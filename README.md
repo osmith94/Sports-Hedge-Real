@@ -24,6 +24,8 @@ backend/
     venues/     read-only venue integrations
   tests/
 docs/
+  CORE_TENETS.md
+  core-tenets/
 .github/workflows/
 ```
 
@@ -72,6 +74,14 @@ Then inspect:
 
 ## Project documents
 
-See `docs/INITIAL_INTEGRATION_PLAN.md` for the active Phase 1 engineering plan.
+**Start with `docs/CORE_TENETS.md`.** The core-tenets directory is the product/architecture contract for humans and AI agents and should be used as acceptance criteria during implementation and review.
 
-The next engineering milestone is football-specific normalization and the first cross-venue market matching pipeline.
+See also:
+
+- `docs/ARCHITECTURE.md`
+- `docs/INITIAL_INTEGRATION_PLAN.md`
+- `docs/RESEARCH_MODULE.md`
+- `docs/MARKET_INTELLIGENCE_MODULE.md`
+- `docs/SCENARIO_RESPONSE_PROFILES.md`
+- `docs/MANAGER_ERA_AND_REGIME_CONTEXT.md`
+- `docs/PRIORITY_ARB_ALERTS.md`
