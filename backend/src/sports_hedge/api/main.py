@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from sports_hedge.api.market_intelligence import router as market_intelligence_router
+from sports_hedge.api.paper import router as paper_router
 from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueCapabilities, VenueName
 
@@ -12,6 +13,7 @@ app = FastAPI(
     description="Phase 1 paper-only football arbitrage research API",
 )
 app.include_router(market_intelligence_router)
+app.include_router(paper_router)
 
 
 @app.get("/health")

@@ -73,6 +73,14 @@ class SettlementFingerprint(BaseModel):
     source_rule_version: str | None = None
 
     def deterministic_key(self) -> str:
+        """Return only economically relevant settlement semantics.
+
+        ``source_rule_version`` is retained on the model for provenance/audit but is
+        deliberately excluded here. A venue-specific rule document identifier is
+        not itself an economic difference and must not prevent two otherwise
+        equivalent markets from matching.
+        """
+
         values = (
             self.scope,
             self.period,
@@ -82,7 +90,6 @@ class SettlementFingerprint(BaseModel):
             self.extra_time_included,
             self.abandonment_rule or "",
             self.postponement_rule or "",
-            self.source_rule_version or "",
         )
         return "|".join(str(value) for value in values)
 
