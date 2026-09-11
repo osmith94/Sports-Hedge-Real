@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+from datetime import timedelta
+from decimal import Decimal
+from typing import Sequence
+
+from sports_hedge.domain.football import MarketFamily
+from sports_hedge.domain.models import VenueName
+from sports_hedge.market_intelligence.analytics import MarketIntelligenceAnalytics
+from sports_hedge.market_intelligence.models import (
+    AnnotationCategory,
+    MarketEventAnnotation,
+    MarketSnapshot,
+    MovementScore,
+    ReversionAnalysis,
+)
+from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
+
+
+class MarketIntelligenceService:
+    """Application service for recording and researching historical market behaviour."""
+
+    def __init__(self, repository: SqliteMarketIntelligenceRepository) -> None:
+        self.repository = repository
+        self.analytics = MarketIntelligenceAnalytics()
+
+    def record_snapshot(self, snapshot: MarketSnapshot) -> None:
+        self.repository.append_snapshot(snapshot)
+
+    def record_annotation(self, annotation: MarketEventAnnotation) -> None:
+        self.repository.append_annotation(annotation)
+
+    def market_history(
+        self,
+        *,
+        canonical_event_id: str | None = None,
+        canonical_market_id: str | None = None,
+        canonical_outcome: str | None = None,
+        venue: VenueName | None = None,
+        market_family: MarketFamily | None = None,
+        competition: str | None = None,
+        team: str | None = None,
+    ) -> list[MarketSnapshot]:
+        return self.repository.list_snapshots(
+            canonical_event_id=canonical_event_id,
+            canonical_market_id=canonical_market_id,
+            canonical_outcome=canonical_outcome,
+            venue=venue,
+            market_family=market_family,
+            competition=competition,
+            team=team,
+        )
+
+    def event_annotations(
+        self,
+        canonical_event_id: str,
+        *,
+        category: AnnotationCategory | None = None,
+    ) -> list[MarketEventAnnotation]:
+        return self.repository.list_annotations(
+            canonical_event_id=canonical_event_id,
+            category=category,
+        )
+
+    def score_recent_move(
+        self,
+        *,
+        canonical_market_id: str,
+        canonical_outcome: str,
+        lookback_minutes: int,
+        historical_moves: Sequence[Decimal | float],
+        venue: VenueName | None = None,
+        minimum_sample_size: int = 8,
+    ) -> MovementScore | None:
+        history = self.repository.list_snapshots(
+            canonical_market_id=canonical_market_id,
+            canonical_outcome=canonical_outcome,
+            venue=venue,
+        )
+        move = self.analytics.probability_move(history, lookback_minutes=lookback_minutes)
+        if move is None or not history:
+            return None
+        return self.analytics.score_move(
+            move,
+            historical_moves,
+            minimum_sample_size=minimum_sample_size,
+            current_liquidity=history[-1].total_liquidity,
+        )
+
+    def analyze_annotation_reaction(
+        self,
+        *,
+        annotation: MarketEventAnnotation,
+        canonical_market_id: str,
+        canonical_outcome: str,
+        venue: VenueName | None = None,
+        shock_window_minutes: int = 5,
+        horizons_minutes: Sequence[int] = (1, 5, 15, 30, 60),
+    ) -> ReversionAnalysis | None:
+        history = self.repository.list_snapshots(
+            canonical_event_id=annotation.canonical_event_id,
+            canonical_market_id=canonical_market_id,
+            canonical_outcome=canonical_outcome,
+            venue=venue,
+        )
+        baseline_candidates = [
+            snapshot for snapshot in history if snapshot.observed_at <= annotation.occurred_at
+        ]
+        after = [
+            snapshot
+            for snapshot in history
+            if annotation.occurred_at < snapshot.observed_at
+            <= annotation.occurred_at + timedelta(minutes=shock_window_minutes)
+        ]
+        if not baseline_candidates or not after:
+            return None
+
+        baseline = baseline_candidates[-1]
+        baseline_probability = _probability(baseline)
+        shock = max(
+            after,
+            key=lambda snapshot: abs(float(_probability(snapshot) - baseline_probability)),
+        )
+        if _probability(shock) == baseline_probability:
+            return None
+
+        post = [snapshot for snapshot in history if snapshot.observed_at >= shock.observed_at]
+        return self.analytics.reversion_analysis(
+            baseline_probability=baseline_probability,
+            shock_snapshot=shock,
+            post_snapshots=post,
+            horizons_minutes=horizons_minutes,
+        )
+
+
+def _probability(snapshot: MarketSnapshot) -> Decimal:
+    if snapshot.implied_probability is None:
+        raise ValueError("Snapshot has no implied probability")
+    return snapshot.implied_probability

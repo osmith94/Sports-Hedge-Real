@@ -29,6 +29,9 @@ class MarketFamily(StrEnum):
     HALF_TIME_FULL_TIME = "half_time_full_time"
     TO_QUALIFY = "to_qualify"
     NEXT_GOAL = "next_goal"
+    CORNERS = "corners"
+    CARDS = "cards"
+    PLAYER_PROPS = "player_props"
     UNKNOWN = "unknown"
 
 
