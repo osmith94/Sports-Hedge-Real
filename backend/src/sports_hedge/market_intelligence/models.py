@@ -8,7 +8,11 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
-from sports_hedge.domain.football import MarketFamily
+from sports_hedge.domain.football import (
+    FootballPeriod,
+    MarketFamily,
+    SettlementScope,
+)
 from sports_hedge.domain.models import VenueName
 
 
@@ -54,6 +58,10 @@ class MarketSnapshot(BaseModel):
     canonical_market_id: str
     canonical_outcome: str
     market_family: MarketFamily
+    period: FootballPeriod = FootballPeriod.UNKNOWN
+    market_line: Decimal | None = None
+    settlement_scope: SettlementScope = SettlementScope.UNKNOWN
+    settlement_key: str | None = None
     competition: str | None = None
     home_team: str | None = None
     away_team: str | None = None

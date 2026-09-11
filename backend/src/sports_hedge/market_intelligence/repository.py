@@ -7,7 +7,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sports_hedge.domain.football import MarketFamily
+from sports_hedge.domain.football import (
+    FootballPeriod,
+    MarketFamily,
+    SettlementScope,
+)
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.models import (
     AnnotationCategory,
@@ -17,11 +21,7 @@ from sports_hedge.market_intelligence.models import (
 
 
 class SqliteMarketIntelligenceRepository:
-    """Small append-only time-series store for Phase 1 research.
-
-    SQLite keeps local development simple. The schema deliberately mirrors a shape that can
-    later move to PostgreSQL/Timescale without changing the analytics contracts.
-    """
+    """Append-only time-series store for Phase 1 research."""
 
     def __init__(self, database: str | Path = ":memory:") -> None:
         self._connection = sqlite3.connect(str(database), check_same_thread=False)
@@ -39,6 +39,10 @@ class SqliteMarketIntelligenceRepository:
                 canonical_market_id TEXT NOT NULL,
                 canonical_outcome TEXT NOT NULL,
                 market_family TEXT NOT NULL,
+                period TEXT NOT NULL DEFAULT 'unknown',
+                market_line TEXT,
+                settlement_scope TEXT NOT NULL DEFAULT 'unknown',
+                settlement_key TEXT,
                 competition TEXT,
                 home_team TEXT,
                 away_team TEXT,
@@ -91,19 +95,45 @@ class SqliteMarketIntelligenceRepository:
                 ON market_event_annotations(category, occurred_at);
             """
         )
+        self._ensure_snapshot_columns()
+        self._connection.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_snapshot_dimensions_time
+                ON market_snapshots(market_family, period, market_line, settlement_scope, observed_at);
+            """
+        )
         self._connection.commit()
+
+    def _ensure_snapshot_columns(self) -> None:
+        existing = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(market_snapshots)").fetchall()
+        }
+        migrations = {
+            "period": "ALTER TABLE market_snapshots ADD COLUMN period TEXT NOT NULL DEFAULT 'unknown'",
+            "market_line": "ALTER TABLE market_snapshots ADD COLUMN market_line TEXT",
+            "settlement_scope": (
+                "ALTER TABLE market_snapshots ADD COLUMN settlement_scope "
+                "TEXT NOT NULL DEFAULT 'unknown'"
+            ),
+            "settlement_key": "ALTER TABLE market_snapshots ADD COLUMN settlement_key TEXT",
+        }
+        for column, sql in migrations.items():
+            if column not in existing:
+                self._connection.execute(sql)
 
     def append_snapshot(self, snapshot: MarketSnapshot) -> None:
         self._connection.execute(
             """
             INSERT INTO market_snapshots (
                 snapshot_id, observed_at, venue, canonical_event_id, canonical_market_id,
-                canonical_outcome, market_family, competition, home_team, away_team,
-                source_event_id, source_market_id, source_outcome_id, kickoff_utc,
-                decimal_odds, implied_probability, best_back_odds, best_lay_odds,
-                back_size, lay_size, spread_decimal, total_liquidity, source_latency_ms,
-                order_book_json, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                canonical_outcome, market_family, period, market_line, settlement_scope,
+                settlement_key, competition, home_team, away_team, source_event_id,
+                source_market_id, source_outcome_id, kickoff_utc, decimal_odds,
+                implied_probability, best_back_odds, best_lay_odds, back_size, lay_size,
+                spread_decimal, total_liquidity, source_latency_ms, order_book_json,
+                metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snapshot.snapshot_id,
@@ -113,6 +143,10 @@ class SqliteMarketIntelligenceRepository:
                 snapshot.canonical_market_id,
                 snapshot.canonical_outcome,
                 snapshot.market_family.value,
+                snapshot.period.value,
+                _stringify_decimal(snapshot.market_line),
+                snapshot.settlement_scope.value,
+                snapshot.settlement_key,
                 snapshot.competition,
                 snapshot.home_team,
                 snapshot.away_team,
@@ -165,6 +199,9 @@ class SqliteMarketIntelligenceRepository:
         canonical_outcome: str | None = None,
         venue: VenueName | None = None,
         market_family: MarketFamily | None = None,
+        period: FootballPeriod | None = None,
+        market_line: Decimal | None = None,
+        settlement_scope: SettlementScope | None = None,
         competition: str | None = None,
         team: str | None = None,
         start_at: datetime | None = None,
@@ -187,6 +224,12 @@ class SqliteMarketIntelligenceRepository:
             add_clause("venue = ?", venue.value)
         if market_family is not None:
             add_clause("market_family = ?", market_family.value)
+        if period is not None:
+            add_clause("period = ?", period.value)
+        if market_line is not None:
+            add_clause("market_line = ?", str(market_line))
+        if settlement_scope is not None:
+            add_clause("settlement_scope = ?", settlement_scope.value)
         if competition is not None:
             add_clause("competition = ?", competition)
         if team is not None:
@@ -256,6 +299,10 @@ def _snapshot_from_row(row: sqlite3.Row) -> MarketSnapshot:
         canonical_market_id=row["canonical_market_id"],
         canonical_outcome=row["canonical_outcome"],
         market_family=MarketFamily(row["market_family"]),
+        period=FootballPeriod(row["period"]),
+        market_line=_decimal(row["market_line"]),
+        settlement_scope=SettlementScope(row["settlement_scope"]),
+        settlement_key=row["settlement_key"],
         competition=row["competition"],
         home_team=row["home_team"],
         away_team=row["away_team"],

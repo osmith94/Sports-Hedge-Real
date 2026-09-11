@@ -17,6 +17,14 @@ export type MarketFamily =
   | "player_props"
   | "unknown";
 
+export type FootballPeriod = "full_time" | "first_half" | "second_half" | "extra_time" | "unknown";
+export type SettlementScope =
+  | "regulation_time"
+  | "including_extra_time"
+  | "including_penalties"
+  | "period_only"
+  | "unknown";
+
 export type MarketSnapshot = {
   snapshot_id: string;
   observed_at: string;
@@ -25,6 +33,10 @@ export type MarketSnapshot = {
   canonical_market_id: string;
   canonical_outcome: string;
   market_family: MarketFamily;
+  period: FootballPeriod;
+  market_line?: string | number | null;
+  settlement_scope: SettlementScope;
+  settlement_key?: string | null;
   competition?: string | null;
   home_team?: string | null;
   away_team?: string | null;
@@ -45,7 +57,7 @@ export type PaperScanRecord = {
   away_team: string;
   kickoff_utc: string;
   market_family: MarketFamily;
-  period: string;
+  period: FootballPeriod;
   line?: string | number | null;
   venues: Venue[];
   source_market_ids: string[];
@@ -89,6 +101,9 @@ export type TrendSummary = {
     canonical_outcome: string;
     venue: Venue;
     market_family: MarketFamily;
+    period: FootballPeriod;
+    market_line?: string | number | null;
+    settlement_scope: SettlementScope;
     value: number;
     start_at: string;
     end_at: string;

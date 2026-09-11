@@ -107,8 +107,8 @@ def build_paper_scan_record(
         away_team=snapshot.away_team,
         kickoff_utc=snapshot.kickoff_utc,
         market_family=snapshot.market_family,
-        period=_period_from_history(history),
-        line=_line_from_history(history),
+        period=snapshot.period,
+        line=snapshot.market_line,
         venues=venues,
         source_market_ids=source_market_ids,
         mapping_confidence=decision.market_match.confidence,
@@ -125,23 +125,3 @@ def build_paper_scan_record(
         rejection_reasons=decision.rejection_reasons,
         decision_json=decision.model_dump_json(),
     )
-
-
-def _period_from_history(history: Sequence[MarketSnapshot]) -> FootballPeriod:
-    raw = history[-1].metadata.get("period")
-    if raw:
-        try:
-            return FootballPeriod(str(raw))
-        except ValueError:
-            pass
-    return FootballPeriod.FULL_TIME
-
-
-def _line_from_history(history: Sequence[MarketSnapshot]) -> Decimal | None:
-    raw = history[-1].metadata.get("line")
-    if raw is None:
-        return None
-    try:
-        return Decimal(str(raw))
-    except Exception:
-        return None

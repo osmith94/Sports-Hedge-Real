@@ -3,12 +3,17 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Sequence
 
 from pydantic import BaseModel, Field
 
-from sports_hedge.domain.football import MarketFamily
+from sports_hedge.domain.football import (
+    FootballPeriod,
+    MarketFamily,
+    SettlementScope,
+)
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.analytics import MarketIntelligenceAnalytics
 from sports_hedge.market_intelligence.models import KickoffBucket, MarketSnapshot
@@ -25,6 +30,9 @@ class TrendMetric(StrEnum):
 class TrendQuery(BaseModel):
     venue: VenueName | None = None
     market_family: MarketFamily | None = None
+    period: FootballPeriod | None = None
+    market_line: Decimal | None = None
+    settlement_scope: SettlementScope | None = None
     competition: str | None = None
     team: str | None = None
     canonical_outcome: str | None = None
@@ -42,6 +50,9 @@ class TrendObservation(BaseModel):
     canonical_outcome: str
     venue: VenueName
     market_family: MarketFamily
+    period: FootballPeriod
+    market_line: Decimal | None = None
+    settlement_scope: SettlementScope
     value: float
     start_at: datetime
     end_at: datetime
@@ -121,6 +132,13 @@ class TrendExplorer:
                 continue
             if query.market_family is not None and snapshot.market_family != query.market_family:
                 continue
+            if query.period is not None and snapshot.period != query.period:
+                continue
+            if query.market_line is not None and snapshot.market_line != query.market_line:
+                continue
+            if query.settlement_scope is not None:
+                if snapshot.settlement_scope != query.settlement_scope:
+                    continue
             if query.competition is not None and snapshot.competition != query.competition:
                 continue
             if query.team is not None and query.team not in {snapshot.home_team, snapshot.away_team}:
@@ -176,7 +194,7 @@ class TrendExplorer:
             value = _liquidity_growth(ordered)
         elif metric == TrendMetric.PEAK_RETRACEMENT:
             value = _peak_retracement(ordered)
-        else:  # pragma: no cover - enum makes this defensive
+        else:  # pragma: no cover
             raise ValueError(f"Unsupported trend metric: {metric}")
 
         if value is None or not math.isfinite(value):
@@ -189,6 +207,9 @@ class TrendExplorer:
             canonical_outcome=first.canonical_outcome,
             venue=first.venue,
             market_family=first.market_family,
+            period=first.period,
+            market_line=first.market_line,
+            settlement_scope=first.settlement_scope,
             value=value,
             start_at=ordered[0].observed_at,
             end_at=ordered[-1].observed_at,
@@ -226,7 +247,11 @@ def _realized_logit_volatility(snapshots: Sequence[MarketSnapshot]) -> float:
     probabilities = [snapshot.implied_probability for snapshot in snapshots]
     if any(probability is None for probability in probabilities):
         raise ValueError("Snapshot has no implied probability")
-    logits = [MarketIntelligenceAnalytics.logit(probability) for probability in probabilities if probability is not None]
+    logits = [
+        MarketIntelligenceAnalytics.logit(probability)
+        for probability in probabilities
+        if probability is not None
+    ]
     changes = [second - first for first, second in zip(logits, logits[1:])]
     return math.sqrt(sum(change * change for change in changes))
 

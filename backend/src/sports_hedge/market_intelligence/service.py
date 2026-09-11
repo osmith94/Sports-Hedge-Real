@@ -4,7 +4,11 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Sequence
 
-from sports_hedge.domain.football import MarketFamily
+from sports_hedge.domain.football import (
+    FootballPeriod,
+    MarketFamily,
+    SettlementScope,
+)
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.analytics import MarketIntelligenceAnalytics
 from sports_hedge.market_intelligence.event_reaction import (
@@ -55,6 +59,9 @@ class MarketIntelligenceService:
         canonical_outcome: str | None = None,
         venue: VenueName | None = None,
         market_family: MarketFamily | None = None,
+        period: FootballPeriod | None = None,
+        market_line: Decimal | None = None,
+        settlement_scope: SettlementScope | None = None,
         competition: str | None = None,
         team: str | None = None,
     ) -> list[MarketSnapshot]:
@@ -64,6 +71,9 @@ class MarketIntelligenceService:
             canonical_outcome=canonical_outcome,
             venue=venue,
             market_family=market_family,
+            period=period,
+            market_line=market_line,
+            settlement_scope=settlement_scope,
             competition=competition,
             team=team,
         )
@@ -89,6 +99,9 @@ class MarketIntelligenceService:
         history = self.repository.list_snapshots(
             venue=cohort.venue,
             market_family=cohort.market_family,
+            period=cohort.period,
+            market_line=cohort.market_line,
+            settlement_scope=cohort.settlement_scope,
             competition=cohort.competition,
             team=cohort.team,
             canonical_outcome=cohort.canonical_outcome,

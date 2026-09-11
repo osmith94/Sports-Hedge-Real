@@ -8,7 +8,11 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from sports_hedge.config import get_settings
-from sports_hedge.domain.football import MarketFamily
+from sports_hedge.domain.football import (
+    FootballPeriod,
+    MarketFamily,
+    SettlementScope,
+)
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.event_reaction import EventReactionAnalysis
 from sports_hedge.market_intelligence.models import (
@@ -62,6 +66,9 @@ def market_history(
     canonical_outcome: str | None = None,
     venue: VenueName | None = None,
     market_family: MarketFamily | None = None,
+    period: FootballPeriod | None = None,
+    market_line: Decimal | None = None,
+    settlement_scope: SettlementScope | None = None,
     competition: str | None = None,
     team: str | None = None,
     limit: int = Query(default=2000, ge=1, le=10000),
@@ -73,6 +80,9 @@ def market_history(
         canonical_outcome=canonical_outcome,
         venue=venue,
         market_family=market_family,
+        period=period,
+        market_line=market_line,
+        settlement_scope=settlement_scope,
         competition=competition,
         team=team,
     )
@@ -150,6 +160,9 @@ def trend_summary(
     metric: TrendMetric,
     venue: VenueName | None = None,
     market_family: MarketFamily | None = None,
+    period: FootballPeriod | None = None,
+    market_line: Decimal | None = None,
+    settlement_scope: SettlementScope | None = None,
     competition: str | None = None,
     team: str | None = None,
     canonical_outcome: str | None = None,
@@ -172,6 +185,9 @@ def trend_summary(
     query = TrendQuery(
         venue=venue,
         market_family=market_family,
+        period=period,
+        market_line=market_line,
+        settlement_scope=settlement_scope,
         competition=competition,
         team=team,
         canonical_outcome=canonical_outcome,
