@@ -24,6 +24,7 @@ sports_hedge/
   api/
   application/
   arbitrage/
+    watchlist/
   domain/
   fees/
   liquidity/

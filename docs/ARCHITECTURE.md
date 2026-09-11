@@ -158,6 +158,8 @@ Output includes:
 - maximum executable size constrained by depth;
 - capital-efficiency metrics.
 
+`arbitrage/watchlist/` is a paper-only read model for near opportunities approaching the configured trigger. Below-threshold items are watch candidates, not arbitrage. `TRIGGERED` is reserved for candidates that already pass the existing settlement, cost, depth and risk gates. Lifecycle history is append-only.
+
 ### `liquidity/`
 
 Purpose: convert quoted prices into executable prices for a requested stake.

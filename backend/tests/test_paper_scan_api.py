@@ -7,6 +7,9 @@ from fastapi.testclient import TestClient
 from sports_hedge.api.main import app
 from sports_hedge.api.market_intelligence import get_market_intelligence_service
 from sports_hedge.api.paper import get_paper_audit_repository
+from sports_hedge.api.watchlist import get_watchlist_service
+from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
+from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
@@ -19,9 +22,11 @@ OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
 def test_paper_pair_scan_api_is_research_only_and_returns_auditable_decision() -> None:
     repository = SqliteMarketIntelligenceRepository()
     audit = SqlitePaperScanRepository()
+    watchlist_store = SqliteWatchlistRepository()
     intelligence = MarketIntelligenceService(repository)
     app.dependency_overrides[get_market_intelligence_service] = lambda: intelligence
     app.dependency_overrides[get_paper_audit_repository] = lambda: audit
+    app.dependency_overrides[get_watchlist_service] = lambda: WatchlistService(watchlist_store)
     client = TestClient(app)
 
     payload = {
@@ -119,6 +124,10 @@ def test_paper_pair_scan_api_is_research_only_and_returns_auditable_decision() -
         assert float(scan_rows[0]["guaranteed_profit_gbp"]) > 0
         assert set(scan_rows[0]["venues"]) == {"matchbook", "polymarket"}
 
+        watchlist = client.get("/paper/watchlist/triggered")
+        assert watchlist.status_code == 200
+        assert watchlist.json()[0]["status"] == "TRIGGERED"
+
         summary = client.get("/paper/scans/summary", params={"since": "2020-01-01T00:00:00Z"})
         assert summary.status_code == 200
         summary_payload = summary.json()
@@ -133,4 +142,5 @@ def test_paper_pair_scan_api_is_research_only_and_returns_auditable_decision() -
     finally:
         app.dependency_overrides.clear()
         audit.close()
+        watchlist_store.close()
         repository.close()
