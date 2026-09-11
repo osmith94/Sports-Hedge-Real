@@ -190,7 +190,11 @@ def test_notifications_api_exposes_recent_unread_and_mark_read() -> None:
     service, _email = _router()
     app.dependency_overrides[get_notification_router] = lambda: service
     client = TestClient(app)
-    payload = _alert().model_dump(mode="json")
+    live_now = datetime.now(UTC)
+    payload = _alert(
+        created_at=live_now,
+        expires_at=live_now + timedelta(minutes=10),
+    ).model_dump(mode="json")
     try:
         opened = client.post("/notifications/priority-alerts", json=payload)
         assert opened.status_code == 200
