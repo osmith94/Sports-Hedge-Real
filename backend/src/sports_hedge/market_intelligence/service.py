@@ -7,6 +7,10 @@ from typing import Sequence
 from sports_hedge.domain.football import MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.analytics import MarketIntelligenceAnalytics
+from sports_hedge.market_intelligence.event_reaction import (
+    EventReactionAnalysis,
+    EventReactionAnalyzer,
+)
 from sports_hedge.market_intelligence.models import (
     AnnotationCategory,
     MarketEventAnnotation,
@@ -23,6 +27,7 @@ class MarketIntelligenceService:
     def __init__(self, repository: SqliteMarketIntelligenceRepository) -> None:
         self.repository = repository
         self.analytics = MarketIntelligenceAnalytics()
+        self.event_reactions = EventReactionAnalyzer()
 
     def record_snapshot(self, snapshot: MarketSnapshot) -> None:
         self.repository.append_snapshot(snapshot)
@@ -85,6 +90,27 @@ class MarketIntelligenceService:
             historical_moves,
             minimum_sample_size=minimum_sample_size,
             current_liquidity=history[-1].total_liquidity,
+        )
+
+    def analyze_cross_market_event(
+        self,
+        *,
+        annotation: MarketEventAnnotation,
+        venue: VenueName | None = None,
+        pre_window_minutes: int = 5,
+        post_window_minutes: int = 30,
+        response_threshold_probability_points: Decimal = Decimal("0.005"),
+    ) -> EventReactionAnalysis:
+        history = self.repository.list_snapshots(
+            canonical_event_id=annotation.canonical_event_id,
+            venue=venue,
+        )
+        return self.event_reactions.analyze(
+            annotation,
+            history,
+            pre_window_minutes=pre_window_minutes,
+            post_window_minutes=post_window_minutes,
+            response_threshold_probability_points=response_threshold_probability_points,
         )
 
     def analyze_annotation_reaction(
