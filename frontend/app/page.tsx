@@ -1,3 +1,4 @@
+import { RunPaperScan } from "../components/run-paper-scan";
 import { getPaperScans, getPaperScanSummary, PaperScanRecord } from "../lib/api";
 
 export const dynamic = "force-dynamic";
@@ -73,6 +74,8 @@ export default async function ArbitragePage() {
         ))}
       </section>
 
+      <RunPaperScan />
+
       <section className="panel">
         <div className="panel-header">
           <div>
@@ -85,13 +88,13 @@ export default async function ArbitragePage() {
         </div>
 
         {apiAvailable && scans.length === 0 ? (
-          <div className="empty-state">
+          <div className="empty-live">
             No paper scans have been recorded yet. Run a read-only collection cycle to populate this monitor.
           </div>
         ) : null}
 
         {!apiAvailable ? (
-          <div className="empty-state">
+          <div className="empty-live">
             The FastAPI service is not reachable. The dashboard is showing no fabricated fallback opportunities.
           </div>
         ) : null}

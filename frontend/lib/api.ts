@@ -84,6 +84,55 @@ export type PaperScanSummary = {
   latest_scan_at?: string | null;
 };
 
+export type PaperCollectionIssue = {
+  stage: string;
+  venue?: Venue | null;
+  source_id?: string | null;
+  detail: string;
+};
+
+export type PaperCollectionDecision = {
+  eligible_for_paper_simulation: boolean;
+  canonical_event_id?: string | null;
+  canonical_market_id?: string | null;
+  rejection_reasons: string[];
+};
+
+export type PaperCollectionReport = {
+  started_at: string;
+  completed_at: string;
+  raw_matchbook_events: number;
+  raw_polymarket_events: number;
+  normalized_matchbook_events: number;
+  normalized_polymarket_events: number;
+  matched_event_pairs: number;
+  normalized_matchbook_markets: number;
+  normalized_polymarket_markets: number;
+  matched_market_pairs: number;
+  order_books_fetched: number;
+  paper_decisions: PaperCollectionDecision[];
+  issues: PaperCollectionIssue[];
+};
+
+export type PaperCollectionRequest = {
+  fee_snapshots?: Array<{
+    venue: Venue;
+    profit_haircut_rate: string;
+    source?: string;
+    detail?: string;
+  }>;
+  fx_snapshots?: Array<{
+    currency: string;
+    gbp_per_unit: string;
+    source?: string;
+  }>;
+  capital_limit_gbp?: string;
+  minimum_net_edge?: string;
+  maximum_execution_risk?: number;
+  max_event_pairs?: number;
+  max_market_pairs_per_event?: number;
+};
+
 export type TrendSummary = {
   metric: string;
   sample_size: number;
@@ -134,10 +183,20 @@ export type EventReaction = {
 
 const API_BASE = process.env.NEXT_PUBLIC_SPORTS_HEDGE_API_URL ?? "http://localhost:8000";
 
+async function errorDetail(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { detail?: unknown };
+    if (typeof body.detail === "string" && body.detail.trim()) return body.detail;
+  } catch {
+    // Use the stable status fallback below when an upstream returned no JSON body.
+  }
+  return `Sports Hedge API request failed (${response.status})`;
+}
+
 async function request<T>(path: string): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
   if (!response.ok) {
-    throw new Error(`Sports Hedge API request failed (${response.status})`);
+    throw new Error(await errorDetail(response));
   }
   return response.json() as Promise<T>;
 }
@@ -160,4 +219,19 @@ export function getPaperScans(query = "limit=100"): Promise<PaperScanRecord[]> {
 
 export function getPaperScanSummary(query = ""): Promise<PaperScanSummary> {
   return request(`/paper/scans/summary${query ? `?${query}` : ""}`);
+}
+
+export async function runPaperCollection(
+  payload: PaperCollectionRequest,
+): Promise<PaperCollectionReport> {
+  const response = await fetch(`${API_BASE}/paper/collect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<PaperCollectionReport>;
 }
