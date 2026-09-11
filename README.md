@@ -22,6 +22,8 @@ backend/
     api/        internal FastAPI status/control surface
     domain/     canonical market models
     venues/     read-only venue integrations
+    facts/      canonical match/team/competition identity
+    odds/       historical odds repository, coverage, Excel export
   tests/
 docs/
   CORE_TENETS.md
@@ -85,3 +87,4 @@ See also:
 - `docs/SCENARIO_RESPONSE_PROFILES.md`
 - `docs/MANAGER_ERA_AND_REGIME_CONTEXT.md`
 - `docs/PRIORITY_ARB_ALERTS.md`
+- `docs/HISTORICAL_ODDS.md` — source-neutral historical odds repository (Smarkets optional; quality tiers; coverage and Excel export)
