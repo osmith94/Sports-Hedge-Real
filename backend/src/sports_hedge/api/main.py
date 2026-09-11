@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
+from sports_hedge.api.dislocations import router as dislocations_router
 from sports_hedge.api.market_intelligence import router as market_intelligence_router
 from sports_hedge.api.notifications import router as notifications_router
 from sports_hedge.api.paper import router as paper_router
@@ -15,6 +16,7 @@ app = FastAPI(
     version="0.1.0",
     description="Phase 1 paper-only football arbitrage research API",
 )
+app.include_router(dislocations_router)
 app.include_router(market_intelligence_router)
 app.include_router(notifications_router)
 app.include_router(paper_router)
