@@ -22,6 +22,10 @@ class UnknownStrategyBookError(ValueError):
     """Raised when a strategy label is not a recognised profit-centre book."""
 
 
+class UnknownCapitalSourceError(ValueError):
+    """Raised when a capital-source label is not a recognised funding dimension."""
+
+
 class StrategyBook(StrEnum):
     """Accounting / strategy books (profit centres).
 
@@ -50,6 +54,32 @@ class AttributionScope(StrEnum):
 
     STRATEGY = "strategy"
     SHARED_UNALLOCATED = "shared_unallocated"
+
+
+class CapitalSource(StrEnum):
+    """Funding path for capital used on a posting.
+
+    Distinct from `strategy_book` and from native venue/currency pools. Ordinary
+    automated liquidity is `AUTO_POOL`; one-off Priority Arb escalations are
+    `MANUAL_OVERRIDE`. Unattributable funding stays `SHARED_UNALLOCATED`.
+    This is a posting dimension, not a duplicated cash account.
+    """
+
+    AUTO_POOL = "AUTO_POOL"
+    MANUAL_OVERRIDE = "MANUAL_OVERRIDE"
+    SHARED_UNALLOCATED = "SHARED_UNALLOCATED"
+
+
+_CAPITAL_SOURCE_ALIASES = {
+    "AUTO": CapitalSource.AUTO_POOL,
+    "AUTO_POOL": CapitalSource.AUTO_POOL,
+    "MANUAL": CapitalSource.MANUAL_OVERRIDE,
+    "MANUAL_OVERRIDE": CapitalSource.MANUAL_OVERRIDE,
+    "SHARED": CapitalSource.SHARED_UNALLOCATED,
+    "UNALLOCATED": CapitalSource.SHARED_UNALLOCATED,
+    "SHARED_UNALLOCATED": CapitalSource.SHARED_UNALLOCATED,
+    "SHARED/UNALLOCATED": CapitalSource.SHARED_UNALLOCATED,
+}
 
 
 class PostingSide(StrEnum):
@@ -96,6 +126,20 @@ def product_module_for(book: StrategyBook | str) -> ProductModule:
     return _PRODUCT_MODULE_BY_BOOK[parse_strategy_book(book)]
 
 
+def parse_capital_source(label: str | CapitalSource) -> CapitalSource:
+    if isinstance(label, CapitalSource):
+        return label
+    if not isinstance(label, str) or not label.strip():
+        raise UnknownCapitalSourceError("capital source label is required")
+    normalised = label.strip().upper().replace("-", "_").replace(" ", "_")
+    if normalised in _CAPITAL_SOURCE_ALIASES:
+        return _CAPITAL_SOURCE_ALIASES[normalised]
+    slash_form = label.strip().upper().replace(" ", "")
+    if slash_form in _CAPITAL_SOURCE_ALIASES:
+        return _CAPITAL_SOURCE_ALIASES[slash_form]
+    raise UnknownCapitalSourceError(f"unknown capital source: {label!r}")
+
+
 def cash_account(venue: VenueName, currency: str, state: CashState | str) -> str:
     bucket = CashState(state) if not isinstance(state, CashState) else state
     return f"ASSET:CASH:{bucket.value}:{venue.value}:{currency.upper()}"
@@ -133,10 +177,12 @@ class PostingDimensions(BaseModel):
 
     Optional fields remain optional so treasury/FX journals can omit event
     identity. `strategy_book` is required only when attribution is STRATEGY.
+    `capital_source` is independent of both the book and the native pool.
     """
 
     attribution: AttributionScope = AttributionScope.STRATEGY
     strategy_book: StrategyBook | None = None
+    capital_source: CapitalSource = CapitalSource.AUTO_POOL
     venue: VenueName | None = None
     currency: str = Field(min_length=3, max_length=12)
     competition: str | None = None
@@ -155,6 +201,13 @@ class PostingDimensions(BaseModel):
         if value is None or value == "":
             return None
         return parse_strategy_book(value)
+
+    @field_validator("capital_source", mode="before")
+    @classmethod
+    def validate_capital_source(cls, value: CapitalSource | str | None) -> CapitalSource:
+        if value is None or value == "":
+            return CapitalSource.AUTO_POOL
+        return parse_capital_source(value)
 
     @model_validator(mode="after")
     def attribution_matches_book(self) -> PostingDimensions:

@@ -7,6 +7,7 @@ FX ledger foundation can attach `PostingDimensions` to journals later.
 
 from sports_hedge.accounting.dimensions import (
     AttributionScope,
+    CapitalSource,
     CashState,
     EconomicAccount,
     NativeLiquidityPool,
@@ -14,7 +15,9 @@ from sports_hedge.accounting.dimensions import (
     PostingSide,
     ProductModule,
     StrategyBook,
+    UnknownCapitalSourceError,
     UnknownStrategyBookError,
+    parse_capital_source,
     parse_strategy_book,
     product_module_for,
 )
@@ -32,6 +35,7 @@ from sports_hedge.accounting.strategy_books import (
 __all__ = [
     "AttributionScope",
     "CapitalBucketTotals",
+    "CapitalSource",
     "CashState",
     "DimensionedPosting",
     "EconomicAccount",
@@ -45,8 +49,10 @@ __all__ = [
     "StrategyBook",
     "StrategyBookReport",
     "StrategyBookReporter",
+    "UnknownCapitalSourceError",
     "UnknownStrategyBookError",
     "missing_gbp_presentation_error",
+    "parse_capital_source",
     "parse_strategy_book",
     "product_module_for",
 ]

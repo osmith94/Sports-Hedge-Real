@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, model_validator
 from sports_hedge.accounting.dimensions import (
     WELL_KNOWN_NATIVE_POOLS,
     AttributionScope,
+    CapitalSource,
     CashState,
     EconomicAccount,
     NativeLiquidityPool,
@@ -23,6 +24,7 @@ from sports_hedge.accounting.dimensions import (
     PostingSide,
     StrategyBook,
     cash_account,
+    parse_capital_source,
     parse_strategy_book,
 )
 from sports_hedge.domain.models import VenueName
@@ -103,6 +105,7 @@ class NativePoolBalance(BaseModel):
     amount_gbp: Decimal
     strategy_book: StrategyBook | None = None
     attribution: AttributionScope
+    capital_source: CapitalSource = CapitalSource.AUTO_POOL
 
 
 class ProfitCentreTotals(BaseModel):
@@ -113,6 +116,9 @@ class ProfitCentreTotals(BaseModel):
     allocated_realised_fx_gbp: Decimal = _ZERO
     allocated_unrealised_fx_gbp: Decimal = _ZERO
     capital: CapitalBucketTotals = Field(default_factory=CapitalBucketTotals)
+    capital_by_source: dict[CapitalSource, CapitalBucketTotals] = Field(
+        default_factory=lambda: {source: CapitalBucketTotals() for source in CapitalSource}
+    )
 
     @property
     def net_pnl_gbp(self) -> Decimal:
@@ -128,10 +134,14 @@ class StrategyBookReport(BaseModel):
     by_strategy: dict[StrategyBook, ProfitCentreTotals]
     shared_treasury: ProfitCentreTotals
     native_pool_balances: list[NativePoolBalance]
+    capital_by_source: dict[CapitalSource, CapitalBucketTotals]
     well_known_pools: tuple[NativeLiquidityPool, ...] = WELL_KNOWN_NATIVE_POOLS
 
     def totals_for(self, book: StrategyBook | str) -> ProfitCentreTotals:
         return self.by_strategy[parse_strategy_book(book)]
+
+    def capital_for_source(self, source: CapitalSource | str) -> CapitalBucketTotals:
+        return self.capital_by_source[parse_capital_source(source)]
 
     def native_balances_for(
         self,
@@ -139,6 +149,7 @@ class StrategyBookReport(BaseModel):
         venue: VenueName,
         currency: str,
         strategy_book: StrategyBook | None = None,
+        capital_source: CapitalSource | str | None = None,
         include_shared: bool = True,
     ) -> list[NativePoolBalance]:
         currency = currency.upper()
@@ -147,6 +158,9 @@ class StrategyBookReport(BaseModel):
             for row in self.native_pool_balances
             if row.pool.venue == venue and row.pool.currency == currency
         ]
+        if capital_source is not None:
+            source = parse_capital_source(capital_source)
+            rows = [row for row in rows if row.capital_source == source]
         if strategy_book is None and include_shared:
             return rows
         return [
@@ -212,14 +226,24 @@ def _apply_pnl(totals: ProfitCentreTotals, posting: DimensionedPosting) -> None:
         totals.allocated_unrealised_fx_gbp -= posting.signed_gbp
 
 
-def _apply_capital(totals: ProfitCentreTotals, posting: DimensionedPosting, state: CashState) -> None:
+def _apply_capital(
+    totals: ProfitCentreTotals,
+    posting: DimensionedPosting,
+    state: CashState,
+) -> None:
     signed = posting.signed_gbp
+    _add_bucket(totals.capital, state, signed)
+    source = posting.dimensions.capital_source
+    _add_bucket(totals.capital_by_source[source], state, signed)
+
+
+def _add_bucket(totals: CapitalBucketTotals, state: CashState, signed: Decimal) -> None:
     if state == CashState.AVAILABLE:
-        totals.capital.available_gbp += signed
+        totals.available_gbp += signed
     elif state == CashState.LOCKED:
-        totals.capital.locked_gbp += signed
+        totals.locked_gbp += signed
     else:
-        totals.capital.transit_gbp += signed
+        totals.transit_gbp += signed
 
 
 def assert_single_native_currency(postings: Iterable[DimensionedPosting]) -> str:
@@ -248,8 +272,9 @@ class StrategyBookReporter:
             strategy_book=None,
             attribution=AttributionScope.SHARED_UNALLOCATED,
         )
+        capital_by_source = {source: CapitalBucketTotals() for source in CapitalSource}
         native_buckets: dict[
-            tuple[str, str, CashState, StrategyBook | None, AttributionScope],
+            tuple[str, str, CashState, StrategyBook | None, AttributionScope, CapitalSource],
             list[DimensionedPosting],
         ] = defaultdict(list)
 
@@ -264,6 +289,11 @@ class StrategyBookReporter:
                 if posting.dimensions.currency != currency:
                     raise ValueError("posting currency dimension does not match cash account")
                 _apply_capital(totals, posting, state)
+                _add_bucket(
+                    capital_by_source[posting.dimensions.capital_source],
+                    state,
+                    posting.signed_gbp,
+                )
                 dims = posting.dimensions
                 native_buckets[
                     (
@@ -272,13 +302,21 @@ class StrategyBookReporter:
                         state,
                         dims.strategy_book,
                         dims.attribution,
+                        dims.capital_source,
                     )
                 ].append(posting)
 
         native_pool_balances: list[NativePoolBalance] = []
-        for (venue_raw, currency, state, book, attribution), group in sorted(
+        for (venue_raw, currency, state, book, attribution, source), group in sorted(
             native_buckets.items(),
-            key=lambda item: (item[0][0], item[0][1], item[0][2].value, str(item[0][3]), item[0][4].value),
+            key=lambda item: (
+                item[0][0],
+                item[0][1],
+                item[0][2].value,
+                str(item[0][3]),
+                item[0][4].value,
+                item[0][5].value,
+            ),
         ):
             # Native sum is safe: grouped by currency. GBP is summed separately.
             native_pool_balances.append(
@@ -289,6 +327,7 @@ class StrategyBookReporter:
                     amount_gbp=sum((item.signed_gbp for item in group), _ZERO),
                     strategy_book=book,
                     attribution=attribution,
+                    capital_source=source,
                 )
             )
 
@@ -296,6 +335,7 @@ class StrategyBookReporter:
             by_strategy=by_strategy,
             shared_treasury=shared,
             native_pool_balances=native_pool_balances,
+            capital_by_source=capital_by_source,
         )
 
 
