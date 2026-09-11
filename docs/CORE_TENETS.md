@@ -24,6 +24,7 @@ These files summarize the non-negotiable product principles agreed for Sports He
 12. [`core-tenets/12_AGENT_REVIEW_CONTRACT.md`](core-tenets/12_AGENT_REVIEW_CONTRACT.md) — agents must review their work against all applicable tenets before handoff.
 13. [`core-tenets/13_EVENT_INTELLIGENCE_AND_CAUSALITY.md`](core-tenets/13_EVENT_INTELLIGENCE_AND_CAUSALITY.md) — event timing/lead-lag analysis is valuable context but must not be overstated as causation.
 14. [`core-tenets/14_EVENT_DRIVEN_PRICE_DISLOCATION_ARBITRAGE.md`](core-tenets/14_EVENT_DRIVEN_PRICE_DISLOCATION_ARBITRAGE.md) — a key arbitrage thesis is rapid detection of temporary cross-venue disagreement after material sporting events, with strict freshness, depth, settlement and cost controls.
+15. [`core-tenets/15_EFFECTIVE_VENUE_ECONOMICS_AND_FEES.md`](core-tenets/15_EFFECTIVE_VENUE_ECONOMICS_AND_FEES.md) — Sports Hedge compares net executable economics after the exact applicable venue/market/side/order-role costs, not headline odds.
 
 ## Source specifications
 
