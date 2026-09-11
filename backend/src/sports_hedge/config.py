@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     market_intelligence_db_path: str = "./data/market_intelligence.sqlite"
     market_intelligence_minimum_sample_size: int = Field(default=8, ge=2)
+    paper_audit_db_path: str = "./data/paper_audit.sqlite"
 
     paper_bankroll_gbp: float = Field(default=5000.0, gt=0)
     paper_bankroll_usd: float = Field(default=5000.0, gt=0)

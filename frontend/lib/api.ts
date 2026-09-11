@@ -35,6 +35,43 @@ export type MarketSnapshot = {
   total_liquidity?: string | number | null;
 };
 
+export type PaperScanRecord = {
+  record_id: string;
+  scanned_at: string;
+  canonical_event_id: string;
+  canonical_market_id: string;
+  competition: string;
+  home_team: string;
+  away_team: string;
+  kickoff_utc: string;
+  market_family: MarketFamily;
+  period: string;
+  line?: string | number | null;
+  venues: Venue[];
+  source_market_ids: string[];
+  mapping_confidence: number;
+  is_arbitrage: boolean;
+  eligible_for_paper_simulation: boolean;
+  gross_edge?: string | number | null;
+  net_edge?: string | number | null;
+  executable_stake_gbp?: string | number | null;
+  guaranteed_profit_gbp?: string | number | null;
+  execution_risk_score?: number | null;
+  execution_risk_band?: string | null;
+  rejection_reasons: string[];
+};
+
+export type PaperScanSummary = {
+  since: string;
+  scan_count: number;
+  arbitrage_count: number;
+  eligible_count: number;
+  rejection_count: number;
+  top_net_edge?: string | number | null;
+  top_guaranteed_profit_gbp?: string | number | null;
+  latest_scan_at?: string | null;
+};
+
 export type TrendSummary = {
   metric: string;
   sample_size: number;
@@ -100,4 +137,12 @@ export function getTrend(metric: string, query = ""): Promise<TrendSummary> {
 
 export function getEventReaction(eventId: string, annotationId: string): Promise<EventReaction> {
   return request(`/market-intelligence/events/${encodeURIComponent(eventId)}/reactions/${encodeURIComponent(annotationId)}`);
+}
+
+export function getPaperScans(query = "limit=100"): Promise<PaperScanRecord[]> {
+  return request(`/paper/scans${query ? `?${query}` : ""}`);
+}
+
+export function getPaperScanSummary(query = ""): Promise<PaperScanSummary> {
+  return request(`/paper/scans/summary${query ? `?${query}` : ""}`);
 }
