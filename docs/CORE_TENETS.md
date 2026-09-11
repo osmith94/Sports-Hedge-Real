@@ -22,6 +22,7 @@ These files summarize the non-negotiable product principles agreed for Sports He
 10. [`core-tenets/10_ACCOUNTING_FX_AND_STRATEGY_BOOKS.md`](core-tenets/10_ACCOUNTING_FX_AND_STRATEGY_BOOKS.md) — one audited ledger, GBP functional currency, separate Arbitrage and Research Value strategy books.
 11. [`core-tenets/11_UI_AND_DATA_HONESTY.md`](core-tenets/11_UI_AND_DATA_HONESTY.md) — users must always know what is live, historical, modelled or demo data.
 12. [`core-tenets/12_AGENT_REVIEW_CONTRACT.md`](core-tenets/12_AGENT_REVIEW_CONTRACT.md) — agents must review their work against all applicable tenets before handoff.
+13. [`core-tenets/13_EVENT_INTELLIGENCE_AND_CAUSALITY.md`](core-tenets/13_EVENT_INTELLIGENCE_AND_CAUSALITY.md) — event timing/lead-lag analysis is valuable context but must not be overstated as causation.
 
 ## Source specifications
 
