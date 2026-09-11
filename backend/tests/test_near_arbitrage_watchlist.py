@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from sports_hedge.arbitrage.depth import DepthQuoteCandidate, DepthScanResult
+from sports_hedge.arbitrage.models import ArbitrageSolution, ArbitrageStake
+from sports_hedge.arbitrage.watchlist.adapter import observation_from_paper_decision
 from sports_hedge.arbitrage.watchlist.economics import distance_to_trigger_pp
 from sports_hedge.arbitrage.watchlist.models import (
     LifecycleEventType,
@@ -15,6 +18,9 @@ from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepositor
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import VenueName
+from sports_hedge.market_intelligence.models import MarketSnapshot
+from sports_hedge.matching.markets import MarketMatchResult
+from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 
 TRIGGER = Decimal("0.01")
 EDGE_080 = Decimal("0.008")
@@ -55,7 +61,7 @@ def _observation(
     market_id: str = "mkt-newcastle-chelsea-btts",
     edge: Decimal | None = EDGE_080,
     trigger: Decimal = TRIGGER,
-    quote_age_ms: int = 120,
+    quote_age_ms: int | None = 120,
     eligible: bool = False,
     solver_is_arbitrage: bool = True,
     rejection_reasons: list[str] | None = None,
@@ -63,6 +69,7 @@ def _observation(
     competition: str = "Premier League",
     market_family: MarketFamily = MarketFamily.BOTH_TEAMS_TO_SCORE,
     limiting_depth: Decimal = Decimal("60"),
+    guaranteed_profit_gbp: Decimal | None = None,
 ) -> WatchObservation:
     implied = None
     if edge is not None:
@@ -89,6 +96,7 @@ def _observation(
         limiting_depth_gbp=limiting_depth,
         limiting_leg_outcome="away",
         capital_required_gbp=Decimal("90"),
+        guaranteed_profit_gbp=guaranteed_profit_gbp,
         expected_lock_minutes=Decimal("120"),
         kickoff_utc=datetime(2026, 9, 20, 15, 0, tzinfo=UTC),
     )
@@ -134,6 +142,7 @@ def test_threshold_crossing_creates_lifecycle_event() -> None:
             eligible=True,
             solver_is_arbitrage=True,
             observed_at=OBSERVED + timedelta(seconds=15),
+            guaranteed_profit_gbp=Decimal("1.23"),
         )
     )
     events = service.activity(opportunity_id=first.opportunity_id)
@@ -142,7 +151,8 @@ def test_threshold_crossing_creates_lifecycle_event() -> None:
     assert LifecycleEventType.TRIGGER_CROSSED in types
     assert crossed.status == OpportunityStatus.TRIGGERED
     assert crossed.is_arbitrage is True
-    assert crossed.guaranteed_profit_gbp is not None
+    assert crossed.guaranteed_profit_gbp == Decimal("1.23")
+    assert crossed.capital_required_gbp * crossed.current_net_edge != Decimal("1.23")
     original_first_seen = events[-1]
     service.observe(
         _observation(
@@ -234,6 +244,7 @@ def test_top_n_ranking_is_stable() -> None:
             eligible=True,
             quote_age_ms=50,
             observed_at=OBSERVED + timedelta(seconds=3),
+            guaranteed_profit_gbp=Decimal("2.50"),
         )
     )
     first = [item.canonical_market_id for item in service.top_near(limit=2)]
@@ -270,6 +281,7 @@ def test_filters_and_paper_fill_lifecycle_stay_paper_only() -> None:
             edge=Decimal("0.012"),
             eligible=True,
             observed_at=OBSERVED + timedelta(seconds=5),
+            guaranteed_profit_gbp=Decimal("1.10"),
         )
     )
     filling = service.record_paper_fill(
@@ -284,3 +296,157 @@ def test_filters_and_paper_fill_lifecycle_stay_paper_only() -> None:
     ]
     assert LifecycleEventType.PAPER_FILL_ATTEMPTED in types
     assert LifecycleEventType.TRIGGER_CROSSED in types
+
+
+def test_unknown_quote_age_fails_closed_and_is_not_near() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    opportunity = service.observe(_observation(quote_age_ms=None, edge=EDGE_080))
+    assert opportunity.status == OpportunityStatus.REJECTED
+    assert "unknown_quote_age" in opportunity.rejection_reasons
+    assert opportunity.classification.value != "near_opportunity"
+    assert service.top_near(limit=10) == []
+    details = [event.detail for event in service.activity()]
+    assert "unknown_quote_age" in details
+
+
+def test_missing_depth_is_rejected_not_classified_near() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    opportunity = service.observe(
+        _observation(
+            rejection_reasons=["missing_executable_outcome_depth"],
+            solver_is_arbitrage=False,
+        )
+    )
+    assert opportunity.status == OpportunityStatus.REJECTED
+    assert opportunity.classification.value != "near_opportunity"
+    assert service.top_near(limit=10) == []
+
+
+def test_unknown_venue_currency_is_rejected_without_inventing_gbp() -> None:
+
+    decision = PaperScanDecision(
+        canonical_event_id="evt-1",
+        canonical_market_id="mkt-currency",
+        market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=[]),
+        quote_age_ms=120,
+        minimum_net_edge=TRIGGER,
+        fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
+        depth_scan=DepthScanResult(
+            solution=ArbitrageSolution(
+                is_arbitrage=True,
+                implied_probability_sum=Decimal("0.992"),
+                total_stake=Decimal("90"),
+                guaranteed_return=Decimal("91.23"),
+                guaranteed_profit=Decimal("1.23"),
+                roi=EDGE_080,
+                stakes=[
+                    ArbitrageStake(
+                        outcome="yes",
+                        venue=VenueName.MATCHBOOK,
+                        source_market_id="mb",
+                        stake=Decimal("50"),
+                        net_decimal_odds=Decimal("2.1"),
+                        state_return=Decimal("105"),
+                    ),
+                    ArbitrageStake(
+                        outcome="no",
+                        venue=VenueName.POLYMARKET,
+                        source_market_id="pm",
+                        stake=Decimal("40"),
+                        net_decimal_odds=Decimal("2.05"),
+                        state_return=Decimal("82"),
+                    ),
+                ],
+            ),
+            selected_quotes=[
+                DepthQuoteCandidate(
+                    outcome="yes",
+                    venue=VenueName.MATCHBOOK,
+                    source_market_id="mb",
+                    source_runner_id="y",
+                    gross_weighted_odds=Decimal("2.12"),
+                    net_decimal_odds=Decimal("2.10"),
+                    cumulative_depth=Decimal("80"),
+                    levels_consumed=1,
+                ),
+                DepthQuoteCandidate(
+                    outcome="no",
+                    venue=VenueName.POLYMARKET,
+                    source_market_id="pm",
+                    source_runner_id="n",
+                    gross_weighted_odds=Decimal("2.05"),
+                    net_decimal_odds=Decimal("2.05"),
+                    cumulative_depth=Decimal("60"),
+                    levels_consumed=1,
+                ),
+            ],
+        ),
+    )
+    mapped = observation_from_paper_decision(decision, history=())
+    assert mapped is not None
+    assert mapped.quote_age_ms == 120
+    assert "unknown_venue_currency:matchbook" in mapped.rejection_reasons
+    assert "unknown_venue_currency:polymarket" in mapped.rejection_reasons
+    assert mapped.legs == []
+    opportunity = WatchlistService(SqliteWatchlistRepository()).observe(mapped)
+    assert opportunity.status == OpportunityStatus.REJECTED
+
+    history = [
+        MarketSnapshot(
+            observed_at=OBSERVED,
+            venue=VenueName.MATCHBOOK,
+            canonical_event_id="evt-1",
+            canonical_market_id="mkt-currency",
+            canonical_outcome="yes",
+            market_family=MarketFamily.BOTH_TEAMS_TO_SCORE,
+            decimal_odds=Decimal("2.1"),
+            metadata={"native_currency": "GBP"},
+        ),
+        MarketSnapshot(
+            observed_at=OBSERVED,
+            venue=VenueName.POLYMARKET,
+            canonical_event_id="evt-1",
+            canonical_market_id="mkt-currency",
+            canonical_outcome="no",
+            market_family=MarketFamily.BOTH_TEAMS_TO_SCORE,
+            decimal_odds=Decimal("2.05"),
+            metadata={"native_currency": "USD"},
+        ),
+    ]
+    provenanced = observation_from_paper_decision(decision, history)
+    assert provenanced is not None
+    assert {leg.currency for leg in provenanced.legs} == {"GBP", "USD"}
+    assert provenanced.guaranteed_profit_gbp == Decimal("1.23")
+    assert "unknown_venue_currency:matchbook" not in provenanced.rejection_reasons
+
+
+def test_solver_guaranteed_profit_is_not_replaced_by_edge_times_capital() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    opportunity = service.observe(
+        _observation(
+            edge=Decimal("0.012"),
+            eligible=True,
+            guaranteed_profit_gbp=Decimal("1.23"),
+        )
+    )
+    assert opportunity.status == OpportunityStatus.TRIGGERED
+    assert opportunity.guaranteed_profit_gbp == Decimal("1.23")
+    assert opportunity.capital_required_gbp == Decimal("90")
+    assert opportunity.guaranteed_profit_gbp != Decimal("90") * Decimal("0.012")
+
+
+def test_adapter_preserves_unknown_quote_age_instead_of_zero() -> None:
+
+    decision = PaperScanDecision(
+        canonical_event_id="evt-1",
+        canonical_market_id="mkt-age",
+        market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=[]),
+        quote_age_ms=None,
+        minimum_net_edge=TRIGGER,
+    )
+    mapped = observation_from_paper_decision(decision, history=())
+    assert mapped is not None
+    assert mapped.quote_age_ms is None
+    opportunity = WatchlistService(SqliteWatchlistRepository()).observe(mapped)
+    assert opportunity.status == OpportunityStatus.REJECTED
+    assert "unknown_quote_age" in opportunity.rejection_reasons

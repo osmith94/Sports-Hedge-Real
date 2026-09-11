@@ -45,9 +45,10 @@ def _near_rank_key(item: NearOpportunity) -> tuple:
     )
     depth = item.limiting_depth_gbp if item.limiting_depth_gbp is not None else Decimal("0")
     status_rank = 0 if item.status == OpportunityStatus.APPROACHING else 1
+    age = item.quote_age_ms if item.quote_age_ms is not None else 10**12
     return (
         distance,
-        item.quote_age_ms,
+        age,
         -depth,
         status_rank,
         item.canonical_market_id,
@@ -58,9 +59,10 @@ def _near_rank_key(item: NearOpportunity) -> tuple:
 def _triggered_rank_key(item: NearOpportunity) -> tuple:
     edge = item.current_net_edge if item.current_net_edge is not None else Decimal("-1")
     depth = item.limiting_depth_gbp if item.limiting_depth_gbp is not None else Decimal("0")
+    age = item.quote_age_ms if item.quote_age_ms is not None else 10**12
     return (
         -edge,
-        item.quote_age_ms,
+        age,
         -depth,
         item.canonical_market_id,
         item.opportunity_id,

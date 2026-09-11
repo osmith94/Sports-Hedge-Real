@@ -82,6 +82,7 @@ def test_watchlist_read_endpoints_expose_near_triggered_and_activity() -> None:
             quote_age_ms=90,
             limiting_depth_gbp=Decimal("70"),
             capital_required_gbp=Decimal("120"),
+            guaranteed_profit_gbp=Decimal("1.80"),
             venues=[VenueName.MATCHBOOK, VenueName.POLYMARKET],
         )
     )

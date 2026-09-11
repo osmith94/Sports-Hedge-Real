@@ -39,6 +39,7 @@ class PaperScanDecision(BaseModel):
     fx_snapshots: list[FxRateSnapshot] = Field(default_factory=list)
     minimum_net_edge: Decimal = Field(default=Decimal("0"), ge=0)
     maximum_execution_risk: int = Field(default=100, ge=0, le=100)
+    quote_age_ms: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> "PaperScanDecision":

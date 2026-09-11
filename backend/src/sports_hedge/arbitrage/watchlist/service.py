@@ -80,10 +80,9 @@ class WatchlistService:
             )
         guaranteed = None
         is_arbitrage = False
-        if status == OpportunityStatus.TRIGGERED and observation.current_net_edge is not None:
+        if status == OpportunityStatus.TRIGGERED:
             is_arbitrage = True
-            if observation.capital_required_gbp is not None:
-                guaranteed = observation.capital_required_gbp * observation.current_net_edge
+            guaranteed = observation.guaranteed_profit_gbp
 
         opportunity = NearOpportunity(
             opportunity_id=opportunity_id,
@@ -385,6 +384,17 @@ class WatchlistService:
         if "stale_quote" in current.rejection_reasons and "stale_quote" not in previous_reasons:
             emitted.append(
                 self._event(current, LifecycleEventType.REJECTED_STALE_QUOTE, detail="stale_quote")
+            )
+        if (
+            "unknown_quote_age" in current.rejection_reasons
+            and "unknown_quote_age" not in previous_reasons
+        ):
+            emitted.append(
+                self._event(
+                    current,
+                    LifecycleEventType.REJECTED_STALE_QUOTE,
+                    detail="unknown_quote_age",
+                )
             )
         if missing_cost_reasons(current.rejection_reasons) and not missing_cost_reasons(
             list(previous_reasons)

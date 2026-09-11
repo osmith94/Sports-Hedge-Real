@@ -30,7 +30,9 @@ def observation_from_paper_decision(
     implied: Decimal | None = None
     current_edge: Decimal | None = None
     capital: Decimal | None = None
+    guaranteed_profit: Decimal | None = None
     solver_is_arbitrage = False
+    extra_rejections: list[str] = []
 
     if decision.depth_scan is not None:
         solution = decision.depth_scan.solution
@@ -40,7 +42,10 @@ def observation_from_paper_decision(
             current_edge = net_edge_from_implied_sum(implied)
         stake_by_outcome = {stake.outcome: stake for stake in solution.stakes}
         for quote in decision.depth_scan.selected_quotes:
-            venue_currency = _currency_for_venue(quote.venue, history, fx_map)
+            venue_currency = _currency_for_venue(quote.venue, history)
+            if venue_currency is None:
+                extra_rejections.append(f"unknown_venue_currency:{quote.venue.value}")
+                continue
             gbp_rate = fx_map.get(venue_currency)
             gbp_stake = None
             native_stake = None
@@ -67,6 +72,7 @@ def observation_from_paper_decision(
                 limiting_leg = quote.outcome
         if solver_is_arbitrage:
             capital = solution.total_stake
+            guaranteed_profit = solution.guaranteed_profit
 
     venues = list(dict.fromkeys(leg.venue for leg in legs))
     if snapshot is not None:
@@ -77,6 +83,8 @@ def observation_from_paper_decision(
         delta_minutes = (snapshot.kickoff_utc - decision.scanned_at).total_seconds() / 60.0
         if delta_minutes > 0:
             expected_lock = Decimal(str(delta_minutes))
+
+    resolved_quote_age = quote_age_ms if quote_age_ms is not None else decision.quote_age_ms
 
     return WatchObservation(
         observed_at=decision.scanned_at,
@@ -95,14 +103,15 @@ def observation_from_paper_decision(
         implied_probability_sum=implied,
         solver_is_arbitrage=solver_is_arbitrage,
         eligible_for_paper_simulation=decision.eligible_for_paper_simulation,
-        rejection_reasons=list(decision.rejection_reasons),
+        rejection_reasons=_dedupe([*decision.rejection_reasons, *extra_rejections]),
         execution_risk_score=(
             decision.execution_risk.score if decision.execution_risk is not None else None
         ),
-        quote_age_ms=quote_age_ms if quote_age_ms is not None else 0,
+        quote_age_ms=resolved_quote_age,
         limiting_depth_gbp=limiting_depth,
         limiting_leg_outcome=limiting_leg,
         capital_required_gbp=capital,
+        guaranteed_profit_gbp=guaranteed_profit,
         expected_lock_minutes=expected_lock,
         kickoff_utc=snapshot.kickoff_utc if snapshot is not None else None,
     )
@@ -111,18 +120,20 @@ def observation_from_paper_decision(
 def _currency_for_venue(
     venue: VenueName,
     history: Sequence[MarketSnapshot],
-    fx_map: dict[str, Decimal],
-) -> str:
+) -> str | None:
+    """Return native currency only from explicit observation provenance.
+
+    Unknown currency must not become GBP, USD, or any other invented default.
+    """
+
     for snapshot in reversed(history):
         if snapshot.venue != venue:
             continue
         native = snapshot.metadata.get("native_currency") if snapshot.metadata else None
-        if isinstance(native, str) and native:
+        if isinstance(native, str) and native.strip():
             return native.upper()
-    if venue == VenueName.POLYMARKET and "USD" in fx_map:
-        return "USD"
-    if venue == VenueName.MATCHBOOK and "GBP" in fx_map:
-        return "GBP"
-    if len(fx_map) == 1:
-        return next(iter(fx_map))
-    return "GBP"
+    return None
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))

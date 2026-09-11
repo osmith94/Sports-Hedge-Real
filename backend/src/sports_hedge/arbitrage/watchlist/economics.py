@@ -58,7 +58,9 @@ def missing_cost_reasons(reasons: list[str]) -> list[str]:
     return [
         reason
         for reason in reasons
-        if reason.startswith("missing_fee_snapshot:") or reason.startswith("missing_fx_rate:")
+        if reason.startswith("missing_fee_snapshot:")
+        or reason.startswith("missing_fx_rate:")
+        or reason.startswith("unknown_venue_currency:")
     ]
 
 
@@ -68,6 +70,12 @@ def semantic_reasons(reasons: list[str]) -> list[str]:
 
 def depth_reasons(reasons: list[str]) -> list[str]:
     return [reason for reason in reasons if reason in DEPTH_REASONS]
+
+
+HARD_DEPTH_REASONS = (
+    "missing_executable_outcome_depth",
+    "incomplete_outcome_set",
+)
 
 
 def capital_required_gbp(legs: list[WatchLeg]) -> Decimal | None:
@@ -114,19 +122,18 @@ def classify_status(
     if semantics:
         rejections.extend(semantics)
         return OpportunityStatus.REJECTED, _dedupe([*reasons, *rejections])
+    if observation.quote_age_ms is None:
+        rejections.append("unknown_quote_age")
+        return OpportunityStatus.REJECTED, _dedupe([*reasons, *rejections])
     if observation.quote_age_ms >= max_quote_age_ms:
         rejections.append("stale_quote")
         return OpportunityStatus.REJECTED, _dedupe([*reasons, *rejections])
     if observation.current_net_edge is None or observation.implied_probability_sum is None:
         rejections.append("missing_net_edge")
         return OpportunityStatus.REJECTED, _dedupe([*reasons, *rejections])
-    if depth and not observation.solver_is_arbitrage:
-        if observation.current_net_edge < observation.trigger_net_edge:
-            # Negative or incomplete edge can still be watched unless depth is missing entirely.
-            if "missing_executable_outcome_depth" in depth or "incomplete_outcome_set" in depth:
-                return OpportunityStatus.REJECTED, _dedupe([*reasons, *depth])
-        else:
-            return OpportunityStatus.REJECTED, _dedupe([*reasons, *depth])
+    hard_depth = [reason for reason in depth if reason in HARD_DEPTH_REASONS]
+    if hard_depth:
+        return OpportunityStatus.REJECTED, _dedupe([*reasons, *hard_depth])
     if "execution_risk_above_threshold" in reasons:
         return OpportunityStatus.REJECTED, _dedupe(reasons)
 
@@ -140,6 +147,11 @@ def classify_status(
 
     if previous == OpportunityStatus.PAPER_FILLING:
         return OpportunityStatus.PAPER_FILLING, _dedupe(reasons)
+
+    # Near-arb is only for candidates that passed every non-economic gate and
+    # remain strictly below the configured trigger.
+    if observation.current_net_edge >= observation.trigger_net_edge:
+        return OpportunityStatus.REJECTED, _dedupe(reasons)
 
     distance = distance_to_trigger_pp(observation.current_net_edge, observation.trigger_net_edge)
     if Decimal("0") < distance <= approaching_band_pp:

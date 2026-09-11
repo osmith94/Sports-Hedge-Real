@@ -66,6 +66,7 @@ class PaperScanService:
         fees = list(fee_snapshots or [])
         fx = _with_gbp_rate(list(fx_snapshots or []))
         rejections: list[str] = []
+        quote_age_ms = max(left.quote_age_ms, right.quote_age_ms)
 
         if not match.matched:
             recorded = self.record_observation(left) + self.record_observation(right)
@@ -77,6 +78,7 @@ class PaperScanService:
                 fx_snapshots=fx,
                 minimum_net_edge=minimum_net_edge,
                 maximum_execution_risk=maximum_execution_risk,
+                quote_age_ms=quote_age_ms,
             )
 
         event_id = canonical_matched_event_id([left.market.event, right.market.event])
@@ -132,6 +134,7 @@ class PaperScanService:
                 fx_snapshots=fx,
                 minimum_net_edge=minimum_net_edge,
                 maximum_execution_risk=maximum_execution_risk,
+                quote_age_ms=quote_age_ms,
             )
 
         sources: list[DepthQuoteSource] = []
@@ -177,6 +180,7 @@ class PaperScanService:
                 fx_snapshots=fx,
                 minimum_net_edge=minimum_net_edge,
                 maximum_execution_risk=maximum_execution_risk,
+                quote_age_ms=quote_age_ms,
             )
 
         if solution.roi < minimum_net_edge:
@@ -207,6 +211,7 @@ class PaperScanService:
             fx_snapshots=fx,
             minimum_net_edge=minimum_net_edge,
             maximum_execution_risk=maximum_execution_risk,
+            quote_age_ms=quote_age_ms,
         )
 
     def _record_with_ids(

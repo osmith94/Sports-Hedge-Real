@@ -93,10 +93,11 @@ class WatchObservation(BaseModel):
     eligible_for_paper_simulation: bool = False
     rejection_reasons: list[str] = Field(default_factory=list)
     execution_risk_score: int | None = Field(default=None, ge=0, le=100)
-    quote_age_ms: int = Field(default=0, ge=0)
+    quote_age_ms: int | None = Field(default=None, ge=0)
     limiting_depth_gbp: Decimal | None = Field(default=None, ge=0)
     limiting_leg_outcome: str | None = None
     capital_required_gbp: Decimal | None = Field(default=None, ge=0)
+    guaranteed_profit_gbp: Decimal | None = None
     expected_lock_minutes: Decimal | None = Field(default=None, ge=0)
     kickoff_utc: datetime | None = None
 
@@ -130,7 +131,7 @@ class NearOpportunity(BaseModel):
     current_net_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
     implied_probability_sum: Decimal | None = None
-    quote_age_ms: int = Field(default=0, ge=0)
+    quote_age_ms: int | None = Field(default=None, ge=0)
     limiting_depth_gbp: Decimal | None = None
     limiting_leg_outcome: str | None = None
     capital_required_gbp: Decimal | None = None
