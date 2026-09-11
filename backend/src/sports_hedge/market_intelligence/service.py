@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Sequence
 
@@ -15,6 +15,12 @@ from sports_hedge.market_intelligence.event_reaction import (
     EventReactionAnalysis,
     EventReactionAnalyzer,
 )
+from sports_hedge.market_intelligence.ingestion.contracts import (
+    IngestResult,
+    MarketEventFeed,
+    ProviderEventRecord,
+)
+from sports_hedge.market_intelligence.ingestion.pipeline import MarketEventIngestionPipeline
 from sports_hedge.market_intelligence.models import (
     AnnotationCategory,
     MarketEventAnnotation,
@@ -44,12 +50,27 @@ class MarketIntelligenceService:
         self.analytics = MarketIntelligenceAnalytics()
         self.event_reactions = EventReactionAnalyzer()
         self.trends = TrendExplorer(minimum_sample_size=trend_minimum_sample_size)
+        self.event_ingestion = MarketEventIngestionPipeline(repository)
 
     def record_snapshot(self, snapshot: MarketSnapshot) -> None:
         self.repository.append_snapshot(snapshot)
 
     def record_annotation(self, annotation: MarketEventAnnotation) -> None:
         self.repository.append_annotation(annotation)
+
+    def ingest_market_event(self, record: ProviderEventRecord) -> IngestResult:
+        return self.event_ingestion.ingest(record)
+
+    def ingest_market_events(self, records: list[ProviderEventRecord]) -> list[IngestResult]:
+        return self.event_ingestion.ingest_many(records)
+
+    def ingest_market_event_feed(
+        self,
+        feed: MarketEventFeed,
+        *,
+        since: datetime | None = None,
+    ) -> list[IngestResult]:
+        return self.event_ingestion.ingest_feed(feed, since=since)
 
     def market_history(
         self,
