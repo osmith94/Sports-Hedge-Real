@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     polymarket_gamma_base_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_base_url: str = "https://clob.polymarket.com"
 
+    market_intelligence_db_path: str = "./data/market_intelligence.sqlite"
+    market_intelligence_minimum_sample_size: int = Field(default=8, ge=2)
+
     paper_bankroll_gbp: float = Field(default=5000.0, gt=0)
     paper_bankroll_usd: float = Field(default=5000.0, gt=0)
     min_net_edge: float = Field(default=0.005, ge=0)
