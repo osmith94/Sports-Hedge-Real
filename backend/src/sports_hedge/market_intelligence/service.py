@@ -19,15 +19,27 @@ from sports_hedge.market_intelligence.models import (
     ReversionAnalysis,
 )
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
+from sports_hedge.market_intelligence.trends import (
+    TrendExplorer,
+    TrendMetric,
+    TrendQuery,
+    TrendSummary,
+)
 
 
 class MarketIntelligenceService:
     """Application service for recording and researching historical market behaviour."""
 
-    def __init__(self, repository: SqliteMarketIntelligenceRepository) -> None:
+    def __init__(
+        self,
+        repository: SqliteMarketIntelligenceRepository,
+        *,
+        trend_minimum_sample_size: int = 8,
+    ) -> None:
         self.repository = repository
         self.analytics = MarketIntelligenceAnalytics()
         self.event_reactions = EventReactionAnalyzer()
+        self.trends = TrendExplorer(minimum_sample_size=trend_minimum_sample_size)
 
     def record_snapshot(self, snapshot: MarketSnapshot) -> None:
         self.repository.append_snapshot(snapshot)
@@ -66,6 +78,24 @@ class MarketIntelligenceService:
             canonical_event_id=canonical_event_id,
             category=category,
         )
+
+    def analyze_trend(
+        self,
+        metric: TrendMetric,
+        *,
+        query: TrendQuery | None = None,
+    ) -> TrendSummary:
+        cohort = query or TrendQuery()
+        history = self.repository.list_snapshots(
+            venue=cohort.venue,
+            market_family=cohort.market_family,
+            competition=cohort.competition,
+            team=cohort.team,
+            canonical_outcome=cohort.canonical_outcome,
+            start_at=cohort.start_at,
+            end_at=cohort.end_at,
+        )
+        return self.trends.analyze(metric, history, query=cohort)
 
     def score_recent_move(
         self,

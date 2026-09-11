@@ -17,6 +17,13 @@ from sports_hedge.market_intelligence.models import (
     ReversionAnalysis,
 )
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
+from sports_hedge.market_intelligence.trends import (
+    TrendExplorer,
+    TrendMetric,
+    TrendObservation,
+    TrendQuery,
+    TrendSummary,
+)
 
 __all__ = [
     "AnnotationCategory",
@@ -32,4 +39,9 @@ __all__ = [
     "MovementScore",
     "ReversionAnalysis",
     "SqliteMarketIntelligenceRepository",
+    "TrendExplorer",
+    "TrendMetric",
+    "TrendObservation",
+    "TrendQuery",
+    "TrendSummary",
 ]
