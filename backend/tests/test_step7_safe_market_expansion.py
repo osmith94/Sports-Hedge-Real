@@ -5,8 +5,11 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
+from sports_hedge.api.main import app
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
+from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.application.complete_set import (
     INCOMPLETE_OUTCOME_REASON,
     STEP7_COMPLETE_SET_FAMILIES,
@@ -875,6 +878,33 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
             if decision.depth_scan is not None:
                 for quote in decision.depth_scan.selected_quotes:
                     assert quote.net_decimal_odds > 1
+
+        coordinator = get_live_refresh_coordinator()
+        coordinator.record_report(report)
+        client = TestClient(app)
+        health = client.get("/health")
+        assert health.json()["execution_enabled"] is False
+        detail = client.get(f"/operations/fixtures/{fixture.canonical_event_id}")
+        assert detail.status_code == 200
+        body = detail.json()
+        assert body["execution_enabled"] is False
+        assert body["paper_mode"] == "paper"
+        families = {row["family"] for row in body["markets"] if row.get("family")}
+        assert families >= {
+            "match_result",
+            "both_teams_to_score",
+            "total_goals",
+            "draw_no_bet",
+            "asian_handicap",
+            "to_qualify",
+            "correct_score",
+            "next_goal",
+        }
+        assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "match_result")
+        assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "both_teams_to_score")
+        assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "correct_score")
+        assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "next_goal")
+        coordinator.reset()
     finally:
         repository.close()
 
