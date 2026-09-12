@@ -3,9 +3,8 @@ from __future__ import annotations
 from hashlib import sha256
 
 from sports_hedge.domain.football import FootballPeriod, MarketFamily, SettlementFingerprint
-from sports_hedge.facts.catalog import DEFAULT_CATALOG
-from sports_hedge.facts.errors import IdentityMappingError
-from sports_hedge.facts.identity import build_match_ref, require_aware
+from sports_hedge.facts.catalog import competition_from_label
+from sports_hedge.facts.identity import build_match_ref
 from sports_hedge.odds.models import (
     MappingException,
     OddsObservation,
@@ -15,6 +14,7 @@ from sports_hedge.odds.models import (
     payload_hash,
     source_observation_key,
 )
+from sports_hedge.odds.timestamps import require_aware
 
 
 class OddsMappingError(ValueError):
@@ -22,7 +22,7 @@ class OddsMappingError(ValueError):
 
 
 def map_raw_record(record: RawOddsRecord) -> OddsObservation:
-    """Deterministic mapping. Ambiguous or incomplete identity fails closed."""
+    """Deterministic mapping onto the PR #35 facts identity contract."""
 
     issues = _identity_issues(record)
     if issues:
@@ -46,7 +46,7 @@ def map_raw_record(record: RawOddsRecord) -> OddsObservation:
             season=record.season,
             kickoff_precision=record.kickoff_precision,
         )
-    except IdentityMappingError as error:
+    except ValueError as error:
         raise OddsMappingError(str(error)) from error
 
     settlement = record.settlement or SettlementFingerprint(
@@ -116,15 +116,14 @@ def map_raw_record(record: RawOddsRecord) -> OddsObservation:
         confidence=record.mapping_confidence if record.mapping_confidence is not None else 1.0,
         semantics_complete=semantics_complete,
         settlement_key=settlement_key,
-        competition_id=match.competition_id,
-        season=match.season_label,
+        competition_code=match.competition_code.value,
+        season=match.season,
         home_team=match.home_team,
         away_team=match.away_team,
         kickoff_utc=match.kickoff_utc,
         kickoff_precision=match.kickoff_precision,
         metadata={
             "source_match_id": record.source_match_id,
-            "season_id": match.season_id,
             "home_team_id": match.home_team_id,
             "away_team_id": match.away_team_id,
         },
@@ -154,21 +153,20 @@ def _identity_issues(record: RawOddsRecord) -> list[tuple[str, str, str]]:
     issues: list[tuple[str, str, str]] = []
     if not record.competition:
         issues.append(("competition", "missing_competition", "competition is required"))
-    else:
-        try:
-            DEFAULT_CATALOG.resolve_competition(record.competition)
-        except IdentityMappingError as error:
-            issues.append(("competition", "unknown_competition", str(error)))
+    elif competition_from_label(record.competition, record.season or "2025/26") is None and (
+        competition_from_label(record.competition) is None
+    ):
+        issues.append(
+            (
+                "competition",
+                "unknown_competition",
+                f"cannot map competition {record.competition!r} without guessing",
+            )
+        )
     if not record.home_team or not record.away_team:
         issues.append(("teams", "missing_teams", "home_team and away_team are required"))
-    else:
-        try:
-            home = DEFAULT_CATALOG.resolve_team(record.home_team)
-            away = DEFAULT_CATALOG.resolve_team(record.away_team)
-            if home.team_id == away.team_id:
-                issues.append(("teams", "ambiguous_teams", "home and away teams resolved to the same team"))
-        except IdentityMappingError as error:
-            issues.append(("teams", "unknown_team", str(error)))
+    elif record.home_team.strip().casefold() == record.away_team.strip().casefold():
+        issues.append(("teams", "ambiguous_teams", "home and away teams are identical"))
     if record.kickoff_utc is None:
         issues.append(("kickoff_utc", "missing_kickoff", "kickoff is required for canonical match identity"))
     if record.market_family is None or record.market_family == MarketFamily.UNKNOWN:

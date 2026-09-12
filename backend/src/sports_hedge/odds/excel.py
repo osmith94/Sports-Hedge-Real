@@ -75,7 +75,7 @@ def _write_observations(sheet: Worksheet, observations: list[OddsObservation]) -
         values = [
             observation.observation_id,
             observation.canonical_match_id,
-            observation.competition_id,
+            observation.competition_code,
             observation.season,
             observation.home_team,
             observation.away_team,

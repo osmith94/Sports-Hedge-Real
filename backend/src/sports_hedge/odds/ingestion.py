@@ -50,7 +50,7 @@ class OddsIngestionService:
                 continue
             match = CanonicalMatchFact(
                 canonical_match_id=observation.canonical_match_id,
-                competition_id=observation.competition_id,
+                competition_code=observation.competition_code,
                 season=observation.season,
                 home_team=observation.home_team,
                 away_team=observation.away_team,

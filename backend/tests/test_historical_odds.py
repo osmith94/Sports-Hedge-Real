@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pytest
 from openpyxl import load_workbook
@@ -16,7 +15,7 @@ from sports_hedge.domain.football import (
     SettlementScope,
 )
 from sports_hedge.domain.models import MarketSide
-from sports_hedge.facts.catalog import PREMIER_LEAGUE, season_for
+from sports_hedge.facts.catalog import CompetitionCode
 from sports_hedge.facts.identity import CanonicalMatchRef, build_match_ref, canonical_match_id
 from sports_hedge.odds.adapters.football_data import FootballDataCsvAdapter
 from sports_hedge.odds.adapters.smarkets import SmarketsHistoricalAdapter, smarkets_limitations
@@ -45,28 +44,42 @@ def _ingest_synthetic() -> tuple[SqliteOddsRepository, OddsIngestionService]:
     return repository, service
 
 
-def test_canonical_match_id_matches_historical_warehouse_contract() -> None:
+def test_odds_uses_facts_match_sha256_identity() -> None:
     kickoff = datetime(2025, 8, 16, 17, 30, tzinfo=UTC)
-    season = season_for(PREMIER_LEAGUE, "2025/26")
-    match_id = canonical_match_id(
-        competition_id="premier-league",
-        season_id=season.season_id,
-        home_team_id="arsenal",
-        away_team_id="chelsea",
+    expected = canonical_match_id(
+        competition_code="premier_league",
+        season="2025/26",
+        home_team="Arsenal",
+        away_team="Chelsea",
         kickoff_utc=kickoff,
     )
-    assert match_id == "hist:b57d64f43382541191f4530e"
-    london = datetime(2025, 8, 16, 18, 30, tzinfo=ZoneInfo("Europe/London"))
-    assert (
-        canonical_match_id(
-            competition_id="premier-league",
-            season_id=season.season_id,
-            home_team_id="arsenal",
-            away_team_id="chelsea",
-            kickoff_utc=london,
+    assert expected.startswith("match:")
+    mapped = map_raw_record(
+        RawOddsRecord(
+            source="synthetic",
+            source_market_id="id-check",
+            source_reference="id-check",
+            competition="Premier League",
+            home_team="Arsenal",
+            away_team="Chelsea",
+            kickoff_utc=kickoff,
+            market_family=MarketFamily.MATCH_RESULT,
+            period=FootballPeriod.FULL_TIME,
+            selection="home",
+            decimal_odds=Decimal("2.10"),
+            quote_type=QuoteType.CLOSING,
+            retrieved_at=datetime(2026, 9, 11, tzinfo=UTC),
+            settlement=SettlementFingerprint(
+                scope=SettlementScope.REGULATION_TIME,
+                period=FootballPeriod.FULL_TIME,
+                extra_time_included=False,
+                penalties_included=False,
+            ),
+            semantics_complete=True,
         )
-        == match_id
     )
+    assert mapped.canonical_match_id == expected
+    assert mapped.competition_code == CompetitionCode.PREMIER_LEAGUE.value
 
 
 
@@ -75,8 +88,8 @@ def test_timestamped_and_closing_observations_persist_side_by_side() -> None:
     observations = [
         item
         for item in repository.list_observations()
-        if item.home_team == "Arsenal"
-        and item.away_team == "Liverpool"
+        if item.home_team == "arsenal"
+        and item.away_team == "liverpool"
         and item.market_family == MarketFamily.MATCH_RESULT
         and item.selection == "home"
         and item.decimal_odds is not None
@@ -114,8 +127,8 @@ def test_mapping_is_deterministic_across_aliases() -> None:
         kickoff_utc=datetime(2025, 8, 17, 15, 30, tzinfo=UTC),
     )
     assert left.canonical_match_id == right.canonical_match_id
-    assert left.competition_id == "premier-league"
-    assert left.canonical_match_id.startswith("hist:")
+    assert left.competition_code == CompetitionCode.PREMIER_LEAGUE
+    assert left.canonical_match_id.startswith("match:")
     assert isinstance(left, CanonicalMatchRef)
 
 
@@ -146,7 +159,7 @@ def test_coverage_exposes_missing_markets_and_calendar_gaps() -> None:
     corners = next(
         row
         for row in report.market_coverage
-        if row.competition_code == "premier-league" and row.market_family == "corners"
+        if row.competition_code == "premier_league" and row.market_family == "corners"
     )
     assert corners.matches_in_repository == 2
     assert corners.matches_with_market == 0
@@ -173,7 +186,7 @@ def test_provenance_and_quality_tiers_are_retained() -> None:
     la_liga = next(
         item
         for item in repository.list_observations()
-        if item.competition_id == "la-liga" and item.selection == "home"
+        if item.competition_code == "la_liga" and item.selection == "home"
     )
     assert la_liga.source == "synthetic"
     assert la_liga.quality_tier == QualityTier.A
@@ -182,7 +195,7 @@ def test_provenance_and_quality_tiers_are_retained() -> None:
     championship = next(
         item
         for item in repository.list_observations()
-        if item.competition_id == "championship"
+        if item.competition_code == "championship"
     )
     assert championship.quality_tier == QualityTier.D
     assert championship.decimal_odds is None
@@ -340,28 +353,6 @@ def test_naive_timestamps_are_rejected() -> None:
             decimal_odds=Decimal("2.00"),
             retrieved_at=datetime(2026, 9, 11, 12, 0, tzinfo=UTC),
         )
-
-
-def test_unknown_team_fails_closed() -> None:
-    repository = SqliteOddsRepository()
-    service = OddsIngestionService(repository)
-    record = RawOddsRecord(
-        source="synthetic",
-        source_reference="unknown-team",
-        competition="Premier League",
-        home_team="Arsenal",
-        away_team="Mystery Athletic",
-        kickoff_utc=datetime(2025, 8, 16, 14, 0, tzinfo=UTC),
-        market_family=MarketFamily.MATCH_RESULT,
-        period=FootballPeriod.FULL_TIME,
-        selection="home",
-        decimal_odds=Decimal("2.00"),
-        retrieved_at=datetime(2026, 9, 11, tzinfo=UTC),
-    )
-    result = service.ingest_records("synthetic", [record])
-    assert result.exceptions == 1
-    assert result.observations_created == 0
-    assert repository.list_exceptions()[0].reason == "unknown_team"
 
 
 def test_corrected_odds_are_append_only() -> None:

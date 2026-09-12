@@ -265,7 +265,7 @@ def _parse_kickoff(row: dict[str, str], div: str) -> tuple[datetime | None, Kick
             except ValueError:
                 precision = KickoffPrecision.DATE
     local = datetime(year, month, day, hour, minute, tzinfo=tzinfo)
-    # Explicit adapter conversion: local kickoff -> UTC for the shared hist: identity.
+    # Explicit adapter conversion: local kickoff -> UTC for the facts match identity.
     return local.astimezone(UTC), precision
 
 

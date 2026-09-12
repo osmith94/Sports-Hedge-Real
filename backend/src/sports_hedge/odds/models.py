@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.domain.football import FootballPeriod, MarketFamily, SettlementFingerprint
 from sports_hedge.domain.models import MarketSide
-from sports_hedge.facts.identity import KickoffPrecision, require_aware
+from sports_hedge.facts.identity import KickoffPrecision
+from sports_hedge.odds.timestamps import require_aware
 
 
 class QualityTier(StrEnum):
@@ -66,7 +67,7 @@ class OddsObservation(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     semantics_complete: bool = False
     settlement_key: str | None = None
-    competition_id: str
+    competition_code: str
     season: str
     home_team: str
     away_team: str
@@ -109,7 +110,7 @@ class CanonicalMatchFact(BaseModel):
     """
 
     canonical_match_id: str
-    competition_id: str
+    competition_code: str
     season: str
     home_team: str
     away_team: str

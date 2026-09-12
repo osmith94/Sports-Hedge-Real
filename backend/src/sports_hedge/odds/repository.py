@@ -128,7 +128,7 @@ class SqliteOddsRepository:
             """,
             (
                 match.canonical_match_id,
-                match.competition_id,
+                match.competition_code,
                 match.season,
                 match.home_team,
                 match.away_team,
@@ -266,7 +266,7 @@ class SqliteOddsRepository:
             observation.confidence,
             int(observation.semantics_complete),
             observation.settlement_key,
-            observation.competition_id,
+            observation.competition_code,
             observation.season,
             observation.home_team,
             observation.away_team,
@@ -304,7 +304,7 @@ class SqliteOddsRepository:
             confidence=row["confidence"],
             semantics_complete=bool(row["semantics_complete"]),
             settlement_key=row["settlement_key"],
-            competition_id=row["competition_id"],
+            competition_code=row["competition_id"],
             season=row["season"],
             home_team=row["home_team"],
             away_team=row["away_team"],
@@ -316,7 +316,7 @@ class SqliteOddsRepository:
     def _match_from_row(self, row: sqlite3.Row) -> CanonicalMatchFact:
         return CanonicalMatchFact(
             canonical_match_id=row["canonical_match_id"],
-            competition_id=row["competition_id"],
+            competition_code=row["competition_id"],
             season=row["season"],
             home_team=row["home_team"],
             away_team=row["away_team"],

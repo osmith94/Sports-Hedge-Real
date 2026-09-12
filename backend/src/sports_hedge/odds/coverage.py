@@ -91,7 +91,7 @@ def build_coverage_report(
     exception_list = list(exceptions)
     match_ids_by_comp: dict[tuple[str, str], set[str]] = defaultdict(set)
     for match in match_list:
-        match_ids_by_comp[(match.competition_id, match.season)].add(match.canonical_match_id)
+        match_ids_by_comp[(match.competition_code, match.season)].add(match.canonical_match_id)
 
     obs_by_match: dict[str, list[OddsObservation]] = defaultdict(list)
     for observation in observation_list:
@@ -99,7 +99,7 @@ def build_coverage_report(
 
     market_coverage: list[MarketCoverageRow] = []
     for spec in list_competitions():
-        keys = (spec.competition_id, spec.season)
+        keys = (spec.code.value, spec.season)
         repo_matches = match_ids_by_comp.get(keys, set())
         for family in COVERAGE_FAMILIES:
             with_market: set[str] = set()
@@ -130,7 +130,7 @@ def build_coverage_report(
                 calendar_gap = max(spec.expected_league_matches - total, 0)
             market_coverage.append(
                 MarketCoverageRow(
-                    competition_code=spec.competition_id,
+                    competition_code=spec.code.value,
                     season=spec.season,
                     market_family=family.value,
                     matches_in_repository=total,

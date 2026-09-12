@@ -16,23 +16,30 @@ the current coverage target.
 
 ## Canonical identity
 
-Odds and historical match facts share one warehouse identity contract in
-`sports_hedge.facts`. This is the same `hist:` uuid5 scheme used by PR #35:
+**PR #35 owns `sports_hedge.facts`.** This odds repository consumes that
+package and does not define a second match-ID scheme.
+
+Canonical match IDs are:
 
 ```text
-hist:{uuid5(NAMESPACE_URL, competition_id|season_id|home_team_id|away_team_id|kickoff_utc)}
+match:{sha256(football|competition|season|home|away|kickoff_bucket)[:24]}
 ```
 
-- Competition IDs are `premier-league`, `championship`, `la-liga`, `champions-league`.
-- Season IDs are `{competition_id}:2025-26`.
-- Team IDs come from an explicit catalog. Unknown or ambiguous names fail closed
-  and never mint a new canonical team.
-- Kickoff for the ID seed is the UTC instant of an **aware** timestamp.
-  Naive datetimes are rejected. Adapters that receive local times (for example
-  football-data.co.uk) must attach a documented timezone and convert explicitly.
-- Odds store an `odds_match_index` only as a coverage cache of canonical match
-  IDs already seen. Match scores and events belong to the historical facts
-  repository, not this odds store.
+Competition codes are `premier_league`, `championship`, `la_liga`,
+`champions_league`. Team aliases live in the facts package.
+
+This branch vendors the current #35 `facts` tree so tests can run before
+#35 merges. After #35 is accepted, rebase onto it and keep the
+`test_odds_uses_facts_match_sha256_identity` regression. Unknown-team
+fail-closed cleanup belongs in #35, not a parallel catalog here.
+
+Odds-only rules (this PR):
+
+- Naive quote/kickoff/retrieval timestamps are rejected. football-data.co.uk
+  local kickoffs are converted to UTC inside the adapter with documented
+  timezone provenance.
+- `odds_match_index` is a coverage cache of canonical match IDs already
+  seen. It is not a second match-facts store.
 
 ## Quality tiers
 
