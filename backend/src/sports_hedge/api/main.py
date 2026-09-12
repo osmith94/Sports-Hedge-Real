@@ -53,7 +53,6 @@ app.include_router(market_intelligence_router)
 app.include_router(notifications_router)
 app.include_router(operations_router)
 app.include_router(paper_router)
-app.include_router(paper_router)
 app.include_router(watchlist_router)
 app.include_router(priority_alerts_router)
 
