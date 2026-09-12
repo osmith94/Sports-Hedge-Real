@@ -124,6 +124,7 @@ export type DiscoveredFixture = {
   home_team: string;
   away_team: string;
   competition: string;
+  target_competition_code?: string | null;
   kickoff_utc: string;
   polymarket_matched: boolean;
   fixture_status?: string | null;
@@ -132,6 +133,18 @@ export type DiscoveredFixture = {
   home_score?: number | null;
   away_score?: number | null;
   last_seen_at: string;
+  matched_market_count: number;
+  market_family?: string | null;
+  outcome_context?: string | null;
+  best_matchbook_price?: string | number | null;
+  best_polymarket_price?: string | number | null;
+  current_net_edge?: string | number | null;
+  trigger_net_edge?: string | number | null;
+  distance_to_trigger_pp?: string | number | null;
+  quote_age_ms?: number | null;
+  quote_age_basis?: string | null;
+  no_comparison_reason?: string | null;
+  solver_is_arbitrage: boolean;
 };
 
 export type LiveRefreshStatus = {

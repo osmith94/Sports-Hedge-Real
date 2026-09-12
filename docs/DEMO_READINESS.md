@@ -9,7 +9,7 @@ This is an operator-usability / demo-readiness pass. It does **not** add a new p
 | Surface | Class |
 | --- | --- |
 | `/paper/watchlist/tracked`, `/near`, `/triggered`, `/activity` | `LIVE PAPER` when FastAPI is reachable; empty live lists stay empty; `UNAVAILABLE` if the watchlist API is down (near/triggered may then show labelled `DEMO / FIXTURE`) |
-| `/paper/collect`, `/paper/live-refresh`, Matchbook-discovered fixtures | `LIVE PAPER` when collection credentials/venues respond; empty discovery stays empty; scores `UNAVAILABLE` unless Matchbook payload includes them. Missing Matchbook credentials stay honestly `UNAVAILABLE` / HTTP 503 — never a faked login. Gamma list_events remains first-page only (pagination unimplemented). |
+| `/paper/collect`, `/paper/live-refresh`, Matchbook-discovered fixtures | `LIVE PAPER` when collection credentials/venues respond; empty discovery stays empty; scores `UNAVAILABLE` unless Matchbook payload includes them. Missing Matchbook credentials stay honestly `UNAVAILABLE` / HTTP 503 — never a faked login. Live discovery is allowlisted to English Premier League, EFL Championship and Spain La Liga at the collector boundary. Polymarket public Gamma discovery uses documented `GET /sports` series IDs (EPL `10188`, EFL Championship `10355`, La Liga `10193`) with bounded per-series pagination. Unsupported/empty series stay unmatched rather than invented. |
 | Paper scan history `/paper/scans` | `LIVE PAPER` / empty / `UNAVAILABLE` |
 | Operator comfort-threshold control | UI comparison only against backend `current_net_edge`; does not mutate lifecycle |
 | Priority Alerts `/priority-alerts` | `LIVE PAPER` when the API is up; empty live list stays empty. Walkthrough ticket `pa-ncl-ars-2026-04-12-mr` is `DEMO / FIXTURE` |
@@ -65,7 +65,7 @@ If the SQLite files are absent in an environment, the UI says `UNAVAILABLE` rath
 2. Replace demo Research fee assumptions with authorised venue fee snapshots (Tenet 15 Research path). Arb scan now uses `VenueCostSnapshot` where the per-quote rule exists; MARKET_NET / ACCOUNT_PERIOD / FORMULA-without-rule still fail closed.
 3. Build the Tenet 17 analogue read API (sample size, quality, weak/no relationship, no precedent) without treating correlation as causation.
 4. Operator-visible treasury/full GL instead of the smallest paper journal seam.
-5. Polymarket Gamma pagination / full-series coverage — still unimplemented; first-page / configured series_id only.
+5. Polymarket Gamma coverage for the three demo-target series is bounded-paginated; other sports/leagues remain out of scope. Empty Championship/La Liga series results stay unmatched.
 6. Do not claim production readiness.
 
 ## Exact operator walkthrough

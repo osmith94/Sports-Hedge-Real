@@ -198,6 +198,13 @@ async def test_collector_discovers_matches_fetches_books_and_feeds_paper_pipelin
         assert discovered["1001"].polymarket_matched is True
         assert discovered["1001"].live_score_supported is False
         assert discovered["1001"].home_score is None
+        assert discovered["1001"].matched_market_count == 1
+        assert discovered["1001"].market_family == "both_teams_to_score"
+        assert discovered["1001"].current_net_edge is not None
+        assert discovered["1001"].trigger_net_edge is not None
+        assert discovered["1001"].distance_to_trigger_pp is not None
+        assert discovered["1001"].solver_is_arbitrage is True
+        assert discovered["1001"].no_comparison_reason is None
         decision = report.paper_decisions[0]
         assert decision.fixture_discovery_source == VenueName.MATCHBOOK
         assert decision.live_score_supported is False

@@ -119,3 +119,52 @@ async def test_polymarket_list_events_omits_series_when_filter_disabled() -> Non
         await venue.list_events()
 
     assert "series_id" not in seen[0].params
+
+
+@pytest.mark.asyncio
+async def test_polymarket_list_events_fetches_target_series_and_paginates() -> None:
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        series = request.url.params.get("series_id")
+        offset = request.url.params.get("offset", "0")
+        if request.url.path != "/events":
+            return httpx.Response(404)
+        if series == "10188" and offset == "0":
+            return httpx.Response(
+                200,
+                json=[{"id": "epl-1", "title": "Chelsea vs Hull", "series": [{"title": "Premier League"}]}],
+            )
+        if series == "10355" and offset == "0":
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": f"elc-{index}", "title": f"Club {index} vs Club B"}
+                    for index in range(100)
+                ],
+            )
+        if series == "10355" and offset == "100":
+            return httpx.Response(200, json=[{"id": "elc-page-2", "title": "Leeds vs Leicester"}])
+        if series == "10193":
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json=[])
+
+    settings = Settings(polymarket_gamma_page_limit=100, polymarket_gamma_max_pages_per_series=5)
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url=settings.polymarket_gamma_base_url,
+    ) as http:
+        venue = PolymarketClient(settings, client=http)
+        events = await venue.list_events()
+
+    series_ids = [url.params.get("series_id") for url in seen]
+    assert series_ids.count("10188") == 1
+    assert series_ids.count("10355") == 2
+    assert series_ids.count("10193") == 1
+    ids = [item["id"] for item in events]
+    assert "epl-1" in ids
+    assert "elc-page-2" in ids
+    assert len(events) == 102
+

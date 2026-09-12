@@ -95,6 +95,7 @@ export default async function ArbitragePage() {
   const liveWatchlist = watchlistAvailable ? nearOpportunitiesFromWatchlist(nearRows) : [];
   const liveExecutable = watchlistAvailable ? triggeredOpportunitiesFromWatchlist(triggeredRows) : [];
   const liveTracked = watchlistAvailable ? trackedOpportunitiesFromWatchlist(trackedRows) : [];
+  const liveConnected = apiAvailable && liveRefreshAvailable;
   const watchlist = watchlistAvailable ? liveWatchlist : DEMO_NEAR_ARB;
   const executable = watchlistAvailable ? liveExecutable : DEMO_EXECUTABLE;
   const activity = watchlistAvailable
@@ -118,10 +119,11 @@ export default async function ArbitragePage() {
           <h1>Paper arbitrage operations console</h1>
           <p className="page-subtitle">
             Tracked markets, near-threshold watchlist, paper-eligible triggers, activity and native-currency capital.
-            Matchbook is the live fixture-discovery source; Polymarket is matched onto the same canonical event.
-            Watchlist rows come from `/paper/watchlist/tracked`, `/near`, `/triggered` and `/activity`. The browser
-            does not reclassify rejected scans. DEMO/FIXTURE is used only when a watchlist endpoint is unavailable.
-            Live scores are shown only if Matchbook includes them.
+            Matchbook is the live fixture-discovery source for Premier League, EFL Championship and La Liga only.
+            Polymarket is matched onto the same canonical event when public coverage exists. Watchlist rows come
+            from `/paper/watchlist/tracked`, `/near`, `/triggered` and `/activity`. The browser does not reclassify
+            rejected scans or recompute arb economics. DEMO/FIXTURE walkthrough content is kept in a separate
+            labelled section when the live console is connected.
           </p>
         </div>
         <div className="demo-label">{apiAvailable ? "LIVE PAPER READ MODEL" : "PAPER API OFFLINE"}</div>
@@ -226,14 +228,24 @@ export default async function ArbitragePage() {
       <section className="ops-section">
         <div className="section-label">
           <span>4 · Manual-external paper state</span>
-          <span className="demo-chip">DEMO / FIXTURE · NOT AUTO-POOL</span>
+          <span className={liveConnected ? "status-badge" : "demo-chip"}>
+            {liveConnected ? "LIVE PAPER · EMPTY UNLESS BACKEND HAS A TICKET" : "DEMO / FIXTURE"}
+          </span>
         </div>
         <p className="section-copy">
           Distinct from Near-Arb and validated paper arbs. MANUAL_EXTERNAL does not consume standing liquidity.
-          Live Priority Alert rows stay empty when the backend has none; this walkthrough ticket is labelled demo.
+          Live Priority Alert rows stay empty when the backend has none. The Newcastle–Arsenal walkthrough is
+          not shown here when the live console is connected.
         </p>
-        <OpportunityCard item={DEMO_MANUAL_EXTERNAL} />
-        {externalAlert ? <ExternalLegWorkflow alert={externalAlert} /> : null}
+        {liveConnected ? (
+          <div className="empty-live">
+            No live MANUAL_EXTERNAL ticket in this operations path. Open the demo walkthrough section below for the
+            labelled fictional example.
+          </div>
+        ) : (
+          <OpportunityCard item={DEMO_MANUAL_EXTERNAL} />
+        )}
+        {!liveConnected && externalAlert ? <ExternalLegWorkflow alert={externalAlert} /> : null}
       </section>
 
       <section className="ops-section grid-2">
@@ -242,10 +254,6 @@ export default async function ArbitragePage() {
           <CapitalSummary live={capital.live} fixture={capital.fixture} />
         </div>
       </section>
-
-      <div className="ops-section">
-        <LiquidityPools pools={DEMO_LIQUIDITY_POOLS} />
-      </div>
 
       <section className="panel">
         <div className="panel-header">
@@ -307,6 +315,21 @@ export default async function ArbitragePage() {
             </table>
           </div>
         ) : null}
+      </section>
+
+      <section className="ops-section">
+        <div className="section-label">
+          <span>Demo walkthrough · not live operations</span>
+          <span className="demo-chip">DEMO / FIXTURE · NOT LIVE DISCOVERY</span>
+        </div>
+        <p className="section-copy">
+          Fictional operator-training content, including the Newcastle United v Arsenal MANUAL_EXTERNAL ticket.
+          It is not mixed into Matchbook fixture discovery, tracked markets, near-arb or triggered lists when the
+          live paper API is connected.
+        </p>
+        <OpportunityCard item={DEMO_MANUAL_EXTERNAL} />
+        {externalAlert ? <ExternalLegWorkflow alert={externalAlert} /> : null}
+        <LiquidityPools pools={DEMO_LIQUIDITY_POOLS} />
       </section>
     </>
   );

@@ -42,33 +42,75 @@ class PolymarketClient(ReadOnlyVenue):
         )
 
     async def list_events(self, **filters: Any) -> list[dict[str, Any]]:
-        """List public Gamma events.
+        """List public Gamma events for configured target-competition series.
 
-        Unfiltered ``limit=100`` is an observed audit gap: the first page is
-        typically non-football. Public ``GET /sports`` metadata reports EPL
-        ``series=10188``. When configured, that series filter is applied
-        through this existing ``series_id`` query param. Pagination is still
-        not implemented.
+        Default series IDs come from public ``GET /sports`` (EPL, EFL Championship,
+        La Liga). Pagination is per-series, bounded, and read-only. Empty series
+        results stay empty rather than inventing Championship/La Liga markets.
         """
 
+        page_limit = self.settings.polymarket_gamma_page_limit
         params: dict[str, Any] = {
             "active": "true",
             "closed": "false",
-            "limit": 100,
+            "limit": page_limit,
             **filters,
         }
-        configured = (self.settings.polymarket_gamma_series_id or "").strip()
-        series_id = params.get("series_id")
-        if (series_id is None or str(series_id).strip() == "") and configured:
-            params["series_id"] = configured
-        elif series_id is not None and str(series_id).strip() == "":
+        caller_series = params.get("series_id")
+        if caller_series is not None and str(caller_series).strip() == "":
             params.pop("series_id", None)
+            return await self._get_event_page(params)
+
+        if caller_series is not None:
+            return await self._list_series_events(str(caller_series), params)
+
+        series_ids = self.settings.resolved_polymarket_series_ids()
+        if not series_ids:
+            return await self._get_event_page(params)
+
+        events: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for series_id in series_ids:
+            for item in await self._list_series_events(series_id, params):
+                event_id = str(item.get("id", "")).strip()
+                if event_id and event_id in seen:
+                    continue
+                if event_id:
+                    seen.add(event_id)
+                events.append(item)
+        return events
+
+    async def _list_series_events(
+        self,
+        series_id: str,
+        base_params: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        page_limit = int(base_params.get("limit") or self.settings.polymarket_gamma_page_limit)
+        max_pages = self.settings.polymarket_gamma_max_pages_per_series
+        for page in range(max_pages):
+            params = {
+                **base_params,
+                "series_id": series_id,
+                "limit": page_limit,
+                "offset": page * page_limit,
+            }
+            page_items = await self._get_event_page(params)
+            events.extend(page_items)
+            if len(page_items) < page_limit:
+                break
+        return events
+
+    async def _get_event_page(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         response = await self._client.get(
             f"{self.settings.polymarket_gamma_base_url.rstrip('/')}/events",
             params=params,
         )
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return []
 
     async def list_markets(self, event_id: int | str, **filters: Any) -> list[dict[str, Any]]:
         response = await self._client.get(
