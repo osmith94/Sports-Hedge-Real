@@ -1053,7 +1053,7 @@ def test_hold_vs_unwind_is_not_decided_by_predicted_game_end() -> None:
         UnwindEvaluationRequest(
             position=_position(
                 [_open_leg()],
-                hold="12",
+                hold="10",
                 expected_settlement_at=NOW + timedelta(minutes=3),
             ),
             quotes=quotes,
@@ -1063,7 +1063,7 @@ def test_hold_vs_unwind_is_not_decided_by_predicted_game_end() -> None:
     )
     unknown = engine.evaluate(
         UnwindEvaluationRequest(
-            position=_position([_open_leg()], hold="12"),
+            position=_position([_open_leg()], hold="10"),
             quotes=quotes,
             scarcity=scarce,
             evaluated_at=NOW,
@@ -1073,7 +1073,7 @@ def test_hold_vs_unwind_is_not_decided_by_predicted_game_end() -> None:
         UnwindEvaluationRequest(
             position=_position(
                 [_open_leg()],
-                hold="12",
+                hold="10",
                 remaining_lock_minutes=Decimal("180"),
                 expected_settlement_at=NOW + timedelta(hours=3),
             ),
