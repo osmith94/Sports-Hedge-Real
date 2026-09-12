@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from sports_hedge.api.market_intelligence import get_market_intelligence_service
+from sports_hedge.api.watchlist import get_watchlist_service
 from sports_hedge.application.collector import CollectionReport, ReadOnlyCrossVenueCollector
 from sports_hedge.application.market_observation import (
     MatchbookObservationBuilder,
@@ -18,6 +19,7 @@ from sports_hedge.application.market_observation import (
     VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.models import FeeSnapshot
@@ -32,7 +34,6 @@ from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookClient
 from sports_hedge.venues.polymarket import PolymarketClient
-
 
 router = APIRouter(prefix="/paper", tags=["paper"])
 
@@ -128,6 +129,7 @@ def scan_pair(
     request: PaperPairScanRequest,
     service: PaperScanService = Depends(get_paper_scan_service),
     audit: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+    watchlist: WatchlistService = Depends(get_watchlist_service),
 ) -> PaperScanDecision:
     try:
         left = _build_observation(request.left)
@@ -144,7 +146,13 @@ def scan_pair(
             assumed_latency_ms=request.assumed_latency_ms,
             recent_volatility_bps=request.recent_volatility_bps,
         )
-        _persist_decision(decision, service=service, audit=audit)
+        _persist_decision(
+            decision,
+            service=service,
+            audit=audit,
+            watchlist=watchlist,
+            quote_age_ms=max(request.left.quote_age_ms, request.right.quote_age_ms),
+        )
         return decision
     except (VenueNormalizationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -159,6 +167,7 @@ async def collect_read_only_market_data(
     request: PaperCollectionRequest,
     service: PaperScanService = Depends(get_paper_scan_service),
     audit: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+    watchlist: WatchlistService = Depends(get_watchlist_service),
 ) -> CollectionReport:
     """Run one explicit read-only collection/scan cycle."""
 
@@ -188,12 +197,14 @@ async def collect_read_only_market_data(
             max_market_pairs_per_event=request.max_market_pairs_per_event,
         )
         for decision in report.paper_decisions:
-            _persist_decision(decision, service=service, audit=audit)
+            _persist_decision(decision, service=service, audit=audit, watchlist=watchlist)
         return report
     except MatchbookAuthError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"venue market-data request failed: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"venue market-data request failed: {exc}"
+        ) from exc
     finally:
         await matchbook.aclose()
         await polymarket.aclose()
@@ -204,15 +215,17 @@ def _persist_decision(
     *,
     service: PaperScanService,
     audit: SqlitePaperScanRepository,
+    watchlist: WatchlistService,
+    quote_age_ms: int | None = None,
 ) -> None:
     if not decision.canonical_market_id:
         return
     history = service.market_intelligence.market_history(
         canonical_market_id=decision.canonical_market_id,
     )
-    if not history:
-        return
-    audit.append_scan(build_paper_scan_record(decision, history))
+    if history:
+        audit.append_scan(build_paper_scan_record(decision, history))
+    watchlist.observe_paper_decision(decision, history, quote_age_ms=quote_age_ms)
 
 
 def _build_observation(request: RawVenueObservationRequest) -> VenueMarketObservation:
