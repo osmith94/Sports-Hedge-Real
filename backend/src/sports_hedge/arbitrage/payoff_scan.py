@@ -12,6 +12,7 @@ from sports_hedge.arbitrage.payoff_solver import GeneralizedMaxMinSolver, payoff
 from sports_hedge.domain.models import VenueName
 from sports_hedge.application.complete_set import (
     DNB_STATES,
+    FIRST_TEAM_TO_SCORE_STATES,
     INTEGER_TOTAL_STATES,
     UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
     GeneralizedStateModel,
@@ -129,6 +130,13 @@ def _state_mapping(
             "under": (("under",), ("push",)),
         }
         return INTEGER_TOTAL_STATES, mapping
+    if state_model is GeneralizedStateModel.FIRST_TEAM_TO_SCORE:
+        mapping = {
+            "home": (("home_first",), ()),
+            "away": (("away_first",), ()),
+            "no_goal": (("no_goal",), ()),
+        }
+        return FIRST_TEAM_TO_SCORE_STATES, mapping
     raise ValueError("unsupported_generalized_state_model")
 
 

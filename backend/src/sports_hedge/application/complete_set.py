@@ -5,7 +5,9 @@ from enum import StrEnum
 from sports_hedge.domain.football import (
     CanonicalMarket,
     CanonicalOutcome,
+    FootballPeriod,
     MarketFamily,
+    SettlementScope,
     line_push_possible,
 )
 from sports_hedge.matching.markets import MarketMatchResult
@@ -13,9 +15,10 @@ from sports_hedge.matching.markets import MarketMatchResult
 # Step 7 allowlist: conventional families whose listed outcomes are mutually
 # exclusive AND exhaustive for the existing complete-set solver (no unmodelled
 # push/void state). DNB and integer-line Totals use the Step 8A generalized
-# path instead. Asian Handicap, To Qualify, Correct Score, Next Goal,
-# First Team To Score, Double Chance, corners/cards, team totals and player
-# props stay inventory-visible and solver-ineligible.
+# path instead. First Team To Score (HOME/AWAY/NO_GOAL, regulation time)
+# uses the Step 8B generalized path. Asian Handicap, To Qualify, Correct Score,
+# Next Goal, Double Chance, corners/cards, team totals and player props stay
+# inventory-visible and solver-ineligible.
 STEP7_COMPLETE_SET_FAMILIES: frozenset[MarketFamily] = frozenset(
     {
         MarketFamily.MATCH_RESULT,
@@ -29,13 +32,18 @@ SOLVER_MODEL_GENERALIZED = "generalized_payoff"
 
 DNB_STATES = ("home", "draw", "away")
 INTEGER_TOTAL_STATES = ("over", "push", "under")
+FIRST_TEAM_TO_SCORE_STATES = ("home_first", "away_first", "no_goal")
 DNB_RUNNERS = frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY})
 TOTAL_RUNNERS = frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER})
+FIRST_TEAM_TO_SCORE_RUNNERS = frozenset(
+    {CanonicalOutcome.HOME, CanonicalOutcome.AWAY, CanonicalOutcome.NO_GOAL}
+)
 
 
 class GeneralizedStateModel(StrEnum):
     DRAW_NO_BET = "draw_no_bet"
     INTEGER_TOTAL_GOALS = "integer_total_goals"
+    FIRST_TEAM_TO_SCORE = "first_team_to_score"
 
 
 COMPLETE_OUTCOME_SPACE: dict[MarketFamily, frozenset[CanonicalOutcome]] = {
@@ -157,11 +165,33 @@ def generalized_integer_totals_ready(market: CanonicalMarket) -> bool:
     return settlement.push_possible is True
 
 
+def generalized_first_team_to_score_ready(market: CanonicalMarket) -> bool:
+    if market.family is not MarketFamily.FIRST_TEAM_TO_SCORE:
+        return False
+    present = runner_outcomes(market)
+    if CanonicalOutcome.OTHER in present or present != FIRST_TEAM_TO_SCORE_RUNNERS:
+        return False
+    if market.period is not FootballPeriod.FULL_TIME:
+        return False
+    settlement = market.settlement
+    if not settlement.is_economically_complete():
+        return False
+    if settlement.period is not FootballPeriod.FULL_TIME:
+        return False
+    if settlement.scope is not SettlementScope.REGULATION_TIME:
+        return False
+    if settlement.extra_time_included is not False or settlement.penalties_included is not False:
+        return False
+    return settlement.push_possible is False
+
+
 def generalized_state_model(market: CanonicalMarket) -> GeneralizedStateModel | None:
     if generalized_dnb_ready(market):
         return GeneralizedStateModel.DRAW_NO_BET
     if generalized_integer_totals_ready(market):
         return GeneralizedStateModel.INTEGER_TOTAL_GOALS
+    if generalized_first_team_to_score_ready(market):
+        return GeneralizedStateModel.FIRST_TEAM_TO_SCORE
     return None
 
 
@@ -210,4 +240,21 @@ def scan_ineligibility_reason(market: CanonicalMarket) -> str:
             if CanonicalOutcome.OTHER in present or present != TOTAL_RUNNERS:
                 return INCOMPLETE_OUTCOME_REASON
             return "incomplete_settlement"
+    if market.family is MarketFamily.FIRST_TEAM_TO_SCORE:
+        present = runner_outcomes(market)
+        if CanonicalOutcome.OTHER in present or present != FIRST_TEAM_TO_SCORE_RUNNERS:
+            return INCOMPLETE_OUTCOME_REASON
+        if not market.settlement.is_economically_complete():
+            return "incomplete_settlement"
+        if (
+            market.period is not FootballPeriod.FULL_TIME
+            or market.settlement.period is not FootballPeriod.FULL_TIME
+            or market.settlement.scope is not SettlementScope.REGULATION_TIME
+            or market.settlement.extra_time_included is not False
+            or market.settlement.penalties_included is not False
+        ):
+            return UNPROVEN_SETTLEMENT_REASON
+        if market.settlement.push_possible is not False:
+            return UNPROVEN_SETTLEMENT_REASON
+        return SOLVER_INELIGIBLE_REASON
     return solver_ineligibility_reason(market)

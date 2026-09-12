@@ -113,6 +113,7 @@ def test_step7_allowlist_never_includes_dnb_or_to_qualify() -> None:
     assert MarketFamily.TO_QUALIFY not in STEP7_COMPLETE_SET_FAMILIES
     assert MarketFamily.CORRECT_SCORE not in STEP7_COMPLETE_SET_FAMILIES
     assert MarketFamily.NEXT_GOAL not in STEP7_COMPLETE_SET_FAMILIES
+    assert MarketFamily.FIRST_TEAM_TO_SCORE not in STEP7_COMPLETE_SET_FAMILIES
     dnb = _market(
         VenueName.MATCHBOOK,
         family=MarketFamily.DRAW_NO_BET,
@@ -1128,6 +1129,15 @@ class MultiFamilyMatchbook:
                     "name": "First Team To Score",
                     "runners": [{"id": 81, "name": "Tottenham", "prices": [back]}],
                 },
+                {
+                    "id": 8112,
+                    "name": "First Team To Score",
+                    "runners": [
+                        {"id": 82, "name": "Tottenham", "prices": [back]},
+                        {"id": 83, "name": "Everton", "prices": [back]},
+                        {"id": 84, "name": "No Goal", "prices": [back]},
+                    ],
+                },
             ]
         }
 
@@ -1217,6 +1227,14 @@ class MultiFamilyPolymarket:
                 "clobTokenIds": '["cs1", "cs2"]',
                 "description": regulation,
             },
+            {
+                "id": "pm-ftts",
+                "question": "First team to score",
+                "sportsMarketType": "first team to score",
+                "outcomes": '["Tottenham", "Everton", "No Goal"]',
+                "clobTokenIds": '["ftts-h", "ftts-a", "ftts-n"]',
+                "description": regulation,
+            },
         ]
 
     async def get_order_book(
@@ -1261,9 +1279,11 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
             "both_teams_to_score",
             "total_goals",
             "draw_no_bet",
+            "first_team_to_score",
         }
         assert "asian_handicap" not in scanned_families
         assert "to_qualify" not in scanned_families
+        assert "next_goal" not in scanned_families
         totals = [row for row in rows if row.family == "total_goals" and row.entered_solver]
         assert {row.line for row in totals} >= {Decimal("2.5"), Decimal("3.5"), Decimal("2.0")}
         half_line = [row for row in totals if row.line in {Decimal("2.5"), Decimal("3.5")}]
@@ -1293,11 +1313,15 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
         cs = next(row for row in rows if row.family == "correct_score")
         assert cs.entered_solver is False
         assert cs.comparison_status is InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL
-        first_team = next(
-            row for row in rows if "First Team To Score" in row.display_name or "first team" in (row.display_name or "").lower()
+        first_team_rows = [row for row in rows if row.family == "first_team_to_score"]
+        assert first_team_rows
+        assert any(
+            row.entered_solver and row.solver_model == "generalized_payoff" for row in first_team_rows
         )
-        assert first_team.entered_solver is False
-        assert first_team.comparison_status is InventoryComparisonStatus.UNSUPPORTED_FAMILY
+        assert any(
+            not row.entered_solver and row.reason == INCOMPLETE_OUTCOME_REASON for row in first_team_rows
+        )
+        assert all(row.solver_is_arbitrage is False for row in first_team_rows)
         scanned_ids = {(d.canonical_market_id) for d in report.paper_decisions}
         assert len(scanned_ids) >= 4
         for decision in report.paper_decisions:
@@ -1327,6 +1351,7 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
             "to_qualify",
             "correct_score",
             "next_goal",
+            "first_team_to_score",
         }
         assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "match_result")
         assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "both_teams_to_score")
@@ -1341,6 +1366,16 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "to_qualify")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "correct_score")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "next_goal")
+        assert any(
+            row["entered_solver"] and row.get("solver_model") == "generalized_payoff"
+            for row in body["markets"]
+            if row["family"] == "first_team_to_score"
+        )
+        assert any(
+            not row["entered_solver"] and row.get("reason") == INCOMPLETE_OUTCOME_REASON
+            for row in body["markets"]
+            if row["family"] == "first_team_to_score"
+        )
         coordinator.reset()
     finally:
         repository.close()
@@ -1348,8 +1383,18 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
 
 def test_first_team_to_score_is_not_normalized_into_step7() -> None:
     event = MatchbookNormalizer().normalize_event(MB_EVENT)
-    with pytest.raises(Exception, match="Unsupported Matchbook market"):
-        MatchbookNormalizer().normalize_market(
-            event,
-            {"id": 999, "name": "First Team To Score", "runners": [{"id": 1, "name": "Tottenham"}]},
-        )
+    market = MatchbookNormalizer().normalize_market(
+        event,
+        {
+            "id": 999,
+            "name": "First Team To Score",
+            "runners": [
+                {"id": 1, "name": "Tottenham"},
+                {"id": 2, "name": "Everton"},
+                {"id": 3, "name": "No Goal"},
+            ],
+        },
+    )
+    assert market.family is MarketFamily.FIRST_TEAM_TO_SCORE
+    assert market.family not in STEP7_COMPLETE_SET_FAMILIES
+    assert solver_eligible_market(market) is False
