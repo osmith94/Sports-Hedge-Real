@@ -29,18 +29,14 @@ export function TrackedMarketsBoard({
 
   if (!available) {
     return (
-      <div className="empty-live">
-        Tracked-market watchlist endpoint is unavailable. No fabricated tracked fixtures are substituted.
+      <div className="empty-live-compact">
+        Tracked watchlist unavailable. No fabricated fixtures.
       </div>
     );
   }
 
   if (items.length === 0) {
-    return (
-      <div className="empty-live">
-        No canonical markets are currently on the live paper watchlist. Empty live state is shown as empty.
-      </div>
-    );
+    return <div className="empty-live-compact">No tracked markets.</div>;
   }
 
   return (
@@ -48,11 +44,7 @@ export function TrackedMarketsBoard({
       <div className="comfort-bar">
         <div>
           <div className="comfort-kicker">Operator comparison / comfort threshold</div>
-          <p className="section-copy">
-            Compares the backend-calculated current net edge against an alternate threshold. This does not
-            recompute venue economics or mutate watchlist lifecycle. Distance is percentage points from the
-            already-calculated net edge.
-          </p>
+          <p className="section-copy">Compare backend net edge to an alternate threshold. Does not resize or reclassify.</p>
         </div>
         <div className="comfort-pills" role="group" aria-label="Operator comfort threshold">
           {options.map((option) => {

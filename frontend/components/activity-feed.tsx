@@ -21,7 +21,7 @@ export function ActivityFeed({
       </div>
       <div className="panel-body feed-list">
         {items.length === 0 ? (
-          <div className="empty-live">No watchlist lifecycle events yet. The monitor does not invent paper fill activity.</div>
+          <div className="empty-live-compact">No watchlist events yet.</div>
         ) : items.map((item) => (
           <div className="feed-row" key={item.id}>
             <div className="feed-kind">{item.kind.replaceAll("_", " ")}</div>

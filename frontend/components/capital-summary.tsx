@@ -1,35 +1,26 @@
 import { CapitalSnapshot } from "../lib/arbitrage-ops";
 import { money } from "../lib/format";
 
-export function CapitalSummary({
-  live,
-  fixture,
-}: {
-  live: CapitalSnapshot;
-  fixture: CapitalSnapshot;
-}) {
+export function CapitalSummary({ live }: { live: CapitalSnapshot }) {
   const cards = [
-    { label: "Realised P&L", value: fixture.realisedPnlGbp, live: live.realisedPnlGbp, foot: "Arbitrage strategy · paper", demo: live.realisedPnlGbp === null },
-    { label: "Locked capital", value: live.lockedCapitalGbp ?? fixture.lockedCapitalGbp, live: live.lockedCapitalGbp, foot: "Open paper exposure", demo: live.lockedCapitalGbp === null },
-    { label: "Available capital", value: live.availableCapitalGbp ?? fixture.availableCapitalGbp, live: live.availableCapitalGbp, foot: "Residual vs capital limit", demo: live.availableCapitalGbp === null },
-    { label: "Today / MTD / all-time", value: fixture.todayPnlGbp, live: live.todayPnlGbp, foot: `${money(fixture.todayPnlGbp)} · ${money(fixture.mtdPnlGbp)} · ${money(fixture.allTimePnlGbp)}`, demo: true },
+    { label: "Realised P&L", value: live.realisedPnlGbp, foot: "Arbitrage strategy · not persisted yet" },
+    { label: "Locked paper stake", value: live.lockedCapitalGbp, foot: "Eligible scan exposure · GBP" },
+    { label: "Today P&L", value: live.todayPnlGbp, foot: "No combined USD+GBP cash figure" },
   ];
 
   return (
     <section>
       <div className="section-label">
-        <span>Running P&amp;L / capital</span>
-        <span className="demo-chip">PAPER ONLY · MIXED LIVE / DEMO</span>
+        <span>Activity P&amp;L</span>
+        <span className="status-badge">PAPER ONLY · NO FAKE TOTALS</span>
       </div>
+      <p className="section-copy">Paper P&amp;L is shown only when the scan read model has it; standing capital lives in native pools.</p>
       <div className="metric-grid metric-grid-compact">
         {cards.map((card) => (
           <div className="metric-card" key={card.label}>
-            <div className="metric-label">
-              {card.label}
-              {card.demo ? <span className="demo-inline">DEMO</span> : <span className="live-inline">LIVE</span>}
-            </div>
+            <div className="metric-label">{card.label}</div>
             <div className={`metric-value ${card.label.includes("P&L") ? "metric-positive" : ""}`}>
-              {money(card.demo ? card.value : card.live ?? card.value)}
+              {money(card.value)}
             </div>
             <div className="metric-foot">{card.foot}</div>
           </div>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
 from itertools import product
 
@@ -69,6 +70,7 @@ class DepthAwareCompleteSetScanner:
         *,
         expected_outcomes: list[str],
         capital_limit: Decimal | None = None,
+        venue_capital_limits: Mapping[VenueName, Decimal] | None = None,
         configured_slippage_bps: Decimal | None = None,
     ) -> DepthScanResult:
         expected = list(dict.fromkeys(expected_outcomes))
@@ -115,6 +117,7 @@ class DepthAwareCompleteSetScanner:
             solution = self.solver.solve(
                 [candidate.as_executable_quote() for candidate in combination],
                 capital_limit=capital_limit,
+                venue_capital_limits=venue_capital_limits,
             )
             if not solution.is_arbitrage:
                 continue
@@ -130,6 +133,7 @@ class DepthAwareCompleteSetScanner:
             rejected = self.solver.solve(
                 [candidate.as_executable_quote() for candidate in best_top],
                 capital_limit=capital_limit,
+                venue_capital_limits=venue_capital_limits,
             )
             return DepthScanResult(
                 solution=rejected,

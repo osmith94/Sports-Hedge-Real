@@ -258,7 +258,10 @@ export function RunPaperScan() {
   return (
     <section className="panel scan-control">
       <div className="panel-header">
-        <div className="panel-title">Paper scanner</div>
+        <div>
+          <div className="panel-title">Paper scanner</div>
+          <div className="panel-meta">Read-only collection. Stake sizing uses standing native venue pools.</div>
+        </div>
         <span className="status-badge">PAPER MODE · NO EXECUTION</span>
       </div>
 
@@ -314,8 +317,9 @@ export function RunPaperScan() {
           <summary>Advanced · provenance</summary>
           <p className="scan-advanced-copy">
             FX and venue fees are backend-resolved ({economics?.data_kind ?? "backend_resolved"}).
-            Missing or stale required inputs fail closed. Standing capital belongs to native
-            liquidity pools; optional scan-only capital limit is retained for compatibility.
+            Missing or stale required inputs fail closed. Standing capital is Matchbook GBP /
+            Polymarket USD / Smarkets GBP — never a combined cash figure. Optional extra
+            capital_limit_gbp is a scan-only cap, not live funds.
           </p>
           <label className="scan-field">
             <span>Optional capital limit £</span>

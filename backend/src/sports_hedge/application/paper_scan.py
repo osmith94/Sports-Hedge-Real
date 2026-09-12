@@ -30,7 +30,9 @@ from sports_hedge.normalization.identity import (
     canonical_source_market_id,
 )
 from sports_hedge.paper.fills import PaperOpportunityLeg
+from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.risk.execution import ExecutionRiskInputs, ExecutionRiskScorer
 
 
@@ -47,6 +49,7 @@ class PaperScanService:
         settings: Settings | None = None,
         fx_service: FxRateService | None = None,
         cost_resolver: VenueCostResolver | None = None,
+        liquidity: SqlitePaperLiquidityRepository | None = None,
     ) -> None:
         self.market_intelligence = market_intelligence
         self.market_matcher = market_matcher or MarketMatcher()
@@ -55,6 +58,7 @@ class PaperScanService:
         self.settings = settings or get_settings()
         self.fx_service = fx_service
         self.cost_resolver = cost_resolver
+        self.liquidity = liquidity
 
     def record_observation(self, observation: VenueMarketObservation) -> int:
         event_id = canonical_source_event_id(observation.market.event)
@@ -70,6 +74,7 @@ class PaperScanService:
         venue_costs: list[VenueCostSnapshot] | None = None,
         fx_snapshots: list[FxRateSnapshot] | None = None,
         capital_limit_gbp: Decimal | None = None,
+        liquidity_snapshot: PaperLiquiditySnapshot | None = None,
         minimum_net_edge: Decimal = Decimal("0.005"),
         maximum_execution_risk: int = 60,
         minimum_mapping_confidence: float = 0.98,
@@ -264,10 +269,22 @@ class PaperScanService:
                     )
                 )
 
+        standing = liquidity_snapshot
+        fx_source = next(
+            (snapshot.source for snapshot in fx if snapshot.currency.upper() == "USD"),
+            "backend_fx",
+        )
+        if standing is None and self.liquidity is not None:
+            standing = self.liquidity.get(gbp_per_unit=effective_fx, fx_source=fx_source)
+        venue_capital_limits = None
+        if standing is not None:
+            venue_capital_limits = standing.solver_gbp_limits(effective_fx)
+
         depth_scan = self.depth_scanner.scan(
             sources,
             expected_outcomes=[outcome.value for outcome in expected_outcomes],
             capital_limit=capital_limit_gbp,
+            venue_capital_limits=venue_capital_limits,
             configured_slippage_bps=configured_book_slip if configured_book_slip > 0 else None,
         )
         rejections.extend(depth_scan.cost_rejection_reasons)

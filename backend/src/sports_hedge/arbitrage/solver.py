@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal, getcontext
 
 from sports_hedge.arbitrage.models import ArbitrageSolution, ArbitrageStake, ExecutableQuote
+from sports_hedge.domain.models import VenueName
 
 
 getcontext().prec = 28
@@ -21,6 +23,7 @@ class CompleteSetArbitrageSolver:
         quotes: list[ExecutableQuote],
         *,
         capital_limit: Decimal | None = None,
+        venue_capital_limits: Mapping[VenueName, Decimal] | None = None,
     ) -> ArbitrageSolution:
         if len(quotes) < 2:
             return ArbitrageSolution(
@@ -57,6 +60,35 @@ class CompleteSetArbitrageSolver:
             if capital_limit <= 0:
                 raise ValueError("capital_limit must be positive")
             total_stake = min(total_stake, capital_limit)
+
+        if venue_capital_limits:
+            implied_by_venue: dict[VenueName, Decimal] = {}
+            for quote in quotes:
+                implied_by_venue[quote.venue] = implied_by_venue.get(quote.venue, Decimal("0")) + (
+                    Decimal("1") / quote.net_decimal_odds
+                )
+            for venue, venue_implied in implied_by_venue.items():
+                if venue is VenueName.SMARKETS:
+                    continue
+                if venue not in venue_capital_limits:
+                    continue
+                venue_cap = venue_capital_limits[venue]
+                if venue_cap < 0:
+                    raise ValueError("venue_capital_limits must be non-negative")
+                if venue_cap == 0 or venue_implied <= 0:
+                    return ArbitrageSolution(
+                        is_arbitrage=False,
+                        implied_probability_sum=implied_sum,
+                        rejection_reason="insufficient_venue_capital",
+                    )
+                total_stake = min(total_stake, venue_cap * implied_sum / venue_implied)
+
+        if total_stake <= 0:
+            return ArbitrageSolution(
+                is_arbitrage=False,
+                implied_probability_sum=implied_sum,
+                rejection_reason="insufficient_venue_capital",
+            )
 
         guaranteed_return = total_stake / implied_sum
         guaranteed_profit = guaranteed_return - total_stake

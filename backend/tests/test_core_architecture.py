@@ -136,6 +136,62 @@ def test_three_way_arbitrage_respects_capital_limit() -> None:
     assert len(result.stakes) == 3
 
 
+def test_two_way_arbitrage_respects_matchbook_venue_capital() -> None:
+    quotes = [
+        ExecutableQuote(
+            outcome="yes",
+            venue=VenueName.MATCHBOOK,
+            source_market_id="m1",
+            net_decimal_odds=Decimal("2.10"),
+            max_stake=Decimal("1000"),
+        ),
+        ExecutableQuote(
+            outcome="no",
+            venue=VenueName.POLYMARKET,
+            source_market_id="m2",
+            net_decimal_odds=Decimal("2.10"),
+            max_stake=Decimal("1000"),
+        ),
+    ]
+    unconstrained = CompleteSetArbitrageSolver().solve(quotes)
+    capped = CompleteSetArbitrageSolver().solve(
+        quotes,
+        venue_capital_limits={VenueName.MATCHBOOK: Decimal("20"), VenueName.POLYMARKET: Decimal("1000")},
+    )
+    assert unconstrained.is_arbitrage is True
+    assert capped.is_arbitrage is True
+    matchbook_stake = next(stake.stake for stake in capped.stakes if stake.venue is VenueName.MATCHBOOK)
+    assert matchbook_stake == Decimal("20")
+    assert capped.total_stake < unconstrained.total_stake
+
+
+def test_smarkets_standing_pool_does_not_cap_solver() -> None:
+    quotes = [
+        ExecutableQuote(
+            outcome="yes",
+            venue=VenueName.MATCHBOOK,
+            source_market_id="m1",
+            net_decimal_odds=Decimal("2.10"),
+            max_stake=Decimal("100"),
+        ),
+        ExecutableQuote(
+            outcome="no",
+            venue=VenueName.SMARKETS,
+            source_market_id="m2",
+            net_decimal_odds=Decimal("2.10"),
+            max_stake=Decimal("100"),
+        ),
+    ]
+    unconstrained = CompleteSetArbitrageSolver().solve(quotes)
+    ignored_pool = CompleteSetArbitrageSolver().solve(
+        quotes,
+        venue_capital_limits={VenueName.SMARKETS: Decimal("1")},
+    )
+    assert unconstrained.is_arbitrage is True
+    assert ignored_pool.is_arbitrage is True
+    assert ignored_pool.total_stake == unconstrained.total_stake
+
+
 def test_order_book_walker_uses_multiple_levels() -> None:
     fill = OrderBookWalker().fill(
         [
