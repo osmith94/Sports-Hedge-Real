@@ -46,7 +46,17 @@ from sports_hedge.normalization.identity import (
 )
 from sports_hedge.paper.fills import PaperOpportunityLeg
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
+from sports_hedge.arbitrage.allocation.adapters import (
+    balances_from_liquidity,
+    estimated_time_to_release,
+    exposures_from_trades,
+    request_from_paper_decision,
+)
+from sports_hedge.arbitrage.allocation.engine import allocate
+from sports_hedge.arbitrage.allocation.models import AllocatedStake, AllocationResult
+from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+from sports_hedge.paper.trades import PaperTrade
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.risk.execution import ExecutionRiskInputs, ExecutionRiskScorer
 
@@ -66,6 +76,7 @@ class PaperScanService:
         fx_service: FxRateService | None = None,
         cost_resolver: VenueCostResolver | None = None,
         liquidity: SqlitePaperLiquidityRepository | None = None,
+        open_trades: list[PaperTrade] | None = None,
     ) -> None:
         self.market_intelligence = market_intelligence
         self.market_matcher = market_matcher or MarketMatcher()
@@ -76,6 +87,7 @@ class PaperScanService:
         self.fx_service = fx_service
         self.cost_resolver = cost_resolver
         self.liquidity = liquidity
+        self.open_trades = open_trades or []
 
     def record_observation(self, observation: VenueMarketObservation) -> int:
         event_id = canonical_source_event_id(observation.market.event)
@@ -97,6 +109,8 @@ class PaperScanService:
         minimum_mapping_confidence: float = 0.98,
         assumed_latency_ms: int = 500,
         recent_volatility_bps: float = 0.0,
+        open_trades: list[PaperTrade] | None = None,
+        conditionally_releasable: dict | None = None,
     ) -> PaperScanDecision:
         if minimum_net_edge < 0:
             raise ValueError("minimum_net_edge must be non-negative")
@@ -398,7 +412,7 @@ class PaperScanService:
             effective_fx=effective_fx,
         )
 
-        return PaperScanDecision(
+        draft = PaperScanDecision(
             market_match=match,
             canonical_event_id=event_id,
             canonical_market_id=market_id,
@@ -420,6 +434,83 @@ class PaperScanService:
             execution_modes=execution_modes,
             solver_model=solver_model,
         )
+        trades = open_trades if open_trades is not None else self.open_trades
+        allocation, alloc_reasons = self._allocate_draft(
+            draft,
+            left=left,
+            standing=standing,
+            effective_fx=effective_fx,
+            recent_volatility_bps=recent_volatility_bps,
+            open_trades=trades,
+            conditionally_releasable=conditionally_releasable,
+        )
+        if allocation is not None:
+            draft = draft.model_copy(update={"allocation": allocation})
+            if allocation.accepted:
+                try:
+                    draft = draft.model_copy(
+                        update={"fill_legs": apply_allocation_to_fill_legs(fill_legs, allocation)}
+                    )
+                except FillPlanMappingError as exc:
+                    alloc_reasons.append(f"allocation_failed:{exc.reason}")
+        rejections.extend(alloc_reasons)
+        return draft.model_copy(
+            update={
+                "eligible_for_paper_simulation": not rejections,
+                "rejection_reasons": _dedupe(rejections),
+            }
+        )
+
+    def _allocate_draft(
+        self,
+        draft: PaperScanDecision,
+        *,
+        left: VenueMarketObservation,
+        standing: PaperLiquiditySnapshot | None,
+        effective_fx: dict[str, Decimal],
+        recent_volatility_bps: float,
+        open_trades: list[PaperTrade] | None,
+        conditionally_releasable: dict | None,
+    ) -> tuple[AllocationResult | None, list[str]]:
+        arb = (draft.depth_scan is not None and draft.depth_scan.solution.is_arbitrage) or (
+            draft.payoff_scan is not None and draft.payoff_scan.solution.is_arbitrage
+        )
+        if not arb or standing is None:
+            return None, []
+        policy = policy_from_settings(self.settings)
+        balances = balances_from_liquidity(
+            standing,
+            gbp_per_unit=effective_fx,
+            conditionally_releasable=conditionally_releasable,
+        )
+        estimate = estimated_time_to_release(
+            left.market.event.kickoff_utc,
+            draft.scanned_at,
+            market=left.market,
+            policy=policy,
+        )
+        request = request_from_paper_decision(
+            draft,
+            policy=policy,
+            balances=balances,
+            open_positions=exposures_from_trades(open_trades or []),
+            expected_lock_duration_hours=estimate.hours if estimate else None,
+            expected_lock_basis=estimate.estimate_basis if estimate else None,
+            recent_volatility_bps=(
+                Decimal(str(recent_volatility_bps))
+                if recent_volatility_bps is not None
+                else None
+            ),
+        )
+        if request is None:
+            return None, ["allocation_failed:unsupported_solver_vector"]
+        result = allocate(request)
+        if not result.accepted:
+            reason = result.rejection_reason or (
+                result.limiting_constraint.value if result.limiting_constraint else "allocation_failed"
+            )
+            return result, [f"allocation_failed:{reason}"]
+        return result, []
 
     def _record_with_ids(
         self,
@@ -668,6 +759,72 @@ def _fill_legs_from_observations(
                 )
             )
     return legs
+
+
+class FillPlanMappingError(ValueError):
+    """Allocator stakes cannot be mapped 1:1 onto the paper fill plan."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _fill_map_identity(
+    *,
+    venue: VenueName,
+    source_market_id: str,
+    source_runner_id: str | None,
+    outcome: str,
+) -> tuple[VenueName, str, str, str]:
+    return (venue, source_market_id, source_runner_id or "", outcome)
+
+
+def apply_allocation_to_fill_legs(
+    legs: list[PaperOpportunityLeg], allocation: AllocationResult
+) -> list[PaperOpportunityLeg]:
+    """Resize every positive planned fill leg from allocated native stakes.
+
+    Mapping is exact one-to-one on venue + source market + source runner
+    (when present) + outcome. Missing or duplicate identities fail closed.
+    """
+
+    positive_legs = [leg for leg in legs if leg.requested_stake > 0]
+    positive_stakes = [stake for stake in allocation.recommended_stakes if stake.stake_native > 0]
+    fill_by_id: dict[tuple[VenueName, str, str, str], PaperOpportunityLeg] = {}
+    for leg in positive_legs:
+        key = _fill_map_identity(
+            venue=leg.venue,
+            source_market_id=leg.source_market_id,
+            source_runner_id=leg.source_runner_id,
+            outcome=leg.outcome,
+        )
+        if key in fill_by_id:
+            raise FillPlanMappingError("fill_plan_mapping_duplicate_identity")
+        fill_by_id[key] = leg
+    stake_by_id: dict[tuple[VenueName, str, str, str], AllocatedStake] = {}
+    for stake in positive_stakes:
+        key = _fill_map_identity(
+            venue=stake.venue,
+            source_market_id=stake.source_market_id,
+            source_runner_id=stake.source_runner_id,
+            outcome=stake.outcome,
+        )
+        if key in stake_by_id:
+            raise FillPlanMappingError("fill_plan_mapping_duplicate_identity")
+        stake_by_id[key] = stake
+    if fill_by_id.keys() != stake_by_id.keys():
+        raise FillPlanMappingError("fill_plan_mapping_unmatched_leg")
+    resized: list[PaperOpportunityLeg] = []
+    for leg in positive_legs:
+        key = _fill_map_identity(
+            venue=leg.venue,
+            source_market_id=leg.source_market_id,
+            source_runner_id=leg.source_runner_id,
+            outcome=leg.outcome,
+        )
+        match = stake_by_id[key]
+        resized.append(leg.model_copy(update={"requested_stake": match.stake_native}))
+    return resized
 
 
 def _payoff_leg_key(stake) -> tuple[str, VenueName, str, str]:

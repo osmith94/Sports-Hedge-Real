@@ -69,14 +69,22 @@ def qualify_priority_alert(
     if quote_age_ms > thresholds.maximum_quote_age_ms:
         reasons.append("quote_stale")
 
-    recommendation = recommend_manual_size(
-        candidate.legs,
-        unconstrained,
-        thresholds=thresholds,
-        execution_risk_score=candidate.execution_risk_score,
-        automated_pools=candidate.automated_pools,
-        solver=solver,
-    )
+    try:
+        recommendation = recommend_manual_size(
+            candidate.legs,
+            unconstrained,
+            thresholds=thresholds,
+            execution_risk_score=candidate.execution_risk_score,
+            automated_pools=candidate.automated_pools,
+            solver=solver,
+            canonical_event_id=candidate.canonical_event_id,
+        )
+    except ValueError as exc:
+        return QualificationResult(
+            qualifies=False,
+            reasons=[f"allocation_failed:{exc}"],
+            ordinary_solution=unconstrained,
+        )
     survivability = assess_opportunity_survivability(candidate, thresholds)
     recommendation = recommendation.model_copy(update={"survivability": survivability})
 

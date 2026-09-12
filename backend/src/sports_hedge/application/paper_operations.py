@@ -122,13 +122,19 @@ class PaperOperationsService:
                 provenance=provenance,
             )
         candidate = None
-        if (
-            decision.eligible_for_paper_simulation
-            and decision.depth_scan is not None
-            and decision.depth_scan.solution.is_arbitrage
+        if decision.eligible_for_paper_simulation and (
+            (
+                decision.depth_scan is not None
+                and decision.depth_scan.solution.is_arbitrage
+            )
+            or (
+                decision.payoff_scan is not None
+                and decision.payoff_scan.solution.is_arbitrage
+            )
         ):
-            candidate = _candidate_from_decision(decision, opportunity_id)
-            self.alerts.ingest(candidate)
+            if decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage:
+                candidate = _candidate_from_decision(decision, opportunity_id)
+                self.alerts.ingest(candidate)
             if self.settings.paper_autofill_enabled:
                 try:
                     self.simulate_fill(
@@ -914,6 +920,7 @@ def _priority_leg_from_plan(
         outcome=leg.outcome,
         venue=leg.venue,
         source_market_id=leg.source_market_id,
+        source_runner_id=leg.source_runner_id,
         net_decimal_odds=_net_odds_for_leg(plan, leg),
         max_stake_reporting=native_max * gbp_per_unit,
         native_currency=leg.currency,
@@ -937,6 +944,7 @@ def _candidate_from_decision(decision: PaperScanDecision, opportunity_id: str) -
                 outcome=quote.outcome,
                 venue=quote.venue,
                 source_market_id=quote.source_market_id,
+                source_runner_id=quote.source_runner_id,
                 net_decimal_odds=quote.net_decimal_odds,
                 max_stake_reporting=quote.cumulative_depth,
                 native_currency=currency,

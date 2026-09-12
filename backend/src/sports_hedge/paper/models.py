@@ -92,6 +92,7 @@ class PaperScanDecision(BaseModel):
     cost_assumption_labels: list[str] = Field(default_factory=list)
     fill_legs: list[PaperOpportunityLeg] = Field(default_factory=list)
     execution_modes: dict[VenueName, str] = Field(default_factory=dict)
+    allocation: AllocationResult | None = None
     minimum_net_edge: Decimal = Field(default=Decimal("0"), ge=0)
     maximum_execution_risk: int = Field(default=100, ge=0, le=100)
     quote_age_ms: int | None = Field(default=None, ge=0)
@@ -108,3 +109,8 @@ class PaperScanDecision(BaseModel):
         if self.scanned_at.tzinfo is None:
             self.scanned_at = self.scanned_at.replace(tzinfo=UTC)
         return self
+
+
+from sports_hedge.arbitrage.allocation.models import AllocationResult
+
+PaperScanDecision.model_rebuild()

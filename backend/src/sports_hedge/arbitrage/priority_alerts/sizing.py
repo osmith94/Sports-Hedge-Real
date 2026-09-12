@@ -3,6 +3,13 @@ from __future__ import annotations
 from decimal import Decimal
 
 from sports_hedge.accounting.dimensions import CapitalSource
+from sports_hedge.arbitrage.allocation.adapters import request_from_complete_set
+from sports_hedge.arbitrage.allocation.engine import allocate
+from sports_hedge.arbitrage.allocation.models import (
+    AllocationBalance,
+    AllocationResult,
+    BankrollAllocationPolicy,
+)
 from sports_hedge.arbitrage.models import ArbitrageSolution
 from sports_hedge.arbitrage.priority_alerts.models import (
     AutomatedPoolBalance,
@@ -25,33 +32,49 @@ def recommend_manual_size(
     execution_risk_score: int,
     automated_pools: list[AutomatedPoolBalance] | None = None,
     solver: CompleteSetArbitrageSolver | None = None,
+    policy: BankrollAllocationPolicy | None = None,
+    open_positions=None,
+    canonical_event_id: str | None = None,
+    expected_lock_duration_hours: Decimal | None = None,
+    expected_lock_basis: str | None = None,
 ) -> RecommendedManualSize:
     if not unconstrained.is_arbitrage or not unconstrained.stakes:
         raise ValueError("recommended size requires a confirmed ordinary arbitrage solution")
 
-    solver = solver or CompleteSetArbitrageSolver()
-    limiting_leg = _limiting_leg(legs, unconstrained)
-    raw_limiting_depth = limiting_leg.max_stake_reporting
-    after_haircut = raw_limiting_depth * (Decimal("1") - thresholds.safety_haircut)
-
-    venue_cap = thresholds.venue_limits.get(limiting_leg.venue)
-    caps = [after_haircut, thresholds.operator_manual_cap, thresholds.risk_limit]
-    if venue_cap is not None:
-        caps.append(venue_cap)
-    recommended_limiting = min(caps)
-    if recommended_limiting <= 0:
-        raise ValueError("recommended size must be positive")
-
-    scale = recommended_limiting / raw_limiting_depth
-    capital_limit = unconstrained.total_stake * scale
-    sized = solver.solve(
-        [leg.as_executable_quote() for leg in legs],
-        capital_limit=capital_limit,
+    del solver  # ratios come from the provided solver vector; do not re-solve to fit bankroll
+    allocation = allocate_priority_legs(
+        legs,
+        unconstrained,
+        thresholds=thresholds,
+        execution_risk_score=execution_risk_score,
+        automated_pools=automated_pools,
+        policy=policy,
+        open_positions=open_positions,
+        canonical_event_id=canonical_event_id,
+        expected_lock_duration_hours=expected_lock_duration_hours,
+        expected_lock_basis=expected_lock_basis,
     )
-    if not sized.is_arbitrage:
-        raise ValueError("sized recommendation lost ordinary arbitrage")
+    if not allocation.accepted:
+        raise ValueError(allocation.rejection_reason or "allocation_failed")
+    return recommended_from_allocation(
+        allocation, legs, unconstrained, thresholds, automated_pools=automated_pools
+    )
 
-    coverage = _depth_coverage(legs, sized)
+
+def allocate_priority_legs(
+    legs: list[PriorityLeg],
+    unconstrained: ArbitrageSolution,
+    *,
+    thresholds: PriorityAlertThresholds,
+    execution_risk_score: int,
+    automated_pools: list[AutomatedPoolBalance] | None = None,
+    policy: BankrollAllocationPolicy | None = None,
+    open_positions=None,
+    canonical_event_id: str | None = None,
+    expected_lock_duration_hours: Decimal | None = None,
+    expected_lock_basis: str | None = None,
+) -> AllocationResult:
+    coverage = _depth_coverage(legs, unconstrained)
     fill = score_fill_confidence(
         FillConfidenceInputs(
             depth_coverage_ratio=coverage,
@@ -59,43 +82,146 @@ def recommend_manual_size(
             quote_persistence=min(leg.quote_persistence for leg in legs),
             levels_consumed=max(leg.levels_consumed for leg in legs),
             assumed_latency_ms=max(leg.assumed_latency_ms for leg in legs),
-            venue_cancellation_rate=_optional_max(
-                (leg.venue_cancellation_rate for leg in legs)
-            ),
+            venue_cancellation_rate=_optional_max((leg.venue_cancellation_rate for leg in legs)),
             historical_paper_fill_rate=_optional_min(
                 (leg.historical_paper_fill_rate for leg in legs)
             ),
         )
     )
-    capital_required = capital_required_by_venue_currency(legs, sized)
+    pools = automated_pools or []
+    balances = [
+        AllocationBalance(
+            venue=item.venue,
+            currency=item.currency,
+            available=item.amount,
+        )
+        for item in pools
+    ]
+    merged = policy or BankrollAllocationPolicy(
+        min_reserve_fraction=Decimal("0"),
+        min_reserve_amount=None,
+        max_pool_fraction_per_opportunity=Decimal("1"),
+        max_open_capital_fraction=Decimal("1"),
+        max_same_fixture_capital_fraction=Decimal("1"),
+        max_concurrent_open_opportunities=None,
+        safety_haircut=thresholds.safety_haircut,
+        operator_recommended_cap_reporting=thresholds.operator_manual_cap,
+        risk_limit_reporting=thresholds.risk_limit,
+        venue_limits_native=dict(thresholds.venue_limits),
+    )
+    if policy is None:
+        merged.safety_haircut = thresholds.safety_haircut
+        merged.operator_recommended_cap_reporting = thresholds.operator_manual_cap
+        merged.risk_limit_reporting = thresholds.risk_limit
+        merged.venue_limits_native = dict(thresholds.venue_limits)
+    request = request_from_complete_set(
+        legs,
+        unconstrained,
+        policy=merged,
+        balances=balances,
+        open_positions=open_positions,
+        canonical_event_id=canonical_event_id,
+        execution_risk_score=execution_risk_score,
+        fill_confidence=fill,
+        quote_age_ms=max(leg.quote_age_ms for leg in legs),
+        require_internal_balances=False,
+    )
+    if expected_lock_duration_hours is not None:
+        request = request.model_copy(
+            update={
+                "expected_lock_duration_hours": expected_lock_duration_hours,
+                "expected_lock_basis": expected_lock_basis,
+            }
+        )
+    return allocate(request)
+
+
+def recommended_from_allocation(
+    allocation: AllocationResult,
+    legs: list[PriorityLeg],
+    unconstrained: ArbitrageSolution,
+    thresholds: PriorityAlertThresholds,
+    *,
+    automated_pools: list[AutomatedPoolBalance] | None = None,
+) -> RecommendedManualSize:
+    limiting_leg = _limiting_leg(legs, unconstrained)
+    by_outcome = {item.outcome: item for item in allocation.recommended_stakes}
+    scaled = []
+    for stake in unconstrained.stakes:
+        if stake.stake <= 0:
+            continue
+        allocated = by_outcome[stake.outcome]
+        scale = allocated.stake_reporting / stake.stake
+        scaled.append(
+            stake.model_copy(
+                update={
+                    "stake": allocated.stake_reporting,
+                    "state_return": stake.state_return * scale,
+                }
+            )
+        )
+    capital_required = [
+        VenueCurrencyAmount.model_validate(item.model_dump())
+        for item in allocation.capital_required
+    ]
     auto_pool_draw, additional = additional_capital_required(
         capital_required,
-        automated_pools or [],
+        [
+            AutomatedPoolBalance(venue=item.venue, currency=item.currency, amount=item.amount)
+            for item in (automated_pools or [])
+        ],
         legs,
     )
+    turnover = None
+    if allocation.capital_turnover is not None:
+        turnover = allocation.capital_turnover.model_dump(mode="json")
     return RecommendedManualSize(
-        raw_limiting_depth=raw_limiting_depth,
+        raw_limiting_depth=limiting_leg.max_stake_reporting,
         safety_haircut=thresholds.safety_haircut,
-        recommended_size=recommended_limiting,
-        maximum_validated_size=raw_limiting_depth,
+        recommended_size=allocation.recommended_limiting_stake,
+        maximum_validated_size=allocation.maximum_limiting_stake,
         limiting_leg_outcome=limiting_leg.outcome,
         limiting_leg_venue=limiting_leg.venue,
-        total_stake_reporting=sized.total_stake,
-        guaranteed_payoff=sized.guaranteed_return,
-        guaranteed_profit=sized.guaranteed_profit,
-        guaranteed_roi=sized.roi,
-        capital_efficiency=sized.roi,
-        stake_plan=sized.stakes,
+        total_stake_reporting=allocation.recommended_committed_capital,
+        guaranteed_payoff=unconstrained.guaranteed_return * allocation.scale_recommended,
+        guaranteed_profit=allocation.guaranteed_profit,
+        guaranteed_roi=allocation.guaranteed_roi,
+        capital_efficiency=allocation.guaranteed_roi,
+        stake_plan=scaled,
         capital_required=capital_required,
         additional_capital_required=additional,
         quote_age_ms=max(leg.quote_age_ms for leg in legs),
-        fill_confidence=fill,
-        execution_risk_score=execution_risk_score,
-        reporting_currency="GBP",
+        fill_confidence=allocation.fill_confidence or score_fill_confidence(
+            FillConfidenceInputs(
+                depth_coverage_ratio=Decimal("1"),
+                quote_age_ms=0,
+                levels_consumed=1,
+            )
+        ),
+        execution_risk_score=allocation.execution_risk_score or 0,
         auto_pool_draw=auto_pool_draw,
         has_external_leg=any(
             leg.execution_mode == LegExecutionMode.EXTERNAL_OPERATOR for leg in legs
         ),
+        limiting_constraint=(
+            allocation.limiting_constraint.value if allocation.limiting_constraint else None
+        ),
+        limiting_constraint_detail=allocation.limiting_constraint_detail,
+        recommended_committed_capital=allocation.recommended_committed_capital,
+        maximum_validated_capital=allocation.maximum_validated_capital,
+        reduction_factors=[factor.model_dump(mode="json") for factor in allocation.reduction_factors],
+        free_balance_after=[row.model_dump(mode="json") for row in allocation.free_balance_after],
+        reserve_remaining=[row.model_dump(mode="json") for row in allocation.reserve_remaining],
+        expected_lock_duration_hours=allocation.expected_lock_duration_hours,
+        expected_lock_basis=allocation.expected_lock_basis,
+        estimated_time_to_release=(
+            allocation.estimated_time_to_release.model_dump(mode="json")
+            if allocation.estimated_time_to_release is not None
+            else None
+        ),
+        settled_at=allocation.settled_at,
+        capital_turnover=turnover,
+        survivability=allocation.survivability,
     )
 
 
@@ -146,6 +272,8 @@ def capital_required_by_venue_currency(
     by_outcome = {leg.outcome: leg for leg in legs}
     buckets: dict[tuple[str, str, str], VenueCurrencyAmount] = {}
     for stake in solution.stakes:
+        if stake.stake <= 0:
+            continue
         leg = by_outcome[stake.outcome]
         native = stake.stake / leg.gbp_per_unit
         source = (
