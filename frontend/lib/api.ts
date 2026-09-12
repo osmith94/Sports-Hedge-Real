@@ -226,18 +226,44 @@ export function dashboardVenueCost(
 }
 
 export type PaperCollectionRequest = {
-  fee_snapshots?: PaperFeeSnapshotRequest[];
-  venue_costs?: PaperVenueCostRequest[];
-  fx_snapshots?: Array<{
-    currency: string;
-    gbp_per_unit: string;
-    source?: string;
-  }>;
   capital_limit_gbp?: string;
   minimum_net_edge?: string;
   maximum_execution_risk?: number;
   max_event_pairs?: number;
   max_market_pairs_per_event?: number;
+};
+
+export type EconomicsFxRow = {
+  currency: string;
+  gbp_per_unit: string;
+  source_date: string;
+  valuation_date: string;
+  retrieved_at?: string | null;
+  status: string;
+  primary_source: string;
+  variance_bps?: string | null;
+  check_source?: string | null;
+};
+
+export type EconomicsVenueCostRow = {
+  venue: Venue;
+  market_class?: string | null;
+  action: string;
+  fee_basis: string;
+  known_status: string;
+  rate?: string | null;
+  source: string;
+  effective_from?: string | null;
+  snapshot_id?: string | null;
+  detail?: string | null;
+};
+
+export type EconomicsStatus = {
+  as_of: string;
+  data_kind: string;
+  fx: EconomicsFxRow[];
+  venue_costs: EconomicsVenueCostRow[];
+  issues: string[];
 };
 
 export type TrendSummary = {
@@ -470,6 +496,10 @@ export async function simulatePaperFill(payload: {
 
 export function getLiveRefreshStatus(): Promise<LiveRefreshStatus> {
   return request("/paper/live-refresh");
+}
+
+export function getEconomicsStatus(): Promise<EconomicsStatus> {
+  return request("/paper/economics-status");
 }
 
 export function getNearWatchlist(query = "limit=25"): Promise<NearOpportunity[]> {

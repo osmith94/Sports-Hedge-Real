@@ -11,6 +11,12 @@ from sports_hedge.fees.cost import (
 )
 from sports_hedge.fees.effective import CostRuleError, EffectiveLegEconomics, apply_venue_costs
 from sports_hedge.fees.models import FeeSnapshot
+from sports_hedge.fees.resolver import (
+    UnknownRequiredCostError,
+    VenueCostResolver,
+    VenueCostRule,
+    phase1_seed_rules,
+)
 
 __all__ = [
     "CostKnownStatus",
@@ -21,7 +27,11 @@ __all__ = [
     "FeeSnapshot",
     "MarketAction",
     "OrderRole",
+    "UnknownRequiredCostError",
+    "VenueCostResolver",
+    "VenueCostRule",
     "VenueCostSnapshot",
     "apply_venue_costs",
+    "phase1_seed_rules",
     "require_aware_utc",
 ]
