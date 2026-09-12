@@ -49,6 +49,7 @@ class Settings(BaseSettings):
 
     market_intelligence_db_path: str = "./data/market_intelligence.sqlite"
     market_intelligence_minimum_sample_size: int = Field(default=8, ge=2)
+    event_intelligence_db_path: str = "./data/event_intelligence.sqlite"
     paper_audit_db_path: str = "./data/paper_audit.sqlite"
     paper_liquidity_db_path: str = "./data/paper_liquidity.sqlite"
     paper_ledger_db_path: str = "./data/paper_ledger.sqlite"
