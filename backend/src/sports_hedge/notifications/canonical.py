@@ -2,37 +2,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
-PRIORITY_SEVERITIES = ("PRIORITY", "HIGH_PRIORITY", "CRITICAL")
-PRIORITY_ALERT_STATES = (
-    "OPEN",
-    "AWAITING_EXTERNAL_LEG_CONFIRMATION",
-    "EXTERNAL_LEG_CONFIRMED",
-    "HEDGE_REVALIDATED",
-    "HEDGE_REVALIDATION_FAILED",
-    "EXPIRED",
+from sports_hedge.arbitrage.priority_alerts.models import (
+    OpportunitySurvivability,
+    OperatorAction,
+    PriorityAlert,
+    PriorityAlertState,
+    PrioritySeverity,
 )
-OPERATOR_ACTIONS = (
-    "PREPARE_MANUAL_OVERRIDE",
-    "PREPARE_PROCEED_WITH_EXTERNAL_COUNTERPARTY",
-)
-
-PrioritySeverityName = Literal["PRIORITY", "HIGH_PRIORITY", "CRITICAL"]
-PriorityAlertStateName = Literal[
-    "OPEN",
-    "AWAITING_EXTERNAL_LEG_CONFIRMATION",
-    "EXTERNAL_LEG_CONFIRMED",
-    "HEDGE_REVALIDATED",
-    "HEDGE_REVALIDATION_FAILED",
-    "EXPIRED",
-]
-OperatorActionName = Literal[
-    "PREPARE_MANUAL_OVERRIDE",
-    "PREPARE_PROCEED_WITH_EXTERNAL_COUNTERPARTY",
-]
 
 
 def require_aware_utc(value: datetime, *, field: str) -> datetime:
@@ -63,25 +43,25 @@ class CanonicalHedgeRevalidationAdapter(BaseModel):
     """1:1 slice of ExternalHedgeRevalidation used by notifications."""
 
     accepted: bool
-    lifecycle_state: PriorityAlertStateName
+    lifecycle_state: PriorityAlertState
     reasons: list[str] = Field(default_factory=list)
 
 
 class PriorityAlertNotificationAdapter(BaseModel):
-    """Narrow 1:1 adapter for the canonical Priority Alert read model.
+    """Explicit projection of the merged canonical Priority Alert read model.
 
     Field names match `sports_hedge.arbitrage.priority_alerts.models.PriorityAlert`.
-    This package does not own a second alert truth model and does not import the
-    arb solver or venue execution stack.
+    Survivability is the canonical `OpportunitySurvivability` object or null;
+    this adapter never invents scores or a historical model.
     """
 
     alert_id: str
     opportunity_id: str
     canonical_event_id: str | None = None
     canonical_market_id: str | None = None
-    severity: PrioritySeverityName
-    lifecycle_state: PriorityAlertStateName = "OPEN"
-    operator_action: OperatorActionName = "PREPARE_MANUAL_OVERRIDE"
+    severity: PrioritySeverity
+    lifecycle_state: PriorityAlertState = PriorityAlertState.OPEN
+    operator_action: OperatorAction = OperatorAction.PREPARE_MANUAL_OVERRIDE
     net_guaranteed_edge: Decimal
     recommendation: CanonicalRecommendationAdapter
     opened_at: datetime
@@ -92,6 +72,7 @@ class PriorityAlertNotificationAdapter(BaseModel):
     places_orders: bool = False
     commits_automated_legs: bool = False
     hedge_revalidation: CanonicalHedgeRevalidationAdapter | None = None
+    survivability: OpportunitySurvivability | None = None
 
     @model_validator(mode="after")
     def fail_closed(self) -> "PriorityAlertNotificationAdapter":
@@ -107,8 +88,10 @@ class PriorityAlertNotificationAdapter(BaseModel):
         return self
 
 
-def notification_adapter_from_priority_alert(alert: object) -> PriorityAlertNotificationAdapter:
-    """Project a canonical PriorityAlert (or compatible object) onto the adapter."""
+def notification_adapter_from_priority_alert(
+    alert: PriorityAlert | PriorityAlertNotificationAdapter | object,
+) -> PriorityAlertNotificationAdapter:
+    """Project a merged canonical PriorityAlert (or compatible object) onto the adapter."""
 
     if isinstance(alert, PriorityAlertNotificationAdapter):
         return alert
@@ -120,7 +103,7 @@ def notification_adapter_from_priority_alert(alert: object) -> PriorityAlertNoti
     if hedge is not None:
         hedge_adapter = CanonicalHedgeRevalidationAdapter(
             accepted=bool(hedge.accepted),
-            lifecycle_state=_enum_value(hedge.lifecycle_state),
+            lifecycle_state=PriorityAlertState(_enum_value(hedge.lifecycle_state)),
             reasons=list(getattr(hedge, "reasons", []) or []),
         )
     return PriorityAlertNotificationAdapter(
@@ -128,10 +111,10 @@ def notification_adapter_from_priority_alert(alert: object) -> PriorityAlertNoti
         opportunity_id=str(alert.opportunity_id),
         canonical_event_id=_optional_str(getattr(alert, "canonical_event_id", None)),
         canonical_market_id=_optional_str(getattr(alert, "canonical_market_id", None)),
-        severity=_enum_value(alert.severity),
-        lifecycle_state=_enum_value(getattr(alert, "lifecycle_state", "OPEN")),
-        operator_action=_enum_value(
-            getattr(alert, "operator_action", "PREPARE_MANUAL_OVERRIDE")
+        severity=PrioritySeverity(_enum_value(alert.severity)),
+        lifecycle_state=PriorityAlertState(_enum_value(getattr(alert, "lifecycle_state", "OPEN"))),
+        operator_action=OperatorAction(
+            _enum_value(getattr(alert, "operator_action", OperatorAction.PREPARE_MANUAL_OVERRIDE))
         ),
         net_guaranteed_edge=Decimal(str(alert.net_guaranteed_edge)),
         recommendation=CanonicalRecommendationAdapter(
@@ -149,7 +132,22 @@ def notification_adapter_from_priority_alert(alert: object) -> PriorityAlertNoti
         places_orders=bool(getattr(alert, "places_orders", False)),
         commits_automated_legs=bool(getattr(alert, "commits_automated_legs", False)),
         hedge_revalidation=hedge_adapter,
+        survivability=_canonical_survivability(alert),
     )
+
+
+def _canonical_survivability(alert: object) -> OpportunitySurvivability | None:
+    raw = getattr(alert, "survivability", None)
+    if raw is None:
+        recommendation = getattr(alert, "recommendation", None)
+        raw = getattr(recommendation, "survivability", None) if recommendation is not None else None
+    if raw is None:
+        return None
+    if isinstance(raw, OpportunitySurvivability):
+        return raw
+    if hasattr(raw, "model_dump"):
+        return OpportunitySurvivability.model_validate(raw.model_dump())
+    return OpportunitySurvivability.model_validate(raw)
 
 
 def _enum_value(value: Any) -> str:

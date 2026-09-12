@@ -7,21 +7,19 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from sports_hedge.arbitrage.priority_alerts.models import (
+    OpportunitySurvivability,
+    OperatorAction,
+    PriorityAlertState,
+    PrioritySeverity,
+)
 from sports_hedge.notifications.canonical import (
     CanonicalHedgeRevalidationAdapter,
     PriorityAlertNotificationAdapter,
-    PriorityAlertStateName,
-    PrioritySeverityName,
     notification_adapter_from_priority_alert,
     priority_alert_deep_link,
     require_aware_utc,
 )
-
-SEVERITY_RANK: dict[str, int] = {
-    "PRIORITY": 1,
-    "HIGH_PRIORITY": 2,
-    "CRITICAL": 3,
-}
 
 
 class NotificationChannel(StrEnum):
@@ -52,9 +50,9 @@ class NotificationPayload(BaseModel):
 
     priority_alert_id: str
     opportunity_id: str
-    severity: PrioritySeverityName
-    lifecycle_state: PriorityAlertStateName
-    operator_action: str
+    severity: PrioritySeverity
+    lifecycle_state: PriorityAlertState
+    operator_action: OperatorAction
     requires_operator_confirmation: bool
     revalidation_failed: bool
     revalidation_confirmed: bool
@@ -75,6 +73,7 @@ class NotificationPayload(BaseModel):
     canonical_market_id: str
     paper_mode: bool = True
     hedge_revalidation: CanonicalHedgeRevalidationAdapter | None = None
+    survivability: OpportunitySurvivability | None = None
 
     @classmethod
     def from_priority_alert(cls, alert: object) -> "NotificationPayload":
@@ -87,16 +86,17 @@ class NotificationPayload(BaseModel):
         if adapter.hedge_revalidation is not None:
             lifecycle = adapter.hedge_revalidation.lifecycle_state
         requires_confirmation = (
-            lifecycle == "AWAITING_EXTERNAL_LEG_CONFIRMATION"
-            or adapter.operator_action == "PREPARE_PROCEED_WITH_EXTERNAL_COUNTERPARTY"
+            lifecycle == PriorityAlertState.AWAITING_EXTERNAL_LEG_CONFIRMATION
+            or adapter.operator_action
+            == OperatorAction.PREPARE_PROCEED_WITH_EXTERNAL_COUNTERPARTY
         )
-        revalidation_failed = lifecycle == "HEDGE_REVALIDATION_FAILED" or (
+        revalidation_failed = lifecycle == PriorityAlertState.HEDGE_REVALIDATION_FAILED or (
             adapter.hedge_revalidation is not None and not adapter.hedge_revalidation.accepted
         )
-        revalidation_confirmed = lifecycle == "HEDGE_REVALIDATED"
+        revalidation_confirmed = lifecycle == PriorityAlertState.HEDGE_REVALIDATED
         if requires_confirmation:
             actionability = "REQUIRES_OPERATOR_CONFIRMATION"
-        elif revalidation_failed or lifecycle == "EXPIRED":
+        elif revalidation_failed or lifecycle == PriorityAlertState.EXPIRED:
             actionability = "NOT_FULLY_ACTIONABLE"
         else:
             actionability = "PAPER_REVIEW_ONLY"
@@ -128,11 +128,12 @@ class NotificationPayload(BaseModel):
             canonical_market_id=market_id,
             paper_mode=adapter.paper_mode,
             hedge_revalidation=adapter.hedge_revalidation,
+            survivability=adapter.survivability,
         )
 
     def is_expired(self, *, now: datetime) -> bool:
         moment = require_aware_utc(now, field="now")
-        if self.lifecycle_state == "EXPIRED":
+        if self.lifecycle_state == PriorityAlertState.EXPIRED:
             return True
         return self.expires_at is not None and self.expires_at <= moment
 
@@ -152,9 +153,9 @@ class InAppPriorityNotification(BaseModel):
     canonical_market_id: str
     priority_alert_id: str
     opportunity_id: str
-    severity: PrioritySeverityName
-    lifecycle_state: PriorityAlertStateName
-    operator_action: str
+    severity: PrioritySeverity
+    lifecycle_state: PriorityAlertState
+    operator_action: OperatorAction
     requires_operator_confirmation: bool
     revalidation_failed: bool
     revalidation_confirmed: bool
@@ -176,6 +177,7 @@ class InAppPriorityNotification(BaseModel):
     updated_at: datetime
     last_outbound_at: datetime | None = None
     unread: bool = True
+    survivability: OpportunitySurvivability | None = None
 
     @classmethod
     def from_payload(
@@ -221,6 +223,7 @@ class InAppPriorityNotification(BaseModel):
             updated_at=now,
             last_outbound_at=last_outbound_at,
             unread=unread,
+            survivability=payload.survivability,
         )
 
     def payload(self) -> NotificationPayload:
@@ -249,6 +252,7 @@ class InAppPriorityNotification(BaseModel):
             canonical_event_id=self.canonical_event_id,
             canonical_market_id=self.canonical_market_id,
             paper_mode=True,
+            survivability=self.survivability,
         )
 
 

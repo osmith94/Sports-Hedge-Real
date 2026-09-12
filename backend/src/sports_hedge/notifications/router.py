@@ -3,10 +3,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
+from sports_hedge.arbitrage.priority_alerts.models import (
+    PriorityAlertState,
+    SEVERITY_RANK,
+    SurvivabilityConfidence,
+    VolatilityRegime,
+)
 from sports_hedge.notifications.adapters import ChannelAdapter
 from sports_hedge.notifications.canonical import require_aware_utc
 from sports_hedge.notifications.models import (
-    SEVERITY_RANK,
     InAppNotificationStatus,
     InAppPriorityNotification,
     NotificationChannel,
@@ -126,7 +131,7 @@ class PriorityAlertNotificationRouter:
             update={
                 "status": InAppNotificationStatus.EXPIRED,
                 "last_event": NotificationEventType.PRIORITY_ALERT_EXPIRED,
-                "lifecycle_state": "EXPIRED",
+                "lifecycle_state": PriorityAlertState.EXPIRED,
                 "actionability": "NOT_FULLY_ACTIONABLE",
                 "updated_at": now,
                 "expires_at": payload.expires_at,
@@ -322,7 +327,7 @@ class PriorityAlertNotificationRouter:
 
 def _subject(event: NotificationEventType, payload: NotificationPayload) -> str:
     return (
-        f"{event.value}: {payload.severity} "
+        f"{event.value}: {payload.severity.value} "
         f"{payload.event_summary} / {payload.market_summary}"
     )
 
@@ -334,7 +339,7 @@ def _body(payload: NotificationPayload) -> str:
         f"Expected guaranteed profit: {payload.expected_guaranteed_profit}",
         f"Limiting: {payload.limiting_venue} / {payload.limiting_leg}",
         f"Quote freshness: {payload.quote_freshness_ms}ms",
-        f"Lifecycle: {payload.lifecycle_state}",
+        f"Lifecycle: {payload.lifecycle_state.value}",
         f"Actionability: {payload.actionability}",
         f"Open: {payload.deep_link_path}",
     ]
@@ -343,7 +348,7 @@ def _body(payload: NotificationPayload) -> str:
             "Requires operator confirmation of an external manual leg; "
             "this opportunity is not fully actionable or filled."
         )
-        lines.append(f"Operator action: {payload.operator_action}")
+        lines.append(f"Operator action: {payload.operator_action.value}")
     if payload.revalidation_failed:
         lines.append(
             "Hedge revalidation failed after external confirmation; fail closed. "
@@ -354,6 +359,35 @@ def _body(payload: NotificationPayload) -> str:
             "External leg confirmed and remaining hedge revalidated in paper mode; "
             "no venue orders were placed."
         )
+    survivability = payload.survivability
+    if survivability is not None:
+        if survivability.survivability_score is not None:
+            lines.append(f"Survivability score: {survivability.survivability_score}")
+        if survivability.survival_probability_at_required_latency is not None:
+            lines.append(
+                "Survival probability at required latency: "
+                f"{survivability.survival_probability_at_required_latency}"
+            )
+        if survivability.required_action_latency_seconds is not None:
+            lines.append(
+                f"Required action latency: {survivability.required_action_latency_seconds}s"
+            )
+        if survivability.expected_external_confirmation_latency_seconds is not None:
+            lines.append(
+                "Expected external-confirmation latency: "
+                f"{survivability.expected_external_confirmation_latency_seconds}s"
+            )
+        if survivability.volatility_regime not in (None, VolatilityRegime.UNKNOWN):
+            lines.append(f"Volatility regime: {survivability.volatility_regime.value}")
+        if survivability.survivability_confidence not in (
+            None,
+            SurvivabilityConfidence.UNKNOWN,
+        ):
+            lines.append(
+                f"Survivability confidence: {survivability.survivability_confidence.value}"
+            )
+        if survivability.reasons:
+            lines.append("Survivability reasons: " + ", ".join(survivability.reasons))
     if payload.expires_at is not None:
         lines.append(f"Expires: {payload.expires_at.isoformat()}")
     return "\n".join(lines)

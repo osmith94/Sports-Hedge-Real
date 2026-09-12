@@ -11,6 +11,14 @@ from pydantic import ValidationError
 import sports_hedge.notifications as notifications
 from sports_hedge.api.main import app
 from sports_hedge.api.notifications import get_notification_router
+from sports_hedge.arbitrage.priority_alerts.models import (
+    OpportunitySurvivability,
+    OperatorAction,
+    PriorityAlertState,
+    PrioritySeverity,
+    SurvivabilityConfidence,
+    VolatilityRegime,
+)
 from sports_hedge.config import Settings
 from sports_hedge.notifications.adapters import RecordingAdapter
 from sports_hedge.notifications.canonical import (
@@ -46,15 +54,16 @@ def _alert(
     lifecycle_state: str = "OPEN",
     operator_action: str = "PREPARE_MANUAL_OVERRIDE",
     hedge_revalidation: CanonicalHedgeRevalidationAdapter | None = None,
+    survivability: OpportunitySurvivability | None = None,
 ) -> PriorityAlertNotificationAdapter:
     return PriorityAlertNotificationAdapter(
         alert_id=alert_id,
         opportunity_id=opportunity_id,
         canonical_event_id="evt:newcastle-chelsea-2026-09-20",
         canonical_market_id="evt:newcastle-chelsea-2026-09-20:match_result",
-        severity=severity,  # type: ignore[arg-type]
-        lifecycle_state=lifecycle_state,  # type: ignore[arg-type]
-        operator_action=operator_action,  # type: ignore[arg-type]
+        severity=PrioritySeverity(severity),
+        lifecycle_state=PriorityAlertState(lifecycle_state),
+        operator_action=OperatorAction(operator_action),
         net_guaranteed_edge=Decimal(edge),
         recommendation=CanonicalRecommendationAdapter(
             recommended_size=Decimal(size),
@@ -68,6 +77,7 @@ def _alert(
         event_summary="Newcastle United vs Chelsea",
         market_summary="Match result (regulation time)",
         hedge_revalidation=hedge_revalidation,
+        survivability=survivability,
     )
 
 
@@ -132,7 +142,7 @@ def test_severity_upgrade_can_resend() -> None:
     assert upgrade.event == NotificationEventType.PRIORITY_ALERT_UPGRADED
     assert upgrade.notify_outbound is True
     assert upgrade.notification is not None
-    assert upgrade.notification.severity == "CRITICAL"
+    assert upgrade.notification.severity == PrioritySeverity.CRITICAL
     assert len(email.sent) == 2
     assert email.sent[1].event == NotificationEventType.PRIORITY_ALERT_UPGRADED
 
@@ -187,7 +197,7 @@ def test_external_manual_lifecycle_requires_operator_confirmation() -> None:
     assert decision.notification is not None
     assert decision.notification.requires_operator_confirmation is True
     assert decision.notification.actionability == "REQUIRES_OPERATOR_CONFIRMATION"
-    assert decision.notification.lifecycle_state == "AWAITING_EXTERNAL_LEG_CONFIRMATION"
+    assert decision.notification.lifecycle_state == PriorityAlertState.AWAITING_EXTERNAL_LEG_CONFIRMATION
     assert "not fully actionable or filled" in email.sent[0].body
     assert "PREPARE_PROCEED_WITH_EXTERNAL_COUNTERPARTY" in email.sent[0].body
 
@@ -199,7 +209,7 @@ def test_revalidation_failed_is_not_treated_as_filled() -> None:
             lifecycle_state="HEDGE_REVALIDATION_FAILED",
             hedge_revalidation=CanonicalHedgeRevalidationAdapter(
                 accepted=False,
-                lifecycle_state="HEDGE_REVALIDATION_FAILED",
+                lifecycle_state=PriorityAlertState.HEDGE_REVALIDATION_FAILED,
                 reasons=["fresh_hedge_capacity_insufficient"],
             ),
         ),
@@ -219,7 +229,7 @@ def test_revalidation_confirmed_stays_paper_only() -> None:
             lifecycle_state="HEDGE_REVALIDATED",
             hedge_revalidation=CanonicalHedgeRevalidationAdapter(
                 accepted=True,
-                lifecycle_state="HEDGE_REVALIDATED",
+                lifecycle_state=PriorityAlertState.HEDGE_REVALIDATED,
             ),
         ),
         now=NOW,
@@ -366,3 +376,63 @@ def test_notifications_api_exposes_recent_unread_and_mark_read() -> None:
         assert client.get("/notifications/unread-count").json() == {"unread_count": 0}
     finally:
         app.dependency_overrides.clear()
+
+
+def test_optional_survivability_is_carried_when_present_and_null_when_absent() -> None:
+    service, email = _router()
+    absent = service.route(_alert(), now=NOW)
+    assert absent.notification is not None
+    assert absent.notification.survivability is None
+    assert "Survivability score" not in email.sent[0].body
+
+    supplied = OpportunitySurvivability(
+        survivability_score=42,
+        survival_probability_at_required_latency=Decimal("0.61"),
+        required_action_latency_seconds=Decimal("12"),
+        expected_external_confirmation_latency_seconds=Decimal("25"),
+        volatility_regime=VolatilityRegime.ELEVATED,
+        survivability_confidence=SurvivabilityConfidence.MEDIUM,
+        reasons=["quote_age"],
+        data_insufficient=False,
+    )
+    other = PriorityAlertNotificationRouter(
+        SqliteNotificationRepository(),
+        {NotificationChannel.EMAIL: RecordingAdapter(NotificationChannel.EMAIL)},
+    )
+    present = other.route(
+        _alert(opportunity_id="opp-survivability", survivability=supplied),
+        now=NOW,
+    )
+    assert present.notification is not None
+    assert present.notification.survivability is not None
+    assert present.notification.survivability.survivability_score == 42
+    assert present.notification.survivability.survival_probability_at_required_latency == Decimal(
+        "0.61"
+    )
+    assert present.notification.survivability.required_action_latency_seconds == Decimal("12")
+    assert present.notification.survivability.expected_external_confirmation_latency_seconds == Decimal(
+        "25"
+    )
+    assert present.notification.survivability.volatility_regime == VolatilityRegime.ELEVATED
+    assert present.notification.survivability.survivability_confidence == SurvivabilityConfidence.MEDIUM
+    assert present.notification.survivability.reasons == ["quote_age"]
+
+
+def test_routes_merged_canonical_priority_alert_without_inventing_survivability() -> None:
+    import test_priority_alerts as pa
+
+    alert = pa._service().ingest(pa._candidate())
+    assert alert is not None
+    service, email = _router()
+    decision = service.route(alert, now=alert.opened_at)
+    assert decision.notify_outbound is True
+    assert decision.notification is not None
+    assert decision.notification.priority_alert_id == alert.alert_id
+    assert decision.notification.deep_link_path == f"/arbitrage/priority-alerts/{alert.alert_id}"
+    assert decision.notification.survivability is not None
+    assert decision.notification.survivability.survivability_score is None
+    assert decision.notification.survivability.data_insufficient is True
+    assert "Survivability score" not in email.sent[0].body
+    assert alert.places_orders is False
+    assert alert.commits_automated_legs is False
+

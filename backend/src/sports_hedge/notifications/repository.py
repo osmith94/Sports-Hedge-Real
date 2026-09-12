@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from sports_hedge.arbitrage.priority_alerts.models import OpportunitySurvivability
 from sports_hedge.notifications.models import (
     InAppNotificationStatus,
     InAppPriorityNotification,
@@ -58,7 +59,8 @@ class SqliteNotificationRepository:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 last_outbound_at TEXT,
-                unread INTEGER NOT NULL
+                unread INTEGER NOT NULL,
+                survivability_json TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_priority_notifications_updated
@@ -97,6 +99,7 @@ class SqliteNotificationRepository:
             "revalidation_failed": "INTEGER NOT NULL DEFAULT 0",
             "revalidation_confirmed": "INTEGER NOT NULL DEFAULT 0",
             "actionability": "TEXT NOT NULL DEFAULT 'PAPER_REVIEW_ONLY'",
+            "survivability_json": "TEXT",
         }
         for name, ddl in additions.items():
             if name not in existing:
@@ -128,8 +131,9 @@ class SqliteNotificationRepository:
                 actionability, status, last_event, event_summary, market_summary,
                 net_guaranteed_edge, recommended_size, expected_guaranteed_profit,
                 limiting_venue, limiting_leg, quote_freshness_ms, deep_link_path,
-                alert_created_at, expires_at, created_at, updated_at, last_outbound_at, unread
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                alert_created_at, expires_at, created_at, updated_at, last_outbound_at, unread,
+                survivability_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(opportunity_key) DO UPDATE SET
                 notification_id = excluded.notification_id,
                 canonical_event_id = excluded.canonical_event_id,
@@ -159,7 +163,8 @@ class SqliteNotificationRepository:
                 created_at = excluded.created_at,
                 updated_at = excluded.updated_at,
                 last_outbound_at = excluded.last_outbound_at,
-                unread = excluded.unread
+                unread = excluded.unread,
+                survivability_json = excluded.survivability_json
             """,
             (
                 notification.notification_id,
@@ -168,9 +173,9 @@ class SqliteNotificationRepository:
                 notification.canonical_market_id,
                 notification.priority_alert_id,
                 notification.opportunity_id,
-                notification.severity,
-                notification.lifecycle_state,
-                notification.operator_action,
+                notification.severity.value,
+                notification.lifecycle_state.value,
+                notification.operator_action.value,
                 int(notification.requires_operator_confirmation),
                 int(notification.revalidation_failed),
                 int(notification.revalidation_confirmed),
@@ -194,6 +199,9 @@ class SqliteNotificationRepository:
                 if notification.last_outbound_at is None
                 else notification.last_outbound_at.isoformat(),
                 int(notification.unread),
+                None
+                if notification.survivability is None
+                else notification.survivability.model_dump_json(),
             ),
         )
         self._connection.commit()
@@ -316,7 +324,15 @@ def _notification_from_row(row: sqlite3.Row) -> InAppPriorityNotification:
         updated_at=datetime.fromisoformat(row["updated_at"]),
         last_outbound_at=None if last_outbound is None else datetime.fromisoformat(last_outbound),
         unread=bool(row["unread"]),
+        survivability=_survivability_from_row(row),
     )
+
+
+def _survivability_from_row(row: sqlite3.Row) -> OpportunitySurvivability | None:
+    raw = _row_value(row, "survivability_json")
+    if not raw:
+        return None
+    return OpportunitySurvivability.model_validate(json.loads(raw))
 
 
 def _dispatch_from_row(row: sqlite3.Row) -> NotificationDispatch:
