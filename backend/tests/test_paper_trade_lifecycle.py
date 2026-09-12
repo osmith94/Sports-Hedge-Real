@@ -36,6 +36,7 @@ from sports_hedge.paper.settlement import compute_paper_settlement
 from sports_hedge.paper.trades import (
     PaperLegFillKind,
     PaperSettlementRequest,
+    PaperTrade,
     PaperTradeLeg,
     PaperTradeState,
 )
@@ -267,6 +268,141 @@ def test_manual_external_is_distinct_from_paper_simulated(tmp_path: Path) -> Non
         capital = {leg.capital_source for leg in trade.legs}
         assert CapitalSource.MANUAL_EXTERNAL in capital
         assert CapitalSource.PAPER_SIMULATED_EXTERNAL not in capital
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_manual_external_settlement_releases_exact_shared_fill_lock(tmp_path: Path) -> None:
+    from sports_hedge.application.paper_operations import (
+        _net_odds_for_leg,
+        manual_external_fill_id,
+        paper_trade_id,
+    )
+    from sports_hedge.paper.settlement import LegSettlement, PaperSettlementComputation
+    from sports_hedge.treasury.service import PaperTreasuryError
+
+    ledger = SqlitePaperLedger(tmp_path / "manual-lock.sqlite")
+    _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
+    try:
+        opportunity_id = next(iter(ops._plans))
+        plan = ops._plans[opportunity_id]
+        external = next(leg for leg in plan.legs if leg.venue is VenueName.POLYMARKET)
+        ok = ExternalLegConfirmation(
+            outcome=external.outcome,
+            venue=external.venue,
+            product_id=external.source_market_id,
+            operator_counterparty_reference="ext-ok",
+            executed_price=_net_odds_for_leg(plan, external),
+            executed_size=Decimal("5"),
+            currency=external.currency,
+            executed_at=OBSERVED,
+            eligibility_confirmed=True,
+        )
+        ops.simulate_fill(
+            opportunity_id,
+            config=PaperFillConfig(assumed_latency_ms=0, max_quote_age_ms=10_000),
+            confirm_external=ok,
+            provenance=DataProvenance.FIXTURE_DEMO,
+        )
+        trade = ops.list_active_trades()[0]
+        assert trade.state is PaperTradeState.OPEN
+        expected_id = manual_external_fill_id(opportunity_id, "ext-ok")
+        manual_leg = next(leg for leg in trade.legs if leg.fill_kind is PaperLegFillKind.MANUAL_EXTERNAL)
+        assert manual_leg.fill_id == expected_id
+        assert "ext-ok" in expected_id
+        lock = ledger._connection.execute(
+            "SELECT * FROM paper_treasury_locks WHERE lock_id = ?",
+            (expected_id,),
+        ).fetchone()
+        assert lock is not None
+        assert lock["fill_id"] == expected_id
+        assert lock["fill_id"] == manual_leg.fill_id
+        assert lock["trade_id"] == paper_trade_id(opportunity_id)
+        assert lock["status"] == "open"
+        assert lock["capital_source"] == CapitalSource.MANUAL_EXTERNAL.value
+
+        unrelated_id = "unrelated-pm-usd"
+        ledger.treasury.lock_capital(
+            [
+                TreasuryLockRequest(
+                    venue=manual_leg.venue,
+                    native_currency=manual_leg.currency,
+                    amount_native=Decimal("10"),
+                    lock_id=unrelated_id,
+                    fill_id=unrelated_id,
+                    trade_id="ptrade-unrelated",
+                    opportunity_id="opp-unrelated",
+                    fx_rate_gbp_per_unit=ledger.treasury.lock_fx_rate(
+                        manual_leg.venue, manual_leg.currency
+                    ),
+                )
+            ],
+            occurred_at=OBSERVED,
+        )
+        stranger = PaperTrade(
+            trade_id="ptrade-unrelated",
+            opportunity_id="opp-unrelated",
+            state=PaperTradeState.OPEN,
+            opened_at=OBSERVED,
+            last_updated_at=OBSERVED,
+        )
+        with pytest.raises(PaperTreasuryError, match="unknown_trade_lock"):
+            ledger.treasury.apply_settlement(
+                stranger,
+                PaperSettlementComputation(
+                    winning_outcome=manual_leg.outcome,
+                    realised_pnl_gbp=Decimal("0"),
+                    legs=[
+                        LegSettlement(
+                            outcome=manual_leg.outcome,
+                            venue=manual_leg.venue.value,
+                            currency=manual_leg.currency,
+                            filled_stake=Decimal("5"),
+                            fill_id=expected_id,
+                            won=False,
+                            net_payoff=Decimal("0"),
+                            native_pnl=Decimal("-5"),
+                            gbp_pnl=Decimal("-5"),
+                            fx_rate_gbp_per_unit=ledger.treasury.lock_fx_rate(
+                                manual_leg.venue, manual_leg.currency
+                            ),
+                            capital_source=CapitalSource.MANUAL_EXTERNAL.value,
+                        )
+                    ],
+                ),
+                PaperSettlementRequest(
+                    winning_outcome=manual_leg.outcome,
+                    source="fixture_test",
+                    source_id="steal-manual",
+                    provenance=DataProvenance.FIXTURE_DEMO,
+                ),
+                settled_at=OBSERVED,
+            )
+
+        winning = next(leg.outcome for leg in trade.legs if leg.fill_kind is not PaperLegFillKind.MANUAL_EXTERNAL)
+        settled = ops.settle(
+            trade.trade_id,
+            PaperSettlementRequest(
+                winning_outcome=winning,
+                source="fixture_test",
+                source_id="manual-external-settle",
+                settled_at=OBSERVED,
+                provenance=DataProvenance.FIXTURE_DEMO,
+            ),
+        )
+        assert settled.state is PaperTradeState.CLOSED
+        released = ledger._connection.execute(
+            "SELECT * FROM paper_treasury_locks WHERE lock_id = ?",
+            (expected_id,),
+        ).fetchone()
+        leftover = ledger._connection.execute(
+            "SELECT * FROM paper_treasury_locks WHERE lock_id = ?",
+            (unrelated_id,),
+        ).fetchone()
+        assert released["status"] == "released"
+        assert leftover["status"] == "open"
+        assert Decimal(leftover["released_native"]) == Decimal("0")
     finally:
         repository.close()
         ledger.close()

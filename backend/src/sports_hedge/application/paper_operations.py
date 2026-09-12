@@ -68,6 +68,16 @@ def paper_trade_id(opportunity_id: str) -> str:
     return f"ptrade-{slug}"
 
 
+def manual_external_fill_id(opportunity_id: str, operator_counterparty_reference: str) -> str:
+    """Stable fill/lock identity for an operator-recorded MANUAL_EXTERNAL leg.
+
+    The operator/counterparty reference stays in the id so it remains auditable.
+    Trade persistence and treasury locking must use this exact string.
+    """
+
+    return f"manual-external:{opportunity_id}:{operator_counterparty_reference}"
+
+
 class PaperOperationsError(ValueError):
     """Fail-closed paper operational chain."""
 
@@ -619,7 +629,9 @@ class PaperOperationsService:
                 capital = CapitalSource.MANUAL_EXTERNAL
                 filled_stake = confirmation.executed_size
                 filled_odds = confirmation.executed_price
-                fill_id = f"manual-external:{plan.opportunity_id}:{confirmation.operator_counterparty_reference}"
+                fill_id = manual_external_fill_id(
+                    plan.opportunity_id, confirmation.operator_counterparty_reference
+                )
                 requested = confirmation.executed_size
             legs.append(
                 PaperTradeLeg(
@@ -861,13 +873,16 @@ class PaperOperationsService:
             )
         if confirmation is not None:
             rate = self._lock_fx_rate(confirmation.venue, confirmation.currency, fx)
-            source_id = f"{plan.opportunity_id}:{confirmation.operator_counterparty_reference}"
+            fill_id = manual_external_fill_id(
+                plan.opportunity_id, confirmation.operator_counterparty_reference
+            )
             lock_requests.append(
                 TreasuryLockRequest(
                     venue=confirmation.venue,
                     native_currency=confirmation.currency,
                     amount_native=confirmation.executed_size,
-                    lock_id=source_id,
+                    lock_id=fill_id,
+                    fill_id=fill_id,
                     trade_id=trade_id,
                     opportunity_id=plan.opportunity_id,
                     source="manual_external_confirmation",
@@ -879,7 +894,7 @@ class PaperOperationsService:
             journal_specs.append(
                 (
                     "manual_external_confirmation",
-                    source_id,
+                    fill_id,
                     confirmation.executed_at,
                     "Operator-recorded MANUAL_EXTERNAL fill; Sports Hedge did not place this leg",
                     confirmation.venue,
