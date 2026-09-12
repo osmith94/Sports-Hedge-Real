@@ -12,6 +12,10 @@ from sports_hedge.normalization.identity import kickoff_bucket
 from sports_hedge.normalization.text import normalize_text
 
 
+class NaiveKickoffError(ValueError):
+    """Raised when a timezone-naive kickoff is offered to shared match identity."""
+
+
 class KickoffPrecision(StrEnum):
     MINUTE = "minute"
     DATE = "date"
@@ -32,10 +36,20 @@ class CanonicalMatchRef(BaseModel):
     kickoff_precision: KickoffPrecision = KickoffPrecision.MINUTE
 
     @model_validator(mode="after")
-    def ensure_timezone(self) -> CanonicalMatchRef:
-        if self.kickoff_utc.tzinfo is None:
-            self.kickoff_utc = self.kickoff_utc.replace(tzinfo=UTC)
+    def reject_naive_kickoff(self) -> CanonicalMatchRef:
+        require_aware_kickoff(self.kickoff_utc)
         return self
+
+
+def require_aware_kickoff(kickoff_utc: datetime) -> datetime:
+    """Reject naive kickoffs. Adapters must convert local time before this boundary."""
+
+    if kickoff_utc.tzinfo is None:
+        raise NaiveKickoffError(
+            "naive kickoff_utc is not allowed; convert to a timezone-aware datetime "
+            "in the adapter before constructing canonical match identity"
+        )
+    return kickoff_utc
 
 
 def canonical_team_id(name: str) -> str:
@@ -54,6 +68,7 @@ def canonical_match_id(
 ) -> str:
     """Deterministic match key. Source IDs are never part of this key."""
 
+    require_aware_kickoff(kickoff_utc)
     payload = "|".join(
         [
             "football",
@@ -68,8 +83,7 @@ def canonical_match_id(
 
 
 def season_for_kickoff(kickoff_utc: datetime) -> str:
-    aware = kickoff_utc if kickoff_utc.tzinfo is not None else kickoff_utc.replace(tzinfo=UTC)
-    utc = aware.astimezone(UTC)
+    utc = require_aware_kickoff(kickoff_utc).astimezone(UTC)
     if utc.month >= 7:
         return f"{utc.year}/{str(utc.year + 1)[2:]}"
     return f"{utc.year - 1}/{str(utc.year)[2:]}"
