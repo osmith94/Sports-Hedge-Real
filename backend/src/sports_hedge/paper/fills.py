@@ -23,7 +23,10 @@ class PaperOpportunityLeg(BaseModel):
     """One canonical opportunity leg plus the visible back/buy book used to fill it.
 
     Stakes are denominated in `currency`. Callers that have already converted depth
-    into GBP should set currency to GBP; the simulator does not apply FX.
+    into GBP should set currency to GBP; the simulator does not apply FX or invent
+    a reporting-currency total. Arb net edge and guaranteed profit stay on
+    `ArbitrageSolution` / Near-Arb observations — this is an execution fill, not a
+    second economics truth model.
     """
 
     outcome: str
@@ -34,7 +37,7 @@ class PaperOpportunityLeg(BaseModel):
     requested_stake: Decimal = Field(gt=Decimal("0"))
     displayed_odds: Decimal = Field(gt=Decimal("1"))
     levels: list[BookLevel] = Field(default_factory=list)
-    quote_age_ms: int = Field(default=0, ge=0)
+    quote_age_ms: int | None = Field(default=None, ge=0)
     quote_captured_at: datetime | None = None
 
     @model_validator(mode="after")
@@ -61,7 +64,13 @@ class PaperFillConfig(BaseModel):
 
 
 class PaperFillRecord(BaseModel):
-    """Auditable simulated fill ready for later ledger posting."""
+    """Auditable simulated fill ready for later ledger posting.
+
+    `theoretical_payout` / `realised_payout` are this leg's return if its outcome
+    wins. They are not opportunity P&L and must not be summed across mutually
+    exclusive arb legs. Solver and Near-Arb observations remain the source of
+    complete-set edge and guaranteed profit.
+    """
 
     fill_id: str = Field(default_factory=lambda: str(uuid4()))
     mode: FillMode
@@ -82,7 +91,7 @@ class PaperFillRecord(BaseModel):
     fully_filled: bool
     rejection_reason: str | None = None
     assumed_latency_ms: int = Field(default=0, ge=0)
-    quote_age_ms: int = Field(default=0, ge=0)
+    quote_age_ms: int | None = Field(default=None, ge=0)
     quote_captured_at: datetime | None = None
 
     @model_validator(mode="after")
@@ -124,9 +133,10 @@ class PaperOpportunityFills(BaseModel):
     """Per-leg fills for one paper opportunity.
 
     Monetary payout/profit stays on each `PaperFillRecord`. Mutually exclusive
-    legs must not be summed into an opportunity-level return; settlement-state
-    P&L belongs in a later payoff layer. Native stake totals are grouped by
-    venue and currency so GBP and USD are never added together.
+    legs must not be summed into an opportunity-level return; complete-set edge
+    and guaranteed profit remain on `ArbitrageSolution` and Near-Arb observations.
+    Native stake totals are grouped by venue and currency so GBP and USD are
+    never added together.
     """
 
     opportunity_id: str

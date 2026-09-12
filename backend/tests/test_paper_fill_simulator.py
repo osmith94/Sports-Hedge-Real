@@ -16,6 +16,7 @@ from sports_hedge.paper.simulator import (
     NO_VISIBLE_DEPTH,
     PaperFillSimulator,
     STALE_QUOTE,
+    UNKNOWN_QUOTE_AGE,
 )
 
 
@@ -269,6 +270,7 @@ def test_opportunity_preserves_cross_venue_currency_and_ids() -> None:
                 requested_stake=Decimal("40"),
                 displayed_odds=Decimal("2.20"),
                 levels=[BookLevel(decimal_odds=Decimal("2.20"), available_stake=Decimal("40"))],
+                quote_age_ms=100,
             ),
             PaperOpportunityLeg(
                 outcome="no",
@@ -279,6 +281,7 @@ def test_opportunity_preserves_cross_venue_currency_and_ids() -> None:
                 requested_stake=Decimal("40"),
                 displayed_odds=Decimal("2.10"),
                 levels=[BookLevel(decimal_odds=Decimal("2.10"), available_stake=Decimal("200"))],
+                quote_age_ms=150,
             ),
         ],
         PaperFillConfig(mode=FillMode.REALISTIC),
@@ -336,3 +339,43 @@ def test_fill_time_is_simulation_clock_plus_latency_not_quote_capture() -> None:
     assert result.filled_at == simulated_at + timedelta(milliseconds=500)
     assert result.filled_at > simulated_at
     assert result.filled_at != captured + timedelta(milliseconds=500)
+
+
+def test_unknown_quote_age_fails_closed_instead_of_assuming_fresh() -> None:
+    simulator = PaperFillSimulator()
+    result = simulator.simulate_leg(
+        PaperOpportunityLeg(
+            outcome="yes",
+            venue=VenueName.MATCHBOOK,
+            source_market_id="mb-btts",
+            source_runner_id="yes-1",
+            requested_stake=Decimal("40"),
+            displayed_odds=Decimal("2.20"),
+            levels=_two_level_book(),
+            quote_age_ms=None,
+        ),
+        PaperFillConfig(mode=FillMode.REALISTIC, max_quote_age_ms=1000),
+        now=CAPTURED,
+    )
+
+    assert result.filled_stake == Decimal("0")
+    assert result.remaining_stake == Decimal("40")
+    assert result.rejection_reason == UNKNOWN_QUOTE_AGE
+    assert result.quote_age_ms is None
+
+
+def test_quote_age_at_freshness_cap_is_stale() -> None:
+    simulator = PaperFillSimulator()
+    result = simulator.simulate_leg(
+        _leg(
+            requested="40",
+            displayed="2.20",
+            levels=_two_level_book(),
+            quote_age_ms=1000,
+        ),
+        PaperFillConfig(mode=FillMode.REALISTIC, assumed_latency_ms=0, max_quote_age_ms=1000),
+        now=CAPTURED,
+    )
+
+    assert result.filled_stake == Decimal("0")
+    assert result.rejection_reason == STALE_QUOTE
