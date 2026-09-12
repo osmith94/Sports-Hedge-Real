@@ -9,7 +9,7 @@ class ExecutionRiskInputs(BaseModel):
     quote_age_ms: int = Field(ge=0)
     recent_volatility_bps: float = Field(ge=0)
     leg_count: int = Field(ge=2)
-    minutes_to_kickoff: float = Field(ge=0)
+    minutes_to_kickoff: float | None = Field(default=None, ge=0)
     assumed_latency_ms: int = Field(ge=0)
     hedge_liquidity_ratio: float = Field(default=1.0, ge=0)
 
@@ -58,7 +58,7 @@ class ExecutionRiskScorer:
             reasons.append("cross_venue_latency")
         score += latency_component
 
-        if data.minutes_to_kickoff <= 10:
+        if data.minutes_to_kickoff is not None and data.minutes_to_kickoff <= 10:
             score += 5
             reasons.append("near_kickoff")
 

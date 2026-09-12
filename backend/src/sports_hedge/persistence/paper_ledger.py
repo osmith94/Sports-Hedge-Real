@@ -136,6 +136,7 @@ class SqlitePaperTradeRepository:
             trade.canonical_event_id,
             trade.canonical_market_id,
             trade.settlement_key,
+            trade.solver_model,
             trade.market_family.value if trade.market_family else None,
             trade.period.value if trade.period else None,
             trade.competition,
@@ -163,17 +164,18 @@ class SqlitePaperTradeRepository:
             """
             INSERT INTO paper_trades (
                 trade_id, opportunity_id, canonical_event_id, canonical_market_id,
-                settlement_key, market_family, period, competition, home_team, away_team,
+                settlement_key, solver_model, market_family, period, competition, home_team, away_team,
                 fixture_label, market_label, state, opened_at, last_updated_at, settled_at,
                 guaranteed_profit_gbp_at_open, realised_pnl_gbp, capital_locked_native_json,
                 capital_locked_gbp, settlement_outcome, settlement_source, settlement_source_id,
                 settlement_detail, provenance, fx_snapshots_json, venue_costs_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(trade_id) DO UPDATE SET
                 opportunity_id = excluded.opportunity_id,
                 canonical_event_id = excluded.canonical_event_id,
                 canonical_market_id = excluded.canonical_market_id,
                 settlement_key = excluded.settlement_key,
+                solver_model = excluded.solver_model,
                 market_family = excluded.market_family,
                 period = excluded.period,
                 competition = excluded.competition,
@@ -205,9 +207,10 @@ class SqlitePaperTradeRepository:
                 """
                 INSERT INTO paper_trade_legs (
                     trade_id, venue, outcome, currency, requested_stake, filled_stake,
-                    displayed_odds, filled_odds, source_market_id, fill_id, fill_kind,
-                    capital_source, execution_mode
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    displayed_odds, filled_odds, source_market_id, source_event_id,
+                    source_runner_id, source_contract_id, opening_action, canonical_state,
+                    settlement_fingerprint_key, fill_id, fill_kind, capital_source, execution_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade.trade_id,
@@ -219,6 +222,12 @@ class SqlitePaperTradeRepository:
                     _dec(leg.displayed_odds),
                     _dec(leg.filled_odds),
                     leg.source_market_id,
+                    leg.source_event_id,
+                    leg.source_runner_id,
+                    leg.source_contract_id,
+                    None if leg.opening_action is None else leg.opening_action.value,
+                    leg.canonical_state,
+                    leg.settlement_fingerprint_key,
                     leg.fill_id,
                     leg.fill_kind.value,
                     leg.capital_source.value,
@@ -263,6 +272,14 @@ class SqlitePaperTradeRepository:
                     "displayed_odds": item["displayed_odds"],
                     "filled_odds": item["filled_odds"],
                     "source_market_id": item["source_market_id"],
+                    "source_event_id": item["source_event_id"] if "source_event_id" in item.keys() else None,
+                    "source_runner_id": item["source_runner_id"] if "source_runner_id" in item.keys() else None,
+                    "source_contract_id": item["source_contract_id"] if "source_contract_id" in item.keys() else None,
+                    "opening_action": item["opening_action"] if "opening_action" in item.keys() else None,
+                    "canonical_state": item["canonical_state"] if "canonical_state" in item.keys() else None,
+                    "settlement_fingerprint_key": (
+                        item["settlement_fingerprint_key"] if "settlement_fingerprint_key" in item.keys() else None
+                    ),
                     "fill_id": item["fill_id"],
                     "fill_kind": item["fill_kind"],
                     "capital_source": item["capital_source"],
@@ -296,6 +313,7 @@ class SqlitePaperTradeRepository:
             canonical_event_id=row["canonical_event_id"],
             canonical_market_id=row["canonical_market_id"],
             settlement_key=row["settlement_key"],
+            solver_model=row["solver_model"] if "solver_model" in row.keys() else None,
             market_family=MarketFamily(row["market_family"]) if row["market_family"] else None,
             period=FootballPeriod(row["period"]) if row["period"] else None,
             competition=row["competition"],
@@ -360,6 +378,7 @@ class SqlitePaperLedger:
                 canonical_event_id TEXT,
                 canonical_market_id TEXT,
                 settlement_key TEXT,
+                solver_model TEXT,
                 market_family TEXT,
                 period TEXT,
                 competition TEXT,
@@ -394,6 +413,12 @@ class SqlitePaperLedger:
                 displayed_odds TEXT,
                 filled_odds TEXT,
                 source_market_id TEXT NOT NULL,
+                source_event_id TEXT,
+                source_runner_id TEXT,
+                source_contract_id TEXT,
+                opening_action TEXT,
+                canonical_state TEXT,
+                settlement_fingerprint_key TEXT,
                 fill_id TEXT,
                 fill_kind TEXT NOT NULL,
                 capital_source TEXT NOT NULL,
@@ -413,6 +438,25 @@ class SqlitePaperLedger:
                 ON paper_journal_entries(opportunity_id);
             """
         )
+        self._connection.commit()
+        self._ensure_unwind_identity_columns()
+
+    def _ensure_unwind_identity_columns(self) -> None:
+        trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
+        if "solver_model" not in trade_cols:
+            self._connection.execute("ALTER TABLE paper_trades ADD COLUMN solver_model TEXT")
+        leg_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trade_legs)")}
+        additions = {
+            "source_event_id": "TEXT",
+            "source_runner_id": "TEXT",
+            "source_contract_id": "TEXT",
+            "opening_action": "TEXT",
+            "canonical_state": "TEXT",
+            "settlement_fingerprint_key": "TEXT",
+        }
+        for name, spec in additions.items():
+            if name not in leg_cols:
+                self._connection.execute(f"ALTER TABLE paper_trade_legs ADD COLUMN {name} {spec}")
         self._connection.commit()
 
     def close(self) -> None:
