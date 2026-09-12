@@ -26,6 +26,7 @@ These files summarize the non-negotiable product principles agreed for Sports He
 14. [`core-tenets/14_EVENT_DRIVEN_PRICE_DISLOCATION_ARBITRAGE.md`](core-tenets/14_EVENT_DRIVEN_PRICE_DISLOCATION_ARBITRAGE.md) — a key arbitrage thesis is rapid detection of temporary cross-venue disagreement after material sporting events, with strict freshness, depth, settlement and cost controls.
 15. [`core-tenets/15_EFFECTIVE_VENUE_ECONOMICS_AND_FEES.md`](core-tenets/15_EFFECTIVE_VENUE_ECONOMICS_AND_FEES.md) — Sports Hedge compares net executable economics after the exact applicable venue/market/side/order-role costs, not headline odds.
 16. [`core-tenets/16_EXTERNAL_MANUAL_LEGS.md`](core-tenets/16_EXTERNAL_MANUAL_LEGS.md) — opportunities with a required non-automated venue leg must hard-stop for explicit external/manual confirmation, keep capital separate, and revalidate the remaining hedge before proceeding.
+17. [`core-tenets/17_HISTORICAL_MARKET_MOVEMENT_CONTEXT.md`](core-tenets/17_HISTORICAL_MARKET_MOVEMENT_CONTEXT.md) — large or rapid market moves should be interpreted against comparable historical team/regime/league movements, with explicit sample size, uncertainty and the ability to report weak/no relationship or no historical precedent.
 
 ## Source specifications
 
