@@ -15,7 +15,7 @@ def canonical_source_event_id(event: CanonicalEvent) -> str:
             normalize_text(event.competition),
             normalize_text(event.home_team),
             normalize_text(event.away_team),
-            _kickoff_bucket(event.kickoff_utc).isoformat(),
+            kickoff_bucket(event.kickoff_utc).isoformat(),
             event.source_venue.value,
             event.source_event_id,
         ]
@@ -56,7 +56,7 @@ def canonical_matched_event_id(events: Sequence[CanonicalEvent]) -> str:
             first.sport,
             normalize_text(first.home_team),
             normalize_text(first.away_team),
-            _kickoff_bucket(first.kickoff_utc).isoformat(),
+            kickoff_bucket(first.kickoff_utc).isoformat(),
             *source_refs,
         ]
     )
@@ -88,9 +88,15 @@ def canonical_matched_market_id(
     return f"mkt:{sha256(payload.encode('utf-8')).hexdigest()[:24]}"
 
 
-def _kickoff_bucket(value: datetime) -> datetime:
+def kickoff_bucket(value: datetime) -> datetime:
+    """Round kickoff to the nearest five minutes (UTC)."""
+
     aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     utc = aware.astimezone(UTC)
     bucket_seconds = 5 * 60
     rounded = ((int(utc.timestamp()) + bucket_seconds // 2) // bucket_seconds) * bucket_seconds
     return datetime.fromtimestamp(rounded, tz=UTC)
+
+
+def _kickoff_bucket(value: datetime) -> datetime:
+    return kickoff_bucket(value)
