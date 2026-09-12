@@ -29,9 +29,16 @@ from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
+from sports_hedge.fees.effective import profit_commission_net_odds
 from sports_hedge.paper.fills import PaperFillConfig
 from sports_hedge.paper.models import FxRateSnapshot
-from sports_hedge.paper.trades import PaperLegFillKind, PaperSettlementRequest, PaperTradeState
+from sports_hedge.paper.settlement import compute_paper_settlement
+from sports_hedge.paper.trades import (
+    PaperLegFillKind,
+    PaperSettlementRequest,
+    PaperTradeLeg,
+    PaperTradeState,
+)
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from test_paper_scan_pipeline import matchbook_payloads, polymarket_payloads
@@ -39,6 +46,35 @@ from venue_cost_helpers import matchbook_polymarket_costs
 
 
 OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
+
+
+def independent_realised_pnl_gbp(trade, winning_outcome: str) -> Decimal:
+    """Textbook profit-commission P&L from recorded fills, fees and FX.
+
+    Independent of `compute_paper_settlement` so double-counted fees fail this proof.
+    Unfilled legs contribute nothing.
+    """
+
+    fx = {item.currency: item.gbp_per_unit for item in trade.fx_snapshots}
+    fx.setdefault("GBP", Decimal("1"))
+    costs = {item.venue: item for item in trade.venue_costs}
+    total = Decimal("0")
+    for leg in trade.legs:
+        if leg.filled_stake <= 0:
+            continue
+        gbp_per = fx[leg.currency]
+        if leg.outcome != winning_outcome:
+            total += -leg.filled_stake * gbp_per
+            continue
+        cost = costs[leg.venue]
+        if cost.rate is None:
+            raise AssertionError(f"missing fee rate for {leg.venue}")
+        odds = leg.filled_odds or leg.displayed_odds
+        if odds is None:
+            raise AssertionError(f"missing filled odds for {leg.outcome}")
+        net_odds = profit_commission_net_odds(odds, cost.rate)
+        total += (leg.filled_stake * net_odds - leg.filled_stake) * gbp_per
+    return total
 
 
 def _ops(
@@ -153,6 +189,17 @@ def test_manual_external_is_distinct_from_paper_simulated(tmp_path: Path) -> Non
         awaiting = ops.list_active_trades()
         assert len(awaiting) == 1
         assert awaiting[0].state is PaperTradeState.AWAITING_MANUAL_EXTERNAL
+        assert len(awaiting[0].legs) == len(plan.legs)
+        assert all(leg.fill_kind is PaperLegFillKind.UNFILLED for leg in awaiting[0].legs)
+        assert all(leg.filled_stake == 0 for leg in awaiting[0].legs)
+        assert {(leg.venue, leg.outcome) for leg in awaiting[0].legs} == {
+            (leg.venue, leg.outcome) for leg in plan.legs
+        }
+        pending_external = next(leg for leg in awaiting[0].legs if leg.venue is VenueName.POLYMARKET)
+        assert pending_external.execution_mode == "EXTERNAL_OPERATOR"
+        assert pending_external.capital_source is CapitalSource.MANUAL_EXTERNAL
+        assert pending_external.requested_stake > 0
+        assert pending_external.source_market_id
         external = next(leg for leg in plan.legs if leg.venue is VenueName.POLYMARKET)
         from sports_hedge.application.paper_operations import _net_odds_for_leg
 
@@ -189,6 +236,104 @@ def test_manual_external_is_distinct_from_paper_simulated(tmp_path: Path) -> Non
         ledger.close()
 
 
+def test_partial_settlement_when_unfilled_canonical_outcome_wins(tmp_path: Path) -> None:
+    ledger = SqlitePaperLedger(tmp_path / "partial.sqlite")
+    _scan, watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
+    try:
+        opportunity_id = next(iter(ops._plans))
+        plan = ops._plans[opportunity_id]
+        opportunity = watchlist.repository.get(opportunity_id)
+        assert opportunity is not None
+        keep_plan, drop_plan = plan.legs[0], plan.legs[1]
+        fx = {item.currency: item.gbp_per_unit for item in plan.fx_snapshots}
+        fx.setdefault("GBP", Decimal("1"))
+        keep_rate = fx[keep_plan.currency]
+        trade = ops._new_trade_shell(plan, opportunity, OBSERVED, DataProvenance.FIXTURE_DEMO)
+        trade.state = PaperTradeState.PARTIAL
+        trade.legs = [
+            PaperTradeLeg(
+                venue=keep_plan.venue,
+                outcome=keep_plan.outcome,
+                currency=keep_plan.currency,
+                requested_stake=keep_plan.requested_stake,
+                filled_stake=keep_plan.requested_stake,
+                displayed_odds=keep_plan.displayed_odds,
+                filled_odds=keep_plan.displayed_odds,
+                source_market_id=keep_plan.source_market_id,
+                fill_id="paper-fill-partial-keep",
+                fill_kind=PaperLegFillKind.INTERNAL_SIMULATED,
+                capital_source=CapitalSource.AUTO_POOL,
+                execution_mode="INTERNAL",
+            ),
+            PaperTradeLeg(
+                venue=drop_plan.venue,
+                outcome=drop_plan.outcome,
+                currency=drop_plan.currency,
+                requested_stake=drop_plan.requested_stake,
+                filled_stake=Decimal("0"),
+                displayed_odds=drop_plan.displayed_odds,
+                filled_odds=None,
+                source_market_id=drop_plan.source_market_id,
+                fill_id=None,
+                fill_kind=PaperLegFillKind.UNFILLED,
+                capital_source=CapitalSource.AUTO_POOL,
+                execution_mode="INTERNAL",
+            ),
+        ]
+        trade.capital_locked_native = {keep_plan.currency: keep_plan.requested_stake}
+        trade.capital_locked_gbp = keep_plan.requested_stake * keep_rate
+        trade.fx_snapshots = list(plan.fx_snapshots)
+        trade.venue_costs = list(plan.venue_costs)
+        ops.trades.save(trade)
+
+        with pytest.raises(PaperOperationsError, match="settlement_outcome_not_on_trade"):
+            ops.settle(
+                trade.trade_id,
+                PaperSettlementRequest(
+                    winning_outcome="not-on-this-market",
+                    source="fixture_test",
+                    source_id="bogus",
+                    provenance=DataProvenance.FIXTURE_DEMO,
+                ),
+            )
+
+        persisted = ops.trades.get(trade.trade_id)
+        assert persisted is not None
+        computation = compute_paper_settlement(persisted, winning_outcome=drop_plan.outcome)
+        assert all(item.filled_stake > 0 for item in computation.legs)
+        assert drop_plan.outcome not in {item.outcome for item in computation.legs}
+        assert all(item.won is False for item in computation.legs)
+        expected = independent_realised_pnl_gbp(persisted, drop_plan.outcome)
+        assert expected == -keep_plan.requested_stake * keep_rate
+        assert computation.realised_pnl_gbp == expected
+
+        settled = ops.settle(
+            trade.trade_id,
+            PaperSettlementRequest(
+                winning_outcome=drop_plan.outcome,
+                source="fixture_test",
+                source_id="partial-unfilled-wins",
+                settled_at=OBSERVED,
+                provenance=DataProvenance.FIXTURE_DEMO,
+            ),
+        )
+        assert settled.state is PaperTradeState.CLOSED
+        assert settled.settlement_outcome == drop_plan.outcome
+        assert settled.realised_pnl_gbp == expected
+        postings = ops.journal.postings(opportunity_id=opportunity_id)
+        assert gbp_is_balanced(postings)
+        settle_entries = [
+            entry
+            for entry in ops.journal.list_entries(opportunity_id=opportunity_id)
+            if entry.source == "paper_settlement"
+        ]
+        assert len(settle_entries) == 1
+        assert any(posting.account_code.startswith("PNL:BETTING") for posting in settle_entries[0].postings)
+    finally:
+        repository.close()
+        ledger.close()
+
+
 @pytest.mark.parametrize("outcome_index", [0, 1])
 def test_settlement_moves_trade_to_closed_history(tmp_path: Path, outcome_index: int) -> None:
     ledger = SqlitePaperLedger(tmp_path / f"paper-{outcome_index}.sqlite")
@@ -199,8 +344,9 @@ def test_settlement_moves_trade_to_closed_history(tmp_path: Path, outcome_index:
         assert detail.legs
         assert detail.audit
         assert detail.journals
-        outcomes = sorted({leg.outcome for leg in trade.legs if leg.filled_stake > 0})
+        outcomes = sorted({leg.outcome for leg in trade.legs})
         winning = outcomes[outcome_index]
+        expected_pnl = independent_realised_pnl_gbp(trade, winning)
         settled = ops.settle(
             trade.trade_id,
             PaperSettlementRequest(
@@ -214,7 +360,7 @@ def test_settlement_moves_trade_to_closed_history(tmp_path: Path, outcome_index:
         assert settled.state is PaperTradeState.CLOSED
         assert settled.settlement_outcome == winning
         assert settled.settlement_source == "fixture_test"
-        assert settled.realised_pnl_gbp is not None
+        assert settled.realised_pnl_gbp == expected_pnl
         assert settled.trade_id not in {item.trade_id for item in ops.list_active_trades()}
         assert settled.trade_id in {item.trade_id for item in ops.list_closed_trades()}
         postings = ops.journal.postings(opportunity_id=trade.opportunity_id)
@@ -294,7 +440,9 @@ def test_trade_api_and_paper_page_are_not_mock_portfolio(tmp_path: Path) -> None
         summary = client.get("/paper/trades/summary").json()
         assert summary["open_count"] == 1
         assert summary["data_kind"] == "persisted_paper_trades"
+        open_trade = ops.trade_detail(rows[0]["trade_id"])
         outcome = rows[0]["legs"][0]["outcome"]
+        expected_open_pnl = independent_realised_pnl_gbp(open_trade, outcome)
         settled = client.post(
             f"/paper/trades/{rows[0]['trade_id']}/settle",
             json={
@@ -306,10 +454,42 @@ def test_trade_api_and_paper_page_are_not_mock_portfolio(tmp_path: Path) -> None
         )
         assert settled.status_code == 200
         assert settled.json()["state"] == "CLOSED"
+        assert Decimal(str(settled.json()["realised_pnl_gbp"])) == expected_open_pnl
         assert client.get("/paper/trades/active").json() == []
         closed = client.get("/paper/trades/closed").json()
         assert len(closed) == 1
-        assert closed[0]["realised_pnl_gbp"] is not None
+        assert Decimal(str(closed[0]["realised_pnl_gbp"])) == expected_open_pnl
+    finally:
+        app.dependency_overrides.clear()
+        audit.close()
+        repository.close()
+        ledger.close()
+
+
+def test_awaiting_external_api_returns_unfilled_planned_legs(tmp_path: Path) -> None:
+    ledger = SqlitePaperLedger(tmp_path / "awaiting-api.sqlite")
+    _scan, watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
+    audit = SqlitePaperScanRepository()
+    app.dependency_overrides[get_market_intelligence_service] = lambda: _scan.market_intelligence
+    app.dependency_overrides[get_paper_audit_repository] = lambda: audit
+    app.dependency_overrides[get_watchlist_service] = lambda: watchlist
+    app.dependency_overrides[get_paper_operations_service] = lambda: ops
+    app.dependency_overrides[get_priority_alert_service] = lambda: ops.alerts
+    client = TestClient(app)
+    try:
+        opportunity_id = next(iter(ops._plans))
+        blocked = client.post("/paper/simulate-fill", json={"opportunity_id": opportunity_id})
+        assert blocked.status_code == 409
+        active = client.get("/paper/trades/active").json()
+        assert len(active) == 1
+        assert active[0]["state"] == "AWAITING_MANUAL_EXTERNAL"
+        assert active[0]["legs"]
+        assert all(leg["fill_kind"] == "UNFILLED" for leg in active[0]["legs"])
+        detail = client.get(f"/paper/trades/{active[0]['trade_id']}").json()
+        assert {leg["outcome"] for leg in detail["legs"]} == {
+            leg.outcome for leg in ops._plans[opportunity_id].legs
+        }
+        assert any(leg["execution_mode"] == "EXTERNAL_OPERATOR" for leg in detail["legs"])
     finally:
         app.dependency_overrides.clear()
         audit.close()

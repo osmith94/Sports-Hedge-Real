@@ -491,6 +491,7 @@ class PaperOperationsService:
             return existing
         trade = self._new_trade_shell(plan, opportunity, occurred_at, provenance)
         trade.state = PaperTradeState.AWAITING_MANUAL_EXTERNAL
+        trade.legs = _unfilled_legs_from_plan(plan)
         trade.audit.append(
             PaperTradeAuditEvent(
                 occurred_at=occurred_at,
@@ -797,6 +798,36 @@ class PaperOperationsService:
             )
             entries.append(posted)
         return entries
+
+
+def _unfilled_legs_from_plan(plan: PaperFillPlan) -> list[PaperTradeLeg]:
+    """Planned legs awaiting fill or MANUAL_EXTERNAL confirmation. No cash is locked."""
+
+    legs: list[PaperTradeLeg] = []
+    for plan_leg in plan.legs:
+        mode = plan.execution_modes.get(plan_leg.venue, LegExecutionMode.INTERNAL)
+        capital = (
+            CapitalSource.MANUAL_EXTERNAL
+            if mode is LegExecutionMode.EXTERNAL_OPERATOR
+            else CapitalSource.AUTO_POOL
+        )
+        legs.append(
+            PaperTradeLeg(
+                venue=plan_leg.venue,
+                outcome=plan_leg.outcome,
+                currency=plan_leg.currency,
+                requested_stake=plan_leg.requested_stake,
+                filled_stake=Decimal("0"),
+                displayed_odds=plan_leg.displayed_odds,
+                filled_odds=None,
+                source_market_id=plan_leg.source_market_id,
+                fill_id=None,
+                fill_kind=PaperLegFillKind.UNFILLED,
+                capital_source=capital,
+                execution_mode=mode.value,
+            )
+        )
+    return legs
 
 
 def _with_stable_fill_ids(

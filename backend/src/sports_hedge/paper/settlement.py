@@ -46,7 +46,11 @@ def compute_paper_settlement(
     *,
     winning_outcome: str,
 ) -> PaperSettlementComputation:
-    outcomes = {leg.outcome for leg in trade.legs if leg.filled_stake > 0}
+    """Settle from a labelled outcome over the trade's canonical legs.
+
+    UNFILLED PARTIAL outcomes are valid winners; P&L uses filled legs only.
+    """
+    outcomes = {leg.outcome for leg in trade.legs}
     if winning_outcome not in outcomes:
         raise PaperSettlementError("settlement_outcome_not_on_trade")
     fx = {item.currency: item for item in trade.fx_snapshots}
