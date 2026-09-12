@@ -25,9 +25,12 @@ from sports_hedge.paper.unwind.models import (
     CapitalScarcityInput,
     CloseLegPlan,
     ClosePlan,
+    DurationDecisionRole,
+    EstimatedTimeToRelease,
     IncrementalCloseCapitalStatus,
     OpenPaperLeg,
     OpenPaperPosition,
+    RemainingLockSource,
     ReverseQuote,
     UnwindDecision,
     UnwindEvaluationRequest,
@@ -156,11 +159,11 @@ class PaperUnwindEngine:
                 recommendation = UnwindRecommendation.UNWIND_NOT_SAFE
                 reason = "incremental_close_capital_unknown"
 
-        # Passthrough only. Do not invent remaining lock from kickoff, match
-        # clock, or expected_settlement_at. Those fields are not close triggers
-        # and are not assumed capital-release times.
-        remaining = position.remaining_lock_minutes
-        turnover = _opportunity_cost_hint(request.scarcity)
+        # Advisory passthrough only. Do not invent remaining lock from
+        # kickoff, match clock, or expected_settlement_at - evaluated_at.
+        estimate = _estimated_time_to_release(position)
+        duration_role = _duration_decision_role(estimate, request.scarcity)
+        turnover = _opportunity_cost_hint(request.scarcity, estimate)
 
         return UnwindDecision(
             trade_id=position.trade_id,
@@ -168,8 +171,12 @@ class PaperUnwindEngine:
             decision_reason=reason,
             hold_pnl_gbp=hold,
             validated_exit_pnl_gbp=exit_pnl if fully else None,
+            unwind_cost_gbp=give_up if fully else None,
             profit_give_up_gbp=give_up if fully else None,
-            remaining_lock_minutes=remaining,
+            opportunity_cost_gbp=request.scarcity.opportunity_cost_gbp,
+            remaining_lock_minutes=estimate.remaining_lock_minutes,
+            estimated_time_to_release=estimate,
+            duration_decision_role=duration_role,
             capital_turnover_hint=turnover,
             conditionally_releasable_by_venue_currency=releasable,
             gross_close_liability_native=gross_liability,
@@ -320,8 +327,9 @@ class PaperUnwindEngine:
         if not ages:
             return None
         minutes: float | None = None
-        if position.remaining_lock_minutes is not None:
-            minutes = float(position.remaining_lock_minutes)
+        estimate = _estimated_time_to_release(position)
+        if estimate.remaining_lock_minutes is not None:
+            minutes = float(estimate.remaining_lock_minutes)
         ratios = []
         for leg in legs:
             if leg.available_closing_capacity <= 0:
@@ -378,11 +386,42 @@ def _apply_deferred_profit_commission(
     return []
 
 
-def _opportunity_cost_hint(scarcity: CapitalScarcityInput) -> str | None:
-    """Scarcity / competing opportunities only. Never a predicted match finish."""
+def _estimated_time_to_release(position: OpenPaperPosition) -> EstimatedTimeToRelease:
+    return EstimatedTimeToRelease(
+        remaining_lock_minutes=position.remaining_lock_minutes,
+        expected_settlement_at=position.expected_settlement_at,
+        basis=position.remaining_lock_basis,
+        confidence=position.remaining_lock_confidence,
+        detail=position.remaining_lock_detail,
+    )
+
+
+def _duration_decision_role(
+    estimate: EstimatedTimeToRelease,
+    scarcity: CapitalScarcityInput,
+) -> DurationDecisionRole:
+    if scarcity.opportunity_cost_gbp is not None:
+        return DurationDecisionRole.OPPORTUNITY_COST_COMPARED
+    if (
+        estimate.remaining_lock_minutes is not None
+        or estimate.expected_settlement_at is not None
+    ):
+        return DurationDecisionRole.RANKING_CONTEXT_ONLY
+    return DurationDecisionRole.DURATION_UNKNOWN
+
+
+def _opportunity_cost_hint(
+    scarcity: CapitalScarcityInput,
+    estimate: EstimatedTimeToRelease,
+) -> str | None:
+    """Scarcity / competing opportunities, or advisory lock duration. Never a finish timer."""
 
     if scarcity.opportunity_cost_gbp is not None:
         return "opportunity_cost_from_current_scarcity"
+    if estimate.basis is not RemainingLockSource.UNKNOWN and (
+        estimate.remaining_lock_minutes is not None or estimate.expected_settlement_at is not None
+    ):
+        return "advisory_estimated_time_to_release"
     if scarcity.pressure is CapitalPressure.SCARCE:
         return "scarce_capital_competing_opportunities"
     return None

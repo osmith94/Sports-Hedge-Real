@@ -54,6 +54,56 @@ class IncrementalCloseCapitalStatus(StrEnum):
     UNKNOWN_NOT_MODELLED = "unknown_not_modelled"
 
 
+class RemainingLockSource(StrEnum):
+    """Who supplied remaining lock. Estimates without this stay unknown."""
+
+    AUTHORITATIVE_PROVIDER = "authoritative_provider"
+    AUTHORITATIVE_LEDGER = "authoritative_ledger"
+    UNKNOWN = "unknown"
+
+
+class DurationDecisionRole(StrEnum):
+    """How remaining lock participates in hold-vs-unwind. Never a settlement clock."""
+
+    OPPORTUNITY_COST_COMPARED = "opportunity_cost_compared"
+    RANKING_CONTEXT_ONLY = "ranking_context_only"
+    DURATION_UNKNOWN = "duration_unknown"
+
+
+class EstimatedTimeToRelease(BaseModel):
+    """Advisory remaining-lock input for opportunity-cost / ranking.
+
+    Distinct from unwind_cost_gbp. Never settles a market, never posts 8E,
+    and never makes conditionally releasable capital spendable.
+    """
+
+    remaining_lock_minutes: Decimal | None = Field(default=None, ge=0)
+    expected_settlement_at: datetime | None = None
+    basis: RemainingLockSource = RemainingLockSource.UNKNOWN
+    confidence: Decimal | None = Field(default=None, ge=0, le=1)
+    detail: str | None = None
+    advisory: bool = True
+    settles_or_releases_capital: bool = False
+
+    @model_validator(mode="after")
+    def authoritative_or_null(self) -> EstimatedTimeToRelease:
+        self.advisory = True
+        self.settles_or_releases_capital = False
+        if self.expected_settlement_at is not None:
+            self.expected_settlement_at = require_aware_instant(
+                self.expected_settlement_at, "expected_settlement_at"
+            )
+        authoritative = {
+            RemainingLockSource.AUTHORITATIVE_PROVIDER,
+            RemainingLockSource.AUTHORITATIVE_LEDGER,
+        }
+        if self.basis not in authoritative:
+            self.remaining_lock_minutes = None
+            self.expected_settlement_at = None
+            self.basis = RemainingLockSource.UNKNOWN
+        return self
+
+
 class UnwindPolicy(BaseModel):
     """Deterministic conservative close rule. Headline spread is never enough."""
 
@@ -147,7 +197,8 @@ class OpenPaperPosition(BaseModel):
         default=None,
         description=(
             "Authoritative provider/ledger settlement instant only. "
-            "Null/unknown is valid. Not a wall-clock match-finish estimate."
+            "Null unless remaining_lock_basis is authoritative. Never derived "
+            "from kickoff or a fabricated match-finish clock."
         ),
     )
     remaining_lock_minutes: Decimal | None = Field(
@@ -155,11 +206,13 @@ class OpenPaperPosition(BaseModel):
         ge=0,
         description=(
             "Authoritative remaining lock if a provider/ledger supplied it. "
-            "Null/unknown is valid. The engine must not invent this from kickoff "
-            "or predicted match completion, and must not use it as a close trigger "
-            "or assumed capital-release time."
+            "Null/unknown is valid. Advisory hold-vs-unwind / opportunity-cost "
+            "input only — never a settlement or spendable-release trigger."
         ),
     )
+    remaining_lock_basis: RemainingLockSource = RemainingLockSource.UNKNOWN
+    remaining_lock_confidence: Decimal | None = Field(default=None, ge=0, le=1)
+    remaining_lock_detail: str | None = None
     legs: list[OpenPaperLeg] = Field(min_length=1)
     paper_only: bool = True
     places_orders: bool = False
@@ -175,6 +228,17 @@ class OpenPaperPosition(BaseModel):
         keys = {leg.settlement_fingerprint_key for leg in self.legs}
         if keys != {self.settlement_fingerprint_key}:
             raise ValueError("settlement_identity_mismatch")
+        estimate = EstimatedTimeToRelease(
+            remaining_lock_minutes=self.remaining_lock_minutes,
+            expected_settlement_at=self.expected_settlement_at,
+            basis=self.remaining_lock_basis,
+            confidence=self.remaining_lock_confidence,
+            detail=self.remaining_lock_detail,
+        )
+        self.remaining_lock_minutes = estimate.remaining_lock_minutes
+        self.expected_settlement_at = estimate.expected_settlement_at
+        self.remaining_lock_basis = estimate.basis
+        self.remaining_lock_confidence = estimate.confidence
         return self
 
 
@@ -266,17 +330,36 @@ class UnwindDecision(BaseModel):
     decision_reason: str
     hold_pnl_gbp: Decimal | None = None
     validated_exit_pnl_gbp: Decimal | None = None
-    profit_give_up_gbp: Decimal | None = None
+    unwind_cost_gbp: Decimal | None = Field(
+        default=None,
+        description="hold_pnl_gbp - validated_exit_pnl_gbp after fees, slippage and FX. Not opportunity cost.",
+    )
+    profit_give_up_gbp: Decimal | None = Field(
+        default=None,
+        description="Alias of unwind_cost_gbp for existing close-plan consumers.",
+    )
+    opportunity_cost_gbp: Decimal | None = Field(
+        default=None,
+        description="Passthrough of 8C/treasury opportunity_cost_gbp. Never fabricated.",
+    )
     remaining_lock_minutes: Decimal | None = Field(
         default=None,
-        description="Passthrough of an authoritative remaining lock, else null. Not a close trigger.",
+        description="Advisory remaining lock when authoritative; else null. Not a close trigger.",
     )
+    estimated_time_to_release: EstimatedTimeToRelease = Field(
+        default_factory=EstimatedTimeToRelease,
+        description="Advisory duration for hold-vs-unwind / opportunity-cost ranking.",
+    )
+    duration_decision_role: DurationDecisionRole = DurationDecisionRole.DURATION_UNKNOWN
     capital_turnover_hint: str | None = Field(
         default=None,
         description=(
-            "Opportunity-cost hint from current capital scarcity / competing opportunities. "
+            "Opportunity-cost or advisory remaining-lock hint. "
             "Never a fabricated game-finish or settlement timer."
         ),
+    )
+    spendable_release_requires: str = (
+        "validated_unwind_and_8e_or_venue_event_settlement_and_8e"
     )
     conditionally_releasable_by_venue_currency: dict[str, Decimal] = Field(
         default_factory=dict,
@@ -312,6 +395,9 @@ class UnwindDecision(BaseModel):
             self.incremental_close_capital_status = IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
         if self.incremental_close_capital_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED:
             self.incremental_close_capital_native = {}
+        self.estimated_time_to_release.advisory = True
+        self.estimated_time_to_release.settles_or_releases_capital = False
+        self.spendable_release_requires = "validated_unwind_and_8e_or_venue_event_settlement_and_8e"
         return self
 
 

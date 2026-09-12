@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from sports_hedge.application.complete_set import SOLVER_MODEL_SIMPLE
 from sports_hedge.paper.trades import PaperLegFillKind, PaperTrade
-from sports_hedge.paper.unwind.models import OpenPaperLeg, OpenPaperPosition
+from sports_hedge.paper.unwind.models import (
+    OpenPaperLeg,
+    OpenPaperPosition,
+    RemainingLockSource,
+)
 
 
 class UnwindIdentityError(ValueError):
@@ -34,6 +38,7 @@ def position_from_trade(trade: PaperTrade) -> OpenPaperPosition:
         # Leave both unknown rather than inventing a match-finish clock.
         expected_settlement_at=None,
         remaining_lock_minutes=None,
+        remaining_lock_basis=RemainingLockSource.UNKNOWN,
         legs=legs,
         paper_only=trade.paper_only,
         places_orders=trade.places_orders,

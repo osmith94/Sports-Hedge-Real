@@ -1,8 +1,10 @@
 """Deterministic conservative hold-vs-unwind rule.
 
-Predicted wall-clock match completion is not an input. HOLD vs UNWIND uses
-reverse-leg executability, fees/FX, execution risk, and capital scarcity —
-not a fabricated game-finish timer.
+Unwind cost is hold_pnl minus validated exit after fees/slippage/FX.
+Remaining lock is advisory context. When 8C/treasury supplies
+opportunity_cost_gbp, compare that modelled benefit of freeing capital
+against unwind_cost. Do not invent a return from duration. Predicted
+wall-clock match completion never settles or releases capital.
 """
 
 from __future__ import annotations
@@ -41,6 +43,11 @@ def decide_recommendation(
     give_up = hold_pnl_gbp - exit_pnl_gbp
     if give_up <= 0:
         return UnwindRecommendation.UNWIND_ELIGIBLE, "exit_pnl_not_inferior_to_hold"
+
+    if scarcity.opportunity_cost_gbp is not None:
+        if give_up <= scarcity.opportunity_cost_gbp:
+            return UnwindRecommendation.UNWIND_ELIGIBLE, "unwind_cost_within_supplied_opportunity_cost"
+        return UnwindRecommendation.HOLD, "unwind_cost_exceeds_supplied_opportunity_cost"
 
     if scarcity.pressure is CapitalPressure.SCARCE:
         proportional_cap = hold_pnl_gbp * policy.max_profit_give_up_ratio_when_scarce

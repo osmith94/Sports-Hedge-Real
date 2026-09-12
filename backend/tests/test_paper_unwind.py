@@ -35,9 +35,11 @@ from sports_hedge.paper.trades import (
 from sports_hedge.paper.unwind import (
     CapitalPressure,
     CapitalScarcityInput,
+    DurationDecisionRole,
     IncrementalCloseCapitalStatus,
     OpenPaperPosition,
     PaperUnwindEngine,
+    RemainingLockSource,
     ReverseQuote,
     UnwindEvaluationRequest,
     UnwindPolicy,
@@ -170,6 +172,9 @@ def _position(
     solver: str = "simple_complete_set",
     remaining_lock_minutes: Decimal | None = None,
     expected_settlement_at: datetime | None = None,
+    remaining_lock_basis: RemainingLockSource = RemainingLockSource.UNKNOWN,
+    remaining_lock_confidence: Decimal | None = None,
+    remaining_lock_detail: str | None = None,
 ) -> OpenPaperPosition:
     return OpenPaperPosition(
         trade_id="ptrade-demo",
@@ -182,6 +187,9 @@ def _position(
         capital_locked_native={leg.native_currency: sum((item.filled_size for item in legs if item.native_currency == leg.native_currency), Decimal("0")) for leg in legs},
         remaining_lock_minutes=remaining_lock_minutes,
         expected_settlement_at=expected_settlement_at,
+        remaining_lock_basis=remaining_lock_basis,
+        remaining_lock_confidence=remaining_lock_confidence,
+        remaining_lock_detail=remaining_lock_detail,
         legs=legs,
     )
 
@@ -268,10 +276,16 @@ def test_fully_executable_reverse_depth_produces_exact_pnl_and_releasable_capita
     # Matchbook: matched 110, gross 10, 2% commission 0.20 => 9.80
     # Polymarket: sell 100 shares @ 0.48 => proceeds 48, pnl -2 USD * 0.80 = -1.60
     assert decision.validated_exit_pnl_gbp == Decimal("8.20")
+    assert decision.unwind_cost_gbp == Decimal("3.80")
+    assert decision.profit_give_up_gbp == decision.unwind_cost_gbp
+    assert decision.opportunity_cost_gbp is None
     assert decision.conditionally_releasable_by_venue_currency[venue_currency_key(VenueName.MATCHBOOK, "GBP")] == Decimal("100")
     assert decision.conditionally_releasable_by_venue_currency[venue_currency_key(VenueName.POLYMARKET, "USD")] == Decimal("50")
     assert decision.spendable is False
     assert decision.remaining_lock_minutes is None
+    assert decision.estimated_time_to_release.remaining_lock_minutes is None
+    assert decision.estimated_time_to_release.settles_or_releases_capital is False
+    assert decision.duration_decision_role is DurationDecisionRole.DURATION_UNKNOWN
     assert decision.capital_turnover_hint is None
     mb = decision.close_plan.legs[0]
     assert mb.close_action is MarketAction.LAY
@@ -369,6 +383,7 @@ def test_scarce_capital_give_up_must_pass_both_caps() -> None:
     )
     assert surrendered.close_plan.fully_executable is True
     assert surrendered.validated_exit_pnl_gbp == Decimal("0")
+    assert surrendered.unwind_cost_gbp == Decimal("1.50")
     assert surrendered.profit_give_up_gbp == Decimal("1.50")
     assert surrendered.recommendation is UnwindRecommendation.HOLD
     assert surrendered.decision_reason == "give_up_exceeds_scarce_capital_threshold"
@@ -386,6 +401,7 @@ def test_scarce_capital_give_up_must_pass_both_caps() -> None:
     # but scarce recycling requires known incremental close capital. Gross lay
     # liability 110 is not modelled Matchbook netting, so fail closed.
     assert small.validated_exit_pnl_gbp == Decimal("9.80")
+    assert small.unwind_cost_gbp == Decimal("0.20")
     assert small.profit_give_up_gbp == Decimal("0.20")
     assert small.close_plan.legs[0].liability == Decimal("110")
     assert small.incremental_close_capital_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
@@ -421,6 +437,36 @@ def test_scarce_policy_uses_the_more_restrictive_bound() -> None:
     )
     assert eligible is UnwindRecommendation.UNWIND_ELIGIBLE
     assert reason == "scarce_capital_accepts_bounded_give_up"
+
+    hold_vs_tiny_oc, oc_reason = decide_recommendation(
+        fully_executable=True,
+        fail_reasons=[],
+        hold_pnl_gbp=Decimal("10"),
+        exit_pnl_gbp=Decimal("9.90"),
+        policy=policy,
+        scarcity=CapitalScarcityInput(
+            pressure=CapitalPressure.SCARCE,
+            opportunity_cost_gbp=Decimal("0.01"),
+        ),
+        execution_risk_score=0,
+    )
+    assert hold_vs_tiny_oc is UnwindRecommendation.HOLD
+    assert oc_reason == "unwind_cost_exceeds_supplied_opportunity_cost"
+
+    free_scarce_hour, hour_reason = decide_recommendation(
+        fully_executable=True,
+        fail_reasons=[],
+        hold_pnl_gbp=Decimal("10"),
+        exit_pnl_gbp=Decimal("9.90"),
+        policy=policy,
+        scarcity=CapitalScarcityInput(
+            pressure=CapitalPressure.SCARCE,
+            opportunity_cost_gbp=Decimal("0.50"),
+        ),
+        execution_risk_score=0,
+    )
+    assert free_scarce_hour is UnwindRecommendation.UNWIND_ELIGIBLE
+    assert hour_reason == "unwind_cost_within_supplied_opportunity_cost"
 
 
 def test_abundant_capital_prefers_hold_of_guaranteed_position() -> None:
@@ -905,8 +951,10 @@ def test_unwind_does_not_mutate_liquidity_or_journal(tmp_path: Path) -> None:
     adapted = position_from_trade(persisted)
     assert adapted.remaining_lock_minutes is None
     assert adapted.expected_settlement_at is None
+    assert adapted.remaining_lock_basis is RemainingLockSource.UNKNOWN
     assert decision.remaining_lock_minutes is None
     assert decision.capital_turnover_hint is None
+    assert decision.estimated_time_to_release.settles_or_releases_capital is False
 
 
 def test_close_plan_api_is_paper_only_and_not_an_execution_endpoint(tmp_path: Path) -> None:
@@ -972,6 +1020,10 @@ def test_close_plan_api_is_paper_only_and_not_an_execution_endpoint(tmp_path: Pa
         assert payload["places_orders"] is False
         assert payload["spendable"] is False
         assert payload["data_kind"] == "modelled_paper_unwind"
+        assert payload["duration_decision_role"] == "duration_unknown"
+        assert payload["estimated_time_to_release"]["advisory"] is True
+        assert payload["estimated_time_to_release"]["settles_or_releases_capital"] is False
+        assert payload["opportunity_cost_gbp"] is None
         assert "place_order" not in payload
     finally:
         app.dependency_overrides.clear()
@@ -1007,6 +1059,8 @@ def test_unknown_remaining_lock_is_valid_and_not_fabricated() -> None:
     )
     assert decision.close_plan.fully_executable is True
     assert decision.remaining_lock_minutes is None
+    assert decision.estimated_time_to_release.expected_settlement_at is None
+    assert decision.estimated_time_to_release.basis is RemainingLockSource.UNKNOWN
     assert decision.capital_turnover_hint != "capital_locked_until_expected_settlement"
     assert decision.capital_turnover_hint is None
     assert decision.recommendation is UnwindRecommendation.HOLD
@@ -1069,7 +1123,7 @@ def test_hold_vs_unwind_is_not_decided_by_predicted_game_end() -> None:
             evaluated_at=NOW,
         )
     )
-    far = engine.evaluate(
+    unauthoritative = engine.evaluate(
         UnwindEvaluationRequest(
             position=_position(
                 [_open_leg()],
@@ -1082,8 +1136,21 @@ def test_hold_vs_unwind_is_not_decided_by_predicted_game_end() -> None:
             evaluated_at=NOW,
         )
     )
-    assert soon.recommendation is unknown.recommendation is far.recommendation
-    assert soon.decision_reason == unknown.decision_reason == far.decision_reason
+    authored = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position(
+                [_open_leg()],
+                hold="10",
+                remaining_lock_minutes=Decimal("180"),
+                remaining_lock_basis=RemainingLockSource.AUTHORITATIVE_LEDGER,
+            ),
+            quotes=quotes,
+            scarcity=scarce,
+            evaluated_at=NOW,
+        )
+    )
+    assert soon.recommendation is unknown.recommendation is unauthoritative.recommendation is authored.recommendation
+    assert soon.decision_reason == unknown.decision_reason == unauthoritative.decision_reason == authored.decision_reason
     assert soon.decision_reason == "incremental_close_capital_unknown"
     assert soon.recommendation is UnwindRecommendation.UNWIND_NOT_SAFE
     assert soon.gross_close_liability_native[venue_currency_key(VenueName.MATCHBOOK, "GBP")] == Decimal("110")
@@ -1091,7 +1158,11 @@ def test_hold_vs_unwind_is_not_decided_by_predicted_game_end() -> None:
     assert soon.incremental_close_capital_native == {}
     assert soon.capital_turnover_hint == "opportunity_cost_from_current_scarcity"
     assert unknown.capital_turnover_hint == "opportunity_cost_from_current_scarcity"
-    assert far.remaining_lock_minutes == Decimal("180")
+    assert unauthoritative.remaining_lock_minutes is None
+    assert unauthoritative.estimated_time_to_release.expected_settlement_at is None
+    assert authored.remaining_lock_minutes == Decimal("180")
+    assert authored.estimated_time_to_release.settles_or_releases_capital is False
+    assert authored.duration_decision_role is DurationDecisionRole.OPPORTUNITY_COST_COMPARED
     assert unknown.remaining_lock_minutes is None
 
 
