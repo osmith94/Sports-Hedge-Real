@@ -500,14 +500,27 @@ def _fee_status(
     return "missing", f"missing_venue_cost:{venue.value}"
 
 
+FUNCTIONAL_CURRENCY = "GBP"
+FX_STATUS_NOT_REQUIRED = "not_required"
+FX_STATUS_KNOWN = "known"
+FX_STATUS_MISSING = "missing"
+
+
 def _fx_status(currency: str | None, fx_snapshots: list[FxRateSnapshot] | None) -> str | None:
+    """GBP is the functional currency: conversion is not required.
+
+    Non-GBP natives remain fail-closed when a rate snapshot is absent.
+    """
+
     if not currency:
         return None
+    if currency.upper() == FUNCTIONAL_CURRENCY:
+        return FX_STATUS_NOT_REQUIRED
     if not fx_snapshots:
-        return "missing"
+        return FX_STATUS_MISSING
     if any(snapshot.currency.upper() == currency.upper() for snapshot in fx_snapshots):
-        return "known"
-    return "missing"
+        return FX_STATUS_KNOWN
+    return FX_STATUS_MISSING
 
 
 def _best_backs(observation: VenueMarketObservation | None) -> list[VenueQuoteFact]:

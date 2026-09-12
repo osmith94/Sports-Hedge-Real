@@ -14,10 +14,14 @@ from sports_hedge.application.collector import (
     ReadOnlyCrossVenueCollector,
 )
 from sports_hedge.application.fixture_inventory import (
+    FX_STATUS_KNOWN,
+    FX_STATUS_MISSING,
+    FX_STATUS_NOT_REQUIRED,
     InventoryComparisonStatus,
     InventoryMarket,
     assemble_fixture_inventory,
     solver_eligible_pair,
+    _fx_status,
 )
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.application.paper_scan import PaperScanService
@@ -393,8 +397,28 @@ async def test_missing_costs_and_fx_fail_closed_on_inventory() -> None:
         )
         assert all(not row.solver_is_arbitrage for row in equivalent)
         assert any(row.matchbook and row.matchbook.fee_status == "missing" for row in markets)
+        assert any(
+            row.matchbook and row.matchbook.fx_status == FX_STATUS_NOT_REQUIRED for row in markets
+        )
+        assert any(
+            row.polymarket and row.polymarket.fx_status == FX_STATUS_MISSING for row in markets
+        )
     finally:
         repository.close()
+
+
+def test_gbp_fx_status_is_not_required_regardless_of_snapshots() -> None:
+    usd = FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))
+    gbp = FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal("1"))
+    assert _fx_status("GBP", None) == FX_STATUS_NOT_REQUIRED
+    assert _fx_status("gbp", []) == FX_STATUS_NOT_REQUIRED
+    assert _fx_status("GBP", [usd]) == FX_STATUS_NOT_REQUIRED
+    assert _fx_status("GBP", [gbp, usd]) == FX_STATUS_NOT_REQUIRED
+    assert _fx_status("USD", None) == FX_STATUS_MISSING
+    assert _fx_status("USD", []) == FX_STATUS_MISSING
+    assert _fx_status("USD", [gbp]) == FX_STATUS_MISSING
+    assert _fx_status("USD", [usd]) == FX_STATUS_KNOWN
+    assert _fx_status(None, None) is None
 
 
 @pytest.mark.asyncio
