@@ -31,6 +31,7 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.models import FeeSnapshot
 from sports_hedge.fees.resolver import VenueCostResolver
+from sports_hedge.fx.models import FxRateUnavailable
 from sports_hedge.fx.repository import SqliteFxRateRepository
 from sports_hedge.fx.service import FxRateService
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
@@ -43,7 +44,9 @@ from sports_hedge.paper.audit import (
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
 from sports_hedge.paper.chain import SimulatePaperFillRequest, SimulatePaperFillResult
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
+from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.venues.matchbook import (
     MatchbookAuthError,
     MatchbookClient,
@@ -115,6 +118,17 @@ class EconomicsStatus(BaseModel):
     issues: list[str] = Field(default_factory=list)
 
 
+class PaperPoolUpdate(BaseModel):
+    venue: VenueName
+    available: Decimal = Field(ge=0)
+    locked: Decimal | None = Field(default=None, ge=0)
+    transit: Decimal | None = Field(default=None, ge=0)
+
+
+class PaperLiquidityUpdateRequest(BaseModel):
+    pools: list[PaperPoolUpdate] = Field(min_length=1, max_length=3)
+
+
 @lru_cache
 def get_paper_audit_repository() -> SqlitePaperScanRepository:
     settings = get_settings()
@@ -161,15 +175,31 @@ def get_venue_cost_resolver() -> VenueCostResolver:
     return VenueCostResolver()
 
 
+@lru_cache
+def get_paper_liquidity_repository() -> SqlitePaperLiquidityRepository:
+    settings = get_settings()
+    database = settings.paper_liquidity_db_path
+    if database != ":memory:":
+        path = Path(database)
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return SqlitePaperLiquidityRepository(
+        database,
+        matchbook_gbp=Decimal(str(settings.paper_bankroll_gbp)),
+        polymarket_usd=Decimal(str(settings.paper_bankroll_usd)),
+    )
+
+
 def get_paper_scan_service(
     intelligence: MarketIntelligenceService = Depends(get_market_intelligence_service),
     fx: FxRateService = Depends(get_fx_rate_service),
     costs: VenueCostResolver = Depends(get_venue_cost_resolver),
+    liquidity: SqlitePaperLiquidityRepository = Depends(get_paper_liquidity_repository),
 ) -> PaperScanService:
     return PaperScanService(
         intelligence,
         fx_service=fx,
         cost_resolver=costs,
+        liquidity=liquidity,
     )
 
 
@@ -218,6 +248,39 @@ def scan_summary(
 ) -> PaperScanSummary:
     resolved_since = since or datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     return repository.summary(since=resolved_since)
+
+
+@router.get("/liquidity-pools", response_model=PaperLiquiditySnapshot)
+def paper_liquidity_pools(
+    repository: SqlitePaperLiquidityRepository = Depends(get_paper_liquidity_repository),
+    fx: FxRateService = Depends(get_fx_rate_service),
+) -> PaperLiquiditySnapshot:
+    rates, source = _backend_fx_for_pools(fx)
+    return repository.get(gbp_per_unit=rates, fx_source=source)
+
+
+@router.post("/liquidity-pools", response_model=PaperLiquiditySnapshot)
+def update_paper_liquidity_pools(
+    request: PaperLiquidityUpdateRequest,
+    repository: SqlitePaperLiquidityRepository = Depends(get_paper_liquidity_repository),
+    fx: FxRateService = Depends(get_fx_rate_service),
+) -> PaperLiquiditySnapshot:
+    available = {item.venue: item.available for item in request.pools}
+    locked = {item.venue: item.locked for item in request.pools if item.locked is not None}
+    transit = {item.venue: item.transit for item in request.pools if item.transit is not None}
+    repository.update_available(available, locked=locked or None, transit=transit or None)
+    rates, source = _backend_fx_for_pools(fx)
+    return repository.get(gbp_per_unit=rates, fx_source=source)
+
+
+@router.post("/liquidity-pools/reset", response_model=PaperLiquiditySnapshot)
+def reset_paper_liquidity_pools(
+    repository: SqlitePaperLiquidityRepository = Depends(get_paper_liquidity_repository),
+    fx: FxRateService = Depends(get_fx_rate_service),
+) -> PaperLiquiditySnapshot:
+    repository.reset()
+    rates, source = _backend_fx_for_pools(fx)
+    return repository.get(gbp_per_unit=rates, fx_source=source)
 
 
 @router.post(
@@ -380,6 +443,7 @@ async def server_owned_refresh_tick() -> None:
         get_market_intelligence_service(),
         get_fx_rate_service(),
         get_venue_cost_resolver(),
+        get_paper_liquidity_repository(),
     )
     audit = get_paper_audit_repository()
     from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
@@ -467,3 +531,17 @@ def _build_observation(request: RawVenueObservationRequest) -> VenueMarketObserv
             quote_age_ms=request.quote_age_ms,
         )
     raise ValueError(f"Paper scan does not yet support venue: {request.venue.value}")
+
+
+def _backend_fx_for_pools(fx: FxRateService) -> tuple[dict[str, Decimal], str | None]:
+    rates: dict[str, Decimal] = {"GBP": Decimal("1")}
+    try:
+        snapshots = fx.paper_snapshots({"USD", "GBP"}, as_of=datetime.now(UTC))
+    except FxRateUnavailable:
+        return rates, None
+    source = None
+    for snapshot in snapshots:
+        rates[snapshot.currency] = snapshot.gbp_per_unit
+        if snapshot.currency == "USD":
+            source = snapshot.source
+    return rates, source

@@ -17,13 +17,11 @@ export function PriorityAlertsSeam({
             : "Live priority-alert API unavailable"}
         </div>
         <p>
-          Live backend `/priority-alerts`{" "}
           {liveAvailable
             ? liveCount
-              ? "has paper alerts."
-              : "is empty — no demo substitution."
-            : "could not be reached."}{" "}
-          Fictional walkthrough tickets are kept in the labelled demo walkthrough area, not this live operations path.
+              ? "Live paper alerts available."
+              : "No live alerts."
+            : "Priority-alert API unavailable."}
         </p>
       </div>
       <div className="pa-seam-actions">

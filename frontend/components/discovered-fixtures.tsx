@@ -28,8 +28,8 @@ export function DiscoveredFixturesPanel({
 }) {
   if (!available || !status) {
     return (
-      <div className="empty-live">
-        Live discovery status is unavailable. No fabricated fixtures or scores are substituted.
+      <div className="empty-live-compact">
+        Discovery status unavailable. No fabricated fixtures.
       </div>
     );
   }
@@ -39,19 +39,12 @@ export function DiscoveredFixturesPanel({
   return (
     <>
       <p className="section-copy">
-        Live discovery is limited to English Premier League, EFL Championship and Spain La Liga.
-        Unknown Matchbook competitions are excluded rather than guessed. Polymarket is matched
-        only where public series coverage exists; otherwise the row stays{" "}
-        unmatched / no supported Polymarket coverage. Prices, net edge, trigger, distance and
-        freshness are backend fields. This table is fixture discovery, not near-arb or triggered
-        lifecycle. Last collection completed{" "}
+        PL / Championship / La Liga only. Last collection{" "}
         {status.last_completed_at ? relativeTime(status.last_completed_at) : "never"}.
         {status.last_error ? ` Last error: ${status.last_error}` : ""}
       </p>
       {items.length === 0 ? (
-        <div className="empty-live">
-          No in-scope Matchbook fixtures in the latest collection cycle. Empty live discovery stays empty.
-        </div>
+        <div className="empty-live-compact">No in-scope Matchbook fixtures.</div>
       ) : (
         <div className="table-wrap">
           <table>

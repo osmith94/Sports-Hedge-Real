@@ -518,6 +518,60 @@ export function getWatchlistActivity(query = "limit=100"): Promise<OpportunityLi
   return request(`/paper/watchlist/activity${query ? `?${query}` : ""}`);
 }
 
+export type PaperLiquidityPool = {
+  venue: Venue;
+  native_currency: "GBP" | "USD";
+  available: string | number;
+  locked: string | number;
+  transit: string | number;
+  included_in_solver: boolean;
+  connection_status: "connected" | "not_connected";
+  capital_kind: "paper_hypothetical";
+  gbp_carrying_value?: string | number | null;
+  gbp_carrying_status: "identity" | "fx_converted" | "fx_unavailable";
+  gbp_fx_source?: string | null;
+  updated_at?: string | null;
+};
+
+export type PaperLiquiditySnapshot = {
+  capital_kind: "paper_hypothetical";
+  data_kind: "paper_config";
+  pools: PaperLiquidityPool[];
+  updated_at: string;
+};
+
+export function getPaperLiquidityPools(): Promise<PaperLiquiditySnapshot> {
+  return request("/paper/liquidity-pools");
+}
+
+export async function savePaperLiquidityPools(
+  pools: Array<{ venue: Venue; available: string; locked?: string; transit?: string }>,
+): Promise<PaperLiquiditySnapshot> {
+  const response = await fetch(`${API_BASE}/paper/liquidity-pools`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pools }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<PaperLiquiditySnapshot>;
+}
+
+export async function resetPaperLiquidityPools(): Promise<PaperLiquiditySnapshot> {
+  const response = await fetch(`${API_BASE}/paper/liquidity-pools/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<PaperLiquiditySnapshot>;
+}
+
 export type LivePriorityAlertRow = {
   alert_id: string;
   opportunity_id: string;

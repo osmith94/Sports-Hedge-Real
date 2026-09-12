@@ -144,6 +144,20 @@ tr:last-child td { border-bottom: none; }
 .trend-stat-value { margin-top: 4px; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
 
 .empty-live { border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 20px; color: var(--muted); font-size: 11px; line-height: 1.55; background: rgba(17, 30, 27, .4); }
+.empty-live-compact { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; color: var(--muted); font-size: 11px; line-height: 1.4; background: var(--panel-raised); }
+.ops-section-compact { margin-bottom: 8px; }
+.heading-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.pool-table-wrap { overflow-x: auto; padding: 0 4px 8px; }
+.pool-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 0 17px 14px; }
+.pool-link { color: var(--accent); font-size: 10px; font-weight: 750; letter-spacing: .04em; }
+.pool-reset { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 8px; padding: 9px 12px; font-size: 10px; font-weight: 750; cursor: pointer; }
+.pool-editor { padding: 0 17px 16px; }
+.scan-advanced { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel-raised); }
+.scan-advanced summary { cursor: pointer; font-size: 10px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.scan-advanced .scan-field { margin-top: 10px; max-width: 280px; }
+.demo-walkthrough { margin-top: 18px; border: 1px solid rgba(241, 191, 105, .24); border-radius: var(--radius); padding: 12px 14px; background: rgba(241, 191, 105, .05); }
+.demo-walkthrough summary { cursor: pointer; color: var(--amber); font-size: 11px; font-weight: 750; }
+.demo-walkthrough .opp-card { margin-top: 12px; }
 
 .ops-section { margin-bottom: 16px; }
 .section-label { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }

@@ -12,6 +12,7 @@ import {
   getLivePriorityAlerts,
   getLiveRefreshStatus,
   getNearWatchlist,
+  getPaperLiquidityPools,
   getPaperScans,
   getPaperScanSummary,
   getTrackedWatchlist,
@@ -20,15 +21,12 @@ import {
   LiveRefreshStatus,
   NearOpportunity,
   OpportunityLifecycleEvent,
+  PaperLiquiditySnapshot,
   PaperScanRecord,
 } from "../lib/api";
 import {
   DEFAULT_SCANNER_ASSUMPTIONS,
-  DEMO_ACTIVITY,
-  DEMO_EXECUTABLE,
-  DEMO_LIQUIDITY_POOLS,
   DEMO_MANUAL_EXTERNAL,
-  DEMO_NEAR_ARB,
   buildCapitalSnapshot,
   marketLabel,
 } from "../lib/arbitrage-ops";
@@ -61,6 +59,8 @@ export default async function ArbitragePage() {
   let activityRows: OpportunityLifecycleEvent[] = [];
   let liveRefresh: LiveRefreshStatus | null = null;
   let liveRefreshAvailable = true;
+  let liquidity: PaperLiquiditySnapshot | null = null;
+  let liquidityAvailable = true;
 
   try {
     [scans, summary] = await Promise.all([getPaperScans("limit=100"), getPaperScanSummary()]);
@@ -91,24 +91,29 @@ export default async function ArbitragePage() {
     livePriorityAvailable = false;
   }
 
+  try {
+    liquidity = await getPaperLiquidityPools();
+  } catch {
+    liquidityAvailable = false;
+  }
+
   const assumptions = DEFAULT_SCANNER_ASSUMPTIONS;
   const liveWatchlist = watchlistAvailable ? nearOpportunitiesFromWatchlist(nearRows) : [];
   const liveExecutable = watchlistAvailable ? triggeredOpportunitiesFromWatchlist(triggeredRows) : [];
   const liveTracked = watchlistAvailable ? trackedOpportunitiesFromWatchlist(trackedRows) : [];
   const liveConnected = apiAvailable && liveRefreshAvailable;
-  const watchlist = watchlistAvailable ? liveWatchlist : DEMO_NEAR_ARB;
-  const executable = watchlistAvailable ? liveExecutable : DEMO_EXECUTABLE;
-  const activity = watchlistAvailable
-    ? { items: activityFromWatchlist(activityRows), usedFixture: false }
-    : { items: DEMO_ACTIVITY, usedFixture: true };
+  const activity = {
+    items: watchlistAvailable ? activityFromWatchlist(activityRows) : [],
+    usedFixture: false,
+  };
   const capital = buildCapitalSnapshot(apiAvailable ? scans : [], summary, assumptions);
   const externalAlert = getPriorityAlert("pa-ncl-ars-2026-04-12-mr");
 
   const metrics = [
-    { label: "Tracked markets", value: watchlistAvailable ? String(liveTracked.length) : "—", foot: "Canonical markets on the paper watchlist", demo: false },
-    { label: "Near-arb candidates", value: watchlistAvailable ? String(liveWatchlist.length) : "—", foot: "WATCHING / APPROACHING below backend trigger", demo: false },
-    { label: "Triggered paper arbs", value: watchlistAvailable ? String(liveExecutable.length) : "—", foot: "Solver-validated complete-set only", positive: true, demo: false },
-    { label: "Top net edge", value: summary ? percent(summary.top_net_edge) : "—", foot: "Best persisted scan in today’s window", positive: true, demo: false },
+    { label: "Tracked markets", value: watchlistAvailable ? String(liveTracked.length) : "—", foot: "Paper watchlist", positive: false },
+    { label: "Near-arb", value: watchlistAvailable ? String(liveWatchlist.length) : "—", foot: "Below trigger", positive: false },
+    { label: "Triggered", value: watchlistAvailable ? String(liveExecutable.length) : "—", foot: "Solver-validated", positive: true },
+    { label: "Top net edge", value: summary ? percent(summary.top_net_edge) : "—", foot: "Today’s scan window", positive: true },
   ];
 
   return (
@@ -116,17 +121,15 @@ export default async function ArbitragePage() {
       <div className="page-heading">
         <div>
           <div className="eyebrow">Arbitrage operations</div>
-          <h1>Paper arbitrage operations console</h1>
+          <h1>Operations console</h1>
           <p className="page-subtitle">
-            Tracked markets, near-threshold watchlist, paper-eligible triggers, activity and native-currency capital.
-            Matchbook is the live fixture-discovery source for Premier League, EFL Championship and La Liga only.
-            Polymarket is matched onto the same canonical event when public coverage exists. Watchlist rows come
-            from `/paper/watchlist/tracked`, `/near`, `/triggered` and `/activity`. The browser does not reclassify
-            rejected scans or recompute arb economics. DEMO/FIXTURE walkthrough content is kept in a separate
-            labelled section when the live console is connected.
+            Live paper scan, discovery, watchlist and native standing capital. PAPER MODE · no execution.
           </p>
         </div>
-        <div className="demo-label">{apiAvailable ? "LIVE PAPER READ MODEL" : "PAPER API OFFLINE"}</div>
+        <div className="heading-actions">
+          <div className="demo-label">{apiAvailable ? "LIVE PAPER READ MODEL" : "PAPER API OFFLINE"}</div>
+          <a className="pool-link" href="#demo-walkthrough">Demo walkthrough</a>
+        </div>
       </div>
 
       <section className="metric-grid">
@@ -144,7 +147,7 @@ export default async function ArbitragePage() {
 
       <section className="ops-section">
         <div className="section-label">
-          <span>0 · Matchbook fixture discovery</span>
+          <span>Fixture discovery</span>
           <span className={liveRefreshAvailable ? "status-badge" : "demo-chip"}>
             {liveRefreshAvailable ? "LIVE PAPER · MATCHBOOK PRIMARY" : "DISCOVERY STATUS UNAVAILABLE"}
           </span>
@@ -152,133 +155,108 @@ export default async function ArbitragePage() {
         <DiscoveredFixturesPanel status={liveRefresh} available={liveRefreshAvailable} />
       </section>
 
-      <section className="ops-section">
+      <section className={`ops-section ${liveTracked.length ? "" : "ops-section-compact"}`}>
         <div className="section-label">
-          <span>1 · Tracked markets</span>
+          <span>Tracked</span>
           <span className={watchlistAvailable ? "status-badge" : "demo-chip"}>
             {watchlistAvailable
               ? liveTracked.length
                 ? "LIVE WATCHLIST · TRACKED"
-                : "LIVE WATCHLIST · EMPTY"
+                : "EMPTY"
               : "WATCHLIST UNAVAILABLE"}
           </span>
         </div>
-        <p className="section-copy">
-          Canonical fixtures/markets currently on the paper watchlist. Current net margin, configured backend trigger
-          and distance to trigger are backend-calculated and refresh as repeated read-only collections persist new
-          observations. Negative net margin stays visible as below break-even. Source, last updated and quote age at
-          last evaluation are shown per row; ages are not ticked on screen between refreshes. Strike narrative is the
-          observed distance sequence only — not a causal claim. Collection → alerts → paper fills → ledger is not wired.
-        </p>
+        {liveTracked.length ? (
+          <p className="section-copy">Backend net margin, trigger and distance. Empty stays empty.</p>
+        ) : null}
         <TrackedMarketsBoard items={liveTracked} available={watchlistAvailable} />
       </section>
 
-      <section className="ops-section">
+      <section className={`ops-section ${liveWatchlist.length ? "" : "ops-section-compact"}`}>
         <div className="section-label">
-          <span>2 · Near-arb watchlist</span>
+          <span>Near-arb</span>
           <span className={watchlistAvailable ? "status-badge" : "demo-chip"}>
             {watchlistAvailable
               ? liveWatchlist.length
-                ? "LIVE WATCHLIST · NOT EXECUTABLE"
-                : "LIVE WATCHLIST · EMPTY"
-              : "DEMO / FIXTURE · WATCHLIST UNAVAILABLE"}
+                ? "NOT EXECUTABLE"
+                : "EMPTY"
+              : "WATCHLIST UNAVAILABLE"}
           </span>
         </div>
-        <p className="section-copy">
-          WATCHING / APPROACHING candidates have already passed semantics, costs, FX, depth, freshness and risk gates.
-          They remain below the configured backend trigger and are not guaranteed arbitrage until the strict
-          trigger/solver condition is met.
-        </p>
-        {watchlist.length === 0 ? (
-          <div className="empty-live">No near-threshold opportunities in the current scan window.</div>
+        {liveWatchlist.length ? (
+          <p className="section-copy">Below backend trigger — not guaranteed arbitrage.</p>
+        ) : null}
+        {liveWatchlist.length === 0 ? (
+          <div className="empty-live-compact">No near-threshold candidates.</div>
         ) : (
           <div className="opp-stack">
-            {watchlist.map((item) => (
+            {liveWatchlist.map((item) => (
               <OpportunityCard item={item} key={item.id} />
             ))}
           </div>
         )}
       </section>
 
-      <section className="ops-section">
+      <section className={`ops-section ${liveExecutable.length ? "" : "ops-section-compact"}`}>
         <div className="section-label">
-          <span>3 · Triggered / executable</span>
+          <span>Triggered</span>
           <span className={watchlistAvailable ? "status-badge" : "demo-chip"}>
-            {liveExecutable.length ? "LIVE WATCHLIST · TRIGGERED" : watchlistAvailable ? "NO TRIGGERS" : "DEMO / FIXTURE"}
+            {liveExecutable.length ? "TRIGGERED" : watchlistAvailable ? "EMPTY" : "UNAVAILABLE"}
           </span>
         </div>
-        <p className="section-copy">
-          Guaranteed profit is shown only for solver-validated triggered complete-set opportunities. Paper fill
-          lifecycle remains simulation-only.
-        </p>
-        {watchlistAvailable && liveExecutable.length === 0 ? (
-          <div className="empty-live">
-            No paper-eligible opportunities in the current scan window. The monitor does not invent triggered
-            arbitrage.
-          </div>
+        {liveExecutable.length ? (
+          <p className="section-copy">Solver-validated complete-set only. Simulation only.</p>
+        ) : null}
+        {liveExecutable.length === 0 ? (
+          <div className="empty-live-compact">No triggered paper arbs.</div>
         ) : (
           <div className="opp-stack">
-            {executable.map((item) => (
+            {liveExecutable.map((item) => (
               <OpportunityCard item={item} executable key={item.id} />
             ))}
           </div>
         )}
       </section>
 
-      <section className="ops-section">
+      <section className="ops-section ops-section-compact">
         <div className="section-label">
-          <span>4 · Manual-external paper state</span>
-          <span className={liveConnected ? "status-badge" : "demo-chip"}>
-            {liveConnected ? "LIVE PAPER · EMPTY UNLESS BACKEND HAS A TICKET" : "DEMO / FIXTURE"}
+          <span>MANUAL_EXTERNAL</span>
+          <span className={liveConnected && livePriorityCount === 0 ? "status-badge" : "demo-chip"}>
+            {liveConnected ? (livePriorityCount ? "LIVE TICKETS" : "EMPTY") : "API OFFLINE"}
           </span>
         </div>
-        <p className="section-copy">
-          Distinct from Near-Arb and validated paper arbs. MANUAL_EXTERNAL does not consume standing liquidity.
-          Live Priority Alert rows stay empty when the backend has none. The Newcastle–Arsenal walkthrough is
-          not shown here when the live console is connected.
-        </p>
-        {liveConnected ? (
-          <div className="empty-live">
-            No live MANUAL_EXTERNAL ticket in this operations path. Open the demo walkthrough section below for the
-            labelled fictional example.
-          </div>
-        ) : (
-          <OpportunityCard item={DEMO_MANUAL_EXTERNAL} />
-        )}
-        {!liveConnected && externalAlert ? <ExternalLegWorkflow alert={externalAlert} /> : null}
+        <div className="empty-live-compact">
+          {livePriorityCount
+            ? `${livePriorityCount} live priority alert${livePriorityCount === 1 ? "" : "s"} — open Priority Alerts.`
+            : "No live MANUAL_EXTERNAL ticket. Does not consume standing pools."}
+        </div>
       </section>
 
       <section className="ops-section grid-2">
         <ActivityFeed items={activity.items} usedFixture={activity.usedFixture} />
         <div className="stack-gap">
-          <CapitalSummary live={capital.live} fixture={capital.fixture} />
+          <CapitalSummary live={capital.live} />
         </div>
       </section>
+
+      <div className="ops-section">
+        <LiquidityPools snapshot={liquidity} available={liquidityAvailable} compact />
+      </div>
 
       <section className="panel">
         <div className="panel-header">
           <div>
             <div className="panel-title">Paper scan history</div>
-            <div className="panel-meta">
-              Accepted and rejected matched-market decisions, newest first. Scanner audit, not a second near-arb classifier.
-            </div>
+            <div className="panel-meta">Newest matched-market decisions.</div>
           </div>
           <span className="status-badge">{apiAvailable ? "SCANNER DATA" : "NO API CONNECTION"}</span>
         </div>
-
         {apiAvailable && scans.length === 0 ? (
-          <div className="empty-live">
-            No paper scans have been recorded yet. Run a read-only collection cycle to populate this monitor.
-          </div>
+          <div className="empty-live-compact">No paper scans yet.</div>
         ) : null}
-
         {!apiAvailable ? (
-          <div className="empty-live">
-            The FastAPI service is not reachable. The dashboard is showing no fabricated fallback opportunities
-            for live scan history.
-          </div>
+          <div className="empty-live-compact">Paper API unreachable. No fabricated scan history.</div>
         ) : null}
-
         {scans.length > 0 ? (
           <div className="table-wrap">
             <table>
@@ -317,20 +295,14 @@ export default async function ArbitragePage() {
         ) : null}
       </section>
 
-      <section className="ops-section">
-        <div className="section-label">
-          <span>Demo walkthrough · not live operations</span>
-          <span className="demo-chip">DEMO / FIXTURE · NOT LIVE DISCOVERY</span>
-        </div>
+      <details className="demo-walkthrough" id="demo-walkthrough">
+        <summary>Demo walkthrough · fictional tickets (hidden from live path)</summary>
         <p className="section-copy">
-          Fictional operator-training content, including the Newcastle United v Arsenal MANUAL_EXTERNAL ticket.
-          It is not mixed into Matchbook fixture discovery, tracked markets, near-arb or triggered lists when the
-          live paper API is connected.
+          Labelled DEMO / FIXTURE training content. Not mixed into discovery, watchlist, P&amp;L or standing pools.
         </p>
         <OpportunityCard item={DEMO_MANUAL_EXTERNAL} />
         {externalAlert ? <ExternalLegWorkflow alert={externalAlert} /> : null}
-        <LiquidityPools pools={DEMO_LIQUIDITY_POOLS} />
-      </section>
+      </details>
     </>
   );
 }
