@@ -22,6 +22,10 @@ from sports_hedge.facts.identity import (
     build_match_ref,
     canonical_match_id,
 )
+from sports_hedge.historical.adapters import SyntheticHistoricalAdapter
+from sports_hedge.historical.catalog import PREMIER_LEAGUE
+from sports_hedge.historical.ingestion import HistoricalIngestionService
+from sports_hedge.historical.repository import SqliteHistoricalRepository
 from sports_hedge.odds.adapters.football_data import FootballDataCsvAdapter
 from sports_hedge.odds.adapters.smarkets import SmarketsHistoricalAdapter, smarkets_limitations
 from sports_hedge.odds.adapters.synthetic import SyntheticOddsAdapter
@@ -33,8 +37,8 @@ from sports_hedge.odds.models import QualityTier, QuoteType, RawOddsRecord, Venu
 from sports_hedge.odds.repository import SqliteOddsRepository
 
 FOOTBALL_DATA_SAMPLE = """Div,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,B365H,B365D,B365A,B365CH,B365CD,B365CA,B365>2.5,B365<2.5,B365C>2.5,B365C<2.5
-E0,16/08/2025,15:00,Arsenal,Liverpool,2,1,2.10,3.40,3.50,2.05,3.50,3.60,1.85,2.00,1.90,1.95
-E0,17/08/2025,16:30,Chelsea,Man City,1,1,2.50,3.30,2.80,2.55,3.25,2.75,1.90,1.90,1.88,1.92
+E0,16/08/2025,15:00,Arsenal,Chelsea,2,1,2.10,3.40,3.50,2.05,3.50,3.60,1.85,2.00,1.90,1.95
+E0,17/08/2025,16:30,Chelsea,Leeds United,1,1,2.50,3.30,2.80,2.55,3.25,2.75,1.90,1.90,1.88,1.92
 """
 
 UNKNOWN_COMPETITION_CSV = """Div,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,B365H,B365D,B365A
@@ -95,7 +99,7 @@ def test_timestamped_and_closing_observations_persist_side_by_side() -> None:
         item
         for item in repository.list_observations()
         if item.home_team == "arsenal"
-        and item.away_team == "liverpool"
+        and item.away_team == "chelsea"
         and item.market_family == MarketFamily.MATCH_RESULT
         and item.selection == "home"
         and item.decimal_odds is not None
@@ -363,7 +367,7 @@ def test_naive_timestamps_are_rejected() -> None:
             source_reference="naive",
             competition="Premier League",
             home_team="Arsenal",
-            away_team="Liverpool",
+            away_team="Chelsea",
             kickoff_utc=naive_kickoff,
             market_family=MarketFamily.MATCH_RESULT,
             period=FootballPeriod.FULL_TIME,
@@ -388,7 +392,7 @@ def test_corrected_odds_are_append_only() -> None:
         "source_reference": "syn-close-revision",
         "competition": "Premier League",
         "home_team": "Arsenal",
-        "away_team": "Liverpool",
+        "away_team": "Chelsea",
         "kickoff_utc": kickoff,
         "market_family": MarketFamily.MATCH_RESULT,
         "period": FootballPeriod.FULL_TIME,
@@ -416,4 +420,79 @@ def test_corrected_odds_are_append_only() -> None:
     assert len({item.source_observation_key for item in rows}) == 1
     assert replay_result.observations_created == 0
     assert replay_result.observations_duplicate == 1
+
+
+def test_unknown_team_fails_closed() -> None:
+    record = RawOddsRecord(
+        source="synthetic",
+        source_reference="unknown-team",
+        competition="Premier League",
+        home_team="Arsenal",
+        away_team="Not A Real Club",
+        kickoff_utc=datetime(2025, 8, 16, 17, 30, tzinfo=UTC),
+        market_family=MarketFamily.MATCH_RESULT,
+        period=FootballPeriod.FULL_TIME,
+        selection="home",
+        decimal_odds=Decimal("2.00"),
+        retrieved_at=datetime(2026, 9, 11, tzinfo=UTC),
+    )
+    with pytest.raises(OddsMappingError, match="unknown_team"):
+        map_raw_record(record)
+
+
+def test_odds_join_historical_facts_match_id() -> None:
+    facts_repo = SqliteHistoricalRepository(":memory:")
+    HistoricalIngestionService(facts_repo).ingest_adapter(
+        SyntheticHistoricalAdapter(),
+        competition_id=PREMIER_LEAGUE.competition_id,
+        season_label="2025/26",
+    )
+    facts_match = facts_repo.list_matches(competition_id="premier-league")[0]
+    mapped = map_raw_record(
+        RawOddsRecord(
+            source="synthetic",
+            source_market_id="join-check",
+            source_reference="id-check",
+            competition="Premier League",
+            home_team="Arsenal",
+            away_team="Chelsea",
+            kickoff_utc=facts_match.kickoff_utc,
+            market_family=MarketFamily.MATCH_RESULT,
+            period=FootballPeriod.FULL_TIME,
+            selection="home",
+            decimal_odds=Decimal("2.10"),
+            quote_type=QuoteType.CLOSING,
+            retrieved_at=datetime(2026, 9, 11, tzinfo=UTC),
+            settlement=SettlementFingerprint(
+                scope=SettlementScope.REGULATION_TIME,
+                period=FootballPeriod.FULL_TIME,
+                extra_time_included=False,
+                penalties_included=False,
+            ),
+            semantics_complete=True,
+        )
+    )
+    assert facts_match.match_id == "match:f295bd6ca68b6926073e179d"
+    assert mapped.canonical_match_id == facts_match.match_id
+
+
+def test_timestamped_paths_expose_logit_without_inventing_open_close_precision() -> None:
+    repository, _ = _ingest_synthetic()
+    timestamped = next(
+        item
+        for item in repository.list_observations()
+        if item.quote_type == QuoteType.TIMESTAMPED and item.decimal_odds is not None
+    )
+    closing = next(
+        item
+        for item in repository.list_observations()
+        if item.quote_type == QuoteType.CLOSING and item.decimal_odds is not None
+    )
+    assert timestamped.observed_at is not None
+    assert timestamped.implied_probability() == Decimal(1) / timestamped.decimal_odds
+    assert timestamped.implied_logit() is not None
+    assert closing.observed_at is None
+    assert closing.quality_tier == QualityTier.C
+    assert closing.implied_logit() is not None
+
 

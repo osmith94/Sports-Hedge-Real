@@ -1,8 +1,9 @@
 # Historical odds coverage example
 
 Generated from the in-repo **synthetic** adapter for Premier League,
-Championship and La Liga 2025/26. The SQLite repository is the source of
-truth; this document is a review snapshot.
+Championship and La Liga 2025/26. This is a **fixture/demo** review
+snapshot, not production coverage of 2025/26. The SQLite repository is
+the source of truth.
 
 ## Universe
 

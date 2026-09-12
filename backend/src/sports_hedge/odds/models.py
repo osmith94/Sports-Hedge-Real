@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -100,13 +101,31 @@ class OddsObservation(BaseModel):
             self.settlement_key,
         )
 
+    def implied_probability(self) -> Decimal | None:
+        """Raw implied probability 1/odds. None when no odds were stored."""
+
+        if self.decimal_odds is None:
+            return None
+        return Decimal(1) / self.decimal_odds
+
+    def implied_logit(self) -> float | None:
+        """Logit of implied probability for movement analysis. Not a prediction."""
+
+        probability = self.implied_probability()
+        if probability is None:
+            return None
+        value = float(probability)
+        if value <= 0.0 or value >= 1.0:
+            return None
+        return math.log(value / (1.0 - value))
+
 
 class CanonicalMatchFact(BaseModel):
     """Odds-side match index used as a coverage cache.
 
     This is not the historical football facts repository. Match scores and
-    events belong to the shared facts warehouse (PR #35). This row only
-    records that odds ingestion observed a canonical match ID.
+    events belong to ``sports_hedge.historical``. This row only records that
+    odds ingestion observed a canonical match ID.
     """
 
     canonical_match_id: str

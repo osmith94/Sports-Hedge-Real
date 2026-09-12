@@ -3,8 +3,12 @@ from __future__ import annotations
 from hashlib import sha256
 
 from sports_hedge.domain.football import FootballPeriod, MarketFamily, SettlementFingerprint
+from sports_hedge.facts.aliases import football_alias_registry
 from sports_hedge.facts.catalog import competition_from_label
 from sports_hedge.facts.identity import build_match_ref
+from sports_hedge.historical.catalog import HistoricalCatalog
+from sports_hedge.historical.errors import HistoricalMappingError
+from sports_hedge.normalization.text import normalize_text
 from sports_hedge.odds.models import (
     MappingException,
     OddsObservation,
@@ -21,8 +25,11 @@ class OddsMappingError(ValueError):
     """Raised when a record cannot be mapped without guessing."""
 
 
+_HISTORICAL_CATALOG = HistoricalCatalog()
+
+
 def map_raw_record(record: RawOddsRecord) -> OddsObservation:
-    """Deterministic mapping onto the PR #35 facts identity contract."""
+    """Map onto the shared ``sports_hedge.facts`` match identity from main."""
 
     issues = _identity_issues(record)
     if issues:
@@ -38,15 +45,17 @@ def map_raw_record(record: RawOddsRecord) -> OddsObservation:
     require_aware(record.kickoff_utc, "kickoff_utc")
 
     try:
+        home_team = _resolve_bounded_team(record.home_team)
+        away_team = _resolve_bounded_team(record.away_team)
         match = build_match_ref(
             competition=record.competition,
-            home_team=record.home_team,
-            away_team=record.away_team,
+            home_team=home_team,
+            away_team=away_team,
             kickoff_utc=record.kickoff_utc,
             season=record.season,
             kickoff_precision=record.kickoff_precision,
         )
-    except ValueError as error:
+    except (ValueError, HistoricalMappingError) as error:
         raise OddsMappingError(str(error)) from error
 
     settlement = record.settlement or SettlementFingerprint(
@@ -167,6 +176,12 @@ def _identity_issues(record: RawOddsRecord) -> list[tuple[str, str, str]]:
         issues.append(("teams", "missing_teams", "home_team and away_team are required"))
     elif record.home_team.strip().casefold() == record.away_team.strip().casefold():
         issues.append(("teams", "ambiguous_teams", "home and away teams are identical"))
+    else:
+        for field, label in (("home_team", record.home_team), ("away_team", record.away_team)):
+            try:
+                _resolve_bounded_team(label)
+            except OddsMappingError as error:
+                issues.append((field, "unknown_team", str(error)))
     if record.kickoff_utc is None:
         issues.append(("kickoff_utc", "missing_kickoff", "kickoff is required for canonical match identity"))
     if record.market_family is None or record.market_family == MarketFamily.UNKNOWN:
@@ -176,6 +191,22 @@ def _identity_issues(record: RawOddsRecord) -> list[tuple[str, str, str]]:
     if not record.selection:
         issues.append(("selection", "missing_selection", "selection/outcome is required"))
     return issues
+
+
+def _resolve_bounded_team(name: str) -> str:
+    """Fail closed unless the name is in the historical catalog or an explicit alias of one."""
+
+    try:
+        return _HISTORICAL_CATALOG.resolve_team(name).canonical_name
+    except HistoricalMappingError:
+        key = normalize_text(name)
+        if key not in football_alias_registry.aliases:
+            raise OddsMappingError(f"Unknown team '{name}'")
+        aliased = football_alias_registry.aliases[key]
+        try:
+            return _HISTORICAL_CATALOG.resolve_team(aliased).canonical_name
+        except HistoricalMappingError as error:
+            raise OddsMappingError(f"Unknown team '{name}'") from error
 
 
 def _fingerprint_complete(settlement: SettlementFingerprint) -> bool:

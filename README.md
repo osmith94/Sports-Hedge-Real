@@ -23,7 +23,8 @@ backend/
     domain/     canonical market models
     venues/     read-only venue integrations
     facts/      canonical match/team/competition identity
-    odds/       historical odds repository, coverage, Excel export
+    historical/ football match facts repository (canonical denominator)
+    odds/       historical odds observations, coverage, Excel export
   tests/
 docs/
   CORE_TENETS.md

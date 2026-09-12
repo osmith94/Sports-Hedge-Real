@@ -16,8 +16,9 @@ the current coverage target.
 
 ## Canonical identity
 
-**PR #35 owns `sports_hedge.facts`.** This odds repository consumes that
-package and does not define a second match-ID scheme.
+`sports_hedge.facts` on `main` (merged PR #35,
+`d0e2a323d18f79ee52ac88663599e1e06c65c02c`) owns match/team/competition
+identity. This odds package does not vendor or redefine that contract.
 
 Canonical match IDs are:
 
@@ -26,24 +27,38 @@ match:{sha256(football|competition|season|home|away|kickoff_bucket)[:24]}
 ```
 
 Competition codes are `premier_league`, `championship`, `la_liga`,
-`champions_league`. Team aliases live in the facts package.
+`champions_league`. Odds mapping calls `facts.identity.build_match_ref`
+after fail-closed team resolution through `historical.catalog.HistoricalCatalog`
+(explicit `facts` aliases of catalogued teams are allowed; unknown names are
+rejected).
 
-This branch vendors `sports_hedge.facts` from PR #35
-(`30ea96c2d5a7b5e6a09eebee741012f667dc2dc1`) so tests can run before #35
-merges. It is not a second identity contract. After #35 is accepted,
-rebase onto `main` and drop the vendored copy if `main` already has the
-package. Keep `test_odds_uses_facts_match_sha256_identity` as the
-cross-module regression (Arsenal vs Chelsea 2025-08-16 17:30 UTC →
-`match:f295bd6ca68b6926073e179d`). Unknown-team fail-closed cleanup belongs
-in #35, not a parallel catalog here.
+Cross-module regression: Arsenal vs Chelsea 2025-08-16 17:30 UTC is
+`match:f295bd6ca68b6926073e179d` in both the facts repository and odds
+observations.
 
-Odds-only rules (this PR):
+Odds-only rules:
 
 - Naive quote/kickoff/retrieval timestamps are rejected. football-data.co.uk
   local kickoffs are converted to UTC inside the adapter with documented
   timezone provenance.
 - `odds_match_index` is a coverage cache of canonical match IDs already
-  seen. It is not a second match-facts store.
+  seen. It is not a second match-facts store. `sports_hedge.historical` remains
+  the canonical match denominator.
+- Opening/closing quotes stay quality C and have no invented `observed_at`.
+  Timestamped paths needed for Core Tenet 17 movement context are stored only
+  when the source supplied `observed_at`. Implied probability/logit are derived
+  from stored decimal odds; this package does not run the analogue engine.
+
+## Coverage honesty
+
+| Kind | What it is |
+| --- | --- |
+| Fixture / demo | In-repo `synthetic` adapter, `docs/examples/historical-odds-coverage.md`, and `docs/examples/historical-odds-export.xlsx` |
+| Operator-supplied local CSV | football-data.co.uk **style** files the operator already has locally (quality C). Not downloaded in CI |
+| Production historical odds | **Not collected in this PR.** Smarkets is optional and has no authorised bulk archive wired here |
+
+The example Excel/markdown files are synthetic review snapshots, not live
+coverage of 2025/26.
 
 ## Quality tiers
 

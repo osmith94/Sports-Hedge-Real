@@ -105,6 +105,8 @@ class SqliteOddsRepository:
                 ON odds_observations(competition_id, season, source, market_family);
             CREATE INDEX IF NOT EXISTS idx_odds_source_key
                 ON odds_observations(source_observation_key);
+            CREATE INDEX IF NOT EXISTS idx_odds_movement_path
+                ON odds_observations(canonical_match_id, selection, observed_at);
             CREATE INDEX IF NOT EXISTS idx_matches_universe
                 ON odds_match_index(competition_id, season);
             """
