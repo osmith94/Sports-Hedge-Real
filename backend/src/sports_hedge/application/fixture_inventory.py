@@ -6,10 +6,18 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from sports_hedge.application.complete_set import (
+    INCOMPLETE_OUTCOME_REASON,
+    PUSH_STATE_REASON,
+    SOLVER_INELIGIBLE_REASON,
+    UNPROVEN_HANDICAP_REASON,
+    UNPROVEN_SETTLEMENT_REASON,
+    solver_eligible_market,
+    solver_ineligibility_reason,
+)
 from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.domain.football import (
     CanonicalMarket,
-    CanonicalOutcome,
     FootballPeriod,
     MarketFamily,
 )
@@ -83,20 +91,6 @@ class InventoryMarket(BaseModel):
     canonical: CanonicalMarket | None = None
     observation: VenueMarketObservation | None = None
     normalize_error: str | None = None
-
-
-def solver_eligible_market(market: CanonicalMarket) -> bool:
-    """Phase 1 solver may inspect only complete canonical outcome spaces.
-
-    Unsupported families and OTHER/correct-score-style runners stay visible in
-    inventory but must not enter paper_scan / the complete-set solver.
-    """
-
-    if market.family in {MarketFamily.UNKNOWN, MarketFamily.CORRECT_SCORE}:
-        return False
-    if any(runner.outcome is CanonicalOutcome.OTHER for runner in market.runners):
-        return False
-    return True
 
 
 def solver_eligible_pair(left: CanonicalMarket, right: CanonicalMarket, match: MarketMatchResult) -> bool:
@@ -297,8 +291,8 @@ def _venue_only_row(
         reasons = ["unsupported_family"]
     elif not solver_eligible_market(canonical):
         status = InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL
-        reason = "unsupported_outcome_model"
-        reasons = ["unsupported_outcome_model"]
+        reason = solver_ineligibility_reason(canonical)
+        reasons = [reason]
     facts = _facts_from_inventory(item, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
     return FixtureMarketInventoryRow(
         display_name=market_display_name(
@@ -384,13 +378,6 @@ def _classify_pair(
             ["unsupported_family"],
             False,
         )
-    if not solver_eligible_market(left_market) or not solver_eligible_market(right_market):
-        return (
-            InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL,
-            "unsupported_outcome_model",
-            ["unsupported_outcome_model", *match.reasons],
-            False,
-        )
     if not match.matched:
         if "settlement_mismatch" in match.reasons or "incomplete_settlement" in match.reasons:
             reason = next(
@@ -399,7 +386,31 @@ def _classify_pair(
                 if item in {"settlement_mismatch", "incomplete_settlement"}
             )
             return InventoryComparisonStatus.SETTLEMENT_MISMATCH, reason, list(match.reasons), False
+        if not solver_eligible_market(left_market) or not solver_eligible_market(right_market):
+            ineligible = (
+                solver_ineligibility_reason(left_market)
+                if not solver_eligible_market(left_market)
+                else solver_ineligibility_reason(right_market)
+            )
+            return (
+                InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL,
+                ineligible,
+                [ineligible, *match.reasons],
+                False,
+            )
         return InventoryComparisonStatus.OTHER, match.reasons[0] if match.reasons else "not_equivalent", list(match.reasons), False
+    if not solver_eligible_market(left_market) or not solver_eligible_market(right_market):
+        ineligible = (
+            solver_ineligibility_reason(left_market)
+            if not solver_eligible_market(left_market)
+            else solver_ineligibility_reason(right_market)
+        )
+        return (
+            InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL,
+            ineligible,
+            [ineligible, *match.reasons],
+            False,
+        )
 
     entered = decision is not None and solver_eligible_pair(left_market, right_market, match)
     rejections = list(decision.rejection_reasons) if decision is not None else []
@@ -440,7 +451,15 @@ def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
         return InventoryComparisonStatus.MISSING_FX
     if reason in {"stale_quote", "unknown_quote_age"} or reason.startswith("stale") or "quote_age" in reason:
         return InventoryComparisonStatus.STALE
-    if reason in {"noncanonical_outcome_space", "unsupported_outcome_model"}:
+    if reason in {
+        "noncanonical_outcome_space",
+        "unsupported_outcome_model",
+        INCOMPLETE_OUTCOME_REASON,
+        SOLVER_INELIGIBLE_REASON,
+        PUSH_STATE_REASON,
+        UNPROVEN_SETTLEMENT_REASON,
+        UNPROVEN_HANDICAP_REASON,
+    }:
         return InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL
     if reason in {"unsupported_family", "market_family_mismatch"} and reason == "unsupported_family":
         return InventoryComparisonStatus.UNSUPPORTED_FAMILY

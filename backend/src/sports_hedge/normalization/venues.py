@@ -15,6 +15,7 @@ from sports_hedge.domain.football import (
     MarketFamily,
     SettlementFingerprint,
     SettlementScope,
+    line_push_possible,
 )
 from sports_hedge.domain.models import VenueName
 from sports_hedge.normalization.text import normalize_text
@@ -57,7 +58,7 @@ class MatchbookNormalizer:
         name = _required_string(payload, "name")
         family, line = _matchbook_market_family(name, payload)
         period = _period_from_text(name)
-        settlement = _standard_football_settlement(period=period, line=line)
+        settlement = _standard_football_settlement(family=family, period=period, line=line)
         runners = [
             CanonicalRunner(
                 source_runner_id=_required_string(runner, "id"),
@@ -122,7 +123,7 @@ class PolymarketNormalizer:
 
         family, line = _polymarket_market_family(question, payload)
         period = _period_from_text(question)
-        settlement = _polymarket_settlement(payload, period=period, line=line)
+        settlement = _polymarket_settlement(payload, family=family, period=period, line=line)
         outcomes = _list_field(payload.get("outcomes"))
         token_ids = _list_field(
             _first(payload, "clobTokenIds", "clob_token_ids", "tokenIds", "token_ids")
@@ -307,12 +308,12 @@ def _polymarket_market_family(
         return MarketFamily.ASIAN_HANDICAP, line
     if "draw no bet" in combined:
         return MarketFamily.DRAW_NO_BET, None
+    if "to qualify" in combined:
+        return MarketFamily.TO_QUALIFY, None
     if "moneyline" in sports_type or "match result" in combined or "to win" in text:
         return MarketFamily.MATCH_RESULT, None
     if "correct score" in combined:
         return MarketFamily.CORRECT_SCORE, None
-    if "to qualify" in combined:
-        return MarketFamily.TO_QUALIFY, None
     raise VenueNormalizationError(f"Unsupported Polymarket sports market: {question}")
 
 
@@ -324,9 +325,21 @@ def _canonical_runner_outcome(
     away_team: str,
 ) -> CanonicalOutcome:
     text = normalize_text(label)
-    if text == normalize_text(home_team):
+    home = normalize_text(home_team)
+    away = normalize_text(away_team)
+    if family is MarketFamily.TO_QUALIFY:
+        if text in {home, "home qualify", "home to qualify"} or (
+            home and home in text and "qualify" in text
+        ):
+            return CanonicalOutcome.HOME_QUALIFY
+        if text in {away, "away qualify", "away to qualify"} or (
+            away and away in text and "qualify" in text
+        ):
+            return CanonicalOutcome.AWAY_QUALIFY
+        return CanonicalOutcome.OTHER
+    if text == home:
         return CanonicalOutcome.HOME
-    if text == normalize_text(away_team):
+    if text == away:
         return CanonicalOutcome.AWAY
     if text in {"draw", "tie"}:
         return CanonicalOutcome.DRAW
@@ -350,9 +363,21 @@ def _canonical_runner_outcome(
 
 def _standard_football_settlement(
     *,
+    family: MarketFamily,
     period: FootballPeriod,
     line: Decimal | None,
 ) -> SettlementFingerprint:
+    # Matchbook market payloads do not carry resolution-rule text. Do not infer
+    # extra-time/penalty semantics from the To Qualify family name alone.
+    if family is MarketFamily.TO_QUALIFY:
+        return SettlementFingerprint(
+            scope=SettlementScope.UNKNOWN,
+            period=period,
+            line=None,
+            push_possible=None,
+            extra_time_included=None,
+            penalties_included=None,
+        )
     if period == FootballPeriod.FULL_TIME:
         scope = SettlementScope.REGULATION_TIME
         extra_time = False
@@ -361,11 +386,12 @@ def _standard_football_settlement(
         scope = SettlementScope.PERIOD_ONLY
         extra_time = False
         penalties = False
+    push = _family_push_possible(family, line)
     return SettlementFingerprint(
         scope=scope,
         period=period,
-        line=line,
-        push_possible=_push_possible(line),
+        line=line if family in {MarketFamily.TOTAL_GOALS, MarketFamily.ASIAN_HANDICAP} else None,
+        push_possible=push,
         extra_time_included=extra_time,
         penalties_included=penalties,
     )
@@ -374,6 +400,7 @@ def _standard_football_settlement(
 def _polymarket_settlement(
     payload: dict[str, Any],
     *,
+    family: MarketFamily,
     period: FootballPeriod,
     line: Decimal | None,
 ) -> SettlementFingerprint:
@@ -388,11 +415,7 @@ def _polymarket_settlement(
         if value
     )
     text = normalize_text(rules_text)
-    if "90 minutes" in text or "regulation time" in text:
-        scope = SettlementScope.REGULATION_TIME
-        extra_time = False
-        penalties = False
-    elif "including penalties" in text:
+    if "including penalties" in text:
         scope = SettlementScope.INCLUDING_PENALTIES
         extra_time = True
         penalties = True
@@ -400,15 +423,22 @@ def _polymarket_settlement(
         scope = SettlementScope.INCLUDING_EXTRA_TIME
         extra_time = True
         penalties = False
+    elif "90 minutes" in text or "regulation time" in text:
+        scope = SettlementScope.REGULATION_TIME
+        extra_time = False
+        penalties = False
     else:
         scope = SettlementScope.UNKNOWN
         extra_time = None
         penalties = None
+    if family is MarketFamily.TO_QUALIFY:
+        period = FootballPeriod.FULL_TIME
+        line = None
     return SettlementFingerprint(
         scope=scope,
         period=period,
-        line=line,
-        push_possible=_push_possible(line),
+        line=line if family in {MarketFamily.TOTAL_GOALS, MarketFamily.ASIAN_HANDICAP} else None,
+        push_possible=_family_push_possible(family, line),
         extra_time_included=extra_time,
         penalties_included=penalties,
         source_rule_version=str(payload.get("id", "")) or None,
@@ -443,10 +473,14 @@ def _line_from_payload_or_text(payload: dict[str, Any], text: str) -> Decimal | 
     return None
 
 
-def _push_possible(line: Decimal | None) -> bool | None:
-    if line is None:
-        return None
-    return line == line.to_integral_value()
+def _family_push_possible(family: MarketFamily, line: Decimal | None) -> bool | None:
+    if family is MarketFamily.DRAW_NO_BET:
+        return True
+    if family in {MarketFamily.MATCH_RESULT, MarketFamily.BOTH_TEAMS_TO_SCORE, MarketFamily.TO_QUALIFY}:
+        return False
+    if family in {MarketFamily.TOTAL_GOALS, MarketFamily.ASIAN_HANDICAP}:
+        return line_push_possible(line)
+    return line_push_possible(line)
 
 
 def _split_fixture_title(title: str) -> tuple[str, str]:

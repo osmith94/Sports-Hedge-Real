@@ -3,6 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from sports_hedge.application.complete_set import (
+    complete_set_outcomes,
+    solver_eligible_market,
+    solver_ineligibility_reason,
+)
 from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.quote_freshness import (
     conservative_combined_age_ms,
@@ -162,8 +167,33 @@ class PaperScanService:
         ):
             rejections.append("unknown_settlement_scope")
 
-        expected_outcomes = [runner.outcome for runner in left.market.runners]
-        if any(outcome == CanonicalOutcome.OTHER for outcome in expected_outcomes):
+        if not solver_eligible_market(left.market) or not solver_eligible_market(right.market):
+            ineligible = (
+                solver_ineligibility_reason(left.market)
+                if not solver_eligible_market(left.market)
+                else solver_ineligibility_reason(right.market)
+            )
+            rejections.append(ineligible)
+            return PaperScanDecision(
+                market_match=match,
+                canonical_event_id=event_id,
+                canonical_market_id=market_id,
+                snapshots_recorded=recorded,
+                rejection_reasons=_dedupe(rejections),
+                fee_snapshots=fees,
+                venue_costs=costs,
+                fx_snapshots=fx,
+                cost_assumption_labels=assumption_labels,
+                minimum_net_edge=minimum_net_edge,
+                maximum_execution_risk=maximum_execution_risk,
+                quote_age_ms=quote_age_ms,
+                quote_age_basis=quote_age_basis,
+            )
+
+        expected_space = complete_set_outcomes(left.market.family)
+        assert expected_space is not None
+        expected_outcomes = sorted(expected_space, key=lambda outcome: outcome.value)
+        if CanonicalOutcome.OTHER in expected_space:
             rejections.append("noncanonical_outcome_space")
 
         if costs:
@@ -250,6 +280,8 @@ class PaperScanService:
             rate = effective_fx[observation.native_currency]
             cost = scan_costs[observation.venue]
             for book in observation.outcome_books:
+                # Back/buy complete-set only. Matchbook lay levels stay on the
+                # observation for display/risk and are never solver inputs.
                 if not book.back_levels:
                     continue
                 sources.append(
