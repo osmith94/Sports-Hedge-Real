@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     market_intelligence_minimum_sample_size: int = Field(default=8, ge=2)
     paper_audit_db_path: str = "./data/paper_audit.sqlite"
     paper_liquidity_db_path: str = "./data/paper_liquidity.sqlite"
+    paper_ledger_db_path: str = "./data/paper_ledger.sqlite"
+    paper_autofill_enabled: bool = False
     watchlist_db_path: str = "./data/near_arb_watchlist.sqlite"
     paper_live_refresh_enabled: bool = False
     paper_live_refresh_interval_seconds: int = Field(default=30, ge=15, le=300)

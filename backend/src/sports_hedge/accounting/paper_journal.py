@@ -18,6 +18,7 @@ from sports_hedge.accounting.dimensions import (
     AttributionScope,
     CapitalSource,
     CashState,
+    EconomicAccount,
     PostingDimensions,
     PostingSide,
     StrategyBook,
@@ -73,6 +74,7 @@ class PaperJournalEntry(BaseModel):
     occurred_at: datetime
     description: str
     opportunity_id: str
+    trade_id: str | None = None
     provenance: DataProvenance = DataProvenance.LIVE_PAPER
     postings: list[PaperJournalPosting] = Field(min_length=2)
 
@@ -94,6 +96,39 @@ class PaperJournalEntry(BaseModel):
             )
         return self
 
+    def facts_match(self, other: PaperJournalEntry) -> bool:
+        """Compare economic facts, ignoring generated journal ids."""
+
+        left = [
+            (
+                item.account_code,
+                item.side.value,
+                item.amount_native,
+                item.amount_gbp,
+                item.dimensions.currency,
+                item.dimensions.capital_source.value,
+            )
+            for item in self.postings
+        ]
+        right = [
+            (
+                item.account_code,
+                item.side.value,
+                item.amount_native,
+                item.amount_gbp,
+                item.dimensions.currency,
+                item.dimensions.capital_source.value,
+            )
+            for item in other.postings
+        ]
+        return (
+            self.source == other.source
+            and self.source_id == other.source_id
+            and self.opportunity_id == other.opportunity_id
+            and self.description == other.description
+            and left == right
+        )
+
 
 class PaperJournal:
     """In-memory append-only journal. Corrections would require a reversing entry."""
@@ -109,6 +144,22 @@ class PaperJournal:
         self._ids.add(key)
         self._entries.append(entry)
         return entry
+
+    def get(self, source: str, source_id: str) -> PaperJournalEntry | None:
+        for entry in self._entries:
+            if entry.source == source and entry.source_id == source_id:
+                return entry
+        return None
+
+    def append_idempotent(self, entry: PaperJournalEntry) -> tuple[PaperJournalEntry, bool]:
+        existing = self.get(entry.source, entry.source_id)
+        if existing is not None:
+            if not existing.facts_match(entry):
+                raise DuplicateJournalError(
+                    f"conflicting_journal_facts {entry.source}:{entry.source_id}"
+                )
+            return existing, False
+        return self.append(entry), True
 
     def list_entries(self, *, opportunity_id: str | None = None) -> list[PaperJournalEntry]:
         if opportunity_id is None:
@@ -128,6 +179,27 @@ class PaperJournal:
         return facts
 
 
+def _strategy_dims(
+    *,
+    venue: VenueName,
+    currency: str,
+    opportunity_id: str,
+    capital_source: CapitalSource,
+    canonical_event_id: str | None = None,
+    position_id: str | None = None,
+) -> PostingDimensions:
+    return PostingDimensions(
+        attribution=AttributionScope.STRATEGY,
+        strategy_book=StrategyBook.ARBITRAGE,
+        capital_source=capital_source,
+        venue=venue,
+        currency=currency,
+        opportunity_id=opportunity_id,
+        canonical_event_id=canonical_event_id,
+        position_id=position_id,
+    )
+
+
 def cash_lock_postings(
     *,
     venue: VenueName,
@@ -142,13 +214,11 @@ def cash_lock_postings(
 ) -> list[PaperJournalPosting]:
     """Move available native cash to locked. Balanced in GBP. Does not invent P&L."""
 
-    dims = PostingDimensions(
-        attribution=AttributionScope.STRATEGY,
-        strategy_book=StrategyBook.ARBITRAGE,
-        capital_source=capital_source,
+    dims = _strategy_dims(
         venue=venue,
         currency=currency,
         opportunity_id=opportunity_id,
+        capital_source=capital_source,
         canonical_event_id=canonical_event_id,
         position_id=position_id,
     )
@@ -170,6 +240,76 @@ def cash_lock_postings(
             dimensions=dims,
         ),
     ]
+
+
+def settlement_leg_postings(
+    *,
+    venue: VenueName,
+    currency: str,
+    stake_native: Decimal,
+    net_payoff_native: Decimal,
+    venue_fee_native: Decimal,
+    amount_gbp_per_native: Decimal,
+    opportunity_id: str,
+    capital_source: CapitalSource,
+    canonical_event_id: str | None = None,
+    position_id: str | None = None,
+    won: bool,
+) -> list[PaperJournalPosting]:
+    """Release locked stake and post native betting P&L / fees. Balanced in GBP."""
+
+    dims = _strategy_dims(
+        venue=venue,
+        currency=currency,
+        opportunity_id=opportunity_id,
+        capital_source=capital_source,
+        canonical_event_id=canonical_event_id,
+        position_id=position_id,
+    )
+
+    def posting(account: str, side: PostingSide, native: Decimal) -> PaperJournalPosting:
+        return PaperJournalPosting(
+            account_code=account,
+            side=side,
+            amount_native=native,
+            amount_gbp=native * amount_gbp_per_native,
+            fx_rate_gbp_per_unit=amount_gbp_per_native,
+            dimensions=dims,
+        )
+
+    posts: list[PaperJournalPosting] = []
+    if won:
+        posts.append(
+            posting(cash_account(venue, currency, CashState.LOCKED), PostingSide.CREDIT, stake_native)
+        )
+        posts.append(
+            posting(cash_account(venue, currency, CashState.AVAILABLE), PostingSide.DEBIT, stake_native)
+        )
+        gross_profit = net_payoff_native + venue_fee_native - stake_native
+        if gross_profit > 0:
+            posts.append(
+                posting(
+                    cash_account(venue, currency, CashState.AVAILABLE),
+                    PostingSide.DEBIT,
+                    gross_profit,
+                )
+            )
+            posts.append(posting(EconomicAccount.PNL_BETTING.value, PostingSide.CREDIT, gross_profit))
+        if venue_fee_native > 0:
+            posts.append(posting(EconomicAccount.PNL_VENUE_FEES.value, PostingSide.DEBIT, venue_fee_native))
+            posts.append(
+                posting(
+                    cash_account(venue, currency, CashState.AVAILABLE),
+                    PostingSide.CREDIT,
+                    venue_fee_native,
+                )
+            )
+    else:
+        posts.append(
+            posting(cash_account(venue, currency, CashState.LOCKED), PostingSide.CREDIT, stake_native)
+        )
+        posts.append(posting(EconomicAccount.PNL_BETTING.value, PostingSide.DEBIT, stake_native))
+    return posts
 
 
 def assert_native_currencies_separate(postings: Iterable[DimensionedPosting]) -> None:
