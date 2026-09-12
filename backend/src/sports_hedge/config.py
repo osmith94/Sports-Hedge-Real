@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     notifications_db_path: str = "./data/notifications.sqlite"
     notification_cooldown_seconds: int = Field(default=900, ge=0)
     historical_db_path: str = "./data/historical_football.sqlite"
+    historical_odds_db_path: str = "./data/historical_odds.sqlite"
 
     paper_bankroll_gbp: float = Field(default=5000.0, gt=0)
     paper_bankroll_usd: float = Field(default=5000.0, gt=0)
