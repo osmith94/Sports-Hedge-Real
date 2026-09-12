@@ -39,14 +39,26 @@ capital_source = MANUAL_OVERRIDE
 
 Manual override capital must never silently become part of the permanent automated pool.
 
-### Manual External Capital / Leg
-An externally confirmed venue leg that is not executed from the Sports Hedge automated pool.
+### Manual External / external-operator capital
+A generic `MANUAL_EXTERNAL` source for a required leg that Sports Hedge itself cannot execute.
 
 ```text
 capital_source = MANUAL_EXTERNAL
+execution_mode = EXTERNAL_OPERATOR
+lifecycle_state = AWAITING_EXTERNAL_LEG_CONFIRMATION
+operator_action = PREPARE_PROCEED_WITH_EXTERNAL_COUNTERPARTY
 ```
 
-It must remain distinct from both `AUTO_POOL` and `MANUAL_OVERRIDE`, and must not imply Sports Hedge custody or automated execution.
+Rules:
+- that leg must not draw from `AUTO_POOL`;
+- there is a hard stop before any automated counterpart leg is committed;
+- the operator action is never `PLACE BET`;
+- confirmation records venue/product, operator/counterparty reference, executed price, size, currency, timestamp, and optional evidence;
+- remaining hedge legs are revalidated against a **fresh** quote/cost snapshot with the confirmed external stake treated as **fixed realised exposure** (not a max-stake the solver may shrink). If remaining depth cannot hedge the full confirmed amount while keeping a positive minimum net payoff after costs/FX, fail closed;
+- beneficial-owner / jurisdiction / account eligibility stay outside the execution engine. The engine only accepts an explicit `eligibility_confirmed` flag;
+- `MANUAL_EXTERNAL` is a distinct accounting source from `AUTO_POOL` and ordinary `MANUAL_OVERRIDE`.
+
+Phase 1 remains paper-only: confirmation and revalidation are audit/state contracts. They do not place, cancel, or commit venue orders.
 
 ## Priority alert qualification
 
@@ -63,7 +75,7 @@ minimum_depth_coverage
 minimum_fill_confidence
 minimum_capital_efficiency
 minimum_survivability_score
-minimum_survival_probability_at_action_latency
+minimum_survival_probability_at_required_latency
 ```
 
 A Priority Alert should only fire after the ordinary arb checks have already confirmed economic equivalence and positive minimum payoff across valid settlement states.
@@ -147,10 +159,15 @@ expected MANUAL_EXTERNAL counterparty confirmation latency
 
 A calm, persistent 1% edge should normally score as more survivable than the same 1% edge during rapid repricing.
 
+These are estimates, not guarantees. Phase 1 carries an optional typed seam (`OpportunitySurvivability`) on the Priority Alert read model so a later historical scorer can plug in without another contract fork. Missing or unmodelled values remain explicit/null; this layer must not invent probabilities.
+
 Suggested outputs:
 
 ```text
-survivability_score: 0-100
+survivability_score: 0-100 or null
+survival_probability_at_required_latency
+required_action_latency_seconds
+survivability_confidence
 survival_probability_5s
 survival_probability_15s
 survival_probability_30s
@@ -158,11 +175,13 @@ survival_probability_60s
 estimated_median_remaining_life
 historical_dislocation_half_life
 volatility_regime
+recent_volatility
+survivability_reasons / component drivers
 ```
 
-These are estimates, not guarantees. Where historical data is weak, the UI must state that uncertainty rather than invent precise probabilities.
+Where historical data is weak, the UI must state that uncertainty rather than invent precise probabilities. Survivability remains distinct from current arb edge and fill confidence.
 
-For `MANUAL_EXTERNAL`, the operator view should compare expected counterparty response time to survivability. Example:
+For `MANUAL_EXTERNAL`, expected external confirmation latency is the relevant action horizon. The operator view should compare that latency to survivability. Example:
 
 ```text
 Expected external confirmation latency: 30s
@@ -269,7 +288,8 @@ This allows reporting of:
 - manually escalated arbitrage P&L;
 - externally confirmed manual-leg economics;
 - capital used from standing pools;
-- capital used from one-off overrides.
+- capital used from one-off overrides;
+- capital used from external-operator counterparties.
 
 One audited ledger remains the source of truth.
 

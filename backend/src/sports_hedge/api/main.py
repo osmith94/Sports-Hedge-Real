@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from sports_hedge.api.market_intelligence import router as market_intelligence_router
 from sports_hedge.api.paper import router as paper_router
+from sports_hedge.api.priority_alerts import router as priority_alerts_router
 from sports_hedge.api.watchlist import router as watchlist_router
 from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueCapabilities, VenueName
@@ -16,6 +17,7 @@ app = FastAPI(
 app.include_router(market_intelligence_router)
 app.include_router(paper_router)
 app.include_router(watchlist_router)
+app.include_router(priority_alerts_router)
 
 
 @app.get("/health")

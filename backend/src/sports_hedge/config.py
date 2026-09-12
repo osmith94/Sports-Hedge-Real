@@ -47,6 +47,17 @@ class Settings(BaseSettings):
     simulate_partial_fills: bool = True
     fx_spread_bps: int = Field(default=10, ge=0)
 
+    priority_min_net_edge: float = Field(default=0.03, ge=0)
+    priority_min_expected_profit: float = Field(default=20.0, ge=0)
+    priority_min_executable_depth: float = Field(default=200.0, ge=0)
+    priority_max_quote_age_ms: int = Field(default=2000, ge=0)
+    priority_max_execution_risk: int = Field(default=40, ge=0, le=100)
+    priority_min_depth_coverage: float = Field(default=1.0, ge=0)
+    priority_min_capital_efficiency: float = Field(default=0.03, ge=0)
+    priority_safety_haircut: float = Field(default=0.05, ge=0, lt=1)
+    priority_operator_manual_cap: float = Field(default=10000.0, gt=0)
+    priority_risk_limit: float = Field(default=10000.0, gt=0)
+
     @model_validator(mode="after")
     def enforce_phase_one_safety(self) -> "Settings":
         if self.sports_hedge_mode != "paper":
