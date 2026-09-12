@@ -5,8 +5,10 @@ export type DataProvenance = "LIVE_PAPER" | "DEMO_FIXTURE";
 
 export type OpportunityStatus =
   | "WATCHING"
+  | "APPROACHING"
   | "TRIGGERED"
   | "PAPER_FILLING"
+  | "PARTIAL"
   | "FILLED"
   | "CLOSED"
   | "EXPIRED"
@@ -63,7 +65,7 @@ export type ActivityEvent = {
   id: string;
   provenance: DataProvenance;
   at: string;
-  kind: ActivityKind;
+  kind: string;
   title: string;
   detail: string;
 };
@@ -122,7 +124,7 @@ export const DEMO_NEAR_ARB: ArbitrageOpportunity[] = [
     status: "WATCHING",
     executable: false,
     scannedAt: "2026-04-12T14:02:11Z",
-    guaranteedProfitGbp: 5.92,
+    guaranteedProfitGbp: null,
     executionRisk: "28 · low",
   },
   {
@@ -147,7 +149,7 @@ export const DEMO_NEAR_ARB: ArbitrageOpportunity[] = [
     status: "WATCHING",
     executable: false,
     scannedAt: "2026-04-12T14:01:44Z",
-    guaranteedProfitGbp: 2.91,
+    guaranteedProfitGbp: null,
     executionRisk: "41 · medium",
   },
 ];
@@ -283,37 +285,6 @@ export function marketLabel(item: PaperScanRecord): string {
   return `${family}${line}`;
 }
 
-export function settlementLabel(item: PaperScanRecord): string {
-  const period = item.period.replaceAll("_", " ");
-  return `${period} · canonical ${item.canonical_market_id.slice(0, 12)}`;
-}
-
-function triggerFromDecision(item: PaperScanRecord, fallback: number): number {
-  if (!item.decision_json) return fallback;
-  try {
-    const parsed = JSON.parse(item.decision_json) as { minimum_net_edge?: string | number };
-    const value = number(parsed.minimum_net_edge);
-    return value === null ? fallback : value;
-  } catch {
-    return fallback;
-  }
-}
-
-function currenciesFromDecision(item: PaperScanRecord): string[] {
-  if (!item.decision_json) return item.venues.includes("polymarket") ? ["GBP", "USD"] : ["GBP"];
-  try {
-    const parsed = JSON.parse(item.decision_json) as {
-      fx_snapshots?: Array<{ currency?: string }>;
-    };
-    const currencies = (parsed.fx_snapshots ?? [])
-      .map((snapshot) => snapshot.currency)
-      .filter((value): value is string => Boolean(value));
-    return currencies.length ? Array.from(new Set(currencies)) : ["GBP"];
-  } catch {
-    return ["GBP"];
-  }
-}
-
 function latestByMarket(scans: PaperScanRecord[]): PaperScanRecord[] {
   const seen = new Set<string>();
   const latest: PaperScanRecord[] = [];
@@ -323,138 +294,6 @@ function latestByMarket(scans: PaperScanRecord[]): PaperScanRecord[] {
     latest.push(scan);
   }
   return latest;
-}
-
-const NEAR_ARB_ALLOWED_REJECTIONS = new Set(["net_edge_below_threshold"]);
-
-function isHardGateReason(reason: string): boolean {
-  return !NEAR_ARB_ALLOWED_REJECTIONS.has(reason);
-}
-
-export function isNearArbCandidate(item: PaperScanRecord, trigger: number): boolean {
-  if (item.eligible_for_paper_simulation) return false;
-  const net = number(item.net_edge);
-  if (net === null || net >= trigger) return false;
-  const hard = item.rejection_reasons.filter(isHardGateReason);
-  if (hard.length) return false;
-  return item.rejection_reasons.includes("net_edge_below_threshold") || item.rejection_reasons.length === 0;
-}
-
-function statusForScan(item: PaperScanRecord, net: number | null, trigger: number): OpportunityStatus {
-  if (item.eligible_for_paper_simulation) return "TRIGGERED";
-  if (item.rejection_reasons.some(isHardGateReason)) return "REJECTED";
-  if (net !== null && net < trigger) return "WATCHING";
-  if (item.rejection_reasons.length) return "REJECTED";
-  return "WATCHING";
-}
-
-export function opportunityFromScan(
-  item: PaperScanRecord,
-  assumptions: ScannerAssumptions,
-): ArbitrageOpportunity {
-  const net = number(item.net_edge);
-  const trigger = triggerFromDecision(item, assumptions.minimumNetArb);
-  const distance = net === null ? null : (trigger - net) * 100;
-  const riskFlags = [
-    ...item.rejection_reasons,
-    item.execution_risk_band ? `risk_${item.execution_risk_band}` : null,
-  ].filter((value): value is string => Boolean(value));
-
-  return {
-    id: item.record_id,
-    provenance: "LIVE_PAPER",
-    eventLabel: `${item.home_team} v ${item.away_team}`,
-    competition: item.competition,
-    marketLabel: marketLabel(item),
-    settlement: settlementLabel(item),
-    venues: item.venues,
-    netArb: net,
-    trigger,
-    distanceToTriggerPp: distance,
-    movement: null,
-    capitalRequiredGbp: number(item.executable_stake_gbp),
-    expectedLock: null,
-    quoteFreshness: null,
-    executableDepth: item.executable_stake_gbp != null ? `£${Number(item.executable_stake_gbp).toFixed(0)}` : null,
-    limitingLeg: null,
-    riskFlags,
-    currencies: currenciesFromDecision(item),
-    status: statusForScan(item, net, trigger),
-    executable: item.eligible_for_paper_simulation,
-    scannedAt: item.scanned_at,
-    guaranteedProfitGbp: number(item.guaranteed_profit_gbp),
-    executionRisk: item.execution_risk_score != null
-      ? `${item.execution_risk_score}${item.execution_risk_band ? ` · ${item.execution_risk_band}` : ""}`
-      : null,
-  };
-}
-
-export function buildNearArbWatchlist(
-  scans: PaperScanRecord[],
-  assumptions: ScannerAssumptions,
-): ArbitrageOpportunity[] {
-  return latestByMarket(scans)
-    .filter((item) => isNearArbCandidate(item, triggerFromDecision(item, assumptions.minimumNetArb)))
-    .map((item) => opportunityFromScan(item, assumptions))
-    .sort((a, b) => (a.distanceToTriggerPp ?? 99) - (b.distanceToTriggerPp ?? 99))
-    .slice(0, 10);
-}
-
-export function buildExecutableOpportunities(
-  scans: PaperScanRecord[],
-  assumptions: ScannerAssumptions,
-): ArbitrageOpportunity[] {
-  return latestByMarket(scans)
-    .filter((item) => item.eligible_for_paper_simulation)
-    .map((item) => opportunityFromScan(item, assumptions));
-}
-
-export function buildActivityFeed(scans: PaperScanRecord[]): ActivityEvent[] {
-  return scans.slice(0, 40).map((item) => {
-    const event = `${item.home_team} v ${item.away_team}`;
-    if (item.eligible_for_paper_simulation) {
-      return {
-        id: `${item.record_id}-triggered`,
-        provenance: "LIVE_PAPER" as const,
-        at: item.scanned_at,
-        kind: "THRESHOLD_CROSSED" as const,
-        title: "Threshold crossed",
-        detail: `${event} · ${marketLabel(item)} · paper-eligible`,
-      };
-    }
-    if (item.rejection_reasons.includes("net_edge_below_threshold")) {
-      return {
-        id: `${item.record_id}-watch`,
-        provenance: "LIVE_PAPER" as const,
-        at: item.scanned_at,
-        kind: "WATCHLIST_ENTERED" as const,
-        title: "Entered near-arb watchlist",
-        detail: `${event} · ${marketLabel(item)} · below configured trigger`,
-      };
-    }
-    if (item.rejection_reasons.length) {
-      const reason = item.rejection_reasons[0].replaceAll("_", " ");
-      const kindDetail = item.rejection_reasons.some((entry) => entry.includes("missing_") || entry.includes("stale"))
-        ? item.rejection_reasons.join(" · ")
-        : reason;
-      return {
-        id: `${item.record_id}-reject`,
-        provenance: "LIVE_PAPER" as const,
-        at: item.scanned_at,
-        kind: "REJECTED" as const,
-        title: "Rejected",
-        detail: `${event} · ${kindDetail}`,
-      };
-    }
-    return {
-      id: `${item.record_id}-scan`,
-      provenance: "LIVE_PAPER" as const,
-      at: item.scanned_at,
-      kind: "WATCHLIST_ENTERED" as const,
-      title: "Scan recorded",
-      detail: `${event} · ${marketLabel(item)}`,
-    };
-  });
 }
 
 export function buildCapitalSnapshot(
@@ -480,25 +319,4 @@ export function buildCapitalSnapshot(
       : "Realised P&L is not persisted on the paper scan read model.",
   };
   return { live, fixture: DEMO_CAPITAL };
-}
-
-export function mergeActivityFeed(live: ActivityEvent[]): { items: ActivityEvent[]; usedFixture: boolean } {
-  if (live.length === 0) {
-    return { items: DEMO_ACTIVITY, usedFixture: true };
-  }
-  const fillKinds = new Set<ActivityKind>([
-    "PAPER_FILL_ATTEMPTED",
-    "PARTIAL_FILL",
-    "PAPER_POSITION_COMPLETED",
-    "SETTLED",
-    "VOIDED",
-    "CLOSED",
-    "REALISED_PNL",
-  ]);
-  const hasFillLifecycle = live.some((item) => fillKinds.has(item.kind));
-  if (hasFillLifecycle) return { items: live, usedFixture: false };
-  return {
-    items: [...live.slice(0, 12), ...DEMO_ACTIVITY],
-    usedFixture: true,
-  };
 }

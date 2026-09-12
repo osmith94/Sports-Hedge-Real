@@ -6,8 +6,8 @@ function provenanceLabel(value: ArbitrageOpportunity["provenance"]): string {
 }
 
 function statusClass(status: ArbitrageOpportunity["status"]): string {
-  if (status === "TRIGGERED" || status === "FILLED" || status === "PAPER_FILLING") return "ops-status is-hot";
-  if (status === "WATCHING") return "ops-status is-watch";
+  if (status === "TRIGGERED" || status === "FILLED" || status === "PAPER_FILLING" || status === "PARTIAL") return "ops-status is-hot";
+  if (status === "WATCHING" || status === "APPROACHING") return "ops-status is-watch";
   if (status === "REJECTED" || status === "EXPIRED") return "ops-status is-reject";
   return "ops-status";
 }

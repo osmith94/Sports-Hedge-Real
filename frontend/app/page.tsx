@@ -6,21 +6,23 @@ import { RunPaperScan } from "../components/run-paper-scan";
 import { PriorityAlertsSeam } from "../components/arbitrage/priority-alerts/priority-alerts-seam";
 import { ExternalLegWorkflow } from "../components/arbitrage/priority-alerts/external-leg-workflow";
 import { getPriorityAlert } from "../lib/priority-alerts/provider";
-import { getPaperScans, getPaperScanSummary, PaperScanRecord } from "../lib/api";
+import { getPaperScans, getPaperScanSummary, PaperScanRecord, getNearWatchlist, getTriggeredWatchlist, getWatchlistActivity, NearOpportunity, OpportunityLifecycleEvent } from "../lib/api";
 import {
   DEFAULT_SCANNER_ASSUMPTIONS,
+  DEMO_ACTIVITY,
   DEMO_EXECUTABLE,
   DEMO_LIQUIDITY_POOLS,
   DEMO_MANUAL_EXTERNAL,
   DEMO_NEAR_ARB,
-  buildActivityFeed,
   buildCapitalSnapshot,
-  buildExecutableOpportunities,
-  buildNearArbWatchlist,
   marketLabel,
-  mergeActivityFeed,
 } from "../lib/arbitrage-ops";
 import { money, percent } from "../lib/format";
+import {
+  activityFromWatchlist,
+  nearOpportunitiesFromWatchlist,
+  triggeredOpportunitiesFromWatchlist,
+} from "../lib/watchlist";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +36,10 @@ export default async function ArbitragePage() {
   let scans: PaperScanRecord[] = [];
   let summary: Awaited<ReturnType<typeof getPaperScanSummary>> | null = null;
   let apiAvailable = true;
+  let watchlistAvailable = true;
+  let nearRows: NearOpportunity[] = [];
+  let triggeredRows: NearOpportunity[] = [];
+  let activityRows: OpportunityLifecycleEvent[] = [];
 
   try {
     [scans, summary] = await Promise.all([getPaperScans("limit=100"), getPaperScanSummary()]);
@@ -41,12 +47,24 @@ export default async function ArbitragePage() {
     apiAvailable = false;
   }
 
+  try {
+    [nearRows, triggeredRows, activityRows] = await Promise.all([
+      getNearWatchlist("limit=25"),
+      getTriggeredWatchlist("limit=25"),
+      getWatchlistActivity("limit=100"),
+    ]);
+  } catch {
+    watchlistAvailable = false;
+  }
+
   const assumptions = DEFAULT_SCANNER_ASSUMPTIONS;
-  const liveWatchlist = apiAvailable ? buildNearArbWatchlist(scans, assumptions) : [];
-  const liveExecutable = apiAvailable ? buildExecutableOpportunities(scans, assumptions) : [];
-  const watchlist = apiAvailable ? liveWatchlist : DEMO_NEAR_ARB;
-  const executable = apiAvailable ? liveExecutable : DEMO_EXECUTABLE;
-  const activity = mergeActivityFeed(apiAvailable ? buildActivityFeed(scans) : []);
+  const liveWatchlist = watchlistAvailable ? nearOpportunitiesFromWatchlist(nearRows) : [];
+  const liveExecutable = watchlistAvailable ? triggeredOpportunitiesFromWatchlist(triggeredRows) : [];
+  const watchlist = watchlistAvailable ? liveWatchlist : DEMO_NEAR_ARB;
+  const executable = watchlistAvailable ? liveExecutable : DEMO_EXECUTABLE;
+  const activity = watchlistAvailable
+    ? { items: activityFromWatchlist(activityRows), usedFixture: false }
+    : { items: DEMO_ACTIVITY, usedFixture: true };
   const capital = buildCapitalSnapshot(apiAvailable ? scans : [], summary, assumptions);
   const externalAlert = getPriorityAlert("pa-ncl-ars-2026-04-12-mr");
 
@@ -64,8 +82,9 @@ export default async function ArbitragePage() {
           <div className="eyebrow">Arbitrage operations</div>
           <h1>Paper arbitrage operations console</h1>
           <p className="page-subtitle">
-            Near-threshold watchlist, paper-eligible triggers, activity and native-currency capital. Live
-            paper scans stay fail-closed; DEMO/FIXTURE is used only where the backend has no field yet.
+            Near-threshold watchlist, paper-eligible triggers, activity and native-currency capital.
+            Watchlist rows come from the paper watchlist read model; scan history stays a separate scanner view.
+            DEMO/FIXTURE is used only when a watchlist endpoint is unavailable or a field has no backend yet.
           </p>
         </div>
         <div className="demo-label">{apiAvailable ? "LIVE PAPER READ MODEL" : "PAPER API OFFLINE"}</div>
@@ -87,12 +106,17 @@ export default async function ArbitragePage() {
       <section className="ops-section">
         <div className="section-label">
           <span>1 · Near-arb watchlist</span>
-          <span className={liveWatchlist.length ? "status-badge" : "demo-chip"}>
-            {liveWatchlist.length ? "LIVE PAPER · NOT EXECUTABLE" : "DEMO / FIXTURE · NO LIVE NEAR-ARB"}
+          <span className={watchlistAvailable ? "status-badge" : "demo-chip"}>
+            {watchlistAvailable
+              ? liveWatchlist.length
+                ? "LIVE WATCHLIST · NOT EXECUTABLE"
+                : "LIVE WATCHLIST · EMPTY"
+              : "DEMO / FIXTURE · WATCHLIST UNAVAILABLE"}
           </span>
         </div>
         <p className="section-copy">
-          Closest matched markets below the configured net-arb trigger. These are not called arbitrage until
+          Closest matched markets below the configured net-arb trigger. Status, distance, depth and
+          freshness come from the paper watchlist read model. These are not called arbitrage until
           settlement, payoff and cost checks pass.
         </p>
         {watchlist.length === 0 ? (
@@ -109,11 +133,11 @@ export default async function ArbitragePage() {
       <section className="ops-section">
         <div className="section-label">
           <span>2 · Triggered / executable</span>
-          <span className={liveExecutable.length ? "status-badge" : apiAvailable ? "status-badge" : "demo-chip"}>
-            {liveExecutable.length ? "LIVE PAPER ELIGIBLE" : apiAvailable ? "NO TRIGGERS" : "DEMO / FIXTURE"}
+          <span className={watchlistAvailable ? "status-badge" : "demo-chip"}>
+            {liveExecutable.length ? "LIVE WATCHLIST · TRIGGERED" : watchlistAvailable ? "NO TRIGGERS" : "DEMO / FIXTURE"}
           </span>
         </div>
-        {apiAvailable && liveExecutable.length === 0 ? (
+        {watchlistAvailable && liveExecutable.length === 0 ? (
           <div className="empty-live">
             No paper-eligible opportunities in the current scan window. The monitor does not invent triggered
             arbitrage.
