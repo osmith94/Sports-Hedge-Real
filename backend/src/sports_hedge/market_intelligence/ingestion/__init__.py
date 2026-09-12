@@ -13,6 +13,7 @@ from sports_hedge.market_intelligence.ingestion.contracts import (
     NormalizedMarketEvent,
     ProviderEventRecord,
     ingestion_key,
+    localize_naive_datetime,
 )
 from sports_hedge.market_intelligence.ingestion.fixtures import (
     FixtureMarketEventFeed,
@@ -44,6 +45,7 @@ __all__ = [
     "UnconfiguredProviderFeed",
     "annotation_from_normalized",
     "ingestion_key",
+    "localize_naive_datetime",
     "map_event_category",
     "newcastle_arsenal_fixture_feed",
     "normalize_provider_event",

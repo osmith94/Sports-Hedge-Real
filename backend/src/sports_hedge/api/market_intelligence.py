@@ -16,9 +16,6 @@ from sports_hedge.domain.football import (
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.event_reaction import EventReactionAnalysis
 from sports_hedge.market_intelligence.ingestion.contracts import IngestResult, ProviderEventRecord
-from sports_hedge.market_intelligence.ingestion.fixtures import (
-    newcastle_arsenal_fixture_feed,
-)
 from sports_hedge.market_intelligence.models import (
     AnnotationCategory,
     KickoffBucket,
@@ -115,24 +112,14 @@ def ingest_market_events(
     records: list[ProviderEventRecord],
     service: MarketIntelligenceService = Depends(get_market_intelligence_service),
 ) -> list[IngestResult]:
-    """Manual/fixture ingestion of provider-neutral sports and news events.
+    """Ingest provider-neutral sports and news events.
 
-    Rejected mappings are returned in the batch rather than guessed. Duplicate
-    source events are idempotent and do not create a second annotation.
+    Rejected mappings are returned in the batch rather than guessed. Identical
+    source events are idempotent. Changed content for the same source id is
+    recorded as a conflict/revision without overwriting the earlier observation.
     """
 
     return service.ingest_market_events(records)
-
-
-@router.post(
-    "/events/ingest/fixtures/newcastle-arsenal",
-    response_model=list[IngestResult],
-    status_code=status.HTTP_200_OK,
-)
-def ingest_newcastle_arsenal_fixture(
-    service: MarketIntelligenceService = Depends(get_market_intelligence_service),
-) -> list[IngestResult]:
-    return service.ingest_market_event_feed(newcastle_arsenal_fixture_feed())
 
 
 @router.get(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from hashlib import sha256
 from sqlite3 import IntegrityError
@@ -22,7 +23,9 @@ class MarketEventIngestionPipeline:
     """Idempotent mapping from provider-neutral events to timeline annotations.
 
     Annotations are temporal context only. This pipeline never infers that an
-    event caused a market move.
+    event caused a market move. Identical source content is stored once;
+    a later payload for the same source id is appended as a conflict/revision
+    without mutating the earlier observation.
     """
 
     def __init__(self, repository: SqliteMarketIntelligenceRepository) -> None:
@@ -39,32 +42,37 @@ class MarketEventIngestionPipeline:
                 rejection=exc.issue,
             )
 
+        fingerprint = source_content_fingerprint(normalized)
+        _attach_fingerprint(normalized, fingerprint)
         annotation = annotation_from_normalized(normalized)
-        existing = self.repository.get_annotation(annotation.annotation_id)
-        if existing is not None:
+        existing_same_content = self.repository.get_annotation(annotation.annotation_id)
+        if existing_same_content is not None:
             return IngestResult(
                 status="duplicate",
                 provider=normalized.provider,
                 source_event_id=normalized.source_event_id,
-                annotation=existing,
+                annotation=existing_same_content,
             )
 
-        try:
-            self.repository.append_annotation(annotation)
-        except IntegrityError:
-            duplicate = self.repository.get_annotation(annotation.annotation_id)
+        priors = self.repository.list_annotations_for_ingestion_key(normalized.ingestion_key)
+        if priors:
+            _attach_revision(normalized, priors)
+            annotation = annotation_from_normalized(normalized)
+            persisted = _append_or_existing(self.repository, annotation)
             return IngestResult(
-                status="duplicate",
+                status="conflict",
                 provider=normalized.provider,
                 source_event_id=normalized.source_event_id,
-                annotation=duplicate or annotation,
+                annotation=persisted,
+                prior_annotation=priors[0],
             )
 
+        persisted = _append_or_existing(self.repository, annotation)
         return IngestResult(
             status="created",
             provider=normalized.provider,
             source_event_id=normalized.source_event_id,
-            annotation=annotation,
+            annotation=persisted,
         )
 
     def ingest_many(self, records: list[ProviderEventRecord]) -> list[IngestResult]:
@@ -80,8 +88,12 @@ class MarketEventIngestionPipeline:
 
 
 def annotation_from_normalized(event: NormalizedMarketEvent) -> MarketEventAnnotation:
+    fingerprint = event.metadata.get("ingestion", {}).get("content_fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        fingerprint = source_content_fingerprint(event)
+        _attach_fingerprint(event, fingerprint)
     return MarketEventAnnotation(
-        annotation_id=_deterministic_annotation_id(event.ingestion_key),
+        annotation_id=_deterministic_annotation_id(event.ingestion_key, fingerprint),
         canonical_event_id=event.canonical_event_id,
         occurred_at=event.source_occurred_at,
         category=event.category,
@@ -93,6 +105,59 @@ def annotation_from_normalized(event: NormalizedMarketEvent) -> MarketEventAnnot
     )
 
 
-def _deterministic_annotation_id(key: str) -> str:
-    digest = sha256(key.encode("utf-8")).hexdigest()[:24]
+def source_content_fingerprint(event: NormalizedMarketEvent) -> str:
+    ingestion = event.metadata.get("ingestion", {})
+    payload = {
+        "canonical_event_id": event.canonical_event_id,
+        "category": event.category.value,
+        "confidence": event.confidence,
+        "home_team": ingestion.get("home_team"),
+        "away_team": ingestion.get("away_team"),
+        "player_ref": event.player_ref,
+        "provider_payload": event.metadata.get("provider_payload", {}),
+        "source_occurred_at": event.source_occurred_at.isoformat(),
+        "source_reference": event.source_reference,
+        "source_url": event.source_url,
+        "team_ref": event.team_ref,
+        "title": event.title,
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return sha256(blob.encode()).hexdigest()[:32]
+
+
+def _attach_fingerprint(event: NormalizedMarketEvent, fingerprint: str) -> None:
+    ingestion = dict(event.metadata.get("ingestion", {}))
+    ingestion["content_fingerprint"] = fingerprint
+    event.metadata["ingestion"] = ingestion
+
+
+def _attach_revision(
+    event: NormalizedMarketEvent,
+    priors: list[MarketEventAnnotation],
+) -> None:
+    ingestion = dict(event.metadata.get("ingestion", {}))
+    ingestion["revision"] = True
+    ingestion["corrects_annotation_id"] = priors[0].annotation_id
+    ingestion["prior_annotation_ids"] = [item.annotation_id for item in priors]
+    ingestion["prior_content_fingerprints"] = [
+        item.metadata.get("ingestion", {}).get("content_fingerprint") for item in priors
+    ]
+    ingestion["causal_claim"] = False
+    ingestion["temporal_context_only"] = True
+    event.metadata["ingestion"] = ingestion
+
+
+def _append_or_existing(
+    repository: SqliteMarketIntelligenceRepository,
+    annotation: MarketEventAnnotation,
+) -> MarketEventAnnotation:
+    try:
+        repository.append_annotation(annotation)
+        return annotation
+    except IntegrityError:
+        return repository.get_annotation(annotation.annotation_id) or annotation
+
+
+def _deterministic_annotation_id(key: str, fingerprint: str) -> str:
+    digest = sha256(f"{key}|{fingerprint}".encode()).hexdigest()[:24]
     return f"ann:{digest}"

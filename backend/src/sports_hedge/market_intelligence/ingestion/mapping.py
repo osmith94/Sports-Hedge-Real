@@ -4,6 +4,7 @@ from sports_hedge.market_intelligence.ingestion.contracts import (
     MappingIssue,
     NormalizedMarketEvent,
     ProviderEventRecord,
+    ingestion_key,
 )
 from sports_hedge.market_intelligence.models import AnnotationCategory
 from sports_hedge.normalization.text import normalize_text
@@ -82,6 +83,7 @@ def normalize_provider_event(record: ProviderEventRecord) -> NormalizedMarketEve
             "ingestion": {
                 "provider": record.provider.strip(),
                 "source_event_id": record.source_event_id.strip(),
+                "ingestion_key": ingestion_key(record.provider, record.source_event_id),
                 "source_occurred_at": record.source_occurred_at.isoformat(),
                 "retrieved_at": record.retrieved_at.isoformat(),
                 "team_ref": _optional_ref(record.team_ref),

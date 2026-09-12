@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import datetime, tzinfo
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 from sports_hedge.market_intelligence.models import AnnotationCategory, MarketEventAnnotation
 
@@ -33,13 +33,15 @@ class ProviderEventRecord(BaseModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     payload: dict[str, Any] = Field(default_factory=dict)
 
-    @model_validator(mode="after")
-    def ensure_timezones(self) -> ProviderEventRecord:
-        if self.source_occurred_at.tzinfo is None:
-            self.source_occurred_at = self.source_occurred_at.replace(tzinfo=UTC)
-        if self.retrieved_at.tzinfo is None:
-            self.retrieved_at = self.retrieved_at.replace(tzinfo=UTC)
-        return self
+    @field_validator("source_occurred_at", "retrieved_at")
+    @classmethod
+    def require_aware_timestamps(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+            raise ValueError(
+                "timezone-aware datetime required; refuse to assume UTC. "
+                "Normalize at the source adapter with an explicit timezone"
+            )
+        return value
 
 
 class NormalizedMarketEvent(BaseModel):
@@ -73,10 +75,11 @@ class MappingIssue(BaseModel):
 
 
 class IngestResult(BaseModel):
-    status: Literal["created", "duplicate", "rejected"]
+    status: Literal["created", "duplicate", "rejected", "conflict"]
     provider: str
     source_event_id: str
     annotation: MarketEventAnnotation | None = None
+    prior_annotation: MarketEventAnnotation | None = None
     rejection: MappingIssue | None = None
 
     @property
@@ -95,3 +98,14 @@ class MarketEventFeed(Protocol):
 
 def ingestion_key(provider: str, source_event_id: str) -> str:
     return f"{provider.strip().casefold()}:{source_event_id.strip()}"
+
+
+def localize_naive_datetime(value: datetime, timezone: tzinfo) -> datetime:
+    """Attach a timezone only at an explicit adapter boundary.
+
+    ProviderEventRecord itself never guesses UTC for naive values.
+    """
+
+    if value.tzinfo is not None:
+        raise ValueError("datetime is already timezone-aware; do not re-localize")
+    return value.replace(tzinfo=timezone)

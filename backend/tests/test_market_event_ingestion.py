@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from sports_hedge.api.main import app
 from sports_hedge.api.market_intelligence import get_market_intelligence_service
@@ -14,7 +15,10 @@ from sports_hedge.market_intelligence.ingestion.adapters import (
     OfficialSportsDataFeed,
     ProviderNotConfiguredError,
 )
-from sports_hedge.market_intelligence.ingestion.contracts import ProviderEventRecord
+from sports_hedge.market_intelligence.ingestion.contracts import (
+    ProviderEventRecord,
+    localize_naive_datetime,
+)
 from sports_hedge.market_intelligence.ingestion.fixtures import (
     CANONICAL_EVENT_ID,
     FIXTURE_KICKOFF,
@@ -190,14 +194,20 @@ def test_unconfigured_provider_adapter_is_a_seam_not_a_hardcoded_source() -> Non
         feed.fetch()
 
 
-def test_ingest_api_accepts_fixture_timeline_and_rejects_duplicates() -> None:
+def test_ingest_api_accepts_provider_records_and_rejects_duplicates() -> None:
     repository = SqliteMarketIntelligenceRepository()
     service = MarketIntelligenceService(repository)
     app.dependency_overrides[get_market_intelligence_service] = lambda: service
     client = TestClient(app)
+    records = [item.model_dump(mode="json") for item in team_sheet_yellow_red_timeline()]
 
     try:
-        created = client.post("/market-intelligence/events/ingest/fixtures/newcastle-arsenal")
+        missing_fixture = client.post(
+            "/market-intelligence/events/ingest/fixtures/newcastle-arsenal"
+        )
+        assert missing_fixture.status_code == 404
+
+        created = client.post("/market-intelligence/events/ingest", json=records)
         assert created.status_code == 200
         payload = created.json()
         assert [item["status"] for item in payload] == ["created", "created", "created"]
@@ -207,7 +217,7 @@ def test_ingest_api_accepts_fixture_timeline_and_rejects_duplicates() -> None:
             "red_card",
         ]
 
-        duplicate = client.post("/market-intelligence/events/ingest/fixtures/newcastle-arsenal")
+        duplicate = client.post("/market-intelligence/events/ingest", json=records)
         assert [item["status"] for item in duplicate.json()] == [
             "duplicate",
             "duplicate",
@@ -220,3 +230,100 @@ def test_ingest_api_accepts_fixture_timeline_and_rejects_duplicates() -> None:
     finally:
         app.dependency_overrides.clear()
         repository.close()
+
+
+def test_changed_source_content_is_a_conflict_revision_not_a_silent_duplicate() -> None:
+    repository = SqliteMarketIntelligenceRepository()
+    pipeline = MarketEventIngestionPipeline(repository)
+    original = make_record(
+        source_event_id="src-correction",
+        title="Yellow card: Bruno Guimaraes",
+        category="YELLOW_CARD",
+        player_ref="Bruno Guimaraes",
+        source_occurred_at=datetime(2026, 9, 12, 16, 12, tzinfo=UTC),
+    )
+    correction = make_record(
+        source_event_id="src-correction",
+        title="Red card: Bruno Guimaraes",
+        category="RED_CARD",
+        player_ref="Bruno Guimaraes",
+        source_occurred_at=datetime(2026, 9, 12, 16, 18, tzinfo=UTC),
+        retrieved_at=datetime(2026, 9, 12, 19, 45, tzinfo=UTC),
+        payload={"minute": 18, "corrected": True},
+    )
+
+    first = pipeline.ingest(original)
+    second = pipeline.ingest(correction)
+    third = pipeline.ingest(correction)
+    stored = repository.list_annotations(canonical_event_id=CANONICAL_EVENT_ID)
+
+    assert first.status == "created"
+    assert first.annotation is not None
+    assert second.status == "conflict"
+    assert second.annotation is not None
+    assert second.prior_annotation is not None
+    assert second.prior_annotation.annotation_id == first.annotation.annotation_id
+    assert second.annotation.annotation_id != first.annotation.annotation_id
+    assert second.annotation.category == AnnotationCategory.RED_CARD
+    assert second.annotation.occurred_at == datetime(2026, 9, 12, 16, 18, tzinfo=UTC)
+    assert first.annotation.category == AnnotationCategory.YELLOW_CARD
+    assert stored[0].annotation_id == first.annotation.annotation_id
+    assert stored[0].title == "Yellow card: Bruno Guimaraes"
+    assert stored[1].metadata["ingestion"]["revision"] is True
+    assert stored[1].metadata["ingestion"]["corrects_annotation_id"] == first.annotation.annotation_id
+    assert stored[1].metadata["ingestion"]["causal_claim"] is False
+    assert len(stored) == 2
+    assert third.status == "duplicate"
+    assert third.annotation is not None
+    assert third.annotation.annotation_id == second.annotation.annotation_id
+    repository.close()
+
+
+def test_retrieval_time_change_alone_is_still_a_duplicate() -> None:
+    repository = SqliteMarketIntelligenceRepository()
+    pipeline = MarketEventIngestionPipeline(repository)
+    first = pipeline.ingest(make_record())
+    second = pipeline.ingest(
+        make_record(retrieved_at=datetime(2026, 9, 12, 21, 0, tzinfo=UTC))
+    )
+    stored = repository.list_annotations(canonical_event_id=CANONICAL_EVENT_ID)
+
+    assert first.status == "created"
+    assert second.status == "duplicate"
+    assert len(stored) == 1
+    repository.close()
+
+
+def test_naive_source_and_retrieval_timestamps_fail_closed() -> None:
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        make_record(source_occurred_at=datetime(2026, 9, 12, 15, 0))  # noqa: DTZ001
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        make_record(retrieved_at=datetime(2026, 9, 12, 19, 0))  # noqa: DTZ001
+
+    localized = localize_naive_datetime(datetime(2026, 9, 12, 15, 0), UTC)  # noqa: DTZ001
+    record = make_record(source_occurred_at=localized)
+    assert record.source_occurred_at.tzinfo is not None
+
+    client_repository = SqliteMarketIntelligenceRepository()
+    service = MarketIntelligenceService(client_repository)
+    app.dependency_overrides[get_market_intelligence_service] = lambda: service
+    client = TestClient(app)
+    try:
+        response = client.post(
+            "/market-intelligence/events/ingest",
+            json=[
+                {
+                    "provider": "fixture_test",
+                    "source_event_id": "naive",
+                    "source_occurred_at": "2026-09-12T15:00:00",
+                    "retrieved_at": "2026-09-12T19:00:00Z",
+                    "category": "TEAM_SHEET",
+                    "canonical_event_id": CANONICAL_EVENT_ID,
+                    "title": "Starting XI announced",
+                }
+            ],
+        )
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+        client_repository.close()
