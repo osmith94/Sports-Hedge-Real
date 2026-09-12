@@ -1,0 +1,431 @@
+.page {
+  display: grid;
+  gap: 16px;
+}
+
+.honesty {
+  border: 1px dashed rgba(241, 191, 105, 0.35);
+  background: rgba(241, 191, 105, 0.07);
+  color: var(--amber);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.metaRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 6px 9px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.chipAccent {
+  color: var(--accent);
+  border-color: rgba(124, 242, 176, 0.22);
+  background: var(--accent-soft);
+}
+
+.chipWarn {
+  color: var(--amber);
+  border-color: rgba(241, 191, 105, 0.24);
+  background: rgba(241, 191, 105, 0.08);
+}
+
+.list {
+  display: grid;
+  gap: 16px;
+}
+
+.card {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.cardFeatured {
+  border-color: rgba(124, 242, 176, 0.22);
+  box-shadow: 0 0 0 1px rgba(124, 242, 176, 0.05);
+}
+
+.cardHeader {
+  padding: 16px 18px 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.compRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted-2);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 750;
+}
+
+.kickoff {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.teams {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px 14px;
+}
+
+.teamLink {
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+}
+
+.teamLink:hover {
+  color: var(--accent);
+}
+
+.regimeTeam {
+  font-size: 16px;
+}
+
+.versus {
+  color: var(--muted-2);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.headerMeta {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+  align-content: start;
+}
+
+.demoBadge {
+  color: var(--amber);
+  border: 1px solid rgba(241, 191, 105, 0.24);
+  background: rgba(241, 191, 105, 0.08);
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 5px 8px;
+}
+
+.paperBadge {
+  color: var(--accent);
+  border: 1px solid rgba(124, 242, 176, 0.2);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 5px 8px;
+}
+
+.contextNote {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  max-width: 760px;
+}
+
+.section {
+  padding: 14px 18px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.sectionTitle {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+.regimeGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.regimeCard {
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  border-radius: 10px;
+  padding: 12px 13px;
+}
+
+.regimeTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.role {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+.prob {
+  font-size: 18px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+}
+
+.probFoot {
+  color: var(--muted-2);
+  font-size: 9px;
+  margin-top: 2px;
+}
+
+.manager {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.regimeMeta {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+  display: grid;
+  gap: 3px;
+}
+
+.flag {
+  margin-top: 8px;
+  color: var(--amber);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.callouts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.callout {
+  border-radius: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+}
+
+.calloutHigh {
+  border-color: rgba(124, 242, 176, 0.28);
+  background: rgba(124, 242, 176, 0.06);
+}
+
+.calloutLow {
+  border-color: rgba(129, 184, 245, 0.28);
+  background: rgba(129, 184, 245, 0.06);
+}
+
+.calloutKicker {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+.calloutHigh .calloutKicker {
+  color: var(--accent);
+}
+
+.calloutLow .calloutKicker {
+  color: var(--blue);
+}
+
+.calloutTitle {
+  margin-top: 5px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.calloutMeta {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.scenarioList {
+  display: grid;
+  gap: 8px;
+}
+
+.scenarioRow {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.4fr) minmax(90px, 0.5fr) repeat(3, minmax(70px, 0.45fr)) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.scenarioTitle {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.scenarioDetail {
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 3px;
+}
+
+.statLabel {
+  color: var(--muted-2);
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.statValue {
+  margin-top: 3px;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.srcHigh {
+  color: var(--accent);
+}
+
+.srcLow {
+  color: var(--blue);
+}
+
+.qualitySufficient {
+  color: var(--accent);
+}
+
+.qualityThin,
+.qualityIllustrative {
+  color: var(--amber);
+}
+
+.labLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(124, 242, 176, 0.28);
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.labLink:hover {
+  background: rgba(124, 242, 176, 0.16);
+}
+
+.arb {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+}
+
+.arbTitle {
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.arbCopy {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  max-width: 780px;
+}
+
+.arbLink {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line-strong);
+  background: var(--panel-raised);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 11px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.arbLink:hover {
+  border-color: rgba(124, 242, 176, 0.35);
+  color: var(--accent);
+}
+
+@media (max-width: 1050px) {
+  .scenarioRow {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+
+  .labLink {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}
+
+@media (max-width: 760px) {
+  .cardHeader,
+  .regimeGrid,
+  .callouts,
+  .arb {
+    grid-template-columns: 1fr;
+  }
+
+  .headerMeta {
+    justify-items: start;
+  }
+
+  .scenarioRow {
+    grid-template-columns: 1fr 1fr;
+  }
+}

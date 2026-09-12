@@ -1,0 +1,295 @@
+.page {
+  display: grid;
+  gap: 16px;
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.linkChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.linkChip:hover {
+  border-color: rgba(124, 242, 176, 0.28);
+  color: var(--accent);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.ruleList {
+  display: grid;
+  gap: 10px;
+}
+
+.card {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: var(--radius);
+  padding: 15px 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.cardInactive {
+  opacity: 0.72;
+}
+
+.cardTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.cardTitle {
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.cardSummary {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  margin-top: 4px;
+}
+
+.metaRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: var(--panel-raised);
+}
+
+.pillActive {
+  color: var(--accent);
+  border-color: rgba(124, 242, 176, 0.2);
+  background: var(--accent-soft);
+}
+
+.pillInactive {
+  color: var(--amber);
+  border-color: rgba(241, 191, 105, 0.24);
+  background: rgba(241, 191, 105, 0.08);
+}
+
+.pillDemo {
+  color: var(--amber);
+  border-color: rgba(241, 191, 105, 0.24);
+  background: rgba(241, 191, 105, 0.08);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.button,
+.buttonGhost,
+.buttonDanger {
+  border-radius: 8px;
+  padding: 8px 11px;
+  min-height: 32px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.button {
+  border: 1px solid rgba(124, 242, 176, 0.32);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.button:hover {
+  background: rgba(124, 242, 176, 0.16);
+}
+
+.buttonGhost {
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.buttonGhost:hover {
+  border-color: var(--line-strong);
+}
+
+.buttonDanger {
+  border: 1px solid rgba(240, 130, 130, 0.28);
+  background: rgba(240, 130, 130, 0.08);
+  color: var(--red);
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fieldFull {
+  grid-column: 1 / -1;
+}
+
+.field span {
+  color: var(--muted-2);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.field input,
+.field select,
+.field textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font-size: 11px;
+  outline: none;
+}
+
+.field textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+  border-color: rgba(124, 242, 176, 0.45);
+  box-shadow: 0 0 0 2px rgba(124, 242, 176, 0.07);
+}
+
+.formActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.note {
+  color: var(--muted-2);
+  font-size: 10px;
+  line-height: 1.5;
+  margin-top: 10px;
+}
+
+.demoList {
+  display: grid;
+  gap: 10px;
+}
+
+.demoRow {
+  border: 1px dashed rgba(241, 191, 105, 0.28);
+  background: rgba(17, 30, 27, 0.55);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.demoTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.demoTitle {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.demoMeta {
+  color: var(--muted-2);
+  font-size: 10px;
+  margin-top: 4px;
+  line-height: 1.45;
+}
+
+.matchResult {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.matchYes {
+  color: var(--accent);
+}
+
+.matchNo {
+  color: var(--muted);
+}
+
+.empty {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  padding: 18px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.seam {
+  color: var(--muted-2);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+@media (max-width: 1050px) {
+  .layout,
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .badges {
+    justify-content: flex-start;
+  }
+}

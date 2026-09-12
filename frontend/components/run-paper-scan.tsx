@@ -8,6 +8,8 @@ import {
   PaperCollectionRequest,
   runPaperCollection,
 } from "../lib/api";
+import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
+import { percent } from "../lib/format";
 
 type ScanState =
   | { kind: "idle" }
@@ -47,7 +49,10 @@ export function RunPaperScan() {
   const [matchbookFeePercent, setMatchbookFeePercent] = useState("");
   const [polymarketFeePercent, setPolymarketFeePercent] = useState("");
   const [capitalLimit, setCapitalLimit] = useState("");
-  const [maxRisk, setMaxRisk] = useState("60");
+  const [minNetArbPercent, setMinNetArbPercent] = useState(
+    String(DEFAULT_SCANNER_ASSUMPTIONS.minimumNetArb * 100),
+  );
+  const [maxRisk, setMaxRisk] = useState(String(DEFAULT_SCANNER_ASSUMPTIONS.maximumExecutionRisk));
   const [loading, setLoading] = useState(false);
   const [state, setState] = useState<ScanState>({ kind: "idle" });
 
@@ -62,6 +67,7 @@ export function RunPaperScan() {
       const matchbookFee = optionalPercentRate(matchbookFeePercent, "Matchbook fee");
       const polymarketFee = optionalPercentRate(polymarketFeePercent, "Polymarket fee");
       const capital = optionalPositive(capitalLimit, "Capital limit");
+      const minNet = optionalPercentRate(minNetArbPercent, "Minimum net arb");
       const risk = Number(maxRisk);
       if (!Number.isInteger(risk) || risk < 0 || risk > 100) {
         throw new Error("Maximum execution risk must be a whole number from 0 to 100.");
@@ -71,6 +77,7 @@ export function RunPaperScan() {
         maximum_execution_risk: risk,
       };
       if (capital) payload.capital_limit_gbp = capital;
+      if (minNet) payload.minimum_net_edge = minNet;
       if (fxRate) {
         payload.fx_snapshots = [
           { currency: "USD", gbp_per_unit: fxRate, source: "dashboard_input" },
@@ -107,20 +114,42 @@ export function RunPaperScan() {
     }
   }
 
+  const triggerDisplay = minNetArbPercent.trim()
+    ? `${minNetArbPercent.trim()}%`
+    : percent(DEFAULT_SCANNER_ASSUMPTIONS.minimumNetArb);
+
   return (
     <section className="panel scan-control">
       <div className="panel-header">
         <div>
-          <div className="panel-title">Run read-only scan</div>
+          <div className="panel-title">Paper scanner controls</div>
           <div className="panel-meta">
             Fetch current Matchbook and Polymarket market data, persist history, and run the paper filters.
           </div>
         </div>
-        <span className="status-badge">NO EXECUTION</span>
+        <span className="status-badge">PAPER MODE · NO EXECUTION</span>
       </div>
 
       <form className="scan-form" onSubmit={submit}>
-        <div className="scan-control-grid">
+        <div className="assumption-strip">
+          <span>Trigger {triggerDisplay} net arb</span>
+          <span>Capital {capitalLimit.trim() ? `£${capitalLimit.trim()}` : "unset"}</span>
+          <span>Max risk {maxRisk}/100</span>
+          <span>Fees {matchbookFeePercent || polymarketFeePercent ? "dashboard input" : "fail-closed if missing"}</span>
+          <span>FX {usdToGbp.trim() ? "dashboard USD→GBP" : "fail-closed if missing"}</span>
+        </div>
+
+        <div className="scan-control-grid scan-control-grid-ops">
+          <label className="scan-field">
+            <span>Min net arb %</span>
+            <input
+              inputMode="decimal"
+              value={minNetArbPercent}
+              onChange={(event) => setMinNetArbPercent(event.target.value)}
+              placeholder="1.00"
+              aria-label="Minimum net arbitrage trigger percent"
+            />
+          </label>
           <label className="scan-field">
             <span>USD → GBP</span>
             <input

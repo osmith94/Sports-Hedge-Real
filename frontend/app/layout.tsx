@@ -19,7 +19,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
                 <span className="status-item"><span className="status-dot" /> Matchbook data</span>
                 <span className="status-item"><span className="status-dot readonly" /> Polymarket read-only</span>
               </div>
-              <div className="clock">GBP · PAPER · DEMO DATA</div>
+              <div className="clock">GBP · PAPER MODE · NO EXECUTION</div>
             </header>
             <main className="main">{children}</main>
           </div>

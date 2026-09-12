@@ -71,6 +71,7 @@ export type PaperScanRecord = {
   execution_risk_score?: number | null;
   execution_risk_band?: string | null;
   rejection_reasons: string[];
+  decision_json?: string;
 };
 
 export type PaperScanSummary = {

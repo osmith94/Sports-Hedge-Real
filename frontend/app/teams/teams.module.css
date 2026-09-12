@@ -1,0 +1,480 @@
+.banner {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  border: 1px solid rgba(241, 191, 105, 0.28);
+  background: rgba(241, 191, 105, 0.08);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+
+.bannerMark {
+  flex: 0 0 auto;
+  border: 1px solid rgba(241, 191, 105, 0.32);
+  color: var(--amber);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  padding: 6px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.bannerCopy {
+  color: var(--amber);
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.searchRow {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.4fr) auto;
+  gap: 10px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+
+.searchInput {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 11px 12px;
+  outline: none;
+}
+
+.searchInput::placeholder {
+  color: #536760;
+}
+
+.searchInput:focus {
+  border-color: rgba(124, 242, 176, 0.45);
+  box-shadow: 0 0 0 2px rgba(124, 242, 176, 0.07);
+}
+
+.leagueChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.chipActive {
+  color: var(--accent);
+  border-color: rgba(124, 242, 176, 0.25);
+  background: var(--accent-soft);
+}
+
+.directory {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.teamCard {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: var(--radius);
+  padding: 15px 16px;
+  min-width: 0;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.teamCard:hover {
+  border-color: rgba(124, 242, 176, 0.28);
+  background: var(--panel-raised);
+}
+
+.teamCardTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.crest {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel-raised);
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+}
+
+.teamName {
+  font-size: 14px;
+  font-weight: 720;
+  letter-spacing: -0.02em;
+}
+
+.teamMeta {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 3px;
+}
+
+.srcIndex {
+  text-align: right;
+}
+
+.srcValue {
+  font-size: 18px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.srcLabel {
+  color: var(--muted-2);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.teamStats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.stat {
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  border-radius: 8px;
+  padding: 8px 9px;
+}
+
+.statLabel {
+  color: var(--muted-2);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.statValue {
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.empty {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  padding: 20px;
+  color: var(--muted);
+  font-size: 11px;
+  grid-column: 1 / -1;
+}
+
+.identity {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.85fr);
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.identityCard,
+.fixtureCard,
+.managerCard {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: var(--radius);
+  padding: 16px 17px;
+}
+
+.kicker {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.clubTitle {
+  font-size: 26px;
+  margin: 0;
+  letter-spacing: -0.03em;
+}
+
+.clubSub {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 7px 0 0;
+  line-height: 1.5;
+}
+
+.metricStrip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 16px 0 0;
+}
+
+.kickoffTime {
+  font-size: 20px;
+  font-weight: 740;
+  letter-spacing: -0.03em;
+  margin-top: 6px;
+}
+
+.fixtureLine {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.tab {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  padding: 8px 11px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.tabActive {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: rgba(124, 242, 176, 0.22);
+}
+
+.sectionHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  margin: 6px 0 10px;
+}
+
+.sectionTitle {
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.sectionMeta {
+  color: var(--muted-2);
+  font-size: 10px;
+}
+
+.cardGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.scenarioCard {
+  display: block;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: var(--radius);
+  padding: 14px 15px;
+  min-width: 0;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.scenarioCard:hover {
+  border-color: rgba(124, 242, 176, 0.28);
+  background: var(--panel-raised);
+}
+
+.scenarioTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.scenarioName {
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.scenarioTrigger {
+  color: var(--muted-2);
+  font-size: 10px;
+  margin-top: 4px;
+}
+
+.srcBig {
+  font-size: 22px;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+}
+
+.srcPos {
+  color: var(--accent);
+}
+
+.srcNeg {
+  color: var(--red);
+}
+
+.srcNeu {
+  color: var(--muted);
+}
+
+.gridStats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 7px;
+  font-size: 9px;
+  font-weight: 750;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.qualitySufficient {
+  color: var(--accent);
+  border-color: rgba(124, 242, 176, 0.18);
+  background: var(--accent-soft);
+}
+
+.qualityLimited {
+  color: var(--amber);
+  border-color: rgba(241, 191, 105, 0.22);
+  background: rgba(241, 191, 105, 0.08);
+}
+
+.qualitySparse {
+  color: var(--red);
+  border-color: rgba(240, 130, 130, 0.22);
+  background: rgba(240, 130, 130, 0.07);
+}
+
+.tableWrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: var(--radius);
+  margin-bottom: 16px;
+}
+
+.tableWrap table {
+  min-width: 980px;
+}
+
+.clickRow {
+  cursor: pointer;
+}
+
+.tableWrap tr.clickRow:hover td {
+  background: rgba(124, 242, 176, 0.04);
+}
+
+.labLink {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.deltaPos {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.deltaNeg {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.notes {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.note {
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  padding: 11px 12px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  background: rgba(17, 30, 27, 0.4);
+}
+
+.backLink {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  margin-bottom: 12px;
+  display: inline-flex;
+}
+
+.backLink:hover {
+  color: var(--accent);
+}
+
+.managerGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+@media (max-width: 1100px) {
+  .directory,
+  .cardGrid,
+  .identity,
+  .managerGrid,
+  .metricStrip {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .gridStats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .searchRow,
+  .directory,
+  .cardGrid,
+  .identity,
+  .managerGrid,
+  .metricStrip,
+  .teamStats {
+    grid-template-columns: 1fr;
+  }
+}

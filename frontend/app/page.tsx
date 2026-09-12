@@ -1,31 +1,28 @@
+import { ActivityFeed } from "../components/activity-feed";
+import { CapitalSummary } from "../components/capital-summary";
+import { LiquidityPools } from "../components/liquidity-pools";
+import { OpportunityCard } from "../components/opportunity-card";
 import { RunPaperScan } from "../components/run-paper-scan";
+import { PriorityAlertsSeam } from "../components/arbitrage/priority-alerts/priority-alerts-seam";
+import { ExternalLegWorkflow } from "../components/arbitrage/priority-alerts/external-leg-workflow";
+import { getPriorityAlert } from "../lib/priority-alerts/provider";
 import { getPaperScans, getPaperScanSummary, PaperScanRecord } from "../lib/api";
+import {
+  DEFAULT_SCANNER_ASSUMPTIONS,
+  DEMO_EXECUTABLE,
+  DEMO_LIQUIDITY_POOLS,
+  DEMO_MANUAL_EXTERNAL,
+  DEMO_NEAR_ARB,
+  buildActivityFeed,
+  buildCapitalSnapshot,
+  buildExecutableOpportunities,
+  buildNearArbWatchlist,
+  marketLabel,
+  mergeActivityFeed,
+} from "../lib/arbitrage-ops";
+import { money, percent } from "../lib/format";
 
 export const dynamic = "force-dynamic";
-
-function number(value: string | number | null | undefined): number | null {
-  if (value === null || value === undefined) return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function percent(value: string | number | null | undefined): string {
-  const parsed = number(value);
-  return parsed === null ? "—" : `${(parsed * 100).toFixed(2)}%`;
-}
-
-function money(value: string | number | null | undefined): string {
-  const parsed = number(value);
-  return parsed === null
-    ? "—"
-    : new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(parsed);
-}
-
-function marketLabel(item: PaperScanRecord): string {
-  const family = item.market_family.replaceAll("_", " ");
-  const line = item.line === null || item.line === undefined ? "" : ` ${item.line}`;
-  return `${family}${line}`;
-}
 
 function statusText(item: PaperScanRecord): string {
   if (item.eligible_for_paper_simulation) return "Paper eligible";
@@ -44,21 +41,31 @@ export default async function ArbitragePage() {
     apiAvailable = false;
   }
 
+  const assumptions = DEFAULT_SCANNER_ASSUMPTIONS;
+  const liveWatchlist = apiAvailable ? buildNearArbWatchlist(scans, assumptions) : [];
+  const liveExecutable = apiAvailable ? buildExecutableOpportunities(scans, assumptions) : [];
+  const watchlist = apiAvailable ? liveWatchlist : DEMO_NEAR_ARB;
+  const executable = apiAvailable ? liveExecutable : DEMO_EXECUTABLE;
+  const activity = mergeActivityFeed(apiAvailable ? buildActivityFeed(scans) : []);
+  const capital = buildCapitalSnapshot(apiAvailable ? scans : [], summary, assumptions);
+  const externalAlert = getPriorityAlert("pa-ncl-ars-2026-04-12-mr");
+
   const metrics = [
-    { label: "Scans today", value: summary ? String(summary.scan_count) : "—", foot: "Matched market scan decisions" },
-    { label: "Arbitrage detected", value: summary ? String(summary.arbitrage_count) : "—", foot: "Before final paper eligibility gates" },
-    { label: "Paper eligible", value: summary ? String(summary.eligible_count) : "—", foot: "Passed mapping, costs and risk", positive: true },
-    { label: "Top net edge", value: summary ? percent(summary.top_net_edge) : "—", foot: "Best persisted scan in today’s window", positive: true },
+    { label: "Scans today", value: summary ? String(summary.scan_count) : "—", foot: "Matched market scan decisions", demo: false },
+    { label: "Arbitrage detected", value: summary ? String(summary.arbitrage_count) : "—", foot: "Before final paper eligibility gates", demo: false },
+    { label: "Paper eligible", value: summary ? String(summary.eligible_count) : "—", foot: "Passed mapping, costs and risk", positive: true, demo: false },
+    { label: "Top net edge", value: summary ? percent(summary.top_net_edge) : "—", foot: "Best persisted scan in today’s window", positive: true, demo: false },
   ];
 
   return (
     <>
       <div className="page-heading">
         <div>
-          <div className="eyebrow">Arbitrage</div>
-          <h1>Cross-venue opportunity monitor</h1>
+          <div className="eyebrow">Arbitrage operations</div>
+          <h1>Paper arbitrage operations console</h1>
           <p className="page-subtitle">
-            Persisted paper scans after canonical matching, executable depth, fee assumptions, FX and execution-risk checks.
+            Near-threshold watchlist, paper-eligible triggers, activity and native-currency capital. Live
+            paper scans stay fail-closed; DEMO/FIXTURE is used only where the backend has no field yet.
           </p>
         </div>
         <div className="demo-label">{apiAvailable ? "LIVE PAPER READ MODEL" : "PAPER API OFFLINE"}</div>
@@ -75,6 +82,73 @@ export default async function ArbitragePage() {
       </section>
 
       <RunPaperScan />
+      <PriorityAlertsSeam />
+
+      <section className="ops-section">
+        <div className="section-label">
+          <span>1 · Near-arb watchlist</span>
+          <span className={liveWatchlist.length ? "status-badge" : "demo-chip"}>
+            {liveWatchlist.length ? "LIVE PAPER · NOT EXECUTABLE" : "DEMO / FIXTURE · NO LIVE NEAR-ARB"}
+          </span>
+        </div>
+        <p className="section-copy">
+          Closest matched markets below the configured net-arb trigger. These are not called arbitrage until
+          settlement, payoff and cost checks pass.
+        </p>
+        {watchlist.length === 0 ? (
+          <div className="empty-live">No near-threshold opportunities in the current scan window.</div>
+        ) : (
+          <div className="opp-stack">
+            {watchlist.map((item) => (
+              <OpportunityCard item={item} key={item.id} />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="ops-section">
+        <div className="section-label">
+          <span>2 · Triggered / executable</span>
+          <span className={liveExecutable.length ? "status-badge" : apiAvailable ? "status-badge" : "demo-chip"}>
+            {liveExecutable.length ? "LIVE PAPER ELIGIBLE" : apiAvailable ? "NO TRIGGERS" : "DEMO / FIXTURE"}
+          </span>
+        </div>
+        {apiAvailable && liveExecutable.length === 0 ? (
+          <div className="empty-live">
+            No paper-eligible opportunities in the current scan window. The monitor does not invent triggered
+            arbitrage.
+          </div>
+        ) : (
+          <div className="opp-stack">
+            {executable.map((item) => (
+              <OpportunityCard item={item} executable key={item.id} />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="ops-section">
+        <div className="section-label">
+          <span>3 · Manual-external paper state</span>
+          <span className="demo-chip">DEMO / FIXTURE · NOT AUTO-POOL</span>
+        </div>
+        <p className="section-copy">
+          Distinct from Near-Arb and validated paper arbs. MANUAL_EXTERNAL does not consume standing liquidity.
+        </p>
+        <OpportunityCard item={DEMO_MANUAL_EXTERNAL} />
+        {externalAlert ? <ExternalLegWorkflow alert={externalAlert} /> : null}
+      </section>
+
+      <section className="ops-section grid-2">
+        <ActivityFeed items={activity.items} usedFixture={activity.usedFixture} />
+        <div className="stack-gap">
+          <CapitalSummary live={capital.live} fixture={capital.fixture} />
+        </div>
+      </section>
+
+      <div className="ops-section">
+        <LiquidityPools pools={DEMO_LIQUIDITY_POOLS} />
+      </div>
 
       <section className="panel">
         <div className="panel-header">
@@ -95,7 +169,8 @@ export default async function ArbitragePage() {
 
         {!apiAvailable ? (
           <div className="empty-live">
-            The FastAPI service is not reachable. The dashboard is showing no fabricated fallback opportunities.
+            The FastAPI service is not reachable. The dashboard is showing no fabricated fallback opportunities
+            for live scan history.
           </div>
         ) : null}
 
