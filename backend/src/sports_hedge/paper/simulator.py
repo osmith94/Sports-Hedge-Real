@@ -59,7 +59,7 @@ class PaperFillSimulator:
         now: datetime | None = None,
     ) -> PaperFillRecord:
         simulated_at = _ensure_utc(now or datetime.now(UTC))
-        filled_at = _fill_timestamp(leg, config, simulated_at)
+        filled_at = _fill_timestamp(config, simulated_at)
 
         if config.is_ideal:
             return _record(
@@ -172,14 +172,8 @@ def _visible_levels(levels: list[BookLevel], config: PaperFillConfig) -> list[Bo
     return ordered
 
 
-def _fill_timestamp(
-    leg: PaperOpportunityLeg,
-    config: PaperFillConfig,
-    simulated_at: datetime,
-) -> datetime:
-    if leg.quote_captured_at is None:
-        return simulated_at
-    return _ensure_utc(leg.quote_captured_at + timedelta(milliseconds=config.assumed_latency_ms))
+def _fill_timestamp(config: PaperFillConfig, simulated_at: datetime) -> datetime:
+    return _ensure_utc(simulated_at + timedelta(milliseconds=config.assumed_latency_ms))
 
 
 def _record(
@@ -216,6 +210,7 @@ def _record(
         rejection_reason=rejection_reason,
         assumed_latency_ms=config.assumed_latency_ms,
         quote_age_ms=leg.quote_age_ms,
+        quote_captured_at=leg.quote_captured_at,
     )
 
 

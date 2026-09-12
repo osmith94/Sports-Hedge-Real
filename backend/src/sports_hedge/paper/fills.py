@@ -83,11 +83,14 @@ class PaperFillRecord(BaseModel):
     rejection_reason: str | None = None
     assumed_latency_ms: int = Field(default=0, ge=0)
     quote_age_ms: int = Field(default=0, ge=0)
+    quote_captured_at: datetime | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> "PaperFillRecord":
         if self.filled_at.tzinfo is None:
             self.filled_at = self.filled_at.replace(tzinfo=UTC)
+        if self.quote_captured_at is not None and self.quote_captured_at.tzinfo is None:
+            self.quote_captured_at = self.quote_captured_at.replace(tzinfo=UTC)
         self.currency = self.currency.upper()
         return self
 
@@ -102,8 +105,29 @@ class PaperFillRecord(BaseModel):
         return self.filled_stake * self.weighted_odds
 
 
+class PaperNativeStakeTotals(BaseModel):
+    """Requested/filled residual for one venue+currency. Never mixed across FX."""
+
+    currency: str
+    venue: VenueName
+    requested_stake: Decimal
+    filled_stake: Decimal
+    remaining_stake: Decimal
+
+    @model_validator(mode="after")
+    def normalize_currency(self) -> "PaperNativeStakeTotals":
+        self.currency = self.currency.upper()
+        return self
+
+
 class PaperOpportunityFills(BaseModel):
-    """Bundle of per-leg fills for one paper opportunity."""
+    """Per-leg fills for one paper opportunity.
+
+    Monetary payout/profit stays on each `PaperFillRecord`. Mutually exclusive
+    legs must not be summed into an opportunity-level return; settlement-state
+    P&L belongs in a later payoff layer. Native stake totals are grouped by
+    venue and currency so GBP and USD are never added together.
+    """
 
     opportunity_id: str
     mode: FillMode
@@ -117,36 +141,37 @@ class PaperOpportunityFills(BaseModel):
         return self
 
     @property
-    def requested_stake(self) -> Decimal:
-        return sum((fill.requested_stake for fill in self.fills), Decimal("0"))
+    def fully_filled(self) -> bool:
+        return bool(self.fills) and all(fill.fully_filled for fill in self.fills)
 
     @property
-    def filled_stake(self) -> Decimal:
-        return sum((fill.filled_stake for fill in self.fills), Decimal("0"))
-
-    @property
-    def remaining_stake(self) -> Decimal:
-        return sum((fill.remaining_stake for fill in self.fills), Decimal("0"))
-
-    @property
-    def theoretical_payout(self) -> Decimal:
-        return sum((fill.theoretical_payout for fill in self.fills), Decimal("0"))
-
-    @property
-    def realised_payout(self) -> Decimal:
-        return sum((fill.realised_payout for fill in self.fills), Decimal("0"))
-
-    @property
-    def theoretical_profit(self) -> Decimal:
-        return self.theoretical_payout - self.requested_stake
-
-    @property
-    def realised_profit(self) -> Decimal:
-        return self.realised_payout - self.filled_stake
+    def max_slippage_bps(self) -> Decimal:
+        if not self.fills:
+            return Decimal("0")
+        return max(fill.slippage_bps for fill in self.fills)
 
     @property
     def rejection_reasons(self) -> list[str]:
         return [fill.rejection_reason for fill in self.fills if fill.rejection_reason]
+
+    def native_stake_totals(self) -> list[PaperNativeStakeTotals]:
+        grouped: dict[tuple[str, VenueName], PaperNativeStakeTotals] = {}
+        for fill in self.fills:
+            key = (fill.currency, fill.venue)
+            current = grouped.get(key)
+            if current is None:
+                grouped[key] = PaperNativeStakeTotals(
+                    currency=fill.currency,
+                    venue=fill.venue,
+                    requested_stake=fill.requested_stake,
+                    filled_stake=fill.filled_stake,
+                    remaining_stake=fill.remaining_stake,
+                )
+            else:
+                current.requested_stake += fill.requested_stake
+                current.filled_stake += fill.filled_stake
+                current.remaining_stake += fill.remaining_stake
+        return sorted(grouped.values(), key=lambda item: (item.currency, item.venue.value))
 
 
 def apply_odds_haircut(odds: Decimal, haircut_bps: Decimal) -> Decimal:

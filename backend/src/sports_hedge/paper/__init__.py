@@ -7,6 +7,7 @@ from sports_hedge.paper.fills import (
     FillMode,
     PaperFillConfig,
     PaperFillRecord,
+    PaperNativeStakeTotals,
     PaperOpportunityFills,
     PaperOpportunityLeg,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "PaperFillConfig",
     "PaperFillRecord",
     "PaperFillSimulator",
+    "PaperNativeStakeTotals",
     "PaperOpportunityFills",
     "PaperOpportunityLeg",
 ]

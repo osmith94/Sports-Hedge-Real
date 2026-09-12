@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sports_hedge.domain.models import VenueName
@@ -8,6 +8,7 @@ from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.paper.fills import (
     FillMode,
     PaperFillConfig,
+    PaperOpportunityFills,
     PaperOpportunityLeg,
 )
 from sports_hedge.paper.simulator import (
@@ -80,8 +81,9 @@ def test_ideal_mode_fully_fills_at_displayed_price_ignoring_thin_depth() -> None
     assert fill.currency == "GBP"
     assert fill.source_market_id == "mb-btts"
     assert fill.outcome == "yes"
-    assert result.theoretical_payout == Decimal("220.00")
-    assert result.realised_payout == Decimal("220.00")
+    assert fill.theoretical_payout == Decimal("220.00")
+    assert fill.realised_payout == Decimal("220.00")
+    assert result.fully_filled is True
 
 
 def test_realistic_full_fill_at_displayed_top_of_book() -> None:
@@ -241,15 +243,16 @@ def test_worse_latency_slippage_and_depth_worsen_realised_economics() -> None:
         now=CAPTURED,
     )
 
-    assert ideal.realised_payout > baseline.realised_payout
-    assert baseline.realised_payout > slipped.realised_payout
+    assert ideal.fills[0].realised_payout > baseline.fills[0].realised_payout
+    assert baseline.fills[0].realised_payout > slipped.fills[0].realised_payout
     assert slipped.fills[0].weighted_odds == Decimal("2.15") * Decimal("0.9975")
     assert delayed.fills[0].levels_consumed == 1
     assert delayed.fills[0].weighted_odds == Decimal("2.10")
-    assert delayed.realised_payout < baseline.realised_payout
-    assert thinner.filled_stake == Decimal("40")
-    assert thinner.remaining_stake == Decimal("40")
-    assert thinner.realised_payout < baseline.realised_payout
+    assert delayed.fills[0].realised_payout < baseline.fills[0].realised_payout
+    assert thinner.fills[0].filled_stake == Decimal("40")
+    assert thinner.fills[0].remaining_stake == Decimal("40")
+    assert thinner.fills[0].realised_payout < baseline.fills[0].realised_payout
+    assert thinner.fully_filled is False
     assert thinner.rejection_reasons == [INSUFFICIENT_DEPTH]
 
 
@@ -290,3 +293,46 @@ def test_opportunity_preserves_cross_venue_currency_and_ids() -> None:
     assert by_venue[VenueName.POLYMARKET].source_runner_id == "no-token"
     assert all(fill.fully_filled for fill in result.fills)
     assert result.mode is FillMode.REALISTIC
+    assert result.fully_filled is True
+    totals = {(item.currency, item.venue): item for item in result.native_stake_totals()}
+    assert totals[("GBP", VenueName.MATCHBOOK)].requested_stake == Decimal("40")
+    assert totals[("GBP", VenueName.MATCHBOOK)].filled_stake == Decimal("40")
+    assert totals[("USD", VenueName.POLYMARKET)].requested_stake == Decimal("40")
+    assert totals[("USD", VenueName.POLYMARKET)].filled_stake == Decimal("40")
+    assert not hasattr(PaperOpportunityFills, "requested_stake")
+    assert not hasattr(PaperOpportunityFills, "filled_stake")
+    assert not hasattr(PaperOpportunityFills, "remaining_stake")
+    assert not hasattr(PaperOpportunityFills, "theoretical_payout")
+    assert not hasattr(PaperOpportunityFills, "realised_payout")
+    assert not hasattr(PaperOpportunityFills, "theoretical_profit")
+    assert not hasattr(PaperOpportunityFills, "realised_profit")
+
+
+def test_fill_time_is_simulation_clock_plus_latency_not_quote_capture() -> None:
+    captured = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
+    simulated_at = captured + timedelta(seconds=2)
+    simulator = PaperFillSimulator()
+    result = simulator.simulate_leg(
+        PaperOpportunityLeg(
+            outcome="yes",
+            venue=VenueName.MATCHBOOK,
+            source_market_id="mb-btts",
+            source_runner_id="yes-1",
+            requested_stake=Decimal("40"),
+            displayed_odds=Decimal("2.20"),
+            levels=_two_level_book(),
+            quote_age_ms=2000,
+            quote_captured_at=captured,
+        ),
+        PaperFillConfig(
+            mode=FillMode.REALISTIC,
+            assumed_latency_ms=500,
+            max_quote_age_ms=3000,
+        ),
+        now=simulated_at,
+    )
+
+    assert result.quote_captured_at == captured
+    assert result.filled_at == simulated_at + timedelta(milliseconds=500)
+    assert result.filled_at > simulated_at
+    assert result.filled_at != captured + timedelta(milliseconds=500)
