@@ -16,7 +16,12 @@ from sports_hedge.domain.football import (
 )
 from sports_hedge.domain.models import MarketSide
 from sports_hedge.facts.catalog import CompetitionCode
-from sports_hedge.facts.identity import CanonicalMatchRef, build_match_ref, canonical_match_id
+from sports_hedge.facts.identity import (
+    CanonicalMatchRef,
+    NaiveKickoffError,
+    build_match_ref,
+    canonical_match_id,
+)
 from sports_hedge.odds.adapters.football_data import FootballDataCsvAdapter
 from sports_hedge.odds.adapters.smarkets import SmarketsHistoricalAdapter, smarkets_limitations
 from sports_hedge.odds.adapters.synthetic import SyntheticOddsAdapter
@@ -53,7 +58,8 @@ def test_odds_uses_facts_match_sha256_identity() -> None:
         away_team="Chelsea",
         kickoff_utc=kickoff,
     )
-    assert expected.startswith("match:")
+    # Same fixture and ID as PR #35's published Arsenal–Chelsea example.
+    assert expected == "match:f295bd6ca68b6926073e179d"
     mapped = map_raw_record(
         RawOddsRecord(
             source="synthetic",
@@ -335,6 +341,18 @@ def test_league_settlement_fingerprint_is_reused_when_complete() -> None:
     mapped = map_raw_record(record)
     assert mapped.settlement_key == record.settlement.deterministic_key()
     assert mapped.quality_tier == QualityTier.A
+
+
+def test_facts_identity_rejects_naive_kickoff() -> None:
+    naive_kickoff = datetime(2025, 8, 16, 17, 30, tzinfo=UTC).replace(tzinfo=None)
+    with pytest.raises(NaiveKickoffError):
+        canonical_match_id(
+            competition_code="premier_league",
+            season="2025/26",
+            home_team="Arsenal",
+            away_team="Chelsea",
+            kickoff_utc=naive_kickoff,
+        )
 
 
 def test_naive_timestamps_are_rejected() -> None:

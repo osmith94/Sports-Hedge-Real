@@ -28,10 +28,14 @@ match:{sha256(football|competition|season|home|away|kickoff_bucket)[:24]}
 Competition codes are `premier_league`, `championship`, `la_liga`,
 `champions_league`. Team aliases live in the facts package.
 
-This branch vendors the current #35 `facts` tree so tests can run before
-#35 merges. After #35 is accepted, rebase onto it and keep the
-`test_odds_uses_facts_match_sha256_identity` regression. Unknown-team
-fail-closed cleanup belongs in #35, not a parallel catalog here.
+This branch vendors `sports_hedge.facts` from PR #35
+(`30ea96c2d5a7b5e6a09eebee741012f667dc2dc1`) so tests can run before #35
+merges. It is not a second identity contract. After #35 is accepted,
+rebase onto `main` and drop the vendored copy if `main` already has the
+package. Keep `test_odds_uses_facts_match_sha256_identity` as the
+cross-module regression (Arsenal vs Chelsea 2025-08-16 17:30 UTC →
+`match:f295bd6ca68b6926073e179d`). Unknown-team fail-closed cleanup belongs
+in #35, not a parallel catalog here.
 
 Odds-only rules (this PR):
 
