@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from functools import lru_cache
 from json import JSONDecodeError, loads
+from logging import getLogger
 from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+LOGGER = getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -27,6 +30,11 @@ class Settings(BaseSettings):
     matchbook_currency: Literal["GBP", "USD", "EUR", "AUD", "CAD", "HKD"] = "GBP"
     matchbook_price_depth: int = Field(default=5, ge=1, le=50)
     matchbook_minimum_liquidity: float = Field(default=2.0, ge=0)
+    # Provider-side event paging. sport-ids is resolved via GET /edge/rest/lookups/sports.
+    matchbook_event_per_page: int = Field(default=100, ge=1, le=100)
+    matchbook_event_max_pages: int = Field(default=10, ge=1, le=50)
+    matchbook_fixture_lookback_hours: int = Field(default=6, ge=1, le=24)
+    matchbook_fixture_lookahead_hours: int = Field(default=72, ge=1, le=168)
 
     polymarket_gamma_base_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_base_url: str = "https://clob.polymarket.com"
@@ -103,6 +111,14 @@ class Settings(BaseSettings):
             raise ValueError("Phase 1 supports paper mode only")
         if self.sports_hedge_execution_enabled:
             raise ValueError("Live execution is intentionally unavailable in Phase 1")
+        if self.polymarket_gamma_series_id is not None:
+            displayed = self.polymarket_gamma_series_id.strip() or "(empty — series filter disabled)"
+            LOGGER.warning(
+                "POLYMARKET_GAMMA_SERIES_ID is a legacy single-series override (%s); "
+                "Championship and La Liga will not be queried unless this is unset. "
+                "Prefer POLYMARKET_GAMMA_SERIES_IDS.",
+                displayed,
+            )
         return self
 
 

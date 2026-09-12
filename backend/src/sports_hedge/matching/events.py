@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 from pydantic import BaseModel, Field
 
 from sports_hedge.domain.football import CanonicalEvent
+from sports_hedge.facts.aliases import resolve_team_name
 
 
 class EventMatchResult(BaseModel):
@@ -33,8 +34,14 @@ class EventMatcher:
         if kickoff_delta > self.kickoff_tolerance:
             return EventMatchResult(matched=False, confidence=0.0, reasons=["kickoff_outside_tolerance"])
 
-        home_score = self._similarity(left.home_team, right.home_team)
-        away_score = self._similarity(left.away_team, right.away_team)
+        home_score = self._similarity(
+            resolve_team_name(left.home_team),
+            resolve_team_name(right.home_team),
+        )
+        away_score = self._similarity(
+            resolve_team_name(left.away_team),
+            resolve_team_name(right.away_team),
+        )
         competition_score = self._similarity(left.competition, right.competition)
         kickoff_score = 1.0 - (kickoff_delta.total_seconds() / self.kickoff_tolerance.total_seconds())
 

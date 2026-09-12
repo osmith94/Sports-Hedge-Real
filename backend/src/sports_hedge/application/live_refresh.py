@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sports_hedge.application.collector import CollectionReport, DiscoveredFixture
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
-from sports_hedge.venues.matchbook import MatchbookAuthError
+from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookDiscoveryError
 
 
 class LiveRefreshStatus(BaseModel):
@@ -119,7 +119,7 @@ class LiveRefreshCoordinator:
                 await tick()
             except asyncio.CancelledError:
                 raise
-            except (MatchbookAuthError, Exception):
+            except (MatchbookAuthError, MatchbookDiscoveryError, Exception):
                 pass
             try:
                 await asyncio.wait_for(
