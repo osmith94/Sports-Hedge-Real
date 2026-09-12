@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
 from sports_hedge.application.fixture_state import matchbook_fixture_state
+from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.arbitrage.watchlist.models import WatchLeg, WatchObservation
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
@@ -112,6 +113,7 @@ def test_watchlist_observation_history_describes_approach_without_causation() ->
 
 
 def test_live_refresh_status_is_matchbook_primary_and_server_loop_off_by_default() -> None:
+    get_live_refresh_coordinator().reset()
     client = TestClient(app)
     health = client.get("/health")
     assert health.status_code == 200

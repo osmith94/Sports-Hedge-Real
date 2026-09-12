@@ -309,6 +309,8 @@ def _polymarket_market_family(
         return MarketFamily.DRAW_NO_BET, None
     if "moneyline" in sports_type or "match result" in combined or "to win" in text:
         return MarketFamily.MATCH_RESULT, None
+    if "correct score" in combined:
+        return MarketFamily.CORRECT_SCORE, None
     if "to qualify" in combined:
         return MarketFamily.TO_QUALIFY, None
     raise VenueNormalizationError(f"Unsupported Polymarket sports market: {question}")

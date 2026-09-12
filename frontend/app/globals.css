@@ -160,6 +160,14 @@ tr:last-child td { border-bottom: none; }
 .demo-walkthrough .opp-card { margin-top: 12px; }
 
 .ops-section { margin-bottom: 16px; }
+.fixture-link { color: var(--accent); font-weight: 750; }
+.fixture-link:hover { text-decoration: underline; }
+.inventory-stack { display: grid; gap: 12px; }
+.inventory-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px; }
+.pa-detail-nav { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+.pa-chip { display: inline-flex; padding: 4px 7px; border-radius: 999px; font-size: 9px; font-weight: 800; letter-spacing: .06em; }
+.pa-chip-paper { color: var(--accent); border: 1px solid rgba(124, 242, 176, .24); background: var(--accent-soft); }
+.pa-chip-demo { color: var(--amber); border: 1px solid rgba(241, 191, 105, .24); background: rgba(241, 191, 105, .08); }
 .section-label { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .section-copy { color: var(--muted); font-size: 11px; margin: 0 0 10px; line-height: 1.5; max-width: 820px; }
 .opp-stack { display: grid; gap: 10px; }
@@ -255,7 +263,7 @@ tr:last-child td { border-bottom: none; }
   .sidebar-footer { margin-top: 16px; }
   .topbar { position: static; padding: 0 16px; }
   .main { padding: 18px 14px; }
-  .metric-grid { grid-template-columns: 1fr 1fr; }
+  .inventory-grid { grid-template-columns: 1fr; }
   .page-heading { align-items: flex-start; flex-direction: column; }
   .trend-card { grid-template-columns: 1fr 1fr; }
   .scan-control-grid, .scan-ops-row { grid-template-columns: 1fr 1fr; }

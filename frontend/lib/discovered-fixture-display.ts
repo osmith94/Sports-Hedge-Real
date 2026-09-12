@@ -30,6 +30,34 @@ export function polymarketCoverageLabel(item: DiscoveredFixture): string {
   return item.no_comparison_reason || "unmatched / no supported Polymarket coverage";
 }
 
+export function fixtureHref(item: DiscoveredFixture): string {
+  return `/arbitrage/fixtures/${encodeURIComponent(item.canonical_event_id)}`;
+}
+
+export function fixturePhaseLabel(item: DiscoveredFixture): string {
+  if (item.in_running) return "IN-PLAY";
+  const status = (item.fixture_status || "").toLowerCase();
+  if (status.includes("open") || status.includes("pre") || !status) return "PRE";
+  return item.fixture_status?.toUpperCase() || "PRE";
+}
+
+export function kickoffClockLabel(kickoffUtc: string): string {
+  const stamp = new Date(kickoffUtc);
+  if (Number.isNaN(stamp.getTime())) return "—";
+  return stamp.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "UTC",
+    hour12: false,
+  });
+}
+
+export function inventorySummaryLabel(item: DiscoveredFixture): string {
+  const discovered = item.discovered_market_count ?? item.matched_market_count;
+  const equivalent = item.matched_equivalent_count ?? item.matched_market_count;
+  return `${discovered} discovered · ${equivalent} equivalent`;
+}
+
 export function arbClaimLabel(item: DiscoveredFixture): string {
   return item.solver_is_arbitrage ? "solver-validated paper arb" : "not arbitrage";
 }
@@ -48,7 +76,7 @@ export function discoveredFixtureCells(item: DiscoveredFixture): Record<(typeof 
     Kickoff: item.kickoff_utc,
     "Matchbook status": item.fixture_status ?? "—",
     Polymarket: polymarketCoverageLabel(item),
-    "Matched markets": String(item.matched_market_count),
+    "Matched markets": inventorySummaryLabel(item),
     "Family / outcomes": [item.market_family, item.outcome_context].filter(Boolean).join(" · ") || "—",
     "Best Matchbook": decimalText(item.best_matchbook_price),
     "Best Polymarket": decimalText(item.best_polymarket_price),

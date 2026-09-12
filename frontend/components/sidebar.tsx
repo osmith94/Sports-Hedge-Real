@@ -52,7 +52,7 @@ export function Sidebar() {
             {group.items.map((item) => {
               const active =
                 item.href === "/"
-                  ? pathname === "/"
+                  ? pathname === "/" || pathname.startsWith("/arbitrage/fixtures")
                   : item.href === "/teams"
                     ? pathname.startsWith("/teams")
                     : pathname === item.href || pathname.startsWith(`${item.href}/`);
