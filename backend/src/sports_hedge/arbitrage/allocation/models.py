@@ -86,6 +86,11 @@ class BankrollAllocationPolicy(BaseModel):
     unknown_volatility_reduction: Decimal = Field(default=Decimal("0.05"), ge=0, lt=1)
     elevated_volatility_bps: Decimal = Field(default=Decimal("40"), ge=0)
     elevated_volatility_reduction: Decimal = Field(default=Decimal("0.15"), ge=0, lt=1)
+    football_regulation_playing_minutes: Decimal = Field(default=Decimal("90"), gt=0)
+    football_halftime_minutes: Decimal = Field(default=Decimal("15"), ge=0)
+    football_stoppage_and_settlement_buffer_minutes: Decimal = Field(
+        default=Decimal("15"), ge=0
+    )
 
 
 class AllocationBalance(BaseModel):

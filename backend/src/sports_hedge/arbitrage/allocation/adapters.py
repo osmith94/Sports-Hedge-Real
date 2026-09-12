@@ -25,18 +25,34 @@ from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.paper.models import PaperScanDecision
 from sports_hedge.paper.trades import PaperTrade, PaperTradeState
 
-FOOTBALL_REGULATION_MINUTES = Decimal("90")
-FOOTBALL_FIRST_HALF_MINUTES = Decimal("45")
-MODELLED_SETTLEMENT_BUFFER_MINUTES = Decimal("15")
-LOCK_BASIS_KICKOFF_PLUS_REGULATION_PLUS_SETTLEMENT_BUFFER = (
-    "kickoff_plus_regulation_plus_settlement_buffer"
+FOOTBALL_REGULATION_PLAYING_MINUTES = Decimal("90")
+FOOTBALL_FIRST_HALF_PLAYING_MINUTES = Decimal("45")
+FOOTBALL_HALFTIME_MINUTES = Decimal("15")
+MODELLED_STOPPAGE_AND_SETTLEMENT_BUFFER_MINUTES = Decimal("15")
+# 90 playing + 15 buffer without halftime. Not a defensible full-time wall-clock release.
+UNDERSTATED_FULL_TIME_ELAPSED_MINUTES = (
+    FOOTBALL_REGULATION_PLAYING_MINUTES + MODELLED_STOPPAGE_AND_SETTLEMENT_BUFFER_MINUTES
 )
-LOCK_BASIS_KICKOFF_PLUS_FIRST_HALF_PLUS_SETTLEMENT_BUFFER = (
-    "kickoff_plus_first_half_plus_settlement_buffer"
+LOCK_BASIS_KICKOFF_PLUS_ELAPSED_REGULATION_HALFTIME_STOPPAGE_SETTLEMENT = (
+    "kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer"
+)
+LOCK_BASIS_KICKOFF_PLUS_ELAPSED_FIRST_HALF_STOPPAGE_SETTLEMENT = (
+    "kickoff_plus_elapsed_first_half_stoppage_settlement_buffer"
 )
 KICKOFF_AS_RELEASE_LOCK_BASES = frozenset(
     {"time_to_kickoff", "kickoff", "time_until_kickoff"}
 )
+UNDERSTATED_ELAPSED_LOCK_BASES = frozenset(
+    {
+        "kickoff_plus_regulation_plus_settlement_buffer",
+        "kickoff_plus_first_half_plus_settlement_buffer",
+    }
+)
+
+# Back-compat aliases so older tests/imports fail loudly on understated totals.
+FOOTBALL_REGULATION_MINUTES = FOOTBALL_REGULATION_PLAYING_MINUTES
+FOOTBALL_FIRST_HALF_MINUTES = FOOTBALL_FIRST_HALF_PLAYING_MINUTES
+MODELLED_SETTLEMENT_BUFFER_MINUTES = MODELLED_STOPPAGE_AND_SETTLEMENT_BUFFER_MINUTES
 
 
 def request_from_complete_set(
@@ -241,11 +257,26 @@ def exposures_from_trades(trades: list[PaperTrade]) -> list[OpenPositionExposure
     return exposures
 
 
-def _modelled_post_kickoff_lock_minutes(market: CanonicalMarket) -> tuple[Decimal | None, str | None]:
-    """Return extra minutes after kickoff until a defensible capital-release estimate.
+def _elapsed_minutes_from_policy(policy: BankrollAllocationPolicy | None) -> tuple[Decimal, Decimal, Decimal]:
+    source = policy or BankrollAllocationPolicy()
+    return (
+        source.football_regulation_playing_minutes,
+        source.football_halftime_minutes,
+        source.football_stoppage_and_settlement_buffer_minutes,
+    )
+
+
+def _modelled_post_kickoff_lock_minutes(
+    market: CanonicalMarket,
+    *,
+    policy: BankrollAllocationPolicy | None = None,
+) -> tuple[Decimal | None, str | None]:
+    """Return extra wall-clock minutes after kickoff until a conservative release estimate.
 
     Pre-match arbs stay locked through settlement, not merely until kickoff.
-    Extra-time, penalties, second-half, and unknown scopes are omitted.
+    Full-time regulation uses elapsed match time (playing + halftime + stoppage/settlement
+    buffer), never 90 minutes of playing time alone. Extra-time, penalties, second-half,
+    and unknown scopes are omitted.
     """
 
     settlement = market.settlement
@@ -259,19 +290,18 @@ def _modelled_post_kickoff_lock_minutes(market: CanonicalMarket) -> tuple[Decima
         return None, None
     if settlement.extra_time_included is True or settlement.penalties_included is True:
         return None, None
+    playing, halftime, buffer = _elapsed_minutes_from_policy(policy)
     if period is FootballPeriod.FULL_TIME and settlement.scope is SettlementScope.REGULATION_TIME:
-        return (
-            FOOTBALL_REGULATION_MINUTES + MODELLED_SETTLEMENT_BUFFER_MINUTES,
-            LOCK_BASIS_KICKOFF_PLUS_REGULATION_PLUS_SETTLEMENT_BUFFER,
-        )
+        extra = playing + halftime + buffer
+        if extra <= UNDERSTATED_FULL_TIME_ELAPSED_MINUTES:
+            return None, None
+        return extra, LOCK_BASIS_KICKOFF_PLUS_ELAPSED_REGULATION_HALFTIME_STOPPAGE_SETTLEMENT
     if period is FootballPeriod.FIRST_HALF and settlement.scope in {
         SettlementScope.PERIOD_ONLY,
         SettlementScope.REGULATION_TIME,
     }:
-        return (
-            FOOTBALL_FIRST_HALF_MINUTES + MODELLED_SETTLEMENT_BUFFER_MINUTES,
-            LOCK_BASIS_KICKOFF_PLUS_FIRST_HALF_PLUS_SETTLEMENT_BUFFER,
-        )
+        extra = FOOTBALL_FIRST_HALF_PLAYING_MINUTES + buffer
+        return extra, LOCK_BASIS_KICKOFF_PLUS_ELAPSED_FIRST_HALF_STOPPAGE_SETTLEMENT
     return None, None
 
 
@@ -280,18 +310,20 @@ def lock_hours_until_capital_release(
     as_of: datetime | None,
     *,
     market: CanonicalMarket | None,
+    policy: BankrollAllocationPolicy | None = None,
 ) -> tuple[Decimal | None, str | None]:
     """Modelled hours until capital can be treated as released after settlement.
 
     Time-to-kickoff is never returned as a capital-release duration. In-play
-    remaining time is omitted without a match clock.
+    remaining time is omitted without a match clock. Full-time football never
+    uses kickoff + 105 minutes (playing + buffer without halftime).
     """
 
     if kickoff_utc is None or as_of is None or market is None:
         return None, None
     if as_of >= kickoff_utc:
         return None, None
-    extra_minutes, basis = _modelled_post_kickoff_lock_minutes(market)
+    extra_minutes, basis = _modelled_post_kickoff_lock_minutes(market, policy=policy)
     if extra_minutes is None or basis is None:
         return None, None
     hours_to_kickoff = Decimal(str((kickoff_utc - as_of).total_seconds())) / Decimal("3600")

@@ -487,6 +487,7 @@ class PaperScanService:
             left.market.event.kickoff_utc,
             draft.scanned_at,
             market=left.market,
+            policy=policy,
         )
         request = request_from_paper_decision(
             draft,

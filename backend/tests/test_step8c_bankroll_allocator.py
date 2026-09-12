@@ -11,8 +11,10 @@ from sports_hedge.api.paper import get_paper_audit_repository, get_paper_liquidi
 from sports_hedge.api.watchlist import get_watchlist_service
 from sports_hedge.application.complete_set import SOLVER_MODEL_GENERALIZED, SOLVER_MODEL_SIMPLE
 from sports_hedge.arbitrage.allocation.adapters import (
-    FOOTBALL_REGULATION_MINUTES,
-    MODELLED_SETTLEMENT_BUFFER_MINUTES,
+    FOOTBALL_HALFTIME_MINUTES,
+    FOOTBALL_REGULATION_PLAYING_MINUTES,
+    MODELLED_STOPPAGE_AND_SETTLEMENT_BUFFER_MINUTES,
+    UNDERSTATED_FULL_TIME_ELAPSED_MINUTES,
     lock_hours_until_capital_release,
     request_from_complete_set,
     request_from_payoff,
@@ -326,13 +328,13 @@ def test_acceptance_lock_duration_metric_does_not_change_arb_class() -> None:
     short = allocate(
         _demo_request(
             lock_hours=Decimal("0.5"),
-            lock_basis="kickoff_plus_regulation_plus_settlement_buffer",
+            lock_basis="kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer",
         )
     )
     long = allocate(
         _demo_request(
             lock_hours=Decimal("72"),
-            lock_basis="kickoff_plus_regulation_plus_settlement_buffer",
+            lock_basis="kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer",
         )
     )
     assert short.accepted and long.accepted
@@ -686,12 +688,50 @@ def test_pre_match_lock_hours_are_settlement_not_kickoff() -> None:
         kickoff, as_of, market=_regulation_market(kickoff=kickoff)
     )
     hours_to_kickoff = Decimal("2")
-    extra = (FOOTBALL_REGULATION_MINUTES + MODELLED_SETTLEMENT_BUFFER_MINUTES) / Decimal("60")
+    extra = (
+        FOOTBALL_REGULATION_PLAYING_MINUTES
+        + FOOTBALL_HALFTIME_MINUTES
+        + MODELLED_STOPPAGE_AND_SETTLEMENT_BUFFER_MINUTES
+    ) / Decimal("60")
+    kickoff_plus_105 = hours_to_kickoff + (UNDERSTATED_FULL_TIME_ELAPSED_MINUTES / Decimal("60"))
     assert hours is not None
+    assert extra * Decimal("60") > UNDERSTATED_FULL_TIME_ELAPSED_MINUTES
     assert hours == (hours_to_kickoff + extra).quantize(Decimal("0.0001"))
     assert hours > hours_to_kickoff
-    assert basis == "kickoff_plus_regulation_plus_settlement_buffer"
+    assert hours > kickoff_plus_105
+    assert basis == "kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer"
     assert basis != "time_to_kickoff"
+    assert basis != "kickoff_plus_regulation_plus_settlement_buffer"
+
+
+def test_pre_match_full_time_release_is_later_than_kickoff_plus_105_minutes() -> None:
+    kickoff = datetime(2026, 9, 13, 15, 0, tzinfo=UTC)
+    as_of = kickoff - timedelta(minutes=1)
+    hours, basis = lock_hours_until_capital_release(
+        kickoff, as_of, market=_regulation_market(kickoff=kickoff)
+    )
+    minutes_after_kickoff = (hours - Decimal("1") / Decimal("60")) * Decimal("60")
+    assert hours is not None
+    assert basis == "kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer"
+    assert minutes_after_kickoff > Decimal("105")
+    optimistic = BankrollAllocationPolicy(
+        football_halftime_minutes=Decimal("0"),
+        football_stoppage_and_settlement_buffer_minutes=Decimal("15"),
+    )
+    omitted_hours, omitted_basis = lock_hours_until_capital_release(
+        kickoff, as_of, market=_regulation_market(kickoff=kickoff), policy=optimistic
+    )
+    assert omitted_hours is None
+    assert omitted_basis is None
+    labelled_105 = allocate(
+        _demo_request(
+            lock_hours=Decimal("2") + Decimal("105") / Decimal("60"),
+            lock_basis="kickoff_plus_regulation_plus_settlement_buffer",
+        )
+    )
+    assert labelled_105.accepted is True
+    assert labelled_105.capital_turnover is None
+    assert labelled_105.expected_lock_basis is None
 
 
 def test_pre_match_lock_omitted_when_settlement_scope_unknown() -> None:

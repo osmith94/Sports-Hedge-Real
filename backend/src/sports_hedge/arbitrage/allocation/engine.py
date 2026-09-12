@@ -26,14 +26,20 @@ EXTERNAL_OPERATOR = "EXTERNAL_OPERATOR"
 KICKOFF_AS_RELEASE_LOCK_BASES = frozenset(
     {"time_to_kickoff", "kickoff", "time_until_kickoff"}
 )
+UNDERSTATED_ELAPSED_LOCK_BASES = frozenset(
+    {
+        "kickoff_plus_regulation_plus_settlement_buffer",
+        "kickoff_plus_first_half_plus_settlement_buffer",
+    }
+)
 
 
 def _capital_release_lock(request: AllocationRequest) -> tuple[Decimal | None, str | None]:
-    """Omit lock hours that are labelled as time-to-kickoff rather than settlement release."""
+    """Omit lock hours that understate wall-clock time to settlement/release."""
 
     basis = request.expected_lock_basis
     hours = request.expected_lock_duration_hours
-    if basis in KICKOFF_AS_RELEASE_LOCK_BASES:
+    if basis in KICKOFF_AS_RELEASE_LOCK_BASES or basis in UNDERSTATED_ELAPSED_LOCK_BASES:
         return None, None
     if hours is None or hours <= 0 or not basis:
         return None, None
