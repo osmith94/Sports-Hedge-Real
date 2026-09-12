@@ -731,27 +731,6 @@ def _recommendation_reductions(
                 input_status=ReductionInputStatus.KNOWN,
             )
         )
-    lock_hours, lock_basis = _capital_release_lock(request)
-    if lock_hours is not None:
-        lock_reason = (
-            f"{lock_basis} recorded; ranking only — capital stays locked until "
-            "clean unwind or paper settlement"
-        )
-        lock_status = ReductionInputStatus.KNOWN
-    else:
-        lock_reason = (
-            "capital stays locked until clean unwind or recorded settlement; "
-            "duration is not predicted from kickoff"
-        )
-        lock_status = ReductionInputStatus.UNKNOWN
-    factors.append(
-        ReductionFactor(
-            name="lock_duration",
-            amount=Decimal("0"),
-            reason=lock_reason,
-            input_status=lock_status,
-        )
-    )
     open_count = len(request.open_positions)
     if open_count:
         amount = min(

@@ -335,9 +335,10 @@ def test_acceptance_lock_duration_does_not_drive_allocator_or_predict_settlement
     assert ledger.capital_turnover is not None
     assert ledger.expected_lock_basis == "paper_operations_settlement"
     assert "not_guaranteed" in ledger.capital_turnover.label
-    lock_factor = next(factor for factor in missing.reduction_factors if factor.name == "lock_duration")
-    assert lock_factor.amount == 0
-    assert lock_factor.input_status is ReductionInputStatus.UNKNOWN
+    assert not any(
+        factor.name == "lock_duration" and factor.amount > 0
+        for factor in missing.reduction_factors
+    )
 
 
 def test_kickoff_labelled_lock_is_not_used_as_capital_release() -> None:
