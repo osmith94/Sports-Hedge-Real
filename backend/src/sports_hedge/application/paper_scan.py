@@ -17,6 +17,9 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.fees.models import FeeSnapshot
+from sports_hedge.fees.resolver import UnknownRequiredCostError, VenueCostResolver
+from sports_hedge.fx.models import FxRateUnavailable
+from sports_hedge.fx.service import FxRateService
 from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
@@ -42,12 +45,16 @@ class PaperScanService:
         depth_scanner: DepthAwareCompleteSetScanner | None = None,
         risk_scorer: ExecutionRiskScorer | None = None,
         settings: Settings | None = None,
+        fx_service: FxRateService | None = None,
+        cost_resolver: VenueCostResolver | None = None,
     ) -> None:
         self.market_intelligence = market_intelligence
         self.market_matcher = market_matcher or MarketMatcher()
         self.depth_scanner = depth_scanner or DepthAwareCompleteSetScanner()
         self.risk_scorer = risk_scorer or ExecutionRiskScorer()
         self.settings = settings or get_settings()
+        self.fx_service = fx_service
+        self.cost_resolver = cost_resolver
 
     def record_observation(self, observation: VenueMarketObservation) -> int:
         event_id = canonical_source_event_id(observation.market.event)
@@ -78,16 +85,28 @@ class PaperScanService:
 
         match = self.market_matcher.match(left.market, right.market)
         fees = list(fee_snapshots or [])
-        costs = list(venue_costs or [])
-        fx = _with_gbp_rate(list(fx_snapshots or []))
         rejections: list[str] = []
         assumption_labels: list[str] = []
+        evaluated_at = datetime.now(UTC)
+        costs, cost_resolve_reasons = self._resolve_costs(
+            left,
+            right,
+            venue_costs=venue_costs,
+            as_of=evaluated_at,
+        )
+        fx, fx_resolve_reasons = self._resolve_fx(
+            left,
+            right,
+            fx_snapshots=fx_snapshots,
+            as_of=evaluated_at,
+        )
+        rejections.extend(cost_resolve_reasons)
+        rejections.extend(fx_resolve_reasons)
         quote_age_ms = conservative_combined_age_ms(left.quote_age_ms, right.quote_age_ms)
         quote_age_basis = conservative_combined_basis(
             left.metadata.get("quote_age_basis") if isinstance(left.metadata, dict) else None,
             right.metadata.get("quote_age_basis") if isinstance(right.metadata, dict) else None,
         )
-        evaluated_at = datetime.now(UTC)
         for snapshot in fees:
             rejections.extend(
                 _cost_clock_reasons(snapshot.captured_at, kind="fee", as_of=evaluated_at)
@@ -218,6 +237,10 @@ class PaperScanService:
             )
             effective_fx[snapshot.currency] = rate
             assumption_labels.extend(labels)
+            if snapshot.check_status:
+                assumption_labels.append(
+                    f"fx_{snapshot.currency}:{snapshot.source}:{snapshot.check_status}"
+                )
         for observation in (left, right):
             rate = effective_fx[observation.native_currency]
             cost = scan_costs[observation.venue]
@@ -373,6 +396,57 @@ class PaperScanService:
             hedge_liquidity_ratio=hedge_liquidity_ratio,
         )
 
+    def _resolve_costs(
+        self,
+        left: VenueMarketObservation,
+        right: VenueMarketObservation,
+        *,
+        venue_costs: list[VenueCostSnapshot] | None,
+        as_of: datetime,
+    ) -> tuple[list[VenueCostSnapshot], list[str]]:
+        if venue_costs is not None:
+            return list(venue_costs), []
+        if self.cost_resolver is None:
+            return [], []
+        resolved: list[VenueCostSnapshot] = []
+        reasons: list[str] = []
+        for observation in (left, right):
+            action = (
+                MarketAction.BUY
+                if observation.venue is VenueName.POLYMARKET
+                else MarketAction.BACK
+            )
+            try:
+                resolved.append(
+                    self.cost_resolver.resolve(
+                        venue=observation.venue,
+                        market_class=observation.market.family,
+                        action=action,
+                        as_of=as_of,
+                    )
+                )
+            except UnknownRequiredCostError as exc:
+                reasons.append(exc.reason)
+        return resolved, reasons
+
+    def _resolve_fx(
+        self,
+        left: VenueMarketObservation,
+        right: VenueMarketObservation,
+        *,
+        fx_snapshots: list[FxRateSnapshot] | None,
+        as_of: datetime,
+    ) -> tuple[list[FxRateSnapshot], list[str]]:
+        if fx_snapshots is not None:
+            return _with_gbp_rate(list(fx_snapshots), as_of=as_of), []
+        if self.fx_service is None:
+            return _with_gbp_rate([], as_of=as_of), []
+        currencies = {left.native_currency, right.native_currency, "GBP"}
+        try:
+            return self.fx_service.paper_snapshots(currencies, as_of=as_of), []
+        except FxRateUnavailable as exc:
+            return _with_gbp_rate([], as_of=as_of), [exc.reason]
+
 
 def _cost_clock_reasons(captured_at: datetime, *, kind: str, as_of: datetime) -> list[str]:
     try:
@@ -385,13 +459,14 @@ def _cost_clock_reasons(captured_at: datetime, *, kind: str, as_of: datetime) ->
     return []
 
 
-def _with_gbp_rate(rates: list[FxRateSnapshot]) -> list[FxRateSnapshot]:
+def _with_gbp_rate(rates: list[FxRateSnapshot], *, as_of: datetime | None = None) -> list[FxRateSnapshot]:
     if not any(rate.currency.upper() == "GBP" for rate in rates):
         rates.append(
             FxRateSnapshot(
                 currency="GBP",
                 gbp_per_unit=Decimal("1"),
                 source="functional_currency",
+                captured_at=as_of or datetime.now(UTC),
             )
         )
     return rates

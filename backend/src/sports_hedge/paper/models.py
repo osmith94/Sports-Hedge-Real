@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, Field, model_validator
@@ -25,6 +25,10 @@ class FxRateSnapshot(BaseModel):
     captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     spread_bps: Decimal | None = Field(default=None, ge=0)
     conversion_slippage_bps: Decimal | None = Field(default=None, ge=0)
+    source_date: date | None = None
+    valuation_date: date | None = None
+    check_status: str | None = None
+    variance_bps: Decimal | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def normalize(self) -> "FxRateSnapshot":

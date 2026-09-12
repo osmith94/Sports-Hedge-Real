@@ -76,7 +76,7 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 .scan-control { margin-bottom: 16px; }
 .scan-form { padding: 15px 17px 16px; }
 .scan-control-grid { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)) auto; gap: 10px; align-items: end; }
-.scan-control-grid-ops { grid-template-columns: repeat(6, minmax(100px, 1fr)) auto; }
+.scan-control-grid-ops { grid-template-columns: repeat(3, minmax(100px, 1fr)) auto; }
 .assumption-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .assumption-strip span { border: 1px solid var(--line); background: var(--panel-raised); color: var(--muted); border-radius: 999px; padding: 5px 8px; font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .scan-field { display: grid; gap: 6px; min-width: 0; }

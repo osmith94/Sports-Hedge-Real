@@ -9,7 +9,7 @@ from sports_hedge.api.dislocations import router as dislocations_router
 from sports_hedge.api.historical import router as historical_router
 from sports_hedge.api.market_intelligence import router as market_intelligence_router
 from sports_hedge.api.notifications import router as notifications_router
-from sports_hedge.api.paper import router as paper_router, server_owned_refresh_tick
+from sports_hedge.api.paper import router as paper_router, server_owned_refresh_tick, get_accounting_schedule
 from sports_hedge.api.priority_alerts import router as priority_alerts_router
 from sports_hedge.api.watchlist import router as watchlist_router
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
@@ -21,10 +21,13 @@ from sports_hedge.domain.models import VenueCapabilities, VenueName
 async def lifespan(_app: FastAPI):
     coordinator = get_live_refresh_coordinator()
     coordinator.configure_from_settings()
+    schedule = get_accounting_schedule()
     await coordinator.start_server_loop(server_owned_refresh_tick)
+    await schedule.start()
     try:
         yield
     finally:
+        await schedule.stop()
         await coordinator.stop_server_loop()
 
 

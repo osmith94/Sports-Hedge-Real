@@ -152,139 +152,40 @@ def test_paper_pair_scan_api_is_research_only_and_returns_auditable_decision() -
         repository.close()
 
 
-def test_dashboard_explicit_zero_fee_is_accepted_as_assumed_zero() -> None:
-    repository = SqliteMarketIntelligenceRepository()
-    audit = SqlitePaperScanRepository()
-    watchlist_store = SqliteWatchlistRepository()
-    intelligence = MarketIntelligenceService(repository)
-    app.dependency_overrides[get_market_intelligence_service] = lambda: intelligence
-    app.dependency_overrides[get_paper_audit_repository] = lambda: audit
-    app.dependency_overrides[get_watchlist_service] = lambda: WatchlistService(watchlist_store)
+def test_live_collection_rejects_client_fx_and_fee_assumptions() -> None:
     client = TestClient(app)
-
-    payload = {
-        "left": {
-            "venue": "matchbook",
-            "event_payload": {
-                "id": 1001,
-                "name": "Newcastle United vs Chelsea",
-                "start": KICKOFF.isoformat(),
-                "competition-name": "Premier League",
-            },
-            "market_payload": {
-                "id": 2001,
-                "name": "Both Teams To Score",
-                "runners": [
-                    {
-                        "id": 301,
-                        "name": "Yes",
-                        "prices": [
-                            {"side": "back", "odds": "2.20", "available-amount": "100"},
-                            {"side": "lay", "odds": "2.22", "available-amount": "100"},
-                        ],
-                    },
-                    {
-                        "id": 302,
-                        "name": "No",
-                        "prices": [
-                            {"side": "back", "odds": "1.80", "available-amount": "100"},
-                            {"side": "lay", "odds": "1.82", "available-amount": "100"},
-                        ],
-                    },
-                ],
-            },
-            "observed_at": OBSERVED.isoformat(),
-            "native_currency": "GBP",
-            "quote_age_ms": 100,
+    response = client.post(
+        "/paper/collect",
+        json={
+            "fee_snapshots": [
+                {"venue": "matchbook", "profit_haircut_rate": "0.02", "source": "dashboard_input"}
+            ],
+            "fx_snapshots": [{"currency": "USD", "gbp_per_unit": "0.75", "source": "dashboard_input"}],
         },
-        "right": {
-            "venue": "polymarket",
-            "event_payload": {
-                "id": "pm-event-1",
-                "title": "Newcastle United vs Chelsea",
-                "startTime": KICKOFF.isoformat(),
-                "competition": "Premier League",
-            },
-            "market_payload": {
-                "id": "pm-market-1",
-                "question": "Both teams to score?",
-                "sportsMarketType": "both teams to score",
-                "outcomes": '["Yes", "No"]',
-                "clobTokenIds": '["yes-token", "no-token"]',
-                "description": "Resolves based on 90 minutes of regulation time.",
-            },
-            "books_by_token": {
-                "yes-token": {
-                    "bids": [{"price": "0.49", "size": "250"}],
-                    "asks": [{"price": "0.51", "size": "250"}],
-                },
-                "no-token": {
-                    "bids": [{"price": "0.41", "size": "300"}],
-                    "asks": [{"price": "0.43", "size": "300"}],
-                },
-            },
-            "observed_at": OBSERVED.isoformat(),
-            "quote_age_ms": 150,
-        },
-        "fee_snapshots": [
-            {"venue": "matchbook", "profit_haircut_rate": "0.02", "source": "dashboard_input"},
-            {
-                "venue": "polymarket",
-                "profit_haircut_rate": "0",
-                "zero_rate_basis": "assumed_zero",
-                "source": "dashboard_input",
-                "detail": "Dashboard-entered 0% is an operator assumption (assumed_zero), not a verified venue fee.",
-            },
-        ],
-        "fx_snapshots": [{"currency": "USD", "gbp_per_unit": "0.75", "source": "dashboard_input"}],
-        "venue_costs": [
-            venue_cost_payload("matchbook", "0.02", source="dashboard_input"),
-            venue_cost_payload(
-                "polymarket",
-                "0",
-                source="dashboard_input",
-                detail="Dashboard-entered 0% is an operator assumption (assumed_zero), not a verified venue fee.",
-            ),
-        ],
-        "maximum_execution_risk": 100,
-    }
-
-    try:
-        missing_basis = client.post(
-            "/paper/collect",
-            json={
-                "fee_snapshots": [
-                    {"venue": "polymarket", "profit_haircut_rate": "0", "source": "dashboard_input"}
-                ]
-            },
-        )
-        assert missing_basis.status_code == 422
-
-        response = client.post("/paper/scan/pair", json=payload)
-        assert response.status_code == 200
-        body = response.json()
-        assert body["eligible_for_paper_simulation"] is True
-        polymarket_fee = next(
-            snapshot for snapshot in body["fee_snapshots"] if snapshot["venue"] == "polymarket"
-        )
-        assert polymarket_fee["profit_haircut_rate"] in {"0", "0.0", "0.00"}
-        assert polymarket_fee["zero_rate_basis"] == "assumed_zero"
-        assert polymarket_fee["zero_rate_basis"] != "verified_zero"
-    finally:
-        app.dependency_overrides.clear()
-        audit.close()
-        watchlist_store.close()
-        repository.close()
+    )
+    assert response.status_code == 422
+    detail = str(response.json()["detail"]).lower()
+    assert "client" in detail or "backend" in detail
 
 
-def test_frontend_paper_request_sends_assumed_zero_for_dashboard_zero() -> None:
+def test_economics_status_is_backend_resolved() -> None:
+    client = TestClient(app)
+    response = client.get("/paper/economics-status")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data_kind"] == "backend_resolved"
+    assert "fx" in body
+    assert "venue_costs" in body
+
+
+def test_frontend_live_scanner_does_not_send_operator_fx_or_fees() -> None:
     repo = Path(__file__).resolve().parents[2]
     api_ts = (repo / "frontend" / "lib" / "api.ts").read_text(encoding="utf-8")
     scan_tsx = (repo / "frontend" / "components" / "run-paper-scan.tsx").read_text(encoding="utf-8")
-    assert "zero_rate_basis?: ZeroRateBasis" in api_ts
-    assert 'zero_rate_basis = "assumed_zero"' in api_ts
-    assert 'zero_rate_basis = "verified_zero"' not in api_ts
-    assert "not a verified venue fee" in api_ts
-    assert "dashboardFeeSnapshot" in scan_tsx
-    assert "DASHBOARD_ASSUMED_ZERO_DETAIL" in scan_tsx
-    assert "never verified" in scan_tsx
+    assert "dashboardFeeSnapshot" not in scan_tsx
+    assert "dashboardVenueCost" not in scan_tsx
+    assert "USD → GBP" not in scan_tsx
+    assert "Matchbook fee %" not in scan_tsx
+    assert "getEconomicsStatus" in scan_tsx
+    assert "fx_snapshots" not in api_ts.split("export type PaperCollectionRequest")[1].split("export type TrendSummary")[0]
+    assert "fee_snapshots" not in api_ts.split("export type PaperCollectionRequest")[1].split("export type TrendSummary")[0]

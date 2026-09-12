@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.api.market_intelligence import get_market_intelligence_service
 from sports_hedge.api.priority_alerts import get_priority_alert_service
@@ -30,6 +30,9 @@ from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.models import FeeSnapshot
+from sports_hedge.fees.resolver import VenueCostResolver
+from sports_hedge.fx.repository import SqliteFxRateRepository
+from sports_hedge.fx.service import FxRateService
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.normalization.venues import VenueNormalizationError
 from sports_hedge.paper.audit import (
@@ -81,9 +84,6 @@ class PaperCollectionRequest(BaseModel):
     polymarket_event_filters: dict[str, Any] = Field(default_factory=dict)
     matchbook_market_filters: dict[str, Any] = Field(default_factory=dict)
     polymarket_market_filters: dict[str, Any] = Field(default_factory=dict)
-    fee_snapshots: list[FeeSnapshot] = Field(default_factory=list)
-    venue_costs: list[VenueCostSnapshot] = Field(default_factory=list)
-    fx_snapshots: list[FxRateSnapshot] = Field(default_factory=list)
     capital_limit_gbp: Decimal | None = Field(default=None, gt=0)
     minimum_net_edge: Decimal = Field(default=Decimal("0.005"), ge=0)
     maximum_execution_risk: int = Field(default=60, ge=0, le=100)
@@ -92,6 +92,27 @@ class PaperCollectionRequest(BaseModel):
     recent_volatility_bps: float = Field(default=0.0, ge=0)
     max_event_pairs: int = Field(default=25, ge=1, le=100)
     max_market_pairs_per_event: int = Field(default=50, ge=1, le=200)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_client_economics(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            for key in ("fee_snapshots", "venue_costs", "fx_snapshots"):
+                if value.get(key):
+                    raise ValueError(
+                        "live collection rejects client FX and venue-cost assumptions; "
+                        "economics resolve on the backend"
+                    )
+                value.pop(key, None)
+        return value
+
+
+class EconomicsStatus(BaseModel):
+    as_of: datetime
+    data_kind: str = "backend_resolved"
+    fx: list[dict[str, Any]] = Field(default_factory=list)
+    venue_costs: list[dict[str, Any]] = Field(default_factory=list)
+    issues: list[str] = Field(default_factory=list)
 
 
 @lru_cache
@@ -104,10 +125,52 @@ def get_paper_audit_repository() -> SqlitePaperScanRepository:
     return SqlitePaperScanRepository(database)
 
 
+@lru_cache
+def get_fx_rate_repository() -> SqliteFxRateRepository:
+    settings = get_settings()
+    database = settings.fx_db_path
+    if database != ":memory:":
+        path = Path(database)
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return SqliteFxRateRepository(database)
+
+
+def get_fx_rate_service() -> FxRateService:
+    settings = get_settings()
+    return FxRateService(
+        get_fx_rate_repository(),
+        check_tolerance_bps=Decimal(settings.fx_check_tolerance_bps),
+        stale_after_days=settings.fx_stale_after_days,
+    )
+
+
+@lru_cache
+def get_accounting_schedule():
+    from sports_hedge.fx.schedule import AccountingSchedule
+
+    settings = get_settings()
+    return AccountingSchedule(
+        get_fx_rate_service(),
+        journal=get_paper_journal_holder().journal,
+        enabled=settings.accounting_schedule_enabled,
+    )
+
+
+@lru_cache
+def get_venue_cost_resolver() -> VenueCostResolver:
+    return VenueCostResolver()
+
+
 def get_paper_scan_service(
     intelligence: MarketIntelligenceService = Depends(get_market_intelligence_service),
+    fx: FxRateService = Depends(get_fx_rate_service),
+    costs: VenueCostResolver = Depends(get_venue_cost_resolver),
 ) -> PaperScanService:
-    return PaperScanService(intelligence)
+    return PaperScanService(
+        intelligence,
+        fx_service=fx,
+        cost_resolver=costs,
+    )
 
 
 @lru_cache
@@ -174,9 +237,9 @@ def scan_pair(
         decision = service.scan_pair(
             left,
             right,
-            fee_snapshots=request.fee_snapshots,
-            venue_costs=request.venue_costs,
-            fx_snapshots=request.fx_snapshots,
+            fee_snapshots=request.fee_snapshots or None,
+            venue_costs=request.venue_costs or None,
+            fx_snapshots=request.fx_snapshots or None,
             capital_limit_gbp=request.capital_limit_gbp,
             minimum_net_edge=request.minimum_net_edge,
             maximum_execution_risk=request.maximum_execution_risk,
@@ -195,6 +258,40 @@ def scan_pair(
         return decision
     except (VenueNormalizationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/economics-status", response_model=EconomicsStatus)
+def economics_status(
+    fx: FxRateService = Depends(get_fx_rate_service),
+    costs: VenueCostResolver = Depends(get_venue_cost_resolver),
+) -> EconomicsStatus:
+    as_of = datetime.now(UTC)
+    issues: list[str] = []
+    fx_rows = []
+    try:
+        for rate in fx.economics_status(as_of=as_of):
+            fx_rows.append(
+                {
+                    "currency": rate.currency,
+                    "gbp_per_unit": str(rate.gbp_per_unit),
+                    "source_date": rate.source_date.isoformat(),
+                    "valuation_date": rate.valuation_date.isoformat(),
+                    "status": rate.status.value,
+                    "primary_source": rate.primary_source,
+                    "variance_bps": None if rate.variance_bps is None else str(rate.variance_bps),
+                    "check_source": rate.check_source,
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        issues.append(str(exc))
+    if not any(row["currency"] == "USD" for row in fx_rows):
+        issues.append("missing_fx_rate:USD")
+    venue_rows = [
+        snapshot.model_dump(mode="json")
+        for snapshot in costs.list_status(as_of=as_of)
+        if snapshot.market_class in {"both_teams_to_score", "match_result", "player_props"}
+    ]
+    return EconomicsStatus(as_of=as_of, fx=fx_rows, venue_costs=venue_rows, issues=issues)
 
 
 @router.get("/live-refresh", response_model=LiveRefreshStatus)
@@ -277,7 +374,11 @@ async def server_owned_refresh_tick() -> None:
     """Background tick used when PAPER_LIVE_REFRESH_ENABLED is true."""
 
     coordinator = get_live_refresh_coordinator()
-    service = get_paper_scan_service(get_market_intelligence_service())
+    service = get_paper_scan_service(
+        get_market_intelligence_service(),
+        get_fx_rate_service(),
+        get_venue_cost_resolver(),
+    )
     audit = get_paper_audit_repository()
     from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
 

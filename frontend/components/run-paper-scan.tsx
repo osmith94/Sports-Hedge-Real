@@ -4,11 +4,10 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import {
-  DASHBOARD_ASSUMED_ZERO_DETAIL,
+  EconomicsStatus,
   PaperCollectionReport,
   PaperCollectionRequest,
-  dashboardFeeSnapshot,
-  dashboardVenueCost,
+  getEconomicsStatus,
   getLiveRefreshStatus,
   runPaperCollection,
 } from "../lib/api";
@@ -47,11 +46,29 @@ function reportSummary(report: PaperCollectionReport): string {
   return `${report.matched_event_pairs} event pair${report.matched_event_pairs === 1 ? "" : "s"} · ${report.matched_market_pairs} market pair${report.matched_market_pairs === 1 ? "" : "s"} · ${eligible} paper-eligible · ${report.issues.length} issue${report.issues.length === 1 ? "" : "s"}`;
 }
 
+function fxStatusLine(status: EconomicsStatus | null): string {
+  if (!status) return "FX backend-resolved · loading";
+  const usd = status.fx.find((row) => row.currency === "USD");
+  if (!usd) {
+    const missing = status.issues.find((issue) => issue.includes("missing_fx_rate")) || "missing USD rate";
+    return `FX USD/GBP unavailable · ${missing}`;
+  }
+  const sourceDate = usd.source_date.slice(0, 10);
+  const source = usd.primary_source.includes("ecb") ? "ECB" : usd.primary_source;
+  return `FX USD/GBP ${usd.gbp_per_unit} · ${source} ${sourceDate} · ${usd.status}`;
+}
+
+function costStatusLine(status: EconomicsStatus | null): string {
+  if (!status) return "Venue costs backend-resolved · loading";
+  const matchbook = status.venue_costs.find((row) => row.venue === "matchbook");
+  const polymarket = status.venue_costs.find((row) => row.venue === "polymarket");
+  if (!matchbook || !polymarket) return "Venue costs incomplete · fail closed if required rule missing";
+  const mb = matchbook.rate ? `${(Number(matchbook.rate) * 100).toFixed(2)}% ${matchbook.fee_basis}` : matchbook.fee_basis;
+  return `Costs Matchbook ${mb} · Polymarket ${polymarket.fee_basis} · ${matchbook.source}`;
+}
+
 export function RunPaperScan() {
   const router = useRouter();
-  const [usdToGbp, setUsdToGbp] = useState("");
-  const [matchbookFeePercent, setMatchbookFeePercent] = useState("");
-  const [polymarketFeePercent, setPolymarketFeePercent] = useState("");
   const [capitalLimit, setCapitalLimit] = useState("");
   const [minNetArbPercent, setMinNetArbPercent] = useState(
     String(DEFAULT_SCANNER_ASSUMPTIONS.minimumNetArb * 100),
@@ -61,14 +78,12 @@ export function RunPaperScan() {
   const [state, setState] = useState<ScanState>({ kind: "idle" });
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [intervalSeconds, setIntervalSeconds] = useState(30);
+  const [economics, setEconomics] = useState<EconomicsStatus | null>(null);
   const payloadRef = useRef<PaperCollectionRequest>({ maximum_execution_risk: 60 });
   const inFlightRef = useRef(false);
   const collectRef = useRef<() => Promise<void>>(async () => undefined);
 
   const buildPayload = useCallback((): PaperCollectionRequest => {
-    const fxRate = optionalPositive(usdToGbp, "USD→GBP rate");
-    const matchbookFee = optionalPercentRate(matchbookFeePercent, "Matchbook fee");
-    const polymarketFee = optionalPercentRate(polymarketFeePercent, "Polymarket fee");
     const capital = optionalPositive(capitalLimit, "Capital limit");
     const minNet = optionalPercentRate(minNetArbPercent, "Minimum net arb");
     const risk = Number(maxRisk);
@@ -80,32 +95,8 @@ export function RunPaperScan() {
     };
     if (capital) payload.capital_limit_gbp = capital;
     if (minNet) payload.minimum_net_edge = minNet;
-    if (fxRate) {
-      payload.fx_snapshots = [
-        { currency: "USD", gbp_per_unit: fxRate, source: "dashboard_input" },
-      ];
-    }
-    const fees: NonNullable<PaperCollectionRequest["fee_snapshots"]> = [];
-    const venueCosts: NonNullable<PaperCollectionRequest["venue_costs"]> = [];
-    if (matchbookFee !== undefined) {
-      fees.push(dashboardFeeSnapshot("matchbook", matchbookFee));
-      venueCosts.push(dashboardVenueCost("matchbook", matchbookFee));
-    }
-    if (polymarketFee !== undefined) {
-      fees.push(dashboardFeeSnapshot("polymarket", polymarketFee));
-      venueCosts.push(dashboardVenueCost("polymarket", polymarketFee));
-    }
-    if (fees.length) payload.fee_snapshots = fees;
-    if (venueCosts.length) payload.venue_costs = venueCosts;
     return payload;
-  }, [
-    capitalLimit,
-    matchbookFeePercent,
-    maxRisk,
-    minNetArbPercent,
-    polymarketFeePercent,
-    usdToGbp,
-  ]);
+  }, [capitalLimit, maxRisk, minNetArbPercent]);
 
   useEffect(() => {
     try {
@@ -114,6 +105,14 @@ export function RunPaperScan() {
       payloadRef.current = { maximum_execution_risk: 60 };
     }
   }, [buildPayload]);
+
+  const refreshEconomics = useCallback(async () => {
+    try {
+      setEconomics(await getEconomicsStatus());
+    } catch {
+      setEconomics(null);
+    }
+  }, []);
 
   const collect = useCallback(async () => {
     if (inFlightRef.current) return;
@@ -125,6 +124,7 @@ export function RunPaperScan() {
       payloadRef.current = payload;
       const report = await runPaperCollection(payload);
       setState({ kind: "success", report });
+      await refreshEconomics();
       router.refresh();
     } catch (error) {
       setState({
@@ -135,11 +135,15 @@ export function RunPaperScan() {
       inFlightRef.current = false;
       setLoading(false);
     }
-  }, [buildPayload, router]);
+  }, [buildPayload, refreshEconomics, router]);
 
   useEffect(() => {
     collectRef.current = collect;
   }, [collect]);
+
+  useEffect(() => {
+    void refreshEconomics();
+  }, [refreshEconomics]);
 
   useEffect(() => {
     let cancelled = false;
@@ -194,13 +198,8 @@ export function RunPaperScan() {
           <span>Trigger {triggerDisplay} net arb</span>
           <span>Capital {capitalLimit.trim() ? `£${capitalLimit.trim()}` : "unset"}</span>
           <span>Max risk {maxRisk}/100</span>
-          <span>
-            Fees{" "}
-            {matchbookFeePercent || polymarketFeePercent
-              ? "dashboard assumption (0% is assumed_zero, never verified)"
-              : "fail-closed if missing"}
-          </span>
-          <span>FX {usdToGbp.trim() ? "dashboard USD→GBP" : "fail-closed if missing"}</span>
+          <span>{fxStatusLine(economics)}</span>
+          <span>{costStatusLine(economics)}</span>
           <span>Cadence {intervalSeconds}s</span>
         </div>
 
@@ -213,36 +212,6 @@ export function RunPaperScan() {
               onChange={(event) => setMinNetArbPercent(event.target.value)}
               placeholder="1.00"
               aria-label="Minimum net arbitrage trigger percent"
-            />
-          </label>
-          <label className="scan-field">
-            <span>USD → GBP</span>
-            <input
-              inputMode="decimal"
-              value={usdToGbp}
-              onChange={(event) => setUsdToGbp(event.target.value)}
-              placeholder="e.g. 0.75"
-              aria-label="USD to GBP paper FX rate"
-            />
-          </label>
-          <label className="scan-field">
-            <span>Matchbook fee %</span>
-            <input
-              inputMode="decimal"
-              value={matchbookFeePercent}
-              onChange={(event) => setMatchbookFeePercent(event.target.value)}
-              placeholder="enter assumption"
-              aria-label="Matchbook paper fee assumption percent"
-            />
-          </label>
-          <label className="scan-field">
-            <span>Polymarket fee %</span>
-            <input
-              inputMode="decimal"
-              value={polymarketFeePercent}
-              onChange={(event) => setPolymarketFeePercent(event.target.value)}
-              placeholder="enter assumption"
-              aria-label="Polymarket paper fee assumption percent"
             />
           </label>
           <label className="scan-field">
@@ -283,8 +252,9 @@ export function RunPaperScan() {
         </label>
 
         <div className="scan-note">
-          No orders are submitted. Blank fee or FX assumptions keep affected results diagnostic and
-          ineligible for paper simulation rather than inventing costs. {DASHBOARD_ASSUMED_ZERO_DETAIL}
+          FX and venue fees are backend-resolved with timestamped provenance. The operator console
+          cannot enter USD→GBP or venue-fee percentages for the solver. Missing or stale required
+          inputs fail closed. {economics?.data_kind === "backend_resolved" ? "Data: backend_resolved." : ""}
         </div>
 
         {state.kind === "success" ? (
