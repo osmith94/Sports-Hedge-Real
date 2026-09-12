@@ -41,7 +41,11 @@ from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
 from sports_hedge.paper.chain import SimulatePaperFillRequest, SimulatePaperFillResult
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
-from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookClient
+from sports_hedge.venues.matchbook import (
+    MatchbookAuthError,
+    MatchbookClient,
+    MatchbookDiscoveryError,
+)
 from sports_hedge.venues.polymarket import PolymarketClient
 
 router = APIRouter(prefix="/paper", tags=["paper"])
@@ -227,7 +231,7 @@ async def collect_read_only_market_data(
 
     try:
         return await coordinator.run_cycle(runner)
-    except MatchbookAuthError as exc:
+    except (MatchbookAuthError, MatchbookDiscoveryError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -287,7 +291,7 @@ async def server_owned_refresh_tick() -> None:
 
     try:
         await coordinator.run_cycle(runner)
-    except (MatchbookAuthError, httpx.HTTPError):
+    except (MatchbookAuthError, MatchbookDiscoveryError, httpx.HTTPError):
         return
 
 

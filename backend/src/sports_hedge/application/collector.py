@@ -189,6 +189,7 @@ class ReadOnlyCrossVenueCollector:
         polymarket_payload = await self.polymarket.list_events(**(polymarket_event_filters or {}))
         raw_matchbook_events = _extract_matchbook_items(matchbook_payload, "events")
         raw_polymarket_events = [item for item in polymarket_payload if isinstance(item, dict)]
+        issues.extend(_matchbook_discovery_issues(matchbook_payload))
         scoped_matchbook_events, scope_issues = _scope_matchbook_events(raw_matchbook_events)
         issues.extend(scope_issues)
 
@@ -544,6 +545,19 @@ def _discovered_fixture(
         no_comparison_reason=None if polymarket_matched else UNMATCHED_POLYMARKET_COVERAGE,
         solver_is_arbitrage=False,
     )
+
+
+def _matchbook_discovery_issues(payload: dict[str, Any]) -> list[CollectorIssue]:
+    if not payload.get("truncated"):
+        return []
+    detail = payload.get("truncation-detail") or payload.get("truncation_detail")
+    return [
+        CollectorIssue(
+            stage="matchbook_discovery",
+            venue=VenueName.MATCHBOOK,
+            detail=str(detail or "Matchbook event list truncated at safety cap"),
+        )
+    ]
 
 
 def _scope_matchbook_events(

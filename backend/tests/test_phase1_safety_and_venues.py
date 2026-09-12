@@ -22,9 +22,16 @@ async def test_matchbook_login_and_event_read_are_read_only() -> None:
         seen_paths.append(request.url.path)
         if request.url.path == "/bpapi/rest/security/session":
             return httpx.Response(200, json={"session-token": "paper-session"})
+        if request.url.path == "/edge/rest/lookups/sports":
+            return httpx.Response(
+                200,
+                json={"sports": [{"id": 15, "name": "Football", "type": "SPORT"}]},
+            )
         if request.url.path == "/edge/rest/events":
             assert request.headers["session-token"] == "paper-session"
             assert request.url.params["currency"] == "GBP"
+            assert request.url.params["sport-ids"] == "15"
+            assert request.url.params.get("offset") == "0"
             return httpx.Response(200, json={"events": []})
         return httpx.Response(404)
 
@@ -40,8 +47,12 @@ async def test_matchbook_login_and_event_read_are_read_only() -> None:
         venue = MatchbookClient(settings, client=http)
         result = await venue.list_events()
 
-    assert result == {"events": []}
-    assert seen_paths == ["/bpapi/rest/security/session", "/edge/rest/events"]
+    assert result["events"] == []
+    assert seen_paths == [
+        "/bpapi/rest/security/session",
+        "/edge/rest/lookups/sports",
+        "/edge/rest/events",
+    ]
     assert venue.capabilities.execution_enabled is False
     assert not hasattr(venue, "place_order")
 

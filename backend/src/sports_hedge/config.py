@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     matchbook_currency: Literal["GBP", "USD", "EUR", "AUD", "CAD", "HKD"] = "GBP"
     matchbook_price_depth: int = Field(default=5, ge=1, le=50)
     matchbook_minimum_liquidity: float = Field(default=2.0, ge=0)
+    # Provider-side event paging. sport-ids is resolved via GET /edge/rest/lookups/sports.
+    matchbook_event_per_page: int = Field(default=100, ge=1, le=100)
+    matchbook_event_max_pages: int = Field(default=10, ge=1, le=50)
+    matchbook_fixture_lookback_hours: int = Field(default=6, ge=1, le=24)
+    matchbook_fixture_lookahead_hours: int = Field(default=72, ge=1, le=168)
 
     polymarket_gamma_base_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_base_url: str = "https://clob.polymarket.com"
