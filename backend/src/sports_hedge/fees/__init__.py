@@ -9,7 +9,13 @@ from sports_hedge.fees.cost import (
     VenueCostSnapshot,
     require_aware_utc,
 )
-from sports_hedge.fees.effective import CostRuleError, EffectiveLegEconomics, apply_venue_costs
+from sports_hedge.fees.effective import (
+    CostRuleError,
+    EffectiveCloseEconomics,
+    EffectiveLegEconomics,
+    apply_closing_action_costs,
+    apply_venue_costs,
+)
 from sports_hedge.fees.models import FeeSnapshot
 from sports_hedge.fees.resolver import (
     UnknownRequiredCostError,
@@ -21,6 +27,7 @@ from sports_hedge.fees.resolver import (
 __all__ = [
     "CostKnownStatus",
     "CostRuleError",
+    "EffectiveCloseEconomics",
     "EffectiveLegEconomics",
     "FeeBasis",
     "FeeScope",
@@ -31,6 +38,7 @@ __all__ = [
     "VenueCostResolver",
     "VenueCostRule",
     "VenueCostSnapshot",
+    "apply_closing_action_costs",
     "apply_venue_costs",
     "phase1_seed_rules",
     "require_aware_utc",

@@ -51,6 +51,7 @@ from sports_hedge.paper.trades import (
     PaperTradeBookSummary,
     PaperTradeDetail,
 )
+from sports_hedge.paper.unwind.models import PaperClosePlanRequest, UnwindDecision
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
@@ -523,6 +524,30 @@ def paper_trade_detail(
         return operations.trade_detail(trade_id)
     except PaperOperationsError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/trades/{trade_id}/close-plan", response_model=UnwindDecision)
+def paper_trade_close_plan(
+    trade_id: str,
+    request: PaperClosePlanRequest,
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> UnwindDecision:
+    """PAPER-ONLY close-plan evaluation. Does not release capital or place orders."""
+
+    if request.places_orders:
+        raise HTTPException(status_code=422, detail="close-plan evaluation cannot place orders")
+    try:
+        return operations.evaluate_unwind(
+            trade_id,
+            quotes=request.quotes,
+            fx=request.fx,
+            policy=request.policy,
+            scarcity=request.scarcity,
+        )
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/trades/{trade_id}/settle", response_model=PaperTradeDetail)

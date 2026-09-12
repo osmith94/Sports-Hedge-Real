@@ -26,6 +26,7 @@ from sports_hedge.arbitrage.watchlist.models import NearOpportunity, Opportunity
 from sports_hedge.arbitrage.watchlist.service import WatchlistService, _opportunity_id
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
+from sports_hedge.fees.cost import MarketAction
 from sports_hedge.paper.chain import (
     PaperChainStep,
     PaperChainTrace,
@@ -47,6 +48,14 @@ from sports_hedge.paper.trades import (
     PaperTradeLeg,
     PaperTradeState,
 )
+from sports_hedge.paper.unwind import (
+    PaperUnwindEngine,
+    UnwindDecision,
+    UnwindEvaluationRequest,
+    UnwindIdentityError,
+    position_from_trade,
+)
+from sports_hedge.paper.unwind.models import CapitalScarcityInput, ReverseQuote, UnwindPolicy
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger, SqlitePaperTradeRepository
 
 
@@ -417,6 +426,53 @@ class PaperOperationsService:
             journals=self.journal.list_entries(opportunity_id=trade.opportunity_id),
         )
 
+    def evaluate_unwind(
+        self,
+        trade_id: str,
+        *,
+        quotes: list[ReverseQuote],
+        fx=None,
+        policy: UnwindPolicy | None = None,
+        scarcity: CapitalScarcityInput | None = None,
+        evaluated_at: datetime | None = None,
+    ) -> UnwindDecision:
+        """Analytical close plan. Does not post journals or mutate pool balances."""
+
+        if self.trades is None:
+            raise PaperOperationsError("paper_trade_repository_unavailable")
+        trade = self.trades.get(trade_id)
+        if trade is None:
+            raise PaperOperationsError("unknown_trade")
+        if trade.state is PaperTradeState.CLOSED:
+            raise PaperOperationsError("trade_already_closed")
+        try:
+            position = position_from_trade(trade)
+        except UnwindIdentityError as exc:
+            raise PaperOperationsError(str(exc)) from exc
+        snapshots = list(fx) if fx is not None else list(trade.fx_snapshots)
+        decision = PaperUnwindEngine().evaluate(
+            UnwindEvaluationRequest(
+                position=position,
+                quotes=quotes,
+                fx=snapshots,
+                policy=policy or UnwindPolicy(),
+                scarcity=scarcity or CapitalScarcityInput(),
+                evaluated_at=evaluated_at,
+            )
+        )
+        trade.audit.append(
+            PaperTradeAuditEvent(
+                occurred_at=evaluated_at or datetime.now(UTC),
+                event_type=PaperTradeAuditEventType.CLOSE_PLAN_EVALUATED,
+                detail=(
+                    f"{decision.recommendation.value}:{decision.decision_reason};"
+                    "conditionally_releasable_is_not_spendable"
+                ),
+            )
+        )
+        self.trades.save(trade)
+        return decision
+
     def book_summary(self) -> PaperTradeBookSummary:
         active = self.list_active_trades()
         closed = self.list_closed_trades()
@@ -565,6 +621,14 @@ class PaperOperationsService:
                     displayed_odds=plan_leg.displayed_odds,
                     filled_odds=filled_odds,
                     source_market_id=plan_leg.source_market_id,
+                    source_event_id=plan.canonical_event_id,
+                    source_runner_id=plan_leg.source_runner_id,
+                    source_contract_id=plan_leg.source_runner_id if plan_leg.venue is VenueName.POLYMARKET else None,
+                    opening_action=(
+                        MarketAction.BUY if plan_leg.venue is VenueName.POLYMARKET else MarketAction.BACK
+                    ),
+                    canonical_state=plan_leg.outcome,
+                    settlement_fingerprint_key=opportunity.settlement_key,
                     fill_id=fill_id,
                     fill_kind=fill_kind,
                     capital_source=capital,
@@ -645,6 +709,11 @@ class PaperOperationsService:
         guaranteed = None
         if plan.decision.depth_scan is not None and plan.decision.depth_scan.solution.is_arbitrage:
             guaranteed = plan.decision.depth_scan.solution.guaranteed_profit
+        elif (
+            plan.decision.payoff_scan is not None
+            and plan.decision.payoff_scan.solution.is_arbitrage
+        ):
+            guaranteed = plan.decision.payoff_scan.solution.minimum_state_pnl
         home = opportunity.home_team
         away = opportunity.away_team
         fixture = None
@@ -659,6 +728,7 @@ class PaperOperationsService:
             canonical_event_id=plan.canonical_event_id,
             canonical_market_id=plan.canonical_market_id,
             settlement_key=opportunity.settlement_key,
+            solver_model=plan.decision.solver_model,
             market_family=opportunity.market_family,
             period=opportunity.period,
             competition=opportunity.competition,

@@ -1,0 +1,384 @@
+"""Paper-only mark-to-market and hold-vs-unwind decision engine.
+
+Prices every required reverse transaction from current marginal depth, fees,
+FX, slippage and freshness. Does not post balances, allocate capital, or
+place venue orders.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from decimal import Decimal
+
+from sports_hedge.fees.cost import FeeBasis, MarketAction
+from sports_hedge.fees.effective import CostRuleError, apply_closing_action_costs
+from sports_hedge.liquidity.reverse import walk_lay_to_cover_payout, walk_prediction_sell
+from sports_hedge.paper.models import FxRateSnapshot
+from sports_hedge.paper.unwind.mechanics import close_action_for, mechanics_for_venue
+from sports_hedge.paper.unwind.models import (
+    CloseLegPlan,
+    ClosePlan,
+    OpenPaperLeg,
+    OpenPaperPosition,
+    ReverseQuote,
+    UnwindDecision,
+    UnwindEvaluationRequest,
+    UnwindRecommendation,
+    VenueCloseMechanics,
+)
+from sports_hedge.paper.unwind.policy import decide_recommendation
+from sports_hedge.risk.execution import ExecutionRiskInputs, ExecutionRiskResult, ExecutionRiskScorer
+
+
+class PaperUnwindEngine:
+    """Evaluate an already-open paper position against reverse-side liquidity."""
+
+    def __init__(self, risk: ExecutionRiskScorer | None = None) -> None:
+        self.risk = risk or ExecutionRiskScorer()
+
+    def evaluate(self, request: UnwindEvaluationRequest) -> UnwindDecision:
+        evaluated_at = request.evaluated_at or datetime.now(UTC)
+        position = request.position
+        reasons: list[str] = []
+        quotes = {
+            (item.venue, item.source_market_id, item.source_runner_id, item.canonical_outcome): item
+            for item in request.quotes
+        }
+        fx = {item.currency.upper(): item for item in request.fx}
+
+        legs: list[CloseLegPlan] = []
+        for open_leg in position.legs:
+            quote = quotes.get(
+                (
+                    open_leg.venue,
+                    open_leg.source_market_id,
+                    open_leg.source_runner_id,
+                    open_leg.canonical_outcome,
+                )
+            )
+            legs.append(
+                self._close_leg(
+                    position,
+                    open_leg,
+                    quote,
+                    fx=fx,
+                    policy_max_age=request.policy.max_quote_age_ms,
+                    evaluated_at=evaluated_at,
+                    reasons=reasons,
+                )
+            )
+
+        fully = bool(legs) and all(leg.executable for leg in legs)
+        if reasons:
+            fully = False
+
+        if fully:
+            commission_fail = _apply_deferred_profit_commission(legs, position, quotes)
+            reasons.extend(commission_fail)
+            if commission_fail:
+                fully = False
+
+        exit_pnl: Decimal | None = None
+        if fully:
+            exit_pnl = Decimal("0")
+            for plan, open_leg in zip(legs, position.legs, strict=True):
+                rate = _fx_rate(open_leg.native_currency, fx, reasons)
+                if rate is None:
+                    fully = False
+                    exit_pnl = None
+                    break
+                plan.gbp_close_pnl = plan.native_close_pnl * rate
+                exit_pnl += plan.gbp_close_pnl
+
+        risk = self._risk(position, legs, request, evaluated_at) if fully else None
+        if fully and risk is not None:
+            for plan in legs:
+                if plan.fill_confidence is None:
+                    plan.fill_confidence = Decimal(str(max(0, 100 - risk.score))) / Decimal("100")
+
+        hold = position.hold_pnl_gbp
+        give_up = (hold - exit_pnl) if fully and exit_pnl is not None else None
+        recommendation, reason = decide_recommendation(
+            fully_executable=fully,
+            fail_reasons=list(dict.fromkeys(reasons)),
+            hold_pnl_gbp=hold,
+            exit_pnl_gbp=exit_pnl if exit_pnl is not None else hold,
+            policy=request.policy,
+            scarcity=request.scarcity,
+            execution_risk_score=None if risk is None else risk.score,
+        )
+        if not fully:
+            recommendation = UnwindRecommendation.UNWIND_NOT_SAFE
+
+        releasable: dict[str, Decimal] = {}
+        extra_capital: dict[str, Decimal] = {}
+        if fully:
+            for open_leg, plan in zip(position.legs, legs, strict=True):
+                currency = open_leg.native_currency
+                releasable[currency] = releasable.get(currency, Decimal("0")) + open_leg.filled_size
+                if plan.liability > 0:
+                    extra_capital[currency] = extra_capital.get(currency, Decimal("0")) + plan.liability
+
+        remaining = position.remaining_lock_minutes
+        if remaining is None and position.expected_settlement_at is not None:
+            delta = (position.expected_settlement_at - evaluated_at).total_seconds() / 60
+            remaining = Decimal(str(max(delta, 0)))
+
+        turnover = None
+        if remaining is not None and remaining > 0:
+            turnover = "capital_locked_until_expected_settlement"
+
+        return UnwindDecision(
+            trade_id=position.trade_id,
+            recommendation=recommendation,
+            decision_reason=reason,
+            hold_pnl_gbp=hold,
+            validated_exit_pnl_gbp=exit_pnl if fully else None,
+            profit_give_up_gbp=give_up if fully else None,
+            remaining_lock_minutes=remaining,
+            capital_turnover_hint=turnover,
+            conditionally_releasable_by_venue_currency=releasable,
+            additional_close_capital_native=extra_capital,
+            close_plan=ClosePlan(
+                evaluated_at=evaluated_at,
+                fully_executable=fully,
+                legs=legs,
+                rejection_reasons=list(dict.fromkeys(reasons)),
+            ),
+            execution_risk=risk,
+            capital_pressure=request.scarcity.pressure,
+        )
+
+    def _close_leg(
+        self,
+        position: OpenPaperPosition,
+        open_leg: OpenPaperLeg,
+        quote: ReverseQuote | None,
+        *,
+        fx: dict[str, FxRateSnapshot],
+        policy_max_age: int,
+        evaluated_at: datetime,
+        reasons: list[str],
+    ) -> CloseLegPlan:
+        del fx
+        mechanics = mechanics_for_venue(open_leg.venue)
+        try:
+            close_action = close_action_for(open_leg.opening_action, mechanics)
+        except ValueError as exc:
+            reasons.append(str(exc))
+            return _rejected_leg(open_leg, mechanics, str(exc))
+
+        if quote is None:
+            reasons.append("missing_reverse_quote")
+            return _rejected_leg(open_leg, mechanics, "missing_reverse_quote", close_action=close_action)
+        if quote.native_currency != open_leg.native_currency:
+            reasons.append("native_currency_mismatch")
+            return _rejected_leg(open_leg, mechanics, "native_currency_mismatch", close_action=close_action)
+        if quote.settlement_fingerprint_key != position.settlement_fingerprint_key:
+            reasons.append("settlement_identity_mismatch")
+            return _rejected_leg(open_leg, mechanics, "settlement_identity_mismatch", close_action=close_action)
+        if quote.quote_age_ms is None:
+            reasons.append("unknown_quote_age")
+            return _rejected_leg(open_leg, mechanics, "unknown_quote_age", close_action=close_action)
+        if quote.quote_age_ms > policy_max_age:
+            reasons.append("stale_quote")
+            return _rejected_leg(open_leg, mechanics, "stale_quote", close_action=close_action)
+        if quote.closing_cost.action is not close_action:
+            reasons.append("unsupported_exit_fee")
+            return _rejected_leg(open_leg, mechanics, "unsupported_exit_fee", close_action=close_action)
+
+        if mechanics is VenueCloseMechanics.EXCHANGE_BACK_LAY:
+            required = open_leg.filled_size * open_leg.filled_price
+            fill = walk_lay_to_cover_payout(quote.levels, required)
+            proceeds = fill.matched_stake
+            native_pnl = fill.matched_stake - open_leg.filled_size if fill.fully_filled else Decimal("0")
+            top = min((level.decimal_odds for level in quote.levels), default=None)
+        elif mechanics is VenueCloseMechanics.PREDICTION_BINARY_BUY_SELL:
+            required = open_leg.filled_size * open_leg.filled_price
+            fill = walk_prediction_sell(quote.levels, required)
+            proceeds = fill.proceeds
+            native_pnl = fill.proceeds - open_leg.filled_size if fill.fully_filled else Decimal("0")
+            top = min((level.decimal_odds for level in quote.levels), default=None)
+        else:
+            reasons.append("unsupported_close_mechanics")
+            return _rejected_leg(open_leg, mechanics, "unsupported_close_mechanics", close_action=close_action)
+
+        slippage = None
+        if fill.weighted_average_odds is not None and top is not None and top > 0:
+            slippage = (fill.weighted_average_odds - top) / top
+
+        if not fill.fully_filled:
+            reasons.append("insufficient_reverse_depth")
+            return CloseLegPlan(
+                venue=open_leg.venue,
+                canonical_outcome=open_leg.canonical_outcome,
+                opening_action=open_leg.opening_action,
+                close_action=close_action,
+                mechanics=mechanics,
+                required_close_quantity=required,
+                filled_close_quantity=fill.filled_quantity,
+                available_closing_capacity=fill.available_capacity,
+                levels_consumed=fill.levels_consumed,
+                weighted_closing_price=fill.weighted_average_odds,
+                worst_closing_price=fill.worst_odds,
+                slippage_vs_top=slippage,
+                matched_stake=fill.matched_stake,
+                liability=fill.liability,
+                proceeds=fill.proceeds,
+                quote_age_ms=quote.quote_age_ms,
+                quote_age_basis=quote.quote_age_basis,
+                fill_confidence=quote.fill_confidence,
+                executable=False,
+                rejection_reason="insufficient_reverse_depth",
+                native_currency=open_leg.native_currency,
+            )
+
+        try:
+            costs = apply_closing_action_costs(
+                quote.closing_cost,
+                action=close_action,
+                gross_proceeds=proceeds if close_action is MarketAction.SELL else fill.matched_stake,
+                matched_stake=fill.matched_stake if close_action is MarketAction.LAY else fill.shares_sold,
+                as_of=evaluated_at,
+            )
+        except CostRuleError as exc:
+            reasons.append(exc.reason)
+            return _rejected_leg(open_leg, mechanics, exc.reason, close_action=close_action)
+
+        native_pnl = native_pnl if costs.deferred_profit_commission else native_pnl - costs.venue_fee
+        return CloseLegPlan(
+            venue=open_leg.venue,
+            canonical_outcome=open_leg.canonical_outcome,
+            opening_action=open_leg.opening_action,
+            close_action=close_action,
+            mechanics=mechanics,
+            required_close_quantity=required,
+            filled_close_quantity=fill.filled_quantity,
+            available_closing_capacity=fill.available_capacity,
+            levels_consumed=fill.levels_consumed,
+            weighted_closing_price=fill.weighted_average_odds,
+            worst_closing_price=fill.worst_odds,
+            slippage_vs_top=slippage,
+            matched_stake=fill.matched_stake,
+            liability=fill.liability,
+            proceeds=fill.proceeds,
+            closing_fee=Decimal("0") if costs.deferred_profit_commission else costs.venue_fee,
+            native_close_pnl=native_pnl,
+            gbp_close_pnl=Decimal("0"),
+            native_currency=open_leg.native_currency,
+            quote_age_ms=quote.quote_age_ms,
+            quote_age_basis=quote.quote_age_basis,
+            fill_confidence=quote.fill_confidence,
+            executable=True,
+            fee_snapshot_id=costs.fee_snapshot_id,
+            deferred_profit_commission=costs.deferred_profit_commission,
+        )
+
+    def _risk(
+        self,
+        position: OpenPaperPosition,
+        legs: list[CloseLegPlan],
+        request: UnwindEvaluationRequest,
+        evaluated_at: datetime,
+    ) -> ExecutionRiskResult | None:
+        ages = [leg.quote_age_ms for leg in legs if leg.quote_age_ms is not None]
+        if not ages:
+            return None
+        minutes = 0.0
+        if position.remaining_lock_minutes is not None:
+            minutes = float(position.remaining_lock_minutes)
+        elif position.expected_settlement_at is not None:
+            minutes = max((position.expected_settlement_at - evaluated_at).total_seconds() / 60, 0)
+        ratios = []
+        for leg in legs:
+            if leg.available_closing_capacity <= 0:
+                return None
+            ratios.append(float(leg.required_close_quantity / leg.available_closing_capacity))
+        hedge = 1.0
+        if ratios:
+            hedge = min((1 / r if r else 1.0) for r in ratios)
+        return self.risk.score(
+            ExecutionRiskInputs(
+                spread_bps=0.0,
+                size_to_depth_ratio=max(ratios) if ratios else 0.0,
+                quote_age_ms=max(ages),
+                recent_volatility_bps=request.recent_volatility_bps,
+                leg_count=max(len(legs), 2),
+                minutes_to_kickoff=minutes,
+                assumed_latency_ms=request.assumed_latency_ms,
+                hedge_liquidity_ratio=hedge,
+            )
+        )
+
+
+def _apply_deferred_profit_commission(
+    legs: list[CloseLegPlan],
+    position: OpenPaperPosition,
+    quotes: dict[tuple, ReverseQuote],
+) -> list[str]:
+    grouped: dict[tuple, list[int]] = {}
+    for index, open_leg in enumerate(position.legs):
+        quote = quotes.get(
+            (open_leg.venue, open_leg.source_market_id, open_leg.source_runner_id, open_leg.canonical_outcome)
+        )
+        plan = legs[index]
+        if quote is None or not plan.deferred_profit_commission:
+            continue
+        if quote.closing_cost.fee_basis is not FeeBasis.PROFIT_COMMISSION or quote.closing_cost.rate is None:
+            return ["unknown_exit_fee"]
+        key = (open_leg.venue, open_leg.native_currency, quote.closing_cost.rate)
+        grouped.setdefault(key, []).append(index)
+
+    for key, indexes in grouped.items():
+        _venue, _currency, rate = key
+        gross = sum((legs[index].native_close_pnl for index in indexes), Decimal("0"))
+        fee = max(gross, Decimal("0")) * rate
+        if fee <= 0:
+            continue
+        remaining = fee
+        for index in indexes:
+            take = remaining
+            legs[index].closing_fee += take
+            legs[index].native_close_pnl -= take
+            remaining = Decimal("0")
+            break
+    return []
+
+
+def _fx_rate(
+    currency: str,
+    fx: dict[str, FxRateSnapshot],
+    reasons: list[str],
+) -> Decimal | None:
+    if currency == "GBP":
+        return Decimal("1")
+    snap = fx.get(currency)
+    if snap is None:
+        reasons.append(f"missing_fx_rate:{currency}")
+        return None
+    return snap.gbp_per_unit
+
+
+def _rejected_leg(
+    open_leg: OpenPaperLeg,
+    mechanics: VenueCloseMechanics,
+    reason: str,
+    *,
+    close_action: MarketAction | None = None,
+) -> CloseLegPlan:
+    action = close_action or (
+        MarketAction.LAY if open_leg.opening_action is MarketAction.BACK else MarketAction.SELL
+    )
+    return CloseLegPlan(
+        venue=open_leg.venue,
+        canonical_outcome=open_leg.canonical_outcome,
+        opening_action=open_leg.opening_action,
+        close_action=action,
+        mechanics=mechanics,
+        required_close_quantity=open_leg.filled_size,
+        filled_close_quantity=Decimal("0"),
+        available_closing_capacity=Decimal("0"),
+        native_currency=open_leg.native_currency,
+        executable=False,
+        rejection_reason=reason,
+    )

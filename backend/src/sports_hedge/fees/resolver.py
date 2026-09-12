@@ -205,6 +205,22 @@ def phase1_seed_rules() -> list[VenueCostRule]:
         )
         rules.append(
             VenueCostRule(
+                venue=VenueName.MATCHBOOK,
+                market_class=family.value,
+                action=MarketAction.LAY,
+                order_role=OrderRole.TAKER,
+                fee_basis=FeeBasis.PROFIT_COMMISSION,
+                known_status=CostKnownStatus.KNOWN,
+                rate=Decimal("0.02"),
+                currency="GBP",
+                source="venue_cost_registry:matchbook_commission_schedule",
+                effective_from=effective,
+                catalog_version=version,
+                detail="Phase 1 seeded Matchbook football taker profit commission for closing lays only.",
+            )
+        )
+        rules.append(
+            VenueCostRule(
                 venue=VenueName.POLYMARKET,
                 market_class=family.value,
                 action=MarketAction.BUY,
@@ -216,6 +232,21 @@ def phase1_seed_rules() -> list[VenueCostRule]:
                 effective_from=effective,
                 catalog_version=version,
                 detail="Phase 1 seeded Polymarket sports CLOB none_confirmed for listed football families.",
+            )
+        )
+        rules.append(
+            VenueCostRule(
+                venue=VenueName.POLYMARKET,
+                market_class=family.value,
+                action=MarketAction.SELL,
+                order_role=OrderRole.TAKER,
+                fee_basis=FeeBasis.NONE_CONFIRMED,
+                known_status=CostKnownStatus.KNOWN,
+                currency="USD",
+                source="venue_cost_registry:polymarket_fee_schedule",
+                effective_from=effective,
+                catalog_version=version,
+                detail="Phase 1 seeded Polymarket sports CLOB none_confirmed for closing sells.",
             )
         )
     rules.append(

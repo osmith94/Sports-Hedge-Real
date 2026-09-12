@@ -16,7 +16,7 @@ from sports_hedge.accounting.dimensions import CapitalSource
 from sports_hedge.accounting.paper_journal import DataProvenance, PaperJournalEntry
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import VenueName
-from sports_hedge.fees.cost import VenueCostSnapshot
+from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
 from sports_hedge.paper.models import FxRateSnapshot
 
 
@@ -52,6 +52,7 @@ class PaperTradeAuditEventType(StrEnum):
     FILLS_RECORDED = "fills_recorded"
     SETTLED = "settled"
     SETTLEMENT_IDEMPOTENT = "settlement_idempotent"
+    CLOSE_PLAN_EVALUATED = "close_plan_evaluated"
 
 
 class PaperTradeLeg(BaseModel):
@@ -63,6 +64,12 @@ class PaperTradeLeg(BaseModel):
     displayed_odds: Decimal | None = Field(default=None, gt=1)
     filled_odds: Decimal | None = Field(default=None, gt=1)
     source_market_id: str
+    source_event_id: str | None = None
+    source_runner_id: str | None = None
+    source_contract_id: str | None = None
+    opening_action: MarketAction | None = None
+    canonical_state: str | None = None
+    settlement_fingerprint_key: str | None = None
     fill_id: str | None = None
     fill_kind: PaperLegFillKind = PaperLegFillKind.UNFILLED
     capital_source: CapitalSource = CapitalSource.AUTO_POOL
@@ -93,6 +100,7 @@ class PaperTrade(BaseModel):
     canonical_event_id: str | None = None
     canonical_market_id: str | None = None
     settlement_key: str | None = None
+    solver_model: str | None = None
     market_family: MarketFamily | None = None
     period: FootballPeriod | None = None
     competition: str | None = None
