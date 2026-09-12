@@ -20,6 +20,7 @@ from sports_hedge.application.live_refresh import (
     get_live_refresh_coordinator,
 )
 from sports_hedge.application.market_observation import (
+    KalshiObservationBuilder,
     MatchbookObservationBuilder,
     PolymarketObservationBuilder,
     VenueMarketObservation,
@@ -61,6 +62,7 @@ from sports_hedge.treasury.models import (
     ValidatedUnwindResult,
 )
 from sports_hedge.treasury.service import PaperTreasuryError
+from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import (
     MatchbookAuthError,
     MatchbookClient,
@@ -154,7 +156,7 @@ class PaperTreasuryFxRequest(BaseModel):
 
 
 class PaperLiquidityUpdateRequest(BaseModel):
-    pools: list[PaperPoolUpdate] = Field(min_length=1, max_length=3)
+    pools: list[PaperPoolUpdate] = Field(min_length=1, max_length=4)
 
 
 @lru_cache
@@ -214,6 +216,7 @@ def get_paper_liquidity_repository() -> SqlitePaperLiquidityRepository:
         database,
         matchbook_gbp=Decimal(str(settings.paper_bankroll_gbp)),
         polymarket_usd=Decimal(str(settings.paper_bankroll_usd)),
+        kalshi_usd=Decimal(str(settings.paper_bankroll_kalshi_usd)),
     )
 
 
@@ -549,9 +552,11 @@ async def _execute_collection(
     settings = get_settings()
     matchbook = MatchbookClient(settings)
     polymarket = PolymarketClient(settings)
+    kalshi = KalshiClient(settings)
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
         polymarket=polymarket,
+        kalshi=kalshi,
         paper_scan=service,
     )
     try:
@@ -571,6 +576,7 @@ async def _execute_collection(
     finally:
         await matchbook.aclose()
         await polymarket.aclose()
+        await kalshi.aclose()
 
 
 async def server_owned_refresh_tick() -> None:
@@ -739,6 +745,24 @@ def _build_observation(request: RawVenueObservationRequest) -> VenueMarketObserv
             observed_at=request.observed_at,
             source_latency_ms=request.source_latency_ms,
             quote_age_ms=request.quote_age_ms,
+        )
+    if request.venue == VenueName.KALSHI:
+        payloads = request.market_payload.get("grouped_payloads")
+        if not isinstance(payloads, list) or not payloads:
+            payloads = [request.market_payload]
+        return KalshiObservationBuilder().build(
+            request.event_payload,
+            payloads,
+            request.books_by_token,
+            series=request.market_payload.get("series")
+            if isinstance(request.market_payload.get("series"), dict)
+            else None,
+            observed_at=request.observed_at,
+            source_latency_ms=request.source_latency_ms,
+            quote_age_ms=request.quote_age_ms,
+            fee_snapshot=request.market_payload.get("kalshi_fee")
+            if isinstance(request.market_payload.get("kalshi_fee"), dict)
+            else None,
         )
     raise ValueError(f"Paper scan does not yet support venue: {request.venue.value}")
 
