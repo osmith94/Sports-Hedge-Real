@@ -200,6 +200,44 @@ def _strategy_dims(
     )
 
 
+def seed_funding_postings(
+    *,
+    venue: VenueName,
+    currency: str,
+    amount_native: Decimal,
+    amount_gbp: Decimal,
+    fx_rate_gbp_per_unit: Decimal,
+    opportunity_id: str,
+) -> list[PaperJournalPosting]:
+    """Paper-only seed of available native cash. Balanced in GBP. Not live funding."""
+
+    dims = PostingDimensions(
+        attribution=AttributionScope.SHARED_UNALLOCATED,
+        capital_source=CapitalSource.SHARED_UNALLOCATED,
+        venue=venue,
+        currency=currency,
+        opportunity_id=opportunity_id,
+    )
+    return [
+        PaperJournalPosting(
+            account_code=cash_account(venue, currency, CashState.AVAILABLE),
+            side=PostingSide.DEBIT,
+            amount_native=amount_native,
+            amount_gbp=amount_gbp,
+            fx_rate_gbp_per_unit=fx_rate_gbp_per_unit,
+            dimensions=dims,
+        ),
+        PaperJournalPosting(
+            account_code=EconomicAccount.EQUITY_PAPER_SEED.value,
+            side=PostingSide.CREDIT,
+            amount_native=amount_native,
+            amount_gbp=amount_gbp,
+            fx_rate_gbp_per_unit=fx_rate_gbp_per_unit,
+            dimensions=dims,
+        ),
+    ]
+
+
 def cash_lock_postings(
     *,
     venue: VenueName,

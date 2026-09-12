@@ -16,6 +16,7 @@ const VENUE_LABEL: Record<string, string> = {
   matchbook: "Matchbook",
   polymarket: "Polymarket",
   smarkets: "Smarkets",
+  kalshi: "Kalshi",
 };
 
 function statusLabel(pool: PaperLiquidityPool): string {

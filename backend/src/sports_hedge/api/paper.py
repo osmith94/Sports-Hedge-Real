@@ -55,6 +55,12 @@ from sports_hedge.paper.unwind.models import PaperClosePlanRequest, UnwindDecisi
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
+from sports_hedge.treasury.models import (
+    PaperTreasurySnapshot,
+    TreasuryLockRequest,
+    ValidatedUnwindResult,
+)
+from sports_hedge.treasury.service import PaperTreasuryError
 from sports_hedge.venues.matchbook import (
     MatchbookAuthError,
     MatchbookClient,
@@ -131,6 +137,20 @@ class PaperPoolUpdate(BaseModel):
     available: Decimal = Field(ge=0)
     locked: Decimal | None = Field(default=None, ge=0)
     transit: Decimal | None = Field(default=None, ge=0)
+
+
+class PaperTreasuryResetRequest(BaseModel):
+    seed_gbp: Decimal | None = Field(default=None, gt=0)
+    usd_gbp_per_unit: Decimal | None = Field(default=None, gt=0)
+    fx_source: str | None = None
+    include_kalshi: bool | None = None
+    reason: str = "explicit paper treasury demo reset"
+
+
+class PaperTreasuryFxRequest(BaseModel):
+    usd_gbp_per_unit: Decimal = Field(gt=0)
+    fx_source: str = Field(min_length=1)
+    fx_as_of: datetime | None = None
 
 
 class PaperLiquidityUpdateRequest(BaseModel):
@@ -224,7 +244,13 @@ def get_paper_ledger() -> SqlitePaperLedger:
     if database != ":memory:":
         path = Path(database)
         path.parent.mkdir(parents=True, exist_ok=True)
-    return SqlitePaperLedger(database)
+    return SqlitePaperLedger(
+        database,
+        seed_gbp=Decimal(str(settings.paper_treasury_seed_gbp)),
+        usd_gbp_per_unit=Decimal(str(settings.paper_treasury_demo_usd_gbp_per_unit)),
+        fx_source=settings.paper_treasury_demo_fx_source,
+        include_kalshi=settings.paper_treasury_include_kalshi,
+    )
 
 
 @lru_cache
@@ -273,6 +299,89 @@ def scan_summary(
 ) -> PaperScanSummary:
     resolved_since = since or datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     return repository.summary(since=resolved_since)
+
+
+@router.get("/treasury", response_model=PaperTreasurySnapshot)
+def paper_treasury(
+    ledger: SqlitePaperLedger = Depends(get_paper_ledger),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> PaperTreasurySnapshot:
+    return ledger.treasury.snapshot(event_limit=limit)
+
+
+@router.post("/treasury/reset", response_model=PaperTreasurySnapshot)
+def reset_paper_treasury(
+    request: PaperTreasuryResetRequest,
+    ledger: SqlitePaperLedger = Depends(get_paper_ledger),
+    fx: FxRateService = Depends(get_fx_rate_service),
+) -> PaperTreasurySnapshot:
+    settings = get_settings()
+    seed_gbp = request.seed_gbp or Decimal(str(settings.paper_treasury_seed_gbp))
+    rate = request.usd_gbp_per_unit
+    source = request.fx_source
+    if rate is None or source is None:
+        rates, fx_source = _backend_fx_for_pools(fx)
+        usd_rate = rates.get("USD")
+        if rate is None:
+            rate = usd_rate or Decimal(str(settings.paper_treasury_demo_usd_gbp_per_unit))
+        if source is None:
+            source = fx_source or settings.paper_treasury_demo_fx_source
+    include = (
+        settings.paper_treasury_include_kalshi
+        if request.include_kalshi is None
+        else request.include_kalshi
+    )
+    try:
+        return ledger.treasury.reset_demo_session(
+            seed_gbp=seed_gbp,
+            usd_gbp_per_unit=rate,
+            fx_source=source,
+            include_kalshi=include,
+            reason=request.reason,
+        )
+    except PaperTreasuryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/treasury/fx-snapshot", response_model=PaperTreasurySnapshot)
+def paper_treasury_fx_snapshot(
+    request: PaperTreasuryFxRequest,
+    ledger: SqlitePaperLedger = Depends(get_paper_ledger),
+) -> PaperTreasurySnapshot:
+    try:
+        return ledger.treasury.apply_fx_snapshot(
+            usd_gbp_per_unit=request.usd_gbp_per_unit,
+            fx_source=request.fx_source,
+            fx_as_of=request.fx_as_of,
+        )
+    except PaperTreasuryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/treasury/locks", response_model=PaperTreasurySnapshot)
+def paper_treasury_locks(
+    requests: list[TreasuryLockRequest],
+    ledger: SqlitePaperLedger = Depends(get_paper_ledger),
+) -> PaperTreasurySnapshot:
+    try:
+        ledger.treasury.lock_capital(requests)
+    except PaperTreasuryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ledger.treasury.snapshot()
+
+
+@router.post("/treasury/unwind", response_model=PaperTreasurySnapshot)
+def paper_treasury_unwind(
+    result: ValidatedUnwindResult,
+    ledger: SqlitePaperLedger = Depends(get_paper_ledger),
+) -> PaperTreasurySnapshot:
+    """8D supplies a completed close. conditionally_releasable metadata does not post."""
+
+    try:
+        ledger.treasury.post_unwind(result)
+    except PaperTreasuryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ledger.treasury.snapshot()
 
 
 @router.get("/liquidity-pools", response_model=PaperLiquiditySnapshot)
