@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sports_hedge.accounting.dimensions import CapitalSource
+from sports_hedge.accounting.dimensions import CapitalSource, parse_capital_source
 from sports_hedge.accounting.paper_journal import (
     DataProvenance,
     DuplicateJournalError,
@@ -140,6 +140,7 @@ class PaperTreasuryService:
         with self._ledger.transaction():
             current = self.active_session()
             if current is not None:
+                self._assert_reset_allowed(current)
                 self._close_session(current, occurred_at=occurred, reason=reason)
             session_id = f"pts-{uuid4()}"
             self._connection.execute(
@@ -344,6 +345,8 @@ class PaperTreasuryService:
                     lock = self._lock_row(leg.lock_id)
                     if lock is None:
                         raise PaperTreasuryError("unknown_lock")
+                    if (lock["trade_id"] or None) not in {None, result.trade_id}:
+                        raise PaperTreasuryError("unknown_trade_lock")
                     remaining = Decimal(lock["locked_native"]) - Decimal(lock["released_native"])
                     if leg.amount_native > remaining:
                         raise PaperTreasuryError("release_exceeds_lock")
@@ -538,24 +541,20 @@ class PaperTreasuryService:
             raise PaperTreasuryError("invalid_lock_amount")
         existing = self._lock_row(request.lock_id)
         if existing is not None:
+            if not _lock_facts_match(existing, request):
+                raise PaperTreasuryError("conflicting_lock_facts")
             posted = self._ledger.journal.get(request.source, request.lock_id)
             if posted is None:
                 raise PaperTreasuryError("duplicate_lock")
-            if Decimal(existing["locked_native"]) != request.amount_native:
-                raise PaperTreasuryError("duplicate_lock")
-            if VenueName(existing["venue"]) is not request.venue:
-                raise PaperTreasuryError("venue_mismatch")
             return posted
         pool = self._pool_row(session.session_id, request.venue, request.native_currency)
         available = Decimal(pool["available_cash"])
         locked = Decimal(pool["locked_capital"])
         if request.amount_native > available:
             raise PaperTreasuryError("insufficient_available_cash")
-        expected_rate = Decimal(pool["fx_rate_gbp_per_unit"])
-        if request.native_currency == "GBP":
-            if request.fx_rate_gbp_per_unit != Decimal("1"):
-                raise PaperTreasuryError("currency_mismatch")
-        amount_gbp = request.amount_native * request.fx_rate_gbp_per_unit
+        journal_rate, fx_source = self._authoritative_lock_fx(pool, request)
+        amount_gbp = request.amount_native * journal_rate
+        capital_source = parse_capital_source(request.capital_source)
         new_available = available - request.amount_native
         new_locked = locked + request.amount_native
         if new_available < 0:
@@ -572,8 +571,9 @@ class PaperTreasuryService:
             """
             INSERT INTO paper_treasury_locks (
                 lock_id, session_id, pool_id, trade_id, opportunity_id,
-                venue, native_currency, locked_native, released_native, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0', 'open')
+                venue, native_currency, locked_native, released_native, status,
+                source, capital_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0', 'open', ?, ?)
             """,
             (
                 request.lock_id,
@@ -584,6 +584,8 @@ class PaperTreasuryService:
                 request.venue.value,
                 request.native_currency,
                 str(request.amount_native),
+                request.source,
+                capital_source.value,
             ),
         )
         posted, _created = self._ledger.journal.append_idempotent(
@@ -600,11 +602,9 @@ class PaperTreasuryService:
                     currency=request.native_currency,
                     amount_native=request.amount_native,
                     amount_gbp=amount_gbp,
-                    fx_rate_gbp_per_unit=request.fx_rate_gbp_per_unit,
+                    fx_rate_gbp_per_unit=journal_rate,
                     opportunity_id=request.opportunity_id or request.lock_id,
-                    capital_source=CapitalSource(request.capital_source)
-                    if request.capital_source in {item.value for item in CapitalSource}
-                    else CapitalSource.AUTO_POOL,
+                    capital_source=capital_source,
                     position_id=request.lock_id,
                 ),
             )
@@ -625,12 +625,11 @@ class PaperTreasuryService:
                 source=request.source,
                 source_id=request.lock_id,
                 reason=request.reason,
-                fx_rate_gbp_per_unit=request.fx_rate_gbp_per_unit,
-                fx_source=session.fx_source if request.native_currency != "GBP" else "functional_currency",
+                fx_rate_gbp_per_unit=journal_rate,
+                fx_source=fx_source,
                 journal_id=posted.journal_id,
             )
         )
-        _ = expected_rate
         return posted
 
     def _apply_leg_settlement(
@@ -653,16 +652,15 @@ class PaperTreasuryService:
         session = self._require_session()
         pool = self._pool_row(session.session_id, venue, currency)
         lock = self._open_lock_for_trade(session.session_id, trade.trade_id, venue, currency)
-        if lock is not None:
-            remaining = Decimal(lock["locked_native"]) - Decimal(lock["released_native"])
-            locked_release = min(stake_native, remaining)
-            self._bump_lock_released(lock["lock_id"], locked_release)
-            lock_id = lock["lock_id"]
-            available_delta = net_payoff_native
-        else:
-            locked_release = min(stake_native, Decimal(pool["locked_capital"]))
-            lock_id = source_id
-            available_delta = net_payoff_native if locked_release > 0 else realised_pnl_native
+        if lock is None or lock["trade_id"] != trade.trade_id:
+            raise PaperTreasuryError("unknown_trade_lock")
+        remaining = Decimal(lock["locked_native"]) - Decimal(lock["released_native"])
+        if stake_native > remaining:
+            raise PaperTreasuryError("release_exceeds_lock")
+        locked_release = stake_native
+        self._bump_lock_released(lock["lock_id"], locked_release)
+        lock_id = lock["lock_id"]
+        available_delta = net_payoff_native
         locked = Decimal(pool["locked_capital"])
         available = Decimal(pool["available_cash"])
         if locked_release > locked:
@@ -796,6 +794,42 @@ class PaperTreasuryService:
                 fx_source=fx_source,
             )
         )
+
+    def _assert_reset_allowed(self, session: PaperTreasurySession) -> None:
+        open_locks = self._connection.execute(
+            """
+            SELECT COUNT(*) AS n FROM paper_treasury_locks
+            WHERE session_id = ? AND status = 'open'
+            """,
+            (session.session_id,),
+        ).fetchone()["n"]
+        if open_locks:
+            raise PaperTreasuryError("active_treasury_locks")
+        trades = getattr(self._ledger, "trades", None)
+        if trades is not None and trades.list_active():
+            raise PaperTreasuryError("open_paper_positions")
+
+    def _authoritative_lock_fx(self, pool: Any, request: TreasuryLockRequest) -> tuple[Decimal, str]:
+        if pool["fx_rate_gbp_per_unit"] is None:
+            raise PaperTreasuryError("missing_fx_snapshot")
+        pool_rate = Decimal(pool["fx_rate_gbp_per_unit"])
+        pool_source = pool["fx_source"]
+        if request.native_currency == "GBP":
+            if pool_rate != Decimal("1") or request.fx_rate_gbp_per_unit != Decimal("1"):
+                raise PaperTreasuryError("fx_rate_mismatch")
+            return Decimal("1"), "functional_currency"
+        if not pool_source:
+            raise PaperTreasuryError("missing_fx_provenance")
+        if request.fx_rate_gbp_per_unit != pool_rate:
+            raise PaperTreasuryError("fx_rate_mismatch")
+        return pool_rate, pool_source
+
+    def lock_fx_rate(self, venue: VenueName, currency: str) -> Decimal:
+        session = self._require_session()
+        pool = self._pool_row(session.session_id, venue, currency)
+        if pool["fx_rate_gbp_per_unit"] is None:
+            raise PaperTreasuryError("missing_fx_snapshot")
+        return Decimal(pool["fx_rate_gbp_per_unit"])
 
     def _require_session(self) -> PaperTreasurySession:
         session = self.active_session()
@@ -1006,4 +1040,25 @@ def _event_from_row(row: Any) -> PaperTreasuryEvent:
         fx_rate_gbp_per_unit=Decimal(row["fx_rate_gbp_per_unit"]) if row["fx_rate_gbp_per_unit"] else None,
         fx_source=row["fx_source"],
         journal_id=row["journal_id"],
+    )
+
+
+def _row_value(row: Any, key: str, default: str) -> str:
+    try:
+        value = row[key]
+    except (KeyError, IndexError):
+        return default
+    return default if value is None else str(value)
+
+
+def _lock_facts_match(existing: Any, request: TreasuryLockRequest) -> bool:
+    return (
+        VenueName(existing["venue"]) is request.venue
+        and existing["native_currency"].upper() == request.native_currency
+        and Decimal(existing["locked_native"]) == request.amount_native
+        and (existing["trade_id"] or None) == request.trade_id
+        and (existing["opportunity_id"] or None) == request.opportunity_id
+        and _row_value(existing, "source", "paper_fill_simulator") == request.source
+        and _row_value(existing, "capital_source", "AUTO_POOL")
+        == parse_capital_source(request.capital_source).value
     )

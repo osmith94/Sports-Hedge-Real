@@ -154,7 +154,7 @@ def test_multi_venue_lock_is_atomic() -> None:
     ledger.close()
 
 
-def test_duplicate_lock_is_idempotent() -> None:
+def test_duplicate_lock_is_idempotent_only_for_same_facts() -> None:
     ledger = _ledger()
     request = _lock(VenueName.MATCHBOOK, "GBP", Decimal("250"), "lock-dup")
     first = ledger.treasury.lock_capital([request], occurred_at=NOW)
@@ -162,16 +162,63 @@ def test_duplicate_lock_is_idempotent() -> None:
     assert first[0].journal_id == second[0].journal_id
     pool = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP")
     assert pool.locked_capital == Decimal("250")
+    with pytest.raises(PaperTreasuryError, match="conflicting_lock_facts"):
+        ledger.treasury.lock_capital(
+            [_lock(VenueName.MATCHBOOK, "GBP", Decimal("100"), "lock-dup")],
+            occurred_at=NOW,
+        )
+    with pytest.raises(PaperTreasuryError, match="conflicting_lock_facts"):
+        ledger.treasury.lock_capital(
+            [_lock(VenueName.MATCHBOOK, "GBP", Decimal("250"), "lock-dup", trade_id="ptrade-other")],
+            occurred_at=NOW,
+        )
+    conflicting_source = _lock(VenueName.MATCHBOOK, "GBP", Decimal("250"), "lock-dup")
+    conflicting_source.source = "other_source"
+    with pytest.raises(PaperTreasuryError, match="conflicting_lock_facts"):
+        ledger.treasury.lock_capital([conflicting_source], occurred_at=NOW)
+    conflicting_capital = _lock(VenueName.MATCHBOOK, "GBP", Decimal("250"), "lock-dup")
+    conflicting_capital.capital_source = "MANUAL_EXTERNAL"
+    with pytest.raises(PaperTreasuryError, match="conflicting_lock_facts"):
+        ledger.treasury.lock_capital([conflicting_capital], occurred_at=NOW)
+    pool = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP")
+    assert pool.locked_capital == Decimal("250")
     ledger.close()
 
 
-def test_demo_reset_opens_new_session_without_rewriting_history(tmp_path: Path) -> None:
+def test_demo_reset_fails_closed_while_locks_open_then_preserves_history(tmp_path: Path) -> None:
     path = tmp_path / "treasury.sqlite"
     ledger = _ledger(path)
     first_id = ledger.treasury.snapshot().session.session_id
     ledger.treasury.lock_capital(
         [_lock(VenueName.MATCHBOOK, "GBP", Decimal("250"), "lock-before-reset")],
         occurred_at=NOW,
+    )
+    with pytest.raises(PaperTreasuryError, match="active_treasury_locks"):
+        ledger.treasury.reset_demo_session(
+            seed_gbp=SEED,
+            usd_gbp_per_unit=FX,
+            fx_source="paper_demo_fx_snapshot",
+            reason="operator reset",
+            now=NOW,
+        )
+    assert ledger.treasury.snapshot().session.session_id == first_id
+    assert ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital == Decimal("250")
+    ledger.treasury.post_unwind(
+        ValidatedUnwindResult(
+            trade_id="ptrade-demo",
+            close_completed=True,
+            source_id="unwind-before-reset",
+            releases=[
+                UnwindReleaseLeg(
+                    venue=VenueName.MATCHBOOK,
+                    native_currency="GBP",
+                    lock_id="lock-before-reset",
+                    amount_native=Decimal("250"),
+                    fx_rate_gbp_per_unit=Decimal("1"),
+                )
+            ],
+        ),
+        now=NOW,
     )
     ledger.treasury.reset_demo_session(
         seed_gbp=SEED,
@@ -195,6 +242,31 @@ def test_demo_reset_opens_new_session_without_rewriting_history(tmp_path: Path) 
     assert any(item.lock_id == "lock-before-reset" for item in historical)
     assert any(item.event_type.value == "session_close" for item in historical)
     reopened.close()
+
+
+def test_demo_reset_fails_closed_while_open_paper_positions() -> None:
+    from sports_hedge.paper.trades import PaperTrade, PaperTradeState
+
+    ledger = _ledger()
+    ledger.trades.save(
+        PaperTrade(
+            trade_id="ptrade-open",
+            opportunity_id="opp-open",
+            state=PaperTradeState.OPEN,
+            opened_at=NOW,
+            last_updated_at=NOW,
+        )
+    )
+    with pytest.raises(PaperTreasuryError, match="open_paper_positions"):
+        ledger.treasury.reset_demo_session(
+            seed_gbp=SEED,
+            usd_gbp_per_unit=FX,
+            fx_source="paper_demo_fx_snapshot",
+            reason="operator reset",
+            now=NOW,
+        )
+    assert ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").available_cash == SEED
+    ledger.close()
 
 
 def test_fx_snapshot_updates_carrying_value_not_native() -> None:
@@ -342,6 +414,95 @@ def test_settlement_releases_lock_and_records_realised_pnl() -> None:
     ledger.close()
 
 
+def test_settlement_cannot_release_another_trades_lock() -> None:
+    from sports_hedge.paper.settlement import LegSettlement, PaperSettlementComputation
+    from sports_hedge.paper.trades import PaperSettlementRequest, PaperTrade, PaperTradeState
+
+    ledger = _ledger()
+    ledger.treasury.lock_capital(
+        [_lock(VenueName.MATCHBOOK, "GBP", Decimal("250"), "lock-a", trade_id="ptrade-a")],
+        occurred_at=NOW,
+    )
+    ledger.treasury.lock_capital(
+        [_lock(VenueName.MATCHBOOK, "GBP", Decimal("250"), "lock-b", trade_id="ptrade-b")],
+        occurred_at=NOW,
+    )
+    stranger = PaperTrade(
+        trade_id="ptrade-stranger",
+        opportunity_id="opp-stranger",
+        state=PaperTradeState.OPEN,
+        opened_at=NOW,
+        last_updated_at=NOW,
+    )
+    computation = PaperSettlementComputation(
+        winning_outcome="home",
+        realised_pnl_gbp=Decimal("0"),
+        legs=[
+            LegSettlement(
+                outcome="home",
+                venue="matchbook",
+                currency="GBP",
+                filled_stake=Decimal("250"),
+                won=False,
+                net_payoff=Decimal("0"),
+                native_pnl=Decimal("-250"),
+                gbp_pnl=Decimal("-250"),
+                fx_rate_gbp_per_unit=Decimal("1"),
+                capital_source="AUTO_POOL",
+            )
+        ],
+    )
+    with pytest.raises(PaperTreasuryError, match="unknown_trade_lock"):
+        ledger.treasury.apply_settlement(
+            stranger,
+            computation,
+            PaperSettlementRequest(winning_outcome="home", source="operator", source_id="stranger"),
+            settled_at=NOW,
+        )
+    pool = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP")
+    assert pool.locked_capital == Decimal("500")
+    assert pool.available_cash == Decimal("500")
+    owned = PaperTrade(
+        trade_id="ptrade-a",
+        opportunity_id="opp-demo",
+        state=PaperTradeState.OPEN,
+        opened_at=NOW,
+        last_updated_at=NOW,
+    )
+    ledger.treasury.apply_settlement(
+        owned,
+        computation,
+        PaperSettlementRequest(winning_outcome="home", source="operator", source_id="a"),
+        settled_at=NOW,
+    )
+    pool = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP")
+    assert pool.locked_capital == Decimal("250")
+    assert pool.available_cash == Decimal("500")
+    ledger.close()
+
+
+def test_lock_rejects_stale_fx_and_journals_pool_snapshot() -> None:
+    ledger = _ledger()
+    with pytest.raises(PaperTreasuryError, match="fx_rate_mismatch"):
+        ledger.treasury.lock_capital(
+            [_lock(VenueName.POLYMARKET, "USD", Decimal("100"), "lock-stale-fx", rate=Decimal("0.50"))],
+            occurred_at=NOW,
+        )
+    assert ledger.treasury.snapshot().pool(VenueName.POLYMARKET, "USD").locked_capital == 0
+    posted = ledger.treasury.lock_capital(
+        [_lock(VenueName.POLYMARKET, "USD", Decimal("100"), "lock-pool-fx")],
+        occurred_at=NOW,
+    )
+    lock_posting = next(
+        item for item in posted[0].postings if item.fx_rate_gbp_per_unit is not None
+    )
+    assert lock_posting.fx_rate_gbp_per_unit == FX
+    event = next(item for item in ledger.treasury.list_events() if item.lock_id == "lock-pool-fx")
+    assert event.fx_source == "paper_demo_fx_snapshot"
+    assert event.fx_rate_gbp_per_unit == FX
+    ledger.close()
+
+
 def test_rejects_currency_and_venue_mismatch() -> None:
     ledger = _ledger()
     with pytest.raises(PaperTreasuryError, match="stale_unknown_pool"):
@@ -393,6 +554,10 @@ def test_treasury_api_seed_lock_and_fx(tmp_path: Path) -> None:
         assert Decimal(after["matchbook"]["available_cash"]) == Decimal("750")
         assert Decimal(after["matchbook"]["locked_capital"]) == Decimal("250")
 
+        blocked = client.post("/paper/treasury/reset", json={"reason": "api reset while locked"})
+        assert blocked.status_code == 409
+        assert "active_treasury_locks" in str(blocked.json()["detail"])
+
         fx = client.post(
             "/paper/treasury/fx-snapshot",
             json={"usd_gbp_per_unit": "0.5", "fx_source": "test_fx"},
@@ -401,6 +566,28 @@ def test_treasury_api_seed_lock_and_fx(tmp_path: Path) -> None:
         pm = next(pool for pool in fx.json()["pools"] if pool["venue"] == "polymarket")
         assert Decimal(pm["available_cash"]) == Decimal(venues["polymarket"]["available_cash"])
         assert pm["fx_source"] == "test_fx"
+
+        released = client.post(
+            "/paper/treasury/unwind",
+            json={
+                "trade_id": "ptrade-api",
+                "close_completed": True,
+                "source_id": "unwind-api-lock",
+                "releases": [
+                    {
+                        "venue": "matchbook",
+                        "native_currency": "GBP",
+                        "lock_id": "api-lock-mb",
+                        "amount_native": "250",
+                        "fx_rate_gbp_per_unit": "1",
+                    }
+                ],
+            },
+        )
+        assert released.status_code == 200
+        assert Decimal(
+            next(pool for pool in released.json()["pools"] if pool["venue"] == "matchbook")["locked_capital"]
+        ) == Decimal("0")
 
         reset = client.post("/paper/treasury/reset", json={"reason": "api reset"})
         assert reset.status_code == 200

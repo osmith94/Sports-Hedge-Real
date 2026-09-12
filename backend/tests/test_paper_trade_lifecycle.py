@@ -41,6 +41,7 @@ from sports_hedge.paper.trades import (
 )
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
+from sports_hedge.treasury.models import TreasuryLockRequest
 from test_paper_scan_pipeline import matchbook_payloads, polymarket_payloads
 from venue_cost_helpers import matchbook_polymarket_costs
 
@@ -320,6 +321,21 @@ def test_partial_settlement_when_unfilled_canonical_outcome_wins(tmp_path: Path)
         trade.fx_snapshots = list(plan.fx_snapshots)
         trade.venue_costs = list(plan.venue_costs)
         ops.trades.save(trade)
+        treasury_rate = ledger.treasury.lock_fx_rate(keep_plan.venue, keep_plan.currency)
+        ledger.treasury.lock_capital(
+            [
+                TreasuryLockRequest(
+                    venue=keep_plan.venue,
+                    native_currency=keep_plan.currency,
+                    amount_native=keep_plan.requested_stake,
+                    lock_id="paper-fill-partial-keep",
+                    trade_id=trade.trade_id,
+                    opportunity_id=plan.opportunity_id,
+                    fx_rate_gbp_per_unit=treasury_rate,
+                )
+            ],
+            occurred_at=OBSERVED,
+        )
 
         with pytest.raises(PaperOperationsError, match="settlement_outcome_not_on_trade"):
             ops.settle(

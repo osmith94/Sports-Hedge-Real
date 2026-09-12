@@ -549,7 +549,9 @@ class SqlitePaperLedger:
                 native_currency TEXT NOT NULL,
                 locked_native TEXT NOT NULL,
                 released_native TEXT NOT NULL,
-                status TEXT NOT NULL
+                status TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'paper_fill_simulator',
+                capital_source TEXT NOT NULL DEFAULT 'AUTO_POOL'
             );
 
             CREATE INDEX IF NOT EXISTS idx_paper_treasury_events_session
@@ -558,6 +560,7 @@ class SqlitePaperLedger:
         )
         self._connection.commit()
         self._ensure_unwind_identity_columns()
+        self._ensure_treasury_lock_fact_columns()
 
     def _ensure_unwind_identity_columns(self) -> None:
         trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
@@ -575,6 +578,21 @@ class SqlitePaperLedger:
         for name, spec in additions.items():
             if name not in leg_cols:
                 self._connection.execute(f"ALTER TABLE paper_trade_legs ADD COLUMN {name} {spec}")
+        self._connection.commit()
+
+    def _ensure_treasury_lock_fact_columns(self) -> None:
+        columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(paper_treasury_locks)")
+        }
+        if "source" not in columns:
+            self._connection.execute(
+                "ALTER TABLE paper_treasury_locks ADD COLUMN source TEXT NOT NULL DEFAULT 'paper_fill_simulator'"
+            )
+        if "capital_source" not in columns:
+            self._connection.execute(
+                "ALTER TABLE paper_treasury_locks ADD COLUMN capital_source TEXT NOT NULL DEFAULT 'AUTO_POOL'"
+            )
         self._connection.commit()
 
     def close(self) -> None:

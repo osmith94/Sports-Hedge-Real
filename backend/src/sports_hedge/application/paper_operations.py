@@ -36,7 +36,7 @@ from sports_hedge.paper.chain import (
     SimulatePaperFillResult,
 )
 from sports_hedge.paper.fills import PaperFillConfig, PaperFillRecord, PaperOpportunityFills, PaperOpportunityLeg
-from sports_hedge.paper.models import PaperScanDecision
+from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.settlement import PaperSettlementError, compute_paper_settlement
 from sports_hedge.paper.simulator import PaperFillSimulator
 from sports_hedge.paper.trades import (
@@ -819,7 +819,7 @@ class PaperOperationsService:
         for fill in fills.fills:
             if fill.filled_stake <= 0:
                 continue
-            rate = Decimal("1") if fill.currency == "GBP" else fx[fill.currency].gbp_per_unit
+            rate = self._lock_fx_rate(fill.venue, fill.currency, fx)
             amount_gbp = fill.filled_stake * rate
             mode = modes.get(fill.venue, LegExecutionMode.INTERNAL)
             simulated_external = simulate_external and mode is LegExecutionMode.EXTERNAL_OPERATOR
@@ -860,11 +860,7 @@ class PaperOperationsService:
                 )
             )
         if confirmation is not None:
-            rate = (
-                Decimal("1")
-                if confirmation.currency == "GBP"
-                else fx[confirmation.currency].gbp_per_unit
-            )
+            rate = self._lock_fx_rate(confirmation.venue, confirmation.currency, fx)
             source_id = f"{plan.opportunity_id}:{confirmation.operator_counterparty_reference}"
             lock_requests.append(
                 TreasuryLockRequest(
@@ -929,6 +925,21 @@ class PaperOperationsService:
             )
             entries.append(posted)
         return entries
+
+    def _lock_fx_rate(
+        self,
+        venue: VenueName,
+        currency: str,
+        fx: dict[str, FxRateSnapshot],
+    ) -> Decimal:
+        if self.ledger is not None:
+            try:
+                return self.ledger.treasury.lock_fx_rate(venue, currency)
+            except PaperTreasuryError as exc:
+                raise PaperOperationsError(str(exc)) from exc
+        if currency.upper() == "GBP":
+            return Decimal("1")
+        return fx[currency].gbp_per_unit
 
 
 def _unfilled_legs_from_plan(plan: PaperFillPlan) -> list[PaperTradeLeg]:
