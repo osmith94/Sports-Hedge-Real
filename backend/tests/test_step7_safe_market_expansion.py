@@ -106,6 +106,47 @@ def _scan(mb_market: dict[str, Any], pm_market: dict[str, Any], books: dict[str,
         repository.close()
 
 
+def test_step7_allowlist_never_includes_dnb_or_to_qualify() -> None:
+    assert MarketFamily.DRAW_NO_BET not in STEP7_COMPLETE_SET_FAMILIES
+    assert MarketFamily.TO_QUALIFY not in STEP7_COMPLETE_SET_FAMILIES
+    assert MarketFamily.CORRECT_SCORE not in STEP7_COMPLETE_SET_FAMILIES
+    assert MarketFamily.NEXT_GOAL not in STEP7_COMPLETE_SET_FAMILIES
+    dnb = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.DRAW_NO_BET,
+        source_id="dnb-contract",
+        outcomes=[CanonicalOutcome.HOME, CanonicalOutcome.AWAY],
+    )
+    qualify = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.TO_QUALIFY,
+        source_id="qualify-assumed",
+        extra_time=True,
+        outcomes=[CanonicalOutcome.HOME_QUALIFY, CanonicalOutcome.AWAY_QUALIFY],
+    )
+    integer_ah = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.ASIAN_HANDICAP,
+        source_id="ah-integer",
+        outcomes=[CanonicalOutcome.HOME, CanonicalOutcome.AWAY],
+        line=Decimal("-1.0"),
+    )
+    half_ah = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.ASIAN_HANDICAP,
+        source_id="ah-half",
+        outcomes=[CanonicalOutcome.HOME, CanonicalOutcome.AWAY],
+        line=Decimal("-0.5"),
+    )
+    assert solver_eligible_market(dnb) is False
+    assert solver_ineligibility_reason(dnb) == PUSH_STATE_REASON
+    assert solver_eligible_market(qualify) is False
+    assert solver_ineligibility_reason(qualify) == UNPROVEN_SETTLEMENT_REASON
+    assert integer_ah.settlement.push_possible is True
+    assert solver_eligible_market(integer_ah) is False
+    assert solver_eligible_market(half_ah) is True
+
+
 def _naive_two_way_guaranteed_profit(odds: str = "2.20") -> Decimal:
     """What CompleteSetArbitrageSolver reports if push/void states are ignored."""
 
