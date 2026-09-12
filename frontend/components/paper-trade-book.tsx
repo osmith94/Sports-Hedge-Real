@@ -30,12 +30,21 @@ function fixture(trade: PaperTrade): string {
   return trade.fixture_label || `${trade.home_team ?? "Unknown"} v ${trade.away_team ?? "Unknown"}`;
 }
 
+function stakeLabel(leg: PaperTrade["legs"][number]): string {
+  const ccy = leg.currency === "USD" ? "USD" : "GBP";
+  if (leg.fill_kind === "UNFILLED") {
+    return `requested ${money(leg.requested_stake, ccy)} unfilled`;
+  }
+  return money(leg.filled_stake, ccy);
+}
+
 function legsLine(trade: PaperTrade): string {
   if (!trade.legs.length) return "No legs recorded";
   return trade.legs
     .map((leg) => {
       const odds = leg.filled_odds ?? leg.displayed_odds;
-      return `${leg.venue} ${leg.outcome} ${odds ?? "—"} × ${money(leg.filled_stake, leg.currency === "USD" ? "USD" : "GBP")} (${leg.fill_kind})`;
+      const mode = leg.execution_mode === "EXTERNAL_OPERATOR" ? " · EXTERNAL_OPERATOR" : "";
+      return `${leg.venue} ${leg.outcome} ${odds ?? "—"} × ${stakeLabel(leg)} (${leg.fill_kind}${mode})`;
     })
     .join(" · ");
 }

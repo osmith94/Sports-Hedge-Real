@@ -53,11 +53,15 @@ def independent_realised_pnl_gbp(trade, winning_outcome: str) -> Decimal:
 
     Independent of `compute_paper_settlement` so double-counted fees fail this proof.
     Unfilled legs contribute nothing.
+
+    Winning native P&L = stake * (1 + (odds-1)*(1-rate)) - stake
+                       = stake * (odds-1) * (1-rate)
+    Losing native P&L  = -stake
+    GBP                = native * stored gbp_per_unit (1 for GBP)
     """
 
     fx = {item.currency: item.gbp_per_unit for item in trade.fx_snapshots}
     fx.setdefault("GBP", Decimal("1"))
-    costs = {item.venue: item for item in trade.venue_costs}
     total = Decimal("0")
     for leg in trade.legs:
         if leg.filled_stake <= 0:
@@ -66,7 +70,7 @@ def independent_realised_pnl_gbp(trade, winning_outcome: str) -> Decimal:
         if leg.outcome != winning_outcome:
             total += -leg.filled_stake * gbp_per
             continue
-        cost = costs[leg.venue]
+        cost = _cost_for_leg(trade.venue_costs, leg)
         if cost.rate is None:
             raise AssertionError(f"missing fee rate for {leg.venue}")
         odds = leg.filled_odds or leg.displayed_odds
@@ -75,6 +79,37 @@ def independent_realised_pnl_gbp(trade, winning_outcome: str) -> Decimal:
         net_odds = profit_commission_net_odds(odds, cost.rate)
         total += (leg.filled_stake * net_odds - leg.filled_stake) * gbp_per
     return total
+
+
+def _cost_for_leg(costs, leg):
+    matches = [item for item in costs if item.venue is leg.venue]
+    if len(matches) == 1:
+        return matches[0]
+    by_market = [item for item in matches if item.source_market_id == leg.source_market_id]
+    if len(by_market) == 1:
+        return by_market[0]
+    raise AssertionError(f"ambiguous/missing venue cost for {leg.venue}")
+
+
+def assert_settlement_arithmetic(trade, winning_outcome: str, expected: Decimal) -> None:
+    computation = compute_paper_settlement(trade, winning_outcome=winning_outcome)
+    assert computation.realised_pnl_gbp == expected
+    gbp_sum = Decimal("0")
+    for item in computation.legs:
+        assert item.filled_stake > 0
+        if item.won:
+            assert item.filled_odds is not None
+            assert item.gross_payoff == item.filled_stake * item.filled_odds
+            assert item.venue_fee == item.gross_payoff - item.net_payoff
+            assert item.native_pnl == item.net_payoff - item.filled_stake
+        else:
+            assert item.venue_fee == Decimal("0")
+            assert item.net_payoff == Decimal("0")
+            assert item.gross_payoff == Decimal("0")
+            assert item.native_pnl == -item.filled_stake
+        assert item.gbp_pnl == item.native_pnl * item.fx_rate_gbp_per_unit
+        gbp_sum += item.gbp_pnl
+    assert computation.realised_pnl_gbp == gbp_sum
 
 
 def _ops(
@@ -306,6 +341,7 @@ def test_partial_settlement_when_unfilled_canonical_outcome_wins(tmp_path: Path)
         expected = independent_realised_pnl_gbp(persisted, drop_plan.outcome)
         assert expected == -keep_plan.requested_stake * keep_rate
         assert computation.realised_pnl_gbp == expected
+        assert_settlement_arithmetic(persisted, drop_plan.outcome, expected)
 
         settled = ops.settle(
             trade.trade_id,
@@ -347,6 +383,7 @@ def test_settlement_moves_trade_to_closed_history(tmp_path: Path, outcome_index:
         outcomes = sorted({leg.outcome for leg in trade.legs})
         winning = outcomes[outcome_index]
         expected_pnl = independent_realised_pnl_gbp(trade, winning)
+        assert_settlement_arithmetic(trade, winning, expected_pnl)
         settled = ops.settle(
             trade.trade_id,
             PaperSettlementRequest(
@@ -485,11 +522,21 @@ def test_awaiting_external_api_returns_unfilled_planned_legs(tmp_path: Path) -> 
         assert active[0]["state"] == "AWAITING_MANUAL_EXTERNAL"
         assert active[0]["legs"]
         assert all(leg["fill_kind"] == "UNFILLED" for leg in active[0]["legs"])
+        plan = ops._plans[opportunity_id]
         detail = client.get(f"/paper/trades/{active[0]['trade_id']}").json()
-        assert {leg["outcome"] for leg in detail["legs"]} == {
-            leg.outcome for leg in ops._plans[opportunity_id].legs
-        }
+        assert {leg["outcome"] for leg in detail["legs"]} == {leg.outcome for leg in plan.legs}
         assert any(leg["execution_mode"] == "EXTERNAL_OPERATOR" for leg in detail["legs"])
+        for planned in plan.legs:
+            row = next(
+                item
+                for item in detail["legs"]
+                if item["venue"] == planned.venue.value and item["outcome"] == planned.outcome
+            )
+            assert Decimal(str(row["requested_stake"])) == planned.requested_stake
+            assert Decimal(str(row["filled_stake"])) == Decimal("0")
+            assert row["currency"] == planned.currency
+            assert row["source_market_id"] == planned.source_market_id
+            assert row["filled_odds"] is None
     finally:
         app.dependency_overrides.clear()
         audit.close()

@@ -67,8 +67,10 @@ export default async function PaperTradeDetailPage({
                 <th>Venue</th>
                 <th>Outcome</th>
                 <th>Fill kind</th>
+                <th>Mode</th>
                 <th>Odds</th>
-                <th>Stake</th>
+                <th>Requested</th>
+                <th>Filled</th>
                 <th>Capital source</th>
               </tr>
             </thead>
@@ -78,8 +80,14 @@ export default async function PaperTradeDetailPage({
                   <td>{leg.venue}</td>
                   <td>{leg.outcome}</td>
                   <td>{leg.fill_kind}</td>
+                  <td>{leg.execution_mode}</td>
                   <td>{leg.filled_odds ?? leg.displayed_odds ?? "—"}</td>
-                  <td>{money(leg.filled_stake, leg.currency === "USD" ? "USD" : "GBP")}</td>
+                  <td>{money(leg.requested_stake, leg.currency === "USD" ? "USD" : "GBP")}</td>
+                  <td>
+                    {leg.fill_kind === "UNFILLED"
+                      ? "Unfilled"
+                      : money(leg.filled_stake, leg.currency === "USD" ? "USD" : "GBP")}
+                  </td>
                   <td>{leg.capital_source}</td>
                 </tr>
               ))}
