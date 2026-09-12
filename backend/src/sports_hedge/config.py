@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     market_intelligence_minimum_sample_size: int = Field(default=8, ge=2)
     paper_audit_db_path: str = "./data/paper_audit.sqlite"
     watchlist_db_path: str = "./data/near_arb_watchlist.sqlite"
+    notifications_db_path: str = "./data/notifications.sqlite"
+    notification_cooldown_seconds: int = Field(default=900, ge=0)
 
     paper_bankroll_gbp: float = Field(default=5000.0, gt=0)
     paper_bankroll_usd: float = Field(default=5000.0, gt=0)
