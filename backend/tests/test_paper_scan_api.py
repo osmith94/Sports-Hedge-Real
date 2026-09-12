@@ -176,6 +176,7 @@ def test_economics_status_is_backend_resolved() -> None:
     assert body["data_kind"] == "backend_resolved"
     assert "fx" in body
     assert "venue_costs" in body
+    assert all("retrieved_at" in row for row in body["fx"])
 
 
 def test_frontend_live_scanner_does_not_send_operator_fx_or_fees() -> None:
@@ -186,6 +187,10 @@ def test_frontend_live_scanner_does_not_send_operator_fx_or_fees() -> None:
     assert "dashboardVenueCost" not in scan_tsx
     assert "USD → GBP" not in scan_tsx
     assert "Matchbook fee %" not in scan_tsx
+    assert "Capital limit £" not in scan_tsx
     assert "getEconomicsStatus" in scan_tsx
+    assert "econ-strip" in scan_tsx
+    assert "scan-ops-row" in scan_tsx
+    assert "Optional capital limit" in scan_tsx
     assert "fx_snapshots" not in api_ts.split("export type PaperCollectionRequest")[1].split("export type TrendSummary")[0]
     assert "fee_snapshots" not in api_ts.split("export type PaperCollectionRequest")[1].split("export type TrendSummary")[0]

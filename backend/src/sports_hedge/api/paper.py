@@ -270,12 +270,14 @@ def economics_status(
     fx_rows = []
     try:
         for rate in fx.economics_status(as_of=as_of):
+            retrieved = rate.retrieved_at or rate.captured_at
             fx_rows.append(
                 {
                     "currency": rate.currency,
                     "gbp_per_unit": str(rate.gbp_per_unit),
                     "source_date": rate.source_date.isoformat(),
                     "valuation_date": rate.valuation_date.isoformat(),
+                    "retrieved_at": retrieved.isoformat() if retrieved is not None else None,
                     "status": rate.status.value,
                     "primary_source": rate.primary_source,
                     "variance_bps": None if rate.variance_bps is None else str(rate.variance_bps),

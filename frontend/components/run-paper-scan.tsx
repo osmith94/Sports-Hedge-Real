@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 import {
   EconomicsStatus,
+  EconomicsVenueCostRow,
   PaperCollectionReport,
   PaperCollectionRequest,
   getEconomicsStatus,
@@ -12,12 +13,18 @@ import {
   runPaperCollection,
 } from "../lib/api";
 import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
-import { percent } from "../lib/format";
 
 type ScanState =
   | { kind: "idle" }
   | { kind: "success"; report: PaperCollectionReport }
   | { kind: "error"; message: string };
+
+type StripChip = {
+  key: string;
+  label: string;
+  warn: boolean;
+  title: string;
+};
 
 function optionalPositive(value: string, label: string): string | undefined {
   const trimmed = value.trim();
@@ -46,25 +53,96 @@ function reportSummary(report: PaperCollectionReport): string {
   return `${report.matched_event_pairs} event pair${report.matched_event_pairs === 1 ? "" : "s"} · ${report.matched_market_pairs} market pair${report.matched_market_pairs === 1 ? "" : "s"} · ${eligible} paper-eligible · ${report.issues.length} issue${report.issues.length === 1 ? "" : "s"}`;
 }
 
-function fxStatusLine(status: EconomicsStatus | null): string {
-  if (!status) return "FX backend-resolved · loading";
-  const usd = status.fx.find((row) => row.currency === "USD");
-  if (!usd) {
-    const missing = status.issues.find((issue) => issue.includes("missing_fx_rate")) || "missing USD rate";
-    return `FX USD/GBP unavailable · ${missing}`;
-  }
-  const sourceDate = usd.source_date.slice(0, 10);
-  const source = usd.primary_source.includes("ecb") ? "ECB" : usd.primary_source;
-  return `FX USD/GBP ${usd.gbp_per_unit} · ${source} ${sourceDate} · ${usd.status}`;
+function sourceLabel(source: string): string {
+  if (source.includes("ecb")) return "ECB";
+  if (source.includes("boe")) return "BoE";
+  if (source.includes("matchbook")) return "registry";
+  if (source.includes("polymarket")) return "registry";
+  return source.replace(/^venue_cost_registry:/, "");
 }
 
-function costStatusLine(status: EconomicsStatus | null): string {
-  if (!status) return "Venue costs backend-resolved · loading";
-  const matchbook = status.venue_costs.find((row) => row.venue === "matchbook");
-  const polymarket = status.venue_costs.find((row) => row.venue === "polymarket");
-  if (!matchbook || !polymarket) return "Venue costs incomplete · fail closed if required rule missing";
-  const mb = matchbook.rate ? `${(Number(matchbook.rate) * 100).toFixed(2)}% ${matchbook.fee_basis}` : matchbook.fee_basis;
-  return `Costs Matchbook ${mb} · Polymarket ${polymarket.fee_basis} · ${matchbook.source}`;
+function clockStamp(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const parsed = Date.parse(iso);
+  if (!Number.isFinite(parsed)) return iso.slice(0, 16);
+  return `${new Date(parsed).toISOString().replace("T", " ").slice(0, 16)}Z`;
+}
+
+function venueCostChip(
+  status: EconomicsStatus | null,
+  venue: "matchbook" | "polymarket",
+  short: string,
+): StripChip {
+  const preferred = ["match_result", "both_teams_to_score"];
+  const rows = status?.venue_costs.filter((row) => row.venue === venue) ?? [];
+  const row =
+    preferred.map((family) => rows.find((item) => item.market_class === family)).find(Boolean) ??
+    rows[0];
+  if (!status) {
+    return { key: venue, label: `${short} …`, warn: false, title: "Loading backend venue costs" };
+  }
+  if (!row) {
+    const diagnostic = status.issues.find((item) => item.includes(venue)) ?? `${venue} cost missing`;
+    return { key: venue, label: `${short} warn`, warn: true, title: diagnostic };
+  }
+  return {
+    key: venue,
+    label: `${short} ${formatFeeRule(row)}`,
+    warn: row.known_status !== "known",
+    title: [
+      `${row.fee_basis} · ${row.action}`,
+      row.market_class,
+      row.source,
+      row.effective_from ? `effective ${row.effective_from.slice(0, 10)}` : null,
+      row.snapshot_id,
+      row.detail,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  };
+}
+
+function formatFeeRule(row: EconomicsVenueCostRow): string {
+  if (row.rate != null && row.rate !== "" && Number(row.rate) > 0) {
+    return `${(Number(row.rate) * 100).toFixed(2)}% ${row.fee_basis}`;
+  }
+  return row.fee_basis.replaceAll("_", " ");
+}
+
+function economicsChips(status: EconomicsStatus | null): StripChip[] {
+  const usd = status?.fx.find((row) => row.currency === "USD");
+  const fxIssue = status?.issues.find((item) => item.includes("fx_rate")) ?? "missing USD rate";
+  const fxChip: StripChip = usd
+    ? {
+        key: "fx",
+        label: `USD/GBP ${Number(usd.gbp_per_unit).toFixed(4)} · ${sourceLabel(usd.primary_source)} ${usd.source_date.slice(0, 10)} · ${usd.status}`,
+        warn:
+          usd.status === "exception" ||
+          Boolean(status?.issues.some((item) => item.includes("stale_fx"))),
+        title: [
+          `primary ${usd.primary_source}`,
+          `published ${usd.source_date}`,
+          usd.retrieved_at ? `retrieved ${clockStamp(usd.retrieved_at)}` : null,
+          `valuation ${usd.valuation_date}`,
+          usd.check_source ? `check ${usd.check_source}` : null,
+          usd.variance_bps ? `variance ${usd.variance_bps} bps` : null,
+          status?.data_kind,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      }
+    : {
+        key: "fx",
+        label: status ? "USD/GBP warn" : "USD/GBP …",
+        warn: Boolean(status),
+        title: status ? fxIssue : "Loading backend FX",
+      };
+
+  return [
+    fxChip,
+    venueCostChip(status, "matchbook", "MB"),
+    venueCostChip(status, "polymarket", "PM"),
+  ];
 }
 
 export function RunPaperScan() {
@@ -175,57 +253,29 @@ export function RunPaperScan() {
     await collect();
   }
 
-  const triggerDisplay = minNetArbPercent.trim()
-    ? `${minNetArbPercent.trim()}%`
-    : percent(DEFAULT_SCANNER_ASSUMPTIONS.minimumNetArb);
+  const chips = economicsChips(economics);
 
   return (
     <section className="panel scan-control">
       <div className="panel-header">
-        <div>
-          <div className="panel-title">Paper scanner controls</div>
-          <div className="panel-meta">
-            Matchbook discovers fixtures; Polymarket is matched onto the same canonical event. Repeated
-            read-only collection updates watchlist net margin and distance-to-strike. PAPER MODE · no
-            orders.
-          </div>
-        </div>
+        <div className="panel-title">Paper scanner</div>
         <span className="status-badge">PAPER MODE · NO EXECUTION</span>
       </div>
 
       <form className="scan-form" onSubmit={submit}>
-        <div className="assumption-strip">
-          <span>Trigger {triggerDisplay} net arb</span>
-          <span>Capital {capitalLimit.trim() ? `£${capitalLimit.trim()}` : "unset"}</span>
-          <span>Max risk {maxRisk}/100</span>
-          <span>{fxStatusLine(economics)}</span>
-          <span>{costStatusLine(economics)}</span>
-          <span>Cadence {intervalSeconds}s</span>
-        </div>
-
-        <div className="scan-control-grid scan-control-grid-ops">
-          <label className="scan-field">
+        <div className="scan-ops-row">
+          <label className="scan-field scan-field-primary">
             <span>Min net arb %</span>
             <input
               inputMode="decimal"
               value={minNetArbPercent}
               onChange={(event) => setMinNetArbPercent(event.target.value)}
-              placeholder="1.00"
+              placeholder="0.50"
               aria-label="Minimum net arbitrage trigger percent"
             />
           </label>
-          <label className="scan-field">
-            <span>Capital limit £</span>
-            <input
-              inputMode="decimal"
-              value={capitalLimit}
-              onChange={(event) => setCapitalLimit(event.target.value)}
-              placeholder="optional"
-              aria-label="Paper capital limit pounds"
-            />
-          </label>
-          <label className="scan-field">
-            <span>Max risk / 100</span>
+          <label className="scan-field scan-field-compact">
+            <span>Max risk</span>
             <input
               inputMode="numeric"
               value={maxRisk}
@@ -233,29 +283,51 @@ export function RunPaperScan() {
               aria-label="Maximum execution risk score"
             />
           </label>
+          <label className="scan-refresh">
+            <input
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(event) => setAutoRefresh(event.target.checked)}
+            />
+            Auto {intervalSeconds}s
+          </label>
           <div className="scan-action">
             <button className="scan-button" type="submit" disabled={loading}>
-              {loading ? "Scanning…" : "Run read-only scan"}
+              {loading ? "Scanning…" : "Run scan"}
             </button>
           </div>
         </div>
 
-        <label className="scan-note">
-          <input
-            type="checkbox"
-            checked={autoRefresh}
-            onChange={(event) => setAutoRefresh(event.target.checked)}
-          />{" "}
-          Keep refreshing while this console is open (read-only Matchbook/Polymarket collection at{" "}
-          {intervalSeconds}s). Does not place orders. Server loop stays off unless{" "}
-          <code>PAPER_LIVE_REFRESH_ENABLED</code> is set.
-        </label>
-
-        <div className="scan-note">
-          FX and venue fees are backend-resolved with timestamped provenance. The operator console
-          cannot enter USD→GBP or venue-fee percentages for the solver. Missing or stale required
-          inputs fail closed. {economics?.data_kind === "backend_resolved" ? "Data: backend_resolved." : ""}
+        <div className="econ-strip" aria-label="Backend-resolved FX and venue costs">
+          {chips.map((chip) => (
+            <span
+              key={chip.key}
+              className={chip.warn ? "econ-chip econ-chip-warn" : "econ-chip"}
+              title={chip.title}
+            >
+              {chip.label}
+            </span>
+          ))}
         </div>
+
+        <details className="scan-advanced">
+          <summary>Advanced · provenance</summary>
+          <p className="scan-advanced-copy">
+            FX and venue fees are backend-resolved ({economics?.data_kind ?? "backend_resolved"}).
+            Missing or stale required inputs fail closed. Standing capital belongs to native
+            liquidity pools; optional scan-only capital limit is retained for compatibility.
+          </p>
+          <label className="scan-field">
+            <span>Optional capital limit £</span>
+            <input
+              inputMode="decimal"
+              value={capitalLimit}
+              onChange={(event) => setCapitalLimit(event.target.value)}
+              placeholder="native pools"
+              aria-label="Optional paper capital limit pounds"
+            />
+          </label>
+        </details>
 
         {state.kind === "success" ? (
           <div className="scan-message scan-message-success" role="status">
