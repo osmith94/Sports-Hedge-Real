@@ -286,6 +286,8 @@ class RecommendedManualSize(BaseModel):
     reserve_remaining: list[dict[str, Any]] = Field(default_factory=list)
     expected_lock_duration_hours: Decimal | None = None
     expected_lock_basis: str | None = None
+    estimated_time_to_release: dict[str, Any] | None = None
+    settled_at: datetime | None = None
     capital_turnover: dict[str, Any] | None = None
     capital_turnover_label: str = "modelled_ranking_input_not_guaranteed_return_rate"
 

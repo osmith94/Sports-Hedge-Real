@@ -214,6 +214,12 @@ def recommended_from_allocation(
         reserve_remaining=[row.model_dump(mode="json") for row in allocation.reserve_remaining],
         expected_lock_duration_hours=allocation.expected_lock_duration_hours,
         expected_lock_basis=allocation.expected_lock_basis,
+        estimated_time_to_release=(
+            allocation.estimated_time_to_release.model_dump(mode="json")
+            if allocation.estimated_time_to_release is not None
+            else None
+        ),
+        settled_at=allocation.settled_at,
         capital_turnover=turnover,
         survivability=allocation.survivability,
     )

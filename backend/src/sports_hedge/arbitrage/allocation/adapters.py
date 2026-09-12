@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
+from sports_hedge.domain.football import CanonicalMarket, FootballPeriod, SettlementScope
 from sports_hedge.arbitrage.allocation.models import (
     AllocationBalance,
     AllocationLeg,
     AllocationRequest,
     BankrollAllocationPolicy,
+    EstimateConfidence,
+    EstimatedTimeToRelease,
     OpenPositionExposure,
     VenueNativeAmount,
 )
@@ -22,6 +26,20 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.paper.models import PaperScanDecision
 from sports_hedge.paper.trades import PaperTrade, PaperTradeState
+
+FOOTBALL_REGULATION_PLAYING_MINUTES = Decimal("90")
+FOOTBALL_FIRST_HALF_PLAYING_MINUTES = Decimal("45")
+FOOTBALL_HALFTIME_MINUTES = Decimal("15")
+MODELLED_STOPPAGE_AND_SETTLEMENT_BUFFER_MINUTES = Decimal("15")
+UNDERSTATED_FULL_TIME_ELAPSED_MINUTES = (
+    FOOTBALL_REGULATION_PLAYING_MINUTES + MODELLED_STOPPAGE_AND_SETTLEMENT_BUFFER_MINUTES
+)
+LOCK_BASIS_PREMATCH_ELAPSED = "kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer"
+LOCK_BASIS_INPLAY_MODELLED_REMAINING = (
+    "modelled_remaining_elapsed_regulation_halftime_stoppage_settlement_buffer"
+)
+LOCK_BASIS_FIRST_HALF_ELAPSED = "kickoff_plus_elapsed_first_half_stoppage_settlement_buffer"
+LOCK_BASIS_PROVIDER_LIVE = "provider_live_match_clock"
 
 
 def request_from_complete_set(
@@ -224,6 +242,88 @@ def exposures_from_trades(trades: list[PaperTrade]) -> list[OpenPositionExposure
             )
         )
     return exposures
+
+
+def _elapsed_minutes_from_policy(policy: BankrollAllocationPolicy | None) -> tuple[Decimal, Decimal, Decimal]:
+    source = policy or BankrollAllocationPolicy()
+    return (
+        source.football_regulation_playing_minutes,
+        source.football_halftime_minutes,
+        source.football_stoppage_and_settlement_buffer_minutes,
+    )
+
+
+def _full_time_elapsed_minutes(policy: BankrollAllocationPolicy | None) -> Decimal | None:
+    playing, halftime, buffer = _elapsed_minutes_from_policy(policy)
+    extra = playing + halftime + buffer
+    if extra <= UNDERSTATED_FULL_TIME_ELAPSED_MINUTES:
+        return None
+    return extra
+
+
+def estimated_time_to_release(
+    kickoff_utc: datetime | None,
+    as_of: datetime | None,
+    *,
+    market: CanonicalMarket | None,
+    policy: BankrollAllocationPolicy | None = None,
+    live_remaining_minutes: Decimal | None = None,
+) -> EstimatedTimeToRelease | None:
+    """Conservative modelled hours until capital *might* become free.
+
+    Advisory only. Does not settle a position or release spendable cash.
+    """
+
+    if live_remaining_minutes is not None and live_remaining_minutes > 0:
+        hours = (live_remaining_minutes / Decimal("60")).quantize(Decimal("0.0001"))
+        return EstimatedTimeToRelease(
+            hours=hours,
+            estimate_basis=LOCK_BASIS_PROVIDER_LIVE,
+            estimate_confidence=EstimateConfidence.PROVIDER_LIVE,
+        )
+    if kickoff_utc is None or as_of is None or market is None:
+        return None
+    settlement = market.settlement
+    period = market.period
+    if settlement.scope is SettlementScope.UNKNOWN or period is FootballPeriod.UNKNOWN:
+        return None
+    if settlement.scope in {
+        SettlementScope.INCLUDING_EXTRA_TIME,
+        SettlementScope.INCLUDING_PENALTIES,
+    }:
+        return None
+    if settlement.extra_time_included is True or settlement.penalties_included is True:
+        return None
+    _, _, buffer = _elapsed_minutes_from_policy(policy)
+    if period is FootballPeriod.FIRST_HALF and settlement.scope in {
+        SettlementScope.PERIOD_ONLY,
+        SettlementScope.REGULATION_TIME,
+    }:
+        extra = FOOTBALL_FIRST_HALF_PLAYING_MINUTES + buffer
+        basis = LOCK_BASIS_FIRST_HALF_ELAPSED
+    elif period is FootballPeriod.FULL_TIME and settlement.scope is SettlementScope.REGULATION_TIME:
+        extra = _full_time_elapsed_minutes(policy)
+        if extra is None:
+            return None
+        basis = LOCK_BASIS_PREMATCH_ELAPSED
+    else:
+        return None
+    minutes_from_kickoff = Decimal(str((as_of - kickoff_utc).total_seconds())) / Decimal("60")
+    if minutes_from_kickoff <= 0:
+        hours = ((-minutes_from_kickoff) + extra) / Decimal("60")
+        return EstimatedTimeToRelease(
+            hours=hours.quantize(Decimal("0.0001")),
+            estimate_basis=basis,
+            estimate_confidence=EstimateConfidence.MODELLED,
+        )
+    remaining = extra - minutes_from_kickoff
+    if remaining <= 0:
+        return None
+    return EstimatedTimeToRelease(
+        hours=(remaining / Decimal("60")).quantize(Decimal("0.0001")),
+        estimate_basis=LOCK_BASIS_INPLAY_MODELLED_REMAINING,
+        estimate_confidence=EstimateConfidence.MODELLED,
+    )
 
 
 def request_from_paper_decision(

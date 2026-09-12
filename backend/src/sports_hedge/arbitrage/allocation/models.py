@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal
@@ -40,6 +41,28 @@ class AllocationConstraintKind(StrEnum):
     CANNOT_RESIZE = "cannot_resize"
     SOLVER_NOT_ARBITRAGE = "solver_not_arbitrage"
     ZERO_STAKE_EXCLUDED = "zero_stake_excluded"
+
+
+class EstimateConfidence(StrEnum):
+    MODELLED = "modelled"
+    PROVIDER_LIVE = "provider_live"
+    UNKNOWN = "unknown"
+
+
+class EstimatedTimeToRelease(BaseModel):
+    """Advisory modelled hours until capital *might* become free.
+
+    Never an authoritative settlement time. Never releases spendable cash.
+    Actual cash changes only after a completed unwind (8E) or recorded settlement.
+    """
+
+    hours: Decimal = Field(gt=0)
+    estimate_basis: str
+    estimate_confidence: EstimateConfidence = EstimateConfidence.MODELLED
+    label: str = "modelled_estimate_not_authoritative_settlement"
+    does_not_release_capital: Literal[True] = True
+    is_not_settlement: Literal[True] = True
+    data_kind: Literal["modelled"] = "modelled"
 
 
 class ReductionInputStatus(StrEnum):
@@ -86,6 +109,11 @@ class BankrollAllocationPolicy(BaseModel):
     unknown_volatility_reduction: Decimal = Field(default=Decimal("0.05"), ge=0, lt=1)
     elevated_volatility_bps: Decimal = Field(default=Decimal("40"), ge=0)
     elevated_volatility_reduction: Decimal = Field(default=Decimal("0.15"), ge=0, lt=1)
+    football_regulation_playing_minutes: Decimal = Field(default=Decimal("90"), gt=0)
+    football_halftime_minutes: Decimal = Field(default=Decimal("15"), ge=0)
+    football_stoppage_and_settlement_buffer_minutes: Decimal = Field(
+        default=Decimal("15"), ge=0
+    )
 
 
 class AllocationBalance(BaseModel):
@@ -177,6 +205,9 @@ class AllocationRequest(BaseModel):
     survivability: Any | None = None
     expected_lock_duration_hours: Decimal | None = Field(default=None, ge=0)
     expected_lock_basis: str | None = None
+    estimated_time_to_release_hours: Decimal | None = Field(default=None, ge=0)
+    estimate_basis: str | None = None
+    estimate_confidence: EstimateConfidence | None = None
     quote_age_ms: int | None = Field(default=None, ge=0)
     external_confirmation_latency_seconds: Decimal | None = Field(default=None, ge=0)
     recent_volatility_bps: Decimal | None = Field(default=None, ge=0)
@@ -187,6 +218,10 @@ class AllocationRequest(BaseModel):
     def reject_zero_stake_legs(self) -> "AllocationRequest":
         if any(leg.solver_stake <= 0 for leg in self.legs):
             raise ValueError("zero-stake legs must be excluded from allocation input")
+        if self.estimated_time_to_release_hours is None:
+            self.estimated_time_to_release_hours = self.expected_lock_duration_hours
+        if self.estimate_basis is None:
+            self.estimate_basis = self.expected_lock_basis
         return self
 
 
@@ -239,20 +274,23 @@ class NativeBalanceAfter(BaseModel):
 
 
 class CapitalTurnoverMetric(BaseModel):
-    """Optional ranking input from a recorded settlement timestamp.
+    """Advisory ranking input from estimated time-to-release. Not a return rate.
 
-    Not a capital-release signal and not a guaranteed return rate. Kickoff and
-    match-duration guesses must not populate this record.
+    Does not release capital or settle a position.
     """
 
     metric: Decimal
-    formula: str = "guaranteed_profit / committed_capital / expected_lock_hours"
-    expected_lock_duration_hours: Decimal
-    expected_lock_basis: str
+    formula: str = "guaranteed_profit / committed_capital / estimated_time_to_release_hours"
+    estimated_time_to_release_hours: Decimal
+    estimate_basis: str
+    estimate_confidence: EstimateConfidence = EstimateConfidence.MODELLED
+    expected_lock_duration_hours: Decimal | None = None
+    expected_lock_basis: str | None = None
     guaranteed_profit: Decimal
     committed_capital: Decimal
     label: str = "modelled_ranking_input_not_guaranteed_return_rate"
     estimate_not_guarantee: bool = True
+    does_not_release_capital: Literal[True] = True
 
 
 class AllocationResult(BaseModel):
@@ -277,6 +315,8 @@ class AllocationResult(BaseModel):
     reduction_factors: list[ReductionFactor] = Field(default_factory=list)
     expected_lock_duration_hours: Decimal | None = None
     expected_lock_basis: str | None = None
+    estimated_time_to_release: EstimatedTimeToRelease | None = None
+    settled_at: datetime | None = None
     capital_turnover: CapitalTurnoverMetric | None = None
     fill_confidence: Any | None = None
     execution_risk_score: int | None = None

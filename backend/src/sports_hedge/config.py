@@ -105,6 +105,9 @@ class Settings(BaseSettings):
     allocation_matchbook_limit_gbp: float | None = Field(default=None, gt=0)
     allocation_polymarket_limit_usd: float | None = Field(default=None, gt=0)
     allocation_external_leg_cap_native: float | None = Field(default=None, gt=0)
+    allocation_football_regulation_playing_minutes: float = Field(default=90.0, gt=0)
+    allocation_football_halftime_minutes: float = Field(default=15.0, ge=0)
+    allocation_football_stoppage_settlement_buffer_minutes: float = Field(default=15.0, ge=0)
 
     @field_validator("cors_allow_origins", mode="before")
     @classmethod

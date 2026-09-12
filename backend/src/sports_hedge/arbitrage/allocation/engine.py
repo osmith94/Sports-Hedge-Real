@@ -14,6 +14,8 @@ from sports_hedge.arbitrage.allocation.models import (
     BankrollAllocationPolicy,
     CapitalTurnoverMetric,
     ConstraintBinding,
+    EstimateConfidence,
+    EstimatedTimeToRelease,
     NativeBalanceAfter,
     OpenPositionExposure,
     ReductionFactor,
@@ -23,31 +25,46 @@ from sports_hedge.arbitrage.allocation.models import (
 from sports_hedge.domain.models import VenueName
 
 EXTERNAL_OPERATOR = "EXTERNAL_OPERATOR"
-# Ranking-only. Never predicted from kickoff or match duration. Does not unlock capital.
-LEDGER_SETTLEMENT_LOCK_BASES = frozenset(
+KICKOFF_ONLY_BASES = frozenset({"time_to_kickoff", "kickoff", "time_until_kickoff"})
+OPTIMISTIC_ELAPSED_BASES = frozenset(
     {
-        "paper_operations_settlement",
-        "provider_settlement_timestamp",
-        "ledger_settlement_timestamp",
+        "kickoff_plus_regulation_plus_settlement_buffer",
+        "kickoff_plus_first_half_plus_settlement_buffer",
+    }
+)
+ADVISORY_ESTIMATE_BASES = frozenset(
+    {
+        "kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer",
+        "modelled_remaining_elapsed_regulation_halftime_stoppage_settlement_buffer",
+        "kickoff_plus_elapsed_first_half_stoppage_settlement_buffer",
+        "provider_live_match_clock",
     }
 )
 
 
-def _capital_release_lock(request: AllocationRequest) -> tuple[Decimal | None, str | None]:
-    """Accept lock hours only from a recorded settlement timestamp.
+def _advisory_time_to_release(request: AllocationRequest) -> EstimatedTimeToRelease | None:
+    """Modelled ranking input only. Never a settlement clock or cash-release trigger."""
 
-    Kickoff, regulation length, and other predicted finish times are omitted.
-    Capital stays locked until a clean unwind fills or paper operations records
-    settlement. This value is a ranking input, not a release gate.
-    """
-
-    basis = request.expected_lock_basis
-    hours = request.expected_lock_duration_hours
-    if basis not in LEDGER_SETTLEMENT_LOCK_BASES:
-        return None, None
-    if hours is None or hours <= 0:
-        return None, None
-    return hours, basis
+    hours = request.estimated_time_to_release_hours
+    basis = request.estimate_basis
+    if hours is None or hours <= 0 or not basis:
+        return None
+    if basis in KICKOFF_ONLY_BASES or basis in OPTIMISTIC_ELAPSED_BASES:
+        return None
+    if basis not in ADVISORY_ESTIMATE_BASES:
+        return None
+    confidence = request.estimate_confidence
+    if confidence is None:
+        confidence = (
+            EstimateConfidence.PROVIDER_LIVE
+            if basis == "provider_live_match_clock"
+            else EstimateConfidence.MODELLED
+        )
+    return EstimatedTimeToRelease(
+        hours=hours,
+        estimate_basis=basis,
+        estimate_confidence=confidence,
+    )
 
 
 def allocate(request: AllocationRequest) -> AllocationResult:
@@ -97,8 +114,8 @@ def allocate(request: AllocationRequest) -> AllocationResult:
             fill_confidence=request.fill_confidence,
             execution_risk_score=request.execution_risk_score,
             survivability=request.survivability,
-            expected_lock_duration_hours=_capital_release_lock(request)[0],
-            expected_lock_basis=_capital_release_lock(request)[1],
+            estimated_time_to_release=_advisory_time_to_release(request),
+            settled_at=None,
             scale_maximum=Decimal("0"),
             scale_recommended=Decimal("0"),
         )
@@ -134,13 +151,16 @@ def allocate(request: AllocationRequest) -> AllocationResult:
     profit = request.guaranteed_profit_at_solver_size * scale_recommended
     after = _balances_after(request, scale_recommended)
     limiting_leg = _limiting_depth_leg(request.legs)
-    lock_hours, lock_basis = _capital_release_lock(request)
+    estimate = _advisory_time_to_release(request)
     turnover = None
-    if lock_hours is not None and rec_capital > 0 and lock_basis:
+    if estimate is not None and rec_capital > 0:
         turnover = CapitalTurnoverMetric(
-            metric=profit / rec_capital / lock_hours,
-            expected_lock_duration_hours=lock_hours,
-            expected_lock_basis=lock_basis,
+            metric=profit / rec_capital / estimate.hours,
+            estimated_time_to_release_hours=estimate.hours,
+            estimate_basis=estimate.estimate_basis,
+            estimate_confidence=estimate.estimate_confidence,
+            expected_lock_duration_hours=estimate.hours,
+            expected_lock_basis=estimate.estimate_basis,
             guaranteed_profit=profit,
             committed_capital=rec_capital,
         )
@@ -165,8 +185,10 @@ def allocate(request: AllocationRequest) -> AllocationResult:
         limiting_constraint_detail=binding.detail,
         hard_constraints=bindings,
         reduction_factors=reductions,
-        expected_lock_duration_hours=lock_hours,
-        expected_lock_basis=lock_basis,
+        expected_lock_duration_hours=estimate.hours if estimate else None,
+        expected_lock_basis=estimate.estimate_basis if estimate else None,
+        estimated_time_to_release=estimate,
+        settled_at=None,
         capital_turnover=turnover,
         fill_confidence=request.fill_confidence,
         execution_risk_score=request.execution_risk_score,
@@ -831,7 +853,7 @@ def _rejected(
         fill_confidence=request.fill_confidence,
         execution_risk_score=request.execution_risk_score,
         survivability=request.survivability,
-        expected_lock_duration_hours=_capital_release_lock(request)[0],
-        expected_lock_basis=_capital_release_lock(request)[1],
+        estimated_time_to_release=_advisory_time_to_release(request),
+        settled_at=None,
         guaranteed_roi=request.roi,
     )
