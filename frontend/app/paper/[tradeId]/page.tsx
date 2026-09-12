@@ -11,7 +11,8 @@ export default async function PaperTradeDetailPage({
 }: {
   params: Promise<{ tradeId: string }>;
 }) {
-  const { tradeId } = await params;
+  const { tradeId: rawId } = await params;
+  const tradeId = decodeURIComponent(rawId);
   let trade;
   try {
     trade = await getPaperTrade(tradeId);

@@ -281,6 +281,7 @@ def test_trade_api_and_paper_page_are_not_mock_portfolio(tmp_path: Path) -> None
         assert active.status_code == 200
         rows = active.json()
         assert len(rows) == 1
+        assert ":" not in rows[0]["trade_id"]
         assert rows[0]["state"] == "OPEN"
         assert "15000" not in active.text
         assert "15.82" not in active.text

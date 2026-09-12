@@ -50,6 +50,13 @@ from sports_hedge.paper.trades import (
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger, SqlitePaperTradeRepository
 
 
+def paper_trade_id(opportunity_id: str) -> str:
+    """Path-safe trade id. Colons break Next.js / FastAPI path segments."""
+
+    slug = opportunity_id.replace(":", "-").replace("/", "-")
+    return f"ptrade-{slug}"
+
+
 class PaperOperationsError(ValueError):
     """Fail-closed paper operational chain."""
 
@@ -640,7 +647,7 @@ class PaperOperationsService:
         if opportunity.market_family is not None:
             market_label = opportunity.market_family.value.replace("_", " ")
         return PaperTrade(
-            trade_id=f"paper-trade:{plan.opportunity_id}",
+            trade_id=paper_trade_id(plan.opportunity_id),
             opportunity_id=plan.opportunity_id,
             canonical_event_id=plan.canonical_event_id,
             canonical_market_id=plan.canonical_market_id,
@@ -720,7 +727,7 @@ class PaperOperationsService:
         entries: list[PaperJournalEntry] = []
         fx = {item.currency: item for item in plan.fx_snapshots}
         modes = plan.execution_modes
-        trade_id = f"paper-trade:{plan.opportunity_id}"
+        trade_id = paper_trade_id(plan.opportunity_id)
         for fill in fills.fills:
             if fill.filled_stake <= 0:
                 continue
