@@ -811,19 +811,29 @@ def test_unsupported_fee_basis_fails_closed_on_generalized_path() -> None:
     assert decision.eligible_for_paper_simulation is False
     assert decision.fill_legs == []
 
-    unsafe_scan = DepthAwarePayoffScanner().scan(
-        [
-            _source("home", VenueName.MATCHBOOK, "mb-h", "mb-dnb").model_copy(update={"cost": payout}),
-            _source("away", VenueName.POLYMARKET, "pm-a", "pm-dnb"),
-        ],
-        state_model=GeneralizedStateModel.DRAW_NO_BET,
+    extra_bases = (
+        payout,
+        payout.model_copy(update={"fee_basis": FeeBasis.TRANSACTION}),
+        payout.model_copy(update={"fee_basis": FeeBasis.FIXED, "fixed_amount": Decimal("0.50")}),
+        payout.model_copy(update={"fee_basis": FeeBasis.FORMULA, "formula_parameters": {"k": Decimal("0.01")}}),
+        payout.model_copy(
+            update={"fee_basis": FeeBasis.UNKNOWN, "known_status": CostKnownStatus.UNKNOWN, "rate": None}
+        ),
     )
-    assert unsafe_scan.solution.is_arbitrage is False
-    assert unsafe_scan.solution.rejection_reason == UNSUPPORTED_STATE_PAYOFF_FEE_BASIS
-    assert unsafe_scan.solution.state_pnl == {} or all(
-        value == 0 for value in unsafe_scan.solution.state_pnl.values()
-    )
-    assert not unsafe_scan.selected_quotes
+    for unsafe_cost in extra_bases:
+        unsafe_scan = DepthAwarePayoffScanner().scan(
+            [
+                _source("home", VenueName.MATCHBOOK, "mb-h", "mb-dnb").model_copy(update={"cost": unsafe_cost}),
+                _source("away", VenueName.POLYMARKET, "pm-a", "pm-dnb"),
+            ],
+            state_model=GeneralizedStateModel.DRAW_NO_BET,
+        )
+        assert unsafe_scan.solution.is_arbitrage is False
+        assert unsafe_scan.solution.rejection_reason == UNSUPPORTED_STATE_PAYOFF_FEE_BASIS
+        assert unsafe_scan.solution.state_pnl == {} or all(
+            value == 0 for value in unsafe_scan.solution.state_pnl.values()
+        )
+        assert not unsafe_scan.selected_quotes
 
 
 def test_materially_invalid_lp_output_is_rejected_not_repaired() -> None:
@@ -865,6 +875,24 @@ def test_materially_invalid_lp_output_is_rejected_not_repaired() -> None:
     rejected_capital = GeneralizedMaxMinSolver(linprog=capital_violating).solve(wide)
     assert rejected_capital.is_arbitrage is False
     assert rejected_capital.rejection_reason == "numerical_validation_failed"
+    assert rejected_capital.selected_stakes == []
+
+    venue_limited = PayoffProblem(
+        states=["home", "away"],
+        legs=[
+            _leg(leg_id="a", venue=VenueName.MATCHBOOK, max_stake="20", payoffs={"home": "1", "away": "-0.1"}),
+            _leg(leg_id="b", venue=VenueName.POLYMARKET, max_stake="20", payoffs={"home": "-0.1", "away": "1"}),
+        ],
+        venue_capital_limits={VenueName.MATCHBOOK: Decimal("5")},
+    )
+
+    def venue_capital_violating(*_args: object, **_kwargs: object):
+        return SimpleNamespace(success=True, x=[8.0, 2.0])
+
+    rejected_venue = GeneralizedMaxMinSolver(linprog=venue_capital_violating).solve(venue_limited)
+    assert rejected_venue.is_arbitrage is False
+    assert rejected_venue.rejection_reason == "numerical_validation_failed"
+    assert rejected_venue.selected_stakes == []
 
     def epsilon_noise(*_args: object, **_kwargs: object):
         return SimpleNamespace(success=True, x=[-1e-12, 4.0])

@@ -173,7 +173,7 @@ def _problem_from_quotes(
 
 
 def _quote_identity(quote: DepthQuoteCandidate) -> tuple[VenueName, str, str, str]:
-    return (quote.venue, quote.source_market_id, quote.source_runner_id, quote.outcome)
+    return (quote.venue, quote.source_market_id, quote.source_runner_id or "", quote.outcome)
 
 
 def _quotes_for_positive_stakes(
