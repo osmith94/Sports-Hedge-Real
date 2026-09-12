@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -44,6 +44,7 @@ from sports_hedge.paper.unwind import (
     UnwindRecommendation,
     VenueCloseMechanics,
     mechanics_for_venue,
+    position_from_trade,
     register_venue_close_mechanics,
     venue_currency_key,
 )
@@ -162,7 +163,14 @@ def _quote(
     )
 
 
-def _position(legs: list[OpenPaperLeg], *, hold: str = "10", solver: str = "simple_complete_set") -> OpenPaperPosition:
+def _position(
+    legs: list[OpenPaperLeg],
+    *,
+    hold: str = "10",
+    solver: str = "simple_complete_set",
+    remaining_lock_minutes: Decimal | None = None,
+    expected_settlement_at: datetime | None = None,
+) -> OpenPaperPosition:
     return OpenPaperPosition(
         trade_id="ptrade-demo",
         opportunity_id="opp-demo",
@@ -172,7 +180,8 @@ def _position(legs: list[OpenPaperLeg], *, hold: str = "10", solver: str = "simp
         solver_model=solver,
         hold_pnl_gbp=Decimal(hold),
         capital_locked_native={leg.native_currency: sum((item.filled_size for item in legs if item.native_currency == leg.native_currency), Decimal("0")) for leg in legs},
-        remaining_lock_minutes=Decimal("90"),
+        remaining_lock_minutes=remaining_lock_minutes,
+        expected_settlement_at=expected_settlement_at,
         legs=legs,
     )
 
@@ -262,6 +271,8 @@ def test_fully_executable_reverse_depth_produces_exact_pnl_and_releasable_capita
     assert decision.conditionally_releasable_by_venue_currency[venue_currency_key(VenueName.MATCHBOOK, "GBP")] == Decimal("100")
     assert decision.conditionally_releasable_by_venue_currency[venue_currency_key(VenueName.POLYMARKET, "USD")] == Decimal("50")
     assert decision.spendable is False
+    assert decision.remaining_lock_minutes is None
+    assert decision.capital_turnover_hint is None
     mb = decision.close_plan.legs[0]
     assert mb.close_action is MarketAction.LAY
     assert mb.liability == Decimal("110")
@@ -381,6 +392,7 @@ def test_scarce_capital_give_up_must_pass_both_caps() -> None:
     assert small.incremental_close_capital_native == {}
     assert small.recommendation is UnwindRecommendation.UNWIND_NOT_SAFE
     assert small.decision_reason == "incremental_close_capital_unknown"
+    assert small.capital_turnover_hint == "scarce_capital_competing_opportunities"
 
 
 def test_scarce_policy_uses_the_more_restrictive_bound() -> None:
@@ -890,6 +902,11 @@ def test_unwind_does_not_mutate_liquidity_or_journal(tmp_path: Path) -> None:
     assert persisted.state is PaperTradeState.OPEN
     assert persisted.capital_locked_native["GBP"] == Decimal("100")
     assert any(event.event_type.value == "close_plan_evaluated" for event in persisted.audit)
+    adapted = position_from_trade(persisted)
+    assert adapted.remaining_lock_minutes is None
+    assert adapted.expected_settlement_at is None
+    assert decision.remaining_lock_minutes is None
+    assert decision.capital_turnover_hint is None
 
 
 def test_close_plan_api_is_paper_only_and_not_an_execution_endpoint(tmp_path: Path) -> None:
@@ -958,6 +975,140 @@ def test_close_plan_api_is_paper_only_and_not_an_execution_endpoint(tmp_path: Pa
         assert "place_order" not in payload
     finally:
         app.dependency_overrides.clear()
+
+
+def _executable_matchbook_quotes() -> list[ReverseQuote]:
+    return [
+        _quote(
+            venue=VenueName.MATCHBOOK,
+            outcome="home",
+            levels=[BookLevel(decimal_odds=Decimal("2.00"), available_stake=Decimal("200"))],
+            cost=_lay_cost(),
+            currency="GBP",
+            runner="mb-home",
+            market="mb-1x2",
+        )
+    ]
+
+
+def test_unknown_remaining_lock_is_valid_and_not_fabricated() -> None:
+    engine = PaperUnwindEngine()
+    fabricated_finish = NOW + timedelta(minutes=90)
+    decision = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position(
+                [_open_leg(price="2.00")],
+                hold="8",
+                expected_settlement_at=fabricated_finish,
+            ),
+            quotes=_executable_matchbook_quotes(),
+            evaluated_at=NOW,
+        )
+    )
+    assert decision.close_plan.fully_executable is True
+    assert decision.remaining_lock_minutes is None
+    assert decision.capital_turnover_hint != "capital_locked_until_expected_settlement"
+    assert decision.capital_turnover_hint is None
+    assert decision.recommendation is UnwindRecommendation.HOLD
+    assert decision.decision_reason == "exit_inferior_to_hold_after_fees"
+
+
+def test_engine_does_not_fabricate_a_finish_estimate_from_expected_settlement() -> None:
+    engine = PaperUnwindEngine()
+    with_timer = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position(
+                [_open_leg(price="2.00")],
+                hold="8",
+                expected_settlement_at=NOW + timedelta(minutes=5),
+            ),
+            quotes=_executable_matchbook_quotes(),
+            evaluated_at=NOW,
+        )
+    )
+    unknown = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position([_open_leg(price="2.00")], hold="8"),
+            quotes=_executable_matchbook_quotes(),
+            evaluated_at=NOW,
+        )
+    )
+    assert with_timer.remaining_lock_minutes is None
+    assert unknown.remaining_lock_minutes is None
+    assert with_timer.capital_turnover_hint is None
+    assert unknown.capital_turnover_hint is None
+    assert "near_kickoff" not in (with_timer.execution_risk.reasons if with_timer.execution_risk else [])
+    assert with_timer.recommendation is unknown.recommendation
+    assert with_timer.decision_reason == unknown.decision_reason
+
+
+def test_hold_vs_unwind_is_not_decided_by_predicted_game_end() -> None:
+    engine = PaperUnwindEngine()
+    quotes = _executable_matchbook_quotes()
+    scarce = CapitalScarcityInput(
+        pressure=CapitalPressure.SCARCE,
+        opportunity_cost_gbp=Decimal("4"),
+    )
+    soon = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position(
+                [_open_leg()],
+                hold="12",
+                expected_settlement_at=NOW + timedelta(minutes=3),
+            ),
+            quotes=quotes,
+            scarcity=scarce,
+            evaluated_at=NOW,
+        )
+    )
+    unknown = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position([_open_leg()], hold="12"),
+            quotes=quotes,
+            scarcity=scarce,
+            evaluated_at=NOW,
+        )
+    )
+    far = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position(
+                [_open_leg()],
+                hold="12",
+                remaining_lock_minutes=Decimal("180"),
+                expected_settlement_at=NOW + timedelta(hours=3),
+            ),
+            quotes=quotes,
+            scarcity=scarce,
+            evaluated_at=NOW,
+        )
+    )
+    assert soon.recommendation is unknown.recommendation is far.recommendation
+    assert soon.decision_reason == unknown.decision_reason == far.decision_reason
+    assert soon.decision_reason == "incremental_close_capital_unknown"
+    assert soon.recommendation is UnwindRecommendation.UNWIND_NOT_SAFE
+    assert soon.gross_close_liability_native[venue_currency_key(VenueName.MATCHBOOK, "GBP")] == Decimal("110")
+    assert soon.incremental_close_capital_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+    assert soon.incremental_close_capital_native == {}
+    assert soon.capital_turnover_hint == "opportunity_cost_from_current_scarcity"
+    assert unknown.capital_turnover_hint == "opportunity_cost_from_current_scarcity"
+    assert far.remaining_lock_minutes == Decimal("180")
+    assert unknown.remaining_lock_minutes is None
+
+
+def test_execution_risk_does_not_invent_minutes_when_lock_unknown() -> None:
+    engine = PaperUnwindEngine()
+    decision = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position([_open_leg(price="2.00")], hold="0"),
+            quotes=_executable_matchbook_quotes(),
+            policy=UnwindPolicy(max_profit_give_up_gbp=Decimal("100")),
+            evaluated_at=NOW,
+        )
+    )
+    assert decision.close_plan.fully_executable is True
+    assert decision.remaining_lock_minutes is None
+    assert decision.execution_risk is not None
+    assert "near_kickoff" not in decision.execution_risk.reasons
 
 
 def test_unwind_modules_have_no_live_execution_surface() -> None:

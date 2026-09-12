@@ -1,4 +1,9 @@
-"""Deterministic conservative hold-vs-unwind rule."""
+"""Deterministic conservative hold-vs-unwind rule.
+
+Predicted wall-clock match completion is not an input. HOLD vs UNWIND uses
+reverse-leg executability, fees/FX, execution risk, and capital scarcity —
+not a fabricated game-finish timer.
+"""
 
 from __future__ import annotations
 

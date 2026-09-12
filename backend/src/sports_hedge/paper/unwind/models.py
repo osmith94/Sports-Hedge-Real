@@ -143,8 +143,23 @@ class OpenPaperPosition(BaseModel):
     solver_model: str
     hold_pnl_gbp: Decimal
     capital_locked_native: dict[str, Decimal] = Field(default_factory=dict)
-    expected_settlement_at: datetime | None = None
-    remaining_lock_minutes: Decimal | None = Field(default=None, ge=0)
+    expected_settlement_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Authoritative provider/ledger settlement instant only. "
+            "Null/unknown is valid. Not a wall-clock match-finish estimate."
+        ),
+    )
+    remaining_lock_minutes: Decimal | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Authoritative remaining lock if a provider/ledger supplied it. "
+            "Null/unknown is valid. The engine must not invent this from kickoff "
+            "or predicted match completion, and must not use it as a close trigger "
+            "or assumed capital-release time."
+        ),
+    )
     legs: list[OpenPaperLeg] = Field(min_length=1)
     paper_only: bool = True
     places_orders: bool = False
@@ -252,8 +267,17 @@ class UnwindDecision(BaseModel):
     hold_pnl_gbp: Decimal | None = None
     validated_exit_pnl_gbp: Decimal | None = None
     profit_give_up_gbp: Decimal | None = None
-    remaining_lock_minutes: Decimal | None = None
-    capital_turnover_hint: str | None = None
+    remaining_lock_minutes: Decimal | None = Field(
+        default=None,
+        description="Passthrough of an authoritative remaining lock, else null. Not a close trigger.",
+    )
+    capital_turnover_hint: str | None = Field(
+        default=None,
+        description=(
+            "Opportunity-cost hint from current capital scarcity / competing opportunities. "
+            "Never a fabricated game-finish or settlement timer."
+        ),
+    )
     conditionally_releasable_by_venue_currency: dict[str, Decimal] = Field(
         default_factory=dict,
         description="Native amounts keyed by venue_currency_key(venue, currency), e.g. polymarket:USD. Never merge distinct venues.",

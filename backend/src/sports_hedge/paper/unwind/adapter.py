@@ -30,6 +30,10 @@ def position_from_trade(trade: PaperTrade) -> OpenPaperPosition:
         solver_model=trade.solver_model or SOLVER_MODEL_SIMPLE,
         hold_pnl_gbp=trade.guaranteed_profit_gbp_at_open,
         capital_locked_native=dict(trade.capital_locked_native),
+        # PaperTrade has no authoritative remaining-lock / settlement timer.
+        # Leave both unknown rather than inventing a match-finish clock.
+        expected_settlement_at=None,
+        remaining_lock_minutes=None,
         legs=legs,
         paper_only=trade.paper_only,
         places_orders=trade.places_orders,

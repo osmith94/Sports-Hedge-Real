@@ -3,6 +3,11 @@
 Prices every required reverse transaction from current marginal depth, fees,
 FX, slippage and freshness. Does not post balances, allocate capital, or
 place venue orders.
+
+Capital becomes releasable only after a fully validated clean unwind whose
+required reverse legs complete, or after actual venue/event settlement
+recorded by paper operations/treasury. Predicted match completion is not a
+hold-vs-unwind trigger and is not an assumed capital-release time.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.paper.unwind.mechanics import close_action_for, mechanics_for_venue
 from sports_hedge.paper.unwind.models import (
     CapitalPressure,
+    CapitalScarcityInput,
     CloseLegPlan,
     ClosePlan,
     IncrementalCloseCapitalStatus,
@@ -93,7 +99,7 @@ class PaperUnwindEngine:
                 plan.gbp_close_pnl = plan.native_close_pnl * rate
                 exit_pnl += plan.gbp_close_pnl
 
-        risk = self._risk(position, legs, request, evaluated_at) if fully else None
+        risk = self._risk(position, legs, request) if fully else None
         if fully and risk is not None:
             for plan in legs:
                 if plan.fill_confidence is None:
@@ -150,14 +156,11 @@ class PaperUnwindEngine:
                 recommendation = UnwindRecommendation.UNWIND_NOT_SAFE
                 reason = "incremental_close_capital_unknown"
 
+        # Passthrough only. Do not invent remaining lock from kickoff, match
+        # clock, or expected_settlement_at. Those fields are not close triggers
+        # and are not assumed capital-release times.
         remaining = position.remaining_lock_minutes
-        if remaining is None and position.expected_settlement_at is not None:
-            delta = (position.expected_settlement_at - evaluated_at).total_seconds() / 60
-            remaining = Decimal(str(max(delta, 0)))
-
-        turnover = None
-        if remaining is not None and remaining > 0:
-            turnover = "capital_locked_until_expected_settlement"
+        turnover = _opportunity_cost_hint(request.scarcity)
 
         return UnwindDecision(
             trade_id=position.trade_id,
@@ -312,16 +315,13 @@ class PaperUnwindEngine:
         position: OpenPaperPosition,
         legs: list[CloseLegPlan],
         request: UnwindEvaluationRequest,
-        evaluated_at: datetime,
     ) -> ExecutionRiskResult | None:
         ages = [leg.quote_age_ms for leg in legs if leg.quote_age_ms is not None]
         if not ages:
             return None
-        minutes = 0.0
+        minutes: float | None = None
         if position.remaining_lock_minutes is not None:
             minutes = float(position.remaining_lock_minutes)
-        elif position.expected_settlement_at is not None:
-            minutes = max((position.expected_settlement_at - evaluated_at).total_seconds() / 60, 0)
         ratios = []
         for leg in legs:
             if leg.available_closing_capacity <= 0:
@@ -376,6 +376,16 @@ def _apply_deferred_profit_commission(
             remaining = Decimal("0")
             break
     return []
+
+
+def _opportunity_cost_hint(scarcity: CapitalScarcityInput) -> str | None:
+    """Scarcity / competing opportunities only. Never a predicted match finish."""
+
+    if scarcity.opportunity_cost_gbp is not None:
+        return "opportunity_cost_from_current_scarcity"
+    if scarcity.pressure is CapitalPressure.SCARCE:
+        return "scarce_capital_competing_opportunities"
+    return None
 
 
 def _annotate_incremental_close_capital(plan: CloseLegPlan) -> None:
