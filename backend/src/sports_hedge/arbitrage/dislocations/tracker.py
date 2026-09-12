@@ -13,6 +13,7 @@ from sports_hedge.arbitrage.dislocations.models import (
     NearArbSignal,
     VenueQuoteSnapshot,
     VenueReactionState,
+    require_aware_utc,
 )
 
 MATERIAL_REPRICE = Decimal("0.01")
@@ -35,6 +36,7 @@ class DislocationTracker:
         annotation: EventAnnotationInput | None = None,
         near_arb: NearArbSignal | None = None,
     ) -> DislocationState:
+        as_of = require_aware_utc(as_of, "as_of")
         key = (canonical_event_id, canonical_market_id)
         state = self._states.get(key) or DislocationState(
             canonical_event_id=canonical_event_id,

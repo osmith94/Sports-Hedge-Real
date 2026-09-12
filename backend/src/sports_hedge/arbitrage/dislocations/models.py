@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
@@ -93,9 +93,18 @@ def event_category_from_label(label: str) -> EventCategory | None:
     return _LABEL_ALIASES.get(label.strip().lower())
 
 
-def _ensure_utc(value: datetime) -> datetime:
+def require_aware_utc(value: datetime, field_name: str) -> datetime:
+    """Reject naive or non-UTC datetimes. Never guess UTC."""
+
     if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
+        raise ValueError(
+            f"{field_name} must be timezone-aware UTC; naive datetimes are rejected"
+        )
+    offset = value.utcoffset()
+    if offset is None or offset != timedelta(0):
+        raise ValueError(
+            f"{field_name} must be UTC; non-UTC offsets are rejected rather than converted"
+        )
     return value
 
 
@@ -108,10 +117,10 @@ class CanonicalEventContext(BaseModel):
     economically_equivalent_venues: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
-    def ensure_timezone(self) -> "CanonicalEventContext":
-        self.as_of = _ensure_utc(self.as_of)
+    def require_utc_timestamps(self) -> "CanonicalEventContext":
+        self.as_of = require_aware_utc(self.as_of, "as_of")
         if self.kickoff_utc is not None:
-            self.kickoff_utc = _ensure_utc(self.kickoff_utc)
+            self.kickoff_utc = require_aware_utc(self.kickoff_utc, "kickoff_utc")
         return self
 
     @property
@@ -137,11 +146,11 @@ class EventAnnotationInput(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
-    def ensure_timezone(self) -> "EventAnnotationInput":
-        self.occurred_at = _ensure_utc(self.occurred_at)
-        self.retrieved_at = _ensure_utc(self.retrieved_at)
+    def require_utc_timestamps(self) -> "EventAnnotationInput":
+        self.occurred_at = require_aware_utc(self.occurred_at, "occurred_at")
+        self.retrieved_at = require_aware_utc(self.retrieved_at, "retrieved_at")
         if self.source_timestamp is not None:
-            self.source_timestamp = _ensure_utc(self.source_timestamp)
+            self.source_timestamp = require_aware_utc(self.source_timestamp, "source_timestamp")
         return self
 
 
@@ -166,15 +175,19 @@ class VenueQuoteSnapshot(BaseModel):
 
     @model_validator(mode="after")
     def derive_fields(self) -> "VenueQuoteSnapshot":
-        self.quote_timestamp = _ensure_utc(self.quote_timestamp)
-        self.retrieved_at = _ensure_utc(self.retrieved_at)
+        self.quote_timestamp = require_aware_utc(self.quote_timestamp, "quote_timestamp")
+        self.retrieved_at = require_aware_utc(self.retrieved_at, "retrieved_at")
         if self.source_timestamp is not None:
-            self.source_timestamp = _ensure_utc(self.source_timestamp)
+            self.source_timestamp = require_aware_utc(self.source_timestamp, "source_timestamp")
         if self.implied_probability is None:
             self.implied_probability = Decimal("1") / self.decimal_odds
+        age_ms = (self.retrieved_at - self.quote_timestamp).total_seconds() * 1000
+        if age_ms < 0:
+            raise ValueError(
+                "quote_timestamp later than retrieved_at is inconsistent future data"
+            )
         if self.quote_age_ms is None:
-            age = (self.retrieved_at - self.quote_timestamp).total_seconds() * 1000
-            self.quote_age_ms = max(0, int(age))
+            self.quote_age_ms = int(age_ms)
         return self
 
 

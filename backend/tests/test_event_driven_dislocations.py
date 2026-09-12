@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from sports_hedge.api.main import app
 from sports_hedge.arbitrage import dislocations as dislocations_pkg
@@ -372,6 +374,64 @@ def test_tracker_records_suspension_reopen_and_does_not_claim_causality() -> Non
     assert second.validated_arb_duration_seconds == 1.5
     assert second.causality_claim is None
     assert second.event_occurred_at != second.venues["matchbook"].last_quote_timestamp
+
+
+def test_naive_timestamps_fail_closed_instead_of_assuming_utc() -> None:
+    naive = datetime(2026, 9, 12, 15, 12)
+    with pytest.raises(ValidationError, match="timezone-aware UTC"):
+        CanonicalEventContext(
+            canonical_event_id="e-1",
+            canonical_market_id="m-1",
+            as_of=naive,
+        )
+    with pytest.raises(ValidationError, match="timezone-aware UTC"):
+        EventAnnotationInput(
+            canonical_event_id="e-1",
+            category=EventCategory.RED_CARD,
+            occurred_at=naive,
+            retrieved_at=EVENT_AT,
+        )
+    with pytest.raises(ValidationError, match="timezone-aware UTC"):
+        _quote(VenueName.MATCHBOOK, quote_at=naive, retrieved_at=AS_OF, age_ms=None)
+    plus_one = timezone(timedelta(hours=1))
+    with pytest.raises(ValidationError, match="must be UTC"):
+        CanonicalEventContext(
+            canonical_event_id="e-1",
+            canonical_market_id="m-1",
+            as_of=datetime(2026, 9, 12, 15, 12, tzinfo=plus_one),
+        )
+    with pytest.raises(ValueError, match="timezone-aware UTC"):
+        DislocationTracker().observe(
+            canonical_event_id="e-1",
+            canonical_market_id="m-1",
+            as_of=naive,
+            quotes=[],
+        )
+
+
+def test_future_quote_timestamp_is_rejected_not_clamped_fresh() -> None:
+    quoted = EVENT_AT + timedelta(seconds=5)
+    retrieved = EVENT_AT + timedelta(seconds=1)
+    with pytest.raises(ValidationError, match="inconsistent future data"):
+        VenueQuoteSnapshot(
+            venue=VenueName.MATCHBOOK,
+            canonical_event_id="e-1",
+            canonical_market_id="m-1",
+            canonical_outcome="home",
+            quote_timestamp=quoted,
+            retrieved_at=retrieved,
+            decimal_odds=Decimal("2.10"),
+            executable_depth=Decimal("800"),
+            settlement_semantics_complete=True,
+            costs_and_fx_complete=True,
+        )
+    with pytest.raises(ValidationError, match="inconsistent future data"):
+        _quote(
+            VenueName.MATCHBOOK,
+            quote_at=quoted,
+            retrieved_at=retrieved,
+            age_ms=0,
+        )
 
 
 def test_unknown_event_label_fails_closed() -> None:
