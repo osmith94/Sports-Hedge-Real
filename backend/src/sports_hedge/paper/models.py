@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.arbitrage.depth import DepthScanResult
+from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
 from sports_hedge.paper.fills import PaperOpportunityLeg
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
@@ -80,6 +81,8 @@ class PaperScanDecision(BaseModel):
     canonical_market_id: str | None = None
     snapshots_recorded: int = Field(default=0, ge=0)
     depth_scan: DepthScanResult | None = None
+    payoff_scan: PayoffScanResult | None = None
+    solver_model: str | None = None
     execution_risk: ExecutionRiskResult | None = None
     eligible_for_paper_simulation: bool = False
     rejection_reasons: list[str] = Field(default_factory=list)

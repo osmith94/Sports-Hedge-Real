@@ -4,9 +4,13 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from sports_hedge.application.complete_set import (
+    SOLVER_MODEL_SIMPLE,
     complete_set_outcomes,
+    generalized_payoff_eligible_pair,
+    generalized_state_model,
+    scan_ineligibility_reason,
     solver_eligible_market,
-    solver_ineligibility_reason,
+    solver_model_for_pair,
 )
 from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.quote_freshness import (
@@ -15,6 +19,7 @@ from sports_hedge.application.quote_freshness import (
     require_aware_instant,
 )
 from sports_hedge.arbitrage.depth import DepthAwareCompleteSetScanner, DepthQuoteSource
+from sports_hedge.arbitrage.payoff_scan import DepthAwarePayoffScanner, PayoffScanResult
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.football import CanonicalOutcome, SettlementScope
 from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
@@ -50,6 +55,7 @@ class PaperScanService:
         *,
         market_matcher: MarketMatcher | None = None,
         depth_scanner: DepthAwareCompleteSetScanner | None = None,
+        payoff_scanner: DepthAwarePayoffScanner | None = None,
         risk_scorer: ExecutionRiskScorer | None = None,
         settings: Settings | None = None,
         fx_service: FxRateService | None = None,
@@ -59,6 +65,7 @@ class PaperScanService:
         self.market_intelligence = market_intelligence
         self.market_matcher = market_matcher or MarketMatcher()
         self.depth_scanner = depth_scanner or DepthAwareCompleteSetScanner()
+        self.payoff_scanner = payoff_scanner or DepthAwarePayoffScanner()
         self.risk_scorer = risk_scorer or ExecutionRiskScorer()
         self.settings = settings or get_settings()
         self.fx_service = fx_service
@@ -167,12 +174,13 @@ class PaperScanService:
         ):
             rejections.append("unknown_settlement_scope")
 
-        if not solver_eligible_market(left.market) or not solver_eligible_market(right.market):
-            ineligible = (
-                solver_ineligibility_reason(left.market)
-                if not solver_eligible_market(left.market)
-                else solver_ineligibility_reason(right.market)
-            )
+        solver_model = solver_model_for_pair(left.market, right.market)
+        if solver_model is None:
+            ineligible = scan_ineligibility_reason(left.market)
+            if solver_eligible_market(left.market) or generalized_payoff_eligible_pair(
+                left.market, right.market
+            ):
+                ineligible = scan_ineligibility_reason(right.market)
             rejections.append(ineligible)
             return PaperScanDecision(
                 market_match=match,
@@ -188,12 +196,18 @@ class PaperScanService:
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
+                solver_model=None,
             )
 
-        expected_space = complete_set_outcomes(left.market.family)
-        assert expected_space is not None
-        expected_outcomes = sorted(expected_space, key=lambda outcome: outcome.value)
-        if CanonicalOutcome.OTHER in expected_space:
+        expected_space = complete_set_outcomes(left.market.family) if solver_model == SOLVER_MODEL_SIMPLE else None
+        if expected_space is not None:
+            expected_outcomes = sorted(expected_space, key=lambda outcome: outcome.value)
+        else:
+            expected_outcomes = sorted(
+                {book.outcome for book in [*left.outcome_books, *right.outcome_books]},
+                key=lambda outcome: outcome.value,
+            )
+        if any(outcome == CanonicalOutcome.OTHER for outcome in expected_outcomes):
             rejections.append("noncanonical_outcome_space")
 
         if costs:
@@ -256,6 +270,7 @@ class PaperScanService:
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
+                solver_model=solver_model,
             )
 
         sources: list[DepthQuoteSource] = []
@@ -280,8 +295,8 @@ class PaperScanService:
             rate = effective_fx[observation.native_currency]
             cost = scan_costs[observation.venue]
             for book in observation.outcome_books:
-                # Back/buy complete-set only. Matchbook lay levels stay on the
-                # observation for display/risk and are never solver inputs.
+                # Back/buy only. Matchbook lay levels stay on the observation
+                # for display/risk and never enter either solver path.
                 if not book.back_levels:
                     continue
                 sources.append(
@@ -312,24 +327,45 @@ class PaperScanService:
         if standing is not None:
             venue_capital_limits = standing.solver_gbp_limits(effective_fx)
 
-        depth_scan = self.depth_scanner.scan(
-            sources,
-            expected_outcomes=[outcome.value for outcome in expected_outcomes],
-            capital_limit=capital_limit_gbp,
-            venue_capital_limits=venue_capital_limits,
-            configured_slippage_bps=configured_book_slip if configured_book_slip > 0 else None,
-        )
-        rejections.extend(depth_scan.cost_rejection_reasons)
-        solution = depth_scan.solution
-        if not solution.is_arbitrage:
-            rejections.append(solution.rejection_reason or "no_arbitrage")
-        elif solution.roi < minimum_net_edge:
-            rejections.append("net_edge_below_threshold")
+        depth_scan = None
+        payoff_scan: PayoffScanResult | None = None
+        slip = configured_book_slip if configured_book_slip > 0 else None
+        if solver_model == SOLVER_MODEL_SIMPLE:
+            depth_scan = self.depth_scanner.scan(
+                sources,
+                expected_outcomes=[outcome.value for outcome in expected_outcomes],
+                capital_limit=capital_limit_gbp,
+                venue_capital_limits=venue_capital_limits,
+                configured_slippage_bps=slip,
+            )
+            rejections.extend(depth_scan.cost_rejection_reasons)
+            solution = depth_scan.solution
+            if not solution.is_arbitrage:
+                rejections.append(solution.rejection_reason or "no_arbitrage")
+            elif solution.roi < minimum_net_edge:
+                rejections.append("net_edge_below_threshold")
+        else:
+            state_model = generalized_state_model(left.market)
+            assert state_model is not None
+            payoff_scan = self.payoff_scanner.scan(
+                sources,
+                state_model=state_model,
+                capital_limit=capital_limit_gbp,
+                venue_capital_limits=venue_capital_limits,
+                configured_slippage_bps=slip,
+            )
+            rejections.extend(payoff_scan.cost_rejection_reasons)
+            payoff = payoff_scan.solution
+            if not payoff.is_arbitrage:
+                rejections.append(payoff.rejection_reason or "no_arbitrage")
+            elif payoff.roi < minimum_net_edge:
+                rejections.append("net_edge_below_threshold")
 
         risk_inputs = self._risk_inputs(
             left,
             right,
             depth_scan=depth_scan,
+            payoff_scan=payoff_scan,
             assumed_latency_ms=assumed_latency_ms,
             recent_volatility_bps=recent_volatility_bps,
             quote_age_ms=quote_age_ms if quote_age_ms is not None else 10**9,
@@ -350,6 +386,7 @@ class PaperScanService:
             left,
             right,
             depth_scan=depth_scan,
+            payoff_scan=payoff_scan,
             effective_fx=effective_fx,
         )
 
@@ -359,6 +396,7 @@ class PaperScanService:
             canonical_market_id=market_id,
             snapshots_recorded=recorded,
             depth_scan=depth_scan,
+            payoff_scan=payoff_scan,
             execution_risk=risk,
             eligible_for_paper_simulation=not rejections,
             rejection_reasons=_dedupe(rejections),
@@ -372,6 +410,7 @@ class PaperScanService:
             quote_age_basis=quote_age_basis,
             fill_legs=fill_legs,
             execution_modes=execution_modes,
+            solver_model=solver_model,
         )
 
     def _record_with_ids(
@@ -395,11 +434,24 @@ class PaperScanService:
         right: VenueMarketObservation,
         *,
         depth_scan,
+        payoff_scan=None,
         assumed_latency_ms: int,
         recent_volatility_bps: float,
         quote_age_ms: int,
     ) -> ExecutionRiskInputs | None:
-        selected_quotes = list(depth_scan.selected_quotes)
+        selected_quotes = []
+        stake_by_key: dict[tuple[str, VenueName], Decimal] = {}
+        if depth_scan is not None:
+            selected_quotes = list(depth_scan.selected_quotes)
+            for stake in depth_scan.solution.stakes:
+                stake_by_key[(stake.outcome, stake.venue)] = stake.stake
+        elif payoff_scan is not None:
+            selected_quotes = list(payoff_scan.selected_quotes)
+            for stake in payoff_scan.solution.selected_stakes:
+                outcome = stake.runner_outcome or ""
+                stake_by_key[(outcome, stake.venue)] = (
+                    stake_by_key.get((outcome, stake.venue), Decimal("0")) + stake.stake
+                )
         if len(selected_quotes) < 2:
             return None
 
@@ -407,7 +459,6 @@ class PaperScanService:
         spread_bps = 0.0
         size_to_depth_ratio = 0.0
         hedge_liquidity_ratio = 1.0
-        stakes = {stake.outcome: stake for stake in depth_scan.solution.stakes}
 
         for selected in selected_quotes:
             observation = observation_by_venue.get(selected.venue)
@@ -419,14 +470,14 @@ class PaperScanService:
             if book is None:
                 return None
             spread_bps = max(spread_bps, book.probability_spread_bps)
-            stake = stakes.get(selected.outcome)
-            if stake is None or stake.stake <= 0 or selected.cumulative_depth <= 0:
+            stake_amount = stake_by_key.get((selected.outcome, selected.venue))
+            if stake_amount is None or stake_amount <= 0 or selected.cumulative_depth <= 0:
                 return None
-            ratio = float(stake.stake / selected.cumulative_depth)
+            ratio = float(stake_amount / selected.cumulative_depth)
             size_to_depth_ratio = max(size_to_depth_ratio, ratio)
             hedge_liquidity_ratio = min(
                 hedge_liquidity_ratio,
-                min(float(selected.cumulative_depth / stake.stake), 1.0),
+                min(float(selected.cumulative_depth / stake_amount), 1.0),
             )
 
         observed_at = max(left.observed_at, right.observed_at)
@@ -536,10 +587,21 @@ def _fill_legs_from_observations(
     right,
     *,
     depth_scan,
+    payoff_scan=None,
     effective_fx: dict[str, Decimal],
 ) -> list[PaperOpportunityLeg]:
-    selected = {(quote.outcome, quote.venue) for quote in depth_scan.selected_quotes}
-    stakes = {stake.outcome: stake for stake in depth_scan.solution.stakes}
+    selected: set[tuple[str, VenueName]] = set()
+    stakes: dict[tuple[str, VenueName], Decimal] = {}
+    if depth_scan is not None:
+        selected = {(quote.outcome, quote.venue) for quote in depth_scan.selected_quotes}
+        for stake in depth_scan.solution.stakes:
+            stakes[(stake.outcome, stake.venue)] = stake.stake
+    elif payoff_scan is not None:
+        selected = {(quote.outcome, quote.venue) for quote in payoff_scan.selected_quotes}
+        for stake in payoff_scan.solution.selected_stakes:
+            outcome = stake.runner_outcome or ""
+            key = (outcome, stake.venue)
+            stakes[key] = stakes.get(key, Decimal("0")) + stake.stake
     legs: list[PaperOpportunityLeg] = []
     for observation in (left, right):
         rate = effective_fx.get(observation.native_currency)
@@ -550,9 +612,9 @@ def _fill_legs_from_observations(
             if (outcome, observation.venue) not in selected or not book.back_levels:
                 continue
             best = max(book.back_levels, key=lambda item: item.decimal_odds)
-            stake = stakes.get(outcome)
+            stake_amount = stakes.get((outcome, observation.venue))
             visible = sum((level.available_stake for level in book.back_levels), Decimal("0"))
-            requested = stake.stake / rate if stake is not None and stake.stake > 0 else visible
+            requested = stake_amount / rate if stake_amount is not None and stake_amount > 0 else visible
             if visible > 0:
                 requested = min(requested, visible)
             if requested <= 0:

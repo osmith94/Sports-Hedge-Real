@@ -6,6 +6,7 @@ from decimal import Decimal
 from sports_hedge.arbitrage.watchlist.economics import (
     gross_edge_from_quotes,
     net_edge_from_implied_sum,
+    quantized_edge,
 )
 from sports_hedge.arbitrage.watchlist.models import WatchLeg, WatchObservation
 from sports_hedge.domain.football import MarketFamily
@@ -39,7 +40,47 @@ def observation_from_paper_decision(
     solver_is_arbitrage = False
     extra_rejections: list[str] = []
 
-    if decision.depth_scan is not None:
+    if decision.payoff_scan is not None:
+        solution = decision.payoff_scan.solution
+        solver_is_arbitrage = solution.is_arbitrage
+        current_edge = quantized_edge(solution.roi)
+        if solver_is_arbitrage:
+            capital = solution.total_capital_used
+            guaranteed_profit = solution.minimum_state_pnl
+        stake_by_key = {
+            (stake.runner_outcome or "", stake.venue): stake
+            for stake in solution.selected_stakes
+        }
+        for quote in decision.payoff_scan.selected_quotes:
+            venue_currency = _currency_for_venue(quote.venue, history)
+            if venue_currency is None:
+                extra_rejections.append(f"unknown_venue_currency:{quote.venue.value}")
+                continue
+            gbp_rate = fx_map.get(venue_currency)
+            gbp_stake = None
+            native_stake = None
+            stake = stake_by_key.get((quote.outcome, quote.venue))
+            if stake is not None:
+                gbp_stake = stake.stake
+                if gbp_rate is not None:
+                    native_stake = stake.stake / gbp_rate
+            legs.append(
+                WatchLeg(
+                    outcome=quote.outcome,
+                    venue=quote.venue,
+                    source_market_id=quote.source_market_id,
+                    currency=venue_currency,
+                    native_stake=native_stake,
+                    gbp_per_unit=gbp_rate,
+                    gbp_stake=gbp_stake,
+                    net_decimal_odds=quote.net_decimal_odds,
+                    cumulative_depth_gbp=quote.cumulative_depth,
+                )
+            )
+            if limiting_depth is None or quote.cumulative_depth < limiting_depth:
+                limiting_depth = quote.cumulative_depth
+                limiting_leg = quote.outcome
+    elif decision.depth_scan is not None:
         solution = decision.depth_scan.solution
         implied = solution.implied_probability_sum
         solver_is_arbitrage = solution.is_arbitrage
@@ -110,6 +151,7 @@ def observation_from_paper_decision(
         gross_edge=gross_edge,
         implied_probability_sum=implied,
         solver_is_arbitrage=solver_is_arbitrage,
+        solver_model=decision.solver_model,
         eligible_for_paper_simulation=decision.eligible_for_paper_simulation,
         rejection_reasons=_dedupe([*decision.rejection_reasons, *extra_rejections]),
         execution_risk_score=(

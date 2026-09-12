@@ -276,8 +276,20 @@ def test_naive_solver_would_overstate_profit_on_dnb_and_integer_lines() -> None:
         },
     )
 
-    for decision in (dnb, integer_totals, integer_ah, qualify):
+    for decision in (dnb, integer_totals):
         assert decision.depth_scan is None
+        assert decision.payoff_scan is not None
+        assert decision.solver_model == "generalized_payoff"
+        assert decision.payoff_scan.solution.is_arbitrage is False
+        assert decision.payoff_scan.solution.minimum_state_pnl <= 0
+        assert decision.eligible_for_paper_simulation is False
+    assert dnb.payoff_scan is not None
+    assert dnb.payoff_scan.solution.state_pnl["draw"] == 0
+    assert integer_totals.payoff_scan is not None
+    assert integer_totals.payoff_scan.solution.state_pnl["push"] == 0
+    for decision in (integer_ah, qualify):
+        assert decision.depth_scan is None
+        assert decision.payoff_scan is None
         assert decision.eligible_for_paper_simulation is False
         assert decision.rejection_reasons
     assert mb_totals.market.settlement.push_possible is True
@@ -290,8 +302,8 @@ def test_naive_solver_would_overstate_profit_on_dnb_and_integer_lines() -> None:
         UNPROVEN_SETTLEMENT_REASON in qualify.rejection_reasons
         or "incomplete_settlement" in qualify.rejection_reasons
     )
-    assert PUSH_STATE_REASON in dnb.rejection_reasons
-    assert PUSH_STATE_REASON in integer_totals.rejection_reasons
+    assert PUSH_STATE_REASON not in dnb.rejection_reasons
+    assert PUSH_STATE_REASON not in integer_totals.rejection_reasons
     assert UNPROVEN_HANDICAP_REASON in integer_ah.rejection_reasons
 
 
@@ -611,7 +623,7 @@ def test_dnb_is_deferred_from_complete_set_solver() -> None:
     assert MarketMatcher().match(mb, pm).matched is True
     assert solver_eligible_market(mb) is False
     assert solver_ineligibility_reason(mb) == PUSH_STATE_REASON
-    decision, _, _ = _scan(
+    decision, matchbook, polymarket = _scan(
         {
             "id": 7402,
             "name": "Draw No Bet",
@@ -635,16 +647,24 @@ def test_dnb_is_deferred_from_complete_set_solver() -> None:
     )
     assert decision.market_match.matched is True
     assert decision.depth_scan is None
-    assert PUSH_STATE_REASON in decision.rejection_reasons
+    assert decision.solver_model == "generalized_payoff"
+    assert decision.payoff_scan is not None
+    assert decision.payoff_scan.solution.is_arbitrage is False
+    assert decision.payoff_scan.solution.minimum_state_pnl <= 0
+    assert decision.payoff_scan.solution.state_pnl["draw"] == 0
     assert decision.eligible_for_paper_simulation is False
     rows = assemble_fixture_inventory(
-        [_inventory(mb, name="Draw No Bet")],
-        [_inventory(pm, name="Draw no bet")],
+        [_inventory(matchbook.market, name="Draw No Bet")],
+        [_inventory(polymarket.market, name="Draw no bet")],
+        decisions_by_source_ids={
+            (matchbook.market.source_market_id, polymarket.market.source_market_id): decision
+        },
     )
     assert len(rows) == 1
-    assert rows[0].entered_solver is False
-    assert rows[0].reason == PUSH_STATE_REASON
-    assert rows[0].comparison_status is InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL
+    assert rows[0].entered_solver is True
+    assert rows[0].solver_model == "generalized_payoff"
+    assert rows[0].solver_is_arbitrage is False
+    assert rows[0].reason
 
 
 def test_integer_line_totals_and_ah_stay_out_of_solver_even_when_listed_odds_look_like_arb() -> None:
@@ -676,7 +696,11 @@ def test_integer_line_totals_and_ah_stay_out_of_solver_even_when_listed_odds_loo
     assert solver_eligible_market(mb_totals.market) is False
     assert decision_totals.market_match.matched is True
     assert decision_totals.depth_scan is None
-    assert PUSH_STATE_REASON in decision_totals.rejection_reasons
+    assert decision_totals.solver_model == "generalized_payoff"
+    assert decision_totals.payoff_scan is not None
+    assert decision_totals.payoff_scan.solution.is_arbitrage is False
+    assert decision_totals.payoff_scan.solution.state_pnl["push"] == 0
+    assert decision_totals.eligible_for_paper_simulation is False
 
     decision_ah, mb_ah, pm_ah = _scan(
         {
@@ -1236,21 +1260,26 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
             "match_result",
             "both_teams_to_score",
             "total_goals",
+            "draw_no_bet",
         }
-        assert "draw_no_bet" not in scanned_families
         assert "asian_handicap" not in scanned_families
         assert "to_qualify" not in scanned_families
         totals = [row for row in rows if row.family == "total_goals" and row.entered_solver]
-        assert {row.line for row in totals} == {Decimal("2.5"), Decimal("3.5")}
+        assert {row.line for row in totals} >= {Decimal("2.5"), Decimal("3.5"), Decimal("2.0")}
+        half_line = [row for row in totals if row.line in {Decimal("2.5"), Decimal("3.5")}]
+        assert all(row.solver_model == "simple_complete_set" for row in half_line)
         integer_totals = [
             row for row in rows if row.family == "total_goals" and row.line == Decimal("2.0")
         ]
         assert integer_totals
-        assert all(not row.entered_solver for row in integer_totals)
-        assert all(row.reason == PUSH_STATE_REASON for row in integer_totals)
+        assert all(row.entered_solver for row in integer_totals)
+        assert all(row.solver_model == "generalized_payoff" for row in integer_totals)
+        assert all(row.solver_is_arbitrage is False for row in integer_totals)
         dnb = next(row for row in rows if row.family == "draw_no_bet")
-        assert dnb.entered_solver is False
-        assert dnb.reason == PUSH_STATE_REASON
+        assert dnb.entered_solver is True
+        assert dnb.solver_model == "generalized_payoff"
+        assert dnb.solver_is_arbitrage is False
+        assert dnb.reason
         ah_rows = [row for row in rows if row.family == "asian_handicap"]
         assert ah_rows
         assert all(not row.entered_solver for row in ah_rows)
@@ -1301,7 +1330,13 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
         }
         assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "match_result")
         assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "both_teams_to_score")
-        assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "draw_no_bet")
+        assert all(row["entered_solver"] for row in body["markets"] if row["family"] == "draw_no_bet")
+        assert all(
+            row.get("solver_model") == "generalized_payoff"
+            for row in body["markets"]
+            if row["family"] == "draw_no_bet"
+        )
+        assert all(not row["solver_is_arbitrage"] for row in body["markets"] if row["family"] == "draw_no_bet")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "asian_handicap")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "to_qualify")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "correct_score")
