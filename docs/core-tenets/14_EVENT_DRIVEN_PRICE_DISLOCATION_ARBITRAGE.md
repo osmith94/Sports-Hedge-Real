@@ -45,6 +45,7 @@ The opportunity is the **temporary economic disagreement between venues**, not t
 8. Event annotations are context. They do not prove that a particular trader, bookmaker or model caused the observed price move.
 9. Sports Hedge must not depend on courtsiding, private venue information, broadcast-delay exploitation, geobypass or unauthorised access. The system uses authorised/public data sources and permitted APIs.
 10. Phase 1 remains paper-only; event-driven detection must not introduce live venue execution paths.
+11. Priority and manual-external workflows should consider **opportunity survivability**, including current price volatility, rather than ranking opportunities by current edge alone.
 
 ## Event-driven burst mode
 
@@ -95,6 +96,50 @@ executable depth during dislocation
 
 These metrics are for system design and historical research. They must not be treated as proof that the same timing will persist.
 
+## Opportunity survivability
+
+Sports Hedge should estimate how likely an identified opportunity is to **remain economically valid long enough to act on it**.
+
+Survivability is distinct from current net edge and from fill confidence. It is an operational forecast based on the state and recent behaviour of the market.
+
+Important inputs should include, where available:
+
+```text
+recent realised price volatility on every required leg
+rate and direction of recent price change
+cross-venue dispersion velocity / convergence speed
+quote persistence and quote age
+spread and order-book depth
+rate of depth cancellation / replenishment
+number of book levels required
+venue suspension / reopen behaviour
+recent event-driven repricing state
+historical duration of comparable dislocations
+expected operator / counterparty response time for MANUAL_EXTERNAL legs
+```
+
+Volatility must materially affect the estimate. A 1% current arbitrage in a calm, persistent book should normally be assessed as more survivable than the same 1% edge while one or both legs are repricing rapidly.
+
+Useful outputs may include:
+
+```text
+survivability_score                  # calibrated 0-100 operational score
+survival_probability_5s
+survival_probability_15s
+survival_probability_30s
+survival_probability_60s
+estimated_median_remaining_life
+historical_dislocation_half_life
+volatility_regime
+adverse_move_rate
+```
+
+The exact model can evolve, but the underlying inputs and calibration must be inspectable. Do not manufacture precision where historical coverage is weak.
+
+For a manual-external opportunity, Sports Hedge should compare estimated survivability with the expected confirmation latency. For example, if an external counterparty normally needs 30 seconds and the opportunity has a very low estimated probability of remaining valid for 30 seconds, the alert should be downgraded or explicitly marked **LOW SURVIVABILITY**, even if the current headline edge is attractive.
+
+Survivability is not a guarantee. Any confirmed external fill must still trigger a fresh hedge revalidation before the remaining leg can proceed.
+
 ## High-liquidity concurrency
 
 The product must work when many games are live simultaneously.
@@ -114,6 +159,7 @@ near-arb distance to trigger
 quote freshness
 number of equivalent venues available
 execution-risk score
+opportunity survivability / volatility regime
 historical event-response relevance
 ```
 
@@ -144,7 +190,8 @@ A large headline edge is not sufficient. Escalation should also require:
 - acceptable fill/execution risk;
 - known fees/FX;
 - strict settlement equivalence;
-- sufficient expected guaranteed profit / capital efficiency.
+- sufficient expected guaranteed profit / capital efficiency;
+- survivability appropriate to the expected action/confirmation latency.
 
 ## Violation examples
 
@@ -153,6 +200,7 @@ This tenet is violated if Sports Hedge:
 - treats a pre-event stale quote as a live arb after a red card;
 - assumes that a suspended venue quote can be filled;
 - ignores quote age during a rapid event-driven market move;
+- treats a highly volatile fleeting edge as equivalent to a persistent edge without a survivability distinction;
 - polls low-value markets while missing highly liquid active dislocations because there is no prioritisation;
 - conflates a strong Research prediction with guaranteed arbitrage;
 - relies on unauthorised or courtside latency advantages;
@@ -172,6 +220,8 @@ For any event-driven arbitrage implementation, reviewers should verify:
 - [ ] burst scanning respects API/rate-limit constraints;
 - [ ] concurrent-game prioritisation is deterministic and inspectable;
 - [ ] Priority Alert escalation uses execution quality as well as edge;
+- [ ] survivability incorporates current volatility and expected action latency;
+- [ ] survivability inputs/calibration remain inspectable and uncertainty is explicit;
 - [ ] no live order placement is introduced in Phase 1;
 - [ ] no courtsiding, geobypass or unauthorised latency exploitation is required.
 
@@ -179,4 +229,4 @@ For any event-driven arbitrage implementation, reviewers should verify:
 
 Sports Hedge should be able to answer:
 
-> A major event just changed this game. Which economically equivalent venues have repriced, which have not, and is there a genuinely executable cross-venue arbitrage after costs right now?
+> A major event just changed this game. Which economically equivalent venues have repriced, which have not, is there a genuinely executable cross-venue arbitrage after costs right now, and how likely is that opportunity to survive long enough to act on it?
