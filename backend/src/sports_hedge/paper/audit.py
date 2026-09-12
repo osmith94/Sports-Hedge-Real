@@ -80,6 +80,8 @@ def build_paper_scan_record(
         raise ValueError("market history lacks kickoff required for paper read model")
 
     depth_scan = decision.depth_scan
+    payoff_scan = decision.payoff_scan
+    allocation = decision.allocation
     solution = depth_scan.solution if depth_scan is not None else None
     gross_edge: Decimal | None = None
     net_edge: Decimal | None = None
@@ -92,6 +94,23 @@ def build_paper_scan_record(
             gross_edge = Decimal("1") / gross_implied - Decimal("1")
     if solution is not None and solution.implied_probability_sum > 0:
         net_edge = net_edge_from_implied_sum(solution.implied_probability_sum)
+    elif payoff_scan is not None and payoff_scan.solution.is_arbitrage:
+        net_edge = payoff_scan.solution.roi
+
+    is_arb = bool(solution and solution.is_arbitrage) or bool(
+        payoff_scan is not None and payoff_scan.solution.is_arbitrage
+    )
+    executable = None
+    profit = None
+    if allocation is not None and allocation.accepted:
+        executable = allocation.recommended_committed_capital
+        profit = allocation.guaranteed_profit
+    elif solution is not None and solution.is_arbitrage:
+        executable = solution.total_stake
+        profit = solution.guaranteed_profit
+    elif payoff_scan is not None and payoff_scan.solution.is_arbitrage:
+        executable = payoff_scan.solution.total_capital_used
+        profit = payoff_scan.solution.minimum_state_pnl
 
     source_market_ids = sorted(
         {
@@ -116,14 +135,12 @@ def build_paper_scan_record(
         venues=venues,
         source_market_ids=source_market_ids,
         mapping_confidence=decision.market_match.confidence,
-        is_arbitrage=bool(solution and solution.is_arbitrage),
+        is_arbitrage=is_arb,
         eligible_for_paper_simulation=decision.eligible_for_paper_simulation,
         gross_edge=gross_edge,
         net_edge=net_edge,
-        executable_stake_gbp=solution.total_stake if solution and solution.is_arbitrage else None,
-        guaranteed_profit_gbp=(
-            solution.guaranteed_profit if solution and solution.is_arbitrage else None
-        ),
+        executable_stake_gbp=executable,
+        guaranteed_profit_gbp=profit,
         execution_risk_score=(decision.execution_risk.score if decision.execution_risk else None),
         execution_risk_band=(decision.execution_risk.band if decision.execution_risk else None),
         rejection_reasons=decision.rejection_reasons,

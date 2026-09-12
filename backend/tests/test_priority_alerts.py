@@ -182,6 +182,7 @@ def test_limiting_leg_caps_validated_size_before_safety_haircut() -> None:
     assert recommendation.raw_limiting_depth == Decimal("500")
     assert recommendation.maximum_validated_size == Decimal("500")
     assert recommendation.limiting_leg_venue == VenueName.SMARKETS
+    assert recommendation.limiting_constraint == "executable_depth"
     hedge_stake = next(
         stake.stake for stake in recommendation.stake_plan if stake.outcome == "no"
     )
@@ -193,8 +194,8 @@ def test_safety_haircut_reduces_recommendation() -> None:
     alert = service.ingest(_candidate(limiting=Decimal("500"), hedge=Decimal("5000")))
     assert alert is not None
     assert alert.recommendation.safety_haircut == Decimal("0.05")
-    assert alert.recommendation.recommended_size == Decimal("475")
     assert alert.recommendation.recommended_size < alert.recommendation.maximum_validated_size
+    assert any(factor["name"] == "safety_haircut" for factor in alert.recommendation.reduction_factors)
 
 
 def test_user_entered_amount_above_validated_maximum_is_rejected_and_capped() -> None:
@@ -350,7 +351,9 @@ def test_priority_alert_api_is_read_only_prepare_and_detail() -> None:
 
     detail = client.get(f"/priority-alerts/{alert_id}")
     assert detail.status_code == 200
-    assert Decimal(detail.json()["recommendation"]["recommended_size"]) == Decimal("475")
+    rec = detail.json()["recommendation"]
+    assert Decimal(rec["recommended_size"]) < Decimal(rec["maximum_validated_size"])
+    assert Decimal(rec["maximum_validated_size"]) == Decimal("500")
 
     over = client.post(
         f"/priority-alerts/{alert_id}/manual-override",

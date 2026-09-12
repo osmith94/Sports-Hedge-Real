@@ -202,11 +202,17 @@ def get_paper_scan_service(
     costs: VenueCostResolver = Depends(get_venue_cost_resolver),
     liquidity: SqlitePaperLiquidityRepository = Depends(get_paper_liquidity_repository),
 ) -> PaperScanService:
+    open_trades = []
+    try:
+        open_trades = get_paper_ledger().trades.list_active()
+    except Exception:
+        open_trades = []
     return PaperScanService(
         intelligence,
         fx_service=fx,
         cost_resolver=costs,
         liquidity=liquidity,
+        open_trades=open_trades,
     )
 
 

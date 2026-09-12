@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, computed_field, model_validator
@@ -275,6 +276,17 @@ class RecommendedManualSize(BaseModel):
     auto_pool_draw: list[VenueCurrencyAmount] = Field(default_factory=list)
     has_external_leg: bool = False
     survivability: OpportunitySurvivability | None = None
+    limiting_constraint: str | None = None
+    limiting_constraint_detail: str | None = None
+    recommended_committed_capital: Decimal | None = None
+    maximum_validated_capital: Decimal | None = None
+    reduction_factors: list[dict[str, Any]] = Field(default_factory=list)
+    free_balance_after: list[dict[str, Any]] = Field(default_factory=list)
+    reserve_remaining: list[dict[str, Any]] = Field(default_factory=list)
+    expected_lock_duration_hours: Decimal | None = None
+    expected_lock_basis: str | None = None
+    capital_turnover: dict[str, Any] | None = None
+    capital_turnover_label: str = "modelled_ranking_input_not_guaranteed_return_rate"
 
 
 class PriorityAlertEvent(BaseModel):

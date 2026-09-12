@@ -122,13 +122,19 @@ class PaperOperationsService:
                 provenance=provenance,
             )
         candidate = None
-        if (
-            decision.eligible_for_paper_simulation
-            and decision.depth_scan is not None
-            and decision.depth_scan.solution.is_arbitrage
+        if decision.eligible_for_paper_simulation and (
+            (
+                decision.depth_scan is not None
+                and decision.depth_scan.solution.is_arbitrage
+            )
+            or (
+                decision.payoff_scan is not None
+                and decision.payoff_scan.solution.is_arbitrage
+            )
         ):
-            candidate = _candidate_from_decision(decision, opportunity_id)
-            self.alerts.ingest(candidate)
+            if decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage:
+                candidate = _candidate_from_decision(decision, opportunity_id)
+                self.alerts.ingest(candidate)
             if self.settings.paper_autofill_enabled:
                 try:
                     self.simulate_fill(

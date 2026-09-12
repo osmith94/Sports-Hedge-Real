@@ -95,6 +95,17 @@ class Settings(BaseSettings):
     priority_operator_manual_cap: float = Field(default=10000.0, gt=0)
     priority_risk_limit: float = Field(default=10000.0, gt=0)
 
+    allocation_min_reserve_fraction: float = Field(default=0.30, ge=0, le=1)
+    allocation_min_reserve_amount: float | None = Field(default=None, ge=0)
+    allocation_max_pool_fraction_per_opportunity: float = Field(default=0.25, gt=0, le=1)
+    allocation_max_open_capital_fraction: float = Field(default=0.70, gt=0, le=1)
+    allocation_max_same_fixture_fraction: float = Field(default=0.40, gt=0, le=1)
+    allocation_max_concurrent_open: int = Field(default=4, ge=0)
+    allocation_per_opportunity_limit_gbp: float | None = Field(default=None, gt=0)
+    allocation_matchbook_limit_gbp: float | None = Field(default=None, gt=0)
+    allocation_polymarket_limit_usd: float | None = Field(default=None, gt=0)
+    allocation_external_leg_cap_native: float | None = Field(default=None, gt=0)
+
     @field_validator("cors_allow_origins", mode="before")
     @classmethod
     def split_cors_allow_origins(cls, value: Any) -> list[str]:
