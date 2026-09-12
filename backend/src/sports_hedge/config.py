@@ -30,9 +30,14 @@ class Settings(BaseSettings):
 
     polymarket_gamma_base_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_base_url: str = "https://clob.polymarket.com"
-    # Observed public Gamma GET /sports: EPL series=10188. Empty disables the
-    # list_events filter; unfiltered first-100 discovery remains an audit gap.
-    polymarket_gamma_series_id: str | None = "10188"
+    # Public Gamma GET /sports (2026-09-12): epl=10188, elc=10355, lal=10193.
+    # Empty single-id override disables series filtering.
+    polymarket_gamma_series_id: str | None = None
+    polymarket_gamma_series_ids: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["10188", "10355", "10193"]
+    )
+    polymarket_gamma_page_limit: int = Field(default=100, ge=1, le=100)
+    polymarket_gamma_max_pages_per_series: int = Field(default=5, ge=1, le=20)
 
     market_intelligence_db_path: str = "./data/market_intelligence.sqlite"
     market_intelligence_minimum_sample_size: int = Field(default=8, ge=2)
@@ -79,6 +84,19 @@ class Settings(BaseSettings):
     def split_cors_allow_origins(cls, value: Any) -> list[str]:
         return parse_cors_allow_origins(value)
 
+    @field_validator("polymarket_gamma_series_ids", mode="before")
+    @classmethod
+    def split_polymarket_series_ids(cls, value: Any) -> list[str]:
+        return parse_series_ids(value)
+
+    def resolved_polymarket_series_ids(self) -> list[str]:
+        """Single-id override wins when set, including explicit disable (empty)."""
+
+        if self.polymarket_gamma_series_id is not None:
+            single = self.polymarket_gamma_series_id.strip()
+            return [single] if single else []
+        return list(self.polymarket_gamma_series_ids)
+
     @model_validator(mode="after")
     def enforce_phase_one_safety(self) -> "Settings":
         if self.sports_hedge_mode != "paper":
@@ -111,6 +129,25 @@ def parse_cors_allow_origins(value: Any) -> list[str]:
     if any(origin == "*" for origin in origins):
         raise ValueError("CORS allowlist must not include an unrestricted wildcard")
     return origins
+
+
+def parse_series_ids(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = loads(text)
+            except JSONDecodeError as exc:
+                raise ValueError("POLYMARKET_GAMMA_SERIES_IDS JSON list is invalid") from exc
+            return parse_series_ids(parsed)
+        return [part.strip() for part in text.split(",") if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    raise ValueError("POLYMARKET_GAMMA_SERIES_IDS must be a list or comma-separated string")
 
 
 @lru_cache

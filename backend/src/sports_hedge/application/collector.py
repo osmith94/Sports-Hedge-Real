@@ -15,8 +15,18 @@ from sports_hedge.application.quote_freshness import (
 from sports_hedge.application.market_observation import (
     MatchbookObservationBuilder,
     PolymarketObservationBuilder,
+    VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.target_competitions import (
+    UNMATCHED_POLYMARKET_COVERAGE,
+    ScopeDecision,
+    scope_matchbook_event,
+)
+from sports_hedge.arbitrage.watchlist.economics import (
+    distance_to_trigger_pp,
+    net_edge_from_implied_sum,
+)
 from sports_hedge.domain.football import CanonicalEvent, CanonicalMarket
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
@@ -64,6 +74,7 @@ class DiscoveredFixture(BaseModel):
     home_team: str
     away_team: str
     competition: str
+    target_competition_code: str | None = None
     kickoff_utc: datetime
     polymarket_matched: bool = False
     fixture_status: str | None = None
@@ -72,6 +83,18 @@ class DiscoveredFixture(BaseModel):
     home_score: int | None = None
     away_score: int | None = None
     last_seen_at: datetime
+    matched_market_count: int = Field(default=0, ge=0)
+    market_family: str | None = None
+    outcome_context: str | None = None
+    best_matchbook_price: Decimal | None = None
+    best_polymarket_price: Decimal | None = None
+    current_net_edge: Decimal | None = None
+    trigger_net_edge: Decimal | None = None
+    distance_to_trigger_pp: Decimal | None = None
+    quote_age_ms: int | None = Field(default=None, ge=0)
+    quote_age_basis: str | None = None
+    no_comparison_reason: str | None = None
+    solver_is_arbitrage: bool = False
 
 
 class CollectionReport(BaseModel):
@@ -166,9 +189,11 @@ class ReadOnlyCrossVenueCollector:
         polymarket_payload = await self.polymarket.list_events(**(polymarket_event_filters or {}))
         raw_matchbook_events = _extract_matchbook_items(matchbook_payload, "events")
         raw_polymarket_events = [item for item in polymarket_payload if isinstance(item, dict)]
+        scoped_matchbook_events, scope_issues = _scope_matchbook_events(raw_matchbook_events)
+        issues.extend(scope_issues)
 
         matchbook_events = self._normalize_events(
-            raw_matchbook_events,
+            scoped_matchbook_events,
             venue=VenueName.MATCHBOOK,
             issues=issues,
         )
@@ -185,14 +210,14 @@ class ReadOnlyCrossVenueCollector:
         matched_matchbook_ids = {
             left.canonical.source_event_id for left, _right, _match in event_pairs
         }
-        discovered_fixtures = [
-            _discovered_fixture(
+        discovered_by_id = {
+            event.canonical.source_event_id: _discovered_fixture(
                 event,
                 polymarket_matched=event.canonical.source_event_id in matched_matchbook_ids,
                 seen_at=started_at,
             )
             for event in matchbook_events
-        ]
+        }
 
         decisions: list[PaperScanDecision] = []
         normalized_matchbook_markets = 0
@@ -201,6 +226,7 @@ class ReadOnlyCrossVenueCollector:
         order_books_fetched = 0
 
         for left_event, right_event, _ in event_pairs:
+            fixture = discovered_by_id.get(left_event.canonical.source_event_id)
             try:
                 mb_started = perf_counter()
                 mb_market_payload = await self.matchbook.list_markets(
@@ -218,6 +244,8 @@ class ReadOnlyCrossVenueCollector:
                         detail=str(exc),
                     )
                 )
+                if fixture is not None:
+                    fixture.no_comparison_reason = "list_markets_unavailable"
                 continue
 
             try:
@@ -236,6 +264,8 @@ class ReadOnlyCrossVenueCollector:
                         detail=str(exc),
                     )
                 )
+                if fixture is not None:
+                    fixture.no_comparison_reason = "list_markets_unavailable"
                 continue
 
             left_markets = self._normalize_markets(
@@ -259,6 +289,10 @@ class ReadOnlyCrossVenueCollector:
                 matcher=self.market_matcher,
             )[:max_market_pairs_per_event]
             matched_market_pairs += len(market_pairs)
+            if fixture is not None:
+                fixture.matched_market_count = len(market_pairs)
+                if not market_pairs:
+                    fixture.no_comparison_reason = "no_settlement_equivalent_market_pair"
 
             for left_market, right_market, _ in market_pairs:
                 books_by_token: dict[str, dict[str, Any]] = {}
@@ -290,6 +324,8 @@ class ReadOnlyCrossVenueCollector:
                         book_failed = True
                         break
                 if book_failed:
+                    if fixture is not None and fixture.current_net_edge is None:
+                        fixture.no_comparison_reason = "order_book_unavailable"
                     continue
 
                 evaluated_at = datetime.now(UTC)
@@ -390,11 +426,19 @@ class ReadOnlyCrossVenueCollector:
                         }
                     )
                 )
+                if fixture is not None:
+                    _apply_backend_comparison(
+                        fixture,
+                        left_market=left_market,
+                        matchbook_observation=matchbook_observation,
+                        polymarket_observation=polymarket_observation,
+                        decision=decision,
+                    )
 
         completed_at = datetime.now(UTC)
         discovered_fixtures = [
             item.model_copy(update={"last_seen_at": completed_at})
-            for item in discovered_fixtures
+            for item in discovered_by_id.values()
         ]
         return CollectionReport(
             started_at=started_at,
@@ -482,11 +526,13 @@ def _discovered_fixture(
 ) -> DiscoveredFixture:
     state = matchbook_fixture_state(event.raw)
     canonical = event.canonical
+    scoped = scope_matchbook_event(event.raw)
     return DiscoveredFixture(
         source_event_id=canonical.source_event_id,
         home_team=canonical.home_team,
         away_team=canonical.away_team,
         competition=canonical.competition,
+        target_competition_code=scoped.competition.code.value if scoped.competition else None,
         kickoff_utc=canonical.kickoff_utc,
         polymarket_matched=polymarket_matched,
         fixture_status=state.venue_status,
@@ -495,7 +541,97 @@ def _discovered_fixture(
         home_score=state.home_score,
         away_score=state.away_score,
         last_seen_at=seen_at,
+        no_comparison_reason=None if polymarket_matched else UNMATCHED_POLYMARKET_COVERAGE,
+        solver_is_arbitrage=False,
     )
+
+
+def _scope_matchbook_events(
+    payloads: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[CollectorIssue]]:
+    scoped: list[dict[str, Any]] = []
+    issues: list[CollectorIssue] = []
+    for payload in payloads:
+        decision: ScopeDecision = scope_matchbook_event(payload)
+        source_id = str(payload.get("id", "")) or None
+        if not decision.allowed:
+            issues.append(
+                CollectorIssue(
+                    stage="target_competition",
+                    venue=VenueName.MATCHBOOK,
+                    source_id=source_id,
+                    detail=(
+                        f"{decision.reason}: sport={decision.sport!r} "
+                        f"competition={decision.label!r}"
+                    ),
+                )
+            )
+            continue
+        scoped.append(payload)
+    return scoped, issues
+
+
+def _best_observed_back(observation: VenueMarketObservation) -> Decimal | None:
+    prices = [
+        book.best_back.decimal_odds
+        for book in observation.outcome_books
+        if book.best_back is not None
+    ]
+    return max(prices) if prices else None
+
+
+def _outcome_context(market: _NormalizedMarket) -> str:
+    labels = [runner.outcome.value for runner in market.canonical.runners]
+    return "/".join(labels)
+
+
+def _apply_backend_comparison(
+    fixture: DiscoveredFixture,
+    *,
+    left_market: _NormalizedMarket,
+    matchbook_observation: VenueMarketObservation,
+    polymarket_observation: VenueMarketObservation,
+    decision: PaperScanDecision,
+) -> None:
+    """Copy solver/scan fields onto the discovery row. No frontend economics."""
+
+    current_net = None
+    if decision.depth_scan is not None:
+        implied = decision.depth_scan.solution.implied_probability_sum
+        if implied > 0:
+            current_net = net_edge_from_implied_sum(implied)
+    replace = fixture.current_net_edge is None or (
+        current_net is not None and current_net > fixture.current_net_edge
+    )
+    if not replace:
+        return
+    trigger = decision.minimum_net_edge
+    distance = (
+        distance_to_trigger_pp(current_net, trigger) if current_net is not None else None
+    )
+    solver_arb = bool(
+        decision.eligible_for_paper_simulation
+        and decision.depth_scan is not None
+        and decision.depth_scan.solution.is_arbitrage
+    )
+    no_reason = None
+    if current_net is None:
+        no_reason = decision.rejection_reasons[0] if decision.rejection_reasons else "no_comparison"
+    elif not solver_arb and decision.rejection_reasons:
+        no_reason = None
+    fixture.market_family = left_market.canonical.family.value
+    fixture.outcome_context = _outcome_context(left_market)
+    fixture.best_matchbook_price = _best_observed_back(matchbook_observation)
+    fixture.best_polymarket_price = _best_observed_back(polymarket_observation)
+    fixture.current_net_edge = current_net
+    fixture.trigger_net_edge = trigger
+    fixture.distance_to_trigger_pp = distance
+    fixture.quote_age_ms = decision.quote_age_ms
+    fixture.quote_age_basis = decision.quote_age_basis
+    fixture.no_comparison_reason = no_reason
+    fixture.solver_is_arbitrage = solver_arb
+    if current_net is None and not fixture.no_comparison_reason:
+        fixture.no_comparison_reason = "no_comparison"
 
 
 def _greedy_unique_event_pairs(

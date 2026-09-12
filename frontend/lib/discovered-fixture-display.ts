@@ -1,0 +1,64 @@
+import { DiscoveredFixture } from "./api";
+import { percent, percentPoints } from "./format";
+
+export const DISCOVERY_TABLE_HEADERS = [
+  "Fixture",
+  "Kickoff",
+  "Matchbook status",
+  "Polymarket",
+  "Matched markets",
+  "Family / outcomes",
+  "Best Matchbook",
+  "Best Polymarket",
+  "Net edge",
+  "Trigger",
+  "Distance",
+  "Freshness",
+  "Comparison",
+  "Arb claim",
+  "Score",
+  "Last seen",
+] as const;
+
+function decimalText(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  return String(value);
+}
+
+export function polymarketCoverageLabel(item: DiscoveredFixture): string {
+  if (item.polymarket_matched) return "matched";
+  return item.no_comparison_reason || "unmatched / no supported Polymarket coverage";
+}
+
+export function arbClaimLabel(item: DiscoveredFixture): string {
+  return item.solver_is_arbitrage ? "solver-validated paper arb" : "not arbitrage";
+}
+
+export function freshnessLabel(item: DiscoveredFixture): string {
+  if (item.quote_age_ms == null) {
+    return item.quote_age_basis ? `unknown · ${item.quote_age_basis}` : "unavailable";
+  }
+  const basis = item.quote_age_basis ? ` · ${item.quote_age_basis}` : "";
+  return `${item.quote_age_ms}ms${basis}`;
+}
+
+export function discoveredFixtureCells(item: DiscoveredFixture): Record<(typeof DISCOVERY_TABLE_HEADERS)[number], string> {
+  return {
+    Fixture: `${item.home_team} v ${item.away_team}`,
+    Kickoff: item.kickoff_utc,
+    "Matchbook status": item.fixture_status ?? "—",
+    Polymarket: polymarketCoverageLabel(item),
+    "Matched markets": String(item.matched_market_count),
+    "Family / outcomes": [item.market_family, item.outcome_context].filter(Boolean).join(" · ") || "—",
+    "Best Matchbook": decimalText(item.best_matchbook_price),
+    "Best Polymarket": decimalText(item.best_polymarket_price),
+    "Net edge": percent(item.current_net_edge),
+    Trigger: percent(item.trigger_net_edge),
+    Distance: percentPoints(item.distance_to_trigger_pp),
+    Freshness: freshnessLabel(item),
+    Comparison: item.no_comparison_reason ?? "backend comparison available",
+    "Arb claim": arbClaimLabel(item),
+    Score: "",
+    "Last seen": item.last_seen_at,
+  };
+}
