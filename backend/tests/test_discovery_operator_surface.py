@@ -81,6 +81,8 @@ def test_discovery_ui_renders_target_rows_from_backend_fields() -> None:
     display = (FRONTEND / "lib" / "discovered-fixture-display.ts").read_text(encoding="utf-8")
     assert "current_net_edge" in display
     assert "distance_to_trigger_pp" in display
+    assert "fixtureHref" in source or "canonical_event_id" in source
+    assert "/arbitrage/fixtures/" in source or "fixtureHref" in display
     page = (FRONTEND / "app" / "page.tsx").read_text(encoding="utf-8")
     assert "Demo walkthrough · not live operations" in page
     assert "liveConnected" in page

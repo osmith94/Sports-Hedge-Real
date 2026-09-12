@@ -121,6 +121,7 @@ export type PaperCollectionReport = {
 export type DiscoveredFixture = {
   source: Venue;
   source_event_id: string;
+  canonical_event_id: string;
   home_team: string;
   away_team: string;
   competition: string;
@@ -134,6 +135,8 @@ export type DiscoveredFixture = {
   away_score?: number | null;
   last_seen_at: string;
   matched_market_count: number;
+  discovered_market_count?: number;
+  matched_equivalent_count?: number;
   market_family?: string | null;
   outcome_context?: string | null;
   best_matchbook_price?: string | number | null;
@@ -145,6 +148,69 @@ export type DiscoveredFixture = {
   quote_age_basis?: string | null;
   no_comparison_reason?: string | null;
   solver_is_arbitrage: boolean;
+};
+
+export type InventoryComparisonStatus =
+  | "matched_equivalent"
+  | "venue_only"
+  | "settlement_mismatch"
+  | "unsupported_outcome_model"
+  | "unsupported_family"
+  | "missing_costs"
+  | "missing_fx"
+  | "stale"
+  | "other";
+
+export type VenueQuoteFact = {
+  outcome: string;
+  decimal_odds?: string | number | null;
+  size_at_touch?: string | number | null;
+};
+
+export type VenueMarketFacts = {
+  venue: Venue;
+  source_event_id: string;
+  source_market_id: string;
+  family?: string | null;
+  period?: string | null;
+  line?: string | number | null;
+  settlement_key?: string | null;
+  settlement_complete?: boolean | null;
+  best_backs: VenueQuoteFact[];
+  usable_depth_at_touch?: string | number | null;
+  observed_at?: string | null;
+  quote_age_ms?: number | null;
+  quote_age_basis?: string | null;
+  native_currency?: string | null;
+  fee_status?: string | null;
+  fee_source?: string | null;
+  fx_status?: string | null;
+};
+
+export type FixtureMarketInventoryRow = {
+  display_name: string;
+  family?: string | null;
+  period?: string | null;
+  line?: string | number | null;
+  comparison_status: InventoryComparisonStatus;
+  reason?: string | null;
+  rejection_reasons: string[];
+  match_reasons: string[];
+  entered_solver: boolean;
+  current_net_edge?: string | number | null;
+  trigger_net_edge?: string | number | null;
+  distance_to_trigger_pp?: string | number | null;
+  solver_is_arbitrage: boolean;
+  matchbook?: VenueMarketFacts | null;
+  polymarket?: VenueMarketFacts | null;
+};
+
+export type FixtureDetailReadModel = {
+  fixture: DiscoveredFixture;
+  markets: FixtureMarketInventoryRow[];
+  data_class: string;
+  paper_mode: string;
+  execution_enabled: boolean;
 };
 
 export type LiveRefreshStatus = {
@@ -496,6 +562,10 @@ export async function simulatePaperFill(payload: {
 
 export function getLiveRefreshStatus(): Promise<LiveRefreshStatus> {
   return request("/paper/live-refresh");
+}
+
+export function getFixtureDetail(canonicalEventId: string): Promise<FixtureDetailReadModel> {
+  return request(`/operations/fixtures/${encodeURIComponent(canonicalEventId)}`);
 }
 
 export function getEconomicsStatus(): Promise<EconomicsStatus> {

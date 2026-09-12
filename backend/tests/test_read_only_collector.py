@@ -248,7 +248,7 @@ async def test_collector_pairs_each_event_only_once() -> None:
         )
         assert report.normalized_matchbook_events == 2
         assert report.matched_event_pairs == 1
-        assert len(matchbook.list_markets_calls) == 1
+        assert len(matchbook.list_markets_calls) == 2
         assert len(polymarket.list_markets_calls) == 1
     finally:
         repository.close()

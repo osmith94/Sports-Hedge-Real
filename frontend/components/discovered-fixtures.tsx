@@ -1,8 +1,12 @@
+import Link from "next/link";
 import { DiscoveredFixture, LiveRefreshStatus } from "../lib/api";
 import {
   DISCOVERY_TABLE_HEADERS,
   arbClaimLabel,
+  fixtureHref,
+  fixturePhaseLabel,
   freshnessLabel,
+  inventorySummaryLabel,
   polymarketCoverageLabel,
 } from "../lib/discovered-fixture-display";
 import { percent, percentPoints, relativeTime } from "../lib/format";
@@ -41,7 +45,8 @@ export function DiscoveredFixturesPanel({
       <p className="section-copy">
         PL / Championship / La Liga only. Last collection{" "}
         {status.last_completed_at ? relativeTime(status.last_completed_at) : "never"}.
-        {status.last_error ? ` Last error: ${status.last_error}` : ""}
+        {status.last_error ? ` Last error: ${status.last_error}` : ""} Click a fixture for
+        the full discovered market inventory — not match-result only.
       </p>
       {items.length === 0 ? (
         <div className="empty-live-compact">No in-scope Matchbook fixtures.</div>
@@ -57,9 +62,12 @@ export function DiscoveredFixturesPanel({
             </thead>
             <tbody>
               {items.map((item) => (
-                <tr key={item.source_event_id}>
+                <tr key={item.canonical_event_id}>
                   <td className="row-title">
-                    {item.home_team} v {item.away_team}
+                    <Link className="fixture-link" href={fixtureHref(item)}>
+                      {item.home_team} v {item.away_team}
+                      <span className="muted"> · {fixturePhaseLabel(item)}</span>
+                    </Link>
                     <div className="muted">
                       {item.competition}
                       {item.target_competition_code ? ` · ${item.target_competition_code}` : ""}
@@ -71,7 +79,7 @@ export function DiscoveredFixturesPanel({
                     {item.in_running ? " · in-running" : ""}
                   </td>
                   <td>{polymarketCoverageLabel(item)}</td>
-                  <td>{item.matched_market_count}</td>
+                  <td>{inventorySummaryLabel(item)}</td>
                   <td className="muted">
                     {item.market_family ?? "—"}
                     {item.outcome_context ? ` · ${item.outcome_context}` : ""}

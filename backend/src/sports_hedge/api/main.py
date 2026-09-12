@@ -9,6 +9,8 @@ from sports_hedge.api.dislocations import router as dislocations_router
 from sports_hedge.api.historical import router as historical_router
 from sports_hedge.api.market_intelligence import router as market_intelligence_router
 from sports_hedge.api.notifications import router as notifications_router
+from sports_hedge.api.operations import router as operations_router
+from sports_hedge.api.paper import router as paper_router, server_owned_refresh_tick, get_accounting_schedule
 from sports_hedge.api.paper import router as paper_router, server_owned_refresh_tick, get_accounting_schedule
 from sports_hedge.api.priority_alerts import router as priority_alerts_router
 from sports_hedge.api.watchlist import router as watchlist_router
@@ -48,6 +50,8 @@ app.include_router(dislocations_router)
 app.include_router(historical_router)
 app.include_router(market_intelligence_router)
 app.include_router(notifications_router)
+app.include_router(operations_router)
+app.include_router(paper_router)
 app.include_router(paper_router)
 app.include_router(watchlist_router)
 app.include_router(priority_alerts_router)

@@ -7,6 +7,15 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from sports_hedge.application.fixture_inventory import (
+    FixtureMarketInventoryRow,
+    InventoryMarket,
+    assemble_fixture_inventory,
+    inventory_summary,
+    raw_market_id,
+    raw_market_name,
+    solver_eligible_pair,
+)
 from sports_hedge.application.fixture_state import matchbook_fixture_state
 from sports_hedge.application.quote_freshness import (
     matchbook_market_quote_age,
@@ -18,6 +27,7 @@ from sports_hedge.application.market_observation import (
     VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.normalization.identity import canonical_source_event_id
 from sports_hedge.application.target_competitions import (
     EVENT_IDENTITY_MISMATCH,
     SERIES_NOT_QUERIED,
@@ -76,6 +86,7 @@ class CollectorIssue(BaseModel):
 class DiscoveredFixture(BaseModel):
     source: VenueName = VenueName.MATCHBOOK
     source_event_id: str
+    canonical_event_id: str
     home_team: str
     away_team: str
     competition: str
@@ -89,6 +100,8 @@ class DiscoveredFixture(BaseModel):
     away_score: int | None = None
     last_seen_at: datetime
     matched_market_count: int = Field(default=0, ge=0)
+    discovered_market_count: int = Field(default=0, ge=0)
+    matched_equivalent_count: int = Field(default=0, ge=0)
     market_family: str | None = None
     outcome_context: str | None = None
     best_matchbook_price: Decimal | None = None
@@ -100,6 +113,14 @@ class DiscoveredFixture(BaseModel):
     quote_age_basis: str | None = None
     no_comparison_reason: str | None = None
     solver_is_arbitrage: bool = False
+
+
+class FixtureDetailReadModel(BaseModel):
+    fixture: DiscoveredFixture
+    markets: list[FixtureMarketInventoryRow] = Field(default_factory=list)
+    data_class: str = "live_paper_when_collected"
+    paper_mode: str = "paper"
+    execution_enabled: bool = False
 
 
 class CollectionReport(BaseModel):
@@ -118,6 +139,7 @@ class CollectionReport(BaseModel):
     order_books_fetched: int = Field(default=0, ge=0)
     paper_decisions: list[PaperScanDecision] = Field(default_factory=list)
     discovered_fixtures: list[DiscoveredFixture] = Field(default_factory=list)
+    fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = Field(default_factory=dict)
     issues: list[CollectorIssue] = Field(default_factory=list)
 
     @property
@@ -232,14 +254,19 @@ class ReadOnlyCrossVenueCollector:
             for event in matchbook_events
         }
 
+        paired_right_by_left = {
+            left.canonical.source_event_id: right for left, right, _ in event_pairs
+        }
         decisions: list[PaperScanDecision] = []
         normalized_matchbook_markets = 0
         normalized_polymarket_markets = 0
         matched_market_pairs = 0
         order_books_fetched = 0
+        fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = {}
 
-        for left_event, right_event, _ in event_pairs:
+        for left_event in matchbook_events:
             fixture = discovered_by_id.get(left_event.canonical.source_event_id)
+            right_event = paired_right_by_left.get(left_event.canonical.source_event_id)
             try:
                 mb_started = perf_counter()
                 mb_market_payload = await self.matchbook.list_markets(
@@ -261,40 +288,45 @@ class ReadOnlyCrossVenueCollector:
                     fixture.no_comparison_reason = "list_markets_unavailable"
                 continue
 
-            try:
-                pm_started = perf_counter()
-                pm_market_payload = await self.polymarket.list_markets(
-                    right_event.canonical.source_event_id,
-                    **(polymarket_market_filters or {}),
-                )
-                polymarket_market_latency_ms = _elapsed_ms(pm_started)
-            except Exception as exc:
-                issues.append(
-                    CollectorIssue(
-                        stage="list_markets",
-                        venue=VenueName.POLYMARKET,
-                        source_id=right_event.canonical.source_event_id,
-                        detail=str(exc),
-                    )
-                )
-                if fixture is not None:
-                    fixture.no_comparison_reason = "list_markets_unavailable"
-                continue
-
-            left_markets = self._normalize_markets(
+            raw_matchbook = _extract_matchbook_items(mb_market_payload, "markets")
+            left_markets, matchbook_inventory = self._inventory_markets(
                 left_event,
-                _extract_matchbook_items(mb_market_payload, "markets"),
+                raw_matchbook,
                 venue=VenueName.MATCHBOOK,
                 issues=issues,
             )
-            right_markets = self._normalize_markets(
-                right_event,
-                [item for item in pm_market_payload if isinstance(item, dict)],
-                venue=VenueName.POLYMARKET,
-                issues=issues,
-            )
             normalized_matchbook_markets += len(left_markets)
-            normalized_polymarket_markets += len(right_markets)
+
+            right_markets: list[_NormalizedMarket] = []
+            polymarket_inventory: list[InventoryMarket] = []
+            polymarket_market_latency_ms = 0
+            if right_event is not None:
+                try:
+                    pm_started = perf_counter()
+                    pm_market_payload = await self.polymarket.list_markets(
+                        right_event.canonical.source_event_id,
+                        **(polymarket_market_filters or {}),
+                    )
+                    polymarket_market_latency_ms = _elapsed_ms(pm_started)
+                except Exception as exc:
+                    issues.append(
+                        CollectorIssue(
+                            stage="list_markets",
+                            venue=VenueName.POLYMARKET,
+                            source_id=right_event.canonical.source_event_id,
+                            detail=str(exc),
+                        )
+                    )
+                    if fixture is not None:
+                        fixture.no_comparison_reason = "list_markets_unavailable"
+                    pm_market_payload = []
+                right_markets, polymarket_inventory = self._inventory_markets(
+                    right_event,
+                    [item for item in pm_market_payload if isinstance(item, dict)],
+                    venue=VenueName.POLYMARKET,
+                    issues=issues,
+                )
+                normalized_polymarket_markets += len(right_markets)
 
             market_pairs = _greedy_unique_market_pairs(
                 left_markets,
@@ -304,115 +336,69 @@ class ReadOnlyCrossVenueCollector:
             matched_market_pairs += len(market_pairs)
             if fixture is not None:
                 fixture.matched_market_count = len(market_pairs)
-                if not market_pairs:
+                if right_event is not None and not market_pairs:
                     fixture.no_comparison_reason = "no_settlement_equivalent_market_pair"
 
-            for left_market, right_market, _ in market_pairs:
-                books_by_token: dict[str, dict[str, Any]] = {}
-                poly_book_latency_ms = 0
-                book_failed = False
-                required_tokens = [
-                    runner.source_runner_id for runner in right_market.canonical.runners
-                ]
-                for runner in right_market.canonical.runners:
-                    try:
-                        book_started = perf_counter()
-                        raw_book = await self.polymarket.get_order_book(
-                            right_event.canonical.source_event_id,
-                            right_market.canonical.source_market_id,
-                            runner.source_runner_id,
-                        )
-                        poly_book_latency_ms += _elapsed_ms(book_started)
-                        books_by_token[runner.source_runner_id] = raw_book
-                        order_books_fetched += 1
-                    except Exception as exc:
-                        issues.append(
-                            CollectorIssue(
-                                stage="order_book",
-                                venue=VenueName.POLYMARKET,
-                                source_id=runner.source_runner_id,
-                                detail=str(exc),
-                            )
-                        )
-                        book_failed = True
-                        break
+            decisions_by_source_ids: dict[tuple[str, str], PaperScanDecision] = {}
+            observations_by_market_id: dict[tuple[VenueName, str], VenueMarketObservation] = {}
+
+            for left_market in left_markets:
+                observation = self._try_matchbook_observation(
+                    left_event,
+                    left_market,
+                    retrieved_at=matchbook_retrieved_at,
+                    latency_ms=matchbook_market_latency_ms,
+                    issues=issues,
+                )
+                if observation is None:
+                    continue
+                observations_by_market_id[
+                    (VenueName.MATCHBOOK, left_market.canonical.source_market_id)
+                ] = observation
+                for item in matchbook_inventory:
+                    if item.source_market_id == left_market.canonical.source_market_id:
+                        item.observation = observation
+
+            for right_market in right_markets:
+                if right_event is None:
+                    break
+                books_by_token, poly_book_latency_ms, fetched, book_failed = await self._fetch_polymarket_books(
+                    right_event,
+                    right_market,
+                    issues=issues,
+                )
+                order_books_fetched += fetched
                 if book_failed:
+                    continue
+                observation = self._try_polymarket_observation(
+                    right_event,
+                    right_market,
+                    books_by_token,
+                    latency_ms=polymarket_market_latency_ms + poly_book_latency_ms,
+                    issues=issues,
+                )
+                if observation is None:
+                    continue
+                for item in polymarket_inventory:
+                    if item.source_market_id == right_market.canonical.source_market_id:
+                        item.observation = observation
+                observations_by_market_id[
+                    (VenueName.POLYMARKET, right_market.canonical.source_market_id)
+                ] = observation
+
+            for left_market, right_market, match in market_pairs:
+                if not solver_eligible_pair(left_market.canonical, right_market.canonical, match):
+                    continue
+                matchbook_observation = observations_by_market_id.get(
+                    (VenueName.MATCHBOOK, left_market.canonical.source_market_id)
+                )
+                polymarket_observation = observations_by_market_id.get(
+                    (VenueName.POLYMARKET, right_market.canonical.source_market_id)
+                )
+                if matchbook_observation is None or polymarket_observation is None:
                     if fixture is not None and fixture.current_net_edge is None:
                         fixture.no_comparison_reason = "order_book_unavailable"
                     continue
-
-                evaluated_at = datetime.now(UTC)
-                matchbook_age = matchbook_market_quote_age(
-                    left_market.raw,
-                    retrieved_at=matchbook_retrieved_at,
-                    evaluated_at=evaluated_at,
-                )
-                polymarket_age = polymarket_books_quote_age(
-                    books_by_token,
-                    required_tokens=required_tokens,
-                    evaluated_at=evaluated_at,
-                )
-                if matchbook_age.reason:
-                    issues.append(
-                        CollectorIssue(
-                            stage="quote_age",
-                            venue=VenueName.MATCHBOOK,
-                            source_id=left_market.canonical.source_market_id,
-                            detail=matchbook_age.reason,
-                        )
-                    )
-                if polymarket_age.reason:
-                    issues.append(
-                        CollectorIssue(
-                            stage="quote_age",
-                            venue=VenueName.POLYMARKET,
-                            source_id=right_market.canonical.source_market_id,
-                            detail=polymarket_age.reason,
-                        )
-                    )
-                try:
-                    matchbook_observation = self.matchbook_builder.build(
-                        left_event.raw,
-                        left_market.raw,
-                        observed_at=evaluated_at,
-                        source_latency_ms=matchbook_market_latency_ms,
-                        quote_age_ms=matchbook_age.quote_age_ms,
-                        quote_age_basis=matchbook_age.basis,
-                        quote_age_reason=matchbook_age.reason,
-                    )
-                except (VenueNormalizationError, ValueError) as exc:
-                    issues.append(
-                        CollectorIssue(
-                            stage="build_observation",
-                            venue=VenueName.MATCHBOOK,
-                            source_id=left_market.canonical.source_market_id,
-                            detail=str(exc),
-                        )
-                    )
-                    continue
-
-                try:
-                    polymarket_observation = self.polymarket_builder.build(
-                        right_event.raw,
-                        right_market.raw,
-                        books_by_token,
-                        observed_at=evaluated_at,
-                        source_latency_ms=polymarket_market_latency_ms + poly_book_latency_ms,
-                        quote_age_ms=polymarket_age.quote_age_ms,
-                        quote_age_basis=polymarket_age.basis,
-                        quote_age_reason=polymarket_age.reason,
-                    )
-                except (VenueNormalizationError, ValueError) as exc:
-                    issues.append(
-                        CollectorIssue(
-                            stage="build_observation",
-                            venue=VenueName.POLYMARKET,
-                            source_id=right_market.canonical.source_market_id,
-                            detail=str(exc),
-                        )
-                    )
-                    continue
-
                 decision = self.paper_scan.scan_pair(
                     matchbook_observation,
                     polymarket_observation,
@@ -427,26 +413,47 @@ class ReadOnlyCrossVenueCollector:
                     recent_volatility_bps=recent_volatility_bps,
                 )
                 state = matchbook_fixture_state(left_event.raw)
-                decisions.append(
-                    decision.model_copy(
-                        update={
-                            "fixture_discovery_source": VenueName.MATCHBOOK,
-                            "fixture_status": state.venue_status,
-                            "in_running": state.in_running,
-                            "live_score_supported": state.live_score_supported,
-                            "home_score": state.home_score,
-                            "away_score": state.away_score,
-                        }
-                    )
+                stored = decision.model_copy(
+                    update={
+                        "fixture_discovery_source": VenueName.MATCHBOOK,
+                        "fixture_status": state.venue_status,
+                        "in_running": state.in_running,
+                        "live_score_supported": state.live_score_supported,
+                        "home_score": state.home_score,
+                        "away_score": state.away_score,
+                    }
                 )
+                decisions.append(stored)
+                decisions_by_source_ids[
+                    (
+                        left_market.canonical.source_market_id,
+                        right_market.canonical.source_market_id,
+                    )
+                ] = stored
                 if fixture is not None:
                     _apply_backend_comparison(
                         fixture,
                         left_market=left_market,
                         matchbook_observation=matchbook_observation,
                         polymarket_observation=polymarket_observation,
-                        decision=decision,
+                        decision=stored,
                     )
+
+            inventory_rows = assemble_fixture_inventory(
+                matchbook_inventory,
+                polymarket_inventory,
+                matcher=self.market_matcher,
+                decisions_by_source_ids=decisions_by_source_ids,
+                venue_costs=venue_costs,
+                fx_snapshots=fx_snapshots,
+            )
+            if fixture is not None:
+                discovered_count, equivalent_count, best_edge = inventory_summary(inventory_rows)
+                fixture.discovered_market_count = discovered_count
+                fixture.matched_equivalent_count = equivalent_count
+                if fixture.current_net_edge is None and best_edge is not None:
+                    fixture.current_net_edge = best_edge
+                fixture_markets[fixture.canonical_event_id] = inventory_rows
 
         completed_at = datetime.now(UTC)
         discovered_fixtures = [
@@ -469,6 +476,7 @@ class ReadOnlyCrossVenueCollector:
             order_books_fetched=order_books_fetched,
             paper_decisions=decisions,
             discovered_fixtures=discovered_fixtures,
+            fixture_markets=fixture_markets,
             issues=issues,
         )
 
@@ -498,26 +506,26 @@ class ReadOnlyCrossVenueCollector:
                 )
         return result
 
-    def _normalize_markets(
+    def _inventory_markets(
         self,
         event: _NormalizedEvent,
         payloads: list[dict[str, Any]],
         *,
         venue: VenueName,
         issues: list[CollectorIssue],
-    ) -> list[_NormalizedMarket]:
-        result: list[_NormalizedMarket] = []
+    ) -> tuple[list[_NormalizedMarket], list[InventoryMarket]]:
+        normalized: list[_NormalizedMarket] = []
+        inventory: list[InventoryMarket] = []
         normalizer = (
             self.matchbook_normalizer if venue == VenueName.MATCHBOOK else self.polymarket_normalizer
         )
         for payload in payloads:
-            source_id = str(payload.get("id", payload.get("conditionId", ""))) or None
+            source_id = raw_market_id(payload, venue) or None
+            name = raw_market_name(payload, venue)
             try:
-                result.append(
-                    _NormalizedMarket(
-                        payload,
-                        normalizer.normalize_market(event.canonical, payload),
-                    )
+                market = _NormalizedMarket(
+                    payload,
+                    normalizer.normalize_market(event.canonical, payload),
                 )
             except (VenueNormalizationError, ValueError) as exc:
                 issues.append(
@@ -528,7 +536,152 @@ class ReadOnlyCrossVenueCollector:
                         detail=str(exc),
                     )
                 )
-        return result
+                inventory.append(
+                    InventoryMarket(
+                        venue=venue,
+                        source_event_id=event.canonical.source_event_id,
+                        source_market_id=source_id or name,
+                        raw_name=name,
+                        normalize_error=str(exc),
+                    )
+                )
+                continue
+            normalized.append(market)
+            inventory.append(
+                InventoryMarket(
+                    venue=venue,
+                    source_event_id=event.canonical.source_event_id,
+                    source_market_id=market.canonical.source_market_id,
+                    raw_name=name,
+                    canonical=market.canonical,
+                )
+            )
+        return normalized, inventory
+
+    def _try_matchbook_observation(
+        self,
+        event: _NormalizedEvent,
+        market: _NormalizedMarket,
+        *,
+        retrieved_at: datetime,
+        latency_ms: int,
+        issues: list[CollectorIssue],
+    ) -> VenueMarketObservation | None:
+        evaluated_at = datetime.now(UTC)
+        age = matchbook_market_quote_age(
+            market.raw,
+            retrieved_at=retrieved_at,
+            evaluated_at=evaluated_at,
+        )
+        if age.reason:
+            issues.append(
+                CollectorIssue(
+                    stage="quote_age",
+                    venue=VenueName.MATCHBOOK,
+                    source_id=market.canonical.source_market_id,
+                    detail=age.reason,
+                )
+            )
+        try:
+            return self.matchbook_builder.build(
+                event.raw,
+                market.raw,
+                observed_at=evaluated_at,
+                source_latency_ms=latency_ms,
+                quote_age_ms=age.quote_age_ms,
+                quote_age_basis=age.basis,
+                quote_age_reason=age.reason,
+            )
+        except (VenueNormalizationError, ValueError) as exc:
+            issues.append(
+                CollectorIssue(
+                    stage="build_observation",
+                    venue=VenueName.MATCHBOOK,
+                    source_id=market.canonical.source_market_id,
+                    detail=str(exc),
+                )
+            )
+            return None
+
+    async def _fetch_polymarket_books(
+        self,
+        event: _NormalizedEvent,
+        market: _NormalizedMarket,
+        *,
+        issues: list[CollectorIssue],
+    ) -> tuple[dict[str, dict[str, Any]], int, int, bool]:
+        books_by_token: dict[str, dict[str, Any]] = {}
+        latency_ms = 0
+        fetched = 0
+        for runner in market.canonical.runners:
+            try:
+                started = perf_counter()
+                raw_book = await self.polymarket.get_order_book(
+                    event.canonical.source_event_id,
+                    market.canonical.source_market_id,
+                    runner.source_runner_id,
+                )
+                latency_ms += _elapsed_ms(started)
+                books_by_token[runner.source_runner_id] = raw_book
+                fetched += 1
+            except Exception as exc:
+                issues.append(
+                    CollectorIssue(
+                        stage="order_book",
+                        venue=VenueName.POLYMARKET,
+                        source_id=runner.source_runner_id,
+                        detail=str(exc),
+                    )
+                )
+                return books_by_token, latency_ms, fetched, True
+        return books_by_token, latency_ms, fetched, False
+
+    def _try_polymarket_observation(
+        self,
+        event: _NormalizedEvent,
+        market: _NormalizedMarket,
+        books_by_token: dict[str, dict[str, Any]],
+        *,
+        latency_ms: int,
+        issues: list[CollectorIssue],
+    ) -> VenueMarketObservation | None:
+        evaluated_at = datetime.now(UTC)
+        required_tokens = [runner.source_runner_id for runner in market.canonical.runners]
+        age = polymarket_books_quote_age(
+            books_by_token,
+            required_tokens=required_tokens,
+            evaluated_at=evaluated_at,
+        )
+        if age.reason:
+            issues.append(
+                CollectorIssue(
+                    stage="quote_age",
+                    venue=VenueName.POLYMARKET,
+                    source_id=market.canonical.source_market_id,
+                    detail=age.reason,
+                )
+            )
+        try:
+            return self.polymarket_builder.build(
+                event.raw,
+                market.raw,
+                books_by_token,
+                observed_at=evaluated_at,
+                source_latency_ms=latency_ms,
+                quote_age_ms=age.quote_age_ms,
+                quote_age_basis=age.basis,
+                quote_age_reason=age.reason,
+            )
+        except (VenueNormalizationError, ValueError) as exc:
+            issues.append(
+                CollectorIssue(
+                    stage="build_observation",
+                    venue=VenueName.POLYMARKET,
+                    source_id=market.canonical.source_market_id,
+                    detail=str(exc),
+                )
+            )
+            return None
 
 
 def _discovered_fixture(
@@ -544,6 +697,7 @@ def _discovered_fixture(
     scoped = scope_matchbook_event(event.raw)
     return DiscoveredFixture(
         source_event_id=canonical.source_event_id,
+        canonical_event_id=canonical_source_event_id(canonical),
         home_team=canonical.home_team,
         away_team=canonical.away_team,
         competition=canonical.competition,

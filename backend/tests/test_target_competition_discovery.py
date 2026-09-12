@@ -267,6 +267,6 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
         assert la_liga.target_competition_code == "la_liga"
         assert la_liga.polymarket_matched is False
         assert la_liga.no_comparison_reason == UNMATCHED_POLYMARKET_COVERAGE
-        assert matchbook.list_markets_calls == ["1001"]
+        assert set(matchbook.list_markets_calls) == {"1001", "2001", "3001"}
     finally:
         repository.close()
