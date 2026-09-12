@@ -136,4 +136,8 @@ Excel sheets:
 4. Mapping Exceptions
 5. Quality Summary
 
-See `docs/examples/historical-odds-coverage.md` for a synthetic example.
+See `docs/examples/historical-odds-coverage.md` for a **synthetic** example.
+Real Football-Data PL/Championship coverage (2021/22–2025/26) is in
+`docs/examples/football-data-england-coverage.md` (operator backfill; see
+`docs/HISTORICAL_BACKFILL.md`). Synthetic examples remain
+`docs/examples/historical-odds-coverage.md`.

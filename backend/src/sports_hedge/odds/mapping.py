@@ -135,6 +135,8 @@ def map_raw_record(record: RawOddsRecord) -> OddsObservation:
             "source_match_id": record.source_match_id,
             "home_team_id": match.home_team_id,
             "away_team_id": match.away_team_id,
+            "research_only": bool(record.raw_payload.get("research_only")),
+            "source_url": record.source_url,
         },
     )
 

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import csv
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from io import StringIO
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from sports_hedge.domain.football import (
     FootballPeriod,
@@ -15,61 +12,63 @@ from sports_hedge.domain.football import (
     SettlementScope,
 )
 from sports_hedge.facts.catalog import competition_from_label
-from sports_hedge.facts.identity import KickoffPrecision
-from sports_hedge.odds.models import QuoteType, RawOddsRecord, VenueKind
-
-# Public football-data.co.uk CSVs. Downloaded only when a local path is supplied
-# by the caller; this adapter never bypasses access controls.
-FOOTBALL_DATA_PUBLIC_FILES = {
-    "E0": "https://www.football-data.co.uk/mmz4281/2526/E0.csv",
-    "E1": "https://www.football-data.co.uk/mmz4281/2526/E1.csv",
-    "SP1": "https://www.football-data.co.uk/mmz4281/2526/SP1.csv",
-}
-
-_TZ = {
-    "E0": ZoneInfo("Europe/London"),
-    "E1": ZoneInfo("Europe/London"),
-    "SP1": ZoneInfo("Europe/Madrid"),
-}
-
-_BOOKMAKER_1X2 = {
-    "B365": ("B365H", "B365D", "B365A", "B365CH", "B365CD", "B365CA"),
-    "PS": ("PSH", "PSD", "PSA", "PSCH", "PSCD", "PSCA"),
-}
-
-_BOOKMAKER_OU = {
-    "B365": ("B365>2.5", "B365<2.5", "B365C>2.5", "B365C<2.5"),
-}
+from sports_hedge.facts.identity import KickoffPrecision, season_for_kickoff
+from sports_hedge.odds.models import QuoteType, RawOddsRecord
+from sports_hedge.sources.football_data import (
+    KICKOFF_TIMEZONES,
+    int_or_none,
+    parse_kickoff,
+    public_csv_url,
+    rows_from_csv,
+    season_code_from_label,
+)
+from sports_hedge.sources.football_data_odds import DeclaredOddsMarket, declared_odds_markets
 
 
 class FootballDataCsvAdapter:
     """Parse public football-data.co.uk style CSVs already obtained by the operator.
 
     Odds in this source are opening/closing bookmaker quotes (quality C). The
-    adapter never invents observation timestamps or liquidity.
+    adapter never invents observation timestamps or liquidity. Column presence is
+    header-driven from the declared Football-Data maps.
     """
 
     source = "football_data"
     required = False
 
-    def __init__(self, csv_text: str, *, retrieved_at: datetime) -> None:
+    def __init__(
+        self,
+        csv_text: str,
+        *,
+        retrieved_at: datetime,
+        season_label: str | None = None,
+        source_url: str | None = None,
+        div: str | None = None,
+    ) -> None:
         self._csv_text = csv_text
         self._retrieved_at = retrieved_at
+        self._season_label = season_label
+        self._source_url = source_url
+        self._div = div
+        self._markets = declared_odds_markets()
 
     @classmethod
     def from_path(cls, path: str | Path, *, retrieved_at: datetime) -> FootballDataCsvAdapter:
-        return cls(Path(path).read_text(encoding="utf-8"), retrieved_at=retrieved_at)
+        return cls(Path(path).read_text(encoding="utf-8-sig"), retrieved_at=retrieved_at)
 
     def fetch(self) -> Sequence[RawOddsRecord]:
-        reader = csv.DictReader(StringIO(self._csv_text))
         records: list[RawOddsRecord] = []
-        for index, row in enumerate(reader):
+        for index, row in enumerate(rows_from_csv(self._csv_text)):
             records.extend(self._row_records(row, index))
         return records
 
     def _row_records(self, row: dict[str, str], index: int) -> list[RawOddsRecord]:
-        div = (row.get("Div") or "").strip()
-        spec = competition_from_label(div)
+        div = self._div or (row.get("Div") or "").strip()
+        kickoff, precision = parse_kickoff(row, div)
+        season = self._season_label
+        if season is None and kickoff is not None:
+            season = season_for_kickoff(kickoff)
+        spec = competition_from_label(div, season or "2025/26") or competition_from_label(div)
         if spec is None:
             return [
                 RawOddsRecord(
@@ -82,10 +81,11 @@ class FootballDataCsvAdapter:
                     raw_payload=dict(row),
                 )
             ]
-        kickoff, precision = _parse_kickoff(row, div)
+        resolved_season = season or spec.season
+        source_url = self._source_url or public_csv_url(div, season_code_from_label(resolved_season))
         home = (row.get("HomeTeam") or "").strip()
         away = (row.get("AwayTeam") or "").strip()
-        match_id = f"{div}:{row.get('Date', '')}:{home}:{away}"
+        match_id = f"{season_code_from_label(resolved_season)}:{div}:{row.get('Date', '')}:{home}:{away}"
         settlement = SettlementFingerprint(
             scope=SettlementScope.REGULATION_TIME,
             period=FootballPeriod.FULL_TIME,
@@ -93,17 +93,15 @@ class FootballDataCsvAdapter:
             penalties_included=False,
             push_possible=False,
         )
-        records: list[RawOddsRecord] = []
-        # Facts row so coverage has a denominator even when a market is missing.
-        records.append(
+        records: list[RawOddsRecord] = [
             RawOddsRecord(
                 source=self.source,
                 source_market_id=f"{match_id}:facts",
                 source_match_id=match_id,
                 source_reference=f"{match_id}:facts",
-                source_url=FOOTBALL_DATA_PUBLIC_FILES.get(div),
+                source_url=source_url,
                 competition=spec.display_name,
-                season=spec.season,
+                season=resolved_season,
                 home_team=home,
                 away_team=away,
                 kickoff_utc=kickoff,
@@ -116,112 +114,94 @@ class FootballDataCsvAdapter:
                 retrieved_at=self._retrieved_at,
                 settlement=settlement,
                 semantics_complete=True,
-                home_goals=_int_or_none(row.get("FTHG")),
-                away_goals=_int_or_none(row.get("FTAG")),
+                home_goals=int_or_none(row.get("FTHG")),
+                away_goals=int_or_none(row.get("FTAG")),
                 raw_payload={
                     "div": div,
                     "kind": "facts",
-                    "kickoff_timezone": str(_TZ.get(div, ZoneInfo("UTC"))),
+                    "season_code": season_code_from_label(resolved_season),
+                    "kickoff_timezone": str(KICKOFF_TIMEZONES.get(div)),
+                    "source_url": source_url,
                 },
             )
-        )
-        for book, columns in _BOOKMAKER_1X2.items():
-            open_h, open_d, open_a, close_h, close_d, close_a = columns
+        ]
+        present = {key for key, value in row.items() if value}
+        for market in self._markets:
             records.extend(
-                self._triple(
+                self._market_records(
                     row,
+                    present=present,
                     match_id=match_id,
                     spec_name=spec.display_name,
-                    season=spec.season,
+                    season=resolved_season,
+                    source_url=source_url,
                     home=home,
                     away=away,
                     kickoff=kickoff,
                     precision=precision,
-                    book=book,
-                    family=MarketFamily.MATCH_RESULT,
-                    line=None,
-                    opening_columns=(open_h, open_d, open_a),
-                    closing_columns=(close_h, close_d, close_a),
-                    selections=("home", "draw", "away"),
-                    settlement=settlement,
-                )
-            )
-        for book, columns in _BOOKMAKER_OU.items():
-            open_o, open_u, close_o, close_u = columns
-            ou_settlement = SettlementFingerprint(
-                scope=SettlementScope.REGULATION_TIME,
-                period=FootballPeriod.FULL_TIME,
-                line=Decimal("2.5"),
-                extra_time_included=False,
-                penalties_included=False,
-                push_possible=False,
-            )
-            records.extend(
-                self._triple(
-                    row,
-                    match_id=match_id,
-                    spec_name=spec.display_name,
-                    season=spec.season,
-                    home=home,
-                    away=away,
-                    kickoff=kickoff,
-                    precision=precision,
-                    book=book,
-                    family=MarketFamily.TOTAL_GOALS,
-                    line=Decimal("2.5"),
-                    opening_columns=(open_o, open_u),
-                    closing_columns=(close_o, close_u),
-                    selections=("over", "under"),
-                    settlement=ou_settlement,
+                    market=market,
                 )
             )
         return records
 
-    def _triple(
+    def _market_records(
         self,
         row: dict[str, str],
         *,
+        present: set[str],
         match_id: str,
         spec_name: str,
         season: str,
+        source_url: str,
         home: str,
         away: str,
         kickoff: datetime | None,
         precision: KickoffPrecision,
-        book: str,
-        family: MarketFamily,
-        line: Decimal | None,
-        opening_columns: tuple[str, ...],
-        closing_columns: tuple[str, ...],
-        selections: tuple[str, ...],
-        settlement: SettlementFingerprint,
+        market: DeclaredOddsMarket,
     ) -> list[RawOddsRecord]:
         records: list[RawOddsRecord] = []
-        for quote_type, columns in (
-            (QuoteType.OPENING, opening_columns),
-            (QuoteType.CLOSING, closing_columns),
+        for quote_type, columns, line_column in (
+            (QuoteType.OPENING, market.opening_columns, market.opening_line_column),
+            (QuoteType.CLOSING, market.closing_columns, market.closing_line_column),
         ):
-            for selection, column in zip(selections, columns, strict=True):
+            if not any(column in present for column in columns):
+                continue
+            line = market.line
+            if line_column:
+                parsed_line = _decimal_or_none(row.get(line_column), allow_negative=True)
+                if parsed_line is not None:
+                    line = parsed_line
+            settlement = SettlementFingerprint(
+                scope=SettlementScope.REGULATION_TIME,
+                period=FootballPeriod.FULL_TIME,
+                line=line,
+                extra_time_included=False,
+                penalties_included=False,
+                push_possible=market.family == MarketFamily.ASIAN_HANDICAP,
+            )
+            for selection, column in zip(market.selections, columns, strict=True):
                 odds = _decimal_or_none(row.get(column))
                 if odds is None:
                     continue
                 records.append(
                     RawOddsRecord(
                         source=self.source,
-                        source_market_id=f"{match_id}:{family.value}:{book}:{quote_type.value}",
+                        source_market_id=(
+                            f"{match_id}:{market.family.value}:{market.book}:{quote_type.value}"
+                        ),
                         source_match_id=match_id,
-                        source_reference=f"{match_id}:{book}:{column}",
-                        source_url=FOOTBALL_DATA_PUBLIC_FILES.get((row.get("Div") or "").strip()),
-                        venue=book.casefold(),
-                        bookmaker=book.casefold(),
-                        venue_kind=VenueKind.BOOKMAKER,
+                        source_reference=f"{match_id}:{market.book}:{column}",
+                        source_url=source_url,
+                        venue=market.book.casefold(),
+                        bookmaker=market.book.casefold(),
+                        venue_kind=market.venue_kind,
                         competition=spec_name,
                         season=season,
                         home_team=home,
                         away_team=away,
                         kickoff_utc=kickoff,
                         kickoff_precision=precision,
-                        market_family=family,
+                        market_family=market.family,
                         period=FootballPeriod.FULL_TIME,
                         line=line,
                         selection=selection,
@@ -231,60 +211,24 @@ class FootballDataCsvAdapter:
                         retrieved_at=self._retrieved_at,
                         settlement=settlement,
                         semantics_complete=True,
-                        raw_payload={"column": column, "book": book},
+                        raw_payload={
+                            "column": column,
+                            "book": market.book,
+                            "research_only": market.research_only,
+                            "source_url": source_url,
+                        },
                     )
                 )
         return records
 
 
-def _parse_kickoff(row: dict[str, str], div: str) -> tuple[datetime | None, KickoffPrecision]:
-    date_raw = (row.get("Date") or "").strip()
-    time_raw = (row.get("Time") or "").strip()
-    if not date_raw:
-        return None, KickoffPrecision.UNKNOWN
-    parts = date_raw.split("/")
-    if len(parts) != 3:
-        return None, KickoffPrecision.UNKNOWN
-    try:
-        day, month, year = (int(part) for part in parts)
-    except ValueError:
-        return None, KickoffPrecision.UNKNOWN
-    if year < 100:
-        year += 2000
-    tzinfo = _TZ.get(div, ZoneInfo("UTC"))
-    hour = 0
-    minute = 0
-    precision = KickoffPrecision.DATE
-    if time_raw:
-        time_parts = time_raw.split(":")
-        if len(time_parts) == 2:
-            try:
-                hour = int(time_parts[0])
-                minute = int(time_parts[1])
-                precision = KickoffPrecision.MINUTE
-            except ValueError:
-                precision = KickoffPrecision.DATE
-    local = datetime(year, month, day, hour, minute, tzinfo=tzinfo)
-    # Explicit adapter conversion: local kickoff -> UTC for the facts match identity.
-    return local.astimezone(UTC), precision
-
-
-def _decimal_or_none(value: str | None) -> Decimal | None:
+def _decimal_or_none(value: str | None, *, allow_negative: bool = False) -> Decimal | None:
     if value is None or not value.strip():
         return None
     try:
         parsed = Decimal(value.strip())
     except (InvalidOperation, ValueError):
         return None
-    if parsed <= 1:
+    if not allow_negative and parsed <= 1:
         return None
     return parsed
-
-
-def _int_or_none(value: str | None) -> int | None:
-    if value is None or not value.strip():
-        return None
-    try:
-        return int(value.strip())
-    except ValueError:
-        return None

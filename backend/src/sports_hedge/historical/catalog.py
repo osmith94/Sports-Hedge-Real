@@ -122,42 +122,79 @@ class HistoricalCatalog:
         return [self._teams[key] for key in sorted(self._teams)]
 
     def _seed_initial_teams(self) -> None:
-        seeds = (
-            Team(
-                team_id=canonical_team_id("Arsenal"),
-                canonical_name="Arsenal",
-                country="England",
-            ),
-            Team(
-                team_id=canonical_team_id("Chelsea"),
-                canonical_name="Chelsea",
-                country="England",
-            ),
-            Team(
-                team_id=canonical_team_id("Leeds United"),
-                canonical_name="Leeds United",
-                country="England",
-            ),
-            Team(
-                team_id=canonical_team_id("Leicester City"),
-                canonical_name="Leicester City",
-                country="England",
-            ),
-            Team(
-                team_id=canonical_team_id("Real Madrid"),
-                canonical_name="Real Madrid",
-                country="Spain",
-            ),
-            Team(
-                team_id=canonical_team_id("Barcelona"),
-                canonical_name="Barcelona",
-                country="Spain",
-            ),
-        )
-        for team in seeds:
-            self.register_team(team)
-        self.add_team_alias("Barca", canonical_team_id("Barcelona"))
-        self.add_team_alias("Real Madrid CF", canonical_team_id("Real Madrid"))
+        for team_name, country, aliases in _TEAM_SEEDS:
+            self.register_team(
+                Team(
+                    team_id=canonical_team_id(team_name),
+                    canonical_name=team_name,
+                    country=country,
+                ),
+                aliases=aliases,
+            )
+
+
+_TEAM_SEEDS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    # Premier League 2025/26 + Football-Data.co.uk labels
+    ("Arsenal", "England", ()),
+    ("Aston Villa", "England", ()),
+    ("Bournemouth", "England", ("AFC Bournemouth",)),
+    ("Brentford", "England", ()),
+    ("Brighton and Hove Albion", "England", ("Brighton",)),
+    ("Burnley", "England", ()),
+    ("Chelsea", "England", ()),
+    ("Crystal Palace", "England", ()),
+    ("Everton", "England", ()),
+    ("Fulham", "England", ()),
+    ("Leeds United", "England", ("Leeds",)),
+    ("Liverpool", "England", ()),
+    ("Manchester City", "England", ("Man City",)),
+    ("Manchester United", "England", ("Man United", "Man Utd")),
+    ("Newcastle United", "England", ("Newcastle",)),
+    ("Nottingham Forest", "England", ("Nott'm Forest", "Nottm Forest")),
+    ("Sunderland", "England", ()),
+    ("Tottenham Hotspur", "England", ("Tottenham", "Spurs")),
+    ("West Ham United", "England", ("West Ham",)),
+    ("Wolverhampton Wanderers", "England", ("Wolves",)),
+    # Championship 2025/26 + Football-Data.co.uk labels
+    ("Birmingham City", "England", ("Birmingham",)),
+    ("Blackburn Rovers", "England", ("Blackburn",)),
+    ("Bristol City", "England", ()),
+    ("Charlton Athletic", "England", ("Charlton",)),
+    ("Coventry City", "England", ("Coventry",)),
+    ("Derby County", "England", ("Derby",)),
+    ("Hull City", "England", ("Hull",)),
+    ("Ipswich Town", "England", ("Ipswich",)),
+    ("Leicester City", "England", ("Leicester",)),
+    ("Middlesbrough", "England", ()),
+    ("Millwall", "England", ()),
+    ("Norwich City", "England", ("Norwich",)),
+    ("Oxford United", "England", ("Oxford",)),
+    ("Portsmouth", "England", ()),
+    ("Preston North End", "England", ("Preston",)),
+    ("Queens Park Rangers", "England", ("QPR",)),
+    ("Sheffield United", "England", ("Sheffield Utd",)),
+    ("Sheffield Wednesday", "England", ("Sheffield Weds",)),
+    ("Southampton", "England", ()),
+    ("Stoke City", "England", ("Stoke",)),
+    ("Swansea City", "England", ("Swansea",)),
+    ("Watford", "England", ()),
+    ("West Bromwich Albion", "England", ("West Brom",)),
+    ("Wrexham", "England", ()),
+    # Additional Football-Data labels from 2021/22–2024/25 England files
+    ("Barnsley", "England", ()),
+    ("Blackpool", "England", ()),
+    ("Cardiff City", "England", ("Cardiff",)),
+    ("Huddersfield Town", "England", ("Huddersfield",)),
+    ("Luton Town", "England", ("Luton",)),
+    ("Peterborough United", "England", ("Peterboro", "Peterborough")),
+    ("Plymouth Argyle", "England", ("Plymouth",)),
+    ("Reading", "England", ()),
+    ("Rotherham United", "England", ("Rotherham",)),
+    ("Wigan Athletic", "England", ("Wigan",)),
+    # La Liga seeds retained for synthetic historical fixtures
+    ("Real Madrid", "Spain", ("Real Madrid CF",)),
+    ("Barcelona", "Spain", ("Barca",)),
+)
 
 
 def _normalize_season_label(label: str) -> str:

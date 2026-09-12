@@ -29,21 +29,42 @@ class CompetitionSeason(BaseModel):
     aliases: tuple[str, ...] = Field(default_factory=tuple)
 
 
+_SEASONS = ("2025/26", "2024/25", "2023/24", "2022/23", "2021/22")
+
+
+def _england_seasons(
+    *,
+    code: CompetitionCode,
+    display_name: str,
+    expected_league_matches: int,
+    football_data_div: str,
+    aliases: tuple[str, ...],
+) -> tuple[CompetitionSeason, ...]:
+    return tuple(
+        CompetitionSeason(
+            code=code,
+            display_name=display_name,
+            season=season,
+            in_bounded_universe=True,
+            expected_league_matches=expected_league_matches,
+            football_data_div=football_data_div,
+            aliases=aliases,
+        )
+        for season in _SEASONS
+    )
+
+
 _COMPETITIONS: tuple[CompetitionSeason, ...] = (
-    CompetitionSeason(
+    *_england_seasons(
         code=CompetitionCode.PREMIER_LEAGUE,
         display_name="Premier League",
-        season="2025/26",
-        in_bounded_universe=True,
         expected_league_matches=380,
         football_data_div="E0",
         aliases=("premier league", "epl", "english premier league", "e0"),
     ),
-    CompetitionSeason(
+    *_england_seasons(
         code=CompetitionCode.CHAMPIONSHIP,
         display_name="Championship",
-        season="2025/26",
-        in_bounded_universe=True,
         expected_league_matches=552,
         football_data_div="E1",
         aliases=("efl championship", "english championship", "e1"),

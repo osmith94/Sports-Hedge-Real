@@ -21,6 +21,7 @@ COVERAGE_FAMILIES = (
     MarketFamily.BOTH_TEAMS_TO_SCORE,
     MarketFamily.CORNERS,
     MarketFamily.CARDS,
+    MarketFamily.ASIAN_HANDICAP,
 )
 
 

@@ -1,6 +1,7 @@
 """Source-neutral historical football facts repository."""
 
 from sports_hedge.historical.adapters import HistoricalSourceAdapter, SyntheticHistoricalAdapter
+from sports_hedge.historical.football_data import FootballDataHistoricalAdapter
 from sports_hedge.historical.catalog import (
     CHAMPIONS_LEAGUE,
     CHAMPIONSHIP,
@@ -19,6 +20,7 @@ __all__ = [
     "LA_LIGA",
     "PREMIER_LEAGUE",
     "CoverageReporter",
+    "FootballDataHistoricalAdapter",
     "HistoricalCatalog",
     "HistoricalExcelExporter",
     "HistoricalIngestionService",

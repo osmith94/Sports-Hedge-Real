@@ -89,3 +89,4 @@ See also:
 - `docs/MANAGER_ERA_AND_REGIME_CONTEXT.md`
 - `docs/PRIORITY_ARB_ALERTS.md`
 - `docs/HISTORICAL_ODDS.md` — source-neutral historical odds repository (Smarkets optional; quality tiers; coverage and Excel export)
+- `docs/HISTORICAL_BACKFILL.md` — operator-invoked Football-Data.co.uk 2025/26 PL/Championship backfill

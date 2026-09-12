@@ -8,6 +8,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from sports_hedge.odds.coverage import CoverageReport
 from sports_hedge.odds.models import MappingException, OddsObservation
+from sports_hedge.odds.movement import OpenCloseMove
 
 _HEADER_FONT = Font(bold=True)
 
@@ -17,17 +18,26 @@ def export_odds_workbook(
     *,
     observations: list[OddsObservation],
     report: CoverageReport,
+    moves: list[OpenCloseMove] | None = None,
+    include_observations: bool = True,
+    include_moves: bool = True,
 ) -> Path:
     """Write a review workbook. The SQLite repository remains source of truth."""
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
-    _write_observations(workbook.active, observations)
-    _write_market_coverage(workbook.create_sheet("Market Coverage"), report)
+    if include_observations:
+        _write_observations(workbook.active, observations)
+        _write_market_coverage(workbook.create_sheet("Market Coverage"), report)
+    else:
+        workbook.active.title = "Market Coverage"
+        _write_market_coverage(workbook.active, report)
     _write_source_coverage(workbook.create_sheet("Source Coverage"), report)
     _write_exceptions(workbook.create_sheet("Mapping Exceptions"), report.mapping_exceptions)
     _write_quality(workbook.create_sheet("Quality Summary"), report)
+    if include_moves:
+        _write_open_close(workbook.create_sheet("Open Close Moves"), moves or [])
     workbook.save(destination)
     return destination
 
@@ -64,6 +74,10 @@ def _write_observations(sheet: Worksheet, observations: list[OddsObservation]) -
         "liquidity",
         "commission_known",
         "quality_tier",
+        "venue_kind",
+        "research_only",
+        "implied_probability",
+        "implied_logit",
         "semantics_complete",
         "settlement_key",
         "source_url",
@@ -95,6 +109,12 @@ def _write_observations(sheet: Worksheet, observations: list[OddsObservation]) -
             None if observation.liquidity is None else format(observation.liquidity, "f"),
             observation.commission_known,
             observation.quality_tier.value,
+            observation.venue_kind.value,
+            bool(observation.metadata.get("research_only")),
+            None
+            if observation.implied_probability() is None
+            else format(observation.implied_probability(), "f"),
+            observation.implied_logit(),
             observation.semantics_complete,
             observation.settlement_key,
             observation.source_url,
@@ -193,5 +213,40 @@ def _write_quality(sheet: Worksheet, report: CoverageReport) -> None:
     _write_header(sheet, headers)
     for row_index, row in enumerate(report.quality_summary, start=2):
         values = [row.quality_tier, row.observations, row.matches, row.meaning]
+        for column, value in enumerate(values, start=1):
+            sheet.cell(row_index, column, value)
+
+
+def _write_open_close(sheet: Worksheet, moves: list[OpenCloseMove]) -> None:
+    headers = [
+        "canonical_match_id",
+        "competition",
+        "season",
+        "bookmaker",
+        "market_family",
+        "selection",
+        "opening_line",
+        "opening_odds",
+        "closing_odds",
+        "implied_probability_delta",
+        "implied_logit_delta",
+        "research_only",
+    ]
+    _write_header(sheet, headers)
+    for row_index, move in enumerate(moves, start=2):
+        values = [
+            move.canonical_match_id,
+            move.competition_code,
+            move.season,
+            move.bookmaker,
+            move.market_family,
+            move.selection,
+            None if move.line is None else format(move.line, "f"),
+            format(move.opening_odds, "f"),
+            format(move.closing_odds, "f"),
+            format(move.implied_probability_delta, "f"),
+            move.implied_logit_delta,
+            move.research_only,
+        ]
         for column, value in enumerate(values, start=1):
             sheet.cell(row_index, column, value)

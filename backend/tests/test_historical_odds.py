@@ -311,6 +311,7 @@ def test_excel_export_has_required_sheets(tmp_path: Path) -> None:
         "Source Coverage",
         "Mapping Exceptions",
         "Quality Summary",
+        "Open Close Moves",
     ]
     assert workbook["Odds Observations"].max_row > 1
 
