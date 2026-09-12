@@ -595,6 +595,7 @@ class PaperScanService:
             0.0,
             (left.market.event.kickoff_utc - observed_at).total_seconds() / 60.0,
         )
+        measured_latency_ms = max(left.source_latency_ms, right.source_latency_ms)
         return ExecutionRiskInputs(
             spread_bps=spread_bps,
             size_to_depth_ratio=size_to_depth_ratio,
@@ -602,7 +603,7 @@ class PaperScanService:
             recent_volatility_bps=recent_volatility_bps,
             leg_count=used,
             minutes_to_kickoff=minutes_to_kickoff,
-            assumed_latency_ms=assumed_latency_ms,
+            assumed_latency_ms=max(assumed_latency_ms, measured_latency_ms),
             hedge_liquidity_ratio=hedge_liquidity_ratio,
         )
 
@@ -616,16 +617,34 @@ class PaperScanService:
     ) -> tuple[list[VenueCostSnapshot], list[str]]:
         if venue_costs is not None:
             return list(venue_costs), []
-        if self.cost_resolver is None:
-            return [], []
         resolved: list[VenueCostSnapshot] = []
         reasons: list[str] = []
         for observation in (left, right):
             action = (
                 MarketAction.BUY
-                if observation.venue is VenueName.POLYMARKET
+                if observation.venue in {VenueName.POLYMARKET, VenueName.KALSHI}
                 else MarketAction.BACK
             )
+            if observation.venue is VenueName.KALSHI:
+                metadata = observation.metadata if isinstance(observation.metadata, dict) else {}
+                fee_meta = metadata.get("kalshi_fee")
+                if isinstance(fee_meta, dict):
+                    from sports_hedge.fees.kalshi import kalshi_cost_from_series
+
+                    snapshot = kalshi_cost_from_series(
+                        fee_meta,
+                        captured_at=as_of,
+                        source_market_id=observation.market.source_market_id,
+                    )
+                    if snapshot.is_economically_known():
+                        resolved.append(snapshot)
+                    else:
+                        reasons.append("unknown_required_venue_cost:kalshi")
+                    continue
+                reasons.append("unknown_required_venue_cost:kalshi")
+                continue
+            if self.cost_resolver is None:
+                continue
             try:
                 resolved.append(
                     self.cost_resolver.resolve(
@@ -841,7 +860,7 @@ def _quote_leg_key(quote) -> tuple[str, VenueName, str, str]:
 
 
 def _action_mismatch(venue: VenueName, action: MarketAction) -> str | None:
-    if venue is VenueName.POLYMARKET and action is not MarketAction.BUY:
+    if venue in {VenueName.POLYMARKET, VenueName.KALSHI} and action is not MarketAction.BUY:
         return f"unsupported_action:{venue.value}"
     if venue in {VenueName.MATCHBOOK, VenueName.SMARKETS} and action is not MarketAction.BACK:
         return f"unsupported_action:{venue.value}"
