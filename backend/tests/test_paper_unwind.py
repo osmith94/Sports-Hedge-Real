@@ -1061,6 +1061,8 @@ def test_unknown_remaining_lock_is_valid_and_not_fabricated() -> None:
     assert decision.remaining_lock_minutes is None
     assert decision.estimated_time_to_release.expected_settlement_at is None
     assert decision.estimated_time_to_release.basis is RemainingLockSource.UNKNOWN
+    assert decision.duration_decision_role is DurationDecisionRole.DURATION_UNKNOWN
+    assert decision.opportunity_cost_gbp is None
     assert decision.capital_turnover_hint != "capital_locked_until_expected_settlement"
     assert decision.capital_turnover_hint is None
     assert decision.recommendation is UnwindRecommendation.HOLD
@@ -1164,6 +1166,183 @@ def test_hold_vs_unwind_is_not_decided_by_predicted_game_end() -> None:
     assert authored.estimated_time_to_release.settles_or_releases_capital is False
     assert authored.duration_decision_role is DurationDecisionRole.OPPORTUNITY_COST_COMPARED
     assert unknown.remaining_lock_minutes is None
+
+
+def _prediction_flat_exit() -> tuple[OpenPaperLeg, list[ReverseQuote], list[FxRateSnapshot]]:
+    leg = _open_leg(
+        venue=VenueName.POLYMARKET,
+        action=MarketAction.BUY,
+        price="2.00",
+        size="50",
+        currency="USD",
+        runner="pm-home",
+        market="pm-1x2",
+        event="pm-evt",
+    )
+    quotes = [
+        _quote(
+            venue=VenueName.POLYMARKET,
+            outcome="home",
+            levels=[BookLevel(decimal_odds=Decimal("2.00"), available_stake=Decimal("100"))],
+            cost=_sell_cost(),
+            currency="USD",
+            runner="pm-home",
+            market="pm-1x2",
+            event="pm-evt",
+        )
+    ]
+    fx = [FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"), source="test", captured_at=NOW)]
+    return leg, quotes, fx
+
+
+def test_ten_pence_give_up_depends_on_supplied_opportunity_cost_not_clock() -> None:
+    """£0.10 unwind cost: tiny OC (≈5 min) holds; larger OC (≈1h / ≈2d) may unwind."""
+
+    engine = PaperUnwindEngine()
+    leg, quotes, fx = _prediction_flat_exit()
+
+    five_min = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position(
+                [leg],
+                hold="0.10",
+                remaining_lock_minutes=Decimal("5"),
+                remaining_lock_basis=RemainingLockSource.AUTHORITATIVE_PROVIDER,
+                remaining_lock_confidence=Decimal("0.55"),
+                remaining_lock_detail="provider remaining lock ~5m",
+            ),
+            quotes=quotes,
+            fx=fx,
+            scarcity=CapitalScarcityInput(
+                pressure=CapitalPressure.SCARCE,
+                opportunity_cost_gbp=Decimal("0.01"),
+            ),
+            evaluated_at=NOW,
+        )
+    )
+    one_hour = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position(
+                [leg],
+                hold="0.10",
+                remaining_lock_minutes=Decimal("60"),
+                remaining_lock_basis=RemainingLockSource.AUTHORITATIVE_LEDGER,
+                remaining_lock_confidence=Decimal("0.80"),
+            ),
+            quotes=quotes,
+            fx=fx,
+            scarcity=CapitalScarcityInput(
+                pressure=CapitalPressure.SCARCE,
+                opportunity_cost_gbp=Decimal("0.50"),
+            ),
+            evaluated_at=NOW,
+        )
+    )
+    two_days = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position(
+                [leg],
+                hold="0.10",
+                remaining_lock_minutes=Decimal("2880"),
+                remaining_lock_basis=RemainingLockSource.AUTHORITATIVE_PROVIDER,
+                remaining_lock_confidence=Decimal("0.40"),
+            ),
+            quotes=quotes,
+            fx=fx,
+            scarcity=CapitalScarcityInput(
+                pressure=CapitalPressure.SCARCE,
+                opportunity_cost_gbp=Decimal("2.00"),
+            ),
+            evaluated_at=NOW,
+        )
+    )
+    assert five_min.close_plan.fully_executable is True
+    assert five_min.validated_exit_pnl_gbp == Decimal("0")
+    assert five_min.unwind_cost_gbp == Decimal("0.10")
+    assert five_min.spendable is False
+    assert five_min.incremental_close_capital_status is IncrementalCloseCapitalStatus.KNOWN
+    assert five_min.recommendation is UnwindRecommendation.HOLD
+    assert five_min.decision_reason == "unwind_cost_exceeds_supplied_opportunity_cost"
+    assert five_min.duration_decision_role is DurationDecisionRole.OPPORTUNITY_COST_COMPARED
+    assert five_min.estimated_time_to_release.remaining_lock_minutes == Decimal("5")
+    assert five_min.estimated_time_to_release.advisory is True
+    assert one_hour.recommendation is UnwindRecommendation.UNWIND_ELIGIBLE
+    assert one_hour.decision_reason == "unwind_cost_within_supplied_opportunity_cost"
+    assert one_hour.remaining_lock_minutes == Decimal("60")
+    assert two_days.recommendation is UnwindRecommendation.UNWIND_ELIGIBLE
+    assert two_days.decision_reason == "unwind_cost_within_supplied_opportunity_cost"
+    assert two_days.remaining_lock_minutes == Decimal("2880")
+    assert two_days.opportunity_cost_gbp == Decimal("2.00")
+
+
+def test_duration_without_opportunity_cost_is_ranking_context_only() -> None:
+    engine = PaperUnwindEngine()
+    leg, quotes, fx = _prediction_flat_exit()
+    scarce = CapitalScarcityInput(pressure=CapitalPressure.SCARCE)
+    short = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position(
+                [leg],
+                hold="0.10",
+                remaining_lock_minutes=Decimal("5"),
+                remaining_lock_basis=RemainingLockSource.AUTHORITATIVE_PROVIDER,
+                remaining_lock_confidence=Decimal("0.50"),
+            ),
+            quotes=quotes,
+            fx=fx,
+            scarcity=scarce,
+            evaluated_at=NOW,
+        )
+    )
+    long = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position(
+                [leg],
+                hold="0.10",
+                remaining_lock_minutes=Decimal("2880"),
+                remaining_lock_basis=RemainingLockSource.AUTHORITATIVE_PROVIDER,
+                remaining_lock_confidence=Decimal("0.50"),
+            ),
+            quotes=quotes,
+            fx=fx,
+            scarcity=scarce,
+            evaluated_at=NOW,
+        )
+    )
+    assert short.opportunity_cost_gbp is None
+    assert long.opportunity_cost_gbp is None
+    assert short.unwind_cost_gbp == long.unwind_cost_gbp == Decimal("0.10")
+    assert short.recommendation is long.recommendation is UnwindRecommendation.HOLD
+    assert short.decision_reason == long.decision_reason == "give_up_exceeds_scarce_capital_threshold"
+    assert short.duration_decision_role is DurationDecisionRole.RANKING_CONTEXT_ONLY
+    assert long.duration_decision_role is DurationDecisionRole.RANKING_CONTEXT_ONLY
+    assert short.capital_turnover_hint == "advisory_estimated_time_to_release"
+    assert short.remaining_lock_minutes == Decimal("5")
+    assert long.remaining_lock_minutes == Decimal("2880")
+    assert short.spendable is False
+
+
+def test_authoritative_settlement_instant_does_not_become_remaining_minutes() -> None:
+    engine = PaperUnwindEngine()
+    settlement_at = NOW + timedelta(minutes=90)
+    decision = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position(
+                [_open_leg(price="2.00")],
+                hold="8",
+                expected_settlement_at=settlement_at,
+                remaining_lock_basis=RemainingLockSource.AUTHORITATIVE_PROVIDER,
+                remaining_lock_confidence=Decimal("0.90"),
+            ),
+            quotes=_executable_matchbook_quotes(),
+            evaluated_at=NOW,
+        )
+    )
+    assert decision.remaining_lock_minutes is None
+    assert decision.estimated_time_to_release.expected_settlement_at == settlement_at
+    assert decision.estimated_time_to_release.basis is RemainingLockSource.AUTHORITATIVE_PROVIDER
+    assert decision.duration_decision_role is DurationDecisionRole.RANKING_CONTEXT_ONLY
+    assert decision.capital_turnover_hint == "advisory_estimated_time_to_release"
 
 
 def test_execution_risk_does_not_invent_minutes_when_lock_unknown() -> None:
