@@ -38,10 +38,8 @@ def decide_recommendation(
         return UnwindRecommendation.UNWIND_ELIGIBLE, "exit_pnl_not_inferior_to_hold"
 
     if scarcity.pressure is CapitalPressure.SCARCE:
-        allowed = max(
-            policy.max_profit_give_up_gbp_when_scarce,
-            hold_pnl_gbp * policy.max_profit_give_up_ratio_when_scarce,
-        )
+        proportional_cap = hold_pnl_gbp * policy.max_profit_give_up_ratio_when_scarce
+        allowed = min(policy.max_profit_give_up_gbp_when_scarce, proportional_cap)
         if give_up <= allowed:
             return UnwindRecommendation.UNWIND_ELIGIBLE, "scarce_capital_accepts_bounded_give_up"
         return UnwindRecommendation.HOLD, "give_up_exceeds_scarce_capital_threshold"

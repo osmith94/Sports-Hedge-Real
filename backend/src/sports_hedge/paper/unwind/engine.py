@@ -25,6 +25,7 @@ from sports_hedge.paper.unwind.models import (
     UnwindEvaluationRequest,
     UnwindRecommendation,
     VenueCloseMechanics,
+    venue_currency_key,
 )
 from sports_hedge.paper.unwind.policy import decide_recommendation
 from sports_hedge.risk.execution import ExecutionRiskInputs, ExecutionRiskResult, ExecutionRiskScorer
@@ -114,10 +115,10 @@ class PaperUnwindEngine:
         extra_capital: dict[str, Decimal] = {}
         if fully:
             for open_leg, plan in zip(position.legs, legs, strict=True):
-                currency = open_leg.native_currency
-                releasable[currency] = releasable.get(currency, Decimal("0")) + open_leg.filled_size
+                key = venue_currency_key(open_leg.venue, open_leg.native_currency)
+                releasable[key] = releasable.get(key, Decimal("0")) + open_leg.filled_size
                 if plan.liability > 0:
-                    extra_capital[currency] = extra_capital.get(currency, Decimal("0")) + plan.liability
+                    extra_capital[key] = extra_capital.get(key, Decimal("0")) + plan.liability
 
         remaining = position.remaining_lock_minutes
         if remaining is None and position.expected_settlement_at is not None:

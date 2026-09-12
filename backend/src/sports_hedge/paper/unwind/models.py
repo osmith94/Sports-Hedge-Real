@@ -36,6 +36,12 @@ class VenueCloseMechanics(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
+def venue_currency_key(venue: VenueName, currency: str) -> str:
+    """Stable native-pool key. Distinct venues that share a currency stay separate."""
+
+    return f"{venue.value}:{currency.upper()}"
+
+
 class CapitalPressure(StrEnum):
     ABUNDANT = "abundant"
     SCARCE = "scarce"
@@ -48,7 +54,12 @@ class UnwindPolicy(BaseModel):
     max_execution_risk: int = Field(default=60, ge=0, le=100)
     max_profit_give_up_gbp: Decimal = Field(default=Decimal("0"), ge=0)
     max_profit_give_up_gbp_when_scarce: Decimal = Field(default=Decimal("2"), ge=0)
-    max_profit_give_up_ratio_when_scarce: Decimal = Field(default=Decimal("0.10"), ge=0, le=1)
+    max_profit_give_up_ratio_when_scarce: Decimal = Field(
+        default=Decimal("0.10"),
+        ge=0,
+        le=1,
+        description="Both the absolute and proportional scarce caps must pass; the effective bound is the more restrictive of the two.",
+    )
     min_retained_exit_pnl_gbp: Decimal | None = Field(default=None)
     allow_partial_close: bool = False
     require_known_fx: bool = True
@@ -219,8 +230,14 @@ class UnwindDecision(BaseModel):
     profit_give_up_gbp: Decimal | None = None
     remaining_lock_minutes: Decimal | None = None
     capital_turnover_hint: str | None = None
-    conditionally_releasable_by_venue_currency: dict[str, Decimal] = Field(default_factory=dict)
-    additional_close_capital_native: dict[str, Decimal] = Field(default_factory=dict)
+    conditionally_releasable_by_venue_currency: dict[str, Decimal] = Field(
+        default_factory=dict,
+        description="Native amounts keyed by venue_currency_key(venue, currency), e.g. polymarket:USD. Never merge distinct venues.",
+    )
+    additional_close_capital_native: dict[str, Decimal] = Field(
+        default_factory=dict,
+        description="Additional close liability keyed by venue_currency_key(venue, currency).",
+    )
     close_plan: ClosePlan
     execution_risk: ExecutionRiskResult | None = None
     capital_pressure: CapitalPressure = CapitalPressure.ABUNDANT
@@ -236,6 +253,7 @@ class UnwindDecision(BaseModel):
         self.paper_only = True
         if not self.close_plan.fully_executable:
             self.conditionally_releasable_by_venue_currency = {}
+            self.additional_close_capital_native = {}
         return self
 
 

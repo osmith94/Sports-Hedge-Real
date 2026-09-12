@@ -44,8 +44,10 @@ from sports_hedge.paper.unwind import (
     VenueCloseMechanics,
     mechanics_for_venue,
     register_venue_close_mechanics,
+    venue_currency_key,
 )
 from sports_hedge.paper.unwind.models import OpenPaperLeg
+from sports_hedge.paper.unwind.policy import decide_recommendation
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 
 
@@ -66,9 +68,14 @@ def _lay_cost(*, rate: str = "0.02") -> VenueCostSnapshot:
     )
 
 
-def _sell_cost(*, rate: str | None = None, basis: FeeBasis = FeeBasis.NONE_CONFIRMED) -> VenueCostSnapshot:
+def _sell_cost(
+    *,
+    venue: VenueName = VenueName.POLYMARKET,
+    rate: str | None = None,
+    basis: FeeBasis = FeeBasis.NONE_CONFIRMED,
+) -> VenueCostSnapshot:
     return VenueCostSnapshot(
-        venue=VenueName.POLYMARKET,
+        venue=venue,
         action=MarketAction.SELL,
         fee_basis=basis,
         known_status=CostKnownStatus.KNOWN,
@@ -251,13 +258,15 @@ def test_fully_executable_reverse_depth_produces_exact_pnl_and_releasable_capita
     # Matchbook: matched 110, gross 10, 2% commission 0.20 => 9.80
     # Polymarket: sell 100 shares @ 0.48 => proceeds 48, pnl -2 USD * 0.80 = -1.60
     assert decision.validated_exit_pnl_gbp == Decimal("8.20")
-    assert decision.conditionally_releasable_by_venue_currency["GBP"] == Decimal("100")
-    assert decision.conditionally_releasable_by_venue_currency["USD"] == Decimal("50")
+    assert decision.conditionally_releasable_by_venue_currency[venue_currency_key(VenueName.MATCHBOOK, "GBP")] == Decimal("100")
+    assert decision.conditionally_releasable_by_venue_currency[venue_currency_key(VenueName.POLYMARKET, "USD")] == Decimal("50")
     assert decision.spendable is False
     mb = decision.close_plan.legs[0]
     assert mb.close_action is MarketAction.LAY
     assert mb.liability == Decimal("110")
     assert mb.matched_stake == Decimal("110")
+    assert decision.additional_close_capital_native[venue_currency_key(VenueName.MATCHBOOK, "GBP")] == Decimal("110")
+    assert "GBP" not in decision.additional_close_capital_native
     pm = decision.close_plan.legs[1]
     assert pm.close_action is MarketAction.SELL
     assert pm.proceeds == Decimal("48")
@@ -314,51 +323,80 @@ def test_fees_make_converged_exit_inferior_so_hold() -> None:
     assert decision.validated_exit_pnl_gbp == Decimal("0")
     assert decision.recommendation is UnwindRecommendation.HOLD
     assert decision.decision_reason == "exit_inferior_to_hold_after_fees"
-    assert decision.conditionally_releasable_by_venue_currency["GBP"] == Decimal("100")
+    assert decision.conditionally_releasable_by_venue_currency[venue_currency_key(VenueName.MATCHBOOK, "GBP")] == Decimal("100")
 
 
-def test_scarce_capital_may_unwind_with_small_give_up() -> None:
+def test_scarce_capital_give_up_must_pass_both_caps() -> None:
     engine = PaperUnwindEngine()
-    decision = engine.evaluate(
-        UnwindEvaluationRequest(
-            position=_position([_open_leg(price="2.00")], hold="8"),
-            quotes=[
-                _quote(
-                    venue=VenueName.MATCHBOOK,
-                    outcome="home",
-                    levels=[BookLevel(decimal_odds=Decimal("2.00"), available_stake=Decimal("200"))],
-                    cost=_lay_cost(),
-                    currency="GBP",
-                    runner="mb-home",
-                    market="mb-1x2",
-                )
-            ],
-            scarcity=CapitalScarcityInput(pressure=CapitalPressure.SCARCE, detail="allocator_input"),
-            evaluated_at=NOW,
+    quotes = [
+        _quote(
+            venue=VenueName.MATCHBOOK,
+            outcome="home",
+            levels=[BookLevel(decimal_odds=Decimal("2.00"), available_stake=Decimal("200"))],
+            cost=_lay_cost(),
+            currency="GBP",
+            runner="mb-home",
+            market="mb-1x2",
         )
-    )
-    # give-up 8 vs hold, ratio 10% of 8 = 0.8, plus absolute 2 => allowed 2, 8 > 2 so HOLD.
-    # Use hold 1.50 so 10% = 0.15, max(2, 0.15)=2, give-up 1.50 <= 2.
-    decision = engine.evaluate(
+    ]
+    scarce = CapitalScarcityInput(pressure=CapitalPressure.SCARCE)
+
+    surrendered = engine.evaluate(
         UnwindEvaluationRequest(
             position=_position([_open_leg(price="2.00")], hold="1.50"),
-            quotes=[
-                _quote(
-                    venue=VenueName.MATCHBOOK,
-                    outcome="home",
-                    levels=[BookLevel(decimal_odds=Decimal("2.00"), available_stake=Decimal("200"))],
-                    cost=_lay_cost(),
-                    currency="GBP",
-                    runner="mb-home",
-                    market="mb-1x2",
-                )
-            ],
-            scarcity=CapitalScarcityInput(pressure=CapitalPressure.SCARCE),
+            quotes=quotes,
+            scarcity=scarce,
             evaluated_at=NOW,
         )
     )
-    assert decision.recommendation is UnwindRecommendation.UNWIND_ELIGIBLE
-    assert decision.decision_reason == "scarce_capital_accepts_bounded_give_up"
+    assert surrendered.close_plan.fully_executable is True
+    assert surrendered.validated_exit_pnl_gbp == Decimal("0")
+    assert surrendered.profit_give_up_gbp == Decimal("1.50")
+    assert surrendered.recommendation is UnwindRecommendation.HOLD
+    assert surrendered.decision_reason == "give_up_exceeds_scarce_capital_threshold"
+
+    small = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position([_open_leg(price="2.20")], hold="10"),
+            quotes=quotes,
+            scarcity=scarce,
+            evaluated_at=NOW,
+        )
+    )
+    # matched 110, gross 10, 2% fee 0.20 => exit 9.80; give-up 0.20
+    # min(£2, 10% of £10 = £1) = £1; 0.20 <= 1 => UNWIND_ELIGIBLE
+    assert small.validated_exit_pnl_gbp == Decimal("9.80")
+    assert small.profit_give_up_gbp == Decimal("0.20")
+    assert small.recommendation is UnwindRecommendation.UNWIND_ELIGIBLE
+    assert small.decision_reason == "scarce_capital_accepts_bounded_give_up"
+
+
+def test_scarce_policy_uses_the_more_restrictive_bound() -> None:
+    policy = UnwindPolicy()
+    scarce = CapitalScarcityInput(pressure=CapitalPressure.SCARCE)
+    hold_surrender, reason = decide_recommendation(
+        fully_executable=True,
+        fail_reasons=[],
+        hold_pnl_gbp=Decimal("1.50"),
+        exit_pnl_gbp=Decimal("0"),
+        policy=policy,
+        scarcity=scarce,
+        execution_risk_score=0,
+    )
+    assert hold_surrender is UnwindRecommendation.HOLD
+    assert reason == "give_up_exceeds_scarce_capital_threshold"
+
+    eligible, reason = decide_recommendation(
+        fully_executable=True,
+        fail_reasons=[],
+        hold_pnl_gbp=Decimal("10"),
+        exit_pnl_gbp=Decimal("9.80"),
+        policy=policy,
+        scarcity=scarce,
+        execution_risk_score=0,
+    )
+    assert eligible is UnwindRecommendation.UNWIND_ELIGIBLE
+    assert reason == "scarce_capital_accepts_bounded_give_up"
 
 
 def test_abundant_capital_prefers_hold_of_guaranteed_position() -> None:
@@ -571,6 +609,77 @@ def test_kalshi_compatible_registry_does_not_hard_code_a_venue_pair() -> None:
     assert mechanics_for_venue(VenueName.POLYMARKET) is VenueCloseMechanics.PREDICTION_BINARY_BUY_SELL
     assert mechanics_for_venue(VenueName.MATCHBOOK) is not mechanics_for_venue(VenueName.POLYMARKET)
     register_venue_close_mechanics(VenueName.POLYMARKET, original)
+
+
+def test_two_usd_venues_are_not_merged_in_conditionally_releasable() -> None:
+    original = mechanics_for_venue(VenueName.SMARKETS)
+    register_venue_close_mechanics(VenueName.SMARKETS, VenueCloseMechanics.PREDICTION_BINARY_BUY_SELL)
+    try:
+        engine = PaperUnwindEngine()
+        polymarket = _open_leg(
+            venue=VenueName.POLYMARKET,
+            action=MarketAction.BUY,
+            price="2.00",
+            size="50",
+            currency="USD",
+            runner="pm-home",
+            market="pm-1x2",
+            event="pm-evt",
+        )
+        kalshi_shaped = _open_leg(
+            venue=VenueName.SMARKETS,
+            action=MarketAction.BUY,
+            price="2.00",
+            size="40",
+            currency="USD",
+            runner="kl-home",
+            market="kl-1x2",
+            event="kl-evt",
+        )
+        decision = engine.evaluate(
+            UnwindEvaluationRequest(
+                position=_position([polymarket, kalshi_shaped], hold="1"),
+                quotes=[
+                    _quote(
+                        venue=VenueName.POLYMARKET,
+                        outcome="home",
+                        levels=[
+                            BookLevel(decimal_odds=Decimal("2.00"), available_stake=Decimal("100"))
+                        ],
+                        cost=_sell_cost(venue=VenueName.POLYMARKET),
+                        currency="USD",
+                        runner="pm-home",
+                        market="pm-1x2",
+                        event="pm-evt",
+                    ),
+                    _quote(
+                        venue=VenueName.SMARKETS,
+                        outcome="home",
+                        levels=[
+                            BookLevel(decimal_odds=Decimal("2.00"), available_stake=Decimal("100"))
+                        ],
+                        cost=_sell_cost(venue=VenueName.SMARKETS),
+                        currency="USD",
+                        runner="kl-home",
+                        market="kl-1x2",
+                        event="kl-evt",
+                    ),
+                ],
+                fx=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"), source="test", captured_at=NOW)],
+                evaluated_at=NOW,
+            )
+        )
+        assert decision.close_plan.fully_executable is True
+        assert decision.spendable is False
+        releasable = decision.conditionally_releasable_by_venue_currency
+        assert venue_currency_key(VenueName.POLYMARKET, "USD") in releasable
+        assert venue_currency_key(VenueName.SMARKETS, "USD") in releasable
+        assert releasable[venue_currency_key(VenueName.POLYMARKET, "USD")] == Decimal("50")
+        assert releasable[venue_currency_key(VenueName.SMARKETS, "USD")] == Decimal("40")
+        assert "USD" not in releasable
+        assert sum(releasable.values()) == Decimal("90")
+    finally:
+        register_venue_close_mechanics(VenueName.SMARKETS, original)
 
 
 def test_unwind_does_not_mutate_liquidity_or_journal(tmp_path: Path) -> None:
