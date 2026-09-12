@@ -21,14 +21,32 @@ function formatLock(minutes: string | number | null | undefined): string | null 
   return `${Math.round(parsed)}m`;
 }
 
-function formatQuoteAge(ms: number | null | undefined): string | null {
-  if (ms === null || ms === undefined) return null;
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
+function formatQuoteAge(
+  ms: number | null | undefined,
+  basis?: string | null,
+): string | null {
+  const age =
+    ms === null || ms === undefined ? null : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+  const parts = [age, basis, age || basis ? "at last evaluation" : null].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
 }
 
 function displayStatus(status: WatchlistOpportunityStatus): OpportunityStatus {
   return status;
+}
+
+function narrativeMovement(value: string | null | undefined): "up" | "down" | "flat" | null {
+  if (value === "approaching") return "up";
+  if (value === "moving_away") return "down";
+  if (value === "stable") return "flat";
+  return null;
+}
+
+function liveScoreLabel(item: NearOpportunity): string {
+  if (item.live_score_supported && item.home_score != null && item.away_score != null) {
+    return `${item.home_score}–${item.away_score} · Matchbook`;
+  }
+  return "unavailable · not in Matchbook payload";
 }
 
 export function opportunityFromWatchlist(item: NearOpportunity): ArbitrageOpportunity {
@@ -42,6 +60,7 @@ export function opportunityFromWatchlist(item: NearOpportunity): ArbitrageOpport
     new Set(item.legs.map((leg) => leg.currency).filter((value): value is string => Boolean(value))),
   );
   const depth = number(item.limiting_depth_gbp);
+  const narrative = item.strike_narrative ?? null;
 
   return {
     id: item.opportunity_id,
@@ -52,12 +71,13 @@ export function opportunityFromWatchlist(item: NearOpportunity): ArbitrageOpport
     settlement,
     venues: item.venues,
     netArb: number(item.current_net_edge),
+    grossArb: number(item.gross_edge),
     trigger: number(item.trigger_net_edge) ?? 0,
     distanceToTriggerPp: number(item.distance_to_trigger_pp),
-    movement: null,
+    movement: narrativeMovement(narrative),
     capitalRequiredGbp: number(item.capital_required_gbp),
     expectedLock: formatLock(item.expected_lock_minutes),
-    quoteFreshness: formatQuoteAge(item.quote_age_ms),
+    quoteFreshness: formatQuoteAge(item.quote_age_ms, item.quote_age_basis),
     executableDepth: depth === null ? null : money(depth),
     limitingLeg: item.limiting_leg_outcome ?? null,
     riskFlags: [...item.insufficiency_reasons, ...item.rejection_reasons],
@@ -67,6 +87,12 @@ export function opportunityFromWatchlist(item: NearOpportunity): ArbitrageOpport
     scannedAt: item.last_seen_at,
     guaranteedProfitGbp: executable ? number(item.guaranteed_profit_gbp) : null,
     executionRisk: item.execution_risk_score != null ? String(item.execution_risk_score) : null,
+    discoverySource: item.fixture_discovery_source ?? "matchbook",
+    fixtureStatus: item.fixture_status ?? null,
+    inRunning: item.in_running ?? null,
+    liveScoreLabel: liveScoreLabel(item),
+    strikeNarrative: narrative,
+    observationCount: item.observation_count ?? null,
   };
 }
 
@@ -76,6 +102,10 @@ export function nearOpportunitiesFromWatchlist(items: NearOpportunity[]): Arbitr
 
 export function triggeredOpportunitiesFromWatchlist(items: NearOpportunity[]): ArbitrageOpportunity[] {
   return items.filter((item) => TRIGGERED_STATUSES.has(item.status)).map(opportunityFromWatchlist);
+}
+
+export function trackedOpportunitiesFromWatchlist(items: NearOpportunity[]): ArbitrageOpportunity[] {
+  return items.map(opportunityFromWatchlist);
 }
 
 const ACTIVITY_TITLES: Record<WatchlistLifecycleEventType, string> = {

@@ -1,4 +1,5 @@
 import { ArbitrageOpportunity } from "../lib/arbitrage-ops";
+import { grossPricesEffectivelyEqual } from "../lib/comfort-threshold";
 import { money, percent, percentPoints, relativeTime } from "../lib/format";
 
 function provenanceLabel(value: ArbitrageOpportunity["provenance"]): string {
@@ -12,6 +13,19 @@ function statusClass(status: ArbitrageOpportunity["status"]): string {
   return "ops-status";
 }
 
+function operatorNote(item: ArbitrageOpportunity, executable?: boolean): string {
+  if (item.executable || executable) {
+    return "Paper-eligible validated complete-set opportunity. Guaranteed profit is solver-owned. No venue orders will be placed.";
+  }
+  if (item.status === "WATCHING" || item.status === "APPROACHING") {
+    return "Validated watch candidate. Semantics, costs, FX, depth, freshness and risk gates have already passed. It is below the backend trigger and is not guaranteed arbitrage until the strict trigger/solver condition is met.";
+  }
+  if (item.status === "REJECTED") {
+    return "Not a near-arb. Non-economic gates failed; this row is not reclassified in the browser.";
+  }
+  return "Not executable paper arbitrage.";
+}
+
 export function OpportunityCard({
   item,
   executable,
@@ -19,6 +33,12 @@ export function OpportunityCard({
   item: ArbitrageOpportunity;
   executable?: boolean;
 }) {
+  const belowEven = item.netArb !== null && item.netArb < 0;
+  const feeNote =
+    belowEven && grossPricesEffectivelyEqual(item.grossArb)
+      ? "Gross prices are effectively equal; fees/costs are why net margin is below break-even."
+      : null;
+
   return (
     <article className={`opp-card ${item.executable || executable ? "opp-card-hot" : ""}`}>
       <div className="opp-card-top">
@@ -40,15 +60,18 @@ export function OpportunityCard({
 
       <div className="opp-metrics">
         <div>
-          <div className="opp-k">Net arb</div>
-          <div className={`opp-v ${item.executable ? "edge" : ""}`}>{percent(item.netArb)}</div>
+          <div className="opp-k">Net margin</div>
+          <div className={`opp-v ${item.executable ? "edge" : ""} ${belowEven ? "edge-negative" : ""}`}>
+            {percent(item.netArb)}
+            {belowEven ? " · below break-even" : ""}
+          </div>
         </div>
         <div>
-          <div className="opp-k">Trigger</div>
+          <div className="opp-k">Backend trigger</div>
           <div className="opp-v">{percent(item.trigger)}</div>
         </div>
         <div>
-          <div className="opp-k">Distance</div>
+          <div className="opp-k">Distance to trigger</div>
           <div className="opp-v">{item.executable ? "triggered" : percentPoints(item.distanceToTriggerPp)}</div>
         </div>
         <div>
@@ -56,31 +79,40 @@ export function OpportunityCard({
           <div className="opp-v">{money(item.capitalRequiredGbp)}</div>
         </div>
         <div>
-          <div className="opp-k">{executable ? "Guaranteed" : "Move"}</div>
+          <div className="opp-k">{executable ? "Guaranteed" : "Gross"}</div>
           <div className="opp-v">
-            {executable ? money(item.guaranteedProfitGbp) : item.movement ?? "—"}
+            {executable ? money(item.guaranteedProfitGbp) : percent(item.grossArb)}
           </div>
         </div>
       </div>
 
       <div className="opp-meta">
         <span>{item.venues.join(" / ")}</span>
+        <span>source {item.discoverySource ?? "matchbook"}</span>
         <span>{item.currencies.join(" · ")}</span>
         <span>lock {item.expectedLock ?? "—"}</span>
-        <span>quotes {item.quoteFreshness ?? "—"}</span>
+        <span>age at last evaluation {item.quoteFreshness ?? "—"}</span>
+        <span>updated {relativeTime(item.scannedAt)}</span>
+        <span>
+          narrative{" "}
+          {item.strikeNarrative === "approaching"
+            ? "approaching threshold"
+            : item.strikeNarrative === "moving_away"
+              ? "moving away"
+              : item.strikeNarrative === "stable"
+                ? "stable vs prior observation"
+                : "insufficient history"}
+        </span>
+        <span>score {item.liveScoreLabel ?? "unavailable"}</span>
         <span>depth {item.executableDepth ?? "—"}</span>
         <span>limit {item.limitingLeg ?? "—"}</span>
         <span>risk {item.executionRisk ?? "—"}</span>
-        <span>{relativeTime(item.scannedAt)}</span>
       </div>
       {item.riskFlags.length ? (
         <div className="opp-flags">{item.riskFlags.slice(0, 4).map((flag) => flag.replaceAll("_", " ")).join(" · ")}</div>
       ) : null}
-      {!item.executable ? (
-        <div className="opp-note">Not executable · has not passed settlement, payoff and cost gates.</div>
-      ) : (
-        <div className="opp-note">Paper-eligible · no venue orders will be placed.</div>
-      )}
+      <div className="opp-note">{operatorNote(item, executable)}</div>
+      {feeNote ? <div className="opp-note">{feeNote}</div> : null}
     </article>
   );
 }

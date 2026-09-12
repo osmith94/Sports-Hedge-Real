@@ -93,6 +93,23 @@ class SettlementFingerprint(BaseModel):
         )
         return "|".join(str(value) for value in values)
 
+    def is_economically_complete(self) -> bool:
+        """Required settlement evidence must be known before markets can compare.
+
+        Incomplete fingerprints are not equivalent merely because unknown fields
+        match. ``source_rule_version`` remains provenance-only.
+        """
+
+        if self.scope is SettlementScope.UNKNOWN:
+            return False
+        if self.period is FootballPeriod.UNKNOWN:
+            return False
+        if self.extra_time_included is None:
+            return False
+        if self.penalties_included is None:
+            return False
+        return True
+
 
 class CanonicalEvent(BaseModel):
     sport: str = "football"

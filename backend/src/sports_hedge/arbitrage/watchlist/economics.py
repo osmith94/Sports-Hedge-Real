@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from decimal import ROUND_HALF_EVEN, Decimal
 
 from sports_hedge.arbitrage.watchlist.models import (
@@ -17,6 +18,7 @@ SEMANTIC_REASONS = (
     "market_not_equivalent",
     "event_mismatch",
     "settlement_mismatch",
+    "incomplete_settlement",
     "unknown_settlement_scope",
     "noncanonical_outcome_space",
     "mapping_confidence_below_threshold",
@@ -29,6 +31,25 @@ DEPTH_REASONS = (
     "no_arbitrage",
 )
 WATCH_ONLY_REASONS = ("net_edge_below_threshold",)
+NEAR_ELIGIBLE_REASONS = (
+    "net_edge_below_threshold",
+    "no_positive_edge",
+    "no_arbitrage",
+)
+COST_CLOCK_REASONS = (
+    "future_fee_snapshot",
+    "future_fx_snapshot",
+    "invalid_fee_snapshot_time",
+    "invalid_fx_snapshot_time",
+    "unsupported_fee_basis",
+    "unsupported_fee_scope",
+    "unknown_costs",
+    "unknown_fee_scope",
+    "legacy_fee_snapshot_not_cost_truth",
+    "unconverted_currency",
+    "unknown_order_role",
+    "unsupported_action",
+)
 
 
 def quantized_edge(value: Decimal) -> Decimal:
@@ -45,6 +66,22 @@ def net_edge_from_implied_sum(implied_probability_sum: Decimal) -> Decimal:
     return quantized_edge(Decimal("1") / implied_probability_sum - Decimal("1"))
 
 
+def gross_edge_from_quotes(quotes: Sequence[object]) -> Decimal | None:
+    """Gross complete-set edge from selected quotes. Missing odds fail closed."""
+
+    if not quotes:
+        return None
+    implied = Decimal("0")
+    for quote in quotes:
+        gross = getattr(quote, "gross_weighted_odds", None)
+        if gross is None or gross <= 0:
+            return None
+        implied += Decimal("1") / gross
+    if implied <= 0:
+        return None
+    return quantized_edge(Decimal("1") / implied - Decimal("1"))
+
+
 def distance_to_trigger_pp(current_net_edge: Decimal, trigger_net_edge: Decimal) -> Decimal:
     """Return how many percentage points the edge sits below (or above) the trigger.
 
@@ -59,8 +96,12 @@ def missing_cost_reasons(reasons: list[str]) -> list[str]:
         reason
         for reason in reasons
         if reason.startswith("missing_fee_snapshot:")
+        or reason.startswith("missing_venue_cost:")
         or reason.startswith("missing_fx_rate:")
         or reason.startswith("unknown_venue_currency:")
+        or reason.startswith("unsupported_fee_")
+        or reason.startswith("unknown_costs")
+        or reason in COST_CLOCK_REASONS
     ]
 
 
@@ -135,6 +176,10 @@ def classify_status(
     if hard_depth:
         return OpportunityStatus.REJECTED, _dedupe([*reasons, *hard_depth])
     if "execution_risk_above_threshold" in reasons:
+        return OpportunityStatus.REJECTED, _dedupe(reasons)
+
+    leftover = [reason for reason in reasons if reason not in NEAR_ELIGIBLE_REASONS]
+    if leftover:
         return OpportunityStatus.REJECTED, _dedupe(reasons)
 
     triggered = (

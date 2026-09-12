@@ -95,14 +95,7 @@ class PolymarketNormalizer:
         if not title:
             raise VenueNormalizationError("Polymarket event has no title")
         home_team, away_team = _split_fixture_title(title)
-        kickoff_raw = _first(
-            payload,
-            "startDate",
-            "startDateIso",
-            "gameStartTime",
-            "start_time",
-        )
-        kickoff = _parse_datetime(kickoff_raw)
+        kickoff = _parse_polymarket_fixture_datetime(_polymarket_fixture_start(payload))
         competition = _polymarket_competition(payload) or "Unknown competition"
         confidence = 1.0 if competition != "Unknown competition" else 0.85
         return CanonicalEvent(
@@ -182,6 +175,63 @@ def _matchbook_competition(payload: dict[str, Any]) -> str | None:
         if name and tag_type in {"competition", "league", "tournament"}:
             return name
     return None
+
+
+# Observed Gamma football fixture clocks. Listing/creation ``startDate``,
+# date-only ``eventDate``, and settlement ``endDate`` are not kickoff.
+_POLYMARKET_FIXTURE_START_KEYS = (
+    "startTime",
+    "gameStartTime",
+    "start_time",
+    "game_start_time",
+)
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _polymarket_fixture_start(payload: dict[str, Any]) -> Any:
+    raw = _first(payload, *_POLYMARKET_FIXTURE_START_KEYS)
+    if raw:
+        return raw
+    markets = payload.get("markets")
+    if isinstance(markets, list):
+        for market in markets:
+            if isinstance(market, dict):
+                nested = _first(market, *_POLYMARKET_FIXTURE_START_KEYS)
+                if nested:
+                    return nested
+    return None
+
+
+def _parse_polymarket_fixture_datetime(value: Any) -> datetime:
+    if not value:
+        raise VenueNormalizationError(
+            "Polymarket event has no supported fixture start time; leaving unmatched"
+        )
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            raise VenueNormalizationError(
+                "Polymarket fixture time is timezone-naive; leaving unmatched"
+            )
+        return value.astimezone(UTC)
+    text = str(value).strip()
+    if _DATE_ONLY.fullmatch(text):
+        raise VenueNormalizationError(
+            "Polymarket fixture time is date-only; refusing midnight guess"
+        )
+    normalized = text.replace("Z", "+00:00")
+    if re.search(r"[+-]\d{2}$", normalized):
+        normalized = f"{normalized}:00"
+    if " " in normalized and "T" not in normalized:
+        normalized = normalized.replace(" ", "T", 1)
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise VenueNormalizationError(f"Invalid Polymarket fixture datetime: {value}") from exc
+    if parsed.tzinfo is None:
+        raise VenueNormalizationError(
+            "Polymarket fixture time is timezone-naive; leaving unmatched"
+        )
+    return parsed.astimezone(UTC)
 
 
 def _polymarket_competition(payload: dict[str, Any]) -> str | None:
@@ -430,8 +480,10 @@ def _parse_datetime(value: Any) -> datetime:
             parsed = datetime.fromisoformat(text)
         except ValueError as exc:
             raise VenueNormalizationError(f"Invalid event datetime: {value}") from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        raise VenueNormalizationError(
+            "Football event start datetime is timezone-naive; refuse to assume UTC"
+        )
     return parsed.astimezone(UTC)
 
 

@@ -18,7 +18,7 @@ OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
 
 def test_watchlist_read_endpoints_expose_near_triggered_and_activity() -> None:
     repository = SqliteWatchlistRepository()
-    service = WatchlistService(repository)
+    service = WatchlistService(repository, clock=lambda: OBSERVED)
     app.dependency_overrides[get_watchlist_service] = lambda: service
     client = TestClient(app)
 
@@ -62,6 +62,7 @@ def test_watchlist_read_endpoints_expose_near_triggered_and_activity() -> None:
             solver_is_arbitrage=True,
             rejection_reasons=["net_edge_below_threshold"],
             quote_age_ms=180,
+            quote_age_basis="source",
             limiting_depth_gbp=Decimal("40"),
             capital_required_gbp=Decimal("100"),
         )
@@ -89,7 +90,11 @@ def test_watchlist_read_endpoints_expose_near_triggered_and_activity() -> None:
 
     try:
         near = client.get(
-            "/paper/watchlist/near", params={"limit": 10, "competition": "Premier League"}
+            "/paper/watchlist/near",
+            params={
+                "limit": 10,
+                "competition": "Premier League",
+            },
         )
         assert near.status_code == 200
         near_body = near.json()
@@ -99,6 +104,7 @@ def test_watchlist_read_endpoints_expose_near_triggered_and_activity() -> None:
         assert near_body[0]["is_arbitrage"] is False
         assert near_body[0]["guaranteed_profit_gbp"] is None
         assert float(near_body[0]["distance_to_trigger_pp"]) == 0.2
+        assert near_body[0]["quote_age_basis"] == "source"
 
         triggered = client.get("/paper/watchlist/triggered")
         assert triggered.status_code == 200

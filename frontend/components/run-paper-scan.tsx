@@ -1,11 +1,15 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import {
+  DASHBOARD_ASSUMED_ZERO_DETAIL,
   PaperCollectionReport,
   PaperCollectionRequest,
+  dashboardFeeSnapshot,
+  dashboardVenueCost,
+  getLiveRefreshStatus,
   runPaperCollection,
 } from "../lib/api";
 import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
@@ -55,52 +59,70 @@ export function RunPaperScan() {
   const [maxRisk, setMaxRisk] = useState(String(DEFAULT_SCANNER_ASSUMPTIONS.maximumExecutionRisk));
   const [loading, setLoading] = useState(false);
   const [state, setState] = useState<ScanState>({ kind: "idle" });
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [intervalSeconds, setIntervalSeconds] = useState(30);
+  const payloadRef = useRef<PaperCollectionRequest>({ maximum_execution_risk: 60 });
+  const inFlightRef = useRef(false);
+  const collectRef = useRef<() => Promise<void>>(async () => undefined);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (loading) return;
+  const buildPayload = useCallback((): PaperCollectionRequest => {
+    const fxRate = optionalPositive(usdToGbp, "USD→GBP rate");
+    const matchbookFee = optionalPercentRate(matchbookFeePercent, "Matchbook fee");
+    const polymarketFee = optionalPercentRate(polymarketFeePercent, "Polymarket fee");
+    const capital = optionalPositive(capitalLimit, "Capital limit");
+    const minNet = optionalPercentRate(minNetArbPercent, "Minimum net arb");
+    const risk = Number(maxRisk);
+    if (!Number.isInteger(risk) || risk < 0 || risk > 100) {
+      throw new Error("Maximum execution risk must be a whole number from 0 to 100.");
+    }
+    const payload: PaperCollectionRequest = {
+      maximum_execution_risk: risk,
+    };
+    if (capital) payload.capital_limit_gbp = capital;
+    if (minNet) payload.minimum_net_edge = minNet;
+    if (fxRate) {
+      payload.fx_snapshots = [
+        { currency: "USD", gbp_per_unit: fxRate, source: "dashboard_input" },
+      ];
+    }
+    const fees: NonNullable<PaperCollectionRequest["fee_snapshots"]> = [];
+    const venueCosts: NonNullable<PaperCollectionRequest["venue_costs"]> = [];
+    if (matchbookFee !== undefined) {
+      fees.push(dashboardFeeSnapshot("matchbook", matchbookFee));
+      venueCosts.push(dashboardVenueCost("matchbook", matchbookFee));
+    }
+    if (polymarketFee !== undefined) {
+      fees.push(dashboardFeeSnapshot("polymarket", polymarketFee));
+      venueCosts.push(dashboardVenueCost("polymarket", polymarketFee));
+    }
+    if (fees.length) payload.fee_snapshots = fees;
+    if (venueCosts.length) payload.venue_costs = venueCosts;
+    return payload;
+  }, [
+    capitalLimit,
+    matchbookFeePercent,
+    maxRisk,
+    minNetArbPercent,
+    polymarketFeePercent,
+    usdToGbp,
+  ]);
 
+  useEffect(() => {
+    try {
+      payloadRef.current = buildPayload();
+    } catch {
+      payloadRef.current = { maximum_execution_risk: 60 };
+    }
+  }, [buildPayload]);
+
+  const collect = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setLoading(true);
     setState({ kind: "idle" });
     try {
-      const fxRate = optionalPositive(usdToGbp, "USD→GBP rate");
-      const matchbookFee = optionalPercentRate(matchbookFeePercent, "Matchbook fee");
-      const polymarketFee = optionalPercentRate(polymarketFeePercent, "Polymarket fee");
-      const capital = optionalPositive(capitalLimit, "Capital limit");
-      const minNet = optionalPercentRate(minNetArbPercent, "Minimum net arb");
-      const risk = Number(maxRisk);
-      if (!Number.isInteger(risk) || risk < 0 || risk > 100) {
-        throw new Error("Maximum execution risk must be a whole number from 0 to 100.");
-      }
-
-      const payload: PaperCollectionRequest = {
-        maximum_execution_risk: risk,
-      };
-      if (capital) payload.capital_limit_gbp = capital;
-      if (minNet) payload.minimum_net_edge = minNet;
-      if (fxRate) {
-        payload.fx_snapshots = [
-          { currency: "USD", gbp_per_unit: fxRate, source: "dashboard_input" },
-        ];
-      }
-
-      const fees: NonNullable<PaperCollectionRequest["fee_snapshots"]> = [];
-      if (matchbookFee !== undefined) {
-        fees.push({
-          venue: "matchbook",
-          profit_haircut_rate: matchbookFee,
-          source: "dashboard_input",
-        });
-      }
-      if (polymarketFee !== undefined) {
-        fees.push({
-          venue: "polymarket",
-          profit_haircut_rate: polymarketFee,
-          source: "dashboard_input",
-        });
-      }
-      if (fees.length) payload.fee_snapshots = fees;
-
+      const payload = buildPayload();
+      payloadRef.current = payload;
       const report = await runPaperCollection(payload);
       setState({ kind: "success", report });
       router.refresh();
@@ -110,8 +132,43 @@ export function RunPaperScan() {
         message: error instanceof Error ? error.message : "Read-only scan failed.",
       });
     } finally {
+      inFlightRef.current = false;
       setLoading(false);
     }
+  }, [buildPayload, router]);
+
+  useEffect(() => {
+    collectRef.current = collect;
+  }, [collect]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getLiveRefreshStatus()
+      .then((status) => {
+        if (!cancelled && status.interval_seconds) {
+          setIntervalSeconds(status.interval_seconds);
+        }
+      })
+      .catch(() => {
+        // Status endpoint down: keep the 30s default cadence.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!autoRefresh) return undefined;
+    const cadenceMs = Math.max(15, intervalSeconds) * 1000;
+    const timer = window.setInterval(() => {
+      void collectRef.current();
+    }, cadenceMs);
+    return () => window.clearInterval(timer);
+  }, [autoRefresh, intervalSeconds]);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await collect();
   }
 
   const triggerDisplay = minNetArbPercent.trim()
@@ -124,7 +181,9 @@ export function RunPaperScan() {
         <div>
           <div className="panel-title">Paper scanner controls</div>
           <div className="panel-meta">
-            Fetch current Matchbook and Polymarket market data, persist history, and run the paper filters.
+            Matchbook discovers fixtures; Polymarket is matched onto the same canonical event. Repeated
+            read-only collection updates watchlist net margin and distance-to-strike. PAPER MODE · no
+            orders.
           </div>
         </div>
         <span className="status-badge">PAPER MODE · NO EXECUTION</span>
@@ -135,8 +194,14 @@ export function RunPaperScan() {
           <span>Trigger {triggerDisplay} net arb</span>
           <span>Capital {capitalLimit.trim() ? `£${capitalLimit.trim()}` : "unset"}</span>
           <span>Max risk {maxRisk}/100</span>
-          <span>Fees {matchbookFeePercent || polymarketFeePercent ? "dashboard input" : "fail-closed if missing"}</span>
+          <span>
+            Fees{" "}
+            {matchbookFeePercent || polymarketFeePercent
+              ? "dashboard assumption (0% is assumed_zero, never verified)"
+              : "fail-closed if missing"}
+          </span>
           <span>FX {usdToGbp.trim() ? "dashboard USD→GBP" : "fail-closed if missing"}</span>
+          <span>Cadence {intervalSeconds}s</span>
         </div>
 
         <div className="scan-control-grid scan-control-grid-ops">
@@ -206,8 +271,20 @@ export function RunPaperScan() {
           </div>
         </div>
 
+        <label className="scan-note">
+          <input
+            type="checkbox"
+            checked={autoRefresh}
+            onChange={(event) => setAutoRefresh(event.target.checked)}
+          />{" "}
+          Keep refreshing while this console is open (read-only Matchbook/Polymarket collection at{" "}
+          {intervalSeconds}s). Does not place orders. Server loop stays off unless{" "}
+          <code>PAPER_LIVE_REFRESH_ENABLED</code> is set.
+        </label>
+
         <div className="scan-note">
-          No orders are submitted. Blank fee or FX assumptions keep affected results diagnostic and ineligible for paper simulation rather than inventing costs.
+          No orders are submitted. Blank fee or FX assumptions keep affected results diagnostic and
+          ineligible for paper simulation rather than inventing costs. {DASHBOARD_ASSUMED_ZERO_DETAIL}
         </div>
 
         {state.kind === "success" ? (

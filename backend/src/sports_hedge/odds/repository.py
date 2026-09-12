@@ -18,6 +18,92 @@ from sports_hedge.odds.models import (
     QuoteType,
     VenueKind,
 )
+from sports_hedge.odds.movement import settlement_key_without_line
+
+
+_CURRENT_REVISIONS = """
+candidates AS (
+    SELECT *
+    FROM odds_observations
+    WHERE quote_type IN ('opening', 'closing')
+),
+ranked_revisions AS (
+    SELECT *,
+           ROW_NUMBER() OVER (
+               PARTITION BY
+                   source,
+                   IFNULL(source_market_id, ''),
+                   IFNULL(source_reference, ''),
+                   quote_type,
+                   selection,
+                   IFNULL(side, ''),
+                   IFNULL(observed_at, '')
+               ORDER BY retrieved_at DESC, observation_id DESC
+           ) AS revision_rn
+    FROM candidates
+),
+current_revisions AS (
+    SELECT * FROM ranked_revisions WHERE revision_rn = 1
+),
+eligible AS (
+    SELECT * FROM current_revisions
+    WHERE decimal_odds IS NOT NULL
+      AND semantics_complete = 1
+      AND settlement_key IS NOT NULL
+      AND settlement_key != ''
+)
+"""
+
+_OPEN_CLOSE_CURRENT = f"""
+{_CURRENT_REVISIONS},
+ranked_pairs AS (
+    SELECT *,
+           ROW_NUMBER() OVER (
+               PARTITION BY
+                   quote_type,
+                   canonical_match_id,
+                   market_family,
+                   period,
+                   IFNULL(line, ''),
+                   settlement_key,
+                   selection,
+                   source,
+                   IFNULL(bookmaker, ''),
+                   IFNULL(venue, ''),
+                   IFNULL(side, '')
+               ORDER BY retrieved_at DESC, observation_id DESC
+           ) AS pair_rn
+    FROM eligible
+),
+current_quotes AS (
+    SELECT * FROM ranked_pairs WHERE pair_rn = 1
+)
+"""
+
+_OPEN_CLOSE_IDENTITY_CURRENT = f"""
+{_CURRENT_REVISIONS},
+ranked_identity AS (
+    SELECT *,
+           ROW_NUMBER() OVER (
+               PARTITION BY
+                   quote_type,
+                   canonical_match_id,
+                   market_family,
+                   period,
+                   selection,
+                   source,
+                   IFNULL(bookmaker, ''),
+                   IFNULL(venue, ''),
+                   IFNULL(side, ''),
+                   settlement_key_without_line(settlement_key)
+               ORDER BY retrieved_at DESC, observation_id DESC
+           ) AS identity_rn
+    FROM eligible
+),
+current_identity AS (
+    SELECT * FROM ranked_identity WHERE identity_rn = 1
+)
+"""
 
 
 class SqliteOddsRepository:
@@ -26,6 +112,11 @@ class SqliteOddsRepository:
     def __init__(self, database: str | Path = ":memory:") -> None:
         self._connection = sqlite3.connect(str(database), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._connection.create_function(
+            "settlement_key_without_line",
+            1,
+            settlement_key_without_line,
+        )
         self._create_schema()
 
     def _create_schema(self) -> None:
@@ -238,6 +329,72 @@ class SqliteOddsRepository:
 
     def close(self) -> None:
         self._connection.close()
+
+    def count_matches(self) -> int:
+        row = self._connection.execute("SELECT COUNT(*) AS n FROM odds_match_index").fetchone()
+        return int(row["n"]) if row is not None else 0
+
+    def count_observations(self) -> int:
+        row = self._connection.execute("SELECT COUNT(*) AS n FROM odds_observations").fetchone()
+        return int(row["n"]) if row is not None else 0
+
+    def count_same_line_opening_closing_pairs(self) -> int:
+        """Count current opening→closing price pairs using classify_open_close semantics.
+
+        Current revision per stable source identity is selected before line pairing.
+        """
+
+        row = self._connection.execute(
+            f"""
+            WITH {_OPEN_CLOSE_CURRENT}
+            SELECT COUNT(*) AS n
+            FROM current_quotes o
+            JOIN current_quotes c
+              ON o.quote_type = 'opening'
+             AND c.quote_type = 'closing'
+             AND o.canonical_match_id = c.canonical_match_id
+             AND o.market_family = c.market_family
+             AND o.period = c.period
+             AND IFNULL(o.line, '') = IFNULL(c.line, '')
+             AND o.settlement_key = c.settlement_key
+             AND o.selection = c.selection
+             AND o.source = c.source
+             AND IFNULL(o.bookmaker, '') = IFNULL(c.bookmaker, '')
+             AND IFNULL(o.venue, '') = IFNULL(c.venue, '')
+             AND IFNULL(o.side, '') = IFNULL(c.side, '')
+            """
+        ).fetchone()
+        return int(row["n"]) if row is not None else 0
+
+    def count_asian_handicap_line_shifts(self) -> int:
+        """Count current AH structural line changes using classify_open_close semantics.
+
+        Current revision per stable source identity is selected before line comparison.
+        """
+
+        row = self._connection.execute(
+            f"""
+            WITH {_OPEN_CLOSE_IDENTITY_CURRENT}
+            SELECT COUNT(*) AS n
+            FROM current_identity o
+            JOIN current_identity c
+              ON o.quote_type = 'opening'
+             AND c.quote_type = 'closing'
+             AND o.market_family = 'asian_handicap'
+             AND c.market_family = 'asian_handicap'
+             AND o.canonical_match_id = c.canonical_match_id
+             AND o.period = c.period
+             AND o.selection = c.selection
+             AND o.source = c.source
+             AND IFNULL(o.bookmaker, '') = IFNULL(c.bookmaker, '')
+             AND IFNULL(o.venue, '') = IFNULL(c.venue, '')
+             AND IFNULL(o.side, '') = IFNULL(c.side, '')
+             AND settlement_key_without_line(o.settlement_key)
+               = settlement_key_without_line(c.settlement_key)
+             AND IFNULL(o.line, '') != IFNULL(c.line, '')
+            """
+        ).fetchone()
+        return int(row["n"]) if row is not None else 0
 
     def _observation_row(self, observation: OddsObservation) -> tuple[Any, ...]:
         return (

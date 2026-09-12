@@ -102,6 +102,8 @@ export type PaperCollectionDecision = {
 export type PaperCollectionReport = {
   started_at: string;
   completed_at: string;
+  discovery_source?: Venue;
+  matching_venue?: Venue;
   raw_matchbook_events: number;
   raw_polymarket_events: number;
   normalized_matchbook_events: number;
@@ -112,16 +114,107 @@ export type PaperCollectionReport = {
   matched_market_pairs: number;
   order_books_fetched: number;
   paper_decisions: PaperCollectionDecision[];
+  discovered_fixtures?: DiscoveredFixture[];
   issues: PaperCollectionIssue[];
 };
 
+export type DiscoveredFixture = {
+  source: Venue;
+  source_event_id: string;
+  home_team: string;
+  away_team: string;
+  competition: string;
+  kickoff_utc: string;
+  polymarket_matched: boolean;
+  fixture_status?: string | null;
+  in_running?: boolean | null;
+  live_score_supported: boolean;
+  home_score?: number | null;
+  away_score?: number | null;
+  last_seen_at: string;
+};
+
+export type LiveRefreshStatus = {
+  discovery_source: Venue;
+  matching_venue: Venue;
+  server_loop_enabled: boolean;
+  interval_seconds: number;
+  cycle_in_progress: boolean;
+  last_started_at?: string | null;
+  last_completed_at?: string | null;
+  last_error?: string | null;
+  last_matched_event_pairs?: number | null;
+  last_matched_market_pairs?: number | null;
+  last_paper_decisions?: number | null;
+  last_issue_count?: number | null;
+  live_scores: string;
+  discovered_fixtures: DiscoveredFixture[];
+};
+
+export type ZeroRateBasis = "verified_zero" | "assumed_zero";
+
+export type PaperFeeSnapshotRequest = {
+  venue: Venue;
+  profit_haircut_rate: string;
+  zero_rate_basis?: ZeroRateBasis;
+  source?: string;
+  detail?: string;
+};
+
+export const DASHBOARD_ASSUMED_ZERO_DETAIL =
+  "Dashboard-entered 0% is an operator assumption (assumed_zero), not a verified venue fee.";
+
+export function dashboardFeeSnapshot(
+  venue: Venue,
+  profitHaircutRate: string,
+): PaperFeeSnapshotRequest {
+  const snapshot: PaperFeeSnapshotRequest = {
+    venue,
+    profit_haircut_rate: profitHaircutRate,
+    source: "dashboard_input",
+  };
+  if (Number(profitHaircutRate) === 0) {
+    snapshot.zero_rate_basis = "assumed_zero";
+    snapshot.detail = DASHBOARD_ASSUMED_ZERO_DETAIL;
+  }
+  return snapshot;
+}
+
+export type PaperVenueCostRequest = {
+  venue: Venue;
+  action: "back" | "buy";
+  fee_basis: "profit_commission";
+  known_status: "known";
+  source: string;
+  rate: string;
+  fee_scope: "per_quote";
+  order_role: "not_applicable";
+  currency: string;
+  detail?: string;
+};
+
+export function dashboardVenueCost(
+  venue: Venue,
+  profitHaircutRate: string,
+): PaperVenueCostRequest {
+  const assumedZero = Number(profitHaircutRate) === 0;
+  return {
+    venue,
+    action: venue === "polymarket" ? "buy" : "back",
+    fee_basis: "profit_commission",
+    known_status: "known",
+    source: "dashboard_input",
+    rate: profitHaircutRate,
+    fee_scope: "per_quote",
+    order_role: "not_applicable",
+    currency: venue === "polymarket" ? "USD" : "GBP",
+    detail: assumedZero ? DASHBOARD_ASSUMED_ZERO_DETAIL : undefined,
+  };
+}
+
 export type PaperCollectionRequest = {
-  fee_snapshots?: Array<{
-    venue: Venue;
-    profit_haircut_rate: string;
-    source?: string;
-    detail?: string;
-  }>;
+  fee_snapshots?: PaperFeeSnapshotRequest[];
+  venue_costs?: PaperVenueCostRequest[];
   fx_snapshots?: Array<{
     currency: string;
     gbp_per_unit: string;
@@ -288,9 +381,11 @@ export type NearOpportunity = {
   is_arbitrage?: boolean;
   trigger_net_edge: string | number;
   current_net_edge?: string | number | null;
+  gross_edge?: string | number | null;
   distance_to_trigger_pp?: string | number | null;
   implied_probability_sum?: string | number | null;
   quote_age_ms?: number | null;
+  quote_age_basis?: "source" | "retrieval" | "unknown" | string | null;
   limiting_depth_gbp?: string | number | null;
   limiting_leg_outcome?: string | null;
   capital_required_gbp?: string | number | null;
@@ -301,6 +396,16 @@ export type NearOpportunity = {
   last_seen_at: string;
   rejection_reasons: string[];
   insufficiency_reasons: string[];
+  fixture_discovery_source?: Venue | null;
+  fixture_status?: string | null;
+  in_running?: boolean | null;
+  live_score_supported?: boolean;
+  home_score?: number | null;
+  away_score?: number | null;
+  strike_narrative?: string | null;
+  previous_net_edge?: string | number | null;
+  previous_distance_to_trigger_pp?: string | number | null;
+  observation_count?: number;
 };
 
 export type OpportunityLifecycleEvent = {
@@ -329,6 +434,31 @@ export async function runPaperCollection(
   return response.json() as Promise<PaperCollectionReport>;
 }
 
+export async function simulatePaperFill(payload: {
+  opportunity_id: string;
+  operator_note?: string;
+  provenance?: "live_paper" | "fixture_demo";
+}): Promise<unknown> {
+  const response = await fetch(`${API_BASE}/paper/simulate-fill`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      operator_note: "PAPER-ONLY explicit simulate fill",
+      provenance: "live_paper",
+      ...payload,
+    }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json();
+}
+
+export function getLiveRefreshStatus(): Promise<LiveRefreshStatus> {
+  return request("/paper/live-refresh");
+}
+
 export function getNearWatchlist(query = "limit=25"): Promise<NearOpportunity[]> {
   return request(`/paper/watchlist/near${query ? `?${query}` : ""}`);
 }
@@ -337,6 +467,41 @@ export function getTriggeredWatchlist(query = "limit=25"): Promise<NearOpportuni
   return request(`/paper/watchlist/triggered${query ? `?${query}` : ""}`);
 }
 
+export function getTrackedWatchlist(query = "limit=100"): Promise<NearOpportunity[]> {
+  return request(`/paper/watchlist/tracked${query ? `?${query}` : ""}`);
+}
+
 export function getWatchlistActivity(query = "limit=100"): Promise<OpportunityLifecycleEvent[]> {
   return request(`/paper/watchlist/activity${query ? `?${query}` : ""}`);
+}
+
+export type LivePriorityAlertRow = {
+  alert_id: string;
+  opportunity_id: string;
+  severity: string;
+  lifecycle_state: string;
+  capital_source?: string;
+};
+
+export function getLivePriorityAlerts(): Promise<LivePriorityAlertRow[]> {
+  return request("/priority-alerts");
+}
+
+export type HistoricalCoverageReadModel = {
+  data_class: "REAL_HISTORICAL" | "UNAVAILABLE" | string;
+  facts_available: boolean;
+  odds_available: boolean;
+  analogue_model: string;
+  analogue_note: string;
+  movement_semantics: string;
+  match_count?: number | null;
+  stored_observation_count?: number | null;
+  same_line_opening_closing_pairs?: number | null;
+  asian_handicap_line_shifts?: number | null;
+  competitions: { competition: string; season: string; matches: number }[];
+  unavailable_reason?: string | null;
+};
+
+export function getHistoricalCoverage(): Promise<HistoricalCoverageReadModel> {
+  return request("/research/historical/coverage");
 }

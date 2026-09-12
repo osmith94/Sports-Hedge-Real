@@ -37,7 +37,9 @@ def qualify_priority_alert(
         reasons.append("eligibility_not_confirmed")
 
     required_venues = {leg.venue for leg in candidate.legs}
-    fee_venues = {snapshot.venue for snapshot in candidate.fee_snapshots}
+    fee_venues = {snapshot.venue for snapshot in candidate.venue_costs} or {
+        snapshot.venue for snapshot in candidate.fee_snapshots
+    }
     missing_fees = sorted(venue.value for venue in required_venues - fee_venues)
     if missing_fees:
         reasons.extend(f"missing_fee_snapshot:{venue}" for venue in missing_fees)

@@ -4,7 +4,7 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityLifecycleEvent
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
@@ -40,7 +40,8 @@ def top_near_opportunities(
     market_family: MarketFamily | None = None,
     service: WatchlistService = Depends(get_watchlist_service),
 ) -> list[NearOpportunity]:
-    return service.top_near(
+    return _read_watchlist(
+        service.top_near,
         limit=limit,
         competition=competition,
         venue=venue,
@@ -56,7 +57,25 @@ def triggered_opportunities(
     market_family: MarketFamily | None = None,
     service: WatchlistService = Depends(get_watchlist_service),
 ) -> list[NearOpportunity]:
-    return service.triggered(
+    return _read_watchlist(
+        service.triggered,
+        limit=limit,
+        competition=competition,
+        venue=venue,
+        market_family=market_family,
+    )
+
+
+@router.get("/tracked", response_model=list[NearOpportunity])
+def tracked_markets(
+    limit: int = Query(default=100, ge=1, le=500),
+    competition: str | None = None,
+    venue: VenueName | None = None,
+    market_family: MarketFamily | None = None,
+    service: WatchlistService = Depends(get_watchlist_service),
+) -> list[NearOpportunity]:
+    return _read_watchlist(
+        service.tracked,
         limit=limit,
         competition=competition,
         venue=venue,
@@ -72,3 +91,10 @@ def recent_lifecycle_activity(
     service: WatchlistService = Depends(get_watchlist_service),
 ) -> list[OpportunityLifecycleEvent]:
     return service.activity(limit=limit, opportunity_id=opportunity_id, since=since)
+
+
+def _read_watchlist(reader, **kwargs):
+    try:
+        return reader(**kwargs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -3,7 +3,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from decimal import Decimal
 
-from sports_hedge.arbitrage.watchlist.economics import net_edge_from_implied_sum
+from sports_hedge.arbitrage.watchlist.economics import (
+    gross_edge_from_quotes,
+    net_edge_from_implied_sum,
+)
 from sports_hedge.arbitrage.watchlist.models import WatchLeg, WatchObservation
 from sports_hedge.domain.football import MarketFamily
 from sports_hedge.domain.models import VenueName
@@ -16,6 +19,7 @@ def observation_from_paper_decision(
     history: Sequence[MarketSnapshot] = (),
     *,
     quote_age_ms: int | None = None,
+    quote_age_basis: str | None = None,
 ) -> WatchObservation | None:
     """Map a paper scan onto the watchlist ingest contract without changing solver gates."""
 
@@ -29,6 +33,7 @@ def observation_from_paper_decision(
     limiting_leg: str | None = None
     implied: Decimal | None = None
     current_edge: Decimal | None = None
+    gross_edge: Decimal | None = None
     capital: Decimal | None = None
     guaranteed_profit: Decimal | None = None
     solver_is_arbitrage = False
@@ -40,6 +45,7 @@ def observation_from_paper_decision(
         solver_is_arbitrage = solution.is_arbitrage
         if implied is not None and implied > 0:
             current_edge = net_edge_from_implied_sum(implied)
+        gross_edge = gross_edge_from_quotes(decision.depth_scan.selected_quotes)
         stake_by_outcome = {stake.outcome: stake for stake in solution.stakes}
         for quote in decision.depth_scan.selected_quotes:
             venue_currency = _currency_for_venue(quote.venue, history)
@@ -85,6 +91,7 @@ def observation_from_paper_decision(
             expected_lock = Decimal(str(delta_minutes))
 
     resolved_quote_age = quote_age_ms if quote_age_ms is not None else decision.quote_age_ms
+    resolved_basis = quote_age_basis if quote_age_basis is not None else decision.quote_age_basis
 
     return WatchObservation(
         observed_at=decision.scanned_at,
@@ -100,6 +107,7 @@ def observation_from_paper_decision(
         legs=legs,
         trigger_net_edge=decision.minimum_net_edge,
         current_net_edge=current_edge,
+        gross_edge=gross_edge,
         implied_probability_sum=implied,
         solver_is_arbitrage=solver_is_arbitrage,
         eligible_for_paper_simulation=decision.eligible_for_paper_simulation,
@@ -108,12 +116,19 @@ def observation_from_paper_decision(
             decision.execution_risk.score if decision.execution_risk is not None else None
         ),
         quote_age_ms=resolved_quote_age,
+        quote_age_basis=resolved_basis,
         limiting_depth_gbp=limiting_depth,
         limiting_leg_outcome=limiting_leg,
         capital_required_gbp=capital,
         guaranteed_profit_gbp=guaranteed_profit,
         expected_lock_minutes=expected_lock,
         kickoff_utc=snapshot.kickoff_utc if snapshot is not None else None,
+        fixture_discovery_source=decision.fixture_discovery_source,
+        fixture_status=decision.fixture_status,
+        in_running=decision.in_running,
+        live_score_supported=decision.live_score_supported,
+        home_score=decision.home_score if decision.live_score_supported else None,
+        away_score=decision.away_score if decision.live_score_supported else None,
     )
 
 

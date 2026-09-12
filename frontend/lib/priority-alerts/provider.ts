@@ -5,7 +5,7 @@ export type PriorityAlertProviderMeta = {
   source: "DEMO_FIXTURE";
   paperMode: true;
   label: "DEMO/FIXTURE DATA";
-  note: "Typed demo provider until Agent AB backend contracts land. No venue calls.";
+  note: string;
 };
 
 export function getPriorityAlertProviderMeta(): PriorityAlertProviderMeta {
@@ -13,7 +13,7 @@ export function getPriorityAlertProviderMeta(): PriorityAlertProviderMeta {
     source: "DEMO_FIXTURE",
     paperMode: true,
     label: "DEMO/FIXTURE DATA",
-    note: "Typed demo provider until Agent AB backend contracts land. No venue calls.",
+    note: "Demo walkthrough tickets until a live `/priority-alerts` row exists. Empty live lists stay empty. No venue calls.",
   };
 }
 

@@ -11,8 +11,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from sports_hedge.api.market_intelligence import get_market_intelligence_service
+from sports_hedge.api.priority_alerts import get_priority_alert_service
 from sports_hedge.api.watchlist import get_watchlist_service
+from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
 from sports_hedge.application.collector import CollectionReport, ReadOnlyCrossVenueCollector
+from sports_hedge.application.live_refresh import (
+    LiveRefreshStatus,
+    get_live_refresh_coordinator,
+)
 from sports_hedge.application.market_observation import (
     MatchbookObservationBuilder,
     PolymarketObservationBuilder,
@@ -22,6 +28,7 @@ from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueName
+from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.models import FeeSnapshot
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.normalization.venues import VenueNormalizationError
@@ -30,6 +37,8 @@ from sports_hedge.paper.audit import (
     PaperScanSummary,
     build_paper_scan_record,
 )
+from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
+from sports_hedge.paper.chain import SimulatePaperFillRequest, SimulatePaperFillResult
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookClient
@@ -46,13 +55,14 @@ class RawVenueObservationRequest(BaseModel):
     observed_at: datetime | None = None
     native_currency: str | None = None
     source_latency_ms: int = Field(default=0, ge=0)
-    quote_age_ms: int = Field(default=0, ge=0)
+    quote_age_ms: int | None = Field(default=None, ge=0)
 
 
 class PaperPairScanRequest(BaseModel):
     left: RawVenueObservationRequest
     right: RawVenueObservationRequest
     fee_snapshots: list[FeeSnapshot] = Field(default_factory=list)
+    venue_costs: list[VenueCostSnapshot] = Field(default_factory=list)
     fx_snapshots: list[FxRateSnapshot] = Field(default_factory=list)
     capital_limit_gbp: Decimal | None = Field(default=None, gt=0)
     minimum_net_edge: Decimal = Field(default=Decimal("0.005"), ge=0)
@@ -68,6 +78,7 @@ class PaperCollectionRequest(BaseModel):
     matchbook_market_filters: dict[str, Any] = Field(default_factory=dict)
     polymarket_market_filters: dict[str, Any] = Field(default_factory=dict)
     fee_snapshots: list[FeeSnapshot] = Field(default_factory=list)
+    venue_costs: list[VenueCostSnapshot] = Field(default_factory=list)
     fx_snapshots: list[FxRateSnapshot] = Field(default_factory=list)
     capital_limit_gbp: Decimal | None = Field(default=None, gt=0)
     minimum_net_edge: Decimal = Field(default=Decimal("0.005"), ge=0)
@@ -93,6 +104,28 @@ def get_paper_scan_service(
     intelligence: MarketIntelligenceService = Depends(get_market_intelligence_service),
 ) -> PaperScanService:
     return PaperScanService(intelligence)
+
+
+@lru_cache
+def get_paper_journal_holder() -> PaperOperationsService:
+    """Process-local paper chain. Tests override get_paper_operations_service."""
+
+    from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
+
+    return PaperOperationsService(
+        watchlist=get_watchlist_service(get_watchlist_repository()),
+        alerts=get_priority_alert_service(),
+    )
+
+
+def get_paper_operations_service(
+    watchlist: WatchlistService = Depends(get_watchlist_service),
+    alerts: PriorityAlertService = Depends(get_priority_alert_service),
+) -> PaperOperationsService:
+    holder = get_paper_journal_holder()
+    holder.watchlist = watchlist
+    holder.alerts = alerts
+    return holder
 
 
 @router.get("/scans", response_model=list[PaperScanRecord])
@@ -138,6 +171,7 @@ def scan_pair(
             left,
             right,
             fee_snapshots=request.fee_snapshots,
+            venue_costs=request.venue_costs,
             fx_snapshots=request.fx_snapshots,
             capital_limit_gbp=request.capital_limit_gbp,
             minimum_net_edge=request.minimum_net_edge,
@@ -151,11 +185,19 @@ def scan_pair(
             service=service,
             audit=audit,
             watchlist=watchlist,
-            quote_age_ms=max(request.left.quote_age_ms, request.right.quote_age_ms),
+            operations=get_paper_operations_service(watchlist, get_priority_alert_service()),
+            quote_age_ms=decision.quote_age_ms,
         )
         return decision
     except (VenueNormalizationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/live-refresh", response_model=LiveRefreshStatus)
+def live_refresh_status() -> LiveRefreshStatus:
+    coordinator = get_live_refresh_coordinator()
+    coordinator.configure_from_settings()
+    return coordinator.status
 
 
 @router.post(
@@ -169,8 +211,37 @@ async def collect_read_only_market_data(
     audit: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
     watchlist: WatchlistService = Depends(get_watchlist_service),
 ) -> CollectionReport:
-    """Run one explicit read-only collection/scan cycle."""
+    """Run one explicit read-only collection/scan cycle and persist watchlist observations."""
 
+    kwargs = request.model_dump()
+    coordinator = get_live_refresh_coordinator()
+    coordinator.remember_request(kwargs)
+
+    async def runner() -> CollectionReport:
+        return await _execute_collection(
+            kwargs,
+            service=service,
+            audit=audit,
+            watchlist=watchlist,
+        )
+
+    try:
+        return await coordinator.run_cycle(runner)
+    except MatchbookAuthError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"venue market-data request failed: {exc}"
+        ) from exc
+
+
+async def _execute_collection(
+    kwargs: dict[str, Any],
+    *,
+    service: PaperScanService,
+    audit: SqlitePaperScanRepository,
+    watchlist: WatchlistService,
+) -> CollectionReport:
     settings = get_settings()
     matchbook = MatchbookClient(settings)
     polymarket = PolymarketClient(settings)
@@ -180,34 +251,69 @@ async def collect_read_only_market_data(
         paper_scan=service,
     )
     try:
-        report = await collector.collect_and_scan(
-            matchbook_event_filters=request.matchbook_event_filters,
-            polymarket_event_filters=request.polymarket_event_filters,
-            matchbook_market_filters=request.matchbook_market_filters,
-            polymarket_market_filters=request.polymarket_market_filters,
-            fee_snapshots=request.fee_snapshots,
-            fx_snapshots=request.fx_snapshots,
-            capital_limit_gbp=request.capital_limit_gbp,
-            minimum_net_edge=request.minimum_net_edge,
-            maximum_execution_risk=request.maximum_execution_risk,
-            minimum_mapping_confidence=request.minimum_mapping_confidence,
-            assumed_latency_ms=request.assumed_latency_ms,
-            recent_volatility_bps=request.recent_volatility_bps,
-            max_event_pairs=request.max_event_pairs,
-            max_market_pairs_per_event=request.max_market_pairs_per_event,
-        )
+        report = await collector.collect_and_scan(**kwargs)
         for decision in report.paper_decisions:
-            _persist_decision(decision, service=service, audit=audit, watchlist=watchlist)
+            _persist_decision(
+                decision,
+                service=service,
+                audit=audit,
+                watchlist=watchlist,
+                operations=get_paper_operations_service(watchlist, get_priority_alert_service()),
+            )
         return report
-    except MatchbookAuthError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=502, detail=f"venue market-data request failed: {exc}"
-        ) from exc
     finally:
         await matchbook.aclose()
         await polymarket.aclose()
+
+
+async def server_owned_refresh_tick() -> None:
+    """Background tick used when PAPER_LIVE_REFRESH_ENABLED is true."""
+
+    coordinator = get_live_refresh_coordinator()
+    service = get_paper_scan_service(get_market_intelligence_service())
+    audit = get_paper_audit_repository()
+    from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
+
+    watchlist = get_watchlist_service(get_watchlist_repository())
+    kwargs = coordinator.last_request() or PaperCollectionRequest().model_dump()
+
+    async def runner() -> CollectionReport:
+        return await _execute_collection(
+            kwargs,
+            service=service,
+            audit=audit,
+            watchlist=watchlist,
+        )
+
+    try:
+        await coordinator.run_cycle(runner)
+    except (MatchbookAuthError, httpx.HTTPError):
+        return
+
+
+@router.post(
+    "/simulate-fill",
+    response_model=SimulatePaperFillResult,
+    status_code=status.HTTP_200_OK,
+)
+def simulate_paper_fill(
+    request: SimulatePaperFillRequest,
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> SimulatePaperFillResult:
+    """PAPER-ONLY operator action. Never places a venue order or signs a wallet."""
+
+    try:
+        return operations.simulate_fill(
+            request.opportunity_id,
+            capital_source=request.capital_source,
+            confirm_external=request.confirm_external,
+            provenance=request.provenance,
+            operator_note=request.operator_note,
+        )
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _persist_decision(
@@ -216,6 +322,7 @@ def _persist_decision(
     service: PaperScanService,
     audit: SqlitePaperScanRepository,
     watchlist: WatchlistService,
+    operations: PaperOperationsService | None = None,
     quote_age_ms: int | None = None,
 ) -> None:
     if not decision.canonical_market_id:
@@ -226,6 +333,8 @@ def _persist_decision(
     if history:
         audit.append_scan(build_paper_scan_record(decision, history))
     watchlist.observe_paper_decision(decision, history, quote_age_ms=quote_age_ms)
+    if operations is not None:
+        operations.persist_triggered_chain(decision)
 
 
 def _build_observation(request: RawVenueObservationRequest) -> VenueMarketObservation:

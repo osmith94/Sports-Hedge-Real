@@ -45,14 +45,9 @@ export const RESEARCH_BROWSE = [
 ] as const;
 
 export const HISTORICAL_SEAM = {
-  dataClass: "UNAVAILABLE" as DataClass,
+  dataClass: "HISTORICAL" as DataClass,
   title: "Historical repository",
-  status: "Blocked on architecture review",
+  status: "Repository-derived coverage when the read API can open the SQLite files",
   note:
-    "PRs #35 (football stats) and #36 (historical odds) remain blocked: append-only provenance, naive-UTC coercion, and a split canonical identity. This demo does not merge them. Coverage below is a seam, not live warehouse data.",
-  competitions: [
-    { competition: "Premier League 2025/26", coverage: "UNAVAILABLE", quality: "—" },
-    { competition: "Championship 2025/26", coverage: "UNAVAILABLE", quality: "—" },
-    { competition: "La Liga 2025/26", coverage: "UNAVAILABLE", quality: "—" },
-  ],
+    "Premier League and Championship 2021/22–2025/26 facts and odds are merged. Counts come from `/research/historical/coverage`, not hardcoded product logic. Tenet 17 analogue scoring is UNAVAILABLE. Same-line opening→closing pairs are price movement; AH line changes are structural line shifts. Correlation/context only, never causation.",
 };

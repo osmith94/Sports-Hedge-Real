@@ -11,6 +11,7 @@ from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.models import MarketSnapshot
 from sports_hedge.paper.models import PaperScanDecision
+from sports_hedge.arbitrage.watchlist.economics import net_edge_from_implied_sum
 
 
 class PaperScanRecord(BaseModel):
@@ -81,6 +82,7 @@ def build_paper_scan_record(
     depth_scan = decision.depth_scan
     solution = depth_scan.solution if depth_scan is not None else None
     gross_edge: Decimal | None = None
+    net_edge: Decimal | None = None
     if depth_scan is not None and depth_scan.selected_quotes:
         gross_implied = sum(
             (Decimal("1") / quote.gross_weighted_odds for quote in depth_scan.selected_quotes),
@@ -88,6 +90,8 @@ def build_paper_scan_record(
         )
         if gross_implied > 0:
             gross_edge = Decimal("1") / gross_implied - Decimal("1")
+    if solution is not None and solution.implied_probability_sum > 0:
+        net_edge = net_edge_from_implied_sum(solution.implied_probability_sum)
 
     source_market_ids = sorted(
         {
@@ -115,7 +119,7 @@ def build_paper_scan_record(
         is_arbitrage=bool(solution and solution.is_arbitrage),
         eligible_for_paper_simulation=decision.eligible_for_paper_simulation,
         gross_edge=gross_edge,
-        net_edge=solution.roi if solution and solution.is_arbitrage else None,
+        net_edge=net_edge,
         executable_stake_gbp=solution.total_stake if solution and solution.is_arbitrage else None,
         guaranteed_profit_gbp=(
             solution.guaranteed_profit if solution and solution.is_arbitrage else None

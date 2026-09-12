@@ -72,3 +72,50 @@ async def test_polymarket_public_order_book_has_no_execution_capability() -> Non
     assert book["asset_id"] == "token-123"
     assert venue.capabilities.execution_enabled is False
     assert not hasattr(venue, "place_order")
+
+
+@pytest.mark.asyncio
+async def test_polymarket_list_events_applies_configured_epl_series_filter() -> None:
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        if request.url.path == "/events":
+            return httpx.Response(200, json=[{"id": "934146", "title": "Chelsea FC vs. Hull City AFC"}])
+        return httpx.Response(404)
+
+    settings = Settings(polymarket_gamma_series_id="10188")
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url=settings.polymarket_gamma_base_url,
+    ) as http:
+        venue = PolymarketClient(settings, client=http)
+        events = await venue.list_events()
+        overridden = await venue.list_events(series_id="99999")
+
+    assert events[0]["id"] == "934146"
+    assert seen[0].params["series_id"] == "10188"
+    assert seen[0].params["limit"] == "100"
+    assert seen[1].params["series_id"] == "99999"
+    assert overridden[0]["id"] == "934146"
+
+
+@pytest.mark.asyncio
+async def test_polymarket_list_events_omits_series_when_filter_disabled() -> None:
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return httpx.Response(200, json=[])
+
+    settings = Settings(polymarket_gamma_series_id="")
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url=settings.polymarket_gamma_base_url,
+    ) as http:
+        venue = PolymarketClient(settings, client=http)
+        await venue.list_events()
+
+    assert "series_id" not in seen[0].params

@@ -89,6 +89,7 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 .scan-button:hover:not(:disabled) { background: rgba(124, 242, 176, .16); border-color: rgba(124, 242, 176, .5); }
 .scan-button:disabled { opacity: .55; cursor: wait; }
 .scan-note { margin-top: 10px; color: var(--muted-2); font-size: 9px; line-height: 1.5; }
+.scan-note input { margin-right: 6px; }
 .scan-message { margin-top: 11px; border-radius: 8px; padding: 9px 10px; font-size: 10px; line-height: 1.45; }
 .scan-message-success { color: var(--accent); border: 1px solid rgba(124, 242, 176, .2); background: var(--accent-soft); }
 .scan-message-error { color: var(--red); border: 1px solid rgba(240, 130, 130, .22); background: rgba(240, 130, 130, .07); }
@@ -101,6 +102,7 @@ tr:last-child td { border-bottom: none; }
 .row-title { color: var(--text); font-weight: 650; }
 .muted { color: var(--muted-2); }
 .edge { color: var(--accent); font-weight: 700; }
+.edge-negative { color: var(--red); font-weight: 700; }
 .risk-low { color: var(--accent); }
 .risk-medium { color: var(--amber); }
 .status-badge { display: inline-flex; padding: 4px 7px; border-radius: 999px; font-size: 9px; font-weight: 750; background: var(--accent-soft); color: var(--accent); border: 1px solid rgba(124, 242, 176, .16); }
@@ -179,6 +181,12 @@ tr:last-child td { border-bottom: none; }
 .pool-rows strong { color: var(--text); font-variant-numeric: tabular-nums; }
 .pool-gbp { margin-top: 10px; color: var(--muted-2); font-size: 10px; }
 .pool-unsupported { margin-top: 12px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+
+.comfort-bar { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 12px; display: grid; gap: 10px; }
+.comfort-kicker { color: var(--amber); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.comfort-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+.comfort-pill { border: 1px solid var(--line); background: var(--panel-raised); color: var(--muted); border-radius: 999px; padding: 7px 10px; font-size: 10px; font-weight: 750; cursor: pointer; }
+.comfort-pill.active { color: var(--accent); border-color: rgba(124, 242, 176, .28); background: var(--accent-soft); }
 
 .value-overlay, .value-callouts { display: grid; gap: 8px; margin: 10px 0 12px; }
 .value-overlay { border: 1px solid rgba(129, 184, 245, .28); background: rgba(129, 184, 245, .06); border-radius: 12px; padding: 11px 13px; }

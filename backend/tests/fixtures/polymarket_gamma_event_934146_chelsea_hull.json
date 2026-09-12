@@ -1,0 +1,69 @@
+{
+  "fixture_id": "polymarket-gamma-event-934146-chelsea-hull",
+  "identified_as": "PINNED RAW public Gamma event 934146 Chelsea FC vs. Hull City AFC. Kickoff-selection regression fixture, not a live quote or paper fill.",
+  "source": "https://gamma-api.polymarket.com/events/934146",
+  "retrieved_at": "2026-09-12T14:36:20Z",
+  "payload": {
+    "id": "934146",
+    "title": "Chelsea FC vs. Hull City AFC",
+    "slug": "epl-che-hul-2026-09-12",
+    "ticker": "epl-che-hul-2026-09-12",
+    "startDate": "2026-08-30T04:00:12Z",
+    "startTime": "2026-09-12T14:00:00Z",
+    "endDate": "2026-09-12T14:00:00Z",
+    "eventDate": "2026-09-12",
+    "createdAt": "2026-08-30T04:00:01.042958Z",
+    "creationDate": "2026-08-30T04:01:14.948205Z",
+    "series": [
+      {
+        "id": "10188",
+        "ticker": "premier-league-2025",
+        "slug": "premier-league-2025",
+        "title": "Premier League 2025",
+        "seriesType": "single",
+        "recurrence": "daily",
+        "image": "",
+        "icon": "",
+        "active": true,
+        "closed": false,
+        "archived": false,
+        "featured": false,
+        "restricted": true,
+        "createdAt": "2025-08-08T14:56:37.247227Z",
+        "updatedAt": "2026-09-12T14:32:15.568202Z",
+        "volume24hr": 6706108.2907960005,
+        "volume": 7619981.257860001,
+        "liquidity": 17484655.36066,
+        "commentCount": 3169,
+        "requiresTranslation": false
+      }
+    ],
+    "sport": {
+      "id": 2,
+      "sport": "epl",
+      "name": "Premier League",
+      "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/league-icons/epl-24885021.png",
+      "resolution": "https://www.premierleague.com/",
+      "ordering": "home",
+      "tags": "1,82,306,100639,100350",
+      "primaryTagId": 306,
+      "series": "10188",
+      "createdAt": "2025-11-05T19:27:45.399303Z"
+    },
+    "markets": [
+      {
+        "id": "3989227",
+        "question": "Will Chelsea FC win on 2026-09-12?",
+        "sportsMarketType": "moneyline",
+        "outcomes": "[\"Yes\", \"No\"]",
+        "clobTokenIds": "[\"8345235115259791017124926977649814015774877062975656424337303351144207238697\", \"16366698950196598716681858663809384555875072025205059329422753308343230597015\"]",
+        "description": "In the upcoming game, scheduled for September 12, 2026\nIf Chelsea FC wins, this market will resolve to \"Yes\".\nOtherwise, this market will resolve to \"No\".\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely, with no make-up game, this market will resolve \"No\".\nThis market refers only to the outcome within the first 90 minutes of regular play plus stoppage time.\n\nThe primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. However, if the governing body or event organizers have not published final match statistics within 2 hours after the event's conclusion, data from Flashscore may be used; if Flashscore data is unavailable, data from Sofascore may be used; if neither is available, a consensus of credible reporting may be used instead. All markets will settle based on the official final result as recognized by the governing body or event organizers. Revisions to officially declared final scores made after market resolution will not be accounted for in determining the outcome.",
+        "startDate": "2026-08-30T04:00:12Z",
+        "endDate": "2026-09-12T14:00:00Z",
+        "gameStartTime": "2026-09-12 14:00:00+00",
+        "startDateIso": "2026-08-30",
+        "endDateIso": "2026-09-12"
+      }
+    ]
+  }
+}

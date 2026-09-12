@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, computed_field, model_validator
 from sports_hedge.accounting.dimensions import CapitalSource, StrategyBook
 from sports_hedge.arbitrage.models import ArbitrageSolution, ArbitrageStake, ExecutableQuote
 from sports_hedge.domain.models import VenueName
+from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.models import FeeSnapshot
 from sports_hedge.paper.models import FxRateSnapshot
 
@@ -441,6 +442,7 @@ class PriorityAlertCandidate(BaseModel):
     ordinary_solution: ArbitrageSolution
     legs: list[PriorityLeg]
     fee_snapshots: list[FeeSnapshot] = Field(default_factory=list)
+    venue_costs: list[VenueCostSnapshot] = Field(default_factory=list)
     fx_snapshots: list[FxRateSnapshot] = Field(default_factory=list)
     automated_pools: list[AutomatedPoolBalance] = Field(default_factory=list)
     execution_risk_score: int = Field(default=0, ge=0, le=100)

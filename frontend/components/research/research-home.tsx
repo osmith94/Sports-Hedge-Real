@@ -13,11 +13,18 @@ import { DemoBanner } from "./demo-banner";
 import { UpcomingFixtures } from "./upcoming-fixtures";
 import { ValueSignals } from "./value-signals";
 import { HistoricalCoverageSeam } from "./historical-coverage";
+import { getHistoricalCoverage } from "../../lib/api";
 
-export function ResearchHome() {
+export async function ResearchHome() {
   const top = rankedResearchSignals[0];
   const topQuote = top ? bestAvailableQuote(top) : undefined;
   const topEv = top && topQuote?.netDecimal != null ? evPerPound(top.modelProbability, topQuote.netDecimal) : null;
+  let coverage = null;
+  try {
+    coverage = await getHistoricalCoverage();
+  } catch {
+    coverage = null;
+  }
 
   return (
     <div className={styles.page}>
@@ -64,7 +71,7 @@ export function ResearchHome() {
       <ValueSignals />
       <UpcomingFixtures />
       <BrowseGrid />
-      <HistoricalCoverageSeam />
+      <HistoricalCoverageSeam coverage={coverage} />
       <ArbitrageWorkspaceCta />
     </div>
   );

@@ -617,11 +617,24 @@ class SqliteHistoricalRepository:
 
     def count_matches(self) -> int:
         row = self._connection.execute("SELECT COUNT(*) AS n FROM matches").fetchone()
-        return int(row["n"])
+        return int(row["n"]) if row is not None else 0
 
     def count_events(self) -> int:
         row = self._connection.execute("SELECT COUNT(*) AS n FROM match_events").fetchone()
         return int(row["n"])
+
+    def match_counts_by_competition_season(self) -> list[tuple[str, str, int]]:
+        rows = self._connection.execute(
+            """
+            SELECT c.name AS competition_name, s.label AS season_label, COUNT(*) AS n
+            FROM matches m
+            JOIN competitions c ON c.competition_id = m.competition_id
+            JOIN seasons s ON s.season_id = m.season_id
+            GROUP BY c.name, s.label
+            ORDER BY c.name, s.label
+            """
+        ).fetchall()
+        return [(str(row["competition_name"]), str(row["season_label"]), int(row["n"])) for row in rows]
 
     def close(self) -> None:
         self._connection.close()

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
+from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import VenueName
 
@@ -88,25 +89,32 @@ class WatchObservation(BaseModel):
     legs: list[WatchLeg] = Field(default_factory=list)
     trigger_net_edge: Decimal = Field(ge=0)
     current_net_edge: Decimal | None = None
+    gross_edge: Decimal | None = None
     implied_probability_sum: Decimal | None = Field(default=None, gt=0)
     solver_is_arbitrage: bool = False
     eligible_for_paper_simulation: bool = False
     rejection_reasons: list[str] = Field(default_factory=list)
     execution_risk_score: int | None = Field(default=None, ge=0, le=100)
     quote_age_ms: int | None = Field(default=None, ge=0)
+    quote_age_basis: str | None = None
     limiting_depth_gbp: Decimal | None = Field(default=None, ge=0)
     limiting_leg_outcome: str | None = None
     capital_required_gbp: Decimal | None = Field(default=None, ge=0)
     guaranteed_profit_gbp: Decimal | None = None
     expected_lock_minutes: Decimal | None = Field(default=None, ge=0)
     kickoff_utc: datetime | None = None
+    fixture_discovery_source: VenueName | None = None
+    fixture_status: str | None = None
+    in_running: bool | None = None
+    live_score_supported: bool = False
+    home_score: int | None = Field(default=None, ge=0)
+    away_score: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> WatchObservation:
-        if self.observed_at.tzinfo is None:
-            self.observed_at = self.observed_at.replace(tzinfo=UTC)
-        if self.kickoff_utc is not None and self.kickoff_utc.tzinfo is None:
-            self.kickoff_utc = self.kickoff_utc.replace(tzinfo=UTC)
+        self.observed_at = require_aware_instant(self.observed_at, "observed_at")
+        if self.kickoff_utc is not None:
+            self.kickoff_utc = require_aware_instant(self.kickoff_utc, "kickoff_utc")
         if not self.venues:
             self.venues = list(dict.fromkeys(leg.venue for leg in self.legs))
         return self
@@ -129,9 +137,11 @@ class NearOpportunity(BaseModel):
     is_arbitrage: bool = False
     trigger_net_edge: Decimal
     current_net_edge: Decimal | None = None
+    gross_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
     implied_probability_sum: Decimal | None = None
     quote_age_ms: int | None = Field(default=None, ge=0)
+    quote_age_basis: str | None = None
     limiting_depth_gbp: Decimal | None = None
     limiting_leg_outcome: str | None = None
     capital_required_gbp: Decimal | None = None
@@ -142,16 +152,24 @@ class NearOpportunity(BaseModel):
     last_seen_at: datetime
     rejection_reasons: list[str] = Field(default_factory=list)
     insufficiency_reasons: list[str] = Field(default_factory=list)
+    fixture_discovery_source: VenueName | None = None
+    fixture_status: str | None = None
+    in_running: bool | None = None
+    live_score_supported: bool = False
+    home_score: int | None = Field(default=None, ge=0)
+    away_score: int | None = Field(default=None, ge=0)
+    strike_narrative: str | None = None
+    previous_net_edge: Decimal | None = None
+    previous_distance_to_trigger_pp: Decimal | None = None
+    observation_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def enforce_non_arbitrage_labelling(self) -> NearOpportunity:
         if self.status != OpportunityStatus.TRIGGERED:
             self.is_arbitrage = False
             self.guaranteed_profit_gbp = None
-        if self.first_seen_at.tzinfo is None:
-            self.first_seen_at = self.first_seen_at.replace(tzinfo=UTC)
-        if self.last_seen_at.tzinfo is None:
-            self.last_seen_at = self.last_seen_at.replace(tzinfo=UTC)
+        self.first_seen_at = require_aware_instant(self.first_seen_at, "first_seen_at")
+        self.last_seen_at = require_aware_instant(self.last_seen_at, "last_seen_at")
         return self
 
 
@@ -167,6 +185,40 @@ class OpportunityLifecycleEvent(BaseModel):
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> OpportunityLifecycleEvent:
-        if self.occurred_at.tzinfo is None:
-            self.occurred_at = self.occurred_at.replace(tzinfo=UTC)
+        self.occurred_at = require_aware_instant(self.occurred_at, "occurred_at")
         return self
+
+
+class OpportunityObservationPoint(BaseModel):
+    """Append-only net-edge sample. Sequence is observational, not causal."""
+
+    opportunity_id: str
+    observed_at: datetime
+    current_net_edge: Decimal | None = None
+    distance_to_trigger_pp: Decimal | None = None
+    quote_age_ms: int | None = Field(default=None, ge=0)
+    status: OpportunityStatus
+
+    @model_validator(mode="after")
+    def ensure_timezone(self) -> OpportunityObservationPoint:
+        self.observed_at = require_aware_instant(self.observed_at, "observed_at")
+        return self
+
+
+def strike_distance_narrative(
+    points: list[OpportunityObservationPoint],
+) -> tuple[str | None, Decimal | None, Decimal | None]:
+    """Describe recent distance-to-trigger change without claiming cause."""
+
+    if len(points) < 2:
+        return "insufficient_history", None, None
+    previous, current = points[-2], points[-1]
+    if previous.distance_to_trigger_pp is None or current.distance_to_trigger_pp is None:
+        return "insufficient_history", previous.current_net_edge, previous.distance_to_trigger_pp
+    if current.distance_to_trigger_pp < previous.distance_to_trigger_pp:
+        label = "approaching"
+    elif current.distance_to_trigger_pp > previous.distance_to_trigger_pp:
+        label = "moving_away"
+    else:
+        label = "stable"
+    return label, previous.current_net_edge, previous.distance_to_trigger_pp

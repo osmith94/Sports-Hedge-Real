@@ -1,0 +1,32 @@
+{
+  "fixture_id": "matchbook-event-chelsea-hull-discovery",
+  "identified_as": "PINNED Matchbook-shaped discovery fixture for Chelsea vs Hull. Fixture clocks and settlement only — not authenticated live Matchbook access.",
+  "source": "fixture",
+  "retrieved_at": "2026-09-12T13:59:50Z",
+  "payload": {
+    "id": 88001,
+    "name": "Chelsea FC vs Hull City AFC",
+    "start": "2026-09-12T14:00:00Z",
+    "competition-name": "Premier League",
+    "status": "open",
+    "markets": [
+      {
+        "id": 99001,
+        "name": "Match Odds",
+        "runners": [
+          {"id": 1, "name": "Chelsea FC", "prices": [{"side": "back", "odds": "1.40", "available-amount": "200", "odds-time": "2026-09-12T13:59:40Z"}]},
+          {"id": 2, "name": "Draw", "prices": [{"side": "back", "odds": "4.50", "available-amount": "120", "odds-time": "2026-09-12T13:59:40Z"}]},
+          {"id": 3, "name": "Hull City AFC", "prices": [{"side": "back", "odds": "8.00", "available-amount": "80", "odds-time": "2026-09-12T13:59:40Z"}]}
+        ]
+      },
+      {
+        "id": 99002,
+        "name": "Both Teams To Score",
+        "runners": [
+          {"id": 11, "name": "Yes", "prices": [{"side": "back", "odds": "2.10", "available-amount": "150", "odds-time": "2026-09-12T13:59:41Z"}]},
+          {"id": 12, "name": "No", "prices": [{"side": "back", "odds": "1.80", "available-amount": "150", "odds-time": "2026-09-12T13:59:41Z"}]}
+        ]
+      }
+    ]
+  }
+}

@@ -38,7 +38,11 @@ class MarketMatcher:
             reasons.append("period_mismatch")
         if left.line != right.line:
             reasons.append("line_mismatch")
-        if left.settlement.deterministic_key() != right.settlement.deterministic_key():
+        left_complete = left.settlement.is_economically_complete()
+        right_complete = right.settlement.is_economically_complete()
+        if not left_complete or not right_complete:
+            reasons.append("incomplete_settlement")
+        elif left.settlement.deterministic_key() != right.settlement.deterministic_key():
             reasons.append("settlement_mismatch")
 
         left_outcomes = {runner.outcome for runner in left.runners}

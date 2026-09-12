@@ -9,10 +9,10 @@ import pytest
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.domain.models import VenueName
-from sports_hedge.fees.models import FeeSnapshot
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
+from venue_cost_helpers import matchbook_polymarket_costs
 
 
 KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
@@ -98,13 +98,13 @@ class FakePolymarket:
             {
                 "id": "pm-event-1",
                 "title": "Newcastle United vs Chelsea",
-                "startDate": KICKOFF.isoformat(),
+                "startTime": KICKOFF.isoformat(),
                 "competition": "Premier League",
             },
             {
                 "id": "pm-event-2",
                 "title": "Arsenal vs Liverpool",
-                "startDate": KICKOFF.isoformat(),
+                "startTime": KICKOFF.isoformat(),
                 "competition": "Premier League",
             },
         ]
@@ -141,15 +141,18 @@ class FakePolymarket:
         assert outcome_id is not None
         token = str(outcome_id)
         self.book_calls.append(token)
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
         if token == "yes-token":
             return {
                 "asset_id": token,
+                "timestamp": now_ms - 200,
                 "bids": [{"price": "0.49", "size": "250"}],
                 "asks": [{"price": "0.51", "size": "250"}],
             }
         if token == "no-token":
             return {
                 "asset_id": token,
+                "timestamp": now_ms - 180,
                 "bids": [{"price": "0.41", "size": "300"}],
                 "asks": [{"price": "0.43", "size": "300"}],
             }
@@ -170,15 +173,14 @@ async def test_collector_discovers_matches_fetches_books_and_feeds_paper_pipelin
 
     try:
         report = await collector.collect_and_scan(
-            fee_snapshots=[
-                FeeSnapshot(venue=VenueName.MATCHBOOK, profit_haircut_rate=Decimal("0.02")),
-                FeeSnapshot(venue=VenueName.POLYMARKET, profit_haircut_rate=Decimal("0")),
-            ],
+            venue_costs=matchbook_polymarket_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             capital_limit_gbp=Decimal("100"),
             maximum_execution_risk=100,
         )
 
+        assert report.discovery_source == VenueName.MATCHBOOK
+        assert report.matching_venue == VenueName.POLYMARKET
         assert report.raw_matchbook_events == 2
         assert report.raw_polymarket_events == 2
         assert report.normalized_matchbook_events == 1
@@ -190,7 +192,18 @@ async def test_collector_discovers_matches_fetches_books_and_feeds_paper_pipelin
         assert report.order_books_fetched == 2
         assert polymarket.book_calls == ["yes-token", "no-token"]
         assert len(report.paper_decisions) == 1
+        assert report.discovered_fixtures
+        discovered = {item.source_event_id: item for item in report.discovered_fixtures}
+        assert "1001" in discovered
+        assert discovered["1001"].polymarket_matched is True
+        assert discovered["1001"].live_score_supported is False
+        assert discovered["1001"].home_score is None
         decision = report.paper_decisions[0]
+        assert decision.fixture_discovery_source == VenueName.MATCHBOOK
+        assert decision.live_score_supported is False
+        assert decision.quote_age_ms is not None
+        assert decision.quote_age_ms < 2000
+        assert "unknown_quote_age" not in decision.rejection_reasons
         assert decision.depth_scan is not None
         assert decision.depth_scan.solution.is_arbitrage is True
         assert decision.eligible_for_paper_simulation is True
@@ -222,10 +235,7 @@ async def test_collector_pairs_each_event_only_once() -> None:
 
     try:
         report = await collector.collect_and_scan(
-            fee_snapshots=[
-                FeeSnapshot(venue=VenueName.MATCHBOOK),
-                FeeSnapshot(venue=VenueName.POLYMARKET),
-            ],
+            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             maximum_execution_risk=100,
         )

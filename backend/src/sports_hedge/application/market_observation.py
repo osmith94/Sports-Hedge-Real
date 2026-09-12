@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from pydantic import BaseModel, Field, model_validator
 
+from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.domain.football import CanonicalMarket, CanonicalOutcome
 from sports_hedge.domain.models import VenueName
 from sports_hedge.liquidity.book import BookLevel
@@ -53,14 +54,19 @@ class VenueMarketObservation(BaseModel):
     native_currency: str
     outcome_books: list[OutcomeOrderBook]
     source_latency_ms: int = Field(default=0, ge=0)
-    quote_age_ms: int = Field(default=0, ge=0)
+    quote_age_ms: int | None = Field(default=None, ge=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_observation(self) -> "VenueMarketObservation":
-        if self.observed_at.tzinfo is None:
-            self.observed_at = self.observed_at.replace(tzinfo=UTC)
+        self.observed_at = require_aware_instant(self.observed_at, "observed_at")
         self.native_currency = self.native_currency.upper()
+        if self.market.event.kickoff_utc.tzinfo is None:
+            raise ValueError("kickoff_utc must be timezone-aware")
+        self.market.event.kickoff_utc = require_aware_instant(
+            self.market.event.kickoff_utc,
+            "kickoff_utc",
+        )
         outcomes = [book.outcome for book in self.outcome_books]
         if len(outcomes) != len(set(outcomes)):
             raise ValueError("outcome_books must contain unique canonical outcomes")
@@ -160,7 +166,9 @@ class MatchbookObservationBuilder:
         observed_at: datetime | None = None,
         native_currency: str = "GBP",
         source_latency_ms: int = 0,
-        quote_age_ms: int = 0,
+        quote_age_ms: int | None = None,
+        quote_age_basis: str | None = None,
+        quote_age_reason: str | None = None,
     ) -> VenueMarketObservation:
         event = self.normalizer.normalize_event(event_payload)
         market = self.normalizer.normalize_market(event, market_payload)
@@ -201,7 +209,11 @@ class MatchbookObservationBuilder:
             outcome_books=books,
             source_latency_ms=source_latency_ms,
             quote_age_ms=quote_age_ms,
-            metadata={"price_model": "exchange_back_lay"},
+            metadata=_quote_metadata(
+                "exchange_back_lay",
+                basis=quote_age_basis,
+                reason=quote_age_reason,
+            ),
         )
 
 
@@ -217,7 +229,9 @@ class PolymarketObservationBuilder:
         *,
         observed_at: datetime | None = None,
         source_latency_ms: int = 0,
-        quote_age_ms: int = 0,
+        quote_age_ms: int | None = None,
+        quote_age_basis: str | None = None,
+        quote_age_reason: str | None = None,
     ) -> VenueMarketObservation:
         event = self.normalizer.normalize_event(event_payload)
         market = self.normalizer.normalize_market(event, market_payload)
@@ -242,7 +256,11 @@ class PolymarketObservationBuilder:
             outcome_books=books,
             source_latency_ms=source_latency_ms,
             quote_age_ms=quote_age_ms,
-            metadata={"price_model": "clob_token_probability"},
+            metadata=_quote_metadata(
+                "clob_token_probability",
+                basis=quote_age_basis,
+                reason=quote_age_reason,
+            ),
         )
 
 
@@ -314,3 +332,17 @@ def _decimal_from(payload: Mapping[str, Any], *keys: str) -> Decimal | None:
         except (InvalidOperation, ValueError):
             continue
     return None
+
+
+def _quote_metadata(
+    price_model: str,
+    *,
+    basis: str | None,
+    reason: str | None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {"price_model": price_model}
+    if basis:
+        metadata["quote_age_basis"] = basis
+    if reason:
+        metadata["quote_age_reason"] = reason
+    return metadata

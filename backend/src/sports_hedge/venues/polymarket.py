@@ -42,12 +42,27 @@ class PolymarketClient(ReadOnlyVenue):
         )
 
     async def list_events(self, **filters: Any) -> list[dict[str, Any]]:
+        """List public Gamma events.
+
+        Unfiltered ``limit=100`` is an observed audit gap: the first page is
+        typically non-football. Public ``GET /sports`` metadata reports EPL
+        ``series=10188``. When configured, that series filter is applied
+        through this existing ``series_id`` query param. Pagination is still
+        not implemented.
+        """
+
         params: dict[str, Any] = {
             "active": "true",
             "closed": "false",
             "limit": 100,
             **filters,
         }
+        configured = (self.settings.polymarket_gamma_series_id or "").strip()
+        series_id = params.get("series_id")
+        if (series_id is None or str(series_id).strip() == "") and configured:
+            params["series_id"] = configured
+        elif series_id is not None and str(series_id).strip() == "":
+            params.pop("series_id", None)
         response = await self._client.get(
             f"{self.settings.polymarket_gamma_base_url.rstrip('/')}/events",
             params=params,

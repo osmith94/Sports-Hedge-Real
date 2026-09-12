@@ -44,6 +44,7 @@ export type ArbitrageOpportunity = {
   settlement: string;
   venues: Venue[] | string[];
   netArb: number | null;
+  grossArb: number | null;
   trigger: number;
   distanceToTriggerPp: number | null;
   movement: "up" | "down" | "flat" | null;
@@ -59,6 +60,12 @@ export type ArbitrageOpportunity = {
   scannedAt?: string | null;
   guaranteedProfitGbp: number | null;
   executionRisk?: string | null;
+  discoverySource?: string | null;
+  fixtureStatus?: string | null;
+  inRunning?: boolean | null;
+  liveScoreLabel?: string | null;
+  strikeNarrative?: string | null;
+  observationCount?: number | null;
 };
 
 export type ActivityEvent = {
@@ -111,12 +118,13 @@ export const DEMO_NEAR_ARB: ArbitrageOpportunity[] = [
     settlement: "regulation time · 1X2",
     venues: ["matchbook", "polymarket"],
     netArb: 0.008,
+    grossArb: 0.009,
     trigger: 0.01,
     distanceToTriggerPp: 0.2,
     movement: "up",
     capitalRequiredGbp: 740,
     expectedLock: "until FT + settlement (~2h 40m)",
-    quoteFreshness: "1.4s · both legs",
+    quoteFreshness: "1.4s · both legs · at last evaluation",
     executableDepth: "£740 limited by Polymarket home",
     limitingLeg: "Polymarket · Home",
     riskFlags: ["quote_age_ok", "mapping 99.1%"],
@@ -136,12 +144,13 @@ export const DEMO_NEAR_ARB: ArbitrageOpportunity[] = [
     settlement: "regulation time · yes/no",
     venues: ["matchbook", "polymarket"],
     netArb: 0.0071,
+    grossArb: 0.008,
     trigger: 0.01,
     distanceToTriggerPp: 0.29,
     movement: "flat",
     capitalRequiredGbp: 410,
     expectedLock: "until FT (~3h 05m)",
-    quoteFreshness: "2.8s · Matchbook lagging",
+    quoteFreshness: "2.8s · Matchbook lagging · at last evaluation",
     executableDepth: "£410 limited by Matchbook Yes",
     limitingLeg: "Matchbook · Yes",
     riskFlags: ["thin_away_depth"],
@@ -164,12 +173,13 @@ export const DEMO_EXECUTABLE: ArbitrageOpportunity[] = [
     settlement: "regulation time · two-way",
     venues: ["matchbook", "polymarket"],
     netArb: 0.0124,
+    grossArb: 0.014,
     trigger: 0.01,
     distanceToTriggerPp: 0,
     movement: "up",
     capitalRequiredGbp: 520,
     expectedLock: "until FT (~1h 50m)",
-    quoteFreshness: "0.9s · both legs",
+    quoteFreshness: "0.9s · both legs · at last evaluation",
     executableDepth: "£520 · 62% of quoted size",
     limitingLeg: "Polymarket · Away",
     riskFlags: [],
@@ -262,13 +272,14 @@ export const DEMO_MANUAL_EXTERNAL: ArbitrageOpportunity = {
   settlement: "regulation time · 1X2 · Polymarket leg is external-manual",
   venues: ["matchbook", "polymarket"],
   netArb: 0.018,
+  grossArb: 0.021,
   trigger: 0.01,
   distanceToTriggerPp: 0,
   movement: "up",
   capitalRequiredGbp: 380,
-  expectedLock: "awaiting external confirmation",
-  quoteFreshness: "1.1s Matchbook · Polymarket not auto-executable",
-  executableDepth: "Matchbook hedge held · Polymarket not drawn from AUTO_POOL",
+    expectedLock: "awaiting external confirmation",
+    quoteFreshness: "1.1s Matchbook · Polymarket not auto-executable · at last evaluation",
+    executableDepth: "Matchbook hedge held · Polymarket not drawn from AUTO_POOL",
   limitingLeg: "Polymarket · Away (MANUAL_EXTERNAL)",
   riskFlags: ["AWAITING_EXTERNAL_LEG_CONFIRMATION", "MANUAL_EXTERNAL"],
   currencies: ["GBP", "USD"],

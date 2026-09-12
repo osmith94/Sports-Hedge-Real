@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from decimal import Decimal
 
+from sports_hedge.application.quote_freshness import (
+    effective_quote_age_ms,
+    require_aware_instant,
+)
 from sports_hedge.arbitrage.watchlist.adapter import observation_from_paper_decision
 from sports_hedge.arbitrage.watchlist.economics import (
     classification_for,
@@ -17,9 +22,12 @@ from sports_hedge.arbitrage.watchlist.models import (
     OpportunityLifecycleEvent,
     OpportunityStatus,
     WatchObservation,
+    strike_distance_narrative,
+    OpportunityObservationPoint,
 )
 from sports_hedge.arbitrage.watchlist.ranking import (
     rank_near_opportunities,
+    rank_tracked_opportunities,
     rank_triggered_opportunities,
 )
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
@@ -38,6 +46,7 @@ class WatchlistService:
         *,
         approaching_band_pp: Decimal = Decimal("0.50"),
         max_quote_age_ms: int = 1000,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if approaching_band_pp < 0:
             raise ValueError("approaching_band_pp must be non-negative")
@@ -46,6 +55,7 @@ class WatchlistService:
         self.repository = repository or SqliteWatchlistRepository()
         self.approaching_band_pp = approaching_band_pp
         self.max_quote_age_ms = max_quote_age_ms
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def observe_paper_decision(
         self,
@@ -53,11 +63,13 @@ class WatchlistService:
         history: Sequence[MarketSnapshot] = (),
         *,
         quote_age_ms: int | None = None,
+        quote_age_basis: str | None = None,
     ) -> NearOpportunity | None:
         observation = observation_from_paper_decision(
             decision,
             history,
             quote_age_ms=quote_age_ms,
+            quote_age_basis=quote_age_basis,
         )
         if observation is None:
             return None
@@ -101,9 +113,11 @@ class WatchlistService:
             is_arbitrage=is_arbitrage,
             trigger_net_edge=observation.trigger_net_edge,
             current_net_edge=observation.current_net_edge,
+            gross_edge=observation.gross_edge,
             distance_to_trigger_pp=distance,
             implied_probability_sum=observation.implied_probability_sum,
             quote_age_ms=observation.quote_age_ms,
+            quote_age_basis=observation.quote_age_basis,
             limiting_depth_gbp=observation.limiting_depth_gbp,
             limiting_leg_outcome=observation.limiting_leg_outcome,
             capital_required_gbp=observation.capital_required_gbp,
@@ -116,6 +130,32 @@ class WatchlistService:
             last_seen_at=observation.observed_at,
             rejection_reasons=reasons,
             insufficiency_reasons=insufficiency_reasons(reasons),
+            fixture_discovery_source=observation.fixture_discovery_source,
+            fixture_status=observation.fixture_status,
+            in_running=observation.in_running,
+            live_score_supported=observation.live_score_supported,
+            home_score=observation.home_score if observation.live_score_supported else None,
+            away_score=observation.away_score if observation.live_score_supported else None,
+        )
+        self.repository.append_observation(
+            OpportunityObservationPoint(
+                opportunity_id=opportunity_id,
+                observed_at=observation.observed_at,
+                current_net_edge=observation.current_net_edge,
+                distance_to_trigger_pp=distance,
+                quote_age_ms=observation.quote_age_ms,
+                status=status,
+            )
+        )
+        history = self.repository.list_observations(opportunity_id)
+        narrative, previous_edge, previous_distance = strike_distance_narrative(history)
+        opportunity = opportunity.model_copy(
+            update={
+                "strike_narrative": narrative,
+                "previous_net_edge": previous_edge,
+                "previous_distance_to_trigger_pp": previous_distance,
+                "observation_count": len(history),
+            }
         )
         self.repository.upsert_opportunity(opportunity)
         self._append_lifecycle(previous, opportunity, observation)
@@ -200,9 +240,15 @@ class WatchlistService:
         competition: str | None = None,
         venue: VenueName | None = None,
         market_family: MarketFamily | None = None,
+        as_of: datetime | None = None,
     ) -> list[NearOpportunity]:
         return rank_near_opportunities(
-            self._filtered(competition=competition, venue=venue, market_family=market_family),
+            self._freshness_filtered(
+                competition=competition,
+                venue=venue,
+                market_family=market_family,
+                as_of=as_of,
+            ),
             limit=limit,
         )
 
@@ -213,9 +259,36 @@ class WatchlistService:
         competition: str | None = None,
         venue: VenueName | None = None,
         market_family: MarketFamily | None = None,
+        as_of: datetime | None = None,
     ) -> list[NearOpportunity]:
         return rank_triggered_opportunities(
-            self._filtered(competition=competition, venue=venue, market_family=market_family),
+            self._freshness_filtered(
+                competition=competition,
+                venue=venue,
+                market_family=market_family,
+                as_of=as_of,
+            ),
+            limit=limit,
+        )
+
+    def tracked(
+        self,
+        *,
+        limit: int = 100,
+        competition: str | None = None,
+        venue: VenueName | None = None,
+        market_family: MarketFamily | None = None,
+        as_of: datetime | None = None,
+    ) -> list[NearOpportunity]:
+        """Canonical markets currently on the watchlist, including below-break-even net edges."""
+
+        return rank_tracked_opportunities(
+            self._freshness_filtered(
+                competition=competition,
+                venue=venue,
+                market_family=market_family,
+                as_of=as_of,
+            ),
             limit=limit,
         )
 
@@ -231,6 +304,74 @@ class WatchlistService:
             opportunity_id=opportunity_id,
             since=since,
         )
+
+    def _freshness_filtered(
+        self,
+        *,
+        competition: str | None,
+        venue: VenueName | None,
+        market_family: MarketFamily | None,
+        as_of: datetime | None,
+    ) -> list[NearOpportunity]:
+        evaluated = require_aware_instant(as_of or self._clock(), "as_of")
+        return [
+            self._present_freshness(item, evaluated)
+            for item in self._filtered(
+                competition=competition,
+                venue=venue,
+                market_family=market_family,
+            )
+        ]
+
+    def _present_freshness(self, item: NearOpportunity, as_of: datetime) -> NearOpportunity:
+        fill_or_terminal = {
+            OpportunityStatus.PAPER_FILLING,
+            OpportunityStatus.PARTIAL,
+            OpportunityStatus.FILLED,
+            OpportunityStatus.CLOSED,
+            OpportunityStatus.EXPIRED,
+        }
+        effective = effective_quote_age_ms(item.quote_age_ms, item.last_seen_at, as_of)
+        if item.status in fill_or_terminal:
+            return item.model_copy(update={"quote_age_ms": effective})
+
+        stale = effective is None or effective >= self.max_quote_age_ms
+        if not stale:
+            return item.model_copy(update={"quote_age_ms": effective})
+
+        reason = "unknown_quote_age" if effective is None else "stale_quote"
+        reasons = list(dict.fromkeys([*item.rejection_reasons, reason]))
+        persisted = item.model_copy(
+            update={
+                "status": OpportunityStatus.REJECTED,
+                "classification": classification_for(OpportunityStatus.REJECTED),
+                "is_arbitrage": False,
+                "guaranteed_profit_gbp": None,
+                "rejection_reasons": reasons,
+            }
+        )
+        if item.status in {
+            OpportunityStatus.WATCHING,
+            OpportunityStatus.APPROACHING,
+            OpportunityStatus.TRIGGERED,
+        }:
+            self.repository.upsert_opportunity(persisted)
+            events = [
+                self._event(
+                    persisted, LifecycleEventType.REJECTED_STALE_QUOTE, detail=reason
+                ).model_copy(update={"occurred_at": as_of})
+            ]
+            if item.status == OpportunityStatus.TRIGGERED:
+                events.append(
+                    self._event(
+                        persisted,
+                        LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
+                        detail="quotes_aged_out_before_paper_fill",
+                    ).model_copy(update={"occurred_at": as_of})
+                )
+            for event in events:
+                self.repository.append_event(event)
+        return persisted.model_copy(update={"quote_age_ms": effective})
 
     def _filtered(
         self,
@@ -435,6 +576,7 @@ class WatchlistService:
             "event_mismatch",
             "settlement_mismatch",
             "unknown_settlement_scope",
+            "incomplete_settlement",
             "noncanonical_outcome_space",
             "mapping_confidence_below_threshold",
             "same_venue_pair",

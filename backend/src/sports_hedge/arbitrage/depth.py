@@ -8,8 +8,10 @@ from pydantic import BaseModel, Field
 from sports_hedge.arbitrage.models import ArbitrageSolution, ExecutableQuote
 from sports_hedge.arbitrage.solver import CompleteSetArbitrageSolver
 from sports_hedge.domain.models import VenueName
-from sports_hedge.fees.models import FeeSnapshot
+from sports_hedge.fees.cost import VenueCostSnapshot
+from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.liquidity.book import BookLevel
+from sports_hedge.paper.fills import apply_odds_haircut
 
 
 class DepthQuoteSource(BaseModel):
@@ -18,7 +20,7 @@ class DepthQuoteSource(BaseModel):
     source_market_id: str
     source_runner_id: str
     levels: list[BookLevel]
-    fee_snapshot: FeeSnapshot
+    cost: VenueCostSnapshot
 
 
 class DepthQuoteCandidate(BaseModel):
@@ -45,6 +47,7 @@ class DepthScanResult(BaseModel):
     solution: ArbitrageSolution
     selected_quotes: list[DepthQuoteCandidate] = Field(default_factory=list)
     combinations_evaluated: int = Field(default=0, ge=0)
+    cost_rejection_reasons: list[str] = Field(default_factory=list)
 
 
 class DepthAwareCompleteSetScanner:
@@ -66,6 +69,7 @@ class DepthAwareCompleteSetScanner:
         *,
         expected_outcomes: list[str],
         capital_limit: Decimal | None = None,
+        configured_slippage_bps: Decimal | None = None,
     ) -> DepthScanResult:
         expected = list(dict.fromkeys(expected_outcomes))
         if len(expected) < 2:
@@ -78,18 +82,27 @@ class DepthAwareCompleteSetScanner:
             )
 
         options_by_outcome: dict[str, list[DepthQuoteCandidate]] = {outcome: [] for outcome in expected}
+        cost_reasons: list[str] = []
         for source in sources:
             if source.outcome not in options_by_outcome:
                 continue
-            options_by_outcome[source.outcome].extend(_prefix_candidates(source))
+            candidates, reasons = _prefix_candidates(
+                source,
+                configured_slippage_bps=configured_slippage_bps,
+            )
+            cost_reasons.extend(reasons)
+            options_by_outcome[source.outcome].extend(candidates)
 
+        cost_reasons = list(dict.fromkeys(cost_reasons))
         if any(not options for options in options_by_outcome.values()):
+            reason = cost_reasons[0] if cost_reasons else "missing_executable_outcome_depth"
             return DepthScanResult(
                 solution=ArbitrageSolution(
                     is_arbitrage=False,
                     implied_probability_sum=Decimal("1"),
-                    rejection_reason="missing_executable_outcome_depth",
-                )
+                    rejection_reason=reason,
+                ),
+                cost_rejection_reasons=cost_reasons,
             )
 
         best_solution: ArbitrageSolution | None = None
@@ -122,25 +135,43 @@ class DepthAwareCompleteSetScanner:
                 solution=rejected,
                 selected_quotes=best_top,
                 combinations_evaluated=combinations_evaluated,
+                cost_rejection_reasons=cost_reasons,
             )
 
         return DepthScanResult(
             solution=best_solution,
             selected_quotes=best_candidates,
             combinations_evaluated=combinations_evaluated,
+            cost_rejection_reasons=cost_reasons,
         )
 
 
-def _prefix_candidates(source: DepthQuoteSource) -> list[DepthQuoteCandidate]:
+def _prefix_candidates(
+    source: DepthQuoteSource,
+    *,
+    configured_slippage_bps: Decimal | None,
+) -> tuple[list[DepthQuoteCandidate], list[str]]:
     ordered = sorted(source.levels, key=lambda item: item.decimal_odds, reverse=True)
     candidates: list[DepthQuoteCandidate] = []
+    cost_reasons: list[str] = []
     cumulative_stake = Decimal("0")
     cumulative_return = Decimal("0")
     for index, level in enumerate(ordered, start=1):
         cumulative_stake += level.available_stake
         cumulative_return += level.available_stake * level.decimal_odds
         gross_average = cumulative_return / cumulative_stake
-        net_average = source.fee_snapshot.apply_to_decimal_odds(gross_average)
+        try:
+            economics = apply_venue_costs(
+                source.cost,
+                gross_decimal_odds=gross_average,
+                require_gbp=False,
+            )
+        except CostRuleError as exc:
+            cost_reasons.append(exc.reason)
+            continue
+        net_average = economics.net_decimal_equivalent
+        if configured_slippage_bps:
+            net_average = apply_odds_haircut(net_average, configured_slippage_bps)
         if net_average <= 1:
             continue
         candidates.append(
@@ -155,7 +186,7 @@ def _prefix_candidates(source: DepthQuoteSource) -> list[DepthQuoteCandidate]:
                 levels_consumed=index,
             )
         )
-    return candidates
+    return candidates, list(dict.fromkeys(cost_reasons))
 
 
 def _better(candidate: ArbitrageSolution, incumbent: ArbitrageSolution) -> bool:

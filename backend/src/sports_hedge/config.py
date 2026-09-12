@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from json import JSONDecodeError, loads
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -29,11 +30,22 @@ class Settings(BaseSettings):
 
     polymarket_gamma_base_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_base_url: str = "https://clob.polymarket.com"
+    # Observed public Gamma GET /sports: EPL series=10188. Empty disables the
+    # list_events filter; unfiltered first-100 discovery remains an audit gap.
+    polymarket_gamma_series_id: str | None = "10188"
 
     market_intelligence_db_path: str = "./data/market_intelligence.sqlite"
     market_intelligence_minimum_sample_size: int = Field(default=8, ge=2)
     paper_audit_db_path: str = "./data/paper_audit.sqlite"
     watchlist_db_path: str = "./data/near_arb_watchlist.sqlite"
+    paper_live_refresh_enabled: bool = False
+    paper_live_refresh_interval_seconds: int = Field(default=30, ge=15, le=300)
+    cors_allow_origins: Annotated[list[str], NoDecode] = Field(
+        default=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ]
+    )
     notifications_db_path: str = "./data/notifications.sqlite"
     notification_cooldown_seconds: int = Field(default=900, ge=0)
     historical_db_path: str = "./data/historical_football.sqlite"
@@ -62,6 +74,11 @@ class Settings(BaseSettings):
     priority_operator_manual_cap: float = Field(default=10000.0, gt=0)
     priority_risk_limit: float = Field(default=10000.0, gt=0)
 
+    @field_validator("cors_allow_origins", mode="before")
+    @classmethod
+    def split_cors_allow_origins(cls, value: Any) -> list[str]:
+        return parse_cors_allow_origins(value)
+
     @model_validator(mode="after")
     def enforce_phase_one_safety(self) -> "Settings":
         if self.sports_hedge_mode != "paper":
@@ -69,6 +86,31 @@ class Settings(BaseSettings):
         if self.sports_hedge_execution_enabled:
             raise ValueError("Live execution is intentionally unavailable in Phase 1")
         return self
+
+
+def parse_cors_allow_origins(value: Any) -> list[str]:
+    """Restrictive console origin allowlist. Wildcard * is rejected."""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = loads(text)
+            except JSONDecodeError as exc:
+                raise ValueError("CORS_ALLOW_ORIGINS JSON list is invalid") from exc
+            return parse_cors_allow_origins(parsed)
+        origins = [part.strip() for part in text.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple)):
+        origins = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raise ValueError("CORS_ALLOW_ORIGINS must be a list or comma-separated string")
+    if any(origin == "*" for origin in origins):
+        raise ValueError("CORS allowlist must not include an unrestricted wildcard")
+    return origins
 
 
 @lru_cache

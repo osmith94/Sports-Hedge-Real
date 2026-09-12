@@ -225,7 +225,7 @@ def test_top_n_ranking_is_stable() -> None:
             edge=Decimal("0.008"),
             quote_age_ms=100,
             limiting_depth=Decimal("40"),
-            observed_at=OBSERVED + timedelta(seconds=1),
+            observed_at=OBSERVED,
         )
     )
     service.observe(
@@ -234,7 +234,7 @@ def test_top_n_ranking_is_stable() -> None:
             edge=Decimal("0.009"),
             quote_age_ms=400,
             limiting_depth=Decimal("10"),
-            observed_at=OBSERVED + timedelta(seconds=2),
+            observed_at=OBSERVED,
         )
     )
     service.observe(
@@ -243,18 +243,21 @@ def test_top_n_ranking_is_stable() -> None:
             edge=Decimal("0.015"),
             eligible=True,
             quote_age_ms=50,
-            observed_at=OBSERVED + timedelta(seconds=3),
+            observed_at=OBSERVED,
             guaranteed_profit_gbp=Decimal("2.50"),
         )
     )
-    first = [item.canonical_market_id for item in service.top_near(limit=2)]
-    second = [item.canonical_market_id for item in service.top_near(limit=2)]
+    first = [item.canonical_market_id for item in service.top_near(limit=2, as_of=OBSERVED)]
+    second = [item.canonical_market_id for item in service.top_near(limit=2, as_of=OBSERVED)]
     assert first == second == ["mkt-c", "mkt-a"]
     ranked = rank_near_opportunities(service.repository.list_opportunities(), limit=3)
     assert [item.canonical_market_id for item in ranked] == ["mkt-c", "mkt-a", "mkt-b"]
-    triggered = service.triggered(limit=10)
+    triggered = service.triggered(limit=10, as_of=OBSERVED)
     assert [item.canonical_market_id for item in triggered] == ["mkt-triggered"]
-    assert all(item.status != OpportunityStatus.TRIGGERED for item in service.top_near(limit=10))
+    assert all(
+        item.status != OpportunityStatus.TRIGGERED
+        for item in service.top_near(limit=10, as_of=OBSERVED)
+    )
 
 
 def test_filters_and_paper_fill_lifecycle_stay_paper_only() -> None:
@@ -273,6 +276,7 @@ def test_filters_and_paper_fill_lifecycle_stay_paper_only() -> None:
         competition="Premier League",
         venue=VenueName.MATCHBOOK,
         market_family=MarketFamily.BOTH_TEAMS_TO_SCORE,
+        as_of=OBSERVED,
     )
     assert [item.canonical_market_id for item in filtered] == ["mkt-pl"]
     triggered = service.observe(
@@ -304,7 +308,7 @@ def test_unknown_quote_age_fails_closed_and_is_not_near() -> None:
     assert opportunity.status == OpportunityStatus.REJECTED
     assert "unknown_quote_age" in opportunity.rejection_reasons
     assert opportunity.classification.value != "near_opportunity"
-    assert service.top_near(limit=10) == []
+    assert service.top_near(limit=10, as_of=OBSERVED) == []
     details = [event.detail for event in service.activity()]
     assert "unknown_quote_age" in details
 
@@ -319,7 +323,44 @@ def test_missing_depth_is_rejected_not_classified_near() -> None:
     )
     assert opportunity.status == OpportunityStatus.REJECTED
     assert opportunity.classification.value != "near_opportunity"
-    assert service.top_near(limit=10) == []
+    assert service.top_near(limit=10, as_of=OBSERVED) == []
+
+
+def test_unknown_non_economic_failure_is_rejected_not_near() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    opportunity = service.observe(
+        _observation(rejection_reasons=["unsupported_fee_basis"])
+    )
+    assert opportunity.status == OpportunityStatus.REJECTED
+    assert opportunity.classification.value != "near_opportunity"
+    assert "unsupported_fee_basis" in opportunity.rejection_reasons
+    assert service.top_near(limit=10, as_of=OBSERVED) == []
+    tracked = service.tracked(limit=10, as_of=OBSERVED)
+    assert [item.canonical_market_id for item in tracked] == ["mkt-newcastle-chelsea-btts"]
+    assert tracked[0].status == OpportunityStatus.REJECTED
+
+
+def test_negative_edge_with_failed_risk_or_depth_is_not_near() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    risk_blocked = service.observe(
+        _observation(
+            market_id="mkt-risk",
+            rejection_reasons=["no_positive_edge", "execution_risk_above_threshold"],
+            solver_is_arbitrage=False,
+        )
+    )
+    depth_blocked = service.observe(
+        _observation(
+            market_id="mkt-depth",
+            rejection_reasons=["no_arbitrage", "missing_executable_outcome_depth"],
+            solver_is_arbitrage=False,
+        )
+    )
+    assert risk_blocked.status == OpportunityStatus.REJECTED
+    assert depth_blocked.status == OpportunityStatus.REJECTED
+    assert service.top_near(limit=10, as_of=OBSERVED) == []
+    tracked_ids = {item.canonical_market_id for item in service.tracked(limit=10, as_of=OBSERVED)}
+    assert tracked_ids == {"mkt-risk", "mkt-depth"}
 
 
 def test_unknown_venue_currency_is_rejected_without_inventing_gbp() -> None:
@@ -450,3 +491,20 @@ def test_adapter_preserves_unknown_quote_age_instead_of_zero() -> None:
     opportunity = WatchlistService(SqliteWatchlistRepository()).observe(mapped)
     assert opportunity.status == OpportunityStatus.REJECTED
     assert "unknown_quote_age" in opportunity.rejection_reasons
+
+
+def test_adapter_preserves_quote_age_basis_for_operator_presentation() -> None:
+    decision = PaperScanDecision(
+        canonical_event_id="evt-1",
+        canonical_market_id="mkt-basis",
+        market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=[]),
+        quote_age_ms=40,
+        quote_age_basis="retrieval",
+        minimum_net_edge=TRIGGER,
+    )
+    mapped = observation_from_paper_decision(decision, history=())
+    assert mapped is not None
+    assert mapped.quote_age_ms == 40
+    assert mapped.quote_age_basis == "retrieval"
+    opportunity = WatchlistService(SqliteWatchlistRepository()).observe(mapped)
+    assert opportunity.quote_age_basis == "retrieval"

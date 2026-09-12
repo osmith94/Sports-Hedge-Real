@@ -1,5 +1,5 @@
 import { ResearchHome } from "../../components/research/research-home";
 
-export default function ResearchPage() {
+export default async function ResearchPage() {
   return <ResearchHome />;
 }

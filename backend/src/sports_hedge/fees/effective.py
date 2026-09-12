@@ -50,6 +50,7 @@ def apply_venue_costs(
     stake: Decimal = Decimal("1"),
     as_of: datetime | None = None,
     quoted_at: datetime | None = None,
+    require_gbp: bool = True,
 ) -> EffectiveLegEconomics:
     """Apply the snapshot's own cost rule. Does not coerce bases together."""
 
@@ -73,10 +74,16 @@ def apply_venue_costs(
             "Lay/sell/synthetic legs require state-payoff economics, not back net odds",
         )
     if snapshot.currency != "GBP":
-        raise CostRuleError(
-            "unconverted_currency",
-            "Non-GBP venue costs must be converted before GBP value ranking",
-        )
+        if require_gbp:
+            raise CostRuleError(
+                "unconverted_currency",
+                "Non-GBP venue costs must be converted before GBP value ranking",
+            )
+        if not snapshot.is_rate_only():
+            raise CostRuleError(
+                "unconverted_currency",
+                "Fixed native fees cannot be applied to GBP payoff without an FX conversion of the fee",
+            )
     if gross_decimal_odds <= 1:
         raise CostRuleError("invalid_gross_odds", "gross_decimal_odds must exceed 1")
     if stake <= 0:

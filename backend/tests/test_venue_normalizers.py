@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +18,10 @@ from sports_hedge.normalization.venues import (
     VenueNormalizationError,
 )
 
+PINNED_GAMMA_934146 = (
+    Path(__file__).resolve().parent / "fixtures" / "polymarket_gamma_event_934146_chelsea_hull.json"
+)
+
 
 MATCHBOOK_EVENT = {
     "id": 1001,
@@ -27,7 +34,9 @@ MATCHBOOK_EVENT = {
 POLYMARKET_EVENT = {
     "id": "poly-event-1",
     "title": "Newcastle United vs. Arsenal",
-    "startDate": "2026-09-20T15:00:00Z",
+    "startTime": "2026-09-20T15:00:00Z",
+    "startDate": "2026-08-01T04:00:12Z",
+    "endDate": "2026-09-20T15:00:00Z",
     "series": [{"title": "Premier League"}],
 }
 
@@ -154,6 +163,85 @@ def test_polymarket_normalizes_public_binary_contract_but_preserves_yes_no() -> 
         CanonicalOutcome.YES,
         CanonicalOutcome.NO,
     ]
+    assert event.kickoff_utc == datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
+
+
+def test_polymarket_pinned_gamma_934146_uses_fixture_start_not_listing_or_deadline() -> None:
+    """PINNED RAW Gamma event 934146 Chelsea FC vs. Hull City AFC — kickoff regression."""
+
+    fixture = json.loads(PINNED_GAMMA_934146.read_text(encoding="utf-8"))
+    assert fixture["fixture_id"] == "polymarket-gamma-event-934146-chelsea-hull"
+    assert fixture["source"] == "https://gamma-api.polymarket.com/events/934146"
+    assert fixture["retrieved_at"] == "2026-09-12T14:36:20Z"
+    payload = fixture["payload"]
+    assert payload["startDate"] == "2026-08-30T04:00:12Z"
+    assert payload["endDate"] == "2026-09-12T14:00:00Z"
+    assert payload["startTime"] == "2026-09-12T14:00:00Z"
+
+    normalizer = PolymarketNormalizer()
+    event = normalizer.normalize_event(payload)
+    market = normalizer.normalize_market(event, payload["markets"][0])
+
+    assert event.source_event_id == "934146"
+    assert event.home_team == "Chelsea FC"
+    assert event.away_team == "Hull City AFC"
+    assert event.kickoff_utc == datetime(2026, 9, 12, 14, 0, tzinfo=UTC)
+    assert [runner.outcome for runner in market.runners] == [
+        CanonicalOutcome.YES,
+        CanonicalOutcome.NO,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("event_id", "title", "start_time"),
+    [
+        ("934152", "Liverpool FC vs. Fulham FC", "2026-09-12T14:00:00Z"),
+        ("934157", "AFC Bournemouth vs. Brentford FC", "2026-09-12T14:00:00Z"),
+    ],
+)
+def test_polymarket_observed_epl_ids_ignore_listing_startdate(
+    event_id: str,
+    title: str,
+    start_time: str,
+) -> None:
+    event = PolymarketNormalizer().normalize_event(
+        {
+            "id": event_id,
+            "title": title,
+            "startDate": "2026-08-30T04:00:12Z",
+            "startTime": start_time,
+            "endDate": start_time,
+            "eventDate": "2026-09-12",
+            "series": [{"title": "Premier League"}],
+        }
+    )
+    assert event.kickoff_utc == datetime(2026, 9, 12, 14, 0, tzinfo=UTC)
+
+
+def test_polymarket_unknown_or_date_only_fixture_time_stays_unmatched() -> None:
+    normalizer = PolymarketNormalizer()
+    listing_only = {
+        **POLYMARKET_EVENT,
+        "startTime": None,
+        "startDate": "2026-08-30T04:00:12Z",
+        "endDate": "2026-09-12T14:00:00Z",
+        "eventDate": "2026-09-12",
+    }
+    listing_only.pop("startTime")
+    with pytest.raises(VenueNormalizationError, match="no supported fixture start time"):
+        normalizer.normalize_event(listing_only)
+
+    with pytest.raises(VenueNormalizationError, match="date-only"):
+        normalizer.normalize_event({**POLYMARKET_EVENT, "startTime": "2026-09-12"})
+
+
+def test_polymarket_fixture_start_converts_aware_non_utc_and_keeps_raw_source() -> None:
+    event = PolymarketNormalizer().normalize_event(
+        {**POLYMARKET_EVENT, "startTime": "2026-09-12T10:00:00-04:00"}
+    )
+    assert event.kickoff_utc == datetime(2026, 9, 12, 14, 0, tzinfo=UTC)
+    assert event.source_event_id == "poly-event-1"
+    assert event.source_venue.value == "polymarket"
 
 
 def test_polymarket_corners_classifies_for_history_without_guessing_settlement() -> None:

@@ -80,6 +80,21 @@ Incomplete settlement fingerprints (`semantics_complete=false`) cannot be
 grouped with complete markets. `market_equivalence_key()` is `None` until
 scope, period, extra-time and penalties flags are known.
 
+Opening→closing pairing uses that equivalence key plus quote provenance
+(selection, source, bookmaker, venue, side). Incomplete or mismatched
+period/settlement/source/bookmaker/venue/side quotes do not form a price
+move. Asian handicap quotes whose **line** changed are counted as structural
+line shifts, not probability analogues. The current revision for each stable
+source observation identity (`source`, `source_market_id`, `source_reference`,
+quote type, selection, side, `observed_at`) is selected first — including a
+later correction with incomplete semantics or no usable price, which suppresses
+the prior row. Eligible complete quotes are then classified. Concurrently
+offered lines with distinct source identities stay separate; two identities
+that map to the same proposition contribute one current pair. Coverage SQL
+counters use the same current-revision pair units as `classify_open_close`
+(latest `retrieved_at`, then `observation_id`). Append-only stored rows are
+ranked, not overwritten.
+
 ## Adapters
 
 All adapters implement `OddsSourceAdapter`. None is a hard dependency.

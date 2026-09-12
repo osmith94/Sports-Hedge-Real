@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
@@ -86,7 +86,7 @@ class VenueCostSnapshot(BaseModel):
     action: MarketAction
     fee_basis: FeeBasis
     known_status: CostKnownStatus
-    captured_at: datetime
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     source: str
     source_market_id: str | None = None
     market_class: str | None = None
@@ -127,4 +127,46 @@ class VenueCostSnapshot(BaseModel):
         return (
             self.known_status is CostKnownStatus.KNOWN
             and self.fee_basis is not FeeBasis.UNKNOWN
+        )
+
+    def is_rate_only(self) -> bool:
+        """True when net odds do not depend on a currency-denominated fixed fee."""
+
+        if self.fee_basis is FeeBasis.FIXED:
+            return False
+        if self.fee_basis is FeeBasis.TRANSACTION and self.fixed_amount:
+            return False
+        return True
+
+    @classmethod
+    def per_quote_profit_commission(
+        cls,
+        venue: VenueName,
+        rate: Decimal,
+        *,
+        action: MarketAction,
+        source: str,
+        captured_at: datetime | None = None,
+        currency: str = "GBP",
+        detail: str | None = None,
+        snapshot_id: str | None = None,
+        source_market_id: str | None = None,
+        order_role: OrderRole = OrderRole.NOT_APPLICABLE,
+    ) -> VenueCostSnapshot:
+        """Explicit supported PER_QUOTE profit-commission snapshot. Not a generic haircut fallback."""
+
+        return cls(
+            venue=venue,
+            action=action,
+            fee_basis=FeeBasis.PROFIT_COMMISSION,
+            known_status=CostKnownStatus.KNOWN,
+            captured_at=captured_at or datetime.now(UTC),
+            source=source,
+            source_market_id=source_market_id,
+            order_role=order_role,
+            fee_scope=FeeScope.PER_QUOTE,
+            rate=rate,
+            currency=currency,
+            snapshot_id=snapshot_id,
+            detail=detail,
         )

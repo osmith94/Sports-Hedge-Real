@@ -6,6 +6,11 @@ from sports_hedge.arbitrage.watchlist.models import NearOpportunity, Opportunity
 
 NEAR_STATUSES = {OpportunityStatus.WATCHING, OpportunityStatus.APPROACHING}
 TRIGGERED_STATUSES = {OpportunityStatus.TRIGGERED}
+TRACKED_EXCLUDED = {
+    OpportunityStatus.CLOSED,
+    OpportunityStatus.EXPIRED,
+    OpportunityStatus.FILLED,
+}
 
 
 def rank_near_opportunities(
@@ -39,6 +44,24 @@ def rank_triggered_opportunities(
     return ordered[:limit]
 
 
+def rank_tracked_opportunities(
+    opportunities: list[NearOpportunity],
+    *,
+    limit: int,
+) -> list[NearOpportunity]:
+    """Operator board of canonical markets currently being tracked.
+
+    Negative net edges remain visible. This is not a near-arb or triggered ranking
+    and does not reclassify rejected scans.
+    """
+
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    eligible = [item for item in opportunities if item.status not in TRACKED_EXCLUDED]
+    ordered = sorted(eligible, key=_tracked_rank_key)
+    return ordered[:limit]
+
+
 def _near_rank_key(item: NearOpportunity) -> tuple:
     distance = (
         item.distance_to_trigger_pp if item.distance_to_trigger_pp is not None else Decimal("999")
@@ -64,6 +87,19 @@ def _triggered_rank_key(item: NearOpportunity) -> tuple:
         -edge,
         age,
         -depth,
+        item.canonical_market_id,
+        item.opportunity_id,
+    )
+
+
+def _tracked_rank_key(item: NearOpportunity) -> tuple:
+    distance = (
+        item.distance_to_trigger_pp if item.distance_to_trigger_pp is not None else Decimal("999")
+    )
+    return (
+        item.status == OpportunityStatus.REJECTED,
+        distance,
+        -item.last_seen_at.timestamp(),
         item.canonical_market_id,
         item.opportunity_id,
     )

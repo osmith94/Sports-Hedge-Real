@@ -1,12 +1,27 @@
 import { ActivityFeed } from "../components/activity-feed";
 import { CapitalSummary } from "../components/capital-summary";
+import { DiscoveredFixturesPanel } from "../components/discovered-fixtures";
 import { LiquidityPools } from "../components/liquidity-pools";
 import { OpportunityCard } from "../components/opportunity-card";
 import { RunPaperScan } from "../components/run-paper-scan";
+import { TrackedMarketsBoard } from "../components/tracked-markets";
 import { PriorityAlertsSeam } from "../components/arbitrage/priority-alerts/priority-alerts-seam";
 import { ExternalLegWorkflow } from "../components/arbitrage/priority-alerts/external-leg-workflow";
 import { getPriorityAlert } from "../lib/priority-alerts/provider";
-import { getPaperScans, getPaperScanSummary, PaperScanRecord, getNearWatchlist, getTriggeredWatchlist, getWatchlistActivity, NearOpportunity, OpportunityLifecycleEvent } from "../lib/api";
+import {
+  getLivePriorityAlerts,
+  getLiveRefreshStatus,
+  getNearWatchlist,
+  getPaperScans,
+  getPaperScanSummary,
+  getTrackedWatchlist,
+  getTriggeredWatchlist,
+  getWatchlistActivity,
+  LiveRefreshStatus,
+  NearOpportunity,
+  OpportunityLifecycleEvent,
+  PaperScanRecord,
+} from "../lib/api";
 import {
   DEFAULT_SCANNER_ASSUMPTIONS,
   DEMO_ACTIVITY,
@@ -21,6 +36,7 @@ import { money, percent } from "../lib/format";
 import {
   activityFromWatchlist,
   nearOpportunitiesFromWatchlist,
+  trackedOpportunitiesFromWatchlist,
   triggeredOpportunitiesFromWatchlist,
 } from "../lib/watchlist";
 
@@ -37,9 +53,14 @@ export default async function ArbitragePage() {
   let summary: Awaited<ReturnType<typeof getPaperScanSummary>> | null = null;
   let apiAvailable = true;
   let watchlistAvailable = true;
+  let livePriorityAvailable = true;
+  let livePriorityCount = 0;
   let nearRows: NearOpportunity[] = [];
   let triggeredRows: NearOpportunity[] = [];
+  let trackedRows: NearOpportunity[] = [];
   let activityRows: OpportunityLifecycleEvent[] = [];
+  let liveRefresh: LiveRefreshStatus | null = null;
+  let liveRefreshAvailable = true;
 
   try {
     [scans, summary] = await Promise.all([getPaperScans("limit=100"), getPaperScanSummary()]);
@@ -48,18 +69,32 @@ export default async function ArbitragePage() {
   }
 
   try {
-    [nearRows, triggeredRows, activityRows] = await Promise.all([
+    [nearRows, triggeredRows, trackedRows, activityRows] = await Promise.all([
       getNearWatchlist("limit=25"),
       getTriggeredWatchlist("limit=25"),
+      getTrackedWatchlist("limit=100"),
       getWatchlistActivity("limit=100"),
     ]);
   } catch {
     watchlistAvailable = false;
   }
 
+  try {
+    liveRefresh = await getLiveRefreshStatus();
+  } catch {
+    liveRefreshAvailable = false;
+  }
+
+  try {
+    livePriorityCount = (await getLivePriorityAlerts()).length;
+  } catch {
+    livePriorityAvailable = false;
+  }
+
   const assumptions = DEFAULT_SCANNER_ASSUMPTIONS;
   const liveWatchlist = watchlistAvailable ? nearOpportunitiesFromWatchlist(nearRows) : [];
   const liveExecutable = watchlistAvailable ? triggeredOpportunitiesFromWatchlist(triggeredRows) : [];
+  const liveTracked = watchlistAvailable ? trackedOpportunitiesFromWatchlist(trackedRows) : [];
   const watchlist = watchlistAvailable ? liveWatchlist : DEMO_NEAR_ARB;
   const executable = watchlistAvailable ? liveExecutable : DEMO_EXECUTABLE;
   const activity = watchlistAvailable
@@ -69,9 +104,9 @@ export default async function ArbitragePage() {
   const externalAlert = getPriorityAlert("pa-ncl-ars-2026-04-12-mr");
 
   const metrics = [
-    { label: "Scans today", value: summary ? String(summary.scan_count) : "—", foot: "Matched market scan decisions", demo: false },
-    { label: "Arbitrage detected", value: summary ? String(summary.arbitrage_count) : "—", foot: "Before final paper eligibility gates", demo: false },
-    { label: "Paper eligible", value: summary ? String(summary.eligible_count) : "—", foot: "Passed mapping, costs and risk", positive: true, demo: false },
+    { label: "Tracked markets", value: watchlistAvailable ? String(liveTracked.length) : "—", foot: "Canonical markets on the paper watchlist", demo: false },
+    { label: "Near-arb candidates", value: watchlistAvailable ? String(liveWatchlist.length) : "—", foot: "WATCHING / APPROACHING below backend trigger", demo: false },
+    { label: "Triggered paper arbs", value: watchlistAvailable ? String(liveExecutable.length) : "—", foot: "Solver-validated complete-set only", positive: true, demo: false },
     { label: "Top net edge", value: summary ? percent(summary.top_net_edge) : "—", foot: "Best persisted scan in today’s window", positive: true, demo: false },
   ];
 
@@ -82,9 +117,11 @@ export default async function ArbitragePage() {
           <div className="eyebrow">Arbitrage operations</div>
           <h1>Paper arbitrage operations console</h1>
           <p className="page-subtitle">
-            Near-threshold watchlist, paper-eligible triggers, activity and native-currency capital.
-            Watchlist rows come from the paper watchlist read model; scan history stays a separate scanner view.
-            DEMO/FIXTURE is used only when a watchlist endpoint is unavailable or a field has no backend yet.
+            Tracked markets, near-threshold watchlist, paper-eligible triggers, activity and native-currency capital.
+            Matchbook is the live fixture-discovery source; Polymarket is matched onto the same canonical event.
+            Watchlist rows come from `/paper/watchlist/tracked`, `/near`, `/triggered` and `/activity`. The browser
+            does not reclassify rejected scans. DEMO/FIXTURE is used only when a watchlist endpoint is unavailable.
+            Live scores are shown only if Matchbook includes them.
           </p>
         </div>
         <div className="demo-label">{apiAvailable ? "LIVE PAPER READ MODEL" : "PAPER API OFFLINE"}</div>
@@ -101,11 +138,42 @@ export default async function ArbitragePage() {
       </section>
 
       <RunPaperScan />
-      <PriorityAlertsSeam />
+      <PriorityAlertsSeam liveAvailable={livePriorityAvailable} liveCount={livePriorityCount} />
 
       <section className="ops-section">
         <div className="section-label">
-          <span>1 · Near-arb watchlist</span>
+          <span>0 · Matchbook fixture discovery</span>
+          <span className={liveRefreshAvailable ? "status-badge" : "demo-chip"}>
+            {liveRefreshAvailable ? "LIVE PAPER · MATCHBOOK PRIMARY" : "DISCOVERY STATUS UNAVAILABLE"}
+          </span>
+        </div>
+        <DiscoveredFixturesPanel status={liveRefresh} available={liveRefreshAvailable} />
+      </section>
+
+      <section className="ops-section">
+        <div className="section-label">
+          <span>1 · Tracked markets</span>
+          <span className={watchlistAvailable ? "status-badge" : "demo-chip"}>
+            {watchlistAvailable
+              ? liveTracked.length
+                ? "LIVE WATCHLIST · TRACKED"
+                : "LIVE WATCHLIST · EMPTY"
+              : "WATCHLIST UNAVAILABLE"}
+          </span>
+        </div>
+        <p className="section-copy">
+          Canonical fixtures/markets currently on the paper watchlist. Current net margin, configured backend trigger
+          and distance to trigger are backend-calculated and refresh as repeated read-only collections persist new
+          observations. Negative net margin stays visible as below break-even. Source, last updated and quote age at
+          last evaluation are shown per row; ages are not ticked on screen between refreshes. Strike narrative is the
+          observed distance sequence only — not a causal claim. Collection → alerts → paper fills → ledger is not wired.
+        </p>
+        <TrackedMarketsBoard items={liveTracked} available={watchlistAvailable} />
+      </section>
+
+      <section className="ops-section">
+        <div className="section-label">
+          <span>2 · Near-arb watchlist</span>
           <span className={watchlistAvailable ? "status-badge" : "demo-chip"}>
             {watchlistAvailable
               ? liveWatchlist.length
@@ -115,9 +183,9 @@ export default async function ArbitragePage() {
           </span>
         </div>
         <p className="section-copy">
-          Closest matched markets below the configured net-arb trigger. Status, distance, depth and
-          freshness come from the paper watchlist read model. These are not called arbitrage until
-          settlement, payoff and cost checks pass.
+          WATCHING / APPROACHING candidates have already passed semantics, costs, FX, depth, freshness and risk gates.
+          They remain below the configured backend trigger and are not guaranteed arbitrage until the strict
+          trigger/solver condition is met.
         </p>
         {watchlist.length === 0 ? (
           <div className="empty-live">No near-threshold opportunities in the current scan window.</div>
@@ -132,11 +200,15 @@ export default async function ArbitragePage() {
 
       <section className="ops-section">
         <div className="section-label">
-          <span>2 · Triggered / executable</span>
+          <span>3 · Triggered / executable</span>
           <span className={watchlistAvailable ? "status-badge" : "demo-chip"}>
             {liveExecutable.length ? "LIVE WATCHLIST · TRIGGERED" : watchlistAvailable ? "NO TRIGGERS" : "DEMO / FIXTURE"}
           </span>
         </div>
+        <p className="section-copy">
+          Guaranteed profit is shown only for solver-validated triggered complete-set opportunities. Paper fill
+          lifecycle remains simulation-only.
+        </p>
         {watchlistAvailable && liveExecutable.length === 0 ? (
           <div className="empty-live">
             No paper-eligible opportunities in the current scan window. The monitor does not invent triggered
@@ -153,11 +225,12 @@ export default async function ArbitragePage() {
 
       <section className="ops-section">
         <div className="section-label">
-          <span>3 · Manual-external paper state</span>
+          <span>4 · Manual-external paper state</span>
           <span className="demo-chip">DEMO / FIXTURE · NOT AUTO-POOL</span>
         </div>
         <p className="section-copy">
           Distinct from Near-Arb and validated paper arbs. MANUAL_EXTERNAL does not consume standing liquidity.
+          Live Priority Alert rows stay empty when the backend has none; this walkthrough ticket is labelled demo.
         </p>
         <OpportunityCard item={DEMO_MANUAL_EXTERNAL} />
         {externalAlert ? <ExternalLegWorkflow alert={externalAlert} /> : null}
@@ -179,7 +252,7 @@ export default async function ArbitragePage() {
           <div>
             <div className="panel-title">Paper scan history</div>
             <div className="panel-meta">
-              Accepted and rejected matched-market decisions, newest first
+              Accepted and rejected matched-market decisions, newest first. Scanner audit, not a second near-arb classifier.
             </div>
           </div>
           <span className="status-badge">{apiAvailable ? "SCANNER DATA" : "NO API CONNECTION"}</span>
@@ -208,13 +281,18 @@ export default async function ArbitragePage() {
                 </tr>
               </thead>
               <tbody>
-                {scans.map((item) => (
+                {scans.map((item) => {
+                  const net = item.net_edge == null ? null : Number(item.net_edge);
+                  return (
                   <tr key={item.record_id}>
                     <td className="row-title">{item.home_team} v {item.away_team}</td>
                     <td>{marketLabel(item)}</td>
                     <td className="muted">{item.venues.join(" / ")}</td>
                     <td>{percent(item.gross_edge)}</td>
-                    <td className={item.net_edge !== null && item.net_edge !== undefined ? "edge" : ""}>{percent(item.net_edge)}</td>
+                    <td className={net !== null && net < 0 ? "edge-negative" : net !== null ? "edge" : ""}>
+                      {percent(item.net_edge)}
+                      {net !== null && net < 0 ? " · below break-even" : ""}
+                    </td>
                     <td>{money(item.executable_stake_gbp)}</td>
                     <td className={item.guaranteed_profit_gbp !== null && item.guaranteed_profit_gbp !== undefined ? "edge" : ""}>{money(item.guaranteed_profit_gbp)}</td>
                     <td className={item.execution_risk_band === "low" ? "risk-low" : "risk-medium"}>
@@ -223,7 +301,8 @@ export default async function ArbitragePage() {
                     <td>{(item.mapping_confidence * 100).toFixed(1)}%</td>
                     <td>{statusText(item)}</td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

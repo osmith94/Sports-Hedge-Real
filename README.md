@@ -65,6 +65,22 @@ Then inspect:
 - `GET /health` — confirms paper mode and execution-disabled state.
 - `GET /venues` — shows current venue capability flags.
 
+## Operator console (two processes)
+
+The documented localhost walkthrough runs FastAPI and Next.js as separate origins. Browser `fetch` from `http://localhost:3000` to `http://localhost:8000` is cross-origin.
+
+```bash
+# terminal 1
+cd backend
+uvicorn sports_hedge.api.main:app --reload --port 8000
+
+# terminal 2
+cd frontend
+npm run dev
+```
+
+CORS is a **restrictive allowlist** (`CORS_ALLOW_ORIGINS`), defaulting to `http://localhost:3000` and `http://127.0.0.1:3000`. It is not `*` and does not grant trading permissions. Server-rendered GETs do not exercise this path; clicking **Run read-only scan** does (`POST /paper/collect`).
+
 ## Current implementation
 
 - paper-only safety configuration;

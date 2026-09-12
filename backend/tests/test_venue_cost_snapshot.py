@@ -34,6 +34,18 @@ def _snapshot(**overrides: object) -> VenueCostSnapshot:
     return VenueCostSnapshot.model_validate(payload)
 
 
+def test_legacy_fee_snapshot_does_not_treat_missing_rate_as_zero() -> None:
+    with pytest.raises(ValidationError):
+        FeeSnapshot(venue=VenueName.MATCHBOOK)
+    explicit_zero = FeeSnapshot(
+        venue=VenueName.MATCHBOOK,
+        profit_haircut_rate=Decimal("0"),
+        zero_rate_basis="verified_zero",
+        captured_at=CAPTURED,
+    )
+    assert explicit_zero.apply_to_decimal_odds(Decimal("2.20")) == Decimal("2.20")
+
+
 def test_profit_commission_shares_formula_with_legacy_fee_snapshot() -> None:
     snapshot = _snapshot()
     economics = apply_venue_costs(snapshot, gross_decimal_odds=Decimal("2.20"))

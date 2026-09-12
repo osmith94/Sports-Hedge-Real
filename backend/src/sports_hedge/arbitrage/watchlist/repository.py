@@ -12,6 +12,7 @@ from sports_hedge.arbitrage.watchlist.models import (
     NearOpportunity,
     OpportunityClassification,
     OpportunityLifecycleEvent,
+    OpportunityObservationPoint,
     OpportunityStatus,
     WatchLeg,
 )
@@ -81,8 +82,43 @@ class SqliteWatchlistRepository:
                 ON watchlist_lifecycle_events(occurred_at DESC);
             CREATE INDEX IF NOT EXISTS idx_watchlist_events_opportunity
                 ON watchlist_lifecycle_events(opportunity_id, occurred_at);
+
+            CREATE TABLE IF NOT EXISTS watchlist_observation_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opportunity_id TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                current_net_edge TEXT,
+                distance_to_trigger_pp TEXT,
+                quote_age_ms INTEGER,
+                status TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_watchlist_observation_history
+                ON watchlist_observation_history(opportunity_id, observed_at, id);
             """
         )
+        columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(watchlist_opportunities)")
+        }
+        extras = {
+            "gross_edge": "TEXT",
+            "fixture_discovery_source": "TEXT",
+            "fixture_status": "TEXT",
+            "in_running": "INTEGER",
+            "live_score_supported": "INTEGER",
+            "home_score": "INTEGER",
+            "away_score": "INTEGER",
+            "strike_narrative": "TEXT",
+            "previous_net_edge": "TEXT",
+            "previous_distance_to_trigger_pp": "TEXT",
+            "observation_count": "INTEGER",
+            "quote_age_basis": "TEXT",
+        }
+        for name, ddl in extras.items():
+            if name not in columns:
+                self._connection.execute(
+                    f"ALTER TABLE watchlist_opportunities ADD COLUMN {name} {ddl}"
+                )
         self._connection.commit()
 
     def get(self, opportunity_id: str) -> NearOpportunity | None:
@@ -99,14 +135,19 @@ class SqliteWatchlistRepository:
                 opportunity_id, canonical_event_id, canonical_market_id, settlement_key,
                 competition, home_team, away_team, market_family, period, venues_json,
                 legs_json, status, classification, is_arbitrage, trigger_net_edge,
-                current_net_edge, distance_to_trigger_pp, implied_probability_sum,
+                current_net_edge, gross_edge, distance_to_trigger_pp, implied_probability_sum,
                 quote_age_ms, limiting_depth_gbp, limiting_leg_outcome,
                 capital_required_gbp, guaranteed_profit_gbp, execution_risk_score,
                 expected_lock_minutes, first_seen_at, last_seen_at,
-                rejection_reasons_json, insufficiency_reasons_json
+                rejection_reasons_json, insufficiency_reasons_json,
+                fixture_discovery_source, fixture_status, in_running,
+                live_score_supported, home_score, away_score, strike_narrative,
+                previous_net_edge, previous_distance_to_trigger_pp, observation_count,
+                quote_age_basis
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(opportunity_id) DO UPDATE SET
                 canonical_event_id = excluded.canonical_event_id,
@@ -124,6 +165,7 @@ class SqliteWatchlistRepository:
                 is_arbitrage = excluded.is_arbitrage,
                 trigger_net_edge = excluded.trigger_net_edge,
                 current_net_edge = excluded.current_net_edge,
+                gross_edge = excluded.gross_edge,
                 distance_to_trigger_pp = excluded.distance_to_trigger_pp,
                 implied_probability_sum = excluded.implied_probability_sum,
                 quote_age_ms = excluded.quote_age_ms,
@@ -136,7 +178,18 @@ class SqliteWatchlistRepository:
                 first_seen_at = excluded.first_seen_at,
                 last_seen_at = excluded.last_seen_at,
                 rejection_reasons_json = excluded.rejection_reasons_json,
-                insufficiency_reasons_json = excluded.insufficiency_reasons_json
+                insufficiency_reasons_json = excluded.insufficiency_reasons_json,
+                fixture_discovery_source = excluded.fixture_discovery_source,
+                fixture_status = excluded.fixture_status,
+                in_running = excluded.in_running,
+                live_score_supported = excluded.live_score_supported,
+                home_score = excluded.home_score,
+                away_score = excluded.away_score,
+                strike_narrative = excluded.strike_narrative,
+                previous_net_edge = excluded.previous_net_edge,
+                previous_distance_to_trigger_pp = excluded.previous_distance_to_trigger_pp,
+                observation_count = excluded.observation_count,
+                quote_age_basis = excluded.quote_age_basis
             """,
             (
                 opportunity.opportunity_id,
@@ -155,6 +208,7 @@ class SqliteWatchlistRepository:
                 int(opportunity.is_arbitrage),
                 _stringify(opportunity.trigger_net_edge),
                 _stringify(opportunity.current_net_edge),
+                _stringify(opportunity.gross_edge),
                 _stringify(opportunity.distance_to_trigger_pp),
                 _stringify(opportunity.implied_probability_sum),
                 opportunity.quote_age_ms,
@@ -168,6 +222,19 @@ class SqliteWatchlistRepository:
                 opportunity.last_seen_at.isoformat(),
                 json.dumps(opportunity.rejection_reasons),
                 json.dumps(opportunity.insufficiency_reasons),
+                opportunity.fixture_discovery_source.value
+                if opportunity.fixture_discovery_source
+                else None,
+                opportunity.fixture_status,
+                None if opportunity.in_running is None else int(opportunity.in_running),
+                int(opportunity.live_score_supported),
+                opportunity.home_score,
+                opportunity.away_score,
+                opportunity.strike_narrative,
+                _stringify(opportunity.previous_net_edge),
+                _stringify(opportunity.previous_distance_to_trigger_pp),
+                opportunity.observation_count,
+                opportunity.quote_age_basis,
             ),
         )
         self._connection.commit()
@@ -192,6 +259,46 @@ class SqliteWatchlistRepository:
             ),
         )
         self._connection.commit()
+
+    def append_observation(self, point: OpportunityObservationPoint) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO watchlist_observation_history (
+                opportunity_id, observed_at, current_net_edge, distance_to_trigger_pp,
+                quote_age_ms, status
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                point.opportunity_id,
+                point.observed_at.isoformat(),
+                _stringify(point.current_net_edge),
+                _stringify(point.distance_to_trigger_pp),
+                point.quote_age_ms,
+                point.status.value,
+            ),
+        )
+        self._connection.commit()
+
+    def list_observations(
+        self,
+        opportunity_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[OpportunityObservationPoint]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        rows = self._connection.execute(
+            """
+            SELECT * FROM watchlist_observation_history
+            WHERE opportunity_id = ?
+            ORDER BY observed_at DESC, id DESC
+            LIMIT ?
+            """,
+            (opportunity_id, limit),
+        ).fetchall()
+        points = [_observation_from_row(row) for row in rows]
+        points.reverse()
+        return points
 
     def list_opportunities(self) -> list[NearOpportunity]:
         rows = self._connection.execute(
@@ -247,6 +354,7 @@ def _opportunity_from_row(row: sqlite3.Row) -> NearOpportunity:
         is_arbitrage=bool(row["is_arbitrage"]),
         trigger_net_edge=Decimal(row["trigger_net_edge"]),
         current_net_edge=_decimal(row["current_net_edge"]),
+        gross_edge=_decimal(row["gross_edge"]) if "gross_edge" in row.keys() else None,
         distance_to_trigger_pp=_decimal(row["distance_to_trigger_pp"]),
         implied_probability_sum=_decimal(row["implied_probability_sum"]),
         quote_age_ms=None if row["quote_age_ms"] is None else int(row["quote_age_ms"]),
@@ -260,6 +368,19 @@ def _opportunity_from_row(row: sqlite3.Row) -> NearOpportunity:
         last_seen_at=datetime.fromisoformat(row["last_seen_at"]),
         rejection_reasons=list(json.loads(row["rejection_reasons_json"])),
         insufficiency_reasons=list(json.loads(row["insufficiency_reasons_json"])),
+        fixture_discovery_source=_venue(_row_get(row, "fixture_discovery_source")),
+        fixture_status=_row_get(row, "fixture_status"),
+        in_running=_optional_bool(_row_get(row, "in_running")),
+        live_score_supported=bool(_row_get(row, "live_score_supported") or 0),
+        home_score=_optional_int(_row_get(row, "home_score")),
+        away_score=_optional_int(_row_get(row, "away_score")),
+        strike_narrative=_row_get(row, "strike_narrative"),
+        previous_net_edge=_decimal(_row_get(row, "previous_net_edge")),
+        previous_distance_to_trigger_pp=_decimal(
+            _row_get(row, "previous_distance_to_trigger_pp")
+        ),
+        observation_count=int(_row_get(row, "observation_count") or 0),
+        quote_age_basis=_row_get(row, "quote_age_basis"),
     )
 
 
@@ -282,3 +403,38 @@ def _stringify(value: Decimal | None) -> str | None:
 
 def _decimal(value: str | None) -> Decimal | None:
     return None if value is None else Decimal(value)
+
+
+def _observation_from_row(row: sqlite3.Row) -> OpportunityObservationPoint:
+    return OpportunityObservationPoint(
+        opportunity_id=row["opportunity_id"],
+        observed_at=datetime.fromisoformat(row["observed_at"]),
+        current_net_edge=_decimal(row["current_net_edge"]),
+        distance_to_trigger_pp=_decimal(row["distance_to_trigger_pp"]),
+        quote_age_ms=None if row["quote_age_ms"] is None else int(row["quote_age_ms"]),
+        status=OpportunityStatus(row["status"]),
+    )
+
+
+def _row_get(row: sqlite3.Row, key: str) -> Any:
+    if key not in row.keys():
+        return None
+    return row[key]
+
+
+def _venue(value: str | None) -> VenueName | None:
+    if not value:
+        return None
+    return VenueName(value)
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
