@@ -347,6 +347,10 @@ def economics_status(
                     "check_source": rate.check_source,
                 }
             )
+            try:
+                fx.resolve_for_scanner(rate.currency, as_of=as_of)
+            except FxRateUnavailable as exc:
+                issues.append(exc.reason)
     except Exception as exc:  # noqa: BLE001
         issues.append(str(exc))
     if not any(row["currency"] == "USD" for row in fx_rows):
