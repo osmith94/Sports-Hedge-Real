@@ -12,9 +12,12 @@ from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.application.complete_set import (
     INCOMPLETE_OUTCOME_REASON,
+    PUSH_STATE_REASON,
     STEP7_COMPLETE_SET_FAMILIES,
     SOLVER_INELIGIBLE_REASON,
+    UNPROVEN_SETTLEMENT_REASON,
     solver_eligible_market,
+    solver_ineligibility_reason,
 )
 from sports_hedge.application.fixture_inventory import (
     InventoryComparisonStatus,
@@ -300,9 +303,26 @@ def test_asian_handicap_requires_exact_line_and_compatible_push() -> None:
     )
     assert quarter.settlement.push_possible is None
     assert solver_eligible_market(quarter) is False
+    labelled = MatchbookNormalizer().normalize_market(
+        MatchbookNormalizer().normalize_event(MB_EVENT),
+        {
+            "id": 7303,
+            "name": "Asian Handicap -0.5",
+            "line": "-0.5",
+            "runners": [
+                {"id": 1, "name": "Tottenham -0.5"},
+                {"id": 2, "name": "Everton +0.5"},
+            ],
+        },
+    )
+    assert [runner.outcome for runner in labelled.runners] == [
+        CanonicalOutcome.OTHER,
+        CanonicalOutcome.OTHER,
+    ]
+    assert solver_eligible_market(labelled) is False
 
 
-def test_dnb_complete_space_does_not_require_draw() -> None:
+def test_dnb_is_deferred_from_complete_set_solver() -> None:
     mb = MatchbookNormalizer().normalize_market(
         MatchbookNormalizer().normalize_event(MB_EVENT),
         {
@@ -327,14 +347,15 @@ def test_dnb_complete_space_does_not_require_draw() -> None:
     assert {runner.outcome for runner in mb.runners} == {CanonicalOutcome.HOME, CanonicalOutcome.AWAY}
     assert CanonicalOutcome.DRAW not in {runner.outcome for runner in mb.runners}
     assert MarketMatcher().match(mb, pm).matched is True
-    assert solver_eligible_market(mb) is True
+    assert solver_eligible_market(mb) is False
+    assert solver_ineligibility_reason(mb) == PUSH_STATE_REASON
     decision, _, _ = _scan(
         {
             "id": 7402,
             "name": "Draw No Bet",
             "runners": [
-                {"id": 1, "name": "Tottenham", "prices": [{"side": "back", "odds": "1.85", "available-amount": "40"}]},
-                {"id": 2, "name": "Everton", "prices": [{"side": "back", "odds": "2.05", "available-amount": "40"}]},
+                {"id": 1, "name": "Tottenham", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+                {"id": 2, "name": "Everton", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
             ],
         },
         {
@@ -345,13 +366,93 @@ def test_dnb_complete_space_does_not_require_draw() -> None:
             "clobTokenIds": '["h", "a"]',
             "description": "Resolves based on 90 minutes of regulation time. Draw voids.",
         },
-        _pm_books("h", "a"),
+        {
+            "h": {"asset_id": "h", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+            "a": {"asset_id": "a", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+        },
     )
     assert decision.market_match.matched is True
-    assert decision.depth_scan is not None
+    assert decision.depth_scan is None
+    assert PUSH_STATE_REASON in decision.rejection_reasons
+    assert decision.eligible_for_paper_simulation is False
+    rows = assemble_fixture_inventory(
+        [_inventory(mb, name="Draw No Bet")],
+        [_inventory(pm, name="Draw no bet")],
+    )
+    assert len(rows) == 1
+    assert rows[0].entered_solver is False
+    assert rows[0].reason == PUSH_STATE_REASON
+    assert rows[0].comparison_status is InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL
 
 
-def test_to_qualify_is_distinct_from_regulation_match_result() -> None:
+def test_integer_line_totals_and_ah_stay_out_of_solver_even_when_listed_odds_look_like_arb() -> None:
+    decision_totals, mb_totals, _ = _scan(
+        {
+            "id": 7410,
+            "name": "Over/Under 2.0 Goals",
+            "line": "2.0",
+            "runners": [
+                {"id": 1, "name": "Over 2.0", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+                {"id": 2, "name": "Under 2.0", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+            ],
+        },
+        {
+            "id": "pm-tg-20",
+            "question": "Total goals 2.0",
+            "sportsMarketType": "total goals",
+            "line": "2.0",
+            "outcomes": '["Over", "Under"]',
+            "clobTokenIds": '["o", "u"]',
+            "description": "Resolves based on 90 minutes of regulation time.",
+        },
+        {
+            "o": {"asset_id": "o", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+            "u": {"asset_id": "u", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+        },
+    )
+    assert mb_totals.market.settlement.push_possible is True
+    assert solver_eligible_market(mb_totals.market) is False
+    assert decision_totals.market_match.matched is True
+    assert decision_totals.depth_scan is None
+    assert PUSH_STATE_REASON in decision_totals.rejection_reasons
+
+    decision_ah, mb_ah, pm_ah = _scan(
+        {
+            "id": 7411,
+            "name": "Asian Handicap -1.0",
+            "line": "-1.0",
+            "runners": [
+                {"id": 1, "name": "Tottenham", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+                {"id": 2, "name": "Everton", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+            ],
+        },
+        {
+            "id": "pm-ah-1-scan",
+            "question": "Asian handicap -1.0",
+            "sportsMarketType": "handicap",
+            "line": "-1.0",
+            "outcomes": '["Tottenham", "Everton"]',
+            "clobTokenIds": '["ah-h", "ah-a"]',
+            "description": "Resolves based on 90 minutes of regulation time.",
+        },
+        {
+            "ah-h": {"asset_id": "ah-h", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+            "ah-a": {"asset_id": "ah-a", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+        },
+    )
+    assert mb_ah.market.settlement.push_possible is True
+    assert solver_eligible_market(mb_ah.market) is False
+    assert decision_ah.depth_scan is None
+    assert PUSH_STATE_REASON in decision_ah.rejection_reasons
+    rows = assemble_fixture_inventory(
+        [_inventory(mb_ah.market, name="Asian Handicap -1.0")],
+        [_inventory(pm_ah.market, name="AH -1")],
+    )
+    assert all(not row.entered_solver for row in rows)
+    assert any(row.reason == PUSH_STATE_REASON for row in rows)
+
+
+def test_to_qualify_is_not_inferred_from_family_name() -> None:
     mb_result = MatchbookNormalizer().normalize_market(
         MatchbookNormalizer().normalize_event(MB_EVENT),
         {
@@ -383,19 +484,10 @@ def test_to_qualify_is_distinct_from_regulation_match_result() -> None:
             "description": "Resolves including penalties after extra time.",
         },
     )
-    pm_regulation = PolymarketNormalizer().normalize_market(
-        PolymarketNormalizer().normalize_event(PM_EVENT),
-        {
-            "id": "pm-qualify-90",
-            "question": "Who will to qualify?",
-            "sportsMarketType": "to qualify",
-            "outcomes": '["Tottenham", "Everton"]',
-            "clobTokenIds": '["qh", "qa"]',
-            "description": "Resolves based on 90 minutes of regulation time.",
-        },
-    )
     assert mb_qualify.family is MarketFamily.TO_QUALIFY
-    assert mb_qualify.settlement.scope is SettlementScope.INCLUDING_PENALTIES
+    assert mb_qualify.settlement.scope is SettlementScope.UNKNOWN
+    assert mb_qualify.settlement.extra_time_included is None
+    assert mb_qualify.settlement.penalties_included is None
     assert mb_result.settlement.scope is SettlementScope.REGULATION_TIME
     assert {runner.outcome for runner in mb_qualify.runners} == {
         CanonicalOutcome.HOME_QUALIFY,
@@ -404,9 +496,20 @@ def test_to_qualify_is_distinct_from_regulation_match_result() -> None:
     matcher = MarketMatcher()
     assert matcher.match(mb_result, mb_qualify).matched is False
     assert "market_family_mismatch" in matcher.match(mb_result, pm_qualify).reasons
-    assert matcher.match(mb_qualify, pm_qualify).matched is True
-    assert matcher.match(mb_qualify, pm_regulation).matched is False
-    assert solver_eligible_market(pm_regulation) is False
+    assert matcher.match(mb_qualify, pm_qualify).matched is False
+    assert "incomplete_settlement" in matcher.match(mb_qualify, pm_qualify).reasons
+    assert solver_eligible_market(mb_qualify) is False
+    assert solver_eligible_market(pm_qualify) is False
+    assert solver_ineligibility_reason(mb_qualify) == UNPROVEN_SETTLEMENT_REASON
+    rows = assemble_fixture_inventory(
+        [_inventory(mb_qualify, name="To Qualify")],
+        [_inventory(pm_qualify, name="To qualify")],
+    )
+    assert all(not row.entered_solver for row in rows)
+    assert any(
+        row.reason in {UNPROVEN_SETTLEMENT_REASON, "incomplete_settlement"} or "incomplete_settlement" in row.match_reasons
+        for row in rows
+    )
 
 
 def test_incomplete_runner_sets_fail_closed() -> None:
@@ -688,6 +791,15 @@ class MultiFamilyMatchbook:
                     ],
                 },
                 {
+                    "id": 8111,
+                    "name": "Over/Under 2.0 Goals",
+                    "line": "2.0",
+                    "runners": [
+                        {"id": 25, "name": "Over 2.0", "prices": [back]},
+                        {"id": 26, "name": "Under 2.0", "prices": [back]},
+                    ],
+                },
+                {
                     "id": 8105,
                     "name": "Draw No Bet",
                     "runners": [
@@ -778,6 +890,15 @@ class MultiFamilyPolymarket:
                 "description": regulation,
             },
             {
+                "id": "pm-tg-20",
+                "question": "Total goals 2.0",
+                "sportsMarketType": "total goals",
+                "line": "2.0",
+                "outcomes": '["Over", "Under"]',
+                "clobTokenIds": '["o20", "u20"]',
+                "description": regulation,
+            },
+            {
                 "id": "pm-dnb",
                 "question": "Draw no bet",
                 "sportsMarketType": "draw no bet",
@@ -853,12 +974,24 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
             "match_result",
             "both_teams_to_score",
             "total_goals",
-            "draw_no_bet",
             "asian_handicap",
-            "to_qualify",
         }
+        assert "draw_no_bet" not in scanned_families
+        assert "to_qualify" not in scanned_families
         totals = [row for row in rows if row.family == "total_goals" and row.entered_solver]
         assert {row.line for row in totals} == {Decimal("2.5"), Decimal("3.5")}
+        integer_totals = [
+            row for row in rows if row.family == "total_goals" and row.line == Decimal("2.0")
+        ]
+        assert integer_totals
+        assert all(not row.entered_solver for row in integer_totals)
+        assert all(row.reason == PUSH_STATE_REASON for row in integer_totals)
+        dnb = next(row for row in rows if row.family == "draw_no_bet")
+        assert dnb.entered_solver is False
+        assert dnb.reason == PUSH_STATE_REASON
+        qualify = next(row for row in rows if row.family == "to_qualify")
+        assert qualify.entered_solver is False
+        assert qualify.reason in {UNPROVEN_SETTLEMENT_REASON, "incomplete_settlement"}
         next_goal = next(row for row in rows if row.family == "next_goal" or row.display_name == "Next Goal")
         assert next_goal.entered_solver is False
         assert next_goal.reason
@@ -871,7 +1004,7 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
         assert first_team.entered_solver is False
         assert first_team.comparison_status is InventoryComparisonStatus.UNSUPPORTED_FAMILY
         scanned_ids = {(d.canonical_market_id) for d in report.paper_decisions}
-        assert len(scanned_ids) >= 7
+        assert len(scanned_ids) >= 4
         for decision in report.paper_decisions:
             assert SOLVER_INELIGIBLE_REASON not in decision.rejection_reasons
             assert "noncanonical_outcome_space" not in decision.rejection_reasons
@@ -902,6 +1035,8 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
         }
         assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "match_result")
         assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "both_teams_to_score")
+        assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "draw_no_bet")
+        assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "to_qualify")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "correct_score")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "next_goal")
         coordinator.reset()

@@ -8,7 +8,9 @@ from pydantic import BaseModel, Field
 
 from sports_hedge.application.complete_set import (
     INCOMPLETE_OUTCOME_REASON,
+    PUSH_STATE_REASON,
     SOLVER_INELIGIBLE_REASON,
+    UNPROVEN_SETTLEMENT_REASON,
     solver_eligible_market,
     solver_ineligibility_reason,
 )
@@ -453,6 +455,8 @@ def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
         "unsupported_outcome_model",
         INCOMPLETE_OUTCOME_REASON,
         SOLVER_INELIGIBLE_REASON,
+        PUSH_STATE_REASON,
+        UNPROVEN_SETTLEMENT_REASON,
     }:
         return InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL
     if reason in {"unsupported_family", "market_family_mismatch"} and reason == "unsupported_family":

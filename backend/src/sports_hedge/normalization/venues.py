@@ -367,14 +367,16 @@ def _standard_football_settlement(
     period: FootballPeriod,
     line: Decimal | None,
 ) -> SettlementFingerprint:
+    # Matchbook market payloads do not carry resolution-rule text. Do not infer
+    # extra-time/penalty semantics from the To Qualify family name alone.
     if family is MarketFamily.TO_QUALIFY:
         return SettlementFingerprint(
-            scope=SettlementScope.INCLUDING_PENALTIES,
-            period=FootballPeriod.FULL_TIME,
+            scope=SettlementScope.UNKNOWN,
+            period=period,
             line=None,
-            push_possible=False,
-            extra_time_included=True,
-            penalties_included=True,
+            push_possible=None,
+            extra_time_included=None,
+            penalties_included=None,
         )
     if period == FootballPeriod.FULL_TIME:
         scope = SettlementScope.REGULATION_TIME
