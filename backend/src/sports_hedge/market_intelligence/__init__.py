@@ -8,6 +8,11 @@ from sports_hedge.market_intelligence.event_reaction import (
     MarketDependencyGraph,
     MarketReaction,
 )
+from sports_hedge.market_intelligence.ingestion import (
+    IngestResult,
+    MarketEventIngestionPipeline,
+    ProviderEventRecord,
+)
 from sports_hedge.market_intelligence.models import (
     AnnotationCategory,
     HistoricalCohortStats,
@@ -30,13 +35,16 @@ __all__ = [
     "EventReactionAnalysis",
     "EventReactionAnalyzer",
     "HistoricalCohortStats",
+    "IngestResult",
     "LeadLagResult",
     "MarketDependencyGraph",
     "MarketEventAnnotation",
+    "MarketEventIngestionPipeline",
     "MarketIntelligenceAnalytics",
     "MarketReaction",
     "MarketSnapshot",
     "MovementScore",
+    "ProviderEventRecord",
     "ReversionAnalysis",
     "SqliteMarketIntelligenceRepository",
     "TrendExplorer",

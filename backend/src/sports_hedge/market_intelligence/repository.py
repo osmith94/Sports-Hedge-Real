@@ -278,6 +278,26 @@ class SqliteMarketIntelligenceRepository:
         ).fetchall()
         return [_annotation_from_row(row) for row in rows]
 
+    def get_annotation(self, annotation_id: str) -> MarketEventAnnotation | None:
+        row = self._connection.execute(
+            "SELECT * FROM market_event_annotations WHERE annotation_id = ?",
+            (annotation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _annotation_from_row(row)
+
+    def list_annotations_for_ingestion_key(self, key: str) -> list[MarketEventAnnotation]:
+        rows = self._connection.execute(
+            """
+            SELECT * FROM market_event_annotations
+            WHERE json_extract(metadata_json, '$.ingestion.ingestion_key') = ?
+            ORDER BY occurred_at ASC, annotation_id ASC
+            """,
+            (key,),
+        ).fetchall()
+        return [_annotation_from_row(row) for row in rows]
+
     def close(self) -> None:
         self._connection.close()
 
