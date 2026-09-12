@@ -173,7 +173,7 @@ class CloseLegPlan(BaseModel):
     required_close_quantity: Decimal
     filled_close_quantity: Decimal
     available_closing_capacity: Decimal
-    levels_consumed: int = Field(ge=0)
+    levels_consumed: int = Field(default=0, ge=0)
     weighted_closing_price: Decimal | None = None
     worst_closing_price: Decimal | None = None
     slippage_vs_top: Decimal | None = None

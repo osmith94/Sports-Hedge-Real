@@ -13,6 +13,13 @@ from pydantic import BaseModel, Field
 from sports_hedge.liquidity.book import BookLevel
 
 
+_EPS = Decimal("0.00000001")
+
+
+def _nearly_zero(value: Decimal) -> bool:
+    return value.copy_abs() <= _EPS
+
+
 class ReverseFill(BaseModel):
     requested_quantity: Decimal
     filled_quantity: Decimal
@@ -60,7 +67,7 @@ def walk_lay_to_cover_payout(levels: list[BookLevel], required_payout: Decimal) 
         worst = level.decimal_odds
         consumed += 1
 
-    if remaining < 0 and remaining.copy_abs() < Decimal("0.00000001"):
+    if _nearly_zero(remaining):
         remaining = Decimal("0")
 
     average = None if matched == 0 else (required_payout - remaining) / matched
@@ -106,12 +113,15 @@ def walk_prediction_sell(levels: list[BookLevel], required_shares: Decimal) -> R
         take = min(shares_at_level, remaining)
         if take <= 0:
             continue
-        probability = Decimal("1") / level.decimal_odds
         sold += take
         remaining -= take
-        proceeds += take * probability
+        proceeds += take * level.available_stake / shares_at_level
         worst = level.decimal_odds
         consumed += 1
+
+    if _nearly_zero(remaining):
+        remaining = Decimal("0")
+    proceeds = proceeds.quantize(_EPS) if proceeds else proceeds
 
     average = None if sold == 0 else sold / proceeds if proceeds > 0 else None
     return ReverseFill(

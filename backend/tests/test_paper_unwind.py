@@ -190,9 +190,9 @@ def test_lay_walk_covers_payout_and_does_not_treat_lay_as_back() -> None:
 
 
 def test_prediction_sell_uses_share_quantity_not_back_stake() -> None:
-    # 100 shares at 0.48: encoded as odds 1/0.48 and notional 96.
+    # 100 shares at 0.48: odds 25/12, notional 96.
     levels = [
-        BookLevel(decimal_odds=Decimal("1") / Decimal("0.48"), available_stake=Decimal("96")),
+        BookLevel(decimal_odds=Decimal("25") / Decimal("12"), available_stake=Decimal("96")),
     ]
     fill = walk_prediction_sell(levels, Decimal("100"))
     assert fill.fully_filled is True
@@ -232,7 +232,7 @@ def test_fully_executable_reverse_depth_produces_exact_pnl_and_releasable_capita
                     outcome="home",
                     levels=[
                         BookLevel(
-                            decimal_odds=Decimal("1") / Decimal("0.48"),
+                            decimal_odds=Decimal("25") / Decimal("12"),
                             available_stake=Decimal("96"),
                         )
                     ],
@@ -514,7 +514,7 @@ def test_simple_and_generalized_positions_share_the_same_engine() -> None:
                 _quote(
                     venue=VenueName.MATCHBOOK,
                     outcome="home" if False else "draw",
-                    levels=[BookLevel(decimal_odds=Decimal("3.00"), available_stake=Decimal("80"))],
+                    levels=[BookLevel(decimal_odds=Decimal("3.00"), available_stake=Decimal("200"))],
                     cost=_lay_cost(rate="0"),
                     currency="GBP",
                     runner="mb-home",
@@ -543,7 +543,7 @@ def test_simple_and_generalized_positions_share_the_same_engine() -> None:
                 _quote(
                     venue=VenueName.MATCHBOOK,
                     outcome="no_goal",
-                    levels=[BookLevel(decimal_odds=Decimal("2.80"), available_stake=Decimal("80"))],
+                    levels=[BookLevel(decimal_odds=Decimal("2.80"), available_stake=Decimal("200"))],
                     cost=_lay_cost(rate="0"),
                     currency="GBP",
                     runner="mb-home",
