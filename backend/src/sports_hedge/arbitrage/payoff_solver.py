@@ -11,6 +11,7 @@ from sports_hedge.domain.models import VenueName
 getcontext().prec = 28
 
 STAKE_QUANT = Decimal("0.00000001")
+LP_STAKE_TOLERANCE = Decimal("0.00000001")
 LP_ENGINE = "scipy.linprog.highs"
 
 LinprogFn = Callable[..., Any]
@@ -146,8 +147,6 @@ class GeneralizedMaxMinSolver:
                 parsed = _finite_decimal(value)
                 if parsed is None:
                     return _rejected("non_finite_solver_output", states=states)
-                if parsed < 0:
-                    parsed = Decimal("0")
                 candidate.append(parsed)
         except Exception:
             return _rejected("solver_failure", states=states)
@@ -157,20 +156,22 @@ class GeneralizedMaxMinSolver:
     def _post_validate(self, problem: PayoffProblem, candidate: Sequence[Decimal]) -> PayoffSolution:
         stakes: list[Decimal] = []
         for stake, leg in zip(candidate, problem.legs, strict=True):
-            clamped = min(stake, leg.max_stake)
-            stakes.append(_quantize_down(clamped))
+            if stake < -LP_STAKE_TOLERANCE:
+                return _rejected("numerical_validation_failed", states=problem.states, numerically_validated=True)
+            if stake > leg.max_stake + LP_STAKE_TOLERANCE:
+                return _rejected("numerical_validation_failed", states=problem.states, numerically_validated=True)
+            cleaned = Decimal("0") if stake < 0 else stake
+            if cleaned > leg.max_stake:
+                cleaned = leg.max_stake
+            stakes.append(_quantize_down(cleaned))
 
         def capital_used(values: Sequence[Decimal]) -> Decimal:
             return sum((value * leg.capital_per_unit for value, leg in zip(values, problem.legs, strict=True)), Decimal("0"))
 
         total_capital = capital_used(stakes)
-        if problem.capital_limit is not None and total_capital > problem.capital_limit:
-            if total_capital <= 0:
-                return _rejected("insufficient_venue_capital", states=problem.states, numerically_validated=True)
-            scale = problem.capital_limit / total_capital
-            stakes = [_quantize_down(stake * scale) for stake in stakes]
-            total_capital = capital_used(stakes)
-            if total_capital > problem.capital_limit:
+        if problem.capital_limit is not None:
+            excess = total_capital - problem.capital_limit
+            if excess > LP_STAKE_TOLERANCE:
                 return _rejected("numerical_validation_failed", states=problem.states, numerically_validated=True)
 
         if problem.venue_capital_limits:
@@ -183,7 +184,7 @@ class GeneralizedMaxMinSolver:
                 cap = problem.venue_capital_limits.get(venue)
                 if cap is None:
                     continue
-                if used > cap:
+                if used - cap > LP_STAKE_TOLERANCE:
                     return _rejected("numerical_validation_failed", states=problem.states, numerically_validated=True)
 
         state_pnl: dict[str, Decimal] = {}

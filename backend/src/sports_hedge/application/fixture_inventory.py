@@ -12,6 +12,7 @@ from sports_hedge.application.complete_set import (
     SOLVER_INELIGIBLE_REASON,
     SPLIT_LINE_REASON,
     UNKNOWN_DRAW_VOID_REASON,
+    UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
     UNPROVEN_HANDICAP_REASON,
     UNPROVEN_SETTLEMENT_REASON,
     scan_eligible_pair,
@@ -456,7 +457,11 @@ def _status_from_rejections(rejections: list[str]) -> InventoryComparisonStatus:
 
 
 def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
-    if reason.startswith("missing_venue_cost") or reason in {"missing_costs", "legacy_fee_snapshot_not_cost_truth"}:
+    if reason.startswith("missing_venue_cost") or reason in {
+        "missing_costs",
+        "legacy_fee_snapshot_not_cost_truth",
+        UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
+    }:
         return InventoryComparisonStatus.MISSING_COSTS
     if reason.startswith("missing_fx") or reason.startswith("missing_fx_rate"):
         return InventoryComparisonStatus.MISSING_FX

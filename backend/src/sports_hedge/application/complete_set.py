@@ -58,6 +58,7 @@ UNPROVEN_SETTLEMENT_REASON = "unproven_settlement_semantics"
 UNPROVEN_HANDICAP_REASON = "unproven_handicap_semantics"
 SPLIT_LINE_REASON = "generalized_split_line_not_modelled"
 UNKNOWN_DRAW_VOID_REASON = "unknown_draw_void_semantics"
+UNSUPPORTED_STATE_PAYOFF_FEE_BASIS = "unsupported_state_payoff_fee_basis"
 
 
 def complete_set_outcomes(family: MarketFamily) -> frozenset[CanonicalOutcome] | None:

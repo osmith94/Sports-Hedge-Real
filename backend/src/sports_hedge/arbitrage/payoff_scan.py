@@ -13,8 +13,10 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.application.complete_set import (
     DNB_STATES,
     INTEGER_TOTAL_STATES,
+    UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
     GeneralizedStateModel,
 )
+from sports_hedge.fees.cost import FeeBasis
 
 
 class PayoffScanResult(BaseModel):
@@ -22,6 +24,9 @@ class PayoffScanResult(BaseModel):
     selected_quotes: list[DepthQuoteCandidate] = Field(default_factory=list)
     combinations_evaluated: int = Field(default=0, ge=0)
     cost_rejection_reasons: list[str] = Field(default_factory=list)
+
+
+STATE_SAFE_FEE_BASES = frozenset({FeeBasis.NONE_CONFIRMED, FeeBasis.PROFIT_COMMISSION})
 
 
 class DepthAwarePayoffScanner:
@@ -42,6 +47,14 @@ class DepthAwarePayoffScanner:
         states, mapping = _state_mapping(state_model)
         options: list[list[DepthQuoteCandidate]] = []
         cost_reasons: list[str] = []
+        if any(source.cost.fee_basis not in STATE_SAFE_FEE_BASES for source in sources):
+            return PayoffScanResult(
+                solution=PayoffSolution(
+                    is_arbitrage=False,
+                    rejection_reason=UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
+                ),
+                cost_rejection_reasons=[UNSUPPORTED_STATE_PAYOFF_FEE_BASIS],
+            )
         for source in sources:
             if source.outcome not in mapping:
                 continue
@@ -82,7 +95,7 @@ class DepthAwarePayoffScanner:
             solution = self.solver.solve(problem)
             if best is None or _better(solution, best):
                 best = solution
-                best_quotes = list(combination)
+                best_quotes = _quotes_for_positive_stakes(combination, solution)
 
         if best is None:
             return PayoffScanResult(
@@ -157,6 +170,22 @@ def _problem_from_quotes(
         )
     except ValueError:
         return None
+
+
+def _quote_identity(quote: DepthQuoteCandidate) -> tuple[VenueName, str, str, str]:
+    return (quote.venue, quote.source_market_id, quote.source_runner_id, quote.outcome)
+
+
+def _quotes_for_positive_stakes(
+    quotes: Sequence[DepthQuoteCandidate],
+    solution: PayoffSolution,
+) -> list[DepthQuoteCandidate]:
+    selected = {
+        (stake.venue, stake.source_market_id, stake.source_runner_id or "", stake.runner_outcome or "")
+        for stake in solution.selected_stakes
+        if stake.stake > 0
+    }
+    return [quote for quote in quotes if _quote_identity(quote) in selected]
 
 
 def _better(candidate: PayoffSolution, incumbent: PayoffSolution) -> bool:

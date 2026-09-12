@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from sports_hedge.application.complete_set import (
     SOLVER_MODEL_SIMPLE,
+    UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
     complete_set_outcomes,
     generalized_payoff_eligible_pair,
     generalized_state_model,
@@ -19,7 +20,11 @@ from sports_hedge.application.quote_freshness import (
     require_aware_instant,
 )
 from sports_hedge.arbitrage.depth import DepthAwareCompleteSetScanner, DepthQuoteSource
-from sports_hedge.arbitrage.payoff_scan import DepthAwarePayoffScanner, PayoffScanResult
+from sports_hedge.arbitrage.payoff_scan import (
+    STATE_SAFE_FEE_BASES,
+    DepthAwarePayoffScanner,
+    PayoffScanResult,
+)
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.football import CanonicalOutcome, SettlementScope
 from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
@@ -240,6 +245,9 @@ class PaperScanService:
             except CostRuleError as exc:
                 rejections.append(exc.reason)
                 missing_fees = True
+            if solver_model != SOLVER_MODEL_SIMPLE and cost.fee_basis not in STATE_SAFE_FEE_BASES:
+                rejections.append(UNSUPPORTED_STATE_PAYOFF_FEE_BASIS)
+                missing_fees = True
 
         fx_map = {snapshot.currency: snapshot for snapshot in fx}
         missing_fx = sorted(
@@ -448,17 +456,19 @@ class PaperScanService:
         elif payoff_scan is not None:
             selected_quotes = list(payoff_scan.selected_quotes)
             for stake in payoff_scan.solution.selected_stakes:
-                outcome = stake.runner_outcome or ""
-                stake_by_key[(outcome, stake.venue)] = (
-                    stake_by_key.get((outcome, stake.venue), Decimal("0")) + stake.stake
+                if stake.stake <= 0:
+                    continue
+                stake_by_key[_payoff_leg_key(stake)] = (
+                    stake_by_key.get(_payoff_leg_key(stake), Decimal("0")) + stake.stake
                 )
-        if len(selected_quotes) < 2:
+        if depth_scan is not None and len(selected_quotes) < 2:
             return None
 
         observation_by_venue = {left.venue: left, right.venue: right}
         spread_bps = 0.0
         size_to_depth_ratio = 0.0
         hedge_liquidity_ratio = 1.0
+        used = 0
 
         for selected in selected_quotes:
             observation = observation_by_venue.get(selected.venue)
@@ -470,15 +480,24 @@ class PaperScanService:
             if book is None:
                 return None
             spread_bps = max(spread_bps, book.probability_spread_bps)
-            stake_amount = stake_by_key.get((selected.outcome, selected.venue))
-            if stake_amount is None or stake_amount <= 0 or selected.cumulative_depth <= 0:
-                return None
+            if depth_scan is not None:
+                stake_amount = stake_by_key.get((selected.outcome, selected.venue))
+                if stake_amount is None or stake_amount <= 0 or selected.cumulative_depth <= 0:
+                    return None
+            else:
+                stake_amount = stake_by_key.get(_quote_leg_key(selected))
+                if stake_amount is None or stake_amount <= 0 or selected.cumulative_depth <= 0:
+                    continue
+            used += 1
             ratio = float(stake_amount / selected.cumulative_depth)
             size_to_depth_ratio = max(size_to_depth_ratio, ratio)
             hedge_liquidity_ratio = min(
                 hedge_liquidity_ratio,
                 min(float(selected.cumulative_depth / stake_amount), 1.0),
             )
+
+        if used < 2:
+            return None
 
         observed_at = max(left.observed_at, right.observed_at)
         minutes_to_kickoff = max(
@@ -490,7 +509,7 @@ class PaperScanService:
             size_to_depth_ratio=size_to_depth_ratio,
             quote_age_ms=quote_age_ms,
             recent_volatility_bps=recent_volatility_bps,
-            leg_count=len(selected_quotes),
+            leg_count=used,
             minutes_to_kickoff=minutes_to_kickoff,
             assumed_latency_ms=assumed_latency_ms,
             hedge_liquidity_ratio=hedge_liquidity_ratio,
@@ -597,10 +616,11 @@ def _fill_legs_from_observations(
         for stake in depth_scan.solution.stakes:
             stakes[(stake.outcome, stake.venue)] = stake.stake
     elif payoff_scan is not None:
-        selected = {(quote.outcome, quote.venue) for quote in payoff_scan.selected_quotes}
         for stake in payoff_scan.solution.selected_stakes:
-            outcome = stake.runner_outcome or ""
-            key = (outcome, stake.venue)
+            if stake.stake <= 0:
+                continue
+            key = _payoff_leg_key(stake)
+            selected.add(key)
             stakes[key] = stakes.get(key, Decimal("0")) + stake.stake
     legs: list[PaperOpportunityLeg] = []
     for observation in (left, right):
@@ -609,12 +629,26 @@ def _fill_legs_from_observations(
             continue
         for book in observation.outcome_books:
             outcome = book.outcome.value
-            if (outcome, observation.venue) not in selected or not book.back_levels:
+            if depth_scan is not None:
+                select_key: tuple = (outcome, observation.venue)
+            else:
+                select_key = (
+                    outcome,
+                    observation.venue,
+                    observation.market.source_market_id,
+                    book.source_runner_id,
+                )
+            if select_key not in selected or not book.back_levels:
                 continue
             best = max(book.back_levels, key=lambda item: item.decimal_odds)
-            stake_amount = stakes.get((outcome, observation.venue))
+            stake_amount = stakes.get(select_key)
             visible = sum((level.available_stake for level in book.back_levels), Decimal("0"))
-            requested = stake_amount / rate if stake_amount is not None and stake_amount > 0 else visible
+            if stake_amount is None or stake_amount <= 0:
+                if depth_scan is None:
+                    continue
+                requested = visible
+            else:
+                requested = stake_amount / rate
             if visible > 0:
                 requested = min(requested, visible)
             if requested <= 0:
@@ -634,6 +668,19 @@ def _fill_legs_from_observations(
                 )
             )
     return legs
+
+
+def _payoff_leg_key(stake) -> tuple[str, VenueName, str, str]:
+    return (
+        stake.runner_outcome or "",
+        stake.venue,
+        stake.source_market_id,
+        stake.source_runner_id or "",
+    )
+
+
+def _quote_leg_key(quote) -> tuple[str, VenueName, str, str]:
+    return (quote.outcome, quote.venue, quote.source_market_id, quote.source_runner_id)
 
 
 def _action_mismatch(venue: VenueName, action: MarketAction) -> str | None:

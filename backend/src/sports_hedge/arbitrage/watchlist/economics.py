@@ -49,6 +49,7 @@ COST_CLOCK_REASONS = (
     "unconverted_currency",
     "unknown_order_role",
     "unsupported_action",
+    "unsupported_state_payoff_fee_basis",
 )
 
 
