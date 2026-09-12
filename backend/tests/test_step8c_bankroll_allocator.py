@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
@@ -36,8 +35,6 @@ from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
-from sports_hedge.paper.liquidity import default_pools
-from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from venue_cost_helpers import venue_cost_payload

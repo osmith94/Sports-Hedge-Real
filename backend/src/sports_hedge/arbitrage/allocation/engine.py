@@ -98,7 +98,6 @@ def allocate(request: AllocationRequest) -> AllocationResult:
             )
 
     try:
-        max_plan = _plan_at_scale(request, scale_max)
         rec_plan = _plan_at_scale(request, scale_recommended)
         _validate_scaled_payoff(request, scale_max)
         _validate_scaled_payoff(request, scale_recommended)
