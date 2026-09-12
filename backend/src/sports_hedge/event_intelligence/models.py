@@ -74,7 +74,7 @@ class EventSubject(BaseModel):
 
     @model_validator(mode="after")
     def strip_empty(self) -> "EventSubject":
-        for field_name in self.model_fields:
+        for field_name in type(self).model_fields:
             value = getattr(self, field_name)
             if isinstance(value, str):
                 stripped = value.strip()
