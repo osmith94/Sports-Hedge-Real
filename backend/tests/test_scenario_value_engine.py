@@ -12,6 +12,14 @@ from sports_hedge.domain.football import (
     SettlementScope,
 )
 from sports_hedge.domain.models import VenueName
+from sports_hedge.fees.cost import (
+    CostKnownStatus,
+    FeeBasis,
+    MarketAction,
+    OrderRole,
+    VenueCostSnapshot,
+)
+from sports_hedge.fees.effective import apply_venue_costs
 from sports_hedge.research.value import PAPER_RESEARCH_ONLY, ScenarioValueEngine
 from sports_hedge.research.value.contracts import (
     CanonicalProposition,
@@ -76,6 +84,50 @@ def _evidence(**overrides: object) -> ScenarioEvidence:
     return ScenarioEvidence.model_validate(payload)
 
 
+def _cost(
+    venue: VenueName,
+    source_market_id: str,
+    quoted_at: datetime,
+    *,
+    rate: str | None = "0.02",
+    fee_basis: FeeBasis = FeeBasis.PROFIT_COMMISSION,
+    known: bool = True,
+    action: MarketAction = MarketAction.BACK,
+    order_role: OrderRole = OrderRole.TAKER,
+    fixed_amount: str | None = None,
+    snapshot_id: str | None = None,
+) -> VenueCostSnapshot:
+    if not known:
+        return VenueCostSnapshot(
+            venue=venue,
+            action=action,
+            fee_basis=FeeBasis.UNKNOWN,
+            known_status=CostKnownStatus.UNKNOWN,
+            captured_at=quoted_at,
+            source="test_unknown",
+            source_market_id=source_market_id,
+            order_role=order_role,
+            snapshot_id=snapshot_id,
+        )
+    return VenueCostSnapshot(
+        venue=venue,
+        action=action,
+        fee_basis=fee_basis,
+        known_status=CostKnownStatus.KNOWN,
+        captured_at=quoted_at,
+        source="test_paper_assumption",
+        source_market_id=source_market_id,
+        order_role=order_role,
+        account_or_fee_tier="standard",
+        rate=None if rate is None else Decimal(rate),
+        fixed_amount=None if fixed_amount is None else Decimal(fixed_amount),
+        currency="GBP",
+        effective_from=quoted_at,
+        snapshot_id=snapshot_id,
+        detail="Deterministic paper cost snapshot",
+    )
+
+
 def _quote(
     venue: VenueName = VenueName.MATCHBOOK,
     *,
@@ -86,18 +138,52 @@ def _quote(
     extra_time: bool = False,
     complete_settlement: bool = True,
     source_market_id: str | None = None,
+    fee_basis: FeeBasis = FeeBasis.PROFIT_COMMISSION,
+    action: MarketAction = MarketAction.BACK,
+    order_role: OrderRole = OrderRole.TAKER,
+    fixed_amount: str | None = None,
+    snapshot_id: str | None = None,
 ) -> VenueQuote:
+    market_id = source_market_id or f"{venue}-corners-over"
+    quoted_at = AS_OF - timedelta(seconds=age_seconds)
+    known = commission is not None or fee_basis in {FeeBasis.NONE_CONFIRMED, FeeBasis.FIXED, FeeBasis.FORMULA}
+    if commission is None and fee_basis is FeeBasis.PROFIT_COMMISSION:
+        known = False
+    rate: str | None
+    if fee_basis is FeeBasis.NONE_CONFIRMED:
+        rate = None
+        known = True
+    elif fee_basis is FeeBasis.FORMULA:
+        rate = None
+        known = True
+    elif fee_basis is FeeBasis.FIXED:
+        rate = None
+        known = True
+    else:
+        rate = commission
     return VenueQuote(
         venue=venue,
-        source_market_id=source_market_id or f"{venue}-corners-over",
+        source_market_id=market_id,
+        action=action,
         displayed_decimal_odds=Decimal(odds),
-        quoted_at=AS_OF - timedelta(seconds=age_seconds),
+        quoted_at=quoted_at,
         settlement=_settlement(extra_time=extra_time, complete=complete_settlement),
         market_family=MarketFamily.CORNERS,
         period=FootballPeriod.FULL_TIME,
         line=Decimal("10.5"),
         available_depth=None if depth is None else Decimal(depth),
-        commission_rate=None if commission is None else Decimal(commission),
+        cost=_cost(
+            venue,
+            market_id,
+            quoted_at,
+            rate=rate,
+            fee_basis=fee_basis if known else FeeBasis.UNKNOWN,
+            known=known,
+            action=action,
+            order_role=order_role,
+            fixed_amount=fixed_amount,
+            snapshot_id=snapshot_id,
+        ),
     )
 
 
@@ -106,6 +192,7 @@ def test_package_is_paper_research_only_and_isolated_from_arbitrage_solver() -> 
     source = inspect.getsource(value_engine_module)
     assert "sports_hedge.arbitrage" not in source
     assert "place_order" not in source
+    assert "commission_rate" not in source
 
 
 def test_positive_value_uses_matchbook_as_reference() -> None:
@@ -132,6 +219,7 @@ def test_positive_value_uses_matchbook_as_reference() -> None:
     assert result.score_components is not None
     assert result.quote_age_seconds == Decimal("5")
     assert result.src == Decimal("1.40")
+    assert result.fee_basis == FeeBasis.PROFIT_COMMISSION.value
 
 
 def test_no_value_when_model_probability_is_below_cost_adjusted_price() -> None:
@@ -306,7 +394,7 @@ def test_missing_costs_fail_closed_without_inventing_fees() -> None:
     )
 
     assert result.status is ValueStatus.MISSING_COSTS
-    assert result.rejection_reason == "missing_costs"
+    assert result.rejection_reason == "unknown_costs"
 
 
 def test_insufficient_liquidity_is_rejected() -> None:
@@ -336,3 +424,84 @@ def test_stale_matchbook_does_not_block_fresh_equivalent_venue() -> None:
     assert result.status is ValueStatus.VALUE
     assert result.best_venue is VenueName.SMARKETS
     assert result.reference_venue is VenueName.MATCHBOOK
+
+
+def test_fee_basis_not_coerced_to_profit_commission() -> None:
+    matchbook = _quote(VenueName.MATCHBOOK, odds="2.20", commission="0.05")
+    smarkets = _quote(
+        VenueName.SMARKETS,
+        odds="2.20",
+        commission=None,
+        fee_basis=FeeBasis.NONE_CONFIRMED,
+    )
+    result = ScenarioValueEngine().evaluate(
+        _proposition(),
+        _evidence(),
+        [matchbook, smarkets],
+        as_of=AS_OF,
+    )
+
+    matchbook_net = apply_venue_costs(
+        matchbook.cost,
+        gross_decimal_odds=matchbook.displayed_decimal_odds,
+    )
+    smarkets_net = apply_venue_costs(
+        smarkets.cost,
+        gross_decimal_odds=smarkets.displayed_decimal_odds,
+    )
+    assert smarkets_net.net_decimal_equivalent > matchbook_net.net_decimal_equivalent
+    assert result.best_venue is VenueName.SMARKETS
+    assert result.fee_basis == FeeBasis.NONE_CONFIRMED.value
+    assert result.reference_venue is VenueName.MATCHBOOK
+
+
+def test_same_headline_payout_fee_loses_to_profit_commission() -> None:
+    payout = _quote(
+        VenueName.MATCHBOOK,
+        odds="2.10",
+        commission="0.05",
+        fee_basis=FeeBasis.PAYOUT,
+    )
+    profit = _quote(
+        VenueName.SMARKETS,
+        odds="2.10",
+        commission="0.05",
+        fee_basis=FeeBasis.PROFIT_COMMISSION,
+    )
+    result = ScenarioValueEngine().evaluate(
+        _proposition(),
+        _evidence(),
+        [payout, profit],
+        as_of=AS_OF,
+    )
+
+    assert result.best_venue is VenueName.SMARKETS
+    assert result.fee_basis == FeeBasis.PROFIT_COMMISSION.value
+    assert result.best_net_price == apply_venue_costs(
+        profit.cost,
+        gross_decimal_odds=profit.displayed_decimal_odds,
+    ).net_decimal_equivalent
+
+
+def test_unsupported_formula_basis_fails_closed() -> None:
+    result = ScenarioValueEngine().evaluate(
+        _proposition(),
+        _evidence(),
+        [_quote(fee_basis=FeeBasis.FORMULA, commission=None)],
+        as_of=AS_OF,
+    )
+
+    assert result.status is ValueStatus.MISSING_COSTS
+    assert result.rejection_reason == "unsupported_fee_basis"
+
+
+def test_lay_action_fails_closed_instead_of_back_haircut() -> None:
+    result = ScenarioValueEngine().evaluate(
+        _proposition(),
+        _evidence(),
+        [_quote(action=MarketAction.LAY)],
+        as_of=AS_OF,
+    )
+
+    assert result.status is ValueStatus.MISSING_COSTS
+    assert result.rejection_reason == "unsupported_action"

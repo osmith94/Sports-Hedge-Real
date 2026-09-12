@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.domain.football import FootballPeriod, MarketFamily, SettlementFingerprint
 from sports_hedge.domain.models import VenueName
+from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
 
 
 class ValueStatus(StrEnum):
@@ -93,22 +94,36 @@ class ScenarioEvidence(BaseModel):
 
 
 class VenueQuote(BaseModel):
-    """Provider-neutral back/buy quote for one canonical proposition.
+    """Provider-neutral quote for one canonical proposition.
 
-    ``commission_rate`` is required for economic evaluation. ``None`` means the
-    fee is unknown — never treat that as a zero-commission venue.
+    Headline ``displayed_decimal_odds`` are never ranked directly. Net economics
+    come from ``cost`` via the shared venue-cost rule for this side/action.
     """
 
     venue: VenueName
     source_market_id: str
+    action: MarketAction
     displayed_decimal_odds: Decimal = Field(gt=Decimal("1"))
     quoted_at: datetime
     settlement: SettlementFingerprint
     market_family: MarketFamily
     period: FootballPeriod
+    cost: VenueCostSnapshot
     line: Decimal | None = None
     available_depth: Decimal | None = Field(default=None, ge=0)
-    commission_rate: Decimal | None = Field(default=None, ge=0, lt=1)
+
+    @model_validator(mode="after")
+    def cost_must_match_quote(self) -> VenueQuote:
+        if self.cost.venue != self.venue:
+            raise ValueError("cost snapshot venue must match the quote venue")
+        if self.cost.action != self.action:
+            raise ValueError("cost snapshot action must match the quote action")
+        if (
+            self.cost.source_market_id is not None
+            and self.cost.source_market_id != self.source_market_id
+        ):
+            raise ValueError("cost snapshot source_market_id must match the quote")
+        return self
 
 
 class ValueEnginePolicy(BaseModel):
@@ -161,5 +176,7 @@ class ScenarioValueResult(BaseModel):
     available_depth: Decimal | None = None
     value_signal_score: Decimal | None = None
     score_components: ScoreComponents | None = None
+    fee_basis: str | None = None
+    fee_snapshot_id: str | None = None
     rejection_reason: str | None = None
     paper_research_only: bool = True

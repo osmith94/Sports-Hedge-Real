@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from sports_hedge.domain.models import VenueName
 from sports_hedge.research.value.contracts import CanonicalProposition, VenueQuote
-from sports_hedge.research.value.economics import quote_net_odds
+from sports_hedge.research.value.economics import quote_cost_rejection, quote_net_odds
 from sports_hedge.research.value.settlement import settlement_is_complete
 
 _VENUE_TIEBREAK = {
@@ -74,7 +74,7 @@ def has_sufficient_depth(quote: VenueQuote, min_depth: Decimal) -> bool:
 
 
 def has_known_costs(quote: VenueQuote) -> bool:
-    return quote.commission_rate is not None
+    return quote_cost_rejection(quote) is None
 
 
 def select_best_quote(quotes: list[VenueQuote]) -> VenueQuote:

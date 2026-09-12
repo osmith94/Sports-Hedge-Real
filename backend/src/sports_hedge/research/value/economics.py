@@ -2,21 +2,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from sports_hedge.fees.effective import (
+    CostRuleError,
+    EffectiveLegEconomics,
+    apply_venue_costs,
+    profit_commission_net_odds,
+)
 from sports_hedge.research.value.contracts import VenueQuote
-
-
-def net_back_odds(displayed_decimal_odds: Decimal, commission_rate: Decimal) -> Decimal:
-    """Effective decimal odds after a known profit commission.
-
-    Does not invent fees: callers must only pass a supplied commission rate.
-    """
-
-    if displayed_decimal_odds <= 1:
-        raise ValueError("displayed_decimal_odds must exceed 1")
-    if commission_rate < 0 or commission_rate >= 1:
-        raise ValueError("commission_rate must be in [0, 1)")
-    profit = displayed_decimal_odds - Decimal("1")
-    return Decimal("1") + profit * (Decimal("1") - commission_rate)
 
 
 def raw_implied_probability(displayed_decimal_odds: Decimal) -> Decimal:
@@ -47,7 +39,26 @@ def probability_edge_percentage_points(
     return (model_probability - cost_adjusted_market_probability) * Decimal("100")
 
 
+def quote_effective_economics(quote: VenueQuote) -> EffectiveLegEconomics:
+    """Net price from the quote's own cost rule, not a generic commission haircut."""
+
+    return apply_venue_costs(
+        quote.cost,
+        gross_decimal_odds=quote.displayed_decimal_odds,
+    )
+
+
 def quote_net_odds(quote: VenueQuote) -> Decimal:
-    if quote.commission_rate is None:
-        raise ValueError("commission_rate is required to compute net odds")
-    return net_back_odds(quote.displayed_decimal_odds, quote.commission_rate)
+    return quote_effective_economics(quote).net_decimal_equivalent
+
+
+def quote_cost_rejection(quote: VenueQuote) -> str | None:
+    try:
+        quote_effective_economics(quote)
+    except CostRuleError as exc:
+        return exc.reason
+    return None
+
+
+# Preserved name for profit-commission arithmetic used by tests and FeeSnapshot.
+net_back_odds = profit_commission_net_odds

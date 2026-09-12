@@ -15,7 +15,8 @@ from sports_hedge.research.value.economics import (
     cost_adjusted_implied_probability,
     expected_profit_per_unit,
     probability_edge_percentage_points,
-    quote_net_odds,
+    quote_cost_rejection,
+    quote_effective_economics,
     raw_implied_probability,
 )
 from sports_hedge.research.value.quotes import (
@@ -84,15 +85,18 @@ class ScenarioValueEngine:
 
         costed = [quote for quote in liquid if has_known_costs(quote)]
         if not costed:
+            reasons = {quote_cost_rejection(quote) for quote in liquid}
+            reason = next(iter(reasons)) if len(reasons) == 1 else "missing_costs"
             return self._rejected(
                 evidence,
                 ValueStatus.MISSING_COSTS,
-                "missing_costs",
+                reason or "missing_costs",
                 reference=reference,
             )
 
         best = select_best_quote(costed)
-        net_odds = quote_net_odds(best)
+        economics = quote_effective_economics(best)
+        net_odds = economics.net_decimal_equivalent
         raw_p = raw_implied_probability(best.displayed_decimal_odds)
         cost_p = cost_adjusted_implied_probability(net_odds)
         point_ev = expected_profit_per_unit(evidence.model_probability, net_odds)
@@ -142,6 +146,8 @@ class ScenarioValueEngine:
             available_depth=depth,
             value_signal_score=score,
             score_components=components,
+            fee_basis=economics.fee_basis.value,
+            fee_snapshot_id=economics.fee_snapshot_id,
             rejection_reason=reason,
         )
 

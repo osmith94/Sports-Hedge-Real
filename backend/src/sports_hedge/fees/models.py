@@ -6,6 +6,7 @@ from decimal import Decimal
 from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.domain.models import VenueName
+from sports_hedge.fees.effective import profit_commission_net_odds
 
 
 class FeeSnapshot(BaseModel):
@@ -29,7 +30,4 @@ class FeeSnapshot(BaseModel):
         return self
 
     def apply_to_decimal_odds(self, decimal_odds: Decimal) -> Decimal:
-        if decimal_odds <= 1:
-            raise ValueError("decimal_odds must exceed 1")
-        profit = decimal_odds - Decimal("1")
-        return Decimal("1") + profit * (Decimal("1") - self.profit_haircut_rate)
+        return profit_commission_net_odds(decimal_odds, self.profit_haircut_rate)
