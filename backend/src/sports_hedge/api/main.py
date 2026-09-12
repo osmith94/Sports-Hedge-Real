@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
 from sports_hedge.api.dislocations import router as dislocations_router
+from sports_hedge.api.event_intelligence import router as event_intelligence_router
 from sports_hedge.api.historical import router as historical_router
 from sports_hedge.api.market_intelligence import router as market_intelligence_router
 from sports_hedge.api.notifications import router as notifications_router
@@ -45,6 +46,7 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 app.include_router(dislocations_router)
+app.include_router(event_intelligence_router)
 app.include_router(historical_router)
 app.include_router(market_intelligence_router)
 app.include_router(notifications_router)
