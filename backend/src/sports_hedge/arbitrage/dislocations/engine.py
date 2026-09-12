@@ -6,6 +6,8 @@ from sports_hedge.arbitrage.dislocations.models import (
     BurstPriorityDecision,
     EVENT_MATERIALITY,
     MATERIAL_EVENT_CATEGORIES,
+    MATERIAL_SCAN_TRIGGERS,
+    SCAN_TRIGGER_MATERIALITY,
     EventAnnotationInput,
     NearArbSignal,
     PriorityFactors,
@@ -63,7 +65,7 @@ def evaluate_candidate(
     if liquidity == 0 and candidate.quotes:
         liquidity = sum((quote.liquidity for quote in candidate.quotes), Decimal("0"))
 
-    materiality = _materiality(candidate.annotation)
+    materiality = _materiality(candidate)
     freshness = _freshness_factor(eligibility)
     equivalent = _equivalent_venues_factor(
         candidate.event.economically_equivalent_venues or len(fresh_venues)
@@ -92,7 +94,7 @@ def evaluate_candidate(
         headline_move_weight=Decimal("0"),
     )
     score = _composite_score(factors)
-    executable_dislocation = (
+    validated_price_dislocation = (
         len(fresh_venues) >= 2
         and dispersion >= DISLOCATION_DISPERSION
         and min_depth > 0
@@ -104,7 +106,7 @@ def evaluate_candidate(
         eligibility=eligibility,
         fresh_venues=len(fresh_venues),
         dispersion=dispersion,
-        executable_dislocation=executable_dislocation,
+        validated_price_dislocation=validated_price_dislocation,
         materiality=materiality,
     )
     priority = _priority_band(
@@ -112,7 +114,7 @@ def evaluate_candidate(
         candidate=candidate,
         fresh_venues=len(fresh_venues),
         dispersion=dispersion,
-        executable_dislocation=executable_dislocation,
+        validated_price_dislocation=validated_price_dislocation,
         liquidity=liquidity,
         near_arb=candidate.near_arb,
     )
@@ -123,7 +125,7 @@ def evaluate_candidate(
         composite_score=score,
         factors=factors,
         reasons=reasons,
-        executable_dislocation=executable_dislocation,
+        validated_price_dislocation=validated_price_dislocation,
         cross_venue_dispersion=dispersion,
         fresh_executable_venues=len(fresh_venues),
         quote_eligibility=eligibility,
@@ -164,10 +166,15 @@ def assess_quote_eligibility(
     )
 
 
-def _materiality(annotation: EventAnnotationInput | None) -> Decimal:
-    if annotation is None:
+def _materiality(candidate: ScanCandidate) -> Decimal:
+    scores: list[Decimal] = []
+    if candidate.annotation is not None:
+        scores.append(EVENT_MATERIALITY.get(candidate.annotation.category, Decimal("0")))
+    if candidate.scan_trigger is not None:
+        scores.append(SCAN_TRIGGER_MATERIALITY.get(candidate.scan_trigger, Decimal("0")))
+    if not scores:
         return Decimal("0")
-    return EVENT_MATERIALITY.get(annotation.category, Decimal("0"))
+    return max(scores)
 
 
 def _cross_venue_dispersion(quotes: list[VenueQuoteSnapshot]) -> Decimal:
@@ -230,18 +237,19 @@ def _priority_band(
     candidate: ScanCandidate,
     fresh_venues: int,
     dispersion: Decimal,
-    executable_dislocation: bool,
+    validated_price_dislocation: bool,
     liquidity: Decimal,
     near_arb: NearArbSignal | None,
 ) -> ScanPriority:
-    material_event = (
-        candidate.annotation is not None
-        and candidate.annotation.category in MATERIAL_EVENT_CATEGORIES
-    )
+    material_event = False
+    if candidate.annotation is not None:
+        material_event = candidate.annotation.category in MATERIAL_EVENT_CATEGORIES
+    if candidate.scan_trigger is not None:
+        material_event = material_event or candidate.scan_trigger in MATERIAL_SCAN_TRIGGERS
     two_fresh_material_dispersion = fresh_venues >= 2 and dispersion >= MATERIAL_DISPERSION
     close_to_arb = near_arb is not None and near_arb.distance_to_trigger <= NEAR_ARB_CLOSE
     if (
-        executable_dislocation
+        validated_price_dislocation
         and two_fresh_material_dispersion
         and close_to_arb
         and liquidity >= HIGH_LIQUIDITY
@@ -263,23 +271,26 @@ def _reasons(
     eligibility: list[QuoteEligibility],
     fresh_venues: int,
     dispersion: Decimal,
-    executable_dislocation: bool,
+    validated_price_dislocation: bool,
     materiality: Decimal,
 ) -> list[str]:
     reasons: list[str] = []
     if candidate.annotation is not None:
         reasons.append(f"event:{candidate.annotation.category.value}")
         reasons.append("event_timestamp_separated_from_quote_timestamp")
+    if candidate.scan_trigger is not None:
+        reasons.append(f"scan_trigger:{candidate.scan_trigger.value}")
     if materiality > 0:
         reasons.append("event_materiality_applied")
     if fresh_venues >= 2:
         reasons.append(f"fresh_executable_venues:{fresh_venues}")
     if dispersion >= MATERIAL_DISPERSION:
         reasons.append("material_cross_venue_dispersion")
-    if executable_dislocation:
-        reasons.append("executable_dislocation_after_gates")
+    if validated_price_dislocation:
+        reasons.append("validated_price_dislocation_after_gates")
+        reasons.append("not_an_arbitrage_result")
     else:
-        reasons.append("no_executable_dislocation")
+        reasons.append("no_validated_price_dislocation")
     blocked = sorted(
         {reason for item in eligibility for reason in item.reasons if not item.executable}
     )

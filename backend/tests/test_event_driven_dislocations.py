@@ -14,7 +14,6 @@ from sports_hedge.arbitrage.dislocations import (
     CanonicalEventContext,
     DislocationTracker,
     EventAnnotationInput,
-    EventCategory,
     EventDrivenDislocationService,
     NearArbSignal,
     RateBudget,
@@ -22,11 +21,13 @@ from sports_hedge.arbitrage.dislocations import (
     ScanPriority,
     VenueQuoteSnapshot,
     evaluate_candidate,
+    event_annotation_from_market_intelligence,
     event_category_from_label,
     schedule_scans,
 )
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
+from sports_hedge.market_intelligence.models import AnnotationCategory, MarketEventAnnotation
 
 
 EVENT_AT = datetime(2026, 9, 12, 15, 12, tzinfo=UTC)
@@ -50,7 +51,7 @@ def _event(
 
 
 def _annotation(
-    category: EventCategory = EventCategory.RED_CARD,
+    category: AnnotationCategory = AnnotationCategory.RED_CARD,
     event_id: str = "e-1",
 ) -> EventAnnotationInput:
     return EventAnnotationInput(
@@ -132,7 +133,7 @@ def test_red_card_raises_scan_priority_for_affected_canonical_event() -> None:
         ScanCandidate(
             event=_event(),
             quotes=[],
-            annotation=_annotation(EventCategory.RED_CARD),
+            annotation=_annotation(AnnotationCategory.RED_CARD),
             execution_risk_score=50,
         )
     )
@@ -140,10 +141,10 @@ def test_red_card_raises_scan_priority_for_affected_canonical_event() -> None:
     assert after.priority in {ScanPriority.ELEVATED, ScanPriority.BURST, ScanPriority.CRITICAL}
     assert after.priority_rank > baseline.priority_rank
     assert after.canonical_event_id == "e-1"
-    assert "event:RED_CARD" in after.reasons
+    assert "event:red_card" in after.reasons
 
 
-def test_suspended_venue_quote_cannot_create_executable_dislocation() -> None:
+def test_suspended_venue_quote_cannot_create_validated_price_dislocation() -> None:
     decision = evaluate_candidate(
         ScanCandidate(
             event=_event(),
@@ -155,7 +156,7 @@ def test_suspended_venue_quote_cannot_create_executable_dislocation() -> None:
             market_liquidity=Decimal("8000"),
         )
     )
-    assert decision.executable_dislocation is False
+    assert decision.validated_price_dislocation is False
     assert any("venue_suspended" in item.reasons for item in decision.quote_eligibility)
     assert "venue_suspended" in decision.reasons
 
@@ -176,7 +177,7 @@ def test_stale_pre_event_quote_is_rejected_after_material_event() -> None:
     )
     assert matchbook.executable is False
     assert "stale_pre_event_quote" in matchbook.reasons
-    assert decision.executable_dislocation is False
+    assert decision.validated_price_dislocation is False
     assert matchbook.quote_timestamp < EVENT_AT
     assert decision.event_occurred_at == EVENT_AT
 
@@ -193,7 +194,8 @@ def test_two_fresh_venues_with_material_dispersion_enter_burst_priority() -> Non
     assert decision.fresh_executable_venues == 2
     assert decision.cross_venue_dispersion >= Decimal("0.03")
     assert decision.priority in {ScanPriority.BURST, ScanPriority.CRITICAL}
-    assert decision.executable_dislocation is True
+    assert decision.validated_price_dislocation is True
+    assert "not_an_arbitrage_result" in decision.reasons
 
 
 def test_twenty_simultaneous_games_under_constrained_budget_are_ranked_deterministically() -> None:
@@ -207,7 +209,7 @@ def test_twenty_simultaneous_games_under_constrained_budget_are_ranked_determini
                 depth=str(100 + index),
                 liquidity=str(500 + index * 10),
             ),
-            annotation=_annotation(EventCategory.GOAL, event_id=f"e-{index:02d}")
+            annotation=_annotation(AnnotationCategory.GOAL, event_id=f"e-{index:02d}")
             if index >= 15
             else None,
             near_arb=NearArbSignal(
@@ -329,7 +331,7 @@ def test_incomplete_settlement_and_missing_costs_fail_closed() -> None:
         _quote(VenueName.POLYMARKET, odds="2.50", costs=False),
     ]
     decision = evaluate_candidate(ScanCandidate(event=_event(), quotes=quotes))
-    assert decision.executable_dislocation is False
+    assert decision.validated_price_dislocation is False
     assert "incomplete_settlement_semantics" in decision.reasons
     assert "missing_costs_or_fx" in decision.reasons
 
@@ -387,7 +389,7 @@ def test_naive_timestamps_fail_closed_instead_of_assuming_utc() -> None:
     with pytest.raises(ValidationError, match="timezone-aware UTC"):
         EventAnnotationInput(
             canonical_event_id="e-1",
-            category=EventCategory.RED_CARD,
+            category=AnnotationCategory.RED_CARD,
             occurred_at=naive,
             retrieved_at=EVENT_AT,
         )
@@ -434,18 +436,55 @@ def test_future_quote_timestamp_is_rejected_not_clamped_fresh() -> None:
         )
 
 
+def test_quote_event_id_mismatch_fails_closed() -> None:
+    with pytest.raises(ValidationError, match="canonical_event_id"):
+        ScanCandidate(
+            event=_event(event_id="e-1", market_id="m-1"),
+            quotes=[_quote(VenueName.MATCHBOOK, event_id="e-other", market_id="m-1")],
+        )
+
+
+def test_quote_market_id_mismatch_fails_closed() -> None:
+    with pytest.raises(ValidationError, match="canonical_market_id"):
+        ScanCandidate(
+            event=_event(event_id="e-1", market_id="m-1"),
+            quotes=[_quote(VenueName.MATCHBOOK, event_id="e-1", market_id="m-other")],
+        )
+
+
+def test_market_intelligence_annotation_adapts_without_second_event_model() -> None:
+    annotation = MarketEventAnnotation(
+        canonical_event_id="e-1",
+        occurred_at=EVENT_AT,
+        category=AnnotationCategory.RED_CARD,
+        source="official_sports_data",
+        title="Red card",
+        confidence=1.0,
+    )
+    adapted = event_annotation_from_market_intelligence(
+        annotation,
+        retrieved_at=EVENT_AT + timedelta(seconds=1),
+        source_timestamp=EVENT_AT,
+    )
+    decision = evaluate_candidate(ScanCandidate(event=_event(), annotation=adapted, quotes=[]))
+    assert adapted.category is AnnotationCategory.RED_CARD
+    assert decision.priority in {ScanPriority.ELEVATED, ScanPriority.BURST, ScanPriority.CRITICAL}
+
+
 def test_unknown_event_label_fails_closed() -> None:
-    assert event_category_from_label("RED_CARD") == EventCategory.RED_CARD
-    assert event_category_from_label("red_card") == EventCategory.RED_CARD
+    assert event_category_from_label("RED_CARD") == AnnotationCategory.RED_CARD
+    assert event_category_from_label("red_card") == AnnotationCategory.RED_CARD
     assert event_category_from_label("rumour_from_unauthorised_source") is None
+    assert event_category_from_label("abnormal_cross_venue_spread") is None
 
 
-def test_package_stays_isolated_from_collector_event_ingestion_and_venues() -> None:
+def test_package_stays_isolated_from_collector_and_venues() -> None:
     forbidden_imports = (
         "sports_hedge.application.collector",
-        "sports_hedge.market_intelligence",
         "sports_hedge.venues",
         "sports_hedge.application.paper_scan",
+        "sports_hedge.market_intelligence.ingestion.pipeline",
+        "sports_hedge.market_intelligence.ingestion.adapters",
     )
     for path in PACKAGE_ROOT.glob("*.py"):
         text = path.read_text(encoding="utf-8")

@@ -8,25 +8,19 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.domain.models import VenueName
+from sports_hedge.market_intelligence.models import AnnotationCategory, MarketEventAnnotation
 
 
-class EventCategory(StrEnum):
-    """Material event categories that can raise scan priority.
+class ScanTrigger(StrEnum):
+    """Market-state scan triggers that are not Market Intelligence event labels.
 
-    This is an Arbitrage-owned contract. Agent P event-ingestion labels may be
-    mapped onto it through :func:`event_category_from_label` without importing
-    market-intelligence modules.
+    Sporting/news event truth uses :class:`AnnotationCategory` from Market
+    Intelligence. These values only describe cross-venue scan conditions.
     """
 
-    RED_CARD = "RED_CARD"
-    GOAL = "GOAL"
-    PENALTY = "PENALTY"
-    PLAYER_INJURY = "PLAYER_INJURY"
-    KEY_PLAYER_SUBSTITUTED = "KEY_PLAYER_SUBSTITUTED"
-    TEAM_SHEET = "TEAM_SHEET"
-    ABNORMAL_CROSS_VENUE_SPREAD = "ABNORMAL_CROSS_VENUE_SPREAD"
-    RAPID_PRICE_MOVE = "RAPID_PRICE_MOVE"
-    VENUE_REOPEN_AFTER_SUSPENSION = "VENUE_REOPEN_AFTER_SUSPENSION"
+    ABNORMAL_CROSS_VENUE_SPREAD = "abnormal_cross_venue_spread"
+    RAPID_PRICE_MOVE = "rapid_price_move"
+    VENUE_REOPEN_AFTER_SUSPENSION = "venue_reopen_after_suspension"
 
 
 class ScanPriority(StrEnum):
@@ -43,54 +37,69 @@ PRIORITY_RANK: dict[ScanPriority, int] = {
     ScanPriority.CRITICAL: 3,
 }
 
-EVENT_MATERIALITY: dict[EventCategory, Decimal] = {
-    EventCategory.RED_CARD: Decimal("1.00"),
-    EventCategory.GOAL: Decimal("0.90"),
-    EventCategory.PENALTY: Decimal("0.85"),
-    EventCategory.PLAYER_INJURY: Decimal("0.75"),
-    EventCategory.KEY_PLAYER_SUBSTITUTED: Decimal("0.70"),
-    EventCategory.VENUE_REOPEN_AFTER_SUSPENSION: Decimal("0.80"),
-    EventCategory.ABNORMAL_CROSS_VENUE_SPREAD: Decimal("0.55"),
-    EventCategory.RAPID_PRICE_MOVE: Decimal("0.50"),
-    EventCategory.TEAM_SHEET: Decimal("0.45"),
+EVENT_MATERIALITY: dict[AnnotationCategory, Decimal] = {
+    AnnotationCategory.RED_CARD: Decimal("1.00"),
+    AnnotationCategory.GOAL: Decimal("0.90"),
+    AnnotationCategory.PENALTY: Decimal("0.85"),
+    AnnotationCategory.INJURY_NEWS: Decimal("0.75"),
+    AnnotationCategory.SUBSTITUTION: Decimal("0.70"),
+    AnnotationCategory.PLAYER_OUT: Decimal("0.65"),
+    AnnotationCategory.TEAM_SHEET: Decimal("0.45"),
 }
 
-MATERIAL_EVENT_CATEGORIES: frozenset[EventCategory] = frozenset(
+SCAN_TRIGGER_MATERIALITY: dict[ScanTrigger, Decimal] = {
+    ScanTrigger.VENUE_REOPEN_AFTER_SUSPENSION: Decimal("0.80"),
+    ScanTrigger.ABNORMAL_CROSS_VENUE_SPREAD: Decimal("0.55"),
+    ScanTrigger.RAPID_PRICE_MOVE: Decimal("0.50"),
+}
+
+MATERIAL_EVENT_CATEGORIES: frozenset[AnnotationCategory] = frozenset(
     {
-        EventCategory.RED_CARD,
-        EventCategory.GOAL,
-        EventCategory.PENALTY,
-        EventCategory.PLAYER_INJURY,
-        EventCategory.KEY_PLAYER_SUBSTITUTED,
-        EventCategory.VENUE_REOPEN_AFTER_SUSPENSION,
+        AnnotationCategory.RED_CARD,
+        AnnotationCategory.GOAL,
+        AnnotationCategory.PENALTY,
+        AnnotationCategory.INJURY_NEWS,
+        AnnotationCategory.SUBSTITUTION,
+        AnnotationCategory.PLAYER_OUT,
     }
 )
 
-_LABEL_ALIASES: dict[str, EventCategory] = {
-    "red_card": EventCategory.RED_CARD,
-    "goal": EventCategory.GOAL,
-    "penalty": EventCategory.PENALTY,
-    "injury_news": EventCategory.PLAYER_INJURY,
-    "player_injury": EventCategory.PLAYER_INJURY,
-    "substitution": EventCategory.KEY_PLAYER_SUBSTITUTED,
-    "key_player_substituted": EventCategory.KEY_PLAYER_SUBSTITUTED,
-    "team_sheet": EventCategory.TEAM_SHEET,
-    "abnormal_cross_venue_spread": EventCategory.ABNORMAL_CROSS_VENUE_SPREAD,
-    "rapid_price_move": EventCategory.RAPID_PRICE_MOVE,
-    "venue_reopen_after_suspension": EventCategory.VENUE_REOPEN_AFTER_SUSPENSION,
-}
+MATERIAL_SCAN_TRIGGERS: frozenset[ScanTrigger] = frozenset(
+    {ScanTrigger.VENUE_REOPEN_AFTER_SUSPENSION}
+)
 
 
-def event_category_from_label(label: str) -> EventCategory | None:
-    """Map an external/Agent P annotation label onto this module's categories.
+def event_category_from_label(label: str) -> AnnotationCategory | None:
+    """Resolve a provider-neutral Market Intelligence category label.
 
     Unknown labels fail closed (return None) rather than being guessed.
+    Burst-only scan triggers are not event-ingestion categories.
     """
 
-    normalized = label.strip().upper().replace("-", "_").replace(" ", "_")
-    if normalized in EventCategory.__members__:
-        return EventCategory[normalized]
-    return _LABEL_ALIASES.get(label.strip().lower())
+    token = label.strip().casefold().replace("-", "_").replace(" ", "_")
+    try:
+        return AnnotationCategory(token)
+    except ValueError:
+        return None
+
+
+def event_annotation_from_market_intelligence(
+    annotation: MarketEventAnnotation,
+    *,
+    retrieved_at: datetime,
+    source_timestamp: datetime | None = None,
+) -> "EventAnnotationInput":
+    """Adapt a canonical MI annotation without inventing a second event model."""
+
+    return EventAnnotationInput(
+        canonical_event_id=annotation.canonical_event_id,
+        category=annotation.category,
+        occurred_at=annotation.occurred_at,
+        retrieved_at=retrieved_at,
+        source_timestamp=source_timestamp,
+        source=annotation.source,
+        confidence=annotation.confidence,
+    )
 
 
 def require_aware_utc(value: datetime, field_name: str) -> datetime:
@@ -131,14 +140,15 @@ class CanonicalEventContext(BaseModel):
 
 
 class EventAnnotationInput(BaseModel):
-    """Typed seam for a material-event annotation.
+    """Typed seam for a Market Intelligence event annotation.
 
     `occurred_at` is the sporting/source event time. `retrieved_at` is when
-    Sports Hedge learned about it. They must remain distinct.
+    Sports Hedge learned about it. They must remain distinct. Category labels
+    are :class:`AnnotationCategory` values, not a second event-truth enum.
     """
 
     canonical_event_id: str
-    category: EventCategory
+    category: AnnotationCategory
     occurred_at: datetime
     retrieved_at: datetime
     source_timestamp: datetime | None = None
@@ -221,6 +231,7 @@ class ScanCandidate(BaseModel):
     event: CanonicalEventContext
     quotes: list[VenueQuoteSnapshot] = Field(default_factory=list)
     annotation: EventAnnotationInput | None = None
+    scan_trigger: ScanTrigger | None = None
     near_arb: NearArbSignal | None = None
     execution_risk_score: int = Field(default=50, ge=0, le=100)
     market_liquidity: Decimal = Field(default=Decimal("0"), ge=0)
@@ -235,6 +246,15 @@ class ScanCandidate(BaseModel):
             self.annotation.canonical_event_id != self.event.canonical_event_id
         ):
             raise ValueError("annotation.canonical_event_id must match event.canonical_event_id")
+        for quote in self.quotes:
+            if quote.canonical_event_id != self.event.canonical_event_id:
+                raise ValueError(
+                    "quote.canonical_event_id must match event.canonical_event_id"
+                )
+            if quote.canonical_market_id != self.event.canonical_market_id:
+                raise ValueError(
+                    "quote.canonical_market_id must match event.canonical_market_id"
+                )
         return self
 
 
@@ -262,13 +282,20 @@ class PriorityFactors(BaseModel):
 
 
 class BurstPriorityDecision(BaseModel):
+    """Inspectable burst-priority decision. This is not an arbitrage result.
+
+    ``validated_price_dislocation`` means fresh, depth-positive, cost- and
+    settlement-complete quotes disagree across venues. Executable arb remains
+    the existing complete-set solver / watchlist output.
+    """
+
     canonical_event_id: str
     canonical_market_id: str
     priority: ScanPriority
     composite_score: Decimal
     factors: PriorityFactors
     reasons: list[str] = Field(default_factory=list)
-    executable_dislocation: bool
+    validated_price_dislocation: bool
     cross_venue_dispersion: Decimal = Field(default=Decimal("0"), ge=0)
     fresh_executable_venues: int = Field(ge=0)
     quote_eligibility: list[QuoteEligibility] = Field(default_factory=list)

@@ -1,9 +1,9 @@
 """Event-driven price dislocation burst scanner (Agent AE, paper-only).
 
-This package is intentionally isolated from the collector, Agent P event
-ingestion (`market_intelligence`) and Agent Z near-arb watchlist. Callers
-supply typed seams: :class:`EventAnnotationInput`, :class:`VenueQuoteSnapshot`
-and :class:`NearArbSignal`.
+This package is isolated from the collector and venue adapters. Event labels
+come from Market Intelligence :class:`AnnotationCategory` / annotations; callers
+supply quotes and optional near-arb distance through typed seams. This module
+does not decide executable arbitrage.
 """
 
 from sports_hedge.arbitrage.dislocations.engine import evaluate_candidate
@@ -12,13 +12,14 @@ from sports_hedge.arbitrage.dislocations.models import (
     CanonicalEventContext,
     DislocationState,
     EventAnnotationInput,
-    EventCategory,
     NearArbSignal,
     RateBudget,
     ScanCandidate,
     ScanPriority,
     ScanSchedule,
+    ScanTrigger,
     VenueQuoteSnapshot,
+    event_annotation_from_market_intelligence,
     event_category_from_label,
 )
 from sports_hedge.arbitrage.dislocations.scheduler import schedule_scans
@@ -31,15 +32,16 @@ __all__ = [
     "DislocationState",
     "DislocationTracker",
     "EventAnnotationInput",
-    "EventCategory",
     "EventDrivenDislocationService",
     "NearArbSignal",
     "RateBudget",
     "ScanCandidate",
     "ScanPriority",
     "ScanSchedule",
+    "ScanTrigger",
     "VenueQuoteSnapshot",
     "evaluate_candidate",
+    "event_annotation_from_market_intelligence",
     "event_category_from_label",
     "schedule_scans",
 ]
