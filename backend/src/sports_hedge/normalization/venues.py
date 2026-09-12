@@ -375,9 +375,13 @@ def _canonical_runner_outcome(
         return CanonicalOutcome.OTHER
     if family is MarketFamily.FIRST_TEAM_TO_SCORE and _is_no_goal_runner(text):
         return CanonicalOutcome.NO_GOAL
-    if text in {home, "home", "home team"}:
+    if text == home:
         return CanonicalOutcome.HOME
-    if text in {away, "away", "away team"}:
+    if text == away:
+        return CanonicalOutcome.AWAY
+    if family is MarketFamily.FIRST_TEAM_TO_SCORE and text in {"home", "home team"}:
+        return CanonicalOutcome.HOME
+    if family is MarketFamily.FIRST_TEAM_TO_SCORE and text in {"away", "away team"}:
         return CanonicalOutcome.AWAY
     if text in {"draw", "tie"}:
         return CanonicalOutcome.DRAW

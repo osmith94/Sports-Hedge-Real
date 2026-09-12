@@ -140,6 +140,78 @@ def test_matchbook_team_level_first_team_to_score_normalizes_home_away_no_goal()
     }
 
 
+def test_generic_home_away_aliases_do_not_broaden_unrelated_families() -> None:
+    event = MatchbookNormalizer().normalize_event(MB_EVENT)
+    match_odds = MatchbookNormalizer().normalize_market(
+        event,
+        {
+            "id": 9605,
+            "name": "Match Odds",
+            "runners": [
+                {"id": 1, "name": "Home"},
+                {"id": 2, "name": "Draw"},
+                {"id": 3, "name": "Away"},
+            ],
+        },
+    )
+    assert match_odds.family is MarketFamily.MATCH_RESULT
+    assert [runner.outcome for runner in match_odds.runners] == [
+        CanonicalOutcome.OTHER,
+        CanonicalOutcome.DRAW,
+        CanonicalOutcome.OTHER,
+    ]
+    dnb = MatchbookNormalizer().normalize_market(
+        event,
+        {
+            "id": 9606,
+            "name": "Draw No Bet",
+            "runners": [
+                {"id": 1, "name": "Home Team"},
+                {"id": 2, "name": "Away Team"},
+            ],
+        },
+    )
+    assert dnb.family is MarketFamily.DRAW_NO_BET
+    assert [runner.outcome for runner in dnb.runners] == [
+        CanonicalOutcome.OTHER,
+        CanonicalOutcome.OTHER,
+    ]
+    named = MatchbookNormalizer().normalize_market(
+        event,
+        {
+            "id": 9607,
+            "name": "Match Odds",
+            "runners": [
+                {"id": 1, "name": "Tottenham"},
+                {"id": 2, "name": "Draw"},
+                {"id": 3, "name": "Everton"},
+            ],
+        },
+    )
+    assert [runner.outcome for runner in named.runners] == [
+        CanonicalOutcome.HOME,
+        CanonicalOutcome.DRAW,
+        CanonicalOutcome.AWAY,
+    ]
+    ftts = MatchbookNormalizer().normalize_market(
+        event,
+        {
+            "id": 9608,
+            "name": "First Team To Score",
+            "runners": [
+                {"id": 1, "name": "Home Team"},
+                {"id": 2, "name": "Away Team"},
+                {"id": 3, "name": "No Goal"},
+            ],
+        },
+    )
+    assert [runner.outcome for runner in ftts.runners] == [
+        CanonicalOutcome.HOME,
+        CanonicalOutcome.AWAY,
+        CanonicalOutcome.NO_GOAL,
+    ]
+
+
 def test_polymarket_regulation_time_first_team_to_score_matches_matchbook() -> None:
     event = PolymarketNormalizer().normalize_event(PM_EVENT)
     market = PolymarketNormalizer().normalize_market(event, _ftts_pm_payload())
