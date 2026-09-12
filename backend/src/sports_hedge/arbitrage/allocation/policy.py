@@ -52,11 +52,4 @@ def policy_from_settings(settings: Settings) -> BankrollAllocationPolicy:
         ),
         operator_recommended_cap_reporting=Decimal(str(settings.priority_operator_manual_cap)),
         risk_limit_reporting=Decimal(str(settings.priority_risk_limit)),
-        football_regulation_playing_minutes=Decimal(
-            str(settings.allocation_football_regulation_playing_minutes)
-        ),
-        football_halftime_minutes=Decimal(str(settings.allocation_football_halftime_minutes)),
-        football_stoppage_and_settlement_buffer_minutes=Decimal(
-            str(settings.allocation_football_stoppage_settlement_buffer_minutes)
-        ),
     )

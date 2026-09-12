@@ -23,25 +23,29 @@ from sports_hedge.arbitrage.allocation.models import (
 from sports_hedge.domain.models import VenueName
 
 EXTERNAL_OPERATOR = "EXTERNAL_OPERATOR"
-KICKOFF_AS_RELEASE_LOCK_BASES = frozenset(
-    {"time_to_kickoff", "kickoff", "time_until_kickoff"}
-)
-UNDERSTATED_ELAPSED_LOCK_BASES = frozenset(
+# Ranking-only. Never predicted from kickoff or match duration. Does not unlock capital.
+LEDGER_SETTLEMENT_LOCK_BASES = frozenset(
     {
-        "kickoff_plus_regulation_plus_settlement_buffer",
-        "kickoff_plus_first_half_plus_settlement_buffer",
+        "paper_operations_settlement",
+        "provider_settlement_timestamp",
+        "ledger_settlement_timestamp",
     }
 )
 
 
 def _capital_release_lock(request: AllocationRequest) -> tuple[Decimal | None, str | None]:
-    """Omit lock hours that understate wall-clock time to settlement/release."""
+    """Accept lock hours only from a recorded settlement timestamp.
+
+    Kickoff, regulation length, and other predicted finish times are omitted.
+    Capital stays locked until a clean unwind fills or paper operations records
+    settlement. This value is a ranking input, not a release gate.
+    """
 
     basis = request.expected_lock_basis
     hours = request.expected_lock_duration_hours
-    if basis in KICKOFF_AS_RELEASE_LOCK_BASES or basis in UNDERSTATED_ELAPSED_LOCK_BASES:
+    if basis not in LEDGER_SETTLEMENT_LOCK_BASES:
         return None, None
-    if hours is None or hours <= 0 or not basis:
+    if hours is None or hours <= 0:
         return None, None
     return hours, basis
 
@@ -728,30 +732,26 @@ def _recommendation_reductions(
             )
         )
     lock_hours, lock_basis = _capital_release_lock(request)
-    if lock_hours is not None and lock_hours > policy.long_lock_hours:
-        t = min(
-            lock_hours / (policy.long_lock_hours * 3),
-            Decimal("1"),
+    if lock_hours is not None:
+        lock_reason = (
+            f"{lock_basis} recorded; ranking only — capital stays locked until "
+            "clean unwind or paper settlement"
         )
-        amount = policy.max_lock_duration_reduction * t
-        if amount > 0:
-            factors.append(
-                ReductionFactor(
-                    name="lock_duration",
-                    amount=amount,
-                    reason=f"{lock_basis}={lock_hours}h",
-                    input_status=ReductionInputStatus.KNOWN,
-                )
-            )
-    elif lock_hours is None:
-        factors.append(
-            ReductionFactor(
-                name="lock_duration",
-                amount=Decimal("0"),
-                reason="expected lock duration unknown; metric omitted",
-                input_status=ReductionInputStatus.UNKNOWN,
-            )
+        lock_status = ReductionInputStatus.KNOWN
+    else:
+        lock_reason = (
+            "capital stays locked until clean unwind or recorded settlement; "
+            "duration is not predicted from kickoff"
         )
+        lock_status = ReductionInputStatus.UNKNOWN
+    factors.append(
+        ReductionFactor(
+            name="lock_duration",
+            amount=Decimal("0"),
+            reason=lock_reason,
+            input_status=lock_status,
+        )
+    )
     open_count = len(request.open_positions)
     if open_count:
         amount = min(

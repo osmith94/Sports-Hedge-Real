@@ -86,11 +86,6 @@ class BankrollAllocationPolicy(BaseModel):
     unknown_volatility_reduction: Decimal = Field(default=Decimal("0.05"), ge=0, lt=1)
     elevated_volatility_bps: Decimal = Field(default=Decimal("40"), ge=0)
     elevated_volatility_reduction: Decimal = Field(default=Decimal("0.15"), ge=0, lt=1)
-    football_regulation_playing_minutes: Decimal = Field(default=Decimal("90"), gt=0)
-    football_halftime_minutes: Decimal = Field(default=Decimal("15"), ge=0)
-    football_stoppage_and_settlement_buffer_minutes: Decimal = Field(
-        default=Decimal("15"), ge=0
-    )
 
 
 class AllocationBalance(BaseModel):
@@ -244,7 +239,11 @@ class NativeBalanceAfter(BaseModel):
 
 
 class CapitalTurnoverMetric(BaseModel):
-    """Modelled ranking input. Not a guaranteed return rate."""
+    """Optional ranking input from a recorded settlement timestamp.
+
+    Not a capital-release signal and not a guaranteed return rate. Kickoff and
+    match-duration guesses must not populate this record.
+    """
 
     metric: Decimal
     formula: str = "guaranteed_profit / committed_capital / expected_lock_hours"

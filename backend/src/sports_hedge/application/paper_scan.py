@@ -49,7 +49,6 @@ from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.arbitrage.allocation.adapters import (
     balances_from_liquidity,
     exposures_from_trades,
-    lock_hours_until_capital_release,
     request_from_paper_decision,
 )
 from sports_hedge.arbitrage.allocation.engine import allocate
@@ -437,7 +436,6 @@ class PaperScanService:
         trades = open_trades if open_trades is not None else self.open_trades
         allocation, alloc_reasons = self._allocate_draft(
             draft,
-            left=left,
             standing=standing,
             effective_fx=effective_fx,
             recent_volatility_bps=recent_volatility_bps,
@@ -465,7 +463,6 @@ class PaperScanService:
         self,
         draft: PaperScanDecision,
         *,
-        left: VenueMarketObservation,
         standing: PaperLiquiditySnapshot | None,
         effective_fx: dict[str, Decimal],
         recent_volatility_bps: float,
@@ -483,19 +480,11 @@ class PaperScanService:
             gbp_per_unit=effective_fx,
             conditionally_releasable=conditionally_releasable,
         )
-        lock_hours, lock_basis = lock_hours_until_capital_release(
-            left.market.event.kickoff_utc,
-            draft.scanned_at,
-            market=left.market,
-            policy=policy,
-        )
         request = request_from_paper_decision(
             draft,
             policy=policy,
             balances=balances,
             open_positions=exposures_from_trades(open_trades or []),
-            expected_lock_duration_hours=lock_hours,
-            expected_lock_basis=lock_basis,
             recent_volatility_bps=(
                 Decimal(str(recent_volatility_bps))
                 if recent_volatility_bps is not None

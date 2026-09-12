@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
@@ -11,11 +10,6 @@ from sports_hedge.api.paper import get_paper_audit_repository, get_paper_liquidi
 from sports_hedge.api.watchlist import get_watchlist_service
 from sports_hedge.application.complete_set import SOLVER_MODEL_GENERALIZED, SOLVER_MODEL_SIMPLE
 from sports_hedge.arbitrage.allocation.adapters import (
-    FOOTBALL_HALFTIME_MINUTES,
-    FOOTBALL_REGULATION_PLAYING_MINUTES,
-    MODELLED_STOPPAGE_AND_SETTLEMENT_BUFFER_MINUTES,
-    UNDERSTATED_FULL_TIME_ELAPSED_MINUTES,
-    lock_hours_until_capital_release,
     request_from_complete_set,
     request_from_payoff,
 )
@@ -44,14 +38,6 @@ from sports_hedge.arbitrage.solver import CompleteSetArbitrageSolver
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.config import Settings
-from sports_hedge.domain.football import (
-    CanonicalEvent,
-    CanonicalMarket,
-    FootballPeriod,
-    MarketFamily,
-    SettlementFingerprint,
-    SettlementScope,
-)
 from sports_hedge.domain.models import VenueName
 from sports_hedge.application.paper_scan import (
     FillPlanMappingError,
@@ -324,27 +310,34 @@ def test_acceptance_execution_quality_changes_recommended_not_arb_class() -> Non
     assert any(factor.name == "fill_confidence" for factor in low.reduction_factors)
 
 
-def test_acceptance_lock_duration_metric_does_not_change_arb_class() -> None:
-    short = allocate(
-        _demo_request(
-            lock_hours=Decimal("0.5"),
-            lock_basis="kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer",
-        )
-    )
-    long = allocate(
-        _demo_request(
-            lock_hours=Decimal("72"),
-            lock_basis="kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer",
-        )
-    )
-    assert short.accepted and long.accepted
-    assert short.guaranteed_roi == long.guaranteed_roi
-    assert short.capital_turnover is not None
-    assert long.capital_turnover is not None
-    assert short.capital_turnover.metric > long.capital_turnover.metric
-    assert "not_guaranteed" in short.capital_turnover.label
+def test_acceptance_lock_duration_does_not_drive_allocator_or_predict_settlement() -> None:
     missing = allocate(_demo_request())
+    predicted = allocate(
+        _demo_request(
+            lock_hours=Decimal("2"),
+            lock_basis="kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer",
+        )
+    )
+    kickoff = allocate(_demo_request(lock_hours=Decimal("2"), lock_basis="time_to_kickoff"))
+    ledger = allocate(
+        _demo_request(lock_hours=Decimal("3"), lock_basis="paper_operations_settlement")
+    )
+    assert missing.accepted and predicted.accepted and kickoff.accepted and ledger.accepted
+    assert missing.guaranteed_roi == predicted.guaranteed_roi == kickoff.guaranteed_roi
+    assert missing.recommended_committed_capital == predicted.recommended_committed_capital
+    assert missing.recommended_committed_capital == kickoff.recommended_committed_capital
+    assert missing.recommended_committed_capital == ledger.recommended_committed_capital
     assert missing.capital_turnover is None
+    assert predicted.capital_turnover is None
+    assert kickoff.capital_turnover is None
+    assert predicted.expected_lock_basis is None
+    assert kickoff.expected_lock_duration_hours is None
+    assert ledger.capital_turnover is not None
+    assert ledger.expected_lock_basis == "paper_operations_settlement"
+    assert "not_guaranteed" in ledger.capital_turnover.label
+    lock_factor = next(factor for factor in missing.reduction_factors if factor.name == "lock_duration")
+    assert lock_factor.amount == 0
+    assert lock_factor.input_status is ReductionInputStatus.UNKNOWN
 
 
 def test_kickoff_labelled_lock_is_not_used_as_capital_release() -> None:
@@ -656,120 +649,6 @@ def test_api_allocator_output_on_simple_and_generalized_decisions() -> None:
         watchlist_store.close()
         repository.close()
         liquidity.close()
-
-
-def _regulation_market(*, kickoff: datetime) -> CanonicalMarket:
-    return CanonicalMarket(
-        event=CanonicalEvent(
-            competition="Premier League",
-            home_team="Newcastle",
-            away_team="Chelsea",
-            kickoff_utc=kickoff,
-            source_venue=VenueName.MATCHBOOK,
-            source_event_id="evt-lock",
-        ),
-        source_venue=VenueName.MATCHBOOK,
-        source_market_id="mkt-lock",
-        family=MarketFamily.MATCH_RESULT,
-        period=FootballPeriod.FULL_TIME,
-        settlement=SettlementFingerprint(
-            scope=SettlementScope.REGULATION_TIME,
-            period=FootballPeriod.FULL_TIME,
-            extra_time_included=False,
-            penalties_included=False,
-        ),
-    )
-
-
-def test_pre_match_lock_hours_are_settlement_not_kickoff() -> None:
-    kickoff = datetime(2026, 9, 13, 15, 0, tzinfo=UTC)
-    as_of = kickoff - timedelta(hours=2)
-    hours, basis = lock_hours_until_capital_release(
-        kickoff, as_of, market=_regulation_market(kickoff=kickoff)
-    )
-    hours_to_kickoff = Decimal("2")
-    extra = (
-        FOOTBALL_REGULATION_PLAYING_MINUTES
-        + FOOTBALL_HALFTIME_MINUTES
-        + MODELLED_STOPPAGE_AND_SETTLEMENT_BUFFER_MINUTES
-    ) / Decimal("60")
-    kickoff_plus_105 = hours_to_kickoff + (UNDERSTATED_FULL_TIME_ELAPSED_MINUTES / Decimal("60"))
-    assert hours is not None
-    assert extra * Decimal("60") > UNDERSTATED_FULL_TIME_ELAPSED_MINUTES
-    assert hours == (hours_to_kickoff + extra).quantize(Decimal("0.0001"))
-    assert hours > hours_to_kickoff
-    assert hours > kickoff_plus_105
-    assert basis == "kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer"
-    assert basis != "time_to_kickoff"
-    assert basis != "kickoff_plus_regulation_plus_settlement_buffer"
-
-
-def test_pre_match_full_time_release_is_later_than_kickoff_plus_105_minutes() -> None:
-    kickoff = datetime(2026, 9, 13, 15, 0, tzinfo=UTC)
-    as_of = kickoff - timedelta(minutes=1)
-    hours, basis = lock_hours_until_capital_release(
-        kickoff, as_of, market=_regulation_market(kickoff=kickoff)
-    )
-    minutes_after_kickoff = (hours - Decimal("1") / Decimal("60")) * Decimal("60")
-    assert hours is not None
-    assert basis == "kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer"
-    assert minutes_after_kickoff > Decimal("105")
-    optimistic = BankrollAllocationPolicy(
-        football_halftime_minutes=Decimal("0"),
-        football_stoppage_and_settlement_buffer_minutes=Decimal("15"),
-    )
-    omitted_hours, omitted_basis = lock_hours_until_capital_release(
-        kickoff, as_of, market=_regulation_market(kickoff=kickoff), policy=optimistic
-    )
-    assert omitted_hours is None
-    assert omitted_basis is None
-    labelled_105 = allocate(
-        _demo_request(
-            lock_hours=Decimal("2") + Decimal("105") / Decimal("60"),
-            lock_basis="kickoff_plus_regulation_plus_settlement_buffer",
-        )
-    )
-    assert labelled_105.accepted is True
-    assert labelled_105.capital_turnover is None
-    assert labelled_105.expected_lock_basis is None
-
-
-def test_pre_match_lock_omitted_when_settlement_scope_unknown() -> None:
-    kickoff = datetime(2026, 9, 13, 15, 0, tzinfo=UTC)
-    as_of = kickoff - timedelta(hours=2)
-    market = _regulation_market(kickoff=kickoff).model_copy(
-        update={
-            "settlement": SettlementFingerprint(
-                scope=SettlementScope.UNKNOWN,
-                period=FootballPeriod.FULL_TIME,
-            )
-        }
-    )
-    hours, basis = lock_hours_until_capital_release(kickoff, as_of, market=market)
-    assert hours is None
-    assert basis is None
-
-
-def test_pre_match_lock_omitted_for_extra_time_and_in_play() -> None:
-    kickoff = datetime(2026, 9, 13, 15, 0, tzinfo=UTC)
-    as_of = kickoff - timedelta(hours=2)
-    extra_time = _regulation_market(kickoff=kickoff).model_copy(
-        update={
-            "period": FootballPeriod.EXTRA_TIME,
-            "settlement": SettlementFingerprint(
-                scope=SettlementScope.INCLUDING_EXTRA_TIME,
-                period=FootballPeriod.EXTRA_TIME,
-                extra_time_included=True,
-                penalties_included=False,
-            ),
-        }
-    )
-    hours, basis = lock_hours_until_capital_release(kickoff, as_of, market=extra_time)
-    assert hours is None and basis is None
-    in_play, in_play_basis = lock_hours_until_capital_release(
-        kickoff, kickoff + timedelta(minutes=10), market=_regulation_market(kickoff=kickoff)
-    )
-    assert in_play is None and in_play_basis is None
 
 
 def test_zero_volatility_is_known_not_unknown() -> None:
