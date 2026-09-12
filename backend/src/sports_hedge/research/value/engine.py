@@ -31,10 +31,31 @@ from sports_hedge.research.value.quotes import (
 from sports_hedge.research.value.scoring import value_signal_score
 
 
+def _inspectable_cost_fields(quote: VenueQuote | None) -> dict[str, object]:
+    if quote is None:
+        return {}
+    cost = quote.cost
+    return {
+        "fee_basis": cost.fee_basis.value,
+        "fee_scope": cost.fee_scope.value,
+        "fee_snapshot_id": cost.snapshot_id,
+        "cost_known_status": cost.known_status.value,
+        "cost_source": cost.source,
+        "cost_currency": cost.currency,
+        "cost_captured_at": cost.captured_at,
+        "cost_effective_from": cost.effective_from,
+        "order_role": cost.order_role.value,
+        "action": quote.action.value,
+    }
+
+
 class ScenarioValueEngine:
     """Rank scenario signals by odds-weighted analytical value.
 
-    Isolated from the arbitrage solver. Positive VALUE can still lose.
+    Isolated from the arbitrage solver. Positive VALUE is directional expected
+    value and can still lose; it is not a guaranteed settlement-state payoff.
+    Per-quote effective price only; market-net and period-netted commissions
+    are unsupported.
     """
 
     def __init__(self, policy: ValueEnginePolicy | None = None) -> None:
@@ -92,6 +113,7 @@ class ScenarioValueEngine:
                 ValueStatus.MISSING_COSTS,
                 reason or "missing_costs",
                 reference=reference,
+                cost_quote=liquid[0],
             )
 
         best = select_best_quote(costed)
@@ -146,9 +168,8 @@ class ScenarioValueEngine:
             available_depth=depth,
             value_signal_score=score,
             score_components=components,
-            fee_basis=economics.fee_basis.value,
-            fee_snapshot_id=economics.fee_snapshot_id,
             rejection_reason=reason,
+            **_inspectable_cost_fields(best),
         )
 
     def _classify(
@@ -178,6 +199,7 @@ class ScenarioValueEngine:
         reason: str,
         *,
         reference: VenueQuote | None = None,
+        cost_quote: VenueQuote | None = None,
     ) -> ScenarioValueResult:
         return ScenarioValueResult(
             status=status,
@@ -192,4 +214,5 @@ class ScenarioValueEngine:
             reference_price=None if reference is None else reference.displayed_decimal_odds,
             reference_venue=None if reference is None else reference.venue,
             rejection_reason=reason,
+            **_inspectable_cost_fields(cost_quote or reference),
         )

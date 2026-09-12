@@ -7,7 +7,9 @@ from pydantic import BaseModel
 from sports_hedge.fees.cost import (
     CostKnownStatus,
     FeeBasis,
+    FeeScope,
     MarketAction,
+    OrderRole,
     VenueCostSnapshot,
 )
 
@@ -49,6 +51,18 @@ def apply_venue_costs(
 
     if snapshot.known_status is CostKnownStatus.UNKNOWN or snapshot.fee_basis is FeeBasis.UNKNOWN:
         raise CostRuleError("unknown_costs", "Required venue costs are unknown")
+    if snapshot.fee_scope is FeeScope.UNKNOWN:
+        raise CostRuleError("unknown_fee_scope", "Required fee scope is unknown")
+    if snapshot.fee_scope is not FeeScope.PER_QUOTE:
+        raise CostRuleError(
+            "unsupported_fee_scope",
+            "Market-net, account-period and netted commission schemes are not modelled by per-quote effective price",
+        )
+    if snapshot.order_role is OrderRole.UNKNOWN:
+        raise CostRuleError(
+            "unknown_order_role",
+            "Order role must be explicit (maker/taker/not_applicable); unknown is fail-closed",
+        )
     if snapshot.action not in _BACK_BUY:
         raise CostRuleError(
             "unsupported_action",

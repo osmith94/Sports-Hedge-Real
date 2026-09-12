@@ -3,6 +3,7 @@
 from sports_hedge.fees.cost import (
     CostKnownStatus,
     FeeBasis,
+    FeeScope,
     MarketAction,
     OrderRole,
     VenueCostSnapshot,
@@ -15,6 +16,7 @@ __all__ = [
     "CostRuleError",
     "EffectiveLegEconomics",
     "FeeBasis",
+    "FeeScope",
     "FeeSnapshot",
     "MarketAction",
     "OrderRole",

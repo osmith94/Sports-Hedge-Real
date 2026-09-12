@@ -38,6 +38,21 @@ class OrderRole(StrEnum):
     UNKNOWN = "unknown"
 
 
+class FeeScope(StrEnum):
+    """How a fee is assessed economically.
+
+    This per-quote engine only prices ``PER_QUOTE`` legs. Market-net P&L,
+    account-period, and netted-commission schemes require stateful accounting
+    and must fail closed here rather than being approximated.
+    """
+
+    PER_QUOTE = "per_quote"
+    MARKET_NET_PNL = "market_net_pnl"
+    ACCOUNT_PERIOD = "account_period"
+    NETTED_COMMISSION = "netted_commission"
+    UNKNOWN = "unknown"
+
+
 class MarketAction(StrEnum):
     BACK = "back"
     BUY = "buy"
@@ -61,6 +76,7 @@ class VenueCostSnapshot(BaseModel):
     source_market_id: str | None = None
     market_class: str | None = None
     order_role: OrderRole = OrderRole.NOT_APPLICABLE
+    fee_scope: FeeScope = FeeScope.PER_QUOTE
     account_or_fee_tier: str | None = None
     rate: Decimal | None = Field(default=None, ge=0, lt=1)
     fixed_amount: Decimal | None = Field(default=None, ge=0)

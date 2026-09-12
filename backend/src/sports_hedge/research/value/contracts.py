@@ -177,6 +177,16 @@ class ScenarioValueResult(BaseModel):
     value_signal_score: Decimal | None = None
     score_components: ScoreComponents | None = None
     fee_basis: str | None = None
+    fee_scope: str | None = None
     fee_snapshot_id: str | None = None
+    cost_known_status: str | None = None
+    cost_source: str | None = None
+    cost_currency: str | None = None
+    cost_captured_at: datetime | None = None
+    cost_effective_from: datetime | None = None
+    order_role: str | None = None
+    action: str | None = None
     rejection_reason: str | None = None
     paper_research_only: bool = True
+    evaluation_kind: str = "directional_expected_value"
+    claims_guaranteed_settlement_profit: bool = False

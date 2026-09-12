@@ -15,6 +15,7 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import (
     CostKnownStatus,
     FeeBasis,
+    FeeScope,
     MarketAction,
     OrderRole,
     VenueCostSnapshot,
@@ -94,6 +95,7 @@ def _cost(
     known: bool = True,
     action: MarketAction = MarketAction.BACK,
     order_role: OrderRole = OrderRole.TAKER,
+    fee_scope: FeeScope = FeeScope.PER_QUOTE,
     fixed_amount: str | None = None,
     snapshot_id: str | None = None,
 ) -> VenueCostSnapshot:
@@ -107,6 +109,7 @@ def _cost(
             source="test_unknown",
             source_market_id=source_market_id,
             order_role=order_role,
+            fee_scope=fee_scope,
             snapshot_id=snapshot_id,
         )
     return VenueCostSnapshot(
@@ -118,6 +121,7 @@ def _cost(
         source="test_paper_assumption",
         source_market_id=source_market_id,
         order_role=order_role,
+        fee_scope=fee_scope,
         account_or_fee_tier="standard",
         rate=None if rate is None else Decimal(rate),
         fixed_amount=None if fixed_amount is None else Decimal(fixed_amount),
@@ -141,6 +145,7 @@ def _quote(
     fee_basis: FeeBasis = FeeBasis.PROFIT_COMMISSION,
     action: MarketAction = MarketAction.BACK,
     order_role: OrderRole = OrderRole.TAKER,
+    fee_scope: FeeScope = FeeScope.PER_QUOTE,
     fixed_amount: str | None = None,
     snapshot_id: str | None = None,
 ) -> VenueQuote:
@@ -181,6 +186,7 @@ def _quote(
             known=known,
             action=action,
             order_role=order_role,
+            fee_scope=fee_scope,
             fixed_amount=fixed_amount,
             snapshot_id=snapshot_id,
         ),
@@ -220,6 +226,17 @@ def test_positive_value_uses_matchbook_as_reference() -> None:
     assert result.quote_age_seconds == Decimal("5")
     assert result.src == Decimal("1.40")
     assert result.fee_basis == FeeBasis.PROFIT_COMMISSION.value
+    assert result.fee_scope == FeeScope.PER_QUOTE.value
+    assert result.cost_known_status == CostKnownStatus.KNOWN.value
+    assert result.cost_source == "test_paper_assumption"
+    assert result.cost_currency == "GBP"
+    assert result.cost_captured_at is not None
+    assert result.cost_effective_from is not None
+    assert result.order_role == OrderRole.TAKER.value
+    assert result.action == MarketAction.BACK.value
+    assert result.evaluation_kind == "directional_expected_value"
+    assert result.claims_guaranteed_settlement_profit is False
+    assert result.paper_research_only is True
 
 
 def test_no_value_when_model_probability_is_below_cost_adjusted_price() -> None:
@@ -505,3 +522,60 @@ def test_lay_action_fails_closed_instead_of_back_haircut() -> None:
 
     assert result.status is ValueStatus.MISSING_COSTS
     assert result.rejection_reason == "unsupported_action"
+
+
+def test_stateful_fee_scopes_fail_closed_rather_than_approximating() -> None:
+    market_net = ScenarioValueEngine().evaluate(
+        _proposition(),
+        _evidence(),
+        [_quote(fee_scope=FeeScope.MARKET_NET_PNL)],
+        as_of=AS_OF,
+    )
+    period = ScenarioValueEngine().evaluate(
+        _proposition(),
+        _evidence(),
+        [_quote(fee_scope=FeeScope.ACCOUNT_PERIOD)],
+        as_of=AS_OF,
+    )
+    netted = ScenarioValueEngine().evaluate(
+        _proposition(),
+        _evidence(),
+        [_quote(fee_scope=FeeScope.NETTED_COMMISSION)],
+        as_of=AS_OF,
+    )
+
+    assert market_net.status is ValueStatus.MISSING_COSTS
+    assert market_net.rejection_reason == "unsupported_fee_scope"
+    assert market_net.fee_scope == FeeScope.MARKET_NET_PNL.value
+    assert period.rejection_reason == "unsupported_fee_scope"
+    assert netted.rejection_reason == "unsupported_fee_scope"
+
+
+def test_unknown_order_role_fails_closed() -> None:
+    result = ScenarioValueEngine().evaluate(
+        _proposition(),
+        _evidence(),
+        [_quote(order_role=OrderRole.UNKNOWN)],
+        as_of=AS_OF,
+    )
+
+    assert result.status is ValueStatus.MISSING_COSTS
+    assert result.rejection_reason == "unknown_order_role"
+
+
+def test_value_is_not_an_arbitrage_claim() -> None:
+    result = ScenarioValueEngine().evaluate(
+        _proposition(),
+        _evidence(),
+        [_quote()],
+        as_of=AS_OF,
+    )
+
+    assert result.status is ValueStatus.VALUE
+    assert result.expected_profit_per_unit is not None
+    assert result.expected_profit_per_unit > 0
+    assert result.claims_guaranteed_settlement_profit is False
+    assert result.evaluation_kind == "directional_expected_value"
+    assert not hasattr(result, "is_arbitrage")
+    assert not hasattr(result, "guaranteed_profit")
+
