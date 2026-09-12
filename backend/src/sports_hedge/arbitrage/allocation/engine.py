@@ -753,6 +753,22 @@ def _recommendation_reductions(
                 input_status=ReductionInputStatus.KNOWN,
             )
         )
+    estimate = _advisory_time_to_release(request)
+    if estimate is not None and estimate.hours > policy.long_lock_hours:
+        t = min(estimate.hours / (policy.long_lock_hours * 3), Decimal("1"))
+        amount = policy.max_lock_duration_reduction * t
+        if amount > 0:
+            factors.append(
+                ReductionFactor(
+                    name="lock_duration",
+                    amount=amount,
+                    reason=(
+                        f"advisory {estimate.estimate_basis}={estimate.hours}h; "
+                        "does not release capital or settle"
+                    ),
+                    input_status=ReductionInputStatus.KNOWN,
+                )
+            )
     open_count = len(request.open_positions)
     if open_count:
         amount = min(

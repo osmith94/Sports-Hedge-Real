@@ -348,28 +348,36 @@ def test_acceptance_estimated_time_to_release_is_ranking_only() -> None:
     )
     assert missing.accepted and short.accepted and long.accepted
     assert short.guaranteed_roi == long.guaranteed_roi == missing.guaranteed_roi
+    assert short.maximum_validated_capital == long.maximum_validated_capital == missing.maximum_validated_capital
     assert short.recommended_committed_capital == missing.recommended_committed_capital
-    assert long.recommended_committed_capital == missing.recommended_committed_capital
+    assert long.recommended_committed_capital < short.recommended_committed_capital
     assert kickoff.recommended_committed_capital == missing.recommended_committed_capital
     assert optimistic.recommended_committed_capital == missing.recommended_committed_capital
     assert short.capital_turnover is not None
     assert long.capital_turnover is not None
     assert short.capital_turnover.metric > long.capital_turnover.metric
     assert short.capital_turnover.does_not_release_capital is True
+    assert long.capital_turnover.does_not_release_capital is True
     assert short.estimated_time_to_release is not None
+    assert long.estimated_time_to_release is not None
     assert short.estimated_time_to_release.is_not_settlement is True
     assert short.estimated_time_to_release.estimate_confidence is EstimateConfidence.MODELLED
     assert short.settled_at is None
+    assert long.settled_at is None
     assert kickoff.estimated_time_to_release is None
     assert optimistic.estimated_time_to_release is None
     assert missing.capital_turnover is None
+    assert not any(factor.name == "lock_duration" for factor in short.reduction_factors)
+    assert not any(factor.name == "lock_duration" for factor in missing.reduction_factors)
+    lock_factor = next(factor for factor in long.reduction_factors if factor.name == "lock_duration")
+    assert lock_factor.amount > 0
+    assert "does not release capital" in lock_factor.reason
     mb_short = next(row for row in short.free_balance_after if row.venue is VenueName.MATCHBOOK)
+    mb_long = next(row for row in long.free_balance_after if row.venue is VenueName.MATCHBOOK)
     mb_missing = next(row for row in missing.free_balance_after if row.venue is VenueName.MATCHBOOK)
     assert mb_short.allocated_native == mb_missing.allocated_native
-    assert not any(
-        factor.name == "lock_duration" and factor.amount > 0
-        for factor in short.reduction_factors
-    )
+    assert mb_long.allocated_native < mb_short.allocated_native
+    assert mb_long.conditionally_releasable == mb_short.conditionally_releasable
 
 
 def test_kickoff_labelled_lock_is_not_used_as_capital_release() -> None:
