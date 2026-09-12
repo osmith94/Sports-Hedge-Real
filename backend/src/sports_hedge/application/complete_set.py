@@ -9,15 +9,14 @@ from sports_hedge.domain.football import (
 
 # Step 7 allowlist: conventional families whose listed outcomes are mutually
 # exclusive AND exhaustive for the existing complete-set solver (no unmodelled
-# push/void state). DNB, To Qualify, Correct Score, Next Goal, First Team To
-# Score, Double Chance, corners/cards, team totals and player props stay
-# inventory-visible and solver-ineligible.
+# push/void state). DNB, Asian Handicap, To Qualify, Correct Score, Next Goal,
+# First Team To Score, Double Chance, corners/cards, team totals and player
+# props stay inventory-visible and solver-ineligible.
 STEP7_COMPLETE_SET_FAMILIES: frozenset[MarketFamily] = frozenset(
     {
         MarketFamily.MATCH_RESULT,
         MarketFamily.BOTH_TEAMS_TO_SCORE,
         MarketFamily.TOTAL_GOALS,
-        MarketFamily.ASIAN_HANDICAP,
     }
 )
 
@@ -38,6 +37,7 @@ SOLVER_INELIGIBLE_REASON = "unsupported_outcome_model"
 INCOMPLETE_OUTCOME_REASON = "incomplete_outcome_set"
 PUSH_STATE_REASON = "push_state_not_modelled"
 UNPROVEN_SETTLEMENT_REASON = "unproven_settlement_semantics"
+UNPROVEN_HANDICAP_REASON = "unproven_handicap_semantics"
 
 
 def complete_set_outcomes(family: MarketFamily) -> frozenset[CanonicalOutcome] | None:
@@ -89,6 +89,8 @@ def solver_eligible_market(market: CanonicalMarket) -> bool:
 def solver_ineligibility_reason(market: CanonicalMarket) -> str:
     if market.family is MarketFamily.DRAW_NO_BET:
         return PUSH_STATE_REASON
+    if market.family is MarketFamily.ASIAN_HANDICAP:
+        return UNPROVEN_HANDICAP_REASON
     if market.family is MarketFamily.TO_QUALIFY:
         return UNPROVEN_SETTLEMENT_REASON
     if market.family not in STEP7_COMPLETE_SET_FAMILIES:

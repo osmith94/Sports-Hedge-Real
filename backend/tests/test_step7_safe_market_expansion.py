@@ -15,6 +15,7 @@ from sports_hedge.application.complete_set import (
     PUSH_STATE_REASON,
     STEP7_COMPLETE_SET_FAMILIES,
     SOLVER_INELIGIBLE_REASON,
+    UNPROVEN_HANDICAP_REASON,
     UNPROVEN_SETTLEMENT_REASON,
     solver_eligible_market,
     solver_ineligibility_reason,
@@ -108,6 +109,7 @@ def _scan(mb_market: dict[str, Any], pm_market: dict[str, Any], books: dict[str,
 
 def test_step7_allowlist_never_includes_dnb_or_to_qualify() -> None:
     assert MarketFamily.DRAW_NO_BET not in STEP7_COMPLETE_SET_FAMILIES
+    assert MarketFamily.ASIAN_HANDICAP not in STEP7_COMPLETE_SET_FAMILIES
     assert MarketFamily.TO_QUALIFY not in STEP7_COMPLETE_SET_FAMILIES
     assert MarketFamily.CORRECT_SCORE not in STEP7_COMPLETE_SET_FAMILIES
     assert MarketFamily.NEXT_GOAL not in STEP7_COMPLETE_SET_FAMILIES
@@ -144,7 +146,9 @@ def test_step7_allowlist_never_includes_dnb_or_to_qualify() -> None:
     assert solver_ineligibility_reason(qualify) == UNPROVEN_SETTLEMENT_REASON
     assert integer_ah.settlement.push_possible is True
     assert solver_eligible_market(integer_ah) is False
-    assert solver_eligible_market(half_ah) is True
+    assert solver_ineligibility_reason(integer_ah) == UNPROVEN_HANDICAP_REASON
+    assert solver_eligible_market(half_ah) is False
+    assert solver_ineligibility_reason(half_ah) == UNPROVEN_HANDICAP_REASON
 
 
 def _naive_two_way_guaranteed_profit(odds: str = "2.20") -> Decimal:
@@ -288,7 +292,7 @@ def test_naive_solver_would_overstate_profit_on_dnb_and_integer_lines() -> None:
     )
     assert PUSH_STATE_REASON in dnb.rejection_reasons
     assert PUSH_STATE_REASON in integer_totals.rejection_reasons
-    assert PUSH_STATE_REASON in integer_ah.rejection_reasons
+    assert UNPROVEN_HANDICAP_REASON in integer_ah.rejection_reasons
 
 
 def test_line_push_possible_rejects_quarter_lines() -> None:
@@ -479,6 +483,9 @@ def test_asian_handicap_requires_exact_line_and_compatible_push() -> None:
     assert "line_mismatch" in matcher.match(mb, pm_line).reasons
     assert matcher.match(mb, pm_et).matched is False
     assert "settlement_mismatch" in matcher.match(mb, pm_et).reasons
+    assert solver_eligible_market(mb) is False
+    assert solver_ineligibility_reason(mb) == UNPROVEN_HANDICAP_REASON
+    assert solver_eligible_pair(mb, pm_same, matcher.match(mb, pm_same)) is False
     quarter = MatchbookNormalizer().normalize_market(
         MatchbookNormalizer().normalize_event(MB_EVENT),
         {
@@ -507,6 +514,74 @@ def test_asian_handicap_requires_exact_line_and_compatible_push() -> None:
         CanonicalOutcome.OTHER,
     ]
     assert solver_eligible_market(labelled) is False
+
+
+def test_text_only_signed_asian_handicap_does_not_enter_solver() -> None:
+    """Unsigned fallback parser can drop the minus; Step 7 must not treat that as identity."""
+
+    mb = MatchbookNormalizer().normalize_market(
+        MatchbookNormalizer().normalize_event(MB_EVENT),
+        {
+            "id": 7304,
+            "name": "Asian Handicap -0.5",
+            "runners": [
+                {"id": 1, "name": "Tottenham", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+                {"id": 2, "name": "Everton", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+            ],
+        },
+    )
+    pm = PolymarketNormalizer().normalize_market(
+        PolymarketNormalizer().normalize_event(PM_EVENT),
+        {
+            "id": "pm-ah-text-only",
+            "question": "Asian handicap -0.5",
+            "sportsMarketType": "handicap",
+            "outcomes": '["Tottenham", "Everton"]',
+            "clobTokenIds": '["ah-h", "ah-a"]',
+            "description": "Resolves based on 90 minutes of regulation time.",
+        },
+    )
+    assert mb.family is MarketFamily.ASIAN_HANDICAP
+    assert pm.family is MarketFamily.ASIAN_HANDICAP
+    assert mb.line == Decimal("0.5")
+    assert pm.line == Decimal("0.5")
+    assert mb.line != Decimal("-0.5")
+    assert solver_eligible_market(mb) is False
+    assert solver_eligible_market(pm) is False
+    assert solver_ineligibility_reason(mb) == UNPROVEN_HANDICAP_REASON
+    decision, _, _ = _scan(
+        {
+            "id": 7305,
+            "name": "Asian Handicap -0.5",
+            "runners": [
+                {"id": 1, "name": "Tottenham", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+                {"id": 2, "name": "Everton", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+            ],
+        },
+        {
+            "id": "pm-ah-text-only-scan",
+            "question": "Asian handicap -0.5",
+            "sportsMarketType": "handicap",
+            "outcomes": '["Tottenham", "Everton"]',
+            "clobTokenIds": '["ah-h", "ah-a"]',
+            "description": "Resolves based on 90 minutes of regulation time.",
+        },
+        {
+            "ah-h": {"asset_id": "ah-h", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+            "ah-a": {"asset_id": "ah-a", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+        },
+    )
+    assert decision.depth_scan is None
+    assert decision.eligible_for_paper_simulation is False
+    assert UNPROVEN_HANDICAP_REASON in decision.rejection_reasons
+    rows = assemble_fixture_inventory(
+        [_inventory(mb, name="Asian Handicap -0.5")],
+        [_inventory(pm, name="Asian handicap -0.5")],
+    )
+    assert rows
+    assert all(not row.entered_solver for row in rows)
+    assert any(row.family == "asian_handicap" for row in rows)
+    assert any(row.reason == UNPROVEN_HANDICAP_REASON for row in rows)
 
 
 def test_dnb_is_deferred_from_complete_set_solver() -> None:
@@ -630,13 +705,13 @@ def test_integer_line_totals_and_ah_stay_out_of_solver_even_when_listed_odds_loo
     assert mb_ah.market.settlement.push_possible is True
     assert solver_eligible_market(mb_ah.market) is False
     assert decision_ah.depth_scan is None
-    assert PUSH_STATE_REASON in decision_ah.rejection_reasons
+    assert UNPROVEN_HANDICAP_REASON in decision_ah.rejection_reasons
     rows = assemble_fixture_inventory(
         [_inventory(mb_ah.market, name="Asian Handicap -1.0")],
         [_inventory(pm_ah.market, name="AH -1")],
     )
     assert all(not row.entered_solver for row in rows)
-    assert any(row.reason == PUSH_STATE_REASON for row in rows)
+    assert any(row.reason == UNPROVEN_HANDICAP_REASON for row in rows)
 
 
 def test_to_qualify_is_not_inferred_from_family_name() -> None:
@@ -1161,9 +1236,9 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
             "match_result",
             "both_teams_to_score",
             "total_goals",
-            "asian_handicap",
         }
         assert "draw_no_bet" not in scanned_families
+        assert "asian_handicap" not in scanned_families
         assert "to_qualify" not in scanned_families
         totals = [row for row in rows if row.family == "total_goals" and row.entered_solver]
         assert {row.line for row in totals} == {Decimal("2.5"), Decimal("3.5")}
@@ -1176,6 +1251,10 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
         dnb = next(row for row in rows if row.family == "draw_no_bet")
         assert dnb.entered_solver is False
         assert dnb.reason == PUSH_STATE_REASON
+        ah_rows = [row for row in rows if row.family == "asian_handicap"]
+        assert ah_rows
+        assert all(not row.entered_solver for row in ah_rows)
+        assert all(row.reason == UNPROVEN_HANDICAP_REASON for row in ah_rows)
         qualify = next(row for row in rows if row.family == "to_qualify")
         assert qualify.entered_solver is False
         assert qualify.reason in {UNPROVEN_SETTLEMENT_REASON, "incomplete_settlement"}
@@ -1223,6 +1302,7 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
         assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "match_result")
         assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "both_teams_to_score")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "draw_no_bet")
+        assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "asian_handicap")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "to_qualify")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "correct_score")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "next_goal")
