@@ -44,6 +44,8 @@ def _registry() -> AliasRegistry:
         # La Liga / football-data.co.uk
         "Ath Madrid": "Atletico Madrid",
         "Ath Bilbao": "Athletic Club",
+        "Athletic Bilbao": "Athletic Club",
+        "Athletic Club": "Athletic Club",
         "Barcelona": "Barcelona",
         "Espanol": "Espanyol",
         "Sociedad": "Real Sociedad",
@@ -63,6 +65,7 @@ def _registry() -> AliasRegistry:
         "Valladolid": "Real Valladolid",
         "Oviedo": "Real Oviedo",
         "Elche": "Elche",
+        "Elche CF": "Elche",
         "Levante": "Levante",
     }
     for alias, canonical in pairs.items():

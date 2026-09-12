@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from functools import lru_cache
 from json import JSONDecodeError, loads
+from logging import getLogger
 from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+LOGGER = getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -108,6 +111,14 @@ class Settings(BaseSettings):
             raise ValueError("Phase 1 supports paper mode only")
         if self.sports_hedge_execution_enabled:
             raise ValueError("Live execution is intentionally unavailable in Phase 1")
+        if self.polymarket_gamma_series_id is not None:
+            displayed = self.polymarket_gamma_series_id.strip() or "(empty — series filter disabled)"
+            LOGGER.warning(
+                "POLYMARKET_GAMMA_SERIES_ID is a legacy single-series override (%s); "
+                "Championship and La Liga will not be queried unless this is unset. "
+                "Prefer POLYMARKET_GAMMA_SERIES_IDS.",
+                displayed,
+            )
         return self
 
 

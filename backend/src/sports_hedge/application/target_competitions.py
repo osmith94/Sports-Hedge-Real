@@ -103,6 +103,8 @@ _NON_FOOTBALL_SPORTS = {
 _FOOTBALL_SPORTS = {"football", "soccer", "association football", "soccer football"}
 
 UNMATCHED_POLYMARKET_COVERAGE = "unmatched / no supported Polymarket coverage"
+EVENT_IDENTITY_MISMATCH = "event_identity_mismatch"
+SERIES_NOT_QUERIED = "series_not_queried"
 UNKNOWN_COMPETITION = "unknown_or_ambiguous_competition"
 NON_FOOTBALL_SPORT = "non_football_sport"
 

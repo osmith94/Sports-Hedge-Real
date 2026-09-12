@@ -255,7 +255,10 @@ async def _execute_collection(
         paper_scan=service,
     )
     try:
-        report = await collector.collect_and_scan(**kwargs)
+        report = await collector.collect_and_scan(
+            **kwargs,
+            polymarket_queried_series_ids=settings.resolved_polymarket_series_ids(),
+        )
         for decision in report.paper_decisions:
             _persist_decision(
                 decision,

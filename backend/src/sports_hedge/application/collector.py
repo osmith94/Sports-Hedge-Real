@@ -19,8 +19,13 @@ from sports_hedge.application.market_observation import (
 )
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.target_competitions import (
+    EVENT_IDENTITY_MISMATCH,
+    SERIES_NOT_QUERIED,
     UNMATCHED_POLYMARKET_COVERAGE,
+    TARGET_COMPETITIONS,
     ScopeDecision,
+    TargetCompetition,
+    resolve_target_competition,
     scope_matchbook_event,
 )
 from sports_hedge.arbitrage.watchlist.economics import (
@@ -168,6 +173,7 @@ class ReadOnlyCrossVenueCollector:
         polymarket_event_filters: dict[str, Any] | None = None,
         matchbook_market_filters: dict[str, Any] | None = None,
         polymarket_market_filters: dict[str, Any] | None = None,
+        polymarket_queried_series_ids: list[str] | None = None,
         fee_snapshots: list[FeeSnapshot] | None = None,
         venue_costs: list[VenueCostSnapshot] | None = None,
         fx_snapshots: list[FxRateSnapshot] | None = None,
@@ -203,6 +209,10 @@ class ReadOnlyCrossVenueCollector:
             venue=VenueName.POLYMARKET,
             issues=issues,
         )
+        queried_series_ids = _resolved_queried_series_ids(
+            polymarket_event_filters,
+            polymarket_queried_series_ids,
+        )
         event_pairs = _greedy_unique_event_pairs(
             matchbook_events,
             polymarket_events,
@@ -216,6 +226,8 @@ class ReadOnlyCrossVenueCollector:
                 event,
                 polymarket_matched=event.canonical.source_event_id in matched_matchbook_ids,
                 seen_at=started_at,
+                polymarket_events=polymarket_events,
+                queried_series_ids=queried_series_ids,
             )
             for event in matchbook_events
         }
@@ -524,6 +536,8 @@ def _discovered_fixture(
     *,
     polymarket_matched: bool,
     seen_at: datetime,
+    polymarket_events: list[_NormalizedEvent],
+    queried_series_ids: list[str] | None,
 ) -> DiscoveredFixture:
     state = matchbook_fixture_state(event.raw)
     canonical = event.canonical
@@ -542,9 +556,72 @@ def _discovered_fixture(
         home_score=state.home_score,
         away_score=state.away_score,
         last_seen_at=seen_at,
-        no_comparison_reason=None if polymarket_matched else UNMATCHED_POLYMARKET_COVERAGE,
+        no_comparison_reason=(
+            None
+            if polymarket_matched
+            else _unmatched_polymarket_reason(
+                scoped.competition,
+                polymarket_events=polymarket_events,
+                queried_series_ids=queried_series_ids,
+            )
+        ),
         solver_is_arbitrage=False,
     )
+
+
+def _resolved_queried_series_ids(
+    polymarket_event_filters: dict[str, Any] | None,
+    explicit: list[str] | None,
+) -> list[str] | None:
+    if polymarket_event_filters and "series_id" in polymarket_event_filters:
+        value = str(polymarket_event_filters.get("series_id") or "").strip()
+        return [value] if value else []
+    return list(explicit) if explicit is not None else None
+
+
+def _polymarket_event_target(event: _NormalizedEvent) -> TargetCompetition | None:
+    resolved = resolve_target_competition(event.canonical.competition)
+    if resolved is not None:
+        return resolved
+    series_items = event.raw.get("series", event.raw.get("series_id"))
+    if isinstance(series_items, dict):
+        series_items = [series_items]
+    if isinstance(series_items, str):
+        for item in TARGET_COMPETITIONS:
+            if item.polymarket_gamma_series_id == series_items.strip():
+                return item
+        return resolve_target_competition(series_items)
+    if isinstance(series_items, list):
+        for series in series_items:
+            if not isinstance(series, dict):
+                continue
+            series_id = str(series.get("id", series.get("series_id", ""))).strip()
+            for item in TARGET_COMPETITIONS:
+                if item.polymarket_gamma_series_id and item.polymarket_gamma_series_id == series_id:
+                    return item
+            title = series.get("title") or series.get("name")
+            resolved = resolve_target_competition(str(title) if title else None)
+            if resolved is not None:
+                return resolved
+    return None
+
+
+def _unmatched_polymarket_reason(
+    competition: TargetCompetition | None,
+    *,
+    polymarket_events: list[_NormalizedEvent],
+    queried_series_ids: list[str] | None,
+) -> str:
+    if competition is None:
+        return UNMATCHED_POLYMARKET_COVERAGE
+    series_id = competition.polymarket_gamma_series_id
+    if queried_series_ids and series_id and series_id not in queried_series_ids:
+        return SERIES_NOT_QUERIED
+    for event in polymarket_events:
+        target = _polymarket_event_target(event)
+        if target is not None and target.code == competition.code:
+            return EVENT_IDENTITY_MISMATCH
+    return UNMATCHED_POLYMARKET_COVERAGE
 
 
 def _matchbook_discovery_issues(payload: dict[str, Any]) -> list[CollectorIssue]:
