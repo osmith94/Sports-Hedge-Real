@@ -181,6 +181,17 @@ def _net_win_payoff(
         assert snapshot.fixed_amount is not None
         return snapshot.fixed_amount, stake * gross_decimal_odds - snapshot.fixed_amount
     if basis is FeeBasis.FORMULA:
+        from sports_hedge.fees.kalshi import KALSHI_QUADRATIC_FORMULA, apply_kalshi_quadratic
+
+        if snapshot.formula_name == KALSHI_QUADRATIC_FORMULA:
+            try:
+                return apply_kalshi_quadratic(
+                    snapshot,
+                    gross_decimal_odds=gross_decimal_odds,
+                    stake=stake,
+                )
+            except ValueError as exc:
+                raise CostRuleError("unsupported_fee_basis", str(exc)) from exc
         raise CostRuleError(
             "unsupported_fee_basis",
             "FORMULA fee basis has no authorised rule registered for this snapshot",
