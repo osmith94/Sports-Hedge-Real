@@ -29,6 +29,8 @@ from sports_hedge.application.market_observation import (
     PolymarketObservationBuilder,
 )
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.arbitrage.models import ExecutableQuote
+from sports_hedge.arbitrage.solver import CompleteSetArbitrageSolver
 from sports_hedge.domain.football import (
     CanonicalOutcome,
     MarketFamily,
@@ -102,6 +104,150 @@ def _scan(mb_market: dict[str, Any], pm_market: dict[str, Any], books: dict[str,
         return decision, matchbook, polymarket
     finally:
         repository.close()
+
+
+def _naive_two_way_guaranteed_profit(odds: str = "2.20") -> Decimal:
+    """What CompleteSetArbitrageSolver reports if push/void states are ignored."""
+
+    naive = CompleteSetArbitrageSolver().solve(
+        [
+            ExecutableQuote(
+                outcome="home",
+                venue=VenueName.MATCHBOOK,
+                source_market_id="naive-a",
+                net_decimal_odds=Decimal(odds),
+                max_stake=Decimal("80"),
+            ),
+            ExecutableQuote(
+                outcome="away",
+                venue=VenueName.POLYMARKET,
+                source_market_id="naive-b",
+                net_decimal_odds=Decimal(odds),
+                max_stake=Decimal("80"),
+            ),
+        ]
+    )
+    assert naive.is_arbitrage is True
+    assert naive.guaranteed_profit > 0
+    return naive.guaranteed_profit
+
+
+def test_naive_solver_would_overstate_profit_on_dnb_and_integer_lines() -> None:
+    """Regression: listed 2.20/2.20 two-way looks like an arb, but push/void is unmodelled."""
+
+    false_profit = _naive_two_way_guaranteed_profit()
+    assert false_profit > 0
+
+    dnb, _, _ = _scan(
+        {
+            "id": 7420,
+            "name": "Draw No Bet",
+            "runners": [
+                {"id": 1, "name": "Tottenham", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+                {"id": 2, "name": "Everton", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+            ],
+        },
+        {
+            "id": "pm-dnb-false-profit",
+            "question": "Draw no bet",
+            "sportsMarketType": "draw no bet",
+            "outcomes": '["Tottenham", "Everton"]',
+            "clobTokenIds": '["h", "a"]',
+            "description": "Resolves based on 90 minutes of regulation time. Draw voids.",
+        },
+        {
+            "h": {"asset_id": "h", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+            "a": {"asset_id": "a", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+        },
+    )
+    integer_totals, mb_totals, _ = _scan(
+        {
+            "id": 7421,
+            "name": "Over/Under 2.0 Goals",
+            "line": "2.0",
+            "runners": [
+                {"id": 1, "name": "Over 2.0", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+                {"id": 2, "name": "Under 2.0", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+            ],
+        },
+        {
+            "id": "pm-tg-20-false-profit",
+            "question": "Total goals 2.0",
+            "sportsMarketType": "total goals",
+            "line": "2.0",
+            "outcomes": '["Over", "Under"]',
+            "clobTokenIds": '["o", "u"]',
+            "description": "Resolves based on 90 minutes of regulation time.",
+        },
+        {
+            "o": {"asset_id": "o", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+            "u": {"asset_id": "u", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+        },
+    )
+    integer_ah, mb_ah, _ = _scan(
+        {
+            "id": 7422,
+            "name": "Asian Handicap -1.0",
+            "line": "-1.0",
+            "runners": [
+                {"id": 1, "name": "Tottenham", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+                {"id": 2, "name": "Everton", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+            ],
+        },
+        {
+            "id": "pm-ah-1-false-profit",
+            "question": "Asian handicap -1.0",
+            "sportsMarketType": "handicap",
+            "line": "-1.0",
+            "outcomes": '["Tottenham", "Everton"]',
+            "clobTokenIds": '["ah-h", "ah-a"]',
+            "description": "Resolves based on 90 minutes of regulation time.",
+        },
+        {
+            "ah-h": {"asset_id": "ah-h", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+            "ah-a": {"asset_id": "ah-a", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+        },
+    )
+    qualify, mb_qualify, _ = _scan(
+        {
+            "id": 7423,
+            "name": "To Qualify",
+            "runners": [
+                {"id": 1, "name": "Tottenham", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+                {"id": 2, "name": "Everton", "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}]},
+            ],
+        },
+        {
+            "id": "pm-qualify-false-profit",
+            "question": "Who will to qualify?",
+            "sportsMarketType": "to qualify",
+            "outcomes": '["Tottenham", "Everton"]',
+            "clobTokenIds": '["qh", "qa"]',
+            "description": "Resolves including penalties after extra time.",
+        },
+        {
+            "qh": {"asset_id": "qh", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+            "qa": {"asset_id": "qa", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
+        },
+    )
+
+    for decision in (dnb, integer_totals, integer_ah, qualify):
+        assert decision.depth_scan is None
+        assert decision.eligible_for_paper_simulation is False
+        assert decision.rejection_reasons
+    assert mb_totals.market.settlement.push_possible is True
+    assert mb_ah.market.settlement.push_possible is True
+    assert mb_qualify.market.family is MarketFamily.TO_QUALIFY
+    assert mb_qualify.market.settlement.scope is SettlementScope.UNKNOWN
+    assert solver_eligible_market(mb_qualify.market) is False
+    assert solver_ineligibility_reason(mb_qualify.market) == UNPROVEN_SETTLEMENT_REASON
+    assert (
+        UNPROVEN_SETTLEMENT_REASON in qualify.rejection_reasons
+        or "incomplete_settlement" in qualify.rejection_reasons
+    )
+    assert PUSH_STATE_REASON in dnb.rejection_reasons
+    assert PUSH_STATE_REASON in integer_totals.rejection_reasons
+    assert PUSH_STATE_REASON in integer_ah.rejection_reasons
 
 
 def test_line_push_possible_rejects_quarter_lines() -> None:
