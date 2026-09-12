@@ -581,7 +581,7 @@ def test_correct_score_first_goal_and_ah_remain_excluded() -> None:
     with pytest.raises(Exception, match="Unsupported Matchbook market"):
         MatchbookNormalizer().normalize_market(
             event,
-            {"id": 999, "name": "First Team To Score", "runners": [{"id": 1, "name": "Tottenham"}]},
+            {"id": 999, "name": "Novelty Special", "runners": [{"id": 1, "name": "Tottenham"}]},
         )
 
 

@@ -402,8 +402,14 @@ def _classify_pair(
                 if item in {"settlement_mismatch", "incomplete_settlement"}
             )
             return InventoryComparisonStatus.SETTLEMENT_MISMATCH, reason, list(match.reasons), False
-        if not solver_eligible_market(left_market) and not solver_eligible_market(right_market):
-            ineligible = scan_ineligibility_reason(left_market)
+        left_scan_blocked = not solver_eligible_market(left_market) and not generalized_payoff_eligible_market(
+            left_market
+        )
+        right_scan_blocked = not solver_eligible_market(right_market) and not generalized_payoff_eligible_market(
+            right_market
+        )
+        if left_scan_blocked or right_scan_blocked:
+            ineligible = scan_ineligibility_reason(left_market if left_scan_blocked else right_market)
             return (
                 InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL,
                 ineligible,
@@ -414,7 +420,7 @@ def _classify_pair(
     if not scan_eligible_pair(left_market, right_market, match):
         ineligible = (
             scan_ineligibility_reason(left_market)
-            if not solver_eligible_market(left_market)
+            if not solver_eligible_market(left_market) and not generalized_payoff_eligible_market(left_market)
             else scan_ineligibility_reason(right_market)
         )
         return (

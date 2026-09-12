@@ -29,6 +29,7 @@ class MarketFamily(StrEnum):
     HALF_TIME_FULL_TIME = "half_time_full_time"
     TO_QUALIFY = "to_qualify"
     NEXT_GOAL = "next_goal"
+    FIRST_TEAM_TO_SCORE = "first_team_to_score"
     CORNERS = "corners"
     CARDS = "cards"
     PLAYER_PROPS = "player_props"
@@ -56,6 +57,7 @@ class CanonicalOutcome(StrEnum):
     DRAW_OR_AWAY = "draw_or_away"
     HOME_QUALIFY = "home_qualify"
     AWAY_QUALIFY = "away_qualify"
+    NO_GOAL = "no_goal"
     OTHER = "other"
 
 

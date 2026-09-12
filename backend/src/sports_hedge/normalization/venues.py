@@ -56,7 +56,12 @@ class MatchbookNormalizer:
     ) -> CanonicalMarket:
         source_market_id = _required_string(payload, "id")
         name = _required_string(payload, "name")
-        family, line = _matchbook_market_family(name, payload)
+        family, line = _matchbook_market_family(
+            name,
+            payload,
+            home_team=event.home_team,
+            away_team=event.away_team,
+        )
         period = _period_from_text(name)
         settlement = _standard_football_settlement(family=family, period=period, line=line)
         runners = [
@@ -121,7 +126,12 @@ class PolymarketNormalizer:
         if not question:
             raise VenueNormalizationError(f"Polymarket market {source_market_id} has no question")
 
-        family, line = _polymarket_market_family(question, payload)
+        family, line = _polymarket_market_family(
+            question,
+            payload,
+            home_team=event.home_team,
+            away_team=event.away_team,
+        )
         period = _period_from_text(question)
         settlement = _polymarket_settlement(payload, family=family, period=period, line=line)
         outcomes = _list_field(payload.get("outcomes"))
@@ -252,6 +262,9 @@ def _polymarket_competition(payload: dict[str, Any]) -> str | None:
 def _matchbook_market_family(
     name: str,
     payload: dict[str, Any],
+    *,
+    home_team: str,
+    away_team: str,
 ) -> tuple[MarketFamily, Decimal | None]:
     text = normalize_text(name)
     line = _line_from_payload_or_text(payload, name)
@@ -279,14 +292,26 @@ def _matchbook_market_family(
         return MarketFamily.HALF_TIME_FULL_TIME, None
     if "to qualify" in text or "qualification" in text:
         return MarketFamily.TO_QUALIFY, None
-    if "next goal" in text:
+    if "next goal" in text or "next team to score" in text:
         return MarketFamily.NEXT_GOAL, None
+    if _is_player_goal_market(text):
+        return MarketFamily.PLAYER_PROPS, None
+    if _is_first_team_to_score_market(
+        text,
+        payload,
+        home_team=home_team,
+        away_team=away_team,
+    ):
+        return MarketFamily.FIRST_TEAM_TO_SCORE, None
     raise VenueNormalizationError(f"Unsupported Matchbook market: {name}")
 
 
 def _polymarket_market_family(
     question: str,
     payload: dict[str, Any],
+    *,
+    home_team: str,
+    away_team: str,
 ) -> tuple[MarketFamily, Decimal | None]:
     text = normalize_text(question)
     sports_type = normalize_text(
@@ -300,6 +325,8 @@ def _polymarket_market_family(
         return MarketFamily.CARDS, line
     if any(token in combined for token in ("player prop", "player shots", "player goal")):
         return MarketFamily.PLAYER_PROPS, line
+    if _is_player_goal_market(combined):
+        return MarketFamily.PLAYER_PROPS, line
     if "both teams to score" in combined or "btts" in combined:
         return MarketFamily.BOTH_TEAMS_TO_SCORE, None
     if "total goal" in combined or "over under" in combined and "goal" in combined:
@@ -310,6 +337,15 @@ def _polymarket_market_family(
         return MarketFamily.DRAW_NO_BET, None
     if "to qualify" in combined:
         return MarketFamily.TO_QUALIFY, None
+    if "next goal" in combined or "next team to score" in combined:
+        return MarketFamily.NEXT_GOAL, None
+    if _is_first_team_to_score_market(
+        combined,
+        payload,
+        home_team=home_team,
+        away_team=away_team,
+    ):
+        return MarketFamily.FIRST_TEAM_TO_SCORE, None
     if "moneyline" in sports_type or "match result" in combined or "to win" in text:
         return MarketFamily.MATCH_RESULT, None
     if "correct score" in combined:
@@ -337,9 +373,11 @@ def _canonical_runner_outcome(
         ):
             return CanonicalOutcome.AWAY_QUALIFY
         return CanonicalOutcome.OTHER
-    if text == home:
+    if family is MarketFamily.FIRST_TEAM_TO_SCORE and _is_no_goal_runner(text):
+        return CanonicalOutcome.NO_GOAL
+    if text in {home, "home", "home team"}:
         return CanonicalOutcome.HOME
-    if text == away:
+    if text in {away, "away", "away team"}:
         return CanonicalOutcome.AWAY
     if text in {"draw", "tie"}:
         return CanonicalOutcome.DRAW
@@ -359,6 +397,116 @@ def _canonical_runner_outcome(
         if any(token in text for token in ("draw or away", "x2")):
             return CanonicalOutcome.DRAW_OR_AWAY
     return CanonicalOutcome.OTHER
+
+
+_PLAYER_GOAL_TOKENS = (
+    "first goalscorer",
+    "first goal scorer",
+    "anytime scorer",
+    "anytime goalscorer",
+    "player to score",
+    "last goalscorer",
+    "last goal scorer",
+)
+
+_NO_GOAL_RUNNER_LABELS = {
+    "no goal",
+    "no goals",
+    "neither",
+    "neither team",
+    "neither scores",
+    "neither team to score",
+    "no score",
+    "no scorer",
+    "none",
+    "no",
+    "no team",
+    "no team to score",
+}
+
+
+def _is_player_goal_market(text: str) -> bool:
+    return any(token in text for token in _PLAYER_GOAL_TOKENS)
+
+
+def _explicit_first_team_to_score(text: str) -> bool:
+    return (
+        "first team to score" in text
+        or "team to score first" in text
+        or "first team goal" in text
+        or text in {"ftts", "first team to score"}
+    )
+
+
+def _ambiguous_first_goal_name(text: str) -> bool:
+    if "next" in text or "scorer" in text or "player" in text or "anytime" in text:
+        return False
+    return text in {"first goal", "first to score", "to score first"} or (
+        "first goal" in text and "team" not in text
+    )
+
+
+def _is_no_goal_runner(text: str) -> bool:
+    return text in _NO_GOAL_RUNNER_LABELS or text.startswith("no goal")
+
+
+def _payload_runner_labels(payload: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    runners = payload.get("runners")
+    if isinstance(runners, list):
+        for runner in runners:
+            if isinstance(runner, dict):
+                name = str(runner.get("name") or runner.get("label") or "").strip()
+                if name:
+                    labels.append(name)
+    if labels:
+        return labels
+    return [str(item) for item in _list_field(payload.get("outcomes")) if str(item).strip()]
+
+
+def _payload_is_team_level_first_score(
+    payload: dict[str, Any],
+    *,
+    home_team: str,
+    away_team: str,
+) -> bool:
+    labels = _payload_runner_labels(payload)
+    if len(labels) < 3:
+        return False
+    mapped = {
+        _canonical_runner_outcome(
+            label,
+            family=MarketFamily.FIRST_TEAM_TO_SCORE,
+            home_team=home_team,
+            away_team=away_team,
+        )
+        for label in labels
+    }
+    return mapped == {
+        CanonicalOutcome.HOME,
+        CanonicalOutcome.AWAY,
+        CanonicalOutcome.NO_GOAL,
+    }
+
+
+def _is_first_team_to_score_market(
+    text: str,
+    payload: dict[str, Any],
+    *,
+    home_team: str,
+    away_team: str,
+) -> bool:
+    if _is_player_goal_market(text) or "next goal" in text or "next team to score" in text:
+        return False
+    if _explicit_first_team_to_score(text):
+        return True
+    if _ambiguous_first_goal_name(text):
+        return _payload_is_team_level_first_score(
+            payload,
+            home_team=home_team,
+            away_team=away_team,
+        )
+    return False
 
 
 def _standard_football_settlement(
@@ -476,7 +624,12 @@ def _line_from_payload_or_text(payload: dict[str, Any], text: str) -> Decimal | 
 def _family_push_possible(family: MarketFamily, line: Decimal | None) -> bool | None:
     if family is MarketFamily.DRAW_NO_BET:
         return True
-    if family in {MarketFamily.MATCH_RESULT, MarketFamily.BOTH_TEAMS_TO_SCORE, MarketFamily.TO_QUALIFY}:
+    if family in {
+        MarketFamily.MATCH_RESULT,
+        MarketFamily.BOTH_TEAMS_TO_SCORE,
+        MarketFamily.TO_QUALIFY,
+        MarketFamily.FIRST_TEAM_TO_SCORE,
+    }:
         return False
     if family in {MarketFamily.TOTAL_GOALS, MarketFamily.ASIAN_HANDICAP}:
         return line_push_possible(line)

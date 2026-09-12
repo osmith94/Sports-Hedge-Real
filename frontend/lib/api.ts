@@ -12,6 +12,7 @@ export type MarketFamily =
   | "half_time_full_time"
   | "to_qualify"
   | "next_goal"
+  | "first_team_to_score"
   | "corners"
   | "cards"
   | "player_props"
