@@ -326,10 +326,9 @@ class PaperUnwindEngine:
         ages = [leg.quote_age_ms for leg in legs if leg.quote_age_ms is not None]
         if not ages:
             return None
-        minutes: float | None = None
-        estimate = _estimated_time_to_release(position)
-        if estimate.remaining_lock_minutes is not None:
-            minutes = float(estimate.remaining_lock_minutes)
+        # Remaining lock (authoritative or modelled) is not kickoff proximity.
+        # Leave minutes_to_kickoff unset unless an actual pre-kickoff clock is
+        # known. 8D does not have that input and must not invent near_kickoff.
         ratios = []
         for leg in legs:
             if leg.available_closing_capacity <= 0:
@@ -345,7 +344,7 @@ class PaperUnwindEngine:
                 quote_age_ms=max(ages),
                 recent_volatility_bps=request.recent_volatility_bps,
                 leg_count=max(len(legs), 2),
-                minutes_to_kickoff=minutes,
+                minutes_to_kickoff=None,
                 assumed_latency_ms=request.assumed_latency_ms,
                 hedge_liquidity_ratio=hedge,
             )

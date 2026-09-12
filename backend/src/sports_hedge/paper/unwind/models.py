@@ -55,11 +55,40 @@ class IncrementalCloseCapitalStatus(StrEnum):
 
 
 class RemainingLockSource(StrEnum):
-    """Who supplied remaining lock. Estimates without this stay unknown."""
+    """Who supplied remaining lock. Estimates without this stay unknown.
+
+    Authoritative and modelled are both advisory context. Neither settles
+    or releases capital. They must stay visibly distinct.
+    """
 
     AUTHORITATIVE_PROVIDER = "authoritative_provider"
     AUTHORITATIVE_LEDGER = "authoritative_ledger"
+    MODELLED = "modelled"
     UNKNOWN = "unknown"
+
+
+class RemainingLockClass(StrEnum):
+    """Operator-visible class of remaining lock. Never a settlement clock."""
+
+    AUTHORITATIVE = "authoritative"
+    MODELLED = "modelled"
+    UNKNOWN = "unknown"
+
+
+_AUTHORITATIVE_LOCK_SOURCES = frozenset(
+    {
+        RemainingLockSource.AUTHORITATIVE_PROVIDER,
+        RemainingLockSource.AUTHORITATIVE_LEDGER,
+    }
+)
+
+
+def remaining_lock_class(basis: RemainingLockSource) -> RemainingLockClass:
+    if basis in _AUTHORITATIVE_LOCK_SOURCES:
+        return RemainingLockClass.AUTHORITATIVE
+    if basis is RemainingLockSource.MODELLED:
+        return RemainingLockClass.MODELLED
+    return RemainingLockClass.UNKNOWN
 
 
 class DurationDecisionRole(StrEnum):
@@ -80,27 +109,26 @@ class EstimatedTimeToRelease(BaseModel):
     remaining_lock_minutes: Decimal | None = Field(default=None, ge=0)
     expected_settlement_at: datetime | None = None
     basis: RemainingLockSource = RemainingLockSource.UNKNOWN
+    source_class: RemainingLockClass = RemainingLockClass.UNKNOWN
     confidence: Decimal | None = Field(default=None, ge=0, le=1)
     detail: str | None = None
     advisory: bool = True
     settles_or_releases_capital: bool = False
 
     @model_validator(mode="after")
-    def authoritative_or_null(self) -> EstimatedTimeToRelease:
+    def labelled_source_or_null(self) -> EstimatedTimeToRelease:
         self.advisory = True
         self.settles_or_releases_capital = False
         if self.expected_settlement_at is not None:
             self.expected_settlement_at = require_aware_instant(
                 self.expected_settlement_at, "expected_settlement_at"
             )
-        authoritative = {
-            RemainingLockSource.AUTHORITATIVE_PROVIDER,
-            RemainingLockSource.AUTHORITATIVE_LEDGER,
-        }
-        if self.basis not in authoritative:
+        labelled = _AUTHORITATIVE_LOCK_SOURCES | {RemainingLockSource.MODELLED}
+        if self.basis not in labelled:
             self.remaining_lock_minutes = None
             self.expected_settlement_at = None
             self.basis = RemainingLockSource.UNKNOWN
+        self.source_class = remaining_lock_class(self.basis)
         return self
 
 
@@ -196,18 +224,20 @@ class OpenPaperPosition(BaseModel):
     expected_settlement_at: datetime | None = Field(
         default=None,
         description=(
-            "Authoritative provider/ledger settlement instant only. "
-            "Null unless remaining_lock_basis is authoritative. Never derived "
-            "from kickoff or a fabricated match-finish clock."
+            "Remaining-lock instant when remaining_lock_basis is authoritative "
+            "or clearly labelled modelled. Null/unknown is valid. Never derived "
+            "here from kickoff or a fabricated match-finish clock, and never a "
+            "settlement or spendable-release trigger."
         ),
     )
     remaining_lock_minutes: Decimal | None = Field(
         default=None,
         ge=0,
         description=(
-            "Authoritative remaining lock if a provider/ledger supplied it. "
-            "Null/unknown is valid. Advisory hold-vs-unwind / opportunity-cost "
-            "input only — never a settlement or spendable-release trigger."
+            "Remaining lock if a provider/ledger or a labelled 8C modelled "
+            "estimate supplied it. Null/unknown is valid. Advisory "
+            "hold-vs-unwind / opportunity-cost / ranking input only — never a "
+            "settlement or spendable-release trigger."
         ),
     )
     remaining_lock_basis: RemainingLockSource = RemainingLockSource.UNKNOWN
@@ -344,7 +374,10 @@ class UnwindDecision(BaseModel):
     )
     remaining_lock_minutes: Decimal | None = Field(
         default=None,
-        description="Advisory remaining lock when authoritative; else null. Not a close trigger.",
+        description=(
+            "Advisory remaining lock when authoritative or modelled; else null. "
+            "Not a close, settlement, or spendable-release trigger."
+        ),
     )
     estimated_time_to_release: EstimatedTimeToRelease = Field(
         default_factory=EstimatedTimeToRelease,

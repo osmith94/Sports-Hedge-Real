@@ -39,6 +39,7 @@ from sports_hedge.paper.unwind import (
     IncrementalCloseCapitalStatus,
     OpenPaperPosition,
     PaperUnwindEngine,
+    RemainingLockClass,
     RemainingLockSource,
     ReverseQuote,
     UnwindEvaluationRequest,
@@ -1023,6 +1024,8 @@ def test_close_plan_api_is_paper_only_and_not_an_execution_endpoint(tmp_path: Pa
         assert payload["duration_decision_role"] == "duration_unknown"
         assert payload["estimated_time_to_release"]["advisory"] is True
         assert payload["estimated_time_to_release"]["settles_or_releases_capital"] is False
+        assert payload["estimated_time_to_release"]["source_class"] == "unknown"
+        assert payload["estimated_time_to_release"]["basis"] == "unknown"
         assert payload["opportunity_cost_gbp"] is None
         assert "place_order" not in payload
     finally:
@@ -1061,6 +1064,7 @@ def test_unknown_remaining_lock_is_valid_and_not_fabricated() -> None:
     assert decision.remaining_lock_minutes is None
     assert decision.estimated_time_to_release.expected_settlement_at is None
     assert decision.estimated_time_to_release.basis is RemainingLockSource.UNKNOWN
+    assert decision.estimated_time_to_release.source_class is RemainingLockClass.UNKNOWN
     assert decision.duration_decision_role is DurationDecisionRole.DURATION_UNKNOWN
     assert decision.opportunity_cost_gbp is None
     assert decision.capital_turnover_hint != "capital_locked_until_expected_settlement"
@@ -1162,7 +1166,9 @@ def test_hold_vs_unwind_is_not_decided_by_predicted_game_end() -> None:
     assert unknown.capital_turnover_hint == "opportunity_cost_from_current_scarcity"
     assert unauthoritative.remaining_lock_minutes is None
     assert unauthoritative.estimated_time_to_release.expected_settlement_at is None
+    assert unauthoritative.estimated_time_to_release.source_class is RemainingLockClass.UNKNOWN
     assert authored.remaining_lock_minutes == Decimal("180")
+    assert authored.estimated_time_to_release.source_class is RemainingLockClass.AUTHORITATIVE
     assert authored.estimated_time_to_release.settles_or_releases_capital is False
     assert authored.duration_decision_role is DurationDecisionRole.OPPORTUNITY_COST_COMPARED
     assert unknown.remaining_lock_minutes is None
@@ -1341,8 +1347,96 @@ def test_authoritative_settlement_instant_does_not_become_remaining_minutes() ->
     assert decision.remaining_lock_minutes is None
     assert decision.estimated_time_to_release.expected_settlement_at == settlement_at
     assert decision.estimated_time_to_release.basis is RemainingLockSource.AUTHORITATIVE_PROVIDER
+    assert decision.estimated_time_to_release.source_class is RemainingLockClass.AUTHORITATIVE
     assert decision.duration_decision_role is DurationDecisionRole.RANKING_CONTEXT_ONLY
     assert decision.capital_turnover_hint == "advisory_estimated_time_to_release"
+
+
+def test_modelled_remaining_lock_survives_as_advisory_and_does_not_near_kickoff() -> None:
+    """8C modelled 5m / 1h / 2d is ranking context, not settlement or kickoff risk."""
+
+    engine = PaperUnwindEngine()
+    leg, quotes, fx = _prediction_flat_exit()
+    scarce = CapitalScarcityInput(pressure=CapitalPressure.SCARCE)
+    modelled_detail = (
+        "pre-match scheduled kickoff + modelled elapsed event/settlement window"
+    )
+    cases = (
+        (Decimal("5"), Decimal("0.45")),
+        (Decimal("60"), Decimal("0.60")),
+        (Decimal("2880"), Decimal("0.35")),
+    )
+    decisions = []
+    for minutes, confidence in cases:
+        decisions.append(
+            engine.evaluate(
+                UnwindEvaluationRequest(
+                    position=_position(
+                        [leg],
+                        hold="0.10",
+                        remaining_lock_minutes=minutes,
+                        remaining_lock_basis=RemainingLockSource.MODELLED,
+                        remaining_lock_confidence=confidence,
+                        remaining_lock_detail=modelled_detail,
+                    ),
+                    quotes=quotes,
+                    fx=fx,
+                    scarcity=scarce,
+                    evaluated_at=NOW,
+                )
+            )
+        )
+    five_min, one_hour, two_days = decisions
+    for decision, minutes, confidence in zip(decisions, (Decimal("5"), Decimal("60"), Decimal("2880")), (Decimal("0.45"), Decimal("0.60"), Decimal("0.35")), strict=True):
+        estimate = decision.estimated_time_to_release
+        assert decision.remaining_lock_minutes == minutes
+        assert estimate.remaining_lock_minutes == minutes
+        assert estimate.basis is RemainingLockSource.MODELLED
+        assert estimate.source_class is RemainingLockClass.MODELLED
+        assert estimate.source_class is not RemainingLockClass.AUTHORITATIVE
+        assert estimate.confidence == confidence
+        assert estimate.detail == modelled_detail
+        assert estimate.advisory is True
+        assert estimate.settles_or_releases_capital is False
+        assert decision.spendable is False
+        assert decision.paper_only is True
+        assert decision.places_orders is False
+        assert decision.data_kind == "modelled_paper_unwind"
+        assert decision.duration_decision_role is DurationDecisionRole.RANKING_CONTEXT_ONLY
+        assert decision.opportunity_cost_gbp is None
+        assert decision.unwind_cost_gbp == Decimal("0.10")
+        assert decision.recommendation is UnwindRecommendation.HOLD
+        assert decision.decision_reason == "give_up_exceeds_scarce_capital_threshold"
+        assert decision.execution_risk is not None
+        assert "near_kickoff" not in decision.execution_risk.reasons
+        assert decision.capital_turnover_hint == "advisory_estimated_time_to_release"
+    assert five_min.remaining_lock_minutes == Decimal("5")
+    assert one_hour.remaining_lock_minutes == Decimal("60")
+    assert two_days.remaining_lock_minutes == Decimal("2880")
+    authored = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position(
+                [leg],
+                hold="0.10",
+                remaining_lock_minutes=Decimal("5"),
+                remaining_lock_basis=RemainingLockSource.AUTHORITATIVE_PROVIDER,
+                remaining_lock_confidence=Decimal("0.90"),
+                remaining_lock_detail="provider remaining lock ~5m",
+            ),
+            quotes=quotes,
+            fx=fx,
+            scarcity=scarce,
+            evaluated_at=NOW,
+        )
+    )
+    assert authored.estimated_time_to_release.source_class is RemainingLockClass.AUTHORITATIVE
+    assert authored.estimated_time_to_release.basis is RemainingLockSource.AUTHORITATIVE_PROVIDER
+    assert authored.remaining_lock_minutes == Decimal("5")
+    assert authored.spendable is False
+    assert authored.execution_risk is not None
+    assert "near_kickoff" not in authored.execution_risk.reasons
+    assert five_min.recommendation is authored.recommendation
+    assert five_min.decision_reason == authored.decision_reason
 
 
 def test_execution_risk_does_not_invent_minutes_when_lock_unknown() -> None:
