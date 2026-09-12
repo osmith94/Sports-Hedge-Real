@@ -551,7 +551,8 @@ class SqlitePaperLedger:
                 released_native TEXT NOT NULL,
                 status TEXT NOT NULL,
                 source TEXT NOT NULL DEFAULT 'paper_fill_simulator',
-                capital_source TEXT NOT NULL DEFAULT 'AUTO_POOL'
+                capital_source TEXT NOT NULL DEFAULT 'AUTO_POOL',
+                fill_id TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_paper_treasury_events_session
@@ -593,6 +594,8 @@ class SqlitePaperLedger:
             self._connection.execute(
                 "ALTER TABLE paper_treasury_locks ADD COLUMN capital_source TEXT NOT NULL DEFAULT 'AUTO_POOL'"
             )
+        if "fill_id" not in columns:
+            self._connection.execute("ALTER TABLE paper_treasury_locks ADD COLUMN fill_id TEXT")
         self._connection.commit()
 
     def close(self) -> None:

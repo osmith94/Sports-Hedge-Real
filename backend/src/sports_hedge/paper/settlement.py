@@ -25,6 +25,7 @@ class LegSettlement(BaseModel):
     currency: str
     filled_stake: Decimal
     filled_odds: Decimal | None = None
+    fill_id: str | None = None
     won: bool
     gross_payoff: Decimal = Decimal("0")
     venue_fee: Decimal = Decimal("0")
@@ -79,6 +80,7 @@ def compute_paper_settlement(
                 currency=leg.currency,
                 filled_stake=leg.filled_stake,
                 filled_odds=filled_odds,
+                fill_id=leg.fill_id,
                 won=True,
                 gross_payoff=economics.gross_payoff,
                 venue_fee=economics.venue_fee,
@@ -96,6 +98,7 @@ def compute_paper_settlement(
                 currency=leg.currency,
                 filled_stake=leg.filled_stake,
                 filled_odds=filled_odds,
+                fill_id=leg.fill_id,
                 won=False,
                 gross_payoff=Decimal("0"),
                 venue_fee=Decimal("0"),

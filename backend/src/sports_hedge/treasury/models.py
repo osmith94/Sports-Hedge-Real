@@ -125,6 +125,7 @@ class TreasuryLockRequest(BaseModel):
     native_currency: str
     amount_native: Decimal = Field(gt=0)
     lock_id: str = Field(min_length=1)
+    fill_id: str | None = None
     trade_id: str | None = None
     opportunity_id: str | None = None
     source: str = "paper_fill_simulator"
@@ -135,6 +136,8 @@ class TreasuryLockRequest(BaseModel):
     @model_validator(mode="after")
     def uppercase_currency(self) -> TreasuryLockRequest:
         self.native_currency = self.native_currency.upper()
+        if not self.fill_id:
+            self.fill_id = self.lock_id
         return self
 
 

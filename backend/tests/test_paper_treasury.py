@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from sports_hedge.accounting.dimensions import CashState, EconomicAccount, cash_account
+from sports_hedge.accounting.paper_journal import unwind_close_postings
 from sports_hedge.api.main import app
 from sports_hedge.api.paper import get_paper_ledger
 from sports_hedge.domain.models import VenueName
@@ -40,7 +42,7 @@ def _lock(
     amount: Decimal,
     lock_id: str,
     *,
-    trade_id: str = "ptrade-demo",
+    trade_id: str | None = "ptrade-demo",
     rate: Decimal | None = None,
 ) -> TreasuryLockRequest:
     return TreasuryLockRequest(
@@ -382,6 +384,7 @@ def test_settlement_releases_lock_and_records_realised_pnl() -> None:
                 venue="matchbook",
                 currency="GBP",
                 filled_stake=Decimal("250"),
+                fill_id="lock-settle",
                 won=True,
                 venue_fee=Decimal("10"),
                 net_payoff=Decimal("290"),
@@ -443,6 +446,7 @@ def test_settlement_cannot_release_another_trades_lock() -> None:
                 venue="matchbook",
                 currency="GBP",
                 filled_stake=Decimal("250"),
+                fill_id="lock-a",
                 won=False,
                 net_payoff=Decimal("0"),
                 native_pnl=Decimal("-250"),
@@ -478,6 +482,273 @@ def test_settlement_cannot_release_another_trades_lock() -> None:
     pool = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP")
     assert pool.locked_capital == Decimal("250")
     assert pool.available_cash == Decimal("500")
+    ledger.close()
+
+
+def _lock_row(ledger: SqlitePaperLedger, lock_id: str):
+    return ledger._connection.execute(
+        "SELECT * FROM paper_treasury_locks WHERE lock_id = ?",
+        (lock_id,),
+    ).fetchone()
+
+
+def test_settlement_releases_exact_fill_lock_on_same_venue_currency() -> None:
+    from sports_hedge.paper.settlement import LegSettlement, PaperSettlementComputation
+    from sports_hedge.paper.trades import PaperSettlementRequest, PaperTrade, PaperTradeState
+
+    ledger = _ledger()
+    ledger.treasury.lock_capital(
+        [
+            _lock(VenueName.MATCHBOOK, "GBP", Decimal("100"), "fill-home", trade_id="ptrade-multi"),
+            _lock(VenueName.MATCHBOOK, "GBP", Decimal("150"), "fill-away", trade_id="ptrade-multi"),
+        ],
+        occurred_at=NOW,
+    )
+    trade = PaperTrade(
+        trade_id="ptrade-multi",
+        opportunity_id="opp-demo",
+        state=PaperTradeState.OPEN,
+        opened_at=NOW,
+        last_updated_at=NOW,
+    )
+    first = PaperSettlementComputation(
+        winning_outcome="home",
+        realised_pnl_gbp=Decimal("-100"),
+        legs=[
+            LegSettlement(
+                outcome="home",
+                venue="matchbook",
+                currency="GBP",
+                filled_stake=Decimal("100"),
+                fill_id="fill-home",
+                won=False,
+                net_payoff=Decimal("0"),
+                native_pnl=Decimal("-100"),
+                gbp_pnl=Decimal("-100"),
+                fx_rate_gbp_per_unit=Decimal("1"),
+                capital_source="AUTO_POOL",
+            )
+        ],
+    )
+    ledger.treasury.apply_settlement(
+        trade,
+        first,
+        PaperSettlementRequest(winning_outcome="home", source="operator", source_id="home-only"),
+        settled_at=NOW,
+    )
+    home = _lock_row(ledger, "fill-home")
+    away = _lock_row(ledger, "fill-away")
+    assert home["status"] == "released"
+    assert Decimal(home["released_native"]) == Decimal("100")
+    assert away["status"] == "open"
+    assert Decimal(away["released_native"]) == Decimal("0")
+    pool = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP")
+    assert pool.locked_capital == Decimal("150")
+    assert pool.available_cash == Decimal("750")
+
+    with pytest.raises(PaperTreasuryError, match="missing_lock_identity"):
+        ledger.treasury.apply_settlement(
+            trade,
+            PaperSettlementComputation(
+                winning_outcome="away",
+                realised_pnl_gbp=Decimal("-150"),
+                legs=[
+                    LegSettlement(
+                        outcome="away",
+                        venue="matchbook",
+                        currency="GBP",
+                        filled_stake=Decimal("150"),
+                        fill_id=None,
+                        won=False,
+                        net_payoff=Decimal("0"),
+                        native_pnl=Decimal("-150"),
+                        gbp_pnl=Decimal("-150"),
+                        fx_rate_gbp_per_unit=Decimal("1"),
+                        capital_source="AUTO_POOL",
+                    )
+                ],
+            ),
+            PaperSettlementRequest(winning_outcome="away", source="operator", source_id="missing"),
+            settled_at=NOW,
+        )
+
+    ledger.treasury.apply_settlement(
+        trade,
+        PaperSettlementComputation(
+            winning_outcome="away",
+            realised_pnl_gbp=Decimal("-150"),
+            legs=[
+                LegSettlement(
+                    outcome="away",
+                    venue="matchbook",
+                    currency="GBP",
+                    filled_stake=Decimal("150"),
+                    fill_id="fill-away",
+                    won=False,
+                    net_payoff=Decimal("0"),
+                    native_pnl=Decimal("-150"),
+                    gbp_pnl=Decimal("-150"),
+                    fx_rate_gbp_per_unit=Decimal("1"),
+                    capital_source="AUTO_POOL",
+                )
+            ],
+        ),
+        PaperSettlementRequest(winning_outcome="away", source="operator", source_id="away-only"),
+        settled_at=NOW,
+    )
+    away = _lock_row(ledger, "fill-away")
+    assert away["status"] == "released"
+    assert ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital == Decimal("0")
+    ledger.close()
+
+
+def test_unwind_requires_exact_trade_ownership() -> None:
+    ledger = _ledger()
+    ledger.treasury.lock_capital(
+        [_lock(VenueName.MATCHBOOK, "GBP", Decimal("50"), "lock-unowned", trade_id=None)],
+        occurred_at=NOW,
+    )
+    with pytest.raises(PaperTreasuryError, match="unknown_trade_lock"):
+        ledger.treasury.post_unwind(
+            ValidatedUnwindResult(
+                trade_id="ptrade-demo",
+                close_completed=True,
+                source_id="unwind-null-owner",
+                releases=[
+                    UnwindReleaseLeg(
+                        venue=VenueName.MATCHBOOK,
+                        native_currency="GBP",
+                        lock_id="lock-unowned",
+                        amount_native=Decimal("50"),
+                        realised_pnl_native=Decimal("-2"),
+                        fx_rate_gbp_per_unit=Decimal("1"),
+                    )
+                ],
+            ),
+            now=NOW,
+        )
+    ledger.treasury.lock_capital(
+        [_lock(VenueName.MATCHBOOK, "GBP", Decimal("50"), "lock-owned", trade_id="ptrade-a")],
+        occurred_at=NOW,
+    )
+    with pytest.raises(PaperTreasuryError, match="unknown_trade_lock"):
+        ledger.treasury.post_unwind(
+            ValidatedUnwindResult(
+                trade_id="ptrade-b",
+                close_completed=True,
+                source_id="unwind-wrong-owner",
+                releases=[
+                    UnwindReleaseLeg(
+                        venue=VenueName.MATCHBOOK,
+                        native_currency="GBP",
+                        lock_id="lock-owned",
+                        amount_native=Decimal("50"),
+                        realised_pnl_native=Decimal("-2"),
+                        fx_rate_gbp_per_unit=Decimal("1"),
+                    )
+                ],
+            ),
+            now=NOW,
+        )
+    assert _lock_row(ledger, "lock-unowned")["status"] == "open"
+    assert _lock_row(ledger, "lock-owned")["status"] == "open"
+    ledger.close()
+
+
+def _posts_gbp_balanced(posts) -> bool:
+    debits = sum((item.amount_gbp for item in posts if item.side.value == "debit"), Decimal("0"))
+    credits = sum((item.amount_gbp for item in posts if item.side.value == "credit"), Decimal("0"))
+    return debits == credits
+
+
+def _unwind_cash_delta(entry) -> tuple[Decimal, Decimal]:
+    locked = Decimal("0")
+    available = Decimal("0")
+    locked_acct = cash_account(VenueName.MATCHBOOK, "GBP", CashState.LOCKED)
+    available_acct = cash_account(VenueName.MATCHBOOK, "GBP", CashState.AVAILABLE)
+    for item in entry.postings:
+        signed = item.amount_native if item.side.value == "debit" else -item.amount_native
+        if item.account_code == locked_acct:
+            locked += signed
+        if item.account_code == available_acct:
+            available += signed
+    return locked, available
+
+
+def test_unwind_journal_reconciles_positive_zero_and_negative_pnl() -> None:
+    from sports_hedge.accounting.dimensions import CapitalSource
+
+    negative = unwind_close_postings(
+        venue=VenueName.MATCHBOOK,
+        currency="GBP",
+        locked_native=Decimal("50"),
+        realised_pnl_native=Decimal("-2"),
+        fee_native=Decimal("0"),
+        amount_gbp_per_native=Decimal("1"),
+        opportunity_id="opp-demo",
+        capital_source=CapitalSource.AUTO_POOL,
+        position_id="ptrade-demo",
+    )
+    assert _posts_gbp_balanced(negative)
+    assert cash_account(VenueName.MATCHBOOK, "GBP", CashState.LOCKED) in {
+        item.account_code for item in negative
+    }
+    assert cash_account(VenueName.MATCHBOOK, "GBP", CashState.AVAILABLE) in {
+        item.account_code for item in negative
+    }
+    assert any(
+        item.account_code == EconomicAccount.PNL_BETTING.value
+        and item.side.value == "debit"
+        and item.amount_native == Decimal("2")
+        for item in negative
+    )
+    assert not any(
+        item.account_code == EconomicAccount.PNL_BETTING.value and item.amount_native == Decimal("50")
+        for item in negative
+    )
+
+    ledger = _ledger()
+    cases = (
+        ("lock-neg", Decimal("-2"), Decimal("0"), Decimal("48")),
+        ("lock-zero", Decimal("0"), Decimal("0"), Decimal("50")),
+        ("lock-pos", Decimal("4"), Decimal("1"), Decimal("54")),
+    )
+    for lock_id, pnl, fee, expected_proceeds in cases:
+        ledger.treasury.lock_capital(
+            [_lock(VenueName.MATCHBOOK, "GBP", Decimal("50"), lock_id, trade_id="ptrade-demo")],
+            occurred_at=NOW,
+        )
+        before = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP")
+        posted = ledger.treasury.post_unwind(
+            ValidatedUnwindResult(
+                trade_id="ptrade-demo",
+                close_completed=True,
+                source_id=f"unwind-{lock_id}",
+                releases=[
+                    UnwindReleaseLeg(
+                        venue=VenueName.MATCHBOOK,
+                        native_currency="GBP",
+                        lock_id=lock_id,
+                        amount_native=Decimal("50"),
+                        realised_pnl_native=pnl,
+                        fee_native=fee,
+                        fx_rate_gbp_per_unit=Decimal("1"),
+                    )
+                ],
+            ),
+            now=NOW,
+        )
+        assert posted
+        assert _posts_gbp_balanced(posted[0].postings)
+        locked_delta, available_delta = _unwind_cash_delta(posted[0])
+        assert locked_delta == Decimal("-50")
+        assert available_delta == expected_proceeds
+        after = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP")
+        assert after.locked_capital == before.locked_capital - Decimal("50")
+        assert after.available_cash == before.available_cash + expected_proceeds
+        assert after.realised_pnl_native == before.realised_pnl_native + pnl
+        assert after.cumulative_fees_native == before.cumulative_fees_native + fee
+        assert _lock_row(ledger, lock_id)["status"] == "released"
     ledger.close()
 
 
