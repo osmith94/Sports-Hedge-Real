@@ -126,12 +126,17 @@ def test_strategy_is_a_posting_dimension_not_a_duplicated_account() -> None:
     assert "ARBITRAGE" not in arb
     assert "AUTO_POOL" not in arb
     assert "MANUAL_OVERRIDE" not in arb
+    assert "MANUAL_EXTERNAL" not in arb
 
 
 def test_capital_source_is_typed_and_rejects_unknown_labels() -> None:
     assert parse_capital_source("AUTO_POOL") is CapitalSource.AUTO_POOL
     assert parse_capital_source("manual-override") is CapitalSource.MANUAL_OVERRIDE
+    assert parse_capital_source("manual_external") is CapitalSource.MANUAL_EXTERNAL
+    assert parse_capital_source("EXTERNAL") is CapitalSource.MANUAL_EXTERNAL
     assert parse_capital_source("SHARED/UNALLOCATED") is CapitalSource.SHARED_UNALLOCATED
+    assert parse_capital_source("MANUAL_EXTERNAL") is not CapitalSource.MANUAL_OVERRIDE
+    assert parse_capital_source("MANUAL_EXTERNAL") is not CapitalSource.AUTO_POOL
     with pytest.raises(UnknownCapitalSourceError, match="unknown capital source"):
         parse_capital_source("PRIORITY_ARB")
     with pytest.raises(ValidationError, match="unknown capital source"):
@@ -339,6 +344,91 @@ def test_auto_pool_and_manual_override_capital_are_reported_separately() -> None
         CapitalSource.MANUAL_OVERRIDE,
         CapitalSource.SHARED_UNALLOCATED,
     }
+
+
+def test_manual_external_is_distinct_from_auto_pool_and_manual_override() -> None:
+    auto = _dims(
+        StrategyBook.ARBITRAGE,
+        venue=VenueName.POLYMARKET,
+        currency="USD",
+        capital_source=CapitalSource.AUTO_POOL,
+    )
+    override = _dims(
+        StrategyBook.ARBITRAGE,
+        venue=VenueName.POLYMARKET,
+        currency="USD",
+        capital_source=CapitalSource.MANUAL_OVERRIDE,
+    )
+    external = _dims(
+        StrategyBook.ARBITRAGE,
+        venue=VenueName.POLYMARKET,
+        currency="USD",
+        capital_source=CapitalSource.MANUAL_EXTERNAL,
+    )
+    treasury = _dims(
+        None,
+        venue=VenueName.POLYMARKET,
+        currency="USD",
+        capital_source=CapitalSource.SHARED_UNALLOCATED,
+    )
+    postings = [
+        _posting(
+            cash_account(VenueName.POLYMARKET, "USD", CashState.AVAILABLE),
+            PostingSide.DEBIT,
+            "100",
+            auto,
+        ),
+        _posting(
+            cash_account(VenueName.POLYMARKET, "USD", CashState.LOCKED),
+            PostingSide.DEBIT,
+            "40",
+            override,
+        ),
+        _posting(
+            cash_account(VenueName.POLYMARKET, "USD", CashState.LOCKED),
+            PostingSide.DEBIT,
+            "25",
+            external,
+        ),
+        _posting(
+            cash_account(VenueName.POLYMARKET, "USD", CashState.AVAILABLE),
+            PostingSide.DEBIT,
+            "10",
+            treasury,
+        ),
+    ]
+
+    report = StrategyBookReporter().report(postings)
+    arb = report.totals_for(StrategyBook.ARBITRAGE)
+    external_gbp = Decimal(25) * USD_RATE
+
+    assert arb.capital_by_source[CapitalSource.AUTO_POOL].available_gbp == Decimal(100) * USD_RATE
+    assert arb.capital_by_source[CapitalSource.MANUAL_OVERRIDE].locked_gbp == Decimal(40) * USD_RATE
+    assert arb.capital_by_source[CapitalSource.MANUAL_EXTERNAL].locked_gbp == external_gbp
+    assert arb.capital_by_source[CapitalSource.MANUAL_EXTERNAL].available_gbp == Decimal(0)
+    assert report.capital_for_source(CapitalSource.MANUAL_EXTERNAL).locked_gbp == external_gbp
+    assert report.capital_for_source(CapitalSource.AUTO_POOL).locked_gbp == Decimal(0)
+    assert report.capital_for_source(CapitalSource.MANUAL_OVERRIDE).available_gbp == Decimal(0)
+    assert report.capital_for_source(CapitalSource.SHARED_UNALLOCATED).available_gbp == Decimal(10) * USD_RATE
+
+    assert not CapitalSource.MANUAL_EXTERNAL.implies_sports_hedge_custody()
+    assert not CapitalSource.MANUAL_EXTERNAL.draws_automated_pool()
+    assert CapitalSource.AUTO_POOL.draws_automated_pool()
+    assert CapitalSource.MANUAL_OVERRIDE.implies_sports_hedge_custody()
+    assert not CapitalSource.MANUAL_OVERRIDE.draws_automated_pool()
+    assert not CapitalSource.SHARED_UNALLOCATED.implies_sports_hedge_custody()
+
+    external_rows = report.native_balances_for(
+        venue=VenueName.POLYMARKET,
+        currency="USD",
+        strategy_book=StrategyBook.ARBITRAGE,
+        capital_source="MANUAL_EXTERNAL",
+        include_shared=False,
+    )
+    assert len(external_rows) == 1
+    assert external_rows[0].amount_native == Decimal(25)
+    assert external_rows[0].amount_gbp == external_gbp
+    assert external_rows[0].capital_source is CapitalSource.MANUAL_EXTERNAL
 
 
 def test_native_amounts_cannot_be_mixed_across_currencies() -> None:

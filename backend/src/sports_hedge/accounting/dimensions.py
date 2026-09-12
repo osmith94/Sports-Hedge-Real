@@ -60,21 +60,33 @@ class CapitalSource(StrEnum):
     """Funding path for capital used on a posting.
 
     Distinct from `strategy_book` and from native venue/currency pools. Ordinary
-    automated liquidity is `AUTO_POOL`; one-off Priority Arb escalations are
-    `MANUAL_OVERRIDE`. Unattributable funding stays `SHARED_UNALLOCATED`.
-    This is a posting dimension, not a duplicated cash account.
+    automated liquidity is `AUTO_POOL`; one-off Priority Arb escalations of
+    Sports Hedge capital are `MANUAL_OVERRIDE`. `MANUAL_EXTERNAL` is an
+    externally confirmed venue leg (for example a manual USD fill) and does
+    not imply Sports Hedge custody or an automated-pool draw.
+    `SHARED_UNALLOCATED` remains treasury attribution when funding cannot be
+    assigned to those sources. This is a posting dimension, not a duplicated
+    cash account.
     """
 
     AUTO_POOL = "AUTO_POOL"
     MANUAL_OVERRIDE = "MANUAL_OVERRIDE"
+    MANUAL_EXTERNAL = "MANUAL_EXTERNAL"
     SHARED_UNALLOCATED = "SHARED_UNALLOCATED"
+
+    def implies_sports_hedge_custody(self) -> bool:
+        return self in {CapitalSource.AUTO_POOL, CapitalSource.MANUAL_OVERRIDE}
+
+    def draws_automated_pool(self) -> bool:
+        return self is CapitalSource.AUTO_POOL
 
 
 _CAPITAL_SOURCE_ALIASES = {
     "AUTO": CapitalSource.AUTO_POOL,
     "AUTO_POOL": CapitalSource.AUTO_POOL,
-    "MANUAL": CapitalSource.MANUAL_OVERRIDE,
     "MANUAL_OVERRIDE": CapitalSource.MANUAL_OVERRIDE,
+    "MANUAL_EXTERNAL": CapitalSource.MANUAL_EXTERNAL,
+    "EXTERNAL": CapitalSource.MANUAL_EXTERNAL,
     "SHARED": CapitalSource.SHARED_UNALLOCATED,
     "UNALLOCATED": CapitalSource.SHARED_UNALLOCATED,
     "SHARED_UNALLOCATED": CapitalSource.SHARED_UNALLOCATED,
