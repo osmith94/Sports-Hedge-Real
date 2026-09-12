@@ -88,7 +88,8 @@ class SqliteHistoricalRepository:
                 period TEXT,
                 source_name TEXT NOT NULL,
                 source_event_id TEXT NOT NULL,
-                UNIQUE (source_name, source_event_id),
+                source_observation_id TEXT NOT NULL,
+                UNIQUE (source_observation_id, source_event_id),
                 FOREIGN KEY (match_id) REFERENCES matches(match_id)
             );
 
@@ -118,11 +119,20 @@ class SqliteHistoricalRepository:
                 FOREIGN KEY (team_id) REFERENCES teams(team_id)
             );
 
+            CREATE TABLE IF NOT EXISTS source_match_bindings (
+                source_name TEXT NOT NULL,
+                source_match_id TEXT NOT NULL,
+                match_id TEXT NOT NULL,
+                PRIMARY KEY (source_name, source_match_id),
+                FOREIGN KEY (match_id) REFERENCES matches(match_id)
+            );
+
             CREATE TABLE IF NOT EXISTS source_records (
                 source_record_id TEXT PRIMARY KEY,
                 source_name TEXT NOT NULL,
                 source_match_id TEXT NOT NULL,
                 match_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
                 source_url TEXT,
                 retrieved_at TEXT NOT NULL,
                 source_timestamp TEXT,
@@ -130,7 +140,7 @@ class SqliteHistoricalRepository:
                 raw_payload_json TEXT NOT NULL,
                 quality_flags_json TEXT NOT NULL,
                 confidence REAL NOT NULL,
-                UNIQUE (source_name, source_match_id),
+                UNIQUE (source_name, source_match_id, raw_payload_hash),
                 FOREIGN KEY (match_id) REFERENCES matches(match_id)
             );
 
@@ -138,20 +148,22 @@ class SqliteHistoricalRepository:
                 ON matches(competition_id, season_id, kickoff_utc);
             CREATE INDEX IF NOT EXISTS idx_matches_teams
                 ON matches(home_team_id, away_team_id, kickoff_utc);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_match_events_natural
+            CREATE INDEX IF NOT EXISTS idx_match_events_source
+                ON match_events(source_name, source_event_id);
+            CREATE INDEX IF NOT EXISTS idx_match_events_stoppage
                 ON match_events(
                     match_id,
                     event_type,
                     IFNULL(minute, -1),
-                    IFNULL(team_id, ''),
-                    IFNULL(player_name, '')
+                    IFNULL(extra_minute, -1),
+                    source_name
                 );
             CREATE INDEX IF NOT EXISTS idx_events_match
                 ON match_events(match_id, event_type);
             CREATE INDEX IF NOT EXISTS idx_stats_team
                 ON team_match_stats(team_id);
             CREATE INDEX IF NOT EXISTS idx_source_match
-                ON source_records(match_id, source_name);
+                ON source_records(match_id, source_name, revision);
             """
         )
         self._connection.commit()
@@ -212,7 +224,7 @@ class SqliteHistoricalRepository:
     def get_match_id_for_source(self, source_name: str, source_match_id: str) -> str | None:
         row = self._connection.execute(
             """
-            SELECT match_id FROM source_records
+            SELECT match_id FROM source_match_bindings
             WHERE source_name = ? AND source_match_id = ?
             """,
             (source_name, source_match_id),
@@ -323,17 +335,10 @@ class SqliteHistoricalRepository:
             """
             INSERT INTO match_events (
                 event_id, match_id, event_type, minute, extra_minute, team_id,
-                player_name, related_player_name, period, source_name, source_event_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_name, source_event_id) DO UPDATE SET
-                match_id = excluded.match_id,
-                event_type = excluded.event_type,
-                minute = excluded.minute,
-                extra_minute = excluded.extra_minute,
-                team_id = excluded.team_id,
-                player_name = excluded.player_name,
-                related_player_name = excluded.related_player_name,
-                period = excluded.period
+                player_name, related_player_name, period, source_name, source_event_id,
+                source_observation_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_observation_id, source_event_id) DO NOTHING
             """,
             (
                 event.event_id,
@@ -347,6 +352,7 @@ class SqliteHistoricalRepository:
                 event.period,
                 event.source_name,
                 event.source_event_id,
+                event.source_observation_id,
             ),
         )
         self._connection.commit()
@@ -377,30 +383,59 @@ class SqliteHistoricalRepository:
         )
         self._connection.commit()
 
-    def upsert_source_record(self, match_id: str, provenance: SourceProvenance) -> None:
-        source_record_id = f"{provenance.source_name}:{provenance.source_match_id}"
+    def append_source_observation(self, match_id: str, provenance: SourceProvenance) -> str | None:
+        """Append a versioned source observation. Identical payloads are idempotent."""
+
+        existing = self._connection.execute(
+            """
+            SELECT source_record_id FROM source_records
+            WHERE source_name = ? AND source_match_id = ? AND raw_payload_hash = ?
+            """,
+            (provenance.source_name, provenance.source_match_id, provenance.raw_payload_hash),
+        ).fetchone()
+        if existing is not None:
+            return None
+
+        bound = self.get_match_id_for_source(provenance.source_name, provenance.source_match_id)
+        if bound is not None and bound != match_id:
+            raise HistoricalConflictError(
+                "Source match is already bound to a different canonical match"
+            )
+        self._connection.execute(
+            """
+            INSERT INTO source_match_bindings (source_name, source_match_id, match_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(source_name, source_match_id) DO NOTHING
+            """,
+            (provenance.source_name, provenance.source_match_id, match_id),
+        )
+
+        revision_row = self._connection.execute(
+            """
+            SELECT COALESCE(MAX(revision), 0) AS revision
+            FROM source_records
+            WHERE source_name = ? AND source_match_id = ?
+            """,
+            (provenance.source_name, provenance.source_match_id),
+        ).fetchone()
+        revision = int(revision_row["revision"]) + 1
+        source_record_id = (
+            f"{provenance.source_name}:{provenance.source_match_id}:{provenance.raw_payload_hash[:16]}"
+        )
         self._connection.execute(
             """
             INSERT INTO source_records (
-                source_record_id, source_name, source_match_id, match_id, source_url,
-                retrieved_at, source_timestamp, raw_payload_hash, raw_payload_json,
-                quality_flags_json, confidence
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_name, source_match_id) DO UPDATE SET
-                match_id = excluded.match_id,
-                source_url = excluded.source_url,
-                retrieved_at = excluded.retrieved_at,
-                source_timestamp = excluded.source_timestamp,
-                raw_payload_hash = excluded.raw_payload_hash,
-                raw_payload_json = excluded.raw_payload_json,
-                quality_flags_json = excluded.quality_flags_json,
-                confidence = excluded.confidence
+                source_record_id, source_name, source_match_id, match_id, revision,
+                source_url, retrieved_at, source_timestamp, raw_payload_hash,
+                raw_payload_json, quality_flags_json, confidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source_record_id,
                 provenance.source_name,
                 provenance.source_match_id,
                 match_id,
+                revision,
                 provenance.source_url,
                 provenance.retrieved_at.isoformat(),
                 provenance.source_timestamp.isoformat() if provenance.source_timestamp else None,
@@ -411,6 +446,7 @@ class SqliteHistoricalRepository:
             ),
         )
         self._connection.commit()
+        return source_record_id
 
     def get_match(self, match_id: str) -> MatchRecord | None:
         row = self._connection.execute(
@@ -536,7 +572,8 @@ class SqliteHistoricalRepository:
             FROM match_events e
             LEFT JOIN teams t ON t.team_id = e.team_id
             {where}
-            ORDER BY e.match_id ASC, IFNULL(e.minute, 999), e.event_type ASC, e.event_id ASC
+            ORDER BY e.match_id ASC, IFNULL(e.minute, 999), IFNULL(e.extra_minute, 0),
+                     e.event_type ASC, e.source_name ASC, e.event_id ASC
             """,
             parameters,
         ).fetchall()
@@ -572,7 +609,7 @@ class SqliteHistoricalRepository:
             f"""
             SELECT * FROM source_records
             {where}
-            ORDER BY source_name ASC, source_match_id ASC
+            ORDER BY source_name ASC, source_match_id ASC, revision ASC
             """,
             parameters,
         ).fetchall()
@@ -640,6 +677,7 @@ def _event_from_row(row: sqlite3.Row) -> MatchEventRecord:
         period=row["period"],
         source_name=row["source_name"],
         source_event_id=row["source_event_id"],
+        source_observation_id=row["source_observation_id"],
     )
 
 
@@ -659,6 +697,7 @@ def _lineup_from_row(row: sqlite3.Row) -> LineupRecord:
 
 def _source_from_row(row: sqlite3.Row) -> SourceProvenance:
     return SourceProvenance(
+        observation_id=row["source_record_id"],
         source_name=row["source_name"],
         source_match_id=row["source_match_id"],
         source_url=row["source_url"],
@@ -670,6 +709,7 @@ def _source_from_row(row: sqlite3.Row) -> SourceProvenance:
         raw_payload=json.loads(row["raw_payload_json"]),
         quality_flags=[DataQualityFlag(flag) for flag in json.loads(row["quality_flags_json"])],
         confidence=float(row["confidence"]),
+        revision=int(row["revision"]),
     )
 
 

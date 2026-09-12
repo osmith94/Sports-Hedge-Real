@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from sports_hedge.facts.identity import canonical_team_id
 from sports_hedge.historical.errors import HistoricalMappingError
 from sports_hedge.historical.models import Competition, CompetitionType, Season, Team
 from sports_hedge.normalization.text import normalize_text
@@ -122,17 +123,41 @@ class HistoricalCatalog:
 
     def _seed_initial_teams(self) -> None:
         seeds = (
-            Team(team_id="arsenal", canonical_name="Arsenal", country="England"),
-            Team(team_id="chelsea", canonical_name="Chelsea", country="England"),
-            Team(team_id="leeds-united", canonical_name="Leeds United", country="England"),
-            Team(team_id="leicester-city", canonical_name="Leicester City", country="England"),
-            Team(team_id="real-madrid", canonical_name="Real Madrid", country="Spain"),
-            Team(team_id="barcelona", canonical_name="Barcelona", country="Spain"),
+            Team(
+                team_id=canonical_team_id("Arsenal"),
+                canonical_name="Arsenal",
+                country="England",
+            ),
+            Team(
+                team_id=canonical_team_id("Chelsea"),
+                canonical_name="Chelsea",
+                country="England",
+            ),
+            Team(
+                team_id=canonical_team_id("Leeds United"),
+                canonical_name="Leeds United",
+                country="England",
+            ),
+            Team(
+                team_id=canonical_team_id("Leicester City"),
+                canonical_name="Leicester City",
+                country="England",
+            ),
+            Team(
+                team_id=canonical_team_id("Real Madrid"),
+                canonical_name="Real Madrid",
+                country="Spain",
+            ),
+            Team(
+                team_id=canonical_team_id("Barcelona"),
+                canonical_name="Barcelona",
+                country="Spain",
+            ),
         )
         for team in seeds:
             self.register_team(team)
-        self.add_team_alias("Barca", "barcelona")
-        self.add_team_alias("Real Madrid CF", "real-madrid")
+        self.add_team_alias("Barca", canonical_team_id("Barcelona"))
+        self.add_team_alias("Real Madrid CF", canonical_team_id("Real Madrid"))
 
 
 def _normalize_season_label(label: str) -> str:

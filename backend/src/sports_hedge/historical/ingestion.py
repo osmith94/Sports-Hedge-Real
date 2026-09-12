@@ -5,9 +5,11 @@ from hashlib import sha256
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
+from sports_hedge.facts.catalog import competition_from_label
+from sports_hedge.facts.identity import canonical_match_id
 from sports_hedge.historical.adapters import HistoricalSourceAdapter
 from sports_hedge.historical.catalog import HistoricalCatalog, season_for
-from sports_hedge.historical.errors import HistoricalMappingError
+from sports_hedge.historical.errors import HistoricalConflictError, HistoricalMappingError
 from sports_hedge.historical.models import (
     DataQualityFlag,
     LineupRecord,
@@ -56,6 +58,9 @@ class HistoricalIngestionService:
             season_id=season.season_id,
             home_team_id=home.team_id,
             away_team_id=away.team_id,
+            home_team_name=home.canonical_name,
+            away_team_name=away.canonical_name,
+            season_label=season.label,
         )
         match = MatchRecord(
             match_id=match_id,
@@ -75,7 +80,32 @@ class HistoricalIngestionService:
             away_ht_goals=payload.away_ht_goals,
             venue_name=payload.venue_name,
         )
-        self._repository.upsert_match(match)
+        fact_conflict: HistoricalConflictError | None = None
+        try:
+            self._repository.upsert_match(match)
+        except HistoricalConflictError as exc:
+            fact_conflict = exc
+
+        flags = _quality_flags(payload)
+        provenance = SourceProvenance(
+            source_name=payload.source_name,
+            source_match_id=payload.source_match_id,
+            source_url=payload.source_url,
+            retrieved_at=payload.retrieved_at,
+            source_timestamp=payload.source_timestamp,
+            raw_payload_hash=_payload_hash(payload),
+            raw_payload=payload.raw_payload or payload.model_dump(mode="json"),
+            quality_flags=flags,
+            confidence=_confidence(flags),
+        )
+        observation_id = self._repository.append_source_observation(match_id, provenance)
+        if observation_id is None:
+            if fact_conflict is not None:
+                raise fact_conflict
+            return match_id
+        if fact_conflict is not None:
+            raise fact_conflict
+
         self._repository.upsert_team_stats(
             TeamMatchStatsRecord(
                 match_id=match_id,
@@ -106,23 +136,9 @@ class HistoricalIngestionService:
         )
         teams = {"home": home, "away": away}
         for event in payload.events:
-            self._ingest_event(match_id, payload.source_name, teams, event)
+            self._ingest_event(match_id, payload.source_name, observation_id, teams, event)
         for lineup in payload.lineups:
             self._ingest_lineup(match_id, payload.source_name, teams, lineup)
-
-        flags = _quality_flags(payload)
-        provenance = SourceProvenance(
-            source_name=payload.source_name,
-            source_match_id=payload.source_match_id,
-            source_url=payload.source_url,
-            retrieved_at=payload.retrieved_at,
-            source_timestamp=payload.source_timestamp,
-            raw_payload_hash=_payload_hash(payload),
-            raw_payload=payload.raw_payload or payload.model_dump(mode="json"),
-            quality_flags=flags,
-            confidence=_confidence(flags),
-        )
-        self._repository.upsert_source_record(match_id, provenance)
         return match_id
 
     def ingest_many(self, payloads: list[SourceMatchPayload]) -> list[str]:
@@ -147,7 +163,19 @@ class HistoricalIngestionService:
         season_id: str,
         home_team_id: str,
         away_team_id: str,
+        home_team_name: str,
+        away_team_name: str,
+        season_label: str,
     ) -> str:
+        spec = competition_from_label(payload.competition_name, season_label)
+        competition_code = spec.code.value if spec is not None else competition_id
+        computed = canonical_match_id(
+            competition_code=competition_code,
+            season=season_label,
+            home_team=home_team_name,
+            away_team=away_team_name,
+            kickoff_utc=payload.kickoff_utc,
+        )
         from_source = self._repository.get_match_id_for_source(
             payload.source_name, payload.source_match_id
         )
@@ -158,24 +186,21 @@ class HistoricalIngestionService:
             away_team_id=away_team_id,
             kickoff_utc=payload.kickoff_utc,
         )
-        if from_source and from_identity and from_source != from_identity:
+        if from_source and from_source != computed:
             raise HistoricalMappingError(
                 "Source match maps to a different canonical match than identity lookup"
             )
-        if from_source:
-            return from_source
-        if from_identity:
-            return from_identity
-        seed = (
-            f"{competition_id}|{season_id}|{home_team_id}|"
-            f"{away_team_id}|{payload.kickoff_utc.isoformat()}"
-        )
-        return f"hist:{uuid5(NAMESPACE_URL, seed).hex[:24]}"
+        if from_identity and from_identity != computed:
+            raise HistoricalMappingError(
+                "Persisted match identity does not match shared canonical match id"
+            )
+        return computed
 
     def _ingest_event(
         self,
         match_id: str,
         source_name: str,
+        source_observation_id: str,
         teams: dict[str, Any],
         event: dict[str, Any],
     ) -> None:
@@ -184,14 +209,20 @@ class HistoricalIngestionService:
             raise HistoricalMappingError("Match event is missing source_event_id")
         event_type = MatchEventType(str(event["event_type"]))
         team = _resolve_side(teams, event.get("team"))
-        event_id = str(uuid5(NAMESPACE_URL, f"{source_name}:{source_event_id}"))
+        extra_minute = event.get("extra_minute")
+        event_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"{source_observation_id}:{source_event_id}:{event.get('minute')}:{extra_minute}",
+            )
+        )
         self._repository.upsert_event(
             MatchEventRecord(
                 event_id=event_id,
                 match_id=match_id,
                 event_type=event_type,
                 minute=event.get("minute"),
-                extra_minute=event.get("extra_minute"),
+                extra_minute=extra_minute,
                 team_id=None if team is None else team.team_id,
                 team_name=None if team is None else team.canonical_name,
                 player_name=event.get("player_name"),
@@ -199,6 +230,7 @@ class HistoricalIngestionService:
                 period=event.get("period"),
                 source_name=source_name,
                 source_event_id=source_event_id,
+                source_observation_id=source_observation_id,
             )
         )
 
@@ -242,7 +274,8 @@ def _resolve_side(teams: dict[str, Any], side: Any):
 
 
 def _payload_hash(payload: SourceMatchPayload) -> str:
-    encoded = json.dumps(payload.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    data = payload.model_dump(mode="json", exclude={"retrieved_at"})
+    encoded = json.dumps(data, sort_keys=True, separators=(",", ":"))
     return sha256(encoded.encode("utf-8")).hexdigest()
 
 

@@ -112,6 +112,7 @@ class HistoricalExcelExporter:
                 "period",
                 "source_name",
                 "source_event_id",
+                "source_observation_id",
             ],
             [
                 [
@@ -126,6 +127,7 @@ class HistoricalExcelExporter:
                     event.period,
                     event.source_name,
                     event.source_event_id,
+                    event.source_observation_id,
                 ]
                 for event in self._repository.list_events()
             ],
@@ -191,6 +193,8 @@ class HistoricalExcelExporter:
             [
                 "source_name",
                 "source_match_id",
+                "observation_id",
+                "revision",
                 "source_url",
                 "retrieved_at",
                 "source_timestamp",
@@ -202,6 +206,8 @@ class HistoricalExcelExporter:
                 [
                     record.source_name,
                     record.source_match_id,
+                    record.observation_id,
+                    record.revision,
                     record.source_url,
                     record.retrieved_at.isoformat(),
                     record.source_timestamp.isoformat() if record.source_timestamp else None,

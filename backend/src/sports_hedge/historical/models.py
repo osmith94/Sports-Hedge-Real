@@ -72,6 +72,8 @@ class SourceProvenance(BaseModel):
     raw_payload: dict[str, Any] = Field(default_factory=dict)
     quality_flags: list[DataQualityFlag] = Field(default_factory=list)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    observation_id: str | None = None
+    revision: int = 1
 
 
 class MatchRecord(BaseModel):
@@ -106,6 +108,7 @@ class MatchEventRecord(BaseModel):
     period: str | None = None
     source_name: str
     source_event_id: str
+    source_observation_id: str
 
 
 class TeamMatchStatsRecord(BaseModel):

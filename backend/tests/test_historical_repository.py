@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from sports_hedge.config import Settings
+from sports_hedge.facts.identity import canonical_match_id
 from sports_hedge.historical.adapters import SyntheticHistoricalAdapter
 from sports_hedge.historical.catalog import (
     CHAMPIONS_LEAGUE,
@@ -17,7 +18,7 @@ from sports_hedge.historical.coverage import CoverageReporter
 from sports_hedge.historical.errors import HistoricalConflictError, HistoricalMappingError
 from sports_hedge.historical.excel import SHEET_NAMES, HistoricalExcelExporter, read_sheet_rows
 from sports_hedge.historical.ingestion import HistoricalIngestionService
-from sports_hedge.historical.models import MatchStatus, SourceMatchPayload, Team
+from sports_hedge.historical.models import MatchEventType, MatchStatus, SourceMatchPayload, Team
 from sports_hedge.historical.repository import SqliteHistoricalRepository
 
 SEASON = "2025/26"
@@ -52,6 +53,14 @@ def test_synthetic_fixtures_persist_and_query_across_initial_universe() -> None:
     assert la_liga[0].home_ft_goals == 3
     assert la_liga[0].away_ft_goals == 2
     assert repository.get_match(premier[0].match_id) is not None
+    assert premier[0].match_id.startswith("match:")
+    assert premier[0].match_id == canonical_match_id(
+        competition_code="premier_league",
+        season=SEASON,
+        home_team="Arsenal",
+        away_team="Chelsea",
+        kickoff_utc=premier[0].kickoff_utc,
+    )
     assert CHAMPIONS_LEAGUE.competition_id == "champions-league"
     assert HistoricalCatalog().resolve_competition("UEFA Champions League").competition_id == (
         "champions-league"
@@ -203,3 +212,116 @@ def test_settings_include_historical_database_path() -> None:
     settings = Settings.model_validate({})
     assert settings.historical_db_path.endswith("historical_football.sqlite")
     assert settings.sports_hedge_execution_enabled is False
+
+
+def test_source_observations_are_append_only_and_idempotent() -> None:
+    repository = SqliteHistoricalRepository(":memory:")
+    service = HistoricalIngestionService(repository)
+    adapter = SyntheticHistoricalAdapter()
+    original = adapter.fetch_matches("premier-league", SEASON)[0]
+    service.ingest(original)
+
+    later = original.model_copy(
+        update={"retrieved_at": datetime(2026, 9, 12, 8, 0, tzinfo=UTC)}
+    )
+    service.ingest(later)
+    first_pass = repository.list_source_records()
+    assert len(first_pass) == 1
+    assert first_pass[0].revision == 1
+    assert first_pass[0].retrieved_at == original.retrieved_at
+
+    corrected = original.model_copy(
+        update={
+            "retrieved_at": datetime(2026, 9, 12, 9, 0, tzinfo=UTC),
+            "home_corners": 8,
+            "raw_payload": {"score": "2-1", "corners": "corrected"},
+        }
+    )
+    with pytest.raises(HistoricalConflictError, match="Conflicting corners"):
+        service.ingest(corrected)
+    versions = repository.list_source_records()
+    assert [row.revision for row in versions] == [1, 2]
+    assert versions[0].retrieved_at == original.retrieved_at
+    assert versions[1].retrieved_at == corrected.retrieved_at
+    assert versions[0].raw_payload_hash != versions[1].raw_payload_hash
+
+
+def test_same_event_is_retained_from_two_independent_sources() -> None:
+    repository = SqliteHistoricalRepository(":memory:")
+    service = HistoricalIngestionService(repository)
+    kickoff = datetime(2025, 8, 23, 15, 0, tzinfo=UTC)
+    base = {
+        "retrieved_at": datetime(2026, 9, 11, 12, 0, tzinfo=UTC),
+        "competition_name": "Premier League",
+        "season_label": SEASON,
+        "kickoff_utc": kickoff,
+        "home_team": "Arsenal",
+        "away_team": "Chelsea",
+        "status": MatchStatus.FINISHED,
+        "home_ft_goals": 1,
+        "away_ft_goals": 0,
+        "events": [
+            {
+                "source_event_id": "goal-1",
+                "event_type": MatchEventType.GOAL.value,
+                "minute": 45,
+                "extra_minute": 1,
+                "team": "home",
+                "player_name": "Bukayo Saka",
+            }
+        ],
+    }
+    service.ingest(
+        SourceMatchPayload(source_name="provider-a", source_match_id="a-1", **base)
+    )
+    service.ingest(
+        SourceMatchPayload(source_name="provider-b", source_match_id="b-1", **base)
+    )
+
+    events = repository.list_events()
+    assert len(events) == 2
+    assert {event.source_name for event in events} == {"provider-a", "provider-b"}
+    assert {event.source_observation_id for event in events} == {
+        row.observation_id for row in repository.list_source_records()
+    }
+    assert len(repository.list_matches()) == 1
+
+
+def test_stoppage_time_events_are_distinct() -> None:
+    repository = SqliteHistoricalRepository(":memory:")
+    service = HistoricalIngestionService(repository)
+    payload = SourceMatchPayload(
+        source_name="provider-a",
+        source_match_id="stoppage-1",
+        retrieved_at=datetime(2026, 9, 11, 12, 0, tzinfo=UTC),
+        competition_name="Premier League",
+        season_label=SEASON,
+        kickoff_utc=datetime(2025, 8, 24, 15, 0, tzinfo=UTC),
+        home_team="Arsenal",
+        away_team="Chelsea",
+        status=MatchStatus.FINISHED,
+        home_ft_goals=2,
+        away_ft_goals=0,
+        events=[
+            {
+                "source_event_id": "g-45-1",
+                "event_type": MatchEventType.GOAL.value,
+                "minute": 45,
+                "extra_minute": 1,
+                "team": "home",
+                "player_name": "Bukayo Saka",
+            },
+            {
+                "source_event_id": "g-45-3",
+                "event_type": MatchEventType.GOAL.value,
+                "minute": 45,
+                "extra_minute": 3,
+                "team": "home",
+                "player_name": "Bukayo Saka",
+            },
+        ],
+    )
+    service.ingest(payload)
+    events = repository.list_events()
+    assert [(event.minute, event.extra_minute) for event in events] == [(45, 1), (45, 3)]
+    assert len({event.event_id for event in events}) == 2
