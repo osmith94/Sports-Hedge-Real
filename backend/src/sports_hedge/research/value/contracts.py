@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.domain.football import FootballPeriod, MarketFamily, SettlementFingerprint
 from sports_hedge.domain.models import VenueName
-from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
+from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot, require_aware_utc
 
 
 class ValueStatus(StrEnum):
@@ -114,6 +114,7 @@ class VenueQuote(BaseModel):
 
     @model_validator(mode="after")
     def cost_must_match_quote(self) -> VenueQuote:
+        require_aware_utc(self.quoted_at, "quoted_at")
         if self.cost.venue != self.venue:
             raise ValueError("cost snapshot venue must match the quote venue")
         if self.cost.action != self.action:

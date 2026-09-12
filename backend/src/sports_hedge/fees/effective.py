@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel
@@ -11,6 +12,7 @@ from sports_hedge.fees.cost import (
     MarketAction,
     OrderRole,
     VenueCostSnapshot,
+    require_aware_utc,
 )
 
 _BACK_BUY = {MarketAction.BACK, MarketAction.BUY}
@@ -46,6 +48,8 @@ def apply_venue_costs(
     *,
     gross_decimal_odds: Decimal,
     stake: Decimal = Decimal("1"),
+    as_of: datetime | None = None,
+    quoted_at: datetime | None = None,
 ) -> EffectiveLegEconomics:
     """Apply the snapshot's own cost rule. Does not coerce bases together."""
 
@@ -77,6 +81,7 @@ def apply_venue_costs(
         raise CostRuleError("invalid_gross_odds", "gross_decimal_odds must exceed 1")
     if stake <= 0:
         raise CostRuleError("invalid_stake", "stake must be positive")
+    _reject_inapplicable_snapshot(snapshot, as_of=as_of, quoted_at=quoted_at)
 
     gross_payoff = stake * gross_decimal_odds
     other_known = Decimal("0")
@@ -109,6 +114,33 @@ def profit_commission_net_odds(gross_decimal_odds: Decimal, rate: Decimal) -> De
         raise ValueError("profit commission rate must be in [0, 1)")
     profit = gross_decimal_odds - Decimal("1")
     return Decimal("1") + profit * (Decimal("1") - rate)
+
+
+def _reject_inapplicable_snapshot(
+    snapshot: VenueCostSnapshot,
+    *,
+    as_of: datetime | None,
+    quoted_at: datetime | None,
+) -> None:
+    if as_of is not None:
+        require_aware_utc(as_of, "as_of")
+        if snapshot.captured_at > as_of:
+            raise CostRuleError(
+                "future_captured_cost",
+                "Fee snapshot captured_at is after evaluation time",
+            )
+        if snapshot.effective_from is not None and snapshot.effective_from > as_of:
+            raise CostRuleError(
+                "future_effective_cost",
+                "Fee snapshot effective_from is after evaluation time",
+            )
+    if quoted_at is not None:
+        require_aware_utc(quoted_at, "quoted_at")
+        if snapshot.effective_from is not None and snapshot.effective_from > quoted_at:
+            raise CostRuleError(
+                "future_effective_cost",
+                "Fee snapshot effective_from is after the quote time",
+            )
 
 
 def _net_win_payoff(

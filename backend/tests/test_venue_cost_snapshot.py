@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
+
+from pydantic import ValidationError
 
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import CostKnownStatus, FeeBasis, FeeScope, MarketAction, OrderRole, VenueCostSnapshot
@@ -103,4 +105,34 @@ def test_unknown_order_role_fails_closed() -> None:
         apply_venue_costs(
             _snapshot(order_role=OrderRole.UNKNOWN),
             gross_decimal_odds=Decimal("2.20"),
+        )
+
+
+def test_naive_and_non_utc_fee_timestamps_are_rejected() -> None:
+    naive = datetime(2026, 9, 12, 7, 0)
+    plus_one = timezone(timedelta(hours=1))
+    with pytest.raises(ValidationError, match="timezone-aware UTC"):
+        _snapshot(captured_at=naive)
+    with pytest.raises(ValidationError, match="timezone-aware UTC"):
+        _snapshot(effective_from=naive)
+    with pytest.raises(ValidationError, match="must be UTC"):
+        _snapshot(captured_at=datetime(2026, 9, 12, 7, 0, tzinfo=plus_one))
+
+
+def test_future_captured_and_effective_snapshots_fail_closed() -> None:
+    as_of = CAPTURED
+    quoted_at = CAPTURED
+    with pytest.raises(CostRuleError, match="captured_at"):
+        apply_venue_costs(
+            _snapshot(captured_at=CAPTURED + timedelta(minutes=1)),
+            gross_decimal_odds=Decimal("2.20"),
+            as_of=as_of,
+            quoted_at=quoted_at,
+        )
+    with pytest.raises(CostRuleError, match="effective_from"):
+        apply_venue_costs(
+            _snapshot(effective_from=CAPTURED + timedelta(hours=1)),
+            gross_decimal_odds=Decimal("2.20"),
+            as_of=as_of,
+            quoted_at=quoted_at,
         )

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import inspect
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
+
+from pydantic import ValidationError
+import pytest
 
 import sports_hedge.research.value.engine as value_engine_module
 from sports_hedge.domain.football import (
@@ -31,6 +34,7 @@ from sports_hedge.research.value.contracts import (
     VenueQuote,
 )
 from sports_hedge.research.value.economics import expected_profit_per_unit, net_back_odds
+from sports_hedge.research.value.quotes import quote_age_seconds
 
 
 AS_OF = datetime(2026, 9, 11, 21, 0, tzinfo=UTC)
@@ -98,26 +102,31 @@ def _cost(
     fee_scope: FeeScope = FeeScope.PER_QUOTE,
     fixed_amount: str | None = None,
     snapshot_id: str | None = None,
+    captured_at: datetime | None = None,
+    effective_from: datetime | None = None,
 ) -> VenueCostSnapshot:
+    captured = quoted_at if captured_at is None else captured_at
+    effective = quoted_at if effective_from is None else effective_from
     if not known:
         return VenueCostSnapshot(
             venue=venue,
             action=action,
             fee_basis=FeeBasis.UNKNOWN,
             known_status=CostKnownStatus.UNKNOWN,
-            captured_at=quoted_at,
+            captured_at=captured,
             source="test_unknown",
             source_market_id=source_market_id,
             order_role=order_role,
             fee_scope=fee_scope,
             snapshot_id=snapshot_id,
+            effective_from=effective,
         )
     return VenueCostSnapshot(
         venue=venue,
         action=action,
         fee_basis=fee_basis,
         known_status=CostKnownStatus.KNOWN,
-        captured_at=quoted_at,
+        captured_at=captured,
         source="test_paper_assumption",
         source_market_id=source_market_id,
         order_role=order_role,
@@ -126,7 +135,7 @@ def _cost(
         rate=None if rate is None else Decimal(rate),
         fixed_amount=None if fixed_amount is None else Decimal(fixed_amount),
         currency="GBP",
-        effective_from=quoted_at,
+        effective_from=effective,
         snapshot_id=snapshot_id,
         detail="Deterministic paper cost snapshot",
     )
@@ -148,6 +157,8 @@ def _quote(
     fee_scope: FeeScope = FeeScope.PER_QUOTE,
     fixed_amount: str | None = None,
     snapshot_id: str | None = None,
+    captured_at: datetime | None = None,
+    effective_from: datetime | None = None,
 ) -> VenueQuote:
     market_id = source_market_id or f"{venue}-corners-over"
     quoted_at = AS_OF - timedelta(seconds=age_seconds)
@@ -189,6 +200,8 @@ def _quote(
             fee_scope=fee_scope,
             fixed_amount=fixed_amount,
             snapshot_id=snapshot_id,
+            captured_at=captured_at,
+            effective_from=effective_from,
         ),
     )
 
@@ -578,4 +591,57 @@ def test_value_is_not_an_arbitrage_claim() -> None:
     assert result.evaluation_kind == "directional_expected_value"
     assert not hasattr(result, "is_arbitrage")
     assert not hasattr(result, "guaranteed_profit")
+
+
+def test_future_quote_fails_closed_instead_of_ranking_fresh() -> None:
+    future = _quote(age_seconds=-15)
+    with pytest.raises(ValueError, match="future_quote"):
+        quote_age_seconds(future, AS_OF)
+    result = ScenarioValueEngine().evaluate(
+        _proposition(),
+        _evidence(),
+        [future],
+        as_of=AS_OF,
+    )
+    assert result.status is ValueStatus.STALE_QUOTE
+    assert result.rejection_reason == "future_quote"
+
+
+def test_naive_and_non_utc_timestamps_are_rejected() -> None:
+    naive = datetime(2026, 9, 11, 21, 0)
+    plus_one = timezone(timedelta(hours=1))
+    payload = _quote().model_dump()
+    with pytest.raises(ValidationError, match="timezone-aware UTC"):
+        VenueQuote.model_validate({**payload, "quoted_at": naive})
+    with pytest.raises(ValidationError, match="must be UTC"):
+        VenueQuote.model_validate(
+            {**payload, "quoted_at": datetime(2026, 9, 11, 21, 0, tzinfo=plus_one)}
+        )
+    with pytest.raises(ValueError, match="timezone-aware UTC"):
+        ScenarioValueEngine().evaluate(_proposition(), _evidence(), [_quote()], as_of=naive)
+
+
+def test_future_effective_fee_snapshot_fails_closed() -> None:
+    result = ScenarioValueEngine().evaluate(
+        _proposition(),
+        _evidence(),
+        [_quote(effective_from=AS_OF + timedelta(minutes=5))],
+        as_of=AS_OF,
+    )
+    assert result.status is ValueStatus.MISSING_COSTS
+    assert result.rejection_reason == "future_effective_cost"
+    assert result.cost_effective_from == AS_OF + timedelta(minutes=5)
+
+
+def test_future_captured_fee_snapshot_fails_closed() -> None:
+    result = ScenarioValueEngine().evaluate(
+        _proposition(),
+        _evidence(),
+        [_quote(captured_at=AS_OF + timedelta(seconds=30))],
+        as_of=AS_OF,
+    )
+    assert result.status is ValueStatus.MISSING_COSTS
+    assert result.rejection_reason == "future_captured_cost"
+    assert result.cost_captured_at == AS_OF + timedelta(seconds=30)
+
 

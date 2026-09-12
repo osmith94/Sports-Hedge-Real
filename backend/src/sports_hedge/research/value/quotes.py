@@ -4,6 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sports_hedge.domain.models import VenueName
+from sports_hedge.fees.cost import require_aware_utc
 from sports_hedge.research.value.contracts import CanonicalProposition, VenueQuote
 from sports_hedge.research.value.economics import quote_cost_rejection, quote_net_odds
 from sports_hedge.research.value.settlement import settlement_is_complete
@@ -55,15 +56,25 @@ def semantically_eligible(
     return [], "settlement_mismatch"
 
 
+def quote_timing_rejection(quote: VenueQuote, as_of: datetime) -> str | None:
+    require_aware_utc(as_of, "as_of")
+    require_aware_utc(quote.quoted_at, "quoted_at")
+    if quote.quoted_at > as_of:
+        return "future_quote"
+    return None
+
+
 def quote_age_seconds(quote: VenueQuote, as_of: datetime) -> Decimal:
-    quoted_at = quote.quoted_at
-    if quoted_at.tzinfo is None or as_of.tzinfo is None:
-        raise ValueError("quote timestamps must be timezone-aware")
-    age = (as_of - quoted_at).total_seconds()
+    rejection = quote_timing_rejection(quote, as_of)
+    if rejection is not None:
+        raise ValueError(rejection)
+    age = (as_of - quote.quoted_at).total_seconds()
     return Decimal(str(age))
 
 
 def is_fresh(quote: VenueQuote, as_of: datetime, max_age_seconds: Decimal) -> bool:
+    if quote_timing_rejection(quote, as_of) is not None:
+        return False
     return quote_age_seconds(quote, as_of) <= max_age_seconds
 
 
@@ -73,8 +84,8 @@ def has_sufficient_depth(quote: VenueQuote, min_depth: Decimal) -> bool:
     return quote.available_depth >= min_depth
 
 
-def has_known_costs(quote: VenueQuote) -> bool:
-    return quote_cost_rejection(quote) is None
+def has_known_costs(quote: VenueQuote, as_of: datetime) -> bool:
+    return quote_cost_rejection(quote, as_of) is None
 
 
 def select_best_quote(quotes: list[VenueQuote]) -> VenueQuote:

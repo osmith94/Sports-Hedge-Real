@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 from sports_hedge.fees.effective import (
@@ -39,22 +40,28 @@ def probability_edge_percentage_points(
     return (model_probability - cost_adjusted_market_probability) * Decimal("100")
 
 
-def quote_effective_economics(quote: VenueQuote) -> EffectiveLegEconomics:
+def quote_effective_economics(
+    quote: VenueQuote,
+    *,
+    as_of: datetime | None = None,
+) -> EffectiveLegEconomics:
     """Net price from the quote's own cost rule, not a generic commission haircut."""
 
     return apply_venue_costs(
         quote.cost,
         gross_decimal_odds=quote.displayed_decimal_odds,
+        as_of=as_of,
+        quoted_at=quote.quoted_at,
     )
 
 
-def quote_net_odds(quote: VenueQuote) -> Decimal:
-    return quote_effective_economics(quote).net_decimal_equivalent
+def quote_net_odds(quote: VenueQuote, *, as_of: datetime | None = None) -> Decimal:
+    return quote_effective_economics(quote, as_of=as_of).net_decimal_equivalent
 
 
-def quote_cost_rejection(quote: VenueQuote) -> str | None:
+def quote_cost_rejection(quote: VenueQuote, as_of: datetime | None = None) -> str | None:
     try:
-        quote_effective_economics(quote)
+        quote_effective_economics(quote, as_of=as_of)
     except CostRuleError as exc:
         return exc.reason
     return None

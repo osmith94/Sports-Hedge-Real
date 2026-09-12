@@ -1,12 +1,27 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
 from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.domain.models import VenueName
+
+
+def require_aware_utc(value: datetime, field_name: str) -> datetime:
+    """Reject naive or non-UTC datetimes. Never guess UTC at this boundary."""
+
+    if value.tzinfo is None:
+        raise ValueError(
+            f"{field_name} must be timezone-aware UTC; naive datetimes are rejected"
+        )
+    offset = value.utcoffset()
+    if offset is None or offset != timedelta(0):
+        raise ValueError(
+            f"{field_name} must be UTC; non-UTC offsets are rejected rather than converted"
+        )
+    return value
 
 
 class FeeBasis(StrEnum):
@@ -88,10 +103,9 @@ class VenueCostSnapshot(BaseModel):
 
     @model_validator(mode="after")
     def validate_snapshot(self) -> VenueCostSnapshot:
-        if self.captured_at.tzinfo is None:
-            self.captured_at = self.captured_at.replace(tzinfo=UTC)
-        if self.effective_from is not None and self.effective_from.tzinfo is None:
-            self.effective_from = self.effective_from.replace(tzinfo=UTC)
+        require_aware_utc(self.captured_at, "captured_at")
+        if self.effective_from is not None:
+            require_aware_utc(self.effective_from, "effective_from")
         if self.known_status is CostKnownStatus.UNKNOWN:
             return self
         if self.fee_basis is FeeBasis.UNKNOWN:

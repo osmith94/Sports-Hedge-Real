@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
+from sports_hedge.fees.cost import require_aware_utc
 from sports_hedge.research.value.contracts import (
     CanonicalProposition,
     ScenarioEvidence,
@@ -24,6 +25,7 @@ from sports_hedge.research.value.quotes import (
     has_sufficient_depth,
     is_fresh,
     quote_age_seconds,
+    quote_timing_rejection,
     select_best_quote,
     select_reference_quote,
     semantically_eligible,
@@ -69,6 +71,7 @@ class ScenarioValueEngine:
         *,
         as_of: datetime,
     ) -> ScenarioValueResult:
+        require_aware_utc(as_of, "as_of")
         eligible, semantic_reason = semantically_eligible(proposition, quotes)
         if not eligible:
             return self._rejected(
@@ -86,10 +89,12 @@ class ScenarioValueEngine:
             quote for quote in eligible if is_fresh(quote, as_of, self.policy.max_quote_age_seconds)
         ]
         if not fresh:
+            reasons = {quote_timing_rejection(quote, as_of) for quote in eligible}
+            reason = "future_quote" if reasons == {"future_quote"} else "stale_quote"
             return self._rejected(
                 evidence,
                 ValueStatus.STALE_QUOTE,
-                "stale_quote",
+                reason,
                 reference=reference,
             )
 
@@ -104,9 +109,9 @@ class ScenarioValueEngine:
                 reference=reference,
             )
 
-        costed = [quote for quote in liquid if has_known_costs(quote)]
+        costed = [quote for quote in liquid if has_known_costs(quote, as_of)]
         if not costed:
-            reasons = {quote_cost_rejection(quote) for quote in liquid}
+            reasons = {quote_cost_rejection(quote, as_of) for quote in liquid}
             reason = next(iter(reasons)) if len(reasons) == 1 else "missing_costs"
             return self._rejected(
                 evidence,
@@ -117,7 +122,7 @@ class ScenarioValueEngine:
             )
 
         best = select_best_quote(costed)
-        economics = quote_effective_economics(best)
+        economics = quote_effective_economics(best, as_of=as_of)
         net_odds = economics.net_decimal_equivalent
         raw_p = raw_implied_probability(best.displayed_decimal_odds)
         cost_p = cost_adjusted_implied_probability(net_odds)
