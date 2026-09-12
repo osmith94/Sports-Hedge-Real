@@ -45,8 +45,15 @@ from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
 from sports_hedge.paper.chain import SimulatePaperFillRequest, SimulatePaperFillResult
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
+from sports_hedge.paper.trades import (
+    PaperSettlementRequest,
+    PaperTrade,
+    PaperTradeBookSummary,
+    PaperTradeDetail,
+)
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
+from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.venues.matchbook import (
     MatchbookAuthError,
     MatchbookClient,
@@ -204,14 +211,25 @@ def get_paper_scan_service(
 
 
 @lru_cache
+def get_paper_ledger() -> SqlitePaperLedger:
+    settings = get_settings()
+    database = settings.paper_ledger_db_path
+    if database != ":memory:":
+        path = Path(database)
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return SqlitePaperLedger(database)
+
+
+@lru_cache
 def get_paper_journal_holder() -> PaperOperationsService:
-    """Process-local paper chain. Tests override get_paper_operations_service."""
+    """Process-local paper chain backed by the durable paper ledger."""
 
     from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
 
     return PaperOperationsService(
         watchlist=get_watchlist_service(get_watchlist_repository()),
         alerts=get_priority_alert_service(),
+        ledger=get_paper_ledger(),
     )
 
 
@@ -467,6 +485,54 @@ async def server_owned_refresh_tick() -> None:
         await coordinator.run_cycle(runner)
     except (MatchbookAuthError, MatchbookDiscoveryError, httpx.HTTPError):
         return
+
+
+@router.get("/trades/summary", response_model=PaperTradeBookSummary)
+def paper_trade_summary(
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> PaperTradeBookSummary:
+    return operations.book_summary()
+
+
+@router.get("/trades/active", response_model=list[PaperTrade])
+def active_paper_trades(
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> list[PaperTrade]:
+    return operations.list_active_trades()
+
+
+@router.get("/trades/closed", response_model=list[PaperTrade])
+def closed_paper_trades(
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> list[PaperTrade]:
+    return operations.list_closed_trades()
+
+
+@router.get("/trades/{trade_id}", response_model=PaperTradeDetail)
+def paper_trade_detail(
+    trade_id: str,
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> PaperTradeDetail:
+    try:
+        return operations.trade_detail(trade_id)
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/trades/{trade_id}/settle", response_model=PaperTradeDetail)
+def settle_paper_trade(
+    trade_id: str,
+    request: PaperSettlementRequest,
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> PaperTradeDetail:
+    """PAPER-ONLY explicit settlement. Does not infer a result from kickoff time."""
+
+    try:
+        return operations.settle(trade_id, request)
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post(

@@ -30,6 +30,7 @@ class PaperChainStep(StrEnum):
     WATCHLIST_FILL = "watchlist_fill"
     JOURNAL_POSTING = "journal_posting"
     RECONCILIATION = "reconciliation"
+    PAPER_AUTOFILL = "paper_autofill"
 
 
 class PaperFillPlan(BaseModel):
@@ -90,3 +91,4 @@ class SimulatePaperFillResult(BaseModel):
     trace: PaperChainTrace
     paper_only: bool = True
     places_orders: bool = False
+    trade_id: str | None = None

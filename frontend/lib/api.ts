@@ -602,3 +602,146 @@ export type HistoricalCoverageReadModel = {
 export function getHistoricalCoverage(): Promise<HistoricalCoverageReadModel> {
   return request("/research/historical/coverage");
 }
+
+export type PaperTradeState =
+  | "PENDING"
+  | "PARTIAL"
+  | "OPEN"
+  | "AWAITING_MANUAL_EXTERNAL"
+  | "CLOSED";
+
+export type PaperLegFillKind =
+  | "INTERNAL_SIMULATED"
+  | "PAPER_SIMULATED_EXTERNAL"
+  | "MANUAL_EXTERNAL"
+  | "UNFILLED";
+
+export type PaperTradeLeg = {
+  venue: Venue;
+  outcome: string;
+  currency: string;
+  requested_stake: string | number;
+  filled_stake: string | number;
+  displayed_odds?: string | number | null;
+  filled_odds?: string | number | null;
+  source_market_id: string;
+  fill_id?: string | null;
+  fill_kind: PaperLegFillKind;
+  capital_source: string;
+  execution_mode: string;
+};
+
+export type PaperTradeAuditEvent = {
+  event_id: string;
+  occurred_at: string;
+  event_type: string;
+  detail?: string | null;
+};
+
+export type PaperTrade = {
+  trade_id: string;
+  opportunity_id: string;
+  canonical_event_id?: string | null;
+  canonical_market_id?: string | null;
+  settlement_key?: string | null;
+  market_family?: MarketFamily | null;
+  period?: FootballPeriod | null;
+  competition?: string | null;
+  home_team?: string | null;
+  away_team?: string | null;
+  fixture_label?: string | null;
+  market_label?: string | null;
+  state: PaperTradeState;
+  opened_at: string;
+  last_updated_at: string;
+  settled_at?: string | null;
+  guaranteed_profit_gbp_at_open?: string | number | null;
+  realised_pnl_gbp?: string | number | null;
+  capital_locked_native: Record<string, string | number>;
+  capital_locked_gbp?: string | number | null;
+  settlement_outcome?: string | null;
+  settlement_source?: string | null;
+  settlement_source_id?: string | null;
+  settlement_detail?: string | null;
+  provenance: "live_paper" | "fixture_demo" | "unavailable" | string;
+  paper_only?: boolean;
+  places_orders?: boolean;
+  legs: PaperTradeLeg[];
+  audit: PaperTradeAuditEvent[];
+};
+
+export type PaperJournalPosting = {
+  account_code: string;
+  side: string;
+  amount_native: string | number;
+  amount_gbp: string | number;
+  dimensions: { currency: string; capital_source?: string; venue?: string | null };
+};
+
+export type PaperJournalEntry = {
+  journal_id: string;
+  source: string;
+  source_id: string;
+  occurred_at: string;
+  description: string;
+  opportunity_id: string;
+  provenance: string;
+  postings: PaperJournalPosting[];
+};
+
+export type PaperTradeDetail = PaperTrade & {
+  journals: PaperJournalEntry[];
+};
+
+export type PaperTradeBookSummary = {
+  data_kind: string;
+  paper_only: boolean;
+  open_count: number;
+  closed_count: number;
+  awaiting_manual_external_count: number;
+  capital_locked_native: Record<string, string | number>;
+  capital_locked_gbp?: string | number | null;
+  realised_pnl_gbp?: string | number | null;
+  gbp_unavailable_reason?: string | null;
+};
+
+export function getPaperTradeSummary(): Promise<PaperTradeBookSummary> {
+  return request("/paper/trades/summary");
+}
+
+export function getActivePaperTrades(): Promise<PaperTrade[]> {
+  return request("/paper/trades/active");
+}
+
+export function getClosedPaperTrades(): Promise<PaperTrade[]> {
+  return request("/paper/trades/closed");
+}
+
+export function getPaperTrade(tradeId: string): Promise<PaperTradeDetail> {
+  return request(`/paper/trades/${encodeURIComponent(tradeId)}`);
+}
+
+export async function settlePaperTrade(
+  tradeId: string,
+  payload: {
+    winning_outcome: string;
+    source: string;
+    source_id: string;
+    detail?: string;
+    provenance?: "live_paper" | "fixture_demo";
+  },
+): Promise<PaperTradeDetail> {
+  const response = await fetch(`${API_BASE}/paper/trades/${encodeURIComponent(tradeId)}/settle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      provenance: "fixture_demo",
+      ...payload,
+    }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<PaperTradeDetail>;
+}

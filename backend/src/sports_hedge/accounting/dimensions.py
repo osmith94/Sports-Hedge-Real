@@ -65,13 +65,16 @@ class CapitalSource(StrEnum):
     externally confirmed venue leg (for example a manual USD fill) and does
     not imply Sports Hedge custody or an automated-pool draw.
     `SHARED_UNALLOCATED` remains treasury attribution when funding cannot be
-    assigned to those sources. This is a posting dimension, not a duplicated
-    cash account.
+    assigned to those sources. `PAPER_SIMULATED_EXTERNAL` is a paper-only
+    simulated fill of a leg that would later require EXTERNAL_OPERATOR handling.
+    It is not operator MANUAL_EXTERNAL confirmation and not live custody.
+    This is a posting dimension, not a duplicated cash account.
     """
 
     AUTO_POOL = "AUTO_POOL"
     MANUAL_OVERRIDE = "MANUAL_OVERRIDE"
     MANUAL_EXTERNAL = "MANUAL_EXTERNAL"
+    PAPER_SIMULATED_EXTERNAL = "PAPER_SIMULATED_EXTERNAL"
     SHARED_UNALLOCATED = "SHARED_UNALLOCATED"
 
     def implies_sports_hedge_custody(self) -> bool:
@@ -87,6 +90,8 @@ _CAPITAL_SOURCE_ALIASES = {
     "MANUAL_OVERRIDE": CapitalSource.MANUAL_OVERRIDE,
     "MANUAL_EXTERNAL": CapitalSource.MANUAL_EXTERNAL,
     "EXTERNAL": CapitalSource.MANUAL_EXTERNAL,
+    "PAPER_SIMULATED_EXTERNAL": CapitalSource.PAPER_SIMULATED_EXTERNAL,
+    "PAPER_SIMULATED": CapitalSource.PAPER_SIMULATED_EXTERNAL,
     "SHARED": CapitalSource.SHARED_UNALLOCATED,
     "UNALLOCATED": CapitalSource.SHARED_UNALLOCATED,
     "SHARED_UNALLOCATED": CapitalSource.SHARED_UNALLOCATED,
