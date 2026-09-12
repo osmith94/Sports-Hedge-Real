@@ -49,11 +49,11 @@ from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.arbitrage.allocation.adapters import (
     balances_from_liquidity,
     exposures_from_trades,
-    lock_hours_until_kickoff,
+    lock_hours_until_capital_release,
     request_from_paper_decision,
 )
 from sports_hedge.arbitrage.allocation.engine import allocate
-from sports_hedge.arbitrage.allocation.models import AllocationResult
+from sports_hedge.arbitrage.allocation.models import AllocatedStake, AllocationResult
 from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.trades import PaperTrade
@@ -447,9 +447,12 @@ class PaperScanService:
         if allocation is not None:
             draft = draft.model_copy(update={"allocation": allocation})
             if allocation.accepted:
-                draft = draft.model_copy(
-                    update={"fill_legs": _apply_allocation_to_fill_legs(fill_legs, allocation)}
-                )
+                try:
+                    draft = draft.model_copy(
+                        update={"fill_legs": apply_allocation_to_fill_legs(fill_legs, allocation)}
+                    )
+                except FillPlanMappingError as exc:
+                    alloc_reasons.append(f"allocation_failed:{exc.reason}")
         rejections.extend(alloc_reasons)
         return draft.model_copy(
             update={
@@ -480,8 +483,10 @@ class PaperScanService:
             gbp_per_unit=effective_fx,
             conditionally_releasable=conditionally_releasable,
         )
-        lock_hours, lock_basis = lock_hours_until_kickoff(
-            left.market.event.kickoff_utc, draft.scanned_at
+        lock_hours, lock_basis = lock_hours_until_capital_release(
+            left.market.event.kickoff_utc,
+            draft.scanned_at,
+            market=left.market,
         )
         request = request_from_paper_decision(
             draft,
@@ -490,9 +495,11 @@ class PaperScanService:
             open_positions=exposures_from_trades(open_trades or []),
             expected_lock_duration_hours=lock_hours,
             expected_lock_basis=lock_basis,
-            recent_volatility_bps=Decimal(str(recent_volatility_bps))
-            if recent_volatility_bps
-            else None,
+            recent_volatility_bps=(
+                Decimal(str(recent_volatility_bps))
+                if recent_volatility_bps is not None
+                else None
+            ),
         )
         if request is None:
             return None, ["allocation_failed:unsupported_solver_vector"]
@@ -753,21 +760,68 @@ def _fill_legs_from_observations(
     return legs
 
 
-def _apply_allocation_to_fill_legs(legs: list[PaperOpportunityLeg], allocation: AllocationResult) -> list[PaperOpportunityLeg]:
-    resized: list[PaperOpportunityLeg] = []
-    for leg in legs:
-        match = next(
-            (
-                stake
-                for stake in allocation.recommended_stakes
-                if stake.venue is leg.venue
-                and stake.outcome == leg.outcome
-                and stake.source_market_id == leg.source_market_id
-            ),
-            None,
+class FillPlanMappingError(ValueError):
+    """Allocator stakes cannot be mapped 1:1 onto the paper fill plan."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _fill_map_identity(
+    *,
+    venue: VenueName,
+    source_market_id: str,
+    source_runner_id: str | None,
+    outcome: str,
+) -> tuple[VenueName, str, str, str]:
+    return (venue, source_market_id, source_runner_id or "", outcome)
+
+
+def apply_allocation_to_fill_legs(
+    legs: list[PaperOpportunityLeg], allocation: AllocationResult
+) -> list[PaperOpportunityLeg]:
+    """Resize every positive planned fill leg from allocated native stakes.
+
+    Mapping is exact one-to-one on venue + source market + source runner
+    (when present) + outcome. Missing or duplicate identities fail closed.
+    """
+
+    positive_legs = [leg for leg in legs if leg.requested_stake > 0]
+    positive_stakes = [stake for stake in allocation.recommended_stakes if stake.stake_native > 0]
+    fill_by_id: dict[tuple[VenueName, str, str, str], PaperOpportunityLeg] = {}
+    for leg in positive_legs:
+        key = _fill_map_identity(
+            venue=leg.venue,
+            source_market_id=leg.source_market_id,
+            source_runner_id=leg.source_runner_id,
+            outcome=leg.outcome,
         )
-        if match is None:
-            continue
+        if key in fill_by_id:
+            raise FillPlanMappingError("fill_plan_mapping_duplicate_identity")
+        fill_by_id[key] = leg
+    stake_by_id: dict[tuple[VenueName, str, str, str], AllocatedStake] = {}
+    for stake in positive_stakes:
+        key = _fill_map_identity(
+            venue=stake.venue,
+            source_market_id=stake.source_market_id,
+            source_runner_id=stake.source_runner_id,
+            outcome=stake.outcome,
+        )
+        if key in stake_by_id:
+            raise FillPlanMappingError("fill_plan_mapping_duplicate_identity")
+        stake_by_id[key] = stake
+    if fill_by_id.keys() != stake_by_id.keys():
+        raise FillPlanMappingError("fill_plan_mapping_unmatched_leg")
+    resized: list[PaperOpportunityLeg] = []
+    for leg in positive_legs:
+        key = _fill_map_identity(
+            venue=leg.venue,
+            source_market_id=leg.source_market_id,
+            source_runner_id=leg.source_runner_id,
+            outcome=leg.outcome,
+        )
+        match = stake_by_id[key]
         resized.append(leg.model_copy(update={"requested_stake": match.stake_native}))
     return resized
 

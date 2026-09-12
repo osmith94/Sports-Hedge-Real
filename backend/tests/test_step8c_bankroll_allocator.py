@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
@@ -9,13 +10,22 @@ from sports_hedge.api.market_intelligence import get_market_intelligence_service
 from sports_hedge.api.paper import get_paper_audit_repository, get_paper_liquidity_repository
 from sports_hedge.api.watchlist import get_watchlist_service
 from sports_hedge.application.complete_set import SOLVER_MODEL_GENERALIZED, SOLVER_MODEL_SIMPLE
-from sports_hedge.arbitrage.allocation.adapters import request_from_complete_set, request_from_payoff
+from sports_hedge.arbitrage.allocation.adapters import (
+    FOOTBALL_REGULATION_MINUTES,
+    MODELLED_SETTLEMENT_BUFFER_MINUTES,
+    lock_hours_until_capital_release,
+    request_from_complete_set,
+    request_from_payoff,
+)
 from sports_hedge.arbitrage.allocation.engine import allocate
 from sports_hedge.arbitrage.allocation.models import (
+    AllocatedStake,
     AllocationBalance,
     AllocationConstraintKind,
+    AllocationResult,
     BankrollAllocationPolicy,
     OpenPositionExposure,
+    ReductionInputStatus,
     VenueNativeAmount,
 )
 from sports_hedge.arbitrage.models import ArbitrageSolution, ArbitrageStake
@@ -32,7 +42,20 @@ from sports_hedge.arbitrage.solver import CompleteSetArbitrageSolver
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.config import Settings
+from sports_hedge.domain.football import (
+    CanonicalEvent,
+    CanonicalMarket,
+    FootballPeriod,
+    MarketFamily,
+    SettlementFingerprint,
+    SettlementScope,
+)
 from sports_hedge.domain.models import VenueName
+from sports_hedge.application.paper_scan import (
+    FillPlanMappingError,
+    apply_allocation_to_fill_legs,
+)
+from sports_hedge.paper.fills import PaperOpportunityLeg
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
@@ -97,6 +120,7 @@ def _leg(
         outcome=outcome,
         venue=venue,
         source_market_id=f"{venue.value}-{outcome}",
+        source_runner_id=f"{venue.value}-{outcome}-runner",
         net_decimal_odds=odds,
         max_stake_reporting=max_stake,
         native_currency=currency,
@@ -300,10 +324,16 @@ def test_acceptance_execution_quality_changes_recommended_not_arb_class() -> Non
 
 def test_acceptance_lock_duration_metric_does_not_change_arb_class() -> None:
     short = allocate(
-        _demo_request(lock_hours=Decimal("0.5"), lock_basis="time_to_kickoff")
+        _demo_request(
+            lock_hours=Decimal("0.5"),
+            lock_basis="kickoff_plus_regulation_plus_settlement_buffer",
+        )
     )
     long = allocate(
-        _demo_request(lock_hours=Decimal("72"), lock_basis="time_to_kickoff")
+        _demo_request(
+            lock_hours=Decimal("72"),
+            lock_basis="kickoff_plus_regulation_plus_settlement_buffer",
+        )
     )
     assert short.accepted and long.accepted
     assert short.guaranteed_roi == long.guaranteed_roi
@@ -313,6 +343,16 @@ def test_acceptance_lock_duration_metric_does_not_change_arb_class() -> None:
     assert "not_guaranteed" in short.capital_turnover.label
     missing = allocate(_demo_request())
     assert missing.capital_turnover is None
+
+
+def test_kickoff_labelled_lock_is_not_used_as_capital_release() -> None:
+    result = allocate(
+        _demo_request(lock_hours=Decimal("2"), lock_basis="time_to_kickoff")
+    )
+    assert result.accepted is True
+    assert result.expected_lock_basis is None
+    assert result.expected_lock_duration_hours is None
+    assert result.capital_turnover is None
 
 
 def test_acceptance_generalized_parity_same_allocator() -> None:
@@ -614,3 +654,312 @@ def test_api_allocator_output_on_simple_and_generalized_decisions() -> None:
         watchlist_store.close()
         repository.close()
         liquidity.close()
+
+
+def _regulation_market(*, kickoff: datetime) -> CanonicalMarket:
+    return CanonicalMarket(
+        event=CanonicalEvent(
+            competition="Premier League",
+            home_team="Newcastle",
+            away_team="Chelsea",
+            kickoff_utc=kickoff,
+            source_venue=VenueName.MATCHBOOK,
+            source_event_id="evt-lock",
+        ),
+        source_venue=VenueName.MATCHBOOK,
+        source_market_id="mkt-lock",
+        family=MarketFamily.MATCH_RESULT,
+        period=FootballPeriod.FULL_TIME,
+        settlement=SettlementFingerprint(
+            scope=SettlementScope.REGULATION_TIME,
+            period=FootballPeriod.FULL_TIME,
+            extra_time_included=False,
+            penalties_included=False,
+        ),
+    )
+
+
+def test_pre_match_lock_hours_are_settlement_not_kickoff() -> None:
+    kickoff = datetime(2026, 9, 13, 15, 0, tzinfo=UTC)
+    as_of = kickoff - timedelta(hours=2)
+    hours, basis = lock_hours_until_capital_release(
+        kickoff, as_of, market=_regulation_market(kickoff=kickoff)
+    )
+    hours_to_kickoff = Decimal("2")
+    extra = (FOOTBALL_REGULATION_MINUTES + MODELLED_SETTLEMENT_BUFFER_MINUTES) / Decimal("60")
+    assert hours is not None
+    assert hours == (hours_to_kickoff + extra).quantize(Decimal("0.0001"))
+    assert hours > hours_to_kickoff
+    assert basis == "kickoff_plus_regulation_plus_settlement_buffer"
+    assert basis != "time_to_kickoff"
+
+
+def test_pre_match_lock_omitted_when_settlement_scope_unknown() -> None:
+    kickoff = datetime(2026, 9, 13, 15, 0, tzinfo=UTC)
+    as_of = kickoff - timedelta(hours=2)
+    market = _regulation_market(kickoff=kickoff).model_copy(
+        update={
+            "settlement": SettlementFingerprint(
+                scope=SettlementScope.UNKNOWN,
+                period=FootballPeriod.FULL_TIME,
+            )
+        }
+    )
+    hours, basis = lock_hours_until_capital_release(kickoff, as_of, market=market)
+    assert hours is None
+    assert basis is None
+
+
+def test_pre_match_lock_omitted_for_extra_time_and_in_play() -> None:
+    kickoff = datetime(2026, 9, 13, 15, 0, tzinfo=UTC)
+    as_of = kickoff - timedelta(hours=2)
+    extra_time = _regulation_market(kickoff=kickoff).model_copy(
+        update={
+            "period": FootballPeriod.EXTRA_TIME,
+            "settlement": SettlementFingerprint(
+                scope=SettlementScope.INCLUDING_EXTRA_TIME,
+                period=FootballPeriod.EXTRA_TIME,
+                extra_time_included=True,
+                penalties_included=False,
+            ),
+        }
+    )
+    hours, basis = lock_hours_until_capital_release(kickoff, as_of, market=extra_time)
+    assert hours is None and basis is None
+    in_play, in_play_basis = lock_hours_until_capital_release(
+        kickoff, kickoff + timedelta(minutes=10), market=_regulation_market(kickoff=kickoff)
+    )
+    assert in_play is None and in_play_basis is None
+
+
+def test_zero_volatility_is_known_not_unknown() -> None:
+    known_zero = allocate(_demo_request())
+    unknown = allocate(
+        request_from_complete_set(
+            [
+                _leg(outcome="home", venue=VenueName.MATCHBOOK, max_stake=Decimal("10000")),
+                _leg(
+                    outcome="away",
+                    venue=VenueName.POLYMARKET,
+                    max_stake=Decimal("10000"),
+                    currency="USD",
+                    gbp_per_unit=Decimal("0.75"),
+                    mode=LegExecutionMode.EXTERNAL_OPERATOR,
+                ),
+            ],
+            SOLVER.solve(
+                [
+                    _leg(outcome="home", venue=VenueName.MATCHBOOK, max_stake=Decimal("10000")).as_executable_quote(),
+                    _leg(
+                        outcome="away",
+                        venue=VenueName.POLYMARKET,
+                        max_stake=Decimal("10000"),
+                        currency="USD",
+                        gbp_per_unit=Decimal("0.75"),
+                        mode=LegExecutionMode.EXTERNAL_OPERATOR,
+                    ).as_executable_quote(),
+                ]
+            ),
+            policy=POLICY,
+            balances=_balances(),
+            fill_confidence=_fill_high(),
+            execution_risk_score=10,
+            recent_volatility_bps=None,
+        )
+    )
+    assert known_zero.accepted and unknown.accepted
+    assert not any(factor.name == "volatility" for factor in known_zero.reduction_factors)
+    unknown_factor = next(factor for factor in unknown.reduction_factors if factor.name == "volatility")
+    assert unknown_factor.input_status is ReductionInputStatus.UNKNOWN
+    assert unknown.recommended_committed_capital < known_zero.recommended_committed_capital
+
+
+def _fill_leg(
+    *,
+    outcome: str,
+    venue: VenueName,
+    market: str,
+    runner: str,
+    stake: Decimal,
+) -> PaperOpportunityLeg:
+    return PaperOpportunityLeg(
+        outcome=outcome,
+        venue=venue,
+        source_market_id=market,
+        source_runner_id=runner,
+        requested_stake=stake,
+        displayed_odds=Decimal("2.2"),
+        currency="GBP",
+    )
+
+
+def _allocated(
+    *,
+    outcome: str,
+    venue: VenueName,
+    market: str,
+    runner: str | None,
+    stake: Decimal,
+) -> AllocatedStake:
+    return AllocatedStake(
+        leg_id=f"{venue.value}:{market}:{runner or ''}:{outcome}",
+        outcome=outcome,
+        venue=venue,
+        source_market_id=market,
+        source_runner_id=runner,
+        stake_reporting=stake,
+        stake_native=stake,
+        capital_reporting=stake,
+        capital_native=stake,
+        native_currency="GBP",
+        capital_source="AUTO_POOL",
+        execution_mode="INTERNAL",
+    )
+
+
+def _allocation_with_stakes(stakes: list[AllocatedStake]) -> AllocationResult:
+    return AllocationResult(
+        accepted=True,
+        solver_model=SOLVER_MODEL_SIMPLE,
+        recommended_stakes=stakes,
+        maximum_validated_capital=sum((item.capital_reporting for item in stakes), Decimal("0")),
+        recommended_committed_capital=sum((item.capital_reporting for item in stakes), Decimal("0")),
+    )
+
+
+def test_fill_plan_mapping_fails_closed_on_unmatched_leg() -> None:
+    legs = [
+        _fill_leg(
+            outcome="home",
+            venue=VenueName.MATCHBOOK,
+            market="mb-home",
+            runner="r-home",
+            stake=Decimal("100"),
+        ),
+        _fill_leg(
+            outcome="away",
+            venue=VenueName.POLYMARKET,
+            market="pm-away",
+            runner="r-away",
+            stake=Decimal("100"),
+        ),
+    ]
+    allocation = _allocation_with_stakes(
+        [
+            _allocated(
+                outcome="home",
+                venue=VenueName.MATCHBOOK,
+                market="mb-home",
+                runner="r-home",
+                stake=Decimal("40"),
+            )
+        ]
+    )
+    try:
+        apply_allocation_to_fill_legs(legs, allocation)
+        raise AssertionError("expected unmatched fill-plan mapping to fail closed")
+    except FillPlanMappingError as exc:
+        assert exc.reason == "fill_plan_mapping_unmatched_leg"
+
+
+def test_fill_plan_mapping_fails_closed_when_runner_identity_differs() -> None:
+    legs = [
+        _fill_leg(
+            outcome="home",
+            venue=VenueName.MATCHBOOK,
+            market="mb-home",
+            runner="r-home",
+            stake=Decimal("100"),
+        )
+    ]
+    allocation = _allocation_with_stakes(
+        [
+            _allocated(
+                outcome="home",
+                venue=VenueName.MATCHBOOK,
+                market="mb-home",
+                runner="other-runner",
+                stake=Decimal("40"),
+            )
+        ]
+    )
+    try:
+        apply_allocation_to_fill_legs(legs, allocation)
+        raise AssertionError("expected runner mismatch to fail closed")
+    except FillPlanMappingError as exc:
+        assert exc.reason == "fill_plan_mapping_unmatched_leg"
+
+
+def test_fill_plan_mapping_fails_closed_on_duplicate_identity() -> None:
+    legs = [
+        _fill_leg(
+            outcome="home",
+            venue=VenueName.MATCHBOOK,
+            market="mb-home",
+            runner="r-home",
+            stake=Decimal("50"),
+        ),
+        _fill_leg(
+            outcome="home",
+            venue=VenueName.MATCHBOOK,
+            market="mb-home",
+            runner="r-home",
+            stake=Decimal("50"),
+        ),
+    ]
+    allocation = _allocation_with_stakes(
+        [
+            _allocated(
+                outcome="home",
+                venue=VenueName.MATCHBOOK,
+                market="mb-home",
+                runner="r-home",
+                stake=Decimal("40"),
+            )
+        ]
+    )
+    try:
+        apply_allocation_to_fill_legs(legs, allocation)
+        raise AssertionError("expected duplicate fill identity to fail closed")
+    except FillPlanMappingError as exc:
+        assert exc.reason == "fill_plan_mapping_duplicate_identity"
+
+
+def test_fill_plan_mapping_resizes_one_to_one() -> None:
+    legs = [
+        _fill_leg(
+            outcome="home",
+            venue=VenueName.MATCHBOOK,
+            market="mb-home",
+            runner="r-home",
+            stake=Decimal("100"),
+        ),
+        _fill_leg(
+            outcome="away",
+            venue=VenueName.POLYMARKET,
+            market="pm-away",
+            runner="r-away",
+            stake=Decimal("80"),
+        ),
+    ]
+    allocation = _allocation_with_stakes(
+        [
+            _allocated(
+                outcome="home",
+                venue=VenueName.MATCHBOOK,
+                market="mb-home",
+                runner="r-home",
+                stake=Decimal("40"),
+            ),
+            _allocated(
+                outcome="away",
+                venue=VenueName.POLYMARKET,
+                market="pm-away",
+                runner="r-away",
+                stake=Decimal("32"),
+            ),
+        ]
+    )
+    resized = apply_allocation_to_fill_legs(legs, allocation)
+    assert [leg.requested_stake for leg in resized] == [Decimal("40"), Decimal("32")]
+    assert [leg.source_runner_id for leg in resized] == ["r-home", "r-away"]

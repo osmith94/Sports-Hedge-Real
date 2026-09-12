@@ -23,6 +23,21 @@ from sports_hedge.arbitrage.allocation.models import (
 from sports_hedge.domain.models import VenueName
 
 EXTERNAL_OPERATOR = "EXTERNAL_OPERATOR"
+KICKOFF_AS_RELEASE_LOCK_BASES = frozenset(
+    {"time_to_kickoff", "kickoff", "time_until_kickoff"}
+)
+
+
+def _capital_release_lock(request: AllocationRequest) -> tuple[Decimal | None, str | None]:
+    """Omit lock hours that are labelled as time-to-kickoff rather than settlement release."""
+
+    basis = request.expected_lock_basis
+    hours = request.expected_lock_duration_hours
+    if basis in KICKOFF_AS_RELEASE_LOCK_BASES:
+        return None, None
+    if hours is None or hours <= 0 or not basis:
+        return None, None
+    return hours, basis
 
 
 def allocate(request: AllocationRequest) -> AllocationResult:
@@ -72,8 +87,8 @@ def allocate(request: AllocationRequest) -> AllocationResult:
             fill_confidence=request.fill_confidence,
             execution_risk_score=request.execution_risk_score,
             survivability=request.survivability,
-            expected_lock_duration_hours=request.expected_lock_duration_hours,
-            expected_lock_basis=request.expected_lock_basis,
+            expected_lock_duration_hours=_capital_release_lock(request)[0],
+            expected_lock_basis=_capital_release_lock(request)[1],
             scale_maximum=Decimal("0"),
             scale_recommended=Decimal("0"),
         )
@@ -109,17 +124,13 @@ def allocate(request: AllocationRequest) -> AllocationResult:
     profit = request.guaranteed_profit_at_solver_size * scale_recommended
     after = _balances_after(request, scale_recommended)
     limiting_leg = _limiting_depth_leg(request.legs)
+    lock_hours, lock_basis = _capital_release_lock(request)
     turnover = None
-    if (
-        request.expected_lock_duration_hours is not None
-        and request.expected_lock_duration_hours > 0
-        and rec_capital > 0
-        and request.expected_lock_basis
-    ):
+    if lock_hours is not None and rec_capital > 0 and lock_basis:
         turnover = CapitalTurnoverMetric(
-            metric=profit / rec_capital / request.expected_lock_duration_hours,
-            expected_lock_duration_hours=request.expected_lock_duration_hours,
-            expected_lock_basis=request.expected_lock_basis,
+            metric=profit / rec_capital / lock_hours,
+            expected_lock_duration_hours=lock_hours,
+            expected_lock_basis=lock_basis,
             guaranteed_profit=profit,
             committed_capital=rec_capital,
         )
@@ -144,8 +155,8 @@ def allocate(request: AllocationRequest) -> AllocationResult:
         limiting_constraint_detail=binding.detail,
         hard_constraints=bindings,
         reduction_factors=reductions,
-        expected_lock_duration_hours=request.expected_lock_duration_hours,
-        expected_lock_basis=request.expected_lock_basis,
+        expected_lock_duration_hours=lock_hours,
+        expected_lock_basis=lock_basis,
         capital_turnover=turnover,
         fill_confidence=request.fill_confidence,
         execution_risk_score=request.execution_risk_score,
@@ -710,12 +721,10 @@ def _recommendation_reductions(
                 input_status=ReductionInputStatus.KNOWN,
             )
         )
-    if (
-        request.expected_lock_duration_hours is not None
-        and request.expected_lock_duration_hours > policy.long_lock_hours
-    ):
+    lock_hours, lock_basis = _capital_release_lock(request)
+    if lock_hours is not None and lock_hours > policy.long_lock_hours:
         t = min(
-            request.expected_lock_duration_hours / (policy.long_lock_hours * 3),
+            lock_hours / (policy.long_lock_hours * 3),
             Decimal("1"),
         )
         amount = policy.max_lock_duration_reduction * t
@@ -724,11 +733,11 @@ def _recommendation_reductions(
                 ReductionFactor(
                     name="lock_duration",
                     amount=amount,
-                    reason=f"{request.expected_lock_basis}={request.expected_lock_duration_hours}h",
+                    reason=f"{lock_basis}={lock_hours}h",
                     input_status=ReductionInputStatus.KNOWN,
                 )
             )
-    elif request.expected_lock_duration_hours is None:
+    elif lock_hours is None:
         factors.append(
             ReductionFactor(
                 name="lock_duration",
@@ -837,7 +846,7 @@ def _rejected(
         fill_confidence=request.fill_confidence,
         execution_risk_score=request.execution_risk_score,
         survivability=request.survivability,
-        expected_lock_duration_hours=request.expected_lock_duration_hours,
-        expected_lock_basis=request.expected_lock_basis,
+        expected_lock_duration_hours=_capital_release_lock(request)[0],
+        expected_lock_basis=_capital_release_lock(request)[1],
         guaranteed_roi=request.roi,
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
+from sports_hedge.domain.football import CanonicalMarket, FootballPeriod, SettlementScope
 from sports_hedge.arbitrage.allocation.models import (
     AllocationBalance,
     AllocationLeg,
@@ -23,6 +24,19 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.paper.models import PaperScanDecision
 from sports_hedge.paper.trades import PaperTrade, PaperTradeState
+
+FOOTBALL_REGULATION_MINUTES = Decimal("90")
+FOOTBALL_FIRST_HALF_MINUTES = Decimal("45")
+MODELLED_SETTLEMENT_BUFFER_MINUTES = Decimal("15")
+LOCK_BASIS_KICKOFF_PLUS_REGULATION_PLUS_SETTLEMENT_BUFFER = (
+    "kickoff_plus_regulation_plus_settlement_buffer"
+)
+LOCK_BASIS_KICKOFF_PLUS_FIRST_HALF_PLUS_SETTLEMENT_BUFFER = (
+    "kickoff_plus_first_half_plus_settlement_buffer"
+)
+KICKOFF_AS_RELEASE_LOCK_BASES = frozenset(
+    {"time_to_kickoff", "kickoff", "time_until_kickoff"}
+)
 
 
 def request_from_complete_set(
@@ -51,10 +65,14 @@ def request_from_complete_set(
         leg = by_outcome[stake.outcome]
         allocation_legs.append(
             AllocationLeg(
-                leg_id=f"{leg.venue.value}:{leg.outcome}:{leg.source_market_id}",
+                leg_id=(
+                    f"{leg.venue.value}:{leg.source_market_id}:"
+                    f"{leg.source_runner_id or ''}:{leg.outcome}"
+                ),
                 outcome=leg.outcome,
                 venue=leg.venue,
                 source_market_id=leg.source_market_id,
+                source_runner_id=leg.source_runner_id,
                 solver_stake=stake.stake,
                 max_stake=leg.max_stake_reporting,
                 capital_per_unit=Decimal("1"),
@@ -223,13 +241,64 @@ def exposures_from_trades(trades: list[PaperTrade]) -> list[OpenPositionExposure
     return exposures
 
 
-def lock_hours_until_kickoff(kickoff_utc: datetime | None, as_of: datetime | None) -> tuple[Decimal | None, str | None]:
-    if kickoff_utc is None or as_of is None:
+def _modelled_post_kickoff_lock_minutes(market: CanonicalMarket) -> tuple[Decimal | None, str | None]:
+    """Return extra minutes after kickoff until a defensible capital-release estimate.
+
+    Pre-match arbs stay locked through settlement, not merely until kickoff.
+    Extra-time, penalties, second-half, and unknown scopes are omitted.
+    """
+
+    settlement = market.settlement
+    period = market.period
+    if settlement.scope is SettlementScope.UNKNOWN or period is FootballPeriod.UNKNOWN:
         return None, None
-    seconds = (kickoff_utc - as_of).total_seconds()
-    if seconds < 0:
+    if settlement.scope in {
+        SettlementScope.INCLUDING_EXTRA_TIME,
+        SettlementScope.INCLUDING_PENALTIES,
+    }:
         return None, None
-    return Decimal(str(seconds)) / Decimal("3600"), "time_to_kickoff"
+    if settlement.extra_time_included is True or settlement.penalties_included is True:
+        return None, None
+    if period is FootballPeriod.FULL_TIME and settlement.scope is SettlementScope.REGULATION_TIME:
+        return (
+            FOOTBALL_REGULATION_MINUTES + MODELLED_SETTLEMENT_BUFFER_MINUTES,
+            LOCK_BASIS_KICKOFF_PLUS_REGULATION_PLUS_SETTLEMENT_BUFFER,
+        )
+    if period is FootballPeriod.FIRST_HALF and settlement.scope in {
+        SettlementScope.PERIOD_ONLY,
+        SettlementScope.REGULATION_TIME,
+    }:
+        return (
+            FOOTBALL_FIRST_HALF_MINUTES + MODELLED_SETTLEMENT_BUFFER_MINUTES,
+            LOCK_BASIS_KICKOFF_PLUS_FIRST_HALF_PLUS_SETTLEMENT_BUFFER,
+        )
+    return None, None
+
+
+def lock_hours_until_capital_release(
+    kickoff_utc: datetime | None,
+    as_of: datetime | None,
+    *,
+    market: CanonicalMarket | None,
+) -> tuple[Decimal | None, str | None]:
+    """Modelled hours until capital can be treated as released after settlement.
+
+    Time-to-kickoff is never returned as a capital-release duration. In-play
+    remaining time is omitted without a match clock.
+    """
+
+    if kickoff_utc is None or as_of is None or market is None:
+        return None, None
+    if as_of >= kickoff_utc:
+        return None, None
+    extra_minutes, basis = _modelled_post_kickoff_lock_minutes(market)
+    if extra_minutes is None or basis is None:
+        return None, None
+    hours_to_kickoff = Decimal(str((kickoff_utc - as_of).total_seconds())) / Decimal("3600")
+    hours = hours_to_kickoff + (extra_minutes / Decimal("60"))
+    if hours <= 0:
+        return None, None
+    return hours.quantize(Decimal("0.0001")), basis
 
 
 def request_from_paper_decision(
@@ -260,6 +329,7 @@ def request_from_paper_decision(
                     outcome=quote.outcome,
                     venue=quote.venue,
                     source_market_id=quote.source_market_id,
+                    source_runner_id=quote.source_runner_id,
                     net_decimal_odds=quote.net_decimal_odds,
                     max_stake_reporting=quote.cumulative_depth,
                     native_currency=currency,

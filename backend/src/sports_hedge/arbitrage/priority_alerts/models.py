@@ -113,6 +113,7 @@ class PriorityLeg(BaseModel):
     outcome: str
     venue: VenueName
     source_market_id: str
+    source_runner_id: str | None = None
     net_decimal_odds: Decimal = Field(gt=Decimal("1"))
     max_stake_reporting: Decimal = Field(gt=Decimal("0"))
     native_currency: str
