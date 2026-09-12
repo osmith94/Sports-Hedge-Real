@@ -80,6 +80,7 @@ def _market(
             scope=SettlementScope.INCLUDING_EXTRA_TIME if extra_time else SettlementScope.REGULATION_TIME,
             period=FootballPeriod.FULL_TIME,
             line=line,
+            push_possible=(line == line.to_integral_value()) if line is not None else False,
             extra_time_included=extra_time,
             penalties_included=False,
         ),

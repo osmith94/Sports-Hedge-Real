@@ -111,6 +111,17 @@ class SettlementFingerprint(BaseModel):
         return True
 
 
+def line_push_possible(line: Decimal | None) -> bool | None:
+    """Integer lines can push/void; half-lines cannot; quarter-lines are unknown."""
+
+    if line is None:
+        return None
+    twice = line * Decimal("2")
+    if twice != twice.to_integral_value():
+        return None
+    return line == line.to_integral_value()
+
+
 class CanonicalEvent(BaseModel):
     sport: str = "football"
     competition: str
