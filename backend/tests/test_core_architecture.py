@@ -165,7 +165,7 @@ def test_two_way_arbitrage_respects_matchbook_venue_capital() -> None:
     assert capped.total_stake < unconstrained.total_stake
 
 
-def test_smarkets_quotes_are_excluded_from_solver() -> None:
+def test_smarkets_standing_pool_does_not_cap_solver() -> None:
     quotes = [
         ExecutableQuote(
             outcome="yes",
@@ -182,12 +182,14 @@ def test_smarkets_quotes_are_excluded_from_solver() -> None:
             max_stake=Decimal("100"),
         ),
     ]
-    result = CompleteSetArbitrageSolver().solve(
+    unconstrained = CompleteSetArbitrageSolver().solve(quotes)
+    ignored_pool = CompleteSetArbitrageSolver().solve(
         quotes,
-        venue_capital_limits={VenueName.SMARKETS: Decimal("5000")},
+        venue_capital_limits={VenueName.SMARKETS: Decimal("1")},
     )
-    assert result.is_arbitrage is False
-    assert result.rejection_reason == "smarkets_excluded_from_solver"
+    assert unconstrained.is_arbitrage is True
+    assert ignored_pool.is_arbitrage is True
+    assert ignored_pool.total_stake == unconstrained.total_stake
 
 
 def test_order_book_walker_uses_multiple_levels() -> None:

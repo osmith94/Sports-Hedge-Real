@@ -61,13 +61,6 @@ class CompleteSetArbitrageSolver:
                 raise ValueError("capital_limit must be positive")
             total_stake = min(total_stake, capital_limit)
 
-        if any(quote.venue is VenueName.SMARKETS for quote in quotes):
-            return ArbitrageSolution(
-                is_arbitrage=False,
-                implied_probability_sum=implied_sum,
-                rejection_reason="smarkets_excluded_from_solver",
-            )
-
         if venue_capital_limits:
             implied_by_venue: dict[VenueName, Decimal] = {}
             for quote in quotes:

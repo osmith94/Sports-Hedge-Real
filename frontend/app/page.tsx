@@ -128,7 +128,7 @@ export default async function ArbitragePage() {
         </div>
         <div className="heading-actions">
           <div className="demo-label">{apiAvailable ? "LIVE PAPER READ MODEL" : "PAPER API OFFLINE"}</div>
-          <a className="pool-link" href="#demo-walkthrough">Demo walkthrough</a>
+          <a className="pool-link" href="#demo-walkthrough">Demo walkthrough · not live operations</a>
         </div>
       </div>
 
@@ -296,9 +296,10 @@ export default async function ArbitragePage() {
       </section>
 
       <details className="demo-walkthrough" id="demo-walkthrough">
-        <summary>Demo walkthrough · fictional tickets (hidden from live path)</summary>
+        <summary>Demo walkthrough · not live operations</summary>
         <p className="section-copy">
-          Labelled DEMO / FIXTURE training content. Not mixed into discovery, watchlist, P&amp;L or standing pools.
+          Labelled DEMO / FIXTURE training content, including the Newcastle United v Arsenal MANUAL_EXTERNAL ticket.
+          Not mixed into discovery, watchlist, P&amp;L or standing pools.
         </p>
         <OpportunityCard item={DEMO_MANUAL_EXTERNAL} />
         {externalAlert ? <ExternalLegWorkflow alert={externalAlert} /> : null}
