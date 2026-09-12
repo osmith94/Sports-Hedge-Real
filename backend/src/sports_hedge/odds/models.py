@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
@@ -10,8 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.domain.football import FootballPeriod, MarketFamily, SettlementFingerprint
 from sports_hedge.domain.models import MarketSide
-from sports_hedge.facts.catalog import CompetitionCode
-from sports_hedge.facts.identity import KickoffPrecision
+from sports_hedge.facts.identity import KickoffPrecision, require_aware
 
 
 class QualityTier(StrEnum):
@@ -62,11 +61,12 @@ class OddsObservation(BaseModel):
     source_url: str | None = None
     retrieved_at: datetime
     raw_payload_hash: str | None = None
+    source_observation_key: str
     quality_tier: QualityTier
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     semantics_complete: bool = False
     settlement_key: str | None = None
-    competition_code: CompetitionCode
+    competition_id: str
     season: str
     home_team: str
     away_team: str
@@ -75,13 +75,11 @@ class OddsObservation(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def ensure_timezones(self) -> OddsObservation:
-        if self.observed_at is not None and self.observed_at.tzinfo is None:
-            self.observed_at = self.observed_at.replace(tzinfo=UTC)
-        if self.retrieved_at.tzinfo is None:
-            self.retrieved_at = self.retrieved_at.replace(tzinfo=UTC)
-        if self.kickoff_utc.tzinfo is None:
-            self.kickoff_utc = self.kickoff_utc.replace(tzinfo=UTC)
+    def reject_naive_timestamps(self) -> OddsObservation:
+        require_aware(self.retrieved_at, "retrieved_at")
+        require_aware(self.kickoff_utc, "kickoff_utc")
+        if self.observed_at is not None:
+            require_aware(self.observed_at, "observed_at")
         return self
 
     def market_equivalence_key(self) -> tuple[str, ...] | None:
@@ -103,10 +101,15 @@ class OddsObservation(BaseModel):
 
 
 class CanonicalMatchFact(BaseModel):
-    """Match-level fact row used as the coverage denominator."""
+    """Odds-side match index used as a coverage cache.
+
+    This is not the historical football facts repository. Match scores and
+    events belong to the shared facts warehouse (PR #35). This row only
+    records that odds ingestion observed a canonical match ID.
+    """
 
     canonical_match_id: str
-    competition_code: CompetitionCode
+    competition_id: str
     season: str
     home_team: str
     away_team: str
@@ -114,17 +117,13 @@ class CanonicalMatchFact(BaseModel):
     kickoff_precision: KickoffPrecision = KickoffPrecision.MINUTE
     source: str
     source_match_id: str | None = None
-    home_goals: int | None = None
-    away_goals: int | None = None
     retrieved_at: datetime
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def ensure_timezones(self) -> CanonicalMatchFact:
-        if self.kickoff_utc.tzinfo is None:
-            self.kickoff_utc = self.kickoff_utc.replace(tzinfo=UTC)
-        if self.retrieved_at.tzinfo is None:
-            self.retrieved_at = self.retrieved_at.replace(tzinfo=UTC)
+    def reject_naive_timestamps(self) -> CanonicalMatchFact:
+        require_aware(self.kickoff_utc, "kickoff_utc")
+        require_aware(self.retrieved_at, "retrieved_at")
         return self
 
 
@@ -139,9 +138,8 @@ class MappingException(BaseModel):
     raw_payload_hash: str | None = None
 
     @model_validator(mode="after")
-    def ensure_timezone(self) -> MappingException:
-        if self.retrieved_at.tzinfo is None:
-            self.retrieved_at = self.retrieved_at.replace(tzinfo=UTC)
+    def reject_naive_timestamps(self) -> MappingException:
+        require_aware(self.retrieved_at, "retrieved_at")
         return self
 
 
@@ -182,13 +180,12 @@ class RawOddsRecord(BaseModel):
     mapping_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
-    def ensure_timezones(self) -> RawOddsRecord:
-        if self.kickoff_utc is not None and self.kickoff_utc.tzinfo is None:
-            self.kickoff_utc = self.kickoff_utc.replace(tzinfo=UTC)
-        if self.observed_at is not None and self.observed_at.tzinfo is None:
-            self.observed_at = self.observed_at.replace(tzinfo=UTC)
-        if self.retrieved_at.tzinfo is None:
-            self.retrieved_at = self.retrieved_at.replace(tzinfo=UTC)
+    def reject_naive_timestamps(self) -> RawOddsRecord:
+        require_aware(self.retrieved_at, "retrieved_at")
+        if self.kickoff_utc is not None:
+            require_aware(self.kickoff_utc, "kickoff_utc")
+        if self.observed_at is not None:
+            require_aware(self.observed_at, "observed_at")
         return self
 
 
@@ -198,6 +195,42 @@ def payload_hash(payload: dict[str, Any]) -> str:
 
 
 def observation_id_for(
+    *,
+    source: str,
+    source_market_id: str | None,
+    selection: str,
+    side: MarketSide | None,
+    quote_type: QuoteType,
+    observed_at: datetime | None,
+    line: Decimal | None,
+    decimal_odds: Decimal | None,
+    raw_payload_hash: str | None,
+) -> str:
+    """Identity of one stored observation including content.
+
+    Exact replays keep this ID (idempotent). A corrected price or payload
+    hash produces a new ID so revisions are append-only.
+    """
+
+    payload = "|".join(
+        [
+            source_observation_key(
+                source=source,
+                source_market_id=source_market_id,
+                selection=selection,
+                side=side,
+                quote_type=quote_type,
+                observed_at=observed_at,
+                line=line,
+            ),
+            "" if decimal_odds is None else format(decimal_odds, "f"),
+            raw_payload_hash or "",
+        ]
+    )
+    return f"obs:{sha256(payload.encode()).hexdigest()[:24]}"
+
+
+def source_observation_key(
     *,
     source: str,
     source_market_id: str | None,
@@ -218,7 +251,7 @@ def observation_id_for(
             "" if line is None else format(line, "f"),
         ]
     )
-    return f"obs:{sha256(payload.encode('utf-8')).hexdigest()[:24]}"
+    return f"srcobs:{sha256(payload.encode()).hexdigest()[:24]}"
 
 
 def assign_quality_tier(

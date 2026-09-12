@@ -19,26 +19,26 @@ truth; this document is a review snapshot.
 
 | Competition | Season | Market | Matches | With market | Opening 1X2 | Closing 1X2 | Timestamped | Liquidity | Missing | Calendar gap |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| premier_league | 2025/26 | match_result | 2 | 2 | 0 | 2 | 1 | 1 | 0 | 378 |
-| premier_league | 2025/26 | total_goals | 2 | 1 | 0 | 0 | 1 | 0 | 1 | 378 |
-| premier_league | 2025/26 | both_teams_to_score | 2 | 1 | 0 | 0 | 1 | 0 | 1 | 378 |
-| premier_league | 2025/26 | corners | 2 | 0 | 0 | 0 | 0 | 0 | 2 | 378 |
-| premier_league | 2025/26 | cards | 2 | 0 | 0 | 0 | 0 | 0 | 2 | 378 |
+| premier-league | 2025/26 | match_result | 2 | 2 | 0 | 2 | 1 | 1 | 0 | 378 |
+| premier-league | 2025/26 | total_goals | 2 | 1 | 0 | 0 | 1 | 0 | 1 | 378 |
+| premier-league | 2025/26 | both_teams_to_score | 2 | 1 | 0 | 0 | 1 | 0 | 1 | 378 |
+| premier-league | 2025/26 | corners | 2 | 0 | 0 | 0 | 0 | 0 | 2 | 378 |
+| premier-league | 2025/26 | cards | 2 | 0 | 0 | 0 | 0 | 0 | 2 | 378 |
 | championship | 2025/26 | match_result | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 551 |
 | championship | 2025/26 | total_goals | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 551 |
 | championship | 2025/26 | both_teams_to_score | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 551 |
 | championship | 2025/26 | corners | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 551 |
 | championship | 2025/26 | cards | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 551 |
-| la_liga | 2025/26 | match_result | 1 | 1 | 0 | 0 | 1 | 1 | 0 | 379 |
-| la_liga | 2025/26 | total_goals | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 379 |
-| la_liga | 2025/26 | both_teams_to_score | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 379 |
-| la_liga | 2025/26 | corners | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 379 |
-| la_liga | 2025/26 | cards | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 379 |
-| champions_league | 2025/26 | match_result | 0 | 0 | 0 | 0 | 0 | 0 | 0 |  |
-| champions_league | 2025/26 | total_goals | 0 | 0 | 0 | 0 | 0 | 0 | 0 |  |
-| champions_league | 2025/26 | both_teams_to_score | 0 | 0 | 0 | 0 | 0 | 0 | 0 |  |
-| champions_league | 2025/26 | corners | 0 | 0 | 0 | 0 | 0 | 0 | 0 |  |
-| champions_league | 2025/26 | cards | 0 | 0 | 0 | 0 | 0 | 0 | 0 |  |
+| la-liga | 2025/26 | match_result | 1 | 1 | 0 | 0 | 1 | 1 | 0 | 379 |
+| la-liga | 2025/26 | total_goals | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 379 |
+| la-liga | 2025/26 | both_teams_to_score | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 379 |
+| la-liga | 2025/26 | corners | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 379 |
+| la-liga | 2025/26 | cards | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 379 |
+| champions-league | 2025/26 | match_result | 0 | 0 | 0 | 0 | 0 | 0 | 0 |  |
+| champions-league | 2025/26 | total_goals | 0 | 0 | 0 | 0 | 0 | 0 | 0 |  |
+| champions-league | 2025/26 | both_teams_to_score | 0 | 0 | 0 | 0 | 0 | 0 | 0 |  |
+| champions-league | 2025/26 | corners | 0 | 0 | 0 | 0 | 0 | 0 | 0 |  |
+| champions-league | 2025/26 | cards | 0 | 0 | 0 | 0 | 0 | 0 | 0 |  |
 
 ## Source coverage
 

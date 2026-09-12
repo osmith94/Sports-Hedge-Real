@@ -62,7 +62,7 @@ def render_coverage_markdown(report: CoverageReport) -> str:
         ]
     )
     for row in report.market_coverage:
-        if not row.matches_in_repository and row.competition_code != "champions_league":
+        if not row.matches_in_repository and row.competition_code != "champions-league":
             continue
         lines.append(
             "| {comp} | {season} | {family} | {total} | {with_m} | {open_} | {close} | {ts} | {liq} | {miss} | {gap} |".format(

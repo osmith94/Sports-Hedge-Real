@@ -3,8 +3,9 @@ from __future__ import annotations
 from hashlib import sha256
 
 from sports_hedge.domain.football import FootballPeriod, MarketFamily, SettlementFingerprint
-from sports_hedge.facts.catalog import competition_from_label
-from sports_hedge.facts.identity import build_match_ref
+from sports_hedge.facts.catalog import DEFAULT_CATALOG
+from sports_hedge.facts.errors import IdentityMappingError
+from sports_hedge.facts.identity import build_match_ref, require_aware
 from sports_hedge.odds.models import (
     MappingException,
     OddsObservation,
@@ -12,6 +13,7 @@ from sports_hedge.odds.models import (
     assign_quality_tier,
     observation_id_for,
     payload_hash,
+    source_observation_key,
 )
 
 
@@ -32,15 +34,21 @@ def map_raw_record(record: RawOddsRecord) -> OddsObservation:
     assert record.market_family is not None
     assert record.period is not None
     assert record.selection is not None
+    require_aware(record.retrieved_at, "retrieved_at")
+    require_aware(record.kickoff_utc, "kickoff_utc")
 
-    match = build_match_ref(
-        competition=record.competition,
-        home_team=record.home_team,
-        away_team=record.away_team,
-        kickoff_utc=record.kickoff_utc,
-        season=record.season,
-        kickoff_precision=record.kickoff_precision,
-    )
+    try:
+        match = build_match_ref(
+            competition=record.competition,
+            home_team=record.home_team,
+            away_team=record.away_team,
+            kickoff_utc=record.kickoff_utc,
+            season=record.season,
+            kickoff_precision=record.kickoff_precision,
+        )
+    except IdentityMappingError as error:
+        raise OddsMappingError(str(error)) from error
+
     settlement = record.settlement or SettlementFingerprint(
         period=record.period,
         line=record.line,
@@ -59,6 +67,16 @@ def map_raw_record(record: RawOddsRecord) -> OddsObservation:
         liquidity=record.liquidity,
         venue_kind=record.venue_kind,
     )
+    raw_hash = payload_hash(record.raw_payload) if record.raw_payload else None
+    key = source_observation_key(
+        source=record.source,
+        source_market_id=record.source_market_id,
+        selection=record.selection,
+        side=record.side,
+        quote_type=record.quote_type,
+        observed_at=record.observed_at,
+        line=record.line,
+    )
     observation_id = observation_id_for(
         source=record.source,
         source_market_id=record.source_market_id,
@@ -67,6 +85,8 @@ def map_raw_record(record: RawOddsRecord) -> OddsObservation:
         quote_type=record.quote_type,
         observed_at=record.observed_at,
         line=record.line,
+        decimal_odds=record.decimal_odds,
+        raw_payload_hash=raw_hash,
     )
     return OddsObservation(
         observation_id=observation_id,
@@ -90,31 +110,30 @@ def map_raw_record(record: RawOddsRecord) -> OddsObservation:
         commission_known=record.commission_known,
         source_url=record.source_url,
         retrieved_at=record.retrieved_at,
-        raw_payload_hash=payload_hash(record.raw_payload) if record.raw_payload else None,
+        raw_payload_hash=raw_hash,
+        source_observation_key=key,
         quality_tier=quality,
         confidence=record.mapping_confidence if record.mapping_confidence is not None else 1.0,
         semantics_complete=semantics_complete,
         settlement_key=settlement_key,
-        competition_code=match.competition_code,
-        season=match.season,
+        competition_id=match.competition_id,
+        season=match.season_label,
         home_team=match.home_team,
         away_team=match.away_team,
         kickoff_utc=match.kickoff_utc,
         kickoff_precision=match.kickoff_precision,
         metadata={
             "source_match_id": record.source_match_id,
-            "home_goals": record.home_goals,
-            "away_goals": record.away_goals,
+            "season_id": match.season_id,
+            "home_team_id": match.home_team_id,
+            "away_team_id": match.away_team_id,
         },
     )
 
 
 def mapping_exception_for(record: RawOddsRecord, error: OddsMappingError) -> MappingException:
-    field, reason, detail = _identity_issues(record)[0] if _identity_issues(record) else (
-        "record",
-        "mapping_failed",
-        str(error),
-    )
+    issues = _identity_issues(record)
+    field, reason, detail = issues[0] if issues else ("record", "mapping_failed", str(error))
     digest = sha256(f"{record.source}|{record.source_reference}|{reason}|{detail}".encode()).hexdigest()[:24]
     return MappingException(
         exception_id=f"map:{digest}",
@@ -135,21 +154,21 @@ def _identity_issues(record: RawOddsRecord) -> list[tuple[str, str, str]]:
     issues: list[tuple[str, str, str]] = []
     if not record.competition:
         issues.append(("competition", "missing_competition", "competition is required"))
-    elif (
-        competition_from_label(record.competition, record.season or "2025/26") is None
-        and competition_from_label(record.competition) is None
-    ):
-        issues.append(
-            (
-                "competition",
-                "unknown_competition",
-                f"cannot map competition {record.competition!r} without guessing",
-            )
-        )
+    else:
+        try:
+            DEFAULT_CATALOG.resolve_competition(record.competition)
+        except IdentityMappingError as error:
+            issues.append(("competition", "unknown_competition", str(error)))
     if not record.home_team or not record.away_team:
         issues.append(("teams", "missing_teams", "home_team and away_team are required"))
-    elif record.home_team.strip().casefold() == record.away_team.strip().casefold():
-        issues.append(("teams", "ambiguous_teams", "home and away teams are identical"))
+    else:
+        try:
+            home = DEFAULT_CATALOG.resolve_team(record.home_team)
+            away = DEFAULT_CATALOG.resolve_team(record.away_team)
+            if home.team_id == away.team_id:
+                issues.append(("teams", "ambiguous_teams", "home and away teams resolved to the same team"))
+        except IdentityMappingError as error:
+            issues.append(("teams", "unknown_team", str(error)))
     if record.kickoff_utc is None:
         issues.append(("kickoff_utc", "missing_kickoff", "kickoff is required for canonical match identity"))
     if record.market_family is None or record.market_family == MarketFamily.UNKNOWN:

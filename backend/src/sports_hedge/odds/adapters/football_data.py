@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from io import StringIO
 from pathlib import Path
@@ -118,7 +118,11 @@ class FootballDataCsvAdapter:
                 semantics_complete=True,
                 home_goals=_int_or_none(row.get("FTHG")),
                 away_goals=_int_or_none(row.get("FTAG")),
-                raw_payload={"div": div, "kind": "facts"},
+                raw_payload={
+                    "div": div,
+                    "kind": "facts",
+                    "kickoff_timezone": str(_TZ.get(div, ZoneInfo("UTC"))),
+                },
             )
         )
         for book, columns in _BOOKMAKER_1X2.items():
@@ -260,7 +264,9 @@ def _parse_kickoff(row: dict[str, str], div: str) -> tuple[datetime | None, Kick
                 precision = KickoffPrecision.MINUTE
             except ValueError:
                 precision = KickoffPrecision.DATE
-    return datetime(year, month, day, hour, minute, tzinfo=tzinfo), precision
+    local = datetime(year, month, day, hour, minute, tzinfo=tzinfo)
+    # Explicit adapter conversion: local kickoff -> UTC for the shared hist: identity.
+    return local.astimezone(UTC), precision
 
 
 def _decimal_or_none(value: str | None) -> Decimal | None:

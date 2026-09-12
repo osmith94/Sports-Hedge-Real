@@ -16,14 +16,23 @@ the current coverage target.
 
 ## Canonical identity
 
-Odds map onto the same match/team/competition identities as the football
-facts surface (`sports_hedge.facts`):
+Odds and historical match facts share one warehouse identity contract in
+`sports_hedge.facts`. This is the same `hist:` uuid5 scheme used by PR #35:
 
-- `canonical_match_id` is derived from sport, competition, season, aliased
-  home/away names and a five-minute kickoff bucket.
-- Source IDs are provenance, never identity.
-- Ambiguous competition, missing kickoff, or identical home/away labels fail
-  closed into `mapping_exceptions`.
+```text
+hist:{uuid5(NAMESPACE_URL, competition_id|season_id|home_team_id|away_team_id|kickoff_utc)}
+```
+
+- Competition IDs are `premier-league`, `championship`, `la-liga`, `champions-league`.
+- Season IDs are `{competition_id}:2025-26`.
+- Team IDs come from an explicit catalog. Unknown or ambiguous names fail closed
+  and never mint a new canonical team.
+- Kickoff for the ID seed is the UTC instant of an **aware** timestamp.
+  Naive datetimes are rejected. Adapters that receive local times (for example
+  football-data.co.uk) must attach a documented timezone and convert explicitly.
+- Odds store an `odds_match_index` only as a coverage cache of canonical match
+  IDs already seen. Match scores and events belong to the historical facts
+  repository, not this odds store.
 
 ## Quality tiers
 
@@ -79,8 +88,9 @@ cd backend
 python -m sports_hedge.odds.example_report
 ```
 
-Imports are idempotent (`observation_id` is a content hash) and write an
-`ingestion_checkpoints` cursor so a restart does not duplicate rows.
+Imports are idempotent for exact replays. A corrected price or payload hash
+writes a new observation (`source_observation_key` stays the same) instead of
+overwriting the original row. Checkpoints live in `ingestion_checkpoints`.
 
 ## Coverage and Excel
 

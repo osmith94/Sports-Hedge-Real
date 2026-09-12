@@ -9,7 +9,6 @@ from typing import Any
 
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import MarketSide
-from sports_hedge.facts.catalog import CompetitionCode
 from sports_hedge.facts.identity import KickoffPrecision
 from sports_hedge.odds.models import (
     CanonicalMatchFact,
@@ -32,9 +31,9 @@ class SqliteOddsRepository:
     def _create_schema(self) -> None:
         self._connection.executescript(
             """
-            CREATE TABLE IF NOT EXISTS canonical_matches (
+            CREATE TABLE IF NOT EXISTS odds_match_index (
                 canonical_match_id TEXT PRIMARY KEY,
-                competition_code TEXT NOT NULL,
+                competition_id TEXT NOT NULL,
                 season TEXT NOT NULL,
                 home_team TEXT NOT NULL,
                 away_team TEXT NOT NULL,
@@ -42,8 +41,6 @@ class SqliteOddsRepository:
                 kickoff_precision TEXT NOT NULL,
                 source TEXT NOT NULL,
                 source_match_id TEXT,
-                home_goals INTEGER,
-                away_goals INTEGER,
                 retrieved_at TEXT NOT NULL,
                 metadata_json TEXT NOT NULL
             );
@@ -71,11 +68,12 @@ class SqliteOddsRepository:
                 source_url TEXT,
                 retrieved_at TEXT NOT NULL,
                 raw_payload_hash TEXT,
+                source_observation_key TEXT NOT NULL,
                 quality_tier TEXT NOT NULL,
                 confidence REAL NOT NULL,
                 semantics_complete INTEGER NOT NULL,
                 settlement_key TEXT,
-                competition_code TEXT NOT NULL,
+                competition_id TEXT NOT NULL,
                 season TEXT NOT NULL,
                 home_team TEXT NOT NULL,
                 away_team TEXT NOT NULL,
@@ -104,33 +102,33 @@ class SqliteOddsRepository:
             CREATE INDEX IF NOT EXISTS idx_odds_match
                 ON odds_observations(canonical_match_id, market_family, quote_type);
             CREATE INDEX IF NOT EXISTS idx_odds_coverage
-                ON odds_observations(competition_code, season, source, market_family);
+                ON odds_observations(competition_id, season, source, market_family);
+            CREATE INDEX IF NOT EXISTS idx_odds_source_key
+                ON odds_observations(source_observation_key);
             CREATE INDEX IF NOT EXISTS idx_matches_universe
-                ON canonical_matches(competition_code, season);
+                ON odds_match_index(competition_id, season);
             """
         )
         self._connection.commit()
 
     def upsert_match(self, match: CanonicalMatchFact) -> bool:
         existing = self._connection.execute(
-            "SELECT canonical_match_id FROM canonical_matches WHERE canonical_match_id = ?",
+            "SELECT canonical_match_id FROM odds_match_index WHERE canonical_match_id = ?",
             (match.canonical_match_id,),
         ).fetchone()
         self._connection.execute(
             """
-            INSERT INTO canonical_matches (
-                canonical_match_id, competition_code, season, home_team, away_team,
-                kickoff_utc, kickoff_precision, source, source_match_id, home_goals,
-                away_goals, retrieved_at, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO odds_match_index (
+                canonical_match_id, competition_id, season, home_team, away_team,
+                kickoff_utc, kickoff_precision, source, source_match_id,
+                retrieved_at, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(canonical_match_id) DO UPDATE SET
-                home_goals = COALESCE(excluded.home_goals, canonical_matches.home_goals),
-                away_goals = COALESCE(excluded.away_goals, canonical_matches.away_goals),
-                source_match_id = COALESCE(excluded.source_match_id, canonical_matches.source_match_id)
+                source_match_id = COALESCE(excluded.source_match_id, odds_match_index.source_match_id)
             """,
             (
                 match.canonical_match_id,
-                match.competition_code.value,
+                match.competition_id,
                 match.season,
                 match.home_team,
                 match.away_team,
@@ -138,8 +136,6 @@ class SqliteOddsRepository:
                 match.kickoff_precision.value,
                 match.source,
                 match.source_match_id,
-                match.home_goals,
-                match.away_goals,
                 match.retrieved_at.isoformat(),
                 json.dumps(match.metadata),
             ),
@@ -162,10 +158,10 @@ class SqliteOddsRepository:
                 observation_id, canonical_match_id, source, source_market_id, source_reference,
                 venue, bookmaker, venue_kind, market_family, period, line, selection, side,
                 decimal_odds, observed_at, quote_type, spread, liquidity, commission_known,
-                source_url, retrieved_at, raw_payload_hash, quality_tier, confidence,
-                semantics_complete, settlement_key, competition_code, season, home_team,
-                away_team, kickoff_utc, kickoff_precision, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_url, retrieved_at, raw_payload_hash, source_observation_key, quality_tier,
+                confidence, semantics_complete, settlement_key, competition_id, season,
+                home_team, away_team, kickoff_utc, kickoff_precision, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             self._observation_row(observation),
         )
@@ -228,7 +224,7 @@ class SqliteOddsRepository:
 
     def list_matches(self) -> list[CanonicalMatchFact]:
         rows = self._connection.execute(
-            "SELECT * FROM canonical_matches ORDER BY kickoff_utc, canonical_match_id"
+            "SELECT * FROM odds_match_index ORDER BY kickoff_utc, canonical_match_id"
         ).fetchall()
         return [self._match_from_row(row) for row in rows]
 
@@ -265,11 +261,12 @@ class SqliteOddsRepository:
             observation.source_url,
             observation.retrieved_at.isoformat(),
             observation.raw_payload_hash,
+            observation.source_observation_key,
             observation.quality_tier.value,
             observation.confidence,
             int(observation.semantics_complete),
             observation.settlement_key,
-            observation.competition_code.value,
+            observation.competition_id,
             observation.season,
             observation.home_team,
             observation.away_team,
@@ -302,11 +299,12 @@ class SqliteOddsRepository:
             source_url=row["source_url"],
             retrieved_at=datetime.fromisoformat(row["retrieved_at"]),
             raw_payload_hash=row["raw_payload_hash"],
+            source_observation_key=row["source_observation_key"],
             quality_tier=QualityTier(row["quality_tier"]),
             confidence=row["confidence"],
             semantics_complete=bool(row["semantics_complete"]),
             settlement_key=row["settlement_key"],
-            competition_code=CompetitionCode(row["competition_code"]),
+            competition_id=row["competition_id"],
             season=row["season"],
             home_team=row["home_team"],
             away_team=row["away_team"],
@@ -318,7 +316,7 @@ class SqliteOddsRepository:
     def _match_from_row(self, row: sqlite3.Row) -> CanonicalMatchFact:
         return CanonicalMatchFact(
             canonical_match_id=row["canonical_match_id"],
-            competition_code=CompetitionCode(row["competition_code"]),
+            competition_id=row["competition_id"],
             season=row["season"],
             home_team=row["home_team"],
             away_team=row["away_team"],
@@ -326,8 +324,6 @@ class SqliteOddsRepository:
             kickoff_precision=KickoffPrecision(row["kickoff_precision"]),
             source=row["source"],
             source_match_id=row["source_match_id"],
-            home_goals=row["home_goals"],
-            away_goals=row["away_goals"],
             retrieved_at=datetime.fromisoformat(row["retrieved_at"]),
             metadata=json.loads(row["metadata_json"]),
         )

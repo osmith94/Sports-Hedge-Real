@@ -50,7 +50,7 @@ class OddsIngestionService:
                 continue
             match = CanonicalMatchFact(
                 canonical_match_id=observation.canonical_match_id,
-                competition_code=observation.competition_code,
+                competition_id=observation.competition_id,
                 season=observation.season,
                 home_team=observation.home_team,
                 away_team=observation.away_team,
@@ -58,8 +58,6 @@ class OddsIngestionService:
                 kickoff_precision=observation.kickoff_precision,
                 source=observation.source,
                 source_match_id=observation.metadata.get("source_match_id"),
-                home_goals=record.home_goals,
-                away_goals=record.away_goals,
                 retrieved_at=observation.retrieved_at,
                 metadata={"source_reference": observation.source_reference},
             )
