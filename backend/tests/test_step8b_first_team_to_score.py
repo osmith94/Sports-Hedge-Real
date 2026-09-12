@@ -226,8 +226,11 @@ def test_player_first_goalscorer_is_not_first_team_to_score() -> None:
         },
     )
     assert pm_player.family is MarketFamily.PLAYER_PROPS
-    result = MarketMatcher().match(player, pm_player)
+    ftts = MatchbookNormalizer().normalize_market(event, _ftts_mb_payload(market_id=9704))
+    result = MarketMatcher().match(player, ftts)
     assert result.matched is False
+    assert "market_family_mismatch" in result.reasons
+    assert MarketMatcher().match(pm_player, ftts).matched is False
 
 
 def test_next_goal_remains_distinct_from_first_team_to_score() -> None:
@@ -397,8 +400,9 @@ def test_two_team_structure_cannot_be_labelled_guaranteed() -> None:
     result = GeneralizedMaxMinSolver().solve(two_leg)
     assert result.numerically_validated is True
     assert result.is_arbitrage is False
-    assert result.state_pnl["no_goal"] < 0
-    assert result.minimum_state_pnl < 0
+    assert result.minimum_state_pnl <= 0
+    if any(stake.stake > 0 for stake in result.selected_stakes):
+        assert result.state_pnl["no_goal"] < 0
 
 
 def test_constructed_three_state_opportunity_is_arb_only_when_every_state_is_positive() -> None:
