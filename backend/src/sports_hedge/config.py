@@ -74,6 +74,10 @@ class Settings(BaseSettings):
 
     paper_bankroll_gbp: float = Field(default=5000.0, gt=0)
     paper_bankroll_usd: float = Field(default=5000.0, gt=0)
+    paper_treasury_seed_gbp: float = Field(default=1000.0, gt=0)
+    paper_treasury_demo_usd_gbp_per_unit: float = Field(default=0.80, gt=0)
+    paper_treasury_demo_fx_source: str = "paper_demo_fx_snapshot"
+    paper_treasury_include_kalshi: bool = True
     min_net_edge: float = Field(default=0.005, ge=0)
     max_slippage_bps: int = Field(default=25, ge=0)
     max_event_exposure_gbp: float = Field(default=1000.0, gt=0)

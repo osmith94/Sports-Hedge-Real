@@ -265,6 +265,7 @@ def test_capital_is_reported_by_native_pool_and_optional_strategy_reservation() 
         "polymarket/USD",
         "matchbook/GBP",
         "smarkets/GBP",
+        "kalshi/USD",
     }
 
     usd_reserved = report.native_balances_for(

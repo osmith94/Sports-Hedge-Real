@@ -13,6 +13,8 @@ from sports_hedge.accounting.paper_journal import (
     gbp_is_balanced,
     settlement_leg_postings,
 )
+from sports_hedge.treasury.service import PaperTreasuryError
+from sports_hedge.treasury.models import TreasuryLockRequest
 from sports_hedge.accounting.strategy_books import DimensionedPosting
 from sports_hedge.arbitrage.priority_alerts.fixed_exposure import revalidate_fixed_external_exposure
 from sports_hedge.arbitrage.priority_alerts.models import (
@@ -34,7 +36,7 @@ from sports_hedge.paper.chain import (
     SimulatePaperFillResult,
 )
 from sports_hedge.paper.fills import PaperFillConfig, PaperFillRecord, PaperOpportunityFills, PaperOpportunityLeg
-from sports_hedge.paper.models import PaperScanDecision
+from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.settlement import PaperSettlementError, compute_paper_settlement
 from sports_hedge.paper.simulator import PaperFillSimulator
 from sports_hedge.paper.trades import (
@@ -64,6 +66,16 @@ def paper_trade_id(opportunity_id: str) -> str:
 
     slug = opportunity_id.replace(":", "-").replace("/", "-")
     return f"ptrade-{slug}"
+
+
+def manual_external_fill_id(opportunity_id: str, operator_counterparty_reference: str) -> str:
+    """Stable fill/lock identity for an operator-recorded MANUAL_EXTERNAL leg.
+
+    The operator/counterparty reference stays in the id so it remains auditable.
+    Trade persistence and treasury locking must use this exact string.
+    """
+
+    return f"manual-external:{opportunity_id}:{operator_counterparty_reference}"
 
 
 class PaperOperationsError(ValueError):
@@ -339,43 +351,51 @@ class PaperOperationsService:
         except PaperSettlementError as exc:
             raise PaperOperationsError(str(exc)) from exc
 
-        source_id = f"settle:{trade.trade_id}:{request.source}:{request.source_id}"
-        postings = []
-        for leg in computation.legs:
-            venue = VenueName(leg.venue)
-            capital = CapitalSource(leg.capital_source)
-            postings.extend(
-                settlement_leg_postings(
-                    venue=venue,
-                    currency=leg.currency,
-                    stake_native=leg.filled_stake,
-                    net_payoff_native=leg.net_payoff,
-                    venue_fee_native=leg.venue_fee,
-                    amount_gbp_per_native=leg.fx_rate_gbp_per_unit,
-                    opportunity_id=trade.opportunity_id,
-                    capital_source=capital,
-                    canonical_event_id=trade.canonical_event_id,
-                    position_id=trade.trade_id,
-                    won=leg.won,
+        if self.ledger is not None:
+            try:
+                self.ledger.treasury.apply_settlement(
+                    trade, computation, request, settled_at=settled_at
                 )
+            except (PaperTreasuryError, DuplicateJournalError) as exc:
+                raise PaperOperationsError(str(exc)) from exc
+        else:
+            source_id = f"settle:{trade.trade_id}:{request.source}:{request.source_id}"
+            postings = []
+            for leg in computation.legs:
+                venue = VenueName(leg.venue)
+                capital = CapitalSource(leg.capital_source)
+                postings.extend(
+                    settlement_leg_postings(
+                        venue=venue,
+                        currency=leg.currency,
+                        stake_native=leg.filled_stake,
+                        net_payoff_native=leg.net_payoff,
+                        venue_fee_native=leg.venue_fee,
+                        amount_gbp_per_native=leg.fx_rate_gbp_per_unit,
+                        opportunity_id=trade.opportunity_id,
+                        capital_source=capital,
+                        canonical_event_id=trade.canonical_event_id,
+                        position_id=trade.trade_id,
+                        won=leg.won,
+                    )
+                )
+            entry = PaperJournalEntry(
+                source="paper_settlement",
+                source_id=source_id,
+                occurred_at=settled_at,
+                description=(
+                    f"PAPER-ONLY settlement outcome={request.winning_outcome} "
+                    f"source={request.source}:{request.source_id}"
+                ),
+                opportunity_id=trade.opportunity_id,
+                trade_id=trade.trade_id,
+                provenance=request.provenance,
+                postings=postings,
             )
-        entry = PaperJournalEntry(
-            source="paper_settlement",
-            source_id=source_id,
-            occurred_at=settled_at,
-            description=(
-                f"PAPER-ONLY settlement outcome={request.winning_outcome} "
-                f"source={request.source}:{request.source_id}"
-            ),
-            opportunity_id=trade.opportunity_id,
-            trade_id=trade.trade_id,
-            provenance=request.provenance,
-            postings=postings,
-        )
-        try:
-            self.journal.append_idempotent(entry)
-        except DuplicateJournalError as exc:
-            raise PaperOperationsError("conflicting_journal_facts") from exc
+            try:
+                self.journal.append_idempotent(entry)
+            except DuplicateJournalError as exc:
+                raise PaperOperationsError("conflicting_journal_facts") from exc
 
         trade.state = PaperTradeState.CLOSED
         trade.settled_at = settled_at
@@ -609,7 +629,9 @@ class PaperOperationsService:
                 capital = CapitalSource.MANUAL_EXTERNAL
                 filled_stake = confirmation.executed_size
                 filled_odds = confirmation.executed_price
-                fill_id = f"manual-external:{plan.opportunity_id}:{confirmation.operator_counterparty_reference}"
+                fill_id = manual_external_fill_id(
+                    plan.opportunity_id, confirmation.operator_counterparty_reference
+                )
                 requested = confirmation.executed_size
             legs.append(
                 PaperTradeLeg(
@@ -801,14 +823,15 @@ class PaperOperationsService:
         provenance: DataProvenance,
         simulate_external: bool = False,
     ) -> list[PaperJournalEntry]:
-        entries: list[PaperJournalEntry] = []
         fx = {item.currency: item for item in plan.fx_snapshots}
         modes = plan.execution_modes
         trade_id = paper_trade_id(plan.opportunity_id)
+        lock_requests: list[TreasuryLockRequest] = []
+        journal_specs: list[tuple[str, str, datetime, str, VenueName, str, Decimal, Decimal, CapitalSource]] = []
         for fill in fills.fills:
             if fill.filled_stake <= 0:
                 continue
-            rate = Decimal("1") if fill.currency == "GBP" else fx[fill.currency].gbp_per_unit
+            rate = self._lock_fx_rate(fill.venue, fill.currency, fx)
             amount_gbp = fill.filled_stake * rate
             mode = modes.get(fill.venue, LegExecutionMode.INTERNAL)
             simulated_external = simulate_external and mode is LegExecutionMode.EXTERNAL_OPERATOR
@@ -821,59 +844,117 @@ class PaperOperationsService:
                 if simulated_external
                 else "PAPER-ONLY simulated internal fill cash lock"
             )
+            lock_requests.append(
+                TreasuryLockRequest(
+                    venue=fill.venue,
+                    native_currency=fill.currency,
+                    amount_native=fill.filled_stake,
+                    lock_id=fill.fill_id,
+                    trade_id=trade_id,
+                    opportunity_id=plan.opportunity_id,
+                    source=source,
+                    reason=description,
+                    fx_rate_gbp_per_unit=rate,
+                    capital_source=leg_capital.value,
+                )
+            )
+            journal_specs.append(
+                (
+                    source,
+                    fill.fill_id,
+                    occurred_at,
+                    description,
+                    fill.venue,
+                    fill.currency,
+                    fill.filled_stake,
+                    amount_gbp,
+                    leg_capital,
+                )
+            )
+        if confirmation is not None:
+            rate = self._lock_fx_rate(confirmation.venue, confirmation.currency, fx)
+            fill_id = manual_external_fill_id(
+                plan.opportunity_id, confirmation.operator_counterparty_reference
+            )
+            lock_requests.append(
+                TreasuryLockRequest(
+                    venue=confirmation.venue,
+                    native_currency=confirmation.currency,
+                    amount_native=confirmation.executed_size,
+                    lock_id=fill_id,
+                    fill_id=fill_id,
+                    trade_id=trade_id,
+                    opportunity_id=plan.opportunity_id,
+                    source="manual_external_confirmation",
+                    reason="Operator-recorded MANUAL_EXTERNAL fill; Sports Hedge did not place this leg",
+                    fx_rate_gbp_per_unit=rate,
+                    capital_source=CapitalSource.MANUAL_EXTERNAL.value,
+                )
+            )
+            journal_specs.append(
+                (
+                    "manual_external_confirmation",
+                    fill_id,
+                    confirmation.executed_at,
+                    "Operator-recorded MANUAL_EXTERNAL fill; Sports Hedge did not place this leg",
+                    confirmation.venue,
+                    confirmation.currency,
+                    confirmation.executed_size,
+                    confirmation.executed_size * rate,
+                    CapitalSource.MANUAL_EXTERNAL,
+                )
+            )
+        if self.ledger is not None and lock_requests:
+            try:
+                return self.ledger.treasury.lock_capital(
+                    lock_requests, occurred_at=occurred_at, provenance=provenance
+                )
+            except PaperTreasuryError as exc:
+                raise PaperOperationsError(str(exc)) from exc
+        entries: list[PaperJournalEntry] = []
+        for spec in journal_specs:
+            source, source_id, when, description, venue, currency, native, amount_gbp, leg_capital = spec
             posted, _created = self.journal.append_idempotent(
                 PaperJournalEntry(
                     source=source,
-                    source_id=fill.fill_id,
-                    occurred_at=occurred_at,
+                    source_id=source_id,
+                    occurred_at=when,
                     description=description,
                     opportunity_id=plan.opportunity_id,
                     trade_id=trade_id,
                     provenance=provenance,
                     postings=cash_lock_postings(
-                        venue=fill.venue,
-                        currency=fill.currency,
-                        amount_native=fill.filled_stake,
+                        venue=venue,
+                        currency=currency,
+                        amount_native=native,
                         amount_gbp=amount_gbp,
-                        fx_rate_gbp_per_unit=rate,
+                        fx_rate_gbp_per_unit=(
+                            Decimal("1") if currency == "GBP" else amount_gbp / native
+                        ),
                         opportunity_id=plan.opportunity_id,
                         capital_source=leg_capital,
                         canonical_event_id=plan.canonical_event_id,
-                        position_id=fill.fill_id,
-                    ),
-                )
-            )
-            entries.append(posted)
-        if confirmation is not None:
-            rate = (
-                Decimal("1")
-                if confirmation.currency == "GBP"
-                else fx[confirmation.currency].gbp_per_unit
-            )
-            posted, _created = self.journal.append_idempotent(
-                PaperJournalEntry(
-                    source="manual_external_confirmation",
-                    source_id=f"{plan.opportunity_id}:{confirmation.operator_counterparty_reference}",
-                    occurred_at=confirmation.executed_at,
-                    description="Operator-recorded MANUAL_EXTERNAL fill; Sports Hedge did not place this leg",
-                    opportunity_id=plan.opportunity_id,
-                    trade_id=trade_id,
-                    provenance=provenance,
-                    postings=cash_lock_postings(
-                        venue=confirmation.venue,
-                        currency=confirmation.currency,
-                        amount_native=confirmation.executed_size,
-                        amount_gbp=confirmation.executed_size * rate,
-                        fx_rate_gbp_per_unit=rate,
-                        opportunity_id=plan.opportunity_id,
-                        capital_source=CapitalSource.MANUAL_EXTERNAL,
-                        canonical_event_id=plan.canonical_event_id,
-                        position_id=confirmation.operator_counterparty_reference,
+                        position_id=source_id,
                     ),
                 )
             )
             entries.append(posted)
         return entries
+
+    def _lock_fx_rate(
+        self,
+        venue: VenueName,
+        currency: str,
+        fx: dict[str, FxRateSnapshot],
+    ) -> Decimal:
+        if self.ledger is not None:
+            try:
+                return self.ledger.treasury.lock_fx_rate(venue, currency)
+            except PaperTreasuryError as exc:
+                raise PaperOperationsError(str(exc)) from exc
+        if currency.upper() == "GBP":
+            return Decimal("1")
+        return fx[currency].gbp_per_unit
 
 
 def _unfilled_legs_from_plan(plan: PaperFillPlan) -> list[PaperTradeLeg]:

@@ -119,6 +119,7 @@ class EconomicAccount(StrEnum):
     PNL_VENUE_FEES = "PNL:VENUE_FEES"
     PNL_FX_REALISED = "PNL:FX:REALISED"
     PNL_FX_UNREALISED = "PNL:FX:UNREALISED"
+    EQUITY_PAPER_SEED = "EQUITY:PAPER_SEED"
 
 
 _PRODUCT_MODULE_BY_BOOK = {
@@ -186,6 +187,7 @@ WELL_KNOWN_NATIVE_POOLS: tuple[NativeLiquidityPool, ...] = (
     NativeLiquidityPool(venue=VenueName.POLYMARKET, currency="USD"),
     NativeLiquidityPool(venue=VenueName.MATCHBOOK, currency="GBP"),
     NativeLiquidityPool(venue=VenueName.SMARKETS, currency="GBP"),
+    NativeLiquidityPool(venue=VenueName.KALSHI, currency="USD"),
 )
 
 

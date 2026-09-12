@@ -1,4 +1,4 @@
-export type Venue = "matchbook" | "polymarket" | "smarkets";
+export type Venue = "matchbook" | "polymarket" | "smarkets" | "kalshi";
 
 export type MarketFamily =
   | "match_result"
@@ -614,6 +614,78 @@ export type PaperLiquiditySnapshot = {
 
 export function getPaperLiquidityPools(): Promise<PaperLiquiditySnapshot> {
   return request("/paper/liquidity-pools");
+}
+
+export type PaperTreasuryPool = {
+  pool_id: string;
+  session_id: string;
+  venue: Venue;
+  native_currency: string;
+  identity: string;
+  seed_native: string | number;
+  available_cash: string | number;
+  locked_capital: string | number;
+  realised_pnl_native: string | number;
+  cumulative_fees_native: string | number;
+  gbp_carrying_value?: string | number | null;
+  gbp_carrying_status: string;
+  fx_rate_gbp_per_unit?: string | number | null;
+  fx_source?: string | null;
+  fx_as_of?: string | null;
+};
+
+export type PaperTreasuryEvent = {
+  event_id: string;
+  session_id: string;
+  venue: Venue;
+  native_currency: string;
+  event_type: string;
+  native_amount: string | number;
+  occurred_at: string;
+  trade_id?: string | null;
+  opportunity_id?: string | null;
+  lock_id?: string | null;
+  source: string;
+  source_id: string;
+  reason: string;
+  fx_source?: string | null;
+};
+
+export type PaperTreasurySnapshot = {
+  data_kind: string;
+  capital_kind: string;
+  execution_enabled: boolean;
+  mode: string;
+  session?: {
+    session_id: string;
+    opened_at: string;
+    seed_gbp: string | number;
+    fx_rate_usd_gbp: string | number;
+    fx_source: string;
+    fx_as_of: string;
+    include_kalshi: boolean;
+    reason: string;
+  } | null;
+  pools: PaperTreasuryPool[];
+  events: PaperTreasuryEvent[];
+  note: string;
+};
+
+export function getPaperTreasury(): Promise<PaperTreasurySnapshot> {
+  return request("/paper/treasury");
+}
+
+export async function resetPaperTreasury(reason = "explicit paper treasury demo reset"): Promise<PaperTreasurySnapshot> {
+  const response = await fetch(`${API_BASE}/paper/treasury/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<PaperTreasurySnapshot>;
 }
 
 export async function savePaperLiquidityPools(

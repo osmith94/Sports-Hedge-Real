@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from sqlite3 import IntegrityError
+from typing import Iterator
 
 from sports_hedge.accounting.paper_journal import (
     DuplicateJournalError,
@@ -29,8 +31,9 @@ from sports_hedge.paper.trades import (
 class SqlitePaperJournal:
     """Durable wrap of the in-memory PaperJournal contract."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
-        self._connection = connection
+    def __init__(self, ledger: "SqlitePaperLedger") -> None:
+        self._ledger = ledger
+        self._connection = ledger._connection
         self._memory = PaperJournal()
         self._hydrate_memory()
 
@@ -66,7 +69,7 @@ class SqlitePaperJournal:
                     json.dumps(posted.model_dump(mode="json")),
                 ),
             )
-            self._connection.commit()
+            self._ledger._commit()
         except IntegrityError as exc:
             raise DuplicateJournalError(
                 f"duplicate journal {entry.source}:{entry.source_id}"
@@ -94,8 +97,9 @@ class SqlitePaperJournal:
 
 
 class SqlitePaperTradeRepository:
-    def __init__(self, connection: sqlite3.Connection) -> None:
-        self._connection = connection
+    def __init__(self, ledger: "SqlitePaperLedger") -> None:
+        self._ledger = ledger
+        self._connection = ledger._connection
 
     def get(self, trade_id: str) -> PaperTrade | None:
         row = self._connection.execute(
@@ -257,7 +261,7 @@ class SqlitePaperTradeRepository:
                     event.detail,
                 ),
             )
-        self._connection.commit()
+        self._ledger._commit()
         return trade
 
     def _trade_from_row(self, row: sqlite3.Row) -> PaperTrade:
@@ -348,14 +352,61 @@ class SqlitePaperTradeRepository:
 
 
 class SqlitePaperLedger:
-    """One SQLite file for paper trades and the paper subledger."""
+    """One SQLite file for paper trades, the paper subledger, and paper treasury."""
 
-    def __init__(self, database: str | Path = ":memory:") -> None:
+    def __init__(
+        self,
+        database: str | Path = ":memory:",
+        *,
+        seed_gbp: Decimal = Decimal("1000"),
+        usd_gbp_per_unit: Decimal = Decimal("0.80"),
+        fx_source: str = "paper_demo_fx_snapshot",
+        include_kalshi: bool = True,
+        auto_seed: bool = True,
+    ) -> None:
+        from sports_hedge.treasury.service import PaperTreasuryService
+
+        self._tx_depth = 0
         self._connection = sqlite3.connect(str(database), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._connection.isolation_level = None
         self._create_schema()
-        self.journal = SqlitePaperJournal(self._connection)
-        self.trades = SqlitePaperTradeRepository(self._connection)
+        self.journal = SqlitePaperJournal(self)
+        self.trades = SqlitePaperTradeRepository(self)
+        self.treasury = PaperTreasuryService(self)
+        if auto_seed:
+            self.treasury.ensure_demo_session(
+                seed_gbp=seed_gbp,
+                usd_gbp_per_unit=usd_gbp_per_unit,
+                fx_source=fx_source,
+                include_kalshi=include_kalshi,
+            )
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        self._tx_depth += 1
+        started = self._tx_depth == 1
+        if started:
+            self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            if started:
+                self._connection.commit()
+        except Exception:
+            if started:
+                self._connection.rollback()
+                self.reload_journal()
+            raise
+        finally:
+            self._tx_depth -= 1
+
+    def _commit(self) -> None:
+        if self._tx_depth == 0:
+            self._connection.commit()
+
+    def reload_journal(self) -> None:
+        self.journal._memory = PaperJournal()
+        self.journal._hydrate_memory()
 
     def _create_schema(self) -> None:
         self._connection.executescript(
@@ -436,10 +487,81 @@ class SqlitePaperLedger:
             CREATE INDEX IF NOT EXISTS idx_paper_trades_state ON paper_trades(state);
             CREATE INDEX IF NOT EXISTS idx_paper_journal_opportunity
                 ON paper_journal_entries(opportunity_id);
+
+            CREATE TABLE IF NOT EXISTS paper_treasury_sessions (
+                session_id TEXT PRIMARY KEY,
+                opened_at TEXT NOT NULL,
+                closed_at TEXT,
+                active INTEGER NOT NULL,
+                provenance TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                seed_gbp TEXT NOT NULL,
+                fx_rate_usd_gbp TEXT NOT NULL,
+                fx_source TEXT NOT NULL,
+                fx_as_of TEXT NOT NULL,
+                include_kalshi INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS paper_treasury_pools (
+                pool_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                venue TEXT NOT NULL,
+                native_currency TEXT NOT NULL,
+                seed_native TEXT NOT NULL,
+                available_cash TEXT NOT NULL,
+                locked_capital TEXT NOT NULL,
+                realised_pnl_native TEXT NOT NULL,
+                cumulative_fees_native TEXT NOT NULL,
+                fx_rate_gbp_per_unit TEXT,
+                fx_source TEXT,
+                fx_as_of TEXT,
+                UNIQUE(session_id, venue, native_currency)
+            );
+
+            CREATE TABLE IF NOT EXISTS paper_treasury_events (
+                event_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                pool_id TEXT NOT NULL,
+                venue TEXT NOT NULL,
+                native_currency TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                native_amount TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                trade_id TEXT,
+                opportunity_id TEXT,
+                lock_id TEXT,
+                source TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                fx_rate_gbp_per_unit TEXT,
+                fx_source TEXT,
+                journal_id TEXT,
+                UNIQUE(source, source_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS paper_treasury_locks (
+                lock_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                pool_id TEXT NOT NULL,
+                trade_id TEXT,
+                opportunity_id TEXT,
+                venue TEXT NOT NULL,
+                native_currency TEXT NOT NULL,
+                locked_native TEXT NOT NULL,
+                released_native TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'paper_fill_simulator',
+                capital_source TEXT NOT NULL DEFAULT 'AUTO_POOL',
+                fill_id TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_paper_treasury_events_session
+                ON paper_treasury_events(session_id, occurred_at);
             """
         )
         self._connection.commit()
         self._ensure_unwind_identity_columns()
+        self._ensure_treasury_lock_fact_columns()
 
     def _ensure_unwind_identity_columns(self) -> None:
         trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
@@ -457,6 +579,23 @@ class SqlitePaperLedger:
         for name, spec in additions.items():
             if name not in leg_cols:
                 self._connection.execute(f"ALTER TABLE paper_trade_legs ADD COLUMN {name} {spec}")
+        self._connection.commit()
+
+    def _ensure_treasury_lock_fact_columns(self) -> None:
+        columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(paper_treasury_locks)")
+        }
+        if "source" not in columns:
+            self._connection.execute(
+                "ALTER TABLE paper_treasury_locks ADD COLUMN source TEXT NOT NULL DEFAULT 'paper_fill_simulator'"
+            )
+        if "capital_source" not in columns:
+            self._connection.execute(
+                "ALTER TABLE paper_treasury_locks ADD COLUMN capital_source TEXT NOT NULL DEFAULT 'AUTO_POOL'"
+            )
+        if "fill_id" not in columns:
+            self._connection.execute("ALTER TABLE paper_treasury_locks ADD COLUMN fill_id TEXT")
         self._connection.commit()
 
     def close(self) -> None:

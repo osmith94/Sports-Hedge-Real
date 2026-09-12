@@ -200,6 +200,44 @@ def _strategy_dims(
     )
 
 
+def seed_funding_postings(
+    *,
+    venue: VenueName,
+    currency: str,
+    amount_native: Decimal,
+    amount_gbp: Decimal,
+    fx_rate_gbp_per_unit: Decimal,
+    opportunity_id: str,
+) -> list[PaperJournalPosting]:
+    """Paper-only seed of available native cash. Balanced in GBP. Not live funding."""
+
+    dims = PostingDimensions(
+        attribution=AttributionScope.SHARED_UNALLOCATED,
+        capital_source=CapitalSource.SHARED_UNALLOCATED,
+        venue=venue,
+        currency=currency,
+        opportunity_id=opportunity_id,
+    )
+    return [
+        PaperJournalPosting(
+            account_code=cash_account(venue, currency, CashState.AVAILABLE),
+            side=PostingSide.DEBIT,
+            amount_native=amount_native,
+            amount_gbp=amount_gbp,
+            fx_rate_gbp_per_unit=fx_rate_gbp_per_unit,
+            dimensions=dims,
+        ),
+        PaperJournalPosting(
+            account_code=EconomicAccount.EQUITY_PAPER_SEED.value,
+            side=PostingSide.CREDIT,
+            amount_native=amount_native,
+            amount_gbp=amount_gbp,
+            fx_rate_gbp_per_unit=fx_rate_gbp_per_unit,
+            dimensions=dims,
+        ),
+    ]
+
+
 def cash_lock_postings(
     *,
     venue: VenueName,
@@ -309,6 +347,74 @@ def settlement_leg_postings(
             posting(cash_account(venue, currency, CashState.LOCKED), PostingSide.CREDIT, stake_native)
         )
         posts.append(posting(EconomicAccount.PNL_BETTING.value, PostingSide.DEBIT, stake_native))
+    return posts
+
+
+def unwind_close_postings(
+    *,
+    venue: VenueName,
+    currency: str,
+    locked_native: Decimal,
+    realised_pnl_native: Decimal,
+    fee_native: Decimal,
+    amount_gbp_per_native: Decimal,
+    opportunity_id: str,
+    capital_source: CapitalSource,
+    canonical_event_id: str | None = None,
+    position_id: str | None = None,
+) -> list[PaperJournalPosting]:
+    """Paper close/unwind: release locked principal, post close proceeds, P&L and fees.
+
+    Unlike terminal losing settlement, a clean unwind may return part of the stake.
+    Proceeds = locked principal + realised betting P&L. Fees are recorded on
+    ``PNL:VENUE_FEES`` without inventing a full stake write-off. Balanced in GBP.
+    """
+
+    if locked_native <= 0:
+        raise ValueError("invalid_unwind_principal")
+    if fee_native < 0:
+        raise ValueError("invalid_unwind_fee")
+    proceeds = locked_native + realised_pnl_native
+    if proceeds < 0:
+        raise ValueError("invalid_unwind_proceeds")
+
+    dims = _strategy_dims(
+        venue=venue,
+        currency=currency,
+        opportunity_id=opportunity_id,
+        capital_source=capital_source,
+        canonical_event_id=canonical_event_id,
+        position_id=position_id,
+    )
+
+    def posting(account: str, side: PostingSide, native: Decimal) -> PaperJournalPosting:
+        return PaperJournalPosting(
+            account_code=account,
+            side=side,
+            amount_native=native,
+            amount_gbp=native * amount_gbp_per_native,
+            fx_rate_gbp_per_unit=amount_gbp_per_native,
+            dimensions=dims,
+        )
+
+    posts: list[PaperJournalPosting] = [
+        posting(cash_account(venue, currency, CashState.LOCKED), PostingSide.CREDIT, locked_native),
+    ]
+    if proceeds > 0:
+        posts.append(
+            posting(cash_account(venue, currency, CashState.AVAILABLE), PostingSide.DEBIT, proceeds)
+        )
+    if realised_pnl_native > 0:
+        posts.append(
+            posting(EconomicAccount.PNL_BETTING.value, PostingSide.CREDIT, realised_pnl_native)
+        )
+    elif realised_pnl_native < 0:
+        posts.append(
+            posting(EconomicAccount.PNL_BETTING.value, PostingSide.DEBIT, -realised_pnl_native)
+        )
+    if fee_native > 0:
+        posts.append(posting(EconomicAccount.PNL_VENUE_FEES.value, PostingSide.DEBIT, fee_native))
+        posts.append(posting(EconomicAccount.PNL_BETTING.value, PostingSide.CREDIT, fee_native))
     return posts
 
 

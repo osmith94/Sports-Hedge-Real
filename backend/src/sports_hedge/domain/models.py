@@ -12,6 +12,7 @@ class VenueName(StrEnum):
     MATCHBOOK = "matchbook"
     POLYMARKET = "polymarket"
     SMARKETS = "smarkets"
+    KALSHI = "kalshi"
 
 
 class MarketSide(StrEnum):
