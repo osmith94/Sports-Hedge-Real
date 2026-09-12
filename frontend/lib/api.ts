@@ -222,6 +222,98 @@ export function getPaperScanSummary(query = ""): Promise<PaperScanSummary> {
   return request(`/paper/scans/summary${query ? `?${query}` : ""}`);
 }
 
+export type WatchlistOpportunityStatus =
+  | "WATCHING"
+  | "APPROACHING"
+  | "TRIGGERED"
+  | "PAPER_FILLING"
+  | "PARTIAL"
+  | "FILLED"
+  | "CLOSED"
+  | "EXPIRED"
+  | "REJECTED";
+
+export type WatchlistClassification =
+  | "watch_candidate"
+  | "near_opportunity"
+  | "triggered_opportunity"
+  | "rejected"
+  | "paper_fill"
+  | "closed"
+  | "expired";
+
+export type WatchlistLifecycleEventType =
+  | "candidate_first_seen"
+  | "moved_closer_to_trigger"
+  | "moved_further_from_trigger"
+  | "trigger_crossed"
+  | "trigger_lost_before_fill"
+  | "paper_fill_attempted"
+  | "paper_fill_partial"
+  | "paper_fill_complete"
+  | "rejected_stale_quote"
+  | "rejected_insufficient_depth"
+  | "rejected_semantics"
+  | "rejected_missing_costs"
+  | "rejected_execution_risk"
+  | "closed"
+  | "expired";
+
+export type WatchLeg = {
+  outcome: string;
+  venue: Venue;
+  source_market_id: string;
+  currency: string;
+  native_stake?: string | number | null;
+  gbp_per_unit?: string | number | null;
+  gbp_stake?: string | number | null;
+  net_decimal_odds?: string | number | null;
+  cumulative_depth_gbp?: string | number | null;
+};
+
+export type NearOpportunity = {
+  opportunity_id: string;
+  canonical_event_id: string;
+  canonical_market_id: string;
+  settlement_key?: string | null;
+  competition?: string | null;
+  home_team?: string | null;
+  away_team?: string | null;
+  market_family?: MarketFamily | null;
+  period?: FootballPeriod | null;
+  venues: Venue[];
+  legs: WatchLeg[];
+  status: WatchlistOpportunityStatus;
+  classification: WatchlistClassification;
+  is_arbitrage?: boolean;
+  trigger_net_edge: string | number;
+  current_net_edge?: string | number | null;
+  distance_to_trigger_pp?: string | number | null;
+  implied_probability_sum?: string | number | null;
+  quote_age_ms?: number | null;
+  limiting_depth_gbp?: string | number | null;
+  limiting_leg_outcome?: string | null;
+  capital_required_gbp?: string | number | null;
+  guaranteed_profit_gbp?: string | number | null;
+  execution_risk_score?: number | null;
+  expected_lock_minutes?: string | number | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  rejection_reasons: string[];
+  insufficiency_reasons: string[];
+};
+
+export type OpportunityLifecycleEvent = {
+  event_id: string;
+  opportunity_id: string;
+  occurred_at: string;
+  event_type: WatchlistLifecycleEventType;
+  status: WatchlistOpportunityStatus;
+  current_net_edge?: string | number | null;
+  distance_to_trigger_pp?: string | number | null;
+  detail?: string | null;
+};
+
 export async function runPaperCollection(
   payload: PaperCollectionRequest,
 ): Promise<PaperCollectionReport> {
@@ -235,4 +327,16 @@ export async function runPaperCollection(
     throw new Error(await errorDetail(response));
   }
   return response.json() as Promise<PaperCollectionReport>;
+}
+
+export function getNearWatchlist(query = "limit=25"): Promise<NearOpportunity[]> {
+  return request(`/paper/watchlist/near${query ? `?${query}` : ""}`);
+}
+
+export function getTriggeredWatchlist(query = "limit=25"): Promise<NearOpportunity[]> {
+  return request(`/paper/watchlist/triggered${query ? `?${query}` : ""}`);
+}
+
+export function getWatchlistActivity(query = "limit=100"): Promise<OpportunityLifecycleEvent[]> {
+  return request(`/paper/watchlist/activity${query ? `?${query}` : ""}`);
 }
