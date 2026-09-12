@@ -134,6 +134,7 @@ def _cost(
         account_or_fee_tier="standard",
         rate=None if rate is None else Decimal(rate),
         fixed_amount=None if fixed_amount is None else Decimal(fixed_amount),
+        formula_name="unregistered" if fee_basis is FeeBasis.FORMULA else None,
         currency="GBP",
         effective_from=effective,
         snapshot_id=snapshot_id,

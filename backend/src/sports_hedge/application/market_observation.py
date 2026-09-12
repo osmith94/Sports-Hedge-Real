@@ -11,7 +11,7 @@ from sports_hedge.domain.football import CanonicalMarket, CanonicalOutcome
 from sports_hedge.domain.models import VenueName
 from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.models import MarketSnapshot
-from sports_hedge.normalization.venues import MatchbookNormalizer, PolymarketNormalizer
+from sports_hedge.normalization.venues import KalshiNormalizer, MatchbookNormalizer, PolymarketNormalizer
 
 
 class OutcomeOrderBook(BaseModel):
@@ -262,6 +262,126 @@ class PolymarketObservationBuilder:
                 reason=quote_age_reason,
             ),
         )
+
+
+class KalshiObservationBuilder:
+    """Convert Kalshi YES/NO bid ladders into executable BUY economics.
+
+    A YES bid at X is not treated as Matchbook BACK. The documented binary
+    complement is: a NO bid at X is the executable YES ask at 1-X (and vice versa).
+    """
+
+    def __init__(self, normalizer: KalshiNormalizer | None = None) -> None:
+        self.normalizer = normalizer or KalshiNormalizer()
+
+    def build(
+        self,
+        event_payload: dict[str, Any],
+        market_payloads: list[dict[str, Any]] | dict[str, Any],
+        books_by_ticker: Mapping[str, dict[str, Any]],
+        *,
+        series: dict[str, Any] | None = None,
+        observed_at: datetime | None = None,
+        source_latency_ms: int = 0,
+        quote_age_ms: int | None = None,
+        quote_age_basis: str | None = None,
+        quote_age_reason: str | None = None,
+        fee_snapshot: dict[str, Any] | None = None,
+    ) -> VenueMarketObservation:
+        event = self.normalizer.normalize_event(event_payload, series=series)
+        payloads = market_payloads if isinstance(market_payloads, list) else [market_payloads]
+        assembled = self.normalizer.assemble_canonical_markets(event, payloads, series=series)
+        if len(assembled) != 1:
+            raise ValueError("Kalshi observation builder requires one canonical market group")
+        market = assembled[0]
+        books: list[OutcomeOrderBook] = []
+        for runner in market.runners:
+            ticker, side = _kalshi_runner_ticker_side(runner.source_runner_id)
+            raw_book = dict(books_by_ticker.get(ticker, {}))
+            back_levels = _kalshi_buy_levels(raw_book, side=side)
+            books.append(
+                OutcomeOrderBook(
+                    outcome=runner.outcome,
+                    source_runner_id=runner.source_runner_id,
+                    back_levels=back_levels,
+                    lay_levels=[],
+                    raw_book={
+                        **raw_book,
+                        "market_ticker": ticker,
+                        "event_ticker": event.source_event_id,
+                        "contract_side": side,
+                        "complement": (
+                            "yes_ask = 1 - no_bid" if side == "YES" else "no_ask = 1 - yes_bid"
+                        ),
+                    },
+                )
+            )
+        metadata = _quote_metadata(
+            "kalshi_binary_complement_buy",
+            basis=quote_age_basis,
+            reason=quote_age_reason,
+        )
+        if fee_snapshot:
+            metadata["kalshi_fee"] = fee_snapshot
+        return VenueMarketObservation(
+            market=market,
+            observed_at=observed_at or datetime.now(UTC),
+            native_currency="USD",
+            outcome_books=books,
+            source_latency_ms=source_latency_ms,
+            quote_age_ms=quote_age_ms,
+            metadata=metadata,
+        )
+
+
+def _kalshi_runner_ticker_side(source_runner_id: str) -> tuple[str, str]:
+    if source_runner_id.endswith(":YES"):
+        return source_runner_id[: -len(":YES")], "YES"
+    if source_runner_id.endswith(":NO"):
+        return source_runner_id[: -len(":NO")], "NO"
+    return source_runner_id, "YES"
+
+
+def _kalshi_buy_levels(raw_book: Mapping[str, Any], *, side: str) -> list[BookLevel]:
+    orderbook = raw_book.get("orderbook_fp")
+    if not isinstance(orderbook, dict):
+        orderbook = raw_book if "yes_dollars" in raw_book or "no_dollars" in raw_book else {}
+    yes_bids = _kalshi_price_levels(orderbook.get("yes_dollars"))
+    no_bids = _kalshi_price_levels(orderbook.get("no_dollars"))
+    if side == "YES":
+        opposite = no_bids
+    else:
+        opposite = yes_bids
+    result: list[BookLevel] = []
+    for price, quantity in opposite:
+        ask = Decimal("1") - price
+        if ask <= 0 or ask >= 1 or quantity <= 0:
+            continue
+        result.append(
+            BookLevel(
+                decimal_odds=Decimal("1") / ask,
+                available_stake=ask * quantity,
+            )
+        )
+    return sorted(result, key=lambda item: item.decimal_odds, reverse=True)
+
+
+def _kalshi_price_levels(levels: Any) -> list[tuple[Decimal, Decimal]]:
+    result: list[tuple[Decimal, Decimal]] = []
+    if not isinstance(levels, list):
+        return result
+    for level in levels:
+        if not isinstance(level, (list, tuple)) or len(level) < 2:
+            continue
+        try:
+            price = Decimal(str(level[0]))
+            quantity = Decimal(str(level[1]))
+        except (InvalidOperation, ValueError):
+            continue
+        if price <= 0 or price >= 1 or quantity <= 0:
+            continue
+        result.append((price, quantity))
+    return result
 
 
 def _matchbook_price_level(price: dict[str, Any]) -> tuple[str, BookLevel] | None:

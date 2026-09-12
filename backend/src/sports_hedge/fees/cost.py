@@ -96,6 +96,7 @@ class VenueCostSnapshot(BaseModel):
     rate: Decimal | None = Field(default=None, ge=0, lt=1)
     fixed_amount: Decimal | None = Field(default=None, ge=0)
     formula_parameters: dict[str, Decimal] = Field(default_factory=dict)
+    formula_name: str | None = None
     currency: str = "GBP"
     effective_from: datetime | None = None
     snapshot_id: str | None = None
@@ -111,6 +112,10 @@ class VenueCostSnapshot(BaseModel):
         if self.fee_basis is FeeBasis.UNKNOWN:
             raise ValueError("UNKNOWN fee basis cannot be marked known")
         if self.fee_basis is FeeBasis.NONE_CONFIRMED:
+            return self
+        if self.fee_basis is FeeBasis.FORMULA:
+            if not (self.formula_name or "").strip():
+                raise ValueError("FORMULA fee basis requires formula_name when costs are known")
             return self
         if self.fee_basis is FeeBasis.FIXED and self.fixed_amount is None:
             raise ValueError("FIXED fee basis requires fixed_amount when costs are known")
@@ -136,6 +141,8 @@ class VenueCostSnapshot(BaseModel):
             return False
         if self.fee_basis is FeeBasis.TRANSACTION and self.fixed_amount:
             return False
+        if self.fee_basis is FeeBasis.FORMULA:
+            return True
         return True
 
     @classmethod

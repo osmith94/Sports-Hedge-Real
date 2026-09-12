@@ -5,7 +5,9 @@ export function coverageLabel(row: FixtureMarketInventoryRow): string {
   const venues: string[] = [];
   if (row.matchbook) venues.push("Matchbook");
   if (row.polymarket) venues.push("Polymarket");
-  if (venues.length === 2) return "Matchbook + Polymarket";
+  if (row.kalshi) venues.push("Kalshi");
+  if (venues.length === 3) return "Matchbook + Polymarket + Kalshi";
+  if (venues.length === 2) return venues.join(" + ");
   if (venues.length === 1) return `${venues[0]} only`;
   return "no venue payload";
 }

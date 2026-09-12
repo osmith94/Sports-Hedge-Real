@@ -23,6 +23,7 @@ NativeCurrency = Literal["GBP", "USD"]
 POOL_SPEC: dict[VenueName, tuple[NativeCurrency, bool]] = {
     VenueName.MATCHBOOK: ("GBP", True),
     VenueName.POLYMARKET: ("USD", True),
+    VenueName.KALSHI: ("USD", True),
     VenueName.SMARKETS: ("GBP", False),
 }
 
@@ -101,8 +102,14 @@ class PaperLiquiditySnapshot(BaseModel):
         return limits
 
 
-def default_pools(*, matchbook_gbp: Decimal, polymarket_usd: Decimal) -> list[PaperLiquidityPool]:
+def default_pools(
+    *,
+    matchbook_gbp: Decimal,
+    polymarket_usd: Decimal,
+    kalshi_usd: Decimal | None = None,
+) -> list[PaperLiquidityPool]:
     now = datetime.now(UTC)
+    kalshi_available = Decimal("5000") if kalshi_usd is None else kalshi_usd
     return [
         PaperLiquidityPool(
             venue=VenueName.MATCHBOOK,
@@ -119,6 +126,15 @@ def default_pools(*, matchbook_gbp: Decimal, polymarket_usd: Decimal) -> list[Pa
             venue=VenueName.POLYMARKET,
             native_currency="USD",
             available=polymarket_usd,
+            included_in_solver=True,
+            connection_status="connected",
+            gbp_carrying_status="fx_unavailable",
+            updated_at=now,
+        ),
+        PaperLiquidityPool(
+            venue=VenueName.KALSHI,
+            native_currency="USD",
+            available=kalshi_available,
             included_in_solver=True,
             connection_status="connected",
             gbp_carrying_status="fx_unavailable",

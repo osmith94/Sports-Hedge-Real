@@ -23,9 +23,11 @@ class SqlitePaperLiquidityRepository:
         *,
         matchbook_gbp: Decimal = Decimal("5000"),
         polymarket_usd: Decimal = Decimal("5000"),
+        kalshi_usd: Decimal = Decimal("5000"),
     ) -> None:
         self._matchbook_gbp = matchbook_gbp
         self._polymarket_usd = polymarket_usd
+        self._kalshi_usd = kalshi_usd
         self._connection = sqlite3.connect(str(database), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._create_schema()
@@ -50,19 +52,26 @@ class SqlitePaperLiquidityRepository:
         count = self._connection.execute("SELECT COUNT(*) AS n FROM paper_liquidity_pools").fetchone()["n"]
         if count:
             return
-        self.replace(default_pools(matchbook_gbp=self._matchbook_gbp, polymarket_usd=self._polymarket_usd))
+        self.replace(
+            default_pools(
+                matchbook_gbp=self._matchbook_gbp,
+                polymarket_usd=self._polymarket_usd,
+                kalshi_usd=self._kalshi_usd,
+            )
+        )
 
     def get(self, *, gbp_per_unit: dict[str, Decimal] | None = None, fx_source: str | None = None) -> PaperLiquiditySnapshot:
         rows = list(self._connection.execute("SELECT * FROM paper_liquidity_pools"))
         by_venue = {VenueName(row["venue"]): _pool_from_row(row) for row in rows}
         pools = []
-        for venue in (VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.SMARKETS):
+        for venue in (VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI, VenueName.SMARKETS):
             if venue in by_venue:
                 pools.append(by_venue[venue])
             else:
                 seeded = default_pools(
                     matchbook_gbp=self._matchbook_gbp,
                     polymarket_usd=self._polymarket_usd,
+                    kalshi_usd=self._kalshi_usd,
                 )
                 pools.append(next(item for item in seeded if item.venue is venue))
         valued = apply_carrying_values(pools, gbp_per_unit=gbp_per_unit, fx_source=fx_source)
@@ -116,7 +125,11 @@ class SqlitePaperLiquidityRepository:
 
     def reset(self) -> PaperLiquiditySnapshot:
         return self.replace(
-            default_pools(matchbook_gbp=self._matchbook_gbp, polymarket_usd=self._polymarket_usd)
+            default_pools(
+                matchbook_gbp=self._matchbook_gbp,
+                polymarket_usd=self._polymarket_usd,
+                kalshi_usd=self._kalshi_usd,
+            )
         )
 
     def close(self) -> None:
