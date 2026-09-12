@@ -1,14 +1,12 @@
 import Link from "next/link";
 
-import {
-  FixtureDetailReadModel,
-  FixtureMarketInventoryRow,
-} from "../lib/api";
+import { FixtureDetailReadModel } from "../lib/api";
 import {
   fixturePhaseLabel,
   kickoffClockLabel,
 } from "../lib/discovered-fixture-display";
 import {
+  KalshiFixtureMarketInventoryRow,
   comparisonLabel,
   coverageLabel,
   economicsSummary,
@@ -16,7 +14,12 @@ import {
   solverFacts,
 } from "../lib/fixture-inventory-display";
 
-export function FixtureInventoryWorkspace({ detail }: { detail: FixtureDetailReadModel }) {
+type KalshiFixtureDetailReadModel = Omit<FixtureDetailReadModel, "fixture" | "markets"> & {
+  fixture: FixtureDetailReadModel["fixture"] & { kalshi_matched?: boolean };
+  markets: KalshiFixtureMarketInventoryRow[];
+};
+
+export function FixtureInventoryWorkspace({ detail }: { detail: KalshiFixtureDetailReadModel }) {
   const fixture = detail.fixture;
   const phase = fixturePhaseLabel(fixture);
 
@@ -72,7 +75,7 @@ export function FixtureInventoryWorkspace({ detail }: { detail: FixtureDetailRea
   );
 }
 
-function InventoryRowCard({ row }: { row: FixtureMarketInventoryRow }) {
+function InventoryRowCard({ row }: { row: KalshiFixtureMarketInventoryRow }) {
   return (
     <article className="opp-card">
       <div className="opp-card-top">
