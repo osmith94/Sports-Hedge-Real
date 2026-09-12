@@ -48,6 +48,13 @@ class SourceKind(StrEnum):
     LIVE_READONLY_EXTERNAL = "live_readonly_external"
 
 
+SOURCE_KIND_FOR_PROVENANCE: dict[ProvenanceClass, SourceKind] = {
+    ProvenanceClass.FIXTURE_TEST: SourceKind.FIXTURE_TEST,
+    ProvenanceClass.HISTORICAL_IMPORTED: SourceKind.HISTORICAL_IMPORT,
+    ProvenanceClass.LIVE_READONLY_EXTERNAL: SourceKind.LIVE_READONLY_EXTERNAL,
+}
+
+
 class VerificationStatus(StrEnum):
     VERIFIED = "verified"
     UNVERIFIED = "unverified"
@@ -111,6 +118,21 @@ class EventIntelligenceFact(BaseModel):
             )
         return value.astimezone(UTC)
 
+    @model_validator(mode="after")
+    def reject_contradictory_source_kind(self) -> "EventIntelligenceFact":
+        if self.source_kind is None:
+            return self
+        expected = SOURCE_KIND_FOR_PROVENANCE[self.provenance_class]
+        if self.source_kind is not expected:
+            raise ValueError(
+                "source_kind must match provenance_class; "
+                f"got source_kind={self.source_kind.value} with "
+                f"provenance_class={self.provenance_class.value}. "
+                "Omit source_kind to canonicalize from provenance_class; "
+                "do not present fixture/test data as live"
+            )
+        return self
+
 
 class EventIntelligenceRecord(BaseModel):
     """Canonical fixture-linked event-intelligence row. Temporal context only."""
@@ -152,6 +174,13 @@ class EventIntelligenceRecord(BaseModel):
             raise ValueError("Event intelligence records are temporal context only")
         if self.phase is not EventPhase.PRE_MATCH:
             raise ValueError("This seam stores pre-match/news context only, not in-play scores")
+        expected_kind = SOURCE_KIND_FOR_PROVENANCE[self.provenance_class]
+        if self.source_kind is not expected_kind:
+            raise ValueError(
+                "source_kind must match provenance_class; "
+                f"got source_kind={self.source_kind.value} with "
+                f"provenance_class={self.provenance_class.value}"
+            )
         return self
 
 

@@ -11,7 +11,7 @@ from sports_hedge.event_intelligence.models import (
     EventIntelligenceType,
     EventPhase,
     EventSubject,
-    ProvenanceClass,
+    SOURCE_KIND_FOR_PROVENANCE,
     SourceKind,
     VerificationStatus,
 )
@@ -103,7 +103,7 @@ def normalize_fact(fact: EventIntelligenceFact) -> EventIntelligenceRecord:
             "Player-linked event requires an explicit player id or label; identity is not inferred",
         )
     verification = _verification_status(event_type, subject, quality_flags)
-    source_kind = fact.source_kind or _source_kind_for_provenance(fact.provenance_class)
+    source_kind = _resolved_source_kind(fact)
     raw_payload = dict(fact.raw_payload or fact.payload)
     raw_hash = _payload_hash(raw_payload)
     record = EventIntelligenceRecord(
@@ -268,12 +268,21 @@ def _verification_status(
     return VerificationStatus.VERIFIED
 
 
-def _source_kind_for_provenance(provenance: ProvenanceClass) -> SourceKind:
-    return {
-        ProvenanceClass.FIXTURE_TEST: SourceKind.FIXTURE_TEST,
-        ProvenanceClass.HISTORICAL_IMPORTED: SourceKind.HISTORICAL_IMPORT,
-        ProvenanceClass.LIVE_READONLY_EXTERNAL: SourceKind.LIVE_READONLY_EXTERNAL,
-    }[provenance]
+def _resolved_source_kind(fact: EventIntelligenceFact) -> SourceKind:
+    expected = SOURCE_KIND_FOR_PROVENANCE[fact.provenance_class]
+    if fact.source_kind is None:
+        return expected
+    if fact.source_kind is not expected:
+        raise EventIntelligenceMappingError(
+            "source_kind",
+            "conflict",
+            (
+                "Explicit source_kind contradicts provenance_class; "
+                "refusing to persist contradictory provenance. "
+                "Omit source_kind to canonicalize from provenance_class"
+            ),
+        )
+    return fact.source_kind
 
 
 def _optional(value: str | None) -> str | None:

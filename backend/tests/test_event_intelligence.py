@@ -255,6 +255,32 @@ def test_naive_timestamps_are_refused() -> None:
         make_fact(published_at=datetime(2026, 9, 12, 15, 0))
 
 
+def test_mismatched_explicit_source_kind_fails_closed() -> None:
+    with pytest.raises(ValidationError, match="source_kind must match provenance_class"):
+        make_fact(
+            provenance_class=ProvenanceClass.FIXTURE_TEST,
+            source_kind=SourceKind.LIVE_READONLY_EXTERNAL,
+        )
+
+    service, repository = _service()
+    omitted = service.ingest(make_fact(source_kind=None, source_event_id="omit-kind"))
+    assert omitted.status == "created"
+    assert omitted.record is not None
+    assert omitted.record.provenance_class is ProvenanceClass.FIXTURE_TEST
+    assert omitted.record.source_kind is SourceKind.FIXTURE_TEST
+
+    mismatched = make_fact(source_event_id="mismatch-kind")
+    mismatched.source_kind = SourceKind.LIVE_READONLY_EXTERNAL
+    result = service.ingest(mismatched)
+    assert result.status == "rejected"
+    assert result.rejection is not None
+    assert result.rejection.field == "source_kind"
+    assert result.rejection.reason == "conflict"
+    stored_ids = {item.source_event_id for item in repository.list_timeline(CANONICAL_EVENT_ID)}
+    assert "mismatch-kind" not in stored_ids
+    repository.close()
+
+
 def test_unconfigured_provider_does_not_scrape() -> None:
     feed = UnconfiguredApprovedSourceFeed("official_sports_data")
     with pytest.raises(ProviderNotConfiguredError, match="adapter seam"):
