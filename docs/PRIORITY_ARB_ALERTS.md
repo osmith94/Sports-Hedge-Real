@@ -13,7 +13,8 @@ A Priority Arb Alert is an exceptional, high-quality arbitrage candidate that ha
 - strong executable depth on every required leg;
 - fresh quotes;
 - acceptable execution risk;
-- sufficient expected profit / capital efficiency to justify operator attention.
+- sufficient expected profit / capital efficiency to justify operator attention;
+- sufficient estimated **opportunity survivability** for the expected action/confirmation latency.
 
 It is not a separate arb solver. It is an escalation layer on top of the existing arbitrage engine.
 
@@ -38,6 +39,15 @@ capital_source = MANUAL_OVERRIDE
 
 Manual override capital must never silently become part of the permanent automated pool.
 
+### Manual External Capital / Leg
+An externally confirmed venue leg that is not executed from the Sports Hedge automated pool.
+
+```text
+capital_source = MANUAL_EXTERNAL
+```
+
+It must remain distinct from both `AUTO_POOL` and `MANUAL_OVERRIDE`, and must not imply Sports Hedge custody or automated execution.
+
 ## Priority alert qualification
 
 A normal arbitrage opportunity may be executable without being a Priority Alert.
@@ -52,6 +62,8 @@ maximum_execution_risk
 minimum_depth_coverage
 minimum_fill_confidence
 minimum_capital_efficiency
+minimum_survivability_score
+minimum_survival_probability_at_action_latency
 ```
 
 A Priority Alert should only fire after the ordinary arb checks have already confirmed economic equivalence and positive minimum payoff across valid settlement states.
@@ -92,7 +104,9 @@ The UI must expose:
 - capital required by currency / venue;
 - limiting leg;
 - quote age;
-- execution-risk score.
+- execution-risk score;
+- survivability score / horizon;
+- volatility regime and the main survivability drivers.
 
 ## Fill confidence
 
@@ -109,6 +123,55 @@ Possible inputs:
 
 The underlying inputs must remain visible.
 
+## Opportunity survivability
+
+`survivability` estimates the chance that an opportunity remains economically valid long enough for the required action to complete.
+
+It is related to, but distinct from, fill confidence. Fill confidence asks whether the displayed size is likely to fill; survivability asks whether the cross-venue edge is likely to still exist by the time the workflow reaches the point of commitment.
+
+Inputs should include where available:
+
+```text
+recent realised price volatility on all required legs
+rate/direction of recent price movement
+cross-venue convergence or divergence speed
+quote persistence and age
+spread and executable depth
+rate of depth cancellation / replenishment
+historical duration / half-life of comparable dislocations
+venue suspension/reopen behaviour
+current event-driven repricing state
+expected automated action latency
+expected MANUAL_EXTERNAL counterparty confirmation latency
+```
+
+A calm, persistent 1% edge should normally score as more survivable than the same 1% edge during rapid repricing.
+
+Suggested outputs:
+
+```text
+survivability_score: 0-100
+survival_probability_5s
+survival_probability_15s
+survival_probability_30s
+survival_probability_60s
+estimated_median_remaining_life
+historical_dislocation_half_life
+volatility_regime
+```
+
+These are estimates, not guarantees. Where historical data is weak, the UI must state that uncertainty rather than invent precise probabilities.
+
+For `MANUAL_EXTERNAL`, the operator view should compare expected counterparty response time to survivability. Example:
+
+```text
+Expected external confirmation latency: 30s
+Estimated P(opportunity still valid at 30s): 18%
+Assessment: LOW SURVIVABILITY
+```
+
+This should reduce alert priority or show an explicit warning even when the current edge is attractive.
+
 ## Alert severity
 
 Suggested levels:
@@ -118,7 +181,7 @@ HIGH_PRIORITY
 CRITICAL
 ```
 
-Severity should reflect economics and execution quality, not edge alone.
+Severity should reflect economics, execution quality and survivability, not edge alone.
 
 Example:
 ```text
@@ -128,6 +191,7 @@ Recommended capital: £475
 Expected guaranteed profit: £46.55
 Limiting leg depth: £500
 Fill confidence: HIGH
+Survivability at expected action latency: 84%
 Quote age: 180ms
 ```
 
@@ -153,19 +217,37 @@ PRIORITY_ALERT_DOWNGRADED
 PRIORITY_ALERT_EXPIRED
 MANUAL_OVERRIDE_PREPARED
 MANUAL_OVERRIDE_CANCELLED
+MANUAL_EXTERNAL_AWAITING_CONFIRMATION
+MANUAL_EXTERNAL_CONFIRMED
+HEDGE_REVALIDATION_FAILED
 ```
 
 ## Operator workflow
 
+Standard manual-override workflow:
+
 ```text
 1. Priority alert fires
 2. Operator opens opportunity
-3. Sports Hedge shows all legs and limiting depth
+3. Sports Hedge shows all legs, limiting depth and survivability
 4. Recommended size is prefilled
 5. Operator may reduce / increase within validated maximum
 6. UI recalculates hedge stakes, guaranteed payoff and capital by venue/currency
 7. Operator prepares a MANUAL_OVERRIDE ticket
 8. Phase 1 stops before any real venue order placement
+```
+
+External-manual workflow:
+
+```text
+1. Priority alert fires with MANUAL_EXTERNAL requirement
+2. Sports Hedge shows required external size/price and survivability versus expected response latency
+3. Opportunity enters AWAITING_EXTERNAL_LEG_CONFIRMATION
+4. No automated counterpart leg is committed
+5. External execution details are recorded exactly
+6. Sports Hedge obtains a fresh hedge snapshot and revalidates the full fixed external exposure
+7. If positive minimum payoff no longer survives, fail closed
+8. Phase 1 remains paper-only for Sports Hedge execution
 ```
 
 Any later real-execution integration must be a separate explicit safety/architecture phase.
@@ -175,7 +257,7 @@ Any later real-execution integration must be a separate explicit safety/architec
 Relevant opportunity / position / journal records should retain:
 ```text
 strategy_book = ARBITRAGE
-capital_source = AUTO_POOL | MANUAL_OVERRIDE
+capital_source = AUTO_POOL | MANUAL_OVERRIDE | MANUAL_EXTERNAL
 priority_alert_id
 opportunity_id
 venue
@@ -185,6 +267,7 @@ currency
 This allows reporting of:
 - automated arbitrage P&L;
 - manually escalated arbitrage P&L;
+- externally confirmed manual-leg economics;
 - capital used from standing pools;
 - capital used from one-off overrides.
 
@@ -201,6 +284,8 @@ A Priority Alert card should answer immediately:
 - Which leg is limiting?
 - What is the guaranteed return after costs?
 - How much additional capital is required beyond the automated pools?
+- How likely is this opportunity to survive long enough to act?
+- What current volatility / market behaviour is driving that estimate?
 
 ## Safety / current phase
 
