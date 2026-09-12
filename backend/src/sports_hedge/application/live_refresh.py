@@ -62,6 +62,15 @@ class LiveRefreshCoordinator:
     def last_request(self) -> dict[str, Any]:
         return dict(self._last_request)
 
+    def reset(self) -> None:
+        self._last_request = {}
+        self._last_report = None
+        self.status = LiveRefreshStatus(
+            server_loop_enabled=False,
+            interval_seconds=30,
+        )
+        self.configure_from_settings()
+
     async def run_cycle(self, runner) -> CollectionReport:
         async with self._lock:
             self.status = self.status.model_copy(

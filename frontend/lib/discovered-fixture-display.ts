@@ -58,6 +58,10 @@ export function inventorySummaryLabel(item: DiscoveredFixture): string {
   return `${discovered} discovered · ${equivalent} equivalent`;
 }
 
+export function arbClaimLabel(item: DiscoveredFixture): string {
+  return item.solver_is_arbitrage ? "solver-validated paper arb" : "not arbitrage";
+}
+
 export function freshnessLabel(item: DiscoveredFixture): string {
   if (item.quote_age_ms == null) {
     return item.quote_age_basis ? `unknown · ${item.quote_age_basis}` : "unavailable";

@@ -294,7 +294,7 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
         fx_source="ecb_eurofxref",
     ).solver_gbp_limits({"GBP": Decimal("1"), "USD": Decimal("0.5")})
     assert VenueName.SMARKETS not in limits
-    assert set(matchbook.list_markets_calls) == {"8801", "8803"}
+    assert set(matchbook.list_markets_calls) == {"8801", "8802", "8803"}
 
 
 def test_live_collect_and_economics_status_compose_on_http_surface() -> None:

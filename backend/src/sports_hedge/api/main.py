@@ -11,7 +11,6 @@ from sports_hedge.api.market_intelligence import router as market_intelligence_r
 from sports_hedge.api.notifications import router as notifications_router
 from sports_hedge.api.operations import router as operations_router
 from sports_hedge.api.paper import router as paper_router, server_owned_refresh_tick, get_accounting_schedule
-from sports_hedge.api.paper import router as paper_router, server_owned_refresh_tick, get_accounting_schedule
 from sports_hedge.api.priority_alerts import router as priority_alerts_router
 from sports_hedge.api.watchlist import router as watchlist_router
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator

@@ -458,6 +458,7 @@ def test_operations_fixture_route_uses_canonical_event_id() -> None:
     assert by_source.status_code == 200
     health = client.get("/health")
     assert health.json()["execution_enabled"] is False
+    coordinator.reset()
 
 
 def test_fixture_ui_routes_by_canonical_id_and_renders_inventory_states() -> None:
