@@ -35,6 +35,7 @@ from sports_hedge.paper.trades import (
 from sports_hedge.paper.unwind import (
     CapitalPressure,
     CapitalScarcityInput,
+    IncrementalCloseCapitalStatus,
     OpenPaperPosition,
     PaperUnwindEngine,
     ReverseQuote,
@@ -265,11 +266,17 @@ def test_fully_executable_reverse_depth_produces_exact_pnl_and_releasable_capita
     assert mb.close_action is MarketAction.LAY
     assert mb.liability == Decimal("110")
     assert mb.matched_stake == Decimal("110")
-    assert decision.additional_close_capital_native[venue_currency_key(VenueName.MATCHBOOK, "GBP")] == Decimal("110")
-    assert "GBP" not in decision.additional_close_capital_native
+    assert mb.incremental_close_capital_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+    assert mb.incremental_close_capital_native is None
+    assert decision.gross_close_liability_native[venue_currency_key(VenueName.MATCHBOOK, "GBP")] == Decimal("110")
+    assert decision.incremental_close_capital_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+    assert decision.incremental_close_capital_native == {}
+    assert "GBP" not in decision.gross_close_liability_native
     pm = decision.close_plan.legs[1]
     assert pm.close_action is MarketAction.SELL
     assert pm.proceeds == Decimal("48")
+    assert pm.incremental_close_capital_status is IncrementalCloseCapitalStatus.KNOWN
+    assert pm.incremental_close_capital_native == Decimal("0")
 
 
 def test_insufficient_reverse_depth_is_not_safe_and_releases_nothing() -> None:
@@ -364,11 +371,16 @@ def test_scarce_capital_give_up_must_pass_both_caps() -> None:
         )
     )
     # matched 110, gross 10, 2% fee 0.20 => exit 9.80; give-up 0.20
-    # min(£2, 10% of £10 = £1) = £1; 0.20 <= 1 => UNWIND_ELIGIBLE
+    # min(£2, 10% of £10 = £1) = £1; 0.20 <= 1 would be UNWIND_ELIGIBLE on P&L,
+    # but scarce recycling requires known incremental close capital. Gross lay
+    # liability 110 is not modelled Matchbook netting, so fail closed.
     assert small.validated_exit_pnl_gbp == Decimal("9.80")
     assert small.profit_give_up_gbp == Decimal("0.20")
-    assert small.recommendation is UnwindRecommendation.UNWIND_ELIGIBLE
-    assert small.decision_reason == "scarce_capital_accepts_bounded_give_up"
+    assert small.close_plan.legs[0].liability == Decimal("110")
+    assert small.incremental_close_capital_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+    assert small.incremental_close_capital_native == {}
+    assert small.recommendation is UnwindRecommendation.UNWIND_NOT_SAFE
+    assert small.decision_reason == "incremental_close_capital_unknown"
 
 
 def test_scarce_policy_uses_the_more_restrictive_bound() -> None:
@@ -541,6 +553,113 @@ def test_exchange_close_uses_liability_semantics() -> None:
     # Treating 2.00 lay as a back of 40 would not produce liability 60.
     assert leg.close_action is MarketAction.LAY
     assert mechanics_for_venue(VenueName.MATCHBOOK) is VenueCloseMechanics.EXCHANGE_BACK_LAY
+    assert decision.gross_close_liability_native[venue_currency_key(VenueName.MATCHBOOK, "GBP")] == Decimal("60")
+    assert decision.incremental_close_capital_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+    assert decision.incremental_close_capital_native == {}
+    assert decision.recommendation is UnwindRecommendation.UNWIND_ELIGIBLE
+
+
+def test_gross_lay_liability_is_not_known_incremental_close_capital() -> None:
+    engine = PaperUnwindEngine()
+    decision = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position([_open_leg()], hold="12"),
+            quotes=[
+                _quote(
+                    venue=VenueName.MATCHBOOK,
+                    outcome="home",
+                    levels=[BookLevel(decimal_odds=Decimal("2.00"), available_stake=Decimal("200"))],
+                    cost=_lay_cost(),
+                    currency="GBP",
+                    runner="mb-home",
+                    market="mb-1x2",
+                )
+            ],
+            evaluated_at=NOW,
+        )
+    )
+    leg = decision.close_plan.legs[0]
+    assert decision.close_plan.fully_executable is True
+    assert leg.liability == Decimal("110")
+    assert decision.gross_close_liability_native[venue_currency_key(VenueName.MATCHBOOK, "GBP")] == Decimal("110")
+    assert decision.incremental_close_capital_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+    assert decision.incremental_close_capital_native == {}
+    assert venue_currency_key(VenueName.MATCHBOOK, "GBP") not in decision.incremental_close_capital_native
+
+
+def test_prediction_sell_has_known_zero_incremental_close_capital() -> None:
+    engine = PaperUnwindEngine()
+    polymarket = _open_leg(
+        venue=VenueName.POLYMARKET,
+        action=MarketAction.BUY,
+        price="2.00",
+        size="50",
+        currency="USD",
+        runner="pm-home",
+        market="pm-1x2",
+        event="pm-evt",
+    )
+    decision = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position([polymarket], hold="0"),
+            quotes=[
+                _quote(
+                    venue=VenueName.POLYMARKET,
+                    outcome="home",
+                    levels=[
+                        BookLevel(decimal_odds=Decimal("1") / Decimal("0.50"), available_stake=Decimal("100"))
+                    ],
+                    cost=_sell_cost(),
+                    currency="USD",
+                    runner="pm-home",
+                    market="pm-1x2",
+                    event="pm-evt",
+                )
+            ],
+            fx=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"), source="test", captured_at=NOW)],
+            scarcity=CapitalScarcityInput(pressure=CapitalPressure.SCARCE),
+            evaluated_at=NOW,
+        )
+    )
+    leg = decision.close_plan.legs[0]
+    assert decision.close_plan.fully_executable is True
+    assert leg.liability == Decimal("0")
+    assert leg.incremental_close_capital_status is IncrementalCloseCapitalStatus.KNOWN
+    assert leg.incremental_close_capital_native == Decimal("0")
+    assert decision.incremental_close_capital_status is IncrementalCloseCapitalStatus.KNOWN
+    assert decision.incremental_close_capital_native[venue_currency_key(VenueName.POLYMARKET, "USD")] == Decimal("0")
+    assert decision.gross_close_liability_native == {}
+    assert decision.recommendation is UnwindRecommendation.UNWIND_ELIGIBLE
+    assert decision.decision_reason == "exit_pnl_not_inferior_to_hold"
+
+
+def test_require_known_incremental_close_capital_fails_closed_for_unmodelled_lay() -> None:
+    engine = PaperUnwindEngine()
+    decision = engine.evaluate(
+        UnwindEvaluationRequest(
+            position=_position([_open_leg(price="3.00", size="40")], hold="0"),
+            quotes=[
+                _quote(
+                    venue=VenueName.MATCHBOOK,
+                    outcome="home",
+                    levels=[BookLevel(decimal_odds=Decimal("2.00"), available_stake=Decimal("80"))],
+                    cost=_lay_cost(rate="0"),
+                    currency="GBP",
+                    runner="mb-home",
+                    market="mb-1x2",
+                )
+            ],
+            policy=UnwindPolicy(
+                max_profit_give_up_gbp=Decimal("100"),
+                require_known_incremental_close_capital=True,
+            ),
+            evaluated_at=NOW,
+        )
+    )
+    assert decision.close_plan.fully_executable is True
+    assert decision.close_plan.legs[0].liability == Decimal("60")
+    assert decision.recommendation is UnwindRecommendation.UNWIND_NOT_SAFE
+    assert decision.decision_reason == "incremental_close_capital_unknown"
 
 
 def test_simple_and_generalized_positions_share_the_same_engine() -> None:

@@ -47,6 +47,13 @@ class CapitalPressure(StrEnum):
     SCARCE = "scarce"
 
 
+class IncrementalCloseCapitalStatus(StrEnum):
+    """Whether extra close collateral is validated, not merely a gross liability."""
+
+    KNOWN = "known"
+    UNKNOWN_NOT_MODELLED = "unknown_not_modelled"
+
+
 class UnwindPolicy(BaseModel):
     """Deterministic conservative close rule. Headline spread is never enough."""
 
@@ -64,6 +71,13 @@ class UnwindPolicy(BaseModel):
     allow_partial_close: bool = False
     require_known_fx: bool = True
     require_known_exit_fees: bool = True
+    require_known_incremental_close_capital: bool = Field(
+        default=False,
+        description=(
+            "If true, UNWIND_ELIGIBLE requires modelled incremental close collateral. "
+            "Scarce-capital recycling always requires known incremental collateral even when this is false."
+        ),
+    )
 
     @model_validator(mode="after")
     def reject_partial_policy(self) -> UnwindPolicy:
@@ -189,7 +203,17 @@ class CloseLegPlan(BaseModel):
     worst_closing_price: Decimal | None = None
     slippage_vs_top: Decimal | None = None
     matched_stake: Decimal = Decimal("0")
-    liability: Decimal = Decimal("0")
+    liability: Decimal = Field(
+        default=Decimal("0"),
+        description="Gross mechanical lay liability for the close leg. Not incremental close capital.",
+    )
+    incremental_close_capital_status: IncrementalCloseCapitalStatus = (
+        IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+    )
+    incremental_close_capital_native: Decimal | None = Field(
+        default=None,
+        description="Extra venue collateral required to close, only when pre/post exposure is modelled.",
+    )
     proceeds: Decimal = Decimal("0")
     closing_fee: Decimal = Decimal("0")
     native_close_pnl: Decimal = Decimal("0")
@@ -234,9 +258,16 @@ class UnwindDecision(BaseModel):
         default_factory=dict,
         description="Native amounts keyed by venue_currency_key(venue, currency), e.g. polymarket:USD. Never merge distinct venues.",
     )
-    additional_close_capital_native: dict[str, Decimal] = Field(
+    gross_close_liability_native: dict[str, Decimal] = Field(
         default_factory=dict,
-        description="Additional close liability keyed by venue_currency_key(venue, currency).",
+        description="Gross mechanical close-leg lay liability by venue_currency_key. Not incremental collateral.",
+    )
+    incremental_close_capital_status: IncrementalCloseCapitalStatus = (
+        IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+    )
+    incremental_close_capital_native: dict[str, Decimal] = Field(
+        default_factory=dict,
+        description="Validated extra close collateral by venue_currency_key. Empty when unknown/not modelled.",
     )
     close_plan: ClosePlan
     execution_risk: ExecutionRiskResult | None = None
@@ -253,7 +284,10 @@ class UnwindDecision(BaseModel):
         self.paper_only = True
         if not self.close_plan.fully_executable:
             self.conditionally_releasable_by_venue_currency = {}
-            self.additional_close_capital_native = {}
+            self.incremental_close_capital_native = {}
+            self.incremental_close_capital_status = IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+        if self.incremental_close_capital_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED:
+            self.incremental_close_capital_native = {}
         return self
 
 

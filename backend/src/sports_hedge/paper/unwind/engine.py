@@ -16,8 +16,10 @@ from sports_hedge.liquidity.reverse import walk_lay_to_cover_payout, walk_predic
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.paper.unwind.mechanics import close_action_for, mechanics_for_venue
 from sports_hedge.paper.unwind.models import (
+    CapitalPressure,
     CloseLegPlan,
     ClosePlan,
+    IncrementalCloseCapitalStatus,
     OpenPaperLeg,
     OpenPaperPosition,
     ReverseQuote,
@@ -112,13 +114,41 @@ class PaperUnwindEngine:
             recommendation = UnwindRecommendation.UNWIND_NOT_SAFE
 
         releasable: dict[str, Decimal] = {}
-        extra_capital: dict[str, Decimal] = {}
+        gross_liability: dict[str, Decimal] = {}
+        incremental: dict[str, Decimal] = {}
+        incremental_status = IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
         if fully:
+            incremental_status = IncrementalCloseCapitalStatus.KNOWN
             for open_leg, plan in zip(position.legs, legs, strict=True):
                 key = venue_currency_key(open_leg.venue, open_leg.native_currency)
                 releasable[key] = releasable.get(key, Decimal("0")) + open_leg.filled_size
                 if plan.liability > 0:
-                    extra_capital[key] = extra_capital.get(key, Decimal("0")) + plan.liability
+                    gross_liability[key] = gross_liability.get(key, Decimal("0")) + plan.liability
+                _annotate_incremental_close_capital(plan)
+                if plan.incremental_close_capital_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED:
+                    incremental_status = IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+                elif plan.incremental_close_capital_native is not None:
+                    incremental[key] = incremental.get(key, Decimal("0")) + plan.incremental_close_capital_native
+            if incremental_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED:
+                incremental = {}
+        else:
+            for open_leg, plan in zip(position.legs, legs, strict=True):
+                key = venue_currency_key(open_leg.venue, open_leg.native_currency)
+                if plan.liability > 0:
+                    gross_liability[key] = gross_liability.get(key, Decimal("0")) + plan.liability
+                _annotate_incremental_close_capital(plan)
+
+        if recommendation is UnwindRecommendation.UNWIND_ELIGIBLE:
+            needs_known_incremental = (
+                request.policy.require_known_incremental_close_capital
+                or request.scarcity.pressure is CapitalPressure.SCARCE
+            )
+            if (
+                needs_known_incremental
+                and incremental_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+            ):
+                recommendation = UnwindRecommendation.UNWIND_NOT_SAFE
+                reason = "incremental_close_capital_unknown"
 
         remaining = position.remaining_lock_minutes
         if remaining is None and position.expected_settlement_at is not None:
@@ -139,7 +169,9 @@ class PaperUnwindEngine:
             remaining_lock_minutes=remaining,
             capital_turnover_hint=turnover,
             conditionally_releasable_by_venue_currency=releasable,
-            additional_close_capital_native=extra_capital,
+            gross_close_liability_native=gross_liability,
+            incremental_close_capital_status=incremental_status,
+            incremental_close_capital_native=incremental,
             close_plan=ClosePlan(
                 evaluated_at=evaluated_at,
                 fully_executable=fully,
@@ -344,6 +376,28 @@ def _apply_deferred_profit_commission(
             remaining = Decimal("0")
             break
     return []
+
+
+def _annotate_incremental_close_capital(plan: CloseLegPlan) -> None:
+    """Gross LAY liability is not validated extra cash without venue netting.
+
+    Selling already-owned prediction inventory does not consume incremental
+    collateral. Exchange BACK→LAY netting is not modelled in 8D.
+    """
+
+    if not plan.executable:
+        plan.incremental_close_capital_status = IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+        plan.incremental_close_capital_native = None
+        return
+    if (
+        plan.close_action is MarketAction.SELL
+        and plan.mechanics is VenueCloseMechanics.PREDICTION_BINARY_BUY_SELL
+    ):
+        plan.incremental_close_capital_status = IncrementalCloseCapitalStatus.KNOWN
+        plan.incremental_close_capital_native = Decimal("0")
+        return
+    plan.incremental_close_capital_status = IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+    plan.incremental_close_capital_native = None
 
 
 def _fx_rate(
