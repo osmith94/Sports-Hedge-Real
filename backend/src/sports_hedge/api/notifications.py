@@ -7,9 +7,9 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from sports_hedge.config import get_settings
+from sports_hedge.notifications.canonical import PriorityAlertNotificationAdapter
 from sports_hedge.notifications.models import (
     InAppPriorityNotification,
-    PriorityAlert,
     RouteDecision,
 )
 from sports_hedge.notifications.repository import SqliteNotificationRepository
@@ -41,7 +41,7 @@ def get_notification_router() -> PriorityAlertNotificationRouter:
     status_code=status.HTTP_200_OK,
 )
 def route_priority_alert(
-    alert: PriorityAlert,
+    alert: PriorityAlertNotificationAdapter,
     service: PriorityAlertNotificationRouter = Depends(get_notification_router),
 ) -> RouteDecision:
     return service.route(alert)

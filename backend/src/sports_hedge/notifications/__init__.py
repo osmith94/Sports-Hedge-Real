@@ -6,8 +6,12 @@ from sports_hedge.notifications.adapters import (
     NoOpAdapter,
     RecordingAdapter,
 )
+from sports_hedge.notifications.canonical import (
+    PriorityAlertNotificationAdapter,
+    notification_adapter_from_priority_alert,
+    priority_alert_deep_link,
+)
 from sports_hedge.notifications.models import (
-    AlertSeverity,
     InAppNotificationStatus,
     InAppPriorityNotification,
     NotificationChannel,
@@ -15,15 +19,12 @@ from sports_hedge.notifications.models import (
     NotificationEventType,
     NotificationPayload,
     OutboundMessage,
-    PriorityAlert,
     RouteDecision,
-    priority_alert_deep_link,
 )
 from sports_hedge.notifications.repository import SqliteNotificationRepository
 from sports_hedge.notifications.router import PriorityAlertNotificationRouter, default_adapters
 
 __all__ = [
-    "AlertSeverity",
     "ChannelAdapter",
     "ConsoleEmailAdapter",
     "InAppNotificationStatus",
@@ -34,11 +35,12 @@ __all__ = [
     "NotificationEventType",
     "NotificationPayload",
     "OutboundMessage",
-    "PriorityAlert",
+    "PriorityAlertNotificationAdapter",
     "PriorityAlertNotificationRouter",
     "RecordingAdapter",
     "RouteDecision",
     "SqliteNotificationRepository",
     "default_adapters",
+    "notification_adapter_from_priority_alert",
     "priority_alert_deep_link",
 ]

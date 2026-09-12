@@ -4,18 +4,25 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
+import sports_hedge.notifications as notifications
 from sports_hedge.api.main import app
 from sports_hedge.api.notifications import get_notification_router
 from sports_hedge.config import Settings
 from sports_hedge.notifications.adapters import RecordingAdapter
+from sports_hedge.notifications.canonical import (
+    CanonicalHedgeRevalidationAdapter,
+    CanonicalRecommendationAdapter,
+    PriorityAlertNotificationAdapter,
+    notification_adapter_from_priority_alert,
+    priority_alert_deep_link,
+)
 from sports_hedge.notifications.models import (
-    AlertSeverity,
     NotificationChannel,
     NotificationEventType,
-    PriorityAlert,
-    priority_alert_deep_link,
 )
 from sports_hedge.notifications.repository import SqliteNotificationRepository
 from sports_hedge.notifications.router import PriorityAlertNotificationRouter
@@ -28,40 +35,52 @@ NOW = datetime(2026, 9, 11, 21, 0, tzinfo=UTC)
 def _alert(
     *,
     alert_id: str = "alert-1",
-    severity: AlertSeverity = AlertSeverity.PRIORITY,
-    created_at: datetime = NOW,
-    expires_at: datetime | None = None,
+    opportunity_id: str = "opp:newcastle-chelsea-match-result",
+    severity: str = "PRIORITY",
+    opened_at: datetime = NOW,
+    expired_at: datetime | None = None,
     edge: str = "0.098",
     size: str = "475",
     profit: str = "46.55",
     freshness_ms: int = 180,
-) -> PriorityAlert:
-    return PriorityAlert(
-        priority_alert_id=alert_id,
-        severity=severity,
+    lifecycle_state: str = "OPEN",
+    operator_action: str = "PREPARE_MANUAL_OVERRIDE",
+    hedge_revalidation: CanonicalHedgeRevalidationAdapter | None = None,
+) -> PriorityAlertNotificationAdapter:
+    return PriorityAlertNotificationAdapter(
+        alert_id=alert_id,
+        opportunity_id=opportunity_id,
         canonical_event_id="evt:newcastle-chelsea-2026-09-20",
         canonical_market_id="evt:newcastle-chelsea-2026-09-20:match_result",
+        severity=severity,  # type: ignore[arg-type]
+        lifecycle_state=lifecycle_state,  # type: ignore[arg-type]
+        operator_action=operator_action,  # type: ignore[arg-type]
+        net_guaranteed_edge=Decimal(edge),
+        recommendation=CanonicalRecommendationAdapter(
+            recommended_size=Decimal(size),
+            guaranteed_profit=Decimal(profit),
+            limiting_leg_outcome="away",
+            limiting_leg_venue="smarkets",
+            quote_age_ms=freshness_ms,
+        ),
+        opened_at=opened_at,
+        expired_at=expired_at or NOW + timedelta(minutes=5),
         event_summary="Newcastle United vs Chelsea",
         market_summary="Match result (regulation time)",
-        net_guaranteed_edge=Decimal(edge),
-        recommended_size=Decimal(size),
-        expected_guaranteed_profit=Decimal(profit),
-        limiting_venue="smarkets",
-        limiting_leg="away",
-        quote_freshness_ms=freshness_ms,
-        created_at=created_at,
-        expires_at=expires_at or NOW + timedelta(minutes=5),
+        hedge_revalidation=hedge_revalidation,
     )
 
 
-def _router() -> tuple[PriorityAlertNotificationRouter, RecordingAdapter]:
-    email = RecordingAdapter(NotificationChannel.EMAIL)
+def _router(
+    email: RecordingAdapter | None = None,
+) -> tuple[PriorityAlertNotificationRouter, RecordingAdapter]:
+    adapter = email or RecordingAdapter(NotificationChannel.EMAIL)
     service = PriorityAlertNotificationRouter(
         SqliteNotificationRepository(),
-        {NotificationChannel.EMAIL: email},
+        {NotificationChannel.EMAIL: adapter},
         cooldown=timedelta(minutes=15),
     )
-    return service, email
+    return service, adapter
 
 
 def test_first_priority_alert_produces_in_app_and_email_notification() -> None:
@@ -104,37 +123,38 @@ def test_duplicate_alert_inside_cooldown_does_not_resend() -> None:
 
 def test_severity_upgrade_can_resend() -> None:
     service, email = _router()
-    service.route(_alert(severity=AlertSeverity.PRIORITY), now=NOW)
+    service.route(_alert(severity="PRIORITY"), now=NOW)
     upgrade = service.route(
-        _alert(alert_id="alert-critical", severity=AlertSeverity.CRITICAL, profit="90"),
+        _alert(alert_id="alert-critical", severity="CRITICAL", profit="90"),
         now=NOW + timedelta(minutes=1),
     )
 
     assert upgrade.event == NotificationEventType.PRIORITY_ALERT_UPGRADED
     assert upgrade.notify_outbound is True
     assert upgrade.notification is not None
-    assert upgrade.notification.severity == AlertSeverity.CRITICAL
+    assert upgrade.notification.severity == "CRITICAL"
     assert len(email.sent) == 2
     assert email.sent[1].event == NotificationEventType.PRIORITY_ALERT_UPGRADED
 
 
-def test_deep_link_is_deterministic() -> None:
+def test_deep_link_matches_integrated_ui_route() -> None:
     alert = _alert(alert_id="pa-42")
-    assert alert.deep_link_path == "/priority-alerts/pa-42"
-    assert priority_alert_deep_link("alert-1") == "/priority-alerts/alert-1"
+    payload_path = "/arbitrage/priority-alerts/pa-42"
+    assert priority_alert_deep_link("pa-42") == payload_path
+    assert priority_alert_deep_link("alert-1") == "/arbitrage/priority-alerts/alert-1"
     assert priority_alert_deep_link("alert-1") == priority_alert_deep_link("alert-1")
 
     service, email = _router()
     decision = service.route(alert, now=NOW)
     assert decision.notification is not None
-    assert decision.notification.deep_link_path == "/priority-alerts/pa-42"
-    assert email.sent[0].payload.deep_link_path == "/priority-alerts/pa-42"
+    assert decision.notification.deep_link_path == payload_path
+    assert email.sent[0].payload.deep_link_path == payload_path
 
 
 def test_expired_alert_does_not_send_stale_notification() -> None:
     service, email = _router()
     expired = service.route(
-        _alert(expires_at=NOW - timedelta(seconds=1)),
+        _alert(expired_at=NOW - timedelta(seconds=1)),
         now=NOW,
     )
     assert expired.notify_outbound is False
@@ -144,7 +164,7 @@ def test_expired_alert_does_not_send_stale_notification() -> None:
 
     opened = service.route(_alert(alert_id="live"), now=NOW)
     stale = service.route(
-        _alert(alert_id="stale", expires_at=NOW + timedelta(minutes=1)),
+        _alert(alert_id="stale", expired_at=NOW + timedelta(minutes=1)),
         now=NOW + timedelta(minutes=2),
     )
     assert opened.notify_outbound is True
@@ -153,6 +173,137 @@ def test_expired_alert_does_not_send_stale_notification() -> None:
     assert stale.notification is not None
     assert stale.notification.status.value == "EXPIRED"
     assert len(email.sent) == 1
+
+
+def test_external_manual_lifecycle_requires_operator_confirmation() -> None:
+    service, email = _router()
+    decision = service.route(
+        _alert(
+            lifecycle_state="AWAITING_EXTERNAL_LEG_CONFIRMATION",
+            operator_action="PREPARE_PROCEED_WITH_EXTERNAL_COUNTERPARTY",
+        ),
+        now=NOW,
+    )
+    assert decision.notification is not None
+    assert decision.notification.requires_operator_confirmation is True
+    assert decision.notification.actionability == "REQUIRES_OPERATOR_CONFIRMATION"
+    assert decision.notification.lifecycle_state == "AWAITING_EXTERNAL_LEG_CONFIRMATION"
+    assert "not fully actionable or filled" in email.sent[0].body
+    assert "PREPARE_PROCEED_WITH_EXTERNAL_COUNTERPARTY" in email.sent[0].body
+
+
+def test_revalidation_failed_is_not_treated_as_filled() -> None:
+    service, email = _router()
+    decision = service.route(
+        _alert(
+            lifecycle_state="HEDGE_REVALIDATION_FAILED",
+            hedge_revalidation=CanonicalHedgeRevalidationAdapter(
+                accepted=False,
+                lifecycle_state="HEDGE_REVALIDATION_FAILED",
+                reasons=["fresh_hedge_capacity_insufficient"],
+            ),
+        ),
+        now=NOW,
+    )
+    assert decision.notification is not None
+    assert decision.notification.revalidation_failed is True
+    assert decision.notification.actionability == "NOT_FULLY_ACTIONABLE"
+    assert "fail closed" in email.sent[0].body
+    assert "Do not treat this as filled" in email.sent[0].body
+
+
+def test_revalidation_confirmed_stays_paper_only() -> None:
+    service, email = _router()
+    decision = service.route(
+        _alert(
+            lifecycle_state="HEDGE_REVALIDATED",
+            hedge_revalidation=CanonicalHedgeRevalidationAdapter(
+                accepted=True,
+                lifecycle_state="HEDGE_REVALIDATED",
+            ),
+        ),
+        now=NOW,
+    )
+    assert decision.notification is not None
+    assert decision.notification.revalidation_confirmed is True
+    assert "no venue orders were placed" in email.sent[0].body
+    assert decision.notification.payload().paper_mode is True
+
+
+def test_adapter_maps_1_1_from_canonical_priority_alert_object() -> None:
+    canonical = SimpleNamespace(
+        alert_id="alert-60",
+        opportunity_id="opp-60",
+        canonical_event_id="evt-60",
+        canonical_market_id="mkt-60",
+        severity=SimpleNamespace(value="HIGH_PRIORITY"),
+        lifecycle_state=SimpleNamespace(value="AWAITING_EXTERNAL_LEG_CONFIRMATION"),
+        operator_action=SimpleNamespace(value="PREPARE_PROCEED_WITH_EXTERNAL_COUNTERPARTY"),
+        net_guaranteed_edge=Decimal("0.04"),
+        recommendation=SimpleNamespace(
+            recommended_size=Decimal("200"),
+            guaranteed_profit=Decimal("8"),
+            limiting_leg_outcome="home",
+            limiting_leg_venue="matchbook",
+            quote_age_ms=90,
+        ),
+        opened_at=NOW,
+        expired_at=NOW + timedelta(minutes=3),
+        event_summary=None,
+        market_summary=None,
+        paper_mode=True,
+        places_orders=False,
+        commits_automated_legs=False,
+        hedge_revalidation=None,
+    )
+    adapter = notification_adapter_from_priority_alert(canonical)
+    assert adapter.alert_id == "alert-60"
+    assert adapter.opportunity_id == "opp-60"
+    assert adapter.severity == "HIGH_PRIORITY"
+    assert adapter.lifecycle_state == "AWAITING_EXTERNAL_LEG_CONFIRMATION"
+    service, email = _router()
+    decision = service.route(canonical, now=NOW)
+    assert decision.notification is not None
+    assert decision.notification.priority_alert_id == "alert-60"
+    assert decision.notification.deep_link_path == "/arbitrage/priority-alerts/alert-60"
+    assert decision.notification.requires_operator_confirmation is True
+    assert email.sent[0].payload.opportunity_id == "opp-60"
+
+
+def test_notifications_package_does_not_define_a_second_priority_alert_model() -> None:
+    assert not hasattr(notifications, "PriorityAlert")
+    assert not hasattr(notifications, "AlertSeverity")
+    from sports_hedge.notifications import models as notification_models
+
+    assert not hasattr(notification_models, "PriorityAlert")
+    assert not hasattr(notification_models, "AlertSeverity")
+
+
+def test_naive_timestamps_fail_closed() -> None:
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        _alert(opened_at=datetime(2026, 9, 11, 21, 0))
+    service, _email = _router()
+    with pytest.raises(ValueError, match="timezone-aware"):
+        service.route(_alert(), now=datetime(2026, 9, 11, 21, 0))
+
+
+def test_outbound_adapter_failure_does_not_drop_in_app_notification() -> None:
+    class ExplodingAdapter:
+        channel = NotificationChannel.EMAIL
+
+        def send(self, message: object) -> None:
+            raise RuntimeError("provider unavailable")
+
+    exploding = ExplodingAdapter()
+    service = PriorityAlertNotificationRouter(
+        SqliteNotificationRepository(),
+        {NotificationChannel.EMAIL: exploding},
+    )
+    decision = service.route(_alert(), now=NOW)
+    assert decision.notification is not None
+    assert decision.notification.unread is True
+    assert any(item.reason.startswith("adapter_failed:") for item in decision.dispatches)
+    assert service.unread_count() == 1
 
 
 def test_notification_routing_has_no_betting_or_execution_side_effects() -> None:
@@ -165,9 +316,6 @@ def test_notification_routing_has_no_betting_or_execution_side_effects() -> None
     assert not hasattr(service, "cancel_order")
     venue_like = SimpleNamespace(place_order=None)
     assert venue_like is not service
-
-    import sports_hedge.notifications as notifications
-
     assert "sports_hedge.venues" not in notifications.__dict__
     assert "sports_hedge.arbitrage" not in notifications.__dict__
     assert "sports_hedge.paper" not in notifications.__dict__
@@ -192,8 +340,8 @@ def test_notifications_api_exposes_recent_unread_and_mark_read() -> None:
     client = TestClient(app)
     live_now = datetime.now(UTC)
     payload = _alert(
-        created_at=live_now,
-        expires_at=live_now + timedelta(minutes=10),
+        opened_at=live_now,
+        expired_at=live_now + timedelta(minutes=10),
     ).model_dump(mode="json")
     try:
         opened = client.post("/notifications/priority-alerts", json=payload)
@@ -201,6 +349,7 @@ def test_notifications_api_exposes_recent_unread_and_mark_read() -> None:
         body = opened.json()
         assert body["notify_outbound"] is True
         notification_id = body["notification"]["notification_id"]
+        assert body["notification"]["deep_link_path"] == "/arbitrage/priority-alerts/alert-1"
 
         listed = client.get("/notifications?unread_only=true")
         assert listed.status_code == 200

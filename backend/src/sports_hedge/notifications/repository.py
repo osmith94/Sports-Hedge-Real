@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from sports_hedge.notifications.models import (
-    AlertSeverity,
     InAppNotificationStatus,
     InAppPriorityNotification,
     NotificationChannel,
@@ -35,7 +34,14 @@ class SqliteNotificationRepository:
                 canonical_event_id TEXT NOT NULL,
                 canonical_market_id TEXT NOT NULL,
                 priority_alert_id TEXT NOT NULL,
+                opportunity_id TEXT NOT NULL DEFAULT '',
                 severity TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL DEFAULT 'OPEN',
+                operator_action TEXT NOT NULL DEFAULT 'PREPARE_MANUAL_OVERRIDE',
+                requires_operator_confirmation INTEGER NOT NULL DEFAULT 0,
+                revalidation_failed INTEGER NOT NULL DEFAULT 0,
+                revalidation_confirmed INTEGER NOT NULL DEFAULT 0,
+                actionability TEXT NOT NULL DEFAULT 'PAPER_REVIEW_ONLY',
                 status TEXT NOT NULL,
                 last_event TEXT NOT NULL,
                 event_summary TEXT NOT NULL,
@@ -48,7 +54,7 @@ class SqliteNotificationRepository:
                 quote_freshness_ms INTEGER NOT NULL,
                 deep_link_path TEXT NOT NULL,
                 alert_created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
+                expires_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 last_outbound_at TEXT,
@@ -75,7 +81,28 @@ class SqliteNotificationRepository:
                 ON notification_dispatches(notification_id, created_at DESC);
             """
         )
+        self._ensure_columns()
         self._connection.commit()
+
+    def _ensure_columns(self) -> None:
+        existing = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(priority_notifications)")
+        }
+        additions = {
+            "opportunity_id": "TEXT NOT NULL DEFAULT ''",
+            "lifecycle_state": "TEXT NOT NULL DEFAULT 'OPEN'",
+            "operator_action": "TEXT NOT NULL DEFAULT 'PREPARE_MANUAL_OVERRIDE'",
+            "requires_operator_confirmation": "INTEGER NOT NULL DEFAULT 0",
+            "revalidation_failed": "INTEGER NOT NULL DEFAULT 0",
+            "revalidation_confirmed": "INTEGER NOT NULL DEFAULT 0",
+            "actionability": "TEXT NOT NULL DEFAULT 'PAPER_REVIEW_ONLY'",
+        }
+        for name, ddl in additions.items():
+            if name not in existing:
+                self._connection.execute(
+                    f"ALTER TABLE priority_notifications ADD COLUMN {name} {ddl}"
+                )
 
     def get(self, notification_id: str) -> InAppPriorityNotification | None:
         row = self._connection.execute(
@@ -96,17 +123,26 @@ class SqliteNotificationRepository:
             """
             INSERT INTO priority_notifications (
                 notification_id, opportunity_key, canonical_event_id, canonical_market_id,
-                priority_alert_id, severity, status, last_event, event_summary, market_summary,
+                priority_alert_id, opportunity_id, severity, lifecycle_state, operator_action,
+                requires_operator_confirmation, revalidation_failed, revalidation_confirmed,
+                actionability, status, last_event, event_summary, market_summary,
                 net_guaranteed_edge, recommended_size, expected_guaranteed_profit,
                 limiting_venue, limiting_leg, quote_freshness_ms, deep_link_path,
                 alert_created_at, expires_at, created_at, updated_at, last_outbound_at, unread
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(opportunity_key) DO UPDATE SET
                 notification_id = excluded.notification_id,
                 canonical_event_id = excluded.canonical_event_id,
                 canonical_market_id = excluded.canonical_market_id,
                 priority_alert_id = excluded.priority_alert_id,
+                opportunity_id = excluded.opportunity_id,
                 severity = excluded.severity,
+                lifecycle_state = excluded.lifecycle_state,
+                operator_action = excluded.operator_action,
+                requires_operator_confirmation = excluded.requires_operator_confirmation,
+                revalidation_failed = excluded.revalidation_failed,
+                revalidation_confirmed = excluded.revalidation_confirmed,
+                actionability = excluded.actionability,
                 status = excluded.status,
                 last_event = excluded.last_event,
                 event_summary = excluded.event_summary,
@@ -131,7 +167,14 @@ class SqliteNotificationRepository:
                 notification.canonical_event_id,
                 notification.canonical_market_id,
                 notification.priority_alert_id,
-                notification.severity.value,
+                notification.opportunity_id,
+                notification.severity,
+                notification.lifecycle_state,
+                notification.operator_action,
+                int(notification.requires_operator_confirmation),
+                int(notification.revalidation_failed),
+                int(notification.revalidation_confirmed),
+                notification.actionability,
                 notification.status.value,
                 notification.last_event.value,
                 notification.event_summary,
@@ -144,7 +187,7 @@ class SqliteNotificationRepository:
                 notification.quote_freshness_ms,
                 notification.deep_link_path,
                 notification.alert_created_at.isoformat(),
-                notification.expires_at.isoformat(),
+                None if notification.expires_at is None else notification.expires_at.isoformat(),
                 notification.created_at.isoformat(),
                 notification.updated_at.isoformat(),
                 None
@@ -229,15 +272,33 @@ class SqliteNotificationRepository:
         self._connection.close()
 
 
+def _row_value(row: sqlite3.Row, column: str, default: Any = None) -> Any:
+    try:
+        return row[column]
+    except (IndexError, KeyError):
+        return default
+
+
 def _notification_from_row(row: sqlite3.Row) -> InAppPriorityNotification:
     last_outbound = row["last_outbound_at"]
+    expires_at = row["expires_at"]
+    opportunity_id = str(_row_value(row, "opportunity_id") or row["opportunity_key"])
     return InAppPriorityNotification(
         notification_id=row["notification_id"],
         opportunity_key=row["opportunity_key"],
         canonical_event_id=row["canonical_event_id"],
         canonical_market_id=row["canonical_market_id"],
         priority_alert_id=row["priority_alert_id"],
-        severity=AlertSeverity(row["severity"]),
+        opportunity_id=opportunity_id,
+        severity=row["severity"],
+        lifecycle_state=_row_value(row, "lifecycle_state") or "OPEN",
+        operator_action=_row_value(row, "operator_action") or "PREPARE_MANUAL_OVERRIDE",
+        requires_operator_confirmation=bool(
+            _row_value(row, "requires_operator_confirmation") or 0
+        ),
+        revalidation_failed=bool(_row_value(row, "revalidation_failed") or 0),
+        revalidation_confirmed=bool(_row_value(row, "revalidation_confirmed") or 0),
+        actionability=_row_value(row, "actionability") or "PAPER_REVIEW_ONLY",
         status=InAppNotificationStatus(row["status"]),
         last_event=NotificationEventType(row["last_event"]),
         event_summary=row["event_summary"],
@@ -250,7 +311,7 @@ def _notification_from_row(row: sqlite3.Row) -> InAppPriorityNotification:
         quote_freshness_ms=int(row["quote_freshness_ms"]),
         deep_link_path=row["deep_link_path"],
         alert_created_at=datetime.fromisoformat(row["alert_created_at"]),
-        expires_at=datetime.fromisoformat(row["expires_at"]),
+        expires_at=None if not expires_at else datetime.fromisoformat(expires_at),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
         last_outbound_at=None if last_outbound is None else datetime.fromisoformat(last_outbound),

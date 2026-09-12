@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 from sports_hedge.notifications.adapters import ChannelAdapter
+from sports_hedge.notifications.canonical import require_aware_utc
 from sports_hedge.notifications.models import (
     SEVERITY_RANK,
     InAppNotificationStatus,
@@ -13,7 +14,6 @@ from sports_hedge.notifications.models import (
     NotificationEventType,
     NotificationPayload,
     OutboundMessage,
-    PriorityAlert,
     RouteDecision,
 )
 from sports_hedge.notifications.repository import SqliteNotificationRepository
@@ -22,8 +22,9 @@ from sports_hedge.notifications.repository import SqliteNotificationRepository
 class PriorityAlertNotificationRouter:
     """Deduping, rate-limited routing for Priority Arb Alerts.
 
-    In-app persistence is always applied. Outbound channels (email/push/SMS)
-    are provider-neutral adapters and are never used to place venue orders.
+    Consumes the canonical Priority Alert read model via a 1:1 adapter.
+    In-app persistence is always applied. Outbound channels are provider-neutral
+    and never place venue orders.
     """
 
     def __init__(
@@ -39,26 +40,28 @@ class PriorityAlertNotificationRouter:
         self._cooldown = cooldown
         self._outbound_channels = outbound_channels
 
-    def route(self, alert: PriorityAlert, *, now: datetime | None = None) -> RouteDecision:
-        moment = now or datetime.now(UTC)
-        if moment.tzinfo is None:
-            moment = moment.replace(tzinfo=UTC)
+    def route(self, alert: object, *, now: datetime | None = None) -> RouteDecision:
+        moment = require_aware_utc(now or datetime.now(UTC), field="now")
+        payload = NotificationPayload.from_priority_alert(alert)
+        existing = self._repository.get_by_opportunity_key(payload.opportunity_key)
 
-        existing = self._repository.get_by_opportunity_key(
-            alert.opportunity_key or f"{alert.canonical_event_id}:{alert.canonical_market_id}"
-        )
-
-        if alert.is_expired(now=moment):
-            return self._expire(alert, existing=existing, now=moment)
+        if payload.is_expired(now=moment):
+            return self._expire(payload, existing=existing, now=moment)
 
         if existing is None:
-            return self._open(alert, now=moment)
+            return self._notify(
+                payload,
+                existing=None,
+                now=moment,
+                event=NotificationEventType.PRIORITY_ALERT_OPENED,
+                status=InAppNotificationStatus.OPEN,
+            )
 
         previous_rank = SEVERITY_RANK[existing.severity]
-        next_rank = SEVERITY_RANK[alert.severity]
+        next_rank = SEVERITY_RANK[payload.severity]
         if next_rank > previous_rank:
             return self._notify(
-                alert,
+                payload,
                 existing=existing,
                 now=moment,
                 event=NotificationEventType.PRIORITY_ALERT_UPGRADED,
@@ -66,7 +69,7 @@ class PriorityAlertNotificationRouter:
             )
         if next_rank < previous_rank:
             return self._update_in_app(
-                alert,
+                payload,
                 existing=existing,
                 now=moment,
                 event=NotificationEventType.PRIORITY_ALERT_DOWNGRADED,
@@ -76,7 +79,7 @@ class PriorityAlertNotificationRouter:
 
         if self._within_cooldown(existing, now=moment):
             return self._update_in_app(
-                alert,
+                payload,
                 existing=existing,
                 now=moment,
                 event=NotificationEventType.PRIORITY_ALERT_UPDATED,
@@ -85,7 +88,7 @@ class PriorityAlertNotificationRouter:
             )
 
         return self._notify(
-            alert,
+            payload,
             existing=existing,
             now=moment,
             event=NotificationEventType.PRIORITY_ALERT_OPENED,
@@ -106,18 +109,9 @@ class PriorityAlertNotificationRouter:
     def mark_read(self, notification_id: str) -> InAppPriorityNotification | None:
         return self._repository.mark_read(notification_id)
 
-    def _open(self, alert: PriorityAlert, *, now: datetime) -> RouteDecision:
-        return self._notify(
-            alert,
-            existing=None,
-            now=now,
-            event=NotificationEventType.PRIORITY_ALERT_OPENED,
-            status=InAppNotificationStatus.OPEN,
-        )
-
     def _expire(
         self,
-        alert: PriorityAlert,
+        payload: NotificationPayload,
         *,
         existing: InAppPriorityNotification | None,
         now: datetime,
@@ -132,8 +126,10 @@ class PriorityAlertNotificationRouter:
             update={
                 "status": InAppNotificationStatus.EXPIRED,
                 "last_event": NotificationEventType.PRIORITY_ALERT_EXPIRED,
+                "lifecycle_state": "EXPIRED",
+                "actionability": "NOT_FULLY_ACTIONABLE",
                 "updated_at": now,
-                "expires_at": alert.expires_at,
+                "expires_at": payload.expires_at,
             }
         )
         stored = self._repository.upsert(notification)
@@ -154,15 +150,15 @@ class PriorityAlertNotificationRouter:
 
     def _notify(
         self,
-        alert: PriorityAlert,
+        payload: NotificationPayload,
         *,
         existing: InAppPriorityNotification | None,
         now: datetime,
         event: NotificationEventType,
         status: InAppNotificationStatus,
     ) -> RouteDecision:
-        notification = InAppPriorityNotification.from_alert(
-            alert,
+        notification = InAppPriorityNotification.from_payload(
+            payload,
             now=now,
             notification_id=None if existing is None else existing.notification_id,
             last_outbound_at=now,
@@ -172,7 +168,6 @@ class PriorityAlertNotificationRouter:
             created_at=now if existing is None else existing.created_at,
         )
         stored = self._repository.upsert(notification)
-        payload = NotificationPayload.from_alert(alert)
         self._record_dispatch(
             stored,
             channel=NotificationChannel.IN_APP,
@@ -196,7 +191,7 @@ class PriorityAlertNotificationRouter:
 
     def _update_in_app(
         self,
-        alert: PriorityAlert,
+        payload: NotificationPayload,
         *,
         existing: InAppPriorityNotification,
         now: datetime,
@@ -204,8 +199,8 @@ class PriorityAlertNotificationRouter:
         status: InAppNotificationStatus,
         suppress_reason: str,
     ) -> RouteDecision:
-        notification = InAppPriorityNotification.from_alert(
-            alert,
+        notification = InAppPriorityNotification.from_payload(
+            payload,
             now=now,
             notification_id=existing.notification_id,
             last_outbound_at=existing.last_outbound_at,
@@ -260,7 +255,18 @@ class PriorityAlertNotificationRouter:
             subject=_subject(event, payload),
             body=_body(payload),
         )
-        adapter.send(message)
+        try:
+            adapter.send(message)
+        except Exception as exc:  # noqa: BLE001 — keep in-app delivery usable
+            return self._record_dispatch(
+                notification,
+                channel=channel,
+                event=event,
+                now=now,
+                suppressed=True,
+                reason=f"adapter_failed:{type(exc).__name__}",
+                payload=payload,
+            )
         return self._record_dispatch(
             notification,
             channel=channel,
@@ -316,21 +322,41 @@ class PriorityAlertNotificationRouter:
 
 def _subject(event: NotificationEventType, payload: NotificationPayload) -> str:
     return (
-        f"{event.value}: {payload.severity.value} "
+        f"{event.value}: {payload.severity} "
         f"{payload.event_summary} / {payload.market_summary}"
     )
 
 
 def _body(payload: NotificationPayload) -> str:
-    return (
-        f"Net guaranteed edge: {payload.net_guaranteed_edge}\n"
-        f"Recommended size: {payload.recommended_size}\n"
-        f"Expected guaranteed profit: {payload.expected_guaranteed_profit}\n"
-        f"Limiting: {payload.limiting_venue} / {payload.limiting_leg}\n"
-        f"Quote freshness: {payload.quote_freshness_ms}ms\n"
-        f"Open: {payload.deep_link_path}\n"
-        f"Expires: {payload.expires_at.isoformat()}"
-    )
+    lines = [
+        f"Net guaranteed edge: {payload.net_guaranteed_edge}",
+        f"Recommended size: {payload.recommended_size}",
+        f"Expected guaranteed profit: {payload.expected_guaranteed_profit}",
+        f"Limiting: {payload.limiting_venue} / {payload.limiting_leg}",
+        f"Quote freshness: {payload.quote_freshness_ms}ms",
+        f"Lifecycle: {payload.lifecycle_state}",
+        f"Actionability: {payload.actionability}",
+        f"Open: {payload.deep_link_path}",
+    ]
+    if payload.requires_operator_confirmation:
+        lines.append(
+            "Requires operator confirmation of an external manual leg; "
+            "this opportunity is not fully actionable or filled."
+        )
+        lines.append(f"Operator action: {payload.operator_action}")
+    if payload.revalidation_failed:
+        lines.append(
+            "Hedge revalidation failed after external confirmation; fail closed. "
+            "Do not treat this as filled."
+        )
+    if payload.revalidation_confirmed:
+        lines.append(
+            "External leg confirmed and remaining hedge revalidated in paper mode; "
+            "no venue orders were placed."
+        )
+    if payload.expires_at is not None:
+        lines.append(f"Expires: {payload.expires_at.isoformat()}")
+    return "\n".join(lines)
 
 
 def default_adapters() -> dict[NotificationChannel, ChannelAdapter]:
