@@ -197,6 +197,7 @@ export type FixtureMarketInventoryRow = {
   rejection_reasons: string[];
   match_reasons: string[];
   entered_solver: boolean;
+  solver_model?: string | null;
   current_net_edge?: string | number | null;
   trigger_net_edge?: string | number | null;
   distance_to_trigger_pp?: string | number | null;

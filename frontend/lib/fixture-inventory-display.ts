@@ -49,8 +49,15 @@ export function economicsSummary(facts: VenueMarketFacts | null | undefined): st
 }
 
 export function solverFacts(row: FixtureMarketInventoryRow): string {
+  const model = row.solver_model ? row.solver_model.replaceAll("_", " ") : null;
   if (!row.entered_solver) {
+    const reason = row.reason ? ` · ${row.reason}` : "";
+    if (model) return `${model}${reason}`;
     return row.reason ? `not in solver · ${row.reason}` : "not in solver";
   }
-  return `net ${percent(row.current_net_edge)} · trigger ${percent(row.trigger_net_edge)} · ${percentPoints(row.distance_to_trigger_pp)}`;
+  const prefix = model ? `${model} · ` : "";
+  if (!row.solver_is_arbitrage && row.reason) {
+    return `${prefix}evaluated · ${row.reason}`;
+  }
+  return `${prefix}net ${percent(row.current_net_edge)} · trigger ${percent(row.trigger_net_edge)} · ${percentPoints(row.distance_to_trigger_pp)}`;
 }

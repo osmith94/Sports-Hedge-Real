@@ -10,10 +10,16 @@ from sports_hedge.application.complete_set import (
     INCOMPLETE_OUTCOME_REASON,
     PUSH_STATE_REASON,
     SOLVER_INELIGIBLE_REASON,
+    SPLIT_LINE_REASON,
+    UNKNOWN_DRAW_VOID_REASON,
+    UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
     UNPROVEN_HANDICAP_REASON,
     UNPROVEN_SETTLEMENT_REASON,
+    scan_eligible_pair,
+    scan_ineligibility_reason,
     solver_eligible_market,
-    solver_ineligibility_reason,
+    solver_model_for_pair,
+    generalized_payoff_eligible_market,
 )
 from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.domain.football import (
@@ -75,6 +81,7 @@ class FixtureMarketInventoryRow(BaseModel):
     rejection_reasons: list[str] = Field(default_factory=list)
     match_reasons: list[str] = Field(default_factory=list)
     entered_solver: bool = False
+    solver_model: str | None = None
     current_net_edge: Decimal | None = None
     trigger_net_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
@@ -94,6 +101,8 @@ class InventoryMarket(BaseModel):
 
 
 def solver_eligible_pair(left: CanonicalMarket, right: CanonicalMarket, match: MarketMatchResult) -> bool:
+    """Complete-set eligibility only. Use scan_eligible_pair for live scan routing."""
+
     return bool(
         match.matched
         and solver_eligible_market(left)
@@ -289,9 +298,9 @@ def _venue_only_row(
         status = InventoryComparisonStatus.UNSUPPORTED_FAMILY
         reason = "unsupported_family"
         reasons = ["unsupported_family"]
-    elif not solver_eligible_market(canonical):
+    elif not solver_eligible_market(canonical) and not generalized_payoff_eligible_market(canonical):
         status = InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL
-        reason = solver_ineligibility_reason(canonical)
+        reason = scan_ineligibility_reason(canonical)
         reasons = [reason]
     facts = _facts_from_inventory(item, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
     return FixtureMarketInventoryRow(
@@ -346,6 +355,13 @@ def _paired_row(
         rejection_reasons=rejection_reasons,
         match_reasons=list(match.reasons),
         entered_solver=entered,
+        solver_model=solver_model_for_pair(left.canonical, right.canonical)
+        if left.canonical is not None and right.canonical is not None and entered
+        else (
+            decision.solver_model
+            if decision is not None and decision.solver_model
+            else None
+        ),
         current_net_edge=_decision_net_edge(decision) if entered else None,
         trigger_net_edge=decision.minimum_net_edge if decision is not None and entered else None,
         distance_to_trigger_pp=_decision_distance(decision) if entered else None,
@@ -386,12 +402,8 @@ def _classify_pair(
                 if item in {"settlement_mismatch", "incomplete_settlement"}
             )
             return InventoryComparisonStatus.SETTLEMENT_MISMATCH, reason, list(match.reasons), False
-        if not solver_eligible_market(left_market) or not solver_eligible_market(right_market):
-            ineligible = (
-                solver_ineligibility_reason(left_market)
-                if not solver_eligible_market(left_market)
-                else solver_ineligibility_reason(right_market)
-            )
+        if not solver_eligible_market(left_market) and not solver_eligible_market(right_market):
+            ineligible = scan_ineligibility_reason(left_market)
             return (
                 InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL,
                 ineligible,
@@ -399,11 +411,11 @@ def _classify_pair(
                 False,
             )
         return InventoryComparisonStatus.OTHER, match.reasons[0] if match.reasons else "not_equivalent", list(match.reasons), False
-    if not solver_eligible_market(left_market) or not solver_eligible_market(right_market):
+    if not scan_eligible_pair(left_market, right_market, match):
         ineligible = (
-            solver_ineligibility_reason(left_market)
+            scan_ineligibility_reason(left_market)
             if not solver_eligible_market(left_market)
-            else solver_ineligibility_reason(right_market)
+            else scan_ineligibility_reason(right_market)
         )
         return (
             InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL,
@@ -412,7 +424,7 @@ def _classify_pair(
             False,
         )
 
-    entered = decision is not None and solver_eligible_pair(left_market, right_market, match)
+    entered = decision is not None and scan_eligible_pair(left_market, right_market, match)
     rejections = list(decision.rejection_reasons) if decision is not None else []
     status = InventoryComparisonStatus.MATCHED_EQUIVALENT
     reason: str | None = None
@@ -445,7 +457,11 @@ def _status_from_rejections(rejections: list[str]) -> InventoryComparisonStatus:
 
 
 def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
-    if reason.startswith("missing_venue_cost") or reason in {"missing_costs", "legacy_fee_snapshot_not_cost_truth"}:
+    if reason.startswith("missing_venue_cost") or reason in {
+        "missing_costs",
+        "legacy_fee_snapshot_not_cost_truth",
+        UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
+    }:
         return InventoryComparisonStatus.MISSING_COSTS
     if reason.startswith("missing_fx") or reason.startswith("missing_fx_rate"):
         return InventoryComparisonStatus.MISSING_FX
@@ -459,6 +475,8 @@ def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
         PUSH_STATE_REASON,
         UNPROVEN_SETTLEMENT_REASON,
         UNPROVEN_HANDICAP_REASON,
+        SPLIT_LINE_REASON,
+        UNKNOWN_DRAW_VOID_REASON,
     }:
         return InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL
     if reason in {"unsupported_family", "market_family_mismatch"} and reason == "unsupported_family":
@@ -572,7 +590,13 @@ def _touch_depth(observation: VenueMarketObservation | None) -> Decimal | None:
 
 
 def _decision_net_edge(decision: PaperScanDecision | None) -> Decimal | None:
-    if decision is None or decision.depth_scan is None:
+    if decision is None:
+        return None
+    if decision.payoff_scan is not None:
+        from sports_hedge.arbitrage.watchlist.economics import quantized_edge
+
+        return quantized_edge(decision.payoff_scan.solution.roi)
+    if decision.depth_scan is None:
         return None
     implied = decision.depth_scan.solution.implied_probability_sum
     if implied <= 0:
@@ -592,11 +616,13 @@ def _decision_distance(decision: PaperScanDecision | None) -> Decimal | None:
 
 
 def _decision_is_arb(decision: PaperScanDecision | None) -> bool:
-    if decision is None or decision.depth_scan is None:
+    if decision is None or not decision.eligible_for_paper_simulation:
         return False
-    return bool(
-        decision.eligible_for_paper_simulation and decision.depth_scan.solution.is_arbitrage
-    )
+    if decision.payoff_scan is not None:
+        return bool(decision.payoff_scan.solution.is_arbitrage)
+    if decision.depth_scan is None:
+        return False
+    return bool(decision.depth_scan.solution.is_arbitrage)
 
 
 def _sort_rows(rows: list[FixtureMarketInventoryRow]) -> list[FixtureMarketInventoryRow]:

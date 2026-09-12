@@ -69,6 +69,12 @@ def _market(
     line: Decimal | None = None,
 ) -> CanonicalMarket:
     resolved = outcomes or [CanonicalOutcome.HOME, CanonicalOutcome.DRAW, CanonicalOutcome.AWAY]
+    if family is MarketFamily.DRAW_NO_BET:
+        push_possible = True
+    elif line is not None:
+        push_possible = line == line.to_integral_value()
+    else:
+        push_possible = False
     return CanonicalMarket(
         event=_event(venue, f"{venue.value}-event"),
         source_venue=venue,
@@ -80,7 +86,7 @@ def _market(
             scope=SettlementScope.INCLUDING_EXTRA_TIME if extra_time else SettlementScope.REGULATION_TIME,
             period=FootballPeriod.FULL_TIME,
             line=line,
-            push_possible=(line == line.to_integral_value()) if line is not None else False,
+            push_possible=push_possible,
             extra_time_included=extra_time,
             penalties_included=False,
         ),

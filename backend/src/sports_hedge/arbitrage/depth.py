@@ -150,6 +150,16 @@ class DepthAwareCompleteSetScanner:
         )
 
 
+def prefix_depth_candidates(
+    source: DepthQuoteSource,
+    *,
+    configured_slippage_bps: Decimal | None,
+) -> tuple[list[DepthQuoteCandidate], list[str]]:
+    """Public wrapper so the generalized scanner reuses the same back-prefix economics."""
+
+    return _prefix_candidates(source, configured_slippage_bps=configured_slippage_bps)
+
+
 def _prefix_candidates(
     source: DepthQuoteSource,
     *,

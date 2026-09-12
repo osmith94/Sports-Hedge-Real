@@ -92,6 +92,7 @@ class WatchObservation(BaseModel):
     gross_edge: Decimal | None = None
     implied_probability_sum: Decimal | None = Field(default=None, gt=0)
     solver_is_arbitrage: bool = False
+    solver_model: str | None = None
     eligible_for_paper_simulation: bool = False
     rejection_reasons: list[str] = Field(default_factory=list)
     execution_risk_score: int | None = Field(default=None, ge=0, le=100)

@@ -14,7 +14,7 @@ from sports_hedge.application.fixture_inventory import (
     inventory_summary,
     raw_market_id,
     raw_market_name,
-    solver_eligible_pair,
+    scan_eligible_pair,
 )
 from sports_hedge.application.fixture_state import matchbook_fixture_state
 from sports_hedge.application.quote_freshness import (
@@ -41,6 +41,7 @@ from sports_hedge.application.target_competitions import (
 from sports_hedge.arbitrage.watchlist.economics import (
     distance_to_trigger_pp,
     net_edge_from_implied_sum,
+    quantized_edge,
 )
 from sports_hedge.domain.football import CanonicalEvent, CanonicalMarket
 from sports_hedge.domain.models import VenueName
@@ -387,7 +388,7 @@ class ReadOnlyCrossVenueCollector:
                 ] = observation
 
             for left_market, right_market, match in market_pairs:
-                if not solver_eligible_pair(left_market.canonical, right_market.canonical, match):
+                if not scan_eligible_pair(left_market.canonical, right_market.canonical, match):
                     continue
                 matchbook_observation = observations_by_market_id.get(
                     (VenueName.MATCHBOOK, left_market.canonical.source_market_id)
@@ -841,7 +842,9 @@ def _apply_backend_comparison(
     """Copy solver/scan fields onto the discovery row. No frontend economics."""
 
     current_net = None
-    if decision.depth_scan is not None:
+    if decision.payoff_scan is not None:
+        current_net = quantized_edge(decision.payoff_scan.solution.roi)
+    elif decision.depth_scan is not None:
         implied = decision.depth_scan.solution.implied_probability_sum
         if implied > 0:
             current_net = net_edge_from_implied_sum(implied)
@@ -856,8 +859,16 @@ def _apply_backend_comparison(
     )
     solver_arb = bool(
         decision.eligible_for_paper_simulation
-        and decision.depth_scan is not None
-        and decision.depth_scan.solution.is_arbitrage
+        and (
+            (
+                decision.payoff_scan is not None
+                and decision.payoff_scan.solution.is_arbitrage
+            )
+            or (
+                decision.depth_scan is not None
+                and decision.depth_scan.solution.is_arbitrage
+            )
+        )
     )
     no_reason = None
     if current_net is None:
