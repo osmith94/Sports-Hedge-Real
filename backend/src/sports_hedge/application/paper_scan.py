@@ -25,9 +25,9 @@ from sports_hedge.application.quote_freshness import (
 )
 from sports_hedge.arbitrage.depth import DepthAwareCompleteSetScanner, DepthQuoteSource
 from sports_hedge.arbitrage.payoff_scan import (
-    STATE_SAFE_FEE_BASES,
     DepthAwarePayoffScanner,
     PayoffScanResult,
+    is_state_safe_fee,
 )
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.football import CanonicalOutcome, SettlementScope
@@ -142,6 +142,9 @@ class PaperScanService:
         )
         rejections.extend(cost_resolve_reasons)
         rejections.extend(fx_resolve_reasons)
+        from sports_hedge.fees.labels import cost_assumption_labels_for_snapshots
+
+        assumption_labels.extend(cost_assumption_labels_for_snapshots(costs))
         quote_age_ms = conservative_combined_age_ms(left.quote_age_ms, right.quote_age_ms)
         quote_age_basis = conservative_combined_basis(
             left.metadata.get("quote_age_basis") if isinstance(left.metadata, dict) else None,
@@ -233,12 +236,12 @@ class PaperScanService:
         if any(outcome == CanonicalOutcome.OTHER for outcome in expected_outcomes):
             rejections.append("noncanonical_outcome_space")
 
+        if venue_costs is None and fees:
+            rejections.append("legacy_fee_snapshot_not_cost_truth")
         if costs:
             cost_map = {snapshot.venue: snapshot for snapshot in costs}
         else:
             cost_map = {}
-            if fees:
-                rejections.append("legacy_fee_snapshot_not_cost_truth")
         scan_costs: dict[VenueName, VenueCostSnapshot] = {}
         missing_fees = False
         for observation in (left, right):
@@ -263,7 +266,7 @@ class PaperScanService:
             except CostRuleError as exc:
                 rejections.append(exc.reason)
                 missing_fees = True
-            if solver_model != SOLVER_MODEL_SIMPLE and cost.fee_basis not in STATE_SAFE_FEE_BASES:
+            if solver_model != SOLVER_MODEL_SIMPLE and not is_state_safe_fee(cost):
                 rejections.append(UNSUPPORTED_STATE_PAYOFF_FEE_BASIS)
                 missing_fees = True
 
@@ -650,12 +653,29 @@ class PaperScanService:
                         captured_at=as_of,
                         source_market_id=observation.market.source_market_id,
                     )
-                    if snapshot.is_economically_known():
-                        resolved.append(snapshot)
-                    else:
+                    resolved.append(snapshot)
+                    if not snapshot.is_economically_known():
                         reasons.append("unknown_required_venue_cost:kalshi")
                     continue
                 reasons.append("unknown_required_venue_cost:kalshi")
+                continue
+            if observation.venue is VenueName.POLYMARKET:
+                metadata = observation.metadata if isinstance(observation.metadata, dict) else {}
+                fee_meta = metadata.get("polymarket_fee")
+                if isinstance(fee_meta, dict):
+                    from sports_hedge.fees.polymarket import polymarket_cost_from_market
+
+                    snapshot = polymarket_cost_from_market(
+                        fee_meta,
+                        action=action,
+                        captured_at=as_of,
+                        source_market_id=observation.market.source_market_id,
+                    )
+                    resolved.append(snapshot)
+                    if not snapshot.is_economically_known():
+                        reasons.append("unknown_required_venue_cost:polymarket")
+                    continue
+                reasons.append("unknown_required_venue_cost:polymarket")
                 continue
             if self.cost_resolver is None:
                 continue

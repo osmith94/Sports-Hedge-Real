@@ -48,7 +48,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_allow_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 app.include_router(dislocations_router)

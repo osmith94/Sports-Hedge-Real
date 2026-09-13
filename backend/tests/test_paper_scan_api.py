@@ -178,6 +178,8 @@ def test_economics_status_is_backend_resolved() -> None:
     assert "venue_costs" in body
     assert "fx_schedule" in body
     assert "enabled" in body["fx_schedule"]
+    assert "matchbook_fee" in body
+    assert "polymarket_fee_policy" in body
     assert all("retrieved_at" in row for row in body["fx"])
     assert all("check_status" in row for row in body["fx"])
     assert all("carried_forward" in row for row in body["fx"])
@@ -190,7 +192,9 @@ def test_frontend_live_scanner_does_not_send_operator_fx_or_fees() -> None:
     assert "dashboardFeeSnapshot" not in scan_tsx
     assert "dashboardVenueCost" not in scan_tsx
     assert "USD → GBP" not in scan_tsx
-    assert "Matchbook fee %" not in scan_tsx
+    assert "Matchbook commission %" in scan_tsx
+    assert "saveMatchbookFee" in api_ts
+    assert "commission_rate" in api_ts
     assert "Capital limit £" not in scan_tsx
     assert "getEconomicsStatus" in scan_tsx
     assert "econ-strip" in scan_tsx

@@ -10,7 +10,9 @@ import {
   PaperCollectionRequest,
   getEconomicsStatus,
   getLiveRefreshStatus,
+  resetMatchbookFee,
   runPaperCollection,
+  saveMatchbookFee,
 } from "../lib/api";
 import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
 import { LiveScanPulse, LiveScanPulsePhase } from "./live-scan-pulse";
@@ -96,6 +98,31 @@ function venueCostChip(
   venue: "matchbook" | "polymarket" | "kalshi",
   short: string,
 ): StripChip {
+  if (venue === "matchbook" && status?.matchbook_fee) {
+    const row = status.matchbook_fee;
+    return {
+      key: venue,
+      label: `${short} ${row.label}`,
+      warn: false,
+      title: [
+        row.fee_basis,
+        row.source,
+        row.account_assumption ? "operator/account assumption" : "provider default",
+        row.detail,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
+  if (venue === "polymarket" && status?.polymarket_fee_policy) {
+    const policy = status.polymarket_fee_policy;
+    return {
+      key: venue,
+      label: `${short} per-market CLOB metadata`,
+      warn: false,
+      title: `${policy.resolution} · ${policy.detail}`,
+    };
+  }
   const preferred = ["match_result", "both_teams_to_score"];
   const rows = status?.venue_costs.filter((row) => row.venue === venue) ?? [];
   const row =
@@ -190,6 +217,9 @@ export function RunPaperScan() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [autoAnchorMs, setAutoAnchorMs] = useState<number | null>(null);
   const [economics, setEconomics] = useState<EconomicsStatus | null>(null);
+  const [matchbookCommissionPercent, setMatchbookCommissionPercent] = useState("2.00");
+  const [feeSaving, setFeeSaving] = useState(false);
+  const [feeMessage, setFeeMessage] = useState<string | null>(null);
   const payloadRef = useRef<PaperCollectionRequest>({ maximum_execution_risk: 60 });
   const inFlightRef = useRef(false);
   const collectRef = useRef<() => Promise<void>>(async () => undefined);
@@ -274,6 +304,14 @@ export function RunPaperScan() {
   }, [refreshEconomics]);
 
   useEffect(() => {
+    const rate = economics?.matchbook_fee?.effective_rate;
+    if (rate == null || rate === "") return;
+    const parsed = Number(rate) * 100;
+    if (!Number.isFinite(parsed)) return;
+    setMatchbookCommissionPercent(parsed.toFixed(2));
+  }, [economics?.matchbook_fee?.effective_rate]);
+
+  useEffect(() => {
     let cancelled = false;
     getLiveRefreshStatus()
       .then((status) => {
@@ -325,6 +363,39 @@ export function RunPaperScan() {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await collect();
+  }
+
+  async function saveMatchbookCommission() {
+    const parsed = Number(matchbookCommissionPercent);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed >= 100) {
+      setFeeMessage("Matchbook commission must be between 0% and 100%.");
+      return;
+    }
+    setFeeSaving(true);
+    setFeeMessage(null);
+    try {
+      await saveMatchbookFee((parsed / 100).toFixed(6).replace(/\.?0+$/, "") || "0");
+      await refreshEconomics();
+      setFeeMessage("Saved operator/account Matchbook commission.");
+    } catch (error) {
+      setFeeMessage(error instanceof Error ? error.message : "Could not save Matchbook commission.");
+    } finally {
+      setFeeSaving(false);
+    }
+  }
+
+  async function resetMatchbookCommission() {
+    setFeeSaving(true);
+    setFeeMessage(null);
+    try {
+      await resetMatchbookFee();
+      await refreshEconomics();
+      setFeeMessage("Reset to UK Matchbook provider default 2.00%.");
+    } catch (error) {
+      setFeeMessage(error instanceof Error ? error.message : "Could not reset Matchbook commission.");
+    } finally {
+      setFeeSaving(false);
+    }
   }
 
   const chips = economicsChips(economics);
@@ -440,6 +511,45 @@ export function RunPaperScan() {
             {economics?.data_kind ? ` (${economics.data_kind.replaceAll("_", " ")})` : ""}.
             Missing or stale required inputs fail closed. Standing capital is Matchbook GBP /
             Polymarket USD / Kalshi USD. Optional extra capital limit is a scan-only cap, not live funds.
+            Polymarket fees are per-market CLOB metadata, not a global zero. PAPER MODE · no execution.
+          </p>
+          <div className="matchbook-fee-editor">
+            <label className="scan-field">
+              <span>Matchbook commission %</span>
+              <input
+                inputMode="decimal"
+                value={matchbookCommissionPercent}
+                onChange={(event) => setMatchbookCommissionPercent(event.target.value)}
+                aria-label="Matchbook net-profit commission percent"
+              />
+            </label>
+            <div className="scan-action matchbook-fee-actions">
+              <button
+                className="scan-button"
+                type="button"
+                disabled={feeSaving}
+                onClick={() => void saveMatchbookCommission()}
+              >
+                {feeSaving ? "Saving…" : "Save"}
+              </button>
+              <button
+                className="pool-reset"
+                type="button"
+                disabled={feeSaving}
+                onClick={() => void resetMatchbookCommission()}
+              >
+                Reset to provider default
+              </button>
+            </div>
+          </div>
+          <p className="scan-advanced-copy">
+            Provider default is the UK Matchbook standard 2.00% net-profit commission. A saved
+            override is an operator/account assumption, persists across refresh and backend restart,
+            and is snapshotted on each paper decision. Reset restores the provider default.
+            {economics?.matchbook_fee?.account_assumption
+              ? " Currently using an operator/account assumption."
+              : " Currently using the provider default."}
+            {feeMessage ? ` ${feeMessage}` : ""}
           </p>
           <label className="scan-field">
             <span>Optional capital limit £</span>

@@ -48,6 +48,13 @@ def test_seeded_rules_retain_provenance_and_effective_date() -> None:
     assert snapshot.effective_from is not None
     assert snapshot.snapshot_id
     assert snapshot.market_class == "both_teams_to_score"
+    with pytest.raises(UnknownRequiredCostError, match="unknown_required_venue_cost:polymarket"):
+        resolver.resolve(
+            venue=VenueName.POLYMARKET,
+            market_class=MarketFamily.BOTH_TEAMS_TO_SCORE,
+            action=MarketAction.BUY,
+            as_of=AS_OF,
+        )
 
 
 def test_different_fee_structures_change_best_venue() -> None:
@@ -95,5 +102,5 @@ def test_different_fee_structures_change_best_venue() -> None:
         action=MarketAction.BACK,
         as_of=AS_OF,
     )
-    assert player.rate != football.rate
-    assert apply_venue_costs(player, gross_decimal_odds=odds).net_decimal_equivalent < matchbook_net
+    assert player.rate == football.rate == Decimal("0.02")
+    assert apply_venue_costs(player, gross_decimal_odds=odds).net_decimal_equivalent == matchbook_net

@@ -41,6 +41,11 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.models import FeeSnapshot
 from sports_hedge.fees.resolver import VenueCostResolver
+from sports_hedge.persistence.matchbook_account_fee import (
+    MatchbookAccountFeeStatus,
+    MatchbookFeeUpdate,
+    SqliteMatchbookAccountFeeStore,
+)
 from sports_hedge.fx.models import FxRateUnavailable
 from sports_hedge.fx.repository import SqliteFxRateRepository
 from sports_hedge.fx.service import FxRateService
@@ -141,6 +146,8 @@ class EconomicsStatus(BaseModel):
     data_kind: str = "backend_resolved"
     fx: list[dict[str, Any]] = Field(default_factory=list)
     venue_costs: list[dict[str, Any]] = Field(default_factory=list)
+    matchbook_fee: MatchbookAccountFeeStatus | None = None
+    polymarket_fee_policy: dict[str, Any] = Field(default_factory=dict)
     issues: list[str] = Field(default_factory=list)
     fx_schedule: dict[str, Any] = Field(default_factory=dict)
 
@@ -222,8 +229,18 @@ def get_accounting_schedule():
 
 
 @lru_cache
+def get_matchbook_account_fee_store() -> SqliteMatchbookAccountFeeStore:
+    settings = get_settings()
+    database = settings.paper_account_fees_db_path
+    if database != ":memory:":
+        path = Path(database)
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return SqliteMatchbookAccountFeeStore(database)
+
+
+@lru_cache
 def get_venue_cost_resolver() -> VenueCostResolver:
-    return VenueCostResolver()
+    return VenueCostResolver(matchbook_fee_store=get_matchbook_account_fee_store())
 
 
 @lru_cache
@@ -642,9 +659,46 @@ def economics_status(
         as_of=as_of,
         fx=fx_rows,
         venue_costs=venue_rows,
+        matchbook_fee=costs.matchbook_account_status(as_of=as_of),
+        polymarket_fee_policy={
+            "resolution": "per_market_clob_metadata",
+            "catalog_seeded": False,
+            "detail": (
+                "Polymarket fees resolve from each market's feesEnabled/feeSchedule "
+                "(legacy Gamma feeRate when applicability is present). "
+                "Fee-disabled markets are known zero. Missing applicability or "
+                "parameters fail closed. The venue-cost registry does not seed a global zero."
+            ),
+        },
         issues=issues,
         fx_schedule=schedule.operator_status(as_of=as_of),
     )
+
+
+@router.get("/matchbook-fee", response_model=MatchbookAccountFeeStatus)
+def get_matchbook_fee(
+    costs: VenueCostResolver = Depends(get_venue_cost_resolver),
+) -> MatchbookAccountFeeStatus:
+    return costs.matchbook_account_status(as_of=datetime.now(UTC))
+
+
+@router.put("/matchbook-fee", response_model=MatchbookAccountFeeStatus)
+def put_matchbook_fee(
+    update: MatchbookFeeUpdate,
+    store: SqliteMatchbookAccountFeeStore = Depends(get_matchbook_account_fee_store),
+    costs: VenueCostResolver = Depends(get_venue_cost_resolver),
+) -> MatchbookAccountFeeStatus:
+    store.set_override(update.commission_rate)
+    return costs.matchbook_account_status(as_of=datetime.now(UTC))
+
+
+@router.post("/matchbook-fee/reset", response_model=MatchbookAccountFeeStatus)
+def reset_matchbook_fee(
+    store: SqliteMatchbookAccountFeeStore = Depends(get_matchbook_account_fee_store),
+    costs: VenueCostResolver = Depends(get_venue_cost_resolver),
+) -> MatchbookAccountFeeStatus:
+    store.clear_override()
+    return costs.matchbook_account_status(as_of=datetime.now(UTC))
 
 
 @router.get("/live-refresh", response_model=LiveRefreshStatus)

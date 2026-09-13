@@ -227,6 +227,9 @@ tr:last-child td { border-bottom: none; }
 .scan-advanced { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel-raised); }
 .scan-advanced summary { cursor: pointer; font-size: 10px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .scan-advanced .scan-field { margin-top: 10px; max-width: 280px; }
+.matchbook-fee-editor { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-top: 10px; }
+.matchbook-fee-editor .scan-field { margin-top: 0; max-width: 180px; }
+.matchbook-fee-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .demo-walkthrough { margin-top: 18px; border: 1px solid rgba(241, 191, 105, .24); border-radius: var(--radius); padding: 12px 14px; background: rgba(241, 191, 105, .05); }
 .demo-walkthrough summary { cursor: pointer; color: var(--amber); font-size: 11px; font-weight: 750; }
 .demo-walkthrough .opp-card { margin-top: 12px; }
@@ -243,6 +246,10 @@ tr:last-child td { border-bottom: none; }
 .fixture-link:hover { text-decoration: underline; }
 .inventory-stack { display: grid; gap: 12px; }
 .inventory-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 12px; }
+.inventory-advanced { margin-top: 10px; }
+.inventory-advanced-copy { margin: 8px 0 0; font-size: 10px; line-height: 1.55; color: var(--muted-2); }
+.inventory-advanced-copy p { margin: 0 0 6px; }
+.inventory-reason-detail { color: var(--muted); font-size: 11px; margin: 6px 0 0; line-height: 1.5; max-width: 820px; }
 .pa-detail-nav { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
 .pa-chip { display: inline-flex; padding: 4px 7px; border-radius: 999px; font-size: 9px; font-weight: 800; letter-spacing: .06em; }
 .pa-chip-paper { color: var(--accent); border: 1px solid rgba(124, 242, 176, .24); background: var(--accent-soft); }

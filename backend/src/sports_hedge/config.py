@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     paper_audit_db_path: str = "./data/paper_audit.sqlite"
     paper_liquidity_db_path: str = "./data/paper_liquidity.sqlite"
     paper_ledger_db_path: str = "./data/paper_ledger.sqlite"
+    paper_account_fees_db_path: str = "./data/paper_account_fees.sqlite"
     paper_autofill_enabled: bool = False
     watchlist_db_path: str = "./data/near_arb_watchlist.sqlite"
     paper_live_refresh_enabled: bool = False

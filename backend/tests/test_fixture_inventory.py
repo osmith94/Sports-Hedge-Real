@@ -19,11 +19,14 @@ from sports_hedge.application.fixture_inventory import (
     FX_STATUS_NOT_REQUIRED,
     InventoryComparisonStatus,
     InventoryMarket,
+    VenueMarketFacts,
+    VenueQuoteFact,
     assemble_fixture_inventory,
     solver_eligible_pair,
     _fx_status,
 )
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
+from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.domain.football import (
     CanonicalEvent,
@@ -36,6 +39,8 @@ from sports_hedge.domain.football import (
     SettlementScope,
 )
 from sports_hedge.domain.models import VenueName
+from sports_hedge.fees.cost import CostKnownStatus, FeeBasis, MarketAction, VenueCostSnapshot
+from sports_hedge.fees.resolver import VenueCostResolver
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
@@ -97,13 +102,19 @@ def _market(
     )
 
 
-def _inventory(market: CanonicalMarket, *, name: str) -> InventoryMarket:
+def _inventory(
+    market: CanonicalMarket,
+    *,
+    name: str,
+    observation: VenueMarketObservation | None = None,
+) -> InventoryMarket:
     return InventoryMarket(
         venue=market.source_venue,
         source_event_id=market.event.source_event_id,
         source_market_id=market.source_market_id,
         raw_name=name,
         canonical=market,
+        observation=observation,
     )
 
 
@@ -279,6 +290,7 @@ class RichPolymarket:
                 "outcomes": '["Tottenham", "Draw", "Everton"]',
                 "clobTokenIds": '["h", "d", "a"]',
                 "description": "Resolves based on 90 minutes of regulation time.",
+                "feesEnabled": False,
             },
             {
                 "id": "pm-cs",
@@ -287,6 +299,7 @@ class RichPolymarket:
                 "outcomes": '["1-0", "2-0"]',
                 "clobTokenIds": '["cs1", "cs2"]',
                 "description": "Resolves based on 90 minutes of regulation time.",
+                "feesEnabled": False,
             },
             {
                 "id": "pm-ah",
@@ -296,6 +309,7 @@ class RichPolymarket:
                 "outcomes": '["Tottenham", "Everton"]',
                 "clobTokenIds": '["ah-h", "ah-a"]',
                 "description": "Resolves including extra time.",
+                "feesEnabled": False,
             },
         ]
 
@@ -503,6 +517,7 @@ def test_fixture_ui_routes_by_canonical_id_and_renders_inventory_states() -> Non
     assert "canonical_event_id" in discovered
     assert "/operations/fixtures/" in api
     assert "getFixtureDetail" in page
+    display = (FRONTEND / "lib" / "fixture-inventory-display.ts").read_text(encoding="utf-8")
     for token in (
         "matched_equivalent",
         "venue_only",
@@ -510,13 +525,127 @@ def test_fixture_ui_routes_by_canonical_id_and_renders_inventory_states() -> Non
         "unsupported_outcome_model",
         "PAPER MODE",
         "not in solver",
+        "Not comparable — incomplete outcome set",
+        "Best-price depth",
+        "Limiting best-price depth",
+        "available",
+        "Advanced · provenance",
+        "£4,317 available",
     ):
-        assert token in workspace or token in (FRONTEND / "lib" / "fixture-inventory-display.ts").read_text(
-            encoding="utf-8"
-        )
+        assert token in workspace or token in display
+    assert " / ${quote.size_at_touch}" not in display
+    assert "touch ${facts.usable_depth_at_touch}" not in display
     assert "place_order" not in (FRONTEND / "app" / "arbitrage" / "fixtures" / "[eventId]" / "page.tsx").read_text(
         encoding="utf-8"
     )
+
+
+def test_inventory_resolves_seeded_matchbook_football_fee_without_explicit_snapshots() -> None:
+    market = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.BOTH_TEAMS_TO_SCORE,
+        source_id="mb-btts",
+        outcomes=[CanonicalOutcome.YES, CanonicalOutcome.NO],
+    )
+    rows = assemble_fixture_inventory(
+        [_inventory(market, name="Both Teams To Score")],
+        [],
+        cost_resolver=VenueCostResolver(),
+    )
+    assert len(rows) == 1
+    assert rows[0].matchbook is not None
+    assert rows[0].matchbook.fee_status == "known"
+    assert rows[0].matchbook.fee_source == "venue_cost_registry:matchbook_commission_schedule"
+    assert rows[0].matchbook.fee_label == "2.00% net-profit commission"
+    assert rows[0].matchbook.fee_basis == "profit_commission"
+
+
+def test_inventory_without_resolver_or_snapshots_fails_closed_on_fees() -> None:
+    market = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.BOTH_TEAMS_TO_SCORE,
+        source_id="mb-btts",
+        outcomes=[CanonicalOutcome.YES, CanonicalOutcome.NO],
+    )
+    rows = assemble_fixture_inventory([_inventory(market, name="Both Teams To Score")], [])
+    assert rows[0].matchbook is not None
+    assert rows[0].matchbook.fee_status == "missing"
+
+
+def test_inventory_explicit_unknown_fee_is_not_replaced_by_registry() -> None:
+    market = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.BOTH_TEAMS_TO_SCORE,
+        source_id="mb-btts",
+        outcomes=[CanonicalOutcome.YES, CanonicalOutcome.NO],
+    )
+    unknown = VenueCostSnapshot(
+        venue=VenueName.MATCHBOOK,
+        action=MarketAction.BACK,
+        fee_basis=FeeBasis.UNKNOWN,
+        known_status=CostKnownStatus.UNKNOWN,
+        captured_at=datetime.now(UTC),
+        source="test-unknown-fee",
+        currency="GBP",
+    )
+    rows = assemble_fixture_inventory(
+        [_inventory(market, name="Both Teams To Score")],
+        [],
+        venue_costs=[unknown],
+        cost_resolver=VenueCostResolver(),
+    )
+    assert rows[0].matchbook is not None
+    assert rows[0].matchbook.fee_status == "unknown"
+    assert rows[0].matchbook.fee_source == "test-unknown-fee"
+
+
+def test_inventory_quote_json_keeps_full_decimal_precision() -> None:
+    facts = VenueMarketFacts(
+        venue=VenueName.POLYMARKET,
+        source_event_id="pm-event",
+        source_market_id="pm-yes",
+        best_backs=[
+            VenueQuoteFact(
+                outcome="yes",
+                decimal_odds=Decimal("2.272727272727272727"),
+                size_at_touch=Decimal("4317.04002"),
+            )
+        ],
+        usable_depth_at_touch=Decimal("707.27195"),
+        native_currency="USD",
+        fee_status="known",
+    )
+    dumped = facts.model_dump(mode="json")
+    assert dumped["best_backs"][0]["decimal_odds"] == "2.272727272727272727"
+    assert dumped["best_backs"][0]["size_at_touch"] == "4317.04002"
+    assert dumped["usable_depth_at_touch"] == "707.27195"
+
+
+@pytest.mark.asyncio
+async def test_collector_inventory_uses_scanner_cost_resolver_for_known_matchbook_fee() -> None:
+    repository = SqliteMarketIntelligenceRepository()
+    intelligence = MarketIntelligenceService(repository)
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=RichMatchbook(),
+        polymarket=RichPolymarket(),
+        paper_scan=PaperScanService(intelligence, cost_resolver=VenueCostResolver()),
+    )
+    try:
+        report = await collector.collect_and_scan(maximum_execution_risk=100)
+        markets = report.fixture_markets[report.discovered_fixtures[0].canonical_event_id]
+        football = [
+            row
+            for row in markets
+            if row.matchbook is not None and row.family not in {None, "unknown"}
+        ]
+        assert football
+        assert all(row.matchbook and row.matchbook.fee_status == "known" for row in football)
+        assert any(
+            row.matchbook and row.matchbook.fee_source == "venue_cost_registry:matchbook_commission_schedule"
+            for row in football
+        )
+    finally:
+        repository.close()
 
 
 def test_phase1_operations_router_has_no_execution_surface() -> None:

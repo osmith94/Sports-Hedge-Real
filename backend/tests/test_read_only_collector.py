@@ -121,6 +121,7 @@ class FakePolymarket:
                 "outcomes": '["Yes", "No"]',
                 "clobTokenIds": '["yes-token", "no-token"]',
                 "description": "Resolves based on 90 minutes of regulation time.",
+                "feesEnabled": False,
             },
             {
                 "id": "pm-market-unsupported",
@@ -128,6 +129,7 @@ class FakePolymarket:
                 "outcomes": '["Yes", "No"]',
                 "clobTokenIds": '["a", "b"]',
                 "description": "Resolves based on 90 minutes of regulation time.",
+                "feesEnabled": False,
             },
         ]
 
