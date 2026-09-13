@@ -21,6 +21,11 @@ from sports_hedge.accounting.dimensions import (
     parse_strategy_book,
     product_module_for,
 )
+from sports_hedge.accounting.reconciliation import (
+    LedgerReconciliationError,
+    PaperLedgerReconciliation,
+    reconcile_paper_ledger,
+)
 from sports_hedge.accounting.strategy_books import (
     CapitalBucketTotals,
     DimensionedPosting,
@@ -39,9 +44,11 @@ __all__ = [
     "CashState",
     "DimensionedPosting",
     "EconomicAccount",
+    "LedgerReconciliationError",
     "NativeCurrencyMixError",
     "NativeLiquidityPool",
     "NativePoolBalance",
+    "PaperLedgerReconciliation",
     "PostingDimensions",
     "PostingSide",
     "ProductModule",
@@ -55,4 +62,5 @@ __all__ = [
     "parse_capital_source",
     "parse_strategy_book",
     "product_module_for",
+    "reconcile_paper_ledger",
 ]

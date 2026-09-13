@@ -1206,7 +1206,13 @@ def _pool_from_row(row: Any) -> PaperTreasuryPoolState:
     currency = row["native_currency"]
     available = Decimal(row["available_cash"])
     locked = Decimal(row["locked_capital"])
-    rate = Decimal(row["fx_rate_gbp_per_unit"]) if row["fx_rate_gbp_per_unit"] else None
+    rate_raw = _row_value(row, "fx_rate_gbp_per_unit", "")
+    if rate_raw:
+        rate = Decimal(rate_raw)
+    elif currency.upper() == "GBP":
+        rate = Decimal("1")
+    else:
+        rate = None
     native_total = available + locked
     gbp = native_total * rate if rate is not None else None
     if currency == "GBP":
@@ -1215,6 +1221,7 @@ def _pool_from_row(row: Any) -> PaperTreasuryPoolState:
         status = "fx_converted"
     else:
         status = "fx_unavailable"
+    fx_as_of_raw = _row_value(row, "fx_as_of", "")
     return PaperTreasuryPoolState(
         pool_id=row["pool_id"],
         session_id=row["session_id"],
@@ -1229,8 +1236,8 @@ def _pool_from_row(row: Any) -> PaperTreasuryPoolState:
         gbp_carrying_value=gbp,
         gbp_carrying_status=status,
         fx_rate_gbp_per_unit=rate,
-        fx_source=row["fx_source"],
-        fx_as_of=datetime.fromisoformat(row["fx_as_of"]) if row["fx_as_of"] else None,
+        fx_source=_row_value(row, "fx_source", "") or None,
+        fx_as_of=datetime.fromisoformat(fx_as_of_raw) if fx_as_of_raw else None,
     )
 
 

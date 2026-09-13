@@ -491,6 +491,14 @@ class SqlitePaperLedger:
             self.journal._memory = PaperJournal()
             self.journal._hydrate_memory()
 
+    def reconcile(self):
+        """Prove native treasury pools reconstruct from append-only journal facts."""
+
+        from sports_hedge.accounting.reconciliation import reconcile_paper_ledger
+
+        with self.exclusive():
+            return reconcile_paper_ledger(self)
+
     def _create_schema(self) -> None:
         self._connection.executescript(
             """
@@ -651,6 +659,7 @@ class SqlitePaperLedger:
         self._ensure_risk_snapshot_columns()
         self._ensure_close_fills_column()
         self._ensure_trade_leg_compat_columns()
+        self._ensure_treasury_pool_fx_columns()
 
     def _ensure_risk_snapshot_columns(self) -> None:
         trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
@@ -728,6 +737,24 @@ class SqlitePaperLedger:
         for name, spec in additions.items():
             if name not in columns:
                 self._connection.execute(f"ALTER TABLE paper_trade_legs ADD COLUMN {name} {spec}")
+        self._connection.commit()
+
+    def _ensure_treasury_pool_fx_columns(self) -> None:
+        """Owner DBs may predate GBP carrying-value columns on native pools."""
+
+        if "paper_treasury_pools" not in _table_names(self._connection):
+            return
+        columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(paper_treasury_pools)")
+        }
+        additions = {
+            "fx_rate_gbp_per_unit": "TEXT",
+            "fx_source": "TEXT",
+            "fx_as_of": "TEXT",
+        }
+        for name, spec in additions.items():
+            if name not in columns:
+                self._connection.execute(f"ALTER TABLE paper_treasury_pools ADD COLUMN {name} {spec}")
         self._connection.commit()
 
     def close(self) -> None:
