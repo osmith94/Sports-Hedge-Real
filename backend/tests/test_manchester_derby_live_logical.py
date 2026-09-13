@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
 
 import pytest
 
@@ -13,7 +12,7 @@ from sports_hedge.application.manchester_derby_logical import (
     run_manchester_derby_logical,
 )
 from sports_hedge.matching.events import EventMatcher
-from sports_hedge.normalization.venues import KalshiNormalizer, PolymarketNormalizer
+from sports_hedge.normalization.venues import KalshiNormalizer, PolymarketNormalizer, VenueNormalizationError
 
 # Captured 2026-09-13 public payload shapes. These lock matcher/normalizer behaviour;
 # they do not prove today's live books.
@@ -57,14 +56,32 @@ def test_named_derby_title_and_date_filter() -> None:
     assert not is_named_derby_title("Leeds United vs Newcastle")
 
 
-def test_captured_pm_kalshi_kickoff_mismatch_is_reported_not_guessed() -> None:
+def test_captured_kalshi_expiration_clock_is_not_kickoff() -> None:
     polymarket = PolymarketNormalizer().normalize_event(CAPTURED_PM_DERBY)
-    kalshi = KalshiNormalizer().normalize_event(CAPTURED_KALSHI_GAME)
     assert polymarket.kickoff_utc == DERBY_KICKOFF_UTC
-    assert kalshi.kickoff_utc == datetime(2026, 9, 13, 18, 30, tzinfo=UTC)
+    with pytest.raises(VenueNormalizationError, match="scheduled kickoff"):
+        KalshiNormalizer().normalize_event(CAPTURED_KALSHI_GAME)
+
+
+def test_captured_kalshi_milestone_start_date_joins_polymarket() -> None:
+    payload = {
+        **CAPTURED_KALSHI_GAME,
+        "milestone": {
+            "id": "ms-epl-munmci",
+            "type": "soccer_game",
+            "start_date": "2026-09-13T15:30:00Z",
+            "end_date": "2026-09-13T18:30:00Z",
+            "primary_event_tickers": ["KXEPLGAME-26SEP13MUNMCI"],
+            "related_event_tickers": ["KXEPLGAME-26SEP13MUNMCI"],
+            "details": {"main_game_event_ticker": "KXEPLGAME-26SEP13MUNMCI"},
+        },
+    }
+    polymarket = PolymarketNormalizer().normalize_event(CAPTURED_PM_DERBY)
+    kalshi = KalshiNormalizer().normalize_event(payload)
+    assert kalshi.kickoff_utc == DERBY_KICKOFF_UTC
     match = EventMatcher().match(polymarket, kalshi)
-    assert match.matched is False
-    assert "kickoff_outside_tolerance" in match.reasons
+    assert match.matched is True
+    assert "kickoff_outside_tolerance" not in match.reasons
 
 
 @pytest.mark.live_logical
@@ -81,11 +98,24 @@ async def test_manchester_derby_live_logical_from_public_providers() -> None:
     assert report["venues"]["polymarket"]["discovered"] is True
     assert report["venues"]["kalshi"]["reachable"] is True
     assert report["venues"]["kalshi"]["discovered"] is True
-    assert report["canonical_identity"]["reason"]
+    kalshi_events = report["venues"]["kalshi"]["events"]
+    for item in kalshi_events:
+        if item.get("normalized"):
+            assert item["kickoff_utc"]
+            assert "T18:30" not in item["kickoff_utc"]
+        else:
+            error = (item.get("normalize_error") or "").lower()
+            assert "kickoff" in error
     pairwise = report["pairwise"]["polymarket_kalshi"]
-    if pairwise["events_matched"]:
+    pm_normalized = [item for item in report["venues"]["polymarket"]["events"] if item.get("normalized")]
+    kalshi_normalized = [item for item in kalshi_events if item.get("normalized")]
+    if pm_normalized and kalshi_normalized:
+        assert pairwise["events_matched"], report["canonical_identity"]["reason"]
+    elif pairwise["events_matched"]:
         assert pairwise["reason"]
     else:
-        assert "event_identity_not_matched" in pairwise["reason"]
+        assert "event_identity_not_matched" in pairwise["reason"] or "kickoff" in (
+            report["canonical_identity"]["reason"] or ""
+        )
     if report["venues"]["matchbook"]["reachable"] is False:
         assert "owner-Windows" in report["matchbook_owner_requirement"]

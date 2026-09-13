@@ -51,6 +51,11 @@ from sports_hedge.paper.trades import (
     PaperTradeLeg,
     PaperTradeState,
 )
+from sports_hedge.paper.risk_snapshot import (
+    PaperRiskSnapshotKind,
+    snapshot_from_execution_risk,
+    snapshot_from_scan_decision,
+)
 from sports_hedge.paper.unwind import (
     PaperUnwindEngine,
     UnwindDecision,
@@ -631,6 +636,23 @@ class PaperOperationsService:
                 ),
             )
         )
+        unwind_risk = snapshot_from_execution_risk(
+            decision.execution_risk,
+            kind=PaperRiskSnapshotKind.UNWIND,
+            recorded_at=occurred,
+            opportunity_id=trade.opportunity_id,
+            trade_id=trade.trade_id,
+            maximum_execution_risk=decision.policy.max_execution_risk,
+        )
+        if unwind_risk is not None:
+            trade.close_risks.append(unwind_risk)
+            trade.audit.append(
+                PaperTradeAuditEvent(
+                    occurred_at=occurred,
+                    event_type=PaperTradeAuditEventType.UNWIND_RISK_RECORDED,
+                    detail=f"score={unwind_risk.score} band={unwind_risk.band}",
+                )
+            )
         self.trades.save(trade)
         if self.watchlist.repository.get(trade.opportunity_id) is not None:
             try:
@@ -942,6 +964,26 @@ class PaperOperationsService:
         if fully:
             trade.state = PaperTradeState.OPEN
             trade.guaranteed_profit_gbp_at_open = _opening_guaranteed_profit(plan)
+            if trade.entry_risk is None:
+                snapshot = snapshot_from_scan_decision(
+                    plan.decision,
+                    kind=PaperRiskSnapshotKind.ENTRY,
+                    recorded_at=occurred_at,
+                    opportunity_id=plan.opportunity_id,
+                    trade_id=trade.trade_id,
+                )
+                if snapshot is not None:
+                    trade.entry_risk = snapshot
+                    trade.audit.append(
+                        PaperTradeAuditEvent(
+                            occurred_at=occurred_at,
+                            event_type=PaperTradeAuditEventType.ENTRY_RISK_RECORDED,
+                            detail=(
+                                f"score={snapshot.score} band={snapshot.band} "
+                                f"threshold={snapshot.maximum_execution_risk}"
+                            ),
+                        )
+                    )
         elif partial:
             trade.state = PaperTradeState.PARTIAL
             trade.guaranteed_profit_gbp_at_open = None

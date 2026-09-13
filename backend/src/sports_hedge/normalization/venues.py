@@ -194,17 +194,7 @@ class KalshiNormalizer:
         if not title:
             raise VenueNormalizationError("Kalshi event has no title")
         home_team, away_team = _split_fixture_title(title)
-        kickoff = _parse_datetime(
-            _first(
-                payload,
-                "occurrence_datetime",
-                "target_datetime",
-                "strike_date",
-                "strike_period",
-                "expected_expiration_time",
-            )
-            or _kalshi_nested_occurrence(payload)
-        )
+        kickoff = _kalshi_fixture_kickoff(payload)
         competition = _kalshi_competition(payload, series) or "Unknown competition"
         confidence = 1.0 if competition != "Unknown competition" else 0.85
         return CanonicalEvent(
@@ -346,6 +336,27 @@ class _KalshiContract:
         self.settlement = settlement
 
 
+# Kalshi Trade API Market.occurrence_datetime is "the recorded datetime when
+# the underlying event occurred". For upcoming soccer it is currently a copy
+# of expected_expiration_time (match-end / settlement window), not kickoff.
+# Authoritative scheduled kickoff is the soccer milestone start_date.
+_KALSHI_EXPIRATION_KEYS = (
+    "expected_expiration_time",
+    "expiration_time",
+    "latest_expiration_time",
+    "close_time",
+    "end_date",
+)
+_KALSHI_KICKOFF_CANDIDATE_KEYS = (
+    "start_date",
+    "target_datetime",
+    "game_start_time",
+    "scheduled_start",
+    "strike_date",
+    "occurrence_datetime",
+)
+
+
 def _kalshi_nested_occurrence(payload: dict[str, Any]) -> Any:
     markets = payload.get("markets")
     if isinstance(markets, list):
@@ -355,6 +366,87 @@ def _kalshi_nested_occurrence(payload: dict[str, Any]) -> Any:
                 if nested:
                     return nested
     return None
+
+
+def _kalshi_datetime_payloads(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    payloads = [payload]
+    milestone = payload.get("milestone")
+    if isinstance(milestone, dict):
+        payloads.append(milestone)
+    markets = payload.get("markets")
+    if isinstance(markets, list):
+        payloads.extend(item for item in markets if isinstance(item, dict))
+    return payloads
+
+
+def _kalshi_expiration_clocks(payload: dict[str, Any]) -> set[datetime]:
+    clocks: set[datetime] = set()
+    for item in _kalshi_datetime_payloads(payload):
+        for key in _KALSHI_EXPIRATION_KEYS:
+            raw = item.get(key)
+            parsed = _try_parse_aware_datetime(raw)
+            if parsed is not None:
+                clocks.add(parsed)
+    return clocks
+
+
+def _kalshi_kickoff_candidates(payload: dict[str, Any]) -> list[Any]:
+    candidates: list[Any] = []
+    milestone = payload.get("milestone")
+    if isinstance(milestone, dict):
+        start = milestone.get("start_date")
+        if start:
+            candidates.append(start)
+    for item in _kalshi_datetime_payloads(payload):
+        for key in _KALSHI_KICKOFF_CANDIDATE_KEYS:
+            raw = item.get(key)
+            if raw:
+                candidates.append(raw)
+    nested = _kalshi_nested_occurrence(payload)
+    if nested:
+        candidates.append(nested)
+    return candidates
+
+
+def _kalshi_fixture_kickoff(payload: dict[str, Any]) -> datetime:
+    """Scheduled kickoff from Kalshi milestone/start fields, never expiration.
+
+    occurrence_datetime that equals expected_expiration_time is an expiration
+    clock. Date-only values are refused rather than assumed as midnight UTC.
+    """
+
+    expiration = _kalshi_expiration_clocks(payload)
+    seen: set[datetime] = set()
+    for raw in _kalshi_kickoff_candidates(payload):
+        if _is_date_only_clock(raw):
+            continue
+        parsed = _try_parse_aware_datetime(raw)
+        if parsed is None or parsed in seen:
+            continue
+        seen.add(parsed)
+        if parsed in expiration:
+            continue
+        return parsed
+    raise VenueNormalizationError(
+        "Kalshi event has no scheduled kickoff; occurrence_datetime/expected_expiration_time "
+        "are expiration clocks, not kickoff. Use the soccer milestone start_date."
+    )
+
+
+def _is_date_only_clock(value: Any) -> bool:
+    if isinstance(value, datetime):
+        return False
+    text = str(value or "").strip()
+    return bool(_DATE_ONLY.fullmatch(text))
+
+
+def _try_parse_aware_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return _parse_datetime(value)
+    except VenueNormalizationError:
+        return None
 
 
 def _kalshi_competition(payload: dict[str, Any], series: dict[str, Any] | None) -> str | None:

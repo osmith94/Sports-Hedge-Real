@@ -3,34 +3,60 @@
 import Link from "next/link";
 import { DiscoveredFixture, LiveRefreshStatus } from "../lib/api";
 import {
+  BEST_ARB_MARKET_HELP,
   DISCOVERY_TABLE_HEADERS,
+  EQUIVALENT_MARKETS_HELP,
+  RISK_HELP,
+  bestArbMarketLabel,
+  edgeTone,
   equivalentCountLabel,
   fixtureHref,
-  fixturePhaseLabel,
-  freshnessLabel,
-  opportunityStateLabel,
+  kickoffContextLines,
+  lastRefreshLabel,
+  netEdgeSummary,
+  riskLabel,
+  riskReasonsLabel,
+  signedEdgeVsTrigger,
   technicalDetailLines,
   venuePresent,
+  venuePriceLabel,
 } from "../lib/discovered-fixture-display";
-import { kickoffLocalLabel, kickoffRelativeLabel, percent, percentPoints } from "../lib/format";
+import { kickoffLocalLabel, kickoffRelativeLabel } from "../lib/format";
 
-function VenueMark({
-  code,
-  present,
-}: {
-  code: string;
-  present: boolean;
-}) {
+function HelpMark({ label, text }: { label: string; text: string }) {
   return (
-    <span className={present ? "venue-mark venue-mark-on" : "venue-mark"} title={present ? `${code} present` : `${code} not on this fixture`}>
-      {code}
+    <span className="col-help" title={text} aria-label={label}>
+      i
     </span>
   );
 }
 
+function VenueCell({
+  code,
+  present,
+  price,
+}: {
+  code: string;
+  present: boolean;
+  price: string | number | null | undefined;
+}) {
+  return (
+    <div className="venue-cell">
+      <span
+        className={present ? "venue-mark venue-mark-on" : "venue-mark"}
+        title={present ? `${code} present on this fixture` : `${code} not on this fixture`}
+      >
+        {code}
+      </span>
+      <div className="muted">{venuePriceLabel(price, present)}</div>
+    </div>
+  );
+}
+
 function FixtureRow({ item }: { item: DiscoveredFixture }) {
-  const relative = kickoffRelativeLabel(item.kickoff_utc);
   const details = technicalDetailLines(item);
+  const tone = edgeTone(item);
+  const context = kickoffContextLines(item);
   return (
     <>
       <tr>
@@ -45,31 +71,70 @@ function FixtureRow({ item }: { item: DiscoveredFixture }) {
         </td>
         <td className="wrap">
           {kickoffLocalLabel(item.kickoff_utc)}
-          {relative ? <div className="muted">{relative}</div> : null}
+          {context.map((line) => (
+            <div className="muted" key={line}>
+              {line}
+            </div>
+          ))}
         </td>
-        <td>{fixturePhaseLabel(item)}</td>
         <td>
-          <span className="venue-marks">
-            <VenueMark code="MB" present={venuePresent(item.matchbook_matched)} />
-            <VenueMark code="PM" present={venuePresent(item.polymarket_matched)} />
-            <VenueMark code="K" present={venuePresent(item.kalshi_matched)} />
-          </span>
+          <VenueCell
+            code="MB"
+            present={venuePresent(item.matchbook_matched)}
+            price={item.best_matchbook_price}
+          />
         </td>
-        <td>{equivalentCountLabel(item)}</td>
+        <td>
+          <VenueCell
+            code="PM"
+            present={venuePresent(item.polymarket_matched)}
+            price={item.best_polymarket_price}
+          />
+        </td>
+        <td>
+          <VenueCell
+            code="K"
+            present={venuePresent(item.kalshi_matched)}
+            price={item.best_kalshi_price}
+          />
+        </td>
+        <td>
+          <span title={EQUIVALENT_MARKETS_HELP}>{equivalentCountLabel(item)}</span>
+        </td>
+        <td className="wrap">
+          {bestArbMarketLabel(item)}
+        </td>
         <td className={Number(item.current_net_edge) < 0 ? "edge-negative" : ""}>
-          {percent(item.current_net_edge)}
-          {item.distance_to_trigger_pp != null && item.distance_to_trigger_pp !== "" ? (
-            <div className="muted">{percentPoints(item.distance_to_trigger_pp)} to trigger</div>
-          ) : null}
+          {netEdgeSummary(item)}
         </td>
-        <td>{opportunityStateLabel(item)}</td>
+        <td className={tone === "qualifying" ? "edge-qualifying" : tone === "near" ? "edge-near" : ""}>
+          {signedEdgeVsTrigger(item)}
+        </td>
+        <td
+          className={
+            item.execution_risk_band === "low"
+              ? "risk-low"
+              : item.execution_risk_band === "high" || item.execution_risk_band === "extreme"
+                ? "risk-high"
+                : item.execution_risk_score != null
+                  ? "risk-medium"
+                  : ""
+          }
+          title={riskReasonsLabel(item)}
+        >
+          {riskLabel(item)}
+        </td>
+        <td>{lastRefreshLabel(item)}</td>
       </tr>
       <tr className="discovery-detail-row">
         <td colSpan={DISCOVERY_TABLE_HEADERS.length}>
           <details>
-            <summary>Advanced · mapping and quotes</summary>
+            <summary>Advanced · mapping, quotes, and all market comparisons</summary>
             <div className="muted wrap">{details.join(" · ")}</div>
-            <div className="muted">{freshnessLabel(item)}</div>
+            <div className="muted">
+              Expand this fixture for every equivalent market. The headline is the best
+              executable opportunity only.
+            </div>
           </details>
         </td>
       </tr>
@@ -118,7 +183,18 @@ export function DiscoveredFixturesPanel({
             <thead>
               <tr>
                 {DISCOVERY_TABLE_HEADERS.map((header) => (
-                  <th key={header}>{header}</th>
+                  <th key={header}>
+                    {header}
+                    {header === "Equivalent" ? (
+                      <HelpMark label="What equivalent markets means" text={EQUIVALENT_MARKETS_HELP} />
+                    ) : null}
+                    {header === "Best arb market" ? (
+                      <HelpMark label="What best arb market means" text={BEST_ARB_MARKET_HELP} />
+                    ) : null}
+                    {header === "Risk" ? (
+                      <HelpMark label="What risk score means" text={RISK_HELP} />
+                    ) : null}
+                  </th>
                 ))}
               </tr>
             </thead>

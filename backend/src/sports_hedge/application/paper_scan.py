@@ -387,22 +387,31 @@ class PaperScanService:
             elif payoff.roi < minimum_net_edge:
                 rejections.append("net_edge_below_threshold")
 
-        risk_inputs = self._risk_inputs(
-            left,
-            right,
-            depth_scan=depth_scan,
-            payoff_scan=payoff_scan,
-            assumed_latency_ms=assumed_latency_ms,
-            recent_volatility_bps=recent_volatility_bps,
-            quote_age_ms=quote_age_ms if quote_age_ms is not None else 10**9,
+        liquidity_rejections = opening_liquidity_rejection_reasons(
+            list(scan_costs.values()),
+            quote_age_ms=quote_age_ms,
+            max_quote_age_ms=DEFAULT_OPENING_MAX_QUOTE_AGE_MS,
         )
+        rejections.extend(liquidity_rejections)
+
+        risk_inputs = None
         risk = None
-        if risk_inputs is None:
-            rejections.append("missing_risk_evidence")
-        else:
-            risk = self.risk_scorer.score(risk_inputs)
-            if risk.score > maximum_execution_risk:
-                rejections.append("execution_risk_above_threshold")
+        if not liquidity_rejections:
+            risk_inputs = self._risk_inputs(
+                left,
+                right,
+                depth_scan=depth_scan,
+                payoff_scan=payoff_scan,
+                assumed_latency_ms=assumed_latency_ms,
+                recent_volatility_bps=recent_volatility_bps,
+                quote_age_ms=quote_age_ms if quote_age_ms is not None else 10**9,
+            )
+            if risk_inputs is None:
+                rejections.append("missing_risk_evidence")
+            else:
+                risk = self.risk_scorer.score(risk_inputs)
+                if risk.score > maximum_execution_risk:
+                    rejections.append("execution_risk_above_threshold")
 
         execution_modes = {
             left.venue: _default_execution_mode(left.venue),
@@ -415,13 +424,6 @@ class PaperScanService:
             payoff_scan=payoff_scan,
             effective_fx=effective_fx,
         )
-        rejections.extend(
-            opening_liquidity_rejection_reasons(
-                list(scan_costs.values()),
-                quote_age_ms=quote_age_ms,
-                max_quote_age_ms=DEFAULT_OPENING_MAX_QUOTE_AGE_MS,
-            )
-        )
 
         draft = PaperScanDecision(
             market_match=match,
@@ -431,6 +433,7 @@ class PaperScanService:
             depth_scan=depth_scan,
             payoff_scan=payoff_scan,
             execution_risk=risk,
+            execution_risk_inputs=risk_inputs,
             eligible_for_paper_simulation=not rejections,
             rejection_reasons=_dedupe(rejections),
             fee_snapshots=fees,

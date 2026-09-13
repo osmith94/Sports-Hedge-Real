@@ -9,12 +9,19 @@ FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 HEADERS = [
     "Fixture",
     "Kickoff",
-    "Phase",
-    "Venues",
+    "Matchbook",
+    "Polymarket",
+    "Kalshi",
     "Equivalent",
+    "Best arb market",
     "Net edge",
-    "State",
+    "Edge vs trigger",
+    "Risk",
+    "Last refresh",
 ]
+
+
+REMOVED_PRIMARY_HEADERS = ["Phase", "Venues", "State"]
 
 
 def _percent(value: float | None) -> str:
@@ -65,17 +72,22 @@ def test_discovery_ui_renders_target_rows_from_backend_fields() -> None:
     combined = source + display
     for header in HEADERS:
         assert header in combined
-    assert "percent(item.current_net_edge)" in source
-    assert "percentPoints(item.distance_to_trigger_pp)" in source
+    for header in REMOVED_PRIMARY_HEADERS:
+        assert f'"{header}"' not in display
+    assert "percent(item.current_net_edge)" in display
+    assert "distance_to_trigger_pp" in display
+    assert "const edgeVsTrigger = -parsed" in display
     assert "solver_is_arbitrage" in source or "arbClaimLabel" in display
     assert "1 / " not in source
     assert "kalshi_matched" in source
+    assert "best_matchbook_price" in source
+    assert "best_polymarket_price" in source
+    assert "best_kalshi_price" in source
     assert "kickoffLocalLabel" in source
+    assert "execution_risk_score" in display
     assert "toISOString" not in source
     assert "series_not_queried" not in source
-    display = (FRONTEND / "lib" / "discovered-fixture-display.ts").read_text(encoding="utf-8")
     assert "current_net_edge" in display
-    assert "distance_to_trigger_pp" in display
     assert "fixtureHref" in source or "canonical_event_id" in source
     assert "/arbitrage/fixtures/" in source or "fixtureHref" in display
     page = (FRONTEND / "app" / "page.tsx").read_text(encoding="utf-8")

@@ -20,6 +20,27 @@ type Props = {
   compact?: boolean;
 };
 
+function riskAtEntry(trade: PaperTrade): string {
+  const snapshot = trade.entry_risk;
+  if (!snapshot || snapshot.score == null) return "—";
+  const band = snapshot.band ? ` · ${snapshot.band}` : "";
+  return `${snapshot.score}${band}`;
+}
+
+function riskTooltip(snapshot: PaperTrade["entry_risk"]): string {
+  if (!snapshot) return "No execution-time risk snapshot.";
+  const bits = [
+    snapshot.reasons?.length ? `reasons ${snapshot.reasons.join(", ")}` : null,
+    snapshot.spread_bps != null ? `spread ${snapshot.spread_bps}` : null,
+    snapshot.size_to_depth_ratio != null ? `size/depth ${snapshot.size_to_depth_ratio}` : null,
+    snapshot.quote_age_ms != null ? `quote age ${snapshot.quote_age_ms}ms` : null,
+    snapshot.hedge_liquidity_ratio != null ? `hedge ${snapshot.hedge_liquidity_ratio}` : null,
+    snapshot.assumed_latency_ms != null ? `latency ${snapshot.assumed_latency_ms}ms` : null,
+    snapshot.maximum_execution_risk != null ? `threshold ${snapshot.maximum_execution_risk}` : null,
+  ].filter(Boolean);
+  return bits.join(" · ") || "Execution-time risk snapshot";
+}
+
 function nativeLocked(trade: PaperTrade): string {
   const parts = Object.entries(trade.capital_locked_native).map(([currency, amount]) =>
     money(amount, currency === "USD" ? "USD" : "GBP"),
@@ -222,6 +243,7 @@ function TradeTable({
               <th>Opened</th>
               <th>Legs</th>
               <th>Locked capital</th>
+              <th>Risk at entry</th>
               <th>Guaranteed at open</th>
               <th>Realised P&L</th>
               <th>Status</th>
@@ -230,7 +252,7 @@ function TradeTable({
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={7} className="empty-live">{empty}</td>
+                <td colSpan={8} className="empty-live">{empty}</td>
               </tr>
             ) : (
               rows.map((trade) => (
@@ -254,6 +276,7 @@ function TradeTable({
                     </td>
                     <td>{legsLine(trade)}</td>
                     <td>{nativeLocked(trade)}</td>
+                    <td title={riskTooltip(trade.entry_risk)}>{riskAtEntry(trade)}</td>
                     <td>{money(trade.guaranteed_profit_gbp_at_open)}</td>
                     <td>{trade.state === "CLOSED" ? money(trade.realised_pnl_gbp) : "—"}</td>
                     <td>
@@ -262,7 +285,7 @@ function TradeTable({
                   </tr>
                   {openId === trade.trade_id && detail?.trade_id === trade.trade_id ? (
                     <tr>
-                      <td colSpan={7}>
+                      <td colSpan={8}>
                         <AuditBlock trade={detail} busy={busy} onSettle={onSettle} />
                       </td>
                     </tr>

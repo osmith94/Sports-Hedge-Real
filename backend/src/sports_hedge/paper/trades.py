@@ -18,6 +18,7 @@ from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
 from sports_hedge.paper.models import FxRateSnapshot
+from sports_hedge.paper.risk_snapshot import PaperExecutionRiskSnapshot
 
 
 class PaperTradeState(StrEnum):
@@ -51,10 +52,12 @@ class PaperTradeAuditEventType(StrEnum):
     MANUAL_EXTERNAL_CONFIRMED = "manual_external_confirmed"
     HEDGE_REVALIDATED = "hedge_revalidated"
     FILLS_RECORDED = "fills_recorded"
+    ENTRY_RISK_RECORDED = "entry_risk_recorded"
     SETTLED = "settled"
     SETTLEMENT_IDEMPOTENT = "settlement_idempotent"
     CLOSE_PLAN_EVALUATED = "close_plan_evaluated"
     UNWIND_COMPLETED = "unwind_completed"
+    UNWIND_RISK_RECORDED = "unwind_risk_recorded"
     DEMO_STORE_REINITIALIZED = "demo_store_reinitialized"
 
 
@@ -129,6 +132,8 @@ class PaperTrade(BaseModel):
     legs: list[PaperTradeLeg] = Field(default_factory=list)
     fx_snapshots: list[FxRateSnapshot] = Field(default_factory=list)
     venue_costs: list[VenueCostSnapshot] = Field(default_factory=list)
+    entry_risk: PaperExecutionRiskSnapshot | None = None
+    close_risks: list[PaperExecutionRiskSnapshot] = Field(default_factory=list)
     audit: list[PaperTradeAuditEvent] = Field(default_factory=list)
 
     @model_validator(mode="after")

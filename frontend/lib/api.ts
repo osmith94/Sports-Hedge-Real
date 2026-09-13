@@ -168,6 +168,9 @@ export type DiscoveredFixture = {
   distance_to_trigger_pp?: string | number | null;
   quote_age_ms?: number | null;
   quote_age_basis?: string | null;
+  execution_risk_score?: number | null;
+  execution_risk_band?: string | null;
+  execution_risk_reasons?: string[];
   no_comparison_reason?: string | null;
   solver_is_arbitrage: boolean;
   opportunity_state?: string;
@@ -852,6 +855,30 @@ export type PaperTradeAuditEvent = {
   detail?: string | null;
 };
 
+export type PaperExecutionRiskSnapshot = {
+  kind: "entry" | "unwind" | "close" | string;
+  recorded_at: string;
+  opportunity_id?: string | null;
+  trade_id?: string | null;
+  score?: number | null;
+  band?: string | null;
+  reasons?: string[];
+  maximum_execution_risk?: number | null;
+  quote_age_ms?: number | null;
+  quote_age_basis?: string | null;
+  size_to_depth_ratio?: number | null;
+  hedge_liquidity_ratio?: number | null;
+  spread_bps?: number | null;
+  recent_volatility_bps?: number | null;
+  assumed_latency_ms?: number | null;
+  fill_confidence_score?: number | null;
+  fill_confidence_reasons?: string[];
+  net_edge?: string | number | null;
+  trigger_net_edge?: string | number | null;
+  solver_model?: string | null;
+  eligible_for_paper_simulation?: boolean | null;
+};
+
 export type PaperTrade = {
   trade_id: string;
   opportunity_id: string;
@@ -881,6 +908,8 @@ export type PaperTrade = {
   paper_only?: boolean;
   places_orders?: boolean;
   legs: PaperTradeLeg[];
+  entry_risk?: PaperExecutionRiskSnapshot | null;
+  close_risks?: PaperExecutionRiskSnapshot[];
   audit: PaperTradeAuditEvent[];
 };
 

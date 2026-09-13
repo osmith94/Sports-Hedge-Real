@@ -112,6 +112,7 @@ def _payload_calendar_dates(payload: dict[str, Any]) -> set[date]:
             "start",
             "start-time",
             "start_time",
+            "start_date",
             "strike_date",
             "occurrence_datetime",
             "expected_expiration_time",
@@ -121,6 +122,11 @@ def _payload_calendar_dates(payload: dict[str, Any]) -> set[date]:
     )
     if "26SEP13" in blob.upper() or "2026-09-13" in blob:
         found.add(DERBY_DATE)
+    milestone = payload.get("milestone")
+    if isinstance(milestone, dict):
+        start = str(milestone.get("start_date") or "")
+        if "2026-09-13" in start:
+            found.add(DERBY_DATE)
     for market in payload.get("markets") or []:
         if not isinstance(market, dict):
             continue
@@ -734,10 +740,10 @@ def _limitations(
     kickoff_fail = any("kickoff_outside_tolerance" in (row.get("reasons") or []) for row in pm_k)
     if kickoff_fail and pm_derby and k_derby:
         notes.append(
-            "Kalshi nested occurrence_datetime for KXEPLGAME-26SEP13MUNMCI is 2026-09-13T18:30:00Z "
-            "and equals expected_expiration_time, 3h after Polymarket startTime 2026-09-13T15:30:00Z "
-            "(16:30 UK). EventMatcher kickoff tolerance is 5 minutes, so PM↔K canonical identity "
-            "fails closed rather than guessing a kickoff."
+            "PM↔K identity failed kickoff matching. Kalshi scheduled kickoff is the soccer "
+            "milestone start_date, not market occurrence_datetime. occurrence_datetime that "
+            "equals expected_expiration_time is an expiration clock and is refused. "
+            "If the provider omitted milestones, identity fails closed rather than guessing."
         )
     notes.append(
         "Polymarket exposes the derby as multiple events (moneyline / BTTS / totals / FTTS) and "

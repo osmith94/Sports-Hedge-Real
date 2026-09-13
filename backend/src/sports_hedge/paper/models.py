@@ -13,7 +13,7 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.models import FeeSnapshot
 from sports_hedge.matching.markets import MarketMatchResult
-from sports_hedge.risk.execution import ExecutionRiskResult
+from sports_hedge.risk.execution import ExecutionRiskInputs, ExecutionRiskResult
 
 
 BPS_SCALE = Decimal("10000")
@@ -84,6 +84,7 @@ class PaperScanDecision(BaseModel):
     payoff_scan: PayoffScanResult | None = None
     solver_model: str | None = None
     execution_risk: ExecutionRiskResult | None = None
+    execution_risk_inputs: ExecutionRiskInputs | None = None
     eligible_for_paper_simulation: bool = False
     rejection_reasons: list[str] = Field(default_factory=list)
     fee_snapshots: list[FeeSnapshot] = Field(default_factory=list)

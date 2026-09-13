@@ -56,7 +56,7 @@ Manual override capital:
 
 The recommendation is constrained by the **limiting executable leg**, then reduced by configured safety, liquidity, risk, reserve and operator limits.
 
-**Executable depth** here means Core Tenet 18 **taker** liquidity: current opposing size we can consume now at a known price. Displayed, resting, or passive maker/lay quotes are not executable depth and must not inflate recommended size. Tenet 18 is the authoritative home for taker vs maker fill semantics.
+**Executable depth** here means Core Tenet 18 **taker** liquidity: current opposing size we can consume now at a known price. Displayed, resting, or passive maker/lay quotes are not executable depth and must not inflate recommended size. Tenet 18 is the authoritative home for taker vs maker fill semantics. Execution-risk scoring is a soft ranking input and runs only after those hard Tenet-18 executability gates.
 
 If the mispriced leg has £500 executable and the hedge leg has £5,000, the validated size is constrained by the £500 leg before any safety haircut.
 

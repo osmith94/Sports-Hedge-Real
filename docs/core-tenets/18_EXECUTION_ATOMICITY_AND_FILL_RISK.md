@@ -84,6 +84,19 @@ Any future support for opening lay/maker execution requires a **separate executi
 
 Until that model exists, posting a passive order is not an executable opening arb.
 
+### Hard eligibility gates before risk scoring
+
+Stale and passive-liquidity handling is a **hard eligibility gate before risk scoring**, not a larger risk penalty.
+
+Opening qualification runs in this order:
+
+1. Settlement equivalence, fees, FX, executable taker depth, and freshness/revalidation.
+2. **Hard opening-liquidity gates.** If the opportunity would require posting/resting maker or lay liquidity, or the quote is stale/unrevalidated, it is not executable. Do not compute or display an execution-risk score as though it were a valid arb. Fail closed immediately.
+3. **Soft risk scoring only after the gates pass.** Surviving executable/taker liquidity is then scored with the existing components: spread, size/depth, quote age (within the freshness cap), volatility, extra legs, latency, near-kickoff/event-state, hedge-liquidity, plus fill-confidence/persistence where available.
+4. Fixture-row `Best Arb` and the compact `Risk` column are for that same surviving opportunity only. A mathematically attractive passive/stale candidate may appear in drilldown as observed edge / not executable with the rejection reason. It must not headline and must not carry a qualifying risk score.
+
+Paper OPEN records the exact execution-time risk snapshot used for that decision. Later books must not recompute or overwrite it. An unwind or close assessment is a separate append-only snapshot.
+
 ## Non-negotiables before real treasury execution
 
 1. **No paper-to-live equivalence claim.** Realistic paper simulation may model latency, slippage, depth, stale quotes and partial fills, but it is still a model.
@@ -187,7 +200,11 @@ Before any real-money execution capability is approved, reviewers should verify:
 - [ ] passive or stale liquidity cannot become fixture-row `Best Arb` or count toward executable depth / solver-qualified size;
 - [ ] Phase-1 opening remains back/buy only; Matchbook lay levels may be observed but do not qualify opening arbs;
 - [ ] any future opening lay/maker path has a separate execution model (fill probability, queue/time-in-market, cancel/reprice, shadow evidence, Tenet-18 recovery) before it can qualify;
-- [ ] a stale/passive high-edge candidate cannot outrank a lower-edge genuinely executable taker opportunity.
+- [ ] a stale/passive high-edge candidate cannot outrank a lower-edge genuinely executable taker opportunity;
+- [ ] hard executability, freshness and passive-liquidity gates run before risk scoring;
+- [ ] a non-executable passive/stale candidate is not shown with a risk score as if it were a valid arb;
+- [ ] OPEN paper trades persist an immutable execution-time risk snapshot (score/band/reasons/threshold, quote age/freshness, size-to-depth, hedge liquidity, spread, volatility, latency, fill confidence, net edge/trigger, timestamp);
+- [ ] unwind/close records a separate append-only snapshot and does not overwrite the entry snapshot.
 
 ## Guiding question
 

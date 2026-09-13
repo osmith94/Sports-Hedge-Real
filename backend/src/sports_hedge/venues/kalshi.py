@@ -93,19 +93,29 @@ class KalshiClient(ReadOnlyVenue):
 
         limit = int(filters.get("limit") or self.settings.kalshi_event_page_limit)
         series_tickers = _requested_series(filters, self.settings.kalshi_series_tickers)
+        nested = filters.get("with_nested_markets", "true")
+        with_milestones = filters.get("with_milestones", "true")
         if "cursor" in filters or filters.get("series_ticker"):
             params = {
                 "status": filters.get("status", "open"),
                 "limit": limit,
-                "with_nested_markets": filters.get("with_nested_markets", "true"),
-                **{key: value for key, value in filters.items() if key != "series_tickers"},
+                "with_nested_markets": nested,
+                "with_milestones": with_milestones,
+                **{
+                    key: value
+                    for key, value in filters.items()
+                    if key not in {"series_tickers", "with_nested_markets", "with_milestones"}
+                },
             }
             page = await self._get("/events", params=params)
             events = _extract_items(page_payload(page), "events")
-            return {**page, "events": events, "truncated": False}
+            milestones = _extract_items(page, "milestones")
+            milestones = await self._ensure_milestones(events, milestones)
+            return {**page, "events": events, "milestones": milestones, "truncated": False}
 
         if series_tickers:
             events: list[dict[str, Any]] = []
+            milestones: list[dict[str, Any]] = []
             seen: set[str] = set()
             truncated = False
             for ticker in series_tickers:
@@ -115,13 +125,16 @@ class KalshiClient(ReadOnlyVenue):
                         "status": filters.get("status", "open"),
                         "limit": limit,
                         "series_ticker": ticker,
-                        "with_nested_markets": filters.get("with_nested_markets", "true"),
+                        "with_nested_markets": nested,
+                        "with_milestones": with_milestones,
                     },
                     item_key="events",
+                    extra_keys=("milestones",),
                     limit=limit,
                     max_pages=self.settings.kalshi_event_max_pages,
                 )
                 truncated = truncated or bool(page.get("truncated"))
+                milestones.extend(page.get("milestones") or [])
                 for item in page.get("events", []):
                     event_id = str(item.get("event_ticker") or item.get("ticker") or "").strip()
                     if event_id and event_id in seen:
@@ -129,19 +142,69 @@ class KalshiClient(ReadOnlyVenue):
                     if event_id:
                         seen.add(event_id)
                     events.append(item)
-            return {"events": events, "truncated": truncated, "total": len(events)}
+            milestones = _dedupe_by_id(milestones)
+            milestones = await self._ensure_milestones(events, milestones)
+            return {
+                "events": events,
+                "milestones": milestones,
+                "truncated": truncated,
+                "total": len(events),
+            }
 
-        return await self._paginate(
+        page = await self._paginate(
             "/events",
             params={
                 "status": filters.get("status", "open"),
                 "limit": limit,
-                "with_nested_markets": filters.get("with_nested_markets", "true"),
+                "with_nested_markets": nested,
+                "with_milestones": with_milestones,
             },
             item_key="events",
+            extra_keys=("milestones",),
             limit=limit,
             max_pages=self.settings.kalshi_event_max_pages,
         )
+        events = list(page.get("events") or [])
+        milestones = _dedupe_by_id(page.get("milestones") or [])
+        milestones = await self._ensure_milestones(events, milestones)
+        return {**page, "events": events, "milestones": milestones}
+
+    async def list_milestones(self, **filters: Any) -> list[dict[str, Any]]:
+        """List Kalshi milestones. Soccer `start_date` is scheduled kickoff."""
+
+        limit = int(filters.get("limit") or self.settings.kalshi_event_page_limit)
+        params = {key: value for key, value in filters.items() if key not in {"limit"}}
+        page = await self._paginate(
+            "/milestones",
+            params=params,
+            item_key="milestones",
+            limit=limit,
+            max_pages=self.settings.kalshi_event_max_pages,
+        )
+        return _dedupe_by_id(list(page.get("milestones") or []))
+
+    async def _ensure_milestones(
+        self,
+        events: list[dict[str, Any]],
+        milestones: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Attach event-list milestones, then fetch Sports milestones if kickoff is still missing.
+
+        Kalshi `occurrence_datetime` is not scheduled kickoff. Soccer milestone
+        `start_date` is the authoritative clock. A missing `/milestones` response
+        fails closed rather than inventing a kickoff from expiration.
+        """
+
+        attach_milestones_to_events(events, milestones)
+        if not events or all(_event_has_kickoff_clock(event) for event in events):
+            return _dedupe_by_id(milestones)
+        try:
+            extra = await self.list_milestones(category="Sports")
+        except KalshiDiscoveryError:
+            return _dedupe_by_id(milestones)
+        combined = _dedupe_by_id([*milestones, *extra])
+        attach_milestones_to_events(events, combined)
+        return combined
 
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
         limit = int(filters.get("limit") or self.settings.kalshi_event_page_limit)
@@ -220,8 +283,10 @@ class KalshiClient(ReadOnlyVenue):
         item_key: str,
         limit: int,
         max_pages: int,
+        extra_keys: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         items: list[dict[str, Any]] = []
+        extras: dict[str, list[dict[str, Any]]] = {key: [] for key in extra_keys}
         cursor: str | None = None
         truncated = False
         last_page: dict[str, Any] = {}
@@ -232,6 +297,8 @@ class KalshiClient(ReadOnlyVenue):
             last_page = await self._get(path, params=page_params)
             page_items = _extract_items(last_page, item_key)
             items.extend(page_items)
+            for key in extra_keys:
+                extras[key].extend(_extract_items(last_page, key))
             cursor = str(last_page.get("cursor") or "").strip() or None
             if not page_items or cursor is None:
                 break
@@ -242,6 +309,7 @@ class KalshiClient(ReadOnlyVenue):
         return {
             **last_page,
             item_key: items,
+            **extras,
             "truncated": truncated,
             "total": len(items),
         }
@@ -277,6 +345,91 @@ def _requested_series(filters: dict[str, Any], configured: list[str]) -> list[st
     if ticker:
         return [str(ticker).strip()]
     return [item.strip() for item in configured if str(item).strip()]
+
+
+def _event_has_kickoff_clock(event: dict[str, Any]) -> bool:
+    """True when the event already carries a scheduled-start clock, not expiration."""
+
+    if event.get("start_date"):
+        return True
+    milestone = event.get("milestone")
+    if isinstance(milestone, dict) and milestone.get("start_date"):
+        return True
+    for key in ("target_datetime", "game_start_time", "scheduled_start", "strike_date"):
+        raw = event.get(key)
+        if raw and "T" in str(raw):
+            return True
+    return False
+
+
+def attach_milestones_to_events(
+    events: list[dict[str, Any]],
+    milestones: list[dict[str, Any]],
+) -> None:
+    """Copy the matching soccer milestone onto each event for kickoff parsing.
+
+    Kalshi documents milestones as the real-world occurrence. Soccer
+    ``start_date`` is scheduled kickoff. Market ``occurrence_datetime`` is not.
+    """
+
+    by_ticker: dict[str, dict[str, Any]] = {}
+    for milestone in milestones:
+        if not isinstance(milestone, dict):
+            continue
+        for ticker in _milestone_event_tickers(milestone):
+            current = by_ticker.get(ticker)
+            if current is None or _milestone_kickoff_rank(milestone) < _milestone_kickoff_rank(current):
+                by_ticker[ticker] = milestone
+    for event in events:
+        ticker = str(event.get("event_ticker") or event.get("ticker") or "").strip()
+        milestone = by_ticker.get(ticker)
+        if milestone is None:
+            continue
+        event["milestone"] = milestone
+        start = milestone.get("start_date")
+        if start and not event.get("start_date"):
+            event["start_date"] = start
+
+
+def _milestone_event_tickers(milestone: dict[str, Any]) -> list[str]:
+    tickers: list[str] = []
+    details = milestone.get("details")
+    if isinstance(details, dict):
+        main = str(details.get("main_game_event_ticker") or "").strip()
+        if main:
+            tickers.append(main)
+    for key in ("primary_event_tickers", "related_event_tickers"):
+        values = milestone.get(key) or []
+        if isinstance(values, list):
+            tickers.extend(str(item).strip() for item in values if str(item).strip())
+    seen: set[str] = set()
+    unique: list[str] = []
+    for ticker in tickers:
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        unique.append(ticker)
+    return unique
+
+
+def _milestone_kickoff_rank(milestone: dict[str, Any]) -> tuple[int, int]:
+    milestone_type = str(milestone.get("type") or "").casefold()
+    soccer = 0 if "soccer" in milestone_type else 1
+    has_start = 0 if milestone.get("start_date") else 1
+    return soccer, has_start
+
+
+def _dedupe_by_id(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for item in items:
+        item_id = str(item.get("id") or "").strip()
+        if item_id and item_id in seen:
+            continue
+        if item_id:
+            seen.add(item_id)
+        unique.append(item)
+    return unique
 
 
 def _extract_items(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:

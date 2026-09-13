@@ -26,6 +26,7 @@ from sports_hedge.paper.trades import (
     PaperTradeLeg,
     PaperTradeState,
 )
+from sports_hedge.paper.risk_snapshot import PaperExecutionRiskSnapshot
 
 
 class SqlitePaperJournal:
@@ -162,6 +163,18 @@ class SqlitePaperTradeRepository:
         self._ledger._commit()
 
     def save(self, trade: PaperTrade) -> PaperTrade:
+        existing = self.get(trade.trade_id)
+        if existing is not None and existing.entry_risk is not None:
+            trade.entry_risk = existing.entry_risk
+            if existing.close_risks:
+                known = {
+                    (item.kind, item.recorded_at.isoformat(), item.score)
+                    for item in trade.close_risks
+                }
+                for item in existing.close_risks:
+                    key = (item.kind, item.recorded_at.isoformat(), item.score)
+                    if key not in known:
+                        trade.close_risks.append(item)
         payload = (
             trade.trade_id,
             trade.opportunity_id,
@@ -191,6 +204,8 @@ class SqlitePaperTradeRepository:
             trade.provenance.value,
             json.dumps([item.model_dump(mode="json") for item in trade.fx_snapshots]),
             json.dumps([item.model_dump(mode="json") for item in trade.venue_costs]),
+            json.dumps(trade.entry_risk.model_dump(mode="json") if trade.entry_risk else None),
+            json.dumps([item.model_dump(mode="json") for item in trade.close_risks]),
         )
         self._connection.execute(
             """
@@ -200,8 +215,9 @@ class SqlitePaperTradeRepository:
                 fixture_label, market_label, state, opened_at, last_updated_at, settled_at,
                 guaranteed_profit_gbp_at_open, realised_pnl_gbp, capital_locked_native_json,
                 capital_locked_gbp, settlement_outcome, settlement_source, settlement_source_id,
-                settlement_detail, provenance, fx_snapshots_json, venue_costs_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                settlement_detail, provenance, fx_snapshots_json, venue_costs_json,
+                entry_risk_json, close_risks_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(trade_id) DO UPDATE SET
                 opportunity_id = excluded.opportunity_id,
                 canonical_event_id = excluded.canonical_event_id,
@@ -229,7 +245,9 @@ class SqlitePaperTradeRepository:
                 settlement_detail = excluded.settlement_detail,
                 provenance = excluded.provenance,
                 fx_snapshots_json = excluded.fx_snapshots_json,
-                venue_costs_json = excluded.venue_costs_json
+                venue_costs_json = excluded.venue_costs_json,
+                entry_risk_json = COALESCE(paper_trades.entry_risk_json, excluded.entry_risk_json),
+                close_risks_json = excluded.close_risks_json
             """,
             payload,
         )
@@ -375,6 +393,8 @@ class SqlitePaperTradeRepository:
                 VenueCostSnapshot.model_validate(item)
                 for item in json.loads(row["venue_costs_json"] or "[]")
             ],
+            entry_risk=_entry_risk_from_row(row),
+            close_risks=_close_risks_from_row(row),
             audit=audit,
         )
 
@@ -479,7 +499,9 @@ class SqlitePaperLedger:
                 settlement_detail TEXT,
                 provenance TEXT NOT NULL,
                 fx_snapshots_json TEXT NOT NULL,
-                venue_costs_json TEXT NOT NULL
+                venue_costs_json TEXT NOT NULL,
+                entry_risk_json TEXT,
+                close_risks_json TEXT NOT NULL DEFAULT '[]'
             );
 
             CREATE TABLE IF NOT EXISTS paper_trade_legs (
@@ -590,6 +612,17 @@ class SqlitePaperLedger:
         self._connection.commit()
         self._ensure_unwind_identity_columns()
         self._ensure_treasury_lock_fact_columns()
+        self._ensure_risk_snapshot_columns()
+
+    def _ensure_risk_snapshot_columns(self) -> None:
+        trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
+        if "entry_risk_json" not in trade_cols:
+            self._connection.execute("ALTER TABLE paper_trades ADD COLUMN entry_risk_json TEXT")
+        if "close_risks_json" not in trade_cols:
+            self._connection.execute(
+                "ALTER TABLE paper_trades ADD COLUMN close_risks_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        self._connection.commit()
 
     def _ensure_unwind_identity_columns(self) -> None:
         trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
@@ -636,3 +669,27 @@ def _dec(value: Decimal | None) -> str | None:
 
 def _decimal(value: str | None) -> Decimal | None:
     return None if value is None else Decimal(value)
+
+
+def _entry_risk_from_row(row: sqlite3.Row) -> PaperExecutionRiskSnapshot | None:
+    if "entry_risk_json" not in row.keys():
+        return None
+    raw = row["entry_risk_json"]
+    if not raw:
+        return None
+    payload = json.loads(raw)
+    if not payload:
+        return None
+    return PaperExecutionRiskSnapshot.model_validate(payload)
+
+
+def _close_risks_from_row(row: sqlite3.Row) -> list[PaperExecutionRiskSnapshot]:
+    if "close_risks_json" not in row.keys():
+        return []
+    raw = row["close_risks_json"]
+    if not raw:
+        return []
+    payload = json.loads(raw)
+    if not isinstance(payload, list):
+        return []
+    return [PaperExecutionRiskSnapshot.model_validate(item) for item in payload]

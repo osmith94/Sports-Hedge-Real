@@ -535,10 +535,30 @@ async def test_kalshi_client_paginates_events_and_has_no_trading_methods() -> No
         if request.url.path.endswith("/events") and not request.url.params.get("cursor"):
             return httpx.Response(
                 200,
-                json={"events": [{"event_ticker": "E1", "title": "A vs B"}], "cursor": "next"},
+                json={
+                    "events": [
+                        {
+                            "event_ticker": "E1",
+                            "title": "A vs B",
+                            "strike_date": "2026-09-20T15:00:00Z",
+                        }
+                    ],
+                    "cursor": "next",
+                },
             )
         if request.url.path.endswith("/events") and request.url.params.get("cursor") == "next":
-            return httpx.Response(200, json={"events": [{"event_ticker": "E2", "title": "C vs D"}]})
+            return httpx.Response(
+                200,
+                json={
+                    "events": [
+                        {
+                            "event_ticker": "E2",
+                            "title": "C vs D",
+                            "strike_date": "2026-09-20T17:00:00Z",
+                        }
+                    ]
+                },
+            )
         return httpx.Response(404)
 
     settings = Settings(
@@ -557,6 +577,7 @@ async def test_kalshi_client_paginates_events_and_has_no_trading_methods() -> No
     assert not hasattr(venue, "cancel_order")
     assert all("/trade-api/v2/events" in str(url) for url in seen)
     assert all(url.path.endswith("/events") for url in seen)
+    assert all(url.params.get("with_milestones") == "true" for url in seen)
 
 
 @pytest.mark.asyncio

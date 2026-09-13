@@ -152,6 +152,9 @@ class DiscoveredFixture(BaseModel):
     distance_to_trigger_pp: Decimal | None = None
     quote_age_ms: int | None = Field(default=None, ge=0)
     quote_age_basis: str | None = None
+    execution_risk_score: int | None = Field(default=None, ge=0, le=100)
+    execution_risk_band: str | None = None
+    execution_risk_reasons: list[str] = Field(default_factory=list)
     no_comparison_reason: str | None = None
     solver_is_arbitrage: bool = False
     opportunity_state: str = "unmatched"
@@ -1342,6 +1345,9 @@ def _apply_fixture_headline(
         fixture.current_net_edge = None
         fixture.solver_is_arbitrage = False
         fixture.best_arb_market = None
+        fixture.execution_risk_score = None
+        fixture.execution_risk_band = None
+        fixture.execution_risk_reasons = []
         if fixture.matched_equivalent_count and fixture.no_comparison_reason is None:
             fixture.no_comparison_reason = headline.reason or NO_EXECUTABLE_ARB
         return
@@ -1397,6 +1403,14 @@ def _apply_backend_comparison(
     fixture.distance_to_trigger_pp = distance
     fixture.quote_age_ms = decision.quote_age_ms
     fixture.quote_age_basis = decision.quote_age_basis
+    if decision.execution_risk is not None:
+        fixture.execution_risk_score = decision.execution_risk.score
+        fixture.execution_risk_band = decision.execution_risk.band
+        fixture.execution_risk_reasons = list(decision.execution_risk.reasons)
+    else:
+        fixture.execution_risk_score = None
+        fixture.execution_risk_band = None
+        fixture.execution_risk_reasons = []
     fixture.solver_is_arbitrage = qualifying
     fixture.no_comparison_reason = None
 

@@ -305,8 +305,38 @@ def test_paper_scan_rejects_maker_opening_role() -> None:
         )
         assert decision.eligible_for_paper_simulation is False
         assert PASSIVE_MAKER_NOT_EXECUTABLE in decision.rejection_reasons
+        assert decision.execution_risk is None
         candidate = candidate_from_decision(decision, family="both_teams_to_score")
         assert headline_band_for(candidate) is HeadlineBand.OBSERVED_NOT_EXECUTABLE
+    finally:
+        repository.close()
+
+
+def test_stale_taker_quote_is_rejected_before_risk_scoring() -> None:
+    repository = SqliteMarketIntelligenceRepository()
+    intelligence = MarketIntelligenceService(repository)
+    service = PaperScanService(intelligence)
+    mb_event, mb_market = matchbook_payloads()
+    pm_event, pm_market, pm_books = polymarket_payloads()
+    matchbook = MatchbookObservationBuilder().build(
+        mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=5_000
+    )
+    polymarket = PolymarketObservationBuilder().build(
+        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=5_000
+    )
+    try:
+        decision = service.scan_pair(
+            matchbook,
+            polymarket,
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="test_fx")],
+            maximum_execution_risk=100,
+        )
+        assert decision.quote_age_ms == 5_000
+        assert decision.quote_age_ms > DEFAULT_OPENING_MAX_QUOTE_AGE_MS
+        assert "stale_quote" in decision.rejection_reasons
+        assert decision.execution_risk is None
+        assert decision.eligible_for_paper_simulation is False
     finally:
         repository.close()
 

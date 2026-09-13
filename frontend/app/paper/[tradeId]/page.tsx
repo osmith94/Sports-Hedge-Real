@@ -42,6 +42,17 @@ export default async function PaperTradeDetailPage({
           <div className="metric-value" style={{ fontSize: 18 }}>{relativeTime(trade.opened_at)}</div>
         </div>
         <div className="metric-card">
+          <div className="metric-label">Risk at entry</div>
+          <div className="metric-value" style={{ fontSize: 18 }}>
+            {trade.entry_risk?.score != null
+              ? `${trade.entry_risk.score}${trade.entry_risk.band ? ` · ${trade.entry_risk.band}` : ""}`
+              : "—"}
+          </div>
+          <div className="metric-foot">
+            Immutable execution-time snapshot. Not recomputed from later books.
+          </div>
+        </div>
+        <div className="metric-card">
           <div className="metric-label">Guaranteed at open</div>
           <div className="metric-value">{money(trade.guaranteed_profit_gbp_at_open)}</div>
           <div className="metric-foot">
@@ -99,6 +110,34 @@ export default async function PaperTradeDetailPage({
           </table>
         </div>
       </section>
+      <div style={{ height: 14 }} />
+      {trade.entry_risk || trade.close_risks?.length ? (
+        <section className="panel">
+          <div className="panel-header">
+            <div className="panel-title">Risk provenance</div>
+          </div>
+          <div className="panel-body">
+            {trade.entry_risk ? (
+              <p className="section-copy">
+                Entry {trade.entry_risk.score ?? "—"}
+                {trade.entry_risk.band ? ` · ${trade.entry_risk.band}` : ""}
+                {trade.entry_risk.reasons?.length ? ` · ${trade.entry_risk.reasons.join(", ")}` : ""}
+                {trade.entry_risk.quote_age_ms != null ? ` · quote ${trade.entry_risk.quote_age_ms}ms` : ""}
+                {trade.entry_risk.size_to_depth_ratio != null ? ` · size/depth ${trade.entry_risk.size_to_depth_ratio}` : ""}
+                {trade.entry_risk.hedge_liquidity_ratio != null ? ` · hedge ${trade.entry_risk.hedge_liquidity_ratio}` : ""}
+                {trade.entry_risk.net_edge != null ? ` · net edge ${trade.entry_risk.net_edge}` : ""}
+              </p>
+            ) : null}
+            {(trade.close_risks ?? []).map((snapshot, index) => (
+              <p className="section-copy" key={`${snapshot.kind}-${snapshot.recorded_at}-${index}`}>
+                {snapshot.kind} {snapshot.score ?? "—"}
+                {snapshot.band ? ` · ${snapshot.band}` : ""}
+                {snapshot.reasons?.length ? ` · ${snapshot.reasons.join(", ")}` : ""}
+              </p>
+            ))}
+          </div>
+        </section>
+      ) : null}
       <div style={{ height: 14 }} />
       <section className="panel">
         <div className="panel-header">

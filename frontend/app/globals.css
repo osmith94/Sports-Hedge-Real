@@ -108,9 +108,12 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; min-width: 760px; }
-table.discovery-compact { min-width: 680px; }
+table.discovery-compact { min-width: 1080px; }
 td.wrap, .wrap { white-space: normal; }
-.venue-marks { display: inline-flex; gap: 4px; }
+.venue-cell { display: grid; gap: 3px; }
+.col-help { display: inline-flex; margin-left: 6px; width: 12px; height: 12px; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--muted-2); font-size: 8px; font-weight: 800; align-items: center; justify-content: center; vertical-align: middle; }
+.edge-qualifying { color: var(--accent); font-weight: 700; }
+.edge-near { color: var(--amber); font-weight: 700; }
 .venue-mark { display: inline-flex; min-width: 22px; justify-content: center; padding: 2px 5px; border-radius: 999px; font-size: 9px; font-weight: 800; letter-spacing: .04em; border: 1px solid var(--line); color: var(--muted-2); }
 .venue-mark-on { color: var(--accent); border-color: rgba(124, 242, 176, .28); background: var(--accent-soft); }
 .discovery-detail-row td { padding-top: 0; border-bottom: 1px solid rgba(34, 51, 47, .6); }
@@ -124,6 +127,7 @@ tr:last-child td { border-bottom: none; }
 .edge-negative { color: var(--red); font-weight: 700; }
 .risk-low { color: var(--accent); }
 .risk-medium { color: var(--amber); }
+.risk-high { color: var(--red); font-weight: 700; }
 .status-badge { display: inline-flex; padding: 4px 7px; border-radius: 999px; font-size: 9px; font-weight: 750; background: var(--accent-soft); color: var(--accent); border: 1px solid rgba(124, 242, 176, .16); }
 
 .chart-shell { height: 300px; width: 100%; position: relative; }
