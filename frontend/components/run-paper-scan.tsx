@@ -147,6 +147,8 @@ function economicsChips(status: EconomicsStatus | null): StripChip[] {
           `published ${usd.source_date}`,
           usd.retrieved_at ? `retrieved ${clockStamp(usd.retrieved_at)}` : null,
           `valuation ${usd.valuation_date}`,
+          usd.carried_forward ? "carried forward" : null,
+          usd.check_status ? `BoE ${usd.check_status}` : null,
           usd.check_source ? `check ${usd.check_source}` : null,
           usd.variance_bps ? `variance ${usd.variance_bps} bps` : null,
           status?.data_kind,

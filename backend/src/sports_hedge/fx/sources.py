@@ -26,7 +26,7 @@ BOE_CSV_URL = (
 
 
 class HttpGetter(Protocol):
-    def get(self, url: str, *, timeout: float = 30.0) -> httpx.Response: ...
+    def get(self, url: str, *, timeout: float = 5.0) -> httpx.Response: ...
 
 
 def parse_ecb_eurofxref_daily(xml_text: str, *, retrieved_at: datetime) -> list[PublishedFxClose]:
@@ -132,14 +132,26 @@ def _parse_boe_date(value: str) -> date:
 
 
 class EcbEurofxrefSource:
-    def fetch(self, http: HttpGetter, *, retrieved_at: datetime) -> list[PublishedFxClose]:
-        response = http.get(ECB_DAILY_URL, timeout=30.0)
+    def fetch(
+        self,
+        http: HttpGetter,
+        *,
+        retrieved_at: datetime,
+        timeout: float = 8.0,
+    ) -> list[PublishedFxClose]:
+        response = http.get(ECB_DAILY_URL, timeout=timeout)
         response.raise_for_status()
         return parse_ecb_eurofxref_daily(response.text, retrieved_at=retrieved_at)
 
 
 class BoeXudlussSource:
-    def fetch(self, http: HttpGetter, *, retrieved_at: datetime) -> list[PublishedFxClose]:
-        response = http.get(BOE_CSV_URL, timeout=30.0)
+    def fetch(
+        self,
+        http: HttpGetter,
+        *,
+        retrieved_at: datetime,
+        timeout: float = 2.0,
+    ) -> list[PublishedFxClose]:
+        response = http.get(BOE_CSV_URL, timeout=timeout)
         response.raise_for_status()
         return parse_boe_xudluss_csv(response.text, retrieved_at=retrieved_at)

@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     fx_check_tolerance_bps: int = Field(default=25, ge=0)
     fx_stale_after_days: int = Field(default=7, ge=1)
     accounting_schedule_enabled: bool = False
+    """Default off. Windows paper-demo launcher enables this for local ECB bootstrap only."""
 
     paper_bankroll_gbp: float = Field(default=5000.0, gt=0)
     paper_bankroll_usd: float = Field(default=5000.0, gt=0)

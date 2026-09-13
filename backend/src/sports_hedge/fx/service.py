@@ -16,7 +16,6 @@ from sports_hedge.fx.repository import SqliteFxRateRepository
 from sports_hedge.paper.models import FxRateSnapshot
 
 LONDON = ZoneInfo("Europe/London")
-BERLIN = ZoneInfo("Europe/Berlin")
 GBP = FxRateSnapshot(
     currency="GBP",
     gbp_per_unit=Decimal("1"),
@@ -53,6 +52,9 @@ class FxRateService:
             if existing is None:
                 stored.append(self.repository.insert_if_absent(candidate))
                 continue
+            if existing.status is FxCheckStatus.CARRIED_FORWARD:
+                stored.append(self.repository.replace_carried_forward_with_published(candidate))
+                continue
             if existing.gbp_per_unit != candidate.gbp_per_unit:
                 stored.append(existing)
                 continue
@@ -70,6 +72,16 @@ class FxRateService:
             else:
                 stored.append(existing)
         return stored
+
+    def has_published_primary(self, currency: str, source_date: date) -> bool:
+        """True when a non-carried-forward ECB primary exists for this source date."""
+
+        row = self.repository.get(currency, source_date)
+        return (
+            row is not None
+            and row.status is not FxCheckStatus.CARRIED_FORWARD
+            and row.source_date == source_date
+        )
 
     def apply_boe_checks(self, checks: list[PublishedFxClose]) -> list[DailyFxRate]:
         updated: list[DailyFxRate] = []
@@ -259,10 +271,14 @@ def london_calendar_date(instant: datetime) -> date:
     return instant.astimezone(LONDON).date()
 
 
-def ecb_publication_window_open(instant: datetime) -> bool:
-    """ECB reference rates publish after the Frankfurt working-day session, not at midnight."""
+ECB_PUBLICATION_HOUR_LONDON = 16
+ECB_PUBLICATION_MINUTE_LONDON = 15
 
-    local = instant.astimezone(BERLIN)
+
+def ecb_publication_window_open(instant: datetime) -> bool:
+    """Daily ECB ingest is due from 16:15 Europe/London on working days, not at midnight."""
+
+    local = instant.astimezone(LONDON)
     if local.weekday() >= 5:
         return False
-    return local.hour >= 16
+    return (local.hour, local.minute) >= (ECB_PUBLICATION_HOUR_LONDON, ECB_PUBLICATION_MINUTE_LONDON)

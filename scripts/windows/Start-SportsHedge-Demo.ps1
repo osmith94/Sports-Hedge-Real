@@ -2,7 +2,10 @@
 # Starts FastAPI + Next.js hidden, waits for health, opens the operator console.
 # Enables the read-only live-refresh loop for this process. Autofill stays off so
 # the operator can preview and confirm a concrete size (example £10) before OPEN.
-# Does not enable live execution, wallet signing, or trading credentials.
+# Enables the existing accounting/FX scheduler so a fresh FX DB bootstraps the
+# latest published ECB USD close (weekend/holiday carry-forward) without waiting
+# for the 16:15 UK window. Does not enable live execution, wallet signing, or
+# trading credentials.
 
 $ErrorActionPreference = "Stop"
 
@@ -113,6 +116,7 @@ $env:SPORTS_HEDGE_MODE = "paper"
 $env:SPORTS_HEDGE_EXECUTION_ENABLED = "false"
 $env:PAPER_AUTOFILL_ENABLED = "false"
 $env:PAPER_LIVE_REFRESH_ENABLED = "true"
+$env:ACCOUNTING_SCHEDULE_ENABLED = "true"
 $env:NEXT_PUBLIC_SPORTS_HEDGE_API_URL = "http://127.0.0.1:8000"
 
 $backendAlready = Test-HttpOk $BackendHealth
@@ -155,6 +159,6 @@ try {
 
 Write-Host "Sports Hedge paper demo is running."
 Write-Host "Operator console: $DemoUrl"
-Write-Host "PAPER MODE. execution_enabled=false. PAPER_AUTOFILL_ENABLED=false so the operator chooses size (example £10). PAPER_LIVE_REFRESH_ENABLED=true for this local demo only."
+Write-Host "PAPER MODE. execution_enabled=false. PAPER_AUTOFILL_ENABLED=false so the operator chooses size (example £10). PAPER_LIVE_REFRESH_ENABLED=true and ACCOUNTING_SCHEDULE_ENABLED=true for this local demo only (ECB USD bootstrap + daily 16:15 UK refresh)."
 Write-Host "Logs: $Logs"
 exit 0

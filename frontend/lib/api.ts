@@ -421,9 +421,12 @@ export type EconomicsFxRow = {
   valuation_date: string;
   retrieved_at?: string | null;
   status: string;
+  check_status?: string;
+  carried_forward?: boolean;
   primary_source: string;
   variance_bps?: string | null;
   check_source?: string | null;
+  check_gbp_per_unit?: string | null;
 };
 
 export type EconomicsVenueCostRow = {
@@ -445,6 +448,14 @@ export type EconomicsStatus = {
   fx: EconomicsFxRow[];
   venue_costs: EconomicsVenueCostRow[];
   issues: string[];
+  fx_schedule?: {
+    enabled: boolean;
+    last_ingest_source_date?: string | null;
+    last_daily_ingest_london_date?: string | null;
+    last_bootstrap_source_date?: string | null;
+    last_error?: string | null;
+    scanner_usd?: Record<string, unknown>;
+  };
 };
 
 export type TrendSummary = {
