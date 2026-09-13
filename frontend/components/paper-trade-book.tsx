@@ -312,7 +312,7 @@ function AuditBlock({
   return (
     <div className="paper-audit">
       <div className="panel-meta">
-        Provenance {trade.provenance} · paper only · places_orders={String(trade.places_orders ?? false)}
+        Provenance {trade.provenance} · paper only · no venue orders
         {trade.settlement_outcome
           ? ` · settled ${trade.settlement_outcome} via ${trade.settlement_source}:${trade.settlement_source_id}`
           : ""}

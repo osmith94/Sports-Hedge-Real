@@ -14,7 +14,7 @@ export function HoldVsUnwindCard({
     return (
       <div className="empty-live">
         {emptyHint ??
-          "Hold-vs-unwind is 8D analytical only. Reverse-side quotes are required; a clock estimate never releases capital."}
+          "Hold versus unwind is analytical only. Reverse-side quotes are required; a clock estimate never releases capital."}
       </div>
     );
   }
@@ -55,9 +55,9 @@ export function HoldVsUnwindCard({
       <div className="scan-note">
         Modelled time-to-release: {ttr.source_class}/{ttr.basis}
         {ttr.remaining_lock_minutes != null ? ` · ${ttr.remaining_lock_minutes} min` : " · unknown"}
-        {ttr.confidence != null ? ` · confidence ${ttr.confidence}` : ""}. Advisory only;
-        settles_or_releases_capital={String(ttr.settles_or_releases_capital)}. Spendable release
-        requires {decision.spendable_release_requires.replaceAll("_", " ")}.
+        {ttr.confidence != null ? ` · confidence ${ttr.confidence}` : ""}. Advisory only; this
+        estimate does not release capital. Spendable release requires{" "}
+        {decision.spendable_release_requires.replaceAll("_", " ")}.
       </div>
       {decision.close_plan?.rejection_reasons?.length ? (
         <div className="scan-note">

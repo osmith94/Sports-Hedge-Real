@@ -27,7 +27,9 @@ export default async function PaperTradeDetailPage({
           <div className="eyebrow">Paper trade</div>
           <h1>{trade.fixture_label ?? trade.trade_id}</h1>
           <p className="page-subtitle">
-            PAPER MODE persisted record. Solver {trade.solver_model ?? "n/a"}. Provenance {trade.provenance}. Places orders: {String(trade.places_orders)}. Fill kinds stay distinct: INTERNAL_SIMULATED, PAPER_SIMULATED_EXTERNAL, and MANUAL_EXTERNAL are not interchangeable.
+            PAPER MODE persisted record. Solver {trade.solver_model ?? "n/a"}. Provenance{" "}
+            {trade.provenance}. No venue orders are placed. Simulated internal, paper-simulated
+            external, and operator-confirmed external fills stay distinct.
           </p>
         </div>
         <Link href="/paper" className="demo-label">Back to trade book</Link>

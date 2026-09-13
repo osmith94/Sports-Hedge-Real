@@ -9,12 +9,12 @@ export function CapitalSummary({
   live: CapitalSnapshot;
   tradeSummary?: PaperTradeBookSummary | null;
 }) {
-  const realised = tradeSummary?.realised_pnl_gbp ?? live.realisedPnlGbp;
-  const locked = tradeSummary?.capital_locked_gbp ?? live.lockedCapitalGbp;
+  const realised = tradeSummary?.realised_pnl_gbp ?? null;
+  const locked = tradeSummary?.capital_locked_gbp ?? null;
   const cards = [
     { label: "Realised P&L", value: realised, foot: "Closed paper trades" },
     { label: "Locked paper stake", value: locked, foot: "Open trades · GBP carrying" },
-    { label: "Today P&L", value: live.todayPnlGbp, foot: "Current scan window" },
+    { label: "Today P&L", value: live.todayPnlGbp, foot: "Unset until closed paper trades exist" },
   ];
 
   return (

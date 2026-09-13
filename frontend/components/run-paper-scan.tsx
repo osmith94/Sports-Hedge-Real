@@ -254,7 +254,7 @@ export function RunPaperScan() {
         if (status.last_duration_ms != null) setLastDurationMs(status.last_duration_ms);
         if (status.venue_health) setVenueHealth(status.venue_health);
       } catch {
-        setLastCompletedAt(new Date().toISOString());
+        // Keep prior last-scan facts. A failed collect is not a completed scan.
       }
     } finally {
       inFlightRef.current = false;
@@ -434,9 +434,10 @@ export function RunPaperScan() {
             ))}
           </div>
           <p className="scan-advanced-copy">
-            FX and venue fees are backend-resolved ({economics?.data_kind ?? "backend_resolved"}).
+            FX and venue fees come from the paper economics service
+            {economics?.data_kind ? ` (${economics.data_kind.replaceAll("_", " ")})` : ""}.
             Missing or stale required inputs fail closed. Standing capital is Matchbook GBP /
-            Polymarket USD / Kalshi USD. Optional extra capital_limit_gbp is a scan-only cap, not live funds.
+            Polymarket USD / Kalshi USD. Optional extra capital limit is a scan-only cap, not live funds.
           </p>
           <label className="scan-field">
             <span>Optional capital limit £</span>
