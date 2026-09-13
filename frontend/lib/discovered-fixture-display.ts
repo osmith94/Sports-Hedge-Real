@@ -61,8 +61,12 @@ export function polymarketCoverageLabel(item: DiscoveredFixture): string {
   return item.no_comparison_reason || "unmatched / no supported Polymarket coverage";
 }
 
+export function fixtureDetailHref(canonicalEventId: string): string {
+  return `/arbitrage/fixtures/${encodeURIComponent(canonicalEventId)}`;
+}
+
 export function fixtureHref(item: DiscoveredFixture): string {
-  return `/arbitrage/fixtures/${encodeURIComponent(item.canonical_event_id)}`;
+  return fixtureDetailHref(item.canonical_event_id);
 }
 
 export function fixturePhaseLabel(item: DiscoveredFixture): string {
