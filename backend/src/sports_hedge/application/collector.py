@@ -137,9 +137,22 @@ class DiscoveredFixture(BaseModel):
     solver_is_arbitrage: bool = False
 
 
+class FixturePaperEntry(BaseModel):
+    opportunity_id: str
+    trade_id: str
+    state: str
+    solver_model: str | None = None
+    fill_kinds: list[str] = Field(default_factory=list)
+    guaranteed_profit_gbp_at_open: Decimal | None = None
+    paper_only: bool = True
+    places_orders: bool = False
+    rejection_reason: str | None = None
+
+
 class FixtureDetailReadModel(BaseModel):
     fixture: DiscoveredFixture
     markets: list[FixtureMarketInventoryRow] = Field(default_factory=list)
+    paper_entries: list[FixturePaperEntry] = Field(default_factory=list)
     data_class: str = "live_paper_when_collected"
     paper_mode: str = "paper"
     execution_enabled: bool = False

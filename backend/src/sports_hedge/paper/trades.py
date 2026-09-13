@@ -46,6 +46,7 @@ class PaperTradeAuditEventType(StrEnum):
     TRADE_OPENED = "trade_opened"
     AWAITING_MANUAL_EXTERNAL = "awaiting_manual_external"
     PAPER_AUTOFILL = "paper_autofill"
+    PAPER_ENTRY_REJECTED = "paper_entry_rejected"
     PAPER_SIMULATED_EXTERNAL_FILL = "paper_simulated_external_fill"
     MANUAL_EXTERNAL_CONFIRMED = "manual_external_confirmed"
     HEDGE_REVALIDATED = "hedge_revalidated"

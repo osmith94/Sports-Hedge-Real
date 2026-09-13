@@ -59,6 +59,19 @@ export function FixtureInventoryWorkspace({ detail }: { detail: KalshiFixtureDet
           : ""}
         .
       </p>
+      {detail.paper_entries?.length ? (
+        <p className="section-copy">
+          Paper entries:{" "}
+          {detail.paper_entries
+            .map((entry) => {
+              const kinds = entry.fill_kinds.join("/");
+              const model = entry.solver_model ?? "solver";
+              return `${entry.state} ${model} (${kinds || "no fills"})`;
+            })
+            .join(" · ")}
+          . OPEN only after complete validated paper entry. PAPER MODE · execution disabled.
+        </p>
+      ) : null}
 
       {detail.markets.length === 0 ? (
         <div className="empty-live">

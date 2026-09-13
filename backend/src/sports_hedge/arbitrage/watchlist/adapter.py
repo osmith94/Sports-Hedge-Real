@@ -44,6 +44,8 @@ def observation_from_paper_decision(
         solution = decision.payoff_scan.solution
         solver_is_arbitrage = solution.is_arbitrage
         current_edge = quantized_edge(solution.roi)
+        if solution.roi > Decimal("-1"):
+            implied = Decimal("1") / (Decimal("1") + solution.roi)
         if solver_is_arbitrage:
             capital = solution.total_capital_used
             guaranteed_profit = solution.minimum_state_pnl

@@ -27,7 +27,7 @@ export default async function PaperTradeDetailPage({
           <div className="eyebrow">Paper trade</div>
           <h1>{trade.fixture_label ?? trade.trade_id}</h1>
           <p className="page-subtitle">
-            PAPER MODE persisted record. Provenance {trade.provenance}. Places orders: {String(trade.places_orders)}.
+            PAPER MODE persisted record. Solver {trade.solver_model ?? "n/a"}. Provenance {trade.provenance}. Places orders: {String(trade.places_orders)}.
           </p>
         </div>
         <Link href="/paper" className="demo-label">Back to trade book</Link>
@@ -44,7 +44,11 @@ export default async function PaperTradeDetailPage({
         <div className="metric-card">
           <div className="metric-label">Guaranteed at open</div>
           <div className="metric-value">{money(trade.guaranteed_profit_gbp_at_open)}</div>
-          <div className="metric-foot">Solver snapshot, not realised P&L</div>
+          <div className="metric-foot">
+            {trade.state === "OPEN"
+              ? "Recorded only after every required opening leg validated"
+              : "Unset until the complete opening hedge is validated"}
+          </div>
         </div>
         <div className="metric-card">
           <div className="metric-label">Realised P&L</div>

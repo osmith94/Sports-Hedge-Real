@@ -24,6 +24,7 @@ from sports_hedge.arbitrage.priority_alerts.models import (
     PriorityLeg,
 )
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
+from sports_hedge.application.paper_scan import FillPlanMappingError, apply_allocation_to_fill_legs
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityStatus
 from sports_hedge.arbitrage.watchlist.service import WatchlistService, _opportunity_id
 from sports_hedge.config import Settings, get_settings
@@ -113,6 +114,7 @@ class PaperOperationsService:
             self.trades = trades
         self._plans: dict[str, PaperFillPlan] = {}
         self._external_confirmations: dict[str, ExternalLegConfirmation] = {}
+        self._entry_rejections: dict[str, str] = {}
 
     def persist_triggered_chain(
         self,
@@ -123,7 +125,8 @@ class PaperOperationsService:
         if not decision.canonical_market_id:
             return None
         opportunity_id = _opportunity_id(decision.canonical_market_id)
-        if decision.fill_legs:
+        opening_legs = [leg for leg in decision.fill_legs if leg.requested_stake > 0]
+        if opening_legs:
             self._plans[opportunity_id] = PaperFillPlan(
                 opportunity_id=opportunity_id,
                 canonical_event_id=decision.canonical_event_id,
@@ -132,7 +135,7 @@ class PaperOperationsService:
                 quote_age_ms=decision.quote_age_ms,
                 eligible_for_paper_simulation=decision.eligible_for_paper_simulation,
                 settlement_equivalent=decision.market_match.matched,
-                legs=list(decision.fill_legs),
+                legs=opening_legs,
                 execution_modes={
                     venue: LegExecutionMode(mode)
                     for venue, mode in decision.execution_modes.items()
@@ -143,21 +146,14 @@ class PaperOperationsService:
                 provenance=provenance,
             )
         candidate = None
-        if decision.eligible_for_paper_simulation and (
-            (
-                decision.depth_scan is not None
-                and decision.depth_scan.solution.is_arbitrage
-            )
-            or (
-                decision.payoff_scan is not None
-                and decision.payoff_scan.solution.is_arbitrage
-            )
-        ):
+        solver_arb = _solver_is_arbitrage(decision)
+        if decision.eligible_for_paper_simulation and solver_arb:
             if decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage:
                 candidate = _candidate_from_decision(decision, opportunity_id)
                 self.alerts.ingest(candidate)
             if self.settings.paper_autofill_enabled:
                 try:
+                    self._require_allocator_sized_plan(opportunity_id)
                     self.simulate_fill(
                         opportunity_id,
                         simulate_external=True,
@@ -181,6 +177,7 @@ class PaperOperationsService:
         simulate_external: bool = False,
     ) -> SimulatePaperFillResult:
         simulated_at = now or datetime.now(UTC)
+        require_complete = simulate_external
         existing = self._get_trade_by_opportunity(opportunity_id)
         if existing is not None and existing.state in {
             PaperTradeState.OPEN,
@@ -201,7 +198,10 @@ class PaperOperationsService:
             OpportunityStatus.PAPER_FILLING,
             OpportunityStatus.PARTIAL,
         }:
-            raise PaperOperationsError("stale_before_fill")
+            self._fail_entry(opportunity_id, "stale_before_fill", simulated_at)
+        opening_legs = [leg for leg in plan.legs if leg.requested_stake > 0]
+        if not opening_legs:
+            self._fail_entry(opportunity_id, "no_positive_opening_legs", simulated_at)
 
         fill_config = config or PaperFillConfig(
             assumed_latency_ms=self.settings.simulated_latency_ms,
@@ -217,24 +217,29 @@ class PaperOperationsService:
         if external_venues and not simulate_external:
             if confirmation is None:
                 self._persist_awaiting_external(plan, current, simulated_at, provenance)
-                raise PaperOperationsError("manual_external_confirmation_required")
+                self._fail_entry(opportunity_id, "manual_external_confirmation_required", simulated_at)
             if confirmation.venue not in external_venues:
-                raise PaperOperationsError("external_confirmation_venue_mismatch")
+                self._fail_entry(opportunity_id, "external_confirmation_venue_mismatch", simulated_at)
             self._external_confirmations[opportunity_id] = confirmation
             hedge_valid = self._revalidate_remaining_hedge(plan, confirmation)
             if not hedge_valid:
-                raise PaperOperationsError("remaining_hedge_revalidation_failed")
+                self._fail_entry(opportunity_id, "remaining_hedge_revalidation_failed", simulated_at)
 
         if simulate_external:
-            fill_legs = list(plan.legs)
+            fill_legs = list(opening_legs)
         else:
             fill_legs = [
                 leg
-                for leg in plan.legs
+                for leg in opening_legs
                 if modes.get(leg.venue, LegExecutionMode.INTERNAL) is LegExecutionMode.INTERNAL
             ]
         if not fill_legs:
-            raise PaperOperationsError("no_internal_paper_legs")
+            self._fail_entry(opportunity_id, "no_internal_paper_legs", simulated_at)
+        if require_complete:
+            try:
+                self._assert_spendable_treasury(opening_legs)
+            except PaperOperationsError as exc:
+                self._fail_entry(opportunity_id, str(exc), simulated_at)
 
         fills = self.simulator.simulate(
             fill_legs,
@@ -243,36 +248,74 @@ class PaperOperationsService:
             now=simulated_at,
         )
         fills = _with_stable_fill_ids(fills, opportunity_id, modes, simulate_external=simulate_external)
+        if require_complete and not _complete_opening_fills(fills, opening_legs):
+            reason = fills.rejection_reasons[0] if fills.rejection_reasons else "incomplete_opening_hedge"
+            self._fail_entry(opportunity_id, reason, simulated_at)
         stage = _fill_stage(fills)
         if stage is None:
-            raise PaperOperationsError(
-                fills.rejection_reasons[0] if fills.rejection_reasons else "paper_fill_rejected"
-            )
+            reason = fills.rejection_reasons[0] if fills.rejection_reasons else "paper_fill_rejected"
+            self._fail_entry(opportunity_id, reason, simulated_at)
+        if require_complete and stage is not OpportunityStatus.FILLED:
+            self._fail_entry(opportunity_id, "incomplete_opening_hedge", simulated_at)
+
+        confirmed = confirmation if external_venues and not simulate_external else None
+        try:
+            if self.ledger is not None:
+                with self.ledger.transaction():
+                    journals = self._post_fills(
+                        plan,
+                        fills,
+                        confirmation=confirmed,
+                        capital_source=capital_source,
+                        occurred_at=simulated_at,
+                        provenance=provenance,
+                        simulate_external=simulate_external,
+                    )
+                    trade = self._persist_open_trade(
+                        plan,
+                        current,
+                        fills,
+                        confirmation=confirmed,
+                        occurred_at=simulated_at,
+                        provenance=provenance,
+                        simulate_external=simulate_external,
+                        autofill=simulate_external,
+                        require_complete=require_complete,
+                    )
+            else:
+                journals = self._post_fills(
+                    plan,
+                    fills,
+                    confirmation=confirmed,
+                    capital_source=capital_source,
+                    occurred_at=simulated_at,
+                    provenance=provenance,
+                    simulate_external=simulate_external,
+                )
+                trade = self._persist_open_trade(
+                    plan,
+                    current,
+                    fills,
+                    confirmation=confirmed,
+                    occurred_at=simulated_at,
+                    provenance=provenance,
+                    simulate_external=simulate_external,
+                    autofill=simulate_external,
+                    require_complete=require_complete,
+                )
+        except (PaperOperationsError, PaperTreasuryError) as exc:
+            self._fail_entry(opportunity_id, str(exc), simulated_at)
+
+        if require_complete and trade is not None and trade.state is not PaperTradeState.OPEN:
+            self._fail_entry(opportunity_id, "incomplete_opening_hedge", simulated_at)
+
         opportunity = self.watchlist.record_paper_fill(
             opportunity_id,
             stage=stage,
             occurred_at=simulated_at,
             detail=operator_note,
         )
-        journals = self._post_fills(
-            plan,
-            fills,
-            confirmation=confirmation if external_venues and not simulate_external else None,
-            capital_source=capital_source,
-            occurred_at=simulated_at,
-            provenance=provenance,
-            simulate_external=simulate_external,
-        )
-        trade = self._persist_open_trade(
-            plan,
-            opportunity,
-            fills,
-            confirmation=confirmation if external_venues and not simulate_external else None,
-            occurred_at=simulated_at,
-            provenance=provenance,
-            simulate_external=simulate_external,
-            autofill=simulate_external,
-        )
+        self._entry_rejections.pop(opportunity_id, None)
         alert = None
         existing_id = self.alerts._by_opportunity.get(opportunity_id)
         if existing_id:
@@ -309,6 +352,9 @@ class PaperOperationsService:
             alert=alert,
             hedge_still_valid=hedge_valid,
             trace=trace,
+            solver_model=plan.decision.solver_model,
+            entry_complete=trade is not None and trade.state is PaperTradeState.OPEN,
+            allocated_requested_stakes=_allocated_stake_labels(opening_legs),
         )
         result.trade_id = trade.trade_id if trade is not None else None
         return result
@@ -519,6 +565,67 @@ class PaperOperationsService:
             gbp_unavailable_reason=None if gbp_ok else "missing_fx_on_one_or_more_open_trades",
         )
 
+    def _require_allocator_sized_plan(self, opportunity_id: str) -> None:
+        plan = self._plans.get(opportunity_id)
+        if plan is None:
+            self._fail_entry(opportunity_id, "missing_paper_fill_plan")
+        allocation = plan.decision.allocation
+        if allocation is None or not allocation.accepted:
+            self._fail_entry(opportunity_id, "allocator_size_required")
+        try:
+            mapped = apply_allocation_to_fill_legs(plan.legs, allocation)
+        except FillPlanMappingError as exc:
+            self._fail_entry(opportunity_id, f"allocation_failed:{exc.reason}")
+        mapped_stakes = {
+            (leg.venue, leg.source_market_id, leg.source_runner_id, leg.outcome): leg.requested_stake
+            for leg in mapped
+        }
+        plan_stakes = {
+            (leg.venue, leg.source_market_id, leg.source_runner_id, leg.outcome): leg.requested_stake
+            for leg in plan.legs
+            if leg.requested_stake > 0
+        }
+        if mapped_stakes != plan_stakes:
+            self._fail_entry(opportunity_id, "fill_plan_not_allocator_sized")
+
+    def _assert_spendable_treasury(self, legs: list[PaperOpportunityLeg]) -> None:
+        if self.ledger is None:
+            return
+        snap = self.ledger.treasury.snapshot()
+        needed: dict[tuple[VenueName, str], Decimal] = {}
+        for leg in legs:
+            key = (leg.venue, leg.currency)
+            needed[key] = needed.get(key, Decimal("0")) + leg.requested_stake
+        for (venue, currency), amount in needed.items():
+            try:
+                pool = snap.pool(venue, currency)
+            except KeyError as exc:
+                raise PaperOperationsError("missing_treasury_pool") from exc
+            if pool.available_cash < amount:
+                raise PaperOperationsError("insufficient_spendable_treasury")
+
+    def _fail_entry(
+        self,
+        opportunity_id: str,
+        reason: str,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        self._record_entry_rejection(opportunity_id, reason, occurred_at=occurred_at)
+        raise PaperOperationsError(reason)
+
+    def _record_entry_rejection(
+        self,
+        opportunity_id: str,
+        reason: str,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        self._entry_rejections[opportunity_id] = reason
+        self.watchlist.record_paper_fill_rejection(
+            opportunity_id,
+            occurred_at=occurred_at or datetime.now(UTC),
+            detail=reason,
+        )
+
     def _get_trade_by_opportunity(self, opportunity_id: str) -> PaperTrade | None:
         if self.trades is None:
             return None
@@ -555,6 +662,9 @@ class PaperOperationsService:
             fills=fills,
             journals=journals,
             trace=trace,
+            solver_model=trade.solver_model,
+            entry_complete=trade.state is PaperTradeState.OPEN,
+            allocated_requested_stakes=_allocated_stake_labels_from_trade(trade),
         )
         result.trade_id = trade.trade_id
         return result
@@ -594,20 +704,28 @@ class PaperOperationsService:
         provenance: DataProvenance,
         simulate_external: bool,
         autofill: bool,
+        require_complete: bool = False,
     ) -> PaperTrade | None:
         if self.trades is None:
             return None
         trade = self.trades.get_by_opportunity(plan.opportunity_id) or self._new_trade_shell(
             plan, opportunity, occurred_at, provenance
         )
-        fill_by_key = {(fill.venue, fill.outcome): fill for fill in fills.fills}
+        fill_by_key = {
+            (fill.venue, fill.outcome, fill.source_market_id, fill.source_runner_id): fill
+            for fill in fills.fills
+        }
         legs: list[PaperTradeLeg] = []
         native: dict[str, Decimal] = {}
         gbp = Decimal("0")
         fx = {item.currency: item for item in plan.fx_snapshots}
         for plan_leg in plan.legs:
+            if plan_leg.requested_stake <= 0:
+                continue
             mode = plan.execution_modes.get(plan_leg.venue, LegExecutionMode.INTERNAL)
-            fill = fill_by_key.get((plan_leg.venue, plan_leg.outcome))
+            fill = fill_by_key.get(
+                (plan_leg.venue, plan_leg.outcome, plan_leg.source_market_id, plan_leg.source_runner_id)
+            )
             fill_kind = PaperLegFillKind.UNFILLED
             capital = CapitalSource.AUTO_POOL
             filled_stake = Decimal("0")
@@ -647,7 +765,9 @@ class PaperOperationsService:
                     source_runner_id=plan_leg.source_runner_id,
                     source_contract_id=plan_leg.source_runner_id if plan_leg.venue is VenueName.POLYMARKET else None,
                     opening_action=(
-                        MarketAction.BUY if plan_leg.venue is VenueName.POLYMARKET else MarketAction.BACK
+                        MarketAction.BUY
+                        if plan_leg.venue in {VenueName.POLYMARKET, VenueName.KALSHI}
+                        else MarketAction.BACK
                     ),
                     canonical_state=plan_leg.outcome,
                     settlement_fingerprint_key=opportunity.settlement_key,
@@ -662,10 +782,12 @@ class PaperOperationsService:
                 rate = Decimal("1") if plan_leg.currency == "GBP" else fx[plan_leg.currency].gbp_per_unit
                 gbp += filled_stake * rate
 
-        fully = all(
+        fully = bool(legs) and all(
             leg.filled_stake > 0 and leg.fill_kind is not PaperLegFillKind.UNFILLED for leg in legs
         )
         partial = any(leg.filled_stake > 0 for leg in legs) and not fully
+        if require_complete and not fully:
+            raise PaperOperationsError("incomplete_opening_hedge")
         trade.legs = legs
         trade.capital_locked_native = native
         trade.capital_locked_gbp = gbp
@@ -675,10 +797,13 @@ class PaperOperationsService:
         trade.venue_costs = list(plan.venue_costs)
         if fully:
             trade.state = PaperTradeState.OPEN
+            trade.guaranteed_profit_gbp_at_open = _opening_guaranteed_profit(plan)
         elif partial:
             trade.state = PaperTradeState.PARTIAL
+            trade.guaranteed_profit_gbp_at_open = None
         else:
             trade.state = PaperTradeState.PENDING
+            trade.guaranteed_profit_gbp_at_open = None
         if autofill:
             trade.audit.append(
                 PaperTradeAuditEvent(
@@ -728,19 +853,9 @@ class PaperOperationsService:
         occurred_at: datetime,
         provenance: DataProvenance,
     ) -> PaperTrade:
-        guaranteed = None
-        if plan.decision.depth_scan is not None and plan.decision.depth_scan.solution.is_arbitrage:
-            guaranteed = plan.decision.depth_scan.solution.guaranteed_profit
-        elif (
-            plan.decision.payoff_scan is not None
-            and plan.decision.payoff_scan.solution.is_arbitrage
-        ):
-            guaranteed = plan.decision.payoff_scan.solution.minimum_state_pnl
         home = opportunity.home_team
         away = opportunity.away_team
-        fixture = None
-        if home and away:
-            fixture = f"{home} v {away}"
+        fixture = f"{home} v {away}" if home and away else None
         market_label = None
         if opportunity.market_family is not None:
             market_label = opportunity.market_family.value.replace("_", " ")
@@ -761,7 +876,7 @@ class PaperOperationsService:
             state=PaperTradeState.PENDING,
             opened_at=occurred_at,
             last_updated_at=occurred_at,
-            guaranteed_profit_gbp_at_open=guaranteed,
+            guaranteed_profit_gbp_at_open=None,
             provenance=provenance,
             fx_snapshots=list(plan.fx_snapshots),
             venue_costs=list(plan.venue_costs),
@@ -769,7 +884,7 @@ class PaperOperationsService:
                 PaperTradeAuditEvent(
                     occurred_at=occurred_at,
                     event_type=PaperTradeAuditEventType.TRADE_OPENED,
-                    detail="paper trade opened; guaranteed-profit-at-open is a solver snapshot, not realised P&L",
+                    detail="paper trade opened; guaranteed opening profit is recorded only after the complete hedge validates",
                 )
             ],
         )
@@ -1060,6 +1175,15 @@ def _net_odds_for_leg(plan: PaperFillPlan, leg: PaperOpportunityLeg) -> Decimal:
         for quote in plan.decision.depth_scan.selected_quotes:
             if quote.outcome == leg.outcome and quote.venue == leg.venue:
                 return quote.net_decimal_odds
+    if plan.decision.payoff_scan is not None:
+        for quote in plan.decision.payoff_scan.selected_quotes:
+            if (
+                quote.venue is leg.venue
+                and quote.outcome == leg.outcome
+                and quote.source_market_id == leg.source_market_id
+                and quote.source_runner_id == leg.source_runner_id
+            ):
+                return quote.net_decimal_odds
     return leg.displayed_odds
 
 
@@ -1119,3 +1243,53 @@ def _candidate_from_decision(decision: PaperScanDecision, opportunity_id: str) -
         execution_risk_score=decision.execution_risk.score if decision.execution_risk else 0,
         eligibility_confirmed=not any(leg.execution_mode is LegExecutionMode.EXTERNAL_OPERATOR for leg in legs),
     )
+
+
+def _solver_is_arbitrage(decision: PaperScanDecision) -> bool:
+    if decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage:
+        return True
+    return bool(decision.payoff_scan is not None and decision.payoff_scan.solution.is_arbitrage)
+
+
+def _complete_opening_fills(
+    fills: PaperOpportunityFills,
+    required: list[PaperOpportunityLeg],
+) -> bool:
+    if not fills.fully_filled or len(fills.fills) != len(required):
+        return False
+    fill_ids = {
+        (fill.venue, fill.outcome, fill.source_market_id, fill.source_runner_id)
+        for fill in fills.fills
+        if fill.filled_stake > 0 and fill.fully_filled
+    }
+    required_ids = {
+        (leg.venue, leg.outcome, leg.source_market_id, leg.source_runner_id)
+        for leg in required
+    }
+    return fill_ids == required_ids
+
+
+def _opening_guaranteed_profit(plan: PaperFillPlan) -> Decimal | None:
+    allocation = plan.decision.allocation
+    if allocation is not None and allocation.accepted and allocation.guaranteed_profit > 0:
+        return allocation.guaranteed_profit
+    if plan.decision.depth_scan is not None and plan.decision.depth_scan.solution.is_arbitrage:
+        return plan.decision.depth_scan.solution.guaranteed_profit
+    if plan.decision.payoff_scan is not None and plan.decision.payoff_scan.solution.is_arbitrage:
+        return plan.decision.payoff_scan.solution.minimum_state_pnl
+    return None
+
+
+def _allocated_stake_labels(legs: list[PaperOpportunityLeg]) -> dict[str, Decimal]:
+    labels: dict[str, Decimal] = {}
+    for leg in legs:
+        labels[f"{leg.venue.value}:{leg.outcome}"] = leg.requested_stake
+    return labels
+
+
+def _allocated_stake_labels_from_trade(trade: PaperTrade) -> dict[str, Decimal]:
+    return {
+        f"{leg.venue.value}:{leg.outcome}": leg.requested_stake
+        for leg in trade.legs
+        if leg.requested_stake > 0
+    }
