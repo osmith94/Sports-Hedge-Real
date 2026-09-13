@@ -141,6 +141,7 @@ class MarketEvaluationState(StrEnum):
 NOT_EVALUATED_SCAN_DEADLINE_REASON = "not_evaluated_scan_deadline"
 SCAN_BUDGET_EXHAUSTED_REASON = "scan_budget_exhausted"
 MARKET_FETCH_UNAVAILABLE_REASON = "list_markets_unavailable"
+DEFAULT_MAX_EVENT_PAIRS = 60
 
 
 class DiscoveredFixture(BaseModel):
@@ -327,7 +328,7 @@ class ReadOnlyCrossVenueCollector:
         minimum_mapping_confidence: float = 0.98,
         assumed_latency_ms: int = 500,
         recent_volatility_bps: float = 0.0,
-        max_event_pairs: int = 25,
+        max_event_pairs: int = DEFAULT_MAX_EVENT_PAIRS,
         max_market_pairs_per_event: int = 50,
         config_warnings: list[str] | None = None,
         venue_timeout_seconds: float | None = None,

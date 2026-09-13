@@ -420,7 +420,7 @@ export type PaperCollectionRequest = {
   capital_limit_gbp?: string;
   minimum_net_edge?: string;
   maximum_execution_risk?: number;
-  max_event_pairs?: number;
+  max_event_pairs?: number; // backend collect default 60, max 100
   max_market_pairs_per_event?: number;
 };
 

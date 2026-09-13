@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 import pytest
 
+from pydantic import ValidationError
+
+from sports_hedge.api.paper import PaperCollectionRequest
 from sports_hedge.application.collector import (
+    DEFAULT_MAX_EVENT_PAIRS,
     MARKET_FETCH_UNAVAILABLE_REASON,
     MarketEvaluationState,
     ReadOnlyCrossVenueCollector,
@@ -15,6 +20,8 @@ from sports_hedge.application.collector import (
     _select_prioritized_market_pairs,
 )
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.target_competitions import TargetCompetitionCode
+from sports_hedge.config import Settings
 from sports_hedge.domain.football import (
     CanonicalEvent,
     CanonicalMarket,
@@ -701,3 +708,166 @@ def test_baseline_match_result_rejects_extra_time_and_incomplete_sets() -> None:
     assert _is_baseline_match_result(extra) is False
     assert _is_baseline_match_result(binary) is False
     assert MarketMatcher().match(complete, extra).matched is False
+
+
+THREE_LEAGUE_FIXTURES: list[tuple[str, str, str]] = [
+    ("Premier League", "Arsenal", "Chelsea"),
+    ("Premier League", "Liverpool", "Manchester City"),
+    ("Premier League", "Newcastle United", "Tottenham Hotspur"),
+    ("Premier League", "Aston Villa", "Brighton and Hove Albion"),
+    ("Premier League", "Everton", "Fulham"),
+    ("Premier League", "West Ham United", "Wolverhampton Wanderers"),
+    ("Premier League", "Crystal Palace", "Brentford"),
+    ("Premier League", "Bournemouth", "Nottingham Forest"),
+    ("Premier League", "Manchester United", "Southampton"),
+    ("Premier League", "Fulham", "Everton"),
+    ("Championship", "Leeds United", "Leicester City"),
+    ("Championship", "Burnley", "Sheffield United"),
+    ("Championship", "Sunderland", "Coventry City"),
+    ("Championship", "Middlesbrough", "Norwich City"),
+    ("Championship", "West Bromwich Albion", "Hull City"),
+    ("Championship", "Stoke City", "Derby County"),
+    ("Championship", "Queens Park Rangers", "Swansea City"),
+    ("Championship", "Bristol City", "Preston North End"),
+    ("Championship", "Blackburn Rovers", "Watford"),
+    ("Championship", "Oxford United", "Portsmouth"),
+    ("La Liga", "Elche CF", "Real Madrid CF"),
+    ("La Liga", "Athletic Club", "Barcelona"),
+    ("La Liga", "Atletico Madrid", "Sevilla"),
+    ("La Liga", "Real Sociedad", "Real Betis"),
+    ("La Liga", "Villarreal", "Valencia"),
+    ("La Liga", "Girona", "Osasuna"),
+    ("La Liga", "Celta Vigo", "Getafe"),
+    ("La Liga", "Mallorca", "Rayo Vallecano"),
+    ("La Liga", "Espanyol", "Deportivo Alaves"),
+    ("La Liga", "Las Palmas", "Leganes"),
+]
+
+
+def _btts_matchbook_market(market_id: int) -> dict[str, Any]:
+    return {
+        "id": market_id,
+        "name": "Both Teams To Score",
+        "runners": [
+            {"id": market_id * 10 + 1, "name": "Yes", "prices": _prices("2.20")},
+            {"id": market_id * 10 + 2, "name": "No", "prices": _prices("1.80")},
+        ],
+    }
+
+
+def _btts_polymarket_market(index: int) -> dict[str, Any]:
+    yes_token = f"yes-{index}"
+    no_token = f"no-{index}"
+    return {
+        "id": f"pm-btts-{index}",
+        "question": "Both teams to score?",
+        "sportsMarketType": "both teams to score",
+        "outcomes": '["Yes", "No"]',
+        "clobTokenIds": f'["{yes_token}", "{no_token}"]',
+        "description": REGULATION,
+        "feesEnabled": False,
+    }
+
+
+class ThreeLeagueResponsiveMatchbook:
+    async def list_events(self, **filters: Any) -> dict[str, Any]:
+        del filters
+        return {
+            "events": [
+                {
+                    "id": 20000 + index,
+                    "name": f"{home} vs {away}",
+                    "start": KICKOFF.isoformat(),
+                    "competition-name": competition,
+                }
+                for index, (competition, home, away) in enumerate(THREE_LEAGUE_FIXTURES)
+            ]
+        }
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+        del filters
+        return {"markets": [_btts_matchbook_market(int(event_id))]}
+
+
+class ThreeLeagueResponsivePolymarket:
+    async def list_events(self, **filters: Any) -> list[dict[str, Any]]:
+        del filters
+        return [
+            {
+                "id": f"pm-{index}",
+                "title": f"{home} vs {away}",
+                "startTime": KICKOFF.isoformat(),
+                "competition": competition,
+                "series": [{"id": "10188" if competition == "Premier League" else "10355" if competition == "Championship" else "10193", "title": competition}],
+            }
+            for index, (competition, home, away) in enumerate(THREE_LEAGUE_FIXTURES)
+        ]
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> list[dict[str, Any]]:
+        del filters
+        index = int(str(event_id).removeprefix("pm-"))
+        return [_btts_polymarket_market(index)]
+
+    async def get_order_book(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        outcome_id: int | str | None = None,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del event_id, market_id, filters
+        return _pm_book(str(outcome_id))
+
+
+def test_collect_default_event_capacity_is_sixty_and_timeouts_stay_bounded() -> None:
+    collect_default = inspect.signature(
+        ReadOnlyCrossVenueCollector.collect_and_scan
+    ).parameters["max_event_pairs"].default
+    init_defaults = inspect.signature(ReadOnlyCrossVenueCollector.__init__).parameters
+    assert collect_default == DEFAULT_MAX_EVENT_PAIRS == 60
+    assert PaperCollectionRequest().max_event_pairs == 60
+    assert PaperCollectionRequest(max_event_pairs=100).max_event_pairs == 100
+    with pytest.raises(ValidationError):
+        PaperCollectionRequest(max_event_pairs=101)
+    assert init_defaults["cycle_timeout_seconds"].default == 45.0
+    assert init_defaults["venue_timeout_seconds"].default == 15.0
+    assert init_defaults["provider_call_timeout_seconds"].default == 8.0
+    assert Settings.model_fields["paper_scan_cycle_timeout_seconds"].default == 45
+    assert Settings.model_fields["paper_scan_venue_timeout_seconds"].default == 15
+    assert Settings.model_fields["paper_scan_provider_timeout_seconds"].default == 8
+
+
+@pytest.mark.asyncio
+async def test_thirty_three_league_fixtures_are_not_truncated_by_event_pair_capacity() -> None:
+    assert len(THREE_LEAGUE_FIXTURES) == 30
+    assert len({item[0] for item in THREE_LEAGUE_FIXTURES}) == 3
+    repository = SqliteMarketIntelligenceRepository()
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=ThreeLeagueResponsiveMatchbook(),
+        polymarket=ThreeLeagueResponsivePolymarket(),
+        paper_scan=PaperScanService(MarketIntelligenceService(repository)),
+    )
+    try:
+        report = await collector.collect_and_scan(
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=_fx(),
+            maximum_execution_risk=100,
+        )
+        assert len(report.discovered_fixtures) == 30
+        by_league = {}
+        for item in report.discovered_fixtures:
+            by_league[item.target_competition_code] = by_league.get(item.target_competition_code, 0) + 1
+            assert item.market_evaluation_state == MarketEvaluationState.EVALUATED
+            assert item.matchbook_matched is True
+            assert item.polymarket_matched is True
+        assert by_league == {
+            TargetCompetitionCode.PREMIER_LEAGUE.value: 10,
+            TargetCompetitionCode.CHAMPIONSHIP.value: 10,
+            TargetCompetitionCode.LA_LIGA.value: 10,
+        }
+        assert report.matched_event_pairs == 30
+        assert all(
+            issue.detail != "scan_cycle_deadline_reached" for issue in report.issues
+        )
+    finally:
+        repository.close()
