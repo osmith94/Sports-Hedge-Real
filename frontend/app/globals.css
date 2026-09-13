@@ -159,7 +159,7 @@ tr:last-child td { border-bottom: none; }
 .demo-walkthrough { margin-top: 18px; border: 1px solid rgba(241, 191, 105, .24); border-radius: var(--radius); padding: 12px 14px; background: rgba(241, 191, 105, .05); }
 .demo-walkthrough summary { cursor: pointer; color: var(--amber); font-size: 11px; font-weight: 750; }
 .demo-walkthrough .opp-card { margin-top: 12px; }
-.demo-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 10px 0; }
+.demo-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin: 10px 0; }
 .demo-primary { border: 1px solid rgba(124, 242, 176, .35); background: var(--accent-soft); color: var(--accent); border-radius: 8px; padding: 9px 12px; font-size: 10px; font-weight: 750; cursor: pointer; }
 .demo-primary:disabled, .pool-reset:disabled { opacity: .5; cursor: not-allowed; }
 .hold-card { display: grid; gap: 10px; }

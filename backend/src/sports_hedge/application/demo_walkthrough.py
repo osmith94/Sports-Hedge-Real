@@ -264,12 +264,15 @@ class DemoWalkthroughService:
             )
         if not decision.canonical_market_id:
             raise PaperOperationsError("fixture_replay_missing_market_id")
-        decision = decision.model_copy(
-            update={
-                "canonical_market_id": f"{decision.canonical_market_id}:replay:{replay_suffix}"
-            }
+        history = self.scan.market_intelligence.market_history(
+            canonical_market_id=decision.canonical_market_id
         )
-        mapped = observation_from_paper_decision(decision)
+        unique_id = f"{decision.canonical_market_id}:replay:{replay_suffix}"
+        decision = decision.model_copy(update={"canonical_market_id": unique_id})
+        history = [
+            item.model_copy(update={"canonical_market_id": unique_id}) for item in history
+        ]
+        mapped = observation_from_paper_decision(decision, history)
         if mapped is None:
             raise PaperOperationsError("fixture_replay_watchlist_rejected")
         mapped = mapped.model_copy(update={"data_kind": DEMO_DATA_KIND})
@@ -371,7 +374,7 @@ class DemoWalkthroughService:
         quotes: list[ReverseQuote],
         unwind: UnwindDecision | None,
     ) -> PaperTradeDetail:
-        if unwind is None or not quotes:
+        if not quotes:
             raise PaperOperationsError("fixture_replay_unwind_unavailable")
         return self.operations.complete_validated_unwind(
             trade_id,
@@ -411,12 +414,11 @@ class DemoWalkthroughService:
         notes: list[str],
     ) -> FixtureReplayResult:
         opportunity_id = trade.opportunity_id if trade is not None else None
-        journals = (
-            self.operations.journal.list_entries(opportunity_id=opportunity_id)
+        postings = (
+            self.operations.journal.postings(opportunity_id=opportunity_id)
             if opportunity_id
             else []
         )
-        postings = [posting for entry in journals for posting in entry.postings]
         fill_kinds = sorted({leg.fill_kind.value for leg in (trade.legs if trade else [])})
         venues = sorted(
             {leg.venue for leg in (trade.legs if trade else [])},

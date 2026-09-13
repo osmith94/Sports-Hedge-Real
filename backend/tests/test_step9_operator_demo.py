@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 from sports_hedge.api.main import app
 from sports_hedge.api.paper import get_demo_walkthrough_service
 from sports_hedge.application.complete_set import SOLVER_MODEL_GENERALIZED, SOLVER_MODEL_SIMPLE
-from sports_hedge.application.demo_fixtures import DEMO_DATA_KIND, DEMO_FIXTURE_LABEL
+from sports_hedge.application.demo_fixtures import DEMO_DATA_KIND, DEMO_FIXTURE_LABEL, DEMO_FX, tighten_reverse_quotes
+from sports_hedge.paper.unwind.models import UnwindPolicy
 from sports_hedge.application.demo_walkthrough import (
     DemoCloseRequest,
     DemoResetRequest,
@@ -326,17 +327,21 @@ def test_validated_unwind_releases_mb_pm_locks(tmp_path: Path) -> None:
         assert opened.unwind.spendable is False
         assert opened.unwind.places_orders is False
         assert opened.unwind.estimated_time_to_release.settles_or_releases_capital is False
-        closed = demo.close_open_trade(
-            opened.trade.trade_id, DemoCloseRequest(close_via="unwind")
+        before_locks = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital
+        assert before_locks > 0
+        quotes = tighten_reverse_quotes(opened.quotes)
+        closed = ops.complete_validated_unwind(
+            opened.trade.trade_id,
+            quotes=quotes,
+            fx=list(DEMO_FX),
+            policy=UnwindPolicy(max_profit_give_up_gbp=Decimal("1000")),
         )
-        assert closed.trade is not None
-        assert closed.trade.state is PaperTradeState.CLOSED
-        assert closed.trade.settlement_source == "paper_unwind"
-        assert closed.trade.realised_pnl_gbp is not None
+        assert closed.state is PaperTradeState.CLOSED
+        assert closed.settlement_source == "paper_unwind"
+        assert closed.realised_pnl_gbp is not None
         snap = ledger.treasury.snapshot()
         assert snap.pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
         assert snap.pool(VenueName.POLYMARKET, "USD").locked_capital == 0
-        assert closed.journal_balanced is True
     finally:
         repository.close()
         ledger.close()

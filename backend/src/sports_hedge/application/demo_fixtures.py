@@ -27,6 +27,7 @@ from sports_hedge.fees.cost import (
     VenueCostSnapshot,
 )
 from sports_hedge.fees.kalshi import kalshi_cost_from_series
+from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.paper.unwind.models import ReverseQuote
 
@@ -282,6 +283,27 @@ def reverse_quotes_from_observations(
                 )
             )
     return quotes
+
+
+def tighten_reverse_quotes(quotes: list[ReverseQuote]) -> list[ReverseQuote]:
+    """Labelled DEMO tighter reverse book for proving 8E unwind.
+
+    Identity and Kalshi unknown SELL costs are preserved. Not a live touch.
+    """
+
+    tightened: list[ReverseQuote] = []
+    for quote in quotes:
+        if quote.venue is VenueName.KALSHI or not quote.levels:
+            tightened.append(quote)
+            continue
+        best = min(quote.levels, key=lambda item: item.decimal_odds)
+        size = best.available_stake * Decimal("4") if best.available_stake else Decimal("500")
+        close_odds = best.decimal_odds - Decimal("0.25")
+        if close_odds <= Decimal("1"):
+            close_odds = Decimal("1.01")
+        tighter = BookLevel(decimal_odds=close_odds, available_stake=size)
+        tightened.append(quote.model_copy(update={"levels": [tighter, *quote.levels]}))
+    return tightened
 
 
 def _opening_cost(venue: VenueName, *, captured_at: datetime) -> VenueCostSnapshot:

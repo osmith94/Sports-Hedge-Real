@@ -9,7 +9,7 @@ This is an operator-usability / demo-integration pass. It does **not** add a new
 | Surface | Class |
 | --- | --- |
 | `/paper/watchlist/tracked`, `/near`, `/triggered`, `/activity` | `LIVE PAPER` when FastAPI is reachable. Empty live lists stay empty. `demo_fixture_replay` rows are filtered out of these lists. `UNAVAILABLE` if the watchlist API is down — never back-filled with live-looking fixture arbs. |
-| `/paper/collect`, `/paper/live-refresh`, Matchbook-discovered fixtures | `LIVE PAPER` when collection credentials/venues respond; empty discovery stays empty. Missing Matchbook credentials stay honestly `UNAVAILABLE` / HTTP 503 — never a faked login. Polymarket public Gamma and Kalshi public Trade API v2 are read-only. |
+| `/paper/collect`, `/paper/live-refresh`, Matchbook-discovered fixtures | `LIVE PAPER` when collection credentials/venues respond; empty discovery stays empty. Missing Matchbook credentials stay honestly `UNAVAILABLE` / HTTP 503 — never a faked login. Matchbook discovery paginates `GET /edge/rest/events`. Polymarket public Gamma uses bounded per-series pagination. Kalshi public Trade API v2 is read-only. |
 | `/paper/scans` | `LIVE PAPER` / empty / `UNAVAILABLE` |
 | `/paper/treasury` | Authoritative **persistent paper treasury** (8E), not a labelled demo-only pool widget. Three native venue books. GBP carrying values are FX translations, not spendable cash. |
 | `/paper/liquidity-pools` | Paper config / standing capital used by the solver. Aligned to treasury seed amounts on demo reset. Not a second source of truth for locks. |

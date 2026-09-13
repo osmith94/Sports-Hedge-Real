@@ -343,8 +343,10 @@ export function DemoWalkthroughBoard() {
           ) : null}
           <p className="section-copy">
             Kalshi SELL close fees are unmodelled, so MB↔Kalshi and PM↔Kalshi unwind fail closed.
-            Settlement through 8E is the labelled close path for those pairs. Spread convergence is
-            never a close trigger.
+            Settlement through 8E is the labelled close path for those pairs. On Matchbook↔Polymarket,
+            abundant capital keeps HOLD when reverse-side exit is inferior after fees; unwind posts 8E
+            only when 8D says UNWIND_ELIGIBLE. Spread convergence is never a close trigger. Clock
+            estimates never release capital.
           </p>
         </div>
       </section>
