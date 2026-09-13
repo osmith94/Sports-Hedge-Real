@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import { FixtureDetailReadModel } from "../lib/api";
+import { FixtureDetailReadModel, VenueMarketFacts } from "../lib/api";
 import {
   fixturePhaseLabel,
   kickoffClockLabel,
@@ -10,7 +10,14 @@ import {
   comparisonLabel,
   coverageLabel,
   economicsSummary,
+  humanizeToken,
+  limitingVenues,
+  mismatchExplanation,
+  pairSummary,
+  provenanceLines,
   quoteSummary,
+  reasonLabel,
+  settlementLabel,
   solverFacts,
 } from "../lib/fixture-inventory-display";
 import { PaperDeploymentPreview } from "./paper-deployment-preview";
@@ -39,9 +46,8 @@ export function FixtureInventoryWorkspace({ detail }: { detail: KalshiFixtureDet
             {fixture.home_team} v {fixture.away_team} · {phase} · {kickoffClockLabel(fixture.kickoff_utc)}
           </h1>
           <p className="page-subtitle">
-            Canonical event {fixture.canonical_event_id}. Every discovered market stays visible,
-            including unsupported and rejected rows. Solver edge is shown only when the existing
-            paper scan produced it.
+            Every discovered market stays visible, including unsupported and rejected rows.
+            Solver edge is shown only when the existing paper scan produced it.
           </p>
         </div>
       </div>
@@ -87,11 +93,21 @@ export function FixtureInventoryWorkspace({ detail }: { detail: KalshiFixtureDet
           ))}
         </div>
       )}
+
+      <details className="scan-advanced inventory-advanced">
+        <summary>Advanced · fixture provenance</summary>
+        <p className="inventory-advanced-copy">Canonical event {fixture.canonical_event_id}</p>
+      </details>
     </>
   );
 }
 
 function InventoryRowCard({ row }: { row: KalshiFixtureMarketInventoryRow }) {
+  const limiting = limitingVenues(row);
+  const explanation = mismatchExplanation(row);
+  const family = row.family ? humanizeToken(row.family) : "";
+  const period = row.period ? humanizeToken(row.period) : "";
+
   return (
     <article className="opp-card">
       <div className="opp-card-top">
@@ -99,63 +115,87 @@ function InventoryRowCard({ row }: { row: KalshiFixtureMarketInventoryRow }) {
           <div className="opp-event">{row.display_name}</div>
           <div className="muted">
             {coverageLabel(row)} · {comparisonLabel(row.comparison_status)}
-            {row.family ? ` · ${row.family}` : ""}
-            {row.period ? ` · ${row.period}` : ""}
+            {family ? ` · ${family}` : ""}
+            {period ? ` · ${period}` : ""}
           </div>
         </div>
         <span className="status-badge">{comparisonLabel(row.comparison_status)}</span>
       </div>
       <div className="inventory-grid">
-        <div>
-          <div className="metric-label">Matchbook</div>
-          <div>{quoteSummary(row.matchbook)}</div>
-          <div className="muted">{economicsSummary(row.matchbook)}</div>
-          <div className="muted">
-            {row.matchbook
-              ? `id ${row.matchbook.source_market_id} · settlement ${row.matchbook.settlement_complete ? "complete" : "incomplete/unknown"}`
-              : "not present"}
-          </div>
-        </div>
-        <div>
-          <div className="metric-label">Polymarket</div>
-          <div>{quoteSummary(row.polymarket)}</div>
-          <div className="muted">{economicsSummary(row.polymarket)}</div>
-          <div className="muted">
-            {row.polymarket
-              ? `id ${row.polymarket.source_market_id} · settlement ${row.polymarket.settlement_complete ? "complete" : "incomplete/unknown"}`
-              : "not present"}
-          </div>
-        </div>
-        <div>
-          <div className="metric-label">Kalshi</div>
-          <div>{quoteSummary(row.kalshi)}</div>
-          <div className="muted">{economicsSummary(row.kalshi)}</div>
-          <div className="muted">
-            {row.kalshi
-              ? `id ${row.kalshi.source_market_id} · settlement ${row.kalshi.settlement_complete ? "complete" : "incomplete/unknown"}`
-              : "not present"}
-          </div>
-        </div>
+        <VenueColumn name="Matchbook" facts={row.matchbook} limiting={limiting.has("matchbook")} />
+        <VenueColumn name="Polymarket" facts={row.polymarket} limiting={limiting.has("polymarket")} />
+        <VenueColumn name="Kalshi" facts={row.kalshi} limiting={limiting.has("kalshi")} />
       </div>
       <p className="section-copy">{solverFacts(row)}</p>
       {row.pair_results?.length ? (
         <p className="muted">
-          Pairwise:{" "}
-          {row.pair_results
-            .map((pair) => {
-              const label = `${pair.left_venue}↔${pair.right_venue}`;
-              if (pair.entered_solver) {
-                return `${label} ${pair.solver_model ?? "solver"}`;
-              }
-              const reason = pair.rejection_reasons[0] ?? "not entered";
-              return `${label} ${reason}`;
-            })
-            .join(" · ")}
+          Pairwise: {row.pair_results.map((pair) => pairSummary(pair)).join(" · ")}
         </p>
       ) : null}
       {row.rejection_reasons.length ? (
-        <p className="muted">Reasons: {row.rejection_reasons.join(", ")}</p>
+        <p className="muted">
+          Reasons: {row.rejection_reasons.map((reason) => reasonLabel(reason)).join(" · ")}
+        </p>
       ) : null}
+      {explanation ? <p className="inventory-reason-detail">{explanation}</p> : null}
+      <details className="scan-advanced inventory-advanced">
+        <summary>Advanced · provenance</summary>
+        <ProvenanceBlock row={row} />
+      </details>
     </article>
+  );
+}
+
+function VenueColumn({
+  name,
+  facts,
+  limiting,
+}: {
+  name: string;
+  facts: VenueMarketFacts | null | undefined;
+  limiting: boolean;
+}) {
+  return (
+    <div>
+      <div className="metric-label">{name}</div>
+      {facts ? (
+        <>
+          <div>{quoteSummary(facts)}</div>
+          <div className="muted">{economicsSummary(facts, { limiting })}</div>
+          <div className="muted">{settlementLabel(facts)}</div>
+        </>
+      ) : (
+        <div className="muted">not present</div>
+      )}
+    </div>
+  );
+}
+
+function ProvenanceBlock({ row }: { row: KalshiFixtureMarketInventoryRow }) {
+  const venues: Array<[string, VenueMarketFacts | null | undefined]> = [
+    ["Matchbook", row.matchbook],
+    ["Polymarket", row.polymarket],
+    ["Kalshi", row.kalshi],
+  ];
+  const rawReasons = [
+    row.reason,
+    ...row.rejection_reasons,
+    ...row.match_reasons,
+    ...(row.pair_results ?? []).flatMap((pair) => pair.rejection_reasons),
+  ].filter((reason, index, all): reason is string => Boolean(reason) && all.indexOf(reason) === index);
+
+  return (
+    <div className="inventory-advanced-copy">
+      {venues.map(([name, facts]) =>
+        facts ? (
+          <p key={name}>
+            {name}: {provenanceLines(facts).join(" · ")}
+          </p>
+        ) : (
+          <p key={name}>{name}: not present</p>
+        ),
+      )}
+      {rawReasons.length ? <p>Raw codes: {rawReasons.join(", ")}</p> : null}
+    </div>
   );
 }

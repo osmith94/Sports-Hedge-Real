@@ -884,6 +884,7 @@ class ReadOnlyCrossVenueCollector:
             decisions_by_pair=decisions_by_pair,
             venue_costs=scan_kwargs.get("venue_costs"),
             fx_snapshots=scan_kwargs.get("fx_snapshots"),
+            cost_resolver=self.paper_scan.cost_resolver,
         )
         discovered_count, equivalent_count, _observed_edge = inventory_summary(inventory_rows)
         fixture.discovered_market_count = discovered_count

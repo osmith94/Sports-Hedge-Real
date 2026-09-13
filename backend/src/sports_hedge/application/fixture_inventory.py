@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -28,7 +29,9 @@ from sports_hedge.domain.football import (
     MarketFamily,
 )
 from sports_hedge.domain.models import VenueName
-from sports_hedge.fees.cost import VenueCostSnapshot
+from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
+from sports_hedge.fees.kalshi import kalshi_cost_from_series
+from sports_hedge.fees.resolver import UnknownRequiredCostError, VenueCostResolver
 from sports_hedge.matching.markets import MarketMatchResult, MarketMatcher
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 
@@ -155,6 +158,7 @@ def assemble_fixture_inventory(
     decisions_by_pair: dict[tuple[str, str, str, str], PaperScanDecision] | None = None,
     venue_costs: list[VenueCostSnapshot] | None = None,
     fx_snapshots: list[FxRateSnapshot] | None = None,
+    cost_resolver: VenueCostResolver | None = None,
 ) -> list[FixtureMarketInventoryRow]:
     """Group every discovered market. Never drops unsupported or rejected rows."""
 
@@ -168,12 +172,26 @@ def assemble_fixture_inventory(
     unmatched_right: list[InventoryMarket] = []
     for item in matchbook_markets:
         if item.canonical is None:
-            rows.append(_unnormalized_row(item, venue_costs=venue_costs, fx_snapshots=fx_snapshots))
+            rows.append(
+                _unnormalized_row(
+                    item,
+                    venue_costs=venue_costs,
+                    fx_snapshots=fx_snapshots,
+                    cost_resolver=cost_resolver,
+                )
+            )
         else:
             unmatched_left.append(item)
     for item in polymarket_markets:
         if item.canonical is None:
-            rows.append(_unnormalized_row(item, venue_costs=venue_costs, fx_snapshots=fx_snapshots))
+            rows.append(
+                _unnormalized_row(
+                    item,
+                    venue_costs=venue_costs,
+                    fx_snapshots=fx_snapshots,
+                    cost_resolver=cost_resolver,
+                )
+            )
         else:
             unmatched_right.append(item)
 
@@ -194,6 +212,7 @@ def assemble_fixture_inventory(
                 decision=decisions.get((left.source_market_id, right.source_market_id)),
                 venue_costs=venue_costs,
                 fx_snapshots=fx_snapshots,
+                cost_resolver=cost_resolver,
             )
         )
 
@@ -221,21 +240,43 @@ def assemble_fixture_inventory(
                     decision=None,
                     venue_costs=venue_costs,
                     fx_snapshots=fx_snapshots,
+                    cost_resolver=cost_resolver,
                 )
             )
             break
 
     for index, left in enumerate(leftover_left):
         if index not in grouped_left:
-            rows.append(_venue_only_row(left, venue_costs=venue_costs, fx_snapshots=fx_snapshots))
+            rows.append(
+                _venue_only_row(
+                    left,
+                    venue_costs=venue_costs,
+                    fx_snapshots=fx_snapshots,
+                    cost_resolver=cost_resolver,
+                )
+            )
     for index, right in enumerate(leftover_right):
         if index not in grouped_right:
-            rows.append(_venue_only_row(right, venue_costs=venue_costs, fx_snapshots=fx_snapshots))
+            rows.append(
+                _venue_only_row(
+                    right,
+                    venue_costs=venue_costs,
+                    fx_snapshots=fx_snapshots,
+                    cost_resolver=cost_resolver,
+                )
+            )
 
     unmatched_kalshi: list[InventoryMarket] = []
     for item in kalshi_markets:
         if item.canonical is None:
-            rows.append(_unnormalized_row(item, venue_costs=venue_costs, fx_snapshots=fx_snapshots))
+            rows.append(
+                _unnormalized_row(
+                    item,
+                    venue_costs=venue_costs,
+                    fx_snapshots=fx_snapshots,
+                    cost_resolver=cost_resolver,
+                )
+            )
         else:
             unmatched_kalshi.append(item)
     attached: set[int] = set()
@@ -252,6 +293,7 @@ def assemble_fixture_inventory(
             pair_decisions=pair_decisions,
             venue_costs=venue_costs,
             fx_snapshots=fx_snapshots,
+            cost_resolver=cost_resolver,
         )
     leftover_kalshi = [
         item for index, item in enumerate(unmatched_kalshi) if index not in attached
@@ -288,17 +330,28 @@ def assemble_fixture_inventory(
                 decision=decision,
                 venue_costs=venue_costs,
                 fx_snapshots=fx_snapshots,
+                cost_resolver=cost_resolver,
             )
             replacement.polymarket = row.polymarket
             replacement.kalshi = _facts_from_inventory(
-                kalshi_item, venue_costs=venue_costs, fx_snapshots=fx_snapshots
+                kalshi_item,
+                venue_costs=venue_costs,
+                fx_snapshots=fx_snapshots,
+                cost_resolver=cost_resolver,
             )
             replacement.matchbook = None
             rows[rows.index(row)] = replacement
             break
     for index, item in enumerate(leftover_kalshi):
         if index not in used_kalshi and index not in attached:
-            rows.append(_venue_only_row(item, venue_costs=venue_costs, fx_snapshots=fx_snapshots))
+            rows.append(
+                _venue_only_row(
+                    item,
+                    venue_costs=venue_costs,
+                    fx_snapshots=fx_snapshots,
+                    cost_resolver=cost_resolver,
+                )
+            )
 
     return _sort_rows(rows)
 
@@ -349,11 +402,13 @@ def _unnormalized_row(
     *,
     venue_costs: list[VenueCostSnapshot] | None,
     fx_snapshots: list[FxRateSnapshot] | None,
+    cost_resolver: VenueCostResolver | None,
 ) -> FixtureMarketInventoryRow:
     facts = _facts_from_inventory(
         item,
         venue_costs=venue_costs,
         fx_snapshots=fx_snapshots,
+        cost_resolver=cost_resolver,
     )
     return FixtureMarketInventoryRow(
         display_name=item.raw_name or item.source_market_id,
@@ -372,13 +427,19 @@ def _venue_only_row(
     *,
     venue_costs: list[VenueCostSnapshot] | None,
     fx_snapshots: list[FxRateSnapshot] | None,
+    cost_resolver: VenueCostResolver | None,
 ) -> FixtureMarketInventoryRow:
     canonical = item.canonical
     status = InventoryComparisonStatus.VENUE_ONLY
     reason = "venue_only"
     reasons = ["venue_only"]
     if canonical is None:
-        return _unnormalized_row(item, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
+        return _unnormalized_row(
+            item,
+            venue_costs=venue_costs,
+            fx_snapshots=fx_snapshots,
+            cost_resolver=cost_resolver,
+        )
     if canonical.family is MarketFamily.UNKNOWN:
         status = InventoryComparisonStatus.UNSUPPORTED_FAMILY
         reason = "unsupported_family"
@@ -387,7 +448,12 @@ def _venue_only_row(
         status = InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL
         reason = scan_ineligibility_reason(canonical)
         reasons = [reason]
-    facts = _facts_from_inventory(item, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
+    facts = _facts_from_inventory(
+        item,
+        venue_costs=venue_costs,
+        fx_snapshots=fx_snapshots,
+        cost_resolver=cost_resolver,
+    )
     return FixtureMarketInventoryRow(
         display_name=market_display_name(
             family=canonical.family.value,
@@ -415,6 +481,7 @@ def _paired_row(
     decision: PaperScanDecision | None,
     venue_costs: list[VenueCostSnapshot] | None,
     fx_snapshots: list[FxRateSnapshot] | None,
+    cost_resolver: VenueCostResolver | None,
 ) -> FixtureMarketInventoryRow:
     canonical = left.canonical or right.canonical
     family = canonical.family.value if canonical else None
@@ -426,6 +493,15 @@ def _paired_row(
         match,
         decision=decision,
     )
+
+    def facts_for(item: InventoryMarket) -> VenueMarketFacts:
+        return _facts_from_inventory(
+            item,
+            venue_costs=venue_costs,
+            fx_snapshots=fx_snapshots,
+            cost_resolver=cost_resolver,
+        )
+
     return FixtureMarketInventoryRow(
         display_name=market_display_name(
             family=family,
@@ -452,26 +528,14 @@ def _paired_row(
         trigger_net_edge=decision.minimum_net_edge if decision is not None and entered else None,
         distance_to_trigger_pp=_decision_distance(decision) if entered else None,
         solver_is_arbitrage=_decision_is_arb(decision) if entered else False,
-        matchbook=_facts_from_inventory(left, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
-        if left.venue is VenueName.MATCHBOOK
-        else (
-            _facts_from_inventory(right, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
-            if right.venue is VenueName.MATCHBOOK
-            else None
+        matchbook=facts_for(left) if left.venue is VenueName.MATCHBOOK else (
+            facts_for(right) if right.venue is VenueName.MATCHBOOK else None
         ),
-        polymarket=_facts_from_inventory(left, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
-        if left.venue is VenueName.POLYMARKET
-        else (
-            _facts_from_inventory(right, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
-            if right.venue is VenueName.POLYMARKET
-            else None
+        polymarket=facts_for(left) if left.venue is VenueName.POLYMARKET else (
+            facts_for(right) if right.venue is VenueName.POLYMARKET else None
         ),
-        kalshi=_facts_from_inventory(left, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
-        if left.venue is VenueName.KALSHI
-        else (
-            _facts_from_inventory(right, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
-            if right.venue is VenueName.KALSHI
-            else None
+        kalshi=facts_for(left) if left.venue is VenueName.KALSHI else (
+            facts_for(right) if right.venue is VenueName.KALSHI else None
         ),
     )
 
@@ -602,10 +666,11 @@ def _facts_from_inventory(
     *,
     venue_costs: list[VenueCostSnapshot] | None,
     fx_snapshots: list[FxRateSnapshot] | None,
+    cost_resolver: VenueCostResolver | None,
 ) -> VenueMarketFacts:
     canonical = item.canonical
     observation = item.observation
-    fee_status, fee_source = _fee_status(item.venue, venue_costs)
+    fee_status, fee_source = _fee_status(item, venue_costs, cost_resolver=cost_resolver)
     currency = observation.native_currency if observation is not None else None
     return VenueMarketFacts(
         venue=item.venue,
@@ -635,17 +700,73 @@ def _facts_from_inventory(
 
 
 def _fee_status(
-    venue: VenueName,
+    item: InventoryMarket,
     venue_costs: list[VenueCostSnapshot] | None,
+    *,
+    cost_resolver: VenueCostResolver | None,
 ) -> tuple[str | None, str | None]:
-    if not venue_costs:
-        return "missing", "missing_venue_cost"
-    for snapshot in venue_costs:
-        if snapshot.venue is venue:
-            if snapshot.is_economically_known():
-                return "known", snapshot.source
-            return "unknown", snapshot.source
-    return "missing", f"missing_venue_cost:{venue.value}"
+    """Mirror paper-scan cost truth: explicit snapshots win; otherwise resolve.
+
+    Explicit ``venue_costs`` are fail-closed for absent venues, matching
+    ``PaperScanService._resolve_costs``. When the scan path would auto-resolve
+    from the backend registry / Kalshi metadata, inventory must show the same
+    known/unknown status rather than a false ``fee missing``.
+    """
+
+    if venue_costs is not None:
+        for snapshot in venue_costs:
+            if snapshot.venue is item.venue:
+                if snapshot.is_economically_known():
+                    return "known", snapshot.source
+                return "unknown", snapshot.source
+        return "missing", f"missing_venue_cost:{item.venue.value}"
+
+    snapshot, source = _resolve_inventory_cost(item, cost_resolver=cost_resolver)
+    if snapshot is not None:
+        if snapshot.is_economically_known():
+            return "known", snapshot.source
+        return "unknown", snapshot.source
+    return "missing", source or f"missing_venue_cost:{item.venue.value}"
+
+
+def _resolve_inventory_cost(
+    item: InventoryMarket,
+    *,
+    cost_resolver: VenueCostResolver | None,
+) -> tuple[VenueCostSnapshot | None, str | None]:
+    observation = item.observation
+    as_of = observation.observed_at if observation is not None else datetime.now(UTC)
+    if item.venue is VenueName.KALSHI:
+        metadata = observation.metadata if observation is not None else {}
+        fee_meta = metadata.get("kalshi_fee") if isinstance(metadata, dict) else None
+        if isinstance(fee_meta, dict):
+            snapshot = kalshi_cost_from_series(
+                fee_meta,
+                captured_at=as_of,
+                source_market_id=item.source_market_id,
+            )
+            return snapshot, snapshot.source
+        return None, "unknown_required_venue_cost:kalshi"
+    if cost_resolver is None:
+        return None, "missing_venue_cost"
+    family = item.canonical.family if item.canonical is not None else None
+    if family is None or family is MarketFamily.UNKNOWN:
+        return None, f"unknown_required_venue_cost:{item.venue.value}"
+    action = (
+        MarketAction.BUY
+        if item.venue in {VenueName.POLYMARKET, VenueName.KALSHI}
+        else MarketAction.BACK
+    )
+    try:
+        snapshot = cost_resolver.resolve(
+            venue=item.venue,
+            market_class=family,
+            action=action,
+            as_of=as_of,
+        )
+    except UnknownRequiredCostError as exc:
+        return None, exc.reason
+    return snapshot, snapshot.source
 
 
 FUNCTIONAL_CURRENCY = "GBP"
@@ -787,9 +908,13 @@ def _attach_kalshi(
     pair_decisions: dict[tuple[str, str, str, str], PaperScanDecision],
     venue_costs: list[VenueCostSnapshot] | None,
     fx_snapshots: list[FxRateSnapshot] | None,
+    cost_resolver: VenueCostResolver | None,
 ) -> None:
     row.kalshi = _facts_from_inventory(
-        kalshi_item, venue_costs=venue_costs, fx_snapshots=fx_snapshots
+        kalshi_item,
+        venue_costs=venue_costs,
+        fx_snapshots=fx_snapshots,
+        cost_resolver=cost_resolver,
     )
     pair_summaries: list[InventoryPairResult] = []
     for facts, venue in (
