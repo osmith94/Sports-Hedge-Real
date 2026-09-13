@@ -193,7 +193,7 @@ def test_frontend_live_scanner_does_not_send_operator_fx_or_fees() -> None:
     assert "scan-ops-row" in scan_tsx
     assert "LiveScanPulse" in scan_tsx
     assert "AbortController" in api_ts
-    assert "COLLECT_REQUEST_TIMEOUT_MS" in api_ts
+    assert "PAPER_COLLECTION_TIMEOUT_MS" in api_ts
     assert "Optional capital limit" in scan_tsx
     assert "fx_snapshots" not in api_ts.split("export type PaperCollectionRequest")[1].split("export type TrendSummary")[0]
     assert "fee_snapshots" not in api_ts.split("export type PaperCollectionRequest")[1].split("export type TrendSummary")[0]
