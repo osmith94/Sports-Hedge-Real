@@ -73,6 +73,16 @@ class FxRateService:
                 stored.append(existing)
         return stored
 
+    def has_published_primary(self, currency: str, source_date: date) -> bool:
+        """True when a non-carried-forward ECB primary exists for this source date."""
+
+        row = self.repository.get(currency, source_date)
+        return (
+            row is not None
+            and row.status is not FxCheckStatus.CARRIED_FORWARD
+            and row.source_date == source_date
+        )
+
     def apply_boe_checks(self, checks: list[PublishedFxClose]) -> list[DailyFxRate]:
         updated: list[DailyFxRate] = []
         for check in checks:

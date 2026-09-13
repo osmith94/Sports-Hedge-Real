@@ -18,6 +18,13 @@ LOGGER = getLogger(__name__)
 LONDON = ZoneInfo("Europe/London")
 Clock = Callable[[], datetime]
 
+# Startup is on the demo critical path. ECB must fail closed quickly; BoE is a
+# best-effort independent check and is skipped on startup so it cannot add ~30s.
+ECB_STARTUP_TIMEOUT_SECONDS = 5.0
+ECB_SCHEDULED_TIMEOUT_SECONDS = 8.0
+BOE_CHECK_TIMEOUT_SECONDS = 2.0
+PRIOR_CLOSE_RETRY_SECONDS = 300.0
+
 
 class AccountingSchedule:
     """Separate source ingestion from the 00:00 Europe/London valuation cut-off.
@@ -47,6 +54,7 @@ class AccountingSchedule:
         self.last_revaluation_date: date | None = None
         self.last_error: str | None = None
         self.last_bootstrap_source_date: date | None = None
+        self._next_window_attempt_at: datetime | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
@@ -71,24 +79,43 @@ class AccountingSchedule:
             instant,
             action_key="bootstrap",
             mark_daily_window=False,
+            ecb_timeout=ECB_STARTUP_TIMEOUT_SECONDS,
+            include_boe=False,
         )
 
-    def run_due_jobs(self, *, now: datetime | None = None) -> dict[str, str]:
+    def has_todays_published_usd(self, london_date: date) -> bool:
+        return self.fx.has_published_primary("USD", london_date)
+
+    def _window_ingest_due(self, instant: datetime, london_date: date) -> bool:
+        if not ecb_publication_window_open(instant):
+            return False
+        if self.has_todays_published_usd(london_date):
+            return False
+        if self._next_window_attempt_at is not None:
+            if instant.astimezone(UTC) < self._next_window_attempt_at.astimezone(UTC):
+                return False
+        return True
+
+    def run_due_jobs(self, *, now: datetime | None = None, startup: bool = False) -> dict[str, str]:
         instant = now or self.clock()
         actions: dict[str, str] = {}
         london_date = london_calendar_date(instant)
         window_open = ecb_publication_window_open(instant)
+        ecb_timeout = ECB_STARTUP_TIMEOUT_SECONDS if startup else ECB_SCHEDULED_TIMEOUT_SECONDS
+        include_boe = not startup
         if not self.scanner_usd_usable(as_of=instant) and not window_open:
             actions.update(self.bootstrap_if_needed(now=instant))
         ingested_new_primary = False
-        if window_open and self.last_daily_ingest_london_date != london_date:
+        if self._window_ingest_due(instant, london_date):
             ingested = self._ingest(
                 instant,
                 action_key="ingest",
                 mark_daily_window=True,
+                ecb_timeout=ecb_timeout,
+                include_boe=include_boe,
             )
             actions.update(ingested)
-            ingested_new_primary = "ingest" in ingested
+            ingested_new_primary = ingested.get("ingest") == london_date.isoformat()
         if self.last_revaluation_date != london_date or ingested_new_primary:
             try:
                 self.revaluation.run(valuation_date=london_date, as_of=instant)
@@ -105,9 +132,15 @@ class AccountingSchedule:
         *,
         action_key: str,
         mark_daily_window: bool,
+        ecb_timeout: float,
+        include_boe: bool,
     ) -> dict[str, str]:
         try:
-            stored = self.ingest_published_closes(retrieved_at=instant)
+            stored = self.ingest_published_closes(
+                retrieved_at=instant,
+                ecb_timeout=ecb_timeout,
+                include_boe=include_boe,
+            )
         except Exception as exc:  # noqa: BLE001
             self.last_error = str(exc)
             LOGGER.warning("FX %s failed closed: %s", action_key, exc)
@@ -117,25 +150,55 @@ class AccountingSchedule:
             LOGGER.warning("FX %s produced no published closes", action_key)
             return {f"{action_key}_error": self.last_error}
         source_date = stored[0].source_date
+        usd_row = next((item for item in stored if item.currency == "USD"), None)
+        if usd_row is not None:
+            source_date = usd_row.source_date
         self.last_ingest_source_date = source_date
         if action_key == "bootstrap":
             self.last_bootstrap_source_date = source_date
+        london_date = london_calendar_date(instant)
         if mark_daily_window:
-            self.last_daily_ingest_london_date = london_calendar_date(instant)
+            if source_date == london_date:
+                self.last_daily_ingest_london_date = london_date
+                self._next_window_attempt_at = None
+            else:
+                retry_at = instant + timedelta(seconds=PRIOR_CLOSE_RETRY_SECONDS)
+                self._next_window_attempt_at = retry_at
+                LOGGER.info(
+                    "FX ingest still prior close source_date=%s london_date=%s; retry after %ss",
+                    source_date.isoformat(),
+                    london_date.isoformat(),
+                    int(PRIOR_CLOSE_RETRY_SECONDS),
+                )
+                self.last_error = None
+                self._log_scanner_usd(as_of=instant, action=f"{action_key}_prior_close")
+                return {"ingest_pending": source_date.isoformat()}
         self.last_error = None
         self._log_scanner_usd(as_of=instant, action=action_key)
         return {action_key: source_date.isoformat()}
 
-    def ingest_published_closes(self, *, retrieved_at: datetime) -> list:
+    def ingest_published_closes(
+        self,
+        *,
+        retrieved_at: datetime,
+        ecb_timeout: float = ECB_SCHEDULED_TIMEOUT_SECONDS,
+        include_boe: bool = True,
+        boe_timeout: float = BOE_CHECK_TIMEOUT_SECONDS,
+    ) -> list:
         with self.http_factory() as client:
-            primary = EcbEurofxrefSource().fetch(client, retrieved_at=retrieved_at)
+            primary = EcbEurofxrefSource().fetch(
+                client, retrieved_at=retrieved_at, timeout=ecb_timeout
+            )
             stored = self.fx.persist_ecb_closes(primary)
-            try:
-                checks = BoeXudlussSource().fetch(client, retrieved_at=retrieved_at)
-            except Exception:
-                checks = []
-            if checks:
-                self.fx.apply_boe_checks(checks)
+            if include_boe:
+                try:
+                    checks = BoeXudlussSource().fetch(
+                        client, retrieved_at=retrieved_at, timeout=boe_timeout
+                    )
+                except Exception:
+                    checks = []
+                if checks:
+                    self.fx.apply_boe_checks(checks)
             return stored
 
     def operator_status(self, *, as_of: datetime | None = None) -> dict[str, object]:
@@ -158,6 +221,11 @@ class AccountingSchedule:
                 else self.last_bootstrap_source_date.isoformat()
             ),
             "last_error": self.last_error,
+            "next_window_attempt_at": (
+                None
+                if self._next_window_attempt_at is None
+                else self._next_window_attempt_at.isoformat()
+            ),
         }
         try:
             snapshot = self.fx.resolve_for_scanner("USD", as_of=instant)
@@ -225,7 +293,7 @@ class AccountingSchedule:
 
     def _startup(self) -> None:
         instant = self.clock()
-        self.run_due_jobs(now=instant)
+        self.run_due_jobs(now=instant, startup=True)
         self._log_scanner_usd(as_of=instant, action="startup")
 
     async def stop(self) -> None:

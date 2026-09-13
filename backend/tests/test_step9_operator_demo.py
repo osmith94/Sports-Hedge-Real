@@ -656,6 +656,9 @@ def test_windows_launcher_scripts_encode_paper_only_contract() -> None:
     assert "ACCOUNTING_SCHEDULE_ENABLED" in runbook
     assert "16:15" in runbook
     assert "paper_demo_fx_snapshot" in runbook
+    assert "demo_fixture_replay" in runbook
+    assert "Retry confirm" in runbook
+    assert "already persisted" in runbook
 
 
 def test_stale_demo_pid_is_not_killed() -> None:

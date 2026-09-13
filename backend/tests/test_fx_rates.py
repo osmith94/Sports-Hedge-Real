@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -10,7 +10,13 @@ from sports_hedge.fx.models import FxCheckStatus, FxRateUnavailable, PublishedFx
 from sports_hedge.fx.repository import SqliteFxRateRepository
 from sports_hedge.fx.service import FxRateService, ecb_publication_window_open, london_calendar_date
 from sports_hedge.fx.sources import parse_boe_xudluss_csv, parse_ecb_eurofxref_daily
-from sports_hedge.fx.schedule import AccountingSchedule
+from sports_hedge.fx.schedule import (
+    AccountingSchedule,
+    BOE_CHECK_TIMEOUT_SECONDS,
+    ECB_SCHEDULED_TIMEOUT_SECONDS,
+    ECB_STARTUP_TIMEOUT_SECONDS,
+    PRIOR_CLOSE_RETRY_SECONDS,
+)
 
 ECB_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <gesmes:Envelope xmlns:gesmes="http://www.gesmes.org/xml/2002-08-01" xmlns="http://www.ecb.int/vocabulary/2002-08-01/eurofxref">
@@ -220,6 +226,7 @@ class FakeFxHttp:
         self.fail = fail
         self.ecb_gets = 0
         self.boe_gets = 0
+        self.timeouts: list[tuple[str, float]] = []
 
     def __enter__(self) -> "FakeFxHttp":
         return self
@@ -228,6 +235,7 @@ class FakeFxHttp:
         return None
 
     def get(self, url: str, *, timeout: float = 30.0) -> _FakeFxResponse:
+        self.timeouts.append((url, float(timeout)))
         if self.fail:
             raise RuntimeError("fx source unreachable")
         if "eurofxref" in url:
@@ -235,7 +243,7 @@ class FakeFxHttp:
             return _FakeFxResponse(self.ecb_xml)
         self.boe_gets += 1
         if self.boe_csv is None:
-            raise RuntimeError("boe unavailable")
+            raise TimeoutError("boe check timed out")
         return _FakeFxResponse(self.boe_csv)
 
 
@@ -358,4 +366,94 @@ def test_sunday_bootstrap_unblocks_usd_matched_paper_scan() -> None:
     assert usd.source == "ecb_eurofxref"
     assert usd.source_date == date(2026, 9, 11)
     assert usd.gbp_per_unit != Decimal("0.80")
+
+
+def test_same_day_restart_does_not_refetch_todays_published_close() -> None:
+    service = _service()
+    friday_window = datetime(2026, 9, 11, 16, 15, tzinfo=LONDON)
+    service.persist_ecb_closes(parse_ecb_eurofxref_daily(ECB_XML, retrieved_at=friday_window))
+    http = FakeFxHttp(ecb_xml=ECB_XML)
+    restarted = AccountingSchedule(
+        service,
+        clock=lambda: friday_window,
+        http_factory=lambda: http,
+        enabled=True,
+    )
+    assert restarted.last_daily_ingest_london_date is None
+    actions = restarted.run_due_jobs(startup=True)
+    assert "ingest" not in actions
+    assert "ingest_pending" not in actions
+    assert http.ecb_gets == 0
+    assert http.boe_gets == 0
+    snapshot = service.resolve_for_scanner("USD", as_of=friday_window)
+    assert snapshot.source_date == date(2026, 9, 11)
+
+
+def test_prior_date_payload_does_not_complete_current_window() -> None:
+    service = _service()
+    now = [datetime(2026, 9, 14, 16, 15, tzinfo=LONDON)]
+    http = FakeFxHttp(ecb_xml=ECB_XML)
+    schedule = AccountingSchedule(
+        service,
+        clock=lambda: now[0],
+        http_factory=lambda: http,
+        enabled=True,
+    )
+    first = schedule.run_due_jobs()
+    assert first["ingest_pending"] == "2026-09-11"
+    assert "ingest" not in first
+    assert schedule.last_daily_ingest_london_date is None
+    assert not schedule.has_todays_published_usd(date(2026, 9, 14))
+    assert http.ecb_gets == 1
+    second = schedule.run_due_jobs()
+    assert "ingest" not in second
+    assert "ingest_pending" not in second
+    assert http.ecb_gets == 1
+    now[0] = now[0] + timedelta(seconds=PRIOR_CLOSE_RETRY_SECONDS)
+    http.ecb_xml = MONDAY_ECB_XML
+    refreshed = schedule.run_due_jobs()
+    assert refreshed["ingest"] == "2026-09-14"
+    assert http.ecb_gets == 2
+    assert schedule.has_todays_published_usd(date(2026, 9, 14))
+
+
+def test_startup_source_timeouts_are_bounded_and_skip_boe() -> None:
+    assert ECB_STARTUP_TIMEOUT_SECONDS <= 5
+    assert ECB_SCHEDULED_TIMEOUT_SECONDS <= 8
+    assert BOE_CHECK_TIMEOUT_SECONDS <= 2
+    assert ECB_STARTUP_TIMEOUT_SECONDS + BOE_CHECK_TIMEOUT_SECONDS < 10
+    service = _service()
+    sunday = datetime(2026, 9, 13, 12, 0, tzinfo=LONDON)
+    http = FakeFxHttp(ecb_xml=ECB_XML)
+    schedule = AccountingSchedule(
+        service,
+        clock=lambda: sunday,
+        http_factory=lambda: http,
+        enabled=True,
+    )
+    actions = schedule.run_due_jobs(startup=True)
+    assert actions["bootstrap"] == "2026-09-11"
+    assert http.ecb_gets == 1
+    assert http.boe_gets == 0
+    ecb_timeouts = [timeout for url, timeout in http.timeouts if "eurofxref" in url]
+    assert ecb_timeouts == [ECB_STARTUP_TIMEOUT_SECONDS]
+    snapshot = service.resolve_for_scanner("USD", as_of=sunday)
+    assert snapshot.source_date == date(2026, 9, 11)
+
+    friday_window = datetime(2026, 9, 11, 16, 15, tzinfo=LONDON)
+    empty = _service()
+    scheduled_http = FakeFxHttp(ecb_xml=ECB_XML)
+    scheduled = AccountingSchedule(
+        empty,
+        clock=lambda: friday_window,
+        http_factory=lambda: scheduled_http,
+        enabled=True,
+    )
+    scheduled.run_due_jobs()
+    assert scheduled_http.ecb_gets == 1
+    assert scheduled_http.boe_gets == 1
+    scheduled_ecb = [timeout for url, timeout in scheduled_http.timeouts if "eurofxref" in url]
+    scheduled_boe = [timeout for url, timeout in scheduled_http.timeouts if "eurofxref" not in url]
+    assert scheduled_ecb == [ECB_SCHEDULED_TIMEOUT_SECONDS]
+    assert scheduled_boe == [BOE_CHECK_TIMEOUT_SECONDS]
 

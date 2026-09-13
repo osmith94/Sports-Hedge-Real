@@ -51,7 +51,7 @@ The launcher sets `PAPER_AUTOFILL_ENABLED=false` so the operator can choose £10
 
 On backend start the accounting scheduler bootstraps the latest published ECB daily USD close when `fx_rates.sqlite` is empty or the persisted USD rate is stale, including Sunday/holiday starts (Friday's close is carried forward). It does **not** substitute the treasury demo FX snapshot (`paper_demo_fx_snapshot`, 0.80) into arb qualification. If ECB/network fetch fails, `/paper/economics-status` stays `missing_fx_rate:USD` and scans fail closed.
 
-After bootstrap, `/paper/economics-status` (econ strip on `/`) shows USD GBP-per-unit, ECB source date, valuation date, carried-forward status, retrieval time, and BoE check status when available. Startup logs under `logs\demo-backend.*.log` repeat the same fields. Daily ingest is once per 16:15 Europe/London working day, not every scheduler tick.
+After bootstrap, `/paper/economics-status` (econ strip on `/`) shows USD GBP-per-unit, ECB source date, valuation date, carried-forward status, retrieval time, and BoE check status when available. Startup logs under `logs\demo-backend.*.log` repeat the same fields. Daily ingest is once per 16:15 Europe/London working day: a same-day restart does not refetch if today's published ECB primary is already persisted. If the 16:15 payload is still the previous working-day close, the day stays due and retries with backoff. ECB bootstrap fails closed quickly (bounded timeout); the BoE check is best-effort, skipped on startup, and must not hold the demo start.
 
 Labelled `/demo` books are frozen `DEMO / FIXTURE REPLAY` snapshots (`data_kind=demo_fixture_replay`). Live quote-age rejection on `/` still fail-closes stale `live_paper` rows. Fixture replay is not a live-freshness waiver.
 
