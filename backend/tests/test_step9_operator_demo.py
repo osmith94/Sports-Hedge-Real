@@ -492,9 +492,9 @@ def test_stale_demo_pid_is_not_killed() -> None:
         == "stale"
     )
     stop_ps1 = (REPO_ROOT / "scripts/windows/Stop-SportsHedge-Demo.ps1").read_text(encoding="utf-8")
-    stop_index = stop_ps1.index("Stop-Process")
+    stop_index = stop_ps1.index("Stop-Process -Id")
     assert stop_ps1.index("Test-DemoPidOwned") < stop_index
-    assert stop_ps1.index("action -ne \"stop\"") < stop_index or 'action -ne "stop"' in stop_ps1
+    assert stop_ps1.index('$action -ne "stop"') < stop_index
 
 
 def test_demo_operator_surface_wires_live_discovery_and_solver_guard() -> None:
