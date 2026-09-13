@@ -231,7 +231,7 @@ class DemoWalkthroughService:
                 )
             except PaperTreasuryError as exc:
                 raise PaperOperationsError(str(exc)) from exc
-        self._align_liquidity(seed_gbp=seed, usd_gbp_per_unit=rate)
+        self._align_liquidity()
         self.operations._plans.clear()
         self.operations._preparations.clear()
         self.operations._latest_preparation_by_opportunity.clear()
@@ -535,17 +535,10 @@ class DemoWalkthroughService:
         except PaperTreasuryError as exc:
             raise PaperOperationsError(str(exc)) from exc
 
-    def _align_liquidity(self, *, seed_gbp: Decimal, usd_gbp_per_unit: Decimal) -> None:
+    def _align_liquidity(self) -> None:
         if self.liquidity is None:
             return
-        usd_native = (seed_gbp / usd_gbp_per_unit).quantize(Decimal("0.00000001"))
-        self.liquidity.replace(
-            default_pools(
-                matchbook_gbp=seed_gbp,
-                polymarket_usd=usd_native,
-                kalshi_usd=usd_native,
-            )
-        )
+        self.liquidity.sync_from_treasury_pools(self.ledger.treasury.snapshot().pools)
 
     def _usd_seed_native(self) -> Decimal:
         seed = Decimal(str(self.settings.paper_treasury_seed_gbp))

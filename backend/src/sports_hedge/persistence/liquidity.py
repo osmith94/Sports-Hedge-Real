@@ -100,6 +100,27 @@ class SqlitePaperLiquidityRepository:
         self._connection.commit()
         return self.get()
 
+    def sync_from_treasury_pools(self, pools: list[object]) -> PaperLiquiditySnapshot:
+        """Copy native available/locked from the authoritative treasury snapshot.
+
+        Solver liquidity is a standing-capital projection, not a second lock book.
+        """
+
+        updates: dict[VenueName, Decimal] = {}
+        locked: dict[VenueName, Decimal] = {}
+        for pool in pools:
+            venue = getattr(pool, "venue", None)
+            if venue is None:
+                continue
+            resolved = venue if isinstance(venue, VenueName) else VenueName(str(venue))
+            if resolved is VenueName.SMARKETS:
+                continue
+            updates[resolved] = Decimal(str(getattr(pool, "available_cash")))
+            locked[resolved] = Decimal(str(getattr(pool, "locked_capital")))
+        if not updates:
+            return self.get()
+        return self.update_available(updates, locked=locked)
+
     def update_available(
         self,
         updates: dict[VenueName, Decimal],

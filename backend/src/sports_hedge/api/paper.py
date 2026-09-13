@@ -402,13 +402,7 @@ def adjust_paper_treasury_pools(
         )
     except PaperTreasuryError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    liquidity.update_available(
-        {
-            pool.venue: pool.available_cash
-            for pool in snapshot.pools
-            if pool.venue is not VenueName.SMARKETS
-        }
-    )
+    liquidity.sync_from_treasury_pools(snapshot.pools)
     rates, source = _backend_fx_for_pools(fx)
     liquidity.get(gbp_per_unit=rates, fx_source=source)
     return snapshot

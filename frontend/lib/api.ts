@@ -540,6 +540,24 @@ async function errorDetail(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as { detail?: unknown };
     if (typeof body.detail === "string" && body.detail.trim()) return body.detail;
+    if (Array.isArray(body.detail)) {
+      const parts = body.detail
+        .map((item) => {
+          if (typeof item === "string") return item;
+          if (item && typeof item === "object" && "msg" in item) {
+            const msg = (item as { msg?: unknown }).msg;
+            return typeof msg === "string" ? msg : "";
+          }
+          return "";
+        })
+        .filter((item) => item.trim());
+      if (parts.length) return parts.join("; ");
+    }
+    if (body.detail && typeof body.detail === "object") {
+      const record = body.detail as { message?: unknown; code?: unknown };
+      if (typeof record.message === "string" && record.message.trim()) return record.message;
+      if (typeof record.code === "string" && record.code.trim()) return record.code;
+    }
   } catch {
     // Use the stable status fallback below when an upstream returned no JSON body.
   }
@@ -920,6 +938,15 @@ export async function resetPaperTreasury(reason = "explicit paper treasury demo 
     throw new Error(await errorDetail(response));
   }
   return response.json() as Promise<PaperTreasurySnapshot>;
+}
+
+export async function resetPaperSession(
+  reason = "explicit operator paper session reset",
+): Promise<DemoWalkthroughSnapshot> {
+  return resetDemoWalkthrough({
+    reinitialize_store: true,
+    reason,
+  });
 }
 
 export async function savePaperTreasuryPools(
