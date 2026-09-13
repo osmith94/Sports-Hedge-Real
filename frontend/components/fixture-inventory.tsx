@@ -24,7 +24,13 @@ type KalshiFixtureDetailReadModel = Omit<FixtureDetailReadModel, "fixture" | "ma
   markets: KalshiFixtureMarketInventoryRow[];
 };
 
-export function FixtureInventoryWorkspace({ detail }: { detail: KalshiFixtureDetailReadModel }) {
+export function FixtureInventoryWorkspace({
+  detail,
+  focusOpportunityId,
+}: {
+  detail: KalshiFixtureDetailReadModel;
+  focusOpportunityId?: string | null;
+}) {
   const fixture = detail.fixture;
   const phase = fixturePhaseLabel(fixture);
   const preparable = detail.preparable_opportunities ?? [];
@@ -81,7 +87,7 @@ export function FixtureInventoryWorkspace({ detail }: { detail: KalshiFixtureDet
         </p>
       ) : null}
 
-      <PaperDeploymentPreview opportunities={preparable} />
+      <PaperDeploymentPreview opportunities={preparable} focusOpportunityId={focusOpportunityId} />
 
       {detail.markets.length === 0 ? (
         <div className="empty-live">

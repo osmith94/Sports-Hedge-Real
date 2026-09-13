@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import { ArbitrageOpportunity } from "../lib/arbitrage-ops";
+import { betBlockedReason, isBetActionable, opportunityBetHref } from "../lib/bet-ticket";
 import {
   distanceToSelectedThresholdPp,
   grossPricesEffectivelyEqual,
@@ -98,6 +99,7 @@ export function TrackedMarketsBoard({
               ))}
               <th>Strike narrative</th>
               <th>Economics note</th>
+              <th>Bet</th>
             </tr>
           </thead>
           <tbody>
@@ -186,6 +188,9 @@ export function TrackedMarketsBoard({
                         ? "Solver-owned triggered economics."
                         : "Backend current_net_edge vs selected comparison threshold only."}
                   </td>
+                  <td>
+                    <TrackedBetAction item={item} />
+                  </td>
                 </tr>
               );
             })}
@@ -225,5 +230,22 @@ function SortableHeader({
         ) : null}
       </button>
     </th>
+  );
+}
+
+function TrackedBetAction({ item }: { item: ArbitrageOpportunity }) {
+  const href = opportunityBetHref(item);
+  const actionable = isBetActionable(item) && href != null;
+  if (actionable && href) {
+    return (
+      <a className="bet-button" href={href}>
+        BET
+      </a>
+    );
+  }
+  return (
+    <button type="button" className="bet-button bet-button-disabled" disabled title={betBlockedReason(item)}>
+      BET
+    </button>
   );
 }

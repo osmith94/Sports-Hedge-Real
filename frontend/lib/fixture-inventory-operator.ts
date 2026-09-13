@@ -427,6 +427,7 @@ function matchingPreparable(
 ): PreparablePaperOpportunity[] {
   return preparable.filter((item) => {
     if (!item.eligible_for_paper_simulation || !item.settlement_equivalent) return false;
+    if (item.bet_actionable === false) return false;
     if (item.solver_model && row.solver_model && item.solver_model !== row.solver_model) return false;
     return true;
   });

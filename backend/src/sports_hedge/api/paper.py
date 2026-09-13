@@ -63,6 +63,7 @@ from sports_hedge.paper.audit import (
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
 from sports_hedge.paper.chain import SimulatePaperFillRequest, SimulatePaperFillResult
 from sports_hedge.paper.preparation import PreparePaperDeploymentRequest, PreparedPaperDeployment
+from sports_hedge.paper.bet_ticket import RecommendPaperDeploymentRequest, RecommendedPaperDeployment
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.paper.trades import (
@@ -904,6 +905,25 @@ def settle_paper_trade(
 
     try:
         return operations.settle(trade_id, request)
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/recommend-deployment",
+    response_model=RecommendedPaperDeployment,
+    status_code=status.HTTP_200_OK,
+)
+def recommend_paper_deployment(
+    request: RecommendPaperDeploymentRequest,
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> RecommendedPaperDeployment:
+    """PAPER-ONLY recommended size from the existing allocator. Never locks or OPENs."""
+
+    try:
+        return operations.recommend_paper_deployment(request.opportunity_id)
     except PaperOperationsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:

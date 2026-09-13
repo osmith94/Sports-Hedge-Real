@@ -11,6 +11,7 @@ from sports_hedge.arbitrage.watchlist.models import NearOpportunity, Opportunity
 from sports_hedge.arbitrage.watchlist.ranking import tracked_cohort_opportunity_ids
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
+from sports_hedge.application.paper_operations import PaperOperationsService
 from sports_hedge.config import get_settings
 from sports_hedge.domain.football import MarketFamily
 from sports_hedge.domain.models import VenueName
@@ -34,6 +35,12 @@ def get_watchlist_service(
     return WatchlistService(repository)
 
 
+def get_bet_ticket_operations() -> PaperOperationsService:
+    from sports_hedge.api.paper import get_paper_journal_holder
+
+    return get_paper_journal_holder()
+
+
 @router.get("/near", response_model=list[NearOpportunity])
 def top_near_opportunities(
     limit: int = Query(default=25, ge=1, le=200),
@@ -41,9 +48,11 @@ def top_near_opportunities(
     venue: VenueName | None = None,
     market_family: MarketFamily | None = None,
     service: WatchlistService = Depends(get_watchlist_service),
+    operations: PaperOperationsService = Depends(get_bet_ticket_operations),
 ) -> list[NearOpportunity]:
     return _read_watchlist(
         service.top_near,
+        operations,
         limit=limit,
         competition=competition,
         venue=venue,
@@ -58,9 +67,11 @@ def triggered_opportunities(
     venue: VenueName | None = None,
     market_family: MarketFamily | None = None,
     service: WatchlistService = Depends(get_watchlist_service),
+    operations: PaperOperationsService = Depends(get_bet_ticket_operations),
 ) -> list[NearOpportunity]:
     return _read_watchlist(
         service.triggered,
+        operations,
         limit=limit,
         competition=competition,
         venue=venue,
@@ -75,6 +86,7 @@ def tracked_markets(
     venue: VenueName | None = None,
     market_family: MarketFamily | None = None,
     service: WatchlistService = Depends(get_watchlist_service),
+    operations: PaperOperationsService = Depends(get_bet_ticket_operations),
 ) -> list[NearOpportunity]:
     report = get_live_refresh_coordinator().last_report()
     if report is None:
@@ -84,6 +96,7 @@ def tracked_markets(
     )
     return _read_watchlist(
         service.tracked,
+        operations,
         limit=limit,
         competition=competition,
         venue=venue,
@@ -102,8 +115,9 @@ def recent_lifecycle_activity(
     return service.activity(limit=limit, opportunity_id=opportunity_id, since=since)
 
 
-def _read_watchlist(reader, **kwargs):
+def _read_watchlist(reader, operations: PaperOperationsService, **kwargs):
     try:
-        return reader(**kwargs)
+        items = reader(**kwargs)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return operations.annotate_bet_ticket_actions(items)

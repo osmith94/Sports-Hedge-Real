@@ -94,6 +94,9 @@ export function opportunityFromWatchlist(item: NearOpportunity): ArbitrageOpport
     liveScoreLabel: liveScoreLabel(item),
     strikeNarrative: narrative,
     observationCount: item.observation_count ?? null,
+    canonicalEventId: item.canonical_event_id,
+    betActionable: item.bet_actionable === true,
+    betBlockedReason: item.bet_blocked_reason ?? null,
   };
 }
 
