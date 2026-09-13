@@ -1,6 +1,6 @@
 import { ActivityFeed } from "../components/activity-feed";
 import { CapitalSummary } from "../components/capital-summary";
-import { DiscoveredFixturesPanel } from "../components/discovered-fixtures";
+import { FixtureDiscoverySection } from "../components/fixture-discovery-section";
 import { LiquidityPools } from "../components/liquidity-pools";
 import { OpportunityCard } from "../components/opportunity-card";
 import { PaperTradeBook } from "../components/paper-trade-book";
@@ -203,15 +203,7 @@ export default async function ArbitragePage() {
 
       <PriorityAlertsSeam liveAvailable={livePriorityAvailable} liveCount={livePriorityCount} />
 
-      <section className="ops-section">
-        <div className="section-label">
-          <span>Fixture discovery</span>
-          <span className={liveRefreshAvailable ? "status-badge" : "demo-chip"}>
-            {liveRefreshAvailable ? "LIVE PAPER · MB / PM / K" : "DISCOVERY STATUS UNAVAILABLE"}
-          </span>
-        </div>
-        <DiscoveredFixturesPanel status={liveRefresh} available={liveRefreshAvailable} />
-      </section>
+      <FixtureDiscoverySection status={liveRefresh} available={liveRefreshAvailable} />
 
       <section className={`ops-section ${liveTracked.length ? "" : "ops-section-compact"}`}>
         <div className="section-label">

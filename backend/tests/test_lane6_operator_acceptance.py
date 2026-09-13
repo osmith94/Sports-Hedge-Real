@@ -148,7 +148,8 @@ def test_operator_console_hierarchy_is_treasury_then_scan_then_discovery() -> No
     order = [
         "<LiquidityPools",
         "<RunPaperScan",
-        "Fixture discovery",
+        "<FixtureDiscoverySection",
+        "<span>Tracked</span>",
         "Open paper positions",
         "<ActivityFeed",
         "<CapitalSummary",
@@ -156,6 +157,12 @@ def test_operator_console_hierarchy_is_treasury_then_scan_then_discovery() -> No
     ]
     positions = [page.index(marker) for marker in order]
     assert positions == sorted(positions)
+    discovery = (FRONTEND / "components" / "fixture-discovery-section.tsx").read_text(encoding="utf-8")
+    assert '<details className="discovery-disclosure">' in discovery
+    assert "open=" not in discovery
+    assert "Show discovery" in discovery
+    assert "Hide discovery" in discovery
+    assert "<DiscoveredFixturesPanel" in discovery
     assert "DEMO_NEAR_ARB" not in page
     assert "DEMO_EXECUTABLE" not in page
     assert "DEMO_ACTIVITY" not in page
