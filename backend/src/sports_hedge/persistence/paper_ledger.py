@@ -133,6 +133,34 @@ class SqlitePaperTradeRepository:
         ).fetchall()
         return [self._trade_from_row(row) for row in rows]
 
+    def list_all(self) -> list[PaperTrade]:
+        rows = self._connection.execute("SELECT * FROM paper_trades ORDER BY opened_at DESC").fetchall()
+        return [self._trade_from_row(row) for row in rows]
+
+    def archive_identities(self, session_id: str) -> None:
+        """Free unique opportunity_id/trade_id for a fresh demo session. History remains."""
+
+        suffix = f":archived:{session_id}"
+        for trade in self.list_all():
+            if ":archived:" in trade.trade_id:
+                continue
+            old_id = trade.trade_id
+            new_id = f"{old_id}{suffix}"
+            new_opp = f"{trade.opportunity_id}{suffix}"
+            self._connection.execute(
+                "UPDATE paper_trade_legs SET trade_id = ? WHERE trade_id = ?",
+                (new_id, old_id),
+            )
+            self._connection.execute(
+                "UPDATE paper_trade_events SET trade_id = ? WHERE trade_id = ?",
+                (new_id, old_id),
+            )
+            self._connection.execute(
+                "UPDATE paper_trades SET trade_id = ?, opportunity_id = ? WHERE trade_id = ?",
+                (new_id, new_opp, old_id),
+            )
+        self._ledger._commit()
+
     def save(self, trade: PaperTrade) -> PaperTrade:
         payload = (
             trade.trade_id,

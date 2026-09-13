@@ -27,7 +27,7 @@ export default async function PaperTradeDetailPage({
           <div className="eyebrow">Paper trade</div>
           <h1>{trade.fixture_label ?? trade.trade_id}</h1>
           <p className="page-subtitle">
-            PAPER MODE persisted record. Solver {trade.solver_model ?? "n/a"}. Provenance {trade.provenance}. Places orders: {String(trade.places_orders)}.
+            PAPER MODE persisted record. Solver {trade.solver_model ?? "n/a"}. Provenance {trade.provenance}. Places orders: {String(trade.places_orders)}. Fill kinds stay distinct: INTERNAL_SIMULATED, PAPER_SIMULATED_EXTERNAL, and MANUAL_EXTERNAL are not interchangeable.
           </p>
         </div>
         <Link href="/paper" className="demo-label">Back to trade book</Link>
@@ -97,6 +97,18 @@ export default async function PaperTradeDetailPage({
               ))}
             </tbody>
           </table>
+        </div>
+      </section>
+      <div style={{ height: 14 }} />
+      <section className="panel">
+        <div className="panel-header">
+          <div className="panel-title">Hold vs unwind</div>
+          <span className="status-badge">ANALYTICAL · NOT A RELEASE</span>
+        </div>
+        <div className="panel-body">
+          <div className="empty-live">
+            Reverse-side close quotes are evaluated on demand. Modelled remaining lock, when shown, is advisory and never spendable. Capital releases only after a validated unwind or explicit settlement posts through the paper treasury.
+          </div>
         </div>
       </section>
       <div style={{ height: 14 }} />

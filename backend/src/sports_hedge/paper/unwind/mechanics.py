@@ -10,6 +10,7 @@ _REGISTRY: dict[VenueName, VenueCloseMechanics] = {
     VenueName.MATCHBOOK: VenueCloseMechanics.EXCHANGE_BACK_LAY,
     VenueName.SMARKETS: VenueCloseMechanics.EXCHANGE_BACK_LAY,
     VenueName.POLYMARKET: VenueCloseMechanics.PREDICTION_BINARY_BUY_SELL,
+    VenueName.KALSHI: VenueCloseMechanics.PREDICTION_BINARY_BUY_SELL,
 }
 
 

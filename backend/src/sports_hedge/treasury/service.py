@@ -27,6 +27,7 @@ from sports_hedge.treasury.models import (
     PaperTreasurySession,
     PaperTreasurySnapshot,
     TreasuryLockRequest,
+    UnwindReleaseLeg,
     ValidatedUnwindResult,
 )
 
@@ -542,6 +543,64 @@ class PaperTreasuryService:
                 (session_id, limit),
             ).fetchall()
         return [_event_from_row(row) for row in rows]
+
+    def release_open_locks_for_demo_reset(
+        self,
+        *,
+        reason: str,
+        now: datetime | None = None,
+    ) -> list[PaperJournalEntry]:
+        """Return remaining locked cash at zero betting P&L. Not a market settlement."""
+
+        session = self.active_session()
+        if session is None:
+            return []
+        rows = list(
+            self._connection.execute(
+                """
+                SELECT * FROM paper_treasury_locks
+                WHERE session_id = ? AND status = 'open'
+                """,
+                (session.session_id,),
+            )
+        )
+        grouped: dict[str, list[UnwindReleaseLeg]] = {}
+        occurred = now or datetime.now(UTC)
+        for row in rows:
+            remaining = Decimal(row["locked_native"]) - Decimal(row["released_native"])
+            if remaining <= 0:
+                continue
+            pool = self._pool_row(session.session_id, VenueName(row["venue"]), row["native_currency"])
+            rate = Decimal(pool["fx_rate_gbp_per_unit"])
+            trade_id = row["trade_id"] or "demo-reset"
+            grouped.setdefault(trade_id, []).append(
+                UnwindReleaseLeg(
+                    venue=VenueName(row["venue"]),
+                    native_currency=row["native_currency"],
+                    lock_id=row["lock_id"],
+                    amount_native=remaining,
+                    realised_pnl_native=Decimal("0"),
+                    fee_native=Decimal("0"),
+                    fx_rate_gbp_per_unit=rate,
+                )
+            )
+        entries: list[PaperJournalEntry] = []
+        for trade_id, releases in grouped.items():
+            entries.extend(
+                self.post_unwind(
+                    ValidatedUnwindResult(
+                        trade_id=trade_id,
+                        close_completed=True,
+                        opportunity_id=None,
+                        source="paper_demo_reset",
+                        source_id=f"demo-reset:{session.session_id}:{trade_id}:{occurred.isoformat()}",
+                        reason=reason,
+                        releases=releases,
+                    ),
+                    now=occurred,
+                )
+            )
+        return entries
 
     def _lock_one(
         self,

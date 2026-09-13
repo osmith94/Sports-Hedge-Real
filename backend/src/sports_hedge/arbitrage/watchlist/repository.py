@@ -113,6 +113,7 @@ class SqliteWatchlistRepository:
             "previous_distance_to_trigger_pp": "TEXT",
             "observation_count": "INTEGER",
             "quote_age_basis": "TEXT",
+            "data_kind": "TEXT",
         }
         for name, ddl in extras.items():
             if name not in columns:
@@ -143,11 +144,11 @@ class SqliteWatchlistRepository:
                 fixture_discovery_source, fixture_status, in_running,
                 live_score_supported, home_score, away_score, strike_narrative,
                 previous_net_edge, previous_distance_to_trigger_pp, observation_count,
-                quote_age_basis
+                quote_age_basis, data_kind
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(opportunity_id) DO UPDATE SET
                 canonical_event_id = excluded.canonical_event_id,
@@ -189,7 +190,8 @@ class SqliteWatchlistRepository:
                 previous_net_edge = excluded.previous_net_edge,
                 previous_distance_to_trigger_pp = excluded.previous_distance_to_trigger_pp,
                 observation_count = excluded.observation_count,
-                quote_age_basis = excluded.quote_age_basis
+                quote_age_basis = excluded.quote_age_basis,
+                data_kind = excluded.data_kind
             """,
             (
                 opportunity.opportunity_id,
@@ -235,6 +237,7 @@ class SqliteWatchlistRepository:
                 _stringify(opportunity.previous_distance_to_trigger_pp),
                 opportunity.observation_count,
                 opportunity.quote_age_basis,
+                opportunity.data_kind,
             ),
         )
         self._connection.commit()
@@ -381,6 +384,7 @@ def _opportunity_from_row(row: sqlite3.Row) -> NearOpportunity:
         ),
         observation_count=int(_row_get(row, "observation_count") or 0),
         quote_age_basis=_row_get(row, "quote_age_basis"),
+        data_kind=_row_get(row, "data_kind") or "live_paper",
     )
 
 

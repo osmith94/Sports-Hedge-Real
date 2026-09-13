@@ -13,6 +13,14 @@ from pydantic import BaseModel, Field, model_validator
 from sports_hedge.api.market_intelligence import get_market_intelligence_service
 from sports_hedge.api.priority_alerts import get_priority_alert_service
 from sports_hedge.api.watchlist import get_watchlist_service
+from sports_hedge.application.demo_walkthrough import (
+    DemoCloseRequest,
+    DemoResetRequest,
+    DemoWalkthroughService,
+    DemoWalkthroughSnapshot,
+    FixtureReplayRequest,
+    FixtureReplayResult,
+)
 from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
 from sports_hedge.application.collector import CollectionReport, ReadOnlyCrossVenueCollector
 from sports_hedge.application.live_refresh import (
@@ -279,6 +287,29 @@ def get_paper_operations_service(
     return holder
 
 
+@lru_cache
+def get_demo_walkthrough_service() -> DemoWalkthroughService:
+    from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
+
+    watchlist = get_watchlist_service(get_watchlist_repository())
+    operations = get_paper_journal_holder()
+    operations.watchlist = watchlist
+    operations.alerts = get_priority_alert_service()
+    scan = PaperScanService(
+        get_market_intelligence_service(),
+        fx_service=get_fx_rate_service(),
+        cost_resolver=get_venue_cost_resolver(),
+        liquidity=get_paper_liquidity_repository(),
+    )
+    return DemoWalkthroughService(
+        operations=operations,
+        scan=scan,
+        watchlist=watchlist,
+        ledger=get_paper_ledger(),
+        liquidity=get_paper_liquidity_repository(),
+    )
+
+
 @router.get("/scans", response_model=list[PaperScanRecord])
 def recent_scans(
     limit: int = Query(default=100, ge=1, le=1000),
@@ -344,6 +375,51 @@ def reset_paper_treasury(
         )
     except PaperTreasuryError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/demo/walkthrough", response_model=DemoWalkthroughSnapshot)
+def demo_walkthrough(
+    service: DemoWalkthroughService = Depends(get_demo_walkthrough_service),
+) -> DemoWalkthroughSnapshot:
+    return service.snapshot()
+
+
+@router.post("/demo/reset", response_model=DemoWalkthroughSnapshot)
+def demo_reset(
+    request: DemoResetRequest,
+    service: DemoWalkthroughService = Depends(get_demo_walkthrough_service),
+) -> DemoWalkthroughSnapshot:
+    try:
+        return service.reset(request)
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/demo/fixture-replay", response_model=FixtureReplayResult)
+def demo_fixture_replay(
+    request: FixtureReplayRequest,
+    service: DemoWalkthroughService = Depends(get_demo_walkthrough_service),
+) -> FixtureReplayResult:
+    try:
+        return service.replay(request)
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/demo/trades/{trade_id}/close", response_model=FixtureReplayResult)
+def demo_close_open_trade(
+    trade_id: str,
+    request: DemoCloseRequest,
+    service: DemoWalkthroughService = Depends(get_demo_walkthrough_service),
+) -> FixtureReplayResult:
+    try:
+        return service.close_open_trade(trade_id, request)
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/treasury/fx-snapshot", response_model=PaperTreasurySnapshot)
@@ -653,6 +729,30 @@ def paper_trade_close_plan(
         raise HTTPException(status_code=422, detail="close-plan evaluation cannot place orders")
     try:
         return operations.evaluate_unwind(
+            trade_id,
+            quotes=request.quotes,
+            fx=request.fx,
+            policy=request.policy,
+            scarcity=request.scarcity,
+        )
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/trades/{trade_id}/unwind", response_model=PaperTradeDetail)
+def complete_paper_unwind(
+    trade_id: str,
+    request: PaperClosePlanRequest,
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> PaperTradeDetail:
+    """PAPER-ONLY validated unwind. Posts 8E release only after a complete close plan."""
+
+    if request.places_orders:
+        raise HTTPException(status_code=422, detail="unwind cannot place orders")
+    try:
+        return operations.complete_validated_unwind(
             trade_id,
             quotes=request.quotes,
             fx=request.fx,

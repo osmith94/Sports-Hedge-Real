@@ -111,6 +111,7 @@ class WatchObservation(BaseModel):
     live_score_supported: bool = False
     home_score: int | None = Field(default=None, ge=0)
     away_score: int | None = Field(default=None, ge=0)
+    data_kind: str = "live_paper"
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> WatchObservation:
@@ -164,6 +165,7 @@ class NearOpportunity(BaseModel):
     previous_net_edge: Decimal | None = None
     previous_distance_to_trigger_pp: Decimal | None = None
     observation_count: int = Field(default=0, ge=0)
+    data_kind: str = "live_paper"
 
     @model_validator(mode="after")
     def enforce_non_arbitrage_labelling(self) -> NearOpportunity:

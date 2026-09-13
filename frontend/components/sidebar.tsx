@@ -8,6 +8,7 @@ const navGroups = [
     title: "Arbitrage",
     items: [
       { href: "/", label: "Operations console", icon: "ARB" },
+      { href: "/demo", label: "Operator demo", icon: "D9" },
       { href: "/arbitrage/priority-alerts", label: "Priority Alerts", icon: "PA" },
     ],
   },
