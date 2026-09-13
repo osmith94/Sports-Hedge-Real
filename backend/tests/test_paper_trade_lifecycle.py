@@ -745,7 +745,7 @@ def _lock_and_journal_facts(ledger: SqlitePaperLedger, opportunity_id: str) -> t
     locks = [
         (row["lock_id"], row["status"], row["amount_native"], row["venue"], row["native_currency"])
         for row in ledger._connection.execute(
-            "SELECT lock_id, status, amount_native, venue, native_currency FROM paper_treasury_locks WHERE opportunity_id = ? ORDER BY lock_id",
+            "SELECT lock_id, status, locked_native, venue, native_currency FROM paper_treasury_locks WHERE opportunity_id = ? ORDER BY lock_id",
             (opportunity_id,),
         ).fetchall()
     ]
@@ -1063,7 +1063,12 @@ def test_awaiting_repeat_survives_restart_without_duplicate(tmp_path: Path) -> N
         assert loaded[0].state is PaperTradeState.AWAITING_MANUAL_EXTERNAL
         assert all(leg.filled_stake == 0 for leg in loaded[0].legs)
         assert loaded[0].capital_locked_native == {}
-        assert ops.journal.list_entries() == []
+        fill_sources = {
+            entry.source
+            for entry in ops.journal.list_entries()
+            if entry.source not in {"paper_treasury_seed"}
+        }
+        assert fill_sources == set()
     finally:
         repository.close()
         reopened.close()

@@ -507,6 +507,18 @@ def test_confirm_prepared_deployment_api_locks_requested_size(tmp_path: Path) ->
         ).locked_capital
         assert client.get("/paper/trades/active").json() == []
 
+        unknown = client.post(
+            "/paper/simulate-fill",
+            json={
+                "opportunity_id": opportunity_id,
+                "prepared_deployment_id": "pdep:missing",
+                "simulate_external": True,
+                "provenance": "fixture_demo",
+            },
+        )
+        assert unknown.status_code == 409
+        assert client.get("/paper/trades/active").json() == []
+
         confirmed = client.post(
             "/paper/simulate-fill",
             json={
@@ -531,16 +543,16 @@ def test_confirm_prepared_deployment_api_locks_requested_size(tmp_path: Path) ->
             (leg["venue"], leg["outcome"]): Decimal(leg["filled_stake"]) for leg in active[0]["legs"]
         }
         assert trade_stakes == preview_stakes
-        stale = client.post(
+        retry = client.post(
             "/paper/simulate-fill",
             json={
                 "opportunity_id": opportunity_id,
-                "prepared_deployment_id": "pdep:missing",
+                "prepared_deployment_id": body["prepared_deployment_id"],
                 "simulate_external": True,
                 "provenance": "fixture_demo",
             },
         )
-        assert stale.status_code == 409
+        assert retry.status_code == 200, retry.text
         assert len(client.get("/paper/trades/active").json()) == 1
     finally:
         app.dependency_overrides.clear()
