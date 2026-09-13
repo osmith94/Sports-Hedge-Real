@@ -288,7 +288,13 @@ def test_missing_fee_assumption_does_not_invent_zero_cost_margin() -> None:
         assert decision.execution_risk is None
         assert decision.eligible_for_paper_simulation is False
         assert "missing_venue_cost:matchbook" in decision.rejection_reasons
-        assert "missing_venue_cost:polymarket" in decision.rejection_reasons
+        assert any(
+            reason.startswith("unknown_required_venue_cost:polymarket") or reason == "unknown_costs"
+            for reason in decision.rejection_reasons
+        )
+        pm_costs = [item for item in decision.venue_costs if item.venue is VenueName.POLYMARKET]
+        assert pm_costs
+        assert not pm_costs[0].is_economically_known()
     finally:
         repository.close()
 

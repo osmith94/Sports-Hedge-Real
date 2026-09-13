@@ -25,9 +25,9 @@ from sports_hedge.application.quote_freshness import (
 )
 from sports_hedge.arbitrage.depth import DepthAwareCompleteSetScanner, DepthQuoteSource
 from sports_hedge.arbitrage.payoff_scan import (
-    STATE_SAFE_FEE_BASES,
     DepthAwarePayoffScanner,
     PayoffScanResult,
+    is_state_safe_fee,
 )
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.football import CanonicalOutcome, SettlementScope
@@ -236,12 +236,12 @@ class PaperScanService:
         if any(outcome == CanonicalOutcome.OTHER for outcome in expected_outcomes):
             rejections.append("noncanonical_outcome_space")
 
+        if venue_costs is None and fees:
+            rejections.append("legacy_fee_snapshot_not_cost_truth")
         if costs:
             cost_map = {snapshot.venue: snapshot for snapshot in costs}
         else:
             cost_map = {}
-            if fees:
-                rejections.append("legacy_fee_snapshot_not_cost_truth")
         scan_costs: dict[VenueName, VenueCostSnapshot] = {}
         missing_fees = False
         for observation in (left, right):
@@ -266,7 +266,7 @@ class PaperScanService:
             except CostRuleError as exc:
                 rejections.append(exc.reason)
                 missing_fees = True
-            if solver_model != SOLVER_MODEL_SIMPLE and cost.fee_basis not in STATE_SAFE_FEE_BASES:
+            if solver_model != SOLVER_MODEL_SIMPLE and not is_state_safe_fee(cost):
                 rejections.append(UNSUPPORTED_STATE_PAYOFF_FEE_BASIS)
                 missing_fees = True
 
