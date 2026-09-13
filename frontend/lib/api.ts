@@ -207,9 +207,22 @@ export type FixtureMarketInventoryRow = {
   polymarket?: VenueMarketFacts | null;
 };
 
+export type FixturePaperEntry = {
+  opportunity_id: string;
+  trade_id: string;
+  state: string;
+  solver_model?: string | null;
+  fill_kinds: string[];
+  guaranteed_profit_gbp_at_open?: string | number | null;
+  paper_only?: boolean;
+  places_orders?: boolean;
+  rejection_reason?: string | null;
+};
+
 export type FixtureDetailReadModel = {
   fixture: DiscoveredFixture;
   markets: FixtureMarketInventoryRow[];
+  paper_entries?: FixturePaperEntry[];
   data_class: string;
   paper_mode: string;
   execution_enabled: boolean;
@@ -787,7 +800,7 @@ export type PaperTrade = {
   opportunity_id: string;
   canonical_event_id?: string | null;
   canonical_market_id?: string | null;
-  settlement_key?: string | null;
+  solver_model?: string | null;
   market_family?: MarketFamily | null;
   period?: FootballPeriod | null;
   competition?: string | null;

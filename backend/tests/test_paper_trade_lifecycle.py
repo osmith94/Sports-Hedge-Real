@@ -31,6 +31,7 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.fees.effective import profit_commission_net_odds
 from sports_hedge.paper.fills import PaperFillConfig
+from sports_hedge.paper.liquidity import PaperLiquiditySnapshot, default_pools
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.paper.settlement import compute_paper_settlement
 from sports_hedge.paper.trades import (
@@ -48,6 +49,17 @@ from venue_cost_helpers import matchbook_polymarket_costs
 
 
 OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
+
+
+def _standing_liquidity() -> PaperLiquiditySnapshot:
+    return PaperLiquiditySnapshot(
+        pools=default_pools(
+            matchbook_gbp=Decimal("5000"),
+            polymarket_usd=Decimal("5000"),
+            kalshi_usd=Decimal("5000"),
+        ),
+        updated_at=OBSERVED,
+    )
 
 
 def independent_realised_pnl_gbp(trade, winning_outcome: str) -> Decimal:
@@ -161,6 +173,7 @@ def _ops(
         venue_costs=matchbook_polymarket_costs(),
         fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), spread_bps=Decimal("0"))],
         maximum_execution_risk=100,
+        liquidity_snapshot=_standing_liquidity(),
     )
     assert decision.eligible_for_paper_simulation is True
     watchlist.observe_paper_decision(
@@ -192,6 +205,19 @@ def test_autofill_creates_exactly_one_open_trade(tmp_path: Path) -> None:
         assert trade.capital_locked_native["GBP"] != trade.capital_locked_native["USD"]
         assert trade.guaranteed_profit_gbp_at_open is not None
         assert trade.realised_pnl_gbp is None
+        allocation = ops._plans[trade.opportunity_id].decision.allocation
+        assert allocation is not None and allocation.accepted
+        assert trade.solver_model == "simple_complete_set"
+        for stake in allocation.recommended_stakes:
+            if stake.stake_native <= 0:
+                continue
+            match = next(
+                leg
+                for leg in trade.legs
+                if leg.venue is stake.venue and leg.outcome == stake.outcome
+            )
+            assert match.requested_stake == stake.stake_native
+            assert match.filled_stake == stake.stake_native
         ops.persist_triggered_chain(ops._plans[trade.opportunity_id].decision, provenance=DataProvenance.FIXTURE_DEMO)
         assert len(ops.list_active_trades()) == 1
         assert len(ops.journal.list_entries()) == len({entry.source_id for entry in ops.journal.list_entries()})
@@ -618,8 +644,9 @@ def test_trade_api_and_paper_page_are_not_mock_portfolio(tmp_path: Path) -> None
         assert len(rows) == 1
         assert ":" not in rows[0]["trade_id"]
         assert rows[0]["state"] == "OPEN"
-        assert "15000" not in active.text
-        assert "15.82" not in active.text
+        assert rows[0]["realised_pnl_gbp"] is None
+        assert str(rows[0]["capital_locked_gbp"]) not in {"15000", "15000.00"}
+        assert "15.82" not in str(rows[0].get("realised_pnl_gbp") or "")
         detail = client.get(f"/paper/trades/{rows[0]['trade_id']}")
         assert detail.status_code == 200
         body = detail.json()

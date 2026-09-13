@@ -233,7 +233,10 @@ function TradeTable({
                       <button type="button" className="text-link" onClick={() => onToggle(trade.trade_id)}>
                         {fixture(trade)}
                       </button>
-                      <div className="panel-meta">{trade.market_label ?? trade.market_family ?? "—"}</div>
+                      <div className="panel-meta">
+                        {trade.market_label ?? trade.market_family ?? "—"}
+                        {trade.solver_model ? ` · ${trade.solver_model}` : ""}
+                      </div>
                       <Link href={`/paper/${encodeURIComponent(trade.trade_id)}`} className="panel-meta">
                         Open detail
                       </Link>

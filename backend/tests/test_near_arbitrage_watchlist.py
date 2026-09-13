@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from sports_hedge.application.complete_set import SOLVER_MODEL_GENERALIZED, SOLVER_MODEL_SIMPLE
 from sports_hedge.arbitrage.depth import DepthQuoteCandidate, DepthScanResult
 from sports_hedge.arbitrage.models import ArbitrageSolution, ArbitrageStake
 from sports_hedge.arbitrage.watchlist.adapter import observation_from_paper_decision
@@ -25,6 +26,7 @@ from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 TRIGGER = Decimal("0.01")
 EDGE_080 = Decimal("0.008")
 OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
+_AUTO_IMPLIED = object()
 
 
 def _legs(
@@ -70,10 +72,14 @@ def _observation(
     market_family: MarketFamily = MarketFamily.BOTH_TEAMS_TO_SCORE,
     limiting_depth: Decimal = Decimal("60"),
     guaranteed_profit_gbp: Decimal | None = None,
+    solver_model: str | None = None,
+    implied_probability_sum: Decimal | None | object = _AUTO_IMPLIED,
 ) -> WatchObservation:
-    implied = None
-    if edge is not None:
-        implied = Decimal("1") / (Decimal("1") + edge)
+    implied: Decimal | None
+    if implied_probability_sum is _AUTO_IMPLIED:
+        implied = None if edge is None else Decimal("1") / (Decimal("1") + edge)
+    else:
+        implied = implied_probability_sum if isinstance(implied_probability_sum, Decimal) else None
     return WatchObservation(
         observed_at=observed_at,
         canonical_event_id="evt-newcastle-chelsea",
@@ -89,6 +95,7 @@ def _observation(
         current_net_edge=edge,
         implied_probability_sum=implied,
         solver_is_arbitrage=solver_is_arbitrage,
+        solver_model=solver_model,
         eligible_for_paper_simulation=eligible,
         rejection_reasons=list(rejection_reasons or []),
         execution_risk_score=18,
@@ -508,3 +515,72 @@ def test_adapter_preserves_quote_age_basis_for_operator_presentation() -> None:
     assert mapped.quote_age_basis == "retrieval"
     opportunity = WatchlistService(SqliteWatchlistRepository()).observe(mapped)
     assert opportunity.quote_age_basis == "retrieval"
+
+
+def test_generalized_opportunity_triggers_without_implied_probability_sum() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    opportunity = service.observe(
+        _observation(
+            market_id="mkt-generalized-triggered",
+            edge=Decimal("0.012"),
+            eligible=True,
+            solver_is_arbitrage=True,
+            solver_model=SOLVER_MODEL_GENERALIZED,
+            implied_probability_sum=None,
+            guaranteed_profit_gbp=Decimal("4.20"),
+        )
+    )
+    assert opportunity.status == OpportunityStatus.TRIGGERED
+    assert opportunity.implied_probability_sum is None
+    assert opportunity.current_net_edge == Decimal("0.012")
+    assert opportunity.is_arbitrage is True
+    assert opportunity.guaranteed_profit_gbp == Decimal("4.20")
+
+
+def test_generalized_missing_net_edge_fails_closed() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    opportunity = service.observe(
+        _observation(
+            market_id="mkt-generalized-missing-edge",
+            edge=None,
+            eligible=True,
+            solver_is_arbitrage=True,
+            solver_model=SOLVER_MODEL_GENERALIZED,
+            implied_probability_sum=None,
+            guaranteed_profit_gbp=Decimal("4.20"),
+        )
+    )
+    assert opportunity.status == OpportunityStatus.REJECTED
+    assert "missing_net_edge" in opportunity.rejection_reasons
+    assert opportunity.implied_probability_sum is None
+    assert opportunity.is_arbitrage is False
+    assert opportunity.guaranteed_profit_gbp is None
+
+
+def test_simple_complete_set_still_requires_real_implied_probability_sum() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    missing = service.observe(
+        _observation(
+            market_id="mkt-simple-missing-implied",
+            edge=Decimal("0.012"),
+            eligible=True,
+            solver_is_arbitrage=True,
+            solver_model=SOLVER_MODEL_SIMPLE,
+            implied_probability_sum=None,
+        )
+    )
+    assert missing.status == OpportunityStatus.REJECTED
+    assert "missing_net_edge" in missing.rejection_reasons
+
+    present = service.observe(
+        _observation(
+            market_id="mkt-simple-has-implied",
+            edge=Decimal("0.012"),
+            eligible=True,
+            solver_is_arbitrage=True,
+            solver_model=SOLVER_MODEL_SIMPLE,
+        )
+    )
+    assert present.status == OpportunityStatus.TRIGGERED
+    assert present.implied_probability_sum is not None
+    assert present.implied_probability_sum == Decimal("1") / Decimal("1.012")

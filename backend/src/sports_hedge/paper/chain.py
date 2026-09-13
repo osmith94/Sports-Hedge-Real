@@ -31,6 +31,7 @@ class PaperChainStep(StrEnum):
     JOURNAL_POSTING = "journal_posting"
     RECONCILIATION = "reconciliation"
     PAPER_AUTOFILL = "paper_autofill"
+    PAPER_ENTRY_REJECTED = "paper_entry_rejected"
 
 
 class PaperFillPlan(BaseModel):
@@ -92,3 +93,7 @@ class SimulatePaperFillResult(BaseModel):
     paper_only: bool = True
     places_orders: bool = False
     trade_id: str | None = None
+    solver_model: str | None = None
+    entry_complete: bool = False
+    rejection_reason: str | None = None
+    allocated_requested_stakes: dict[str, Decimal] = Field(default_factory=dict)

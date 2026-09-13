@@ -211,6 +211,31 @@ class WatchlistService:
         )
         return updated
 
+    def record_paper_fill_rejection(
+        self,
+        opportunity_id: str,
+        *,
+        occurred_at,
+        detail: str,
+    ) -> NearOpportunity | None:
+        """Surface a failed paper-entry attempt without OPEN/PARTIAL/FILLED mutation."""
+
+        current = self.repository.get(opportunity_id)
+        if current is None:
+            return None
+        self.repository.append_event(
+            OpportunityLifecycleEvent(
+                opportunity_id=opportunity_id,
+                occurred_at=occurred_at,
+                event_type=LifecycleEventType.PAPER_FILL_REJECTED,
+                status=current.status,
+                current_net_edge=current.current_net_edge,
+                distance_to_trigger_pp=current.distance_to_trigger_pp,
+                detail=detail,
+            )
+        )
+        return current
+
     def close(
         self, opportunity_id: str, *, occurred_at, detail: str | None = None
     ) -> NearOpportunity:

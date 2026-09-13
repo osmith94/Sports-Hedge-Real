@@ -44,6 +44,8 @@ def observation_from_paper_decision(
         solution = decision.payoff_scan.solution
         solver_is_arbitrage = solution.is_arbitrage
         current_edge = quantized_edge(solution.roi)
+        # generalized_payoff has no complete-set implied-probability sum.
+        # Leave implied None rather than synthesizing 1/(1+roi).
         if solver_is_arbitrage:
             capital = solution.total_capital_used
             guaranteed_profit = solution.minimum_state_pnl
