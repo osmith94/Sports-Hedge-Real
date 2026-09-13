@@ -562,6 +562,9 @@ class ReadOnlyCrossVenueCollector:
     ) -> tuple[Any, bool]:
         timeout = self._timeout_budget(self._op_provider_timeout)
         if timeout <= 0:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
             self._record_timeout(stage, venue, source_id)
             return default, True
         try:
