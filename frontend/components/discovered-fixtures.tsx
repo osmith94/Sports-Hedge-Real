@@ -13,6 +13,8 @@ import {
   fixtureHref,
   kickoffContextLines,
   lastRefreshLabel,
+  marketEvaluationLabel,
+  marketEvaluationUnevaluated,
   netEdgeSummary,
   riskLabel,
   riskReasonsLabel,
@@ -44,7 +46,7 @@ function VenueCell({
     <div className="venue-cell">
       <span
         className={present ? "venue-mark venue-mark-on" : "venue-mark"}
-        title={present ? `${code} present on this fixture` : `${code} not on this fixture`}
+        title={present ? `${code} fixture found` : `${code} not on this fixture`}
       >
         {code}
       </span>
@@ -99,7 +101,14 @@ function FixtureRow({ item }: { item: DiscoveredFixture }) {
           />
         </td>
         <td>
-          <span title={EQUIVALENT_MARKETS_HELP}>{equivalentCountLabel(item)}</span>
+          {marketEvaluationUnevaluated(item) ? (
+            <span title={marketEvaluationLabel(item)}>
+              {equivalentCountLabel(item)}
+              <div className="muted">{marketEvaluationLabel(item)}</div>
+            </span>
+          ) : (
+            <span title={EQUIVALENT_MARKETS_HELP}>{equivalentCountLabel(item)}</span>
+          )}
         </td>
         <td className="wrap">
           {bestArbMarketLabel(item)}

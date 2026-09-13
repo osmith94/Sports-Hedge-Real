@@ -624,7 +624,7 @@ async def run_manchester_derby_logical(
             "pair_counts": collection.pair_counts,
             "equivalent_families": families,
             "equivalent_market_count": sum(
-                item.matched_equivalent_count for item in collection.discovered_fixtures
+                item.matched_equivalent_count or 0 for item in collection.discovered_fixtures
             ),
             "family_reasons": _family_reasons(collection),
             "best_net_edge": best_edge,

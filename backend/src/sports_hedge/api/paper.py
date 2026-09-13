@@ -22,7 +22,11 @@ from sports_hedge.application.demo_walkthrough import (
     FixtureReplayResult,
 )
 from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
-from sports_hedge.application.collector import CollectionReport, ReadOnlyCrossVenueCollector
+from sports_hedge.application.collector import (
+    CollectionReport,
+    DEFAULT_MAX_EVENT_PAIRS,
+    ReadOnlyCrossVenueCollector,
+)
 from sports_hedge.application.live_refresh import (
     LiveRefreshStatus,
     ScanCycleTimeout,
@@ -124,7 +128,7 @@ class PaperCollectionRequest(BaseModel):
     minimum_mapping_confidence: float = Field(default=0.98, ge=0, le=1)
     assumed_latency_ms: int = Field(default=500, ge=0)
     recent_volatility_bps: float = Field(default=0.0, ge=0)
-    max_event_pairs: int = Field(default=25, ge=1, le=100)
+    max_event_pairs: int = Field(default=DEFAULT_MAX_EVENT_PAIRS, ge=1, le=100)
     max_market_pairs_per_event: int = Field(default=50, ge=1, le=200)
 
     @model_validator(mode="before")
