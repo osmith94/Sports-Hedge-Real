@@ -19,6 +19,7 @@ from sports_hedge.arbitrage.allocation.adapters import (
 from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.arbitrage.watchlist.models import OpportunityStatus
 from sports_hedge.arbitrage.watchlist.service import _opportunity_id
+from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.application.paper_operations import PaperOperationsError
 from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueName
@@ -42,6 +43,7 @@ from sports_hedge.application.market_observation import (
 )
 from test_step8b_first_team_to_score import _ftts_books, _ftts_mb_payload, _ftts_pm_payload
 from test_step7_safe_market_expansion import MB_EVENT, PM_EVENT
+from test_tracked_current_snapshot import _report
 
 
 def test_current_bet_deployability_requires_accepted_positive_size() -> None:
@@ -349,11 +351,24 @@ def test_recommend_and_prepare_api_keep_paper_boundary(tmp_path: Path) -> None:
         assert Decimal(rejected["maximum_validated_size_gbp"]) == Decimal(
             body["maximum_validated_size_gbp"]
         )
+        triggered = client.get("/paper/watchlist/triggered")
+        assert triggered.status_code == 200
+        triggered_rows = {item["opportunity_id"]: item for item in triggered.json()}
+        assert triggered_rows[opportunity_id]["bet_actionable"] is True
+        coordinator = get_live_refresh_coordinator()
+        coordinator.reset()
+        tracked_empty = client.get("/paper/watchlist/tracked")
+        assert tracked_empty.status_code == 200
+        assert opportunity_id not in {
+            item["opportunity_id"] for item in tracked_empty.json()
+        }
+        coordinator.record_report(_report(decision.canonical_market_id))
         tracked = client.get("/paper/watchlist/tracked")
         assert tracked.status_code == 200
         rows = {item["opportunity_id"]: item for item in tracked.json()}
         assert rows[opportunity_id]["bet_actionable"] is True
     finally:
+        get_live_refresh_coordinator().reset()
         app.dependency_overrides.clear()
         repository.close()
         ledger.close()
