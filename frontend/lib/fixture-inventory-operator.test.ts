@@ -125,13 +125,15 @@ const preparable: PreparablePaperOpportunity[] = [
 ];
 
 describe("Market Comparison operator decision", () => {
-  it("does not use matched-equivalent as the primary decision when a pair is leftover incompatible", () => {
+  it("uses Rejected as the primary decision when MB↔K is solver-evaluated and PM is leftover binary", () => {
     const decision = operatorDecision(matchResultPartial);
-    expect(decision.label).toBe("Partially comparable");
+    expect(decision.label).toBe("Rejected");
     expect(decision.label).not.toBe("Matched equivalent");
-    expect(decision.tone).not.toBe("eligible");
-    expect(decisionBadgeClass(decision.tone)).toContain("is-watch");
+    expect(decision.label).not.toBe("Partially comparable");
+    expect(decision.tone).toBe("rejected");
+    expect(decisionBadgeClass(decision.tone)).toContain("is-reject");
     expect(decisionBadgeClass(decision.tone)).not.toContain("is-hot");
+    expect(decisionBadgeClass(decision.tone)).not.toContain("is-watch");
   });
 
   it("uses Paper eligible only when solver_is_arbitrage is true", () => {
@@ -205,11 +207,86 @@ describe("Market Comparison operator decision", () => {
     expect(decision.label).toBe("Rejected");
     expect(decision.tone).toBe("rejected");
   });
+
+  it("keeps a positive-edge stale/fee gate as Rejected even when pair topology is only partial", () => {
+    const view = inventoryCardViewModel(
+      row({
+        comparison_status: "matched_equivalent",
+        entered_solver: true,
+        solver_is_arbitrage: false,
+        current_net_edge: 0.008,
+        trigger_net_edge: 0.01,
+        distance_to_trigger_pp: 0.2,
+        reason: "stale_quote",
+        rejection_reasons: ["stale_quote"],
+        matchbook: facts("matchbook", homeDrawAway),
+        polymarket: facts("polymarket", yesNo),
+        kalshi: facts("kalshi", homeDrawAway),
+        pair_results: [
+          {
+            left_venue: "matchbook",
+            right_venue: "kalshi",
+            entered_solver: true,
+            rejection_reasons: [],
+            solver_is_arbitrage: false,
+          },
+          {
+            left_venue: "polymarket",
+            right_venue: "kalshi",
+            entered_solver: false,
+            rejection_reasons: ["incomplete_outcome_set"],
+            solver_is_arbitrage: false,
+          },
+        ],
+      }),
+    );
+    expect(view.decision.label).toBe("Rejected");
+    expect(view.decision.tone).toBe("rejected");
+    expect(view.economics?.tone).not.toBe("eligible");
+    expect(view.economics?.tone).not.toBe("caution");
+    expect(view.comparableHeadline).toBe("Comparable: Matchbook ↔ Kalshi");
+    expect(view.pairBadges.map((badge) => badge.text)).toEqual([
+      "MB ↔ K · equivalent",
+      "PM · incompatible outcome set",
+    ]);
+  });
+
+  it("uses Partially comparable only when mapping is mixed and no solver decision exists", () => {
+    const decision = operatorDecision(
+      row({
+        comparison_status: "matched_equivalent",
+        entered_solver: false,
+        solver_is_arbitrage: false,
+        matchbook: facts("matchbook", homeDrawAway),
+        polymarket: facts("polymarket", yesNo),
+        kalshi: facts("kalshi", homeDrawAway),
+        pair_results: [
+          {
+            left_venue: "matchbook",
+            right_venue: "kalshi",
+            entered_solver: false,
+            rejection_reasons: [],
+            solver_is_arbitrage: false,
+          },
+          {
+            left_venue: "polymarket",
+            right_venue: "kalshi",
+            entered_solver: false,
+            rejection_reasons: ["incomplete_outcome_set"],
+            solver_is_arbitrage: false,
+          },
+        ],
+      }),
+    );
+    expect(decision.label).toBe("Partially comparable");
+    expect(decision.tone).toBe("caution");
+  });
 });
 
 describe("pair truth and incompatible venues", () => {
   it("headlines the comparable pair and treats Polymarket binary as leftover", () => {
     const view = inventoryCardViewModel(matchResultPartial);
+    expect(view.decision.label).toBe("Rejected");
     expect(view.title).toBe("Match Result · Full time");
     expect(view.comparableHeadline).toBe("Comparable: Matchbook ↔ Kalshi");
     expect(view.pairBadges.map((badge) => badge.text)).toEqual([
@@ -228,7 +305,7 @@ describe("pair truth and incompatible venues", () => {
 describe("compact economics and rejected-vs-qualified coloring", () => {
   it("shows compact net/trigger/status and does not paint rejected economics green", () => {
     const view = inventoryCardViewModel(matchResultPartial);
-    expect(view.economics?.text).toBe("Net -1.94% | Trigger 1.00% | Partially comparable");
+    expect(view.economics?.text).toBe("Net -1.94% | Trigger 1.00% | Rejected");
     expect(view.economics?.tone).toBe("rejected");
     expect(toneClass(view.economics!.tone)).toBe("is-rejected");
     expect(toneClass(view.economics!.tone)).not.toBe("is-eligible");

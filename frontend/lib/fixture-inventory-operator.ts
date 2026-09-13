@@ -70,6 +70,19 @@ export type InventoryCardView = {
   paperAction: PaperAction;
 };
 
+const ACTION_GATE_REASONS = new Set([
+  "stale_quote",
+  "unknown_quote_age",
+  "missing_venue_cost",
+  "missing_costs",
+  "unknown_required_venue_cost",
+  "unknown_costs",
+  "missing_fx_rate",
+  "missing_fx",
+  "missing_executable_outcome_depth",
+  "unsupported_state_payoff_fee_basis",
+]);
+
 const MAPPING_INCOMPATIBLE = new Set([
   "incomplete_outcome_set",
   "settlement_mismatch",
@@ -135,18 +148,18 @@ export function operatorDecision(
   if (row.solver_is_arbitrage) {
     return { status: "paper_eligible", label: "Paper eligible", tone: "eligible" };
   }
+  if (hasSolverDecision(row)) {
+    if (isNearTrigger(row)) {
+      return { status: "near_trigger", label: "Near trigger", tone: "caution" };
+    }
+    return { status: "rejected", label: "Rejected", tone: "rejected" };
+  }
   const present = presentVenues(row);
-  if (present.length <= 1) {
+  if (present.length <= 1 || row.comparison_status === "venue_only") {
     return { status: "venue_only", label: "Venue only", tone: "neutral" };
   }
   if (pairs.comparable.length && pairs.leftoverVenues.length) {
     return { status: "partially_comparable", label: "Partially comparable", tone: "caution" };
-  }
-  if (isNearTrigger(row)) {
-    return { status: "near_trigger", label: "Near trigger", tone: "caution" };
-  }
-  if (row.comparison_status === "venue_only") {
-    return { status: "venue_only", label: "Venue only", tone: "neutral" };
   }
   return { status: "rejected", label: "Rejected", tone: "rejected" };
 }
@@ -392,11 +405,20 @@ function comparableKindFrom(row: KalshiFixtureMarketInventoryRow, comparableVenu
   return venueKindLabel(any);
 }
 
+function hasSolverDecision(row: KalshiFixtureMarketInventoryRow): boolean {
+  return row.entered_solver || row.current_net_edge != null;
+}
+
 function isNearTrigger(row: KalshiFixtureMarketInventoryRow): boolean {
   if (!row.entered_solver || row.solver_is_arbitrage) return false;
+  if (hasActionGateRejection(row)) return false;
   const net = number(row.current_net_edge);
   const distance = number(row.distance_to_trigger_pp);
   return net !== null && net >= 0 && distance !== null && distance > 0;
+}
+
+function hasActionGateRejection(row: KalshiFixtureMarketInventoryRow): boolean {
+  return collectReasonCodes(row).some((code) => ACTION_GATE_REASONS.has(code));
 }
 
 function matchingPreparable(
