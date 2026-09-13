@@ -1206,6 +1206,9 @@ export type FixtureReplayResult = {
   unwind?: UnwindDecision | null;
   treasury: PaperTreasurySnapshot;
   journal_balanced: boolean;
+  opportunity_id?: string | null;
+  qualify_only?: boolean;
+  preparable_opportunities?: PreparablePaperOpportunity[];
   notes: string[];
 };
 
@@ -1238,6 +1241,7 @@ export async function runFixtureReplay(payload: {
   solver?: FixtureReplayResult["solver"];
   close_via?: FixtureReplayResult["close_via"];
   winning_outcome?: string;
+  qualify_only?: boolean;
 }): Promise<FixtureReplayResult> {
   const response = await fetch(`${API_BASE}/paper/demo/fixture-replay`, {
     method: "POST",
@@ -1298,4 +1302,26 @@ export async function evaluatePaperClosePlan(
     throw new Error(await errorDetail(response));
   }
   return response.json() as Promise<UnwindDecision>;
+}
+
+export type PaperLedgerReconciliation = {
+  ok: boolean;
+  paper_only: boolean;
+  execution_enabled: boolean;
+  journal_count: number;
+  treasury_event_count: number;
+  unique_journal_source_ids: boolean;
+  unique_treasury_source_ids: boolean;
+  gbp_journals_balanced: boolean;
+  native_available: Record<string, string>;
+  native_locked: Record<string, string>;
+  native_realised_pnl: Record<string, string>;
+  native_fees: Record<string, string>;
+  mismatches: string[];
+  deferred: string[];
+  data_kind: string;
+};
+
+export function getPaperLedgerReconciliation(): Promise<PaperLedgerReconciliation> {
+  return request<PaperLedgerReconciliation>("/paper/ledger/reconciliation");
 }

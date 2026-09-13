@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { HoldVsUnwindCard } from "./hold-vs-unwind";
+import { PaperDeploymentPreview } from "./paper-deployment-preview";
 import {
   DemoWalkthroughSnapshot,
   FixtureReplayResult,
@@ -157,8 +158,8 @@ export function DemoWalkthroughBoard() {
           <h1>Integrated paper-mode walkthrough</h1>
           <p className="page-subtitle">
             Reset three native paper pools, inspect live/read-only discovery without substituting
-            fixture rows, then run the same 8F allocator → autofill → 8E treasury → 8D hold/unwind
-            lifecycle. Phase 1 remains PAPER MODE. execution_enabled=false.
+            fixture rows, then qualify a labelled replay and confirm an operator-chosen size
+            (example £10). Phase 1 remains PAPER MODE. execution_enabled=false.
           </p>
         </div>
         <div className="heading-actions">
@@ -311,8 +312,9 @@ export function DemoWalkthroughBoard() {
       <section className="demo-walkthrough">
         <div className="panel-title">3–6. DEMO / FIXTURE REPLAY lifecycle</div>
         <p className="section-copy">
-          Labelled fixture path. Same allocator-sized 8F autofill, 8E locks, and unwind/settlement
-          close as live paper. Never presented as live venue quotes.
+          Labelled fixture path. Qualify first (no OPEN, no lock). Then preview exact native legs
+          and confirm the accepted £10. Confirm revalidates current economics; it does not place
+          venue orders. Never presented as live venue quotes.
         </p>
         <div className="demo-actions">
           <label className="scan-field">
@@ -354,13 +356,32 @@ export function DemoWalkthroughBoard() {
                   venue_pair: pair,
                   solver: effectiveSolver,
                   close_via: "hold",
+                  qualify_only: true,
                 });
                 setReplay(result);
                 await refresh();
               })
             }
           >
-            Open labelled replay
+            Qualify labelled replay
+          </button>
+          <button
+            className="pool-reset"
+            type="button"
+            disabled={busy}
+            onClick={() =>
+              void run(async () => {
+                const result = await runFixtureReplay({
+                  venue_pair: pair,
+                  solver: effectiveSolver,
+                  close_via: "hold",
+                });
+                setReplay(result);
+                await refresh();
+              })
+            }
+          >
+            Allocator-sized autofill OPEN
           </button>
         </div>
         {!pairSupportsGeneralized(pair) ? (
@@ -373,7 +394,16 @@ export function DemoWalkthroughBoard() {
           <div className="scan-note">
             {replay.label} · {replay.venue_pair} · {replay.solver} · fills {replay.fill_kinds.join(", ") || "—"} ·
             journal {replay.journal_balanced ? "balanced" : "unbalanced"}
+            {replay.qualify_only ? " · qualified only (no OPEN yet)" : ""}
           </div>
+        ) : null}
+        {replay?.qualify_only && (replay.preparable_opportunities?.length ?? 0) > 0 ? (
+          <PaperDeploymentPreview
+            opportunities={replay.preparable_opportunities ?? []}
+            onOpened={() => {
+              void refresh();
+            }}
+          />
         ) : null}
       </section>
 
@@ -435,6 +465,18 @@ export function DemoWalkthroughBoard() {
           {shownTrade?.state === "OPEN" ? (
             <div className="demo-actions" style={{ marginTop: 12 }}>
               <button
+                className="pool-reset"
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    await refresh();
+                  })
+                }
+              >
+                Hold — do not release
+              </button>
+              <button
                 className="demo-primary"
                 type="button"
                 disabled={busy}
@@ -467,7 +509,8 @@ export function DemoWalkthroughBoard() {
           <p className="section-copy">
             Kalshi SELL close fees are unmodelled, so MB↔Kalshi and PM↔Kalshi unwind fail closed.
             Settlement through 8E is the labelled close path for those pairs. On Matchbook↔Polymarket,
-            abundant capital keeps HOLD when reverse-side exit is inferior after fees; unwind posts 8E
+            "Hold vs unwind uses the stored labelled reverse book (HOLD when exit is inferior). "
+            "Complete validated unwind uses a labelled tighter reverse book for the DEMO / FIXTURE REPLAY close proof; not a live touch.",
             only when 8D says UNWIND_ELIGIBLE. Spread convergence is never a close trigger. Clock
             estimates never release capital.
           </p>

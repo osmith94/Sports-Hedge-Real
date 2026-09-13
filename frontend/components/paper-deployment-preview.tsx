@@ -12,8 +12,10 @@ import { money } from "../lib/format";
 
 export function PaperDeploymentPreview({
   opportunities,
+  onOpened,
 }: {
   opportunities: PreparablePaperOpportunity[];
+  onOpened?: (tradeId: string) => void;
 }) {
   const defaults = useMemo(
     () => opportunities.filter((item) => item.settlement_equivalent),
@@ -76,6 +78,7 @@ export function PaperDeploymentPreview({
       })) as { trade_id?: string | null; rejection_reason?: string | null };
       if (result.trade_id) {
         setOpenedTradeId(result.trade_id);
+        onOpened?.(result.trade_id);
       } else {
         setConfirmError(result.rejection_reason ?? "Confirm did not OPEN");
       }

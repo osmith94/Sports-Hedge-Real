@@ -1,10 +1,12 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import {
+  PaperLedgerReconciliation,
   PaperTreasurySnapshot,
+  getPaperLedgerReconciliation,
   resetPaperTreasury,
 } from "../lib/api";
 import { money, relativeTime } from "../lib/format";
@@ -30,6 +32,13 @@ export function TreasuryBoard({
   const router = useRouter();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reconciliation, setReconciliation] = useState<PaperLedgerReconciliation | null>(null);
+
+  useEffect(() => {
+    getPaperLedgerReconciliation()
+      .then(setReconciliation)
+      .catch(() => setReconciliation(null));
+  }, [snapshot?.session?.session_id]);
 
   async function onReset(event: FormEvent) {
     event.preventDefault();
@@ -107,6 +116,16 @@ export function TreasuryBoard({
           {error ? (
             <div className="scan-message scan-message-error" role="alert">
               {error}
+            </div>
+          ) : null}
+          {reconciliation ? (
+            <div className="scan-note" style={{ marginBottom: 12 }}>
+              Ledger reconstruction {reconciliation.ok ? "OK" : "NOT OK"} · {reconciliation.data_kind} ·
+              journals {reconciliation.journal_count} · treasury events {reconciliation.treasury_event_count} ·
+              GBP journals {reconciliation.gbp_journals_balanced ? "balanced" : "unbalanced"}
+              {reconciliation.deferred.length ? ` · deferred ${reconciliation.deferred.join("; ")}` : ""}
+              {reconciliation.mismatches.length ? ` · mismatches ${reconciliation.mismatches.join("; ")}` : ""}.
+              Native available/locked reconstruct from the append-only paper journal. PAPER MODE · not a production GL.
             </div>
           ) : null}
           <div className="pool-table-wrap">

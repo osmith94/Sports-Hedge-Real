@@ -1,6 +1,7 @@
 # Sports Hedge Step 9 — one-click paper demo (Windows)
 # Starts FastAPI + Next.js hidden, waits for health, opens the operator console.
-# Enables local paper autofill and the read-only live-refresh loop for this process.
+# Enables the read-only live-refresh loop for this process. Autofill stays off so
+# the operator can preview and confirm a concrete size (example £10) before OPEN.
 # Does not enable live execution, wallet signing, or trading credentials.
 
 $ErrorActionPreference = "Stop"
@@ -110,7 +111,7 @@ function Write-DemoPidIdentity {
 
 $env:SPORTS_HEDGE_MODE = "paper"
 $env:SPORTS_HEDGE_EXECUTION_ENABLED = "false"
-$env:PAPER_AUTOFILL_ENABLED = "true"
+$env:PAPER_AUTOFILL_ENABLED = "false"
 $env:PAPER_LIVE_REFRESH_ENABLED = "true"
 $env:NEXT_PUBLIC_SPORTS_HEDGE_API_URL = "http://127.0.0.1:8000"
 
@@ -154,6 +155,6 @@ try {
 
 Write-Host "Sports Hedge paper demo is running."
 Write-Host "Operator console: $DemoUrl"
-Write-Host "PAPER MODE. execution_enabled=false. PAPER_AUTOFILL_ENABLED=true and PAPER_LIVE_REFRESH_ENABLED=true for this local demo only."
+Write-Host "PAPER MODE. execution_enabled=false. PAPER_AUTOFILL_ENABLED=false so the operator chooses size (example £10). PAPER_LIVE_REFRESH_ENABLED=true for this local demo only."
 Write-Host "Logs: $Logs"
 exit 0

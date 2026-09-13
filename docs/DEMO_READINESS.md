@@ -2,7 +2,7 @@
 
 Integration branch for **Step 9** from verified `main` SHA `91da7b912a678e3c36d89c1160cfad62c8b0f71d` (merged Step 8F automatic paper entry), rebased/merged onto current `main` `0a4a47a5f66a21c4b0e21712092c00fb8ef1b446` so Core Tenet 18 is on the review branch. Downstream of parent #98 and merged 8C allocator, 8D unwind, 8E treasury, Kalshi K1, and 8F autofill.
 
-This is an operator-usability / demo-integration pass. It does **not** add a new product area or live execution. Phase 1 remains read-only venue data plus paper trading only. This document is not a production-readiness claim.
+This document is not a production-readiness claim. The owner Windows click path is `docs/DEMO_RUNBOOK.md`.
 
 ## Data honesty
 
@@ -23,7 +23,7 @@ This is an operator-usability / demo-integration pass. It does **not** add a new
 | Research Home, Matchday, Team Explorer, Scenario Lab/Planner | `DEMO / FIXTURE` (SRC, quotes, fees, EV) |
 | `/research/historical/coverage` | `REAL HISTORICAL` when SQLite facts/odds files contain rows; otherwise `UNAVAILABLE` |
 | Tenet 17 analogue / comparable-move model | `UNAVAILABLE` |
-| Windows one-click launcher | Local process helper. Not a hosted/Vercel deployment. Start sets `PAPER_AUTOFILL_ENABLED=true` and `PAPER_LIVE_REFRESH_ENABLED=true` for that process only (application defaults remain false). Stop verifies PID command/path identity before kill. |
+| Windows one-click launcher | Local process helper. Not a hosted/Vercel deployment. Start sets `PAPER_AUTOFILL_ENABLED=false` (operator chooses size, example £10, before OPEN) and `PAPER_LIVE_REFRESH_ENABLED=true` for that process only (application defaults remain false). Stop verifies PID command/path identity before kill. |
 
 Unknown costs still fail closed. Native GBP and the two USD venue pools are never summed. Polymarket USD and Kalshi USD remain distinct.
 
@@ -37,7 +37,7 @@ Unknown costs still fail closed. Native GBP and the two USD venue pools are neve
 - 8D hold-vs-unwind evaluates executable reverse-side economics. Spread convergence is not a close trigger. Clock / modelled time-to-release is advisory (`settles_or_releases_capital=false`) and never makes capital spendable.
 - Two authoritative release paths: validated paper unwind that posts 8E, or explicit paper settlement that posts 8E. Kalshi SELL close fees are not modelled; unwind involving Kalshi fails closed rather than inventing a fee. Settlement remains the Kalshi close path.
 - Labelled `DEMO / FIXTURE REPLAY` exercises the same allocator → autofill → treasury → unwind/settlement lifecycle and is never mixed into empty live watchlists.
-- Windows double-click start/stop launchers under `scripts/windows/`. Hidden local processes, health wait, duplicate-process avoidance, file logs, visible startup error. `PAPER_AUTOFILL_ENABLED=true` and `PAPER_LIVE_REFRESH_ENABLED=true` for that local demo process only; application defaults remain false. Stop refuses to kill a reused PID unless command/path matches the launcher identity. The launcher opens `/` Operations Console. `/demo` remains a labelled DEMO / FIXTURE REPLAY utility and can still run `/paper/collect` plus **Refresh Live Discovery** for lifecycle acceptance when no live arb exists. No Vercel/cloud migration.
+- Windows double-click start/stop launchers under `scripts/windows/`. Hidden local processes, health wait, duplicate-process avoidance, file logs, visible startup error. `PAPER_AUTOFILL_ENABLED=false` so the operator can preview/confirm a concrete size; `PAPER_LIVE_REFRESH_ENABLED=true` for that local demo process only; application defaults remain false. Stop refuses to kill a reused PID unless command/path matches the launcher identity. The launcher opens `/` Operations Console. `/demo` remains a labelled DEMO / FIXTURE REPLAY utility and can still run `/paper/collect` plus **Refresh Live Discovery** for lifecycle acceptance when no live arb exists. Exact Windows click path: `docs/DEMO_RUNBOOK.md`. No Vercel/cloud migration.
 
 ## What remains fixture/demo / unavailable
 
@@ -53,7 +53,7 @@ Unknown costs still fail closed. Native GBP and the two USD venue pools are neve
 
 1. **Reset / start** — double-click `scripts/windows/Start-SportsHedge-Demo.bat` then `/` Operations Console. PAPER MODE / NO EXECUTION. Seed or reinitialize the three separated native pools from Paper Treasury. Ordinary reset refuses destruction while locks/trades are open.
 2. **Discovery / tracking** — `/` operations console. One-click launch opens `/`. Tracked / near / triggered stay honestly empty when empty. Near is not relabelled as arbitrage. Missing credentials/providers fail as UNAVAILABLE for that venue; other venues still collect. Fixture replay is never mixed into live rows.
-3. **Automatic paper entry** — live 8F autofill when `PAPER_AUTOFILL_ENABLED` is on (demo launcher) and a solver-qualified opportunity exists; otherwise labelled fixture replay. Allocator size is authoritative. Matchbook/Kalshi INTERNAL; Polymarket demo `PAPER_SIMULATED_EXTERNAL`. OPEN only after complete hedge + 8E locks.
+3. **Operator-chosen paper entry** — live `/` fixture drill-down when a preparable opportunity exists; otherwise labelled `/demo` **Qualify labelled replay** then £10 prepare/confirm. Preview mutates nothing. Confirm revalidates and locks the accepted native legs. Allocator-sized autofill remains an explicit secondary control on `/demo`, not the default demo path. Matchbook/Kalshi INTERNAL; Polymarket demo `PAPER_SIMULATED_EXTERNAL`. OPEN only after complete hedge + 8E locks.
 4. **Active position / capital** — `/` plus `/paper` and `/treasury`. Opportunity + solver model, venue legs, native stake, fill kind, guaranteed opening economics when proven, available vs locked native capital by venue/currency, modelled time-to-release basis/confidence when present. PAPER MODE visible.
 5. **Hold vs clean unwind** — 8D close-plan on the open trade using current reverse-side read-only economics (fixture replay supplies labelled reverse quotes). Hold-to-settlement P&L vs validated exit P&L, unwind cost, capital releasable only if the full close fills. Advisory remaining lock / opportunity-cost context is not spendable.
 6. **Close lifecycle** — validated paper unwind (when fully executable) **or** explicit paper settlement, both posting 8E release. After close: realised betting P&L, fees, native cash released/remaining, final native balances by venue/currency, GBP carrying values (not native cash), append-only journal/audit.

@@ -146,6 +146,7 @@ class PaperOperationsService:
         decision: PaperScanDecision,
         *,
         provenance: DataProvenance = DataProvenance.LIVE_PAPER,
+        autofill: bool | None = None,
     ) -> PriorityAlertCandidate | None:
         if not decision.canonical_market_id:
             return None
@@ -176,7 +177,10 @@ class PaperOperationsService:
             if decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage:
                 candidate = _candidate_from_decision(decision, opportunity_id)
                 self.alerts.ingest(candidate)
-            if self.settings.paper_autofill_enabled:
+            should_autofill = (
+                self.settings.paper_autofill_enabled if autofill is None else autofill
+            )
+            if should_autofill:
                 try:
                     self._require_allocator_sized_plan(opportunity_id)
                     self.simulate_fill(

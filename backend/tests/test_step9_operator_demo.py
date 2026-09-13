@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from sports_hedge.accounting.paper_journal import DataProvenance
 from sports_hedge.api.main import app
 from sports_hedge.api.paper import get_demo_walkthrough_service
 from sports_hedge.application.complete_set import SOLVER_MODEL_GENERALIZED, SOLVER_MODEL_SIMPLE
@@ -313,6 +314,85 @@ def test_repeated_simulate_does_not_duplicate_open_trade(tmp_path: Path) -> None
         assert second.trade.trade_id != first_id
         assert second.trade.opportunity_id != opened.trade.opportunity_id
     finally:
+        repository.close()
+        ledger.close()
+
+
+def test_qualify_only_then_confirm_ten_pounds_then_hold_unwind_excludes_settlement(
+    tmp_path: Path,
+) -> None:
+    demo, ops, watchlist, ledger, repository = _bundle(tmp_path)
+    try:
+        ten = Decimal("10")
+        before = ledger.treasury.snapshot()
+        qualified = demo.replay(FixtureReplayRequest(close_via="hold", qualify_only=True))
+        assert qualified.trade is None
+        assert qualified.qualify_only is True
+        assert qualified.opportunity_id
+        assert qualified.preparable_opportunities
+        after_preview_seed = ledger.treasury.snapshot()
+        assert after_preview_seed.pool(VenueName.MATCHBOOK, "GBP").locked_capital == before.pool(
+            VenueName.MATCHBOOK, "GBP"
+        ).locked_capital
+        preview = ops.prepare_fixed_deployment(qualified.opportunity_id, ten)
+        assert preview.accepted is True
+        assert preview.prepared_deployment_id
+        assert preview.locks_treasury is False
+        still = ledger.treasury.snapshot()
+        assert still.pool(VenueName.MATCHBOOK, "GBP").available_cash == before.pool(
+            VenueName.MATCHBOOK, "GBP"
+        ).available_cash
+        opened = ops.simulate_fill(
+            qualified.opportunity_id,
+            simulate_external=True,
+            prepared_deployment_id=preview.prepared_deployment_id,
+            requested_size_gbp=ten,
+            provenance=DataProvenance.FIXTURE_DEMO,
+        )
+        assert opened.entry_complete is True
+        trade = ops.list_active_trades()[0]
+        preview_stakes = {(leg.venue, leg.outcome): leg.stake_native for leg in preview.legs}
+        trade_stakes = {(leg.venue, leg.outcome): leg.filled_stake for leg in trade.legs}
+        assert trade_stakes == preview_stakes
+        hold_locked = dict(trade.capital_locked_native)
+        snap = demo.snapshot()
+        assert snap.hold_vs_unwind is not None
+        assert ops.list_active_trades()[0].capital_locked_native == hold_locked
+        closed = demo.close_open_trade(trade.trade_id, DemoCloseRequest(close_via="unwind"))
+        assert closed.trade is not None
+        assert closed.trade.state is PaperTradeState.CLOSED
+        retry = demo.close_open_trade(trade.trade_id, DemoCloseRequest(close_via="unwind"))
+        assert retry.trade is not None
+        assert retry.trade.trade_id == trade.trade_id
+        with pytest.raises(PaperOperationsError):
+            demo.close_open_trade(trade.trade_id, DemoCloseRequest(close_via="settlement"))
+        report = ledger.reconcile()
+        assert report.ok
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_ledger_reconciliation_api_is_read_only(tmp_path: Path) -> None:
+    demo, _ops, _watchlist, ledger, repository = _bundle(tmp_path)
+    get_demo_walkthrough_service.cache_clear()
+    app.dependency_overrides[get_demo_walkthrough_service] = lambda: demo
+    from sports_hedge.api.paper import get_paper_ledger
+
+    app.dependency_overrides[get_paper_ledger] = lambda: ledger
+    client = TestClient(app)
+    try:
+        response = client.get("/paper/ledger/reconciliation")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ok"] is True
+        assert body["paper_only"] is True
+        assert body["execution_enabled"] is False
+        assert body["places_orders"] is False
+        assert body["gbp_journals_balanced"] is True
+    finally:
+        app.dependency_overrides.clear()
+        get_demo_walkthrough_service.cache_clear()
         repository.close()
         ledger.close()
 

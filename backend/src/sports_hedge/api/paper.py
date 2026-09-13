@@ -355,6 +355,21 @@ def paper_treasury(
     return ledger.treasury.snapshot(event_limit=limit)
 
 
+@router.get("/ledger/reconciliation")
+def paper_ledger_reconciliation(
+    ledger: SqlitePaperLedger = Depends(get_paper_ledger),
+):
+    """Read-only proof that native treasury pools reconstruct from the append-only paper journal."""
+
+    report = ledger.reconcile()
+    payload = report.model_dump()
+    payload["ok"] = report.ok
+    payload["paper_only"] = True
+    payload["places_orders"] = False
+    payload["execution_enabled"] = False
+    return payload
+
+
 @router.post("/treasury/pools", response_model=PaperTreasurySnapshot)
 def adjust_paper_treasury_pools(
     request: PaperTreasuryAdjustRequest,

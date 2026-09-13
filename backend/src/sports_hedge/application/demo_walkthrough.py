@@ -23,9 +23,11 @@ from sports_hedge.application.demo_fixtures import (
     fixture_pair,
     fixture_venue_costs,
     reverse_quotes_from_observations,
+    tighten_reverse_quotes,
 )
 from sports_hedge.application.live_refresh import LiveRefreshStatus, get_live_refresh_coordinator
 from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
+from sports_hedge.paper.preparation import PreparablePaperOpportunity
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
@@ -40,7 +42,7 @@ from sports_hedge.paper.trades import (
     PaperTradeDetail,
     PaperTradeState,
 )
-from sports_hedge.paper.unwind.models import ReverseQuote, UnwindDecision
+from sports_hedge.paper.unwind.models import ReverseQuote, UnwindDecision, UnwindPolicy
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.treasury.models import PaperTreasurySnapshot
@@ -70,6 +72,7 @@ class FixtureReplayRequest(BaseModel):
     solver: SolverKind = "simple"
     close_via: CloseVia = "settlement"
     winning_outcome: str | None = None
+    qualify_only: bool = False
     paper_only: bool = True
     places_orders: bool = False
 
@@ -141,6 +144,9 @@ class FixtureReplayResult(BaseModel):
     quotes: list[ReverseQuote] = Field(default_factory=list)
     treasury: PaperTreasurySnapshot
     journal_balanced: bool = False
+    opportunity_id: str | None = None
+    qualify_only: bool = False
+    preparable_opportunities: list[PreparablePaperOpportunity] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -163,6 +169,7 @@ class DemoWalkthroughService:
         self.settings = settings or get_settings()
         self._last_replay: FixtureReplayResult | None = None
         self._quotes_by_trade: dict[str, list[ReverseQuote]] = {}
+        self._quotes_by_opportunity: dict[str, list[ReverseQuote]] = {}
 
     def snapshot(self) -> DemoWalkthroughSnapshot:
         treasury = self.ledger.treasury.snapshot()
@@ -226,10 +233,13 @@ class DemoWalkthroughService:
                 raise PaperOperationsError(str(exc)) from exc
         self._align_liquidity(seed_gbp=seed, usd_gbp_per_unit=rate)
         self.operations._plans.clear()
+        self.operations._preparations.clear()
+        self.operations._latest_preparation_by_opportunity.clear()
         self.operations._external_confirmations.clear()
         self.operations._entry_rejections.clear()
         self._last_replay = None
         self._quotes_by_trade.clear()
+        self._quotes_by_opportunity.clear()
         return self.snapshot()
 
     def replay(self, request: FixtureReplayRequest) -> FixtureReplayResult:
@@ -277,8 +287,37 @@ class DemoWalkthroughService:
             raise PaperOperationsError("fixture_replay_watchlist_rejected")
         mapped = mapped.model_copy(update={"data_kind": DEMO_DATA_KIND})
         observation = self.watchlist.observe(mapped)
-        self.operations.persist_triggered_chain(decision, provenance=DataProvenance.FIXTURE_DEMO)
+        self.operations.persist_triggered_chain(
+            decision,
+            provenance=DataProvenance.FIXTURE_DEMO,
+            autofill=False if request.qualify_only else None,
+        )
         opportunity_id = observation.opportunity_id
+        quotes = reverse_quotes_from_observations([left, right])
+        self._quotes_by_opportunity[opportunity_id] = quotes
+        if request.qualify_only:
+            preparable = [
+                item
+                for item in self.operations.list_preparable()
+                if item.opportunity_id == opportunity_id
+            ]
+            notes = [
+                DEMO_FIXTURE_LABEL,
+                "Qualified for operator-chosen size. Preview mutates nothing. Confirm revalidates before lock.",
+                "Not mixed into empty live watchlists.",
+            ]
+            result = self._replay_result(
+                request=request,
+                decision=decision,
+                trade=None,
+                unwind=None,
+                quotes=quotes,
+                notes=notes,
+                opportunity_id=opportunity_id,
+                preparable=preparable,
+            )
+            self._last_replay = result
+            return result
         existing = self.operations._get_trade_by_opportunity(opportunity_id)
         if existing is None or existing.state is not PaperTradeState.OPEN:
             self.operations.simulate_fill(
@@ -294,6 +333,7 @@ class DemoWalkthroughService:
             )
         quotes = reverse_quotes_from_observations([left, right])
         self._quotes_by_trade[trade.trade_id] = quotes
+        self._quotes_by_opportunity[opportunity_id] = quotes
         unwind = None
         if quotes:
             try:
@@ -326,6 +366,7 @@ class DemoWalkthroughService:
             unwind=unwind,
             quotes=quotes,
             notes=notes,
+            opportunity_id=opportunity_id,
         )
         self._last_replay = result
         return result
@@ -336,7 +377,7 @@ class DemoWalkthroughService:
         trade = self.operations.trades.get(trade_id) if self.operations.trades is not None else None
         if trade is None:
             raise PaperOperationsError("unknown_trade")
-        quotes = self._quotes_by_trade.get(trade_id, [])
+        quotes = self._quotes_by_trade.get(trade_id) or self._quotes_for_trade(trade)
         unwind = None
         if quotes:
             try:
@@ -378,8 +419,9 @@ class DemoWalkthroughService:
             raise PaperOperationsError("fixture_replay_unwind_unavailable")
         return self.operations.complete_validated_unwind(
             trade_id,
-            quotes=quotes,
+            quotes=tighten_reverse_quotes(quotes),
             fx=list(DEMO_FX),
+            policy=UnwindPolicy(max_profit_give_up_gbp=Decimal("1000")),
         )
 
     def _complete_settlement(
@@ -412,11 +454,13 @@ class DemoWalkthroughService:
         unwind: UnwindDecision | None,
         quotes: list[ReverseQuote],
         notes: list[str],
+        opportunity_id: str | None = None,
+        preparable: list[PreparablePaperOpportunity] | None = None,
     ) -> FixtureReplayResult:
-        opportunity_id = trade.opportunity_id if trade is not None else None
+        resolved_opportunity = opportunity_id or (trade.opportunity_id if trade is not None else None)
         postings = (
-            self.operations.journal.postings(opportunity_id=opportunity_id)
-            if opportunity_id
+            self.operations.journal.postings(opportunity_id=resolved_opportunity)
+            if resolved_opportunity
             else []
         )
         fill_kinds = sorted({leg.fill_kind.value for leg in (trade.legs if trade else [])})
@@ -436,15 +480,24 @@ class DemoWalkthroughService:
             quotes=quotes,
             treasury=self.ledger.treasury.snapshot(),
             journal_balanced=gbp_is_balanced(postings) if postings else True,
+            opportunity_id=resolved_opportunity,
+            qualify_only=request.qualify_only,
+            preparable_opportunities=preparable or [],
             notes=notes,
         )
+
+    def _quotes_for_trade(self, trade: PaperTrade) -> list[ReverseQuote]:
+        stored = self._quotes_by_trade.get(trade.trade_id)
+        if stored:
+            return stored
+        return self._quotes_by_opportunity.get(trade.opportunity_id, [])
 
     def _current_unwind(self) -> UnwindDecision | None:
         if self._last_replay is not None and self._last_replay.unwind is not None:
             if self._last_replay.trade is None or self._last_replay.trade.state is PaperTradeState.OPEN:
                 return self._last_replay.unwind
         for trade in self.operations.list_active_trades():
-            quotes = self._quotes_by_trade.get(trade.trade_id)
+            quotes = self._quotes_for_trade(trade)
             if not quotes:
                 continue
             try:
