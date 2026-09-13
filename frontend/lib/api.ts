@@ -436,6 +436,30 @@ export type EventReaction = {
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_SPORTS_HEDGE_API_URL ?? "http://localhost:8000";
+/** Slightly above backend paper_scan_cycle_timeout_seconds (45s) so Scanning always resolves. */
+export const PAPER_COLLECTION_TIMEOUT_MS = 60_000;
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "";
+    if (name === "AbortError" || name === "TimeoutError") {
+      throw new Error(
+        `Scan timed out after ${Math.round(timeoutMs / 1000)}s. Check venue health and retry.`,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function errorDetail(response: Response): Promise<string> {
   try {
@@ -582,12 +606,16 @@ export type OpportunityLifecycleEvent = {
 export async function runPaperCollection(
   payload: PaperCollectionRequest,
 ): Promise<PaperCollectionReport> {
-  const response = await fetch(`${API_BASE}/paper/collect`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-  });
+  const response = await fetchWithTimeout(
+    `${API_BASE}/paper/collect`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    },
+    PAPER_COLLECTION_TIMEOUT_MS,
+  );
   if (!response.ok) {
     throw new Error(await errorDetail(response));
   }

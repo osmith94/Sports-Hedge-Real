@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     watchlist_db_path: str = "./data/near_arb_watchlist.sqlite"
     paper_live_refresh_enabled: bool = False
     paper_live_refresh_interval_seconds: int = Field(default=30, ge=15, le=300)
+    # Bounded live-scan budgets. A hung provider must not freeze the operator console.
+    paper_scan_cycle_timeout_seconds: int = Field(default=45, ge=10, le=180)
+    paper_scan_venue_timeout_seconds: int = Field(default=15, ge=3, le=60)
+    paper_scan_provider_timeout_seconds: int = Field(default=8, ge=2, le=30)
     cors_allow_origins: Annotated[list[str], NoDecode] = Field(
         default=[
             "http://localhost:3000",

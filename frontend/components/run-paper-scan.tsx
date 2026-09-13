@@ -60,7 +60,13 @@ function venueHealthIsDegraded(health: Record<string, string> | undefined): bool
   const firstClass = ["matchbook", "polymarket", "kalshi"];
   return firstClass.some((venue) => {
     const value = health[venue];
-    return value === "unavailable" || value === "error" || value === "failed";
+    return (
+      value === "unavailable" ||
+      value === "error" ||
+      value === "failed" ||
+      value === "timeout" ||
+      value === "degraded"
+    );
   });
 }
 
@@ -243,6 +249,14 @@ export function RunPaperScan() {
         kind: "error",
         message: error instanceof Error ? error.message : "Read-only scan failed.",
       });
+      try {
+        const status = await getLiveRefreshStatus();
+        if (status.last_completed_at) setLastCompletedAt(status.last_completed_at);
+        if (status.last_duration_ms != null) setLastDurationMs(status.last_duration_ms);
+        if (status.venue_health) setVenueHealth(status.venue_health);
+      } catch {
+        // Status refresh is best-effort after a failed/timed-out collect.
+      }
     } finally {
       inFlightRef.current = false;
       setLoading(false);
@@ -321,12 +335,12 @@ export function RunPaperScan() {
     ? "scanning"
     : state.kind === "error"
       ? "error"
-      : completeFlash
-        ? "complete"
-        : !autoRefresh
-          ? "paused"
-          : venueHealthIsDegraded(venueHealth ?? undefined)
-            ? "degraded"
+      : venueHealthIsDegraded(venueHealth ?? undefined)
+        ? "degraded"
+        : completeFlash
+          ? "complete"
+          : !autoRefresh
+            ? "paused"
             : "idle";
 
   return (

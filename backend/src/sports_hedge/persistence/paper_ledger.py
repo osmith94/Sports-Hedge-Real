@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from sqlite3 import IntegrityError
-from typing import Iterator
+from typing import Any, Iterator
 
 from sports_hedge.accounting.paper_journal import (
     DuplicateJournalError,
@@ -29,7 +30,29 @@ from sports_hedge.paper.trades import (
 from sports_hedge.paper.risk_snapshot import PaperExecutionRiskSnapshot
 
 
-class SqlitePaperJournal:
+class SerializedLedgerBound:
+    """Serialize public methods against the parent ledger lock.
+
+    sqlite3.Connection is not safe for concurrent use, even with
+    ``check_same_thread=False``. FastAPI runs sync paper-trade endpoints in a
+    thread pool, so summary + list-active must not share an unprotected
+    connection. RLock keeps nested journal/treasury transactions atomic.
+    """
+
+    def __getattribute__(self, name: str) -> Any:
+        attr = object.__getattribute__(self, name)
+        if name.startswith("_") or not callable(attr):
+            return attr
+        ledger = object.__getattribute__(self, "_ledger")
+
+        def bound(*args: Any, **kwargs: Any) -> Any:
+            with ledger.exclusive():
+                return attr(*args, **kwargs)
+
+        return bound
+
+
+class SqlitePaperJournal(SerializedLedgerBound):
     """Durable wrap of the in-memory PaperJournal contract."""
 
     def __init__(self, ledger: "SqlitePaperLedger") -> None:
@@ -97,7 +120,7 @@ class SqlitePaperJournal:
         return self._memory.postings(opportunity_id=opportunity_id)
 
 
-class SqlitePaperTradeRepository:
+class SqlitePaperTradeRepository(SerializedLedgerBound):
     def __init__(self, ledger: "SqlitePaperLedger") -> None:
         self._ledger = ledger
         self._connection = ledger._connection
@@ -415,9 +438,15 @@ class SqlitePaperLedger:
         from sports_hedge.treasury.service import PaperTreasuryService
 
         self._tx_depth = 0
-        self._connection = sqlite3.connect(str(database), check_same_thread=False)
+        self._lock = threading.RLock()
+        self._connection = sqlite3.connect(
+            str(database),
+            check_same_thread=False,
+            timeout=30.0,
+        )
         self._connection.row_factory = sqlite3.Row
         self._connection.isolation_level = None
+        self._connection.execute("PRAGMA busy_timeout=5000")
         self._create_schema()
         self.journal = SqlitePaperJournal(self)
         self.trades = SqlitePaperTradeRepository(self)
@@ -431,30 +460,37 @@ class SqlitePaperLedger:
             )
 
     @contextmanager
-    def transaction(self) -> Iterator[None]:
-        self._tx_depth += 1
-        started = self._tx_depth == 1
-        if started:
-            self._connection.execute("BEGIN IMMEDIATE")
-        try:
+    def exclusive(self) -> Iterator[None]:
+        with self._lock:
             yield
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self._lock:
+            self._tx_depth += 1
+            started = self._tx_depth == 1
             if started:
-                self._connection.commit()
-        except Exception:
-            if started:
-                self._connection.rollback()
-                self.reload_journal()
-            raise
-        finally:
-            self._tx_depth -= 1
+                self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                if started:
+                    self._connection.commit()
+            except Exception:
+                if started:
+                    self._connection.rollback()
+                    self.reload_journal()
+                raise
+            finally:
+                self._tx_depth -= 1
 
     def _commit(self) -> None:
         if self._tx_depth == 0:
             self._connection.commit()
 
     def reload_journal(self) -> None:
-        self.journal._memory = PaperJournal()
-        self.journal._hydrate_memory()
+        with self.exclusive():
+            self.journal._memory = PaperJournal()
+            self.journal._hydrate_memory()
 
     def _create_schema(self) -> None:
         self._connection.executescript(
@@ -660,7 +696,8 @@ class SqlitePaperLedger:
         self._connection.commit()
 
     def close(self) -> None:
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
 
 def _dec(value: Decimal | None) -> str | None:

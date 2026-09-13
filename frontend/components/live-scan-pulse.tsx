@@ -11,7 +11,15 @@ const VENUES: Array<{ key: string; label: string }> = [
 function venueTone(value: string | undefined): "ok" | "down" | "unknown" {
   if (!value) return "unknown";
   if (value === "ok") return "ok";
-  if (value === "unavailable" || value === "error" || value === "failed") return "down";
+  if (
+    value === "unavailable" ||
+    value === "error" ||
+    value === "failed" ||
+    value === "timeout" ||
+    value === "degraded"
+  ) {
+    return "down";
+  }
   return "unknown";
 }
 

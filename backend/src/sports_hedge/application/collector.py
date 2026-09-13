@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -257,6 +258,9 @@ class ReadOnlyCrossVenueCollector:
         matchbook_normalizer: MatchbookNormalizer | None = None,
         polymarket_normalizer: PolymarketNormalizer | None = None,
         kalshi_normalizer: KalshiNormalizer | None = None,
+        venue_timeout_seconds: float = 15.0,
+        provider_call_timeout_seconds: float = 8.0,
+        cycle_timeout_seconds: float | None = 45.0,
     ) -> None:
         self.matchbook = matchbook
         self.polymarket = polymarket
@@ -270,6 +274,14 @@ class ReadOnlyCrossVenueCollector:
         self.matchbook_builder = MatchbookObservationBuilder(self.matchbook_normalizer)
         self.polymarket_builder = PolymarketObservationBuilder(self.polymarket_normalizer)
         self.kalshi_builder = KalshiObservationBuilder(self.kalshi_normalizer)
+        self._venue_timeout_seconds = venue_timeout_seconds
+        self._provider_call_timeout_seconds = provider_call_timeout_seconds
+        self._cycle_timeout_seconds = cycle_timeout_seconds
+        self._op_issues: list[CollectorIssue] = []
+        self._op_venue_health: dict[str, str] = {}
+        self._op_venue_timeout = venue_timeout_seconds
+        self._op_provider_timeout = provider_call_timeout_seconds
+        self._op_deadline: float | None = None
 
     async def collect_and_scan(
         self,
@@ -291,6 +303,9 @@ class ReadOnlyCrossVenueCollector:
         max_event_pairs: int = 25,
         max_market_pairs_per_event: int = 50,
         config_warnings: list[str] | None = None,
+        venue_timeout_seconds: float | None = None,
+        provider_call_timeout_seconds: float | None = None,
+        cycle_timeout_seconds: float | None = None,
     ) -> CollectionReport:
         if max_event_pairs <= 0 or max_market_pairs_per_event <= 0:
             raise ValueError("collector pair limits must be positive")
@@ -301,33 +316,58 @@ class ReadOnlyCrossVenueCollector:
             VenueName.POLYMARKET.value: "unknown",
             VenueName.KALSHI.value: "unavailable" if self.kalshi is None else "unknown",
         }
+        self._op_issues = issues
+        self._op_venue_health = venue_health
+        self._op_venue_timeout = (
+            self._venue_timeout_seconds if venue_timeout_seconds is None else venue_timeout_seconds
+        )
+        self._op_provider_timeout = (
+            self._provider_call_timeout_seconds
+            if provider_call_timeout_seconds is None
+            else provider_call_timeout_seconds
+        )
+        cycle_budget = (
+            self._cycle_timeout_seconds if cycle_timeout_seconds is None else cycle_timeout_seconds
+        )
+        self._op_deadline = None if cycle_budget is None else monotonic() + float(cycle_budget)
 
-        raw_matchbook_events, matchbook_payload = await self._list_raw_events(
+        mb_task = self._list_raw_events(
             self.matchbook,
             venue=VenueName.MATCHBOOK,
             filters=matchbook_event_filters or {},
             issues=issues,
             venue_health=venue_health,
         )
-        issues.extend(_matchbook_discovery_issues(matchbook_payload))
-        raw_polymarket_events, _pm_payload = await self._list_raw_events(
+        pm_task = self._list_raw_events(
             self.polymarket,
             venue=VenueName.POLYMARKET,
             filters=polymarket_event_filters or {},
             issues=issues,
             venue_health=venue_health,
         )
-        raw_kalshi_events: list[dict[str, Any]] = []
         if self.kalshi is not None:
-            raw_kalshi_events, _k_payload = await self._list_raw_events(
-                self.kalshi,
-                venue=VenueName.KALSHI,
-                filters={},
-                issues=issues,
-                venue_health=venue_health,
+            (
+                (raw_matchbook_events, matchbook_payload),
+                (raw_polymarket_events, _),
+                (raw_kalshi_events, _),
+            ) = await asyncio.gather(
+                mb_task,
+                pm_task,
+                self._list_raw_events(
+                    self.kalshi,
+                    venue=VenueName.KALSHI,
+                    filters={},
+                    issues=issues,
+                    venue_health=venue_health,
+                ),
             )
         else:
+            (raw_matchbook_events, matchbook_payload), (raw_polymarket_events, _) = (
+                await asyncio.gather(mb_task, pm_task)
+            )
+            raw_kalshi_events = []
             venue_health[VenueName.KALSHI.value] = "unavailable"
+        issues.extend(_matchbook_discovery_issues(matchbook_payload))
 
         mb_scope = filter_in_scope_events(raw_matchbook_events, venue=VenueName.MATCHBOOK)
         pm_scope = filter_in_scope_events(raw_polymarket_events, venue=VenueName.POLYMARKET)
@@ -384,7 +424,21 @@ class ReadOnlyCrossVenueCollector:
         fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = {}
         discovered_fixtures: list[DiscoveredFixture] = []
 
-        for cluster in clusters:
+        for index, cluster in enumerate(clusters):
+            if self._deadline_reached():
+                issues.append(
+                    CollectorIssue(stage="collect", detail="scan_cycle_deadline_reached")
+                )
+                for leftover in clusters[index:]:
+                    discovered_fixtures.append(
+                        _fixture_from_cluster(
+                            leftover,
+                            seen_at=started_at,
+                            polymarket_events=polymarket_events,
+                            queried_series_ids=queried_series_ids,
+                        )
+                    )
+                break
             fixture, cluster_decisions, inventory, market_counts, fetched, pairs = (
                 await self._scan_cluster(
                     cluster,
@@ -458,6 +512,58 @@ class ReadOnlyCrossVenueCollector:
             issues=issues,
         )
 
+    def _deadline_reached(self) -> bool:
+        return self._op_deadline is not None and monotonic() >= self._op_deadline
+
+    def _record_timeout(
+        self,
+        stage: str,
+        venue: VenueName,
+        source_id: str | None = None,
+    ) -> None:
+        timeout = (
+            self._op_venue_timeout if stage == "list_events" else self._op_provider_timeout
+        )
+        self._op_issues.append(
+            CollectorIssue(
+                stage=stage,
+                venue=venue,
+                source_id=source_id,
+                detail=f"{stage}_timeout after {timeout:g}s",
+            )
+        )
+        health = self._op_venue_health
+        current = health.get(venue.value)
+        if stage == "list_events":
+            health[venue.value] = "timeout"
+        elif current == "ok":
+            health[venue.value] = "degraded"
+        elif current in {None, "unknown"}:
+            health[venue.value] = "timeout"
+
+    async def _wait_provider(
+        self,
+        coro: Any,
+        *,
+        stage: str,
+        venue: VenueName,
+        source_id: str | None = None,
+        default: Any,
+    ) -> tuple[Any, bool]:
+        try:
+            return await asyncio.wait_for(coro, timeout=self._op_provider_timeout), False
+        except TimeoutError:
+            self._record_timeout(stage, venue, source_id)
+            return default, True
+        except Exception as exc:
+            self._op_issues.append(
+                CollectorIssue(stage=stage, venue=venue, source_id=source_id, detail=str(exc))
+            )
+            current = self._op_venue_health.get(venue.value)
+            if current == "ok":
+                self._op_venue_health[venue.value] = "degraded"
+            return default, True
+
     async def _list_raw_events(
         self,
         client: Any,
@@ -468,7 +574,13 @@ class ReadOnlyCrossVenueCollector:
         venue_health: dict[str, str],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         try:
-            payload = await client.list_events(**filters)
+            payload = await asyncio.wait_for(
+                client.list_events(**filters),
+                timeout=self._op_venue_timeout,
+            )
+        except TimeoutError:
+            self._record_timeout("list_events", venue)
+            return [], {}
         except Exception as exc:
             issues.append(CollectorIssue(stage="list_events", venue=venue, detail=str(exc)))
             venue_health[venue.value] = "unavailable"
@@ -527,12 +639,22 @@ class ReadOnlyCrossVenueCollector:
         for mb_event in mb_events:
             try:
                 mb_started = perf_counter()
-                mb_market_payload = await self.matchbook.list_markets(
-                    mb_event.canonical.source_event_id,
-                    **matchbook_market_filters,
+                mb_market_payload, mb_failed = await self._wait_provider(
+                    self.matchbook.list_markets(
+                        mb_event.canonical.source_event_id,
+                        **matchbook_market_filters,
+                    ),
+                    stage="list_markets",
+                    venue=VenueName.MATCHBOOK,
+                    source_id=mb_event.canonical.source_event_id,
+                    default={"markets": []},
                 )
                 matchbook_market_latency_ms = _elapsed_ms(mb_started)
                 matchbook_retrieved_at = datetime.now(UTC)
+                if mb_failed:
+                    if fixture.no_comparison_reason is None:
+                        fixture.no_comparison_reason = "list_markets_unavailable"
+                    mb_market_payload = {"markets": []}
             except Exception as exc:
                 issues.append(
                     CollectorIssue(
@@ -572,11 +694,21 @@ class ReadOnlyCrossVenueCollector:
         for pm_event in pm_events:
             try:
                 pm_started = perf_counter()
-                pm_market_payload = await self.polymarket.list_markets(
-                    pm_event.canonical.source_event_id,
-                    **polymarket_market_filters,
+                pm_market_payload, pm_failed = await self._wait_provider(
+                    self.polymarket.list_markets(
+                        pm_event.canonical.source_event_id,
+                        **polymarket_market_filters,
+                    ),
+                    stage="list_markets",
+                    venue=VenueName.POLYMARKET,
+                    source_id=pm_event.canonical.source_event_id,
+                    default=[],
                 )
                 polymarket_market_latency_ms += _elapsed_ms(pm_started)
+                if pm_failed:
+                    if fixture.no_comparison_reason is None:
+                        fixture.no_comparison_reason = "list_markets_unavailable"
+                    pm_market_payload = []
             except Exception as exc:
                 issues.append(
                     CollectorIssue(
@@ -897,11 +1029,19 @@ class ReadOnlyCrossVenueCollector:
         for runner in market.canonical.runners:
             try:
                 started = perf_counter()
-                raw_book = await self.polymarket.get_order_book(
-                    event.canonical.source_event_id,
-                    market.canonical.source_market_id,
-                    runner.source_runner_id,
+                raw_book, book_timed_out = await self._wait_provider(
+                    self.polymarket.get_order_book(
+                        event.canonical.source_event_id,
+                        market.canonical.source_market_id,
+                        runner.source_runner_id,
+                    ),
+                    stage="order_book",
+                    venue=VenueName.POLYMARKET,
+                    source_id=runner.source_runner_id,
+                    default=None,
                 )
+                if book_timed_out or raw_book is None:
+                    return books_by_token, latency_ms, fetched, True
                 latency_ms += _elapsed_ms(started)
                 books_by_token[runner.source_runner_id] = raw_book
                 fetched += 1
@@ -977,7 +1117,13 @@ class ReadOnlyCrossVenueCollector:
         series_ticker = str(event.raw.get("series_ticker") or "").strip()
         if series_ticker:
             try:
-                series = await self.kalshi.get_series(series_ticker)
+                series, _series_failed = await self._wait_provider(
+                    self.kalshi.get_series(series_ticker),
+                    stage="get_series",
+                    venue=VenueName.KALSHI,
+                    source_id=series_ticker,
+                    default=None,
+                )
             except Exception as exc:
                 issues.append(
                     CollectorIssue(
@@ -993,7 +1139,15 @@ class ReadOnlyCrossVenueCollector:
             raw_markets = [item for item in nested if isinstance(item, dict)]
         else:
             try:
-                payload = await self.kalshi.list_markets(event.canonical.source_event_id)
+                payload, markets_failed = await self._wait_provider(
+                    self.kalshi.list_markets(event.canonical.source_event_id),
+                    stage="list_markets",
+                    venue=VenueName.KALSHI,
+                    source_id=event.canonical.source_event_id,
+                    default={"markets": []},
+                )
+                if markets_failed:
+                    return [], [], series, 0
                 raw_markets = _extract_matchbook_items(payload, "markets")
             except Exception as exc:
                 issues.append(
@@ -1106,10 +1260,18 @@ class ReadOnlyCrossVenueCollector:
         for ticker in tickers:
             try:
                 started = perf_counter()
-                raw_book = await self.kalshi.get_order_book(
-                    event.canonical.source_event_id,
-                    ticker,
+                raw_book, book_failed = await self._wait_provider(
+                    self.kalshi.get_order_book(
+                        event.canonical.source_event_id,
+                        ticker,
+                    ),
+                    stage="order_book",
+                    venue=VenueName.KALSHI,
+                    source_id=ticker,
+                    default=None,
                 )
+                if book_failed or raw_book is None:
+                    return None, fetched
                 latency_ms += _elapsed_ms(started)
                 books_by_ticker[ticker] = raw_book
                 fetched += 1

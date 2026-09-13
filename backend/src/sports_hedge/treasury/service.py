@@ -20,6 +20,7 @@ from sports_hedge.accounting.paper_journal import (
 from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.settlement import PaperSettlementComputation
 from sports_hedge.paper.trades import PaperSettlementRequest, PaperTrade
+from sports_hedge.persistence.paper_ledger import SerializedLedgerBound
 from sports_hedge.treasury.models import (
     PaperTreasuryEvent,
     PaperTreasuryEventType,
@@ -40,7 +41,7 @@ class PaperTreasuryError(ValueError):
     """Fail-closed paper treasury mutation."""
 
 
-class PaperTreasuryService:
+class PaperTreasuryService(SerializedLedgerBound):
     def __init__(self, ledger: Any) -> None:
         self._ledger = ledger
         self._connection = ledger._connection

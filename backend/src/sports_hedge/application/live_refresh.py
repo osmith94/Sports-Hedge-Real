@@ -16,6 +16,10 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookDiscoveryError
 
 
+class ScanCycleTimeout(TimeoutError):
+    """Raised when a live-refresh cycle exceeds its bounded deadline."""
+
+
 class LiveRefreshStatus(BaseModel):
     discovery_source: VenueName = VenueName.MATCHBOOK
     discovery_mode: str = "venue_union"
@@ -80,28 +84,64 @@ class LiveRefreshCoordinator:
         )
         self.configure_from_settings()
 
-    async def run_cycle(self, runner) -> CollectionReport:
+    async def run_cycle(self, runner, *, timeout_seconds: float | None = None) -> CollectionReport:
+        settings = get_settings()
+        timeout = float(
+            settings.paper_scan_cycle_timeout_seconds if timeout_seconds is None else timeout_seconds
+        )
         async with self._lock:
+            started = datetime.now(UTC)
             self.status = self.status.model_copy(
                 update={
                     "cycle_in_progress": True,
-                    "last_started_at": datetime.now(UTC),
+                    "last_started_at": started,
                     "last_error": None,
                 }
             )
             try:
-                report = await runner()
+                report = await asyncio.wait_for(runner(), timeout=timeout)
                 self.record_report(report)
                 return report
+            except TimeoutError as exc:
+                finished = datetime.now(UTC)
+                message = f"scan_cycle_timeout after {timeout:g}s"
+                self.status = self.status.model_copy(
+                    update={
+                        "cycle_in_progress": False,
+                        "last_error": message,
+                        "last_completed_at": finished,
+                        "last_duration_ms": max(
+                            0, int((finished - started).total_seconds() * 1000)
+                        ),
+                    }
+                )
+                raise ScanCycleTimeout(message) from exc
             except Exception as exc:
+                finished = datetime.now(UTC)
                 self.status = self.status.model_copy(
                     update={
                         "cycle_in_progress": False,
                         "last_error": str(exc),
-                        "last_completed_at": datetime.now(UTC),
+                        "last_completed_at": finished,
+                        "last_duration_ms": max(
+                            0, int((finished - started).total_seconds() * 1000)
+                        ),
                     }
                 )
                 raise
+            finally:
+                if self.status.cycle_in_progress:
+                    finished = datetime.now(UTC)
+                    self.status = self.status.model_copy(
+                        update={
+                            "cycle_in_progress": False,
+                            "last_error": self.status.last_error or "scan_cycle_abandoned",
+                            "last_completed_at": self.status.last_completed_at or finished,
+                            "last_duration_ms": max(
+                                0, int((finished - started).total_seconds() * 1000)
+                            ),
+                        }
+                    )
 
     def record_report(self, report: CollectionReport) -> None:
         self._last_report = report
@@ -164,11 +204,17 @@ class LiveRefreshCoordinator:
 
     async def _loop(self, tick) -> None:
         while not self._stop.is_set():
+            if self.status.cycle_in_progress:
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=1.0)
+                except TimeoutError:
+                    continue
+                break
             try:
                 await tick()
             except asyncio.CancelledError:
                 raise
-            except (MatchbookAuthError, MatchbookDiscoveryError, Exception):
+            except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, Exception):
                 pass
             try:
                 await asyncio.wait_for(

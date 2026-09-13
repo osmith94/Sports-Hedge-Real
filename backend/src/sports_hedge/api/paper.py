@@ -25,6 +25,7 @@ from sports_hedge.application.paper_operations import PaperOperationsError, Pape
 from sports_hedge.application.collector import CollectionReport, ReadOnlyCrossVenueCollector
 from sports_hedge.application.live_refresh import (
     LiveRefreshStatus,
+    ScanCycleTimeout,
     get_live_refresh_coordinator,
 )
 from sports_hedge.application.market_observation import (
@@ -651,6 +652,8 @@ async def collect_read_only_market_data(
 
     try:
         return await coordinator.run_cycle(runner)
+    except ScanCycleTimeout as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except (MatchbookAuthError, MatchbookDiscoveryError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except httpx.HTTPError as exc:
@@ -675,6 +678,9 @@ async def _execute_collection(
         polymarket=polymarket,
         kalshi=kalshi,
         paper_scan=service,
+        venue_timeout_seconds=settings.paper_scan_venue_timeout_seconds,
+        provider_call_timeout_seconds=settings.paper_scan_provider_timeout_seconds,
+        cycle_timeout_seconds=settings.paper_scan_cycle_timeout_seconds,
     )
     try:
         report = await collector.collect_and_scan(
@@ -723,7 +729,7 @@ async def server_owned_refresh_tick() -> None:
 
     try:
         await coordinator.run_cycle(runner)
-    except (MatchbookAuthError, MatchbookDiscoveryError, httpx.HTTPError):
+    except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, httpx.HTTPError):
         return
 
 
