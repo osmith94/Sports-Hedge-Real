@@ -6,7 +6,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityLifecycleEvent
+from sports_hedge.arbitrage.watchlist.ranking import tracked_cohort_opportunity_ids
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.config import get_settings
@@ -74,12 +76,19 @@ def tracked_markets(
     market_family: MarketFamily | None = None,
     service: WatchlistService = Depends(get_watchlist_service),
 ) -> list[NearOpportunity]:
+    report = get_live_refresh_coordinator().last_report()
+    if report is None:
+        return []
+    cohort_ids = tracked_cohort_opportunity_ids(
+        decision.canonical_market_id for decision in report.paper_decisions
+    )
     return _read_watchlist(
         service.tracked,
         limit=limit,
         competition=competition,
         venue=venue,
         market_family=market_family,
+        collection_cohort_ids=cohort_ids,
     )
 
 

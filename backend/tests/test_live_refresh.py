@@ -136,6 +136,8 @@ def test_live_refresh_status_is_matchbook_primary_and_server_loop_off_by_default
 
 
 def test_tracked_rows_expose_source_freshness_and_narrative() -> None:
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
     repository = SqliteWatchlistRepository()
     service = WatchlistService(repository, clock=lambda: OBSERVED + timedelta(seconds=20))
     app.dependency_overrides[get_watchlist_service] = lambda: service
@@ -144,6 +146,9 @@ def test_tracked_rows_expose_source_freshness_and_narrative() -> None:
     service.observe(
         _observation(market_id="mkt-src", net="-0.006", when=OBSERVED + timedelta(seconds=20))
     )
+    from test_tracked_current_snapshot import _report
+
+    coordinator.record_report(_report("mkt-src"))
     try:
         tracked = client.get("/paper/watchlist/tracked")
         assert tracked.status_code == 200
@@ -158,6 +163,7 @@ def test_tracked_rows_expose_source_freshness_and_narrative() -> None:
         assert row["last_seen_at"]
     finally:
         app.dependency_overrides.clear()
+        coordinator.reset()
         repository.close()
 
 

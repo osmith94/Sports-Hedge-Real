@@ -139,7 +139,7 @@ describe("tracked market sort", () => {
     );
   });
 
-  it("does not change economics, status, or classification while reordering", () => {
+    it("does not change economics, status, or classification while reordering", () => {
     const rows = [
       opportunity({ id: "a", eventLabel: "Alpha", status: "REJECTED", netArb: 0.001, executable: false }),
       opportunity({ id: "b", eventLabel: "Beta", status: "TRIGGERED", netArb: 0.012, executable: true }),
@@ -151,6 +151,68 @@ describe("tracked market sort", () => {
     assert.equal(sorted[0].netArb, 0.012);
     assert.equal(sorted[1].status, "REJECTED");
     assert.equal(sorted[1].executable, false);
+  });
+
+  it("defaults to strongest current opportunity first, with rejected last", () => {
+    const rows = [
+      opportunity({
+        id: "rejected",
+        eventLabel: "Rejected",
+        status: "REJECTED",
+        netArb: 0.04,
+        distanceToTriggerPp: 0,
+        executable: false,
+      }),
+      opportunity({
+        id: "watch-far",
+        eventLabel: "Far",
+        status: "WATCHING",
+        netArb: 0.001,
+        distanceToTriggerPp: 0.9,
+        executable: false,
+      }),
+      opportunity({
+        id: "watch-near",
+        eventLabel: "Near",
+        status: "APPROACHING",
+        netArb: 0.009,
+        distanceToTriggerPp: 0.1,
+        executable: false,
+      }),
+      opportunity({
+        id: "trig-weak",
+        eventLabel: "Weak trigger",
+        status: "TRIGGERED",
+        netArb: 0.011,
+        distanceToTriggerPp: 0,
+        executable: true,
+      }),
+      opportunity({
+        id: "trig-strong",
+        eventLabel: "Strong trigger",
+        status: "TRIGGERED",
+        netArb: 0.03,
+        distanceToTriggerPp: 0,
+        executable: true,
+      }),
+    ];
+    const ranked = sortTrackedMarkets(rows, null, 0.01);
+    assert.deepEqual(
+      ranked.map((row) => row.id),
+      ["trig-strong", "trig-weak", "watch-near", "watch-far", "rejected"],
+    );
+  });
+
+  it("lets a clicked column override the default ranking", () => {
+    const rows = [
+      opportunity({ id: "trig", eventLabel: "Triggered", status: "TRIGGERED", netArb: 0.02, executable: true }),
+      opportunity({ id: "rejected", eventLabel: "Rejected", status: "REJECTED", netArb: 0.001, executable: false }),
+    ];
+    const byFixture = sortTrackedMarkets(rows, { column: "fixture", direction: "asc" }, 0.01);
+    assert.deepEqual(
+      byFixture.map((row) => row.id),
+      ["rejected", "trig"],
+    );
   });
 });
 

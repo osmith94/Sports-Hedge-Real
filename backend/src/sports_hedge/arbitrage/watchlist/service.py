@@ -26,6 +26,8 @@ from sports_hedge.arbitrage.watchlist.models import (
     OpportunityObservationPoint,
 )
 from sports_hedge.arbitrage.watchlist.ranking import (
+    filter_tracked_to_cohort,
+    opportunity_id_for_canonical_market,
     rank_near_opportunities,
     rank_tracked_opportunities,
     rank_triggered_opportunities,
@@ -76,7 +78,7 @@ class WatchlistService:
         return self.observe(observation)
 
     def observe(self, observation: WatchObservation) -> NearOpportunity:
-        opportunity_id = _opportunity_id(observation.canonical_market_id)
+        opportunity_id = opportunity_id_for_canonical_market(observation.canonical_market_id)
         previous = self.repository.get(opportunity_id)
         status, reasons = classify_status(
             observation,
@@ -305,18 +307,26 @@ class WatchlistService:
         venue: VenueName | None = None,
         market_family: MarketFamily | None = None,
         as_of: datetime | None = None,
+        collection_cohort_ids: set[str] | None = None,
     ) -> list[NearOpportunity]:
-        """Canonical markets currently on the watchlist, including below-break-even net edges."""
+        """Current collection-cohort board, including below-break-even net edges.
 
-        return rank_tracked_opportunities(
-            self._freshness_filtered(
-                competition=competition,
-                venue=venue,
-                market_family=market_family,
-                as_of=as_of,
-            ),
-            limit=limit,
+        Pass `collection_cohort_ids` from the latest completed live collection's
+        paper decisions. An empty set is an honest empty current snapshot. Omit
+        the argument only for unit tests of ranking/freshness against persisted
+        rows. This does not delete persisted observations or lifecycle history.
+        """
+
+        items = self._filtered(
+            competition=competition,
+            venue=venue,
+            market_family=market_family,
         )
+        if collection_cohort_ids is not None:
+            items = filter_tracked_to_cohort(items, collection_cohort_ids)
+        evaluated = require_aware_instant(as_of or self._clock(), "as_of")
+        presented = [self._present_freshness(item, evaluated) for item in items]
+        return rank_tracked_opportunities(presented, limit=limit)
 
     def activity(
         self,
@@ -675,5 +685,6 @@ class WatchlistService:
         )
 
 
-def _opportunity_id(canonical_market_id: str) -> str:
-    return f"watch:{canonical_market_id}"
+_opportunity_id = opportunity_id_for_canonical_market
+
+
