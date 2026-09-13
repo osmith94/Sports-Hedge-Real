@@ -55,6 +55,7 @@ from sports_hedge.paper.bet_ticket import (
     BetTicketTreasuryRemaining,
     RecommendedPaperDeployment,
     bet_ticket_action,
+    current_bet_deployability,
 )
 from sports_hedge.paper.preparation import (
     PreparablePaperOpportunity,
@@ -208,22 +209,25 @@ class PaperOperationsService:
             if canonical_event_id is not None and plan.canonical_event_id != canonical_event_id:
                 continue
             watch = self.watchlist.repository.get(plan.opportunity_id)
-            actionable, blocked = bet_ticket_action(
+            semantic, blocked = bet_ticket_action(
                 plan=plan,
                 watch=watch,
                 solver_is_arbitrage=_solver_is_arbitrage(plan.decision),
             )
             recommended = None
             maximum = None
-            if actionable:
+            actionable = False
+            if semantic:
                 try:
-                    rec = self.recommend_paper_deployment(plan.opportunity_id)
+                    rec = self._recommend_from_plan(plan, watch)
+                    actionable = rec.bet_actionable
+                    blocked = rec.bet_blocked_reason
                     if rec.accepted:
                         recommended = rec.recommended_size_gbp
-                        maximum = rec.maximum_validated_size_gbp
-                except PaperOperationsError:
-                    recommended = None
-                    maximum = None
+                    maximum = rec.maximum_validated_size_gbp
+                except PaperOperationsError as exc:
+                    actionable = False
+                    blocked = str(exc)
             market, settlement = _ticket_market_labels(plan, watch)
             rows.append(
                 PreparablePaperOpportunity(
@@ -246,39 +250,66 @@ class PaperOperationsService:
     def annotate_bet_ticket_actions(
         self, items: list[NearOpportunity]
     ) -> list[NearOpportunity]:
-        """Attach BET actionability at read time. Does not persist or resize."""
+        """Attach BET actionability at read time. Does not persist, lock, or OPEN."""
 
         annotated: list[NearOpportunity] = []
         for item in items:
             plan = self._plans.get(item.opportunity_id)
-            actionable, blocked = bet_ticket_action(
+            semantic, blocked = bet_ticket_action(
                 plan=plan,
                 watch=item,
                 solver_is_arbitrage=_solver_is_arbitrage(plan.decision) if plan is not None else False,
             )
-            annotated.append(
-                item.model_copy(
-                    update={
-                        "bet_actionable": actionable,
-                        "bet_blocked_reason": blocked,
-                    }
+            if not semantic or plan is None:
+                annotated.append(
+                    item.model_copy(
+                        update={
+                            "bet_actionable": False,
+                            "bet_blocked_reason": blocked,
+                        }
+                    )
                 )
-            )
+                continue
+            try:
+                rec = self._recommend_from_plan(plan, item)
+                annotated.append(
+                    item.model_copy(
+                        update={
+                            "bet_actionable": rec.bet_actionable,
+                            "bet_blocked_reason": rec.bet_blocked_reason,
+                        }
+                    )
+                )
+            except PaperOperationsError as exc:
+                annotated.append(
+                    item.model_copy(
+                        update={
+                            "bet_actionable": False,
+                            "bet_blocked_reason": str(exc),
+                        }
+                    )
+                )
         return annotated
 
     def recommend_paper_deployment(self, opportunity_id: str) -> RecommendedPaperDeployment:
         """Allocator recommended GBP size. No treasury mutation, no OPEN, no stored preview."""
 
         plan = self._plans.get(opportunity_id)
-        watch = self.watchlist.repository.get(opportunity_id)
-        actionable, blocked = bet_ticket_action(
-            plan=plan,
-            watch=watch,
-            solver_is_arbitrage=_solver_is_arbitrage(plan.decision) if plan is not None else False,
-        )
         if plan is None:
             raise PaperOperationsError("missing_paper_fill_plan")
-        if not actionable:
+        watch = self.watchlist.repository.get(opportunity_id)
+        return self._recommend_from_plan(plan, watch)
+
+    def _recommend_from_plan(
+        self, plan: PaperFillPlan, watch: NearOpportunity | None
+    ) -> RecommendedPaperDeployment:
+        opportunity_id = plan.opportunity_id
+        semantic, blocked = bet_ticket_action(
+            plan=plan,
+            watch=watch,
+            solver_is_arbitrage=_solver_is_arbitrage(plan.decision),
+        )
+        if not semantic:
             return RecommendedPaperDeployment(
                 opportunity_id=opportunity_id,
                 accepted=False,
@@ -294,12 +325,20 @@ class PaperOperationsService:
                 bet_blocked_reason=rejected,
             )
         baseline = allocate(request)
+        deployable, reason = current_bet_deployability(
+            semantically_qualified=True,
+            semantic_blocked_reason=None,
+            allocation_accepted=baseline.accepted,
+            recommended_size=baseline.recommended_size,
+            allocation_rejection_reason=baseline.rejection_reason,
+            limiting_constraint_detail=baseline.limiting_constraint_detail,
+        )
         return RecommendedPaperDeployment(
             opportunity_id=opportunity_id,
-            accepted=baseline.accepted and baseline.recommended_size > 0,
-            bet_actionable=True,
-            bet_blocked_reason=None if baseline.accepted else baseline.rejection_reason,
-            recommended_size_gbp=baseline.recommended_size if baseline.accepted else Decimal("0"),
+            accepted=deployable,
+            bet_actionable=deployable,
+            bet_blocked_reason=reason,
+            recommended_size_gbp=baseline.recommended_size if deployable else Decimal("0"),
             maximum_validated_size_gbp=baseline.maximum_validated_size,
             limiting_constraint=baseline.limiting_constraint,
             limiting_constraint_detail=baseline.limiting_constraint_detail,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.arbitrage.allocation.models import AllocationConstraintKind, NativeBalanceAfter
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityStatus
@@ -25,11 +25,12 @@ def bet_ticket_action(
     watch: NearOpportunity | None,
     solver_is_arbitrage: bool,
 ) -> tuple[bool, str | None]:
-    """Whether a row may expose an active BET control.
+    """Semantic/solver qualification only — not current deployability.
 
-    Qualification is the existing prepare/fill-plan seam, not raw edge.
     Rejected, unevaluated, stale, unsupported, or below-trigger rows stay
-    non-actionable even if displayed edge is positive.
+    non-actionable even if displayed edge is positive. Active BET also
+    requires a current allocator recommendation with positive size; that
+    check lives in ``current_bet_deployability``.
     """
 
     if watch is not None and watch.status not in ACTIONABLE_STATUSES:
@@ -57,6 +58,32 @@ def bet_ticket_action(
     ]
     if blockers:
         return False, blockers[0]
+    return True, None
+
+
+def current_bet_deployability(
+    *,
+    semantically_qualified: bool,
+    semantic_blocked_reason: str | None,
+    allocation_accepted: bool | None = None,
+    recommended_size: Decimal | None = None,
+    allocation_rejection_reason: str | None = None,
+    limiting_constraint_detail: str | None = None,
+) -> tuple[bool, str | None]:
+    """Active BET requires semantic qualification *and* current allocate().
+
+    If treasury, exposure, reserve, or policy now reject — or recommended
+    size is zero — the row is not actionable even when still TRIGGERED.
+    """
+
+    if not semantically_qualified:
+        return False, semantic_blocked_reason
+    if allocation_accepted is not True or recommended_size is None or recommended_size <= 0:
+        return False, (
+            allocation_rejection_reason
+            or limiting_constraint_detail
+            or "current_allocation_unavailable"
+        )
     return True, None
 
 
@@ -144,3 +171,9 @@ class RecommendedPaperDeployment(BaseModel):
         "Recommended size is bounded by treasury, executable depth, fees/FX, "
         "risk and allocator policy. Preparation still required before OPEN."
     )
+
+    @model_validator(mode="after")
+    def bet_actionable_requires_accepted_allocation(self) -> "RecommendedPaperDeployment":
+        if self.bet_actionable and not self.accepted:
+            raise ValueError("bet_actionable_requires_accepted_allocation")
+        return self
