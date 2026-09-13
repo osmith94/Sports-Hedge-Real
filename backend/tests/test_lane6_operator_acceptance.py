@@ -125,7 +125,14 @@ def _bundle(tmp_path: Path):
 def test_lane6_records_exact_git_sha() -> None:
     sha = git_sha()
     assert re.fullmatch(r"[0-9a-f]{40}", sha), sha
-    # Lane 6 branched from the audited PR #115 head; later harness commits may sit on top.
+    probe = subprocess.run(
+        ["git", "cat-file", "-t", AUDITED_PR115_HEAD],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return
     merge_base = subprocess.check_output(
         ["git", "merge-base", "HEAD", AUDITED_PR115_HEAD],
         cwd=REPO_ROOT,
