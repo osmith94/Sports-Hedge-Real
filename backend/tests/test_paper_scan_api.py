@@ -176,7 +176,11 @@ def test_economics_status_is_backend_resolved() -> None:
     assert body["data_kind"] == "backend_resolved"
     assert "fx" in body
     assert "venue_costs" in body
+    assert "fx_schedule" in body
+    assert "enabled" in body["fx_schedule"]
     assert all("retrieved_at" in row for row in body["fx"])
+    assert all("check_status" in row for row in body["fx"])
+    assert all("carried_forward" in row for row in body["fx"])
 
 
 def test_frontend_live_scanner_does_not_send_operator_fx_or_fees() -> None:

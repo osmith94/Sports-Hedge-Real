@@ -142,6 +142,7 @@ class EconomicsStatus(BaseModel):
     fx: list[dict[str, Any]] = Field(default_factory=list)
     venue_costs: list[dict[str, Any]] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
+    fx_schedule: dict[str, Any] = Field(default_factory=dict)
 
 
 class PaperPoolUpdate(BaseModel):
@@ -613,9 +614,14 @@ def economics_status(
                     "valuation_date": rate.valuation_date.isoformat(),
                     "retrieved_at": retrieved.isoformat() if retrieved is not None else None,
                     "status": rate.status.value,
+                    "check_status": rate.status.value,
+                    "carried_forward": rate.status.value == "carried_forward",
                     "primary_source": rate.primary_source,
                     "variance_bps": None if rate.variance_bps is None else str(rate.variance_bps),
                     "check_source": rate.check_source,
+                    "check_gbp_per_unit": (
+                        None if rate.check_gbp_per_unit is None else str(rate.check_gbp_per_unit)
+                    ),
                 }
             )
             try:
@@ -631,7 +637,14 @@ def economics_status(
         for snapshot in costs.list_status(as_of=as_of)
         if snapshot.market_class in {"both_teams_to_score", "match_result", "player_props"}
     ]
-    return EconomicsStatus(as_of=as_of, fx=fx_rows, venue_costs=venue_rows, issues=issues)
+    schedule = get_accounting_schedule()
+    return EconomicsStatus(
+        as_of=as_of,
+        fx=fx_rows,
+        venue_costs=venue_rows,
+        issues=issues,
+        fx_schedule=schedule.operator_status(as_of=as_of),
+    )
 
 
 @router.get("/live-refresh", response_model=LiveRefreshStatus)

@@ -621,7 +621,11 @@ def test_windows_launcher_scripts_encode_paper_only_contract() -> None:
     assert "SPORTS_HEDGE_EXECUTION_ENABLED" in start_ps1
     assert '"false"' in start_ps1
     assert "PAPER_AUTOFILL_ENABLED" in start_ps1
+    assert '$env:PAPER_AUTOFILL_ENABLED = "false"' in start_ps1
     assert "PAPER_LIVE_REFRESH_ENABLED" in start_ps1
+    assert '$env:PAPER_LIVE_REFRESH_ENABLED = "true"' in start_ps1
+    assert '$env:ACCOUNTING_SCHEDULE_ENABLED = "true"' in start_ps1
+    assert '$env:SPORTS_HEDGE_EXECUTION_ENABLED = "false"' in start_ps1
     assert '"true"' in start_ps1
     assert "WindowStyle Hidden" in start_ps1
     assert "/health" in start_ps1
@@ -647,6 +651,11 @@ def test_windows_launcher_scripts_encode_paper_only_contract() -> None:
     assert "production readiness" in docs.lower()
     assert "Refresh Live Discovery" in docs
     assert "Tenet 18" in docs or "execution atomicity" in docs.lower()
+    assert "ACCOUNTING_SCHEDULE_ENABLED" in docs
+    runbook = (REPO_ROOT / "docs/DEMO_RUNBOOK.md").read_text(encoding="utf-8")
+    assert "ACCOUNTING_SCHEDULE_ENABLED" in runbook
+    assert "16:15" in runbook
+    assert "paper_demo_fx_snapshot" in runbook
 
 
 def test_stale_demo_pid_is_not_killed() -> None:

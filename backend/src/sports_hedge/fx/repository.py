@@ -131,6 +131,51 @@ class SqliteFxRateRepository:
         self._connection.commit()
         return rate
 
+    def replace_carried_forward_with_published(self, rate: DailyFxRate) -> DailyFxRate:
+        """Upgrade a same-date carry-forward placeholder to the published ECB primary.
+
+        Never replaces an already-persisted published primary.
+        """
+
+        existing = self.get(rate.currency, rate.valuation_date)
+        if existing is None:
+            return self.insert_if_absent(rate)
+        if existing.status is not FxCheckStatus.CARRIED_FORWARD:
+            return existing
+        self._connection.execute(
+            """
+            UPDATE fx_daily_rates
+            SET source_date = ?, gbp_per_unit = ?, retrieved_at = ?,
+                primary_source = ?, primary_source_id = ?, raw_primary_json = ?,
+                check_source = ?, check_source_id = ?, check_gbp_per_unit = ?,
+                raw_check_json = ?, variance_bps = ?, status = ?, captured_at = ?
+            WHERE currency = ? AND valuation_date = ? AND status = ?
+            """,
+            (
+                rate.source_date.isoformat(),
+                str(rate.gbp_per_unit),
+                rate.retrieved_at.isoformat(),
+                rate.primary_source,
+                rate.primary_source_id,
+                json.dumps(rate.raw_primary),
+                rate.check_source,
+                rate.check_source_id,
+                None if rate.check_gbp_per_unit is None else str(rate.check_gbp_per_unit),
+                json.dumps(rate.raw_check),
+                None if rate.variance_bps is None else str(rate.variance_bps),
+                rate.status.value,
+                (rate.captured_at or rate.retrieved_at).isoformat(),
+                rate.currency,
+                rate.valuation_date.isoformat(),
+                FxCheckStatus.CARRIED_FORWARD.value,
+            ),
+        )
+        self._connection.commit()
+        stored = self.get(rate.currency, rate.valuation_date)
+        if stored is None:
+            raise KeyError(f"FX row vanished for {rate.currency} {rate.valuation_date}")
+        return stored
+
     def update_check_fields(self, rate: DailyFxRate) -> DailyFxRate:
         """Attach/replace independent-check fields only. Never changes gbp_per_unit."""
 

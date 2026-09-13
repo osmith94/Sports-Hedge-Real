@@ -47,7 +47,11 @@ Or from PowerShell:
 .\scripts\windows\Start-SportsHedge-Demo.ps1
 ```
 
-The launcher sets `PAPER_AUTOFILL_ENABLED=false` so the operator can choose £10 before OPEN. It sets `PAPER_LIVE_REFRESH_ENABLED=true` for this local process only. It never sets `SPORTS_HEDGE_EXECUTION_ENABLED=true`.
+The launcher sets `PAPER_AUTOFILL_ENABLED=false` so the operator can choose £10 before OPEN. It sets `PAPER_LIVE_REFRESH_ENABLED=true` and `ACCOUNTING_SCHEDULE_ENABLED=true` for this local process only. It never sets `SPORTS_HEDGE_EXECUTION_ENABLED=true`.
+
+On backend start the accounting scheduler bootstraps the latest published ECB daily USD close when `fx_rates.sqlite` is empty or the persisted USD rate is stale, including Sunday/holiday starts (Friday's close is carried forward). It does **not** substitute the treasury demo FX snapshot (`paper_demo_fx_snapshot`, 0.80) into arb qualification. If ECB/network fetch fails, `/paper/economics-status` stays `missing_fx_rate:USD` and scans fail closed.
+
+After bootstrap, `/paper/economics-status` (econ strip on `/`) shows USD GBP-per-unit, ECB source date, valuation date, carried-forward status, retrieval time, and BoE check status when available. Startup logs under `logs\demo-backend.*.log` repeat the same fields. Daily ingest is once per 16:15 Europe/London working day, not every scheduler tick.
 
 Labelled `/demo` books are frozen `DEMO / FIXTURE REPLAY` snapshots (`data_kind=demo_fixture_replay`). Live quote-age rejection on `/` still fail-closes stale `live_paper` rows. Fixture replay is not a live-freshness waiver.
 

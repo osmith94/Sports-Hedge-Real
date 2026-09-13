@@ -680,15 +680,18 @@ class PaperScanService:
         fx_snapshots: list[FxRateSnapshot] | None,
         as_of: datetime,
     ) -> tuple[list[FxRateSnapshot], list[str]]:
-        if fx_snapshots is not None:
+        if fx_snapshots:
             return _with_gbp_rate(list(fx_snapshots), as_of=as_of), []
         if self.fx_service is None:
             return _with_gbp_rate([], as_of=as_of), []
         currencies = {left.native_currency, right.native_currency, "GBP"}
         try:
-            return self.fx_service.paper_snapshots(currencies, as_of=as_of), []
+            snapshots = self.fx_service.paper_snapshots(currencies, as_of=as_of)
         except FxRateUnavailable as exc:
             return _with_gbp_rate([], as_of=as_of), [exc.reason]
+        if any(item.source == "paper_demo_fx_snapshot" for item in snapshots):
+            return _with_gbp_rate([], as_of=as_of), ["missing_fx_rate:USD"]
+        return snapshots, []
 
 
 def _cost_clock_reasons(captured_at: datetime, *, kind: str, as_of: datetime) -> list[str]:
