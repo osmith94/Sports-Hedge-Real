@@ -642,7 +642,7 @@ class PaperOperationsService:
             recorded_at=occurred,
             opportunity_id=trade.opportunity_id,
             trade_id=trade.trade_id,
-            maximum_execution_risk=decision.policy.max_execution_risk,
+            maximum_execution_risk=(policy or UnwindPolicy()).max_execution_risk,
         )
         if unwind_risk is not None:
             trade.close_risks.append(unwind_risk)

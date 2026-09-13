@@ -118,4 +118,6 @@ async def test_manchester_derby_live_logical_from_public_providers() -> None:
             report["canonical_identity"]["reason"] or ""
         )
     if report["venues"]["matchbook"]["reachable"] is False:
-        assert "owner-Windows" in report["matchbook_owner_requirement"]
+        requirement = report["matchbook_owner_requirement"].casefold()
+        assert "windows" in requirement
+        assert "matchbook" in requirement
