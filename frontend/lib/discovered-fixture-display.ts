@@ -1,4 +1,4 @@
-import { DiscoveredFixture } from "./api";
+import { DiscoveredFixture, LiveRefreshStatus } from "./api";
 import { kickoffLocalLabel, kickoffRelativeLabel, percent, percentPoints } from "./format";
 
 export const DISCOVERY_TABLE_HEADERS = [
@@ -279,4 +279,41 @@ export function technicalDetailLines(item: DiscoveredFixture): string[] {
     item.best_kalshi_price != null ? `K ${decimalText(item.best_kalshi_price)}` : null,
     arbClaimLabel(item),
   ].filter((line): line is string => Boolean(line));
+}
+
+export type DiscoveryCompactCounts = {
+  fixtures: number;
+  crossVenue: number;
+  equivalent: number;
+  qualifying: number;
+  skipped: number;
+};
+
+export function discoveryCompactCounts(status: LiveRefreshStatus | null): DiscoveryCompactCounts {
+  const fixtures = status?.discovered_fixtures ?? [];
+  return {
+    fixtures: fixtures.length,
+    crossVenue: status?.last_matched_event_pairs ?? 0,
+    equivalent: fixtures.reduce((sum, item) => sum + (item.matched_equivalent_count ?? 0), 0),
+    qualifying: fixtures.filter((item) => item.solver_is_arbitrage).length,
+    skipped: status?.skipped_out_of_scope ?? 0,
+  };
+}
+
+export function discoveryCompactSummaryLabel(
+  status: LiveRefreshStatus | null,
+  available: boolean,
+): string {
+  if (!available || !status) {
+    return "Fixture Discovery · status unavailable";
+  }
+  const counts = discoveryCompactCounts(status);
+  return (
+    `Fixture Discovery · ${counts.fixtures} fixtures · ${counts.crossVenue} cross-venue · ` +
+    `${counts.equivalent} equivalent · ${counts.qualifying} qualifying · ${counts.skipped} skipped`
+  );
+}
+
+export function discoveryStatusBadgeLabel(available: boolean): string {
+  return available ? "LIVE PAPER · MB / PM / K" : "DISCOVERY STATUS UNAVAILABLE";
 }

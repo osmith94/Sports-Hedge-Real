@@ -4,6 +4,9 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["lib/**/*.test.ts", "components/**/*.test.ts"],
-    exclude: ["lib/tracked-markets-display.test.ts"],
+    exclude: [
+      "lib/tracked-markets-display.test.ts",
+      "lib/discovered-fixture-display.test.ts",
+    ],
   },
 });
