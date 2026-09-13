@@ -28,6 +28,7 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.trades import PaperLegFillKind, PaperTradeState
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
+from sports_hedge.application.demo_launcher_pid import decide_demo_stop_action
 from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import MatchbookClient
 from sports_hedge.venues.polymarket import PolymarketClient
@@ -231,6 +232,26 @@ def test_generalized_replay_has_no_fabricated_implied_sum(tmp_path: Path) -> Non
         ledger.close()
 
 
+def test_generalized_replay_rejected_for_unsupported_venue_pair(tmp_path: Path) -> None:
+    demo, _ops, _watchlist, ledger, repository = _bundle(tmp_path)
+    get_demo_walkthrough_service.cache_clear()
+    app.dependency_overrides[get_demo_walkthrough_service] = lambda: demo
+    client = TestClient(app)
+    try:
+        for pair in ("matchbook_kalshi", "polymarket_kalshi"):
+            denied = client.post(
+                "/paper/demo/fixture-replay",
+                json={"venue_pair": pair, "solver": "generalized", "close_via": "hold"},
+            )
+            assert denied.status_code == 422
+            assert "Matchbook" in str(denied.json()["detail"])
+    finally:
+        app.dependency_overrides.clear()
+        get_demo_walkthrough_service.cache_clear()
+        repository.close()
+        ledger.close()
+
+
 def test_mb_kalshi_internal_fills_and_settlement(tmp_path: Path) -> None:
     demo, ops, watchlist, ledger, repository = _bundle(tmp_path)
     try:
@@ -406,18 +427,83 @@ def test_windows_launcher_scripts_encode_paper_only_contract() -> None:
     assert "SPORTS_HEDGE_EXECUTION_ENABLED" in start_ps1
     assert '"false"' in start_ps1
     assert "PAPER_AUTOFILL_ENABLED" in start_ps1
+    assert "PAPER_LIVE_REFRESH_ENABLED" in start_ps1
+    assert '"true"' in start_ps1
     assert "WindowStyle Hidden" in start_ps1
     assert "/health" in start_ps1
     assert "demo-backend.pid" in start_ps1
     assert "demo-frontend.pid" in start_ps1
     assert "MessageBox" in start_ps1
     assert "127.0.0.1:3000/demo" in start_ps1
+    assert "command_tokens" in start_ps1
+    assert "ConvertTo-Json" in start_ps1
     assert "vercel" not in start_ps1.lower()
     assert "place_order" not in start_ps1
     assert "MATCHBOOK_PASSWORD" not in start_ps1
     assert "Stop-Process" in stop_ps1
+    assert "Get-CimInstance" in stop_ps1
+    assert "CommandLine" in stop_ps1
+    assert "Test-DemoPidOwned" in stop_ps1
+    assert "unrelated process was not killed" in stop_ps1
     assert "logs" in stop_ps1
     docs = (REPO_ROOT / "docs/DEMO_READINESS.md").read_text(encoding="utf-8")
     assert "PAPER_SIMULATED_EXTERNAL" in docs
     assert "DEMO / FIXTURE REPLAY" in docs
     assert "production readiness" in docs.lower()
+    assert "Refresh Live Discovery" in docs
+    assert "Tenet 18" in docs or "execution atomicity" in docs.lower()
+
+
+def test_stale_demo_pid_is_not_killed() -> None:
+    identity = {
+        "pid": 4242,
+        "path": r"C:\Sports-Hedge\backend\.venv\Scripts\python.exe",
+        "command_tokens": ["uvicorn", "sports_hedge.api.main:app"],
+    }
+    assert (
+        decide_demo_stop_action(
+            identity,
+            live_pid=4242,
+            live_name="python",
+            live_path=identity["path"],
+            live_command_line=r'"C:\Sports-Hedge\backend\.venv\Scripts\python.exe" -m uvicorn sports_hedge.api.main:app --host 127.0.0.1 --port 8000',
+        )
+        == "stop"
+    )
+    assert (
+        decide_demo_stop_action(
+            identity,
+            live_pid=4242,
+            live_name="notepad",
+            live_path=r"C:\Windows\System32\notepad.exe",
+            live_command_line=r"C:\Windows\System32\notepad.exe",
+        )
+        == "stale"
+    )
+    assert decide_demo_stop_action(identity, live_pid=None) == "missing"
+    assert (
+        decide_demo_stop_action(
+            {"pid": 4242},
+            live_pid=4242,
+            live_name="python",
+            live_path=identity["path"],
+            live_command_line="python -m uvicorn sports_hedge.api.main:app",
+        )
+        == "stale"
+    )
+    stop_ps1 = (REPO_ROOT / "scripts/windows/Stop-SportsHedge-Demo.ps1").read_text(encoding="utf-8")
+    stop_index = stop_ps1.index("Stop-Process")
+    assert stop_ps1.index("Test-DemoPidOwned") < stop_index
+    assert stop_ps1.index("action -ne \"stop\"") < stop_index or 'action -ne "stop"' in stop_ps1
+
+
+def test_demo_operator_surface_wires_live_discovery_and_solver_guard() -> None:
+    ui = (REPO_ROOT / "frontend/components/demo-walkthrough.tsx").read_text(encoding="utf-8")
+    assert "runPaperCollection" in ui
+    assert "Refresh Live Discovery" in ui
+    assert "getLiveRefreshStatus" in ui
+    assert "setInterval" in ui
+    assert 'disabled={!pairSupportsGeneralized(pair)}' in ui
+    assert 'pair === "matchbook_polymarket"' in ui
+    assert "effectiveSolver" in ui
+    assert "DEMO / FIXTURE REPLAY" in ui

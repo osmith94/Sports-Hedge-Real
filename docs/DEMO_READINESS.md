@@ -1,6 +1,6 @@
 # Sports Hedge — Demo readiness
 
-Integration branch for **Step 9** from verified `main` SHA `91da7b912a678e3c36d89c1160cfad62c8b0f71d` (merged Step 8F automatic paper entry). Downstream of parent #98 and merged 8C allocator, 8D unwind, 8E treasury, Kalshi K1, and 8F autofill.
+Integration branch for **Step 9** from verified `main` SHA `91da7b912a678e3c36d89c1160cfad62c8b0f71d` (merged Step 8F automatic paper entry), rebased/merged onto current `main` `0a4a47a5f66a21c4b0e21712092c00fb8ef1b446` so Core Tenet 18 is on the review branch. Downstream of parent #98 and merged 8C allocator, 8D unwind, 8E treasury, Kalshi K1, and 8F autofill.
 
 This is an operator-usability / demo-integration pass. It does **not** add a new product area or live execution. Phase 1 remains read-only venue data plus paper trading only. This document is not a production-readiness claim.
 
@@ -9,7 +9,8 @@ This is an operator-usability / demo-integration pass. It does **not** add a new
 | Surface | Class |
 | --- | --- |
 | `/paper/watchlist/tracked`, `/near`, `/triggered`, `/activity` | `LIVE PAPER` when FastAPI is reachable. Empty live lists stay empty. `demo_fixture_replay` rows are filtered out of these lists. `UNAVAILABLE` if the watchlist API is down — never back-filled with live-looking fixture arbs. |
-| `/paper/collect`, `/paper/live-refresh`, Matchbook-discovered fixtures | `LIVE PAPER` when collection credentials/venues respond; empty discovery stays empty. Missing Matchbook credentials stay honestly `UNAVAILABLE` / HTTP 503 — never a faked login. Matchbook discovery paginates `GET /edge/rest/events`. Polymarket public Gamma uses bounded per-series pagination. Kalshi public Trade API v2 is read-only. |
+| `/paper/collect`, `/paper/live-refresh`, Matchbook-discovered fixtures | `LIVE PAPER` when collection credentials/venues respond; empty discovery stays empty. Missing Matchbook credentials stay honestly `UNAVAILABLE` / HTTP 503 — never a faked login. Matchbook discovery paginates `GET /edge/rest/events`. Polymarket public Gamma uses bounded per-series pagination. Kalshi public Trade API v2 is read-only. `/demo` calls this same collect path on load/start, via **Refresh Live Discovery**, and on the operations-console cadence. |
+| `/demo` live discovery panel | Same read-only collect/live-refresh as `/`. Empty stays empty. Fixture replay is never substituted into live rows. |
 | `/paper/scans` | `LIVE PAPER` / empty / `UNAVAILABLE` |
 | `/paper/treasury` | Authoritative **persistent paper treasury** (8E), not a labelled demo-only pool widget. Three native venue books. GBP carrying values are FX translations, not spendable cash. |
 | `/paper/liquidity-pools` | Paper config / standing capital used by the solver. Aligned to treasury seed amounts on demo reset. Not a second source of truth for locks. |
@@ -22,7 +23,7 @@ This is an operator-usability / demo-integration pass. It does **not** add a new
 | Research Home, Matchday, Team Explorer, Scenario Lab/Planner | `DEMO / FIXTURE` (SRC, quotes, fees, EV) |
 | `/research/historical/coverage` | `REAL HISTORICAL` when SQLite facts/odds files contain rows; otherwise `UNAVAILABLE` |
 | Tenet 17 analogue / comparable-move model | `UNAVAILABLE` |
-| Windows one-click launcher | Local process helper. Not a hosted/Vercel deployment. |
+| Windows one-click launcher | Local process helper. Not a hosted/Vercel deployment. Start sets `PAPER_AUTOFILL_ENABLED=true` and `PAPER_LIVE_REFRESH_ENABLED=true` for that process only (application defaults remain false). Stop verifies PID command/path identity before kill. |
 
 Unknown costs still fail closed. Native GBP and the two USD venue pools are never summed. Polymarket USD and Kalshi USD remain distinct.
 
@@ -36,7 +37,7 @@ Unknown costs still fail closed. Native GBP and the two USD venue pools are neve
 - 8D hold-vs-unwind evaluates executable reverse-side economics. Spread convergence is not a close trigger. Clock / modelled time-to-release is advisory (`settles_or_releases_capital=false`) and never makes capital spendable.
 - Two authoritative release paths: validated paper unwind that posts 8E, or explicit paper settlement that posts 8E. Kalshi SELL close fees are not modelled; unwind involving Kalshi fails closed rather than inventing a fee. Settlement remains the Kalshi close path.
 - Labelled `DEMO / FIXTURE REPLAY` exercises the same allocator → autofill → treasury → unwind/settlement lifecycle and is never mixed into empty live watchlists.
-- Windows double-click start/stop launchers under `scripts/windows/`. Hidden local processes, health wait, duplicate-process avoidance, file logs, visible startup error. `PAPER_AUTOFILL_ENABLED=true` for that local demo process only; the application default remains false. No Vercel/cloud migration.
+- Windows double-click start/stop launchers under `scripts/windows/`. Hidden local processes, health wait, duplicate-process avoidance, file logs, visible startup error. `PAPER_AUTOFILL_ENABLED=true` and `PAPER_LIVE_REFRESH_ENABLED=true` for that local demo process only; application defaults remain false. Stop refuses to kill a reused PID unless command/path matches the launcher identity. `/demo` runs the existing `/paper/collect` path on load/start, via **Refresh Live Discovery**, and on the same ≥15s/default 30s cadence as the operations console. No Vercel/cloud migration.
 
 ## What remains fixture/demo / unavailable
 
@@ -51,7 +52,7 @@ Unknown costs still fail closed. Native GBP and the two USD venue pools are neve
 ## Exact Step 9 operator walkthrough
 
 1. **Reset / start demo** — `/demo` or double-click `scripts/windows/Start-SportsHedge-Demo.bat` then `/demo`. PAPER MODE / NO EXECUTION. Seed or reinitialize the three separated native pools. Ordinary reset refuses destruction while locks/trades are open.
-2. **Discovery / tracking** — `/` operations console and the discovery panel on `/demo`. Run read-only live/near-future football collection across the supported venue architecture. Tracked / near / triggered stay honestly empty when empty. Near is not relabelled as arbitrage. Freshness, settlement-equivalence, effective costs, execution-risk and solver status are backend-owned. Missing credentials/providers fail as UNAVAILABLE.
+2. **Discovery / tracking** — `/demo` (and `/` operations console). One-click launch opens `/demo`, which initiates the existing read-only `/paper/collect` path and can auto-refresh on the same safe cadence as the operations console. An explicit **Refresh Live Discovery** button re-runs collection then reloads the walkthrough. Tracked / near / triggered stay honestly empty when empty. Near is not relabelled as arbitrage. Missing credentials/providers fail as UNAVAILABLE. Fixture replay is never mixed into live rows.
 3. **Automatic paper entry** — live 8F autofill when `PAPER_AUTOFILL_ENABLED` is on (demo launcher) and a solver-qualified opportunity exists; otherwise labelled fixture replay. Allocator size is authoritative. Matchbook/Kalshi INTERNAL; Polymarket demo `PAPER_SIMULATED_EXTERNAL`. OPEN only after complete hedge + 8E locks.
 4. **Active position / capital** — `/demo` plus `/paper` and `/treasury`. Opportunity + solver model, venue legs, native stake, fill kind, guaranteed opening economics when proven, available vs locked native capital by venue/currency, modelled time-to-release basis/confidence when present. PAPER MODE visible.
 5. **Hold vs clean unwind** — 8D close-plan on the open trade using current reverse-side read-only economics (fixture replay supplies labelled reverse quotes). Hold-to-settlement P&L vs validated exit P&L, unwind cost, capital releasable only if the full close fills. Advisory remaining lock / opportunity-cost context is not spendable.
@@ -79,10 +80,11 @@ Unknown costs still fail closed. Native GBP and the two USD venue pools are neve
 | 15 Effective venue economics | **PARTIAL** | Arb/demo scan uses `VenueCostSnapshot`. Kalshi SELL close unknown → fail closed. Research still uses typed demo snapshots. |
 | 16 External manual legs | **PASS** (paper distinction) | `PAPER_SIMULATED_EXTERNAL` ≠ `MANUAL_EXTERNAL`. No VPN/geo bypass. |
 | 17 Historical market movement | **PARTIAL** | Coverage counts exposed; analogue model UNAVAILABLE. |
+| 18 Execution atomicity | **PARTIAL** | Applicable. Realistic paper fills may model latency/slippage/depth/partials, but paper full-fill success does **not** prove simultaneous real fills. Production execution remains a later shadow/micro-live gate. `execution_enabled=false`; this step adds no live order path. |
 
 ### Conflicts / non-weakening
 
-No tenet was silently weakened to make the demo “work”. Kalshi unwind stays fail-closed instead of inventing SELL fees. Fixture replay is not injected into empty live watchlists. Phase 1 collection remains read-only. Clock estimates do not release capital.
+No tenet was silently weakened to make the demo “work”. Kalshi unwind stays fail-closed instead of inventing SELL fees. Fixture replay is not injected into empty live watchlists. Phase 1 collection remains read-only. Clock estimates do not release capital. Paper full-fill success is not treated as proof of simultaneous real fills (Tenet 18).
 
 ## Safety
 

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { HoldVsUnwindCard } from "./hold-vs-unwind";
 import {
@@ -10,9 +10,12 @@ import {
   PaperTrade,
   closeDemoTrade,
   getDemoWalkthrough,
+  getLiveRefreshStatus,
   resetDemoWalkthrough,
   runFixtureReplay,
+  runPaperCollection,
 } from "../lib/api";
+import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
 import { money } from "../lib/format";
 
 const PAIRS: Array<FixtureReplayResult["venue_pair"]> = [
@@ -31,6 +34,10 @@ function fillLine(trade: PaperTrade): string {
     .join(" · ");
 }
 
+function pairSupportsGeneralized(pair: FixtureReplayResult["venue_pair"]): boolean {
+  return pair === "matchbook_polymarket";
+}
+
 export function DemoWalkthroughBoard() {
   const [snapshot, setSnapshot] = useState<DemoWalkthroughSnapshot | null>(null);
   const [replay, setReplay] = useState<FixtureReplayResult | null>(null);
@@ -39,6 +46,12 @@ export function DemoWalkthroughBoard() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [available, setAvailable] = useState(true);
+  const [discoveryBusy, setDiscoveryBusy] = useState(false);
+  const [discoveryMessage, setDiscoveryMessage] = useState<string | null>(null);
+  const [autoLiveRefresh, setAutoLiveRefresh] = useState(true);
+  const [intervalSeconds, setIntervalSeconds] = useState(30);
+  const collectInFlight = useRef(false);
+  const collectRef = useRef<() => Promise<void>>(async () => undefined);
 
   const refresh = useCallback(async () => {
     const next = await getDemoWalkthrough();
@@ -47,12 +60,68 @@ export function DemoWalkthroughBoard() {
     setAvailable(true);
   }, []);
 
-  useEffect(() => {
-    refresh().catch((err: unknown) => {
-      setAvailable(false);
-      setError(err instanceof Error ? err.message : "Demo walkthrough API unavailable");
-    });
+  const refreshLiveDiscovery = useCallback(async () => {
+    if (collectInFlight.current) return;
+    collectInFlight.current = true;
+    setDiscoveryBusy(true);
+    try {
+      await runPaperCollection({
+        maximum_execution_risk: DEFAULT_SCANNER_ASSUMPTIONS.maximumExecutionRisk,
+      });
+      setDiscoveryMessage(null);
+    } catch (err) {
+      setDiscoveryMessage(
+        err instanceof Error ? err.message : "Live discovery UNAVAILABLE",
+      );
+    } finally {
+      collectInFlight.current = false;
+      setDiscoveryBusy(false);
+      try {
+        await refresh();
+      } catch (err) {
+        setAvailable(false);
+        setError(err instanceof Error ? err.message : "Demo walkthrough API unavailable");
+      }
+    }
   }, [refresh]);
+
+  useEffect(() => {
+    collectRef.current = refreshLiveDiscovery;
+  }, [refreshLiveDiscovery]);
+
+  useEffect(() => {
+    refresh()
+      .then(() => collectRef.current())
+      .catch((err: unknown) => {
+        setAvailable(false);
+        setError(err instanceof Error ? err.message : "Demo walkthrough API unavailable");
+      });
+  }, [refresh]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getLiveRefreshStatus()
+      .then((status) => {
+        if (!cancelled && status.interval_seconds) {
+          setIntervalSeconds(status.interval_seconds);
+        }
+      })
+      .catch(() => {
+        // Status endpoint down: keep the 30s default cadence used by the operations console.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!autoLiveRefresh) return undefined;
+    const cadenceMs = Math.max(15, intervalSeconds) * 1000;
+    const timer = window.setInterval(() => {
+      void collectRef.current();
+    }, cadenceMs);
+    return () => window.clearInterval(timer);
+  }, [autoLiveRefresh, intervalSeconds]);
 
   async function run(action: () => Promise<void>) {
     setBusy(true);
@@ -66,9 +135,13 @@ export function DemoWalkthroughBoard() {
     }
   }
 
+  const effectiveSolver: FixtureReplayResult["solver"] = pairSupportsGeneralized(pair)
+    ? solver
+    : "simple";
   const liveTriggered = snapshot?.live_triggered.length ?? 0;
   const liveNear = snapshot?.live_near.length ?? 0;
-  const discoveryError = snapshot?.discovery?.last_error;
+  const discovery = snapshot?.discovery;
+  const discoveryError = discoveryMessage ?? discovery?.last_error ?? null;
   const active =
     snapshot?.active_trades[0] ??
     (replay?.trade?.state === "OPEN" ? replay.trade : null);
@@ -119,6 +192,7 @@ export function DemoWalkthroughBoard() {
                 void run(async () => {
                   setSnapshot(await resetDemoWalkthrough({ reinitialize_store: false }));
                   setReplay(null);
+                  await collectRef.current();
                 })
               }
             >
@@ -137,6 +211,7 @@ export function DemoWalkthroughBoard() {
                     }),
                   );
                   setReplay(null);
+                  await collectRef.current();
                 })
               }
             >
@@ -173,16 +248,43 @@ export function DemoWalkthroughBoard() {
         <div className="panel-header">
           <div>
             <div className="panel-title">2. Discovery / tracking</div>
-            <div className="panel-meta">Read-only live/near-future football. Empty stays empty.</div>
+            <div className="panel-meta">
+              Read-only live/near-future football via the same `/paper/collect` path as the operations
+              console. Empty stays empty. Fixture replay is never mixed into these rows.
+            </div>
           </div>
           <span className={discoveryError ? "demo-chip" : "status-badge"}>
             {discoveryError ? "UNAVAILABLE / ERROR" : "LIVE PAPER WHEN CREDENTIALS RESPOND"}
           </span>
         </div>
         <div className="panel-body">
+          <div className="demo-actions">
+            <button
+              className="demo-primary"
+              type="button"
+              disabled={busy || discoveryBusy}
+              onClick={() => void refreshLiveDiscovery()}
+            >
+              {discoveryBusy ? "Refreshing live discovery…" : "Refresh Live Discovery"}
+            </button>
+            <label className="scan-refresh">
+              <input
+                type="checkbox"
+                checked={autoLiveRefresh}
+                onChange={(event) => setAutoLiveRefresh(event.target.checked)}
+              />
+              Auto {intervalSeconds}s
+            </label>
+          </div>
           <p className="section-copy">
             Live triggered: {liveTriggered}. Live near (not arbitrage): {liveNear}.
-            {discoveryError ? ` Discovery error: ${discoveryError}` : " Missing credentials fail honestly rather than inventing inventory."}
+            {discovery?.last_matched_event_pairs != null
+              ? ` Last collection: ${discovery.last_matched_event_pairs} event pair(s), ${discovery.last_matched_market_pairs ?? 0} market pair(s).`
+              : " Collection has not completed yet."}
+            {discovery?.server_loop_enabled ? " Server live-refresh loop is enabled for this process." : ""}
+            {discoveryError
+              ? ` Discovery error: ${discoveryError}`
+              : " Missing credentials fail honestly rather than inventing inventory."}
           </p>
           {liveTriggered === 0 && liveNear === 0 ? (
             <div className="empty-live-compact">
@@ -215,7 +317,16 @@ export function DemoWalkthroughBoard() {
         <div className="demo-actions">
           <label className="scan-field">
             Venue pair
-            <select value={pair} onChange={(event) => setPair(event.target.value as FixtureReplayResult["venue_pair"])}>
+            <select
+              value={pair}
+              onChange={(event) => {
+                const next = event.target.value as FixtureReplayResult["venue_pair"];
+                setPair(next);
+                if (!pairSupportsGeneralized(next)) {
+                  setSolver("simple");
+                }
+              }}
+            >
               {PAIRS.map((item) => (
                 <option key={item} value={item}>{item.replaceAll("_", " ↔ ")}</option>
               ))}
@@ -224,11 +335,13 @@ export function DemoWalkthroughBoard() {
           <label className="scan-field">
             Solver
             <select
-              value={solver}
+              value={effectiveSolver}
               onChange={(event) => setSolver(event.target.value as FixtureReplayResult["solver"])}
             >
               <option value="simple">simple complete-set</option>
-              <option value="generalized">generalized payoff (MB↔PM FTTS)</option>
+              <option value="generalized" disabled={!pairSupportsGeneralized(pair)}>
+                generalized payoff (MB↔PM FTTS only)
+              </option>
             </select>
           </label>
           <button
@@ -237,7 +350,11 @@ export function DemoWalkthroughBoard() {
             disabled={busy}
             onClick={() =>
               void run(async () => {
-                const result = await runFixtureReplay({ venue_pair: pair, solver, close_via: "hold" });
+                const result = await runFixtureReplay({
+                  venue_pair: pair,
+                  solver: effectiveSolver,
+                  close_via: "hold",
+                });
                 setReplay(result);
                 await refresh();
               })
@@ -246,6 +363,12 @@ export function DemoWalkthroughBoard() {
             Open labelled replay
           </button>
         </div>
+        {!pairSupportsGeneralized(pair) ? (
+          <div className="scan-note">
+            Generalized replay is Matchbook↔Polymarket first-team-to-score only. This pair uses the
+            simple complete-set fixture.
+          </div>
+        ) : null}
         {replay ? (
           <div className="scan-note">
             {replay.label} · {replay.venue_pair} · {replay.solver} · fills {replay.fill_kinds.join(", ") || "—"} ·
@@ -366,7 +489,8 @@ export function DemoWalkthroughBoard() {
           ))}
           <p className="section-copy">
             After close, inspect realised betting P&amp;L, fees, released native cash and GBP carrying
-            values on Treasury. GBP translation is not native spendable cash.
+            values on Treasury. GBP translation is not native spendable cash. Paper full-fill success
+            models latency/slippage/depth/partials; it does not prove simultaneous real fills.
           </p>
         </div>
       </section>

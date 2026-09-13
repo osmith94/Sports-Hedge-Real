@@ -1,5 +1,6 @@
 # Sports Hedge Step 9 — one-click paper demo (Windows)
 # Starts FastAPI + Next.js hidden, waits for health, opens the operator console.
+# Enables local paper autofill and the read-only live-refresh loop for this process.
 # Does not enable live execution, wallet signing, or trading credentials.
 
 $ErrorActionPreference = "Stop"
@@ -92,9 +93,25 @@ if (-not (Test-Path $NodeModules)) {
 }
 
 # Paper-only demo environment. Do not inject trading, wallet, or execution secrets.
+function Write-DemoPidIdentity {
+    param(
+        [string]$PidFile,
+        [System.Diagnostics.Process]$Process,
+        [string[]]$CommandTokens
+    )
+    $payload = @{
+        pid = $Process.Id
+        path = $Process.Path
+        name = $Process.ProcessName
+        command_tokens = @($CommandTokens)
+    }
+    ($payload | ConvertTo-Json -Compress) | Set-Content -Path $PidFile -Encoding utf8
+}
+
 $env:SPORTS_HEDGE_MODE = "paper"
 $env:SPORTS_HEDGE_EXECUTION_ENABLED = "false"
 $env:PAPER_AUTOFILL_ENABLED = "true"
+$env:PAPER_LIVE_REFRESH_ENABLED = "true"
 $env:NEXT_PUBLIC_SPORTS_HEDGE_API_URL = "http://127.0.0.1:8000"
 
 $backendAlready = Test-HttpOk $BackendHealth
@@ -106,7 +123,10 @@ if (-not $backendAlready) {
         "-m", "uvicorn", "sports_hedge.api.main:app",
         "--host", "127.0.0.1", "--port", "8000"
     ) -WorkingDirectory $backendDir -WindowStyle Hidden -RedirectStandardOutput $BackendLog -RedirectStandardError $BackendErr -PassThru
-    Set-Content -Path $BackendPidFile -Value $backend.Id -Encoding ascii
+    Write-DemoPidIdentity -PidFile $BackendPidFile -Process $backend -CommandTokens @(
+        "uvicorn",
+        "sports_hedge.api.main:app"
+    )
 }
 
 if (-not $frontendAlready) {
@@ -115,7 +135,12 @@ if (-not $frontendAlready) {
         Show-StartupError "npm.cmd was not found on PATH. Install Node.js, then retry."
     }
     $frontend = Start-Process -FilePath $npmCmd.Source -ArgumentList @("run", "dev", "--", "-H", "127.0.0.1", "-p", "3000") -WorkingDirectory $FrontendDir -WindowStyle Hidden -RedirectStandardOutput $FrontendLog -RedirectStandardError $FrontendErr -PassThru
-    Set-Content -Path $FrontendPidFile -Value $frontend.Id -Encoding ascii
+    Write-DemoPidIdentity -PidFile $FrontendPidFile -Process $frontend -CommandTokens @(
+        "run",
+        "dev",
+        "127.0.0.1",
+        "3000"
+    )
 }
 
 Wait-HttpOk -Url $BackendHealth -Label "Sports Hedge backend"
@@ -129,6 +154,6 @@ try {
 
 Write-Host "Sports Hedge paper demo is running."
 Write-Host "Operator console: $DemoUrl"
-Write-Host "PAPER MODE. execution_enabled=false. PAPER_AUTOFILL_ENABLED=true for this local demo only."
+Write-Host "PAPER MODE. execution_enabled=false. PAPER_AUTOFILL_ENABLED=true and PAPER_LIVE_REFRESH_ENABLED=true for this local demo only."
 Write-Host "Logs: $Logs"
 exit 0
