@@ -20,6 +20,11 @@ class ScanCycleTimeout(TimeoutError):
     """Raised when a live-refresh cycle exceeds its bounded deadline."""
 
 
+# Collector soft-stops at paper_scan_cycle_timeout_seconds. Coordinator waits this
+# extra grace so leftover fixtures can be assembled instead of an empty 504.
+SCAN_CYCLE_RETURN_GRACE_SECONDS = 5.0
+
+
 class LiveRefreshStatus(BaseModel):
     discovery_source: VenueName = VenueName.MATCHBOOK
     discovery_mode: str = "venue_union"
@@ -87,7 +92,9 @@ class LiveRefreshCoordinator:
     async def run_cycle(self, runner, *, timeout_seconds: float | None = None) -> CollectionReport:
         settings = get_settings()
         timeout = float(
-            settings.paper_scan_cycle_timeout_seconds if timeout_seconds is None else timeout_seconds
+            settings.paper_scan_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
+            if timeout_seconds is None
+            else timeout_seconds
         )
         async with self._lock:
             started = datetime.now(UTC)

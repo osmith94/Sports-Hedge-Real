@@ -515,6 +515,14 @@ class ReadOnlyCrossVenueCollector:
     def _deadline_reached(self) -> bool:
         return self._op_deadline is not None and monotonic() >= self._op_deadline
 
+    def _timeout_budget(self, requested: float) -> float:
+        """Cap a provider wait so a slow cluster cannot overrun the cycle deadline."""
+
+        if self._op_deadline is None:
+            return requested
+        remaining = self._op_deadline - monotonic()
+        return min(requested, remaining)
+
     def _record_timeout(
         self,
         stage: str,
@@ -550,8 +558,12 @@ class ReadOnlyCrossVenueCollector:
         source_id: str | None = None,
         default: Any,
     ) -> tuple[Any, bool]:
+        timeout = self._timeout_budget(self._op_provider_timeout)
+        if timeout <= 0:
+            self._record_timeout(stage, venue, source_id)
+            return default, True
         try:
-            return await asyncio.wait_for(coro, timeout=self._op_provider_timeout), False
+            return await asyncio.wait_for(coro, timeout=timeout), False
         except TimeoutError:
             self._record_timeout(stage, venue, source_id)
             return default, True
@@ -573,10 +585,14 @@ class ReadOnlyCrossVenueCollector:
         issues: list[CollectorIssue],
         venue_health: dict[str, str],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        timeout = self._timeout_budget(self._op_venue_timeout)
+        if timeout <= 0:
+            self._record_timeout("list_events", venue)
+            return [], {}
         try:
             payload = await asyncio.wait_for(
                 client.list_events(**filters),
-                timeout=self._op_venue_timeout,
+                timeout=timeout,
             )
         except TimeoutError:
             self._record_timeout("list_events", venue)

@@ -269,3 +269,53 @@ def test_collect_api_returns_degraded_matchbook_and_pm_fixtures(monkeypatch: pyt
     assert payload["venue_health"]["matchbook"] == "timeout"
     assert payload["discovered_fixtures"]
     get_live_refresh_coordinator().reset()
+
+
+def test_collect_api_returns_partial_fixtures_when_cluster_scan_overruns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_live_refresh_coordinator().reset()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "paper_scan_venue_timeout_seconds", 0.4)
+    monkeypatch.setattr(settings, "paper_scan_provider_timeout_seconds", 8)
+    monkeypatch.setattr(settings, "paper_scan_cycle_timeout_seconds", 1)
+    polymarket = FakePolymarket()
+
+    async def empty_matchbook(self, **filters):
+        del self, filters
+        return {"events": []}
+
+    async def pm_events(self, **filters):
+        del self
+        return await polymarket.list_events(**filters)
+
+    async def hang_markets(self, event_id, **filters):
+        del self, event_id, filters
+        await asyncio.sleep(30)
+        return []
+
+    async def empty_kalshi(self, **filters):
+        del self, filters
+        return {"events": []}
+
+    monkeypatch.setattr(MatchbookClient, "list_events", empty_matchbook)
+    monkeypatch.setattr(PolymarketClient, "list_events", pm_events)
+    monkeypatch.setattr(PolymarketClient, "list_markets", hang_markets)
+    monkeypatch.setattr(KalshiClient, "list_events", empty_kalshi)
+
+    client = TestClient(app)
+    started = time.monotonic()
+    response = client.post("/paper/collect", json={"maximum_execution_risk": 100})
+    elapsed = time.monotonic() - started
+    assert elapsed < 3.5
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["discovered_fixtures"]
+    assert any(item["polymarket_matched"] for item in body["discovered_fixtures"])
+    status = client.get("/paper/live-refresh")
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["cycle_in_progress"] is False
+    assert payload["last_completed_at"]
+    assert payload["discovered_fixtures"]
+    get_live_refresh_coordinator().reset()

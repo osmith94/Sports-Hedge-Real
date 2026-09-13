@@ -139,7 +139,7 @@ async def venue_health() -> list[dict[str, object]]:
                 "ok": False,
                 "authenticated": False,
                 "checked_at": datetime.now(UTC),
-                "detail": f"health_timed_out_after_{int(timeout)}s",
+                "detail": f"health_timed_out_after_{timeout:g}s",
             }
         except Exception as exc:
             return {

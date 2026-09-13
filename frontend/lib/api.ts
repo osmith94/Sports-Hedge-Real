@@ -436,7 +436,7 @@ export type EventReaction = {
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_SPORTS_HEDGE_API_URL ?? "http://localhost:8000";
-/** Slightly above backend paper_scan_cycle_timeout_seconds (45s) so Scanning always resolves. */
+/** Slightly above backend cycle timeout (45s) plus return grace (5s) so Scanning always resolves. */
 export const PAPER_COLLECTION_TIMEOUT_MS = 60_000;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 

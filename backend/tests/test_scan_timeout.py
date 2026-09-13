@@ -42,6 +42,13 @@ class HungKalshi(NewcastleKalshi):
         return {"events": []}
 
 
+class SlowMarketsPolymarket(FakePolymarket):
+    async def list_markets(self, event_id: int | str, **filters: Any) -> list[dict[str, Any]]:
+        del event_id, filters
+        await asyncio.sleep(30)
+        return []
+
+
 @pytest.mark.asyncio
 async def test_hung_matchbook_does_not_block_healthy_polymarket_fixtures() -> None:
     repository = SqliteMarketIntelligenceRepository()
@@ -159,3 +166,33 @@ async def test_run_cycle_timeout_clears_in_progress_and_records_error() -> None:
     assert recovered.started_at is not None
     assert coordinator.status.cycle_in_progress is False
     assert coordinator.status.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_slow_cluster_markets_still_return_discovered_fixtures() -> None:
+    repository = SqliteMarketIntelligenceRepository()
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=HungMatchbook(),
+        polymarket=SlowMarketsPolymarket(),
+        paper_scan=PaperScanService(MarketIntelligenceService(repository)),
+        venue_timeout_seconds=0.2,
+        provider_call_timeout_seconds=5.0,
+        cycle_timeout_seconds=0.8,
+    )
+    try:
+        started = monotonic()
+        report = await collector.collect_and_scan(
+            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+            fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
+            maximum_execution_risk=100,
+        )
+        elapsed = monotonic() - started
+        assert elapsed < 2.5
+        assert report.venue_health["matchbook"] == "timeout"
+        assert report.discovered_fixtures
+        assert any(item.polymarket_matched for item in report.discovered_fixtures)
+        assert any(
+            issue.stage in {"list_markets", "collect", "get_order_book"} for issue in report.issues
+        )
+    finally:
+        repository.close()

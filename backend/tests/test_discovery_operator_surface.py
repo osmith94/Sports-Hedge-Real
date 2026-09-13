@@ -104,10 +104,13 @@ def test_discovery_ui_renders_target_rows_from_backend_fields() -> None:
     assert "kalshi" in health
     assert "matchbook" in health
     assert "polymarket" in health
+    assert 'scan === "timeout"' in health
+    assert "${label} timeout" in health
     main = (FRONTEND.parent / "backend" / "src" / "sports_hedge" / "api" / "main.py").read_text(
         encoding="utf-8"
     )
     assert '/venues/health' in main
+    assert "health_timed_out_after_{timeout:g}s" in main
     assert "KalshiClient" in main
     scan = (FRONTEND / "components" / "run-paper-scan.tsx").read_text(encoding="utf-8")
     assert "Refresh interval" in scan

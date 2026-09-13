@@ -14,7 +14,7 @@ const FIRST_CLASS: Array<{ venue: VenueHealth["venue"]; label: string }> = [
 function scanTone(value: string | undefined): "ok" | "warn" | "down" | "unknown" | null {
   if (!value) return null;
   if (value === "ok") return "ok";
-  if (value === "degraded") return "warn";
+  if (value === "degraded" || value === "timeout") return "warn";
   if (value === "unavailable") return "down";
   return "unknown";
 }
@@ -30,6 +30,7 @@ function tone(row: VenueHealth | undefined, scan?: string): "ok" | "warn" | "dow
 
 function caption(row: VenueHealth | undefined, label: string, scan?: string): string {
   if (scan === "degraded") return `${label} degraded`;
+  if (scan === "timeout") return `${label} timeout`;
   if (scan === "unavailable") return `${label} unavailable`;
   if (scan === "ok") return row?.authenticated ? `${label} data` : `${label} read-only`;
   if (!row) return `${label} health unknown`;
