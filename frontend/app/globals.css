@@ -92,6 +92,7 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 .scan-field input { width: 100%; min-width: 0; border: 1px solid var(--line); background: var(--panel-raised); color: var(--text); border-radius: 8px; padding: 9px 10px; font-size: 11px; outline: none; font-variant-numeric: tabular-nums; }
 .scan-field input::placeholder { color: #536760; }
 .scan-field input:focus { border-color: rgba(124, 242, 176, .45); box-shadow: 0 0 0 2px rgba(124, 242, 176, .07); }
+.scan-field select { width: 100%; min-width: 0; border: 1px solid var(--line); background: var(--panel-raised); color: var(--text); border-radius: 8px; padding: 9px 10px; font-size: 11px; outline: none; }
 .scan-action { display: flex; align-items: flex-end; }
 .scan-button { border: 1px solid rgba(124, 242, 176, .32); background: var(--accent-soft); color: var(--accent); border-radius: 8px; padding: 9px 13px; min-height: 35px; font-size: 10px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; cursor: pointer; }
 .scan-button:hover:not(:disabled) { background: rgba(124, 242, 176, .16); border-color: rgba(124, 242, 176, .5); }
@@ -158,6 +159,13 @@ tr:last-child td { border-bottom: none; }
 .demo-walkthrough { margin-top: 18px; border: 1px solid rgba(241, 191, 105, .24); border-radius: var(--radius); padding: 12px 14px; background: rgba(241, 191, 105, .05); }
 .demo-walkthrough summary { cursor: pointer; color: var(--amber); font-size: 11px; font-weight: 750; }
 .demo-walkthrough .opp-card { margin-top: 12px; }
+.demo-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin: 10px 0; }
+.demo-primary { border: 1px solid rgba(124, 242, 176, .35); background: var(--accent-soft); color: var(--accent); border-radius: 8px; padding: 9px 12px; font-size: 10px; font-weight: 750; cursor: pointer; }
+.demo-primary:disabled, .pool-reset:disabled { opacity: .5; cursor: not-allowed; }
+.hold-card { display: grid; gap: 10px; }
+.hold-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.hold-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 10px 0; }
+.pool-figures { color: var(--muted); font-size: 11px; line-height: 1.55; margin-top: 10px; }
 
 .ops-section { margin-bottom: 16px; }
 .fixture-link { color: var(--accent); font-weight: 750; }

@@ -136,6 +136,7 @@ class WatchlistService:
             live_score_supported=observation.live_score_supported,
             home_score=observation.home_score if observation.live_score_supported else None,
             away_score=observation.away_score if observation.live_score_supported else None,
+            data_kind=observation.data_kind,
         )
         self.repository.append_observation(
             OpportunityObservationPoint(
@@ -324,11 +325,19 @@ class WatchlistService:
         opportunity_id: str | None = None,
         since=None,
     ) -> list[OpportunityLifecycleEvent]:
-        return self.repository.list_events(
-            limit=limit,
+        events = self.repository.list_events(
+            limit=limit if opportunity_id else limit * 2,
             opportunity_id=opportunity_id,
             since=since,
         )
+        if opportunity_id is not None:
+            return events
+        demo_ids = {
+            item.opportunity_id
+            for item in self.repository.list_opportunities()
+            if item.data_kind == "demo_fixture_replay"
+        }
+        return [event for event in events if event.opportunity_id not in demo_ids][:limit]
 
     def _freshness_filtered(
         self,
@@ -405,7 +414,11 @@ class WatchlistService:
         venue: VenueName | None,
         market_family: MarketFamily | None,
     ) -> list[NearOpportunity]:
-        items = self.repository.list_opportunities()
+        items = [
+            item
+            for item in self.repository.list_opportunities()
+            if item.data_kind != "demo_fixture_replay"
+        ]
         if competition is not None:
             needle = competition.casefold()
             items = [

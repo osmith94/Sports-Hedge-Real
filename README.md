@@ -65,6 +65,12 @@ Then inspect:
 - `GET /health` — confirms paper mode and execution-disabled state.
 - `GET /venues` — shows current venue capability flags.
 
+## One-click local demo (Windows)
+
+Double-click `scripts/windows/Start-SportsHedge-Demo.bat`. It starts the Python backend and Next.js operator console hidden, waits until they are healthy, and opens `/demo`. The demo page runs the existing read-only `/paper/collect` path (load/start, **Refresh Live Discovery**, and the operations-console cadence). A companion `Stop-SportsHedge-Demo.bat` stops only the launcher-started processes after verifying PID command/path identity; a reused PID is not killed. Logs are written under `logs/`. The launcher forces paper mode (`execution_enabled=false`), enables local paper autofill and the read-only live-refresh loop for that process only, and does not add venue write, wallet, or trading-auth capability. It is not a Vercel/cloud deploy.
+
+Requires a local `backend/.venv` with the package installed and Node.js `npm` on PATH. If the backend or frontend is already healthy on ports 8000/3000, the launcher reuses them instead of starting duplicates.
+
 ## Operator console (two processes)
 
 The documented localhost walkthrough runs FastAPI and Next.js as separate origins. Browser `fetch` from `http://localhost:3000` to `http://localhost:8000` is cross-origin.

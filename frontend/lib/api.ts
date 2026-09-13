@@ -902,3 +902,178 @@ export async function settlePaperTrade(
   }
   return response.json() as Promise<PaperTradeDetail>;
 }
+
+export type UnwindRecommendation = "HOLD" | "UNWIND_ELIGIBLE" | "UNWIND_NOT_SAFE";
+
+export type EstimatedTimeToRelease = {
+  remaining_lock_minutes?: string | number | null;
+  expected_settlement_at?: string | null;
+  basis: string;
+  source_class: string;
+  confidence?: string | number | null;
+  detail?: string | null;
+  advisory: boolean;
+  settles_or_releases_capital: boolean;
+};
+
+export type UnwindDecision = {
+  trade_id: string;
+  recommendation: UnwindRecommendation;
+  decision_reason: string;
+  hold_pnl_gbp?: string | number | null;
+  validated_exit_pnl_gbp?: string | number | null;
+  unwind_cost_gbp?: string | number | null;
+  opportunity_cost_gbp?: string | number | null;
+  remaining_lock_minutes?: string | number | null;
+  estimated_time_to_release: EstimatedTimeToRelease;
+  duration_decision_role: string;
+  capital_turnover_hint?: string | null;
+  spendable_release_requires: string;
+  conditionally_releasable_by_venue_currency: Record<string, string | number>;
+  close_plan: {
+    fully_executable: boolean;
+    rejection_reasons: string[];
+  };
+  paper_only: boolean;
+  places_orders: boolean;
+  spendable: boolean;
+  data_kind: string;
+};
+
+export type DemoPoolCheck = {
+  venue: Venue;
+  native_currency: string;
+  seed_native: string | number;
+  available_cash: string | number;
+  locked_capital: string | number;
+  gbp_carrying_value?: string | number | null;
+  gbp_carrying_status: string;
+  fx_source?: string | null;
+};
+
+export type DemoWalkthroughSnapshot = {
+  data_kind: string;
+  label: string;
+  paper_only: boolean;
+  execution_enabled: boolean;
+  mode: string;
+  treasury: PaperTreasurySnapshot;
+  pools: DemoPoolCheck[];
+  book: PaperTradeBookSummary;
+  active_trades: PaperTrade[];
+  closed_trades: PaperTrade[];
+  live_triggered: NearOpportunity[];
+  live_near: NearOpportunity[];
+  discovery?: LiveRefreshStatus | null;
+  hold_vs_unwind?: UnwindDecision | null;
+  replay?: FixtureReplayResult | null;
+  notes: string[];
+};
+
+export type FixtureReplayResult = {
+  data_kind: string;
+  label: string;
+  paper_only: boolean;
+  execution_enabled: boolean;
+  venue_pair: "matchbook_polymarket" | "matchbook_kalshi" | "polymarket_kalshi";
+  solver: "simple" | "generalized";
+  close_via: "hold" | "unwind" | "settlement";
+  venues: Venue[];
+  fill_kinds: string[];
+  trade?: PaperTradeDetail | null;
+  unwind?: UnwindDecision | null;
+  treasury: PaperTreasurySnapshot;
+  journal_balanced: boolean;
+  notes: string[];
+};
+
+export function getDemoWalkthrough(): Promise<DemoWalkthroughSnapshot> {
+  return request("/paper/demo/walkthrough");
+}
+
+export async function resetDemoWalkthrough(payload?: {
+  reinitialize_store?: boolean;
+  reason?: string;
+}): Promise<DemoWalkthroughSnapshot> {
+  const response = await fetch(`${API_BASE}/paper/demo/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      reinitialize_store: false,
+      reason: "explicit operator demo reset",
+      ...payload,
+    }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<DemoWalkthroughSnapshot>;
+}
+
+export async function runFixtureReplay(payload: {
+  venue_pair?: FixtureReplayResult["venue_pair"];
+  solver?: FixtureReplayResult["solver"];
+  close_via?: FixtureReplayResult["close_via"];
+  winning_outcome?: string;
+}): Promise<FixtureReplayResult> {
+  const response = await fetch(`${API_BASE}/paper/demo/fixture-replay`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      venue_pair: "matchbook_polymarket",
+      solver: "simple",
+      close_via: "hold",
+      paper_only: true,
+      places_orders: false,
+      ...payload,
+    }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<FixtureReplayResult>;
+}
+
+export async function closeDemoTrade(
+  tradeId: string,
+  payload: { close_via: "unwind" | "settlement"; winning_outcome?: string },
+): Promise<FixtureReplayResult> {
+  const response = await fetch(
+    `${API_BASE}/paper/demo/trades/${encodeURIComponent(tradeId)}/close`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        paper_only: true,
+        places_orders: false,
+        ...payload,
+      }),
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<FixtureReplayResult>;
+}
+
+export async function evaluatePaperClosePlan(
+  tradeId: string,
+  payload: { quotes: unknown[]; fx?: unknown[]; places_orders?: boolean },
+): Promise<UnwindDecision> {
+  const response = await fetch(`${API_BASE}/paper/trades/${encodeURIComponent(tradeId)}/close-plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      places_orders: false,
+      ...payload,
+    }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<UnwindDecision>;
+}

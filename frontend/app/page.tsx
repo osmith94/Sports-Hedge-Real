@@ -128,7 +128,8 @@ export default async function ArbitragePage() {
         </div>
         <div className="heading-actions">
           <div className="demo-label">{apiAvailable ? "LIVE PAPER READ MODEL" : "PAPER API OFFLINE"}</div>
-          <a className="pool-link" href="#demo-walkthrough">Demo walkthrough · not live operations</a>
+          <a className="pool-link" href="/demo">Start paper demo walkthrough</a>
+          <a className="pool-link" href="#demo-walkthrough">Legacy MANUAL_EXTERNAL fixture · not live</a>
         </div>
       </div>
 

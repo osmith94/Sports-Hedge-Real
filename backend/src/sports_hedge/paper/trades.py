@@ -54,6 +54,8 @@ class PaperTradeAuditEventType(StrEnum):
     SETTLED = "settled"
     SETTLEMENT_IDEMPOTENT = "settlement_idempotent"
     CLOSE_PLAN_EVALUATED = "close_plan_evaluated"
+    UNWIND_COMPLETED = "unwind_completed"
+    DEMO_STORE_REINITIALIZED = "demo_store_reinitialized"
 
 
 class PaperTradeLeg(BaseModel):

@@ -1,4 +1,5 @@
 import { PaperTradeBook } from "../../components/paper-trade-book";
+import { HoldVsUnwindCard } from "../../components/hold-vs-unwind";
 import {
   getActivePaperTrades,
   getClosedPaperTrades,
@@ -47,9 +48,9 @@ export default async function PaperPortfolioPage() {
             <div className="panel-title">Hold vs rotate</div>
           </div>
           <div className="panel-body">
-            <div className="empty-live">
-              Future paper logic will compare settlement value with the cost of unwinding now. Not modelled in Step 5.
-            </div>
+            <HoldVsUnwindCard
+              emptyHint="8D hold-vs-unwind is modelled from executable reverse-side quotes via POST /paper/trades/{id}/close-plan. Spread convergence and clock estimates never release capital. Open the Operator demo for a labelled DEMO / FIXTURE REPLAY that evaluates the same engine."
+            />
           </div>
         </div>
         <div className="panel">

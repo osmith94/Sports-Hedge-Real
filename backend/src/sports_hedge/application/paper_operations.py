@@ -14,7 +14,7 @@ from sports_hedge.accounting.paper_journal import (
     settlement_leg_postings,
 )
 from sports_hedge.treasury.service import PaperTreasuryError
-from sports_hedge.treasury.models import TreasuryLockRequest
+from sports_hedge.treasury.models import TreasuryLockRequest, UnwindReleaseLeg, ValidatedUnwindResult
 from sports_hedge.accounting.strategy_books import DimensionedPosting
 from sports_hedge.arbitrage.priority_alerts.fixed_exposure import revalidate_fixed_external_exposure
 from sports_hedge.arbitrage.priority_alerts.models import (
@@ -58,7 +58,7 @@ from sports_hedge.paper.unwind import (
     UnwindIdentityError,
     position_from_trade,
 )
-from sports_hedge.paper.unwind.models import CapitalScarcityInput, ReverseQuote, UnwindPolicy
+from sports_hedge.paper.unwind.models import CapitalScarcityInput, RemainingLockSource, ReverseQuote, UnwindPolicy, UnwindRecommendation
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger, SqlitePaperTradeRepository
 
 
@@ -515,6 +515,7 @@ class PaperOperationsService:
             position = position_from_trade(trade)
         except UnwindIdentityError as exc:
             raise PaperOperationsError(str(exc)) from exc
+        position = self._overlay_modelled_remaining_lock(trade, position)
         snapshots = list(fx) if fx is not None else list(trade.fx_snapshots)
         decision = PaperUnwindEngine().evaluate(
             UnwindEvaluationRequest(
@@ -538,6 +539,149 @@ class PaperOperationsService:
         )
         self.trades.save(trade)
         return decision
+
+    def complete_validated_unwind(
+        self,
+        trade_id: str,
+        *,
+        quotes: list[ReverseQuote],
+        fx=None,
+        policy: UnwindPolicy | None = None,
+        scarcity: CapitalScarcityInput | None = None,
+        now: datetime | None = None,
+    ) -> PaperTradeDetail:
+        """PAPER-ONLY: post a fully validated 8D close through 8E. Never places orders."""
+
+        if self.ledger is None or self.trades is None:
+            raise PaperOperationsError("paper_trade_repository_unavailable")
+        occurred = now or datetime.now(UTC)
+        decision = self.evaluate_unwind(
+            trade_id,
+            quotes=quotes,
+            fx=fx,
+            policy=policy,
+            scarcity=scarcity,
+            evaluated_at=occurred,
+        )
+        if decision.recommendation is not UnwindRecommendation.UNWIND_ELIGIBLE:
+            raise PaperOperationsError(f"unwind_not_eligible:{decision.decision_reason}")
+        if not decision.close_plan.fully_executable:
+            raise PaperOperationsError("close_not_fully_executable")
+        trade = self.trades.get(trade_id)
+        if trade is None:
+            raise PaperOperationsError("unknown_trade")
+        try:
+            position = position_from_trade(trade)
+        except UnwindIdentityError as exc:
+            raise PaperOperationsError(str(exc)) from exc
+        if len(decision.close_plan.legs) != len(position.legs):
+            raise PaperOperationsError("unwind_leg_mismatch")
+        releases: list[UnwindReleaseLeg] = []
+        for close_leg, open_leg in zip(decision.close_plan.legs, position.legs, strict=True):
+            if not open_leg.fill_id:
+                raise PaperOperationsError("missing_lock_identity")
+            rate = self._lock_fx_rate(open_leg.venue, open_leg.native_currency, {
+                item.currency: item for item in (fx if fx is not None else trade.fx_snapshots)
+            })
+            releases.append(
+                UnwindReleaseLeg(
+                    venue=close_leg.venue,
+                    native_currency=close_leg.native_currency,
+                    lock_id=open_leg.fill_id,
+                    amount_native=open_leg.filled_size,
+                    realised_pnl_native=close_leg.native_close_pnl,
+                    fee_native=close_leg.closing_fee,
+                    fx_rate_gbp_per_unit=rate,
+                )
+            )
+        try:
+            self.ledger.treasury.post_unwind(
+                ValidatedUnwindResult(
+                    trade_id=trade.trade_id,
+                    close_completed=True,
+                    opportunity_id=trade.opportunity_id,
+                    source="paper_unwind",
+                    source_id=f"unwind:{trade.trade_id}",
+                    reason="validated paper unwind",
+                    releases=releases,
+                ),
+                now=occurred,
+            )
+        except PaperTreasuryError as exc:
+            raise PaperOperationsError(str(exc)) from exc
+        trade.state = PaperTradeState.CLOSED
+        trade.settled_at = occurred
+        trade.last_updated_at = occurred
+        trade.realised_pnl_gbp = decision.validated_exit_pnl_gbp
+        trade.settlement_source = "paper_unwind"
+        trade.settlement_source_id = f"unwind:{trade.trade_id}"
+        trade.settlement_detail = (
+            f"validated unwind {decision.recommendation.value}; "
+            "capital released only after 8E postings"
+        )
+        trade.capital_locked_native = {}
+        trade.capital_locked_gbp = Decimal("0")
+        trade.audit.append(
+            PaperTradeAuditEvent(
+                occurred_at=occurred,
+                event_type=PaperTradeAuditEventType.UNWIND_COMPLETED,
+                detail=(
+                    f"exit_pnl_gbp={decision.validated_exit_pnl_gbp} "
+                    f"unwind_cost_gbp={decision.unwind_cost_gbp}"
+                ),
+            )
+        )
+        self.trades.save(trade)
+        if self.watchlist.repository.get(trade.opportunity_id) is not None:
+            try:
+                self.watchlist.close(trade.opportunity_id, occurred_at=occurred, detail="paper unwind")
+            except Exception:
+                pass
+        return self.trade_detail(trade_id)
+
+    def abandon_open_trades_for_demo_reset(self, *, reason: str, now: datetime | None = None) -> None:
+        if self.trades is None:
+            return
+        occurred = now or datetime.now(UTC)
+        for trade in self.trades.list_active():
+            trade.state = PaperTradeState.CLOSED
+            trade.last_updated_at = occurred
+            trade.settled_at = occurred
+            trade.settlement_source = "demo_reset"
+            trade.settlement_source_id = reason
+            trade.settlement_detail = (
+                "explicit demo store reinitialize; not a market settlement; "
+                "capital returned without realised betting P&L"
+            )
+            trade.realised_pnl_gbp = None
+            trade.capital_locked_native = {}
+            trade.capital_locked_gbp = Decimal("0")
+            trade.audit.append(
+                PaperTradeAuditEvent(
+                    occurred_at=occurred,
+                    event_type=PaperTradeAuditEventType.DEMO_STORE_REINITIALIZED,
+                    detail=reason,
+                )
+            )
+            self.trades.save(trade)
+
+    def _overlay_modelled_remaining_lock(self, trade: PaperTrade, position):
+        plan = self._plans.get(trade.opportunity_id)
+        allocation = plan.decision.allocation if plan is not None else None
+        hours = None if allocation is None else allocation.expected_lock_duration_hours
+        if hours is None or hours <= 0:
+            return position
+        minutes = hours * Decimal("60")
+        basis_label = allocation.expected_lock_basis or "8C modelled estimate"
+        return position.model_copy(
+            update={
+                "remaining_lock_minutes": minutes,
+                "remaining_lock_basis": RemainingLockSource.MODELLED,
+                "remaining_lock_detail": (
+                    f"{basis_label}; advisory only; does not release capital"
+                ),
+            }
+        )
 
     def book_summary(self) -> PaperTradeBookSummary:
         active = self.list_active_trades()
