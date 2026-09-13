@@ -14,6 +14,10 @@ from sports_hedge.application.complete_set import (
     solver_model_for_pair,
 )
 from sports_hedge.application.market_observation import VenueMarketObservation
+from sports_hedge.application.executable_liquidity import (
+    DEFAULT_OPENING_MAX_QUOTE_AGE_MS,
+    opening_liquidity_rejection_reasons,
+)
 from sports_hedge.application.quote_freshness import (
     conservative_combined_age_ms,
     conservative_combined_basis,
@@ -410,6 +414,13 @@ class PaperScanService:
             depth_scan=depth_scan,
             payoff_scan=payoff_scan,
             effective_fx=effective_fx,
+        )
+        rejections.extend(
+            opening_liquidity_rejection_reasons(
+                list(scan_costs.values()),
+                quote_age_ms=quote_age_ms,
+                max_quote_age_ms=DEFAULT_OPENING_MAX_QUOTE_AGE_MS,
+            )
         )
 
         draft = PaperScanDecision(

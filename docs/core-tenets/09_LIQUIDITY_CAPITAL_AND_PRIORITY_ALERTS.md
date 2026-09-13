@@ -56,6 +56,8 @@ Manual override capital:
 
 The recommendation is constrained by the **limiting executable leg**, then reduced by configured safety, liquidity, risk, reserve and operator limits.
 
+**Executable depth** here means Core Tenet 18 **taker** liquidity: current opposing size we can consume now at a known price. Displayed, resting, or passive maker/lay quotes are not executable depth and must not inflate recommended size. Tenet 18 is the authoritative home for taker vs maker fill semantics.
+
 If the mispriced leg has £500 executable and the hedge leg has £5,000, the validated size is constrained by the £500 leg before any safety haircut.
 
 Available venue balance is also a hard bound, but the system should not automatically deploy the entire remaining pool when depth permits it. Sizing must preserve configured reserves and account for concentration, execution risk, quote survivability, manual-external latency and other simultaneous or likely opportunities.
@@ -115,7 +117,7 @@ Priority Alerts should support provider-neutral routing such as in-app, email, p
 - Are native currency pools kept separate?
 - Are available, locked and conditionally releasable capital distinguished without double counting?
 - Is manual override explicitly distinguishable from auto-pool capital?
-- Is recommended size based on limiting executable depth rather than headline liquidity?
+- Is recommended size based on limiting Tenet-18 taker executable depth rather than headline, displayed, or passive/maker quotes?
 - Does sizing preserve reserve/concurrency constraints rather than blindly consuming the full pool?
 - Are expected lock duration and capital opportunity cost considered where relevant?
 - Does an early unwind use executable reverse-side economics after costs rather than spread convergence alone?

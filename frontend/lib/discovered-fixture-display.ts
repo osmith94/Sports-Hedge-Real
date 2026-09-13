@@ -91,6 +91,12 @@ export function freshnessLabel(item: DiscoveredFixture): string {
 }
 
 export function netEdgeSummary(item: DiscoveredFixture): string {
+  if (
+    (item.current_net_edge == null || item.current_net_edge === "") &&
+    (item.headline_band === "no_executable_arb" || item.no_comparison_reason === "no_executable_arb")
+  ) {
+    return "No executable arb";
+  }
   const edge = percent(item.current_net_edge);
   const distance = percentPoints(item.distance_to_trigger_pp);
   if (item.distance_to_trigger_pp == null || item.distance_to_trigger_pp === "") {
@@ -119,6 +125,7 @@ export function technicalDetailLines(item: DiscoveredFixture): string[] {
     item.source_event_id ? `${item.source} ${item.source_event_id}` : null,
     item.kickoff_utc ? `kickoff UTC ${item.kickoff_utc}` : null,
     item.market_family ? `family ${item.market_family}` : null,
+    item.best_arb_market ? `best arb ${item.best_arb_market}` : null,
     item.outcome_context ? `outcomes ${item.outcome_context}` : null,
     item.no_comparison_reason ? `reason ${item.no_comparison_reason}` : null,
     item.quote_age_basis ? `quote basis ${item.quote_age_basis}` : null,

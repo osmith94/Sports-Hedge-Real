@@ -7,6 +7,13 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from sports_hedge.application.executable_liquidity import (
+    HeadlineBand,
+    NO_EXECUTABLE_ARB,
+    candidate_from_decision,
+    headline_band_for,
+    select_fixture_headline,
+)
 from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
     InventoryMarket,
@@ -131,8 +138,12 @@ class DiscoveredFixture(BaseModel):
     matched_market_count: int = Field(default=0, ge=0)
     discovered_market_count: int = Field(default=0, ge=0)
     matched_equivalent_count: int = Field(default=0, ge=0)
+    qualifying_market_count: int = Field(default=0, ge=0)
+    near_executable_market_count: int = Field(default=0, ge=0)
     market_family: str | None = None
     outcome_context: str | None = None
+    best_arb_market: str | None = None
+    headline_band: str | None = None
     best_matchbook_price: Decimal | None = None
     best_polymarket_price: Decimal | None = None
     best_kalshi_price: Decimal | None = None
@@ -632,6 +643,7 @@ class ReadOnlyCrossVenueCollector:
         decisions_by_source_ids: dict[tuple[str, str], PaperScanDecision] = {}
         decisions_by_pair: dict[tuple[str, str, str, str], PaperScanDecision] = {}
         matched_market_pairs = 0
+        headline_applies: list[tuple] = []
         for left_venue, right_venue in pair_specs:
             left_markets = venue_markets[left_venue]
             right_markets = venue_markets[right_venue]
@@ -683,13 +695,7 @@ class ReadOnlyCrossVenueCollector:
                         right_market.canonical.source_market_id,
                     )
                 ] = stored
-                _apply_backend_comparison(
-                    fixture,
-                    left_market=left_market,
-                    left_observation=left_obs,
-                    right_observation=right_obs,
-                    decision=stored,
-                )
+                headline_applies.append((left_market, left_obs, right_obs, stored))
 
         inventory_rows = assemble_fixture_inventory(
             matchbook_inventory,
@@ -701,12 +707,11 @@ class ReadOnlyCrossVenueCollector:
             venue_costs=scan_kwargs.get("venue_costs"),
             fx_snapshots=scan_kwargs.get("fx_snapshots"),
         )
-        discovered_count, equivalent_count, best_edge = inventory_summary(inventory_rows)
+        discovered_count, equivalent_count, _observed_edge = inventory_summary(inventory_rows)
         fixture.discovered_market_count = discovered_count
         fixture.matched_equivalent_count = equivalent_count
         fixture.matched_market_count = matched_market_pairs
-        if fixture.current_net_edge is None and best_edge is not None:
-            fixture.current_net_edge = best_edge
+        _apply_fixture_headline(fixture, headline_applies)
         if cluster.venue_count >= 2 and matched_market_pairs == 0:
             fixture.no_comparison_reason = fixture.no_comparison_reason or (
                 "no_settlement_equivalent_market_pair"
@@ -1179,13 +1184,9 @@ def _fixture_from_cluster(
 
 
 def _opportunity_state(fixture: DiscoveredFixture) -> str:
-    if fixture.solver_is_arbitrage:
+    if fixture.headline_band == HeadlineBand.QUALIFYING.value or fixture.solver_is_arbitrage:
         return "qualifying"
-    if (
-        fixture.current_net_edge is not None
-        and fixture.trigger_net_edge is not None
-        and fixture.current_net_edge < fixture.trigger_net_edge
-    ):
+    if fixture.headline_band == HeadlineBand.NEAR_EXECUTABLE.value:
         return "near"
     if fixture.matchbook_matched + fixture.polymarket_matched + fixture.kalshi_matched >= 2:
         return "matched"
@@ -1317,6 +1318,46 @@ def _outcome_context(market: _NormalizedMarket) -> str:
     return "/".join(labels)
 
 
+def _apply_fixture_headline(
+    fixture: DiscoveredFixture,
+    applies: list[tuple[_NormalizedMarket, VenueMarketObservation, VenueMarketObservation, PaperScanDecision]],
+) -> None:
+    candidates = [
+        candidate_from_decision(
+            decision,
+            family=left_market.canonical.family.value,
+            line=left_market.canonical.line,
+        )
+        for left_market, _left_obs, _right_obs, decision in applies
+    ]
+    fixture.qualifying_market_count = sum(
+        1 for item in candidates if headline_band_for(item) is HeadlineBand.QUALIFYING
+    )
+    fixture.near_executable_market_count = sum(
+        1 for item in candidates if headline_band_for(item) is HeadlineBand.NEAR_EXECUTABLE
+    )
+    headline = select_fixture_headline(candidates)
+    fixture.headline_band = headline.band.value
+    if headline.candidate is None:
+        fixture.current_net_edge = None
+        fixture.solver_is_arbitrage = False
+        fixture.best_arb_market = None
+        if fixture.matched_equivalent_count and fixture.no_comparison_reason is None:
+            fixture.no_comparison_reason = headline.reason or NO_EXECUTABLE_ARB
+        return
+    winner_index = candidates.index(headline.candidate)
+    left_market, left_obs, right_obs, decision = applies[winner_index]
+    _apply_backend_comparison(
+        fixture,
+        left_market=left_market,
+        left_observation=left_obs,
+        right_observation=right_obs,
+        decision=decision,
+        qualifying=headline.band is HeadlineBand.QUALIFYING,
+        best_arb_market=headline.best_arb_market,
+    )
+
+
 def _apply_backend_comparison(
     fixture: DiscoveredFixture,
     *,
@@ -1324,8 +1365,10 @@ def _apply_backend_comparison(
     left_observation: VenueMarketObservation,
     right_observation: VenueMarketObservation,
     decision: PaperScanDecision,
+    qualifying: bool,
+    best_arb_market: str | None,
 ) -> None:
-    """Copy solver/scan fields onto the discovery row. No frontend economics."""
+    """Copy the selected executable headline onto the discovery row."""
 
     current_net = None
     if decision.payoff_scan is not None:
@@ -1334,35 +1377,13 @@ def _apply_backend_comparison(
         implied = decision.depth_scan.solution.implied_probability_sum
         if implied > 0:
             current_net = net_edge_from_implied_sum(implied)
-    replace = fixture.current_net_edge is None or (
-        current_net is not None and current_net > fixture.current_net_edge
-    )
-    if not replace:
-        return
     trigger = decision.minimum_net_edge
     distance = (
         distance_to_trigger_pp(current_net, trigger) if current_net is not None else None
     )
-    solver_arb = bool(
-        decision.eligible_for_paper_simulation
-        and (
-            (
-                decision.payoff_scan is not None
-                and decision.payoff_scan.solution.is_arbitrage
-            )
-            or (
-                decision.depth_scan is not None
-                and decision.depth_scan.solution.is_arbitrage
-            )
-        )
-    )
-    no_reason = None
-    if current_net is None:
-        no_reason = decision.rejection_reasons[0] if decision.rejection_reasons else "no_comparison"
-    elif not solver_arb and decision.rejection_reasons:
-        no_reason = None
     fixture.market_family = left_market.canonical.family.value
     fixture.outcome_context = _outcome_context(left_market)
+    fixture.best_arb_market = best_arb_market
     for observation in (left_observation, right_observation):
         price = _best_observed_back(observation)
         if observation.venue is VenueName.MATCHBOOK:
@@ -1376,10 +1397,8 @@ def _apply_backend_comparison(
     fixture.distance_to_trigger_pp = distance
     fixture.quote_age_ms = decision.quote_age_ms
     fixture.quote_age_basis = decision.quote_age_basis
-    fixture.no_comparison_reason = no_reason
-    fixture.solver_is_arbitrage = solver_arb
-    if current_net is None and not fixture.no_comparison_reason:
-        fixture.no_comparison_reason = "no_comparison"
+    fixture.solver_is_arbitrage = qualifying
+    fixture.no_comparison_reason = None
 
 
 def _greedy_unique_market_pairs(

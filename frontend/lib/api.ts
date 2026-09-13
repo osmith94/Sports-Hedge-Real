@@ -154,8 +154,12 @@ export type DiscoveredFixture = {
   matched_market_count: number;
   discovered_market_count?: number;
   matched_equivalent_count?: number;
+  qualifying_market_count?: number;
+  near_executable_market_count?: number;
   market_family?: string | null;
   outcome_context?: string | null;
+  best_arb_market?: string | null;
+  headline_band?: string | null;
   best_matchbook_price?: string | number | null;
   best_polymarket_price?: string | number | null;
   best_kalshi_price?: string | number | null;

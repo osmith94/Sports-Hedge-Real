@@ -121,6 +121,23 @@ def test_mixed_required_books_use_oldest_quote_not_newest() -> None:
     assert age.quote_age_ms != 0
 
 
+def test_freshness_is_revalidation_not_price_change() -> None:
+    """Tenet 18: unchanged odds are not stale if the quote was just revalidated."""
+
+    first = retrieval_quote_age(
+        retrieved_at=EVALUATED - timedelta(milliseconds=50),
+        evaluated_at=EVALUATED,
+    )
+    revalidated = retrieval_quote_age(
+        retrieved_at=EVALUATED - timedelta(milliseconds=40),
+        evaluated_at=EVALUATED,
+    )
+    assert first.basis == "retrieval"
+    assert first.quote_age_ms == 50
+    assert revalidated.quote_age_ms == 40
+    assert revalidated.quote_age_ms < 2000
+
+
 def test_elapsed_collection_uses_evaluation_clock_after_retrieval() -> None:
     retrieved = EVALUATED - timedelta(milliseconds=80)
     age = retrieval_quote_age(retrieved_at=retrieved, evaluated_at=EVALUATED)
