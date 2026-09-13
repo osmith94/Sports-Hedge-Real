@@ -326,8 +326,8 @@ export function buildCapitalSnapshot(
     mtdPnlGbp: null,
     allTimePnlGbp: null,
     note: summary
-      ? `${summary.eligible_count} paper-eligible scan${summary.eligible_count === 1 ? "" : "s"} in the current window. Realised P&L is not persisted.`
-      : "Realised P&L is not persisted on the paper scan read model.",
+      ? `${summary.eligible_count} paper-eligible scan${summary.eligible_count === 1 ? "" : "s"} in the current window.`
+      : "Paper P&L comes from closed trades when recorded.",
   };
   return { live, fixture: DEMO_CAPITAL };
 }

@@ -3,7 +3,19 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+import httpx
+
 from sports_hedge.domain.models import VenueCapabilities, VenueHealth, VenueName
+
+
+def market_data_http_timeout() -> httpx.Timeout:
+    """Bounded timeouts for Phase 1 read-only venue calls.
+
+    Connect/read splits keep a hanging Windows TLS or proxy handshake from
+    blocking collection after the documented per-request budget.
+    """
+
+    return httpx.Timeout(connect=5.0, read=8.0, write=8.0, pool=5.0)
 
 
 class ReadOnlyVenue(ABC):

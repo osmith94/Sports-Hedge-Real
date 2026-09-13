@@ -15,8 +15,8 @@ export function ActivityFeed({
           <div className="panel-title">Activity feed</div>
           <div className="panel-meta">Paper watchlist, threshold, fill and rejection events</div>
         </div>
-        <span className={usedFixture ? "demo-chip" : "status-badge"}>
-          {usedFixture ? "DEMO / FIXTURE · WATCHLIST UNAVAILABLE" : "WATCHLIST DATA"}
+          <span className={usedFixture ? "demo-chip" : "status-badge"}>
+          {usedFixture ? "DEMO / FIXTURE" : "WATCHLIST"}
         </span>
       </div>
       <div className="panel-body feed-list">

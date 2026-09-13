@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -28,6 +29,8 @@ from sports_hedge.paper.trades import (
     PaperTradeState,
 )
 from sports_hedge.paper.risk_snapshot import PaperExecutionRiskSnapshot
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SerializedLedgerBound:
@@ -148,18 +151,27 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             "SELECT * FROM paper_trades WHERE state != ? ORDER BY opened_at DESC",
             (PaperTradeState.CLOSED.value,),
         ).fetchall()
-        return [self._trade_from_row(row) for row in rows]
+        return self._trades_from_rows(rows)
 
     def list_closed(self) -> list[PaperTrade]:
         rows = self._connection.execute(
             "SELECT * FROM paper_trades WHERE state = ? ORDER BY settled_at DESC, opened_at DESC",
             (PaperTradeState.CLOSED.value,),
         ).fetchall()
-        return [self._trade_from_row(row) for row in rows]
+        return self._trades_from_rows(rows)
 
     def list_all(self) -> list[PaperTrade]:
         rows = self._connection.execute("SELECT * FROM paper_trades ORDER BY opened_at DESC").fetchall()
-        return [self._trade_from_row(row) for row in rows]
+        return self._trades_from_rows(rows)
+
+    def _trades_from_rows(self, rows: list[sqlite3.Row]) -> list[PaperTrade]:
+        trades: list[PaperTrade] = []
+        for row in rows:
+            try:
+                trades.append(self._trade_from_row(row))
+            except Exception:
+                LOGGER.exception("skipping unreadable paper trade %s", row["trade_id"])
+        return trades
 
     def archive_identities(self, session_id: str) -> None:
         """Free unique opportunity_id/trade_id for a fresh demo session. History remains."""
@@ -334,48 +346,35 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
         return trade
 
     def _trade_from_row(self, row: sqlite3.Row) -> PaperTrade:
-        legs = [
-            PaperTradeLeg.model_validate(
-                {
-                    "venue": item["venue"],
-                    "outcome": item["outcome"],
-                    "currency": item["currency"],
-                    "requested_stake": item["requested_stake"],
-                    "filled_stake": item["filled_stake"],
-                    "displayed_odds": item["displayed_odds"],
-                    "filled_odds": item["filled_odds"],
-                    "source_market_id": item["source_market_id"],
-                    "source_event_id": item["source_event_id"] if "source_event_id" in item.keys() else None,
-                    "source_runner_id": item["source_runner_id"] if "source_runner_id" in item.keys() else None,
-                    "source_contract_id": item["source_contract_id"] if "source_contract_id" in item.keys() else None,
-                    "opening_action": item["opening_action"] if "opening_action" in item.keys() else None,
-                    "canonical_state": item["canonical_state"] if "canonical_state" in item.keys() else None,
-                    "settlement_fingerprint_key": (
-                        item["settlement_fingerprint_key"] if "settlement_fingerprint_key" in item.keys() else None
-                    ),
-                    "fill_id": item["fill_id"],
-                    "fill_kind": item["fill_kind"],
-                    "capital_source": item["capital_source"],
-                    "execution_mode": item["execution_mode"],
-                }
-            )
-            for item in self._connection.execute(
-                "SELECT * FROM paper_trade_legs WHERE trade_id = ? ORDER BY rowid",
-                (row["trade_id"],),
-            )
-        ]
-        audit = [
-            PaperTradeAuditEvent(
-                event_id=item["event_id"],
-                occurred_at=datetime.fromisoformat(item["occurred_at"]),
-                event_type=item["event_type"],
-                detail=item["detail"],
-            )
-            for item in self._connection.execute(
-                "SELECT * FROM paper_trade_events WHERE trade_id = ? ORDER BY rowid",
-                (row["trade_id"],),
-            )
-        ]
+        legs = []
+        for item in self._connection.execute(
+            "SELECT * FROM paper_trade_legs WHERE trade_id = ? ORDER BY rowid",
+            (row["trade_id"],),
+        ):
+            try:
+                legs.append(_leg_from_row(item))
+            except Exception:
+                LOGGER.exception(
+                    "skipping unreadable paper trade leg for %s", row["trade_id"]
+                )
+        audit = []
+        for item in self._connection.execute(
+            "SELECT * FROM paper_trade_events WHERE trade_id = ? ORDER BY rowid",
+            (row["trade_id"],),
+        ):
+            try:
+                audit.append(
+                    PaperTradeAuditEvent(
+                        event_id=item["event_id"],
+                        occurred_at=datetime.fromisoformat(item["occurred_at"]),
+                        event_type=item["event_type"],
+                        detail=item["detail"],
+                    )
+                )
+            except Exception:
+                LOGGER.exception(
+                    "skipping unreadable paper trade audit event %s", item["event_id"]
+                )
         native = {
             key: Decimal(value)
             for key, value in json.loads(row["capital_locked_native_json"] or "{}").items()
@@ -383,17 +382,17 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
         return PaperTrade(
             trade_id=row["trade_id"],
             opportunity_id=row["opportunity_id"],
-            canonical_event_id=row["canonical_event_id"],
-            canonical_market_id=row["canonical_market_id"],
-            settlement_key=row["settlement_key"],
-            solver_model=row["solver_model"] if "solver_model" in row.keys() else None,
+            canonical_event_id=_row_value(row, "canonical_event_id"),
+            canonical_market_id=_row_value(row, "canonical_market_id"),
+            settlement_key=_row_value(row, "settlement_key"),
+            solver_model=_row_value(row, "solver_model"),
             market_family=MarketFamily(row["market_family"]) if row["market_family"] else None,
             period=FootballPeriod(row["period"]) if row["period"] else None,
-            competition=row["competition"],
-            home_team=row["home_team"],
-            away_team=row["away_team"],
-            fixture_label=row["fixture_label"],
-            market_label=row["market_label"],
+            competition=_row_value(row, "competition"),
+            home_team=_row_value(row, "home_team"),
+            away_team=_row_value(row, "away_team"),
+            fixture_label=_row_value(row, "fixture_label"),
+            market_label=_row_value(row, "market_label"),
             state=PaperTradeState(row["state"]),
             opened_at=datetime.fromisoformat(row["opened_at"]),
             last_updated_at=datetime.fromisoformat(row["last_updated_at"]),
@@ -402,20 +401,14 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             realised_pnl_gbp=_decimal(row["realised_pnl_gbp"]),
             capital_locked_native=native,
             capital_locked_gbp=_decimal(row["capital_locked_gbp"]),
-            settlement_outcome=row["settlement_outcome"],
-            settlement_source=row["settlement_source"],
-            settlement_source_id=row["settlement_source_id"],
-            settlement_detail=row["settlement_detail"],
+            settlement_outcome=_row_value(row, "settlement_outcome"),
+            settlement_source=_row_value(row, "settlement_source"),
+            settlement_source_id=_row_value(row, "settlement_source_id"),
+            settlement_detail=_row_value(row, "settlement_detail"),
             provenance=row["provenance"],
             legs=legs,
-            fx_snapshots=[
-                FxRateSnapshot.model_validate(item)
-                for item in json.loads(row["fx_snapshots_json"] or "[]")
-            ],
-            venue_costs=[
-                VenueCostSnapshot.model_validate(item)
-                for item in json.loads(row["venue_costs_json"] or "[]")
-            ],
+            fx_snapshots=_models_from_json(row["fx_snapshots_json"], FxRateSnapshot),
+            venue_costs=_models_from_json(row["venue_costs_json"], VenueCostSnapshot),
             entry_risk=_entry_risk_from_row(row),
             close_risks=_close_risks_from_row(row),
             audit=audit,
@@ -649,6 +642,7 @@ class SqlitePaperLedger:
         self._ensure_unwind_identity_columns()
         self._ensure_treasury_lock_fact_columns()
         self._ensure_risk_snapshot_columns()
+        self._ensure_trade_leg_compat_columns()
 
     def _ensure_risk_snapshot_columns(self) -> None:
         trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
@@ -695,9 +689,121 @@ class SqlitePaperLedger:
             self._connection.execute("ALTER TABLE paper_treasury_locks ADD COLUMN fill_id TEXT")
         self._connection.commit()
 
+    def _ensure_trade_leg_compat_columns(self) -> None:
+        """Historical paper_trade_legs rows predate several identity/risk columns."""
+
+        if "paper_trade_legs" not in _table_names(self._connection):
+            return
+        columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(paper_trade_legs)")
+        }
+        additions = {
+            "fill_id": "TEXT",
+            "fill_kind": "TEXT NOT NULL DEFAULT 'INTERNAL_SIMULATED'",
+            "capital_source": "TEXT NOT NULL DEFAULT 'AUTO_POOL'",
+            "execution_mode": "TEXT NOT NULL DEFAULT 'INTERNAL'",
+            "source_event_id": "TEXT",
+            "source_runner_id": "TEXT",
+            "source_contract_id": "TEXT",
+            "opening_action": "TEXT",
+            "canonical_state": "TEXT",
+            "settlement_fingerprint_key": "TEXT",
+        }
+        for name, spec in additions.items():
+            if name not in columns:
+                self._connection.execute(f"ALTER TABLE paper_trade_legs ADD COLUMN {name} {spec}")
+        self._connection.commit()
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+
+def _table_names(connection: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+
+
+def _row_value(row: sqlite3.Row, key: str, default: Any = None) -> Any:
+    try:
+        if key not in row.keys():
+            return default
+        value = row[key]
+    except Exception:
+        return default
+    return default if value is None else value
+
+
+def _optional_odds(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        odds = Decimal(str(value))
+    except Exception:
+        return None
+    return odds if odds > 1 else None
+
+
+def _leg_from_row(item: sqlite3.Row) -> PaperTradeLeg:
+    return PaperTradeLeg.model_validate(
+        {
+            "venue": item["venue"],
+            "outcome": item["outcome"],
+            "currency": item["currency"],
+            "requested_stake": item["requested_stake"],
+            "filled_stake": item["filled_stake"],
+            "displayed_odds": _optional_odds(_row_value(item, "displayed_odds")),
+            "filled_odds": _optional_odds(_row_value(item, "filled_odds")),
+            "source_market_id": _row_value(item, "source_market_id") or "unknown",
+            "source_event_id": _row_value(item, "source_event_id"),
+            "source_runner_id": _row_value(item, "source_runner_id"),
+            "source_contract_id": _row_value(item, "source_contract_id"),
+            "opening_action": _row_value(item, "opening_action"),
+            "canonical_state": _row_value(item, "canonical_state"),
+            "settlement_fingerprint_key": _row_value(item, "settlement_fingerprint_key"),
+            "fill_id": _row_value(item, "fill_id"),
+            "fill_kind": _row_value(item, "fill_kind") or "INTERNAL_SIMULATED",
+            "capital_source": _row_value(item, "capital_source") or "AUTO_POOL",
+            "execution_mode": _row_value(item, "execution_mode") or "INTERNAL",
+        }
+    )
+
+
+def _aware_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    patched = dict(payload)
+    for key in ("captured_at", "effective_from"):
+        value = patched.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        if value.endswith("Z") or value.endswith("z") or "+" in value[10:] or value[-6] == "-":
+            continue
+        patched[key] = f"{value}+00:00"
+    return patched
+
+
+def _models_from_json(raw: str | None, model: type) -> list[Any]:
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    loaded: list[Any] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        try:
+            loaded.append(model.model_validate(item))
+        except Exception:
+            try:
+                loaded.append(model.model_validate(_aware_payload(item)))
+            except Exception:
+                LOGGER.debug("skipping unreadable %s payload", model.__name__, exc_info=True)
+    return loaded
 
 
 def _dec(value: Decimal | None) -> str | None:
@@ -714,10 +820,14 @@ def _entry_risk_from_row(row: sqlite3.Row) -> PaperExecutionRiskSnapshot | None:
     raw = row["entry_risk_json"]
     if not raw:
         return None
-    payload = json.loads(raw)
-    if not payload:
+    try:
+        payload = json.loads(raw)
+        if not payload:
+            return None
+        return PaperExecutionRiskSnapshot.model_validate(payload)
+    except Exception:
+        LOGGER.exception("skipping unreadable entry_risk_json for trade %s", row["trade_id"])
         return None
-    return PaperExecutionRiskSnapshot.model_validate(payload)
 
 
 def _close_risks_from_row(row: sqlite3.Row) -> list[PaperExecutionRiskSnapshot]:
@@ -726,7 +836,17 @@ def _close_risks_from_row(row: sqlite3.Row) -> list[PaperExecutionRiskSnapshot]:
     raw = row["close_risks_json"]
     if not raw:
         return []
-    payload = json.loads(raw)
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        LOGGER.exception("skipping unreadable close_risks_json for trade %s", row["trade_id"])
+        return []
     if not isinstance(payload, list):
         return []
-    return [PaperExecutionRiskSnapshot.model_validate(item) for item in payload]
+    loaded: list[PaperExecutionRiskSnapshot] = []
+    for item in payload:
+        try:
+            loaded.append(PaperExecutionRiskSnapshot.model_validate(item))
+        except Exception:
+            LOGGER.exception("skipping unreadable close risk snapshot")
+    return loaded

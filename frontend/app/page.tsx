@@ -290,7 +290,7 @@ export default async function ArbitragePage() {
       <section className="ops-section grid-2">
         <ActivityFeed items={activity.items} usedFixture={activity.usedFixture} />
         <div className="stack-gap">
-          <CapitalSummary live={capital.live} />
+          <CapitalSummary live={capital.live} tradeSummary={tradeSummary} />
         </div>
       </section>
 

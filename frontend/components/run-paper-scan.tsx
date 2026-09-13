@@ -243,7 +243,6 @@ export function RunPaperScan() {
         setLastDurationMs(Math.max(0, completed - started));
       }
       await refreshEconomics();
-      router.refresh();
     } catch (error) {
       setState({
         kind: "error",
@@ -255,11 +254,12 @@ export function RunPaperScan() {
         if (status.last_duration_ms != null) setLastDurationMs(status.last_duration_ms);
         if (status.venue_health) setVenueHealth(status.venue_health);
       } catch {
-        // Status refresh is best-effort after a failed/timed-out collect.
+        setLastCompletedAt(new Date().toISOString());
       }
     } finally {
       inFlightRef.current = false;
       setLoading(false);
+      router.refresh();
     }
   }, [buildPayload, refreshEconomics, router]);
 
@@ -420,25 +420,23 @@ export function RunPaperScan() {
           {` · cadence ${clampIntervalSeconds(intervalSeconds)}s`}
         </div>
 
-        <div className="econ-strip" aria-label="Backend-resolved FX and venue costs">
-          {chips.map((chip) => (
-            <span
-              key={chip.key}
-              className={chip.warn ? "econ-chip econ-chip-warn" : "econ-chip"}
-              title={chip.title}
-            >
-              {chip.label}
-            </span>
-          ))}
-        </div>
-
         <details className="scan-advanced">
-          <summary>Advanced · provenance</summary>
+          <summary>Advanced · FX / fees / provenance</summary>
+          <div className="econ-strip" aria-label="Backend-resolved FX and venue costs">
+            {chips.map((chip) => (
+              <span
+                key={chip.key}
+                className={chip.warn ? "econ-chip econ-chip-warn" : "econ-chip"}
+                title={chip.title}
+              >
+                {chip.label}
+              </span>
+            ))}
+          </div>
           <p className="scan-advanced-copy">
             FX and venue fees are backend-resolved ({economics?.data_kind ?? "backend_resolved"}).
-            Missing or stale required inputs fail closed.             Standing capital is Matchbook GBP /
-            Polymarket USD / Kalshi USD — never a combined cash figure. Optional extra
-            capital_limit_gbp is a scan-only cap, not live funds.
+            Missing or stale required inputs fail closed. Standing capital is Matchbook GBP /
+            Polymarket USD / Kalshi USD. Optional extra capital_limit_gbp is a scan-only cap, not live funds.
           </p>
           <label className="scan-field">
             <span>Optional capital limit £</span>

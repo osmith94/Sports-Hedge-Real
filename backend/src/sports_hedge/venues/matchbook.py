@@ -9,7 +9,7 @@ import httpx
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueHealth, VenueName
 from sports_hedge.normalization.text import normalize_text
-from sports_hedge.venues.base import ReadOnlyVenue
+from sports_hedge.venues.base import ReadOnlyVenue, market_data_http_timeout
 
 # Official lookups/sports names that mean association football only.
 # NCAA / American / Gaelic football are not in this set and must not match.
@@ -43,7 +43,7 @@ class MatchbookClient(ReadOnlyVenue):
         self._clock = clock or (lambda: datetime.now(UTC))
         self._client = client or httpx.AsyncClient(
             base_url=settings.matchbook_base_url.rstrip("/"),
-            timeout=httpx.Timeout(10.0),
+            timeout=market_data_http_timeout(),
             headers={
                 "Accept": "application/json",
                 "Accept-Encoding": "gzip",

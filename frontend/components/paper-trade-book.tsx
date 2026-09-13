@@ -128,7 +128,7 @@ export function PaperTradeBook({ summary, active, closed, apiAvailable, compact 
   if (!apiAvailable) {
     return (
       <div className="empty-live">
-        Paper trade APIs are unavailable. This page does not fall back to mock portfolio figures.
+        Paper trade book could not be loaded. Treasury above is still authoritative.
       </div>
     );
   }

@@ -277,7 +277,7 @@ def test_live_console_hides_demo_pools_and_compacts_empty_states() -> None:
     assert "empty-live-compact" in page
     assert "demo-walkthrough" in page
     assert "PAPER MODE · NO EXECUTION" in scan
-    assert "Advanced · provenance" in scan
+    assert "Advanced · FX / fees / provenance" in scan
     assert "getEconomicsStatus" in scan
     assert "econ-strip" in scan
     assert "USD → GBP" not in scan

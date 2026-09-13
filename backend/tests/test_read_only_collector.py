@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -289,6 +290,55 @@ async def test_collector_reports_book_failure_without_crashing_scan() -> None:
         assert report.paper_decisions == []
         assert any(
             issue.stage == "order_book" and "temporary public book failure" in issue.detail
+            for issue in report.issues
+        )
+    finally:
+        repository.close()
+
+
+class HangingMatchbook:
+    async def list_events(self, **filters: Any) -> dict[str, Any]:
+        del filters
+        await asyncio.sleep(30)
+        return {"events": []}
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+        del event_id, filters
+        await asyncio.sleep(30)
+        return {"markets": []}
+
+
+@pytest.mark.asyncio
+async def test_collector_returns_healthy_venue_fixtures_when_matchbook_hangs() -> None:
+    import time
+
+    repository = SqliteMarketIntelligenceRepository()
+    intelligence = MarketIntelligenceService(repository)
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=HangingMatchbook(),
+        polymarket=FakePolymarket(),
+        paper_scan=PaperScanService(intelligence),
+        venue_timeout_seconds=0.3,
+        provider_call_timeout_seconds=0.3,
+        cycle_timeout_seconds=2.0,
+    )
+    started = time.monotonic()
+    try:
+        report = await collector.collect_and_scan(maximum_execution_risk=100)
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0
+        assert report.venue_health[VenueName.MATCHBOOK.value] == "timeout"
+        assert report.venue_health[VenueName.POLYMARKET.value] == "ok"
+        assert report.raw_matchbook_events == 0
+        assert report.raw_polymarket_events == 2
+        discovered = {item.source_event_id: item for item in report.discovered_fixtures}
+        assert "pm-event-1" in discovered or "pm-event-2" in discovered
+        assert any(item.polymarket_matched for item in report.discovered_fixtures)
+        assert not any(item.matchbook_matched for item in report.discovered_fixtures)
+        assert any(
+            issue.stage == "list_events"
+            and issue.venue is VenueName.MATCHBOOK
+            and "timeout" in issue.detail
             for issue in report.issues
         )
     finally:

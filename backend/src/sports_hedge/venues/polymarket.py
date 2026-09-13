@@ -7,7 +7,7 @@ import httpx
 
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueCapabilities, VenueHealth, VenueName
-from sports_hedge.venues.base import ReadOnlyVenue
+from sports_hedge.venues.base import ReadOnlyVenue, market_data_http_timeout
 
 
 class PolymarketClient(ReadOnlyVenue):
@@ -33,7 +33,7 @@ class PolymarketClient(ReadOnlyVenue):
         self.settings = settings
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0),
+            timeout=market_data_http_timeout(),
             headers={
                 "Accept": "application/json",
                 "Accept-Encoding": "gzip",

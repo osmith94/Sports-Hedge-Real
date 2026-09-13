@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
@@ -120,17 +122,36 @@ async def venue_health() -> list[dict[str, object]]:
     """Read-only data-plane health for first-class venues. Never false-green."""
 
     settings = get_settings()
+    timeout = settings.paper_scan_provider_timeout_seconds
     clients = (
         MatchbookClient(settings),
         PolymarketClient(settings),
         KalshiClient(settings),
     )
-    results: list[dict[str, object]] = []
+
+    async def _one(client) -> dict[str, object]:
+        try:
+            health = await asyncio.wait_for(client.health(), timeout=timeout)
+            return health.model_dump()
+        except TimeoutError:
+            return {
+                "venue": client.name,
+                "ok": False,
+                "authenticated": False,
+                "checked_at": datetime.now(UTC),
+                "detail": f"health_timed_out_after_{int(timeout)}s",
+            }
+        except Exception as exc:
+            return {
+                "venue": client.name,
+                "ok": False,
+                "authenticated": False,
+                "checked_at": datetime.now(UTC),
+                "detail": str(exc),
+            }
+
     try:
-        for client in clients:
-            health = await client.health()
-            results.append(health.model_dump())
+        return list(await asyncio.gather(*(_one(client) for client in clients)))
     finally:
         for client in clients:
             await client.aclose()
-    return results

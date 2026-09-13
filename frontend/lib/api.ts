@@ -438,28 +438,7 @@ export type EventReaction = {
 const API_BASE = process.env.NEXT_PUBLIC_SPORTS_HEDGE_API_URL ?? "http://localhost:8000";
 /** Slightly above backend paper_scan_cycle_timeout_seconds (45s) so Scanning always resolves. */
 export const PAPER_COLLECTION_TIMEOUT_MS = 60_000;
-
-async function fetchWithTimeout(
-  url: string,
-  init: RequestInit,
-  timeoutMs: number,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } catch (error) {
-    const name = error instanceof Error ? error.name : "";
-    if (name === "AbortError" || name === "TimeoutError") {
-      throw new Error(
-        `Scan timed out after ${Math.round(timeoutMs / 1000)}s. Check venue health and retry.`,
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
+export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 
 async function errorDetail(response: Response): Promise<string> {
   try {
@@ -471,8 +450,32 @@ async function errorDetail(response: Response): Promise<string> {
   return `Sports Hedge API request failed (${response.status})`;
 }
 
-async function request<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  timeoutMessage?: string,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "";
+    if (name === "AbortError" || name === "TimeoutError") {
+      throw new Error(
+        timeoutMessage ??
+          `Sports Hedge API request timed out after ${Math.round(timeoutMs / 1000)}s`,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function request<T>(path: string, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<T> {
+  const response = await fetchWithTimeout(`${API_BASE}${path}`, { cache: "no-store" }, timeoutMs);
   if (!response.ok) {
     throw new Error(await errorDetail(response));
   }
@@ -615,6 +618,7 @@ export async function runPaperCollection(
       cache: "no-store",
     },
     PAPER_COLLECTION_TIMEOUT_MS,
+    `Scan timed out after ${Math.round(PAPER_COLLECTION_TIMEOUT_MS / 1000)}s. Check venue health and retry.`,
   );
   if (!response.ok) {
     throw new Error(await errorDetail(response));

@@ -428,7 +428,7 @@ def test_operator_console_keeps_steps_1_to_3_console_contract() -> None:
     assert "Min net arb %" in scan
     assert "Max risk" in scan
     assert "Optional capital limit" in scan
-    assert "Advanced · provenance" in scan
+    assert "Advanced · FX / fees / provenance" in scan
     assert "econ-strip" in scan
     assert "getEconomicsStatus" in scan
     assert "PAPER MODE · NO EXECUTION" in scan

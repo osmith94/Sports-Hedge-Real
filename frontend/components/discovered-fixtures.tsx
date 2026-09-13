@@ -176,7 +176,13 @@ export function DiscoveredFixturesPanel({
         </div>
       ) : null}
       {items.length === 0 ? (
-        <div className="empty-live-compact">No in-scope fixtures yet.</div>
+        <div className="empty-live-compact">
+          {status.last_error
+            ? "Last scan finished with an error. No in-scope fixtures were stored."
+            : status.last_completed_at
+              ? "No in-scope fixtures from the last scan."
+              : "No in-scope fixtures yet."}
+        </div>
       ) : (
         <div className="table-wrap">
           <table className="discovery-compact">

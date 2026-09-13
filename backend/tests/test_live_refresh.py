@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
@@ -158,3 +159,20 @@ def test_tracked_rows_expose_source_freshness_and_narrative() -> None:
     finally:
         app.dependency_overrides.clear()
         repository.close()
+
+
+@pytest.mark.asyncio
+async def test_live_refresh_records_completion_when_cycle_raises() -> None:
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
+
+    async def boom() -> None:
+        raise RuntimeError("matchbook hung")
+
+    with pytest.raises(RuntimeError, match="hung"):
+        await coordinator.run_cycle(boom)
+    assert coordinator.status.cycle_in_progress is False
+    assert coordinator.status.last_completed_at is not None
+    assert coordinator.status.last_error is not None
+    assert "hung" in coordinator.status.last_error
+    coordinator.reset()
