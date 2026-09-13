@@ -258,13 +258,17 @@ describe("tracked market row identity", () => {
     assert.match(page, /FixtureInventoryWorkspace/);
     assert.match(page, /getFixtureDetail/);
     assert.match(page, /decodeURIComponent\(eventId\)/);
+    assert.match(page, /searchParams/);
+    assert.match(page, /focusOpportunityId/);
     assert.match(inventory, /const preparable = detail\.preparable_opportunities/);
     assert.match(inventory, /PaperDeploymentPreview opportunities=\{preparable\}/);
+    assert.match(inventory, /focusOpportunityId=\{focusOpportunityId\}/);
     assert.match(preview, /id="paper-deployment"/);
+    assert.match(preview, /id="bet-ticket"/);
     assert.match(preview, /No settlement-equivalent qualified opportunity/);
     assert.match(preview, /Prepare paper legs/);
     assert.match(preview, /Confirm paper OPEN/);
-    assert.match(preview, /does not lock treasury or place orders/);
+    assert.match(preview, /does not lock[\s\S]*treasury or place orders/);
     assert.doesNotMatch(preview, /place_order|cancel_order/);
   });
 });
@@ -289,6 +293,8 @@ describe("tracked market keyboard and click-through policy", () => {
     assert.match(source, /type="button"/);
     assert.match(source, /aria-sort=\{ariaSort\}/);
     assert.match(source, /aria-label=\{`Sort by \$\{label\}/);
+    assert.match(source, /<th>Bet<\/th>/);
+    assert.match(source, /TrackedBetAction/);
     assert.doesNotMatch(source, /tabIndex=\{0\}/);
   });
 });
