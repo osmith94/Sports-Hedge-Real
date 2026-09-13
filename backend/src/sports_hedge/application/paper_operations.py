@@ -54,6 +54,7 @@ from sports_hedge.paper.preparation import (
 from sports_hedge.paper.settlement import PaperSettlementError, compute_paper_settlement
 from sports_hedge.paper.simulator import PaperFillSimulator
 from sports_hedge.paper.trades import (
+    PAPER_UNWIND_SOURCE,
     PaperLegFillKind,
     PaperSettlementRequest,
     PaperTrade,
@@ -63,6 +64,7 @@ from sports_hedge.paper.trades import (
     PaperTradeDetail,
     PaperTradeLeg,
     PaperTradeState,
+    paper_unwind_source_id,
 )
 from sports_hedge.paper.risk_snapshot import (
     PaperRiskSnapshotKind,
@@ -74,6 +76,7 @@ from sports_hedge.paper.unwind import (
     UnwindDecision,
     UnwindEvaluationRequest,
     UnwindIdentityError,
+    close_fills_from_decision,
     position_from_trade,
 )
 from sports_hedge.paper.unwind.models import CapitalScarcityInput, RemainingLockSource, ReverseQuote, UnwindPolicy, UnwindRecommendation
@@ -611,6 +614,8 @@ class PaperOperationsService:
             raise PaperOperationsError("unknown_trade")
         settled_at = request.settled_at or now or datetime.now(UTC)
         if trade.state is PaperTradeState.CLOSED:
+            if trade.settlement_source == PAPER_UNWIND_SOURCE:
+                raise PaperOperationsError("already_unwound")
             if (
                 trade.settlement_outcome == request.winning_outcome
                 and trade.settlement_source == request.source
@@ -793,6 +798,27 @@ class PaperOperationsService:
         if self.ledger is None or self.trades is None:
             raise PaperOperationsError("paper_trade_repository_unavailable")
         occurred = now or datetime.now(UTC)
+        trade = self.trades.get(trade_id)
+        if trade is None:
+            raise PaperOperationsError("unknown_trade")
+        unwind_id = paper_unwind_source_id(trade.trade_id)
+        if trade.state is PaperTradeState.CLOSED:
+            if (
+                trade.settlement_source == PAPER_UNWIND_SOURCE
+                and trade.settlement_source_id == unwind_id
+            ):
+                trade.audit.append(
+                    PaperTradeAuditEvent(
+                        occurred_at=occurred,
+                        event_type=PaperTradeAuditEventType.UNWIND_IDEMPOTENT,
+                        detail="identical unwind request ignored",
+                    )
+                )
+                self.trades.save(trade)
+                return self.trade_detail(trade_id)
+            if trade.settlement_source == PAPER_UNWIND_SOURCE:
+                raise PaperOperationsError("already_unwound")
+            raise PaperOperationsError("already_settled")
         decision = self.evaluate_unwind(
             trade_id,
             quotes=quotes,
@@ -814,13 +840,16 @@ class PaperOperationsService:
             raise PaperOperationsError(str(exc)) from exc
         if len(decision.close_plan.legs) != len(position.legs):
             raise PaperOperationsError("unwind_leg_mismatch")
+        fx_map = {
+            item.currency: item for item in (fx if fx is not None else trade.fx_snapshots)
+        }
         releases: list[UnwindReleaseLeg] = []
+        fx_rates: dict[tuple, Decimal] = {}
         for close_leg, open_leg in zip(decision.close_plan.legs, position.legs, strict=True):
             if not open_leg.fill_id:
                 raise PaperOperationsError("missing_lock_identity")
-            rate = self._lock_fx_rate(open_leg.venue, open_leg.native_currency, {
-                item.currency: item for item in (fx if fx is not None else trade.fx_snapshots)
-            })
+            rate = self._lock_fx_rate(open_leg.venue, open_leg.native_currency, fx_map)
+            fx_rates[(close_leg.venue, close_leg.native_currency.upper())] = rate
             releases.append(
                 UnwindReleaseLeg(
                     venue=close_leg.venue,
@@ -833,13 +862,17 @@ class PaperOperationsService:
                 )
             )
         try:
+            close_fills = close_fills_from_decision(position, decision, fx_rates=fx_rates)
+        except UnwindIdentityError as exc:
+            raise PaperOperationsError(str(exc)) from exc
+        try:
             self.ledger.treasury.post_unwind(
                 ValidatedUnwindResult(
                     trade_id=trade.trade_id,
                     close_completed=True,
                     opportunity_id=trade.opportunity_id,
-                    source="paper_unwind",
-                    source_id=f"unwind:{trade.trade_id}",
+                    source=PAPER_UNWIND_SOURCE,
+                    source_id=unwind_id,
                     reason="validated paper unwind",
                     releases=releases,
                 ),
@@ -847,18 +880,29 @@ class PaperOperationsService:
             )
         except PaperTreasuryError as exc:
             raise PaperOperationsError(str(exc)) from exc
+        opening_legs = [leg.model_copy() for leg in trade.legs]
+        trade.legs = opening_legs
+        trade.close_fills = close_fills
         trade.state = PaperTradeState.CLOSED
         trade.settled_at = occurred
         trade.last_updated_at = occurred
         trade.realised_pnl_gbp = decision.validated_exit_pnl_gbp
-        trade.settlement_source = "paper_unwind"
-        trade.settlement_source_id = f"unwind:{trade.trade_id}"
+        trade.settlement_outcome = None
+        trade.settlement_source = PAPER_UNWIND_SOURCE
+        trade.settlement_source_id = unwind_id
         trade.settlement_detail = (
             f"validated unwind {decision.recommendation.value}; "
             "capital released only after 8E postings"
         )
         trade.capital_locked_native = {}
         trade.capital_locked_gbp = Decimal("0")
+        trade.audit.append(
+            PaperTradeAuditEvent(
+                occurred_at=occurred,
+                event_type=PaperTradeAuditEventType.CLOSE_FILLS_RECORDED,
+                detail=f"close_fills={len(close_fills)} distinct from opening legs",
+            )
+        )
         trade.audit.append(
             PaperTradeAuditEvent(
                 occurred_at=occurred,

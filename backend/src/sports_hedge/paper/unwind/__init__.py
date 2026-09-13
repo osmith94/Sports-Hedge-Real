@@ -1,6 +1,10 @@
 """Paper-only unwind economics. No live execution and no treasury postings."""
 
-from sports_hedge.paper.unwind.adapter import UnwindIdentityError, position_from_trade
+from sports_hedge.paper.unwind.adapter import (
+    UnwindIdentityError,
+    close_fills_from_decision,
+    position_from_trade,
+)
 from sports_hedge.paper.unwind.engine import PaperUnwindEngine
 from sports_hedge.paper.unwind.mechanics import mechanics_for_venue, register_venue_close_mechanics
 from sports_hedge.paper.unwind.models import (
@@ -38,6 +42,7 @@ __all__ = [
     "UnwindEvaluationRequest",
     "UnwindIdentityError",
     "UnwindPolicy",
+    "close_fills_from_decision",
     "UnwindRecommendation",
     "VenueCloseMechanics",
     "mechanics_for_venue",

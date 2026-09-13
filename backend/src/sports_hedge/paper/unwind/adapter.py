@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from sports_hedge.application.complete_set import SOLVER_MODEL_SIMPLE
-from sports_hedge.paper.trades import PaperLegFillKind, PaperTrade
+from sports_hedge.paper.trades import (
+    PaperCloseFill,
+    PaperLegFillKind,
+    PaperTrade,
+    paper_close_fill_id,
+)
 from sports_hedge.paper.unwind.models import (
     OpenPaperLeg,
     OpenPaperPosition,
     RemainingLockSource,
+    UnwindDecision,
 )
 
 
@@ -76,6 +84,48 @@ def open_leg_from_trade_leg(trade: PaperTrade, leg) -> OpenPaperLeg:
         fill_kind=leg.fill_kind,
         fill_id=leg.fill_id,
     )
+
+
+def close_fills_from_decision(
+    position: OpenPaperPosition,
+    decision: UnwindDecision,
+    *,
+    fx_rates: dict[tuple, Decimal],
+) -> list[PaperCloseFill]:
+    """Persist reverse-side close fills separately from opening legs."""
+
+    if len(decision.close_plan.legs) != len(position.legs):
+        raise UnwindIdentityError("unwind_leg_mismatch")
+    fills: list[PaperCloseFill] = []
+    for close_leg, open_leg in zip(decision.close_plan.legs, position.legs, strict=True):
+        if not open_leg.fill_id:
+            raise UnwindIdentityError("missing_lock_identity")
+        if not close_leg.executable:
+            raise UnwindIdentityError("close_not_fully_executable")
+        rate = fx_rates.get((close_leg.venue, close_leg.native_currency.upper()))
+        if rate is None:
+            raise UnwindIdentityError(f"missing_fx_rate:{close_leg.native_currency}")
+        fills.append(
+            PaperCloseFill(
+                fill_id=paper_close_fill_id(open_leg.fill_id),
+                opening_fill_id=open_leg.fill_id,
+                venue=close_leg.venue,
+                outcome=close_leg.canonical_outcome,
+                native_currency=close_leg.native_currency,
+                close_action=close_leg.close_action,
+                filled_close_quantity=close_leg.filled_close_quantity,
+                weighted_closing_price=close_leg.weighted_closing_price,
+                proceeds_native=close_leg.proceeds if close_leg.proceeds else close_leg.matched_stake,
+                closing_fee_native=close_leg.closing_fee,
+                native_close_pnl=close_leg.native_close_pnl,
+                gbp_close_pnl=close_leg.gbp_close_pnl,
+                fx_rate_gbp_per_unit=rate,
+                lock_id=open_leg.fill_id,
+                fee_snapshot_id=close_leg.fee_snapshot_id,
+                quote_age_ms=close_leg.quote_age_ms,
+            )
+        )
+    return fills
 
 
 def _fee_snapshot_id(trade: PaperTrade, leg) -> str | None:

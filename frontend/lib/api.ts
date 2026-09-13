@@ -959,6 +959,26 @@ export type PaperTradeLeg = {
   execution_mode: string;
 };
 
+export type PaperCloseFill = {
+  fill_id: string;
+  opening_fill_id: string;
+  venue: Venue;
+  outcome: string;
+  native_currency: string;
+  close_action: string;
+  filled_close_quantity: string | number;
+  weighted_closing_price?: string | number | null;
+  proceeds_native: string | number;
+  closing_fee_native: string | number;
+  native_close_pnl: string | number;
+  gbp_close_pnl: string | number;
+  fx_rate_gbp_per_unit: string | number;
+  lock_id: string;
+  fee_snapshot_id?: string | null;
+  quote_age_ms?: number | null;
+  paper_only?: boolean;
+};
+
 export type PaperTradeAuditEvent = {
   event_id: string;
   occurred_at: string;
@@ -1019,6 +1039,7 @@ export type PaperTrade = {
   paper_only?: boolean;
   places_orders?: boolean;
   legs: PaperTradeLeg[];
+  close_fills?: PaperCloseFill[];
   entry_risk?: PaperExecutionRiskSnapshot | null;
   close_risks?: PaperExecutionRiskSnapshot[];
   audit: PaperTradeAuditEvent[];

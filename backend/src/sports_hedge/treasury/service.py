@@ -457,12 +457,45 @@ class PaperTreasuryService(SerializedLedgerBound):
                     if (lock["trade_id"] or None) != result.trade_id:
                         raise PaperTreasuryError("unknown_trade_lock")
                     remaining = Decimal(lock["locked_native"]) - Decimal(lock["released_native"])
-                    if leg.amount_native > remaining:
-                        raise PaperTreasuryError("release_exceeds_lock")
                     if VenueName(lock["venue"]) is not leg.venue:
                         raise PaperTreasuryError("venue_mismatch")
                     if lock["native_currency"] != leg.native_currency.upper():
                         raise PaperTreasuryError("currency_mismatch")
+                    capital_source = parse_capital_source(
+                        _row_value(lock, "capital_source", "AUTO_POOL")
+                    )
+                    journal_source_id = f"{source_id}:{leg.lock_id}"
+                    expected = PaperJournalEntry(
+                        source=result.source,
+                        source_id=journal_source_id,
+                        occurred_at=occurred,
+                        description="PAPER-ONLY validated unwind capital release",
+                        opportunity_id=result.opportunity_id or result.trade_id,
+                        trade_id=result.trade_id,
+                        postings=unwind_close_postings(
+                            venue=leg.venue,
+                            currency=leg.native_currency,
+                            locked_native=leg.amount_native,
+                            realised_pnl_native=leg.realised_pnl_native,
+                            fee_native=leg.fee_native,
+                            amount_gbp_per_native=leg.fx_rate_gbp_per_unit,
+                            opportunity_id=result.opportunity_id or result.trade_id,
+                            capital_source=capital_source,
+                            position_id=result.trade_id,
+                        ),
+                    )
+                    existing = self._ledger.journal.get(result.source, journal_source_id)
+                    if remaining == 0 and existing is not None:
+                        if not existing.facts_match(expected):
+                            raise PaperTreasuryError("conflicting_journal_facts")
+                        entries.append(existing)
+                        continue
+                    if remaining == 0:
+                        raise PaperTreasuryError("release_exceeds_lock")
+                    if existing is not None:
+                        raise PaperTreasuryError("conflicting_journal_facts")
+                    if leg.amount_native > remaining:
+                        raise PaperTreasuryError("release_exceeds_lock")
                     pool = self._pool_row(session.session_id, leg.venue, leg.native_currency)
                     self._release_locked(
                         pool,
@@ -472,30 +505,7 @@ class PaperTreasuryService(SerializedLedgerBound):
                     pool = self._pool_row(session.session_id, leg.venue, leg.native_currency)
                     self._add_realised(pool, leg.realised_pnl_native, leg.fee_native)
                     self._bump_lock_released(leg.lock_id, leg.amount_native)
-                    capital_source = parse_capital_source(
-                        _row_value(lock, "capital_source", "AUTO_POOL")
-                    )
-                    posted, created = self._ledger.journal.append_idempotent(
-                        PaperJournalEntry(
-                            source=result.source,
-                            source_id=f"{source_id}:{leg.lock_id}",
-                            occurred_at=occurred,
-                            description="PAPER-ONLY validated unwind capital release",
-                            opportunity_id=result.opportunity_id or result.trade_id,
-                            trade_id=result.trade_id,
-                            postings=unwind_close_postings(
-                                venue=leg.venue,
-                                currency=leg.native_currency,
-                                locked_native=leg.amount_native,
-                                realised_pnl_native=leg.realised_pnl_native,
-                                fee_native=leg.fee_native,
-                                amount_gbp_per_native=leg.fx_rate_gbp_per_unit,
-                                opportunity_id=result.opportunity_id or result.trade_id,
-                                capital_source=capital_source,
-                                position_id=result.trade_id,
-                            ),
-                        )
-                    )
+                    posted, created = self._ledger.journal.append_idempotent(expected)
                     entries.append(posted)
                     if created:
                         self._insert_event(

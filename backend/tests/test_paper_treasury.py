@@ -339,6 +339,31 @@ def test_unwind_posts_only_after_completed_close() -> None:
     assert pool.available_cash == Decimal("1010")
     assert pool.realised_pnl_native == Decimal("10")
     assert pool.cumulative_fees_native == Decimal("2")
+    again = ledger.treasury.post_unwind(
+        ValidatedUnwindResult(
+            trade_id="ptrade-demo",
+            close_completed=True,
+            source_id="unwind:ptrade-demo",
+            releases=[
+                UnwindReleaseLeg(
+                    venue=VenueName.MATCHBOOK,
+                    native_currency="GBP",
+                    lock_id="lock-unwind",
+                    amount_native=Decimal("250"),
+                    realised_pnl_native=Decimal("10"),
+                    fee_native=Decimal("2"),
+                    fx_rate_gbp_per_unit=Decimal("1"),
+                )
+            ],
+        ),
+        now=NOW,
+    )
+    assert [entry.source_id for entry in again] == [entry.source_id for entry in posted]
+    pool = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP")
+    assert pool.locked_capital == Decimal("0")
+    assert pool.available_cash == Decimal("1010")
+    assert pool.realised_pnl_native == Decimal("10")
+    assert pool.cumulative_fees_native == Decimal("2")
     with pytest.raises(PaperTreasuryError, match="release_exceeds_lock"):
         ledger.treasury.post_unwind(
             ValidatedUnwindResult(

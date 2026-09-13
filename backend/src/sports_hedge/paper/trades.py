@@ -56,9 +56,22 @@ class PaperTradeAuditEventType(StrEnum):
     SETTLED = "settled"
     SETTLEMENT_IDEMPOTENT = "settlement_idempotent"
     CLOSE_PLAN_EVALUATED = "close_plan_evaluated"
+    CLOSE_FILLS_RECORDED = "close_fills_recorded"
     UNWIND_COMPLETED = "unwind_completed"
+    UNWIND_IDEMPOTENT = "unwind_idempotent"
     UNWIND_RISK_RECORDED = "unwind_risk_recorded"
     DEMO_STORE_REINITIALIZED = "demo_store_reinitialized"
+
+
+PAPER_UNWIND_SOURCE = "paper_unwind"
+
+
+def paper_unwind_source_id(trade_id: str) -> str:
+    return f"unwind:{trade_id}"
+
+
+def paper_close_fill_id(opening_fill_id: str) -> str:
+    return f"close:{opening_fill_id}"
 
 
 class PaperTradeLeg(BaseModel):
@@ -84,6 +97,34 @@ class PaperTradeLeg(BaseModel):
     @model_validator(mode="after")
     def normalize(self) -> PaperTradeLeg:
         self.currency = self.currency.upper()
+        return self
+
+
+class PaperCloseFill(BaseModel):
+    """Persisted paper close fill. Separate from opening legs; never a venue order."""
+
+    fill_id: str
+    opening_fill_id: str
+    venue: VenueName
+    outcome: str
+    native_currency: str
+    close_action: MarketAction
+    filled_close_quantity: Decimal = Field(ge=0)
+    weighted_closing_price: Decimal | None = None
+    proceeds_native: Decimal
+    closing_fee_native: Decimal = Field(ge=0)
+    native_close_pnl: Decimal
+    gbp_close_pnl: Decimal
+    fx_rate_gbp_per_unit: Decimal = Field(gt=0)
+    lock_id: str
+    fee_snapshot_id: str | None = None
+    quote_age_ms: int | None = Field(default=None, ge=0)
+    paper_only: bool = True
+
+    @model_validator(mode="after")
+    def normalize(self) -> PaperCloseFill:
+        self.native_currency = self.native_currency.upper()
+        self.paper_only = True
         return self
 
 
@@ -134,6 +175,7 @@ class PaperTrade(BaseModel):
     venue_costs: list[VenueCostSnapshot] = Field(default_factory=list)
     entry_risk: PaperExecutionRiskSnapshot | None = None
     close_risks: list[PaperExecutionRiskSnapshot] = Field(default_factory=list)
+    close_fills: list[PaperCloseFill] = Field(default_factory=list)
     audit: list[PaperTradeAuditEvent] = Field(default_factory=list)
 
     @model_validator(mode="after")
