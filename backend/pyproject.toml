@@ -32,6 +32,9 @@ packages = ["src/sports_hedge"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["src"]
+markers = [
+  "live_logical: real-provider logical acceptance; skipped unless SPORTS_HEDGE_LIVE_LOGICAL=1",
+]
 
 [tool.ruff]
 line-length = 100
