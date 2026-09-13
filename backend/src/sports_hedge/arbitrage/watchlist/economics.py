@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from decimal import ROUND_HALF_EVEN, Decimal
 
+from sports_hedge.application.complete_set import SOLVER_MODEL_GENERALIZED
 from sports_hedge.arbitrage.watchlist.models import (
     OpportunityClassification,
     OpportunityStatus,
@@ -170,7 +171,13 @@ def classify_status(
     if observation.quote_age_ms >= max_quote_age_ms:
         rejections.append("stale_quote")
         return OpportunityStatus.REJECTED, _dedupe([*reasons, *rejections])
-    if observation.current_net_edge is None or observation.implied_probability_sum is None:
+    if observation.current_net_edge is None:
+        rejections.append("missing_net_edge")
+        return OpportunityStatus.REJECTED, _dedupe([*reasons, *rejections])
+    if (
+        observation.solver_model != SOLVER_MODEL_GENERALIZED
+        and observation.implied_probability_sum is None
+    ):
         rejections.append("missing_net_edge")
         return OpportunityStatus.REJECTED, _dedupe([*reasons, *rejections])
     hard_depth = [reason for reason in depth if reason in HARD_DEPTH_REASONS]

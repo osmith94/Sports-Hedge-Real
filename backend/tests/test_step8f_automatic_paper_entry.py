@@ -22,6 +22,7 @@ from sports_hedge.application.paper_operations import PaperOperationsError, Pape
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
+from sports_hedge.arbitrage.watchlist.adapter import observation_from_paper_decision
 from sports_hedge.arbitrage.watchlist.models import LifecycleEventType, OpportunityStatus
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
@@ -260,6 +261,17 @@ def test_generalized_payoff_autofill_skips_zero_stake_legs(tmp_path: Path) -> No
         assert decision.depth_scan is None
         assert decision.payoff_scan is not None
         assert all(stake.stake > 0 for stake in decision.payoff_scan.solution.selected_stakes)
+        history = scan.market_intelligence.market_history(
+            canonical_market_id=decision.canonical_market_id
+        )
+        mapped = observation_from_paper_decision(decision, history)
+        assert mapped is not None
+        assert mapped.implied_probability_sum is None
+        assert mapped.current_net_edge is not None
+        tracked = watchlist.repository.get(f"watch:{decision.canonical_market_id}")
+        assert tracked is not None
+        assert tracked.implied_probability_sum is None
+        assert tracked.status == OpportunityStatus.FILLED
         trade = ops.list_active_trades()[0]
         assert trade.state is PaperTradeState.OPEN
         assert trade.solver_model == SOLVER_MODEL_GENERALIZED
@@ -273,6 +285,52 @@ def test_generalized_payoff_autofill_skips_zero_stake_legs(tmp_path: Path) -> No
         }
         filled = {(leg.venue, leg.source_market_id, leg.source_runner_id) for leg in trade.legs}
         assert filled <= selected
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_generalized_missing_edge_fails_closed_without_implied_sum(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
+    try:
+        matchbook = MatchbookObservationBuilder().build(
+            MB_EVENT, _ftts_mb_payload(), observed_at=OBSERVED, quote_age_ms=120
+        )
+        polymarket = PolymarketObservationBuilder().build(
+            PM_EVENT, _ftts_pm_payload(), _ftts_books(), observed_at=OBSERVED, quote_age_ms=150
+        )
+        decision = scan.scan_pair(
+            matchbook,
+            polymarket,
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=FX,
+            maximum_execution_risk=100,
+            liquidity_snapshot=_standing(),
+        )
+        assert decision.solver_model == SOLVER_MODEL_GENERALIZED
+        assert decision.payoff_scan is not None
+        history = scan.market_intelligence.market_history(
+            canonical_market_id=decision.canonical_market_id
+        )
+        mapped = observation_from_paper_decision(decision, history)
+        assert mapped is not None
+        assert mapped.implied_probability_sum is None
+        missing = mapped.model_copy(
+            update={
+                "current_net_edge": None,
+                "solver_is_arbitrage": True,
+                "eligible_for_paper_simulation": True,
+            }
+        )
+        opportunity = watchlist.observe(missing)
+        assert opportunity.status == OpportunityStatus.REJECTED
+        assert "missing_net_edge" in opportunity.rejection_reasons
+        assert opportunity.implied_probability_sum is None
+        ops.persist_triggered_chain(decision, provenance=DataProvenance.FIXTURE_DEMO)
+        assert ops.list_active_trades() == []
+        snap = ledger.treasury.snapshot()
+        assert snap.pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
+        assert snap.pool(VenueName.POLYMARKET, "USD").locked_capital == 0
     finally:
         repository.close()
         ledger.close()
