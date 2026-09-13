@@ -14,18 +14,6 @@ import {
   solverFacts,
 } from "../lib/fixture-inventory-display";
 import { PaperDeploymentPreview } from "./paper-deployment-preview";
-import {
-  fixturePhaseLabel,
-  kickoffClockLabel,
-} from "../lib/discovered-fixture-display";
-import {
-  KalshiFixtureMarketInventoryRow,
-  comparisonLabel,
-  coverageLabel,
-  economicsSummary,
-  quoteSummary,
-  solverFacts,
-} from "../lib/fixture-inventory-display";
 
 type KalshiFixtureDetailReadModel = Omit<FixtureDetailReadModel, "fixture" | "markets"> & {
   fixture: FixtureDetailReadModel["fixture"] & { kalshi_matched?: boolean };

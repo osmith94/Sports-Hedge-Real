@@ -82,9 +82,24 @@ def test_thin_native_pool_cannot_borrow_from_other_venue_currency() -> None:
     assert prepared.limiting_constraint in {
         AllocationConstraintKind.NATIVE_VENUE_BALANCE,
         AllocationConstraintKind.MIN_FREE_RESERVE,
+        AllocationConstraintKind.MAX_POOL_FRACTION,
     }
     assert prepared.recommended_stakes == []
-    assert all(item.venue is not VenueName.MATCHBOOK or item.currency != "USD" for item in prepared.capital_required)
+    assert prepared.capital_required == []
+    # Hard constraints remain keyed by native venue/currency; USD surplus does not fund GBP.
+    native_constraints = [
+        item
+        for item in prepared.hard_constraints
+        if item.kind
+        in {
+            AllocationConstraintKind.NATIVE_VENUE_BALANCE,
+            AllocationConstraintKind.MIN_FREE_RESERVE,
+            AllocationConstraintKind.MAX_POOL_FRACTION,
+        }
+        and item.venue is VenueName.MATCHBOOK
+    ]
+    assert native_constraints
+    assert all(item.currency == "GBP" for item in native_constraints)
 
 
 def test_requested_size_above_allocator_maximum_is_rejected_not_silently_resized() -> None:
