@@ -31,6 +31,7 @@ describe("Fixture Detail Market Comparison component contract", () => {
     expect(workspace).toContain("inventory-ineligible");
     expect(workspace).not.toContain("simulatePaperFill");
     expect(preview).toContain('id="paper-deployment"');
+    expect(preview).toContain('id="bet-ticket"');
     expect(preview).toContain("Confirm paper OPEN");
     expect(preview).toContain("PAPER MODE");
   });

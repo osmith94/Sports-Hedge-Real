@@ -388,4 +388,12 @@ describe("paper action CTA visibility", () => {
     expect(noPlan.eligible).toBe(false);
     expect(noPlan.label).toBe("Not eligible for deployment");
   });
+
+  it("hides the positive CTA when current allocator deployability is false", () => {
+    const blocked = paperActionForRow(qualified, [
+      { ...preparable[0], bet_actionable: false, bet_blocked_reason: "native available matchbook GBP" },
+    ]);
+    expect(blocked.eligible).toBe(false);
+    expect(blocked.href).toBeNull();
+  });
 });
