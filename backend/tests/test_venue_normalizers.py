@@ -96,6 +96,53 @@ def test_matchbook_total_goals_preserves_line_and_push_semantics() -> None:
     ]
 
 
+def test_matchbook_named_team_total_is_not_full_match_total_goals() -> None:
+    normalizer = MatchbookNormalizer()
+    event = normalizer.normalize_event(MATCHBOOK_EVENT)
+    market = normalizer.normalize_market(
+        event,
+        {
+            "id": 2005,
+            "name": "Newcastle United Over/Under 2.5 Goals",
+            "market-type": "other",
+            "runners": [
+                {"id": 10, "name": "Over 2.5"},
+                {"id": 11, "name": "Under 2.5"},
+            ],
+        },
+    )
+    assert market.family == MarketFamily.TEAM_TOTAL
+    assert market.line == Decimal("2.5")
+
+
+def test_matchbook_participant_id_total_is_not_full_match_total_goals() -> None:
+    normalizer = MatchbookNormalizer()
+    event = normalizer.normalize_event(MATCHBOOK_EVENT)
+    market = normalizer.normalize_market(
+        event,
+        {
+            "id": 34328274317601081,
+            "name": "Over/Under 2.5 Goals",
+            "market-type": "other",
+            "event-participant-id": 34213468549700100,
+            "runners": [
+                {
+                    "id": 1,
+                    "name": "Over 2.5",
+                    "event-participant-id": 34213468549700100,
+                },
+                {
+                    "id": 2,
+                    "name": "Under 2.5",
+                    "event-participant-id": 34213468549700100,
+                },
+            ],
+        },
+    )
+    assert market.family == MarketFamily.TEAM_TOTAL
+    assert market.source_market_id == "34328274317601081"
+
+
 def test_matchbook_corners_and_cards_are_supported_for_market_intelligence() -> None:
     normalizer = MatchbookNormalizer()
     event = normalizer.normalize_event(MATCHBOOK_EVENT)

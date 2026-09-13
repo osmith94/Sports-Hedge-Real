@@ -216,6 +216,9 @@ export type VenueMarketFacts = {
   fee_formula_name?: string | null;
   fee_account_assumption?: boolean;
   fx_status?: string | null;
+  raw_market_name?: string | null;
+  raw_market_type?: string | null;
+  raw_runner_labels?: string[];
 };
 
 export type FixtureMarketInventoryRow = {

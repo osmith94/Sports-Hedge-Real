@@ -533,6 +533,9 @@ def test_fixture_ui_routes_by_canonical_id_and_renders_inventory_states() -> Non
         "£4,317 available",
     ):
         assert token in workspace or token in display
+    assert "Raw name" in display
+    assert "Raw type" in display
+    assert "Raw runners" in display
     assert " / ${quote.size_at_touch}" not in display
     assert "touch ${facts.usable_depth_at_touch}" not in display
     assert "place_order" not in (FRONTEND / "app" / "arbitrage" / "fixtures" / "[eventId]" / "page.tsx").read_text(

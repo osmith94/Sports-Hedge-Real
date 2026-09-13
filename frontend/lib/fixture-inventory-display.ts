@@ -184,6 +184,11 @@ export function limitingVenues(row: KalshiFixtureMarketInventoryRow): Set<Venue>
 
 export function provenanceLines(facts: VenueMarketFacts): string[] {
   const lines = [`Market ID ${facts.source_market_id}`, `Event ID ${facts.source_event_id}`];
+  if (facts.raw_market_name) lines.push(`Raw name ${facts.raw_market_name}`);
+  if (facts.raw_market_type) lines.push(`Raw type ${facts.raw_market_type}`);
+  if (facts.raw_runner_labels?.length) {
+    lines.push(`Raw runners ${facts.raw_runner_labels.join(" / ")}`);
+  }
   if (facts.settlement_key) lines.push(`Settlement key ${facts.settlement_key}`);
   if (facts.fee_source) lines.push(`Fee source ${facts.fee_source}`);
   if (facts.fee_label) lines.push(`Fee rule ${facts.fee_label}`);

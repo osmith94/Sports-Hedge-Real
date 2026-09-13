@@ -1023,9 +1023,19 @@ def _matchbook_market_family(
         return MarketFamily.CARDS, line
     if "asian handicap" in text or text.startswith("handicap"):
         return MarketFamily.ASIAN_HANDICAP, line
-    if "team total" in text:
+    if any(
+        token in text
+        for token in ("team total", "home total", "away total", "participant total")
+    ):
         return MarketFamily.TEAM_TOTAL, line
-    if "total goal" in text or "over under" in text and "goal" in text:
+    if _matchbook_looks_like_match_total(text):
+        if _matchbook_is_participant_or_team_total(
+            name,
+            payload,
+            home_team=home_team,
+            away_team=away_team,
+        ):
+            return MarketFamily.TEAM_TOTAL, line
         return MarketFamily.TOTAL_GOALS, line
     if "correct score" in text:
         return MarketFamily.CORRECT_SCORE, None
@@ -1193,6 +1203,108 @@ def _ambiguous_first_goal_name(text: str) -> bool:
 
 def _is_no_goal_runner(text: str) -> bool:
     return text in _NO_GOAL_RUNNER_LABELS or text.startswith("no goal")
+
+
+_MATCHBOOK_PARTICIPANT_KEYS = (
+    "event-participant-id",
+    "event_participant_id",
+    "eventParticipantId",
+    "participant-id",
+    "participant_id",
+)
+
+
+def matchbook_raw_market_type(payload: dict[str, Any]) -> str | None:
+    """Return the provider market-type/grading-type without interpreting it."""
+
+    value = _first(payload, "market-type", "market_type", "grading-type", "grading_type")
+    if value is None or str(value).strip() == "":
+        value = payload.get("type")
+    if value is None or str(value).strip() == "":
+        return None
+    return str(value).strip()
+
+
+def _matchbook_looks_like_match_total(text: str) -> bool:
+    return "total goal" in text or ("over under" in text and "goal" in text)
+
+
+def _scalar_id(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _matchbook_market_participant_id(payload: dict[str, Any]) -> str | None:
+    for key in _MATCHBOOK_PARTICIPANT_KEYS:
+        found = _scalar_id(payload.get(key))
+        if found:
+            return found
+    return None
+
+
+def _matchbook_runner_participant_ids(payload: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    runners = payload.get("runners")
+    if not isinstance(runners, list):
+        return ids
+    for runner in runners:
+        if not isinstance(runner, dict):
+            continue
+        for key in _MATCHBOOK_PARTICIPANT_KEYS:
+            found = _scalar_id(runner.get(key))
+            if found:
+                ids.add(found)
+    return ids
+
+
+def _text_mentions_exactly_one_team(text: str, *, home_team: str, away_team: str) -> bool:
+    normalized = normalize_text(text)
+    home = normalize_text(home_team)
+    away = normalize_text(away_team)
+    home_in = bool(home) and home in normalized
+    away_in = bool(away) and away in normalized
+    return home_in != away_in
+
+
+def _matchbook_is_participant_or_team_total(
+    name: str,
+    payload: dict[str, Any],
+    *,
+    home_team: str,
+    away_team: str,
+) -> bool:
+    """True when the book is a team/participant total, not the full-match total.
+
+    A team total must never be canonicalized as full-match TOTAL_GOALS. Missing
+    or conflicting scope evidence is treated as participant-scoped (fail closed).
+    """
+
+    text = normalize_text(name)
+    if any(
+        token in text
+        for token in ("team total", "home total", "away total", "participant total")
+    ):
+        return True
+    if _text_mentions_exactly_one_team(text, home_team=home_team, away_team=away_team):
+        return True
+    if _matchbook_market_participant_id(payload):
+        return True
+    runner_ids = _matchbook_runner_participant_ids(payload)
+    if len(runner_ids) == 1:
+        return True
+    if _text_mentions_exactly_one_team(
+        " ".join(_payload_runner_labels(payload)),
+        home_team=home_team,
+        away_team=away_team,
+    ):
+        return True
+    if _matchbook_looks_like_match_total(text) and len(runner_ids) > 1:
+        # Over/Under runners carrying distinct participant ids is unproven match
+        # vs team scope. Fail closed: do not treat as full-match TOTAL_GOALS.
+        return True
+    return False
 
 
 def _payload_runner_labels(payload: dict[str, Any]) -> list[str]:

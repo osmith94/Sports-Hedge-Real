@@ -11,7 +11,12 @@ from sports_hedge.domain.football import CanonicalMarket, CanonicalOutcome
 from sports_hedge.domain.models import VenueName
 from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.models import MarketSnapshot
-from sports_hedge.normalization.venues import KalshiNormalizer, MatchbookNormalizer, PolymarketNormalizer
+from sports_hedge.normalization.venues import (
+    KalshiNormalizer,
+    MatchbookNormalizer,
+    PolymarketNormalizer,
+    matchbook_raw_market_type,
+)
 
 
 class OutcomeOrderBook(BaseModel):
@@ -202,6 +207,24 @@ class MatchbookObservationBuilder:
                     raw_book={"prices": raw_runner.get("prices", []) or []},
                 )
             )
+        metadata = _quote_metadata(
+            "exchange_back_lay",
+            basis=quote_age_basis,
+            reason=quote_age_reason,
+        )
+        raw_name = str(market_payload.get("name") or "").strip()
+        if raw_name:
+            metadata["raw_market_name"] = raw_name
+        raw_type = matchbook_raw_market_type(market_payload)
+        if raw_type:
+            metadata["raw_market_type"] = raw_type
+        runner_labels = [
+            str(runner.get("name") or "").strip()
+            for runner in market_payload.get("runners", []) or []
+            if isinstance(runner, dict) and str(runner.get("name") or "").strip()
+        ]
+        if runner_labels:
+            metadata["raw_runner_labels"] = runner_labels
         return VenueMarketObservation(
             market=market,
             observed_at=observed_at or datetime.now(UTC),
@@ -209,11 +232,7 @@ class MatchbookObservationBuilder:
             outcome_books=books,
             source_latency_ms=source_latency_ms,
             quote_age_ms=quote_age_ms,
-            metadata=_quote_metadata(
-                "exchange_back_lay",
-                basis=quote_age_basis,
-                reason=quote_age_reason,
-            ),
+            metadata=metadata,
         )
 
 
