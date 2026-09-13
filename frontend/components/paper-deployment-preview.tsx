@@ -13,9 +13,11 @@ import { money } from "../lib/format";
 export function PaperDeploymentPreview({
   opportunities,
   onOpened,
+  provenance = "live_paper",
 }: {
   opportunities: PreparablePaperOpportunity[];
   onOpened?: (tradeId: string) => void;
+  provenance?: "live_paper" | "fixture_demo";
 }) {
   const defaults = useMemo(
     () => opportunities.filter((item) => item.settlement_equivalent),
@@ -29,6 +31,7 @@ export function PaperDeploymentPreview({
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
   const [openedTradeId, setOpenedTradeId] = useState<string | null>(null);
+  const [idempotentRetry, setIdempotentRetry] = useState(false);
 
   if (!defaults.length) {
     return (
@@ -48,6 +51,7 @@ export function PaperDeploymentPreview({
     setError(null);
     setConfirmError(null);
     setOpenedTradeId(null);
+    setIdempotentRetry(false);
     try {
       const result = await preparePaperDeployment({
         opportunity_id: opportunityId,
@@ -74,9 +78,11 @@ export function PaperDeploymentPreview({
         prepared_deployment_id: preview.prepared_deployment_id,
         requested_size_gbp: String(preview.requested_size_gbp),
         simulate_external: true,
+        provenance,
         operator_note: "PAPER-ONLY confirm accepted prepared size; revalidates before lock",
       })) as { trade_id?: string | null; rejection_reason?: string | null };
       if (result.trade_id) {
+        setIdempotentRetry(Boolean(openedTradeId) && result.trade_id === openedTradeId);
         setOpenedTradeId(result.trade_id);
         onOpened?.(result.trade_id);
       } else {
@@ -137,6 +143,7 @@ export function PaperDeploymentPreview({
           confirmBusy={confirmBusy}
           confirmError={confirmError}
           openedTradeId={openedTradeId}
+          idempotentRetry={idempotentRetry}
           onConfirm={onConfirm}
         />
       ) : null}
@@ -149,12 +156,14 @@ function DeploymentResult({
   confirmBusy,
   confirmError,
   openedTradeId,
+  idempotentRetry,
   onConfirm,
 }: {
   preview: PreparedPaperDeployment;
   confirmBusy: boolean;
   confirmError: string | null;
   openedTradeId: string | null;
+  idempotentRetry: boolean;
   onConfirm: () => void;
 }) {
   if (!preview.accepted) {
@@ -212,15 +221,22 @@ function DeploymentResult({
       </p>
       <button
         type="button"
-        disabled={confirmBusy || !preview.prepared_deployment_id || Boolean(openedTradeId)}
+        disabled={confirmBusy || !preview.prepared_deployment_id}
         onClick={onConfirm}
       >
-        {confirmBusy ? "Confirming…" : "Confirm paper OPEN"}
+        {confirmBusy
+          ? "Confirming…"
+          : openedTradeId
+            ? "Retry confirm (idempotent)"
+            : "Confirm paper OPEN"}
       </button>
       {confirmError ? <p className="muted">Rejected: {confirmError}</p> : null}
       {openedTradeId ? (
         <p className="section-copy">
           Paper OPEN recorded for {openedTradeId}. Native legs locked at the confirmed size.
+          {idempotentRetry
+            ? " Repeat confirm returned the same trade; no additional fill, lock, or journal."
+            : ""}
         </p>
       ) : null}
     </div>

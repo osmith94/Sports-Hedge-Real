@@ -365,6 +365,13 @@ class WatchlistService:
             OpportunityStatus.CLOSED,
             OpportunityStatus.EXPIRED,
         }
+        # Labelled DEMO / FIXTURE REPLAY books are frozen snapshots, not live
+        # venue quotes. Do not fail-close them on wall-clock quote age, and do
+        # not persist REJECTED into the live watchlist. Live `live_paper` rows
+        # still reject stale quotes below.
+        if item.data_kind == "demo_fixture_replay":
+            effective = effective_quote_age_ms(item.quote_age_ms, item.last_seen_at, as_of)
+            return item.model_copy(update={"quote_age_ms": effective})
         effective = effective_quote_age_ms(item.quote_age_ms, item.last_seen_at, as_of)
         if item.status in fill_or_terminal:
             return item.model_copy(update={"quote_age_ms": effective})

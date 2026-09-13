@@ -49,6 +49,8 @@ Or from PowerShell:
 
 The launcher sets `PAPER_AUTOFILL_ENABLED=false` so the operator can choose £10 before OPEN. It sets `PAPER_LIVE_REFRESH_ENABLED=true` for this local process only. It never sets `SPORTS_HEDGE_EXECUTION_ENABLED=true`.
 
+Labelled `/demo` books are frozen `DEMO / FIXTURE REPLAY` snapshots (`data_kind=demo_fixture_replay`). Live quote-age rejection on `/` still fail-closes stale `live_paper` rows. Fixture replay is not a live-freshness waiver.
+
 Logs: `logs\demo-backend.*.log` and `logs\demo-frontend.*.log`.
 
 ## Click path
@@ -70,12 +72,13 @@ Logs: `logs\demo-backend.*.log` and `logs\demo-frontend.*.log`.
 5. Click **Qualify labelled replay**. This does **not** OPEN or lock.
 6. In **Fixed-size paper preparation**, leave requested size **10**. Click **Prepare paper legs**.
 7. Confirm: preview shows exact native legs/venues/currencies; available/locked treasury is unchanged.
-8. Click **Confirm paper OPEN**. Confirm revalidates current economics. The accepted £10 legs are what lock. If economics changed, the UI asks you to prepare again — it does not silently resize.
+8. Click **Confirm paper OPEN**. Confirm revalidates current economics. The accepted £10 legs are what lock. If economics changed, the UI asks you to prepare again — it does not silently resize. Provenance on this path is `fixture_demo`, not live paper.
 9. Section 4 shows **OPEN**, opening fills, locked native amounts, guaranteed-at-open economics, realised P&L still empty (locking capital is not P&L).
-10. **Hold — do not release**. Locked capital stays locked. Hold vs unwind is analytical.
-11. **Complete validated unwind**. Separate close fills, exact lock release, realised P&L/fees/FX posted once.
-12. Click unwind again: idempotent (same trade, no second release).
-13. **Record paper settlement** on the same trade must fail closed (unwind and settlement are mutually exclusive).
+10. Click **Retry confirm (idempotent)**. Same trade id; no second fill, lock, or journal. `PENDING` / `AWAITING_MANUAL_EXTERNAL` are not reachable on this labelled `simulate_external` confirm path; those states are covered by lifecycle tests, not this click path.
+11. **Hold — do not release**. Locked capital stays locked. Hold vs unwind is analytical.
+12. **Complete validated unwind**. Separate close fills, exact lock release, realised P&L/fees/FX posted once.
+13. Click unwind again: idempotent (same trade, no second release).
+14. **Record paper settlement** on the same trade must fail closed (unwind and settlement are mutually exclusive).
 
 ### 3. Restart persistence
 

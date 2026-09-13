@@ -74,6 +74,7 @@ def _observation(
     guaranteed_profit_gbp: Decimal | None = None,
     solver_model: str | None = None,
     implied_probability_sum: Decimal | None | object = _AUTO_IMPLIED,
+    data_kind: str = "live_paper",
 ) -> WatchObservation:
     implied: Decimal | None
     if implied_probability_sum is _AUTO_IMPLIED:
@@ -106,6 +107,7 @@ def _observation(
         guaranteed_profit_gbp=guaranteed_profit_gbp,
         expected_lock_minutes=Decimal("120"),
         kickoff_utc=datetime(2026, 9, 20, 15, 0, tzinfo=UTC),
+        data_kind=data_kind,
     )
 
 

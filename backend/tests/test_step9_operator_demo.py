@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -410,6 +411,77 @@ def test_qualify_ten_pounds_accepts_with_production_fx_and_slippage(tmp_path: Pa
         assert preview.applied_size_gbp == Decimal("10")
         assert preview.native_requirements_reconciled is True
         assert preview.resized is False
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_aged_demo_confirm_keeps_fixture_provenance_and_ten_pound_legs(tmp_path: Path) -> None:
+    """Production watchlist cap is 1000ms; labelled replay must still confirm after operator delay."""
+
+    settings = Settings(
+        paper_treasury_seed_gbp=1000,
+        paper_treasury_demo_usd_gbp_per_unit=0.80,
+        paper_treasury_demo_fx_source="paper_demo_fx_snapshot",
+        paper_autofill_enabled=False,
+    )
+    ledger = SqlitePaperLedger(
+        tmp_path / "paper.sqlite",
+        seed_gbp=SEED,
+        usd_gbp_per_unit=FX,
+        fx_source="paper_demo_fx_snapshot",
+    )
+    repository = SqliteMarketIntelligenceRepository()
+    watchlist = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=1000)
+    ops = PaperOperationsService(
+        watchlist=watchlist,
+        alerts=PriorityAlertService(),
+        settings=settings,
+        ledger=ledger,
+    )
+    demo = DemoWalkthroughService(
+        operations=ops,
+        scan=PaperScanService(MarketIntelligenceService(repository), settings=settings),
+        watchlist=watchlist,
+        ledger=ledger,
+        settings=settings,
+    )
+    try:
+        ten = Decimal("10")
+        qualified = demo.replay(FixtureReplayRequest(close_via="hold", qualify_only=True))
+        stored = watchlist.repository.get(qualified.opportunity_id)
+        assert stored is not None
+        assert stored.data_kind == DEMO_DATA_KIND
+        preview = ops.prepare_fixed_deployment(qualified.opportunity_id, ten)
+        assert preview.accepted is True, preview.rejection_reason
+        aged = stored.last_seen_at + timedelta(seconds=5)
+        opened = ops.simulate_fill(
+            qualified.opportunity_id,
+            simulate_external=True,
+            prepared_deployment_id=preview.prepared_deployment_id,
+            requested_size_gbp=ten,
+            provenance=DataProvenance.LIVE_PAPER,
+            now=aged,
+        )
+        assert opened.entry_complete is True
+        trade = ops.list_active_trades()[0]
+        assert trade.provenance is DataProvenance.FIXTURE_DEMO
+        preview_stakes = {(leg.venue, leg.outcome): leg.stake_native for leg in preview.legs}
+        trade_stakes = {(leg.venue, leg.outcome): leg.filled_stake for leg in trade.legs}
+        assert trade_stakes == preview_stakes
+        retry = ops.simulate_fill(
+            qualified.opportunity_id,
+            simulate_external=True,
+            prepared_deployment_id=preview.prepared_deployment_id,
+            requested_size_gbp=ten,
+            now=aged + timedelta(seconds=1),
+        )
+        assert retry.trade_id == trade.trade_id
+        assert retry.trace.detail is not None
+        assert "idempotent" in retry.trace.detail
+        assert len(ops.list_active_trades()) == 1
+        mb_preview = next(leg.stake_native for leg in preview.legs if leg.venue is VenueName.MATCHBOOK)
+        assert ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital == mb_preview
     finally:
         repository.close()
         ledger.close()

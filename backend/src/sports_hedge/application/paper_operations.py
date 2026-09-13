@@ -584,6 +584,8 @@ class PaperOperationsService:
         current = self.watchlist.repository.get(opportunity_id)
         if current is None:
             raise PaperOperationsError("unknown_opportunity")
+        if current.data_kind == "demo_fixture_replay":
+            provenance = DataProvenance.FIXTURE_DEMO
         presented = self.watchlist._present_freshness(current, simulated_at)
         if presented.status not in {
             OpportunityStatus.TRIGGERED,

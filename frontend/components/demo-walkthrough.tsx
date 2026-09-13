@@ -400,6 +400,7 @@ export function DemoWalkthroughBoard() {
         {replay?.qualify_only && (replay.preparable_opportunities?.length ?? 0) > 0 ? (
           <PaperDeploymentPreview
             opportunities={replay.preparable_opportunities ?? []}
+            provenance="fixture_demo"
             onOpened={() => {
               void refresh();
             }}
@@ -511,9 +512,9 @@ export function DemoWalkthroughBoard() {
           <p className="section-copy">
             Kalshi SELL close fees are unmodelled, so MB↔Kalshi and PM↔Kalshi unwind fail closed.
             Settlement through 8E is the labelled close path for those pairs. On Matchbook↔Polymarket,
-            "Hold vs unwind uses the stored labelled reverse book (HOLD when exit is inferior). "
-            "Complete validated unwind uses a labelled tighter reverse book for the DEMO / FIXTURE REPLAY close proof; not a live touch.",
-            only when 8D says UNWIND_ELIGIBLE. Spread convergence is never a close trigger. Clock
+            Hold vs unwind uses the stored labelled reverse book (HOLD when exit is inferior).
+            Complete validated unwind uses a labelled tighter reverse book for the DEMO / FIXTURE REPLAY
+            close proof; not a live touch. Spread convergence is never a close trigger. Clock
             estimates never release capital.
           </p>
         </div>

@@ -372,6 +372,48 @@ def test_stopped_refresh_drops_near_triggered_but_keeps_tracked_history() -> Non
     assert persisted.status == OpportunityStatus.REJECTED
 
 
+def test_demo_fixture_replay_is_not_rejected_stale_on_wall_clock() -> None:
+    last_seen = datetime.now(UTC)
+    service = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=1000)
+    live = service.observe(
+        _observation(
+            market_id="mkt-live-age-out",
+            edge=Decimal("0.015"),
+            eligible=True,
+            quote_age_ms=120,
+            observed_at=last_seen,
+            guaranteed_profit_gbp=Decimal("1.50"),
+        )
+    )
+    demo = service.observe(
+        _observation(
+            market_id="mkt-demo-frozen-book",
+            edge=Decimal("0.015"),
+            eligible=True,
+            quote_age_ms=120,
+            observed_at=last_seen,
+            guaranteed_profit_gbp=Decimal("1.50"),
+            data_kind="demo_fixture_replay",
+        )
+    )
+    assert live.status == OpportunityStatus.TRIGGERED
+    assert demo.status == OpportunityStatus.TRIGGERED
+    aged = last_seen + timedelta(seconds=2)
+    live_presented = service._present_freshness(live, aged)
+    demo_presented = service._present_freshness(demo, aged)
+    assert live_presented.status == OpportunityStatus.REJECTED
+    assert "stale_quote" in live_presented.rejection_reasons
+    assert demo_presented.status == OpportunityStatus.TRIGGERED
+    assert "stale_quote" not in demo_presented.rejection_reasons
+    persisted_demo = service.repository.get(demo.opportunity_id)
+    assert persisted_demo is not None
+    assert persisted_demo.status == OpportunityStatus.TRIGGERED
+    assert service.triggered(as_of=aged) == []
+    tracked_ids = {item.opportunity_id for item in service.tracked(as_of=aged)}
+    assert demo.opportunity_id not in tracked_ids
+    assert live.opportunity_id in tracked_ids
+
+
 def test_watchlist_api_uses_server_clock_not_client_as_of() -> None:
     last_seen = datetime.now(UTC)
     aged = last_seen + timedelta(seconds=2)
