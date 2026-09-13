@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import { FixtureDetailReadModel, VenueMarketFacts } from "../lib/api";
+import { FixtureDetailReadModel, PreparablePaperOpportunity } from "../lib/api";
 import {
   fixturePhaseLabel,
   kickoffClockLabel,
@@ -9,19 +9,14 @@ import {
 } from "../lib/discovered-fixture-display";
 import {
   KalshiFixtureMarketInventoryRow,
-  comparisonLabel,
-  coverageLabel,
-  economicsSummary,
-  humanizeToken,
-  limitingVenues,
-  mismatchExplanation,
-  pairSummary,
   provenanceLines,
-  quoteSummary,
-  reasonLabel,
-  settlementLabel,
-  solverFacts,
 } from "../lib/fixture-inventory-display";
+import {
+  InventoryCardView,
+  decisionBadgeClass,
+  inventoryCardViewModel,
+  toneClass,
+} from "../lib/fixture-inventory-operator";
 import { PaperDeploymentPreview } from "./paper-deployment-preview";
 
 type KalshiFixtureDetailReadModel = Omit<FixtureDetailReadModel, "fixture" | "markets"> & {
@@ -32,6 +27,7 @@ type KalshiFixtureDetailReadModel = Omit<FixtureDetailReadModel, "fixture" | "ma
 export function FixtureInventoryWorkspace({ detail }: { detail: KalshiFixtureDetailReadModel }) {
   const fixture = detail.fixture;
   const phase = fixturePhaseLabel(fixture);
+  const preparable = detail.preparable_opportunities ?? [];
 
   return (
     <>
@@ -85,7 +81,7 @@ export function FixtureInventoryWorkspace({ detail }: { detail: KalshiFixtureDet
         </p>
       ) : null}
 
-      <PaperDeploymentPreview opportunities={detail.preparable_opportunities ?? []} />
+      <PaperDeploymentPreview opportunities={preparable} />
 
       {detail.markets.length === 0 ? (
         <div className="empty-live">
@@ -94,7 +90,11 @@ export function FixtureInventoryWorkspace({ detail }: { detail: KalshiFixtureDet
       ) : (
         <div className="inventory-stack">
           {detail.markets.map((row) => (
-            <InventoryRowCard key={`${row.display_name}-${row.comparison_status}-${row.matchbook?.source_market_id ?? ""}-${row.polymarket?.source_market_id ?? ""}-${row.kalshi?.source_market_id ?? ""}`} row={row} />
+            <InventoryRowCard
+              key={`${row.display_name}-${row.comparison_status}-${row.matchbook?.source_market_id ?? ""}-${row.polymarket?.source_market_id ?? ""}-${row.kalshi?.source_market_id ?? ""}`}
+              row={row}
+              preparable={preparable}
+            />
           ))}
         </div>
       )}
@@ -107,42 +107,52 @@ export function FixtureInventoryWorkspace({ detail }: { detail: KalshiFixtureDet
   );
 }
 
-function InventoryRowCard({ row }: { row: KalshiFixtureMarketInventoryRow }) {
-  const limiting = limitingVenues(row);
-  const explanation = mismatchExplanation(row);
-  const family = row.family ? humanizeToken(row.family) : "";
-  const period = row.period ? humanizeToken(row.period) : "";
-
+function InventoryRowCard({
+  row,
+  preparable,
+}: {
+  row: KalshiFixtureMarketInventoryRow;
+  preparable: PreparablePaperOpportunity[];
+}) {
+  const view = inventoryCardViewModel(row, preparable);
   return (
-    <article className="opp-card">
+    <article
+      className={
+        view.decision.status === "paper_eligible" ? "opp-card opp-card-hot inventory-card" : "opp-card inventory-card"
+      }
+    >
       <div className="opp-card-top">
         <div>
-          <div className="opp-event">{row.display_name}</div>
-          <div className="muted">
-            {coverageLabel(row)} · {comparisonLabel(row.comparison_status)}
-            {family ? ` · ${family}` : ""}
-            {period ? ` · ${period}` : ""}
-          </div>
+          <div className="eyebrow">{view.eyebrow}</div>
+          <div className="opp-event">{view.title}</div>
         </div>
-        <span className="status-badge">{comparisonLabel(row.comparison_status)}</span>
+        <span className={decisionBadgeClass(view.decision.tone)}>{view.decision.label}</span>
       </div>
+      {view.economics ? (
+        <p className={`inventory-economics ${toneClass(view.economics.tone)}`}>{view.economics.text}</p>
+      ) : null}
+      {view.comparableHeadline ? <p className="inventory-pair-headline">{view.comparableHeadline}</p> : null}
+      {view.pairBadges.length ? (
+        <div className="inventory-pair-row">
+          {view.pairBadges.map((badge) => (
+            <span key={badge.text} className={`inventory-pair-badge ${toneClass(badge.tone)}`}>
+              {badge.text}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {view.discoveredNotes.map((note) => (
+        <p key={note} className="inventory-discovered">
+          {note}
+        </p>
+      ))}
       <div className="inventory-grid">
-        <VenueColumn name="Matchbook" facts={row.matchbook} limiting={limiting.has("matchbook")} />
-        <VenueColumn name="Polymarket" facts={row.polymarket} limiting={limiting.has("polymarket")} />
-        <VenueColumn name="Kalshi" facts={row.kalshi} limiting={limiting.has("kalshi")} />
+        {view.venues.map((venue) => (
+          <VenueMiniCardView key={venue.venue} venue={venue} />
+        ))}
       </div>
-      <p className="section-copy">{solverFacts(row)}</p>
-      {row.pair_results?.length ? (
-        <p className="muted">
-          Pairwise: {row.pair_results.map((pair) => pairSummary(pair)).join(" · ")}
-        </p>
-      ) : null}
-      {row.rejection_reasons.length ? (
-        <p className="muted">
-          Reasons: {row.rejection_reasons.map((reason) => reasonLabel(reason)).join(" · ")}
-        </p>
-      ) : null}
-      {explanation ? <p className="inventory-reason-detail">{explanation}</p> : null}
+      {view.operatorReason ? <p className="inventory-reason-detail">{view.operatorReason}</p> : null}
+      <PaperAction view={view} />
       <details className="scan-advanced inventory-advanced">
         <summary>Advanced · provenance</summary>
         <ProvenanceBlock row={row} />
@@ -151,23 +161,29 @@ function InventoryRowCard({ row }: { row: KalshiFixtureMarketInventoryRow }) {
   );
 }
 
-function VenueColumn({
-  name,
-  facts,
-  limiting,
-}: {
-  name: string;
-  facts: VenueMarketFacts | null | undefined;
-  limiting: boolean;
-}) {
+function VenueMiniCardView({ venue }: { venue: InventoryCardView["venues"][number] }) {
   return (
-    <div>
-      <div className="metric-label">{name}</div>
-      {facts ? (
+    <div className="inventory-venue-card">
+      <div className="metric-label">
+        {venue.name}
+        {venue.kind ? ` · ${venue.kind}` : ""}
+      </div>
+      {venue.present ? (
         <>
-          <div>{quoteSummary(facts)}</div>
-          <div className="muted">{economicsSummary(facts, { limiting })}</div>
-          <div className="muted">{settlementLabel(facts)}</div>
+          {venue.quotes.map((quote) => (
+            <div key={quote} className="inventory-venue-quote">
+              {quote}
+            </div>
+          ))}
+          {venue.meta ? <div className="muted">{venue.meta}</div> : null}
+          {venue.incompatibility ? (
+            <div className="inventory-incompatible">{venue.incompatibility}</div>
+          ) : null}
+          {venue.failingChecks.map((check) => (
+            <div key={check} className="inventory-failing">
+              {check}
+            </div>
+          ))}
         </>
       ) : (
         <div className="muted">not present</div>
@@ -176,8 +192,21 @@ function VenueColumn({
   );
 }
 
+function PaperAction({ view }: { view: InventoryCardView }) {
+  if (view.paperAction.eligible && view.paperAction.href) {
+    return (
+      <p className="inventory-action">
+        <a className="inventory-cta" href={view.paperAction.href}>
+          {view.paperAction.label}
+        </a>
+      </p>
+    );
+  }
+  return <p className="inventory-ineligible">{view.paperAction.label}</p>;
+}
+
 function ProvenanceBlock({ row }: { row: KalshiFixtureMarketInventoryRow }) {
-  const venues: Array<[string, VenueMarketFacts | null | undefined]> = [
+  const venues: Array<[string, KalshiFixtureMarketInventoryRow["matchbook"]]> = [
     ["Matchbook", row.matchbook],
     ["Polymarket", row.polymarket],
     ["Kalshi", row.kalshi],
@@ -197,6 +226,7 @@ function ProvenanceBlock({ row }: { row: KalshiFixtureMarketInventoryRow }) {
 
   return (
     <div className="inventory-advanced-copy">
+      {row.comparison_status ? <p>Mapping status: {row.comparison_status}</p> : null}
       {venues.map(([name, facts]) =>
         facts ? (
           <p key={name}>

@@ -258,7 +258,9 @@ describe("tracked market row identity", () => {
     assert.match(page, /FixtureInventoryWorkspace/);
     assert.match(page, /getFixtureDetail/);
     assert.match(page, /decodeURIComponent\(eventId\)/);
-    assert.match(inventory, /PaperDeploymentPreview opportunities=\{detail\.preparable_opportunities/);
+    assert.match(inventory, /const preparable = detail\.preparable_opportunities/);
+    assert.match(inventory, /PaperDeploymentPreview opportunities=\{preparable\}/);
+    assert.match(preview, /id="paper-deployment"/);
     assert.match(preview, /No settlement-equivalent qualified opportunity/);
     assert.match(preview, /Prepare paper legs/);
     assert.match(preview, /Confirm paper OPEN/);

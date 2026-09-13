@@ -102,11 +102,15 @@ export function reasonLabel(reason: string): string {
 }
 
 export function quoteSummary(facts: VenueMarketFacts | null | undefined): string {
-  if (!facts) return "—";
+  return compactQuoteLines(facts).join(" · ") || "—";
+}
+
+export function compactQuoteLines(facts: VenueMarketFacts | null | undefined): string[] {
+  if (!facts) return [];
   const backs = facts.best_backs.filter((quote) => quote.decimal_odds != null);
-  if (!backs.length) return "unknown price";
+  if (!backs.length) return ["unknown price"];
   const currency = venueCurrency(facts);
-  return backs.map((quote) => formatQuote(quote, currency)).join(" · ");
+  return backs.map((quote) => compactQuote(quote, currency));
 }
 
 export function economicsSummary(
@@ -201,14 +205,13 @@ export function provenanceLines(facts: VenueMarketFacts): string[] {
   return lines;
 }
 
-function formatQuote(quote: VenueQuoteFact, currency: "GBP" | "USD"): string {
-  // Operator format examples: YES · 1.47 · £4,317 available / YES · 2.27 · $4,317 available
+function compactQuote(quote: VenueQuoteFact, currency: "GBP" | "USD"): string {
   const odds = formatOdds(quote.decimal_odds);
   const outcome = formatOutcome(quote.outcome);
   if (quote.size_at_touch == null || quote.size_at_touch === "") {
-    return `${outcome} · ${odds}`;
+    return `${outcome} ${odds}`;
   }
-  return `${outcome} · ${odds} · ${formatDepth(quote.size_at_touch, currency)} available`;
+  return `${outcome} ${odds} · ${formatDepth(quote.size_at_touch, currency)}`;
 }
 
 function formatOutcome(outcome: string): string {
@@ -269,14 +272,21 @@ function depthLabel(facts: VenueMarketFacts, limiting: boolean): string {
   return limiting ? `Limiting best-price depth ${amount}` : `Best-price depth ${amount}`;
 }
 
-function venueTitle(venue: Venue): string {
+export function venueTitle(venue: Venue): string {
   if (venue === "matchbook") return "Matchbook";
   if (venue === "polymarket") return "Polymarket";
   if (venue === "kalshi") return "Kalshi";
   return venue;
 }
 
-function outcomeSpaceLabel(facts: VenueMarketFacts): string | null {
+export function venueShortLabel(venue: Venue): string {
+  if (venue === "matchbook") return "MB";
+  if (venue === "polymarket") return "PM";
+  if (venue === "kalshi") return "K";
+  return venue;
+}
+
+export function outcomeSpaceLabel(facts: VenueMarketFacts): string | null {
   const outcomes = facts.best_backs.map((quote) => quote.outcome.toLowerCase());
   if (!outcomes.length) return null;
   const set = new Set(outcomes);
@@ -292,4 +302,92 @@ function collectReasons(row: KalshiFixtureMarketInventoryRow): string[] {
     ...row.rejection_reasons,
     ...(row.pair_results ?? []).flatMap((pair) => pair.rejection_reasons),
   ].filter((reason): reason is string => Boolean(reason));
+}
+
+export function sentenceCase(value: string): string {
+  const humanized = humanizeToken(value).trim();
+  if (!humanized) return "";
+  return humanized.charAt(0).toUpperCase() + humanized.slice(1);
+}
+
+export function venueKindLabel(facts: VenueMarketFacts | null | undefined): string {
+  if (!facts) return "";
+  const space = outcomeSpaceLabel(facts);
+  if (space === "HOME/DRAW/AWAY") return "1X2";
+  if (space === "YES/NO") return "Binary";
+  if (space === "OVER/UNDER") return "Over/Under";
+  if (space) return space;
+  if (facts.family === "match_result") return "1X2";
+  if (facts.family) return sentenceCase(facts.family);
+  return "";
+}
+
+export function compactFeeLabel(facts: VenueMarketFacts): string | null {
+  const status = facts.fee_status;
+  if (status === "missing" || status === "unknown") return `Fee ${status}`;
+  const fromRate = formatFeeRate(facts.fee_rate);
+  if (fromRate) return `Fee ${fromRate}`;
+  if (facts.fee_label) {
+    const matched = facts.fee_label.match(/(\d+(?:\.\d+)?)\s*%/);
+    if (matched) {
+      const amount = Number(matched[1]);
+      if (Number.isFinite(amount)) {
+        return `Fee ${Number.isInteger(amount) ? amount.toFixed(0) : matched[1]}%`;
+      }
+    }
+  }
+  return null;
+}
+
+export function compactDepthLabel(
+  facts: VenueMarketFacts,
+  options?: { limiting?: boolean },
+): string | null {
+  if (facts.usable_depth_at_touch == null) return null;
+  const amount = formatDepth(facts.usable_depth_at_touch, venueCurrency(facts));
+  return options?.limiting ? `Depth ${amount} · limiting` : `Depth ${amount}`;
+}
+
+export function compactVenueMeta(
+  facts: VenueMarketFacts | null | undefined,
+  options?: { limiting?: boolean },
+): string | null {
+  if (!facts) return null;
+  const parts = [compactFeeLabel(facts), compactDepthLabel(facts, options)].filter(
+    (part): part is string => Boolean(part),
+  );
+  const fx = failingFxLabel(facts.fx_status);
+  if (fx) parts.push(fx);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+export function failingVenueChecks(facts: VenueMarketFacts): string[] {
+  const checks: string[] = [];
+  if (facts.settlement_complete === false || facts.settlement_complete == null) {
+    checks.push("Settlement fingerprint incomplete/unknown");
+  }
+  if (facts.fee_status === "missing" || facts.fee_status === "unknown") {
+    const fee = compactFeeLabel(facts);
+    if (fee) checks.push(fee);
+  }
+  const fx = failingFxLabel(facts.fx_status);
+  if (fx) checks.push(fx);
+  return checks;
+}
+
+function failingFxLabel(status: string | null | undefined): string | null {
+  if (!status) return null;
+  if (status === "missing") return "FX missing";
+  if (status === "stale") return "FX stale";
+  if (status === "known" || status === "not_required") return null;
+  if (status.includes("missing") || status.includes("stale")) return `FX ${humanizeToken(status)}`;
+  return null;
+}
+
+function formatFeeRate(value: string | number | null | undefined): string | null {
+  const parsed = number(value);
+  if (parsed === null) return null;
+  const percentValue = Math.abs(parsed) <= 1 ? parsed * 100 : parsed;
+  const digits = Number.isInteger(percentValue) ? 0 : 2;
+  return `${percentValue.toFixed(digits)}%`;
 }

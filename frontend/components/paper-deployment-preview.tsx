@@ -35,7 +35,7 @@ export function PaperDeploymentPreview({
 
   if (!defaults.length) {
     return (
-      <article className="opp-card">
+      <article id="paper-deployment" className="opp-card" tabIndex={-1}>
         <div className="opp-event">Fixed-size paper preparation</div>
         <p className="section-copy">
           No settlement-equivalent qualified opportunity is prepared on this fixture yet. This
@@ -101,7 +101,7 @@ export function PaperDeploymentPreview({
   }
 
   return (
-    <article className="opp-card">
+    <article id="paper-deployment" className="opp-card" tabIndex={-1}>
       <div className="opp-event">Fixed-size paper preparation</div>
       <p className="section-copy">
         Choose a concrete GBP deployment (example £10). Exact native legs are shown before any

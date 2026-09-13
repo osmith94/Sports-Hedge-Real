@@ -589,6 +589,9 @@ def test_fixture_ui_routes_by_canonical_id_and_renders_inventory_states() -> Non
     assert "/operations/fixtures/" in api
     assert "getFixtureDetail" in page
     display = (FRONTEND / "lib" / "fixture-inventory-display.ts").read_text(encoding="utf-8")
+    operator = (FRONTEND / "lib" / "fixture-inventory-operator.ts").read_text(encoding="utf-8")
+    preview = (FRONTEND / "components" / "paper-deployment-preview.tsx").read_text(encoding="utf-8")
+    combined = workspace + display + operator + preview
     for token in (
         "matched_equivalent",
         "venue_only",
@@ -597,16 +600,24 @@ def test_fixture_ui_routes_by_canonical_id_and_renders_inventory_states() -> Non
         "PAPER MODE",
         "not in solver",
         "Not comparable — incomplete outcome set",
-        "Best-price depth",
-        "Limiting best-price depth",
-        "available",
+        "Paper eligible",
+        "Partially comparable",
+        "Review paper deployment",
+        "Not eligible for deployment",
         "Advanced · provenance",
-        "£4,317 available",
+        "paper-deployment",
+        "Market Comparison",
+        "Not comparable with",
+        "Fee ${",
+        "Review paper deployment →",
     ):
-        assert token in workspace or token in display
+        assert token in combined
     assert "Raw name" in display
     assert "Raw type" in display
     assert "Raw runners" in display
+    assert "comparisonLabel(row.comparison_status)" not in workspace
+    assert "simulatePaperFill" not in workspace
+    assert "Confirm paper OPEN" in preview
     assert " / ${quote.size_at_touch}" not in display
     assert "touch ${facts.usable_depth_at_touch}" not in display
     assert "place_order" not in (FRONTEND / "app" / "arbitrage" / "fixtures" / "[eventId]" / "page.tsx").read_text(
