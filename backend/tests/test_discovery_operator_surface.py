@@ -83,6 +83,10 @@ def test_discovery_ui_renders_target_rows_from_backend_fields() -> None:
     assert "best_matchbook_price" in source
     assert "best_polymarket_price" in source
     assert "best_kalshi_price" in source
+    assert "fixture found" in display
+    assert "Not evaluated — scan budget exhausted" in display
+    assert "market_evaluation_state" in display
+    assert 'return "matched"' not in display
     assert "kickoffLocalLabel" in source
     assert "execution_risk_score" in display
     assert "toISOString" not in source

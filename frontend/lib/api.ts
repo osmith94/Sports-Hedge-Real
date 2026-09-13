@@ -153,7 +153,7 @@ export type DiscoveredFixture = {
   last_seen_at: string;
   matched_market_count: number;
   discovered_market_count?: number;
-  matched_equivalent_count?: number;
+  matched_equivalent_count?: number | null;
   qualifying_market_count?: number;
   near_executable_market_count?: number;
   market_family?: string | null;
@@ -174,6 +174,8 @@ export type DiscoveredFixture = {
   no_comparison_reason?: string | null;
   solver_is_arbitrage: boolean;
   opportunity_state?: string;
+  market_evaluation_state?: string | null;
+  market_evaluation_reason?: string | null;
 };
 
 export type InventoryComparisonStatus =

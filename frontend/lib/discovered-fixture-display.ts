@@ -16,7 +16,11 @@ export const DISCOVERY_TABLE_HEADERS = [
 ] as const;
 
 export const EQUIVALENT_MARKETS_HELP =
-  "Count of settlement-equivalent market comparisons for this fixture after canonical matching. The row shows the best executable opportunity; expand the fixture to see every comparison, including rejected or non-executable books.";
+  "Count of settlement-equivalent market comparisons for this fixture after canonical matching. Equivalent 0 means the fixture was evaluated and no settlement-equivalent pairs were found. A dash means markets were not evaluated this cycle (for example the scan budget was exhausted). Venue columns show fixture presence, not market equivalence. The row shows the best executable opportunity; expand the fixture to see every comparison, including rejected or non-executable books.";
+
+export const NOT_EVALUATED_SCAN_BUDGET_LABEL = "Not evaluated — scan budget exhausted";
+export const NOT_EVALUATED_MARKET_FETCH_LABEL = "Not evaluated — market fetch unavailable";
+export const FIXTURE_FOUND_LABEL = "fixture found";
 
 export const BEST_ARB_MARKET_HELP =
   "The market family and selection/line producing the best currently executable net edge for this fixture. Venue prices on this row are for that same market only.";
@@ -43,17 +47,17 @@ export function venueCoverageLabel(item: DiscoveredFixture): string {
 }
 
 export function venueStatusLabel(present: boolean | null | undefined): string {
-  return present ? "matched" : "—";
+  return present ? "fixture found" : "—";
 }
 
 export function venuePriceLabel(price: string | number | null | undefined, present: boolean): string {
   if (!present) return "—";
-  if (price === null || price === undefined || price === "") return "matched";
+  if (price === null || price === undefined || price === "") return FIXTURE_FOUND_LABEL;
   return decimalText(price);
 }
 
 export function polymarketCoverageLabel(item: DiscoveredFixture): string {
-  if (item.polymarket_matched) return "matched";
+  if (item.polymarket_matched) return FIXTURE_FOUND_LABEL;
   return item.no_comparison_reason || "unmatched / no supported Polymarket coverage";
 }
 
@@ -106,12 +110,40 @@ export function kickoffClockLabel(kickoffUtc: string): string {
 }
 
 export function inventorySummaryLabel(item: DiscoveredFixture): string {
+  if (marketEvaluationUnevaluated(item)) {
+    return marketEvaluationLabel(item);
+  }
   const discovered = item.discovered_market_count ?? item.matched_market_count;
   const equivalent = item.matched_equivalent_count ?? item.matched_market_count;
   return `${discovered} discovered · ${equivalent} equivalent`;
 }
 
+export function marketEvaluationUnevaluated(item: DiscoveredFixture): boolean {
+  const state = item.market_evaluation_state;
+  if (state === "evaluated") return false;
+  if (
+    state === "not_evaluated_scan_deadline" ||
+    state === "market_fetch_unavailable" ||
+    item.opportunity_state === "not_evaluated"
+  ) {
+    return true;
+  }
+  return item.matched_equivalent_count == null && !item.solver_is_arbitrage;
+}
+
+export function marketEvaluationLabel(item: DiscoveredFixture): string {
+  if (item.market_evaluation_state === "not_evaluated_scan_deadline") {
+    return NOT_EVALUATED_SCAN_BUDGET_LABEL;
+  }
+  if (item.market_evaluation_state === "market_fetch_unavailable") {
+    return NOT_EVALUATED_MARKET_FETCH_LABEL;
+  }
+  if (marketEvaluationUnevaluated(item)) return "Not evaluated";
+  return EQUIVALENT_MARKETS_HELP;
+}
+
 export function equivalentCountLabel(item: DiscoveredFixture): string {
+  if (marketEvaluationUnevaluated(item)) return "—";
   const equivalent = item.matched_equivalent_count ?? item.matched_market_count ?? 0;
   const near = item.near_executable_market_count;
   const qualifying = item.qualifying_market_count;
@@ -122,9 +154,10 @@ export function equivalentCountLabel(item: DiscoveredFixture): string {
 }
 
 export function opportunityStateLabel(item: DiscoveredFixture): string {
+  if (marketEvaluationUnevaluated(item)) return "not evaluated";
   if (item.opportunity_state) return item.opportunity_state.replaceAll("_", " ");
   if (item.solver_is_arbitrage) return "qualifying";
-  return item.polymarket_matched || item.kalshi_matched || item.matchbook_matched
+  return item.matched_equivalent_count
     ? "matched"
     : "unmatched";
 }
@@ -198,6 +231,7 @@ export function riskReasonsLabel(item: DiscoveredFixture): string {
 }
 
 export function bestArbMarketLabel(item: DiscoveredFixture): string {
+  if (marketEvaluationUnevaluated(item)) return "—";
   if (item.best_arb_market) return item.best_arb_market;
   if (item.headline_band === "no_executable_arb" || item.no_comparison_reason === "no_executable_arb") {
     return "No executable arb";
@@ -232,6 +266,8 @@ export function technicalDetailLines(item: DiscoveredFixture): string[] {
     item.market_family ? `family ${item.market_family}` : null,
     item.outcome_context ? `outcomes ${item.outcome_context}` : null,
     item.no_comparison_reason ? `reason ${item.no_comparison_reason}` : null,
+    item.market_evaluation_state ? `evaluation ${item.market_evaluation_state}` : null,
+    item.market_evaluation_reason ? `evaluation reason ${item.market_evaluation_reason}` : null,
     item.quote_age_basis ? `quote basis ${item.quote_age_basis}` : null,
     item.quote_age_ms != null ? `quote age ${item.quote_age_ms}ms` : null,
     item.best_matchbook_price != null ? `MB ${decimalText(item.best_matchbook_price)}` : null,

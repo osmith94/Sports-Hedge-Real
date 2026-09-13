@@ -4,6 +4,8 @@ import { FixtureDetailReadModel, VenueMarketFacts } from "../lib/api";
 import {
   fixturePhaseLabel,
   kickoffClockLabel,
+  marketEvaluationLabel,
+  marketEvaluationUnevaluated,
 } from "../lib/discovered-fixture-display";
 import {
   KalshiFixtureMarketInventoryRow,
@@ -53,16 +55,19 @@ export function FixtureInventoryWorkspace({ detail }: { detail: KalshiFixtureDet
       </div>
 
       <p className="section-copy">
-        {fixture.discovered_market_count ?? fixture.matched_market_count} discovered ·{" "}
-        {fixture.matched_equivalent_count ?? 0} matched equivalent
+        {marketEvaluationUnevaluated(fixture)
+          ? marketEvaluationLabel(fixture)
+          : `${fixture.discovered_market_count ?? fixture.matched_market_count} discovered · ${
+              fixture.matched_equivalent_count ?? 0
+            } matched equivalent`}
         {fixture.current_net_edge != null
           ? ` · best calculated net edge from solver rows only`
           : " · no solver net edge"}
         . Matchbook status {fixture.fixture_status ?? "unknown"}
         {fixture.in_running ? " · in-play" : " · pre-match"}. Polymarket{" "}
-        {fixture.polymarket_matched ? "matched" : fixture.no_comparison_reason ?? "unmatched"}
+        {fixture.polymarket_matched ? "fixture found" : fixture.no_comparison_reason ?? "unmatched"}
         {fixture.kalshi_matched != null
-          ? `. Kalshi ${fixture.kalshi_matched ? "matched" : "unmatched"}`
+          ? `. Kalshi ${fixture.kalshi_matched ? "fixture found" : "unmatched"}`
           : ""}
         .
       </p>
