@@ -31,7 +31,9 @@ from sports_hedge.domain.football import (
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
 from sports_hedge.fees.kalshi import kalshi_cost_from_series
-from sports_hedge.fees.resolver import UnknownRequiredCostError, VenueCostResolver
+from sports_hedge.fees.labels import operator_fee_label
+from sports_hedge.fees.polymarket import polymarket_cost_from_market
+from sports_hedge.fees.resolver import MATCHBOOK_OVERRIDE_TIER, UnknownRequiredCostError, VenueCostResolver
 from sports_hedge.matching.markets import MarketMatchResult, MarketMatcher
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 
@@ -71,6 +73,11 @@ class VenueMarketFacts(BaseModel):
     native_currency: str | None = None
     fee_status: str | None = None
     fee_source: str | None = None
+    fee_label: str | None = None
+    fee_basis: str | None = None
+    fee_rate: Decimal | None = None
+    fee_formula_name: str | None = None
+    fee_account_assumption: bool = False
     fx_status: str | None = None
 
 
@@ -670,7 +677,7 @@ def _facts_from_inventory(
 ) -> VenueMarketFacts:
     canonical = item.canonical
     observation = item.observation
-    fee_status, fee_source = _fee_status(item, venue_costs, cost_resolver=cost_resolver)
+    fee = _inventory_fee_fields(item, venue_costs, cost_resolver=cost_resolver)
     currency = observation.native_currency if observation is not None else None
     return VenueMarketFacts(
         venue=item.venue,
@@ -693,10 +700,34 @@ def _facts_from_inventory(
             else None
         ),
         native_currency=currency,
-        fee_status=fee_status,
-        fee_source=fee_source,
         fx_status=_fx_status(currency, fx_snapshots),
+        **fee,
     )
+
+
+def _inventory_fee_fields(
+    item: InventoryMarket,
+    venue_costs: list[VenueCostSnapshot] | None,
+    *,
+    cost_resolver: VenueCostResolver | None,
+) -> dict[str, Any]:
+    status, source, snapshot = _fee_status(item, venue_costs, cost_resolver=cost_resolver)
+    rate = None
+    if snapshot is not None:
+        rate = snapshot.rate
+        if rate is None:
+            rate = snapshot.formula_parameters.get("rate")
+    return {
+        "fee_status": status,
+        "fee_source": source,
+        "fee_label": operator_fee_label(snapshot, status=status),
+        "fee_basis": snapshot.fee_basis.value if snapshot is not None else None,
+        "fee_rate": rate,
+        "fee_formula_name": snapshot.formula_name if snapshot is not None else None,
+        "fee_account_assumption": bool(
+            snapshot is not None and snapshot.account_or_fee_tier == MATCHBOOK_OVERRIDE_TIER
+        ),
+    }
 
 
 def _fee_status(
@@ -704,29 +735,30 @@ def _fee_status(
     venue_costs: list[VenueCostSnapshot] | None,
     *,
     cost_resolver: VenueCostResolver | None,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, VenueCostSnapshot | None]:
     """Mirror paper-scan cost truth: explicit snapshots win; otherwise resolve.
 
     Explicit ``venue_costs`` are fail-closed for absent venues, matching
     ``PaperScanService._resolve_costs``. When the scan path would auto-resolve
-    from the backend registry / Kalshi metadata, inventory must show the same
-    known/unknown status rather than a false ``fee missing``.
+    from Matchbook registry, Kalshi metadata, or Polymarket per-market CLOB
+    metadata, inventory must show the same known/unknown status rather than a
+    false ``fee missing``.
     """
 
     if venue_costs is not None:
         for snapshot in venue_costs:
             if snapshot.venue is item.venue:
                 if snapshot.is_economically_known():
-                    return "known", snapshot.source
-                return "unknown", snapshot.source
-        return "missing", f"missing_venue_cost:{item.venue.value}"
+                    return "known", snapshot.source, snapshot
+                return "unknown", snapshot.source, snapshot
+        return "missing", f"missing_venue_cost:{item.venue.value}", None
 
     snapshot, source = _resolve_inventory_cost(item, cost_resolver=cost_resolver)
     if snapshot is not None:
         if snapshot.is_economically_known():
-            return "known", snapshot.source
-        return "unknown", snapshot.source
-    return "missing", source or f"missing_venue_cost:{item.venue.value}"
+            return "known", snapshot.source, snapshot
+        return "unknown", snapshot.source, snapshot
+    return "missing", source or f"missing_venue_cost:{item.venue.value}", None
 
 
 def _resolve_inventory_cost(
@@ -747,6 +779,17 @@ def _resolve_inventory_cost(
             )
             return snapshot, snapshot.source
         return None, "unknown_required_venue_cost:kalshi"
+    if item.venue is VenueName.POLYMARKET:
+        metadata = observation.metadata if observation is not None else {}
+        fee_meta = metadata.get("polymarket_fee") if isinstance(metadata, dict) else None
+        if isinstance(fee_meta, dict):
+            snapshot = polymarket_cost_from_market(
+                fee_meta,
+                captured_at=as_of,
+                source_market_id=item.source_market_id,
+            )
+            return snapshot, snapshot.source
+        return None, "unknown_required_venue_cost:polymarket"
     if cost_resolver is None:
         return None, "missing_venue_cost"
     family = item.canonical.family if item.canonical is not None else None

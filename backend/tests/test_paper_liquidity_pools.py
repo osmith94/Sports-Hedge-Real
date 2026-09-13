@@ -182,6 +182,7 @@ def test_polymarket_pool_uses_backend_fx_not_client_assumption() -> None:
     )
     mb_event, mb_market = matchbook_payloads()
     pm_event, pm_market, pm_books = polymarket_payloads()
+    pm_market = {**pm_market, "feesEnabled": False}
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )

@@ -210,6 +210,11 @@ export type VenueMarketFacts = {
   native_currency?: string | null;
   fee_status?: string | null;
   fee_source?: string | null;
+  fee_label?: string | null;
+  fee_basis?: string | null;
+  fee_rate?: string | number | null;
+  fee_formula_name?: string | null;
+  fee_account_assumption?: boolean;
   fx_status?: string | null;
 };
 
@@ -442,11 +447,31 @@ export type EconomicsVenueCostRow = {
   detail?: string | null;
 };
 
+export type MatchbookFeeStatus = {
+  provider_default_rate: string;
+  override_rate?: string | null;
+  effective_rate: string;
+  fee_basis: string;
+  account_assumption: boolean;
+  label: string;
+  source: string;
+  detail: string;
+  updated_at?: string | null;
+};
+
+export type PolymarketFeePolicy = {
+  resolution: string;
+  catalog_seeded: boolean;
+  detail: string;
+};
+
 export type EconomicsStatus = {
   as_of: string;
   data_kind: string;
   fx: EconomicsFxRow[];
   venue_costs: EconomicsVenueCostRow[];
+  matchbook_fee?: MatchbookFeeStatus | null;
+  polymarket_fee_policy?: PolymarketFeePolicy | null;
   issues: string[];
   fx_schedule?: {
     enabled: boolean;
@@ -755,6 +780,32 @@ export function getFixtureDetail(canonicalEventId: string): Promise<FixtureDetai
 
 export function getEconomicsStatus(): Promise<EconomicsStatus> {
   return request("/paper/economics-status");
+}
+
+export async function saveMatchbookFee(commissionRate: string): Promise<MatchbookFeeStatus> {
+  const response = await fetch(`${API_BASE}/paper/matchbook-fee`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ commission_rate: commissionRate }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<MatchbookFeeStatus>;
+}
+
+export async function resetMatchbookFee(): Promise<MatchbookFeeStatus> {
+  const response = await fetch(`${API_BASE}/paper/matchbook-fee/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<MatchbookFeeStatus>;
 }
 
 export function getNearWatchlist(query = "limit=25"): Promise<NearOpportunity[]> {

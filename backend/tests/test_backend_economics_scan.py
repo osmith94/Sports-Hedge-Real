@@ -45,6 +45,7 @@ def test_paper_scan_resolves_backend_fx_and_registry_costs() -> None:
     )
     mb_event, mb_market = matchbook_payloads()
     pm_event, pm_market, pm_books = polymarket_payloads()
+    pm_market = {**pm_market, "feesEnabled": False}
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
@@ -58,7 +59,9 @@ def test_paper_scan_resolves_backend_fx_and_registry_costs() -> None:
         assert usd.source == "ecb_eurofxref"
         assert usd.gbp_per_unit == Decimal("0.75000000")
         assert {item.venue.value for item in decision.venue_costs} == {"matchbook", "polymarket"}
-        assert all(item.source.startswith("venue_cost_registry") for item in decision.venue_costs)
+        sources = {item.venue.value: item.source for item in decision.venue_costs}
+        assert sources["matchbook"].startswith("venue_cost_registry")
+        assert sources["polymarket"].startswith("polymarket_fee_schedule:market:disabled")
     finally:
         repository.close()
 

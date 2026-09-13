@@ -227,6 +227,9 @@ tr:last-child td { border-bottom: none; }
 .scan-advanced { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel-raised); }
 .scan-advanced summary { cursor: pointer; font-size: 10px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .scan-advanced .scan-field { margin-top: 10px; max-width: 280px; }
+.matchbook-fee-editor { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-top: 10px; }
+.matchbook-fee-editor .scan-field { margin-top: 0; max-width: 180px; }
+.matchbook-fee-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .demo-walkthrough { margin-top: 18px; border: 1px solid rgba(241, 191, 105, .24); border-radius: var(--radius); padding: 12px 14px; background: rgba(241, 191, 105, .05); }
 .demo-walkthrough summary { cursor: pointer; color: var(--amber); font-size: 11px; font-weight: 750; }
 .demo-walkthrough .opp-card { margin-top: 12px; }

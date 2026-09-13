@@ -114,7 +114,7 @@ export function economicsSummary(
   options?: { limiting?: boolean },
 ): string {
   if (!facts) return "—";
-  const fee = feeLabel(facts.fee_status);
+  const fee = feeLabel(facts);
   const fx = fxLabel(facts.fx_status);
   const depth = depthLabel(facts, options?.limiting === true);
   return `${fee} · ${fx} · ${depth}`;
@@ -186,6 +186,8 @@ export function provenanceLines(facts: VenueMarketFacts): string[] {
   const lines = [`Market ID ${facts.source_market_id}`, `Event ID ${facts.source_event_id}`];
   if (facts.settlement_key) lines.push(`Settlement key ${facts.settlement_key}`);
   if (facts.fee_source) lines.push(`Fee source ${facts.fee_source}`);
+  if (facts.fee_label) lines.push(`Fee rule ${facts.fee_label}`);
+  if (facts.fee_account_assumption) lines.push("Fee is an operator/account assumption");
   if (facts.observed_at) lines.push(`Observed ${facts.observed_at}`);
   if (facts.quote_age_ms != null) {
     const basis = facts.quote_age_basis ? ` (${facts.quote_age_basis})` : "";
@@ -238,7 +240,9 @@ export function venueCurrency(facts: VenueMarketFacts): "GBP" | "USD" {
   return "GBP";
 }
 
-function feeLabel(status: string | null | undefined): string {
+function feeLabel(facts: VenueMarketFacts): string {
+  if (facts.fee_label) return facts.fee_label;
+  const status = facts.fee_status;
   if (!status) return "fee unknown";
   if (status === "known") return "fee known";
   if (status === "missing") return "fee missing";

@@ -27,7 +27,9 @@ class PayoffScanResult(BaseModel):
     cost_rejection_reasons: list[str] = Field(default_factory=list)
 
 
-STATE_SAFE_FEE_BASES = frozenset({FeeBasis.NONE_CONFIRMED, FeeBasis.PROFIT_COMMISSION})
+STATE_SAFE_FEE_BASES = frozenset(
+    {FeeBasis.NONE_CONFIRMED, FeeBasis.PROFIT_COMMISSION, FeeBasis.FORMULA}
+)
 
 
 class DepthAwarePayoffScanner:

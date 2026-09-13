@@ -254,6 +254,14 @@ class PolymarketObservationBuilder:
                     raw_book=raw_book,
                 )
             )
+        metadata = _quote_metadata(
+            "clob_token_probability",
+            basis=quote_age_basis,
+            reason=quote_age_reason,
+        )
+        from sports_hedge.fees.polymarket import extract_polymarket_fee_metadata
+
+        metadata["polymarket_fee"] = extract_polymarket_fee_metadata(market_payload)
         return VenueMarketObservation(
             market=market,
             observed_at=observed_at or datetime.now(UTC),
@@ -261,11 +269,7 @@ class PolymarketObservationBuilder:
             outcome_books=books,
             source_latency_ms=source_latency_ms,
             quote_age_ms=quote_age_ms,
-            metadata=_quote_metadata(
-                "clob_token_probability",
-                basis=quote_age_basis,
-                reason=quote_age_reason,
-            ),
+            metadata=metadata,
         )
 
 

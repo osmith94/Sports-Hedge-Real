@@ -142,6 +142,9 @@ class PaperScanService:
         )
         rejections.extend(cost_resolve_reasons)
         rejections.extend(fx_resolve_reasons)
+        from sports_hedge.fees.labels import cost_assumption_labels_for_snapshots
+
+        assumption_labels.extend(cost_assumption_labels_for_snapshots(costs))
         quote_age_ms = conservative_combined_age_ms(left.quote_age_ms, right.quote_age_ms)
         quote_age_basis = conservative_combined_basis(
             left.metadata.get("quote_age_basis") if isinstance(left.metadata, dict) else None,
@@ -650,12 +653,29 @@ class PaperScanService:
                         captured_at=as_of,
                         source_market_id=observation.market.source_market_id,
                     )
-                    if snapshot.is_economically_known():
-                        resolved.append(snapshot)
-                    else:
+                    resolved.append(snapshot)
+                    if not snapshot.is_economically_known():
                         reasons.append("unknown_required_venue_cost:kalshi")
                     continue
                 reasons.append("unknown_required_venue_cost:kalshi")
+                continue
+            if observation.venue is VenueName.POLYMARKET:
+                metadata = observation.metadata if isinstance(observation.metadata, dict) else {}
+                fee_meta = metadata.get("polymarket_fee")
+                if isinstance(fee_meta, dict):
+                    from sports_hedge.fees.polymarket import polymarket_cost_from_market
+
+                    snapshot = polymarket_cost_from_market(
+                        fee_meta,
+                        action=action,
+                        captured_at=as_of,
+                        source_market_id=observation.market.source_market_id,
+                    )
+                    resolved.append(snapshot)
+                    if not snapshot.is_economically_known():
+                        reasons.append("unknown_required_venue_cost:polymarket")
+                    continue
+                reasons.append("unknown_required_venue_cost:polymarket")
                 continue
             if self.cost_resolver is None:
                 continue

@@ -26,6 +26,7 @@ from sports_hedge.application.fixture_inventory import (
     _fx_status,
 )
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
+from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.domain.football import (
     CanonicalEvent,
@@ -101,13 +102,19 @@ def _market(
     )
 
 
-def _inventory(market: CanonicalMarket, *, name: str) -> InventoryMarket:
+def _inventory(
+    market: CanonicalMarket,
+    *,
+    name: str,
+    observation: VenueMarketObservation | None = None,
+) -> InventoryMarket:
     return InventoryMarket(
         venue=market.source_venue,
         source_event_id=market.event.source_event_id,
         source_market_id=market.source_market_id,
         raw_name=name,
         canonical=market,
+        observation=observation,
     )
 
 
@@ -283,6 +290,7 @@ class RichPolymarket:
                 "outcomes": '["Tottenham", "Draw", "Everton"]',
                 "clobTokenIds": '["h", "d", "a"]',
                 "description": "Resolves based on 90 minutes of regulation time.",
+                "feesEnabled": False,
             },
             {
                 "id": "pm-cs",
@@ -291,6 +299,7 @@ class RichPolymarket:
                 "outcomes": '["1-0", "2-0"]',
                 "clobTokenIds": '["cs1", "cs2"]',
                 "description": "Resolves based on 90 minutes of regulation time.",
+                "feesEnabled": False,
             },
             {
                 "id": "pm-ah",
@@ -300,6 +309,7 @@ class RichPolymarket:
                 "outcomes": '["Tottenham", "Everton"]',
                 "clobTokenIds": '["ah-h", "ah-a"]',
                 "description": "Resolves including extra time.",
+                "feesEnabled": False,
             },
         ]
 
@@ -546,6 +556,8 @@ def test_inventory_resolves_seeded_matchbook_football_fee_without_explicit_snaps
     assert rows[0].matchbook is not None
     assert rows[0].matchbook.fee_status == "known"
     assert rows[0].matchbook.fee_source == "venue_cost_registry:matchbook_commission_schedule"
+    assert rows[0].matchbook.fee_label == "2.00% net-profit commission"
+    assert rows[0].matchbook.fee_basis == "profit_commission"
 
 
 def test_inventory_without_resolver_or_snapshots_fails_closed_on_fees() -> None:

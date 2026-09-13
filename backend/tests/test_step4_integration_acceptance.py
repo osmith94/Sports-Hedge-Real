@@ -14,7 +14,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
-from sports_hedge.api.paper import get_fx_rate_service, get_paper_liquidity_repository
+from sports_hedge.api.paper import (
+    get_fx_rate_service,
+    get_matchbook_account_fee_store,
+    get_paper_liquidity_repository,
+    get_venue_cost_resolver,
+)
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.target_competitions import UNMATCHED_POLYMARKET_COVERAGE
@@ -27,6 +32,7 @@ from sports_hedge.fx.service import FxRateService
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
+from sports_hedge.persistence.matchbook_account_fee import SqliteMatchbookAccountFeeStore
 from sports_hedge.venues.matchbook import MatchbookClient
 from sports_hedge.venues.polymarket import PolymarketClient
 from test_matchbook_event_discovery import (
@@ -149,6 +155,7 @@ class MultiSeriesPolymarket:
                 "outcomes": '["Yes", "No"]',
                 "clobTokenIds": '["yes-token", "no-token"]',
                 "description": "Resolves based on 90 minutes of regulation time.",
+                "feesEnabled": False,
             }
         ]
 
@@ -269,7 +276,9 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
         assert usd.source == "ecb_eurofxref"
         assert usd.gbp_per_unit == Decimal("0.50000000")
         assert {item.venue.value for item in decision.venue_costs} == {"matchbook", "polymarket"}
-        assert all(item.source.startswith("venue_cost_registry") for item in decision.venue_costs)
+        sources = {item.venue.value: item.source for item in decision.venue_costs}
+        assert sources["matchbook"].startswith("venue_cost_registry")
+        assert sources["polymarket"].startswith("polymarket_fee_schedule")
         used_pm = sum(
             (
                 stake.stake
@@ -300,8 +309,12 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
 def test_live_collect_and_economics_status_compose_on_http_surface() -> None:
     fx = _backend_fx()
     liquidity = SqlitePaperLiquidityRepository()
+    fee_store = SqliteMatchbookAccountFeeStore()
+    costs = VenueCostResolver(matchbook_fee_store=fee_store)
     app.dependency_overrides[get_fx_rate_service] = lambda: fx
     app.dependency_overrides[get_paper_liquidity_repository] = lambda: liquidity
+    app.dependency_overrides[get_matchbook_account_fee_store] = lambda: fee_store
+    app.dependency_overrides[get_venue_cost_resolver] = lambda: costs
     client = TestClient(app)
     try:
         rejected = client.post(
@@ -324,7 +337,10 @@ def test_live_collect_and_economics_status_compose_on_http_surface() -> None:
         assert "stale_fx_rate:USD" not in body["issues"]
         venues = {row["venue"] for row in body["venue_costs"]}
         assert "matchbook" in venues
-        assert "polymarket" in venues
+        assert "polymarket" not in venues
+        assert body["matchbook_fee"]["label"] == "2.00% net-profit commission"
+        assert body["polymarket_fee_policy"]["catalog_seeded"] is False
+        assert body["polymarket_fee_policy"]["resolution"] == "per_market_clob_metadata"
 
         listed = client.get("/paper/liquidity-pools").json()
         by_venue = {pool["venue"]: pool for pool in listed["pools"]}
@@ -423,8 +439,10 @@ def test_operator_console_keeps_steps_1_to_3_console_contract() -> None:
     assert "fee_snapshots" not in collect_type
     assert "venue_costs" not in collect_type
     assert "USD → GBP" not in scan
-    assert "Matchbook fee %" not in scan
-    assert "Polymarket fee" not in scan
+    assert "Matchbook commission %" in scan
+    assert "operator/account assumption" in scan
+    assert "per-market CLOB metadata" in scan
+    assert "fx_snapshots" not in collect_type
     assert "Min net arb %" in scan
     assert "Max risk" in scan
     assert "Optional capital limit" in scan

@@ -182,10 +182,20 @@ def _net_win_payoff(
         return snapshot.fixed_amount, stake * gross_decimal_odds - snapshot.fixed_amount
     if basis is FeeBasis.FORMULA:
         from sports_hedge.fees.kalshi import KALSHI_QUADRATIC_FORMULA, apply_kalshi_quadratic
+        from sports_hedge.fees.polymarket import POLYMARKET_TAKER_FORMULA, apply_polymarket_taker
 
         if snapshot.formula_name == KALSHI_QUADRATIC_FORMULA:
             try:
                 return apply_kalshi_quadratic(
+                    snapshot,
+                    gross_decimal_odds=gross_decimal_odds,
+                    stake=stake,
+                )
+            except ValueError as exc:
+                raise CostRuleError("unsupported_fee_basis", str(exc)) from exc
+        if snapshot.formula_name == POLYMARKET_TAKER_FORMULA:
+            try:
+                return apply_polymarket_taker(
                     snapshot,
                     gross_decimal_odds=gross_decimal_odds,
                     stake=stake,
