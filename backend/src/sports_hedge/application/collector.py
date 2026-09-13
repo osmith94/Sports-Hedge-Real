@@ -22,6 +22,8 @@ from sports_hedge.application.fixture_inventory import (
     inventory_summary,
     raw_market_id,
     raw_market_name,
+    raw_market_type,
+    raw_runner_labels,
     scan_eligible_pair,
 )
 from sports_hedge.application.fixture_state import matchbook_fixture_state
@@ -977,6 +979,8 @@ class ReadOnlyCrossVenueCollector:
                         source_event_id=event.canonical.source_event_id,
                         source_market_id=source_id or name,
                         raw_name=name,
+                        raw_market_type=raw_market_type(payload, venue),
+                        raw_runner_labels=raw_runner_labels(payload, venue),
                         normalize_error=str(exc),
                     )
                 )
@@ -988,6 +992,8 @@ class ReadOnlyCrossVenueCollector:
                     source_event_id=event.canonical.source_event_id,
                     source_market_id=market.canonical.source_market_id,
                     raw_name=name,
+                    raw_market_type=raw_market_type(payload, venue),
+                    raw_runner_labels=raw_runner_labels(payload, venue),
                     canonical=market.canonical,
                 )
             )
@@ -1205,6 +1211,8 @@ class ReadOnlyCrossVenueCollector:
                         source_event_id=event.canonical.source_event_id,
                         source_market_id=raw_market_id(payload, VenueName.KALSHI) or "kalshi",
                         raw_name=raw_market_name(payload, VenueName.KALSHI),
+                        raw_market_type=raw_market_type(payload, VenueName.KALSHI),
+                        raw_runner_labels=raw_runner_labels(payload, VenueName.KALSHI),
                         normalize_error=str(exc),
                     )
                 )
@@ -1235,12 +1243,16 @@ class ReadOnlyCrossVenueCollector:
                 "series": series,
             }
             normalized.append(_NormalizedMarket(wrapper, market))
+            first_payload = grouped[market.source_market_id][0] if grouped[market.source_market_id] else {}
             inventory.append(
                 InventoryMarket(
                     venue=VenueName.KALSHI,
                     source_event_id=event.canonical.source_event_id,
                     source_market_id=market.source_market_id,
-                    raw_name=market.family.value,
+                    raw_name=raw_market_name(first_payload, VenueName.KALSHI) or market.family.value,
+                    raw_market_type=raw_market_type(first_payload, VenueName.KALSHI),
+                    raw_runner_labels=raw_runner_labels(first_payload, VenueName.KALSHI)
+                    or [runner.label for runner in market.runners],
                     canonical=market,
                 )
             )
@@ -1256,6 +1268,8 @@ class ReadOnlyCrossVenueCollector:
                     source_event_id=event.canonical.source_event_id,
                     source_market_id=raw_market_id(payload, VenueName.KALSHI) or "kalshi",
                     raw_name=raw_market_name(payload, VenueName.KALSHI),
+                    raw_market_type=raw_market_type(payload, VenueName.KALSHI),
+                    raw_runner_labels=raw_runner_labels(payload, VenueName.KALSHI),
                     normalize_error="unsupported_or_ungrouped_kalshi_market",
                 )
             )

@@ -45,7 +45,7 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.normalization.identity import canonical_source_event_id
-from sports_hedge.paper.models import FxRateSnapshot
+from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from venue_cost_helpers import matchbook_polymarket_costs
 
 
@@ -181,6 +181,77 @@ def test_inventory_keeps_matched_venue_only_settlement_and_unsupported_rows() ->
     assert matcher.match(ah_mb, ah_pm).matched is False
     assert "settlement_mismatch" in matcher.match(ah_mb, ah_pm).reasons
     assert solver_eligible_pair(correct, pm_correct, matcher.match(correct, pm_correct)) is False
+
+
+def test_related_kalshi_binary_does_not_match_1x2_despite_shared_settlement() -> None:
+    matchbook_1x2 = _market(VenueName.MATCHBOOK, family=MarketFamily.MATCH_RESULT, source_id="mb-1x2")
+    kalshi_binary = _market(
+        VenueName.KALSHI,
+        family=MarketFamily.MATCH_RESULT,
+        source_id="kalshi-yes-no",
+        outcomes=[CanonicalOutcome.YES, CanonicalOutcome.NO],
+    )
+    assert matchbook_1x2.settlement.deterministic_key() == kalshi_binary.settlement.deterministic_key()
+    matcher = MarketMatcher()
+    mismatch = matcher.match(matchbook_1x2, kalshi_binary)
+    assert mismatch.matched is False
+    assert "outcome_space_mismatch" in mismatch.reasons
+
+    bogus = PaperScanDecision(
+        market_match=mismatch,
+        solver_model="simple_complete_set",
+        eligible_for_paper_simulation=True,
+    )
+    rows = assemble_fixture_inventory(
+        [_inventory(matchbook_1x2, name="Match Result")],
+        [],
+        kalshi_markets=[_inventory(kalshi_binary, name="Match winner yes/no")],
+        decisions_by_pair={
+            (
+                VenueName.MATCHBOOK.value,
+                "mb-1x2",
+                VenueName.KALSHI.value,
+                "kalshi-yes-no",
+            ): bogus
+        },
+    )
+    row = next(item for item in rows if item.matchbook is not None)
+    assert row.kalshi is not None
+    assert row.kalshi.source_market_id == "kalshi-yes-no"
+    assert row.comparison_status is not InventoryComparisonStatus.MATCHED_EQUIVALENT
+    assert "venue_only" in row.rejection_reasons
+    assert "outcome_space_mismatch" in row.rejection_reasons
+    assert row.reason == "outcome_space_mismatch"
+    assert row.entered_solver is False
+    assert row.solver_is_arbitrage is False
+    assert row.solver_model is None
+
+
+def test_equivalent_kalshi_total_is_matched_without_scan_decision() -> None:
+    matchbook_total = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.TOTAL_GOALS,
+        source_id="mb-tg-25",
+        outcomes=[CanonicalOutcome.OVER, CanonicalOutcome.UNDER],
+        line=Decimal("2.5"),
+    )
+    kalshi_total = _market(
+        VenueName.KALSHI,
+        family=MarketFamily.TOTAL_GOALS,
+        source_id="kalshi-tg-25",
+        outcomes=[CanonicalOutcome.OVER, CanonicalOutcome.UNDER],
+        line=Decimal("2.5"),
+    )
+    rows = assemble_fixture_inventory(
+        [_inventory(matchbook_total, name="Over/Under 2.5 Goals")],
+        [],
+        kalshi_markets=[_inventory(kalshi_total, name="Total Goals 2.5")],
+    )
+    row = next(item for item in rows if item.matchbook is not None)
+    assert row.kalshi is not None
+    assert row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
+    assert "venue_only" not in row.rejection_reasons
+    assert row.entered_solver is False
 
 
 def test_unnormalized_market_is_unsupported_family_not_hidden() -> None:
@@ -533,6 +604,9 @@ def test_fixture_ui_routes_by_canonical_id_and_renders_inventory_states() -> Non
         "£4,317 available",
     ):
         assert token in workspace or token in display
+    assert "Raw name" in display
+    assert "Raw type" in display
+    assert "Raw runners" in display
     assert " / ${quote.size_at_touch}" not in display
     assert "touch ${facts.usable_depth_at_touch}" not in display
     assert "place_order" not in (FRONTEND / "app" / "arbitrage" / "fixtures" / "[eventId]" / "page.tsx").read_text(

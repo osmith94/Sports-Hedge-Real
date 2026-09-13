@@ -35,6 +35,7 @@ from sports_hedge.fees.labels import operator_fee_label
 from sports_hedge.fees.polymarket import polymarket_cost_from_market
 from sports_hedge.fees.resolver import MATCHBOOK_OVERRIDE_TIER, UnknownRequiredCostError, VenueCostResolver
 from sports_hedge.matching.markets import MarketMatchResult, MarketMatcher
+from sports_hedge.normalization.venues import matchbook_raw_market_type
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 
 
@@ -79,6 +80,9 @@ class VenueMarketFacts(BaseModel):
     fee_formula_name: str | None = None
     fee_account_assumption: bool = False
     fx_status: str | None = None
+    raw_market_name: str | None = None
+    raw_market_type: str | None = None
+    raw_runner_labels: list[str] = Field(default_factory=list)
 
 
 class FixtureMarketInventoryRow(BaseModel):
@@ -117,6 +121,8 @@ class InventoryMarket(BaseModel):
     source_event_id: str
     source_market_id: str
     raw_name: str
+    raw_market_type: str | None = None
+    raw_runner_labels: list[str] = Field(default_factory=list)
     canonical: CanonicalMarket | None = None
     observation: VenueMarketObservation | None = None
     normalize_error: str | None = None
@@ -288,7 +294,14 @@ def assemble_fixture_inventory(
             unmatched_kalshi.append(item)
     attached: set[int] = set()
     for row in rows:
-        kalshi_index = _matching_kalshi_index(row, unmatched_kalshi, matcher)
+        kalshi_index = _matching_kalshi_index(
+            row,
+            unmatched_kalshi,
+            matcher,
+            matchbook_markets=matchbook_markets,
+            polymarket_markets=polymarket_markets,
+            exclude=attached,
+        )
         if kalshi_index is None:
             continue
         attached.add(kalshi_index)
@@ -297,6 +310,8 @@ def assemble_fixture_inventory(
             row,
             kalshi_item,
             matcher=matcher,
+            matchbook_markets=matchbook_markets,
+            polymarket_markets=polymarket_markets,
             pair_decisions=pair_decisions,
             venue_costs=venue_costs,
             fx_snapshots=fx_snapshots,
@@ -507,6 +522,7 @@ def _paired_row(
             venue_costs=venue_costs,
             fx_snapshots=fx_snapshots,
             cost_resolver=cost_resolver,
+            decision=decision,
         )
 
     return FixtureMarketInventoryRow(
@@ -674,11 +690,21 @@ def _facts_from_inventory(
     venue_costs: list[VenueCostSnapshot] | None,
     fx_snapshots: list[FxRateSnapshot] | None,
     cost_resolver: VenueCostResolver | None,
+    decision: PaperScanDecision | None = None,
 ) -> VenueMarketFacts:
     canonical = item.canonical
     observation = item.observation
     fee = _inventory_fee_fields(item, venue_costs, cost_resolver=cost_resolver)
     currency = observation.native_currency if observation is not None else None
+    fx_truth = decision.fx_snapshots if decision is not None else fx_snapshots
+    metadata = observation.metadata if observation is not None else {}
+    raw_name = item.raw_name or _metadata_str(metadata, "raw_market_name")
+    raw_type = item.raw_market_type or _metadata_str(metadata, "raw_market_type")
+    runner_labels = list(item.raw_runner_labels)
+    if not runner_labels:
+        labels = metadata.get("raw_runner_labels") if isinstance(metadata, dict) else None
+        if isinstance(labels, list):
+            runner_labels = [str(label) for label in labels if str(label).strip()]
     return VenueMarketFacts(
         venue=item.venue,
         source_event_id=item.source_event_id,
@@ -700,9 +726,21 @@ def _facts_from_inventory(
             else None
         ),
         native_currency=currency,
-        fx_status=_fx_status(currency, fx_snapshots),
+        fx_status=_fx_status(currency, fx_truth),
+        raw_market_name=raw_name or None,
+        raw_market_type=raw_type,
+        raw_runner_labels=runner_labels,
         **fee,
     )
+
+
+def _metadata_str(metadata: Any, key: str) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get(key)
+    if value is None or str(value).strip() == "":
+        return None
+    return str(value).strip()
 
 
 def _inventory_fee_fields(
@@ -913,34 +951,116 @@ def _sort_rows(rows: list[FixtureMarketInventoryRow]) -> list[FixtureMarketInven
     )
 
 
+def _row_canonicals(
+    row: FixtureMarketInventoryRow,
+    *,
+    matchbook_markets: list[InventoryMarket],
+    polymarket_markets: list[InventoryMarket],
+) -> list[CanonicalMarket]:
+    canonicals: list[CanonicalMarket] = []
+    for facts, venue, source in (
+        (row.matchbook, VenueName.MATCHBOOK, matchbook_markets),
+        (row.polymarket, VenueName.POLYMARKET, polymarket_markets),
+    ):
+        item = _inventory_from_facts(facts, venue, source)
+        if item is not None and item.canonical is not None:
+            canonicals.append(item.canonical)
+    return canonicals
+
+
+def _kalshi_related_to_row(row: FixtureMarketInventoryRow, item: InventoryMarket) -> bool:
+    if row.family is None or item.canonical is None:
+        return False
+    if item.canonical.family.value != row.family:
+        return False
+    if row.period and item.canonical.period.value != row.period:
+        return False
+    if row.line is not None and item.canonical.line != row.line:
+        return False
+    if row.matchbook is None and row.polymarket is None:
+        return False
+    settlement_keys = {
+        facts.settlement_key
+        for facts in (row.matchbook, row.polymarket)
+        if facts is not None and facts.settlement_key
+    }
+    kalshi_key = item.canonical.settlement.deterministic_key()
+    if settlement_keys and kalshi_key not in settlement_keys:
+        return False
+    return True
+
+
+def _kalshi_match_results(
+    row: FixtureMarketInventoryRow,
+    kalshi_item: InventoryMarket,
+    matcher: MarketMatcher,
+    *,
+    matchbook_markets: list[InventoryMarket],
+    polymarket_markets: list[InventoryMarket],
+) -> list[MarketMatchResult]:
+    if kalshi_item.canonical is None:
+        return []
+    return [
+        matcher.match(canonical, kalshi_item.canonical)
+        for canonical in _row_canonicals(
+            row,
+            matchbook_markets=matchbook_markets,
+            polymarket_markets=polymarket_markets,
+        )
+    ]
+
+
 def _matching_kalshi_index(
     row: FixtureMarketInventoryRow,
     kalshi_markets: list[InventoryMarket],
-    _matcher: MarketMatcher,
+    matcher: MarketMatcher,
+    *,
+    matchbook_markets: list[InventoryMarket],
+    polymarket_markets: list[InventoryMarket],
+    exclude: set[int] | None = None,
 ) -> int | None:
     if row.family is None:
         return None
+    skipped = exclude or set()
+    related: list[tuple[bool, int]] = []
     for index, item in enumerate(kalshi_markets):
-        if item.canonical is None:
+        if index in skipped:
             continue
-        if item.canonical.family.value != row.family:
+        if not _kalshi_related_to_row(row, item):
             continue
-        if row.period and item.canonical.period.value != row.period:
+        matches = _kalshi_match_results(
+            row,
+            item,
+            matcher,
+            matchbook_markets=matchbook_markets,
+            polymarket_markets=polymarket_markets,
+        )
+        equivalent = any(match.matched for match in matches)
+        if not equivalent and row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT:
             continue
-        if row.line is not None and item.canonical.line != row.line:
+        related.append((equivalent, index))
+    if not related:
+        return None
+    for equivalent, index in related:
+        if equivalent:
+            return index
+    return related[0][1]
+
+
+def _clear_stale_venue_only(row: FixtureMarketInventoryRow) -> None:
+    if row.reason == "venue_only":
+        row.reason = None
+    if "venue_only" in row.rejection_reasons:
+        row.rejection_reasons = [item for item in row.rejection_reasons if item != "venue_only"]
+    if "venue_only" in row.match_reasons:
+        row.match_reasons = [item for item in row.match_reasons if item != "venue_only"]
+
+
+def _apply_decision_fx(row: FixtureMarketInventoryRow, decision: PaperScanDecision) -> None:
+    for facts in (row.matchbook, row.polymarket, row.kalshi):
+        if facts is None:
             continue
-        if row.matchbook is None and row.polymarket is None:
-            continue
-        settlement_keys = {
-            facts.settlement_key
-            for facts in (row.matchbook, row.polymarket)
-            if facts is not None and facts.settlement_key
-        }
-        kalshi_key = item.canonical.settlement.deterministic_key()
-        if settlement_keys and kalshi_key not in settlement_keys:
-            continue
-        return index
-    return None
+        facts.fx_status = _fx_status(facts.native_currency, decision.fx_snapshots)
 
 
 def _attach_kalshi(
@@ -948,18 +1068,15 @@ def _attach_kalshi(
     kalshi_item: InventoryMarket,
     *,
     matcher: MarketMatcher,
+    matchbook_markets: list[InventoryMarket],
+    polymarket_markets: list[InventoryMarket],
     pair_decisions: dict[tuple[str, str, str, str], PaperScanDecision],
     venue_costs: list[VenueCostSnapshot] | None,
     fx_snapshots: list[FxRateSnapshot] | None,
     cost_resolver: VenueCostResolver | None,
 ) -> None:
-    row.kalshi = _facts_from_inventory(
-        kalshi_item,
-        venue_costs=venue_costs,
-        fx_snapshots=fx_snapshots,
-        cost_resolver=cost_resolver,
-    )
     pair_summaries: list[InventoryPairResult] = []
+    best_decision: PaperScanDecision | None = None
     for facts, venue in (
         (row.matchbook, VenueName.MATCHBOOK),
         (row.polymarket, VenueName.POLYMARKET),
@@ -985,7 +1102,50 @@ def _attach_kalshi(
                 solver_is_arbitrage=_decision_is_arb(decision),
             )
         )
+        if best_decision is None:
+            best_decision = decision
+        elif _decision_net_edge(decision) is not None and (
+            _decision_net_edge(best_decision) is None
+            or (_decision_net_edge(decision) or Decimal("-1"))
+            > (_decision_net_edge(best_decision) or Decimal("-1"))
+        ):
+            best_decision = decision
+    matches = _kalshi_match_results(
+        row,
+        kalshi_item,
+        matcher,
+        matchbook_markets=matchbook_markets,
+        polymarket_markets=polymarket_markets,
+    )
+    proven = any(match.matched for match in matches)
+    row.kalshi = _facts_from_inventory(
+        kalshi_item,
+        venue_costs=venue_costs,
+        fx_snapshots=fx_snapshots,
+        cost_resolver=cost_resolver,
+        decision=best_decision,
+    )
     row.pair_results = pair_summaries
+    if best_decision is not None:
+        _apply_decision_fx(row, best_decision)
+    if not proven:
+        mismatch_reasons = [reason for match in matches for reason in match.reasons]
+        for reason in mismatch_reasons:
+            if reason not in row.rejection_reasons:
+                row.rejection_reasons.append(reason)
+            if reason not in row.match_reasons:
+                row.match_reasons.append(reason)
+        if mismatch_reasons:
+            if row.comparison_status is InventoryComparisonStatus.VENUE_ONLY:
+                row.comparison_status = InventoryComparisonStatus.OTHER
+            if row.reason in {None, "venue_only"}:
+                row.reason = (
+                    "outcome_space_mismatch"
+                    if "outcome_space_mismatch" in mismatch_reasons
+                    else mismatch_reasons[0]
+                )
+        return
+    _clear_stale_venue_only(row)
     if pair_summaries:
         best = max(
             pair_summaries,
@@ -998,9 +1158,12 @@ def _attach_kalshi(
             row.solver_is_arbitrage = best.solver_is_arbitrage
         if best.entered_solver or not best.rejection_reasons:
             row.comparison_status = InventoryComparisonStatus.MATCHED_EQUIVALENT
-            row.reason = None
-            if "venue_only" in row.rejection_reasons:
-                row.rejection_reasons = [item for item in row.rejection_reasons if item != "venue_only"]
+            if row.reason == "venue_only":
+                row.reason = None
+        return
+    row.comparison_status = InventoryComparisonStatus.MATCHED_EQUIVALENT
+    if row.reason == "venue_only":
+        row.reason = None
 
 
 def _inventory_from_facts(
@@ -1033,6 +1196,39 @@ def raw_market_name(payload: dict[str, Any], venue: VenueName) -> str:
         or payload.get("conditionId")
         or "Polymarket market"
     )
+
+
+def raw_market_type(payload: dict[str, Any], venue: VenueName) -> str | None:
+    if venue is VenueName.MATCHBOOK:
+        return matchbook_raw_market_type(payload)
+    if venue is VenueName.KALSHI:
+        value = payload.get("market_type") or payload.get("type")
+        return str(value).strip() if value else None
+    value = payload.get("sportsMarketType") or payload.get("sports_market_type") or payload.get("marketType")
+    return str(value).strip() if value else None
+
+
+def raw_runner_labels(payload: dict[str, Any], venue: VenueName) -> list[str]:
+    labels: list[str] = []
+    if venue is VenueName.KALSHI:
+        for key in ("yes_sub_title", "yes_subtitle", "no_sub_title", "title"):
+            value = payload.get(key)
+            if value and str(value).strip() and str(value).strip() not in labels:
+                labels.append(str(value).strip())
+        return labels
+    runners = payload.get("runners")
+    if isinstance(runners, list):
+        for runner in runners:
+            if isinstance(runner, dict):
+                name = str(runner.get("name") or runner.get("label") or "").strip()
+                if name:
+                    labels.append(name)
+    if labels:
+        return labels
+    outcomes = payload.get("outcomes")
+    if isinstance(outcomes, list):
+        return [str(item).strip() for item in outcomes if str(item).strip()]
+    return labels
 
 
 def raw_market_id(payload: dict[str, Any], venue: VenueName) -> str:

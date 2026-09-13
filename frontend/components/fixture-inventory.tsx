@@ -177,12 +177,18 @@ function ProvenanceBlock({ row }: { row: KalshiFixtureMarketInventoryRow }) {
     ["Polymarket", row.polymarket],
     ["Kalshi", row.kalshi],
   ];
+  const matched = row.comparison_status === "matched_equivalent";
   const rawReasons = [
     row.reason,
     ...row.rejection_reasons,
     ...row.match_reasons,
     ...(row.pair_results ?? []).flatMap((pair) => pair.rejection_reasons),
-  ].filter((reason, index, all): reason is string => Boolean(reason) && all.indexOf(reason) === index);
+  ].filter(
+    (reason, index, all): reason is string =>
+      Boolean(reason) &&
+      all.indexOf(reason) === index &&
+      !(matched && reason === "venue_only"),
+  );
 
   return (
     <div className="inventory-advanced-copy">
