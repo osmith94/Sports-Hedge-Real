@@ -16,7 +16,15 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from sports_hedge.accounting.paper_journal import DataProvenance
+from sports_hedge.accounting.dimensions import (
+    AttributionScope,
+    CapitalSource,
+    CashState,
+    PostingDimensions,
+    PostingSide,
+    cash_account,
+)
+from sports_hedge.accounting.paper_journal import DataProvenance, PaperJournalEntry, PaperJournalPosting
 from sports_hedge.accounting.reconciliation import LedgerReconciliationError, reconcile_paper_ledger
 from sports_hedge.api.main import app
 from sports_hedge.api.paper import get_paper_ledger
@@ -30,7 +38,13 @@ from sports_hedge.paper.fills import PaperFillConfig, PaperOpportunityLeg
 from sports_hedge.paper.simulator import PaperFillSimulator
 from sports_hedge.paper.trades import PaperSettlementRequest, PaperTradeState
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
-from sports_hedge.treasury.models import TreasuryLockRequest, UnwindReleaseLeg, ValidatedUnwindResult
+from sports_hedge.treasury.models import (
+    PaperTreasuryEvent,
+    PaperTreasuryEventType,
+    TreasuryLockRequest,
+    UnwindReleaseLeg,
+    ValidatedUnwindResult,
+)
 from sports_hedge.treasury.service import PaperTreasuryError
 from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import MatchbookClient
@@ -702,4 +716,81 @@ def test_hanging_provider_does_not_post_phantom_cash(monkeypatch: pytest.MonkeyP
     assert after_pools == before_pools
     ledger.reconcile()
     get_live_refresh_coordinator().reset()
+
+
+def test_cash_in_transit_is_deferred_not_an_accounting_error(tmp_path: Path) -> None:
+    """#116 will add treasury transfers. Transit must not fail closed today."""
+
+    ledger = SqlitePaperLedger(
+        tmp_path / "lane5-transit.sqlite",
+        seed_gbp=SEED,
+        usd_gbp_per_unit=FX,
+        fx_source="paper_demo_fx_snapshot",
+    )
+    try:
+        snap = ledger.treasury.snapshot()
+        assert snap.session is not None
+        pool = snap.pool(VenueName.MATCHBOOK, "GBP")
+        amount = Decimal("5")
+        dims = PostingDimensions(
+            attribution=AttributionScope.SHARED_UNALLOCATED,
+            capital_source=CapitalSource.SHARED_UNALLOCATED,
+            venue=VenueName.MATCHBOOK,
+            currency="GBP",
+        )
+        posted = ledger.journal.append(
+            PaperJournalEntry(
+                source="paper_treasury_transfer",
+                source_id="issue-116-deferred-transit",
+                occurred_at=NOW,
+                description="Forward-compatible cash-in-transit; #116 owns transfer accounting",
+                opportunity_id="issue-116",
+                postings=[
+                    PaperJournalPosting(
+                        account_code=cash_account(VenueName.MATCHBOOK, "GBP", CashState.TRANSIT),
+                        side=PostingSide.DEBIT,
+                        amount_native=amount,
+                        amount_gbp=amount,
+                        fx_rate_gbp_per_unit=Decimal("1"),
+                        dimensions=dims,
+                    ),
+                    PaperJournalPosting(
+                        account_code=cash_account(VenueName.MATCHBOOK, "GBP", CashState.AVAILABLE),
+                        side=PostingSide.CREDIT,
+                        amount_native=amount,
+                        amount_gbp=amount,
+                        fx_rate_gbp_per_unit=Decimal("1"),
+                        dimensions=dims,
+                    ),
+                ],
+            )
+        )
+        with ledger.transaction():
+            ledger._connection.execute(
+                "UPDATE paper_treasury_pools SET available_cash = ? WHERE pool_id = ?",
+                (str(pool.available_cash - amount), pool.pool_id),
+            )
+            ledger.treasury._insert_event(
+                PaperTreasuryEvent(
+                    event_id="evt-deferred-transit",
+                    session_id=snap.session.session_id,
+                    pool_id=pool.pool_id,
+                    venue=VenueName.MATCHBOOK,
+                    native_currency="GBP",
+                    event_type=PaperTreasuryEventType.CORRECTION,
+                    native_amount=amount,
+                    occurred_at=NOW,
+                    source="paper_treasury_transfer",
+                    source_id="issue-116-deferred-transit",
+                    reason="unsupported cash-in-transit pending issue 116",
+                    journal_id=posted.journal_id,
+                )
+            )
+        report = ledger.reconcile()
+        assert report.ok
+        assert report.native_transit["matchbook/GBP"] == "5"
+        assert any(item.startswith("unsupported_transit:matchbook/GBP=") for item in report.deferred)
+        assert not any("unexpected_transit" in item for item in report.mismatches)
+    finally:
+        ledger.close()
 

@@ -59,7 +59,9 @@ export function PaperDeploymentPreview({
       <div className="opp-event">Fixed-size paper preparation</div>
       <p className="section-copy">
         Choose a concrete GBP deployment (example £10). Exact native legs are shown before any
-        OPEN. PAPER MODE · modelled · does not lock treasury or place orders.
+        OPEN. PAPER MODE · modelled · does not lock treasury or place orders. Capital source is
+        the paper pool classification; fill mode is the modelled execution path. Paper-simulated
+        external is not a live external confirmation.
       </p>
       <form className="inventory-grid" onSubmit={onPrepare}>
         <label>
@@ -120,6 +122,8 @@ function DeploymentResult({ preview }: { preview: PreparedPaperDeployment }) {
             <th>Native stake</th>
             <th>GBP capital</th>
             <th>Modelled fee</th>
+            <th>Capital source</th>
+            <th>Fill mode</th>
           </tr>
         </thead>
         <tbody>
@@ -136,6 +140,8 @@ function DeploymentResult({ preview }: { preview: PreparedPaperDeployment }) {
                   ? leg.cost_status
                   : `${money(leg.venue_fee, leg.native_currency === "USD" ? "USD" : "GBP")} · ${leg.fee_basis ?? ""}`}
               </td>
+              <td>{leg.capital_source.replaceAll("_", " ")}</td>
+              <td>{leg.execution_mode.replaceAll("_", " ")}</td>
             </tr>
           ))}
         </tbody>

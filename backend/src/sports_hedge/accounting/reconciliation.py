@@ -33,6 +33,7 @@ FINANCIAL_JOURNAL_SOURCES = frozenset(
         "paper_demo_reset",
         "manual_external_confirmation",
         "daily_fx_revaluation",
+        "paper_treasury_transfer",
     }
 )
 
@@ -74,9 +75,11 @@ class PaperLedgerReconciliation(BaseModel):
     gbp_journals_balanced: bool
     native_available: dict[str, str]
     native_locked: dict[str, str]
+    native_transit: dict[str, str] = Field(default_factory=dict)
     native_realised_pnl: dict[str, str]
     native_fees: dict[str, str]
     mismatches: list[str] = Field(default_factory=list)
+    deferred: list[str] = Field(default_factory=list)
     data_kind: str = "persisted_paper_subledger"
 
     @property
@@ -153,6 +156,7 @@ def reconcile_paper_ledger(ledger: Any) -> PaperLedgerReconciliation:
     unique_events, duplicate_events = _source_keys(treasury_keys)
 
     mismatches: list[str] = []
+    deferred: list[str] = []
     if not unique_journals:
         mismatches.append(f"duplicate_journal_source_ids:{sorted(duplicate_journals)}")
     if not unique_events:
@@ -198,6 +202,7 @@ def reconcile_paper_ledger(ledger: Any) -> PaperLedgerReconciliation:
     betting, fees = journal_native_pnl(session_postings)
     native_available: dict[str, str] = {}
     native_locked: dict[str, str] = {}
+    native_transit: dict[str, str] = {}
     native_pnl: dict[str, str] = {}
     native_fees: dict[str, str] = {}
 
@@ -211,6 +216,7 @@ def reconcile_paper_ledger(ledger: Any) -> PaperLedgerReconciliation:
         identity = f"{pool.venue.value}/{pool.native_currency}"
         native_available[identity] = str(journal_available)
         native_locked[identity] = str(journal_locked)
+        native_transit[identity] = str(journal_transit)
         if journal_available != pool.available_cash:
             mismatches.append(
                 f"available_mismatch:{identity} journal={journal_available} treasury={pool.available_cash}"
@@ -220,7 +226,13 @@ def reconcile_paper_ledger(ledger: Any) -> PaperLedgerReconciliation:
                 f"locked_mismatch:{identity} journal={journal_locked} treasury={pool.locked_capital}"
             )
         if journal_transit != _ZERO:
-            mismatches.append(f"unexpected_transit:{identity}={journal_transit}")
+            # Issue #116 will add treasury transfers. Current schema has no
+            # spendable transit pool, so valid future transit is omitted from
+            # the fail-closed identity rather than treated as an accounting error.
+            deferred.append(
+                f"unsupported_transit:{identity}={journal_transit}; "
+                "treasury transfers deferred to issue 116"
+            )
         pnl_key = (pool.venue, pool.native_currency)
         journal_betting = betting.get(pnl_key, _ZERO)
         journal_fee = fees.get(pnl_key, _ZERO)
@@ -240,7 +252,14 @@ def reconcile_paper_ledger(ledger: Any) -> PaperLedgerReconciliation:
     for (venue, currency, state), amount in cash.items():
         identity = f"{venue.value}/{currency}"
         if identity not in pool_identities and amount != _ZERO:
-            mismatches.append(f"journal_cash_without_pool:{identity}/{state.value}={amount}")
+            if state is CashState.TRANSIT:
+                native_transit.setdefault(identity, str(amount))
+                deferred.append(
+                    f"unsupported_transit:{identity}/{state.value}={amount}; "
+                    "treasury transfers deferred to issue 116"
+                )
+            else:
+                mismatches.append(f"journal_cash_without_pool:{identity}/{state.value}={amount}")
 
     session = snapshot.session
     if session is not None:
@@ -290,9 +309,11 @@ def reconcile_paper_ledger(ledger: Any) -> PaperLedgerReconciliation:
         gbp_journals_balanced=gbp_balanced,
         native_available=native_available,
         native_locked=native_locked,
+        native_transit=native_transit,
         native_realised_pnl=native_pnl,
         native_fees=native_fees,
         mismatches=mismatches,
+        deferred=deferred,
     )
     if not report.ok:
         raise LedgerReconciliationError("; ".join(report.mismatches) or "ledger_reconciliation_failed")

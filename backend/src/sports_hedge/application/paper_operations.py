@@ -50,6 +50,7 @@ from sports_hedge.paper.preparation import (
     PreparablePaperOpportunity,
     PreparedPaperDeployment,
     PreparedPaperLeg,
+    preparation_capital_source,
 )
 from sports_hedge.paper.settlement import PaperSettlementError, compute_paper_settlement
 from sports_hedge.paper.simulator import PaperFillSimulator
@@ -278,7 +279,19 @@ class PaperOperationsService:
             )
         result = allocate_requested_size(request, requested_size_gbp)
         legs = self._prepared_legs(plan, result.recommended_stakes)
-        required = list(result.capital_required)
+        required = [
+            item.model_copy(
+                update={
+                    "capital_source": preparation_capital_source(
+                        plan.execution_modes.get(
+                            item.venue, LegExecutionMode.INTERNAL
+                        ).value,
+                        item.capital_source,
+                    )
+                }
+            )
+            for item in result.capital_required
+        ]
         reconciled = False
         if result.accepted:
             reporting_sum = sum((leg.capital_reporting for leg in legs), Decimal("0"))
@@ -373,7 +386,9 @@ class PaperOperationsService:
                     net_payoff=net_payoff,
                     fee_basis=fee_basis,
                     cost_status=cost_status,
-                    capital_source=stake.capital_source,
+                    capital_source=preparation_capital_source(
+                        stake.execution_mode, stake.capital_source
+                    ),
                     execution_mode=stake.execution_mode,
                 )
             )

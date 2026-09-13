@@ -12,8 +12,10 @@ from sports_hedge.application.market_observation import (
     MatchbookObservationBuilder,
     PolymarketObservationBuilder,
 )
+from sports_hedge.accounting.dimensions import CapitalSource
 from sports_hedge.arbitrage.allocation.engine import allocate, allocate_requested_size
 from sports_hedge.arbitrage.allocation.models import AllocationConstraintKind
+from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
 from sports_hedge.arbitrage.watchlist.service import _opportunity_id
 from sports_hedge.domain.football import (
     CanonicalEvent,
@@ -211,6 +213,17 @@ def test_prepare_ten_pound_btts_shows_exact_legs_without_opening(tmp_path: Path)
             if leg.venue is VenueName.POLYMARKET:
                 assert leg.native_currency == "USD"
                 assert leg.capital_native == leg.capital_reporting / Decimal("0.75")
+                assert leg.execution_mode == LegExecutionMode.EXTERNAL_OPERATOR.value
+                assert leg.capital_source is CapitalSource.PAPER_SIMULATED_EXTERNAL
+                assert leg.capital_source is not CapitalSource.MANUAL_EXTERNAL
+            else:
+                assert leg.execution_mode == LegExecutionMode.INTERNAL.value
+                assert leg.capital_source is CapitalSource.AUTO_POOL
+        for item in preview.capital_required:
+            if item.venue is VenueName.POLYMARKET:
+                assert item.capital_source is CapitalSource.PAPER_SIMULATED_EXTERNAL
+            else:
+                assert item.capital_source is CapitalSource.AUTO_POOL
         native_required = {(item.venue, item.currency): item.amount for item in preview.capital_required}
         after = ledger.treasury.snapshot()
         for (venue, currency), amount in native_required.items():
@@ -319,6 +332,12 @@ def test_prepare_deployment_api_and_fixture_preparable_list(tmp_path: Path) -> N
             assert leg["outcome"]
             assert Decimal(leg["stake_native"]) > 0
             assert Decimal(leg["displayed_odds"]) > 1
+            assert "capital_source" in leg
+            assert "execution_mode" in leg
+            assert leg["capital_source"] != "MANUAL_EXTERNAL"
+            if leg["venue"] == "polymarket":
+                assert leg["capital_source"] == "PAPER_SIMULATED_EXTERNAL"
+                assert leg["execution_mode"] == "EXTERNAL_OPERATOR"
         preparable = ops.list_preparable(decision.canonical_event_id)
         assert any(item.opportunity_id == opportunity_id for item in preparable)
         active = client.get("/paper/trades/active").json()

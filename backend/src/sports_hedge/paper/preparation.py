@@ -9,6 +9,25 @@ from sports_hedge.accounting.dimensions import CapitalSource
 from sports_hedge.arbitrage.allocation.models import AllocationConstraintKind, VenueNativeAmount
 from sports_hedge.domain.models import VenueName
 
+EXTERNAL_OPERATOR = "EXTERNAL_OPERATOR"
+
+
+def preparation_capital_source(
+    execution_mode: str,
+    allocator_source: CapitalSource,
+) -> CapitalSource:
+    """Map allocator capital-source enums onto Phase 1 paper preview semantics.
+
+    The allocator may tag EXTERNAL_OPERATOR legs as MANUAL_EXTERNAL. Preparation
+    never confirms a live external action, so that enum must not be shown as
+    operator MANUAL_EXTERNAL. Keep execution/fill mode on a separate field.
+    """
+
+    mode = execution_mode if isinstance(execution_mode, str) else str(execution_mode)
+    if mode == EXTERNAL_OPERATOR and allocator_source is CapitalSource.MANUAL_EXTERNAL:
+        return CapitalSource.PAPER_SIMULATED_EXTERNAL
+    return allocator_source
+
 
 class PreparedPaperLeg(BaseModel):
     """Exact pre-trade leg. Modelled; does not lock capital or open a trade."""
