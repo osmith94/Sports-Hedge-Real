@@ -185,7 +185,9 @@ export function LiquidityPools({
       setEditing(false);
       router.refresh();
     } catch (err) {
-      showError(err instanceof Error ? err.message : "Could not reset paper session.");
+      const raw = err instanceof Error ? err.message : "Could not reset paper session.";
+      setError(`Reset failed: ${raw}`);
+      setErrorTradeIds(explainTreasurySaveError(raw).tradeIds);
     } finally {
       setSaving(false);
     }

@@ -489,6 +489,134 @@ def test_operations_console_reset_wiring_does_not_call_legacy_liquidity_reset() 
     assert "resetPaperSession" in api
     assert "reinitialize_store: true" in api
     assert "savePaperTreasuryPools" in pools
+    assert 'setError(`Reset failed: ${raw}`)' in pools
+    assert "showError(err instanceof Error ? err.message : \"Could not reset paper session.\")" not in pools
     health = TestClient(app).get("/health").json()
     assert health["execution_enabled"] is False
     assert health["mode"] == "paper"
+
+
+def test_treasury_detail_reset_demo_session_uses_demo_cleanup_not_fail_closed_treasury_reset() -> None:
+    """Owner Windows path: TRSY / Treasury detail 'Reset demo session'.
+
+    Ordinary POST /paper/treasury/reset stays fail-closed. The visible button must
+    not call it; it uses the accounting-safe demo cleanup seam instead.
+    """
+
+    board = (FRONTEND / "components" / "treasury-board.tsx").read_text(encoding="utf-8")
+    pools = (FRONTEND / "components" / "liquidity-pools.tsx").read_text(encoding="utf-8")
+    api = (FRONTEND / "lib/api.ts").read_text(encoding="utf-8")
+    assert "Treasury detail" in pools
+    assert 'href="/treasury"' in pools
+    assert "Reset demo session" in board
+    assert "Confirm reset demo session" in board
+    assert "resetPaperSession" in board
+    assert "resetPaperTreasury" not in board
+    assert "/paper/treasury/reset" not in board
+    assert "reinitialize_store" in api
+    assert "resetPaperSession" in api
+    assert "Reset failed:" in board
+    health = TestClient(app).get("/health").json()
+    assert health["execution_enabled"] is False
+    assert health["mode"] == "paper"
+
+
+def test_owner_reset_demo_session_path_ordinary_api_stays_blocked_demo_cleanup_clears_open_locks(
+    tmp_path: Path,
+) -> None:
+    """Reproduce owner OPEN Matchbook/Polymarket locks, then both reset endpoints.
+
+    POST /paper/treasury/reset (old Reset demo session wiring) remains 409
+    active_treasury_locks. The operator destructive path POST /paper/demo/reset
+    with reinitialize_store=true must not return that as the final result.
+    """
+
+    demo, ops, ledger, liquidity, repository = _bundle(tmp_path)
+    _override(ledger, liquidity, demo)
+    client = _client()
+    try:
+        opened = demo.replay(
+            FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold")
+        )
+        assert opened.trade is not None
+        assert opened.trade.state is PaperTradeState.OPEN
+        trade_id = opened.trade.trade_id
+        before = client.get("/paper/treasury").json()
+        venues = _pools(before)
+        mb_locked = Decimal(venues["matchbook"]["locked_capital"])
+        pm_locked = Decimal(venues["polymarket"]["locked_capital"])
+        assert mb_locked > 0
+        assert pm_locked > 0
+        journals_before = {entry.journal_id for entry in ledger.journal.list_entries()}
+
+        ordinary = client.post(
+            "/paper/treasury/reset",
+            json={"reason": "operator demo reset from treasury UI"},
+        )
+        assert ordinary.status_code == 409
+        ordinary_detail = str(ordinary.json()["detail"])
+        assert "active_treasury_locks" in ordinary_detail
+        still_locked = _pools(client.get("/paper/treasury").json())
+        assert Decimal(still_locked["matchbook"]["locked_capital"]) == mb_locked
+        assert Decimal(still_locked["polymarket"]["locked_capital"]) == pm_locked
+        assert ops.list_active_trades()
+        assert {entry.journal_id for entry in ledger.journal.list_entries()} == journals_before
+
+        destructive = client.post(
+            "/paper/demo/reset",
+            json={
+                "reinitialize_store": True,
+                "reason": "explicit operator paper session reset from treasury UI",
+            },
+        )
+        assert destructive.status_code == 200, destructive.text
+        body = destructive.json()
+        assert "active_treasury_locks" not in destructive.text
+        assert body["execution_enabled"] is False
+        assert body["paper_only"] is True
+        cleared = {pool["venue"]: pool for pool in body["pools"]}
+        assert Decimal(cleared["matchbook"]["locked_capital"]) == 0
+        assert Decimal(cleared["polymarket"]["locked_capital"]) == 0
+        assert Decimal(cleared["kalshi"]["locked_capital"]) == 0
+        assert Decimal(cleared["matchbook"]["available_cash"]) == SEED
+        assert Decimal(cleared["polymarket"]["available_cash"]) == USD_SEED
+        assert Decimal(cleared["kalshi"]["available_cash"]) == USD_SEED
+        assert ops.list_active_trades() == []
+        abandoned = [trade for trade in ops.list_closed_trades() if trade.settlement_source == "demo_reset"]
+        assert abandoned
+        assert all(trade.realised_pnl_gbp is None for trade in abandoned)
+        assert all(":archived:" in trade.trade_id for trade in ledger.trades.list_all())
+        journals_after = {entry.journal_id for entry in ledger.journal.list_entries()}
+        assert journals_before <= journals_after
+        release_events = [
+            event
+            for event in ledger.treasury.list_events(limit=10_000)
+            if event.event_type.value == "release" and event.trade_id == trade_id
+        ]
+        assert release_events
+        assert all(event.source == "paper_demo_reset" for event in release_events)
+        report = ledger.reconcile()
+        assert report.ok
+        saved = client.post(
+            "/paper/treasury/pools",
+            json={
+                "reason": "operator paper treasury edit after reset demo session",
+                "pools": [
+                    {"venue": "matchbook", "available": "900"},
+                    {"venue": "polymarket", "available": "0"},
+                    {"venue": "kalshi", "available": "1250"},
+                ],
+            },
+        )
+        assert saved.status_code == 200, saved.text
+        saved_venues = _pools(saved.json())
+        assert Decimal(saved_venues["matchbook"]["available_cash"]) == Decimal("900")
+        assert Decimal(saved_venues["polymarket"]["available_cash"]) == Decimal("0")
+        assert Decimal(saved_venues["matchbook"]["locked_capital"]) == 0
+        health = client.get("/health").json()
+        assert health["execution_enabled"] is False
+        assert health["mode"] == "paper"
+    finally:
+        _clear_overrides()
+        repository.close()
+        ledger.close()
