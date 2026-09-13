@@ -45,6 +45,7 @@ class PaperLegFillKind(StrEnum):
 
 class PaperTradeAuditEventType(StrEnum):
     TRADE_OPENED = "trade_opened"
+    REPEAT_OBSERVATION_NO_TOP_UP = "repeat_observation_no_top_up"
     AWAITING_MANUAL_EXTERNAL = "awaiting_manual_external"
     PAPER_AUTOFILL = "paper_autofill"
     PAPER_ENTRY_REJECTED = "paper_entry_rejected"

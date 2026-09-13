@@ -273,6 +273,7 @@ export type PreparedPaperLeg = {
 };
 
 export type PreparedPaperDeployment = {
+  prepared_deployment_id?: string | null;
   opportunity_id: string;
   accepted: boolean;
   requested_size_gbp: string | number;
@@ -689,6 +690,9 @@ export async function simulatePaperFill(payload: {
   opportunity_id: string;
   operator_note?: string;
   provenance?: "live_paper" | "fixture_demo";
+  prepared_deployment_id?: string | null;
+  requested_size_gbp?: string;
+  simulate_external?: boolean;
 }): Promise<unknown> {
   const response = await fetch(`${API_BASE}/paper/simulate-fill`, {
     method: "POST",

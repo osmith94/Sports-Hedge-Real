@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from uuid import uuid4
 
 from sports_hedge.accounting.dimensions import CapitalSource
 from sports_hedge.accounting.paper_journal import (
@@ -135,6 +136,8 @@ class PaperOperationsService:
             self.journal = journal or PaperJournal()
             self.trades = trades
         self._plans: dict[str, PaperFillPlan] = {}
+        self._preparations: dict[str, PreparedPaperDeployment] = {}
+        self._latest_preparation_by_opportunity: dict[str, str] = {}
         self._external_confirmations: dict[str, ExternalLegConfirmation] = {}
         self._entry_rejections: dict[str, str] = {}
 
@@ -216,6 +219,29 @@ class PaperOperationsService:
 
         if requested_size_gbp <= 0:
             raise PaperOperationsError("requested_size_must_be_positive")
+        preview = self._compute_prepared_deployment(
+            opportunity_id,
+            requested_size_gbp,
+            operator_note=operator_note,
+        )
+        if preview.accepted:
+            preview = preview.model_copy(
+                update={"prepared_deployment_id": f"pdep:{uuid4().hex}"}
+            )
+            assert preview.prepared_deployment_id is not None
+            self._preparations[preview.prepared_deployment_id] = preview
+            self._latest_preparation_by_opportunity[opportunity_id] = (
+                preview.prepared_deployment_id
+            )
+        return preview
+
+    def _compute_prepared_deployment(
+        self,
+        opportunity_id: str,
+        requested_size_gbp: Decimal,
+        *,
+        operator_note: str,
+    ) -> PreparedPaperDeployment:
         plan = self._plans.get(opportunity_id)
         if plan is None:
             raise PaperOperationsError("missing_paper_fill_plan")
@@ -420,6 +446,104 @@ class PaperOperationsService:
             operator_note=operator_note,
         )
 
+    def _bind_prepared_allocation(
+        self,
+        opportunity_id: str,
+        plan: PaperFillPlan,
+        *,
+        prepared_deployment_id: str | None,
+        requested_size_gbp: Decimal | None,
+    ) -> tuple[PaperFillPlan, str | None]:
+        """Revalidate an operator-accepted size and bind those exact native legs.
+
+        Does not mutate treasury. Does not trust stale prepared quotes. If current
+        economics no longer match the accepted preview, fail closed rather than
+        silently resizing.
+        """
+
+        stored: PreparedPaperDeployment | None = None
+        if prepared_deployment_id is not None:
+            stored = self._preparations.get(prepared_deployment_id)
+            if stored is None:
+                raise PaperOperationsError("unknown_prepared_deployment")
+            if stored.opportunity_id != opportunity_id:
+                raise PaperOperationsError("prepared_deployment_opportunity_mismatch")
+            if not stored.accepted or stored.prepared_deployment_id is None:
+                raise PaperOperationsError("prepared_deployment_not_accepted")
+            if (
+                requested_size_gbp is not None
+                and requested_size_gbp != stored.requested_size_gbp
+            ):
+                raise PaperOperationsError("prepared_deployment_size_mismatch")
+            requested_size_gbp = stored.requested_size_gbp
+        elif requested_size_gbp is not None:
+            latest_id = self._latest_preparation_by_opportunity.get(opportunity_id)
+            candidate = self._preparations.get(latest_id) if latest_id else None
+            if (
+                candidate is not None
+                and candidate.accepted
+                and candidate.requested_size_gbp == requested_size_gbp
+            ):
+                stored = candidate
+                prepared_deployment_id = candidate.prepared_deployment_id
+        else:
+            return plan, None
+
+        current = self._compute_prepared_deployment(
+            opportunity_id,
+            requested_size_gbp,
+            operator_note="PAPER-ONLY confirmation revalidation; does not OPEN until fill",
+        )
+        if not current.accepted:
+            raise PaperOperationsError(
+                current.rejection_reason or "prepared_deployment_not_accepted"
+            )
+        if current.applied_size_gbp != requested_size_gbp:
+            raise PaperOperationsError("prepared_deployment_stale")
+        if stored is not None and _prepared_fingerprint(stored) != _prepared_fingerprint(
+            current
+        ):
+            raise PaperOperationsError("prepared_deployment_stale")
+        return (
+            _plan_with_prepared_stakes(plan, current),
+            stored.prepared_deployment_id if stored is not None else prepared_deployment_id,
+        )
+
+    def _note_repeat_observation(self, trade: PaperTrade, when: datetime) -> PaperTrade:
+        """Record a later scan/submit against an existing trade without topping up."""
+
+        if self.trades is None:
+            return trade
+        plan = self._plans.get(trade.opportunity_id)
+        current_score = None
+        current_edge = None
+        if plan is not None:
+            snapshot = snapshot_from_scan_decision(
+                plan.decision,
+                kind=PaperRiskSnapshotKind.ENTRY,
+                recorded_at=when,
+                opportunity_id=trade.opportunity_id,
+                trade_id=trade.trade_id,
+            )
+            if snapshot is not None:
+                current_score = snapshot.score
+                current_edge = snapshot.net_edge
+        parts = [
+            "repeat observation; analysis/risk may update; Phase 1 does not top up an existing position",
+        ]
+        if current_score is not None:
+            parts.append(f"current_score={current_score}")
+        if current_edge is not None:
+            parts.append(f"current_net_edge={current_edge}")
+        trade.audit.append(
+            PaperTradeAuditEvent(
+                occurred_at=when,
+                event_type=PaperTradeAuditEventType.REPEAT_OBSERVATION_NO_TOP_UP,
+                detail="; ".join(parts),
+            )
+        )
+        return self.trades.save(trade)
+
     def simulate_fill(
         self,
         opportunity_id: str,
@@ -431,16 +555,20 @@ class PaperOperationsService:
         provenance: DataProvenance = DataProvenance.LIVE_PAPER,
         operator_note: str = "PAPER-ONLY explicit simulate fill",
         simulate_external: bool = False,
+        prepared_deployment_id: str | None = None,
+        requested_size_gbp: Decimal | None = None,
     ) -> SimulatePaperFillResult:
         simulated_at = now or datetime.now(UTC)
         require_complete = simulate_external
         existing = self._get_trade_by_opportunity(opportunity_id)
-        if existing is not None and existing.state in {
-            PaperTradeState.OPEN,
-            PaperTradeState.PARTIAL,
-            PaperTradeState.CLOSED,
-        }:
-            return self._result_from_existing_trade(existing, simulated_at)
+        if existing is not None:
+            completing_awaiting = (
+                existing.state is PaperTradeState.AWAITING_MANUAL_EXTERNAL
+                and confirm_external is not None
+            )
+            if not completing_awaiting:
+                noted = self._note_repeat_observation(existing, simulated_at)
+                return self._result_from_existing_trade(noted, simulated_at)
 
         plan = self._plans.get(opportunity_id)
         if plan is None:
@@ -455,6 +583,14 @@ class PaperOperationsService:
             OpportunityStatus.PARTIAL,
         }:
             self._fail_entry(opportunity_id, "stale_before_fill", simulated_at)
+        bound_prepared_id: str | None = None
+        if prepared_deployment_id is not None or requested_size_gbp is not None:
+            plan, bound_prepared_id = self._bind_prepared_allocation(
+                opportunity_id,
+                plan,
+                prepared_deployment_id=prepared_deployment_id,
+                requested_size_gbp=requested_size_gbp,
+            )
         opening_legs = [leg for leg in plan.legs if leg.requested_stake > 0]
         if not opening_legs:
             self._fail_entry(opportunity_id, "no_positive_opening_legs", simulated_at)
@@ -611,6 +747,7 @@ class PaperOperationsService:
             solver_model=plan.decision.solver_model,
             entry_complete=trade is not None and trade.state is PaperTradeState.OPEN,
             allocated_requested_stakes=_allocated_stake_labels(opening_legs),
+            prepared_deployment_id=bound_prepared_id,
         )
         result.trade_id = trade.trade_id if trade is not None else None
         return result
@@ -1771,3 +1908,59 @@ def _allocated_stake_labels_from_trade(trade: PaperTrade) -> dict[str, Decimal]:
         for leg in trade.legs
         if leg.requested_stake > 0
     }
+
+
+def _dec_fingerprint(value: Decimal | None) -> str:
+    if value is None:
+        return ""
+    return format(value, "f")
+
+
+def _prepared_fingerprint(preview: PreparedPaperDeployment) -> tuple:
+    legs = tuple(
+        (
+            leg.venue.value,
+            leg.outcome,
+            leg.source_market_id,
+            leg.source_runner_id or "",
+            _dec_fingerprint(leg.stake_native),
+            _dec_fingerprint(leg.capital_native),
+            _dec_fingerprint(leg.displayed_odds),
+        )
+        for leg in preview.legs
+    )
+    return (
+        preview.accepted,
+        _dec_fingerprint(preview.requested_size_gbp),
+        _dec_fingerprint(preview.applied_size_gbp),
+        legs,
+    )
+
+
+def _plan_with_prepared_stakes(
+    plan: PaperFillPlan,
+    preview: PreparedPaperDeployment,
+) -> PaperFillPlan:
+    by_key = {
+        (leg.venue, leg.outcome, leg.source_market_id, leg.source_runner_id or ""): leg
+        for leg in preview.legs
+    }
+    resized: list[PaperOpportunityLeg] = []
+    seen: set[tuple] = set()
+    for plan_leg in plan.legs:
+        key = (
+            plan_leg.venue,
+            plan_leg.outcome,
+            plan_leg.source_market_id,
+            plan_leg.source_runner_id or "",
+        )
+        prepared = by_key.get(key)
+        if prepared is None:
+            resized.append(plan_leg.model_copy(update={"requested_stake": Decimal("0")}))
+            continue
+        seen.add(key)
+        resized.append(plan_leg.model_copy(update={"requested_stake": prepared.stake_native}))
+    if set(by_key) - seen:
+        raise PaperOperationsError("prepared_deployment_stale")
+    return plan.model_copy(update={"legs": resized})
+

@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
@@ -13,6 +14,8 @@ from sports_hedge.application.market_observation import (
     PolymarketObservationBuilder,
 )
 from sports_hedge.accounting.dimensions import CapitalSource
+from sports_hedge.accounting.paper_journal import DataProvenance
+from sports_hedge.application.paper_operations import PaperOperationsError
 from sports_hedge.arbitrage.allocation.engine import allocate, allocate_requested_size
 from sports_hedge.arbitrage.allocation.models import AllocationConstraintKind
 from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
@@ -342,6 +345,203 @@ def test_prepare_deployment_api_and_fixture_preparable_list(tmp_path: Path) -> N
         assert any(item.opportunity_id == opportunity_id for item in preparable)
         active = client.get("/paper/trades/active").json()
         assert active == []
+    finally:
+        app.dependency_overrides.clear()
+        repository.close()
+        ledger.close()
+
+
+def test_confirm_prepared_ten_pounds_locks_preview_legs_not_allocator(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
+        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+    )
+    try:
+        opportunity_id = _opportunity_id(decision.canonical_market_id)
+        plan = ops._plans[opportunity_id]
+        allocation = plan.decision.allocation
+        assert allocation is not None and allocation.accepted
+        assert allocation.recommended_committed_capital > TEN
+        allocator_stakes = {
+            (stake.venue, stake.outcome): stake.stake_native
+            for stake in allocation.recommended_stakes
+            if stake.stake_native > 0
+        }
+
+        before = ledger.treasury.snapshot()
+        preview = ops.prepare_fixed_deployment(opportunity_id, TEN)
+        assert preview.accepted is True
+        assert preview.prepared_deployment_id
+        assert preview.applied_size_gbp == TEN
+        preview_stakes = {(leg.venue, leg.outcome): leg.stake_native for leg in preview.legs}
+        assert preview_stakes != allocator_stakes
+        after_preview = ledger.treasury.snapshot()
+        for venue, currency in ((VenueName.MATCHBOOK, "GBP"), (VenueName.POLYMARKET, "USD")):
+            assert after_preview.pool(venue, currency).available_cash == before.pool(
+                venue, currency
+            ).available_cash
+            assert after_preview.pool(venue, currency).locked_capital == before.pool(
+                venue, currency
+            ).locked_capital
+        assert ops.list_active_trades() == []
+
+        result = ops.simulate_fill(
+            opportunity_id,
+            simulate_external=True,
+            prepared_deployment_id=preview.prepared_deployment_id,
+            requested_size_gbp=TEN,
+            provenance=DataProvenance.FIXTURE_DEMO,
+        )
+        assert result.entry_complete is True
+        assert result.prepared_deployment_id == preview.prepared_deployment_id
+        trades = ops.list_active_trades()
+        assert len(trades) == 1
+        trade = trades[0]
+        assert trade.state is PaperTradeState.OPEN
+        trade_stakes = {(leg.venue, leg.outcome): leg.filled_stake for leg in trade.legs}
+        assert trade_stakes == preview_stakes
+        assert trade_stakes != allocator_stakes
+        after = ledger.treasury.snapshot()
+        locked_by_currency: dict[str, Decimal] = {}
+        for leg in preview.legs:
+            locked_by_currency[leg.native_currency] = (
+                locked_by_currency.get(leg.native_currency, Decimal("0")) + leg.stake_native
+            )
+        for currency, amount in locked_by_currency.items():
+            venue = VenueName.MATCHBOOK if currency == "GBP" else VenueName.POLYMARKET
+            assert after.pool(venue, currency).locked_capital - before.pool(
+                venue, currency
+            ).locked_capital == amount
+            assert after.pool(venue, currency).available_cash == before.pool(
+                venue, currency
+            ).available_cash - amount
+
+        journals = list(ops.journal.list_entries())
+        retry = ops.simulate_fill(
+            opportunity_id,
+            simulate_external=True,
+            prepared_deployment_id=preview.prepared_deployment_id,
+            requested_size_gbp=TEN,
+            provenance=DataProvenance.FIXTURE_DEMO,
+        )
+        assert retry.trade_id == trade.trade_id
+        assert len(ops.list_active_trades()) == 1
+        assert list(ops.journal.list_entries()) == journals
+        retry_snap = ledger.treasury.snapshot()
+        for venue, currency in ((VenueName.MATCHBOOK, "GBP"), (VenueName.POLYMARKET, "USD")):
+            assert retry_snap.pool(venue, currency).locked_capital == after.pool(
+                venue, currency
+            ).locked_capital
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_stale_or_changed_prepared_preview_fails_closed(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
+        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+    )
+    try:
+        opportunity_id = _opportunity_id(decision.canonical_market_id)
+        preview = ops.prepare_fixed_deployment(opportunity_id, TEN)
+        assert preview.accepted is True
+        plan = ops._plans[opportunity_id]
+        ops._plans[opportunity_id] = plan.model_copy(
+            update={
+                "legs": [
+                    leg.model_copy(
+                        update={
+                            "displayed_odds": (leg.displayed_odds or Decimal("2")) + Decimal("0.05")
+                        }
+                    )
+                    for leg in plan.legs
+                ]
+            }
+        )
+        with pytest.raises(PaperOperationsError, match="prepared_deployment_stale"):
+            ops.simulate_fill(
+                opportunity_id,
+                simulate_external=True,
+                prepared_deployment_id=preview.prepared_deployment_id,
+                provenance=DataProvenance.FIXTURE_DEMO,
+            )
+        assert ops.list_active_trades() == []
+        with pytest.raises(PaperOperationsError, match="unknown_prepared_deployment"):
+            ops.simulate_fill(
+                opportunity_id,
+                simulate_external=True,
+                prepared_deployment_id="pdep:not-a-real-preview",
+                provenance=DataProvenance.FIXTURE_DEMO,
+            )
+        assert ops.list_active_trades() == []
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_confirm_prepared_deployment_api_locks_requested_size(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
+        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+    )
+    try:
+        app.dependency_overrides[get_paper_operations_service] = lambda: ops
+        app.dependency_overrides[get_paper_ledger] = lambda: ledger
+        client = TestClient(app)
+        opportunity_id = _opportunity_id(decision.canonical_market_id)
+        before = ledger.treasury.snapshot()
+        prepared = client.post(
+            "/paper/prepare-deployment",
+            json={
+                "opportunity_id": opportunity_id,
+                "requested_size_gbp": "10",
+                "operator_note": "PAPER-ONLY lane 2 prepare",
+            },
+        )
+        assert prepared.status_code == 200, prepared.text
+        body = prepared.json()
+        assert body["accepted"] is True
+        assert body["prepared_deployment_id"]
+        assert Decimal(body["applied_size_gbp"]) == TEN
+        after_preview = ledger.treasury.snapshot()
+        assert after_preview.pool(VenueName.MATCHBOOK, "GBP").locked_capital == before.pool(
+            VenueName.MATCHBOOK, "GBP"
+        ).locked_capital
+        assert client.get("/paper/trades/active").json() == []
+
+        confirmed = client.post(
+            "/paper/simulate-fill",
+            json={
+                "opportunity_id": opportunity_id,
+                "prepared_deployment_id": body["prepared_deployment_id"],
+                "requested_size_gbp": "10",
+                "simulate_external": True,
+                "operator_note": "PAPER-ONLY confirm accepted prepared size",
+                "provenance": "fixture_demo",
+            },
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        fill_body = confirmed.json()
+        assert fill_body["entry_complete"] is True
+        assert fill_body["prepared_deployment_id"] == body["prepared_deployment_id"]
+        active = client.get("/paper/trades/active").json()
+        assert len(active) == 1
+        preview_stakes = {
+            (leg["venue"], leg["outcome"]): Decimal(leg["stake_native"]) for leg in body["legs"]
+        }
+        trade_stakes = {
+            (leg["venue"], leg["outcome"]): Decimal(leg["filled_stake"]) for leg in active[0]["legs"]
+        }
+        assert trade_stakes == preview_stakes
+        stale = client.post(
+            "/paper/simulate-fill",
+            json={
+                "opportunity_id": opportunity_id,
+                "prepared_deployment_id": "pdep:missing",
+                "simulate_external": True,
+                "provenance": "fixture_demo",
+            },
+        )
+        assert stale.status_code == 409
+        assert len(client.get("/paper/trades/active").json()) == 1
     finally:
         app.dependency_overrides.clear()
         repository.close()

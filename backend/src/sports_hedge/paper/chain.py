@@ -81,6 +81,9 @@ class SimulatePaperFillRequest(BaseModel):
     capital_source: CapitalSource = CapitalSource.AUTO_POOL
     confirm_external: ExternalLegConfirmation | None = None
     provenance: DataProvenance = DataProvenance.LIVE_PAPER
+    prepared_deployment_id: str | None = None
+    requested_size_gbp: Decimal | None = Field(default=None, gt=0)
+    simulate_external: bool = False
 
 
 class SimulatePaperFillResult(BaseModel):
@@ -97,3 +100,4 @@ class SimulatePaperFillResult(BaseModel):
     entry_complete: bool = False
     rejection_reason: str | None = None
     allocated_requested_stakes: dict[str, Decimal] = Field(default_factory=dict)
+    prepared_deployment_id: str | None = None

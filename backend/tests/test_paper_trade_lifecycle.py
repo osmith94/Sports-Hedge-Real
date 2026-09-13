@@ -38,6 +38,7 @@ from sports_hedge.paper.trades import (
     PaperLegFillKind,
     PaperSettlementRequest,
     PaperTrade,
+    PaperTradeAuditEventType,
     PaperTradeLeg,
     PaperTradeState,
 )
@@ -738,3 +739,331 @@ def test_step5_introduces_no_execution_capability() -> None:
     assert "£15.82" not in text
     assert "paperPositions" not in text
     assert "PaperTradeBook" in text
+
+
+def _lock_and_journal_facts(ledger: SqlitePaperLedger, opportunity_id: str) -> tuple:
+    locks = [
+        (row["lock_id"], row["status"], row["amount_native"], row["venue"], row["native_currency"])
+        for row in ledger._connection.execute(
+            "SELECT lock_id, status, amount_native, venue, native_currency FROM paper_treasury_locks WHERE opportunity_id = ? ORDER BY lock_id",
+            (opportunity_id,),
+        ).fetchall()
+    ]
+    journals = [
+        (entry.journal_id, entry.source, entry.source_id)
+        for entry in ledger.journal.list_entries(opportunity_id=opportunity_id)
+    ]
+    return locks, journals
+
+
+def test_repeat_submit_is_idempotent_in_every_active_state(tmp_path: Path) -> None:
+    ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
+    _scan, watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
+    try:
+        opportunity_id = next(iter(ops._plans))
+        plan = ops._plans[opportunity_id]
+        opportunity = ops.watchlist.repository.get(opportunity_id)
+        assert opportunity is not None
+
+        pending = ops._new_trade_shell(plan, opportunity, OBSERVED, DataProvenance.FIXTURE_DEMO)
+        assert pending.state is PaperTradeState.PENDING
+        ops.trades.save(pending)
+        pending_retry = ops.simulate_fill(
+            opportunity_id, simulate_external=True, provenance=DataProvenance.FIXTURE_DEMO
+        )
+        assert pending_retry.trade_id == pending.trade_id
+        loaded_pending = ops.list_active_trades()
+        assert len(loaded_pending) == 1
+        assert loaded_pending[0].state is PaperTradeState.PENDING
+        assert loaded_pending[0].capital_locked_native == {}
+        assert ops.journal.list_entries(opportunity_id=opportunity_id) == []
+        assert any(
+            event.event_type is PaperTradeAuditEventType.REPEAT_OBSERVATION_NO_TOP_UP
+            for event in loaded_pending[0].audit
+        )
+        ops.trades.save(
+            loaded_pending[0].model_copy(
+                update={"state": PaperTradeState.PARTIAL, "capital_locked_native": {}}
+            )
+        )
+        partial_retry = ops.simulate_fill(
+            opportunity_id, simulate_external=True, provenance=DataProvenance.FIXTURE_DEMO
+        )
+        assert partial_retry.trade_id == pending.trade_id
+        assert ops.list_active_trades()[0].state is PaperTradeState.PARTIAL
+        assert ops.journal.list_entries(opportunity_id=opportunity_id) == []
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_awaiting_manual_external_repeat_does_not_open_or_lock(tmp_path: Path) -> None:
+    ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
+    _scan, watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
+    try:
+        opportunity_id = next(iter(ops._plans))
+        with pytest.raises(PaperOperationsError, match="manual_external_confirmation_required"):
+            ops.simulate_fill(
+                opportunity_id,
+                config=PaperFillConfig(assumed_latency_ms=0, max_quote_age_ms=10_000),
+            )
+        awaiting = ops.list_active_trades()
+        assert len(awaiting) == 1
+        assert awaiting[0].state is PaperTradeState.AWAITING_MANUAL_EXTERNAL
+        trade_id = awaiting[0].trade_id
+        before_locks, before_journals = _lock_and_journal_facts(ledger, opportunity_id)
+
+        repeat = ops.simulate_fill(
+            opportunity_id,
+            simulate_external=True,
+            provenance=DataProvenance.FIXTURE_DEMO,
+        )
+        assert repeat.trade_id == trade_id
+        still = ops.list_active_trades()
+        assert len(still) == 1
+        assert still[0].state is PaperTradeState.AWAITING_MANUAL_EXTERNAL
+        assert all(leg.filled_stake == 0 for leg in still[0].legs)
+        assert _lock_and_journal_facts(ledger, opportunity_id) == (before_locks, before_journals)
+
+        plan = ops._plans[opportunity_id]
+        external = next(leg for leg in plan.legs if leg.venue is VenueName.POLYMARKET)
+        from sports_hedge.application.paper_operations import _net_odds_for_leg
+
+        ok = ExternalLegConfirmation(
+            outcome=external.outcome,
+            venue=external.venue,
+            product_id=external.source_market_id,
+            operator_counterparty_reference="ext-repeat-ok",
+            executed_price=_net_odds_for_leg(plan, external),
+            executed_size=Decimal("5"),
+            currency=external.currency,
+            executed_at=OBSERVED,
+            eligibility_confirmed=True,
+        )
+        opened = ops.simulate_fill(
+            opportunity_id,
+            config=PaperFillConfig(assumed_latency_ms=0, max_quote_age_ms=10_000),
+            confirm_external=ok,
+            provenance=DataProvenance.FIXTURE_DEMO,
+        )
+        assert opened.entry_complete is True
+        assert len(ops.list_active_trades()) == 1
+        assert ops.list_active_trades()[0].state is PaperTradeState.OPEN
+        assert ops.list_active_trades()[0].trade_id == trade_id
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_unchanged_and_improved_repeat_do_not_top_up_open_position(tmp_path: Path) -> None:
+    ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
+    _scan, watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
+    try:
+        trade = ops.list_active_trades()[0]
+        assert trade.state is PaperTradeState.OPEN
+        original_id = trade.trade_id
+        original_stakes = {(leg.venue, leg.outcome): leg.filled_stake for leg in trade.legs}
+        original_locks = dict(trade.capital_locked_native)
+        original_journals = list(ops.journal.list_entries())
+        original_risk = trade.entry_risk.model_dump(mode="json") if trade.entry_risk else None
+
+        ops.persist_triggered_chain(
+            ops._plans[trade.opportunity_id].decision, provenance=DataProvenance.FIXTURE_DEMO
+        )
+        unchanged = ops.simulate_fill(
+            trade.opportunity_id, simulate_external=True, provenance=DataProvenance.FIXTURE_DEMO
+        )
+        assert unchanged.trade_id == original_id
+        after_unchanged = ops.list_active_trades()[0]
+        assert {(leg.venue, leg.outcome): leg.filled_stake for leg in after_unchanged.legs} == original_stakes
+        assert after_unchanged.capital_locked_native == original_locks
+        assert list(ops.journal.list_entries()) == original_journals
+        if original_risk is not None:
+            assert after_unchanged.entry_risk is not None
+            assert after_unchanged.entry_risk.model_dump(mode="json") == original_risk
+
+        plan = ops._plans[trade.opportunity_id]
+        fatter = [
+            leg.model_copy(update={"requested_stake": leg.requested_stake * 2}) for leg in plan.legs
+        ]
+        fatter_decision = plan.decision.model_copy(update={"fill_legs": fatter})
+        ops.persist_triggered_chain(fatter_decision, provenance=DataProvenance.FIXTURE_DEMO)
+        improved = ops.simulate_fill(
+            trade.opportunity_id, simulate_external=True, provenance=DataProvenance.FIXTURE_DEMO
+        )
+        assert improved.trade_id == original_id
+        after_improved = ops.list_active_trades()[0]
+        assert after_improved.state is PaperTradeState.OPEN
+        assert {(leg.venue, leg.outcome): leg.filled_stake for leg in after_improved.legs} == original_stakes
+        assert after_improved.capital_locked_native == original_locks
+        assert list(ops.journal.list_entries()) == original_journals
+        assert any(
+            event.event_type is PaperTradeAuditEventType.REPEAT_OBSERVATION_NO_TOP_UP
+            for event in after_improved.audit
+        )
+        if original_risk is not None:
+            assert after_improved.entry_risk.model_dump(mode="json") == original_risk
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_repeat_after_close_and_restart_does_not_duplicate(tmp_path: Path) -> None:
+    db_path = tmp_path / "paper.sqlite"
+    ledger = SqlitePaperLedger(db_path)
+    _scan, watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
+    try:
+        trade = ops.list_active_trades()[0]
+        opportunity_id = trade.opportunity_id
+        trade_id = trade.trade_id
+        winning = trade.legs[0].outcome
+        settled = ops.settle(
+            trade_id,
+            PaperSettlementRequest(
+                winning_outcome=winning,
+                source="fixture_test",
+                source_id="repeat-closed",
+                settled_at=OBSERVED,
+                provenance=DataProvenance.FIXTURE_DEMO,
+            ),
+        )
+        assert settled.state is PaperTradeState.CLOSED
+        closed_journals = list(ops.journal.list_entries())
+        closed_retry = ops.simulate_fill(
+            opportunity_id, simulate_external=True, provenance=DataProvenance.FIXTURE_DEMO
+        )
+        assert closed_retry.trade_id == trade_id
+        assert ops.list_active_trades() == []
+        assert len(ops.list_closed_trades()) == 1
+        assert list(ops.journal.list_entries()) == closed_journals
+        decision = ops._plans[opportunity_id].decision
+        repository.close()
+        ledger.close()
+    except Exception:
+        repository.close()
+        ledger.close()
+        raise
+
+    reopened = SqlitePaperLedger(db_path, auto_seed=False)
+    repository = SqliteMarketIntelligenceRepository()
+    intelligence = MarketIntelligenceService(repository)
+    settings = Settings(
+        max_slippage_bps=0,
+        fx_spread_bps=0,
+        simulated_latency_ms=0,
+        paper_autofill_enabled=False,
+    )
+    scan = PaperScanService(intelligence, settings=settings)
+    watchlist = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=10_000)
+    ops = PaperOperationsService(
+        watchlist=watchlist,
+        alerts=PriorityAlertService(),
+        settings=settings,
+        ledger=reopened,
+    )
+    try:
+        mb_event, mb_market = matchbook_payloads()
+        pm_event, pm_market, pm_books = polymarket_payloads()
+        matchbook = MatchbookObservationBuilder().build(
+            mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
+        )
+        polymarket = PolymarketObservationBuilder().build(
+            pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
+        )
+        decision = scan.scan_pair(
+            matchbook,
+            polymarket,
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=[
+                FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), spread_bps=Decimal("0"))
+            ],
+            maximum_execution_risk=100,
+            liquidity_snapshot=_standing_liquidity(),
+        )
+        watchlist.observe_paper_decision(
+            decision,
+            intelligence.market_history(canonical_market_id=decision.canonical_market_id),
+        )
+        ops.persist_triggered_chain(decision, provenance=DataProvenance.FIXTURE_DEMO)
+        restarted = ops.simulate_fill(
+            opportunity_id, simulate_external=True, provenance=DataProvenance.FIXTURE_DEMO
+        )
+        assert restarted.trade_id == trade_id
+        assert ops.list_active_trades() == []
+        assert len(ops.list_closed_trades()) == 1
+        assert ops.list_closed_trades()[0].state is PaperTradeState.CLOSED
+    finally:
+        repository.close()
+        reopened.close()
+
+
+def test_awaiting_repeat_survives_restart_without_duplicate(tmp_path: Path) -> None:
+    db_path = tmp_path / "awaiting.sqlite"
+    ledger = SqlitePaperLedger(db_path)
+    _scan, watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
+    try:
+        opportunity_id = next(iter(ops._plans))
+        with pytest.raises(PaperOperationsError, match="manual_external_confirmation_required"):
+            ops.simulate_fill(
+                opportunity_id,
+                config=PaperFillConfig(assumed_latency_ms=0, max_quote_age_ms=10_000),
+            )
+        trade_id = ops.list_active_trades()[0].trade_id
+        repository.close()
+        ledger.close()
+    except Exception:
+        repository.close()
+        ledger.close()
+        raise
+
+    reopened = SqlitePaperLedger(db_path, auto_seed=False)
+    repository = SqliteMarketIntelligenceRepository()
+    intelligence = MarketIntelligenceService(repository)
+    settings = Settings(
+        max_slippage_bps=0,
+        fx_spread_bps=0,
+        simulated_latency_ms=0,
+        paper_autofill_enabled=True,
+    )
+    scan = PaperScanService(intelligence, settings=settings)
+    watchlist = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=10_000)
+    ops = PaperOperationsService(
+        watchlist=watchlist,
+        alerts=PriorityAlertService(),
+        settings=settings,
+        ledger=reopened,
+    )
+    try:
+        mb_event, mb_market = matchbook_payloads()
+        pm_event, pm_market, pm_books = polymarket_payloads()
+        matchbook = MatchbookObservationBuilder().build(
+            mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
+        )
+        polymarket = PolymarketObservationBuilder().build(
+            pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
+        )
+        decision = scan.scan_pair(
+            matchbook,
+            polymarket,
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=[
+                FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), spread_bps=Decimal("0"))
+            ],
+            maximum_execution_risk=100,
+            liquidity_snapshot=_standing_liquidity(),
+        )
+        watchlist.observe_paper_decision(
+            decision,
+            intelligence.market_history(canonical_market_id=decision.canonical_market_id),
+        )
+        ops.persist_triggered_chain(decision, provenance=DataProvenance.FIXTURE_DEMO)
+        loaded = ops.list_active_trades()
+        assert len(loaded) == 1
+        assert loaded[0].trade_id == trade_id
+        assert loaded[0].state is PaperTradeState.AWAITING_MANUAL_EXTERNAL
+        assert all(leg.filled_stake == 0 for leg in loaded[0].legs)
+        assert loaded[0].capital_locked_native == {}
+        assert ops.journal.list_entries() == []
+    finally:
+        repository.close()
+        reopened.close()

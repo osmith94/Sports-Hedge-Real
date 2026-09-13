@@ -871,6 +871,9 @@ def simulate_paper_fill(
             confirm_external=request.confirm_external,
             provenance=request.provenance,
             operator_note=request.operator_note,
+            simulate_external=request.simulate_external,
+            prepared_deployment_id=request.prepared_deployment_id,
+            requested_size_gbp=request.requested_size_gbp,
         )
     except PaperOperationsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

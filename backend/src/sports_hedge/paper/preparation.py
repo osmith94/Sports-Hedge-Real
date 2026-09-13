@@ -65,6 +65,7 @@ class PreparePaperDeploymentRequest(BaseModel):
 class PreparedPaperDeployment(BaseModel):
     """Operator-visible fixed paper deployment. Preparation only — no OPEN."""
 
+    prepared_deployment_id: str | None = None
     opportunity_id: str
     accepted: bool
     requested_size_gbp: Decimal

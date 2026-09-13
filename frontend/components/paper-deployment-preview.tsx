@@ -6,6 +6,7 @@ import {
   PreparablePaperOpportunity,
   PreparedPaperDeployment,
   preparePaperDeployment,
+  simulatePaperFill,
 } from "../lib/api";
 import { money } from "../lib/format";
 
@@ -23,6 +24,9 @@ export function PaperDeploymentPreview({
   const [preview, setPreview] = useState<PreparedPaperDeployment | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+  const [openedTradeId, setOpenedTradeId] = useState<string | null>(null);
 
   if (!defaults.length) {
     return (
@@ -40,6 +44,8 @@ export function PaperDeploymentPreview({
     event.preventDefault();
     setBusy(true);
     setError(null);
+    setConfirmError(null);
+    setOpenedTradeId(null);
     try {
       const result = await preparePaperDeployment({
         opportunity_id: opportunityId,
@@ -51,6 +57,37 @@ export function PaperDeploymentPreview({
       setError(err instanceof Error ? err.message : "Prepare failed");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onConfirm() {
+    if (!preview?.accepted || !preview.prepared_deployment_id) {
+      return;
+    }
+    setConfirmBusy(true);
+    setConfirmError(null);
+    try {
+      const result = (await simulatePaperFill({
+        opportunity_id: preview.opportunity_id,
+        prepared_deployment_id: preview.prepared_deployment_id,
+        requested_size_gbp: String(preview.requested_size_gbp),
+        simulate_external: true,
+        operator_note: "PAPER-ONLY confirm accepted prepared size; revalidates before lock",
+      })) as { trade_id?: string | null; rejection_reason?: string | null };
+      if (result.trade_id) {
+        setOpenedTradeId(result.trade_id);
+      } else {
+        setConfirmError(result.rejection_reason ?? "Confirm did not OPEN");
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Confirm failed";
+      setConfirmError(
+        message.includes("prepared_deployment_stale")
+          ? "Current economics changed. Prepare again before OPEN."
+          : message,
+      );
+    } finally {
+      setConfirmBusy(false);
     }
   }
 
@@ -91,12 +128,32 @@ export function PaperDeploymentPreview({
         </div>
       </form>
       {error ? <p className="muted">Rejected: {error}</p> : null}
-      {preview ? <DeploymentResult preview={preview} /> : null}
+      {preview ? (
+        <DeploymentResult
+          preview={preview}
+          confirmBusy={confirmBusy}
+          confirmError={confirmError}
+          openedTradeId={openedTradeId}
+          onConfirm={onConfirm}
+        />
+      ) : null}
     </article>
   );
 }
 
-function DeploymentResult({ preview }: { preview: PreparedPaperDeployment }) {
+function DeploymentResult({
+  preview,
+  confirmBusy,
+  confirmError,
+  openedTradeId,
+  onConfirm,
+}: {
+  preview: PreparedPaperDeployment;
+  confirmBusy: boolean;
+  confirmError: string | null;
+  openedTradeId: string | null;
+  onConfirm: () => void;
+}) {
   if (!preview.accepted) {
     return (
       <p className="section-copy">
@@ -146,6 +203,23 @@ function DeploymentResult({ preview }: { preview: PreparedPaperDeployment }) {
           ))}
         </tbody>
       </table>
+      <p className="section-copy">
+        Confirm revalidates this accepted size against current economics, depth, risk and treasury.
+        If the valid amount changed, prepare again. Confirmation does not place venue orders.
+      </p>
+      <button
+        type="button"
+        disabled={confirmBusy || !preview.prepared_deployment_id || Boolean(openedTradeId)}
+        onClick={onConfirm}
+      >
+        {confirmBusy ? "Confirming…" : "Confirm paper OPEN"}
+      </button>
+      {confirmError ? <p className="muted">Rejected: {confirmError}</p> : null}
+      {openedTradeId ? (
+        <p className="section-copy">
+          Paper OPEN recorded for {openedTradeId}. Native legs locked at the confirmed size.
+        </p>
+      ) : null}
     </div>
   );
 }
