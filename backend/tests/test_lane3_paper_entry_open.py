@@ -14,6 +14,20 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from test_paper_fill_simulator import _leg, _two_level_book
+from test_step8f_automatic_paper_entry import (
+    OBSERVED,
+    _assert_allocator_sized,
+    _kalshi_btts,
+    _kalshi_costs,
+    _matchbook_btts,
+    _observe_and_persist,
+    _ops_bundle,
+    _pm_kalshi_costs,
+    _polymarket_btts,
+)
+from test_step9_operator_demo import _bundle as _demo_bundle
+from venue_cost_helpers import matchbook_polymarket_costs
 
 from sports_hedge.accounting.dimensions import EconomicAccount
 from sports_hedge.accounting.paper_journal import DataProvenance
@@ -35,27 +49,19 @@ from sports_hedge.paper.simulator import INSUFFICIENT_DEPTH, STALE_QUOTE, PaperF
 from sports_hedge.paper.trades import PaperLegFillKind, PaperTradeState
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.treasury.models import PaperTreasuryEventType
-from test_paper_fill_simulator import _leg, _two_level_book
-from test_step8f_automatic_paper_entry import (
-    OBSERVED,
-    _assert_allocator_sized,
-    _kalshi_btts,
-    _kalshi_costs,
-    _matchbook_btts,
-    _observe_and_persist,
-    _ops_bundle,
-    _pm_kalshi_costs,
-    _polymarket_btts,
-)
-from test_step9_operator_demo import _bundle as _demo_bundle
-from venue_cost_helpers import matchbook_polymarket_costs
-
 
 POOLS = (
     (VenueName.MATCHBOOK, "GBP"),
     (VenueName.POLYMARKET, "USD"),
     (VenueName.KALSHI, "USD"),
 )
+# Paper treasury USD seed is quantized to 8 d.p.; lock math may leave a trailing
+# 1e-26 residue versus allocator stakes. Conservation (available+locked) is exact.
+TREASURY_NATIVE_QUANTUM = Decimal("0.00000001")
+
+
+def _native(value: Decimal) -> Decimal:
+    return Decimal(value).quantize(TREASURY_NATIVE_QUANTUM)
 
 
 def _deltas(before, after):
@@ -134,18 +140,22 @@ def test_lane3_mb_pm_arithmetic_lock_ids_and_open_fields(tmp_path: Path) -> None
         mb_req = requested[(VenueName.MATCHBOOK, "GBP")]
         pm_req = requested[(VenueName.POLYMARKET, "USD")]
 
-        assert deltas[(VenueName.MATCHBOOK, "GBP")]["available_delta"] == -mb_req
-        assert deltas[(VenueName.MATCHBOOK, "GBP")]["locked_delta"] == mb_req
-        assert deltas[(VenueName.POLYMARKET, "USD")]["available_delta"] == -pm_req
-        assert deltas[(VenueName.POLYMARKET, "USD")]["locked_delta"] == pm_req
+        for venue, currency in POOLS:
+            assert _native(deltas[(venue, currency)]["available_delta"]) == _native(
+                -deltas[(venue, currency)]["locked_delta"]
+            )
+            native_total_before = opening.pool(venue, currency).available_cash + opening.pool(
+                venue, currency
+            ).locked_capital
+            native_total_after = after.pool(venue, currency).available_cash + after.pool(
+                venue, currency
+            ).locked_capital
+            assert _native(native_total_after) == _native(native_total_before)
+
+        assert _native(deltas[(VenueName.MATCHBOOK, "GBP")]["locked_delta"]) == _native(mb_req)
+        assert _native(deltas[(VenueName.POLYMARKET, "USD")]["locked_delta"]) == _native(pm_req)
         assert deltas[(VenueName.KALSHI, "USD")]["available_delta"] == 0
         assert deltas[(VenueName.KALSHI, "USD")]["locked_delta"] == 0
-        assert after.pool(VenueName.MATCHBOOK, "GBP").available_cash + after.pool(
-            VenueName.MATCHBOOK, "GBP"
-        ).locked_capital == opening.pool(VenueName.MATCHBOOK, "GBP").available_cash
-        assert after.pool(VenueName.POLYMARKET, "USD").available_cash + after.pool(
-            VenueName.POLYMARKET, "USD"
-        ).locked_capital == opening.pool(VenueName.POLYMARKET, "USD").available_cash
 
         locks = _lock_rows(ledger, trade.trade_id)
         assert len(locks) == len(trade.legs)
@@ -284,11 +294,11 @@ def test_lane3_realistic_fill_model_depth_slippage_latency_stale_partial() -> No
 
     slipped = simulator.simulate_leg(
         _leg(requested="80", displayed="2.20", levels=_two_level_book()),
-        PaperFillConfig(mode=FillMode.REALISTIC, slippage_bps=Decimal("25")),
+        PaperFillConfig(mode=FillMode.REALISTIC, slippage_bps=Decimal(25)),
         now=now,
     )
     assert slipped.weighted_odds < depth.weighted_odds
-    assert slipped.filled_stake == Decimal("80")
+    assert slipped.filled_stake == Decimal(80)
 
     delayed = simulator.simulate_leg(
         _leg(requested="80", displayed="2.20", levels=_two_level_book(), quote_age_ms=100),
@@ -317,8 +327,8 @@ def test_lane3_realistic_fill_model_depth_slippage_latency_stale_partial() -> No
         now=now,
     )
     assert partial.fully_filled is False
-    assert partial.filled_stake == Decimal("120")
-    assert partial.remaining_stake == Decimal("30")
+    assert partial.filled_stake == Decimal(120)
+    assert partial.remaining_stake == Decimal(30)
     assert partial.rejection_reason == INSUFFICIENT_DEPTH
 
 
@@ -427,7 +437,7 @@ def test_lane3_fixture_replay_with_production_fill_settings(tmp_path: Path) -> N
 
     ledger = SqlitePaperLedger(
         tmp_path / "paper.sqlite",
-        seed_gbp=Decimal("1000"),
+        seed_gbp=Decimal(1000),
         usd_gbp_per_unit=Decimal("0.80"),
         fx_source="paper_demo_fx_snapshot",
     )
@@ -463,8 +473,10 @@ def test_lane3_fixture_replay_with_production_fill_settings(tmp_path: Path) -> N
         after = ledger.treasury.snapshot()
         for leg in trade.legs:
             pool = after.pool(leg.venue, leg.currency)
-            assert pool.locked_capital == leg.filled_stake
-            assert opening.pool(leg.venue, leg.currency).available_cash - pool.available_cash == leg.filled_stake
+            before_pool = opening.pool(leg.venue, leg.currency)
+            assert pool.available_cash + pool.locked_capital == before_pool.available_cash + before_pool.locked_capital
+            assert _native(pool.locked_capital) == _native(leg.filled_stake)
+            assert _native(before_pool.available_cash - pool.available_cash) == _native(leg.filled_stake)
         assert after.pool(VenueName.KALSHI, "USD").locked_capital == 0
         fills_cfg = PaperFillConfig(
             assumed_latency_ms=settings.simulated_latency_ms,
@@ -483,7 +495,7 @@ def test_lane3_fixture_replay_with_production_fill_settings(tmp_path: Path) -> N
 
 
 def test_lane3_open_trade_api_and_no_execution_paths(tmp_path: Path) -> None:
-    demo, ops, watchlist, ledger, repository = _demo_bundle(tmp_path)
+    demo, ops, _watchlist, ledger, repository = _demo_bundle(tmp_path)
     client = TestClient(app)
     app.dependency_overrides[get_paper_operations_service] = lambda: ops
     app.dependency_overrides[get_paper_ledger] = lambda: ledger
