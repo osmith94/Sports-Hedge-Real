@@ -256,10 +256,27 @@ export type FixturePaperEntry = {
 
 export type PreparablePaperOpportunity = {
   opportunity_id: string;
+  canonical_event_id?: string | null;
   canonical_market_id?: string | null;
   solver_model?: string | null;
   eligible_for_paper_simulation: boolean;
   settlement_equivalent: boolean;
+  bet_actionable?: boolean;
+  bet_blocked_reason?: string | null;
+  recommended_size_gbp?: string | number | null;
+  maximum_validated_size_gbp?: string | number | null;
+  market_label?: string | null;
+  settlement_definition?: string | null;
+};
+
+export type BetTicketExecutionSeam = {
+  mode: "paper";
+  execution_enabled: boolean;
+  places_orders: boolean;
+  paper_confirm_cta: string;
+  live_cta: string;
+  live_cta_available: boolean;
+  live_blocked_reason: string;
 };
 
 export type PreparedPaperLeg = {
@@ -279,6 +296,11 @@ export type PreparedPaperLeg = {
   cost_status: string;
   capital_source: string;
   execution_mode: string;
+  action?: string | null;
+  displayed_depth_native?: string | number | null;
+  depth_consumed_pct?: string | number | null;
+  fx_gbp_per_unit?: string | number | null;
+  fx_source?: string | null;
   data_kind: "modelled";
 };
 
@@ -287,6 +309,8 @@ export type PreparedPaperDeployment = {
   opportunity_id: string;
   accepted: boolean;
   requested_size_gbp: string | number;
+  operator_entered_size_gbp?: string | number | null;
+  recommended_size_gbp?: string | number;
   applied_size_gbp: string | number;
   maximum_validated_size_gbp: string | number;
   resized: boolean;
@@ -303,14 +327,67 @@ export type PreparedPaperDeployment = {
   native_requirements_reconciled: boolean;
   guaranteed_profit_gbp: string | number;
   guaranteed_roi: string | number;
+  gross_edge?: string | number | null;
+  net_edge?: string | number | null;
+  market_label?: string | null;
+  settlement_definition?: string | null;
+  venue_pair?: string[];
+  quote_age_ms?: number | null;
+  quote_age_basis?: string | null;
+  execution_risk_score?: number | null;
+  execution_risk_band?: string | null;
+  execution_risk_reasons?: string[];
+  survivability?: {
+    available: boolean;
+    survivability_score?: number | null;
+    low_survivability_warning?: boolean | null;
+    volatility_regime?: string | null;
+    estimate_not_guarantee?: boolean;
+    note?: string;
+  };
+  fx_assumptions?: Array<{
+    currency: string;
+    gbp_per_unit: string | number;
+    source: string;
+    source_date?: string | null;
+    valuation_date?: string | null;
+    check_status?: string | null;
+  }>;
+  treasury_remaining?: Array<{
+    venue: string;
+    currency: string;
+    free_balance: string | number;
+    reserve_remaining: string | number;
+    locked: string | number;
+    allocated_native: string | number;
+  }>;
   solver_model?: string | null;
   settlement_equivalent: boolean;
   paper_only: boolean;
   places_orders: boolean;
   opens_trade: boolean;
   locks_treasury: boolean;
+  execution_seam?: BetTicketExecutionSeam;
   data_kind: "modelled";
   operator_note?: string;
+};
+
+export type RecommendedPaperDeployment = {
+  opportunity_id: string;
+  accepted: boolean;
+  bet_actionable: boolean;
+  bet_blocked_reason?: string | null;
+  recommended_size_gbp: string | number;
+  maximum_validated_size_gbp: string | number;
+  limiting_constraint?: string | null;
+  limiting_constraint_detail?: string | null;
+  reduction_factors?: string[];
+  paper_only: boolean;
+  places_orders: boolean;
+  opens_trade: boolean;
+  locks_treasury: boolean;
+  execution_seam?: BetTicketExecutionSeam;
+  data_kind: "modelled";
 };
 
 export type FixtureDetailReadModel = {
@@ -712,6 +789,8 @@ export type NearOpportunity = {
   previous_net_edge?: string | number | null;
   previous_distance_to_trigger_pp?: string | number | null;
   observation_count?: number;
+  bet_actionable?: boolean;
+  bet_blocked_reason?: string | null;
 };
 
 export type OpportunityLifecycleEvent = {
@@ -787,6 +866,26 @@ export async function preparePaperDeployment(payload: {
     throw new Error(await errorDetail(response));
   }
   return response.json() as Promise<PreparedPaperDeployment>;
+}
+
+export async function recommendPaperDeployment(payload: {
+  opportunity_id: string;
+  operator_note?: string;
+}): Promise<RecommendedPaperDeployment> {
+  const response = await fetch(`${API_BASE}/paper/recommend-deployment`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      operator_note:
+        "PAPER-ONLY recommended size from existing allocator constraints; does not OPEN or lock",
+      ...payload,
+    }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<RecommendedPaperDeployment>;
 }
 
 export function getLiveRefreshStatus(): Promise<LiveRefreshStatus> {

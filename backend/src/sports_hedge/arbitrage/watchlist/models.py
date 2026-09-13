@@ -166,6 +166,8 @@ class NearOpportunity(BaseModel):
     previous_distance_to_trigger_pp: Decimal | None = None
     observation_count: int = Field(default=0, ge=0)
     data_kind: str = "live_paper"
+    bet_actionable: bool = False
+    bet_blocked_reason: str | None = None
 
     @model_validator(mode="after")
     def enforce_non_arbitrage_labelling(self) -> NearOpportunity:

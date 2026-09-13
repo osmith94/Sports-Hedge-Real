@@ -1,4 +1,5 @@
 import { ArbitrageOpportunity } from "../lib/arbitrage-ops";
+import { betBlockedReason, isBetActionable, opportunityBetHref } from "../lib/bet-ticket";
 import { grossPricesEffectivelyEqual } from "../lib/comfort-threshold";
 import { money, percent, percentPoints, relativeTime } from "../lib/format";
 
@@ -113,6 +114,25 @@ export function OpportunityCard({
       ) : null}
       <div className="opp-note">{operatorNote(item, executable)}</div>
       {feeNote ? <div className="opp-note">{feeNote}</div> : null}
+      <BetAction item={item} />
     </article>
+  );
+}
+
+function BetAction({ item }: { item: ArbitrageOpportunity }) {
+  const href = opportunityBetHref(item);
+  const actionable = isBetActionable(item) && href != null;
+  if (actionable && href) {
+    return (
+      <a className="bet-button" href={href}>
+        BET
+      </a>
+    );
+  }
+  return (
+    <button type="button" className="bet-button bet-button-disabled" disabled title={betBlockedReason(item)}>
+      BET
+      <span className="bet-button-reason">{betBlockedReason(item)}</span>
+    </button>
   );
 }

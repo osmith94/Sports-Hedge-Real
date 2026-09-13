@@ -31,8 +31,9 @@ from sports_hedge.arbitrage.allocation.adapters import (
     exposures_from_trades,
     request_from_paper_decision,
 )
-from sports_hedge.arbitrage.allocation.engine import allocate_requested_size
+from sports_hedge.arbitrage.allocation.engine import allocate, allocate_requested_size
 from sports_hedge.arbitrage.allocation.policy import policy_from_settings
+from sports_hedge.application.executable_liquidity import decision_net_edge
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityStatus
 from sports_hedge.arbitrage.watchlist.service import WatchlistService, _opportunity_id
 from sports_hedge.config import Settings, get_settings
@@ -47,6 +48,15 @@ from sports_hedge.paper.chain import (
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.paper.fills import PaperFillConfig, PaperFillRecord, PaperOpportunityFills, PaperOpportunityLeg
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+from sports_hedge.paper.bet_ticket import (
+    BetTicketExecutionSeam,
+    BetTicketFxAssumption,
+    BetTicketSurvivability,
+    BetTicketTreasuryRemaining,
+    RecommendedPaperDeployment,
+    bet_ticket_action,
+    current_bet_deployability,
+)
 from sports_hedge.paper.preparation import (
     PreparablePaperOpportunity,
     PreparedPaperDeployment,
@@ -198,16 +208,142 @@ class PaperOperationsService:
         for plan in self._plans.values():
             if canonical_event_id is not None and plan.canonical_event_id != canonical_event_id:
                 continue
+            watch = self.watchlist.repository.get(plan.opportunity_id)
+            semantic, blocked = bet_ticket_action(
+                plan=plan,
+                watch=watch,
+                solver_is_arbitrage=_solver_is_arbitrage(plan.decision),
+            )
+            recommended = None
+            maximum = None
+            actionable = False
+            if semantic:
+                try:
+                    rec = self._recommend_from_plan(plan, watch)
+                    actionable = rec.bet_actionable
+                    blocked = rec.bet_blocked_reason
+                    if rec.accepted:
+                        recommended = rec.recommended_size_gbp
+                    maximum = rec.maximum_validated_size_gbp
+                except PaperOperationsError as exc:
+                    actionable = False
+                    blocked = str(exc)
+            market, settlement = _ticket_market_labels(plan, watch)
             rows.append(
                 PreparablePaperOpportunity(
                     opportunity_id=plan.opportunity_id,
+                    canonical_event_id=plan.canonical_event_id,
                     canonical_market_id=plan.canonical_market_id,
                     solver_model=plan.decision.solver_model,
                     eligible_for_paper_simulation=plan.eligible_for_paper_simulation,
                     settlement_equivalent=plan.settlement_equivalent,
+                    bet_actionable=actionable,
+                    bet_blocked_reason=blocked,
+                    recommended_size_gbp=recommended,
+                    maximum_validated_size_gbp=maximum,
+                    market_label=market,
+                    settlement_definition=settlement,
                 )
             )
         return rows
+
+    def annotate_bet_ticket_actions(
+        self, items: list[NearOpportunity]
+    ) -> list[NearOpportunity]:
+        """Attach BET actionability at read time. Does not persist, lock, or OPEN."""
+
+        annotated: list[NearOpportunity] = []
+        for item in items:
+            plan = self._plans.get(item.opportunity_id)
+            semantic, blocked = bet_ticket_action(
+                plan=plan,
+                watch=item,
+                solver_is_arbitrage=_solver_is_arbitrage(plan.decision) if plan is not None else False,
+            )
+            if not semantic or plan is None:
+                annotated.append(
+                    item.model_copy(
+                        update={
+                            "bet_actionable": False,
+                            "bet_blocked_reason": blocked,
+                        }
+                    )
+                )
+                continue
+            try:
+                rec = self._recommend_from_plan(plan, item)
+                annotated.append(
+                    item.model_copy(
+                        update={
+                            "bet_actionable": rec.bet_actionable,
+                            "bet_blocked_reason": rec.bet_blocked_reason,
+                        }
+                    )
+                )
+            except PaperOperationsError as exc:
+                annotated.append(
+                    item.model_copy(
+                        update={
+                            "bet_actionable": False,
+                            "bet_blocked_reason": str(exc),
+                        }
+                    )
+                )
+        return annotated
+
+    def recommend_paper_deployment(self, opportunity_id: str) -> RecommendedPaperDeployment:
+        """Allocator recommended GBP size. No treasury mutation, no OPEN, no stored preview."""
+
+        plan = self._plans.get(opportunity_id)
+        if plan is None:
+            raise PaperOperationsError("missing_paper_fill_plan")
+        watch = self.watchlist.repository.get(opportunity_id)
+        return self._recommend_from_plan(plan, watch)
+
+    def _recommend_from_plan(
+        self, plan: PaperFillPlan, watch: NearOpportunity | None
+    ) -> RecommendedPaperDeployment:
+        opportunity_id = plan.opportunity_id
+        semantic, blocked = bet_ticket_action(
+            plan=plan,
+            watch=watch,
+            solver_is_arbitrage=_solver_is_arbitrage(plan.decision),
+        )
+        if not semantic:
+            return RecommendedPaperDeployment(
+                opportunity_id=opportunity_id,
+                accepted=False,
+                bet_actionable=False,
+                bet_blocked_reason=blocked,
+            )
+        request, rejected = self._allocation_request_or_reject(plan)
+        if request is None:
+            return RecommendedPaperDeployment(
+                opportunity_id=opportunity_id,
+                accepted=False,
+                bet_actionable=False,
+                bet_blocked_reason=rejected,
+            )
+        baseline = allocate(request)
+        deployable, reason = current_bet_deployability(
+            semantically_qualified=True,
+            semantic_blocked_reason=None,
+            allocation_accepted=baseline.accepted,
+            recommended_size=baseline.recommended_size,
+            allocation_rejection_reason=baseline.rejection_reason,
+            limiting_constraint_detail=baseline.limiting_constraint_detail,
+        )
+        return RecommendedPaperDeployment(
+            opportunity_id=opportunity_id,
+            accepted=deployable,
+            bet_actionable=deployable,
+            bet_blocked_reason=reason,
+            recommended_size_gbp=baseline.recommended_size if deployable else Decimal("0"),
+            maximum_validated_size_gbp=baseline.maximum_validated_size,
+            limiting_constraint=baseline.limiting_constraint,
+            limiting_constraint_detail=baseline.limiting_constraint_detail,
+            reduction_factors=[factor.name for factor in baseline.reduction_factors],
+        )
 
     def prepare_fixed_deployment(
         self,
@@ -239,6 +375,39 @@ class PaperOperationsService:
             )
         return preview
 
+    def _allocation_request_or_reject(
+        self, plan: PaperFillPlan
+    ) -> tuple[object | None, str | None]:
+        decision = plan.decision
+        if not plan.settlement_equivalent or not decision.market_match.matched:
+            return None, "market_not_equivalent"
+        if not _solver_is_arbitrage(decision):
+            return None, "solver_not_arbitrage"
+        blockers = [
+            reason
+            for reason in decision.rejection_reasons
+            if not reason.startswith("allocation_failed")
+        ]
+        if blockers:
+            return None, blockers[0]
+        if self.ledger is None:
+            raise PaperOperationsError("missing_spendable_treasury")
+        snap = self.ledger.treasury.snapshot()
+        fx = {item.currency.upper(): item.gbp_per_unit for item in decision.fx_snapshots}
+        fx.setdefault("GBP", Decimal("1"))
+        balances = balances_from_treasury(snap, gbp_per_unit=fx)
+        if any(row.gbp_per_unit is None for row in balances if row.currency != "GBP"):
+            return None, "missing_fx_rate"
+        request = request_from_paper_decision(
+            decision,
+            policy=policy_from_settings(self.settings),
+            balances=balances,
+            open_positions=exposures_from_trades(self.list_active_trades()),
+        )
+        if request is None:
+            return None, "allocation_failed:unsupported_solver_vector"
+        return request, None
+
     def _compute_prepared_deployment(
         self,
         opportunity_id: str,
@@ -249,65 +418,20 @@ class PaperOperationsService:
         plan = self._plans.get(opportunity_id)
         if plan is None:
             raise PaperOperationsError("missing_paper_fill_plan")
-        decision = plan.decision
-        if not plan.settlement_equivalent or not decision.market_match.matched:
-            return self._rejected_deployment(
-                opportunity_id,
-                requested_size_gbp,
-                "market_not_equivalent",
-                plan=plan,
-                operator_note=operator_note,
-            )
-        if not _solver_is_arbitrage(decision):
-            return self._rejected_deployment(
-                opportunity_id,
-                requested_size_gbp,
-                "solver_not_arbitrage",
-                plan=plan,
-                operator_note=operator_note,
-            )
-        blockers = [
-            reason
-            for reason in decision.rejection_reasons
-            if not reason.startswith("allocation_failed")
-        ]
-        if blockers:
-            return self._rejected_deployment(
-                opportunity_id,
-                requested_size_gbp,
-                blockers[0],
-                plan=plan,
-                operator_note=operator_note,
-            )
-        if self.ledger is None:
-            raise PaperOperationsError("missing_spendable_treasury")
-        snap = self.ledger.treasury.snapshot()
-        fx = {item.currency.upper(): item.gbp_per_unit for item in decision.fx_snapshots}
-        fx.setdefault("GBP", Decimal("1"))
-        balances = balances_from_treasury(snap, gbp_per_unit=fx)
-        if any(row.gbp_per_unit is None for row in balances if row.currency != "GBP"):
-            return self._rejected_deployment(
-                opportunity_id,
-                requested_size_gbp,
-                "missing_fx_rate",
-                plan=plan,
-                operator_note=operator_note,
-            )
-        request = request_from_paper_decision(
-            decision,
-            policy=policy_from_settings(self.settings),
-            balances=balances,
-            open_positions=exposures_from_trades(self.list_active_trades()),
-        )
+        request, reject_reason = self._allocation_request_or_reject(plan)
         if request is None:
             return self._rejected_deployment(
                 opportunity_id,
                 requested_size_gbp,
-                "allocation_failed:unsupported_solver_vector",
+                reject_reason or "not_preparable",
                 plan=plan,
                 operator_note=operator_note,
             )
+        baseline = allocate(request)
         result = allocate_requested_size(request, requested_size_gbp)
+        decision = plan.decision
+        snap = self.ledger.treasury.snapshot() if self.ledger is not None else None
+        recommended = baseline.recommended_size if baseline.accepted else Decimal("0")
         legs = self._prepared_legs(plan, result.recommended_stakes)
         required = [
             item.model_copy(
@@ -323,7 +447,7 @@ class PaperOperationsService:
             for item in result.capital_required
         ]
         reconciled = False
-        if result.accepted:
+        if result.accepted and snap is not None:
             reporting_sum = sum((leg.capital_reporting for leg in legs), Decimal("0"))
             # Scaling native legs to GBP can leave sub-tick dust (observed ~1e-27).
             # That is not a resize; a true mismatch is pounds or cents, not dust.
@@ -347,13 +471,17 @@ class PaperOperationsService:
                     plan=plan,
                     operator_note=operator_note,
                     maximum=result.maximum_validated_size,
+                    recommended=recommended,
                     constraint=result.limiting_constraint,
                     detail=result.limiting_constraint_detail,
                 )
+        ticket = self._ticket_fields(plan, result)
         return PreparedPaperDeployment(
             opportunity_id=opportunity_id,
             accepted=result.accepted and reconciled,
             requested_size_gbp=requested_size_gbp,
+            operator_entered_size_gbp=requested_size_gbp,
+            recommended_size_gbp=recommended,
             applied_size_gbp=result.recommended_committed_capital if result.accepted else Decimal("0"),
             maximum_validated_size_gbp=result.maximum_validated_size,
             resized=False,
@@ -368,6 +496,7 @@ class PaperOperationsService:
             solver_model=decision.solver_model,
             settlement_equivalent=plan.settlement_equivalent,
             operator_note=operator_note,
+            **ticket,
         )
 
     def _prepared_legs(self, plan: PaperFillPlan, stakes) -> list[PreparedPaperLeg]:
@@ -404,6 +533,22 @@ class PaperOperationsService:
                     fee_basis = cost.fee_basis.value
             elif cost is None:
                 cost_status = "missing_venue_cost"
+            depth_native = None
+            depth_pct = None
+            if fill is not None and fill.levels:
+                depth_native = sum((level.available_stake for level in fill.levels), Decimal("0"))
+                if depth_native > 0:
+                    depth_pct = (stake.stake_native / depth_native) * Decimal("100")
+            fx_rate = None
+            fx_source = None
+            for snap in plan.fx_snapshots:
+                if snap.currency.upper() == stake.native_currency.upper():
+                    fx_rate = snap.gbp_per_unit
+                    fx_source = snap.source
+                    break
+            if stake.native_currency.upper() == "GBP":
+                fx_rate = Decimal("1")
+                fx_source = fx_source or "functional_gbp"
             prepared.append(
                 PreparedPaperLeg(
                     venue=stake.venue,
@@ -424,6 +569,11 @@ class PaperOperationsService:
                         stake.execution_mode, stake.capital_source
                     ),
                     execution_mode=stake.execution_mode,
+                    action=cost.action.value if cost is not None else None,
+                    displayed_depth_native=depth_native,
+                    depth_consumed_pct=depth_pct,
+                    fx_gbp_per_unit=fx_rate,
+                    fx_source=fx_source,
                 )
             )
         return prepared
@@ -437,13 +587,17 @@ class PaperOperationsService:
         plan: PaperFillPlan,
         operator_note: str,
         maximum: Decimal | None = None,
+        recommended: Decimal | None = None,
         constraint=None,
         detail: str | None = None,
     ) -> PreparedPaperDeployment:
+        ticket = self._ticket_fields(plan, None)
         return PreparedPaperDeployment(
             opportunity_id=opportunity_id,
             accepted=False,
             requested_size_gbp=requested_size_gbp,
+            operator_entered_size_gbp=requested_size_gbp,
+            recommended_size_gbp=recommended or Decimal("0"),
             applied_size_gbp=Decimal("0"),
             maximum_validated_size_gbp=maximum or Decimal("0"),
             rejection_reason=reason,
@@ -452,7 +606,51 @@ class PaperOperationsService:
             solver_model=plan.decision.solver_model,
             settlement_equivalent=plan.settlement_equivalent,
             operator_note=operator_note,
+            **ticket,
         )
+
+    def _ticket_fields(self, plan: PaperFillPlan, result) -> dict:
+        watch = self.watchlist.repository.get(plan.opportunity_id)
+        market, settlement = _ticket_market_labels(plan, watch)
+        risk = plan.decision.execution_risk
+        survivability = _ticket_survivability(result)
+        fx_rows = [
+            BetTicketFxAssumption(
+                currency=item.currency,
+                gbp_per_unit=item.gbp_per_unit,
+                source=item.source,
+                source_date=item.source_date.isoformat() if item.source_date else None,
+                valuation_date=item.valuation_date.isoformat() if item.valuation_date else None,
+                check_status=item.check_status,
+            )
+            for item in plan.fx_snapshots
+        ]
+        treasury = []
+        if result is not None:
+            treasury = [
+                BetTicketTreasuryRemaining.from_balance(row) for row in result.free_balance_after
+            ]
+        venues = list(dict.fromkeys(leg.venue.value for leg in plan.legs))
+        return {
+            "gross_edge": watch.gross_edge if watch is not None else None,
+            "net_edge": (
+                watch.current_net_edge if watch is not None else decision_net_edge(plan.decision)
+            ),
+            "market_label": market,
+            "settlement_definition": settlement,
+            "venue_pair": venues,
+            "quote_age_ms": plan.decision.quote_age_ms,
+            "quote_age_basis": plan.decision.quote_age_basis,
+            "execution_risk_score": risk.score if risk is not None else None,
+            "execution_risk_band": risk.band if risk is not None else None,
+            "execution_risk_reasons": list(risk.reasons) if risk is not None else [],
+            "survivability": survivability,
+            "fx_assumptions": fx_rows,
+            "treasury_remaining": treasury,
+            "execution_seam": BetTicketExecutionSeam(
+                execution_enabled=self.settings.sports_hedge_execution_enabled,
+            ),
+        }
 
     def _bind_prepared_allocation(
         self,
@@ -1867,6 +2065,46 @@ def _candidate_from_decision(decision: PaperScanDecision, opportunity_id: str) -
         fx_snapshots=list(decision.fx_snapshots),
         execution_risk_score=decision.execution_risk.score if decision.execution_risk else 0,
         eligibility_confirmed=not any(leg.execution_mode is LegExecutionMode.EXTERNAL_OPERATOR for leg in legs),
+    )
+
+
+def _ticket_market_labels(
+    plan: PaperFillPlan, watch: NearOpportunity | None
+) -> tuple[str | None, str | None]:
+    if watch is not None:
+        family = _humanize_token(watch.market_family)
+        period = _humanize_token(watch.period)
+        settlement = " · ".join(
+            part for part in (watch.settlement_key, period, family) if part
+        )
+        return family, settlement or None
+    market_id = plan.canonical_market_id
+    return market_id, "settlement-equivalent" if plan.settlement_equivalent else None
+
+
+def _humanize_token(value: object | None) -> str | None:
+    if value is None:
+        return None
+    text = value.value if hasattr(value, "value") else str(value)
+    text = text.replace("_", " ").strip()
+    return text or None
+
+
+def _ticket_survivability(result) -> BetTicketSurvivability:
+    raw = getattr(result, "survivability", None) if result is not None else None
+    if raw is None:
+        return BetTicketSurvivability(available=False)
+    score = getattr(raw, "survivability_score", None)
+    warning = getattr(raw, "low_survivability_warning", None)
+    regime = getattr(raw, "volatility_regime", None)
+    regime_value = regime.value if hasattr(regime, "value") else (str(regime) if regime else None)
+    if score is None and warning is None and regime_value is None:
+        return BetTicketSurvivability(available=False)
+    return BetTicketSurvivability(
+        available=True,
+        survivability_score=score,
+        low_survivability_warning=warning,
+        volatility_regime=regime_value,
     )
 
 

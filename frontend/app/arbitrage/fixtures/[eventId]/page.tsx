@@ -6,6 +6,7 @@ import { getFixtureDetail } from "../../../../lib/api";
 
 type PageProps = {
   params: Promise<{ eventId: string }>;
+  searchParams: Promise<{ bet?: string }>;
 };
 
 export const dynamic = "force-dynamic";
@@ -22,12 +23,14 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   }
 }
 
-export default async function FixtureDetailPage({ params }: PageProps) {
+export default async function FixtureDetailPage({ params, searchParams }: PageProps) {
   const { eventId } = await params;
+  const query = await searchParams;
   const canonicalEventId = decodeURIComponent(eventId);
+  const focusOpportunityId = query.bet ? decodeURIComponent(query.bet) : null;
   try {
     const detail = await getFixtureDetail(canonicalEventId);
-    return <FixtureInventoryWorkspace detail={detail} />;
+    return <FixtureInventoryWorkspace detail={detail} focusOpportunityId={focusOpportunityId} />;
   } catch {
     return (
       <>

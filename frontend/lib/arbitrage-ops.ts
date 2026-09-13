@@ -65,8 +65,10 @@ export type ArbitrageOpportunity = {
   fixtureStatus?: string | null;
   inRunning?: boolean | null;
   liveScoreLabel?: string | null;
-  strikeNarrative?: string | null;
-  observationCount?: number | null;
+    strikeNarrative?: string | null;
+    observationCount?: number | null;
+    betActionable?: boolean;
+    betBlockedReason?: string | null;
 };
 
 export type ActivityEvent = {
