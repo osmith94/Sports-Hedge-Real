@@ -17,19 +17,38 @@ class VenueEvent:
 
 @dataclass
 class FixtureCluster:
-    matchbook: VenueEvent | None = None
-    polymarket: VenueEvent | None = None
-    kalshi: VenueEvent | None = None
+    """One canonical fixture, possibly backed by multiple source events per venue.
+
+    Polymarket and Kalshi often split a fixture into separate series/events
+    (moneyline, BTTS, totals, FTTS). Those source events share fixture identity
+    and must be scanned together so settlement-equivalent families can meet.
+    """
+
+    matchbook_events: list[VenueEvent] = field(default_factory=list)
+    polymarket_events: list[VenueEvent] = field(default_factory=list)
+    kalshi_events: list[VenueEvent] = field(default_factory=list)
     pair_kinds: set[str] = field(default_factory=set)
+
+    @property
+    def matchbook(self) -> VenueEvent | None:
+        return self.matchbook_events[0] if self.matchbook_events else None
+
+    @property
+    def polymarket(self) -> VenueEvent | None:
+        return self.polymarket_events[0] if self.polymarket_events else None
+
+    @property
+    def kalshi(self) -> VenueEvent | None:
+        return self.kalshi_events[0] if self.kalshi_events else None
 
     @property
     def venues_present(self) -> list[VenueName]:
         present: list[VenueName] = []
-        if self.matchbook is not None:
+        if self.matchbook_events:
             present.append(VenueName.MATCHBOOK)
-        if self.polymarket is not None:
+        if self.polymarket_events:
             present.append(VenueName.POLYMARKET)
-        if self.kalshi is not None:
+        if self.kalshi_events:
             present.append(VenueName.KALSHI)
         return present
 
@@ -53,9 +72,22 @@ class FixtureCluster:
             return self.kalshi
         return None
 
+    def events_for(self, venue: VenueName) -> list[VenueEvent]:
+        if venue is VenueName.MATCHBOOK:
+            return list(self.matchbook_events)
+        if venue is VenueName.POLYMARKET:
+            return list(self.polymarket_events)
+        if venue is VenueName.KALSHI:
+            return list(self.kalshi_events)
+        return []
+
 
 def _key(venue: VenueName, source_event_id: str) -> tuple[VenueName, str]:
     return (venue, source_event_id)
+
+
+def _sort_events(items: list[VenueEvent]) -> list[VenueEvent]:
+    return sorted(items, key=lambda item: item.source_event_id)
 
 
 def cluster_venue_events(
@@ -66,16 +98,21 @@ def cluster_venue_events(
     matcher: EventMatcher,
     max_event_pairs: int,
 ) -> tuple[list[FixtureCluster], dict[str, int]]:
-    """Union-find clusters across independently discovered venue events.
+    """Cluster independently discovered venue events by canonical fixture identity.
 
-    Pairwise matching is still greedy one-to-one inside each venue pair. A
-    Polymarket↔Kalshi match does not require a Matchbook event.
+    Pairwise EventMatcher still decides whether two source events are the same
+    fixture. Unlike greedy one-to-one pairing, every matching source event for
+    the same fixture is unioned — including multiple Polymarket or Kalshi
+    events — so a PM↔Kalshi match does not require Matchbook and does not
+    consume a sibling BTTS/totals event as if it were a different fixture.
+
+    ``max_event_pairs`` never drops a multi-venue cluster. Unmatched single-venue
+    leftovers remain visible so unmatched coverage is not silently dropped.
     """
 
-    mb_pm = _greedy_pairs(matchbook, polymarket, matcher)[:max_event_pairs]
-    mb_k = _greedy_pairs(matchbook, kalshi, matcher)[:max_event_pairs]
-    pm_k = _greedy_pairs(polymarket, kalshi, matcher)[:max_event_pairs]
-
+    if max_event_pairs <= 0:
+        raise ValueError("max_event_pairs must be positive")
+    items = [*matchbook, *polymarket, *kalshi]
     parent: dict[tuple[VenueName, str], tuple[VenueName, str]] = {}
     nodes: dict[tuple[VenueName, str], VenueEvent] = {}
 
@@ -84,7 +121,7 @@ def cluster_venue_events(
         nodes[key] = item
         parent.setdefault(key, key)
 
-    for item in (*matchbook, *polymarket, *kalshi):
+    for item in items:
         add_node(item)
 
     def find(key: tuple[VenueName, str]) -> tuple[VenueName, str]:
@@ -106,30 +143,59 @@ def cluster_venue_events(
         for item in (left, right):
             pair_kinds.setdefault(_key(item.venue, item.source_event_id), set()).add(kind)
 
-    for left, right in mb_pm:
-        mark_pair(left, right, "matchbook_polymarket")
-    for left, right in mb_k:
-        mark_pair(left, right, "matchbook_kalshi")
-    for left, right in pm_k:
-        mark_pair(left, right, "polymarket_kalshi")
+    pair_kind = {
+        (VenueName.MATCHBOOK, VenueName.POLYMARKET): "matchbook_polymarket",
+        (VenueName.POLYMARKET, VenueName.MATCHBOOK): "matchbook_polymarket",
+        (VenueName.MATCHBOOK, VenueName.KALSHI): "matchbook_kalshi",
+        (VenueName.KALSHI, VenueName.MATCHBOOK): "matchbook_kalshi",
+        (VenueName.POLYMARKET, VenueName.KALSHI): "polymarket_kalshi",
+        (VenueName.KALSHI, VenueName.POLYMARKET): "polymarket_kalshi",
+    }
+
+    for left_index, left in enumerate(items):
+        for right in items[left_index + 1 :]:
+            match = matcher.match(left.canonical, right.canonical)
+            if not match.matched:
+                continue
+            if left.venue is right.venue:
+                union(left, right)
+                continue
+            kind = pair_kind.get((left.venue, right.venue))
+            if kind is None:
+                union(left, right)
+            else:
+                mark_pair(left, right, kind)
 
     grouped: dict[tuple[VenueName, str], FixtureCluster] = {}
     for key, item in nodes.items():
         root = find(key)
         cluster = grouped.setdefault(root, FixtureCluster())
         if item.venue is VenueName.MATCHBOOK:
-            cluster.matchbook = item
+            cluster.matchbook_events.append(item)
         elif item.venue is VenueName.POLYMARKET:
-            cluster.polymarket = item
+            cluster.polymarket_events.append(item)
         elif item.venue is VenueName.KALSHI:
-            cluster.kalshi = item
+            cluster.kalshi_events.append(item)
         cluster.pair_kinds.update(pair_kinds.get(key, set()))
 
-    clusters = list(grouped.values())
+    clusters: list[FixtureCluster] = []
+    for cluster in grouped.values():
+        cluster.matchbook_events = _sort_events(cluster.matchbook_events)
+        cluster.polymarket_events = _sort_events(cluster.polymarket_events)
+        cluster.kalshi_events = _sort_events(cluster.kalshi_events)
+        clusters.append(cluster)
+
+    clusters.sort(key=lambda item: -item.venue_count)
     counts = {
-        "matchbook_polymarket": len(mb_pm),
-        "matchbook_kalshi": len(mb_k),
-        "polymarket_kalshi": len(pm_k),
+        "matchbook_polymarket": sum(
+            1 for item in clusters if item.matchbook_events and item.polymarket_events
+        ),
+        "matchbook_kalshi": sum(
+            1 for item in clusters if item.matchbook_events and item.kalshi_events
+        ),
+        "polymarket_kalshi": sum(
+            1 for item in clusters if item.polymarket_events and item.kalshi_events
+        ),
     }
     return clusters, counts
 
@@ -146,27 +212,3 @@ def to_venue_event(normalized: object, venue: VenueName) -> VenueEvent:
 
 def cluster_canonical_event_id(cluster: FixtureCluster) -> str:
     return canonical_source_event_id(cluster.anchor.canonical)
-
-
-def _greedy_pairs(
-    left: list[VenueEvent],
-    right: list[VenueEvent],
-    matcher: EventMatcher,
-) -> list[tuple[VenueEvent, VenueEvent]]:
-    candidates: list[tuple[float, int, int]] = []
-    for left_index, left_item in enumerate(left):
-        for right_index, right_item in enumerate(right):
-            match = matcher.match(left_item.canonical, right_item.canonical)
-            if match.matched:
-                candidates.append((match.confidence, left_index, right_index))
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    used_left: set[int] = set()
-    used_right: set[int] = set()
-    result: list[tuple[VenueEvent, VenueEvent]] = []
-    for _, left_index, right_index in candidates:
-        if left_index in used_left or right_index in used_right:
-            continue
-        used_left.add(left_index)
-        used_right.add(right_index)
-        result.append((left[left_index], right[right_index]))
-    return result

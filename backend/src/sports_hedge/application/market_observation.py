@@ -227,14 +227,19 @@ class PolymarketObservationBuilder:
         market_payload: dict[str, Any],
         books_by_token: Mapping[str, dict[str, Any]],
         *,
+        canonical: CanonicalMarket | None = None,
         observed_at: datetime | None = None,
         source_latency_ms: int = 0,
         quote_age_ms: int | None = None,
         quote_age_basis: str | None = None,
         quote_age_reason: str | None = None,
     ) -> VenueMarketObservation:
-        event = self.normalizer.normalize_event(event_payload)
-        market = self.normalizer.normalize_market(event, market_payload)
+        event = (
+            canonical.event
+            if canonical is not None
+            else self.normalizer.normalize_event(event_payload)
+        )
+        market = canonical or self.normalizer.normalize_market(event, market_payload)
         books: list[OutcomeOrderBook] = []
         for runner in market.runners:
             raw_book = dict(books_by_token.get(runner.source_runner_id, {}))

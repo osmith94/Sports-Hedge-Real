@@ -828,6 +828,11 @@ def _attach_kalshi(
             row.solver_model = best.solver_model
             row.current_net_edge = best.current_net_edge
             row.solver_is_arbitrage = best.solver_is_arbitrage
+        if best.entered_solver or not best.rejection_reasons:
+            row.comparison_status = InventoryComparisonStatus.MATCHED_EQUIVALENT
+            row.reason = None
+            if "venue_only" in row.rejection_reasons:
+                row.rejection_reasons = [item for item in row.rejection_reasons if item != "venue_only"]
 
 
 def _inventory_from_facts(

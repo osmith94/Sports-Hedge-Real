@@ -174,6 +174,185 @@ async def test_polymarket_kalshi_discovery_does_not_require_matchbook() -> None:
         repository.close()
 
 
+class SplitSeriesPolymarket:
+    """Same fixture split across moneyline + BTTS source events."""
+
+    async def list_events(self, **filters: Any) -> list[dict[str, Any]]:
+        del filters
+        return [
+            {
+                "id": "pm-ncl-che-ml",
+                "title": "Newcastle United vs Chelsea",
+                "startTime": KICKOFF.isoformat(),
+                "competition": "Premier League",
+                "series": [{"id": 10188, "title": "Premier League"}],
+            },
+            {
+                "id": "pm-ncl-che-btts",
+                "title": "Newcastle United vs Chelsea",
+                "startTime": KICKOFF.isoformat(),
+                "competition": "Premier League",
+                "series": [{"id": 10188, "title": "Premier League"}],
+            },
+        ]
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> list[dict[str, Any]]:
+        del filters
+        if str(event_id) == "pm-ncl-che-ml":
+            return [
+                {
+                    "id": "pm-home-win",
+                    "question": "Will Newcastle United win on 2026-09-20?",
+                    "sportsMarketType": "moneyline",
+                    "outcomes": '["Yes", "No"]',
+                    "clobTokenIds": '["yes-home", "no-home"]',
+                    "description": REGULATION,
+                }
+            ]
+        return [
+            {
+                "id": "pm-btts",
+                "question": "Both teams to score?",
+                "sportsMarketType": "both teams to score",
+                "outcomes": '["Yes", "No"]',
+                "clobTokenIds": '["yes-token", "no-token"]',
+                "description": REGULATION,
+            }
+        ]
+
+    async def get_order_book(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        outcome_id: int | str | None = None,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del event_id, market_id, filters
+        token = str(outcome_id)
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        asks = {"price": "0.51", "size": "250"} if token.startswith("yes") else {"price": "0.43", "size": "300"}
+        bids = {"price": "0.49", "size": "250"} if token.startswith("yes") else {"price": "0.41", "size": "300"}
+        return {"asset_id": token, "timestamp": now_ms - 120, "bids": [bids], "asks": [asks]}
+
+
+class SplitSeriesKalshi:
+    async def list_events(self, **filters: Any) -> dict[str, Any]:
+        del filters
+        return {
+            "events": [
+                {
+                    "event_ticker": "KXEPLGAME-26SEP20NEWCHE",
+                    "series_ticker": "KXEPLGAME",
+                    "title": "Newcastle United vs Chelsea",
+                    "category": "Sports",
+                    "strike_date": KICKOFF.isoformat(),
+                    "markets": [
+                        {
+                            "ticker": "KXEPLGAME-26SEP20NEWCHE-NEW",
+                            "event_ticker": "KXEPLGAME-26SEP20NEWCHE",
+                            "title": "Newcastle United vs Chelsea",
+                            "yes_sub_title": "Newcastle United",
+                            "rules_primary": REGULATION,
+                        },
+                        {
+                            "ticker": "KXEPLGAME-26SEP20NEWCHE-DRAW",
+                            "event_ticker": "KXEPLGAME-26SEP20NEWCHE",
+                            "title": "Newcastle United vs Chelsea",
+                            "yes_sub_title": "Draw",
+                            "rules_primary": REGULATION,
+                        },
+                        {
+                            "ticker": "KXEPLGAME-26SEP20NEWCHE-CHE",
+                            "event_ticker": "KXEPLGAME-26SEP20NEWCHE",
+                            "title": "Newcastle United vs Chelsea",
+                            "yes_sub_title": "Chelsea",
+                            "rules_primary": REGULATION,
+                        },
+                    ],
+                },
+                {
+                    "event_ticker": "KXEPLBTTS-26SEP20NEWCHE",
+                    "series_ticker": "KXEPLBTTS",
+                    "title": "Newcastle United vs Chelsea",
+                    "category": "Sports",
+                    "strike_date": KICKOFF.isoformat(),
+                    "markets": [
+                        {
+                            "ticker": "KXEPLBTTS-26SEP20NEWCHE",
+                            "event_ticker": "KXEPLBTTS-26SEP20NEWCHE",
+                            "title": "Both Teams To Score",
+                            "yes_sub_title": "Yes",
+                            "rules_primary": REGULATION,
+                        }
+                    ],
+                },
+            ]
+        }
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+        del event_id, filters
+        return {"markets": []}
+
+    async def get_order_book(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        outcome_id: int | str | None = None,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del event_id, outcome_id, filters
+        return {
+            "orderbook_fp": {
+                "yes_dollars": [["0.40", "100.00"]],
+                "no_dollars": [["0.49", "200.00"]],
+            }
+        }
+
+    async def get_series(self, series_ticker: str) -> dict[str, Any]:
+        return {**KALSHI_SERIES, "ticker": series_ticker}
+
+
+@pytest.mark.asyncio
+async def test_split_pm_kalshi_events_cluster_and_btts_enters_solver() -> None:
+    repository = SqliteMarketIntelligenceRepository()
+    intelligence = MarketIntelligenceService(repository)
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=FailingMatchbook(),
+        polymarket=SplitSeriesPolymarket(),
+        kalshi=SplitSeriesKalshi(),
+        paper_scan=PaperScanService(intelligence),
+    )
+    try:
+        report = await collector.collect_and_scan(
+            venue_costs=[
+                profit_commission_cost(VenueName.POLYMARKET, "0"),
+                kalshi_cost_from_series(KALSHI_SERIES, captured_at=datetime.now(UTC)),
+            ],
+            fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"), source="paper_demo_fx_snapshot")],
+            maximum_execution_risk=100,
+        )
+        assert report.pair_counts["polymarket_kalshi"] == 1
+        fixtures = [item for item in report.discovered_fixtures if item.polymarket_matched and item.kalshi_matched]
+        assert len(fixtures) == 1
+        rows = report.fixture_markets[fixtures[0].canonical_event_id]
+        btts = [row for row in rows if row.family == "both_teams_to_score"]
+        match_result = [row for row in rows if row.family == "match_result"]
+        assert btts
+        assert any(row.entered_solver for row in btts)
+        assert any(row.comparison_status.value == "matched_equivalent" for row in btts)
+        assert match_result
+        assert all(not row.entered_solver for row in match_result)
+        reasons = " ".join(
+            " ".join(row.match_reasons + row.rejection_reasons + ([row.reason] if row.reason else []))
+            for row in match_result
+        )
+        assert "outcome_space_mismatch" in reasons or "incomplete" in reasons
+        assert any(decision.solver_model for decision in report.paper_decisions)
+        assert all(VenueName.MATCHBOOK not in decision.execution_modes for decision in report.paper_decisions)
+    finally:
+        repository.close()
+
+
 def test_legacy_series_id_is_merged_not_replaced() -> None:
     settings = Settings(polymarket_gamma_series_id="10188")
     assert settings.resolved_polymarket_series_ids() == ["10188", "10355", "10193"]

@@ -121,3 +121,6 @@ async def test_manchester_derby_live_logical_from_public_providers() -> None:
         requirement = report["matchbook_owner_requirement"].casefold()
         assert "windows" in requirement
         assert "matchbook" in requirement
+    assert isinstance(report.get("family_reasons"), list)
+    if pairwise["events_matched"]:
+        assert report["family_reasons"] or pairwise["reason"]

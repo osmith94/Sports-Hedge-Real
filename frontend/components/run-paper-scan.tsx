@@ -13,6 +13,7 @@ import {
   runPaperCollection,
 } from "../lib/api";
 import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
+import { LiveScanPulse, LiveScanPulsePhase } from "./live-scan-pulse";
 
 type ScanState =
   | { kind: "idle" }
@@ -52,6 +53,15 @@ function reportSummary(report: PaperCollectionReport): string {
     (decision) => decision.eligible_for_paper_simulation,
   ).length;
   return `${report.matched_event_pairs} event pair${report.matched_event_pairs === 1 ? "" : "s"} · ${report.matched_market_pairs} market pair${report.matched_market_pairs === 1 ? "" : "s"} · ${eligible} paper-eligible · ${report.issues.length} genuine issue${report.issues.length === 1 ? "" : "s"}`;
+}
+
+function venueHealthIsDegraded(health: Record<string, string> | undefined): boolean {
+  if (!health) return false;
+  const firstClass = ["matchbook", "polymarket", "kalshi"];
+  return firstClass.some((venue) => {
+    const value = health[venue];
+    return value === "unavailable" || value === "error" || value === "failed";
+  });
 }
 
 function clampIntervalSeconds(value: number): number {
@@ -167,6 +177,10 @@ export function RunPaperScan() {
   const [intervalDraft, setIntervalDraft] = useState("30");
   const [lastCompletedAt, setLastCompletedAt] = useState<string | null>(null);
   const [lastDurationMs, setLastDurationMs] = useState<number | null>(null);
+  const [venueHealth, setVenueHealth] = useState<Record<string, string> | null>(null);
+  const [completeFlash, setCompleteFlash] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [autoAnchorMs, setAutoAnchorMs] = useState<number | null>(null);
   const [economics, setEconomics] = useState<EconomicsStatus | null>(null);
   const payloadRef = useRef<PaperCollectionRequest>({ maximum_execution_risk: 60 });
   const inFlightRef = useRef(false);
@@ -214,6 +228,9 @@ export function RunPaperScan() {
       const report = await runPaperCollection(payload);
       setState({ kind: "success", report });
       setLastCompletedAt(report.completed_at);
+      setVenueHealth(report.venue_health ?? null);
+      setCompleteFlash(true);
+      setNowMs(Date.now());
       const started = Date.parse(report.started_at);
       const completed = Date.parse(report.completed_at);
       if (Number.isFinite(started) && Number.isFinite(completed)) {
@@ -252,6 +269,7 @@ export function RunPaperScan() {
         }
         if (status.last_completed_at) setLastCompletedAt(status.last_completed_at);
         if (status.last_duration_ms != null) setLastDurationMs(status.last_duration_ms);
+        if (status.venue_health) setVenueHealth(status.venue_health);
       })
       .catch(() => {
         // Status endpoint down: keep the 30s default cadence.
@@ -262,13 +280,31 @@ export function RunPaperScan() {
   }, []);
 
   useEffect(() => {
-    if (!autoRefresh) return undefined;
+    if (!completeFlash) return undefined;
+    const timer = window.setTimeout(() => setCompleteFlash(false), 550);
+    return () => window.clearTimeout(timer);
+  }, [completeFlash]);
+
+  useEffect(() => {
+    if (!autoRefresh) {
+      setAutoAnchorMs(null);
+      return undefined;
+    }
     const cadenceMs = clampIntervalSeconds(intervalSeconds) * 1000;
-    const timer = window.setInterval(() => {
+    const origin = lastCompletedAt ? Date.parse(lastCompletedAt) : Date.now();
+    setAutoAnchorMs(origin);
+    const wait = Math.max(0, origin + cadenceMs - Date.now());
+    const timer = window.setTimeout(() => {
       void collectRef.current();
-    }, cadenceMs);
+    }, wait);
+    return () => window.clearTimeout(timer);
+  }, [autoRefresh, intervalSeconds, lastCompletedAt]);
+
+  useEffect(() => {
+    if (!autoRefresh || loading) return undefined;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 250);
     return () => window.clearInterval(timer);
-  }, [autoRefresh, intervalSeconds]);
+  }, [autoRefresh, loading]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -276,6 +312,22 @@ export function RunPaperScan() {
   }
 
   const chips = economicsChips(economics);
+  const cadenceMs = clampIntervalSeconds(intervalSeconds) * 1000;
+  const nextRefreshSeconds =
+    autoRefresh && autoAnchorMs != null
+      ? Math.max(0, Math.ceil((autoAnchorMs + cadenceMs - nowMs) / 1000))
+      : null;
+  const pulsePhase: LiveScanPulsePhase = loading
+    ? "scanning"
+    : state.kind === "error"
+      ? "error"
+      : completeFlash
+        ? "complete"
+        : !autoRefresh
+          ? "paused"
+          : venueHealthIsDegraded(venueHealth ?? undefined)
+            ? "degraded"
+            : "idle";
 
   return (
     <section className="panel scan-control">
@@ -331,8 +383,14 @@ export function RunPaperScan() {
             />
             Auto refresh
           </label>
+          <LiveScanPulse
+            phase={pulsePhase}
+            nextRefreshSeconds={nextRefreshSeconds}
+            venueHealth={venueHealth}
+            errorMessage={state.kind === "error" ? state.message : null}
+          />
           <div className="scan-action">
-            <button className="scan-button" type="submit" disabled={loading}>
+            <button className="scan-button" type="submit" disabled={loading} aria-busy={loading}>
               {loading ? "Scanning…" : "Run scan"}
             </button>
           </div>

@@ -70,6 +70,7 @@ from sports_hedge.normalization.venues import (
     MatchbookNormalizer,
     PolymarketNormalizer,
     VenueNormalizationError,
+    promote_polymarket_complete_match_result,
 )
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 
@@ -237,9 +238,11 @@ class ReadOnlyCrossVenueCollector:
     Phase 1 venue clients remain market-data/read methods only because Sports Hedge
     has real execution disabled globally. Kalshi is a first-class venue like
     Matchbook (INTERNAL paper lifecycle), not MANUAL_EXTERNAL. Unsupported payloads
-    are reported and skipped. Event and market pairing is one-to-one so a single
-    venue object cannot silently participate in multiple cross-venue matches in one
-    pass. Every settlement-equivalent venue pair is scanned independently.
+    are reported and skipped. Source events that share canonical fixture identity are
+    clustered together (including split Polymarket/Kalshi series). Market pairing
+    remains one-to-one so a single venue market cannot silently participate in
+    multiple cross-venue matches in one pass. Every settlement-equivalent venue
+    pair is scanned independently.
     """
 
     def __init__(
@@ -503,9 +506,11 @@ class ReadOnlyCrossVenueCollector:
             polymarket_events=polymarket_events,
             queried_series_ids=queried_series_ids,
         )
-        mb_event = _as_normalized(cluster.matchbook)
-        pm_event = _as_normalized(cluster.polymarket)
-        k_event = _as_normalized(cluster.kalshi)
+        mb_events = [_as_normalized(item) for item in cluster.events_for(VenueName.MATCHBOOK)]
+        pm_events = [_as_normalized(item) for item in cluster.events_for(VenueName.POLYMARKET)]
+        k_events = [_as_normalized(item) for item in cluster.events_for(VenueName.KALSHI)]
+        mb_event = mb_events[0] if mb_events else None
+        pm_event = pm_events[0] if pm_events else None
         matchbook_markets: list[_NormalizedMarket] = []
         matchbook_inventory: list[InventoryMarket] = []
         polymarket_markets: list[_NormalizedMarket] = []
@@ -518,9 +523,8 @@ class ReadOnlyCrossVenueCollector:
         matchbook_retrieved_at = datetime.now(UTC)
         matchbook_market_latency_ms = 0
         polymarket_market_latency_ms = 0
-        kalshi_series: dict[str, Any] | None = None
 
-        if mb_event is not None:
+        for mb_event in mb_events:
             try:
                 mb_started = perf_counter()
                 mb_market_payload = await self.matchbook.list_markets(
@@ -541,11 +545,12 @@ class ReadOnlyCrossVenueCollector:
                 fixture.no_comparison_reason = "list_markets_unavailable"
                 mb_market_payload = {"markets": []}
             raw_matchbook = _extract_matchbook_items(mb_market_payload, "markets")
-            matchbook_markets, matchbook_inventory = self._inventory_markets(
+            markets, inventory = self._inventory_markets(
                 mb_event, raw_matchbook, venue=VenueName.MATCHBOOK, issues=issues
             )
-            market_counts[VenueName.MATCHBOOK] = len(matchbook_markets)
-            for left_market in matchbook_markets:
+            matchbook_markets.extend(markets)
+            matchbook_inventory.extend(inventory)
+            for left_market in markets:
                 observation = self._try_matchbook_observation(
                     mb_event,
                     left_market,
@@ -561,15 +566,17 @@ class ReadOnlyCrossVenueCollector:
                 for item in matchbook_inventory:
                     if item.source_market_id == left_market.canonical.source_market_id:
                         item.observation = observation
+        if matchbook_markets:
+            market_counts[VenueName.MATCHBOOK] = len(matchbook_markets)
 
-        if pm_event is not None:
+        for pm_event in pm_events:
             try:
                 pm_started = perf_counter()
                 pm_market_payload = await self.polymarket.list_markets(
                     pm_event.canonical.source_event_id,
                     **polymarket_market_filters,
                 )
-                polymarket_market_latency_ms = _elapsed_ms(pm_started)
+                polymarket_market_latency_ms += _elapsed_ms(pm_started)
             except Exception as exc:
                 issues.append(
                     CollectorIssue(
@@ -582,55 +589,70 @@ class ReadOnlyCrossVenueCollector:
                 if fixture.no_comparison_reason is None:
                     fixture.no_comparison_reason = "list_markets_unavailable"
                 pm_market_payload = []
-            polymarket_markets, polymarket_inventory = self._inventory_markets(
+            markets, inventory = self._inventory_markets(
                 pm_event,
                 [item for item in pm_market_payload if isinstance(item, dict)],
                 venue=VenueName.POLYMARKET,
                 issues=issues,
             )
-            market_counts[VenueName.POLYMARKET] = len(polymarket_markets)
-            for right_market in polymarket_markets:
-                books_by_token, poly_book_latency_ms, fetched, book_failed = (
-                    await self._fetch_polymarket_books(pm_event, right_market, issues=issues)
-                )
-                order_books_fetched += fetched
-                if book_failed:
-                    continue
-                observation = self._try_polymarket_observation(
-                    pm_event,
-                    right_market,
-                    books_by_token,
-                    latency_ms=polymarket_market_latency_ms + poly_book_latency_ms,
-                    issues=issues,
-                )
-                if observation is None:
-                    continue
-                observations_by_market_id[
-                    (VenueName.POLYMARKET, right_market.canonical.source_market_id)
-                ] = observation
-                for item in polymarket_inventory:
-                    if item.source_market_id == right_market.canonical.source_market_id:
-                        item.observation = observation
-
-        if k_event is not None and self.kalshi is not None:
-            kalshi_markets, kalshi_inventory, kalshi_series, fetched = await self._load_kalshi_markets(
-                k_event, issues=issues
+            polymarket_markets.extend(markets)
+            polymarket_inventory.extend(inventory)
+        polymarket_markets, polymarket_inventory = _promote_polymarket_cluster_markets(
+            polymarket_markets, polymarket_inventory
+        )
+        for right_market in polymarket_markets:
+            book_event = _event_for_source(
+                pm_events, right_market.canonical.event.source_event_id
+            ) or pm_event
+            if book_event is None:
+                continue
+            books_by_token, poly_book_latency_ms, fetched, book_failed = (
+                await self._fetch_polymarket_books(book_event, right_market, issues=issues)
             )
             order_books_fetched += fetched
-            market_counts[VenueName.KALSHI] = len(kalshi_markets)
-            for kalshi_market in kalshi_markets:
-                observation, fetched = await self._try_kalshi_observation(
-                    k_event, kalshi_market, series=kalshi_series, issues=issues
+            if book_failed:
+                continue
+            observation = self._try_polymarket_observation(
+                book_event,
+                right_market,
+                books_by_token,
+                latency_ms=polymarket_market_latency_ms + poly_book_latency_ms,
+                issues=issues,
+            )
+            if observation is None:
+                continue
+            observations_by_market_id[
+                (VenueName.POLYMARKET, right_market.canonical.source_market_id)
+            ] = observation
+            for item in polymarket_inventory:
+                if item.source_market_id == right_market.canonical.source_market_id:
+                    item.observation = observation
+        if polymarket_markets:
+            market_counts[VenueName.POLYMARKET] = len(polymarket_markets)
+
+        if self.kalshi is not None:
+            for k_event in k_events:
+                markets, inventory, series, fetched = await self._load_kalshi_markets(
+                    k_event, issues=issues
                 )
                 order_books_fetched += fetched
-                if observation is None:
-                    continue
-                observations_by_market_id[
-                    (VenueName.KALSHI, kalshi_market.canonical.source_market_id)
-                ] = observation
-                for item in kalshi_inventory:
-                    if item.source_market_id == kalshi_market.canonical.source_market_id:
-                        item.observation = observation
+                kalshi_markets.extend(markets)
+                kalshi_inventory.extend(inventory)
+                for kalshi_market in markets:
+                    observation, fetched = await self._try_kalshi_observation(
+                        k_event, kalshi_market, series=series, issues=issues
+                    )
+                    order_books_fetched += fetched
+                    if observation is None:
+                        continue
+                    observations_by_market_id[
+                        (VenueName.KALSHI, kalshi_market.canonical.source_market_id)
+                    ] = observation
+                    for item in kalshi_inventory:
+                        if item.source_market_id == kalshi_market.canonical.source_market_id:
+                            item.observation = observation
+            if kalshi_markets:
+                market_counts[VenueName.KALSHI] = len(kalshi_markets)
 
         venue_markets = {
             VenueName.MATCHBOOK: matchbook_markets,
@@ -925,6 +947,7 @@ class ReadOnlyCrossVenueCollector:
                 event.raw,
                 market.raw,
                 books_by_token,
+                canonical=market.canonical,
                 observed_at=evaluated_at,
                 source_latency_ms=latency_ms,
                 quote_age_ms=age.quote_age_ms,
@@ -1018,8 +1041,12 @@ class ReadOnlyCrossVenueCollector:
         grouped: dict[str, list[dict[str, Any]]] = {}
         for market in canonicals:
             constituents: list[dict[str, Any]] = []
+            seen_tickers: set[str] = set()
             for runner in market.runners:
                 ticker = runner.source_runner_id.rsplit(":", 1)[0]
+                if not ticker or ticker in seen_tickers:
+                    continue
+                seen_tickers.add(ticker)
                 payload = payloads_by_ticker.get(ticker)
                 if payload is not None:
                     constituents.append(payload)
@@ -1132,6 +1159,69 @@ def _as_normalized(item) -> _NormalizedEvent | None:
     if item is None:
         return None
     return _NormalizedEvent(item.raw, item.canonical)
+
+
+def _event_for_source(
+    events: list[_NormalizedEvent],
+    source_event_id: str,
+) -> _NormalizedEvent | None:
+    for event in events:
+        if event.canonical.source_event_id == source_event_id:
+            return event
+    return events[0] if events else None
+
+
+def _promote_polymarket_cluster_markets(
+    markets: list[_NormalizedMarket],
+    inventory: list[InventoryMarket],
+) -> tuple[list[_NormalizedMarket], list[InventoryMarket]]:
+    if len(markets) < 2:
+        return markets, inventory
+    payloads = [item.raw for item in markets if isinstance(item.raw, dict)]
+    canonicals = [item.canonical for item in markets]
+    promoted = promote_polymarket_complete_match_result(canonicals, payloads)
+    original_ids = {item.canonical.source_market_id for item in markets}
+    promoted_ids = {item.source_market_id for item in promoted}
+    if promoted_ids == original_ids:
+        return markets, inventory
+    by_id = {item.canonical.source_market_id: item for item in markets}
+    rebuilt: list[_NormalizedMarket] = []
+    for market in promoted:
+        existing = by_id.get(market.source_market_id)
+        if existing is not None:
+            rebuilt.append(existing)
+            continue
+        constituents = [
+            item.raw
+            for item in markets
+            if item.canonical.source_market_id not in promoted_ids
+            and item.canonical.family is market.family
+        ]
+        wrapper = {
+            "id": market.source_market_id,
+            "question": "Match result",
+            "sportsMarketType": "moneyline",
+            "assembled_match_result": True,
+            "grouped_payloads": constituents,
+        }
+        rebuilt.append(_NormalizedMarket(wrapper, market))
+    kept_ids = {item.canonical.source_market_id for item in rebuilt}
+    rebuilt_inventory = [
+        item for item in inventory if item.source_market_id in kept_ids or item.canonical is None
+    ]
+    for market in rebuilt:
+        if any(item.source_market_id == market.canonical.source_market_id for item in rebuilt_inventory):
+            continue
+        rebuilt_inventory.append(
+            InventoryMarket(
+                venue=VenueName.POLYMARKET,
+                source_event_id=market.canonical.event.source_event_id,
+                source_market_id=market.canonical.source_market_id,
+                raw_name=market.canonical.family.value,
+                canonical=market.canonical,
+            )
+        )
+    return rebuilt, rebuilt_inventory
 
 
 def _fixture_from_cluster(

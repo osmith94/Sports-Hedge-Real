@@ -383,6 +383,28 @@ def render_manchester_derby_report(report: dict[str, Any]) -> str:
             f"- Near opportunities: {report.get('near_count')}",
             f"- OPEN paper allowed: {report.get('open_paper_allowed')}",
             "",
+            "Market-level PM↔K family reasons:",
+        ]
+    )
+    family_reasons = report.get("family_reasons") or []
+    notable = [item for item in family_reasons if item.get("family")]
+    if notable:
+        for item in notable:
+            lines.append(
+                f"- **{item.get('family')}**"
+                f"{'' if item.get('line') in (None, '') else ' line=' + str(item.get('line'))}: "
+                f"status={item.get('comparison_status')} "
+                f"entered_solver={item.get('entered_solver')} "
+                f"reason={item.get('reason')}"
+            )
+        skipped = len(family_reasons) - len(notable)
+        if skipped:
+            lines.append(f"- {skipped} additional unsupported/unnormalized markets (see JSON)")
+    else:
+        lines.append("- none recorded")
+    lines.extend(
+        [
+            "",
             "Pairwise solver paths:",
         ]
     )
@@ -604,6 +626,7 @@ async def run_manchester_derby_logical(
             "equivalent_market_count": sum(
                 item.matched_equivalent_count for item in collection.discovered_fixtures
             ),
+            "family_reasons": _family_reasons(collection),
             "best_net_edge": best_edge,
             "trigger_net_edge": trigger,
             "edge_vs_trigger_pp": None
@@ -681,7 +704,18 @@ def _pairwise_solver_summary(
         matched_events = sum(1 for row in identity if row["matched"])
         pair_decisions = [item for item in decisions if item["pair"] == pair]
         solver_executed = any(item["entered_solver"] for item in pair_decisions)
-        equivalent = collection.pair_counts.get(pair, 0)
+        equivalent = 0
+        for rows in collection.fixture_markets.values():
+            for row in rows:
+                if pair == "polymarket_kalshi" and row.polymarket and row.kalshi:
+                    if row.comparison_status.value == "matched_equivalent":
+                        equivalent += 1
+                elif pair == "matchbook_polymarket" and row.matchbook and row.polymarket:
+                    if row.comparison_status.value == "matched_equivalent":
+                        equivalent += 1
+                elif pair == "matchbook_kalshi" and row.matchbook and row.kalshi:
+                    if row.comparison_status.value == "matched_equivalent":
+                        equivalent += 1
         edges = [
             Decimal(item["current_net_edge"])
             for item in pair_decisions
@@ -746,16 +780,68 @@ def _limitations(
             "If the provider omitted milestones, identity fails closed rather than guessing."
         )
     notes.append(
-        "Polymarket exposes the derby as multiple events (moneyline / BTTS / totals / FTTS) and "
-        "Kalshi as separate series tickers. Pairwise clustering remains greedy one-to-one."
+        "Polymarket and Kalshi often split a fixture into multiple source events "
+        "(moneyline / BTTS / totals / FTTS). Clustering unions those source events "
+        "by canonical fixture identity so settlement-equivalent families can meet. "
+        "Market pairing remains one-to-one and fail-closed."
     )
     notes.append(
-        "Polymarket match-result markets are three binary moneylines; Kalshi GAME assembles a "
-        "three-way HOME/DRAW/AWAY market. Outcome-space mismatch is an honest non-equivalence."
+        "Polymarket match-result Yes/No binaries are assembled into a 3-way HOME/"
+        "DRAW/AWAY market only when all three complementary contracts share a "
+        "settlement fingerprint. A lone binary moneyline is not equivalent to a "
+        "Kalshi three-way GAME and remains fail-closed (outcome_space_mismatch / "
+        "incomplete_outcome_set)."
     )
     if collection.config_warnings:
         notes.extend(collection.config_warnings)
     return notes
+
+
+def _family_reasons(collection: CollectionReport) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for inventory in collection.fixture_markets.values():
+        for row in inventory:
+            pair_bits = []
+            if row.polymarket is not None and row.kalshi is not None:
+                pair_bits.append("polymarket_kalshi")
+            if row.matchbook is not None and row.polymarket is not None:
+                pair_bits.append("matchbook_polymarket")
+            if row.matchbook is not None and row.kalshi is not None:
+                pair_bits.append("matchbook_kalshi")
+            if not pair_bits and (row.polymarket is not None or row.kalshi is not None):
+                pair_bits.append("unpaired")
+            reason = (
+                row.reason
+                or (", ".join(row.rejection_reasons) if row.rejection_reasons else None)
+                or (", ".join(row.match_reasons) if row.match_reasons else None)
+                or row.comparison_status.value
+            )
+            key = (
+                str(row.family or "unknown"),
+                "" if row.line is None else str(row.line),
+                reason,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "family": row.family,
+                    "line": row.line,
+                    "comparison_status": row.comparison_status.value,
+                    "entered_solver": row.entered_solver,
+                    "solver_model": row.solver_model,
+                    "reason": reason,
+                    "match_reasons": list(row.match_reasons),
+                    "rejection_reasons": list(row.rejection_reasons),
+                    "pairs": pair_bits,
+                    "has_polymarket": row.polymarket is not None,
+                    "has_kalshi": row.kalshi is not None,
+                    "has_matchbook": row.matchbook is not None,
+                }
+            )
+    return rows
 
 
 async def _amain() -> None:

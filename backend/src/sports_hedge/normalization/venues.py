@@ -173,6 +173,24 @@ class PolymarketNormalizer:
             confidence=1.0 if settlement.scope != SettlementScope.UNKNOWN else 0.75,
         )
 
+    def assemble_canonical_markets(
+        self,
+        event: CanonicalEvent,
+        payloads: list[dict[str, Any]],
+    ) -> list[CanonicalMarket]:
+        """Normalize Polymarket markets, assembling complementary moneyline binaries.
+
+        A single Yes/No moneyline is preserved as YES/NO (not a 3-way). Only when
+        HOME, DRAW and AWAY Yes contracts share a settlement fingerprint are they
+        promoted to a complete match-result market, matching Kalshi GAME assembly.
+        Incomplete groups stay fail-closed as binaries.
+        """
+
+        normalized: list[CanonicalMarket] = []
+        for payload in payloads:
+            normalized.append(self.normalize_market(event, payload))
+        return promote_polymarket_complete_match_result(normalized, payloads)
+
 
 class KalshiNormalizer:
     """Dedicated Kalshi football normalizer. Does not reuse Polymarket parsing."""
@@ -668,6 +686,137 @@ def _assemble_match_result(
         runners=runners,
         confidence=1.0 if settlement.scope != SettlementScope.UNKNOWN else 0.75,
     )
+
+
+def polymarket_moneyline_yes_outcome(
+    question: str,
+    *,
+    home_team: str,
+    away_team: str,
+) -> CanonicalOutcome | None:
+    """Map a Polymarket moneyline question to the YES-side 3-way outcome.
+
+    Fail closed on ambiguous titles (both teams, home-or-draw, etc.).
+    """
+
+    text = normalize_text(question)
+    home = normalize_text(home_team)
+    away = normalize_text(away_team)
+    if not text:
+        return None
+    if any(token in text for token in ("or draw", "double chance", "draw no bet", "to qualify")):
+        return None
+    draw_like = "draw" in text or "tie" in text
+    home_present = bool(home) and home in text
+    away_present = bool(away) and away in text
+    if draw_like and not home_present and not away_present:
+        return CanonicalOutcome.DRAW
+    if home_present and away_present:
+        return None
+    if "win" not in text and "beat" not in text:
+        if home_present:
+            return CanonicalOutcome.HOME
+        if away_present:
+            return CanonicalOutcome.AWAY
+        return None
+    if home_present:
+        return CanonicalOutcome.HOME
+    if away_present:
+        return CanonicalOutcome.AWAY
+    return None
+
+
+def promote_polymarket_complete_match_result(
+    markets: list[CanonicalMarket],
+    payloads: list[dict[str, Any]] | None = None,
+) -> list[CanonicalMarket]:
+    """Replace complementary Yes/No moneylines with a 3-way when exhaustive.
+
+    Does not invent a comparison: one or two binaries stay YES/NO and will not
+    match a Kalshi HOME/DRAW/AWAY GAME market.
+    """
+
+    payload_by_id: dict[str, dict[str, Any]] = {}
+    for payload in payloads or []:
+        source_id = str(_first(payload, "id", "conditionId", "condition_id") or "").strip()
+        if source_id:
+            payload_by_id[source_id] = payload
+
+    binaries: list[tuple[CanonicalMarket, CanonicalOutcome]] = []
+    passthrough: list[CanonicalMarket] = []
+    for market in markets:
+        if market.family is not MarketFamily.MATCH_RESULT:
+            passthrough.append(market)
+            continue
+        present = {runner.outcome for runner in market.runners}
+        if present == {CanonicalOutcome.HOME, CanonicalOutcome.DRAW, CanonicalOutcome.AWAY}:
+            passthrough.append(market)
+            continue
+        if present != {CanonicalOutcome.YES, CanonicalOutcome.NO}:
+            passthrough.append(market)
+            continue
+        payload = payload_by_id.get(market.source_market_id, {})
+        question = str(_first(payload, "question", "title", "groupItemTitle") or "").strip()
+        yes_outcome = polymarket_moneyline_yes_outcome(
+            question,
+            home_team=market.event.home_team,
+            away_team=market.event.away_team,
+        )
+        if yes_outcome is None:
+            passthrough.append(market)
+            continue
+        binaries.append((market, yes_outcome))
+
+    grouped: dict[tuple[str, str], list[tuple[CanonicalMarket, CanonicalOutcome]]] = {}
+    for market, yes_outcome in binaries:
+        key = (market.period.value, market.settlement.deterministic_key())
+        grouped.setdefault(key, []).append((market, yes_outcome))
+
+    result = list(passthrough)
+    for items in grouped.values():
+        by_outcome: dict[CanonicalOutcome, CanonicalMarket] = {}
+        unique = True
+        for market, yes_outcome in items:
+            if yes_outcome in by_outcome:
+                unique = False
+                break
+            by_outcome[yes_outcome] = market
+        required = {CanonicalOutcome.HOME, CanonicalOutcome.DRAW, CanonicalOutcome.AWAY}
+        if not unique or set(by_outcome) != required:
+            result.extend(market for market, _outcome in items)
+            continue
+        settlements = {market.settlement.deterministic_key() for market in by_outcome.values()}
+        if len(settlements) != 1:
+            result.extend(market for market, _outcome in items)
+            continue
+        first = by_outcome[CanonicalOutcome.HOME]
+        runners: list[CanonicalRunner] = []
+        for outcome in (CanonicalOutcome.HOME, CanonicalOutcome.DRAW, CanonicalOutcome.AWAY):
+            binary = by_outcome[outcome]
+            yes_runner = next(runner for runner in binary.runners if runner.outcome is CanonicalOutcome.YES)
+            runners.append(
+                CanonicalRunner(
+                    source_runner_id=yes_runner.source_runner_id,
+                    outcome=outcome,
+                    label=yes_runner.label if outcome is CanonicalOutcome.DRAW else (
+                        binary.event.home_team if outcome is CanonicalOutcome.HOME else binary.event.away_team
+                    ),
+                )
+            )
+        result.append(
+            CanonicalMarket(
+                event=first.event,
+                source_venue=VenueName.POLYMARKET,
+                source_market_id=f"{first.event.source_event_id}:match_result",
+                family=MarketFamily.MATCH_RESULT,
+                period=first.period,
+                line=None,
+                settlement=first.settlement,
+                runners=runners,
+                confidence=min(item.confidence for item in by_outcome.values()),
+            )
+        )
+    return result
 
 
 def _assemble_binary_yes_no(
@@ -1232,12 +1381,43 @@ def _family_push_possible(family: MarketFamily, line: Decimal | None) -> bool | 
     return line_push_possible(line)
 
 
+_MARKET_DESCRIPTOR_SUFFIX = re.compile(
+    r"(?:\s*[-:|]\s*|\s+)"
+    r"(?:(?:1st|2nd|first|second)\s+half\s+)?"
+    r"(?:more markets|player props|btts|both teams? to score|"
+    r"total goals?|total corners?|totals?|first team to score|ftts|"
+    r"exact score|correct score|halftime result|second half result|"
+    r"half[- ]?time(?: result)?|moneyline|match result|match odds|"
+    r"spread|asian handicap|draw no bet)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_market_descriptor(part: str) -> str:
+    """Remove trailing market-family labels from a fixture participant string.
+
+    Providers often publish split events as ``Home vs Away: BTTS``. Those
+    suffixes are not part of the team name and must not pollute identity.
+    """
+
+    current = part.strip(" -–—:|")
+    previous = None
+    while current != previous:
+        previous = current
+        current = _MARKET_DESCRIPTOR_SUFFIX.sub("", current).strip(" -–—:|")
+    return current
+
+
 def _split_fixture_title(title: str) -> tuple[str, str]:
     clean = title.strip()
     parts = [part.strip(" -") for part in _FIXTURE_SEPARATOR.split(clean) if part.strip(" -")]
     if len(parts) != 2:
         raise VenueNormalizationError(f"Cannot safely split football fixture title: {title}")
-    return parts[0], parts[1]
+    home = _strip_market_descriptor(parts[0])
+    away = _strip_market_descriptor(parts[1])
+    if not home or not away:
+        raise VenueNormalizationError(f"Cannot safely split football fixture title: {title}")
+    return home, away
 
 
 def _required_string(payload: dict[str, Any], key: str) -> str:
