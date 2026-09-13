@@ -30,6 +30,24 @@ Phase 1 reads:
 
 The Phase 1 codebase contains no Matchbook order-placement interface.
 
+### Kalshi
+
+First-class venue with the same Phase-1 capability posture as Matchbook:
+
+```text
+data_enabled = true
+paper_enabled = true
+execution_enabled = false
+```
+
+`execution_enabled=false` is the global Sports Hedge paper boundary, not a Kalshi-specific restriction. Kalshi is not `MANUAL_EXTERNAL`, does not require external-counterparty confirmation, and does not receive geography-derived fill semantics.
+
+Phase 1 reads public Trade API v2 market data (series/events/markets/orderbooks) using dollar/fixed-point fields. Native capital is a USD venue pool distinct from Polymarket USD. Pairwise paper scans include Matchbook↔Kalshi and Polymarket↔Kalshi.
+
+Effective Kalshi fees use event `fee_type_override` / `fee_multiplier_override` when both are present; otherwise series `fee_type` / `fee_multiplier`. Partial or unsupported override combinations fail closed with provenance and do not fall back to series.
+
+The Phase 1 codebase contains no Kalshi order-placement, signing, or portfolio-mutation interface.
+
 ### Polymarket
 
 Public/read-only research integration only.

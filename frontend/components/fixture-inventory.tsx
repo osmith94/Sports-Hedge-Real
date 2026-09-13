@@ -1,14 +1,12 @@
 import Link from "next/link";
 
-import {
-  FixtureDetailReadModel,
-  FixtureMarketInventoryRow,
-} from "../lib/api";
+import { FixtureDetailReadModel } from "../lib/api";
 import {
   fixturePhaseLabel,
   kickoffClockLabel,
 } from "../lib/discovered-fixture-display";
 import {
+  KalshiFixtureMarketInventoryRow,
   comparisonLabel,
   coverageLabel,
   economicsSummary,
@@ -16,7 +14,12 @@ import {
   solverFacts,
 } from "../lib/fixture-inventory-display";
 
-export function FixtureInventoryWorkspace({ detail }: { detail: FixtureDetailReadModel }) {
+type KalshiFixtureDetailReadModel = Omit<FixtureDetailReadModel, "fixture" | "markets"> & {
+  fixture: FixtureDetailReadModel["fixture"] & { kalshi_matched?: boolean };
+  markets: KalshiFixtureMarketInventoryRow[];
+};
+
+export function FixtureInventoryWorkspace({ detail }: { detail: KalshiFixtureDetailReadModel }) {
   const fixture = detail.fixture;
   const phase = fixturePhaseLabel(fixture);
 
@@ -50,7 +53,11 @@ export function FixtureInventoryWorkspace({ detail }: { detail: FixtureDetailRea
           : " · no solver net edge"}
         . Matchbook status {fixture.fixture_status ?? "unknown"}
         {fixture.in_running ? " · in-play" : " · pre-match"}. Polymarket{" "}
-        {fixture.polymarket_matched ? "matched" : fixture.no_comparison_reason ?? "unmatched"}.
+        {fixture.polymarket_matched ? "matched" : fixture.no_comparison_reason ?? "unmatched"}
+        {fixture.kalshi_matched != null
+          ? `. Kalshi ${fixture.kalshi_matched ? "matched" : "unmatched"}`
+          : ""}
+        .
       </p>
 
       {detail.markets.length === 0 ? (
@@ -60,7 +67,7 @@ export function FixtureInventoryWorkspace({ detail }: { detail: FixtureDetailRea
       ) : (
         <div className="inventory-stack">
           {detail.markets.map((row) => (
-            <InventoryRowCard key={`${row.display_name}-${row.comparison_status}-${row.matchbook?.source_market_id ?? ""}-${row.polymarket?.source_market_id ?? ""}`} row={row} />
+            <InventoryRowCard key={`${row.display_name}-${row.comparison_status}-${row.matchbook?.source_market_id ?? ""}-${row.polymarket?.source_market_id ?? ""}-${row.kalshi?.source_market_id ?? ""}`} row={row} />
           ))}
         </div>
       )}
@@ -68,7 +75,7 @@ export function FixtureInventoryWorkspace({ detail }: { detail: FixtureDetailRea
   );
 }
 
-function InventoryRowCard({ row }: { row: FixtureMarketInventoryRow }) {
+function InventoryRowCard({ row }: { row: KalshiFixtureMarketInventoryRow }) {
   return (
     <article className="opp-card">
       <div className="opp-card-top">
@@ -103,8 +110,33 @@ function InventoryRowCard({ row }: { row: FixtureMarketInventoryRow }) {
               : "not present"}
           </div>
         </div>
+        <div>
+          <div className="metric-label">Kalshi</div>
+          <div>{quoteSummary(row.kalshi)}</div>
+          <div className="muted">{economicsSummary(row.kalshi)}</div>
+          <div className="muted">
+            {row.kalshi
+              ? `id ${row.kalshi.source_market_id} · settlement ${row.kalshi.settlement_complete ? "complete" : "incomplete/unknown"}`
+              : "not present"}
+          </div>
+        </div>
       </div>
       <p className="section-copy">{solverFacts(row)}</p>
+      {row.pair_results?.length ? (
+        <p className="muted">
+          Pairwise:{" "}
+          {row.pair_results
+            .map((pair) => {
+              const label = `${pair.left_venue}↔${pair.right_venue}`;
+              if (pair.entered_solver) {
+                return `${label} ${pair.solver_model ?? "solver"}`;
+              }
+              const reason = pair.rejection_reasons[0] ?? "not entered";
+              return `${label} ${reason}`;
+            })
+            .join(" · ")}
+        </p>
+      ) : null}
       {row.rejection_reasons.length ? (
         <p className="muted">Reasons: {row.rejection_reasons.join(", ")}</p>
       ) : null}

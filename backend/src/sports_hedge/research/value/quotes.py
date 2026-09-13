@@ -13,6 +13,7 @@ _VENUE_TIEBREAK = {
     VenueName.MATCHBOOK: 0,
     VenueName.SMARKETS: 1,
     VenueName.POLYMARKET: 2,
+    VenueName.KALSHI: 3,
 }
 
 

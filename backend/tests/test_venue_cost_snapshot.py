@@ -69,7 +69,7 @@ def test_payout_basis_is_not_a_profit_haircut() -> None:
 
 def test_unknown_and_formula_bases_fail_closed() -> None:
     unknown = _snapshot(fee_basis=FeeBasis.UNKNOWN, known_status=CostKnownStatus.UNKNOWN, rate=None)
-    formula = _snapshot(fee_basis=FeeBasis.FORMULA, rate=None)
+    formula = _snapshot(fee_basis=FeeBasis.FORMULA, rate=None, formula_name="unregistered")
 
     with pytest.raises(CostRuleError, match="unknown"):
         apply_venue_costs(unknown, gross_decimal_odds=Decimal("2.20"))

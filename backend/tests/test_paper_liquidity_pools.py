@@ -58,6 +58,7 @@ def test_native_currencies_stay_separate_and_refuse_combined_cash() -> None:
         {
             VenueName.MATCHBOOK: Decimal("100"),
             VenueName.POLYMARKET: Decimal("200"),
+            VenueName.KALSHI: Decimal("0"),
             VenueName.SMARKETS: Decimal("50"),
         }
     )
@@ -82,6 +83,7 @@ def test_smarkets_pool_is_excluded_from_solver_limits() -> None:
     limits = snapshot.solver_gbp_limits({"GBP": Decimal("1"), "USD": Decimal("0.75")})
     assert VenueName.MATCHBOOK in limits
     assert VenueName.POLYMARKET in limits
+    assert VenueName.KALSHI in limits
     assert VenueName.SMARKETS not in limits
 
 
@@ -220,6 +222,7 @@ def test_liquidity_api_persists_and_resets(tmp_path: Path) -> None:
         venues = {pool["venue"]: pool for pool in body["pools"]}
         assert venues["matchbook"]["native_currency"] == "GBP"
         assert venues["polymarket"]["native_currency"] == "USD"
+        assert venues["kalshi"]["native_currency"] == "USD"
         assert venues["smarkets"]["included_in_solver"] is False
         assert "combined_cash" not in str(body)
 
@@ -245,6 +248,7 @@ def test_liquidity_api_persists_and_resets(tmp_path: Path) -> None:
         reset_body = reset.json()
         reset_venues = {pool["venue"]: pool for pool in reset_body["pools"]}
         assert Decimal(reset_venues["matchbook"]["available"]) == Decimal("5000")
+        assert Decimal(reset_venues["kalshi"]["available"]) == Decimal("5000")
         assert Decimal(reset_venues["smarkets"]["available"]) == Decimal("0")
     finally:
         app.dependency_overrides.clear()

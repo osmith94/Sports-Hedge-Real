@@ -42,7 +42,7 @@ class EventMatcher:
             resolve_team_name(left.away_team),
             resolve_team_name(right.away_team),
         )
-        competition_score = self._similarity(left.competition, right.competition)
+        competition_score = self._competition_score(left.competition, right.competition)
         kickoff_score = 1.0 - (kickoff_delta.total_seconds() / self.kickoff_tolerance.total_seconds())
 
         confidence = (
@@ -66,3 +66,13 @@ class EventMatcher:
             confidence=round(confidence, 6),
             reasons=reasons,
         )
+
+    @staticmethod
+    def _competition_score(left: str, right: str) -> float:
+        from sports_hedge.application.target_competitions import resolve_target_competition
+
+        left_target = resolve_target_competition(left)
+        right_target = resolve_target_competition(right)
+        if left_target is not None and right_target is not None:
+            return 1.0 if left_target.code == right_target.code else 0.0
+        return EventMatcher._similarity(left, right)

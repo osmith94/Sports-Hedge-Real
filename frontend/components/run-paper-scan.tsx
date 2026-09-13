@@ -58,6 +58,7 @@ function sourceLabel(source: string): string {
   if (source.includes("boe")) return "BoE";
   if (source.includes("matchbook")) return "registry";
   if (source.includes("polymarket")) return "registry";
+  if (source.includes("kalshi")) return "series";
   return source.replace(/^venue_cost_registry:/, "");
 }
 
@@ -70,7 +71,7 @@ function clockStamp(iso: string | null | undefined): string | null {
 
 function venueCostChip(
   status: EconomicsStatus | null,
-  venue: "matchbook" | "polymarket",
+  venue: "matchbook" | "polymarket" | "kalshi",
   short: string,
 ): StripChip {
   const preferred = ["match_result", "both_teams_to_score"];
@@ -142,6 +143,7 @@ function economicsChips(status: EconomicsStatus | null): StripChip[] {
     fxChip,
     venueCostChip(status, "matchbook", "MB"),
     venueCostChip(status, "polymarket", "PM"),
+    venueCostChip(status, "kalshi", "KS"),
   ];
 }
 

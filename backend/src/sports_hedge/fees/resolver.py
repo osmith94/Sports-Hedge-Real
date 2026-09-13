@@ -39,6 +39,8 @@ class VenueCostRule(BaseModel):
     known_status: CostKnownStatus
     rate: Decimal | None = Field(default=None, ge=0, lt=1)
     fixed_amount: Decimal | None = Field(default=None, ge=0)
+    formula_parameters: dict[str, Decimal] = Field(default_factory=dict)
+    formula_name: str | None = None
     currency: str = "GBP"
     fee_scope: FeeScope = FeeScope.PER_QUOTE
     source: str
@@ -91,6 +93,8 @@ class VenueCostRule(BaseModel):
             account_or_fee_tier=self.account_or_fee_tier,
             rate=self.rate,
             fixed_amount=self.fixed_amount,
+            formula_parameters=dict(self.formula_parameters),
+            formula_name=self.formula_name,
             currency=self.currency,
             effective_from=self.effective_from,
             snapshot_id=f"{self.snapshot_id_prefix}:{self.catalog_version}:{self.venue.value}:{self.market_class}:{self.action.value}:{self.order_role.value}",

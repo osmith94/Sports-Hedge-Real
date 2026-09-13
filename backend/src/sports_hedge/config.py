@@ -47,6 +47,28 @@ class Settings(BaseSettings):
     polymarket_gamma_page_limit: int = Field(default=100, ge=1, le=100)
     polymarket_gamma_max_pages_per_series: int = Field(default=5, ge=1, le=20)
 
+    # Public Kalshi Trade API v2 market data. Demo host is opt-in.
+    kalshi_base_url: str = "https://external-api.kalshi.com/trade-api/v2"
+    kalshi_demo_base_url: str = "https://external-api.demo.kalshi.co/trade-api/v2"
+    kalshi_use_demo: bool = False
+    kalshi_event_page_limit: int = Field(default=200, ge=1, le=200)
+    kalshi_event_max_pages: int = Field(default=10, ge=1, le=50)
+    kalshi_series_tickers: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "KXEPLGAME",
+            "KXEPLBTTS",
+            "KXEPLTOTAL",
+            "KXEPLFTTS",
+            "KXEFLCHAMPIONSHIPGAME",
+            "KXEFLCHAMPIONSHIPBTTS",
+            "KXEFLCHAMPIONSHIPTOTAL",
+            "KXLALIGAGAME",
+            "KXLALIGABTTS",
+            "KXLALIGATOTAL",
+            "KXLALIGAFTTS",
+        ]
+    )
+
     market_intelligence_db_path: str = "./data/market_intelligence.sqlite"
     market_intelligence_minimum_sample_size: int = Field(default=8, ge=2)
     event_intelligence_db_path: str = "./data/event_intelligence.sqlite"
@@ -74,6 +96,7 @@ class Settings(BaseSettings):
 
     paper_bankroll_gbp: float = Field(default=5000.0, gt=0)
     paper_bankroll_usd: float = Field(default=5000.0, gt=0)
+    paper_bankroll_kalshi_usd: float = Field(default=5000.0, gt=0)
     paper_treasury_seed_gbp: float = Field(default=1000.0, gt=0)
     paper_treasury_demo_usd_gbp_per_unit: float = Field(default=0.80, gt=0)
     paper_treasury_demo_fx_source: str = "paper_demo_fx_snapshot"
@@ -122,6 +145,16 @@ class Settings(BaseSettings):
     @classmethod
     def split_polymarket_series_ids(cls, value: Any) -> list[str]:
         return parse_series_ids(value)
+
+    @field_validator("kalshi_series_tickers", mode="before")
+    @classmethod
+    def split_kalshi_series_tickers(cls, value: Any) -> list[str]:
+        return parse_series_ids(value)
+
+    def resolved_kalshi_base_url(self) -> str:
+        if self.kalshi_use_demo:
+            return self.kalshi_demo_base_url.rstrip("/")
+        return self.kalshi_base_url.rstrip("/")
 
     def resolved_polymarket_series_ids(self) -> list[str]:
         """Single-id override wins when set, including explicit disable (empty)."""

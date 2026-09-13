@@ -69,6 +69,7 @@ def health() -> dict[str, object]:
         "live_refresh": {
             "discovery_source": "matchbook",
             "matching_venue": "polymarket",
+            "matching_venues": ["polymarket", "kalshi"],
             "server_loop_enabled": coordinator.status.server_loop_enabled,
             "interval_seconds": coordinator.status.interval_seconds,
         },
@@ -92,6 +93,11 @@ def venues() -> list[dict[str, object]]:
             "venue": VenueName.POLYMARKET,
             "capabilities": paper_only.model_dump(),
             "integration": "public_market_data",
+        },
+        {
+            "venue": VenueName.KALSHI,
+            "capabilities": paper_only.model_dump(),
+            "integration": "official_api",
         },
         {
             "venue": VenueName.SMARKETS,

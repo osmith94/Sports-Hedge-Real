@@ -88,6 +88,18 @@ class FixtureMarketInventoryRow(BaseModel):
     solver_is_arbitrage: bool = False
     matchbook: VenueMarketFacts | None = None
     polymarket: VenueMarketFacts | None = None
+    kalshi: VenueMarketFacts | None = None
+    pair_results: list["InventoryPairResult"] = Field(default_factory=list)
+
+
+class InventoryPairResult(BaseModel):
+    left_venue: VenueName
+    right_venue: VenueName
+    entered_solver: bool = False
+    solver_model: str | None = None
+    current_net_edge: Decimal | None = None
+    rejection_reasons: list[str] = Field(default_factory=list)
+    solver_is_arbitrage: bool = False
 
 
 class InventoryMarket(BaseModel):
@@ -137,8 +149,10 @@ def assemble_fixture_inventory(
     matchbook_markets: list[InventoryMarket],
     polymarket_markets: list[InventoryMarket],
     *,
+    kalshi_markets: list[InventoryMarket] | None = None,
     matcher: MarketMatcher | None = None,
     decisions_by_source_ids: dict[tuple[str, str], PaperScanDecision] | None = None,
+    decisions_by_pair: dict[tuple[str, str, str, str], PaperScanDecision] | None = None,
     venue_costs: list[VenueCostSnapshot] | None = None,
     fx_snapshots: list[FxRateSnapshot] | None = None,
 ) -> list[FixtureMarketInventoryRow]:
@@ -146,6 +160,8 @@ def assemble_fixture_inventory(
 
     matcher = matcher or MarketMatcher()
     decisions = decisions_by_source_ids or {}
+    pair_decisions = decisions_by_pair or {}
+    kalshi_markets = kalshi_markets or []
     rows: list[FixtureMarketInventoryRow] = []
 
     unmatched_left: list[InventoryMarket] = []
@@ -216,6 +232,74 @@ def assemble_fixture_inventory(
         if index not in grouped_right:
             rows.append(_venue_only_row(right, venue_costs=venue_costs, fx_snapshots=fx_snapshots))
 
+    unmatched_kalshi: list[InventoryMarket] = []
+    for item in kalshi_markets:
+        if item.canonical is None:
+            rows.append(_unnormalized_row(item, venue_costs=venue_costs, fx_snapshots=fx_snapshots))
+        else:
+            unmatched_kalshi.append(item)
+    attached: set[int] = set()
+    for row in rows:
+        kalshi_index = _matching_kalshi_index(row, unmatched_kalshi, matcher)
+        if kalshi_index is None:
+            continue
+        attached.add(kalshi_index)
+        kalshi_item = unmatched_kalshi[kalshi_index]
+        _attach_kalshi(
+            row,
+            kalshi_item,
+            matcher=matcher,
+            pair_decisions=pair_decisions,
+            venue_costs=venue_costs,
+            fx_snapshots=fx_snapshots,
+        )
+    leftover_kalshi = [
+        item for index, item in enumerate(unmatched_kalshi) if index not in attached
+    ]
+    leftover_pm_only = [
+        row for row in rows if row.polymarket is not None and row.matchbook is None and row.kalshi is None
+    ]
+    used_pm_rows: set[int] = set()
+    used_kalshi: set[int] = set()
+    for kalshi_index, kalshi_item in enumerate(leftover_kalshi):
+        for row_index, row in enumerate(leftover_pm_only):
+            if row_index in used_pm_rows:
+                continue
+            pm_item = _inventory_from_facts(row.polymarket, VenueName.POLYMARKET, polymarket_markets)
+            if pm_item is None or pm_item.canonical is None or kalshi_item.canonical is None:
+                continue
+            match = matcher.match(pm_item.canonical, kalshi_item.canonical)
+            if not match.matched:
+                continue
+            used_pm_rows.add(row_index)
+            used_kalshi.add(kalshi_index)
+            decision = pair_decisions.get(
+                (
+                    VenueName.POLYMARKET.value,
+                    pm_item.source_market_id,
+                    VenueName.KALSHI.value,
+                    kalshi_item.source_market_id,
+                )
+            ) or decisions.get((pm_item.source_market_id, kalshi_item.source_market_id))
+            replacement = _paired_row(
+                pm_item,
+                kalshi_item,
+                match,
+                decision=decision,
+                venue_costs=venue_costs,
+                fx_snapshots=fx_snapshots,
+            )
+            replacement.polymarket = row.polymarket
+            replacement.kalshi = _facts_from_inventory(
+                kalshi_item, venue_costs=venue_costs, fx_snapshots=fx_snapshots
+            )
+            replacement.matchbook = None
+            rows[rows.index(row)] = replacement
+            break
+    for index, item in enumerate(leftover_kalshi):
+        if index not in used_kalshi and index not in attached:
+            rows.append(_venue_only_row(item, venue_costs=venue_costs, fx_snapshots=fx_snapshots))
+
     return _sort_rows(rows)
 
 
@@ -279,6 +363,7 @@ def _unnormalized_row(
         rejection_reasons=[item.normalize_error] if item.normalize_error else ["unsupported_family"],
         matchbook=facts if item.venue is VenueName.MATCHBOOK else None,
         polymarket=facts if item.venue is VenueName.POLYMARKET else None,
+        kalshi=facts if item.venue is VenueName.KALSHI else None,
     )
 
 
@@ -318,6 +403,7 @@ def _venue_only_row(
         rejection_reasons=reasons,
         matchbook=facts if item.venue is VenueName.MATCHBOOK else None,
         polymarket=facts if item.venue is VenueName.POLYMARKET else None,
+        kalshi=facts if item.venue is VenueName.KALSHI else None,
     )
 
 
@@ -366,8 +452,27 @@ def _paired_row(
         trigger_net_edge=decision.minimum_net_edge if decision is not None and entered else None,
         distance_to_trigger_pp=_decision_distance(decision) if entered else None,
         solver_is_arbitrage=_decision_is_arb(decision) if entered else False,
-        matchbook=_facts_from_inventory(left, venue_costs=venue_costs, fx_snapshots=fx_snapshots),
-        polymarket=_facts_from_inventory(right, venue_costs=venue_costs, fx_snapshots=fx_snapshots),
+        matchbook=_facts_from_inventory(left, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
+        if left.venue is VenueName.MATCHBOOK
+        else (
+            _facts_from_inventory(right, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
+            if right.venue is VenueName.MATCHBOOK
+            else None
+        ),
+        polymarket=_facts_from_inventory(left, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
+        if left.venue is VenueName.POLYMARKET
+        else (
+            _facts_from_inventory(right, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
+            if right.venue is VenueName.POLYMARKET
+            else None
+        ),
+        kalshi=_facts_from_inventory(left, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
+        if left.venue is VenueName.KALSHI
+        else (
+            _facts_from_inventory(right, venue_costs=venue_costs, fx_snapshots=fx_snapshots)
+            if right.venue is VenueName.KALSHI
+            else None
+        ),
     )
 
 
@@ -644,9 +749,110 @@ def _sort_rows(rows: list[FixtureMarketInventoryRow]) -> list[FixtureMarketInven
     )
 
 
+def _matching_kalshi_index(
+    row: FixtureMarketInventoryRow,
+    kalshi_markets: list[InventoryMarket],
+    _matcher: MarketMatcher,
+) -> int | None:
+    if row.family is None:
+        return None
+    for index, item in enumerate(kalshi_markets):
+        if item.canonical is None:
+            continue
+        if item.canonical.family.value != row.family:
+            continue
+        if row.period and item.canonical.period.value != row.period:
+            continue
+        if row.line is not None and item.canonical.line != row.line:
+            continue
+        if row.matchbook is None and row.polymarket is None:
+            continue
+        settlement_keys = {
+            facts.settlement_key
+            for facts in (row.matchbook, row.polymarket)
+            if facts is not None and facts.settlement_key
+        }
+        kalshi_key = item.canonical.settlement.deterministic_key()
+        if settlement_keys and kalshi_key not in settlement_keys:
+            continue
+        return index
+    return None
+
+
+def _attach_kalshi(
+    row: FixtureMarketInventoryRow,
+    kalshi_item: InventoryMarket,
+    *,
+    matcher: MarketMatcher,
+    pair_decisions: dict[tuple[str, str, str, str], PaperScanDecision],
+    venue_costs: list[VenueCostSnapshot] | None,
+    fx_snapshots: list[FxRateSnapshot] | None,
+) -> None:
+    row.kalshi = _facts_from_inventory(
+        kalshi_item, venue_costs=venue_costs, fx_snapshots=fx_snapshots
+    )
+    pair_summaries: list[InventoryPairResult] = []
+    for facts, venue in (
+        (row.matchbook, VenueName.MATCHBOOK),
+        (row.polymarket, VenueName.POLYMARKET),
+    ):
+        if facts is None:
+            continue
+        decision = pair_decisions.get(
+            (venue.value, facts.source_market_id, VenueName.KALSHI.value, kalshi_item.source_market_id)
+        )
+        if decision is None:
+            continue
+        entered = bool(decision.eligible_for_paper_simulation or decision.solver_model)
+        if decision.solver_model and "market_not_equivalent" not in decision.rejection_reasons:
+            entered = True
+        pair_summaries.append(
+            InventoryPairResult(
+                left_venue=venue,
+                right_venue=VenueName.KALSHI,
+                entered_solver=entered and bool(decision.solver_model),
+                solver_model=decision.solver_model,
+                current_net_edge=_decision_net_edge(decision),
+                rejection_reasons=list(decision.rejection_reasons),
+                solver_is_arbitrage=_decision_is_arb(decision),
+            )
+        )
+    row.pair_results = pair_summaries
+    if pair_summaries:
+        best = max(
+            pair_summaries,
+            key=lambda item: item.current_net_edge or Decimal("-1"),
+        )
+        if best.entered_solver and not row.entered_solver:
+            row.entered_solver = True
+            row.solver_model = best.solver_model
+            row.current_net_edge = best.current_net_edge
+            row.solver_is_arbitrage = best.solver_is_arbitrage
+
+
+def _inventory_from_facts(
+    facts: VenueMarketFacts | None,
+    venue: VenueName,
+    source: list[InventoryMarket],
+) -> InventoryMarket | None:
+    if facts is None:
+        return None
+    for item in source:
+        if item.source_market_id == facts.source_market_id and item.venue is venue:
+            return item
+    return None
+
+
 def raw_market_name(payload: dict[str, Any], venue: VenueName) -> str:
     if venue is VenueName.MATCHBOOK:
         return str(payload.get("name") or payload.get("id") or "Matchbook market")
+    if venue is VenueName.KALSHI:
+        return str(
+            payload.get("title")
+            or payload.get("yes_sub_title")
+            or payload.get("ticker")
+            or "Kalshi market"
+        )
     return str(
         payload.get("question")
         or payload.get("title")
@@ -659,4 +865,6 @@ def raw_market_name(payload: dict[str, Any], venue: VenueName) -> str:
 def raw_market_id(payload: dict[str, Any], venue: VenueName) -> str:
     if venue is VenueName.MATCHBOOK:
         return str(payload.get("id") or "")
+    if venue is VenueName.KALSHI:
+        return str(payload.get("ticker") or payload.get("event_ticker") or payload.get("id") or "")
     return str(payload.get("id") or payload.get("conditionId") or payload.get("condition_id") or "")

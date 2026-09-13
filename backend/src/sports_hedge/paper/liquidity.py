@@ -23,6 +23,7 @@ NativeCurrency = Literal["GBP", "USD"]
 POOL_SPEC: dict[VenueName, tuple[NativeCurrency, bool]] = {
     VenueName.MATCHBOOK: ("GBP", True),
     VenueName.POLYMARKET: ("USD", True),
+    VenueName.KALSHI: ("USD", True),
     VenueName.SMARKETS: ("GBP", False),
 }
 
@@ -65,7 +66,26 @@ class PaperLiquiditySnapshot(BaseModel):
         venues = [pool.venue for pool in self.pools]
         if len(venues) != len(set(venues)):
             raise ValueError("duplicate venue liquidity pool")
+
+        # K1 migration boundary: persisted/configured snapshots created before
+        # Kalshi existed legitimately contain the original three standing pools.
+        # Upgrade only that single legacy omission and never invent spendable
+        # capital: Kalshi arrives as its own USD pool with zero available cash.
         missing = [venue for venue in POOL_SPEC if venue not in venues]
+        if missing == [VenueName.KALSHI]:
+            self.pools.append(
+                PaperLiquidityPool(
+                    venue=VenueName.KALSHI,
+                    native_currency="USD",
+                    available=Decimal("0"),
+                    included_in_solver=True,
+                    connection_status="connected",
+                    gbp_carrying_status="fx_unavailable",
+                    updated_at=self.updated_at,
+                )
+            )
+            missing = []
+
         if missing:
             raise ValueError(f"missing standing pools: {[venue.value for venue in missing]}")
         return self
@@ -101,8 +121,14 @@ class PaperLiquiditySnapshot(BaseModel):
         return limits
 
 
-def default_pools(*, matchbook_gbp: Decimal, polymarket_usd: Decimal) -> list[PaperLiquidityPool]:
+def default_pools(
+    *,
+    matchbook_gbp: Decimal,
+    polymarket_usd: Decimal,
+    kalshi_usd: Decimal | None = None,
+) -> list[PaperLiquidityPool]:
     now = datetime.now(UTC)
+    kalshi_available = Decimal("5000") if kalshi_usd is None else kalshi_usd
     return [
         PaperLiquidityPool(
             venue=VenueName.MATCHBOOK,
@@ -119,6 +145,15 @@ def default_pools(*, matchbook_gbp: Decimal, polymarket_usd: Decimal) -> list[Pa
             venue=VenueName.POLYMARKET,
             native_currency="USD",
             available=polymarket_usd,
+            included_in_solver=True,
+            connection_status="connected",
+            gbp_carrying_status="fx_unavailable",
+            updated_at=now,
+        ),
+        PaperLiquidityPool(
+            venue=VenueName.KALSHI,
+            native_currency="USD",
+            available=kalshi_available,
             included_in_solver=True,
             connection_status="connected",
             gbp_carrying_status="fx_unavailable",

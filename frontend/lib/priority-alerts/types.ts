@@ -1,4 +1,4 @@
-export type VenueId = "matchbook" | "polymarket" | "smarkets";
+export type VenueId = "matchbook" | "polymarket" | "kalshi" | "smarkets";
 export type CurrencyCode = "GBP" | "USD";
 export type AlertSeverity = "PRIORITY" | "HIGH_PRIORITY" | "CRITICAL";
 export type FillConfidenceBand = "LOW" | "MEDIUM" | "HIGH";
