@@ -56,7 +56,7 @@ from sports_hedge.domain.football import CanonicalEvent, CanonicalMarket
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.models import FeeSnapshot
-from sports_hedge.matching.events import EventMatchResult, EventMatcher
+from sports_hedge.matching.events import EventMatcher
 from sports_hedge.matching.markets import MarketMatchResult, MarketMatcher
 from sports_hedge.normalization.venues import (
     KalshiNormalizer,
