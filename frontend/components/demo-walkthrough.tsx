@@ -462,8 +462,9 @@ export function DemoWalkthroughBoard() {
         </div>
         <div className="panel-body">
           <HoldVsUnwindCard decision={unwind} />
-          {shownTrade?.state === "OPEN" ? (
+          {shownTrade?.state === "OPEN" || shownTrade?.state === "CLOSED" ? (
             <div className="demo-actions" style={{ marginTop: 12 }}>
+              {shownTrade.state === "OPEN" ? (
               <button
                 className="pool-reset"
                 type="button"
@@ -476,6 +477,7 @@ export function DemoWalkthroughBoard() {
               >
                 Hold — do not release
               </button>
+              ) : null}
               <button
                 className="demo-primary"
                 type="button"

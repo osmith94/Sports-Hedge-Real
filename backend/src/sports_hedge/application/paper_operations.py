@@ -325,7 +325,11 @@ class PaperOperationsService:
         reconciled = False
         if result.accepted:
             reporting_sum = sum((leg.capital_reporting for leg in legs), Decimal("0"))
-            reconciled = reporting_sum == result.recommended_committed_capital
+            # Scaling native legs to GBP can leave sub-tick dust (observed ~1e-27).
+            # That is not a resize; a true mismatch is pounds or cents, not dust.
+            reconciled = abs(reporting_sum - result.recommended_committed_capital) <= Decimal(
+                "0.00000001"
+            )
             for item in required:
                 try:
                     pool = snap.pool(item.venue, item.currency)

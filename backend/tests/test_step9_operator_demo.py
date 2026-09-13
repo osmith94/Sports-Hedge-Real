@@ -373,6 +373,48 @@ def test_qualify_only_then_confirm_ten_pounds_then_hold_unwind_excludes_settleme
         ledger.close()
 
 
+def test_qualify_ten_pounds_accepts_with_production_fx_and_slippage(tmp_path: Path) -> None:
+    settings = Settings(
+        paper_treasury_seed_gbp=1000,
+        paper_treasury_demo_usd_gbp_per_unit=0.80,
+        paper_treasury_demo_fx_source="paper_demo_fx_snapshot",
+        paper_autofill_enabled=False,
+    )
+    assert settings.max_slippage_bps == 25
+    assert settings.fx_spread_bps == 10
+    ledger = SqlitePaperLedger(
+        tmp_path / "paper.sqlite",
+        seed_gbp=SEED,
+        usd_gbp_per_unit=FX,
+        fx_source="paper_demo_fx_snapshot",
+    )
+    repository = SqliteMarketIntelligenceRepository()
+    watchlist = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=10_000)
+    ops = PaperOperationsService(
+        watchlist=watchlist,
+        alerts=PriorityAlertService(),
+        settings=settings,
+        ledger=ledger,
+    )
+    demo = DemoWalkthroughService(
+        operations=ops,
+        scan=PaperScanService(MarketIntelligenceService(repository), settings=settings),
+        watchlist=watchlist,
+        ledger=ledger,
+        settings=settings,
+    )
+    try:
+        qualified = demo.replay(FixtureReplayRequest(close_via="hold", qualify_only=True))
+        preview = ops.prepare_fixed_deployment(qualified.opportunity_id, Decimal("10"))
+        assert preview.accepted is True, preview.rejection_reason
+        assert preview.applied_size_gbp == Decimal("10")
+        assert preview.native_requirements_reconciled is True
+        assert preview.resized is False
+    finally:
+        repository.close()
+        ledger.close()
+
+
 def test_ledger_reconciliation_api_is_read_only(tmp_path: Path) -> None:
     demo, _ops, _watchlist, ledger, repository = _bundle(tmp_path)
     get_demo_walkthrough_service.cache_clear()
