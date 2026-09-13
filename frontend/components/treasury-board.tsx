@@ -7,7 +7,7 @@ import {
   PaperLedgerReconciliation,
   PaperTreasurySnapshot,
   getPaperLedgerReconciliation,
-  resetPaperTreasury,
+  resetPaperSession,
 } from "../lib/api";
 import { money, relativeTime } from "../lib/format";
 
@@ -31,6 +31,7 @@ export function TreasuryBoard({
 }) {
   const router = useRouter();
   const [saving, setSaving] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reconciliation, setReconciliation] = useState<PaperLedgerReconciliation | null>(null);
 
@@ -42,13 +43,20 @@ export function TreasuryBoard({
 
   async function onReset(event: FormEvent) {
     event.preventDefault();
+    if (!confirmReset) {
+      setConfirmReset(true);
+      setError(null);
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      await resetPaperTreasury("operator demo reset from treasury UI");
+      await resetPaperSession("explicit operator paper session reset from treasury UI");
+      setConfirmReset(false);
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not reset paper treasury.");
+      const raw = err instanceof Error ? err.message : "Could not reset paper session.";
+      setError(`Reset failed: ${raw}`);
     } finally {
       setSaving(false);
     }
@@ -104,13 +112,29 @@ export function TreasuryBoard({
           </div>
           <div className="pool-actions">
             <button className="pool-reset" type="submit" form="treasury-reset" disabled={saving}>
-              {saving ? "Resetting…" : "Reset demo session"}
+              {confirmReset
+                ? saving
+                  ? "Resetting…"
+                  : "Confirm reset demo session"
+                : "Reset demo session"}
             </button>
           </div>
           <form id="treasury-reset" onSubmit={(event) => void onReset(event)}>
             <div className="scan-note">
-              Reset opens a new auditable session and seeds £1,000 / USD equivalent. Prior journal
-              and treasury events are retained.
+              {confirmReset
+                ? "Destructive paper-session reset. Remaining demo locks are released at zero betting P&L, active paper trades are abandoned (not a market settlement), identities are archived, and a fresh treasury session opens at configured defaults. Journal/history is retained. PAPER CAPITAL is hypothetical. Confirm above to proceed, or cancel."
+                : "Reset opens a new auditable session and seeds £1,000 / USD equivalent. Remaining paper locks are released at zero betting P&L first; this is not a market settlement. Prior journal and treasury events are retained."}
+              {confirmReset ? (
+                <button
+                  className="pool-link"
+                  type="button"
+                  onClick={() => setConfirmReset(false)}
+                  disabled={saving}
+                  style={{ marginLeft: 8 }}
+                >
+                  Cancel
+                </button>
+              ) : null}
             </div>
           </form>
           {error ? (

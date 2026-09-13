@@ -985,18 +985,34 @@ class PaperTreasuryService(SerializedLedgerBound):
         self._assert_reset_allowed(session)
 
     def _assert_reset_allowed(self, session: PaperTreasurySession) -> None:
-        open_locks = self._connection.execute(
-            """
-            SELECT COUNT(*) AS n FROM paper_treasury_locks
-            WHERE session_id = ? AND status = 'open'
-            """,
-            (session.session_id,),
-        ).fetchone()["n"]
-        if open_locks:
-            raise PaperTreasuryError("active_treasury_locks")
+        lock_rows = list(
+            self._connection.execute(
+                """
+                SELECT lock_id, trade_id FROM paper_treasury_locks
+                WHERE session_id = ? AND status = 'open'
+                ORDER BY lock_id
+                """,
+                (session.session_id,),
+            )
+        )
+        if lock_rows:
+            raise PaperTreasuryError(
+                _mutation_block_message(
+                    "active_treasury_locks",
+                    lock_ids=[row["lock_id"] for row in lock_rows],
+                    trade_ids=[row["trade_id"] for row in lock_rows if row["trade_id"]],
+                )
+            )
         trades = getattr(self._ledger, "trades", None)
-        if trades is not None and trades.list_active():
-            raise PaperTreasuryError("open_paper_positions")
+        if trades is not None:
+            active = trades.list_active()
+            if active:
+                raise PaperTreasuryError(
+                    _mutation_block_message(
+                        "open_paper_positions",
+                        trade_ids=[trade.trade_id for trade in active],
+                    )
+                )
 
     def _authoritative_lock_fx(self, pool: Any, request: TreasuryLockRequest) -> tuple[Decimal, str]:
         if pool["fx_rate_gbp_per_unit"] is None:
@@ -1284,3 +1300,21 @@ def _lock_facts_match(existing: Any, request: TreasuryLockRequest) -> bool:
         and _row_value(existing, "fill_id", existing["lock_id"])
         == (request.fill_id or request.lock_id)
     )
+
+
+def _mutation_block_message(
+    code: str,
+    *,
+    lock_ids: list[str] | None = None,
+    trade_ids: list[str] | None = None,
+) -> str:
+    """Keep the fail-closed code as the prefix so existing matchers still pass."""
+
+    parts = [code]
+    unique_locks = list(dict.fromkeys(lock_ids or []))
+    unique_trades = list(dict.fromkeys(trade_ids or []))
+    if unique_locks:
+        parts.append("lock_id=" + ",".join(unique_locks))
+    if unique_trades:
+        parts.append("trade_id=" + ",".join(unique_trades))
+    return " ".join(parts)

@@ -6,10 +6,10 @@ import { useRouter } from "next/navigation";
 
 import {
   PaperLiquidityPool,
-  PaperLiquiditySnapshot,
   PaperTreasuryPool,
   PaperTreasurySnapshot,
-  resetPaperLiquidityPools,
+  PaperLiquiditySnapshot,
+  resetPaperSession,
   savePaperTreasuryPools,
 } from "../lib/api";
 import { money } from "../lib/format";
@@ -47,6 +47,46 @@ function carryingFromTreasury(pool: PaperTreasuryPool): string {
   return `${money(pool.gbp_carrying_value)} · ${pool.fx_source ?? "FX"}${rate}${asOf}`;
 }
 
+function lockedAmount(value: string | number | null | undefined): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function uniqueIds(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value && value.trim())))];
+}
+
+export function explainTreasurySaveError(raw: string): { text: string; tradeIds: string[] } {
+  const lockIds = uniqueIds(
+    [...raw.matchAll(/lock_id=([^\s]+)/g)].flatMap((match) => match[1].split(",")),
+  );
+  const tradeIds = uniqueIds(
+    [...raw.matchAll(/trade_id=([^\s]+)/g)].flatMap((match) => match[1].split(",")),
+  );
+  if (raw.includes("active_treasury_locks")) {
+    const lockBit = lockIds.length ? ` lock_id=${lockIds.join(", ")}` : "";
+    const tradeBit = tradeIds.length ? ` Blocking paper trade: ${tradeIds.join(", ")}.` : "";
+    return {
+      text:
+        `Save blocked: active_treasury_locks.${lockBit}${tradeBit} ` +
+        "Ordinary paper treasury edits fail closed while locks remain. " +
+        "Use Reset paper session to release remaining paper locks at zero betting P&L. History is retained.",
+      tradeIds,
+    };
+  }
+  if (raw.includes("open_paper_positions")) {
+    const tradeBit = tradeIds.length ? ` Blocking paper trade: ${tradeIds.join(", ")}.` : "";
+    return {
+      text:
+        `Save blocked: open_paper_positions.${tradeBit} ` +
+        "Ordinary paper treasury edits fail closed while paper trades are open. " +
+        "Use Reset paper session to abandon active paper trades (not a market settlement) and start a clean session.",
+      tradeIds,
+    };
+  }
+  return { text: raw || "Could not save paper treasury.", tradeIds };
+}
+
 export function LiquidityPools({
   snapshot,
   available,
@@ -63,7 +103,9 @@ export function LiquidityPools({
   const router = useRouter();
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorTradeIds, setErrorTradeIds] = useState<string[]>([]);
   const [draft, setDraft] = useState<Record<string, string>>({});
 
   const useTreasury = Boolean(treasuryAvailable && treasury);
@@ -74,6 +116,16 @@ export function LiquidityPools({
   const treasuryRows = (treasury?.pools ?? []).filter((pool) =>
     FIRST_CLASS.includes(pool.venue as (typeof FIRST_CLASS)[number]),
   );
+  const lockedRows = useTreasury
+    ? treasuryRows.filter((pool) => lockedAmount(pool.locked_capital) > 0)
+    : [];
+  const saveBlocked = lockedRows.length > 0;
+
+  function showError(raw: string) {
+    const explained = explainTreasurySaveError(raw);
+    setError(explained.text);
+    setErrorTradeIds(explained.tradeIds);
+  }
 
   function startEdit() {
     if (useTreasury && treasury) {
@@ -88,6 +140,7 @@ export function LiquidityPools({
       return;
     }
     setError(null);
+    setErrorTradeIds([]);
     setEditing(true);
   }
 
@@ -95,6 +148,7 @@ export function LiquidityPools({
     event.preventDefault();
     setSaving(true);
     setError(null);
+    setErrorTradeIds([]);
     try {
       const venues = useTreasury
         ? treasuryRows.map((pool) => pool.venue)
@@ -108,21 +162,32 @@ export function LiquidityPools({
       setEditing(false);
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save paper treasury.");
+      showError(err instanceof Error ? err.message : "Could not save paper treasury.");
     } finally {
       setSaving(false);
     }
   }
 
-  async function onReset() {
+  async function onResetPaperSession() {
+    if (!useTreasury) return;
+    if (!confirmReset) {
+      setConfirmReset(true);
+      setError(null);
+      setErrorTradeIds([]);
+      return;
+    }
     setSaving(true);
     setError(null);
+    setErrorTradeIds([]);
     try {
-      await resetPaperLiquidityPools();
+      await resetPaperSession("explicit operator paper session reset from Operations Console");
+      setConfirmReset(false);
       setEditing(false);
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not reset paper pools.");
+      const raw = err instanceof Error ? err.message : "Could not reset paper session.";
+      setError(`Reset failed: ${raw}`);
+      setErrorTradeIds(explainTreasurySaveError(raw).tradeIds);
     } finally {
       setSaving(false);
     }
@@ -245,13 +310,54 @@ export function LiquidityPools({
               Edit paper amounts
             </button>
             <Link className="pool-link" href="/treasury">Treasury detail</Link>
-            <button className="pool-reset" type="button" onClick={() => void onReset()} disabled={saving}>
-              Reset defaults
-            </button>
+            {useTreasury ? (
+              <button
+                className="pool-reset"
+                type="button"
+                onClick={() => void onResetPaperSession()}
+                disabled={saving}
+              >
+                {confirmReset ? (saving ? "Resetting…" : "Confirm reset paper session") : "Reset paper session"}
+              </button>
+            ) : null}
           </div>
+          {saveBlocked ? (
+            <div className="scan-message scan-message-error" role="status">
+              Ordinary save is blocked while paper locks remain
+              {lockedRows.map((pool) => (
+                <span key={pool.venue}>
+                  {` · ${VENUE_LABEL[pool.venue] ?? pool.venue} locked ${money(
+                    pool.locked_capital,
+                    pool.native_currency === "USD" ? "USD" : "GBP",
+                  )}`}
+                </span>
+              ))}
+              . Cause: active_treasury_locks. Use Reset paper session rather than deleting history.
+            </div>
+          ) : null}
+          {confirmReset ? (
+            <div className="scan-note">
+              Destructive paper-session reset. Remaining demo locks are released at zero betting P&amp;L,
+              active paper trades are abandoned (not a market settlement), identities are archived, and a
+              fresh treasury session opens at configured defaults. Journal/history is retained. PAPER CAPITAL
+              is hypothetical. Confirm above to proceed, or cancel.
+              <button
+                className="pool-link"
+                type="button"
+                onClick={() => setConfirmReset(false)}
+                disabled={saving}
+                style={{ marginLeft: 8 }}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : null}
           {editing ? (
             <form className="pool-editor" onSubmit={(event) => void onSave(event)}>
-              <div className="scan-note">PAPER CAPITAL / HYPOTHETICAL · does not represent live venue funds. Edits fail closed while locks or open trades exist.</div>
+              <div className="scan-note">
+                PAPER CAPITAL / HYPOTHETICAL · does not represent live venue funds. Edits fail closed while
+                locks or open trades exist (active_treasury_locks / open_paper_positions).
+              </div>
               <div className="scan-control-grid scan-control-grid-ops">
                 {(useTreasury ? treasuryRows : firstClassLiquidity).map((pool) => {
                   const venue = pool.venue;
@@ -294,6 +400,15 @@ export function LiquidityPools({
           {error ? (
             <div className="scan-message scan-message-error" role="alert">
               {error}
+              {errorTradeIds.length ? (
+                <div>
+                  {errorTradeIds.map((tradeId) => (
+                    <Link className="pool-link" href={`/paper/${encodeURIComponent(tradeId)}`} key={tradeId}>
+                      Open blocking paper trade {tradeId}
+                    </Link>
+                  ))}
+                </div>
+              ) : null}
             </div>
           ) : null}
         </>
