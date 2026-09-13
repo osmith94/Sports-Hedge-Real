@@ -30,14 +30,20 @@ from sports_hedge.application.market_observation import (
 )
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.fees.kalshi import resolve_kalshi_fee_metadata
-from sports_hedge.normalization.identity import canonical_source_event_id
+from sports_hedge.application.fixture_clusters import (
+    FixtureCluster,
+    cluster_canonical_event_id,
+    cluster_venue_events,
+    to_venue_event,
+)
 from sports_hedge.application.target_competitions import (
     EVENT_IDENTITY_MISMATCH,
     SERIES_NOT_QUERIED,
     UNMATCHED_POLYMARKET_COVERAGE,
     TARGET_COMPETITIONS,
-    ScopeDecision,
     TargetCompetition,
+    TargetCompetitionCode,
+    filter_in_scope_events,
     resolve_target_competition,
     scope_matchbook_event,
 )
@@ -113,6 +119,7 @@ class DiscoveredFixture(BaseModel):
     competition: str
     target_competition_code: str | None = None
     kickoff_utc: datetime
+    matchbook_matched: bool = False
     polymarket_matched: bool = False
     kalshi_matched: bool = False
     fixture_status: str | None = None
@@ -128,6 +135,7 @@ class DiscoveredFixture(BaseModel):
     outcome_context: str | None = None
     best_matchbook_price: Decimal | None = None
     best_polymarket_price: Decimal | None = None
+    best_kalshi_price: Decimal | None = None
     current_net_edge: Decimal | None = None
     trigger_net_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
@@ -135,6 +143,7 @@ class DiscoveredFixture(BaseModel):
     quote_age_basis: str | None = None
     no_comparison_reason: str | None = None
     solver_is_arbitrage: bool = False
+    opportunity_state: str = "unmatched"
 
 
 class FixturePaperEntry(BaseModel):
@@ -162,6 +171,7 @@ class CollectionReport(BaseModel):
     started_at: datetime
     completed_at: datetime
     discovery_source: VenueName = VenueName.MATCHBOOK
+    discovery_mode: str = "venue_union"
     matching_venue: VenueName = VenueName.POLYMARKET
     matching_venues: list[VenueName] = Field(default_factory=lambda: [VenueName.POLYMARKET])
     raw_matchbook_events: int = Field(default=0, ge=0)
@@ -171,11 +181,20 @@ class CollectionReport(BaseModel):
     normalized_polymarket_events: int = Field(default=0, ge=0)
     normalized_kalshi_events: int = Field(default=0, ge=0)
     matched_event_pairs: int = Field(default=0, ge=0)
+    pair_counts: dict[str, int] = Field(default_factory=dict)
     normalized_matchbook_markets: int = Field(default=0, ge=0)
     normalized_polymarket_markets: int = Field(default=0, ge=0)
     normalized_kalshi_markets: int = Field(default=0, ge=0)
     matched_market_pairs: int = Field(default=0, ge=0)
     order_books_fetched: int = Field(default=0, ge=0)
+    skipped_out_of_scope: int = Field(default=0, ge=0)
+    skipped_by_reason: dict[str, int] = Field(default_factory=dict)
+    rejected_competition_labels: list[str] = Field(default_factory=list)
+    target_coverage: dict[str, dict[str, int]] = Field(default_factory=dict)
+    config_warnings: list[str] = Field(default_factory=list)
+    operator_summary: str = ""
+    venue_health: dict[str, str] = Field(default_factory=dict)
+    qualifying_arbs: int = Field(default=0, ge=0)
     paper_decisions: list[PaperScanDecision] = Field(default_factory=list)
     discovered_fixtures: list[DiscoveredFixture] = Field(default_factory=list)
     fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = Field(default_factory=dict)
@@ -254,83 +273,90 @@ class ReadOnlyCrossVenueCollector:
         recent_volatility_bps: float = 0.0,
         max_event_pairs: int = 25,
         max_market_pairs_per_event: int = 50,
+        config_warnings: list[str] | None = None,
     ) -> CollectionReport:
         if max_event_pairs <= 0 or max_market_pairs_per_event <= 0:
             raise ValueError("collector pair limits must be positive")
         started_at = datetime.now(UTC)
         issues: list[CollectorIssue] = []
+        venue_health: dict[str, str] = {
+            VenueName.MATCHBOOK.value: "unknown",
+            VenueName.POLYMARKET.value: "unknown",
+            VenueName.KALSHI.value: "unavailable" if self.kalshi is None else "unknown",
+        }
 
-        matchbook_payload = await self.matchbook.list_events(**(matchbook_event_filters or {}))
-        polymarket_payload = await self.polymarket.list_events(**(polymarket_event_filters or {}))
-        raw_matchbook_events = _extract_matchbook_items(matchbook_payload, "events")
-        raw_polymarket_events = [item for item in polymarket_payload if isinstance(item, dict)]
-        issues.extend(_matchbook_discovery_issues(matchbook_payload))
-        scoped_matchbook_events, scope_issues = _scope_matchbook_events(raw_matchbook_events)
-        issues.extend(scope_issues)
-
-        matchbook_events = self._normalize_events(
-            scoped_matchbook_events,
+        raw_matchbook_events, matchbook_payload = await self._list_raw_events(
+            self.matchbook,
             venue=VenueName.MATCHBOOK,
+            filters=matchbook_event_filters or {},
             issues=issues,
+            venue_health=venue_health,
         )
-        polymarket_events = self._normalize_events(
-            raw_polymarket_events,
+        issues.extend(_matchbook_discovery_issues(matchbook_payload))
+        raw_polymarket_events, _pm_payload = await self._list_raw_events(
+            self.polymarket,
             venue=VenueName.POLYMARKET,
+            filters=polymarket_event_filters or {},
             issues=issues,
+            venue_health=venue_health,
         )
-        kalshi_events: list[_NormalizedEvent] = []
         raw_kalshi_events: list[dict[str, Any]] = []
         if self.kalshi is not None:
-            try:
-                kalshi_payload = await self.kalshi.list_events()
-                raw_kalshi_events = _extract_matchbook_items(kalshi_payload, "events")
-            except Exception as exc:
-                issues.append(
-                    CollectorIssue(stage="list_events", venue=VenueName.KALSHI, detail=str(exc))
-                )
-                raw_kalshi_events = []
-            kalshi_events = self._normalize_events(
-                raw_kalshi_events,
+            raw_kalshi_events, _k_payload = await self._list_raw_events(
+                self.kalshi,
                 venue=VenueName.KALSHI,
+                filters={},
                 issues=issues,
+                venue_health=venue_health,
             )
+        else:
+            venue_health[VenueName.KALSHI.value] = "unavailable"
+
+        mb_scope = filter_in_scope_events(raw_matchbook_events, venue=VenueName.MATCHBOOK)
+        pm_scope = filter_in_scope_events(raw_polymarket_events, venue=VenueName.POLYMARKET)
+        k_scope = filter_in_scope_events(raw_kalshi_events, venue=VenueName.KALSHI)
+        skipped_by_reason = _merge_counts(
+            mb_scope.skipped_by_reason, pm_scope.skipped_by_reason, k_scope.skipped_by_reason
+        )
+        rejected_labels = _unique_cap(
+            [*mb_scope.rejected_labels, *pm_scope.rejected_labels, *k_scope.rejected_labels],
+            50,
+        )
+        skipped_out_of_scope = mb_scope.skipped + pm_scope.skipped + k_scope.skipped
+
+        matchbook_events = self._normalize_events(
+            mb_scope.allowed, venue=VenueName.MATCHBOOK, issues=issues
+        )
+        polymarket_events = self._normalize_events(
+            pm_scope.allowed, venue=VenueName.POLYMARKET, issues=issues
+        )
+        kalshi_events = self._normalize_events(
+            k_scope.allowed, venue=VenueName.KALSHI, issues=issues
+        )
         queried_series_ids = _resolved_queried_series_ids(
             polymarket_event_filters,
             polymarket_queried_series_ids,
         )
-        event_pairs = _greedy_unique_event_pairs(
-            matchbook_events,
-            polymarket_events,
+        mb_items = [to_venue_event(event, VenueName.MATCHBOOK) for event in matchbook_events]
+        pm_items = [to_venue_event(event, VenueName.POLYMARKET) for event in polymarket_events]
+        k_items = [to_venue_event(event, VenueName.KALSHI) for event in kalshi_events]
+        clusters, pair_counts = cluster_venue_events(
+            matchbook=mb_items,
+            polymarket=pm_items,
+            kalshi=k_items,
             matcher=self.event_matcher,
-        )[:max_event_pairs]
-        kalshi_event_pairs = _greedy_unique_event_pairs(
-            matchbook_events,
-            kalshi_events,
-            matcher=self.event_matcher,
-        )[:max_event_pairs]
-        matched_matchbook_ids = {
-            left.canonical.source_event_id for left, _right, _match in event_pairs
-        }
-        matched_kalshi_ids = {
-            left.canonical.source_event_id for left, _right, _match in kalshi_event_pairs
-        }
-        discovered_by_id = {
-            event.canonical.source_event_id: _discovered_fixture(
-                event,
-                polymarket_matched=event.canonical.source_event_id in matched_matchbook_ids,
-                kalshi_matched=event.canonical.source_event_id in matched_kalshi_ids,
-                seen_at=started_at,
-                polymarket_events=polymarket_events,
-                queried_series_ids=queried_series_ids,
-            )
-            for event in matchbook_events
-        }
-
-        paired_right_by_left = {
-            left.canonical.source_event_id: right for left, right, _ in event_pairs
-        }
-        paired_kalshi_by_left = {
-            left.canonical.source_event_id: right for left, right, _ in kalshi_event_pairs
+            max_event_pairs=max_event_pairs,
+        )
+        scan_kwargs = {
+            "fee_snapshots": fee_snapshots,
+            "venue_costs": venue_costs,
+            "fx_snapshots": fx_snapshots,
+            "capital_limit_gbp": capital_limit_gbp,
+            "minimum_net_edge": minimum_net_edge,
+            "maximum_execution_risk": maximum_execution_risk,
+            "minimum_mapping_confidence": minimum_mapping_confidence,
+            "assumed_latency_ms": assumed_latency_ms,
+            "recent_volatility_bps": recent_volatility_bps,
         }
         decisions: list[PaperScanDecision] = []
         normalized_matchbook_markets = 0
@@ -339,15 +365,153 @@ class ReadOnlyCrossVenueCollector:
         matched_market_pairs = 0
         order_books_fetched = 0
         fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = {}
+        discovered_fixtures: list[DiscoveredFixture] = []
 
-        for left_event in matchbook_events:
-            fixture = discovered_by_id.get(left_event.canonical.source_event_id)
-            right_event = paired_right_by_left.get(left_event.canonical.source_event_id)
+        for cluster in clusters:
+            fixture, cluster_decisions, inventory, market_counts, fetched, pairs = (
+                await self._scan_cluster(
+                    cluster,
+                    seen_at=started_at,
+                    polymarket_events=polymarket_events,
+                    queried_series_ids=queried_series_ids,
+                    matchbook_market_filters=matchbook_market_filters or {},
+                    polymarket_market_filters=polymarket_market_filters or {},
+                    max_market_pairs_per_event=max_market_pairs_per_event,
+                    scan_kwargs=scan_kwargs,
+                    issues=issues,
+                )
+            )
+            decisions.extend(cluster_decisions)
+            normalized_matchbook_markets += market_counts.get(VenueName.MATCHBOOK, 0)
+            normalized_polymarket_markets += market_counts.get(VenueName.POLYMARKET, 0)
+            normalized_kalshi_markets += market_counts.get(VenueName.KALSHI, 0)
+            matched_market_pairs += pairs
+            order_books_fetched += fetched
+            discovered_fixtures.append(fixture)
+            fixture_markets[fixture.canonical_event_id] = inventory
+
+        completed_at = datetime.now(UTC)
+        qualifying = sum(1 for item in discovered_fixtures if item.solver_is_arbitrage)
+        equivalent = sum(item.matched_equivalent_count for item in discovered_fixtures)
+        coverage = _target_coverage(clusters)
+        operator_summary = (
+            f"{len(discovered_fixtures)} fixtures discovered · "
+            f"MB {len(matchbook_events)} · PM {len(polymarket_events)} · "
+            f"K {len(kalshi_events)} · {sum(pair_counts.values())} cross-venue matches · "
+            f"{equivalent} equivalent markets · {qualifying} qualifying arbs · "
+            f"{skipped_out_of_scope} out-of-scope skipped"
+        )
+        matching_venues = [VenueName.POLYMARKET]
+        if self.kalshi is not None:
+            matching_venues.append(VenueName.KALSHI)
+        return CollectionReport(
+            started_at=started_at,
+            completed_at=completed_at,
+            discovery_source=VenueName.MATCHBOOK,
+            discovery_mode="venue_union",
+            matching_venue=VenueName.POLYMARKET,
+            matching_venues=matching_venues,
+            raw_matchbook_events=len(raw_matchbook_events),
+            raw_polymarket_events=len(raw_polymarket_events),
+            raw_kalshi_events=len(raw_kalshi_events),
+            normalized_matchbook_events=len(matchbook_events),
+            normalized_polymarket_events=len(polymarket_events),
+            normalized_kalshi_events=len(kalshi_events),
+            matched_event_pairs=sum(pair_counts.values()),
+            pair_counts=pair_counts,
+            normalized_matchbook_markets=normalized_matchbook_markets,
+            normalized_polymarket_markets=normalized_polymarket_markets,
+            normalized_kalshi_markets=normalized_kalshi_markets,
+            matched_market_pairs=matched_market_pairs,
+            order_books_fetched=order_books_fetched,
+            skipped_out_of_scope=skipped_out_of_scope,
+            skipped_by_reason=skipped_by_reason,
+            rejected_competition_labels=rejected_labels,
+            target_coverage=coverage,
+            config_warnings=list(config_warnings or []),
+            operator_summary=operator_summary,
+            venue_health=venue_health,
+            qualifying_arbs=qualifying,
+            paper_decisions=decisions,
+            discovered_fixtures=[
+                item.model_copy(update={"last_seen_at": completed_at})
+                for item in discovered_fixtures
+            ],
+            fixture_markets=fixture_markets,
+            issues=issues,
+        )
+
+    async def _list_raw_events(
+        self,
+        client: Any,
+        *,
+        venue: VenueName,
+        filters: dict[str, Any],
+        issues: list[CollectorIssue],
+        venue_health: dict[str, str],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        try:
+            payload = await client.list_events(**filters)
+        except Exception as exc:
+            issues.append(CollectorIssue(stage="list_events", venue=venue, detail=str(exc)))
+            venue_health[venue.value] = "unavailable"
+            return [], {}
+        venue_health[venue.value] = "ok"
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)], {}
+        if isinstance(payload, dict):
+            return _extract_matchbook_items(payload, "events"), payload
+        return [], {}
+
+    async def _scan_cluster(
+        self,
+        cluster: FixtureCluster,
+        *,
+        seen_at: datetime,
+        polymarket_events: list[_NormalizedEvent],
+        queried_series_ids: list[str] | None,
+        matchbook_market_filters: dict[str, Any],
+        polymarket_market_filters: dict[str, Any],
+        max_market_pairs_per_event: int,
+        scan_kwargs: dict[str, Any],
+        issues: list[CollectorIssue],
+    ) -> tuple[
+        DiscoveredFixture,
+        list[PaperScanDecision],
+        list[FixtureMarketInventoryRow],
+        dict[VenueName, int],
+        int,
+        int,
+    ]:
+        fixture = _fixture_from_cluster(
+            cluster,
+            seen_at=seen_at,
+            polymarket_events=polymarket_events,
+            queried_series_ids=queried_series_ids,
+        )
+        mb_event = _as_normalized(cluster.matchbook)
+        pm_event = _as_normalized(cluster.polymarket)
+        k_event = _as_normalized(cluster.kalshi)
+        matchbook_markets: list[_NormalizedMarket] = []
+        matchbook_inventory: list[InventoryMarket] = []
+        polymarket_markets: list[_NormalizedMarket] = []
+        polymarket_inventory: list[InventoryMarket] = []
+        kalshi_markets: list[_NormalizedMarket] = []
+        kalshi_inventory: list[InventoryMarket] = []
+        observations_by_market_id: dict[tuple[VenueName, str], VenueMarketObservation] = {}
+        market_counts: dict[VenueName, int] = {}
+        order_books_fetched = 0
+        matchbook_retrieved_at = datetime.now(UTC)
+        matchbook_market_latency_ms = 0
+        polymarket_market_latency_ms = 0
+        kalshi_series: dict[str, Any] | None = None
+
+        if mb_event is not None:
             try:
                 mb_started = perf_counter()
                 mb_market_payload = await self.matchbook.list_markets(
-                    left_event.canonical.source_event_id,
-                    **(matchbook_market_filters or {}),
+                    mb_event.canonical.source_event_id,
+                    **matchbook_market_filters,
                 )
                 matchbook_market_latency_ms = _elapsed_ms(mb_started)
                 matchbook_retrieved_at = datetime.now(UTC)
@@ -356,83 +520,20 @@ class ReadOnlyCrossVenueCollector:
                     CollectorIssue(
                         stage="list_markets",
                         venue=VenueName.MATCHBOOK,
-                        source_id=left_event.canonical.source_event_id,
+                        source_id=mb_event.canonical.source_event_id,
                         detail=str(exc),
                     )
                 )
-                if fixture is not None:
-                    fixture.no_comparison_reason = "list_markets_unavailable"
-                continue
-
+                fixture.no_comparison_reason = "list_markets_unavailable"
+                mb_market_payload = {"markets": []}
             raw_matchbook = _extract_matchbook_items(mb_market_payload, "markets")
-            left_markets, matchbook_inventory = self._inventory_markets(
-                left_event,
-                raw_matchbook,
-                venue=VenueName.MATCHBOOK,
-                issues=issues,
+            matchbook_markets, matchbook_inventory = self._inventory_markets(
+                mb_event, raw_matchbook, venue=VenueName.MATCHBOOK, issues=issues
             )
-            normalized_matchbook_markets += len(left_markets)
-
-            right_markets: list[_NormalizedMarket] = []
-            polymarket_inventory: list[InventoryMarket] = []
-            polymarket_market_latency_ms = 0
-            if right_event is not None:
-                try:
-                    pm_started = perf_counter()
-                    pm_market_payload = await self.polymarket.list_markets(
-                        right_event.canonical.source_event_id,
-                        **(polymarket_market_filters or {}),
-                    )
-                    polymarket_market_latency_ms = _elapsed_ms(pm_started)
-                except Exception as exc:
-                    issues.append(
-                        CollectorIssue(
-                            stage="list_markets",
-                            venue=VenueName.POLYMARKET,
-                            source_id=right_event.canonical.source_event_id,
-                            detail=str(exc),
-                        )
-                    )
-                    if fixture is not None:
-                        fixture.no_comparison_reason = "list_markets_unavailable"
-                    pm_market_payload = []
-                right_markets, polymarket_inventory = self._inventory_markets(
-                    right_event,
-                    [item for item in pm_market_payload if isinstance(item, dict)],
-                    venue=VenueName.POLYMARKET,
-                    issues=issues,
-                )
-                normalized_polymarket_markets += len(right_markets)
-
-            kalshi_event = paired_kalshi_by_left.get(left_event.canonical.source_event_id)
-            kalshi_markets: list[_NormalizedMarket] = []
-            kalshi_inventory: list[InventoryMarket] = []
-            kalshi_series: dict[str, Any] | None = None
-            if kalshi_event is not None and self.kalshi is not None:
-                kalshi_markets, kalshi_inventory, kalshi_series, fetched = await self._load_kalshi_markets(
-                    kalshi_event,
-                    issues=issues,
-                )
-                order_books_fetched += fetched
-                normalized_kalshi_markets += len(kalshi_markets)
-
-            market_pairs = _greedy_unique_market_pairs(
-                left_markets,
-                right_markets,
-                matcher=self.market_matcher,
-            )[:max_market_pairs_per_event]
-            matched_market_pairs += len(market_pairs)
-            if fixture is not None:
-                fixture.matched_market_count = len(market_pairs)
-                if right_event is not None and not market_pairs:
-                    fixture.no_comparison_reason = "no_settlement_equivalent_market_pair"
-
-            decisions_by_source_ids: dict[tuple[str, str], PaperScanDecision] = {}
-            observations_by_market_id: dict[tuple[VenueName, str], VenueMarketObservation] = {}
-
-            for left_market in left_markets:
+            market_counts[VenueName.MATCHBOOK] = len(matchbook_markets)
+            for left_market in matchbook_markets:
                 observation = self._try_matchbook_observation(
-                    left_event,
+                    mb_event,
                     left_market,
                     retrieved_at=matchbook_retrieved_at,
                     latency_ms=matchbook_market_latency_ms,
@@ -447,19 +548,42 @@ class ReadOnlyCrossVenueCollector:
                     if item.source_market_id == left_market.canonical.source_market_id:
                         item.observation = observation
 
-            for right_market in right_markets:
-                if right_event is None:
-                    break
-                books_by_token, poly_book_latency_ms, fetched, book_failed = await self._fetch_polymarket_books(
-                    right_event,
-                    right_market,
-                    issues=issues,
+        if pm_event is not None:
+            try:
+                pm_started = perf_counter()
+                pm_market_payload = await self.polymarket.list_markets(
+                    pm_event.canonical.source_event_id,
+                    **polymarket_market_filters,
+                )
+                polymarket_market_latency_ms = _elapsed_ms(pm_started)
+            except Exception as exc:
+                issues.append(
+                    CollectorIssue(
+                        stage="list_markets",
+                        venue=VenueName.POLYMARKET,
+                        source_id=pm_event.canonical.source_event_id,
+                        detail=str(exc),
+                    )
+                )
+                if fixture.no_comparison_reason is None:
+                    fixture.no_comparison_reason = "list_markets_unavailable"
+                pm_market_payload = []
+            polymarket_markets, polymarket_inventory = self._inventory_markets(
+                pm_event,
+                [item for item in pm_market_payload if isinstance(item, dict)],
+                venue=VenueName.POLYMARKET,
+                issues=issues,
+            )
+            market_counts[VenueName.POLYMARKET] = len(polymarket_markets)
+            for right_market in polymarket_markets:
+                books_by_token, poly_book_latency_ms, fetched, book_failed = (
+                    await self._fetch_polymarket_books(pm_event, right_market, issues=issues)
                 )
                 order_books_fetched += fetched
                 if book_failed:
                     continue
                 observation = self._try_polymarket_observation(
-                    right_event,
+                    pm_event,
                     right_market,
                     books_by_token,
                     latency_ms=polymarket_market_latency_ms + poly_book_latency_ms,
@@ -467,63 +591,90 @@ class ReadOnlyCrossVenueCollector:
                 )
                 if observation is None:
                     continue
-                for item in polymarket_inventory:
-                    if item.source_market_id == right_market.canonical.source_market_id:
-                        item.observation = observation
                 observations_by_market_id[
                     (VenueName.POLYMARKET, right_market.canonical.source_market_id)
                 ] = observation
+                for item in polymarket_inventory:
+                    if item.source_market_id == right_market.canonical.source_market_id:
+                        item.observation = observation
 
-            decisions_by_pair: dict[tuple[str, str, str, str], PaperScanDecision] = {}
+        if k_event is not None and self.kalshi is not None:
+            kalshi_markets, kalshi_inventory, kalshi_series, fetched = await self._load_kalshi_markets(
+                k_event, issues=issues
+            )
+            order_books_fetched += fetched
+            market_counts[VenueName.KALSHI] = len(kalshi_markets)
             for kalshi_market in kalshi_markets:
-                if kalshi_event is None:
-                    break
                 observation, fetched = await self._try_kalshi_observation(
-                    kalshi_event,
-                    kalshi_market,
-                    series=kalshi_series,
-                    issues=issues,
+                    k_event, kalshi_market, series=kalshi_series, issues=issues
                 )
                 order_books_fetched += fetched
                 if observation is None:
                     continue
-                for item in kalshi_inventory:
-                    if item.source_market_id == kalshi_market.canonical.source_market_id:
-                        item.observation = observation
                 observations_by_market_id[
                     (VenueName.KALSHI, kalshi_market.canonical.source_market_id)
                 ] = observation
+                for item in kalshi_inventory:
+                    if item.source_market_id == kalshi_market.canonical.source_market_id:
+                        item.observation = observation
 
-            extra_pairs = [
-                *_greedy_unique_market_pairs(left_markets, kalshi_markets, matcher=self.market_matcher),
-                *_greedy_unique_market_pairs(right_markets, kalshi_markets, matcher=self.market_matcher),
-            ]
-            matched_market_pairs += len(extra_pairs)
-            for left_market, right_market, match in extra_pairs:
+        venue_markets = {
+            VenueName.MATCHBOOK: matchbook_markets,
+            VenueName.POLYMARKET: polymarket_markets,
+            VenueName.KALSHI: kalshi_markets,
+        }
+        pair_specs = (
+            (VenueName.MATCHBOOK, VenueName.POLYMARKET),
+            (VenueName.MATCHBOOK, VenueName.KALSHI),
+            (VenueName.POLYMARKET, VenueName.KALSHI),
+        )
+        decisions: list[PaperScanDecision] = []
+        decisions_by_source_ids: dict[tuple[str, str], PaperScanDecision] = {}
+        decisions_by_pair: dict[tuple[str, str, str, str], PaperScanDecision] = {}
+        matched_market_pairs = 0
+        for left_venue, right_venue in pair_specs:
+            left_markets = venue_markets[left_venue]
+            right_markets = venue_markets[right_venue]
+            if not left_markets or not right_markets:
+                continue
+            market_pairs = _greedy_unique_market_pairs(
+                left_markets, right_markets, matcher=self.market_matcher
+            )[:max_market_pairs_per_event]
+            matched_market_pairs += len(market_pairs)
+            for left_market, right_market, match in market_pairs:
                 if not scan_eligible_pair(left_market.canonical, right_market.canonical, match):
                     continue
                 left_obs = observations_by_market_id.get(
-                    (left_market.canonical.source_venue, left_market.canonical.source_market_id)
+                    (left_venue, left_market.canonical.source_market_id)
                 )
                 right_obs = observations_by_market_id.get(
-                    (right_market.canonical.source_venue, right_market.canonical.source_market_id)
+                    (right_venue, right_market.canonical.source_market_id)
                 )
                 if left_obs is None or right_obs is None:
+                    if fixture.current_net_edge is None:
+                        fixture.no_comparison_reason = "order_book_unavailable"
                     continue
-                stored = self.paper_scan.scan_pair(
-                    left_obs,
-                    right_obs,
-                    fee_snapshots=fee_snapshots,
-                    venue_costs=venue_costs,
-                    fx_snapshots=fx_snapshots,
-                    capital_limit_gbp=capital_limit_gbp,
-                    minimum_net_edge=minimum_net_edge,
-                    maximum_execution_risk=maximum_execution_risk,
-                    minimum_mapping_confidence=minimum_mapping_confidence,
-                    assumed_latency_ms=assumed_latency_ms,
-                    recent_volatility_bps=recent_volatility_bps,
-                )
+                stored = self.paper_scan.scan_pair(left_obs, right_obs, **scan_kwargs)
+                if mb_event is not None:
+                    state = matchbook_fixture_state(mb_event.raw)
+                    stored = stored.model_copy(
+                        update={
+                            "fixture_discovery_source": cluster.anchor.venue,
+                            "fixture_status": state.venue_status,
+                            "in_running": state.in_running,
+                            "live_score_supported": state.live_score_supported,
+                            "home_score": state.home_score,
+                            "away_score": state.away_score,
+                        }
+                    )
+                else:
+                    stored = stored.model_copy(
+                        update={"fixture_discovery_source": cluster.anchor.venue}
+                    )
                 decisions.append(stored)
+                decisions_by_source_ids[
+                    (left_market.canonical.source_market_id, right_market.canonical.source_market_id)
+                ] = stored
                 decisions_by_pair[
                     (
                         left_obs.venue.value,
@@ -532,271 +683,42 @@ class ReadOnlyCrossVenueCollector:
                         right_market.canonical.source_market_id,
                     )
                 ] = stored
-                if fixture is not None and VenueName.MATCHBOOK in {
-                    left_obs.venue,
-                    right_obs.venue,
-                }:
-                    matchbook_obs = (
-                        left_obs if left_obs.venue is VenueName.MATCHBOOK else right_obs
-                    )
-                    other_obs = right_obs if matchbook_obs is left_obs else left_obs
-                    _apply_backend_comparison(
-                        fixture,
-                        left_market=left_market,
-                        matchbook_observation=matchbook_obs,
-                        polymarket_observation=other_obs,
-                        decision=stored,
-                    )
+                _apply_backend_comparison(
+                    fixture,
+                    left_market=left_market,
+                    left_observation=left_obs,
+                    right_observation=right_obs,
+                    decision=stored,
+                )
 
-            for left_market, right_market, match in market_pairs:
-                if not scan_eligible_pair(left_market.canonical, right_market.canonical, match):
-                    continue
-                matchbook_observation = observations_by_market_id.get(
-                    (VenueName.MATCHBOOK, left_market.canonical.source_market_id)
-                )
-                polymarket_observation = observations_by_market_id.get(
-                    (VenueName.POLYMARKET, right_market.canonical.source_market_id)
-                )
-                if matchbook_observation is None or polymarket_observation is None:
-                    if fixture is not None and fixture.current_net_edge is None:
-                        fixture.no_comparison_reason = "order_book_unavailable"
-                    continue
-                decision = self.paper_scan.scan_pair(
-                    matchbook_observation,
-                    polymarket_observation,
-                    fee_snapshots=fee_snapshots,
-                    venue_costs=venue_costs,
-                    fx_snapshots=fx_snapshots,
-                    capital_limit_gbp=capital_limit_gbp,
-                    minimum_net_edge=minimum_net_edge,
-                    maximum_execution_risk=maximum_execution_risk,
-                    minimum_mapping_confidence=minimum_mapping_confidence,
-                    assumed_latency_ms=assumed_latency_ms,
-                    recent_volatility_bps=recent_volatility_bps,
-                )
-                state = matchbook_fixture_state(left_event.raw)
-                stored = decision.model_copy(
-                    update={
-                        "fixture_discovery_source": VenueName.MATCHBOOK,
-                        "fixture_status": state.venue_status,
-                        "in_running": state.in_running,
-                        "live_score_supported": state.live_score_supported,
-                        "home_score": state.home_score,
-                        "away_score": state.away_score,
-                    }
-                )
-                decisions.append(stored)
-                decisions_by_source_ids[
-                    (
-                        left_market.canonical.source_market_id,
-                        right_market.canonical.source_market_id,
-                    )
-                ] = stored
-                if fixture is not None:
-                    _apply_backend_comparison(
-                        fixture,
-                        left_market=left_market,
-                        matchbook_observation=matchbook_observation,
-                        polymarket_observation=polymarket_observation,
-                        decision=stored,
-                    )
-
-            inventory_rows = assemble_fixture_inventory(
-                matchbook_inventory,
-                polymarket_inventory,
-                kalshi_markets=kalshi_inventory,
-                matcher=self.market_matcher,
-                decisions_by_source_ids=decisions_by_source_ids,
-                decisions_by_pair=decisions_by_pair,
-                venue_costs=venue_costs,
-                fx_snapshots=fx_snapshots,
+        inventory_rows = assemble_fixture_inventory(
+            matchbook_inventory,
+            polymarket_inventory,
+            kalshi_markets=kalshi_inventory,
+            matcher=self.market_matcher,
+            decisions_by_source_ids=decisions_by_source_ids,
+            decisions_by_pair=decisions_by_pair,
+            venue_costs=scan_kwargs.get("venue_costs"),
+            fx_snapshots=scan_kwargs.get("fx_snapshots"),
+        )
+        discovered_count, equivalent_count, best_edge = inventory_summary(inventory_rows)
+        fixture.discovered_market_count = discovered_count
+        fixture.matched_equivalent_count = equivalent_count
+        fixture.matched_market_count = matched_market_pairs
+        if fixture.current_net_edge is None and best_edge is not None:
+            fixture.current_net_edge = best_edge
+        if cluster.venue_count >= 2 and matched_market_pairs == 0:
+            fixture.no_comparison_reason = fixture.no_comparison_reason or (
+                "no_settlement_equivalent_market_pair"
             )
-            if fixture is not None:
-                discovered_count, equivalent_count, best_edge = inventory_summary(inventory_rows)
-                fixture.discovered_market_count = discovered_count
-                fixture.matched_equivalent_count = equivalent_count
-                if fixture.current_net_edge is None and best_edge is not None:
-                    fixture.current_net_edge = best_edge
-                fixture_markets[fixture.canonical_event_id] = inventory_rows
-
-        used_polymarket_ids = {
-            right.canonical.source_event_id for _left, right, _ in event_pairs
-        }
-        used_kalshi_ids = {
-            right.canonical.source_event_id for _left, right, _ in kalshi_event_pairs
-        }
-        leftover_polymarket = [
-            event
-            for event in polymarket_events
-            if event.canonical.source_event_id not in used_polymarket_ids
-        ]
-        leftover_kalshi = [
-            event
-            for event in kalshi_events
-            if event.canonical.source_event_id not in used_kalshi_ids
-        ]
-        if leftover_polymarket and leftover_kalshi and self.kalshi is not None:
-            pm_kalshi_pairs = _greedy_unique_event_pairs(
-                leftover_polymarket,
-                leftover_kalshi,
-                matcher=self.event_matcher,
-            )[:max_event_pairs]
-            for pm_event, kalshi_event, _match in pm_kalshi_pairs:
-                try:
-                    pm_market_payload = await self.polymarket.list_markets(
-                        pm_event.canonical.source_event_id
-                    )
-                except Exception as exc:
-                    issues.append(
-                        CollectorIssue(
-                            stage="list_markets",
-                            venue=VenueName.POLYMARKET,
-                            source_id=pm_event.canonical.source_event_id,
-                            detail=str(exc),
-                        )
-                    )
-                    continue
-                pm_markets, pm_inventory = self._inventory_markets(
-                    pm_event,
-                    [item for item in pm_market_payload if isinstance(item, dict)],
-                    venue=VenueName.POLYMARKET,
-                    issues=issues,
-                )
-                kalshi_markets, kalshi_inventory, kalshi_series, fetched = await self._load_kalshi_markets(
-                    kalshi_event,
-                    issues=issues,
-                )
-                order_books_fetched += fetched
-                normalized_polymarket_markets += len(pm_markets)
-                normalized_kalshi_markets += len(kalshi_markets)
-                observations: dict[tuple[VenueName, str], VenueMarketObservation] = {}
-                for market in pm_markets:
-                    books_by_token, _latency, fetched, failed = await self._fetch_polymarket_books(
-                        pm_event, market, issues=issues
-                    )
-                    order_books_fetched += fetched
-                    if failed:
-                        continue
-                    observation = self._try_polymarket_observation(
-                        pm_event, market, books_by_token, latency_ms=0, issues=issues
-                    )
-                    if observation is None:
-                        continue
-                    observations[(VenueName.POLYMARKET, market.canonical.source_market_id)] = observation
-                    for item in pm_inventory:
-                        if item.source_market_id == market.canonical.source_market_id:
-                            item.observation = observation
-                for market in kalshi_markets:
-                    observation, fetched = await self._try_kalshi_observation(
-                        kalshi_event, market, series=kalshi_series, issues=issues
-                    )
-                    order_books_fetched += fetched
-                    if observation is None:
-                        continue
-                    observations[(VenueName.KALSHI, market.canonical.source_market_id)] = observation
-                    for item in kalshi_inventory:
-                        if item.source_market_id == market.canonical.source_market_id:
-                            item.observation = observation
-                pair_decisions: dict[tuple[str, str, str, str], PaperScanDecision] = {}
-                leftover_pairs = _greedy_unique_market_pairs(
-                    pm_markets, kalshi_markets, matcher=self.market_matcher
-                )
-                matched_market_pairs += len(leftover_pairs)
-                for left_market, right_market, match in leftover_pairs:
-                    if not scan_eligible_pair(left_market.canonical, right_market.canonical, match):
-                        continue
-                    left_obs = observations.get(
-                        (VenueName.POLYMARKET, left_market.canonical.source_market_id)
-                    )
-                    right_obs = observations.get(
-                        (VenueName.KALSHI, right_market.canonical.source_market_id)
-                    )
-                    if left_obs is None or right_obs is None:
-                        continue
-                    stored = self.paper_scan.scan_pair(
-                        left_obs,
-                        right_obs,
-                        fee_snapshots=fee_snapshots,
-                        venue_costs=venue_costs,
-                        fx_snapshots=fx_snapshots,
-                        capital_limit_gbp=capital_limit_gbp,
-                        minimum_net_edge=minimum_net_edge,
-                        maximum_execution_risk=maximum_execution_risk,
-                        minimum_mapping_confidence=minimum_mapping_confidence,
-                        assumed_latency_ms=assumed_latency_ms,
-                        recent_volatility_bps=recent_volatility_bps,
-                    )
-                    decisions.append(stored)
-                    pair_decisions[
-                        (
-                            VenueName.POLYMARKET.value,
-                            left_market.canonical.source_market_id,
-                            VenueName.KALSHI.value,
-                            right_market.canonical.source_market_id,
-                        )
-                    ] = stored
-                inventory_rows = assemble_fixture_inventory(
-                    [],
-                    pm_inventory,
-                    kalshi_markets=kalshi_inventory,
-                    matcher=self.market_matcher,
-                    decisions_by_pair=pair_decisions,
-                    venue_costs=venue_costs,
-                    fx_snapshots=fx_snapshots,
-                )
-                canonical_id = canonical_source_event_id(pm_event.canonical)
-                fixture_markets[canonical_id] = inventory_rows
-                already = any(
-                    item.canonical_event_id == canonical_id for item in discovered_by_id.values()
-                )
-                if not already:
-                    discovered, equivalent, best_edge = inventory_summary(inventory_rows)
-                    discovered_by_id[f"polymarket:{pm_event.canonical.source_event_id}"] = DiscoveredFixture(
-                        source=VenueName.POLYMARKET,
-                        source_event_id=pm_event.canonical.source_event_id,
-                        canonical_event_id=canonical_id,
-                        home_team=pm_event.canonical.home_team,
-                        away_team=pm_event.canonical.away_team,
-                        competition=pm_event.canonical.competition,
-                        kickoff_utc=pm_event.canonical.kickoff_utc,
-                        polymarket_matched=True,
-                        kalshi_matched=True,
-                        last_seen_at=started_at,
-                        discovered_market_count=discovered,
-                        matched_equivalent_count=equivalent,
-                        matched_market_count=len(leftover_pairs),
-                        current_net_edge=best_edge,
-                    )
-
-        completed_at = datetime.now(UTC)
-        discovered_fixtures = [
-            item.model_copy(update={"last_seen_at": completed_at})
-            for item in discovered_by_id.values()
-        ]
-        return CollectionReport(
-            started_at=started_at,
-            completed_at=completed_at,
-            discovery_source=VenueName.MATCHBOOK,
-            matching_venue=VenueName.POLYMARKET,
-            matching_venues=[VenueName.POLYMARKET, VenueName.KALSHI]
-            if self.kalshi is not None
-            else [VenueName.POLYMARKET],
-            raw_matchbook_events=len(raw_matchbook_events),
-            raw_polymarket_events=len(raw_polymarket_events),
-            raw_kalshi_events=len(raw_kalshi_events),
-            normalized_matchbook_events=len(matchbook_events),
-            normalized_polymarket_events=len(polymarket_events),
-            normalized_kalshi_events=len(kalshi_events),
-            matched_event_pairs=len(event_pairs),
-            normalized_matchbook_markets=normalized_matchbook_markets,
-            normalized_polymarket_markets=normalized_polymarket_markets,
-            normalized_kalshi_markets=normalized_kalshi_markets,
-            matched_market_pairs=matched_market_pairs,
-            order_books_fetched=order_books_fetched,
-            paper_decisions=decisions,
-            discovered_fixtures=discovered_fixtures,
-            fixture_markets=fixture_markets,
-            issues=issues,
+        fixture.opportunity_state = _opportunity_state(fixture)
+        return (
+            fixture,
+            decisions,
+            inventory_rows,
+            market_counts,
+            order_books_fetched,
+            matched_market_pairs,
         )
 
     def _normalize_events(
@@ -1198,45 +1120,119 @@ class ReadOnlyCrossVenueCollector:
         return observation, fetched
 
 
-def _discovered_fixture(
-    event: _NormalizedEvent,
+def _as_normalized(item) -> _NormalizedEvent | None:
+    if item is None:
+        return None
+    return _NormalizedEvent(item.raw, item.canonical)
+
+
+def _fixture_from_cluster(
+    cluster: FixtureCluster,
     *,
-    polymarket_matched: bool,
-    kalshi_matched: bool = False,
     seen_at: datetime,
     polymarket_events: list[_NormalizedEvent],
     queried_series_ids: list[str] | None,
 ) -> DiscoveredFixture:
-    state = matchbook_fixture_state(event.raw)
-    canonical = event.canonical
-    scoped = scope_matchbook_event(event.raw)
+    anchor = cluster.anchor
+    canonical = anchor.canonical
+    mb_event = _as_normalized(cluster.matchbook)
+    state = matchbook_fixture_state(mb_event.raw) if mb_event is not None else None
+    competition = resolve_target_competition(canonical.competition)
+    if competition is None and mb_event is not None:
+        scoped = scope_matchbook_event(mb_event.raw)
+        competition = scoped.competition
+    two_plus = cluster.venue_count >= 2
     return DiscoveredFixture(
-        source_event_id=canonical.source_event_id,
-        canonical_event_id=canonical_source_event_id(canonical),
+        source=anchor.venue,
+        source_event_id=anchor.source_event_id,
+        canonical_event_id=cluster_canonical_event_id(cluster),
         home_team=canonical.home_team,
         away_team=canonical.away_team,
         competition=canonical.competition,
-        target_competition_code=scoped.competition.code.value if scoped.competition else None,
+        target_competition_code=competition.code.value if competition else None,
         kickoff_utc=canonical.kickoff_utc,
-        polymarket_matched=polymarket_matched,
-        kalshi_matched=kalshi_matched,
-        fixture_status=state.venue_status,
-        in_running=state.in_running,
-        live_score_supported=state.live_score_supported,
-        home_score=state.home_score,
-        away_score=state.away_score,
+        matchbook_matched=cluster.matchbook is not None,
+        polymarket_matched=cluster.polymarket is not None,
+        kalshi_matched=cluster.kalshi is not None,
+        fixture_status=state.venue_status if state is not None else None,
+        in_running=state.in_running if state is not None else None,
+        live_score_supported=state.live_score_supported if state is not None else False,
+        home_score=state.home_score if state is not None else None,
+        away_score=state.away_score if state is not None else None,
         last_seen_at=seen_at,
         no_comparison_reason=(
             None
-            if polymarket_matched
-            else _unmatched_polymarket_reason(
-                scoped.competition,
-                polymarket_events=polymarket_events,
-                queried_series_ids=queried_series_ids,
+            if two_plus
+            else (
+                None
+                if cluster.polymarket is not None
+                else _unmatched_polymarket_reason(
+                    competition,
+                    polymarket_events=polymarket_events,
+                    queried_series_ids=queried_series_ids,
+                )
             )
         ),
         solver_is_arbitrage=False,
+        opportunity_state="matched" if two_plus else "unmatched",
     )
+
+
+def _opportunity_state(fixture: DiscoveredFixture) -> str:
+    if fixture.solver_is_arbitrage:
+        return "qualifying"
+    if (
+        fixture.current_net_edge is not None
+        and fixture.trigger_net_edge is not None
+        and fixture.current_net_edge < fixture.trigger_net_edge
+    ):
+        return "near"
+    if fixture.matchbook_matched + fixture.polymarket_matched + fixture.kalshi_matched >= 2:
+        return "matched"
+    if fixture.matched_equivalent_count:
+        return "matched"
+    return "unmatched"
+
+
+def _merge_counts(*groups: dict[str, int]) -> dict[str, int]:
+    merged: dict[str, int] = {}
+    for group in groups:
+        for key, value in group.items():
+            merged[key] = merged.get(key, 0) + value
+    return merged
+
+
+def _unique_cap(values: list[str], limit: int) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _target_coverage(clusters: list[FixtureCluster]) -> dict[str, dict[str, int]]:
+    coverage = {
+        code.value: {"matchbook": 0, "polymarket": 0, "kalshi": 0}
+        for code in TargetCompetitionCode
+    }
+    for cluster in clusters:
+        for venue_event, venue_key in (
+            (cluster.matchbook, "matchbook"),
+            (cluster.polymarket, "polymarket"),
+            (cluster.kalshi, "kalshi"),
+        ):
+            if venue_event is None:
+                continue
+            resolved = resolve_target_competition(venue_event.canonical.competition)
+            if resolved is None:
+                continue
+            coverage[resolved.code.value][venue_key] += 1
+    return coverage
 
 
 def _resolved_queried_series_ids(
@@ -1307,31 +1303,6 @@ def _matchbook_discovery_issues(payload: dict[str, Any]) -> list[CollectorIssue]
     ]
 
 
-def _scope_matchbook_events(
-    payloads: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[CollectorIssue]]:
-    scoped: list[dict[str, Any]] = []
-    issues: list[CollectorIssue] = []
-    for payload in payloads:
-        decision: ScopeDecision = scope_matchbook_event(payload)
-        source_id = str(payload.get("id", "")) or None
-        if not decision.allowed:
-            issues.append(
-                CollectorIssue(
-                    stage="target_competition",
-                    venue=VenueName.MATCHBOOK,
-                    source_id=source_id,
-                    detail=(
-                        f"{decision.reason}: sport={decision.sport!r} "
-                        f"competition={decision.label!r}"
-                    ),
-                )
-            )
-            continue
-        scoped.append(payload)
-    return scoped, issues
-
-
 def _best_observed_back(observation: VenueMarketObservation) -> Decimal | None:
     prices = [
         book.best_back.decimal_odds
@@ -1350,8 +1321,8 @@ def _apply_backend_comparison(
     fixture: DiscoveredFixture,
     *,
     left_market: _NormalizedMarket,
-    matchbook_observation: VenueMarketObservation,
-    polymarket_observation: VenueMarketObservation,
+    left_observation: VenueMarketObservation,
+    right_observation: VenueMarketObservation,
     decision: PaperScanDecision,
 ) -> None:
     """Copy solver/scan fields onto the discovery row. No frontend economics."""
@@ -1392,8 +1363,14 @@ def _apply_backend_comparison(
         no_reason = None
     fixture.market_family = left_market.canonical.family.value
     fixture.outcome_context = _outcome_context(left_market)
-    fixture.best_matchbook_price = _best_observed_back(matchbook_observation)
-    fixture.best_polymarket_price = _best_observed_back(polymarket_observation)
+    for observation in (left_observation, right_observation):
+        price = _best_observed_back(observation)
+        if observation.venue is VenueName.MATCHBOOK:
+            fixture.best_matchbook_price = price
+        elif observation.venue is VenueName.POLYMARKET:
+            fixture.best_polymarket_price = price
+        elif observation.venue is VenueName.KALSHI:
+            fixture.best_kalshi_price = price
     fixture.current_net_edge = current_net
     fixture.trigger_net_edge = trigger
     fixture.distance_to_trigger_pp = distance
@@ -1403,32 +1380,6 @@ def _apply_backend_comparison(
     fixture.solver_is_arbitrage = solver_arb
     if current_net is None and not fixture.no_comparison_reason:
         fixture.no_comparison_reason = "no_comparison"
-
-
-def _greedy_unique_event_pairs(
-    left: list[_NormalizedEvent],
-    right: list[_NormalizedEvent],
-    *,
-    matcher: EventMatcher,
-) -> list[tuple[_NormalizedEvent, _NormalizedEvent, EventMatchResult]]:
-    candidates: list[tuple[float, int, int, EventMatchResult]] = []
-    for left_index, left_item in enumerate(left):
-        for right_index, right_item in enumerate(right):
-            match = matcher.match(left_item.canonical, right_item.canonical)
-            if match.matched:
-                candidates.append((match.confidence, left_index, right_index, match))
-    candidates.sort(key=lambda item: item[0], reverse=True)
-
-    used_left: set[int] = set()
-    used_right: set[int] = set()
-    result: list[tuple[_NormalizedEvent, _NormalizedEvent, EventMatchResult]] = []
-    for _, left_index, right_index, match in candidates:
-        if left_index in used_left or right_index in used_right:
-            continue
-        used_left.add(left_index)
-        used_right.add(right_index)
-        result.append((left[left_index], right[right_index], match))
-    return result
 
 
 def _greedy_unique_market_pairs(

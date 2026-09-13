@@ -46,7 +46,10 @@ button, input, select { font: inherit; }
 .status-cluster { display: flex; align-items: center; gap: 16px; color: var(--muted); font-size: 11px; }
 .status-item { display: inline-flex; gap: 7px; align-items: center; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
-.status-dot.readonly { background: var(--amber); }
+.status-dot.readonly, .status-dot.warn { background: var(--amber); }
+.status-dot.ok { background: var(--accent); }
+.status-dot.down { background: var(--red); }
+.status-dot.unknown { background: var(--muted-2); }
 .clock { font-variant-numeric: tabular-nums; color: var(--muted-2); }
 
 .main { padding: 26px; max-width: 1600px; margin: 0 auto; }
@@ -76,7 +79,7 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 .scan-control { margin-bottom: 16px; }
 .scan-form { padding: 15px 17px 16px; }
 .scan-control-grid { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)) auto; gap: 10px; align-items: end; }
-.scan-ops-row { display: grid; grid-template-columns: minmax(140px, 1.4fr) minmax(88px, .7fr) auto auto; gap: 10px; align-items: end; }
+.scan-ops-row { display: grid; grid-template-columns: minmax(140px, 1.4fr) minmax(88px, .7fr) minmax(110px, .8fr) auto auto; gap: 10px; align-items: end; }
 .econ-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .econ-chip { border: 1px solid var(--line); background: var(--panel-raised); color: var(--muted); border-radius: 999px; padding: 5px 9px; font-size: 10px; font-weight: 700; letter-spacing: .02em; font-variant-numeric: tabular-nums; }
 .econ-chip-warn { color: var(--amber); border-color: rgba(241, 191, 105, .35); background: rgba(241, 191, 105, .08); }
@@ -105,6 +108,13 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; min-width: 760px; }
+table.discovery-compact { min-width: 680px; }
+td.wrap, .wrap { white-space: normal; }
+.venue-marks { display: inline-flex; gap: 4px; }
+.venue-mark { display: inline-flex; min-width: 22px; justify-content: center; padding: 2px 5px; border-radius: 999px; font-size: 9px; font-weight: 800; letter-spacing: .04em; border: 1px solid var(--line); color: var(--muted-2); }
+.venue-mark-on { color: var(--accent); border-color: rgba(124, 242, 176, .28); background: var(--accent-soft); }
+.discovery-detail-row td { padding-top: 0; border-bottom: 1px solid rgba(34, 51, 47, .6); }
+.discovery-detail-row summary { cursor: pointer; color: var(--muted-2); font-size: 9px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
 th { text-align: left; color: var(--muted-2); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; font-weight: 750; padding: 10px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 td { color: #ccdad5; font-size: 11px; padding: 12px; border-bottom: 1px solid rgba(34, 51, 47, .6); white-space: nowrap; font-variant-numeric: tabular-nums; }
 tr:last-child td { border-bottom: none; }

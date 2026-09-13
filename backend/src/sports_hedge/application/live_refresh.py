@@ -18,23 +18,32 @@ from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookDiscovery
 
 class LiveRefreshStatus(BaseModel):
     discovery_source: VenueName = VenueName.MATCHBOOK
+    discovery_mode: str = "venue_union"
     matching_venue: VenueName = VenueName.POLYMARKET
+    matching_venues: list[VenueName] = Field(
+        default_factory=lambda: [VenueName.POLYMARKET, VenueName.KALSHI]
+    )
     server_loop_enabled: bool
     interval_seconds: int = Field(ge=15, le=300)
     cycle_in_progress: bool = False
     last_started_at: datetime | None = None
     last_completed_at: datetime | None = None
+    last_duration_ms: int | None = Field(default=None, ge=0)
     last_error: str | None = None
     last_matched_event_pairs: int | None = None
     last_matched_market_pairs: int | None = None
     last_paper_decisions: int | None = None
     last_issue_count: int | None = None
+    skipped_out_of_scope: int | None = None
+    operator_summary: str | None = None
+    config_warnings: list[str] = Field(default_factory=list)
+    venue_health: dict[str, str] = Field(default_factory=dict)
     live_scores: str = "unavailable_unless_matchbook_payload_includes_scores"
     discovered_fixtures: list[DiscoveredFixture] = Field(default_factory=list)
 
 
 class LiveRefreshCoordinator:
-    """Repeated read-only Matchbook→Polymarket collection without stacking cycles."""
+    """Repeated read-only venue-union collection without stacking cycles."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -100,10 +109,19 @@ class LiveRefreshCoordinator:
             update={
                 "cycle_in_progress": False,
                 "last_completed_at": report.completed_at,
+                "discovery_mode": report.discovery_mode,
+                "matching_venues": report.matching_venues,
                 "last_matched_event_pairs": report.matched_event_pairs,
                 "last_matched_market_pairs": report.matched_market_pairs,
                 "last_paper_decisions": len(report.paper_decisions),
                 "last_issue_count": len(report.issues),
+                "skipped_out_of_scope": report.skipped_out_of_scope,
+                "operator_summary": report.operator_summary,
+                "config_warnings": report.config_warnings,
+                "venue_health": report.venue_health,
+                "last_duration_ms": max(
+                    0, int((report.completed_at - report.started_at).total_seconds() * 1000)
+                ),
                 "discovered_fixtures": report.discovered_fixtures,
                 "last_error": None,
             }

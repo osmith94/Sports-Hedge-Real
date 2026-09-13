@@ -17,6 +17,7 @@ type Props = {
   active: PaperTrade[];
   closed: PaperTrade[];
   apiAvailable: boolean;
+  compact?: boolean;
 };
 
 function nativeLocked(trade: PaperTrade): string {
@@ -49,7 +50,7 @@ function legsLine(trade: PaperTrade): string {
     .join(" · ");
 }
 
-export function PaperTradeBook({ summary, active, closed, apiAvailable }: Props) {
+export function PaperTradeBook({ summary, active, closed, apiAvailable, compact = false }: Props) {
   const [openId, setOpenId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PaperTradeDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -113,6 +114,7 @@ export function PaperTradeBook({ summary, active, closed, apiAvailable }: Props)
 
   return (
     <>
+      {compact ? null : (
       <section className="metric-grid">
         <div className="metric-card">
           <div className="metric-label">Open paper trades</div>
@@ -147,12 +149,13 @@ export function PaperTradeBook({ summary, active, closed, apiAvailable }: Props)
           <div className="metric-foot">{headline?.closed_count ?? 0} closed trades</div>
         </div>
       </section>
+      )}
 
       {error ? <div className="empty-live" style={{ marginBottom: 12 }}>{error}</div> : null}
 
       <TradeTable
         title="Active trades"
-        meta="Open, partial, pending and awaiting-manual-confirmation paper trades from the SQLite trade book."
+        meta="Open paper trades and native capital locked. PAPER MODE records only."
         rows={active}
         openId={openId}
         detail={detail}
@@ -162,17 +165,21 @@ export function PaperTradeBook({ summary, active, closed, apiAvailable }: Props)
         empty="No persisted active paper trades."
       />
 
-      <div style={{ height: 14 }} />
-      <TradeTable
-        title="Closed trades"
-        meta="Settled paper history with realised P&L. Settlement is never inferred from kickoff time."
-        rows={closed}
-        openId={openId}
-        detail={detail}
-        busy={busy}
-        onToggle={toggle}
-        empty="No closed paper trades yet."
-      />
+      {compact ? null : (
+        <>
+          <div style={{ height: 14 }} />
+          <TradeTable
+            title="Closed trades"
+            meta="Settled paper history with realised P&L. Settlement is never inferred from kickoff time."
+            rows={closed}
+            openId={openId}
+            detail={detail}
+            busy={busy}
+            onToggle={toggle}
+            empty="No closed paper trades yet."
+          />
+        </>
+      )}
     </>
   );
 }

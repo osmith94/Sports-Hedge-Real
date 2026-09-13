@@ -198,7 +198,7 @@ async def test_matchbook_paginates_past_mixed_first_page_and_keeps_concurrent_ta
     after = int(first_events.params["after"])
     before = int(first_events.params["before"])
     assert after == int(datetime(2026, 9, 12, 11, 0, tzinfo=UTC).timestamp())
-    assert before == int(datetime(2026, 9, 15, 17, 0, tzinfo=UTC).timestamp())
+    assert before == int(datetime(2026, 9, 19, 17, 0, tzinfo=UTC).timestamp())
     assert after < int(KICKOFF.timestamp()) < before
 
 
@@ -244,7 +244,8 @@ async def test_collector_discovers_premier_league_after_more_than_one_hundred_mi
     assert discovered["8803"].target_competition_code == "la_liga"
     assert report.raw_matchbook_events == 103
     assert not any(item.source_event_id.startswith("100") for item in report.discovered_fixtures)
-    assert any(issue.stage == "target_competition" for issue in report.issues)
+    assert report.skipped_out_of_scope >= 1
+    assert not any(issue.stage == "target_competition" for issue in report.issues)
 
 
 @pytest.mark.asyncio

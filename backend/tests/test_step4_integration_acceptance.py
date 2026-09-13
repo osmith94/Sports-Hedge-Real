@@ -437,6 +437,7 @@ def test_operator_console_keeps_steps_1_to_3_console_contract() -> None:
     assert "DEMO_LIQUIDITY_POOLS" not in page
     assert "liveConnected" in page
     assert "excluded from solver" in pools
+    assert "Operator demo" not in (FRONTEND / "components" / "sidebar.tsx").read_text(encoding="utf-8")
     assert not hasattr(MatchbookClient, "place_order")
     assert not hasattr(PolymarketClient, "place_order")
     for path in (REPO / "backend" / "src" / "sports_hedge" / "venues").glob("*.py"):

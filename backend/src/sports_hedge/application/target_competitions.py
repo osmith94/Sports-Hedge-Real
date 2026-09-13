@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from sports_hedge.domain.models import VenueName
 from sports_hedge.normalization.text import normalize_text
 
 
@@ -20,11 +21,14 @@ class TargetCompetition(BaseModel):
     aliases: tuple[str, ...] = Field(default_factory=tuple)
     polymarket_gamma_series_id: str | None = None
     polymarket_gamma_sport: str | None = None
+    kalshi_series_prefixes: tuple[str, ...] = Field(default_factory=tuple)
 
 
 # Public Gamma GET /sports (retrieved 2026-09-12): epl=10188, elc=10355, lal=10193.
 # Series IDs are coverage claims for those competitions only. Empty series_id means
 # Sports Hedge must not invent Polymarket markets for that competition.
+# Aliases include observed Matchbook / Gamma / Kalshi label shapes. Matching is
+# exact after normalize_text; unknown labels fail closed.
 TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
     TargetCompetition(
         code=TargetCompetitionCode.PREMIER_LEAGUE,
@@ -32,25 +36,43 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
         aliases=(
             "premier league",
             "english premier league",
+            "england premier league",
+            "eng premier league",
+            "the premier league",
             "epl",
             "barclays premier league",
+            "barclays premiership",
             "premier league england",
+            "premier league 2025/26",
+            "premier league 2026/27",
+            "premier league 2026",
+            "english premier league 2025/26",
+            "english premier league 2026/27",
         ),
         polymarket_gamma_series_id="10188",
         polymarket_gamma_sport="epl",
+        kalshi_series_prefixes=("KXEPL",),
     ),
     TargetCompetition(
         code=TargetCompetitionCode.CHAMPIONSHIP,
         display_name="EFL Championship",
         aliases=(
             "championship",
+            "the championship",
             "efl championship",
             "english championship",
+            "england championship",
             "sky bet championship",
+            "skybet championship",
             "english football league championship",
+            "efl champ",
+            "championship 2025/26",
+            "efl championship 2025/26",
+            "efl championship 2026/27",
         ),
         polymarket_gamma_series_id="10355",
         polymarket_gamma_sport="elc",
+        kalshi_series_prefixes=("KXEFLCHAMPIONSHIP",),
     ),
     TargetCompetition(
         code=TargetCompetitionCode.LA_LIGA,
@@ -60,13 +82,21 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
             "laliga",
             "la liga santander",
             "la liga ea sports",
+            "laliga ea sports",
             "primera division",
             "primera división",
             "spanish primera",
             "spanish primera division",
+            "spanish la liga",
+            "spain la liga",
+            "spain primera division",
+            "primera división de españa",
+            "la liga 2025/26",
+            "la liga 2026/27",
         ),
         polymarket_gamma_series_id="10193",
         polymarket_gamma_sport="lal",
+        kalshi_series_prefixes=("KXLALIGA",),
     ),
 )
 
@@ -74,6 +104,12 @@ _ALIAS_INDEX: dict[str, TargetCompetition] = {}
 for _item in TARGET_COMPETITIONS:
     for _alias in (_item.display_name, _item.code.value, *_item.aliases):
         _ALIAS_INDEX[normalize_text(_alias)] = _item
+
+_SERIES_INDEX: dict[str, TargetCompetition] = {
+    item.polymarket_gamma_series_id: item
+    for item in TARGET_COMPETITIONS
+    if item.polymarket_gamma_series_id
+}
 
 _NON_FOOTBALL_SPORTS = {
     "cricket",
@@ -107,6 +143,7 @@ EVENT_IDENTITY_MISMATCH = "event_identity_mismatch"
 SERIES_NOT_QUERIED = "series_not_queried"
 UNKNOWN_COMPETITION = "unknown_or_ambiguous_competition"
 NON_FOOTBALL_SPORT = "non_football_sport"
+OUT_OF_SCOPE_COMPETITION = "out_of_scope_competition"
 
 
 class ScopeDecision(BaseModel):
@@ -117,6 +154,13 @@ class ScopeDecision(BaseModel):
     sport: str | None = None
 
 
+class ScopeFilterResult(BaseModel):
+    allowed: list[dict[str, Any]] = Field(default_factory=list)
+    skipped: int = 0
+    skipped_by_reason: dict[str, int] = Field(default_factory=dict)
+    rejected_labels: list[str] = Field(default_factory=list)
+
+
 def resolve_target_competition(label: str | None) -> TargetCompetition | None:
     """Exact alias match only. Unknown and ambiguous labels fail closed."""
 
@@ -125,7 +169,30 @@ def resolve_target_competition(label: str | None) -> TargetCompetition | None:
     normalized = normalize_text(label)
     if not normalized:
         return None
-    return _ALIAS_INDEX.get(normalized)
+    direct = _ALIAS_INDEX.get(normalized)
+    if direct is not None:
+        return direct
+    stripped = _strip_season_suffix(normalized)
+    if stripped != normalized:
+        return _ALIAS_INDEX.get(stripped)
+    return None
+
+
+def resolve_target_competition_from_series_id(series_id: str | None) -> TargetCompetition | None:
+    if not series_id:
+        return None
+    return _SERIES_INDEX.get(str(series_id).strip())
+
+
+def resolve_target_competition_from_kalshi_ticker(series_ticker: str | None) -> TargetCompetition | None:
+    ticker = str(series_ticker or "").strip().upper()
+    if not ticker:
+        return None
+    for item in TARGET_COMPETITIONS:
+        for prefix in item.kalshi_series_prefixes:
+            if ticker.startswith(prefix):
+                return item
+    return None
 
 
 def polymarket_series_ids_for_targets() -> list[str]:
@@ -195,6 +262,150 @@ def scope_matchbook_event(payload: dict[str, Any]) -> ScopeDecision:
             sport=sport,
         )
     return ScopeDecision(allowed=True, competition=resolved, label=label, sport=sport)
+
+
+def scope_polymarket_event(payload: dict[str, Any]) -> ScopeDecision:
+    series_target = _polymarket_series_target(payload)
+    label = _first_str(payload, "competition", "league", "seriesTitle", "series_title")
+    if series_target is not None:
+        return ScopeDecision(
+            allowed=True,
+            competition=series_target,
+            label=label or series_target.display_name,
+            sport="football",
+        )
+    resolved = resolve_target_competition(label)
+    if resolved is None:
+        series_title = _polymarket_series_title(payload)
+        resolved = resolve_target_competition(series_title)
+        label = label or series_title
+    if resolved is None:
+        return ScopeDecision(
+            allowed=False,
+            reason=UNKNOWN_COMPETITION,
+            label=label,
+            sport="football",
+        )
+    return ScopeDecision(allowed=True, competition=resolved, label=label, sport="football")
+
+
+def scope_kalshi_event(payload: dict[str, Any]) -> ScopeDecision:
+    ticker = str(payload.get("series_ticker") or payload.get("ticker") or "").strip()
+    series_target = resolve_target_competition_from_kalshi_ticker(ticker)
+    if series_target is None:
+        nested = payload.get("series")
+        if isinstance(nested, dict):
+            series_target = resolve_target_competition_from_kalshi_ticker(
+                str(nested.get("ticker") or "")
+            )
+    label = _first_str(payload, "competition", "league", "title")
+    if series_target is not None:
+        return ScopeDecision(
+            allowed=True,
+            competition=series_target,
+            label=label or series_target.display_name,
+            sport="football",
+        )
+    resolved = resolve_target_competition(label)
+    if resolved is None:
+        return ScopeDecision(
+            allowed=False,
+            reason=UNKNOWN_COMPETITION,
+            label=label or ticker or None,
+            sport="football",
+        )
+    return ScopeDecision(allowed=True, competition=resolved, label=label, sport="football")
+
+
+def filter_in_scope_events(
+    payloads: list[dict[str, Any]],
+    *,
+    venue: VenueName,
+) -> ScopeFilterResult:
+    """Keep target-competition football only. Out-of-scope is skipped, not an issue."""
+
+    allowed: list[dict[str, Any]] = []
+    skipped_by_reason: dict[str, int] = {}
+    rejected: list[str] = []
+    seen_labels: set[str] = set()
+    skipped = 0
+    for payload in payloads:
+        decision = _scope_for_venue(payload, venue)
+        if decision.allowed:
+            allowed.append(payload)
+            continue
+        skipped += 1
+        reason = decision.reason or OUT_OF_SCOPE_COMPETITION
+        skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
+        label = (decision.label or "").strip()
+        if label and label not in seen_labels:
+            seen_labels.add(label)
+            rejected.append(label)
+    return ScopeFilterResult(
+        allowed=allowed,
+        skipped=skipped,
+        skipped_by_reason=skipped_by_reason,
+        rejected_labels=rejected[:50],
+    )
+
+
+def _scope_for_venue(payload: dict[str, Any], venue: VenueName) -> ScopeDecision:
+    if venue is VenueName.MATCHBOOK:
+        return scope_matchbook_event(payload)
+    if venue is VenueName.POLYMARKET:
+        return scope_polymarket_event(payload)
+    if venue is VenueName.KALSHI:
+        return scope_kalshi_event(payload)
+    return ScopeDecision(allowed=False, reason=UNKNOWN_COMPETITION)
+
+
+def _polymarket_series_target(payload: dict[str, Any]) -> TargetCompetition | None:
+    series_id = payload.get("series_id") or payload.get("seriesId")
+    if isinstance(series_id, (int, str)):
+        resolved = resolve_target_competition_from_series_id(str(series_id))
+        if resolved is not None:
+            return resolved
+    series_items = payload.get("series")
+    if isinstance(series_items, dict):
+        series_items = [series_items]
+    if isinstance(series_items, list):
+        for series in series_items:
+            if not isinstance(series, dict):
+                continue
+            resolved = resolve_target_competition_from_series_id(
+                str(series.get("id", series.get("series_id", ""))).strip()
+            )
+            if resolved is not None:
+                return resolved
+            title = series.get("title") or series.get("name")
+            resolved = resolve_target_competition(str(title) if title else None)
+            if resolved is not None:
+                return resolved
+    return None
+
+
+def _polymarket_series_title(payload: dict[str, Any]) -> str | None:
+    series_items = payload.get("series")
+    if isinstance(series_items, dict):
+        title = series_items.get("title") or series_items.get("name")
+        return str(title).strip() if title else None
+    if isinstance(series_items, list):
+        for series in series_items:
+            if not isinstance(series, dict):
+                continue
+            title = series.get("title") or series.get("name")
+            if title:
+                return str(title).strip()
+    return None
+
+
+def _strip_season_suffix(normalized: str) -> str:
+    parts = normalized.split()
+    if len(parts) >= 2 and "/" in parts[-1] and parts[-1].replace("/", "").isdigit():
+        return " ".join(parts[:-1])
+    if len(parts) >= 2 and parts[-1].isdigit() and len(parts[-1]) == 4:
+        return " ".join(parts[:-1])
+    return normalized
 
 
 def _first_str(payload: dict[str, Any], *keys: str) -> str | None:

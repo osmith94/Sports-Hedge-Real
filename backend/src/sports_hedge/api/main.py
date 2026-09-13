@@ -17,6 +17,9 @@ from sports_hedge.api.watchlist import router as watchlist_router
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueCapabilities, VenueName
+from sports_hedge.venues.kalshi import KalshiClient
+from sports_hedge.venues.matchbook import MatchbookClient
+from sports_hedge.venues.polymarket import PolymarketClient
 
 
 @asynccontextmanager
@@ -68,6 +71,7 @@ def health() -> dict[str, object]:
         "execution_enabled": settings.sports_hedge_execution_enabled,
         "live_refresh": {
             "discovery_source": "matchbook",
+            "discovery_mode": "venue_union",
             "matching_venue": "polymarket",
             "matching_venues": ["polymarket", "kalshi"],
             "server_loop_enabled": coordinator.status.server_loop_enabled,
@@ -109,3 +113,24 @@ def venues() -> list[dict[str, object]]:
             "integration": "deferred",
         },
     ]
+
+
+@app.get("/venues/health")
+async def venue_health() -> list[dict[str, object]]:
+    """Read-only data-plane health for first-class venues. Never false-green."""
+
+    settings = get_settings()
+    clients = (
+        MatchbookClient(settings),
+        PolymarketClient(settings),
+        KalshiClient(settings),
+    )
+    results: list[dict[str, object]] = []
+    try:
+        for client in clients:
+            health = await client.health()
+            results.append(health.model_dump())
+    finally:
+        for client in clients:
+            await client.aclose()
+    return results

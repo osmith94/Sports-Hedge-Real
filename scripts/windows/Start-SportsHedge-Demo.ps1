@@ -65,7 +65,7 @@ $FrontendLog = Join-Path $Logs "demo-frontend.out.log"
 $FrontendErr = Join-Path $Logs "demo-frontend.err.log"
 $BackendHealth = "http://127.0.0.1:8000/health"
 $FrontendHealth = "http://127.0.0.1:3000"
-$DemoUrl = "http://127.0.0.1:3000/demo"
+$DemoUrl = "http://127.0.0.1:3000/"
 
 $Python = Join-Path $Root "backend\.venv\Scripts\python.exe"
 if (-not (Test-Path $Python)) {

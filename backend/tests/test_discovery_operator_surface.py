@@ -9,20 +9,11 @@ FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 HEADERS = [
     "Fixture",
     "Kickoff",
-    "Matchbook status",
-    "Polymarket",
-    "Matched markets",
-    "Family / outcomes",
-    "Best Matchbook",
-    "Best Polymarket",
+    "Phase",
+    "Venues",
+    "Equivalent",
     "Net edge",
-    "Trigger",
-    "Distance",
-    "Freshness",
-    "Comparison",
-    "Arb claim",
-    "Score",
-    "Last seen",
+    "State",
 ]
 
 
@@ -76,8 +67,12 @@ def test_discovery_ui_renders_target_rows_from_backend_fields() -> None:
         assert header in combined
     assert "percent(item.current_net_edge)" in source
     assert "percentPoints(item.distance_to_trigger_pp)" in source
-    assert "solver_is_arbitrage" in source or "arbClaimLabel" in source
+    assert "solver_is_arbitrage" in source or "arbClaimLabel" in display
     assert "1 / " not in source
+    assert "kalshi_matched" in source
+    assert "kickoffLocalLabel" in source
+    assert "toISOString" not in source
+    assert "series_not_queried" not in source
     display = (FRONTEND / "lib" / "discovered-fixture-display.ts").read_text(encoding="utf-8")
     assert "current_net_edge" in display
     assert "distance_to_trigger_pp" in display
@@ -87,3 +82,21 @@ def test_discovery_ui_renders_target_rows_from_backend_fields() -> None:
     assert "Demo walkthrough · not live operations" in page
     assert "liveConnected" in page
     assert "Newcastle" in page
+    assert "Start paper demo walkthrough" not in page
+    sidebar = (FRONTEND / "components" / "sidebar.tsx").read_text(encoding="utf-8")
+    assert "Operator demo" not in sidebar
+    layout = (FRONTEND / "app" / "layout.tsx").read_text(encoding="utf-8")
+    health = (FRONTEND / "components" / "venue-health-bar.tsx").read_text(encoding="utf-8")
+    assert "VenueHealthBar" in layout
+    assert "getVenueHealth" in health
+    assert "kalshi" in health
+    assert "matchbook" in health
+    assert "polymarket" in health
+    main = (FRONTEND.parent / "backend" / "src" / "sports_hedge" / "api" / "main.py").read_text(
+        encoding="utf-8"
+    )
+    assert '/venues/health' in main
+    assert "KalshiClient" in main
+    scan = (FRONTEND / "components" / "run-paper-scan.tsx").read_text(encoding="utf-8")
+    assert "Refresh interval" in scan
+    assert "operator_summary" in scan

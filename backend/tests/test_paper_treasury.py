@@ -881,3 +881,57 @@ def test_treasury_api_seed_lock_and_fx(tmp_path: Path) -> None:
     finally:
         app.dependency_overrides.clear()
         ledger.close()
+
+
+def test_operator_treasury_pool_edit_fail_closed_while_locked(tmp_path: Path) -> None:
+    ledger = SqlitePaperLedger(
+        tmp_path / "edit-treasury.sqlite",
+        seed_gbp=SEED,
+        usd_gbp_per_unit=FX,
+        include_kalshi=True,
+    )
+    app.dependency_overrides[get_paper_ledger] = lambda: ledger
+    client = TestClient(app)
+    try:
+        edited = client.post(
+            "/paper/treasury/pools",
+            json={
+                "reason": "operator paper treasury edit",
+                "pools": [
+                    {"venue": "matchbook", "available": "1500"},
+                    {"venue": "polymarket", "available": "2000"},
+                    {"venue": "kalshi", "available": "1250"},
+                ],
+            },
+        )
+        assert edited.status_code == 200
+        venues = {pool["venue"]: pool for pool in edited.json()["pools"]}
+        assert Decimal(venues["matchbook"]["available_cash"]) == Decimal("1500")
+        assert Decimal(venues["polymarket"]["available_cash"]) == Decimal("2000")
+        assert Decimal(venues["kalshi"]["available_cash"]) == Decimal("1250")
+        assert venues["polymarket"]["fx_source"]
+        assert venues["kalshi"]["fx_source"]
+
+        locked = client.post(
+            "/paper/treasury/locks",
+            json=[
+                {
+                    "venue": "matchbook",
+                    "native_currency": "GBP",
+                    "amount_native": "100",
+                    "lock_id": "edit-lock",
+                    "trade_id": "ptrade-edit",
+                    "fx_rate_gbp_per_unit": "1",
+                }
+            ],
+        )
+        assert locked.status_code == 200
+        blocked = client.post(
+            "/paper/treasury/pools",
+            json={"pools": [{"venue": "matchbook", "available": "50"}]},
+        )
+        assert blocked.status_code == 409
+        assert "active_treasury_locks" in str(blocked.json()["detail"])
+    finally:
+        app.dependency_overrides.clear()
+        ledger.close()

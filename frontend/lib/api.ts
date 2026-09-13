@@ -104,16 +104,30 @@ export type PaperCollectionReport = {
   started_at: string;
   completed_at: string;
   discovery_source?: Venue;
+  discovery_mode?: string;
   matching_venue?: Venue;
+  matching_venues?: Venue[];
   raw_matchbook_events: number;
   raw_polymarket_events: number;
+  raw_kalshi_events?: number;
   normalized_matchbook_events: number;
   normalized_polymarket_events: number;
+  normalized_kalshi_events?: number;
   matched_event_pairs: number;
+  pair_counts?: Record<string, number>;
   normalized_matchbook_markets: number;
   normalized_polymarket_markets: number;
+  normalized_kalshi_markets?: number;
   matched_market_pairs: number;
   order_books_fetched: number;
+  skipped_out_of_scope?: number;
+  skipped_by_reason?: Record<string, number>;
+  rejected_competition_labels?: string[];
+  target_coverage?: Record<string, Record<string, number>>;
+  config_warnings?: string[];
+  operator_summary?: string;
+  venue_health?: Record<string, string>;
+  qualifying_arbs?: number;
   paper_decisions: PaperCollectionDecision[];
   discovered_fixtures?: DiscoveredFixture[];
   issues: PaperCollectionIssue[];
@@ -128,7 +142,9 @@ export type DiscoveredFixture = {
   competition: string;
   target_competition_code?: string | null;
   kickoff_utc: string;
+  matchbook_matched?: boolean;
   polymarket_matched: boolean;
+  kalshi_matched?: boolean;
   fixture_status?: string | null;
   in_running?: boolean | null;
   live_score_supported: boolean;
@@ -142,6 +158,7 @@ export type DiscoveredFixture = {
   outcome_context?: string | null;
   best_matchbook_price?: string | number | null;
   best_polymarket_price?: string | number | null;
+  best_kalshi_price?: string | number | null;
   current_net_edge?: string | number | null;
   trigger_net_edge?: string | number | null;
   distance_to_trigger_pp?: string | number | null;
@@ -149,6 +166,7 @@ export type DiscoveredFixture = {
   quote_age_basis?: string | null;
   no_comparison_reason?: string | null;
   solver_is_arbitrage: boolean;
+  opportunity_state?: string;
 };
 
 export type InventoryComparisonStatus =
@@ -230,19 +248,34 @@ export type FixtureDetailReadModel = {
 
 export type LiveRefreshStatus = {
   discovery_source: Venue;
+  discovery_mode?: string;
   matching_venue: Venue;
+  matching_venues?: Venue[];
   server_loop_enabled: boolean;
   interval_seconds: number;
   cycle_in_progress: boolean;
   last_started_at?: string | null;
   last_completed_at?: string | null;
+  last_duration_ms?: number | null;
   last_error?: string | null;
   last_matched_event_pairs?: number | null;
   last_matched_market_pairs?: number | null;
   last_paper_decisions?: number | null;
   last_issue_count?: number | null;
+  skipped_out_of_scope?: number | null;
+  operator_summary?: string | null;
+  config_warnings?: string[];
+  venue_health?: Record<string, string>;
   live_scores: string;
   discovered_fixtures: DiscoveredFixture[];
+};
+
+export type VenueHealth = {
+  venue: Venue;
+  ok: boolean;
+  authenticated: boolean;
+  checked_at: string;
+  detail?: string | null;
 };
 
 export type ZeroRateBasis = "verified_zero" | "assumed_zero";
@@ -579,6 +612,10 @@ export function getLiveRefreshStatus(): Promise<LiveRefreshStatus> {
   return request("/paper/live-refresh");
 }
 
+export function getVenueHealth(): Promise<VenueHealth[]> {
+  return request("/venues/health");
+}
+
 export function getFixtureDetail(canonicalEventId: string): Promise<FixtureDetailReadModel> {
   return request(`/operations/fixtures/${encodeURIComponent(canonicalEventId)}`);
 }
@@ -693,6 +730,22 @@ export async function resetPaperTreasury(reason = "explicit paper treasury demo 
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ reason }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<PaperTreasurySnapshot>;
+}
+
+export async function savePaperTreasuryPools(
+  pools: Array<{ venue: Venue; available: string }>,
+  reason = "operator paper treasury edit",
+): Promise<PaperTreasurySnapshot> {
+  const response = await fetch(`${API_BASE}/paper/treasury/pools`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pools, reason }),
     cache: "no-store",
   });
   if (!response.ok) {

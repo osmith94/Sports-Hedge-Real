@@ -157,6 +157,16 @@ class PaperTreasuryResetRequest(BaseModel):
     reason: str = "explicit paper treasury demo reset"
 
 
+class PaperTreasuryPoolUpdate(BaseModel):
+    venue: VenueName
+    available: Decimal = Field(ge=0)
+
+
+class PaperTreasuryAdjustRequest(BaseModel):
+    pools: list[PaperTreasuryPoolUpdate] = Field(min_length=1, max_length=3)
+    reason: str = "operator paper treasury edit"
+
+
 class PaperTreasuryFxRequest(BaseModel):
     usd_gbp_per_unit: Decimal = Field(gt=0)
     fx_source: str = Field(min_length=1)
@@ -343,6 +353,32 @@ def paper_treasury(
     return ledger.treasury.snapshot(event_limit=limit)
 
 
+@router.post("/treasury/pools", response_model=PaperTreasurySnapshot)
+def adjust_paper_treasury_pools(
+    request: PaperTreasuryAdjustRequest,
+    ledger: SqlitePaperLedger = Depends(get_paper_ledger),
+    liquidity: SqlitePaperLiquidityRepository = Depends(get_paper_liquidity_repository),
+    fx: FxRateService = Depends(get_fx_rate_service),
+) -> PaperTreasurySnapshot:
+    try:
+        snapshot = ledger.treasury.set_available_amounts(
+            {item.venue: item.available for item in request.pools},
+            reason=request.reason,
+        )
+    except PaperTreasuryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    liquidity.update_available(
+        {
+            pool.venue: pool.available_cash
+            for pool in snapshot.pools
+            if pool.venue is not VenueName.SMARKETS
+        }
+    )
+    rates, source = _backend_fx_for_pools(fx)
+    liquidity.get(gbp_per_unit=rates, fx_source=source)
+    return snapshot
+
+
 @router.post("/treasury/reset", response_model=PaperTreasurySnapshot)
 def reset_paper_treasury(
     request: PaperTreasuryResetRequest,
@@ -477,7 +513,12 @@ def update_paper_liquidity_pools(
     request: PaperLiquidityUpdateRequest,
     repository: SqlitePaperLiquidityRepository = Depends(get_paper_liquidity_repository),
     fx: FxRateService = Depends(get_fx_rate_service),
+    ledger: SqlitePaperLedger = Depends(get_paper_ledger),
 ) -> PaperLiquiditySnapshot:
+    try:
+        ledger.treasury.assert_mutation_safe()
+    except PaperTreasuryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     available = {item.venue: item.available for item in request.pools}
     locked = {item.venue: item.locked for item in request.pools if item.locked is not None}
     transit = {item.venue: item.transit for item in request.pools if item.transit is not None}
@@ -639,6 +680,7 @@ async def _execute_collection(
         report = await collector.collect_and_scan(
             **kwargs,
             polymarket_queried_series_ids=settings.resolved_polymarket_series_ids(),
+            config_warnings=settings.polymarket_series_config_warnings(),
         )
         for decision in report.paper_decisions:
             _persist_decision(
@@ -868,14 +910,26 @@ def _build_observation(request: RawVenueObservationRequest) -> VenueMarketObserv
 
 
 def _backend_fx_for_pools(fx: FxRateService) -> tuple[dict[str, Decimal], str | None]:
+    settings = get_settings()
     rates: dict[str, Decimal] = {"GBP": Decimal("1")}
+    source: str | None = None
     try:
         snapshots = fx.paper_snapshots({"USD", "GBP"}, as_of=datetime.now(UTC))
+        for snapshot in snapshots:
+            rates[snapshot.currency] = snapshot.gbp_per_unit
+            if snapshot.currency == "USD":
+                source = snapshot.source
     except FxRateUnavailable:
-        return rates, None
-    source = None
-    for snapshot in snapshots:
-        rates[snapshot.currency] = snapshot.gbp_per_unit
-        if snapshot.currency == "USD":
-            source = snapshot.source
+        snapshots = []
+    if "USD" not in rates or rates.get("USD") in {None, Decimal("0")}:
+        try:
+            treasury = get_paper_ledger().treasury.snapshot()
+        except Exception:
+            treasury = None
+        if treasury is not None and treasury.session is not None:
+            rates["USD"] = treasury.session.fx_rate_usd_gbp
+            source = treasury.session.fx_source
+        else:
+            rates["USD"] = Decimal(str(settings.paper_treasury_demo_usd_gbp_per_unit))
+            source = settings.paper_treasury_demo_fx_source
     return rates, source

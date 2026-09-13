@@ -285,5 +285,6 @@ async def test_unmatched_reason_is_coverage_when_la_liga_series_was_queried_empt
 def test_legacy_single_series_override_emits_backward_compat_warning(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level("WARNING", logger="sports_hedge.config"):
         settings = Settings(polymarket_gamma_series_id="10188")
-    assert settings.resolved_polymarket_series_ids() == ["10188"]
-    assert any("legacy single-series override" in record.message for record in caplog.records)
+    assert settings.resolved_polymarket_series_ids() == ["10188", "10355", "10193"]
+    assert any("legacy single-series" in record.message for record in caplog.records)
+    assert any("merged into the target series set" in record.message for record in caplog.records)

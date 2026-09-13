@@ -47,10 +47,16 @@ function optionalPercentRate(value: string, label: string): string | undefined {
 }
 
 function reportSummary(report: PaperCollectionReport): string {
+  if (report.operator_summary) return report.operator_summary;
   const eligible = report.paper_decisions.filter(
     (decision) => decision.eligible_for_paper_simulation,
   ).length;
-  return `${report.matched_event_pairs} event pair${report.matched_event_pairs === 1 ? "" : "s"} · ${report.matched_market_pairs} market pair${report.matched_market_pairs === 1 ? "" : "s"} · ${eligible} paper-eligible · ${report.issues.length} issue${report.issues.length === 1 ? "" : "s"}`;
+  return `${report.matched_event_pairs} event pair${report.matched_event_pairs === 1 ? "" : "s"} · ${report.matched_market_pairs} market pair${report.matched_market_pairs === 1 ? "" : "s"} · ${eligible} paper-eligible · ${report.issues.length} genuine issue${report.issues.length === 1 ? "" : "s"}`;
+}
+
+function clampIntervalSeconds(value: number): number {
+  if (!Number.isFinite(value)) return 30;
+  return Math.min(300, Math.max(15, Math.round(value)));
 }
 
 function sourceLabel(source: string): string {
@@ -158,6 +164,9 @@ export function RunPaperScan() {
   const [state, setState] = useState<ScanState>({ kind: "idle" });
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [intervalSeconds, setIntervalSeconds] = useState(30);
+  const [intervalDraft, setIntervalDraft] = useState("30");
+  const [lastCompletedAt, setLastCompletedAt] = useState<string | null>(null);
+  const [lastDurationMs, setLastDurationMs] = useState<number | null>(null);
   const [economics, setEconomics] = useState<EconomicsStatus | null>(null);
   const payloadRef = useRef<PaperCollectionRequest>({ maximum_execution_risk: 60 });
   const inFlightRef = useRef(false);
@@ -204,6 +213,12 @@ export function RunPaperScan() {
       payloadRef.current = payload;
       const report = await runPaperCollection(payload);
       setState({ kind: "success", report });
+      setLastCompletedAt(report.completed_at);
+      const started = Date.parse(report.started_at);
+      const completed = Date.parse(report.completed_at);
+      if (Number.isFinite(started) && Number.isFinite(completed)) {
+        setLastDurationMs(Math.max(0, completed - started));
+      }
       await refreshEconomics();
       router.refresh();
     } catch (error) {
@@ -229,9 +244,14 @@ export function RunPaperScan() {
     let cancelled = false;
     getLiveRefreshStatus()
       .then((status) => {
-        if (!cancelled && status.interval_seconds) {
-          setIntervalSeconds(status.interval_seconds);
+        if (cancelled) return;
+        if (status.interval_seconds) {
+          const clamped = clampIntervalSeconds(status.interval_seconds);
+          setIntervalSeconds(clamped);
+          setIntervalDraft(String(clamped));
         }
+        if (status.last_completed_at) setLastCompletedAt(status.last_completed_at);
+        if (status.last_duration_ms != null) setLastDurationMs(status.last_duration_ms);
       })
       .catch(() => {
         // Status endpoint down: keep the 30s default cadence.
@@ -243,7 +263,7 @@ export function RunPaperScan() {
 
   useEffect(() => {
     if (!autoRefresh) return undefined;
-    const cadenceMs = Math.max(15, intervalSeconds) * 1000;
+    const cadenceMs = clampIntervalSeconds(intervalSeconds) * 1000;
     const timer = window.setInterval(() => {
       void collectRef.current();
     }, cadenceMs);
@@ -262,7 +282,7 @@ export function RunPaperScan() {
       <div className="panel-header">
         <div>
           <div className="panel-title">Paper scanner</div>
-          <div className="panel-meta">Read-only collection. Stake sizing uses standing native venue pools.</div>
+          <div className="panel-meta">Read-only collection. Min net arb is net after modeled costs.</div>
         </div>
         <span className="status-badge">PAPER MODE · NO EXECUTION</span>
       </div>
@@ -288,19 +308,44 @@ export function RunPaperScan() {
               aria-label="Maximum execution risk score"
             />
           </label>
+          <label className="scan-field scan-field-compact">
+            <span>Refresh interval s</span>
+            <input
+              inputMode="numeric"
+              value={intervalDraft}
+              onChange={(event) => setIntervalDraft(event.target.value)}
+              onBlur={() => {
+                const clamped = clampIntervalSeconds(Number(intervalDraft));
+                setIntervalSeconds(clamped);
+                setIntervalDraft(String(clamped));
+              }}
+              aria-label="Refresh interval seconds"
+              title="Safe range 15–300 seconds"
+            />
+          </label>
           <label className="scan-refresh">
             <input
               type="checkbox"
               checked={autoRefresh}
               onChange={(event) => setAutoRefresh(event.target.checked)}
             />
-            Auto {intervalSeconds}s
+            Auto refresh
           </label>
           <div className="scan-action">
             <button className="scan-button" type="submit" disabled={loading}>
               {loading ? "Scanning…" : "Run scan"}
             </button>
           </div>
+        </div>
+        <div className="scan-note">
+          Last scan {lastCompletedAt ? new Date(lastCompletedAt).toLocaleString() : "never"}
+          {lastDurationMs != null ? ` · ${Math.round(lastDurationMs / 100) / 10}s` : ""}
+          {autoRefresh && lastCompletedAt
+            ? ` · next ${new Date(Date.parse(lastCompletedAt) + clampIntervalSeconds(intervalSeconds) * 1000).toLocaleTimeString()}`
+            : autoRefresh
+              ? " · next after this scan"
+              : " · auto off"}
+          {` · cadence ${clampIntervalSeconds(intervalSeconds)}s`}
         </div>
 
         <div className="econ-strip" aria-label="Backend-resolved FX and venue costs">
@@ -319,8 +364,8 @@ export function RunPaperScan() {
           <summary>Advanced · provenance</summary>
           <p className="scan-advanced-copy">
             FX and venue fees are backend-resolved ({economics?.data_kind ?? "backend_resolved"}).
-            Missing or stale required inputs fail closed. Standing capital is Matchbook GBP /
-            Polymarket USD / Smarkets GBP — never a combined cash figure. Optional extra
+            Missing or stale required inputs fail closed.             Standing capital is Matchbook GBP /
+            Polymarket USD / Kalshi USD — never a combined cash figure. Optional extra
             capital_limit_gbp is a scan-only cap, not live funds.
           </p>
           <label className="scan-field">
@@ -338,9 +383,10 @@ export function RunPaperScan() {
         {state.kind === "success" ? (
           <div className="scan-message scan-message-success" role="status">
             {reportSummary(state.report)}
-            {state.report.issues.length > 0 ? (
-              <span> · First issue: {state.report.issues[0].detail}</span>
-            ) : null}
+            {state.report.config_warnings?.length ? ` · ${state.report.config_warnings[0]}` : ""}
+            {state.report.issues.length > 0
+              ? ` · ${state.report.issues.length} genuine issue${state.report.issues.length === 1 ? "" : "s"}`
+              : ""}
           </div>
         ) : null}
 

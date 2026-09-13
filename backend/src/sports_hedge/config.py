@@ -34,7 +34,9 @@ class Settings(BaseSettings):
     matchbook_event_per_page: int = Field(default=100, ge=1, le=100)
     matchbook_event_max_pages: int = Field(default=10, ge=1, le=50)
     matchbook_fixture_lookback_hours: int = Field(default=6, ge=1, le=24)
-    matchbook_fixture_lookahead_hours: int = Field(default=72, ge=1, le=168)
+    # Sunday operator scans must still see the following weekend's PL/Championship
+    # cards. 168h is the documented max and the demo-phase default.
+    matchbook_fixture_lookahead_hours: int = Field(default=168, ge=1, le=168)
 
     polymarket_gamma_base_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_base_url: str = "https://clob.polymarket.com"
@@ -157,12 +159,42 @@ class Settings(BaseSettings):
         return self.kalshi_base_url.rstrip("/")
 
     def resolved_polymarket_series_ids(self) -> list[str]:
-        """Single-id override wins when set, including explicit disable (empty)."""
+        """Target-series coverage with a safe legacy-ID merge.
 
-        if self.polymarket_gamma_series_id is not None:
-            single = self.polymarket_gamma_series_id.strip()
-            return [single] if single else []
-        return list(self.polymarket_gamma_series_ids)
+        A stale ``POLYMARKET_GAMMA_SERIES_ID`` must not silently replace the
+        EPL + Championship + La Liga set. The legacy value is merged into the
+        current list. An explicit empty single-id still disables series
+        filtering (operator-opt-in) and is warned.
+        """
+
+        targets = list(self.polymarket_gamma_series_ids)
+        if self.polymarket_gamma_series_id is None:
+            return targets
+        single = self.polymarket_gamma_series_id.strip()
+        if not single:
+            return []
+        merged: list[str] = []
+        for item in [*targets, single]:
+            if item and item not in merged:
+                merged.append(item)
+        return merged
+
+    def polymarket_series_config_warnings(self) -> list[str]:
+        if self.polymarket_gamma_series_id is None:
+            return []
+        single = self.polymarket_gamma_series_id.strip()
+        if not single:
+            return [
+                "POLYMARKET_GAMMA_SERIES_ID is empty, so Gamma series filtering is disabled. "
+                "Championship/La Liga coverage is no longer guaranteed by the target-series allowlist."
+            ]
+        resolved = self.resolved_polymarket_series_ids()
+        return [
+            "POLYMARKET_GAMMA_SERIES_ID is a legacy single-series setting "
+            f"({single}); it was merged into the target series set "
+            f"({', '.join(resolved)}) rather than replacing it. Unset the legacy "
+            "variable and use POLYMARKET_GAMMA_SERIES_IDS."
+        ]
 
     @model_validator(mode="after")
     def enforce_phase_one_safety(self) -> "Settings":
@@ -170,14 +202,8 @@ class Settings(BaseSettings):
             raise ValueError("Phase 1 supports paper mode only")
         if self.sports_hedge_execution_enabled:
             raise ValueError("Live execution is intentionally unavailable in Phase 1")
-        if self.polymarket_gamma_series_id is not None:
-            displayed = self.polymarket_gamma_series_id.strip() or "(empty — series filter disabled)"
-            LOGGER.warning(
-                "POLYMARKET_GAMMA_SERIES_ID is a legacy single-series override (%s); "
-                "Championship and La Liga will not be queried unless this is unset. "
-                "Prefer POLYMARKET_GAMMA_SERIES_IDS.",
-                displayed,
-            )
+        for warning in self.polymarket_series_config_warnings():
+            LOGGER.warning("%s", warning)
         return self
 
 

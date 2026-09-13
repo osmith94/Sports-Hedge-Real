@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sports_hedge.accounting.dimensions import CapitalSource, parse_capital_source
+from sports_hedge.accounting.dimensions import CapitalSource, PostingSide, parse_capital_source
 from sports_hedge.accounting.paper_journal import (
     DataProvenance,
     DuplicateJournalError,
@@ -227,6 +227,101 @@ class PaperTreasuryService:
                         opportunity_id=opportunity_id,
                         source="paper_treasury_seed",
                         source_id=f"{session_id}:{venue.value}:{currency}",
+                        reason=reason,
+                        fx_rate_gbp_per_unit=rate,
+                        fx_source=source,
+                        journal_id=journal.journal_id,
+                    )
+                )
+        return self.snapshot()
+
+    def set_available_amounts(
+        self,
+        amounts: dict[VenueName, Decimal],
+        *,
+        reason: str = "operator paper treasury edit",
+        provenance: DataProvenance = DataProvenance.LIVE_PAPER,
+        now: datetime | None = None,
+    ) -> PaperTreasurySnapshot:
+        """Set native available cash per venue. Fail-closed while locks/trades are open."""
+
+        if any(value < 0 for value in amounts.values()):
+            raise PaperTreasuryError("invalid_seed_amount")
+        self.assert_mutation_safe()
+        session = self.active_session()
+        if session is None:
+            self.ensure_demo_session(reason=reason, provenance=provenance, now=now)
+            session = self.active_session()
+        if session is None:
+            raise PaperTreasuryError("stale_unknown_pool")
+        occurred = now or datetime.now(UTC)
+        with self._ledger.transaction():
+            self._assert_reset_allowed(session)
+            opportunity_id = f"treasury:{session.session_id}:adjust"
+            for venue, native in amounts.items():
+                if venue is VenueName.SMARKETS:
+                    continue
+                pool = self._pool_row(session.session_id, venue, "GBP" if venue is VenueName.MATCHBOOK else "USD")
+                current = Decimal(pool["available_cash"])
+                delta = native - current
+                if delta == 0:
+                    continue
+                rate = Decimal(pool["fx_rate_gbp_per_unit"] or "0")
+                source = pool["fx_source"]
+                if rate <= 0:
+                    raise PaperTreasuryError("missing_fx_snapshot")
+                gbp = abs(delta) * rate
+                postings = seed_funding_postings(
+                    venue=venue,
+                    currency=pool["native_currency"],
+                    amount_native=abs(delta),
+                    amount_gbp=gbp,
+                    fx_rate_gbp_per_unit=rate,
+                    opportunity_id=opportunity_id,
+                )
+                if delta < 0:
+                    postings = [
+                        item.model_copy(
+                            update={
+                                "side": PostingSide.CREDIT
+                                if item.side is PostingSide.DEBIT
+                                else PostingSide.DEBIT
+                            }
+                        )
+                        for item in postings
+                    ]
+                journal, _created = self._ledger.journal.append_idempotent(
+                    PaperJournalEntry(
+                        source="paper_treasury_adjust",
+                        source_id=f"{session.session_id}:{venue.value}:{occurred.isoformat()}:{native}",
+                        occurred_at=occurred,
+                        description=f"PAPER-ONLY treasury adjust {venue.value}",
+                        opportunity_id=opportunity_id,
+                        provenance=provenance,
+                        postings=postings,
+                    )
+                )
+                self._connection.execute(
+                    """
+                    UPDATE paper_treasury_pools
+                    SET available_cash = ?, seed_native = ?
+                    WHERE pool_id = ?
+                    """,
+                    (str(native), str(native), pool["pool_id"]),
+                )
+                self._insert_event(
+                    PaperTreasuryEvent(
+                        event_id=str(uuid4()),
+                        session_id=session.session_id,
+                        pool_id=pool["pool_id"],
+                        venue=venue,
+                        native_currency=pool["native_currency"],
+                        event_type=PaperTreasuryEventType.CORRECTION,
+                        native_amount=delta,
+                        occurred_at=occurred,
+                        opportunity_id=opportunity_id,
+                        source="paper_treasury_adjust",
+                        source_id=f"{session.session_id}:{venue.value}:{occurred.isoformat()}",
                         reason=reason,
                         fx_rate_gbp_per_unit=rate,
                         fx_source=source,
@@ -871,6 +966,12 @@ class PaperTreasuryService:
                 fx_source=fx_source,
             )
         )
+
+    def assert_mutation_safe(self) -> None:
+        session = self.active_session()
+        if session is None:
+            return
+        self._assert_reset_allowed(session)
 
     def _assert_reset_allowed(self, session: PaperTreasurySession) -> None:
         open_locks = self._connection.execute(

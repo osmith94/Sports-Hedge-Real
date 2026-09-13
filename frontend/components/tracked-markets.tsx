@@ -36,7 +36,7 @@ export function TrackedMarketsBoard({
   }
 
   if (items.length === 0) {
-    return <div className="empty-live-compact">No tracked markets.</div>;
+    return <div className="empty-live-compact">0 / No tracked markets yet</div>;
   }
 
   return (

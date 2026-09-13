@@ -9,8 +9,8 @@ This is an operator-usability / demo-integration pass. It does **not** add a new
 | Surface | Class |
 | --- | --- |
 | `/paper/watchlist/tracked`, `/near`, `/triggered`, `/activity` | `LIVE PAPER` when FastAPI is reachable. Empty live lists stay empty. `demo_fixture_replay` rows are filtered out of these lists. `UNAVAILABLE` if the watchlist API is down — never back-filled with live-looking fixture arbs. |
-| `/paper/collect`, `/paper/live-refresh`, Matchbook-discovered fixtures | `LIVE PAPER` when collection credentials/venues respond; empty discovery stays empty. Missing Matchbook credentials stay honestly `UNAVAILABLE` / HTTP 503 — never a faked login. Matchbook discovery paginates `GET /edge/rest/events`. Polymarket public Gamma uses bounded per-series pagination. Kalshi public Trade API v2 is read-only. `/demo` calls this same collect path on load/start, via **Refresh Live Discovery**, and on the operations-console cadence. |
-| `/demo` live discovery panel | Same read-only collect/live-refresh as `/`. Empty stays empty. Fixture replay is never substituted into live rows. |
+| `/paper/collect`, `/paper/live-refresh`, venue-union fixtures | `LIVE PAPER` when collection credentials/venues respond; empty discovery stays empty. Missing Matchbook credentials stay honestly `UNAVAILABLE` for Matchbook only — Polymarket and Kalshi still collect independently. Matchbook discovery paginates `GET /edge/rest/events`. Polymarket public Gamma uses bounded per-series pagination (legacy `POLYMARKET_GAMMA_SERIES_ID` is merged into the target EPL+Championship+La Liga set). Kalshi public Trade API v2 is read-only. `/` Operations Console is the normal operator surface. `/demo` is an advanced/test fixture-replay utility and is not opened by the launcher. |
+| `/demo` fixture replay | Always labelled `DEMO / FIXTURE REPLAY`. Same read-only collect path is available there for tests. Fixture replay is never substituted into live rows. |
 | `/paper/scans` | `LIVE PAPER` / empty / `UNAVAILABLE` |
 | `/paper/treasury` | Authoritative **persistent paper treasury** (8E), not a labelled demo-only pool widget. Three native venue books. GBP carrying values are FX translations, not spendable cash. |
 | `/paper/liquidity-pools` | Paper config / standing capital used by the solver. Aligned to treasury seed amounts on demo reset. Not a second source of truth for locks. |
@@ -37,7 +37,7 @@ Unknown costs still fail closed. Native GBP and the two USD venue pools are neve
 - 8D hold-vs-unwind evaluates executable reverse-side economics. Spread convergence is not a close trigger. Clock / modelled time-to-release is advisory (`settles_or_releases_capital=false`) and never makes capital spendable.
 - Two authoritative release paths: validated paper unwind that posts 8E, or explicit paper settlement that posts 8E. Kalshi SELL close fees are not modelled; unwind involving Kalshi fails closed rather than inventing a fee. Settlement remains the Kalshi close path.
 - Labelled `DEMO / FIXTURE REPLAY` exercises the same allocator → autofill → treasury → unwind/settlement lifecycle and is never mixed into empty live watchlists.
-- Windows double-click start/stop launchers under `scripts/windows/`. Hidden local processes, health wait, duplicate-process avoidance, file logs, visible startup error. `PAPER_AUTOFILL_ENABLED=true` and `PAPER_LIVE_REFRESH_ENABLED=true` for that local demo process only; application defaults remain false. Stop refuses to kill a reused PID unless command/path matches the launcher identity. `/demo` runs the existing `/paper/collect` path on load/start, via **Refresh Live Discovery**, and on the same ≥15s/default 30s cadence as the operations console. No Vercel/cloud migration.
+- Windows double-click start/stop launchers under `scripts/windows/`. Hidden local processes, health wait, duplicate-process avoidance, file logs, visible startup error. `PAPER_AUTOFILL_ENABLED=true` and `PAPER_LIVE_REFRESH_ENABLED=true` for that local demo process only; application defaults remain false. Stop refuses to kill a reused PID unless command/path matches the launcher identity. The launcher opens `/` Operations Console. `/demo` remains a labelled DEMO / FIXTURE REPLAY utility and can still run `/paper/collect` plus **Refresh Live Discovery** for lifecycle acceptance when no live arb exists. No Vercel/cloud migration.
 
 ## What remains fixture/demo / unavailable
 
@@ -51,19 +51,19 @@ Unknown costs still fail closed. Native GBP and the two USD venue pools are neve
 
 ## Exact Step 9 operator walkthrough
 
-1. **Reset / start demo** — `/demo` or double-click `scripts/windows/Start-SportsHedge-Demo.bat` then `/demo`. PAPER MODE / NO EXECUTION. Seed or reinitialize the three separated native pools. Ordinary reset refuses destruction while locks/trades are open.
-2. **Discovery / tracking** — `/demo` (and `/` operations console). One-click launch opens `/demo`, which initiates the existing read-only `/paper/collect` path and can auto-refresh on the same safe cadence as the operations console. An explicit **Refresh Live Discovery** button re-runs collection then reloads the walkthrough. Tracked / near / triggered stay honestly empty when empty. Near is not relabelled as arbitrage. Missing credentials/providers fail as UNAVAILABLE. Fixture replay is never mixed into live rows.
+1. **Reset / start** — double-click `scripts/windows/Start-SportsHedge-Demo.bat` then `/` Operations Console. PAPER MODE / NO EXECUTION. Seed or reinitialize the three separated native pools from Paper Treasury. Ordinary reset refuses destruction while locks/trades are open.
+2. **Discovery / tracking** — `/` operations console. One-click launch opens `/`. Tracked / near / triggered stay honestly empty when empty. Near is not relabelled as arbitrage. Missing credentials/providers fail as UNAVAILABLE for that venue; other venues still collect. Fixture replay is never mixed into live rows.
 3. **Automatic paper entry** — live 8F autofill when `PAPER_AUTOFILL_ENABLED` is on (demo launcher) and a solver-qualified opportunity exists; otherwise labelled fixture replay. Allocator size is authoritative. Matchbook/Kalshi INTERNAL; Polymarket demo `PAPER_SIMULATED_EXTERNAL`. OPEN only after complete hedge + 8E locks.
-4. **Active position / capital** — `/demo` plus `/paper` and `/treasury`. Opportunity + solver model, venue legs, native stake, fill kind, guaranteed opening economics when proven, available vs locked native capital by venue/currency, modelled time-to-release basis/confidence when present. PAPER MODE visible.
+4. **Active position / capital** — `/` plus `/paper` and `/treasury`. Opportunity + solver model, venue legs, native stake, fill kind, guaranteed opening economics when proven, available vs locked native capital by venue/currency, modelled time-to-release basis/confidence when present. PAPER MODE visible.
 5. **Hold vs clean unwind** — 8D close-plan on the open trade using current reverse-side read-only economics (fixture replay supplies labelled reverse quotes). Hold-to-settlement P&L vs validated exit P&L, unwind cost, capital releasable only if the full close fills. Advisory remaining lock / opportunity-cost context is not spendable.
 6. **Close lifecycle** — validated paper unwind (when fully executable) **or** explicit paper settlement, both posting 8E release. After close: realised betting P&L, fees, native cash released/remaining, final native balances by venue/currency, GBP carrying values (not native cash), append-only journal/audit.
-7. **No-live-arb fallback** — if no live qualifying arb exists, `/demo` **DEMO / FIXTURE REPLAY** runs the same lifecycle. It is never substituted into an empty live list without that label.
+7. **No-live-arb fallback** — if no live qualifying arb exists, labelled `/demo` **DEMO / FIXTURE REPLAY** runs the same lifecycle. It is never substituted into an empty live list without that label.
 
 ## Core tenets (PASS / PARTIAL / FAIL)
 
 | Tenet | Result | Evidence |
 | --- | --- | --- |
-| 01 Product structure | **PASS** | Separate Arbitrage / Research nav. Research never labelled guaranteed arb. `/demo` sits under Arbitrage as an operator walkthrough. |
+| 01 Product structure | **PASS** | Separate Arbitrage / Research nav. Research never labelled guaranteed arb. `/` is the only normal operator surface; `/demo` is an advanced labelled fixture-replay utility, not a competing console. |
 | 02 Paper mode | **PASS** | `execution_enabled=false`. No place/cancel/sign/wallet/trading-auth/write API. Demo launcher cannot turn execution on. |
 | 03 Canonical equivalence | **PARTIAL** | Shared identity and incomplete-fingerprint fail-closed remain. Live discovery still bounded. |
 | 04 Arbitrage operations | **PASS** (paper) | Tracked + near + triggered; 8F OPEN-after-locks; 8D/8E close paths; near ≠ triggered. |

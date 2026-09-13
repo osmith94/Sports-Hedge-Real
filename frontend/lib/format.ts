@@ -36,3 +36,35 @@ export function relativeTime(iso: string | null | undefined, now = Date.now()): 
   if (Math.abs(deltaHr) < 48) return `${deltaHr}h ago`;
   return new Date(then).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
 }
+
+export function kickoffLocalLabel(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(date);
+}
+
+export function kickoffRelativeLabel(
+  iso: string | null | undefined,
+  now = Date.now(),
+): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  const deltaMs = date.getTime() - now;
+  const abs = Math.abs(deltaMs);
+  const minutes = Math.round(abs / 60_000);
+  if (minutes < 1) return deltaMs >= 0 ? "in <1m" : "<1m ago";
+  if (minutes < 60) return deltaMs >= 0 ? `in ${minutes}m` : `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return deltaMs >= 0 ? `in ${hours}h` : `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return deltaMs >= 0 ? `in ${days}d` : `${days}d ago`;
+}

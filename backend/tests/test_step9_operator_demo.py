@@ -434,7 +434,8 @@ def test_windows_launcher_scripts_encode_paper_only_contract() -> None:
     assert "demo-backend.pid" in start_ps1
     assert "demo-frontend.pid" in start_ps1
     assert "MessageBox" in start_ps1
-    assert "127.0.0.1:3000/demo" in start_ps1
+    assert "127.0.0.1:3000/" in start_ps1
+    assert "127.0.0.1:3000/demo" not in start_ps1
     assert "command_tokens" in start_ps1
     assert "ConvertTo-Json" in start_ps1
     assert "vercel" not in start_ps1.lower()

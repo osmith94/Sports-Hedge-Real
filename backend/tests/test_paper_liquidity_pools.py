@@ -273,6 +273,7 @@ def test_live_console_hides_demo_pools_and_compacts_empty_states() -> None:
     assert "DEMO_EXECUTABLE" not in page
     assert "DEMO_ACTIVITY" not in page
     assert "getPaperLiquidityPools" in page
+    assert "getPaperTreasury" in page
     assert "empty-live-compact" in page
     assert "demo-walkthrough" in page
     assert "PAPER MODE · NO EXECUTION" in scan
@@ -281,7 +282,10 @@ def test_live_console_hides_demo_pools_and_compacts_empty_states() -> None:
     assert "econ-strip" in scan
     assert "USD → GBP" not in scan
     assert "Matchbook fee %" not in scan
+    assert "Refresh interval" in scan
+    assert "Auto 30s" not in scan
     assert "DEMO_LIQUIDITY_POOLS" not in treasury
     assert "PAPER CAPITAL" in pools
     assert "HYPOTHETICAL" in pools
     assert "excluded from solver" in pools
+    assert "Paper Treasury" in pools

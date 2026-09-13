@@ -1,26 +1,80 @@
+"use client";
+
 import Link from "next/link";
 import { DiscoveredFixture, LiveRefreshStatus } from "../lib/api";
 import {
   DISCOVERY_TABLE_HEADERS,
-  arbClaimLabel,
+  equivalentCountLabel,
   fixtureHref,
   fixturePhaseLabel,
   freshnessLabel,
-  inventorySummaryLabel,
-  polymarketCoverageLabel,
+  opportunityStateLabel,
+  technicalDetailLines,
+  venuePresent,
 } from "../lib/discovered-fixture-display";
-import { percent, percentPoints, relativeTime } from "../lib/format";
+import { kickoffLocalLabel, kickoffRelativeLabel, percent, percentPoints } from "../lib/format";
 
-function scoreText(item: DiscoveredFixture): string {
-  if (item.live_score_supported && item.home_score != null && item.away_score != null) {
-    return `${item.home_score}–${item.away_score} (Matchbook payload)`;
-  }
-  return "unavailable · Matchbook payload has no score fields";
+function VenueMark({
+  code,
+  present,
+}: {
+  code: string;
+  present: boolean;
+}) {
+  return (
+    <span className={present ? "venue-mark venue-mark-on" : "venue-mark"} title={present ? `${code} present` : `${code} not on this fixture`}>
+      {code}
+    </span>
+  );
 }
 
-function decimalText(value: string | number | null | undefined): string {
-  if (value === null || value === undefined || value === "") return "—";
-  return String(value);
+function FixtureRow({ item }: { item: DiscoveredFixture }) {
+  const relative = kickoffRelativeLabel(item.kickoff_utc);
+  const details = technicalDetailLines(item);
+  return (
+    <>
+      <tr>
+        <td className="row-title wrap">
+          <Link className="fixture-link" href={fixtureHref(item)}>
+            {item.home_team} v {item.away_team}
+          </Link>
+          <div className="muted">
+            {item.competition}
+            {item.target_competition_code ? ` · ${item.target_competition_code}` : ""}
+          </div>
+        </td>
+        <td className="wrap">
+          {kickoffLocalLabel(item.kickoff_utc)}
+          {relative ? <div className="muted">{relative}</div> : null}
+        </td>
+        <td>{fixturePhaseLabel(item)}</td>
+        <td>
+          <span className="venue-marks">
+            <VenueMark code="MB" present={venuePresent(item.matchbook_matched)} />
+            <VenueMark code="PM" present={venuePresent(item.polymarket_matched)} />
+            <VenueMark code="K" present={venuePresent(item.kalshi_matched)} />
+          </span>
+        </td>
+        <td>{equivalentCountLabel(item)}</td>
+        <td className={Number(item.current_net_edge) < 0 ? "edge-negative" : ""}>
+          {percent(item.current_net_edge)}
+          {item.distance_to_trigger_pp != null && item.distance_to_trigger_pp !== "" ? (
+            <div className="muted">{percentPoints(item.distance_to_trigger_pp)} to trigger</div>
+          ) : null}
+        </td>
+        <td>{opportunityStateLabel(item)}</td>
+      </tr>
+      <tr className="discovery-detail-row">
+        <td colSpan={DISCOVERY_TABLE_HEADERS.length}>
+          <details>
+            <summary>Advanced · mapping and quotes</summary>
+            <div className="muted wrap">{details.join(" · ")}</div>
+            <div className="muted">{freshnessLabel(item)}</div>
+          </details>
+        </td>
+      </tr>
+    </>
+  );
 }
 
 export function DiscoveredFixturesPanel({
@@ -39,20 +93,28 @@ export function DiscoveredFixturesPanel({
   }
 
   const items = status.discovered_fixtures;
+  const warnings = status.config_warnings ?? [];
 
   return (
     <>
       <p className="section-copy">
-        PL / Championship / La Liga only. Last collection{" "}
-        {status.last_completed_at ? relativeTime(status.last_completed_at) : "never"}.
-        {status.last_error ? ` Last error: ${status.last_error}` : ""} Click a fixture for
-        the full discovered market inventory — not match-result only.
+        {status.operator_summary
+          ? status.operator_summary
+          : `PL / Championship / La Liga. Last collection ${
+              status.last_completed_at ? kickoffRelativeLabel(status.last_completed_at) ?? "just now" : "never"
+            }.`}
+        {status.last_error ? ` Last error: ${status.last_error}` : ""}
       </p>
+      {warnings.length ? (
+        <div className="scan-message scan-message-error" role="status">
+          {warnings.join(" ")}
+        </div>
+      ) : null}
       {items.length === 0 ? (
-        <div className="empty-live-compact">No in-scope Matchbook fixtures.</div>
+        <div className="empty-live-compact">No in-scope fixtures yet.</div>
       ) : (
         <div className="table-wrap">
-          <table>
+          <table className="discovery-compact">
             <thead>
               <tr>
                 {DISCOVERY_TABLE_HEADERS.map((header) => (
@@ -62,41 +124,7 @@ export function DiscoveredFixturesPanel({
             </thead>
             <tbody>
               {items.map((item) => (
-                <tr key={item.canonical_event_id}>
-                  <td className="row-title">
-                    <Link className="fixture-link" href={fixtureHref(item)}>
-                      {item.home_team} v {item.away_team}
-                      <span className="muted"> · {fixturePhaseLabel(item)}</span>
-                    </Link>
-                    <div className="muted">
-                      {item.competition}
-                      {item.target_competition_code ? ` · ${item.target_competition_code}` : ""}
-                    </div>
-                  </td>
-                  <td>{new Date(item.kickoff_utc).toISOString()}</td>
-                  <td>
-                    {item.fixture_status ?? "—"}
-                    {item.in_running ? " · in-running" : ""}
-                  </td>
-                  <td>{polymarketCoverageLabel(item)}</td>
-                  <td>{inventorySummaryLabel(item)}</td>
-                  <td className="muted">
-                    {item.market_family ?? "—"}
-                    {item.outcome_context ? ` · ${item.outcome_context}` : ""}
-                  </td>
-                  <td>{decimalText(item.best_matchbook_price)}</td>
-                  <td>{decimalText(item.best_polymarket_price)}</td>
-                  <td className={Number(item.current_net_edge) < 0 ? "edge-negative" : ""}>
-                    {percent(item.current_net_edge)}
-                  </td>
-                  <td>{percent(item.trigger_net_edge)}</td>
-                  <td>{percentPoints(item.distance_to_trigger_pp)}</td>
-                  <td className="muted">{freshnessLabel(item)}</td>
-                  <td className="muted">{item.no_comparison_reason ?? "backend comparison available"}</td>
-                  <td>{arbClaimLabel(item)}</td>
-                  <td className="muted">{scoreText(item)}</td>
-                  <td>{relativeTime(item.last_seen_at)}</td>
-                </tr>
+                <FixtureRow item={item} key={item.canonical_event_id} />
               ))}
             </tbody>
           </table>

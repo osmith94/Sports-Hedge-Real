@@ -29,18 +29,24 @@ VARIANT_LABELS = {
         "English Premier League",
         "EPL",
         "Barclays Premier League",
+        "England Premier League",
+        "Premier League 2025/26",
     ),
     TargetCompetitionCode.CHAMPIONSHIP: (
         "Championship",
         "EFL Championship",
         "Sky Bet Championship",
         "English Championship",
+        "The Championship",
+        "EFL Championship 2025/26",
     ),
     TargetCompetitionCode.LA_LIGA: (
         "La Liga",
         "LaLiga",
         "Primera Division",
         "Primera División",
+        "Spanish La Liga",
+        "Spain La Liga",
     ),
 }
 
@@ -239,7 +245,9 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
         assert "4001" not in ids
         assert "4002" not in ids
         assert "4003" not in ids
-        assert any(issue.stage == "target_competition" for issue in report.issues)
+        assert report.skipped_out_of_scope >= 3
+        assert not any(issue.stage == "target_competition" for issue in report.issues)
+        assert "3. Liga" in report.rejected_competition_labels or report.skipped_out_of_scope >= 3
 
         epl = ids["1001"]
         assert epl.polymarket_matched is True
