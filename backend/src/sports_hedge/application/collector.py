@@ -463,8 +463,7 @@ class ReadOnlyCrossVenueCollector:
                             seen_at=started_at,
                             polymarket_events=polymarket_events,
                             queried_series_ids=queried_series_ids,
-                            market_evaluation_state=MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE,
-                            market_evaluation_reason=SCAN_BUDGET_EXHAUSTED_REASON,
+                            leftover=True,
                         )
                     )
                 break
@@ -665,8 +664,6 @@ class ReadOnlyCrossVenueCollector:
             seen_at=seen_at,
             polymarket_events=polymarket_events,
             queried_series_ids=queried_series_ids,
-            market_evaluation_state=MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE,
-            market_evaluation_reason=SCAN_BUDGET_EXHAUSTED_REASON,
         )
         mb_events = [_as_normalized(item) for item in cluster.events_for(VenueName.MATCHBOOK)]
         pm_events = [_as_normalized(item) for item in cluster.events_for(VenueName.POLYMARKET)]
@@ -954,9 +951,7 @@ class ReadOnlyCrossVenueCollector:
             fixture.market_evaluation_state = MarketEvaluationState.MARKET_FETCH_UNAVAILABLE.value
             fixture.market_evaluation_reason = MARKET_FETCH_UNAVAILABLE_REASON
             fixture.matched_equivalent_count = None
-            fixture.no_comparison_reason = (
-                fixture.no_comparison_reason or MARKET_FETCH_UNAVAILABLE_REASON
-            )
+            fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
         else:
             fixture.market_evaluation_state = MarketEvaluationState.EVALUATED.value
             fixture.market_evaluation_reason = None
@@ -1499,8 +1494,7 @@ def _fixture_from_cluster(
     seen_at: datetime,
     polymarket_events: list[_NormalizedEvent],
     queried_series_ids: list[str] | None,
-    market_evaluation_state: MarketEvaluationState = MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE,
-    market_evaluation_reason: str | None = None,
+    leftover: bool = False,
 ) -> DiscoveredFixture:
     anchor = cluster.anchor
     canonical = anchor.canonical
@@ -1511,7 +1505,6 @@ def _fixture_from_cluster(
         scoped = scope_matchbook_event(mb_event.raw)
         competition = scoped.competition
     two_plus = cluster.venue_count >= 2
-    evaluated = market_evaluation_state is MarketEvaluationState.EVALUATED
     unmatched_reason = (
         None
         if two_plus
@@ -1525,14 +1518,18 @@ def _fixture_from_cluster(
             )
         )
     )
-    if not evaluated and two_plus:
-        no_comparison = (
-            NOT_EVALUATED_SCAN_DEADLINE_REASON
-            if market_evaluation_state is MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE
-            else MARKET_FETCH_UNAVAILABLE_REASON
-        )
+    if leftover:
+        evaluation_state = MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE
+        evaluation_reason = SCAN_BUDGET_EXHAUSTED_REASON
+        no_comparison = NOT_EVALUATED_SCAN_DEADLINE_REASON if two_plus else unmatched_reason
+        opportunity_state = "not_evaluated"
+        equivalent_count = None
     else:
+        evaluation_state = MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE
+        evaluation_reason = None
         no_comparison = unmatched_reason
+        opportunity_state = "unmatched"
+        equivalent_count = None
     return DiscoveredFixture(
         source=anchor.venue,
         source_event_id=anchor.source_event_id,
@@ -1551,12 +1548,12 @@ def _fixture_from_cluster(
         home_score=state.home_score if state is not None else None,
         away_score=state.away_score if state is not None else None,
         last_seen_at=seen_at,
-        matched_equivalent_count=None if not evaluated else 0,
+        matched_equivalent_count=equivalent_count,
         no_comparison_reason=no_comparison,
         solver_is_arbitrage=False,
-        opportunity_state="unmatched" if evaluated else "not_evaluated",
-        market_evaluation_state=market_evaluation_state.value,
-        market_evaluation_reason=market_evaluation_reason,
+        opportunity_state=opportunity_state,
+        market_evaluation_state=evaluation_state.value,
+        market_evaluation_reason=evaluation_reason,
     )
 
 
