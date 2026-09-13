@@ -10,7 +10,7 @@ from sports_hedge.application.market_observation import PolymarketObservationBui
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.domain.football import CanonicalOutcome, MarketFamily
 from sports_hedge.domain.models import VenueName
-from sports_hedge.fees.cost import CostKnownStatus, FeeBasis
+from sports_hedge.fees.cost import CostKnownStatus, FeeBasis, MarketAction
 from sports_hedge.fees.effective import apply_venue_costs
 from sports_hedge.fees.polymarket import (
     POLYMARKET_TAKER_FORMULA,
