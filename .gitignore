@@ -30,3 +30,4 @@ Thumbs.db
 logs/
 data/raw/
 data/snapshots/
+*.tsbuildinfo
