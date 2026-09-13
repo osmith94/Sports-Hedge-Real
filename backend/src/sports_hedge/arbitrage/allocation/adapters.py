@@ -185,6 +185,34 @@ def request_from_payoff(
     )
 
 
+def balances_from_treasury(
+    snapshot,
+    *,
+    gbp_per_unit: dict[str, Decimal] | None = None,
+) -> list[AllocationBalance]:
+    """Spendable paper-treasury cash only. Locked capital is not allocatable."""
+
+    rates = gbp_per_unit or {}
+    rows: list[AllocationBalance] = []
+    for pool in snapshot.pools:
+        currency = pool.native_currency.upper()
+        rate = rates.get(currency)
+        if currency == "GBP":
+            rate = Decimal("1")
+        elif rate is None:
+            rate = pool.fx_rate_gbp_per_unit
+        rows.append(
+            AllocationBalance(
+                venue=pool.venue,
+                currency=currency,
+                available=pool.available_cash,
+                locked=pool.locked_capital,
+                gbp_per_unit=rate,
+            )
+        )
+    return rows
+
+
 def balances_from_liquidity(
     snapshot: PaperLiquiditySnapshot,
     *,

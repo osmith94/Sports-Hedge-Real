@@ -53,6 +53,7 @@ from sports_hedge.paper.audit import (
 )
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
 from sports_hedge.paper.chain import SimulatePaperFillRequest, SimulatePaperFillResult
+from sports_hedge.paper.preparation import PreparePaperDeploymentRequest, PreparedPaperDeployment
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.paper.trades import (
@@ -823,6 +824,29 @@ def settle_paper_trade(
 
     try:
         return operations.settle(trade_id, request)
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/prepare-deployment",
+    response_model=PreparedPaperDeployment,
+    status_code=status.HTTP_200_OK,
+)
+def prepare_paper_deployment(
+    request: PreparePaperDeploymentRequest,
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> PreparedPaperDeployment:
+    """PAPER-ONLY fixed-size preview. Never locks treasury, OPENs, or places a venue order."""
+
+    try:
+        return operations.prepare_fixed_deployment(
+            request.opportunity_id,
+            request.requested_size_gbp,
+            operator_note=request.operator_note,
+        )
     except PaperOperationsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:

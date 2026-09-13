@@ -74,6 +74,7 @@ from sports_hedge.normalization.venues import (
     promote_polymarket_complete_match_result,
 )
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+from sports_hedge.paper.preparation import PreparablePaperOpportunity
 
 
 class MatchbookReadClient(Protocol):
@@ -178,6 +179,7 @@ class FixtureDetailReadModel(BaseModel):
     fixture: DiscoveredFixture
     markets: list[FixtureMarketInventoryRow] = Field(default_factory=list)
     paper_entries: list[FixturePaperEntry] = Field(default_factory=list)
+    preparable_opportunities: list[PreparablePaperOpportunity] = Field(default_factory=list)
     data_class: str = "live_paper_when_collected"
     paper_mode: str = "paper"
     execution_enabled: bool = False

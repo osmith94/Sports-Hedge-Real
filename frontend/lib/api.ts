@@ -244,10 +244,69 @@ export type FixturePaperEntry = {
   rejection_reason?: string | null;
 };
 
+export type PreparablePaperOpportunity = {
+  opportunity_id: string;
+  canonical_market_id?: string | null;
+  solver_model?: string | null;
+  eligible_for_paper_simulation: boolean;
+  settlement_equivalent: boolean;
+};
+
+export type PreparedPaperLeg = {
+  venue: Venue;
+  native_currency: string;
+  outcome: string;
+  source_market_id: string;
+  source_runner_id?: string | null;
+  displayed_odds?: string | number | null;
+  stake_native: string | number;
+  stake_reporting: string | number;
+  capital_native: string | number;
+  capital_reporting: string | number;
+  venue_fee?: string | number | null;
+  net_payoff?: string | number | null;
+  fee_basis?: string | null;
+  cost_status: string;
+  capital_source: string;
+  execution_mode: string;
+  data_kind: "modelled";
+};
+
+export type PreparedPaperDeployment = {
+  opportunity_id: string;
+  accepted: boolean;
+  requested_size_gbp: string | number;
+  applied_size_gbp: string | number;
+  maximum_validated_size_gbp: string | number;
+  resized: boolean;
+  rejection_reason?: string | null;
+  limiting_constraint?: string | null;
+  limiting_constraint_detail?: string | null;
+  legs: PreparedPaperLeg[];
+  capital_required: Array<{
+    venue: Venue;
+    currency: string;
+    amount: string | number;
+    capital_source?: string;
+  }>;
+  native_requirements_reconciled: boolean;
+  guaranteed_profit_gbp: string | number;
+  guaranteed_roi: string | number;
+  solver_model?: string | null;
+  settlement_equivalent: boolean;
+  paper_only: boolean;
+  places_orders: boolean;
+  opens_trade: boolean;
+  locks_treasury: boolean;
+  data_kind: "modelled";
+  operator_note?: string;
+};
+
 export type FixtureDetailReadModel = {
   fixture: DiscoveredFixture;
   markets: FixtureMarketInventoryRow[];
   paper_entries?: FixturePaperEntry[];
+  preparable_opportunities?: PreparablePaperOpportunity[];
   data_class: string;
   paper_mode: string;
   execution_enabled: boolean;
@@ -645,6 +704,26 @@ export async function simulatePaperFill(payload: {
     throw new Error(await errorDetail(response));
   }
   return response.json();
+}
+
+export async function preparePaperDeployment(payload: {
+  opportunity_id: string;
+  requested_size_gbp: string;
+  operator_note?: string;
+}): Promise<PreparedPaperDeployment> {
+  const response = await fetch(`${API_BASE}/paper/prepare-deployment`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      operator_note: "PAPER-ONLY fixed-size preparation; does not OPEN or lock",
+      ...payload,
+    }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<PreparedPaperDeployment>;
 }
 
 export function getLiveRefreshStatus(): Promise<LiveRefreshStatus> {

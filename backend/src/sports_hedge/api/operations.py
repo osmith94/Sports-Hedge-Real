@@ -6,8 +6,6 @@ from sports_hedge.application.collector import FixtureDetailReadModel, FixturePa
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.api.paper import get_paper_operations_service
 from sports_hedge.application.paper_operations import PaperOperationsService
-from sports_hedge.paper.trades import PaperTradeState
-
 router = APIRouter(prefix="/operations", tags=["operations"])
 
 
@@ -46,4 +44,5 @@ def fixture_detail(
         )
         for trade in trades
     ]
-    return detail.model_copy(update={"paper_entries": entries})
+    preparable = operations.list_preparable(wanted)
+    return detail.model_copy(update={"paper_entries": entries, "preparable_opportunities": preparable})

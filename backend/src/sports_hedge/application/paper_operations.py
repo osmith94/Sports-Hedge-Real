@@ -25,6 +25,13 @@ from sports_hedge.arbitrage.priority_alerts.models import (
 )
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
 from sports_hedge.application.paper_scan import FillPlanMappingError, apply_allocation_to_fill_legs
+from sports_hedge.arbitrage.allocation.adapters import (
+    balances_from_treasury,
+    exposures_from_trades,
+    request_from_paper_decision,
+)
+from sports_hedge.arbitrage.allocation.engine import allocate_requested_size
+from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityStatus
 from sports_hedge.arbitrage.watchlist.service import WatchlistService, _opportunity_id
 from sports_hedge.config import Settings, get_settings
@@ -36,8 +43,14 @@ from sports_hedge.paper.chain import (
     PaperFillPlan,
     SimulatePaperFillResult,
 )
+from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.paper.fills import PaperFillConfig, PaperFillRecord, PaperOpportunityFills, PaperOpportunityLeg
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+from sports_hedge.paper.preparation import (
+    PreparablePaperOpportunity,
+    PreparedPaperDeployment,
+    PreparedPaperLeg,
+)
 from sports_hedge.paper.settlement import PaperSettlementError, compute_paper_settlement
 from sports_hedge.paper.simulator import PaperFillSimulator
 from sports_hedge.paper.trades import (
@@ -168,6 +181,226 @@ class PaperOperationsService:
                 except PaperOperationsError:
                     pass
         return candidate
+
+    def list_preparable(self, canonical_event_id: str | None = None) -> list[PreparablePaperOpportunity]:
+        rows: list[PreparablePaperOpportunity] = []
+        for plan in self._plans.values():
+            if canonical_event_id is not None and plan.canonical_event_id != canonical_event_id:
+                continue
+            rows.append(
+                PreparablePaperOpportunity(
+                    opportunity_id=plan.opportunity_id,
+                    canonical_market_id=plan.canonical_market_id,
+                    solver_model=plan.decision.solver_model,
+                    eligible_for_paper_simulation=plan.eligible_for_paper_simulation,
+                    settlement_equivalent=plan.settlement_equivalent,
+                )
+            )
+        return rows
+
+    def prepare_fixed_deployment(
+        self,
+        opportunity_id: str,
+        requested_size_gbp: Decimal,
+        *,
+        operator_note: str = "PAPER-ONLY fixed-size preparation; does not OPEN or lock",
+    ) -> PreparedPaperDeployment:
+        """Scale a qualified opportunity to an operator-chosen GBP size.
+
+        Does not lock treasury, simulate fills, or OPEN a trade.
+        """
+
+        if requested_size_gbp <= 0:
+            raise PaperOperationsError("requested_size_must_be_positive")
+        plan = self._plans.get(opportunity_id)
+        if plan is None:
+            raise PaperOperationsError("missing_paper_fill_plan")
+        decision = plan.decision
+        if not plan.settlement_equivalent or not decision.market_match.matched:
+            return self._rejected_deployment(
+                opportunity_id,
+                requested_size_gbp,
+                "market_not_equivalent",
+                plan=plan,
+                operator_note=operator_note,
+            )
+        if not _solver_is_arbitrage(decision):
+            return self._rejected_deployment(
+                opportunity_id,
+                requested_size_gbp,
+                "solver_not_arbitrage",
+                plan=plan,
+                operator_note=operator_note,
+            )
+        blockers = [
+            reason
+            for reason in decision.rejection_reasons
+            if not reason.startswith("allocation_failed")
+        ]
+        if blockers:
+            return self._rejected_deployment(
+                opportunity_id,
+                requested_size_gbp,
+                blockers[0],
+                plan=plan,
+                operator_note=operator_note,
+            )
+        if self.ledger is None:
+            raise PaperOperationsError("missing_spendable_treasury")
+        snap = self.ledger.treasury.snapshot()
+        fx = {item.currency.upper(): item.gbp_per_unit for item in decision.fx_snapshots}
+        fx.setdefault("GBP", Decimal("1"))
+        balances = balances_from_treasury(snap, gbp_per_unit=fx)
+        if any(row.gbp_per_unit is None for row in balances if row.currency != "GBP"):
+            return self._rejected_deployment(
+                opportunity_id,
+                requested_size_gbp,
+                "missing_fx_rate",
+                plan=plan,
+                operator_note=operator_note,
+            )
+        request = request_from_paper_decision(
+            decision,
+            policy=policy_from_settings(self.settings),
+            balances=balances,
+            open_positions=exposures_from_trades(self.list_active_trades()),
+        )
+        if request is None:
+            return self._rejected_deployment(
+                opportunity_id,
+                requested_size_gbp,
+                "allocation_failed:unsupported_solver_vector",
+                plan=plan,
+                operator_note=operator_note,
+            )
+        result = allocate_requested_size(request, requested_size_gbp)
+        legs = self._prepared_legs(plan, result.recommended_stakes)
+        required = list(result.capital_required)
+        reconciled = False
+        if result.accepted:
+            reporting_sum = sum((leg.capital_reporting for leg in legs), Decimal("0"))
+            reconciled = reporting_sum == result.recommended_committed_capital
+            for item in required:
+                try:
+                    pool = snap.pool(item.venue, item.currency)
+                except KeyError:
+                    reconciled = False
+                    break
+                if pool.available_cash < item.amount:
+                    reconciled = False
+                    break
+            if not reconciled:
+                return self._rejected_deployment(
+                    opportunity_id,
+                    requested_size_gbp,
+                    "native_requirements_not_reconciled",
+                    plan=plan,
+                    operator_note=operator_note,
+                    maximum=result.maximum_validated_size,
+                    constraint=result.limiting_constraint,
+                    detail=result.limiting_constraint_detail,
+                )
+        return PreparedPaperDeployment(
+            opportunity_id=opportunity_id,
+            accepted=result.accepted and reconciled,
+            requested_size_gbp=requested_size_gbp,
+            applied_size_gbp=result.recommended_committed_capital if result.accepted else Decimal("0"),
+            maximum_validated_size_gbp=result.maximum_validated_size,
+            resized=False,
+            rejection_reason=None if result.accepted else result.rejection_reason,
+            limiting_constraint=result.limiting_constraint,
+            limiting_constraint_detail=result.limiting_constraint_detail,
+            legs=legs if result.accepted else [],
+            capital_required=required if result.accepted else [],
+            native_requirements_reconciled=reconciled,
+            guaranteed_profit_gbp=result.guaranteed_profit if result.accepted else Decimal("0"),
+            guaranteed_roi=result.guaranteed_roi,
+            solver_model=decision.solver_model,
+            settlement_equivalent=plan.settlement_equivalent,
+            operator_note=operator_note,
+        )
+
+    def _prepared_legs(self, plan: PaperFillPlan, stakes) -> list[PreparedPaperLeg]:
+        fill_by_id: dict[tuple, PaperOpportunityLeg] = {}
+        for leg in plan.legs:
+            key = (leg.venue, leg.source_market_id, leg.source_runner_id or "", leg.outcome)
+            fill_by_id[key] = leg
+        cost_by_venue = {cost.venue: cost for cost in plan.venue_costs}
+        prepared: list[PreparedPaperLeg] = []
+        for stake in stakes:
+            if stake.stake_native <= 0:
+                continue
+            key = (stake.venue, stake.source_market_id, stake.source_runner_id or "", stake.outcome)
+            fill = fill_by_id.get(key)
+            odds = fill.displayed_odds if fill is not None else None
+            fee = None
+            net_payoff = None
+            fee_basis = None
+            cost_status = "modelled"
+            cost = cost_by_venue.get(stake.venue)
+            if cost is not None and odds is not None:
+                try:
+                    economics = apply_venue_costs(
+                        cost,
+                        gross_decimal_odds=odds,
+                        stake=stake.stake_native,
+                        require_gbp=False,
+                    )
+                    fee = economics.venue_fee
+                    net_payoff = economics.net_payoff
+                    fee_basis = economics.fee_basis.value
+                except CostRuleError as exc:
+                    cost_status = exc.reason
+                    fee_basis = cost.fee_basis.value
+            elif cost is None:
+                cost_status = "missing_venue_cost"
+            prepared.append(
+                PreparedPaperLeg(
+                    venue=stake.venue,
+                    native_currency=stake.native_currency,
+                    outcome=stake.outcome,
+                    source_market_id=stake.source_market_id,
+                    source_runner_id=stake.source_runner_id,
+                    displayed_odds=odds,
+                    stake_native=stake.stake_native,
+                    stake_reporting=stake.stake_reporting,
+                    capital_native=stake.capital_native,
+                    capital_reporting=stake.capital_reporting,
+                    venue_fee=fee,
+                    net_payoff=net_payoff,
+                    fee_basis=fee_basis,
+                    cost_status=cost_status,
+                    capital_source=stake.capital_source,
+                    execution_mode=stake.execution_mode,
+                )
+            )
+        return prepared
+
+    def _rejected_deployment(
+        self,
+        opportunity_id: str,
+        requested_size_gbp: Decimal,
+        reason: str,
+        *,
+        plan: PaperFillPlan,
+        operator_note: str,
+        maximum: Decimal | None = None,
+        constraint=None,
+        detail: str | None = None,
+    ) -> PreparedPaperDeployment:
+        return PreparedPaperDeployment(
+            opportunity_id=opportunity_id,
+            accepted=False,
+            requested_size_gbp=requested_size_gbp,
+            applied_size_gbp=Decimal("0"),
+            maximum_validated_size_gbp=maximum or Decimal("0"),
+            rejection_reason=reason,
+            limiting_constraint=constraint,
+            limiting_constraint_detail=detail or reason,
+            solver_model=plan.decision.solver_model,
+            settlement_equivalent=plan.settlement_equivalent,
+            operator_note=operator_note,
+        )
 
     def simulate_fill(
         self,
