@@ -65,6 +65,7 @@ export function opportunityFromWatchlist(item: NearOpportunity): ArbitrageOpport
   return {
     id: item.opportunity_id,
     provenance: "LIVE_PAPER",
+    canonicalEventId: item.canonical_event_id || null,
     eventLabel: `${item.home_team ?? "Unknown"} v ${item.away_team ?? "Unknown"}`,
     competition: item.competition,
     marketLabel: family,

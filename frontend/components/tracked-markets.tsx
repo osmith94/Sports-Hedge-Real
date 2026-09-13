@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import { ArbitrageOpportunity } from "../lib/arbitrage-ops";
@@ -9,6 +11,18 @@ import {
   operatorThresholdOptions,
 } from "../lib/comfort-threshold";
 import { percent, percentPoints } from "../lib/format";
+import {
+  TRACKED_MARKET_SORT_COLUMNS,
+  TRACKED_MARKET_SORT_LABELS,
+  TrackedMarketSortColumn,
+  TrackedMarketSortState,
+  ariaSortForColumn,
+  nextTrackedMarketSort,
+  shouldNavigateFromRowClick,
+  sortIndicator,
+  sortTrackedMarkets,
+  trackedMarketHref,
+} from "../lib/tracked-markets-display";
 
 function formatThreshold(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
@@ -21,11 +35,17 @@ export function TrackedMarketsBoard({
   items: ArbitrageOpportunity[];
   available: boolean;
 }) {
+  const router = useRouter();
   const backendTriggers = useMemo(() => items.map((item) => item.trigger), [items]);
   const options = useMemo(() => operatorThresholdOptions(backendTriggers), [backendTriggers]);
   const defaultTrigger = items[0]?.trigger ?? 0.01;
   const [selected, setSelected] = useState(defaultTrigger);
+  const [sort, setSort] = useState<TrackedMarketSortState | null>(null);
   const selectedThreshold = options.includes(selected) ? selected : options[0] ?? defaultTrigger;
+  const sortedItems = useMemo(
+    () => sortTrackedMarkets(items, sort, selectedThreshold),
+    [items, sort, selectedThreshold],
+  );
 
   if (!available) {
     return (
@@ -68,30 +88,64 @@ export function TrackedMarketsBoard({
         <table>
           <thead>
             <tr>
-              <th>Fixture / market</th>
-              <th>Status</th>
-              <th>Gross edge</th>
-              <th>Current net margin</th>
-              <th>Backend trigger</th>
-              <th>Distance to backend trigger</th>
-              <th>Distance to selected threshold</th>
-              <th>Source / last updated</th>
+              {TRACKED_MARKET_SORT_COLUMNS.map((column) => (
+                <SortableHeader
+                  column={column}
+                  key={column}
+                  onToggle={() => setSort((current) => nextTrackedMarketSort(current, column))}
+                  sort={sort}
+                />
+              ))}
               <th>Strike narrative</th>
               <th>Economics note</th>
             </tr>
           </thead>
           <tbody>
-            {items.map((item) => {
+            {sortedItems.map((item) => {
               const comparison = distanceToSelectedThresholdPp(item.netArb, selectedThreshold);
               const belowEven = item.netArb !== null && item.netArb < 0;
               const feeVisible =
                 belowEven &&
                 grossPricesEffectivelyEqual(item.grossArb) &&
                 item.netArb !== null;
+              const href = trackedMarketHref(item.canonicalEventId);
               return (
-                <tr key={item.id}>
+                <tr
+                  className={href ? "tracked-row is-navigable" : undefined}
+                  key={item.id}
+                  onClick={(event) => {
+                    if (
+                      !href ||
+                      !shouldNavigateFromRowClick({
+                        button: event.button,
+                        metaKey: event.metaKey,
+                        ctrlKey: event.ctrlKey,
+                        altKey: event.altKey,
+                        shiftKey: event.shiftKey,
+                        defaultPrevented: event.defaultPrevented,
+                        selectedText:
+                          typeof window !== "undefined" ? window.getSelection()?.toString() ?? "" : "",
+                        target: event.target as { closest?: (selector: string) => unknown },
+                      })
+                    ) {
+                      return;
+                    }
+                    router.push(href);
+                  }}
+                >
                   <td className="row-title">
-                    {item.eventLabel}
+                    {href ? (
+                      <Link
+                        className="fixture-link tracked-market-link"
+                        href={href}
+                        onClick={(event) => event.stopPropagation()}
+                        title="Open fixture inventory"
+                      >
+                        {item.eventLabel}
+                      </Link>
+                    ) : (
+                      item.eventLabel
+                    )}
                     <div className="muted">{item.marketLabel}{item.competition ? ` · ${item.competition}` : ""}</div>
                   </td>
                   <td>{item.status}</td>
@@ -139,5 +193,37 @@ export function TrackedMarketsBoard({
         </table>
       </div>
     </>
+  );
+}
+
+function SortableHeader({
+  column,
+  sort,
+  onToggle,
+}: {
+  column: TrackedMarketSortColumn;
+  sort: TrackedMarketSortState | null;
+  onToggle: () => void;
+}) {
+  const label = TRACKED_MARKET_SORT_LABELS[column];
+  const indicator = sortIndicator(column, sort);
+  const ariaSort = ariaSortForColumn(column, sort);
+  const directionLabel = ariaSort === "none" ? "" : `, currently ${ariaSort}`;
+  return (
+    <th aria-sort={ariaSort} className="sortable">
+      <button
+        aria-label={`Sort by ${label}${directionLabel}`}
+        className="sort-header"
+        onClick={onToggle}
+        type="button"
+      >
+        {label}
+        {indicator ? (
+          <span aria-hidden="true" className="sort-indicator">
+            {indicator}
+          </span>
+        ) : null}
+      </button>
+    </th>
   );
 }

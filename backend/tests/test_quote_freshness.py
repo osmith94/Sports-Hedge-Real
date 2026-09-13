@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sports_hedge.api.main import app
 from sports_hedge.api.watchlist import get_watchlist_service
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
+from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.quote_freshness import (
@@ -421,6 +422,8 @@ def test_watchlist_api_uses_server_clock_not_client_as_of() -> None:
     service = WatchlistService(repository, clock=lambda: aged, max_quote_age_ms=1000)
     app.dependency_overrides[get_watchlist_service] = lambda: service
     client = TestClient(app)
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
     service.observe(
         _observation(
             market_id="mkt-as-of",
@@ -431,6 +434,9 @@ def test_watchlist_api_uses_server_clock_not_client_as_of() -> None:
             guaranteed_profit_gbp=Decimal("1.50"),
         )
     )
+    from test_tracked_current_snapshot import _report
+
+    coordinator.record_report(_report("mkt-as-of"))
     try:
         ignored_fresh = client.get(
             "/paper/watchlist/triggered",
@@ -444,6 +450,7 @@ def test_watchlist_api_uses_server_clock_not_client_as_of() -> None:
         assert "stale_quote" in tracked.json()[0]["rejection_reasons"]
     finally:
         app.dependency_overrides.clear()
+        coordinator.reset()
         repository.close()
 
 

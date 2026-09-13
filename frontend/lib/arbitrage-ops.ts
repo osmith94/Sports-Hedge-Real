@@ -38,6 +38,7 @@ export type ScannerAssumptions = {
 export type ArbitrageOpportunity = {
   id: string;
   provenance: DataProvenance;
+  canonicalEventId?: string | null;
   eventLabel: string;
   competition?: string | null;
   marketLabel: string;
