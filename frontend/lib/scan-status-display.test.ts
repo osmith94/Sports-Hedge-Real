@@ -88,7 +88,34 @@ describe("dual cadence operator copy", () => {
     assert.doesNotMatch(fullSweepCopy(universePersistFailed, now).detail, /scan_cycle_timeout/);
   });
 
-    it("health bar and scan note no longer ship a single Last scan line", () => {
+  it("names active venues on each cadence line when the backend reports them", () => {
+    const now = Date.parse("2026-09-14T12:00:12Z");
+    const withVenues = status({
+      hot: {
+        cadence_seconds: 30,
+        last_completed_at: "2026-09-14T12:00:00Z",
+        last_duration_ms: 4100,
+        next_due_at: "2026-09-14T12:00:18Z",
+        fixture_count: 7,
+        active_venues: ["matchbook", "kalshi"],
+      },
+      universe: {
+        cadence_seconds: 180,
+        generation_budget_seconds: 150,
+        generation_work_used_s: 41,
+        chunk_last_duration_ms: 8000,
+        fixture_count: 104,
+        evaluated_count: 60,
+        not_evaluated_count: 44,
+        active_venues: ["matchbook", "polymarket", "kalshi"],
+      },
+    });
+    assert.match(fastScanCopy(withVenues, now).detail, /MB·K/);
+    assert.doesNotMatch(fastScanCopy(withVenues, now).detail, /PM/);
+    assert.match(fullSweepCopy(withVenues, now).detail, /MB·PM·K/);
+  });
+
+  it("health bar and scan note no longer ship a single Last scan line", () => {
     const bar = readFileSync(join(frontendRoot, "components/venue-health-bar.tsx"), "utf8");
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
     const layout = readFileSync(join(frontendRoot, "app/layout.tsx"), "utf8");
@@ -96,6 +123,7 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /dualScanStatusLines/);
     assert.doesNotMatch(bar, /Last scan \$\{/);
     assert.doesNotMatch(scan, /Last scan \{lastCompletedAt/);
+    assert.match(scan, /VenueLaneControls/);
     assert.match(scan, /pollLiveStatus/);
     assert.doesNotMatch(scan, /void collectRef\.current\(\)/);
     assert.match(bar, /AUTO PAPER CAPTURE ON/);

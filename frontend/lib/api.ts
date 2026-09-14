@@ -107,6 +107,7 @@ export type PaperCollectionReport = {
   discovery_mode?: string;
   matching_venue?: Venue;
   matching_venues?: Venue[];
+  enabled_venues?: Venue[];
   raw_matchbook_events: number;
   raw_polymarket_events: number;
   raw_kalshi_events?: number;
@@ -425,6 +426,31 @@ export type LaneRefreshStatus = {
   degraded?: boolean;
   resume_cursor?: string | null;
   operator_summary?: string | null;
+  active_venues?: Venue[];
+  pending_venues?: Venue[];
+  comparison_ready?: boolean;
+  venue_warning?: string | null;
+  applies_next_cycle?: boolean;
+};
+
+export type LaneVenueFlags = {
+  matchbook: boolean;
+  polymarket: boolean;
+  kalshi: boolean;
+};
+
+export type LaneVenueParticipation = {
+  hot: Venue[];
+  universe: Venue[];
+  source?: "operator" | "env_default";
+  updated_at?: string | null;
+  hot_warning?: string | null;
+  universe_warning?: string | null;
+};
+
+export type LaneVenueParticipationUpdate = {
+  hot: LaneVenueFlags;
+  universe: LaneVenueFlags;
 };
 
 export type LiveRefreshStatus = {
@@ -452,6 +478,7 @@ export type LiveRefreshStatus = {
   discovered_fixtures: DiscoveredFixture[];
   hot?: LaneRefreshStatus;
   universe?: LaneRefreshStatus;
+  venue_participation?: LaneVenueParticipation | null;
 };
 
 export type VenueHealth = {
@@ -938,6 +965,21 @@ export async function recommendPaperDeployment(payload: {
 
 export function getLiveRefreshStatus(): Promise<LiveRefreshStatus> {
   return request("/paper/live-refresh");
+}
+
+export async function saveVenueParticipation(
+  update: LaneVenueParticipationUpdate,
+): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/venue-participation`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
 }
 
 export function getVenueHealth(): Promise<VenueHealth[]> {

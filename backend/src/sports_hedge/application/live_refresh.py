@@ -16,13 +16,24 @@ from sports_hedge.application.collector import (
     FixtureDetailReadModel,
 )
 from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
+from sports_hedge.application.lane_venues import (
+    LaneVenueParticipation,
+    LaneVenueSet,
+    default_operator_venues,
+    participation_from_lists,
+)
+from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
     ScanLane,
     universe_chunk_wall_seconds,
 )
-from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
+from sports_hedge.persistence.lane_venue_settings import (
+    SqliteLaneVenueSettingsStore,
+    get_lane_venue_settings_store,
+    resolve_lane_venue_participation,
+)
 from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookDiscoveryError
 
 
@@ -76,6 +87,15 @@ class LaneRefreshStatus(BaseModel):
     degraded: bool = False
     resume_cursor: str | None = None
     operator_summary: str | None = None
+    active_venues: list[VenueName] = Field(
+        default_factory=lambda: list(default_operator_venues())
+    )
+    pending_venues: list[VenueName] = Field(
+        default_factory=lambda: list(default_operator_venues())
+    )
+    comparison_ready: bool = True
+    venue_warning: str | None = None
+    applies_next_cycle: bool = False
 
 
 class LiveRefreshStatus(BaseModel):
@@ -115,6 +135,7 @@ class LiveRefreshStatus(BaseModel):
             generation_budget_seconds=150,
         )
     )
+    venue_participation: LaneVenueParticipation | None = None
 
 
 class DualCadencePlan(BaseModel):
@@ -125,13 +146,20 @@ class DualCadencePlan(BaseModel):
     resume_cursor: str | None = None
     skip_event_ids: list[str] = Field(default_factory=list)
     known_source_events: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    enabled_venues: list[VenueName] = Field(
+        default_factory=lambda: list(default_operator_venues())
+    )
     reason: str = ""
 
 
 class LiveRefreshCoordinator:
     """One scheduler with HOT and UNIVERSE lanes. No stacked scanners."""
 
-    def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], datetime] | None = None,
+        venue_settings_store: SqliteLaneVenueSettingsStore | None = None,
+    ) -> None:
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -149,6 +177,16 @@ class LiveRefreshCoordinator:
         self._universe_work_used = 0.0
         self._universe_cursor: str | None = None
         self._universe_evaluated_ids: set[str] = set()
+        self._venue_store = venue_settings_store
+        self._pending_participation = participation_from_lists(
+            default_operator_venues(),
+            default_operator_venues(),
+            source="env_default",
+            allow_empty=False,
+        )
+        self._cycle_hot_venues: tuple[VenueName, ...] | None = None
+        self._cycle_universe_venues: tuple[VenueName, ...] | None = None
+        self._cycle_enabled_venues: tuple[VenueName, ...] | None = None
         self.status = LiveRefreshStatus(
             server_loop_enabled=False,
             interval_seconds=30,
@@ -160,6 +198,10 @@ class LiveRefreshCoordinator:
     def configure_from_settings(self, settings: Settings | None = None) -> None:
         resolved = settings or get_settings()
         hot_cadence = resolved.paper_live_refresh_hot_interval_seconds
+        self._pending_participation = resolve_lane_venue_participation(
+            self._resolved_store(resolved),
+            resolved,
+        )
         self.status = self.status.model_copy(
             update={
                 "server_loop_enabled": resolved.paper_live_refresh_enabled,
@@ -183,7 +225,88 @@ class LiveRefreshCoordinator:
                 ),
             }
         )
+        self._sync_venue_status()
         self._ensure_due_times(self.now(), resolved)
+
+    def _resolved_store(self, settings: Settings | None = None) -> SqliteLaneVenueSettingsStore:
+        if self._venue_store is None:
+            self._venue_store = get_lane_venue_settings_store()
+        return self._venue_store
+
+    def bind_venue_store(self, store: SqliteLaneVenueSettingsStore) -> None:
+        self._venue_store = store
+        self._pending_participation = resolve_lane_venue_participation(store)
+        self._sync_venue_status()
+
+    def apply_venue_participation(
+        self,
+        hot: list[VenueName] | tuple[VenueName, ...],
+        universe: list[VenueName] | tuple[VenueName, ...],
+    ) -> LaneVenueParticipation:
+        store = self._resolved_store()
+        self._pending_participation = store.save(hot, universe, source="operator")
+        self._sync_venue_status()
+        return self._pending_participation
+
+    def pending_venues_for(self, lane: ScanLane | str | None) -> tuple[VenueName, ...]:
+        return self._pending_participation.venues_for(lane)
+
+    def running_cycle_venues(self) -> tuple[VenueName, ...]:
+        if self._cycle_enabled_venues is not None:
+            return self._cycle_enabled_venues
+        if self._hot_in_progress:
+            return self._cycle_hot_venues or self._pending_participation.venues_for(ScanLane.HOT)
+        if self._universe_in_progress:
+            return self._cycle_universe_venues or self._pending_participation.venues_for(
+                ScanLane.UNIVERSE
+            )
+        return self._pending_participation.venues_for(ScanLane.UNIVERSE)
+
+    def _sync_venue_status(self) -> None:
+        pending = self._pending_participation.with_warnings()
+        hot_active = (
+            self._cycle_hot_venues
+            if self._hot_in_progress and self._cycle_hot_venues is not None
+            else tuple(pending.hot)
+        )
+        universe_active = (
+            self._cycle_universe_venues
+            if self._universe_in_progress and self._cycle_universe_venues is not None
+            else tuple(pending.universe)
+        )
+        hot_set = LaneVenueSet.from_enabled(
+            hot_active,
+            pending=pending.hot,
+            in_progress=self._hot_in_progress,
+        )
+        universe_set = LaneVenueSet.from_enabled(
+            universe_active,
+            pending=pending.universe,
+            in_progress=self._universe_in_progress,
+        )
+        self.status = self.status.model_copy(
+            update={
+                "hot": self.status.hot.model_copy(
+                    update={
+                        "active_venues": hot_set.enabled,
+                        "pending_venues": hot_set.pending,
+                        "comparison_ready": hot_set.comparison_ready,
+                        "venue_warning": hot_set.warning,
+                        "applies_next_cycle": hot_set.applies_next_cycle,
+                    }
+                ),
+                "universe": self.status.universe.model_copy(
+                    update={
+                        "active_venues": universe_set.enabled,
+                        "pending_venues": universe_set.pending,
+                        "comparison_ready": universe_set.comparison_ready,
+                        "venue_warning": universe_set.warning,
+                        "applies_next_cycle": universe_set.applies_next_cycle,
+                    }
+                ),
+                "venue_participation": pending,
+            }
+        )
 
     def remember_request(self, payload: dict[str, Any]) -> None:
         self._last_request = dict(payload)
@@ -205,6 +328,9 @@ class LiveRefreshCoordinator:
         self._universe_work_used = 0.0
         self._universe_cursor = None
         self._universe_evaluated_ids = set()
+        self._cycle_hot_venues = None
+        self._cycle_universe_venues = None
+        self._cycle_enabled_venues = None
         self.status = LiveRefreshStatus(
             server_loop_enabled=False,
             interval_seconds=30,
@@ -254,6 +380,8 @@ class LiveRefreshCoordinator:
                 hours=resolved.paper_hot_post_kickoff_unknown_horizon_hours
             ),
         )
+        hot_venues = list(self.pending_venues_for(ScanLane.HOT))
+        universe_venues = list(self.pending_venues_for(ScanLane.UNIVERSE))
         if hot_due and hot_scope:
             timeout = float(resolved.paper_scan_hot_cycle_timeout_seconds)
             return DualCadencePlan(
@@ -262,6 +390,7 @@ class LiveRefreshCoordinator:
                 coordinator_timeout_seconds=timeout + SCAN_CYCLE_RETURN_GRACE_SECONDS,
                 identity_scope=list(hot_scope),
                 known_source_events=self._fixture_state.known_source_events(hot_scope),
+                enabled_venues=hot_venues,
                 reason="hot_due",
             )
         universe_due = self._universe_generation_open(evaluated, resolved)
@@ -293,6 +422,7 @@ class LiveRefreshCoordinator:
                 coordinator_timeout_seconds=chunk_wall,
                 resume_cursor=self._universe_cursor,
                 skip_event_ids=sorted(self._universe_evaluated_ids),
+                enabled_venues=universe_venues,
                 reason="universe_chunk",
             )
         if hot_due:
@@ -303,6 +433,7 @@ class LiveRefreshCoordinator:
                 coordinator_timeout_seconds=timeout + SCAN_CYCLE_RETURN_GRACE_SECONDS,
                 identity_scope=list(hot_scope),
                 known_source_events=self._fixture_state.known_source_events(hot_scope),
+                enabled_venues=hot_venues,
                 reason="hot_due",
             )
         return DualCadencePlan(lane="idle", reason="waiting")
@@ -394,6 +525,10 @@ class LiveRefreshCoordinator:
         async with self._lock:
             if self._hot_in_progress or self._universe_in_progress or self.status.cycle_in_progress:
                 raise ExplicitCollectBusy("scheduled scan in progress")
+            self._cycle_universe_venues = self._pending_participation.venues_for(
+                ScanLane.UNIVERSE
+            )
+            self._cycle_enabled_venues = self._cycle_universe_venues
             try:
                 report = await _await_collection_runner(runner, timeout)
                 self.record_explicit_report(report)
@@ -401,6 +536,9 @@ class LiveRefreshCoordinator:
             except TimeoutError as exc:
                 message = f"scan_cycle_timeout after {timeout:g}s"
                 raise ScanCycleTimeout(message) from exc
+            finally:
+                self._cycle_enabled_venues = None
+                self._sync_venue_status()
 
     def record_explicit_report(self, report: CollectionReport) -> None:
         """Upsert current-state from a manual collect without moving scheduler dues."""
@@ -531,6 +669,8 @@ class LiveRefreshCoordinator:
         )
         self._hot_in_progress = False
         self._universe_in_progress = False
+        self._cycle_enabled_venues = None
+        self._sync_venue_status()
 
     def record_persist_outcome(
         self,
@@ -665,8 +805,7 @@ class LiveRefreshCoordinator:
         next_due = started + timedelta(
             seconds=settings.paper_live_refresh_universe_interval_seconds
         )
-        if next_due <= finished:
-            next_due = finished
+        next_due = max(finished, next_due)
         self._next_universe_due = next_due
         self._universe_generation_started_at = None
 
@@ -684,6 +823,14 @@ class LiveRefreshCoordinator:
     def _mark_lane_started(self, lane: ScanLane, started: datetime) -> None:
         self._hot_in_progress = lane is ScanLane.HOT
         self._universe_in_progress = lane is not ScanLane.HOT
+        if lane is ScanLane.HOT:
+            self._cycle_hot_venues = self._pending_participation.venues_for(ScanLane.HOT)
+            self._cycle_enabled_venues = self._cycle_hot_venues
+        else:
+            self._cycle_universe_venues = self._pending_participation.venues_for(
+                ScanLane.UNIVERSE
+            )
+            self._cycle_enabled_venues = self._cycle_universe_venues
         top = {
             "cycle_in_progress": True,
             "last_started_at": started,
@@ -705,6 +852,7 @@ class LiveRefreshCoordinator:
                     ),
                 }
             )
+            self._sync_venue_status()
             return
         self._ensure_universe_generation(started)
         self.status = self.status.model_copy(
@@ -721,6 +869,7 @@ class LiveRefreshCoordinator:
                 ),
             }
         )
+        self._sync_venue_status()
 
     def _mark_lane_error(
         self,
@@ -781,6 +930,8 @@ class LiveRefreshCoordinator:
         self.status = self.status.model_copy(update=update)
         self._hot_in_progress = False
         self._universe_in_progress = False
+        self._cycle_enabled_venues = None
+        self._sync_venue_status()
 
     def last_report(self) -> CollectionReport | None:
         return self._last_report
@@ -985,8 +1136,7 @@ def _ago_label(moment: datetime | None, now: datetime | None = None) -> str:
         return "never"
     current = now or datetime.now(UTC)
     delta = int((current - moment).total_seconds())
-    if delta < 0:
-        delta = 0
+    delta = max(delta, 0)
     return f"{delta}s ago"
 
 

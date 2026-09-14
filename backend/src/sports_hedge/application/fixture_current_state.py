@@ -567,10 +567,12 @@ class _FixtureRecord:
         else:
             self.universe = observation
         if observation.source_events:
-            self.extra_source_events = observation.source_events
+            self.extra_source_events = _merge_source_events(
+                self.extra_source_events, observation.source_events
+            )
 
     def set_source_events(self, events: tuple[StoredSourceEvent, ...]) -> None:
-        self.extra_source_events = events
+        self.extra_source_events = _merge_source_events(self.extra_source_events, events)
 
     def lane_observation(self, lane: ScanLane) -> LaneObservation | None:
         if lane is ScanLane.HOT:
@@ -636,10 +638,17 @@ class _FixtureRecord:
         return []
 
     def source_events(self) -> tuple[StoredSourceEvent, ...]:
-        for item in (self.hot, self.universe):
-            if item is not None and item.source_events:
-                return item.source_events
-        return self.extra_source_events
+        merged: dict[tuple[str, str], StoredSourceEvent] = {}
+        for item in (self.universe, self.hot):
+            if item is None:
+                continue
+            for event in item.source_events:
+                merged[(event.venue.value, event.source_event_id)] = event
+        for event in self.extra_source_events:
+            key = (event.venue.value, event.source_event_id)
+            if key not in merged:
+                merged[key] = event
+        return tuple(merged.values())
 
 
 def _stamp_fixture(
@@ -676,6 +685,20 @@ def _paper_market_ids_by_fixture(report: CollectionReport) -> dict[str, tuple[st
         if market_id not in grouped[target]:
             grouped[target].append(market_id)
     return {key: tuple(values) for key, values in grouped.items()}
+
+
+def _merge_source_events(
+    existing: tuple[StoredSourceEvent, ...],
+    incoming: tuple[StoredSourceEvent, ...],
+) -> tuple[StoredSourceEvent, ...]:
+    """Keep prior venue IDs when a later lane refresh omits a disabled venue."""
+
+    merged: dict[tuple[str, str], StoredSourceEvent] = {}
+    for event in existing:
+        merged[(event.venue.value, event.source_event_id)] = event
+    for event in incoming:
+        merged[(event.venue.value, event.source_event_id)] = event
+    return tuple(merged.values())
 
 
 def _source_events_from_report(

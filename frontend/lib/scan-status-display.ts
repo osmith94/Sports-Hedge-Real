@@ -19,6 +19,17 @@ function nextDueLabel(iso: string | null | undefined, now = Date.now()): string 
   return `${delta}s`;
 }
 
+function venueShortList(venues: string[] | undefined): string | null {
+  if (venues == null) return null;
+  if (venues.length === 0) return "no venues";
+  const short: Record<string, string> = {
+    matchbook: "MB",
+    polymarket: "PM",
+    kalshi: "K",
+  };
+  return venues.map((venue) => short[venue] ?? venue).join("·");
+}
+
 export function fastScanCopy(
   status: LiveRefreshStatus | null,
   now = Date.now(),
@@ -27,8 +38,10 @@ export function fastScanCopy(
   if (!hot) {
     return { label: "Fast scan", detail: "never" };
   }
+  const venues = venueShortList(hot.active_venues);
+  const venueSuffix = venues ? ` · ${venues}` : "";
   if (hot.cycle_in_progress) {
-    return { label: "Fast scan", detail: "in progress" };
+    return { label: "Fast scan", detail: `in progress${venueSuffix}` };
   }
   const when = hot.last_completed_at
     ? relativeTime(hot.last_completed_at, now)
@@ -42,7 +55,7 @@ export function fastScanCopy(
       : "";
   return {
     label: "Fast scan",
-    detail: `${when} · ${durationLabel(hot.last_duration_ms)} · next ${nextDueLabel(hot.next_due_at, now)} · ${hot.fixture_count} hot${leftover}${persist}`,
+    detail: `${when} · ${durationLabel(hot.last_duration_ms)} · next ${nextDueLabel(hot.next_due_at, now)} · ${hot.fixture_count} hot${venueSuffix}${leftover}${persist}`,
   };
 }
 
@@ -55,8 +68,10 @@ export function fullSweepCopy(
   if (!universe) {
     return { label: "Full sweep", detail: "never" };
   }
+  const venues = venueShortList(universe.active_venues);
+  const venueSuffix = venues ? ` · ${venues}` : "";
   if (universe.cycle_in_progress) {
-    return { label: "Full sweep", detail: "chunk in progress" };
+    return { label: "Full sweep", detail: `chunk in progress${venueSuffix}` };
   }
   const work = universe.generation_work_used_s ?? 0;
   const budget = universe.generation_budget_seconds ?? 150;
@@ -68,7 +83,7 @@ export function fullSweepCopy(
       : "";
   return {
     label: "Full sweep",
-    detail: `chunk ${durationLabel(universe.chunk_last_duration_ms ?? universe.last_duration_ms)} · gen ${Math.round(work)}/${Math.round(budget)}s · next HOT in ${nextDueLabel(hot?.next_due_at, now)} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${leftover} not evaluated${persist}`,
+    detail: `chunk ${durationLabel(universe.chunk_last_duration_ms ?? universe.last_duration_ms)} · gen ${Math.round(work)}/${Math.round(budget)}s · next HOT in ${nextDueLabel(hot?.next_due_at, now)} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${leftover} not evaluated${venueSuffix}${persist}`,
   };
 }
 

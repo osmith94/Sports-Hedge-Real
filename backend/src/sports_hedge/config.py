@@ -96,6 +96,15 @@ class Settings(BaseSettings):
     paper_hot_post_kickoff_unknown_horizon_hours: int = Field(default=3, ge=1, le=12)
     paper_hot_current_state_ttl_seconds: int = Field(default=90, ge=30, le=300)
     paper_universe_current_state_ttl_seconds: int = Field(default=360, ge=60, le=900)
+    # Lane-specific operator venue defaults. Empty/invalid values keep all three
+    # first-class venues on. Persisted operator selections override these.
+    paper_hot_venues: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["matchbook", "polymarket", "kalshi"]
+    )
+    paper_universe_venues: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["matchbook", "polymarket", "kalshi"]
+    )
+    paper_settings_db_path: str = "./data/paper_settings.sqlite"
     paper_scan_venue_timeout_seconds: int = Field(default=15, ge=3, le=60)
     paper_scan_provider_timeout_seconds: int = Field(default=8, ge=2, le=30)
     cors_allow_origins: Annotated[list[str], NoDecode] = Field(
@@ -171,6 +180,11 @@ class Settings(BaseSettings):
     def split_kalshi_series_tickers(cls, value: Any) -> list[str]:
         return parse_series_ids(value)
 
+    @field_validator("paper_hot_venues", "paper_universe_venues", mode="before")
+    @classmethod
+    def split_paper_lane_venues(cls, value: Any) -> list[str]:
+        return parse_series_ids(value)
+
     def resolved_kalshi_base_url(self) -> str:
         if self.kalshi_use_demo:
             return self.kalshi_demo_base_url.rstrip("/")
@@ -215,7 +229,7 @@ class Settings(BaseSettings):
         ]
 
     @model_validator(mode="after")
-    def enforce_phase_one_safety(self) -> "Settings":
+    def enforce_phase_one_safety(self) -> Settings:
         if self.sports_hedge_mode != "paper":
             raise ValueError("Phase 1 supports paper mode only")
         if self.sports_hedge_execution_enabled:

@@ -18,6 +18,7 @@ import {
 import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
 import { dualScanStatusLines } from "../lib/scan-status-display";
 import { LiveScanPulse, LiveScanPulsePhase } from "./live-scan-pulse";
+import { VenueLaneControls } from "./venue-lane-controls";
 
 type ScanState =
   | { kind: "idle" }
@@ -545,6 +546,11 @@ export function RunPaperScan() {
               : " · auto on"
             : " · auto off"}
         </div>
+        <VenueLaneControls
+          status={liveRefresh}
+          disabled={loading}
+          onUpdated={(status) => applyLiveRefresh(status)}
+        />
 
         <details className="scan-advanced">
           <summary>Advanced · FX / fees / provenance</summary>

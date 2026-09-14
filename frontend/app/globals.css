@@ -159,6 +159,16 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 .scan-button:disabled { opacity: .55; cursor: wait; }
 .scan-note { margin-top: 10px; color: var(--muted-2); font-size: 9px; line-height: 1.5; }
 .scan-note input { margin-right: 6px; }
+.venue-lane-controls { display: grid; gap: 8px; margin-top: 10px; }
+.venue-lane-row { display: grid; gap: 6px; }
+.venue-lane-label { color: var(--muted-2); font-size: 9px; font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }
+.venue-lane-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.venue-lane-chip { border: 1px solid var(--line); background: var(--panel-raised); color: var(--muted); border-radius: 999px; padding: 5px 9px; font-size: 10px; font-weight: 800; letter-spacing: .04em; cursor: pointer; }
+.venue-lane-chip.on { color: var(--accent); border-color: rgba(124, 242, 176, .35); background: var(--accent-soft); }
+.venue-lane-chip.off { color: var(--muted-2); opacity: .8; }
+.venue-lane-chip:disabled { cursor: not-allowed; opacity: .55; }
+.venue-lane-warning { margin: 0; color: var(--amber); font-size: 9px; font-weight: 700; line-height: 1.4; }
+.venue-lane-pending { margin: 0; color: var(--muted-2); font-size: 9px; line-height: 1.4; }
 .scan-message { margin-top: 11px; border-radius: 8px; padding: 9px 10px; font-size: 10px; line-height: 1.45; }
 .scan-message-success { color: var(--accent); border: 1px solid rgba(124, 242, 176, .2); background: var(--accent-soft); }
 .scan-message-error { color: var(--red); border: 1px solid rgba(240, 130, 130, .22); background: rgba(240, 130, 130, .07); }

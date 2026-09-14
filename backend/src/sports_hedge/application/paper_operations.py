@@ -14,17 +14,8 @@ from sports_hedge.accounting.paper_journal import (
     gbp_is_balanced,
     settlement_leg_postings,
 )
-from sports_hedge.treasury.service import PaperTreasuryError
-from sports_hedge.treasury.models import TreasuryLockRequest, UnwindReleaseLeg, ValidatedUnwindResult
 from sports_hedge.accounting.strategy_books import DimensionedPosting
-from sports_hedge.arbitrage.priority_alerts.fixed_exposure import revalidate_fixed_external_exposure
-from sports_hedge.arbitrage.priority_alerts.models import (
-    ExternalLegConfirmation,
-    LegExecutionMode,
-    PriorityAlertCandidate,
-    PriorityLeg,
-)
-from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
+from sports_hedge.application.executable_liquidity import decision_net_edge
 from sports_hedge.application.paper_scan import FillPlanMappingError, apply_allocation_to_fill_legs
 from sports_hedge.arbitrage.allocation.adapters import (
     balances_from_treasury,
@@ -33,21 +24,20 @@ from sports_hedge.arbitrage.allocation.adapters import (
 )
 from sports_hedge.arbitrage.allocation.engine import allocate, allocate_requested_size
 from sports_hedge.arbitrage.allocation.policy import policy_from_settings
-from sports_hedge.application.executable_liquidity import decision_net_edge
+from sports_hedge.arbitrage.priority_alerts.fixed_exposure import revalidate_fixed_external_exposure
+from sports_hedge.arbitrage.priority_alerts.models import (
+    ExternalLegConfirmation,
+    LegExecutionMode,
+    PriorityAlertCandidate,
+    PriorityLeg,
+)
+from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityStatus
 from sports_hedge.arbitrage.watchlist.service import WatchlistService, _opportunity_id
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import MarketAction
-from sports_hedge.paper.chain import (
-    PaperChainStep,
-    PaperChainTrace,
-    PaperFillPlan,
-    SimulatePaperFillResult,
-)
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
-from sports_hedge.paper.fills import PaperFillConfig, PaperFillRecord, PaperOpportunityFills, PaperOpportunityLeg
-from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.bet_ticket import (
     BetTicketExecutionSeam,
     BetTicketFxAssumption,
@@ -57,11 +47,29 @@ from sports_hedge.paper.bet_ticket import (
     bet_ticket_action,
     current_bet_deployability,
 )
+from sports_hedge.paper.chain import (
+    PaperChainStep,
+    PaperChainTrace,
+    PaperFillPlan,
+    SimulatePaperFillResult,
+)
+from sports_hedge.paper.fills import (
+    PaperFillConfig,
+    PaperFillRecord,
+    PaperOpportunityFills,
+    PaperOpportunityLeg,
+)
+from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.preparation import (
     PreparablePaperOpportunity,
     PreparedPaperDeployment,
     PreparedPaperLeg,
     preparation_capital_source,
+)
+from sports_hedge.paper.risk_snapshot import (
+    PaperRiskSnapshotKind,
+    snapshot_from_execution_risk,
+    snapshot_from_scan_decision,
 )
 from sports_hedge.paper.settlement import PaperSettlementError, compute_paper_settlement
 from sports_hedge.paper.simulator import PaperFillSimulator
@@ -78,11 +86,6 @@ from sports_hedge.paper.trades import (
     PaperTradeState,
     paper_unwind_source_id,
 )
-from sports_hedge.paper.risk_snapshot import (
-    PaperRiskSnapshotKind,
-    snapshot_from_execution_risk,
-    snapshot_from_scan_decision,
-)
 from sports_hedge.paper.unwind import (
     PaperUnwindEngine,
     UnwindDecision,
@@ -91,8 +94,20 @@ from sports_hedge.paper.unwind import (
     close_fills_from_decision,
     position_from_trade,
 )
-from sports_hedge.paper.unwind.models import CapitalScarcityInput, RemainingLockSource, ReverseQuote, UnwindPolicy, UnwindRecommendation
+from sports_hedge.paper.unwind.models import (
+    CapitalScarcityInput,
+    RemainingLockSource,
+    ReverseQuote,
+    UnwindPolicy,
+    UnwindRecommendation,
+)
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger, SqlitePaperTradeRepository
+from sports_hedge.treasury.models import (
+    TreasuryLockRequest,
+    UnwindReleaseLeg,
+    ValidatedUnwindResult,
+)
+from sports_hedge.treasury.service import PaperTreasuryError
 
 
 def paper_trade_id(opportunity_id: str) -> str:
@@ -157,6 +172,7 @@ class PaperOperationsService:
         *,
         provenance: DataProvenance = DataProvenance.LIVE_PAPER,
         autofill: bool | None = None,
+        refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
     ) -> PriorityAlertCandidate | None:
         if not decision.canonical_market_id:
             return None
@@ -187,7 +203,9 @@ class PaperOperationsService:
             if decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage:
                 candidate = _candidate_from_decision(decision, opportunity_id)
                 self.alerts.ingest(candidate)
-            if self._should_autofill(autofill=autofill, provenance=provenance):
+            if self._should_autofill(autofill=autofill, provenance=provenance) and self._venues_refreshed_this_cycle(
+                opening_legs, refreshed_venues
+            ):
                 try:
                     self._require_allocator_sized_plan(opportunity_id)
                     self.simulate_fill(
@@ -221,6 +239,18 @@ class PaperOperationsService:
             self.settings.paper_autofill_enabled
             and provenance is DataProvenance.LIVE_PAPER
         )
+
+    def _venues_refreshed_this_cycle(
+        self,
+        legs: list,
+        refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None,
+    ) -> bool:
+        """Stale/disabled-venue legs are never executable-fresh auto-capture truth."""
+
+        if refreshed_venues is None:
+            return True
+        allowed = frozenset(refreshed_venues)
+        return all(getattr(leg, "venue", None) in allowed for leg in legs)
 
     def list_preparable(self, canonical_event_id: str | None = None) -> list[PreparablePaperOpportunity]:
         rows: list[PreparablePaperOpportunity] = []
@@ -357,7 +387,7 @@ class PaperOperationsService:
             accepted=deployable,
             bet_actionable=deployable,
             bet_blocked_reason=reason,
-            recommended_size_gbp=baseline.recommended_size if deployable else Decimal("0"),
+            recommended_size_gbp=baseline.recommended_size if deployable else Decimal(0),
             maximum_validated_size_gbp=baseline.maximum_validated_size,
             limiting_constraint=baseline.limiting_constraint,
             limiting_constraint_detail=baseline.limiting_constraint_detail,
@@ -413,7 +443,7 @@ class PaperOperationsService:
             raise PaperOperationsError("missing_spendable_treasury")
         snap = self.ledger.treasury.snapshot()
         fx = {item.currency.upper(): item.gbp_per_unit for item in decision.fx_snapshots}
-        fx.setdefault("GBP", Decimal("1"))
+        fx.setdefault("GBP", Decimal(1))
         balances = balances_from_treasury(snap, gbp_per_unit=fx)
         if any(row.gbp_per_unit is None for row in balances if row.currency != "GBP"):
             return None, "missing_fx_rate"
@@ -450,7 +480,7 @@ class PaperOperationsService:
         result = allocate_requested_size(request, requested_size_gbp)
         decision = plan.decision
         snap = self.ledger.treasury.snapshot() if self.ledger is not None else None
-        recommended = baseline.recommended_size if baseline.accepted else Decimal("0")
+        recommended = baseline.recommended_size if baseline.accepted else Decimal(0)
         legs = self._prepared_legs(plan, result.recommended_stakes)
         required = [
             item.model_copy(
@@ -467,7 +497,7 @@ class PaperOperationsService:
         ]
         reconciled = False
         if result.accepted and snap is not None:
-            reporting_sum = sum((leg.capital_reporting for leg in legs), Decimal("0"))
+            reporting_sum = sum((leg.capital_reporting for leg in legs), Decimal(0))
             # Scaling native legs to GBP can leave sub-tick dust (observed ~1e-27).
             # That is not a resize; a true mismatch is pounds or cents, not dust.
             reconciled = abs(reporting_sum - result.recommended_committed_capital) <= Decimal(
@@ -501,7 +531,7 @@ class PaperOperationsService:
             requested_size_gbp=requested_size_gbp,
             operator_entered_size_gbp=requested_size_gbp,
             recommended_size_gbp=recommended,
-            applied_size_gbp=result.recommended_committed_capital if result.accepted else Decimal("0"),
+            applied_size_gbp=result.recommended_committed_capital if result.accepted else Decimal(0),
             maximum_validated_size_gbp=result.maximum_validated_size,
             resized=False,
             rejection_reason=None if result.accepted else result.rejection_reason,
@@ -510,7 +540,7 @@ class PaperOperationsService:
             legs=legs if result.accepted else [],
             capital_required=required if result.accepted else [],
             native_requirements_reconciled=reconciled,
-            guaranteed_profit_gbp=result.guaranteed_profit if result.accepted else Decimal("0"),
+            guaranteed_profit_gbp=result.guaranteed_profit if result.accepted else Decimal(0),
             guaranteed_roi=result.guaranteed_roi,
             solver_model=decision.solver_model,
             settlement_equivalent=plan.settlement_equivalent,
@@ -555,9 +585,9 @@ class PaperOperationsService:
             depth_native = None
             depth_pct = None
             if fill is not None and fill.levels:
-                depth_native = sum((level.available_stake for level in fill.levels), Decimal("0"))
+                depth_native = sum((level.available_stake for level in fill.levels), Decimal(0))
                 if depth_native > 0:
-                    depth_pct = (stake.stake_native / depth_native) * Decimal("100")
+                    depth_pct = (stake.stake_native / depth_native) * Decimal(100)
             fx_rate = None
             fx_source = None
             for snap in plan.fx_snapshots:
@@ -566,7 +596,7 @@ class PaperOperationsService:
                     fx_source = snap.source
                     break
             if stake.native_currency.upper() == "GBP":
-                fx_rate = Decimal("1")
+                fx_rate = Decimal(1)
                 fx_source = fx_source or "functional_gbp"
             prepared.append(
                 PreparedPaperLeg(
@@ -616,9 +646,9 @@ class PaperOperationsService:
             accepted=False,
             requested_size_gbp=requested_size_gbp,
             operator_entered_size_gbp=requested_size_gbp,
-            recommended_size_gbp=recommended or Decimal("0"),
-            applied_size_gbp=Decimal("0"),
-            maximum_validated_size_gbp=maximum or Decimal("0"),
+            recommended_size_gbp=recommended or Decimal(0),
+            applied_size_gbp=Decimal(0),
+            maximum_validated_size_gbp=maximum or Decimal(0),
             rejection_reason=reason,
             limiting_constraint=constraint,
             limiting_constraint_detail=detail or reason,
@@ -1074,7 +1104,7 @@ class PaperOperationsService:
         trade.settlement_source_id = request.source_id
         trade.settlement_detail = request.detail
         trade.capital_locked_native = {}
-        trade.capital_locked_gbp = Decimal("0")
+        trade.capital_locked_gbp = Decimal(0)
         trade.audit.append(
             PaperTradeAuditEvent(
                 occurred_at=settled_at,
@@ -1274,7 +1304,7 @@ class PaperOperationsService:
             "capital released only after 8E postings"
         )
         trade.capital_locked_native = {}
-        trade.capital_locked_gbp = Decimal("0")
+        trade.capital_locked_gbp = Decimal(0)
         trade.audit.append(
             PaperTradeAuditEvent(
                 occurred_at=occurred,
@@ -1333,7 +1363,7 @@ class PaperOperationsService:
             )
             trade.realised_pnl_gbp = None
             trade.capital_locked_native = {}
-            trade.capital_locked_gbp = Decimal("0")
+            trade.capital_locked_gbp = Decimal(0)
             trade.audit.append(
                 PaperTradeAuditEvent(
                     occurred_at=occurred,
@@ -1349,7 +1379,7 @@ class PaperOperationsService:
         hours = None if allocation is None else allocation.expected_lock_duration_hours
         if hours is None or hours <= 0:
             return position
-        minutes = hours * Decimal("60")
+        minutes = hours * Decimal(60)
         basis_label = allocation.expected_lock_basis or "8C modelled estimate"
         return position.model_copy(
             update={
@@ -1365,16 +1395,16 @@ class PaperOperationsService:
         active = self.list_active_trades()
         closed = self.list_closed_trades()
         native: dict[str, Decimal] = {}
-        gbp_locked = Decimal("0")
+        gbp_locked = Decimal(0)
         gbp_ok = True
         for trade in active:
             for currency, amount in trade.capital_locked_native.items():
-                native[currency] = native.get(currency, Decimal("0")) + amount
+                native[currency] = native.get(currency, Decimal(0)) + amount
             if trade.capital_locked_gbp is None:
                 gbp_ok = False
             else:
                 gbp_locked += trade.capital_locked_gbp
-        realised = sum((trade.realised_pnl_gbp or Decimal("0") for trade in closed), Decimal("0"))
+        realised = sum((trade.realised_pnl_gbp or Decimal(0) for trade in closed), Decimal(0))
         return PaperTradeBookSummary(
             open_count=sum(1 for trade in active if trade.state is not PaperTradeState.AWAITING_MANUAL_EXTERNAL),
             closed_count=len(closed),
@@ -1383,7 +1413,7 @@ class PaperOperationsService:
             ),
             capital_locked_native=native,
             capital_locked_gbp=gbp_locked if gbp_ok else None,
-            realised_pnl_gbp=realised if closed else Decimal("0"),
+            realised_pnl_gbp=realised if closed else Decimal(0),
             gbp_unavailable_reason=None if gbp_ok else "missing_fx_on_one_or_more_open_trades",
         )
 
@@ -1417,7 +1447,7 @@ class PaperOperationsService:
         needed: dict[tuple[VenueName, str], Decimal] = {}
         for leg in legs:
             key = (leg.venue, leg.currency)
-            needed[key] = needed.get(key, Decimal("0")) + leg.requested_stake
+            needed[key] = needed.get(key, Decimal(0)) + leg.requested_stake
         for (venue, currency), amount in needed.items():
             try:
                 pool = snap.pool(venue, currency)
@@ -1539,7 +1569,7 @@ class PaperOperationsService:
         }
         legs: list[PaperTradeLeg] = []
         native: dict[str, Decimal] = {}
-        gbp = Decimal("0")
+        gbp = Decimal(0)
         fx = {item.currency: item for item in plan.fx_snapshots}
         for plan_leg in plan.legs:
             if plan_leg.requested_stake <= 0:
@@ -1550,7 +1580,7 @@ class PaperOperationsService:
             )
             fill_kind = PaperLegFillKind.UNFILLED
             capital = CapitalSource.AUTO_POOL
-            filled_stake = Decimal("0")
+            filled_stake = Decimal(0)
             filled_odds = None
             fill_id = None
             requested = plan_leg.requested_stake
@@ -1600,8 +1630,8 @@ class PaperOperationsService:
                 )
             )
             if filled_stake > 0:
-                native[plan_leg.currency] = native.get(plan_leg.currency, Decimal("0")) + filled_stake
-                rate = Decimal("1") if plan_leg.currency == "GBP" else fx[plan_leg.currency].gbp_per_unit
+                native[plan_leg.currency] = native.get(plan_leg.currency, Decimal(0)) + filled_stake
+                rate = Decimal(1) if plan_leg.currency == "GBP" else fx[plan_leg.currency].gbp_per_unit
                 gbp += filled_stake * rate
 
         fully = bool(legs) and all(
@@ -1740,7 +1770,7 @@ class PaperOperationsService:
         rate_snap = fx.get(confirmation.currency.upper())
         if confirmation.currency.upper() != "GBP" and rate_snap is None:
             return False
-        gbp_per_unit = Decimal("1") if confirmation.currency.upper() == "GBP" else rate_snap.gbp_per_unit
+        gbp_per_unit = Decimal(1) if confirmation.currency.upper() == "GBP" else rate_snap.gbp_per_unit
         executed_reporting = confirmation.executed_size * gbp_per_unit
         external = next(
             (
@@ -1757,7 +1787,7 @@ class PaperOperationsService:
             if plan.execution_modes.get(leg.venue) is LegExecutionMode.EXTERNAL_OPERATOR:
                 continue
             snap = fx.get(leg.currency)
-            rate = Decimal("1") if leg.currency == "GBP" else (snap.gbp_per_unit if snap else None)
+            rate = Decimal(1) if leg.currency == "GBP" else (snap.gbp_per_unit if snap else None)
             if rate is None:
                 return False
             hedge_legs.append(_priority_leg_from_plan(plan, leg, gbp_per_unit=rate))
@@ -1886,7 +1916,7 @@ class PaperOperationsService:
                         amount_native=native,
                         amount_gbp=amount_gbp,
                         fx_rate_gbp_per_unit=(
-                            Decimal("1") if currency == "GBP" else amount_gbp / native
+                            Decimal(1) if currency == "GBP" else amount_gbp / native
                         ),
                         opportunity_id=plan.opportunity_id,
                         capital_source=leg_capital,
@@ -1910,7 +1940,7 @@ class PaperOperationsService:
             except PaperTreasuryError as exc:
                 raise PaperOperationsError(str(exc)) from exc
         if currency.upper() == "GBP":
-            return Decimal("1")
+            return Decimal(1)
         return fx[currency].gbp_per_unit
 
 
@@ -1931,7 +1961,7 @@ def _unfilled_legs_from_plan(plan: PaperFillPlan) -> list[PaperTradeLeg]:
                 outcome=plan_leg.outcome,
                 currency=plan_leg.currency,
                 requested_stake=plan_leg.requested_stake,
-                filled_stake=Decimal("0"),
+                filled_stake=Decimal(0),
                 displayed_odds=plan_leg.displayed_odds,
                 filled_odds=None,
                 source_market_id=plan_leg.source_market_id,
@@ -2007,7 +2037,7 @@ def _native_totals(postings: list[DimensionedPosting]) -> dict[str, Decimal]:
         if not posting.account_code.startswith("ASSET:CASH:LOCKED"):
             continue
         totals[posting.dimensions.currency] = (
-            totals.get(posting.dimensions.currency, Decimal("0")) + posting.amount_native
+            totals.get(posting.dimensions.currency, Decimal(0)) + posting.amount_native
         )
     return totals
 
@@ -2032,7 +2062,7 @@ def _net_odds_for_leg(plan: PaperFillPlan, leg: PaperOpportunityLeg) -> Decimal:
 def _priority_leg_from_plan(
     plan: PaperFillPlan, leg: PaperOpportunityLeg, *, gbp_per_unit: Decimal
 ) -> PriorityLeg:
-    native_max = sum((level.available_stake for level in leg.levels), Decimal("0")) or leg.requested_stake
+    native_max = sum((level.available_stake for level in leg.levels), Decimal(0)) or leg.requested_stake
     return PriorityLeg(
         outcome=leg.outcome,
         venue=leg.venue,
@@ -2054,7 +2084,7 @@ def _candidate_from_decision(decision: PaperScanDecision, opportunity_id: str) -
     for quote in decision.depth_scan.selected_quotes:
         fill = next((item for item in decision.fill_legs if item.outcome == quote.outcome), None)
         currency = fill.currency if fill is not None else "GBP"
-        rate = fx.get(currency, Decimal("1"))
+        rate = fx.get(currency, Decimal(1))
         mode = LegExecutionMode(decision.execution_modes.get(quote.venue, LegExecutionMode.INTERNAL))
         legs.append(
             PriorityLeg(
@@ -2223,7 +2253,7 @@ def _plan_with_prepared_stakes(
         )
         prepared = by_key.get(key)
         if prepared is None:
-            resized.append(plan_leg.model_copy(update={"requested_stake": Decimal("0")}))
+            resized.append(plan_leg.model_copy(update={"requested_stake": Decimal(0)}))
             continue
         seen.add(key)
         resized.append(plan_leg.model_copy(update={"requested_stake": prepared.stake_native}))

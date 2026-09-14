@@ -16,6 +16,12 @@ from pydantic import BaseModel, Field, model_validator
 from sports_hedge.api.market_intelligence import get_market_intelligence_service
 from sports_hedge.api.priority_alerts import get_priority_alert_service
 from sports_hedge.api.watchlist import get_watchlist_service
+from sports_hedge.application.collector import (
+    DEFAULT_MAX_EVENT_PAIRS,
+    CollectionReport,
+    ReadOnlyCrossVenueCollector,
+    acknowledge_task_cancellation,
+)
 from sports_hedge.application.demo_walkthrough import (
     DemoCloseRequest,
     DemoResetRequest,
@@ -24,12 +30,8 @@ from sports_hedge.application.demo_walkthrough import (
     FixtureReplayRequest,
     FixtureReplayResult,
 )
-from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
-from sports_hedge.application.collector import (
-    CollectionReport,
-    DEFAULT_MAX_EVENT_PAIRS,
-    ReadOnlyCrossVenueCollector,
-    acknowledge_task_cancellation,
+from sports_hedge.application.lane_venues import (
+    LaneVenueParticipation,
 )
 from sports_hedge.application.live_refresh import (
     ExplicitCollectBusy,
@@ -37,25 +39,22 @@ from sports_hedge.application.live_refresh import (
     ScanCycleTimeout,
     get_live_refresh_coordinator,
 )
-from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.application.market_observation import (
     KalshiObservationBuilder,
     MatchbookObservationBuilder,
     PolymarketObservationBuilder,
     VenueMarketObservation,
 )
+from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.scan_lanes import ScanLane
+from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.models import FeeSnapshot
 from sports_hedge.fees.resolver import VenueCostResolver
-from sports_hedge.persistence.matchbook_account_fee import (
-    MatchbookAccountFeeStatus,
-    MatchbookFeeUpdate,
-    SqliteMatchbookAccountFeeStore,
-)
 from sports_hedge.fx.models import FxRateUnavailable
 from sports_hedge.fx.repository import SqliteFxRateRepository
 from sports_hedge.fx.service import FxRateService
@@ -66,12 +65,14 @@ from sports_hedge.paper.audit import (
     PaperScanSummary,
     build_paper_scan_record,
 )
-from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
+from sports_hedge.paper.bet_ticket import (
+    RecommendedPaperDeployment,
+    RecommendPaperDeploymentRequest,
+)
 from sports_hedge.paper.chain import SimulatePaperFillRequest, SimulatePaperFillResult
-from sports_hedge.paper.preparation import PreparePaperDeploymentRequest, PreparedPaperDeployment
-from sports_hedge.paper.bet_ticket import RecommendPaperDeploymentRequest, RecommendedPaperDeployment
-from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
+from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+from sports_hedge.paper.preparation import PreparedPaperDeployment, PreparePaperDeploymentRequest
 from sports_hedge.paper.trades import (
     PaperSettlementRequest,
     PaperTrade,
@@ -79,8 +80,13 @@ from sports_hedge.paper.trades import (
     PaperTradeDetail,
 )
 from sports_hedge.paper.unwind.models import PaperClosePlanRequest, UnwindDecision
-from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
+from sports_hedge.persistence.matchbook_account_fee import (
+    MatchbookAccountFeeStatus,
+    MatchbookFeeUpdate,
+    SqliteMatchbookAccountFeeStore,
+)
+from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.treasury.models import (
     PaperTreasurySnapshot,
@@ -162,6 +168,25 @@ class EconomicsStatus(BaseModel):
     polymarket_fee_policy: dict[str, Any] = Field(default_factory=dict)
     issues: list[str] = Field(default_factory=list)
     fx_schedule: dict[str, Any] = Field(default_factory=dict)
+
+
+class LaneVenueFlags(BaseModel):
+    matchbook: bool = True
+    polymarket: bool = True
+    kalshi: bool = True
+
+    def as_venues(self) -> list[VenueName]:
+        mapping = (
+            (VenueName.MATCHBOOK, self.matchbook),
+            (VenueName.POLYMARKET, self.polymarket),
+            (VenueName.KALSHI, self.kalshi),
+        )
+        return [venue for venue, enabled in mapping if enabled]
+
+
+class LaneVenueParticipationUpdate(BaseModel):
+    hot: LaneVenueFlags
+    universe: LaneVenueFlags
 
 
 class PaperPoolUpdate(BaseModel):
@@ -715,6 +740,27 @@ def live_refresh_status() -> LiveRefreshStatus:
     return coordinator.public_status()
 
 
+@router.get("/venue-participation", response_model=LaneVenueParticipation)
+def get_venue_participation() -> LaneVenueParticipation:
+    coordinator = get_live_refresh_coordinator()
+    coordinator.configure_from_settings()
+    participation = coordinator.status.venue_participation
+    if participation is None:
+        coordinator.configure_from_settings()
+        participation = coordinator.status.venue_participation
+    assert participation is not None
+    return participation
+
+
+@router.put("/venue-participation", response_model=LiveRefreshStatus)
+def put_venue_participation(update: LaneVenueParticipationUpdate) -> LiveRefreshStatus:
+    """Persist operator lane venue toggles. Applies at the next safe cycle boundary."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_venue_participation(update.hot.as_venues(), update.universe.as_venues())
+    return coordinator.public_status()
+
+
 @router.post(
     "/collect",
     response_model=CollectionReport,
@@ -738,6 +784,7 @@ async def collect_read_only_market_data(
             service=service,
             audit=audit,
             watchlist=watchlist,
+            enabled_venues=list(coordinator.running_cycle_venues()),
         )
 
     try:
@@ -764,6 +811,7 @@ async def _collect_report(
     skip_event_ids: list[str] | None = None,
     known_source_events: dict[str, list[dict[str, Any]]] | None = None,
     cycle_timeout_seconds: float | None = None,
+    enabled_venues: list[VenueName] | None = None,
 ) -> CollectionReport:
     settings = get_settings()
     matchbook = MatchbookClient(settings)
@@ -793,6 +841,7 @@ async def _collect_report(
             skip_event_ids=skip_event_ids,
             known_source_events=known_source_events,
             cycle_timeout_seconds=cycle_timeout_seconds,
+            enabled_venues=enabled_venues,
         )
     finally:
         acknowledge_task_cancellation()
@@ -814,6 +863,7 @@ def _persist_collection_report(
             audit=audit,
             watchlist=watchlist,
             operations=operations,
+            refreshed_venues=report.enabled_venues,
         )
 
 
@@ -862,6 +912,7 @@ async def _execute_collection(
     skip_event_ids: list[str] | None = None,
     known_source_events: dict[str, list[dict[str, Any]]] | None = None,
     cycle_timeout_seconds: float | None = None,
+    enabled_venues: list[VenueName] | None = None,
 ) -> CollectionReport:
     report = await _collect_report(
         kwargs,
@@ -872,6 +923,7 @@ async def _execute_collection(
         skip_event_ids=skip_event_ids,
         known_source_events=known_source_events,
         cycle_timeout_seconds=cycle_timeout_seconds,
+        enabled_venues=enabled_venues,
     )
     _persist_collection_report(
         report, service=service, audit=audit, watchlist=watchlist
@@ -908,6 +960,7 @@ async def server_owned_refresh_tick() -> None:
             skip_event_ids=plan.skip_event_ids,
             known_source_events=plan.known_source_events,
             cycle_timeout_seconds=plan.collector_timeout_seconds,
+            enabled_venues=list(coordinator.running_cycle_venues()),
         )
 
     try:
@@ -1115,6 +1168,7 @@ def _persist_decision(
     watchlist: WatchlistService,
     operations: PaperOperationsService | None = None,
     quote_age_ms: int | None = None,
+    refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
 ) -> None:
     if not decision.canonical_market_id:
         return
@@ -1125,7 +1179,7 @@ def _persist_decision(
         audit.append_scan(build_paper_scan_record(decision, history))
     watchlist.observe_paper_decision(decision, history, quote_age_ms=quote_age_ms)
     if operations is not None:
-        operations.persist_triggered_chain(decision)
+        operations.persist_triggered_chain(decision, refreshed_venues=refreshed_venues)
 
 
 def _build_observation(request: RawVenueObservationRequest) -> VenueMarketObservation:
@@ -1170,7 +1224,7 @@ def _build_observation(request: RawVenueObservationRequest) -> VenueMarketObserv
 
 def _backend_fx_for_pools(fx: FxRateService) -> tuple[dict[str, Decimal], str | None]:
     settings = get_settings()
-    rates: dict[str, Decimal] = {"GBP": Decimal("1")}
+    rates: dict[str, Decimal] = {"GBP": Decimal(1)}
     source: str | None = None
     try:
         snapshots = fx.paper_snapshots({"USD", "GBP"}, as_of=datetime.now(UTC))
@@ -1180,7 +1234,7 @@ def _backend_fx_for_pools(fx: FxRateService) -> tuple[dict[str, Decimal], str | 
                 source = snapshot.source
     except FxRateUnavailable:
         snapshots = []
-    if "USD" not in rates or rates.get("USD") in {None, Decimal("0")}:
+    if "USD" not in rates or rates.get("USD") in {None, Decimal(0)}:
         try:
             treasury = get_paper_ledger().treasury.snapshot()
         except Exception:

@@ -1,22 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from logging import getLogger
 from time import monotonic, perf_counter
-from typing import Any, Iterator, Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
 from sports_hedge.application.executable_liquidity import (
-    HeadlineBand,
     NO_EXECUTABLE_ARB,
+    HeadlineBand,
     candidate_from_decision,
     headline_band_for,
     select_fixture_headline,
+)
+from sports_hedge.application.fixture_clusters import (
+    FixtureCluster,
+    cluster_canonical_event_id,
+    cluster_identity_aliases,
+    cluster_member_events,
+    cluster_venue_events,
+    to_venue_event,
 )
 from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
@@ -30,10 +39,14 @@ from sports_hedge.application.fixture_inventory import (
     scan_eligible_pair,
 )
 from sports_hedge.application.fixture_state import matchbook_fixture_state
-from sports_hedge.application.quote_freshness import (
-    matchbook_market_quote_age,
-    polymarket_books_quote_age,
-    retrieval_quote_age,
+from sports_hedge.application.lane_venues import (
+    INSUFFICIENT_VENUES_REASON,
+    OPERATOR_SCAN_VENUES,
+    VENUE_HEALTH_DISABLED,
+    coerce_operator_venues,
+    comparison_allowed,
+    comparison_warning,
+    default_operator_venues,
 )
 from sports_hedge.application.market_observation import (
     KalshiObservationBuilder,
@@ -42,21 +55,17 @@ from sports_hedge.application.market_observation import (
     VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key, should_skip_market_work
-from sports_hedge.fees.kalshi import resolve_kalshi_fee_metadata
-from sports_hedge.application.fixture_clusters import (
-    FixtureCluster,
-    cluster_canonical_event_id,
-    cluster_identity_aliases,
-    cluster_member_events,
-    cluster_venue_events,
-    to_venue_event,
+from sports_hedge.application.quote_freshness import (
+    matchbook_market_quote_age,
+    polymarket_books_quote_age,
+    retrieval_quote_age,
 )
+from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key, should_skip_market_work
 from sports_hedge.application.target_competitions import (
     EVENT_IDENTITY_MISMATCH,
     SERIES_NOT_QUERIED,
-    UNMATCHED_POLYMARKET_COVERAGE,
     TARGET_COMPETITIONS,
+    UNMATCHED_POLYMARKET_COVERAGE,
     TargetCompetition,
     TargetCompetitionCode,
     filter_in_scope_events,
@@ -78,9 +87,10 @@ from sports_hedge.domain.football import (
 )
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
+from sports_hedge.fees.kalshi import resolve_kalshi_fee_metadata
 from sports_hedge.fees.models import FeeSnapshot
 from sports_hedge.matching.events import EventMatcher
-from sports_hedge.matching.markets import MarketMatchResult, MarketMatcher
+from sports_hedge.matching.markets import MarketMatcher, MarketMatchResult
 from sports_hedge.normalization.venues import (
     KalshiNormalizer,
     MatchbookNormalizer,
@@ -314,6 +324,9 @@ class CollectionReport(BaseModel):
     discovery_mode: str = "venue_union"
     matching_venue: VenueName = VenueName.POLYMARKET
     matching_venues: list[VenueName] = Field(default_factory=lambda: [VenueName.POLYMARKET])
+    enabled_venues: list[VenueName] = Field(
+        default_factory=lambda: list(OPERATOR_SCAN_VENUES)
+    )
     raw_matchbook_events: int = Field(default=0, ge=0)
     raw_polymarket_events: int = Field(default=0, ge=0)
     raw_kalshi_events: int = Field(default=0, ge=0)
@@ -408,6 +421,7 @@ class ReadOnlyCrossVenueCollector:
         self._cycle_timeout_seconds = cycle_timeout_seconds
         self._op_issues: list[CollectorIssue] = []
         self._op_venue_health: dict[str, str] = {}
+        self._op_enabled_venues: frozenset[VenueName] = frozenset(OPERATOR_SCAN_VENUES)
         self._op_venue_timeout = venue_timeout_seconds
         self._op_provider_timeout = provider_call_timeout_seconds
         self._op_deadline: float | None = None
@@ -449,16 +463,26 @@ class ReadOnlyCrossVenueCollector:
         resume_cursor: str | None = None,
         skip_event_ids: list[str] | None = None,
         known_source_events: dict[str, list[dict[str, Any]]] | None = None,
+        enabled_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
     ) -> CollectionReport:
         if max_event_pairs <= 0 or max_market_pairs_per_event <= 0:
             raise ValueError("collector pair limits must be positive")
         started_at = datetime.now(UTC)
         issues: list[CollectorIssue] = []
+        enabled = frozenset(
+            coerce_operator_venues(enabled_venues)
+            if enabled_venues is not None
+            else default_operator_venues()
+        )
+        self._op_enabled_venues = enabled
         venue_health: dict[str, str] = {
             VenueName.MATCHBOOK.value: "unknown",
             VenueName.POLYMARKET.value: "unknown",
             VenueName.KALSHI.value: "unavailable" if self.kalshi is None else "unknown",
         }
+        for venue in OPERATOR_SCAN_VENUES:
+            if venue not in enabled:
+                venue_health[venue.value] = VENUE_HEALTH_DISABLED
         self._op_issues = issues
         self._op_venue_health = venue_health
         self._op_venue_timeout = (
@@ -518,66 +542,61 @@ class ReadOnlyCrossVenueCollector:
         skip_discovery = resolved_lane == ScanLane.HOT.value and identity_scope is not None
         try:
             with self._stage("event_discovery"):
+                filtered_known = _filter_known_source_events(known_source_events or {}, enabled)
                 if skip_discovery:
                     (
                         raw_matchbook_events,
                         raw_polymarket_events,
                         raw_kalshi_events,
-                    ) = _raw_events_from_known_source_events(known_source_events or {})
+                    ) = _raw_events_from_known_source_events(filtered_known)
                     matchbook_payload: dict[str, Any] = {}
                     for venue_name, has_events in (
                         (VenueName.MATCHBOOK, bool(raw_matchbook_events)),
                         (VenueName.POLYMARKET, bool(raw_polymarket_events)),
                         (VenueName.KALSHI, bool(raw_kalshi_events)),
                     ):
-                        if has_events:
+                        if venue_name not in enabled:
+                            venue_health[venue_name.value] = VENUE_HEALTH_DISABLED
+                        elif has_events:
                             venue_health[venue_name.value] = "ok"
-                    if self.kalshi is None:
+                    if self.kalshi is None and VenueName.KALSHI in enabled:
                         venue_health[VenueName.KALSHI.value] = "unavailable"
                 else:
-                    mb_task = self._list_raw_events(
+                    mb_task = self._discovery_task(
                         self.matchbook,
                         venue=VenueName.MATCHBOOK,
+                        enabled=enabled,
                         filters=matchbook_event_filters or {},
                         issues=issues,
                         venue_health=venue_health,
                     )
-                    pm_task = self._list_raw_events(
+                    pm_task = self._discovery_task(
                         self.polymarket,
                         venue=VenueName.POLYMARKET,
+                        enabled=enabled,
                         filters=polymarket_event_filters or {},
                         issues=issues,
                         venue_health=venue_health,
                     )
-                    if self.kalshi is not None:
-                        (
-                            (raw_matchbook_events, matchbook_payload),
-                            (raw_polymarket_events, _),
-                            (raw_kalshi_events, _),
-                        ) = await self._gather_bounded(
-                            mb_task,
-                            pm_task,
-                            self._list_raw_events(
-                                self.kalshi,
-                                venue=VenueName.KALSHI,
-                                filters={},
-                                issues=issues,
-                                venue_health=venue_health,
-                            ),
-                            default=(
-                                ([], {}),
-                                ([], {}),
-                                ([], {}),
-                            ),
-                        )
-                    else:
-                        (raw_matchbook_events, matchbook_payload), (raw_polymarket_events, _) = (
-                            await self._gather_bounded(
-                                mb_task,
-                                pm_task,
-                                default=(([], {}), ([], {})),
-                            )
-                        )
+                    k_task = self._discovery_task(
+                        self.kalshi,
+                        venue=VenueName.KALSHI,
+                        enabled=enabled,
+                        filters={},
+                        issues=issues,
+                        venue_health=venue_health,
+                    )
+                    (
+                        (raw_matchbook_events, matchbook_payload),
+                        (raw_polymarket_events, _),
+                        (raw_kalshi_events, _),
+                    ) = await self._gather_bounded(
+                        mb_task,
+                        pm_task,
+                        k_task,
+                        default=(([], {}), ([], {}), ([], {})),
+                    )
+                    if self.kalshi is None and VenueName.KALSHI in enabled:
                         raw_kalshi_events = []
                         venue_health[VenueName.KALSHI.value] = "unavailable"
                     issues.extend(_matchbook_discovery_issues(matchbook_payload))
@@ -976,6 +995,30 @@ class ReadOnlyCrossVenueCollector:
                 self._op_venue_health[venue.value] = "degraded"
             return default, True
 
+    async def _discovery_task(
+        self,
+        client: Any,
+        *,
+        venue: VenueName,
+        enabled: frozenset[VenueName],
+        filters: dict[str, Any],
+        issues: list[CollectorIssue],
+        venue_health: dict[str, str],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if venue not in enabled:
+            venue_health[venue.value] = VENUE_HEALTH_DISABLED
+            return [], {}
+        if client is None:
+            venue_health[venue.value] = "unavailable"
+            return [], {}
+        return await self._list_raw_events(
+            client,
+            venue=venue,
+            filters=filters,
+            issues=issues,
+            venue_health=venue_health,
+        )
+
     async def _list_raw_events(
         self,
         client: Any,
@@ -1088,9 +1131,25 @@ class ReadOnlyCrossVenueCollector:
         )
         if deadline_hit:
             operator_summary += f" · partial ({leftover_n} not evaluated)"
-        matching_venues = [VenueName.POLYMARKET]
-        if self.kalshi is not None:
-            matching_venues.append(VenueName.KALSHI)
+        enabled_list = [
+            venue for venue in OPERATOR_SCAN_VENUES if venue in self._op_enabled_venues
+        ]
+        matching_venues = [
+            venue
+            for venue in OPERATOR_SCAN_VENUES
+            if venue in self._op_enabled_venues and venue is not VenueName.MATCHBOOK
+        ]
+        if self.kalshi is None:
+            matching_venues = [
+                venue for venue in matching_venues if venue is not VenueName.KALSHI
+            ]
+        if not matching_venues:
+            matching_venues = list(enabled_list)
+        if not matching_venues:
+            matching_venues = [VenueName.MATCHBOOK]
+        comparison_note = comparison_warning(self._op_enabled_venues)
+        if comparison_note and comparison_note not in config_warnings:
+            config_warnings = [*config_warnings, comparison_note]
         total_ms = max(0, int((monotonic() - started_mono) * 1000))
         assembly_ms = max(0, int((monotonic() - assembly_started) * 1000))
         self._attribution.add(
@@ -1126,6 +1185,7 @@ class ReadOnlyCrossVenueCollector:
             "inflight_live": len(self._inflight),
             "scan_lane": scan_lane,
             "resume_cursor": resume_cursor,
+            "enabled_venues": [item.value for item in self._op_enabled_venues],
             "identity_scope": [
                 item.canonical_event_id for item in discovered_fixtures
             ],
@@ -1136,8 +1196,9 @@ class ReadOnlyCrossVenueCollector:
             completed_at=completed_at,
             discovery_source=VenueName.MATCHBOOK,
             discovery_mode="venue_union",
-            matching_venue=VenueName.POLYMARKET,
+            matching_venue=matching_venues[0],
             matching_venues=matching_venues,
+            enabled_venues=enabled_list,
             raw_matchbook_events=len(raw_matchbook_events),
             raw_polymarket_events=len(raw_polymarket_events),
             raw_kalshi_events=len(raw_kalshi_events),
@@ -1221,6 +1282,13 @@ class ReadOnlyCrossVenueCollector:
         mb_events = [_as_normalized(item) for item in cluster.events_for(VenueName.MATCHBOOK)]
         pm_events = [_as_normalized(item) for item in cluster.events_for(VenueName.POLYMARKET)]
         k_events = [_as_normalized(item) for item in cluster.events_for(VenueName.KALSHI)]
+        enabled = self._op_enabled_venues
+        if VenueName.MATCHBOOK not in enabled:
+            mb_events = []
+        if VenueName.POLYMARKET not in enabled:
+            pm_events = []
+        if VenueName.KALSHI not in enabled:
+            k_events = []
         mb_event = mb_events[0] if mb_events else None
         pm_event = pm_events[0] if pm_events else None
         matchbook_markets: list[_NormalizedMarket] = []
@@ -1441,6 +1509,14 @@ class ReadOnlyCrossVenueCollector:
             (VenueName.MATCHBOOK, VenueName.KALSHI),
             (VenueName.POLYMARKET, VenueName.KALSHI),
         )
+        if not comparison_allowed(enabled):
+            pair_specs = ()
+            if fixture.no_comparison_reason is None:
+                fixture.no_comparison_reason = INSUFFICIENT_VENUES_REASON
+        else:
+            pair_specs = tuple(
+                pair for pair in pair_specs if pair[0] in enabled and pair[1] in enabled
+            )
         decisions: list[PaperScanDecision] = []
         decisions_by_source_ids: dict[tuple[str, str], PaperScanDecision] = {}
         decisions_by_pair: dict[tuple[str, str, str, str], PaperScanDecision] = {}
@@ -2539,6 +2615,23 @@ def _fixture_identity_aliases(
             if decision_id:
                 aliases[decision_id] = cluster_id
     return aliases
+
+
+def _filter_known_source_events(
+    known_source_events: dict[str, list[dict[str, Any]]],
+    enabled: frozenset[VenueName],
+) -> dict[str, list[dict[str, Any]]]:
+    allowed = {venue.value for venue in enabled}
+    filtered: dict[str, list[dict[str, Any]]] = {}
+    for canonical_id, rows in known_source_events.items():
+        kept = [
+            row
+            for row in rows
+            if str(row.get("venue") or "").strip().casefold() in allowed
+        ]
+        if kept:
+            filtered[canonical_id] = kept
+    return filtered
 
 
 def _raw_events_from_known_source_events(
