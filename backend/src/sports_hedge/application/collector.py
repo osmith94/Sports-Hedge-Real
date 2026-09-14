@@ -42,7 +42,7 @@ from sports_hedge.application.market_observation import (
     VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key
+from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key, should_skip_market_work
 from sports_hedge.fees.kalshi import resolve_kalshi_fee_metadata
 from sports_hedge.application.fixture_clusters import (
     FixtureCluster,
@@ -1015,6 +1015,8 @@ class ReadOnlyCrossVenueCollector:
             polymarket_events=polymarket_events,
             queried_series_ids=queried_series_ids,
         )
+        if should_skip_market_work(fixture, seen_at):
+            return fixture, [], [], {}, 0, 0
         mb_events = [_as_normalized(item) for item in cluster.events_for(VenueName.MATCHBOOK)]
         pm_events = [_as_normalized(item) for item in cluster.events_for(VenueName.POLYMARKET)]
         k_events = [_as_normalized(item) for item in cluster.events_for(VenueName.KALSHI)]

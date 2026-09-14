@@ -32,19 +32,35 @@ DEFAULT_EXECUTABLE_QUOTE_AGE_MS = 1000
 UNIVERSE_MIN_CHUNK_SECONDS = 6.0
 
 # Explicit provider statuses only. Elapsed time must never fabricate these.
-_DROP_STATUSES = frozenset(
+TERMINAL_STATUSES = frozenset(
     {
         "completed",
         "complete",
         "settled",
         "void",
+        "voided",
         "expired",
         "closed",
         "finished",
+        "final",
         "settled-complete",
-        "settled_complete",
+        "cancelled",
+        "canceled",
+        "abandoned",
+        "paid",
     }
 )
+SCHEDULE_EXCEPTION_STATUSES = frozenset(
+    {
+        "postponed",
+        "delayed",
+        "rescheduled",
+        "abandoned-postponed",
+    }
+)
+MATCHBOOK_REVERSAL_STATUSES = frozenset({"open", "in-play", "inplay", "suspended"})
+EVICTION_TERMINAL_FROM_MATCHBOOK = "terminal_status_from_matchbook"
+EVICTION_TERMINAL = "terminal_status"
 
 
 def classify_scan_lane(
@@ -54,12 +70,21 @@ def classify_scan_lane(
     hot_horizon: timedelta = DEFAULT_HOT_HORIZON,
     post_kickoff_unknown_horizon: timedelta = DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON,
 ) -> ScanLane:
-    """Return HOT, UNIVERSE, or DROP. Never labels live/completed from time."""
+    """Return HOT, UNIVERSE, or DROP. Never labels live/completed from time.
+
+    Issue #164: explicit terminal provider status leaves current radar immediately.
+    Kickoff-passed + unknown may stay HOT only inside the bounded uncertainty
+    window; after that it leaves current radar without fabricating a status.
+    Postponed/delayed/rescheduled follows explicit provider truth, not kickoff
+    arithmetic. The 3h window is never applied to explicit terminal state.
+    """
 
     evaluated = require_aware_instant(now, "now")
-    status = _normalized_status(getattr(fixture, "fixture_status", None))
-    if status in _DROP_STATUSES:
+    status = fixture_status_value(fixture)
+    if status in TERMINAL_STATUSES:
         return ScanLane.DROP
+    if status in SCHEDULE_EXCEPTION_STATUSES:
+        return ScanLane.UNIVERSE
 
     in_running = getattr(fixture, "in_running", None)
     if in_running is True:
@@ -74,9 +99,73 @@ def classify_scan_lane(
         return ScanLane.HOT
     if kickoff_utc <= evaluated:
         since_kickoff = evaluated - kickoff_utc
-        if since_kickoff <= post_kickoff_unknown_horizon and in_running is not True:
+        if since_kickoff <= post_kickoff_unknown_horizon:
             return ScanLane.HOT
+        # Unknown beyond the bounded window: leave current radar. Do not
+        # rewrite fixture_status or in_running from elapsed time.
+        return ScanLane.DROP
     return ScanLane.UNIVERSE
+
+
+def fixture_status_value(fixture: Any) -> str | None:
+    return _normalized_status(getattr(fixture, "fixture_status", None))
+
+
+def is_explicit_terminal(fixture: Any) -> bool:
+    return fixture_status_value(fixture) in TERMINAL_STATUSES
+
+
+def is_schedule_exception(fixture: Any) -> bool:
+    return fixture_status_value(fixture) in SCHEDULE_EXCEPTION_STATUSES
+
+
+def is_matchbook_sourced(fixture: Any) -> bool:
+    source = getattr(fixture, "source", None)
+    if source is not None and str(source).strip().casefold() == "matchbook":
+        return True
+    return bool(getattr(fixture, "matchbook_matched", False))
+
+
+def terminal_eviction_reason(fixture: Any) -> str:
+    if is_matchbook_sourced(fixture):
+        return EVICTION_TERMINAL_FROM_MATCHBOOK
+    return EVICTION_TERMINAL
+
+
+def should_skip_market_work(fixture: Any, now: datetime, **kwargs: Any) -> bool:
+    """Skip market-list / book / economics once explicit terminal status is known.
+
+    The 3h unknown window still evicts current radar on ingest, but market work
+    stops immediately only for explicit provider terminal truth (#164).
+    """
+
+    del now, kwargs
+    return is_explicit_terminal(fixture)
+
+
+def is_trusted_lifecycle_correction(
+    fixture: Any,
+    *,
+    observed_at: datetime,
+    tombstone_observed_at: datetime,
+) -> bool:
+    """Return True when a later observation may restore a tombstoned fixture.
+
+    Stale/unknown observations from other venues never resurrect terminal truth.
+    """
+
+    scanned = require_aware_instant(observed_at, "observed_at")
+    stamped = require_aware_instant(tombstone_observed_at, "tombstone_observed_at")
+    if scanned < stamped:
+        return False
+    if is_schedule_exception(fixture):
+        return True
+    if not is_matchbook_sourced(fixture):
+        return False
+    status = fixture_status_value(fixture)
+    if status in MATCHBOOK_REVERSAL_STATUSES:
+        return True
+    return getattr(fixture, "in_running", None) is True and status not in TERMINAL_STATUSES
 
 
 def hot_sort_key(fixture: Any) -> tuple:
@@ -199,5 +288,5 @@ def _opportunity_rank(fixture: Any) -> int:
 def _normalized_status(value: Any) -> str | None:
     if value is None:
         return None
-    text = str(value).strip().casefold()
+    text = str(value).strip().casefold().replace("_", "-")
     return text or None

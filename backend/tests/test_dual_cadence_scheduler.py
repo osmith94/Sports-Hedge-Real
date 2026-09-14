@@ -184,7 +184,7 @@ def test_classifier_matrix_does_not_fabricate_live_or_completed() -> None:
     assert live.in_running is True
     assert classify_scan_lane(unknown, NOW) is ScanLane.HOT
     assert unknown.in_running is None
-    assert classify_scan_lane(late_unknown, NOW) is ScanLane.UNIVERSE
+    assert classify_scan_lane(late_unknown, NOW) is ScanLane.DROP
     assert late_unknown.in_running is None
     assert late_unknown.fixture_status is None
     assert classify_scan_lane(completed, NOW) is ScanLane.DROP
@@ -505,7 +505,7 @@ def test_t_plus_3h_unknown_leaves_hot_without_fabricating_completed() -> None:
     assert fixture.in_running is None
     later = NOW + timedelta(minutes=2)
     demoted = classify_scan_lane(fixture, later)
-    assert demoted is ScanLane.UNIVERSE
+    assert demoted is ScanLane.DROP
     assert fixture.in_running is None
     assert fixture.fixture_status is None
 
@@ -631,16 +631,15 @@ def test_later_universe_status_unsticks_stale_hot_live_pin() -> None:
     assert store.hot_identity_scope(later) == []
     hot_count, universe_count = store.membership_counts(later)
     assert hot_count == 0
-    assert universe_count == 1
-    detail = store.detail("stale-live")
-    assert detail is not None
-    assert detail.fixture.in_running is None
-    assert detail.fixture.fixture_status is None
+    assert universe_count == 0
+    detail = store.detail("stale-live", now=later)
+    assert detail is None
+    assert unknown.in_running is None
+    assert unknown.fixture_status is None
     inventory = store.inventory(later)
-    assert inventory[0].in_running is None
+    assert inventory == []
     radar = store.current_radar_rows(later)
-    assert radar[0].membership is ScanLane.UNIVERSE
-    assert radar[0].observation_lane is ScanLane.UNIVERSE
+    assert radar == []
     coordinator.reset()
 
 

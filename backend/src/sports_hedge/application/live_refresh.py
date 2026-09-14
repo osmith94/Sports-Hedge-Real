@@ -705,8 +705,40 @@ class LiveRefreshCoordinator:
     def fixture_current_state(self) -> FixtureCurrentStateStore:
         return self._fixture_state
 
+    def public_status(self) -> LiveRefreshStatus:
+        """Current Discovery/Tracked inventory as of now, after lifecycle eviction."""
+
+        now = self.now()
+        horizon = self.radar_horizon_kwargs()
+        classify = {
+            "hot_horizon": horizon["hot_horizon"],
+            "post_kickoff_unknown_horizon": horizon["post_kickoff_unknown_horizon"],
+        }
+        inventory = self._fixture_state.inventory(
+            now,
+            **classify,
+            hot_interval_seconds=horizon["hot_interval_seconds"],
+            universe_interval_seconds=horizon["universe_interval_seconds"],
+        )
+        hot_count, universe_count = self._fixture_state.membership_counts(now, **classify)
+        self.status = self.status.model_copy(
+            update={
+                "discovered_fixtures": inventory,
+                "hot": self.status.hot.model_copy(update={"fixture_count": hot_count}),
+                "universe": self.status.universe.model_copy(
+                    update={"fixture_count": universe_count}
+                ),
+                "operator_summary": _combined_operator_summary(
+                    self.status.hot, self.status.universe, universe_count
+                ),
+            }
+        )
+        return self.status
+
     def fixture_detail(self, canonical_event_id: str) -> FixtureDetailReadModel | None:
-        return self._fixture_state.detail(canonical_event_id)
+        return self._fixture_state.detail(
+            canonical_event_id, now=self.now(), **self.radar_horizon_kwargs()
+        )
 
     def fixture_identities(self, canonical_event_id: str) -> frozenset[str]:
         return self._fixture_state.identities_for(canonical_event_id)

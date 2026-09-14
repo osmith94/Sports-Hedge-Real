@@ -707,7 +707,7 @@ def reset_matchbook_fee(
 def live_refresh_status() -> LiveRefreshStatus:
     coordinator = get_live_refresh_coordinator()
     coordinator.configure_from_settings()
-    return coordinator.status
+    return coordinator.public_status()
 
 
 @router.post(
