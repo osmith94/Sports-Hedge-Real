@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from logging import getLogger
 from time import monotonic, perf_counter
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -86,6 +88,8 @@ from sports_hedge.normalization.venues import (
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.preparation import PreparablePaperOpportunity
 
+LOGGER = getLogger(__name__)
+
 
 class MatchbookReadClient(Protocol):
     async def list_events(self, **filters: Any) -> dict[str, Any]: ...
@@ -142,6 +146,10 @@ NOT_EVALUATED_SCAN_DEADLINE_REASON = "not_evaluated_scan_deadline"
 SCAN_BUDGET_EXHAUSTED_REASON = "scan_budget_exhausted"
 MARKET_FETCH_UNAVAILABLE_REASON = "list_markets_unavailable"
 DEFAULT_MAX_EVENT_PAIRS = 60
+# Keep ~4s of the 45s operator cycle for leftover assembly before coordinator grace.
+SCAN_FINALISATION_RESERVE_SECONDS = 4.0
+MIN_PROVIDER_WAIT_SECONDS = 0.05
+PROVIDER_CANCEL_DRAIN_SECONDS = 0.05
 
 
 class DiscoveredFixture(BaseModel):
@@ -243,6 +251,7 @@ class CollectionReport(BaseModel):
     discovered_fixtures: list[DiscoveredFixture] = Field(default_factory=list)
     fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = Field(default_factory=dict)
     issues: list[CollectorIssue] = Field(default_factory=list)
+    scan_diagnostics: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def paper_eligible_count(self) -> int:
@@ -310,6 +319,12 @@ class ReadOnlyCrossVenueCollector:
         self._op_venue_timeout = venue_timeout_seconds
         self._op_provider_timeout = provider_call_timeout_seconds
         self._op_deadline: float | None = None
+        self._op_soft_deadline: float | None = None
+        self._op_started_mono: float | None = None
+        self._inflight: set[asyncio.Task[Any]] = set()
+        self._stage_ms: dict[str, int] = {}
+        self._timeouts_by_stage: dict[str, int] = {}
+        self._provider_cancels = 0
 
     async def collect_and_scan(
         self,
@@ -357,92 +372,34 @@ class ReadOnlyCrossVenueCollector:
         cycle_budget = (
             self._cycle_timeout_seconds if cycle_timeout_seconds is None else cycle_timeout_seconds
         )
-        self._op_deadline = None if cycle_budget is None else monotonic() + float(cycle_budget)
-
-        mb_task = self._list_raw_events(
-            self.matchbook,
-            venue=VenueName.MATCHBOOK,
-            filters=matchbook_event_filters or {},
-            issues=issues,
-            venue_health=venue_health,
-        )
-        pm_task = self._list_raw_events(
-            self.polymarket,
-            venue=VenueName.POLYMARKET,
-            filters=polymarket_event_filters or {},
-            issues=issues,
-            venue_health=venue_health,
-        )
-        if self.kalshi is not None:
-            (
-                (raw_matchbook_events, matchbook_payload),
-                (raw_polymarket_events, _),
-                (raw_kalshi_events, _),
-            ) = await asyncio.gather(
-                mb_task,
-                pm_task,
-                self._list_raw_events(
-                    self.kalshi,
-                    venue=VenueName.KALSHI,
-                    filters={},
-                    issues=issues,
-                    venue_health=venue_health,
-                ),
-            )
+        started_mono = monotonic()
+        self._op_started_mono = started_mono
+        self._stage_ms = {}
+        self._timeouts_by_stage = {}
+        self._provider_cancels = 0
+        self._inflight = set()
+        if cycle_budget is None:
+            reserve = 0.0
+            self._op_deadline = None
+            self._op_soft_deadline = None
         else:
-            (raw_matchbook_events, matchbook_payload), (raw_polymarket_events, _) = (
-                await asyncio.gather(mb_task, pm_task)
-            )
-            raw_kalshi_events = []
-            venue_health[VenueName.KALSHI.value] = "unavailable"
-        issues.extend(_matchbook_discovery_issues(matchbook_payload))
+            budget = float(cycle_budget)
+            reserve = finalisation_reserve_seconds(budget)
+            self._op_deadline = started_mono + budget
+            self._op_soft_deadline = self._op_deadline - reserve
 
-        mb_scope = filter_in_scope_events(raw_matchbook_events, venue=VenueName.MATCHBOOK)
-        pm_scope = filter_in_scope_events(raw_polymarket_events, venue=VenueName.POLYMARKET)
-        k_scope = filter_in_scope_events(raw_kalshi_events, venue=VenueName.KALSHI)
-        skipped_by_reason = _merge_counts(
-            mb_scope.skipped_by_reason, pm_scope.skipped_by_reason, k_scope.skipped_by_reason
-        )
-        rejected_labels = _unique_cap(
-            [*mb_scope.rejected_labels, *pm_scope.rejected_labels, *k_scope.rejected_labels],
-            50,
-        )
-        skipped_out_of_scope = mb_scope.skipped + pm_scope.skipped + k_scope.skipped
-
-        matchbook_events = self._normalize_events(
-            mb_scope.allowed, venue=VenueName.MATCHBOOK, issues=issues
-        )
-        polymarket_events = self._normalize_events(
-            pm_scope.allowed, venue=VenueName.POLYMARKET, issues=issues
-        )
-        kalshi_events = self._normalize_events(
-            k_scope.allowed, venue=VenueName.KALSHI, issues=issues
-        )
-        queried_series_ids = _resolved_queried_series_ids(
-            polymarket_event_filters,
-            polymarket_queried_series_ids,
-        )
-        mb_items = [to_venue_event(event, VenueName.MATCHBOOK) for event in matchbook_events]
-        pm_items = [to_venue_event(event, VenueName.POLYMARKET) for event in polymarket_events]
-        k_items = [to_venue_event(event, VenueName.KALSHI) for event in kalshi_events]
-        clusters, pair_counts = cluster_venue_events(
-            matchbook=mb_items,
-            polymarket=pm_items,
-            kalshi=k_items,
-            matcher=self.event_matcher,
-            max_event_pairs=max_event_pairs,
-        )
-        scan_kwargs = {
-            "fee_snapshots": fee_snapshots,
-            "venue_costs": venue_costs,
-            "fx_snapshots": fx_snapshots,
-            "capital_limit_gbp": capital_limit_gbp,
-            "minimum_net_edge": minimum_net_edge,
-            "maximum_execution_risk": maximum_execution_risk,
-            "minimum_mapping_confidence": minimum_mapping_confidence,
-            "assumed_latency_ms": assumed_latency_ms,
-            "recent_volatility_bps": recent_volatility_bps,
-        }
+        raw_matchbook_events: list[dict[str, Any]] = []
+        raw_polymarket_events: list[dict[str, Any]] = []
+        raw_kalshi_events: list[dict[str, Any]] = []
+        matchbook_events: list[_NormalizedEvent] = []
+        polymarket_events: list[_NormalizedEvent] = []
+        kalshi_events: list[_NormalizedEvent] = []
+        queried_series_ids: list[str] | None = None
+        skipped_by_reason: dict[str, int] = {}
+        rejected_labels: list[str] = []
+        skipped_out_of_scope = 0
+        clusters: list[FixtureCluster] = []
+        pair_counts: dict[str, int] = {}
         decisions: list[PaperScanDecision] = []
         normalized_matchbook_markets = 0
         normalized_polymarket_markets = 0
@@ -451,106 +408,299 @@ class ReadOnlyCrossVenueCollector:
         order_books_fetched = 0
         fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = {}
         discovered_fixtures: list[DiscoveredFixture] = []
-
-        for index, cluster in enumerate(clusters):
-            if self._deadline_reached():
-                issues.append(
-                    CollectorIssue(stage="collect", detail="scan_cycle_deadline_reached")
+        cancelled = False
+        try:
+            with self._stage("event_discovery"):
+                mb_task = self._list_raw_events(
+                    self.matchbook,
+                    venue=VenueName.MATCHBOOK,
+                    filters=matchbook_event_filters or {},
+                    issues=issues,
+                    venue_health=venue_health,
                 )
-                for leftover in clusters[index:]:
-                    discovered_fixtures.append(
-                        _fixture_from_cluster(
-                            leftover,
+                pm_task = self._list_raw_events(
+                    self.polymarket,
+                    venue=VenueName.POLYMARKET,
+                    filters=polymarket_event_filters or {},
+                    issues=issues,
+                    venue_health=venue_health,
+                )
+                if self.kalshi is not None:
+                    (
+                        (raw_matchbook_events, matchbook_payload),
+                        (raw_polymarket_events, _),
+                        (raw_kalshi_events, _),
+                    ) = await self._gather_bounded(
+                        mb_task,
+                        pm_task,
+                        self._list_raw_events(
+                            self.kalshi,
+                            venue=VenueName.KALSHI,
+                            filters={},
+                            issues=issues,
+                            venue_health=venue_health,
+                        ),
+                        default=(
+                            ([], {}),
+                            ([], {}),
+                            ([], {}),
+                        ),
+                    )
+                else:
+                    (raw_matchbook_events, matchbook_payload), (raw_polymarket_events, _) = (
+                        await self._gather_bounded(
+                            mb_task,
+                            pm_task,
+                            default=(([], {}), ([], {})),
+                        )
+                    )
+                    raw_kalshi_events = []
+                    venue_health[VenueName.KALSHI.value] = "unavailable"
+                issues.extend(_matchbook_discovery_issues(matchbook_payload))
+
+            with self._stage("normalize_match"):
+                mb_scope = filter_in_scope_events(
+                    raw_matchbook_events, venue=VenueName.MATCHBOOK
+                )
+                pm_scope = filter_in_scope_events(
+                    raw_polymarket_events, venue=VenueName.POLYMARKET
+                )
+                k_scope = filter_in_scope_events(raw_kalshi_events, venue=VenueName.KALSHI)
+                skipped_by_reason = _merge_counts(
+                    mb_scope.skipped_by_reason,
+                    pm_scope.skipped_by_reason,
+                    k_scope.skipped_by_reason,
+                )
+                rejected_labels = _unique_cap(
+                    [*mb_scope.rejected_labels, *pm_scope.rejected_labels, *k_scope.rejected_labels],
+                    50,
+                )
+                skipped_out_of_scope = mb_scope.skipped + pm_scope.skipped + k_scope.skipped
+                matchbook_events = self._normalize_events(
+                    mb_scope.allowed, venue=VenueName.MATCHBOOK, issues=issues
+                )
+                polymarket_events = self._normalize_events(
+                    pm_scope.allowed, venue=VenueName.POLYMARKET, issues=issues
+                )
+                kalshi_events = self._normalize_events(
+                    k_scope.allowed, venue=VenueName.KALSHI, issues=issues
+                )
+                queried_series_ids = _resolved_queried_series_ids(
+                    polymarket_event_filters,
+                    polymarket_queried_series_ids,
+                )
+                mb_items = [
+                    to_venue_event(event, VenueName.MATCHBOOK) for event in matchbook_events
+                ]
+                pm_items = [
+                    to_venue_event(event, VenueName.POLYMARKET) for event in polymarket_events
+                ]
+                k_items = [to_venue_event(event, VenueName.KALSHI) for event in kalshi_events]
+                clusters, pair_counts = cluster_venue_events(
+                    matchbook=mb_items,
+                    polymarket=pm_items,
+                    kalshi=k_items,
+                    matcher=self.event_matcher,
+                    max_event_pairs=max_event_pairs,
+                )
+
+            scan_kwargs = {
+                "fee_snapshots": fee_snapshots,
+                "venue_costs": venue_costs,
+                "fx_snapshots": fx_snapshots,
+                "capital_limit_gbp": capital_limit_gbp,
+                "minimum_net_edge": minimum_net_edge,
+                "maximum_execution_risk": maximum_execution_risk,
+                "minimum_mapping_confidence": minimum_mapping_confidence,
+                "assumed_latency_ms": assumed_latency_ms,
+                "recent_volatility_bps": recent_volatility_bps,
+            }
+            with self._stage("cluster_scan"):
+                for index, cluster in enumerate(clusters):
+                    if self._deadline_reached():
+                        self._cancel_inflight()
+                        _append_deadline_leftovers(
+                            clusters[index:],
+                            discovered_fixtures=discovered_fixtures,
+                            issues=issues,
+                            started_at=started_at,
+                            polymarket_events=polymarket_events,
+                            queried_series_ids=queried_series_ids,
+                        )
+                        break
+                    fixture, cluster_decisions, inventory, market_counts, fetched, pairs = (
+                        await self._scan_cluster(
+                            cluster,
                             seen_at=started_at,
                             polymarket_events=polymarket_events,
                             queried_series_ids=queried_series_ids,
-                            leftover=True,
+                            matchbook_market_filters=matchbook_market_filters or {},
+                            polymarket_market_filters=polymarket_market_filters or {},
+                            max_market_pairs_per_event=max_market_pairs_per_event,
+                            scan_kwargs=scan_kwargs,
+                            issues=issues,
                         )
                     )
-                break
-            fixture, cluster_decisions, inventory, market_counts, fetched, pairs = (
-                await self._scan_cluster(
-                    cluster,
-                    seen_at=started_at,
-                    polymarket_events=polymarket_events,
-                    queried_series_ids=queried_series_ids,
-                    matchbook_market_filters=matchbook_market_filters or {},
-                    polymarket_market_filters=polymarket_market_filters or {},
-                    max_market_pairs_per_event=max_market_pairs_per_event,
-                    scan_kwargs=scan_kwargs,
-                    issues=issues,
-                )
+                    decisions.extend(cluster_decisions)
+                    normalized_matchbook_markets += market_counts.get(VenueName.MATCHBOOK, 0)
+                    normalized_polymarket_markets += market_counts.get(VenueName.POLYMARKET, 0)
+                    normalized_kalshi_markets += market_counts.get(VenueName.KALSHI, 0)
+                    matched_market_pairs += pairs
+                    order_books_fetched += fetched
+                    discovered_fixtures.append(fixture)
+                    if inventory:
+                        fixture_markets[fixture.canonical_event_id] = inventory
+        except asyncio.CancelledError:
+            cancelled = True
+            self._cancel_inflight()
+            LOGGER.warning(
+                "scan_cancelled_assembling_partial fixtures=%s inflight=%s",
+                len(discovered_fixtures),
+                len(self._inflight),
             )
-            decisions.extend(cluster_decisions)
-            normalized_matchbook_markets += market_counts.get(VenueName.MATCHBOOK, 0)
-            normalized_polymarket_markets += market_counts.get(VenueName.POLYMARKET, 0)
-            normalized_kalshi_markets += market_counts.get(VenueName.KALSHI, 0)
-            matched_market_pairs += pairs
-            order_books_fetched += fetched
-            discovered_fixtures.append(fixture)
-            fixture_markets[fixture.canonical_event_id] = inventory
+            _append_deadline_leftovers(
+                clusters,
+                discovered_fixtures=discovered_fixtures,
+                issues=issues,
+                started_at=started_at,
+                polymarket_events=polymarket_events,
+                queried_series_ids=queried_series_ids,
+            )
 
-        completed_at = datetime.now(UTC)
-        qualifying = sum(1 for item in discovered_fixtures if item.solver_is_arbitrage)
-        equivalent = sum(item.matched_equivalent_count or 0 for item in discovered_fixtures)
-        coverage = _target_coverage(clusters)
-        operator_summary = (
-            f"{len(discovered_fixtures)} fixtures discovered · "
-            f"MB {len(matchbook_events)} · PM {len(polymarket_events)} · "
-            f"K {len(kalshi_events)} · {sum(pair_counts.values())} cross-venue matches · "
-            f"{equivalent} equivalent markets · {qualifying} qualifying arbs · "
-            f"{skipped_out_of_scope} out-of-scope skipped"
-        )
-        matching_venues = [VenueName.POLYMARKET]
-        if self.kalshi is not None:
-            matching_venues.append(VenueName.KALSHI)
-        return CollectionReport(
+        return self._finish_report(
             started_at=started_at,
-            completed_at=completed_at,
-            discovery_source=VenueName.MATCHBOOK,
-            discovery_mode="venue_union",
-            matching_venue=VenueName.POLYMARKET,
-            matching_venues=matching_venues,
-            raw_matchbook_events=len(raw_matchbook_events),
-            raw_polymarket_events=len(raw_polymarket_events),
-            raw_kalshi_events=len(raw_kalshi_events),
-            normalized_matchbook_events=len(matchbook_events),
-            normalized_polymarket_events=len(polymarket_events),
-            normalized_kalshi_events=len(kalshi_events),
-            matched_event_pairs=sum(pair_counts.values()),
+            started_mono=started_mono,
+            issues=issues,
+            venue_health=venue_health,
+            raw_matchbook_events=raw_matchbook_events,
+            raw_polymarket_events=raw_polymarket_events,
+            raw_kalshi_events=raw_kalshi_events,
+            matchbook_events=matchbook_events,
+            polymarket_events=polymarket_events,
+            kalshi_events=kalshi_events,
+            skipped_out_of_scope=skipped_out_of_scope,
+            skipped_by_reason=skipped_by_reason,
+            rejected_labels=rejected_labels,
+            clusters=clusters,
             pair_counts=pair_counts,
             normalized_matchbook_markets=normalized_matchbook_markets,
             normalized_polymarket_markets=normalized_polymarket_markets,
             normalized_kalshi_markets=normalized_kalshi_markets,
             matched_market_pairs=matched_market_pairs,
             order_books_fetched=order_books_fetched,
-            skipped_out_of_scope=skipped_out_of_scope,
-            skipped_by_reason=skipped_by_reason,
-            rejected_competition_labels=rejected_labels,
-            target_coverage=coverage,
             config_warnings=list(config_warnings or []),
-            operator_summary=operator_summary,
-            venue_health=venue_health,
-            qualifying_arbs=qualifying,
-            paper_decisions=decisions,
-            discovered_fixtures=[
-                item.model_copy(update={"last_seen_at": completed_at})
-                for item in discovered_fixtures
-            ],
+            decisions=decisions,
+            discovered_fixtures=discovered_fixtures,
             fixture_markets=fixture_markets,
-            issues=issues,
+            cycle_budget=None if cycle_budget is None else float(cycle_budget),
+            reserve=reserve,
+            cancelled=cancelled,
         )
 
     def _deadline_reached(self) -> bool:
-        return self._op_deadline is not None and monotonic() >= self._op_deadline
+        return self._op_soft_deadline is not None and monotonic() >= self._op_soft_deadline
+
+    def _provider_budget_exhausted(self) -> bool:
+        remaining = self._remaining_soft()
+        return remaining is not None and remaining < MIN_PROVIDER_WAIT_SECONDS
+
+    def _remaining_soft(self) -> float | None:
+        if self._op_soft_deadline is None:
+            return None
+        return self._op_soft_deadline - monotonic()
+
+    def _remaining_assembly(self) -> float:
+        if self._op_deadline is None:
+            return PROVIDER_CANCEL_DRAIN_SECONDS
+        return max(0.0, self._op_deadline - monotonic())
 
     def _timeout_budget(self, requested: float) -> float:
-        """Cap a provider wait so a slow cluster cannot overrun the cycle deadline."""
+        """Cap a provider wait to the remaining soft scan budget, not the hard grace."""
 
-        if self._op_deadline is None:
+        remaining = self._remaining_soft()
+        if remaining is None:
             return requested
-        remaining = self._op_deadline - monotonic()
+        if remaining < MIN_PROVIDER_WAIT_SECONDS:
+            return 0.0
         return min(requested, remaining)
+
+    @contextmanager
+    def _stage(self, name: str) -> Iterator[None]:
+        started = monotonic()
+        try:
+            yield
+        finally:
+            duration_ms = max(0, int((monotonic() - started) * 1000))
+            self._stage_ms[name] = duration_ms
+            LOGGER.info("scan_stage %s duration_ms=%s", name, duration_ms)
+
+    def _cancel_inflight(self) -> None:
+        for task in list(self._inflight):
+            if not task.done():
+                task.cancel()
+                self._provider_cancels += 1
+
+    async def _await_bounded(self, coro: Any, timeout: float) -> tuple[Any, bool]:
+        """Wait up to timeout, then cancel without blocking on uncooperative providers."""
+
+        if timeout <= 0:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            return None, True
+        task = asyncio.create_task(coro)
+        self._inflight.add(task)
+        try:
+            done, _pending = await asyncio.wait({task}, timeout=timeout)
+            if task in done:
+                self._inflight.discard(task)
+                return task.result(), False
+            task.cancel()
+            self._provider_cancels += 1
+            drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
+            if drain > 0:
+                await asyncio.wait({task}, timeout=drain)
+            if task.done() and not task.cancelled():
+                self._inflight.discard(task)
+                return task.result(), False
+            return None, True
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        finally:
+            if task.done():
+                self._inflight.discard(task)
+
+    async def _gather_bounded(self, *coros: Any, default: Any) -> Any:
+        remaining = self._remaining_soft()
+        if remaining is None:
+            return await asyncio.gather(*coros)
+        if remaining <= 0:
+            for coro in coros:
+                close = getattr(coro, "close", None)
+                if callable(close):
+                    close()
+            return default
+        tasks = [asyncio.create_task(coro) for coro in coros]
+        for task in tasks:
+            self._inflight.add(task)
+        done, pending = await asyncio.wait(tasks, timeout=remaining)
+        for task in pending:
+            task.cancel()
+            self._provider_cancels += 1
+        if pending:
+            drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
+            if drain > 0:
+                await asyncio.wait(pending, timeout=drain)
+        results: list[Any] = []
+        defaults = default if isinstance(default, tuple) and len(default) == len(tasks) else None
+        for index, task in enumerate(tasks):
+            self._inflight.discard(task)
+            if task.done() and not task.cancelled() and task.exception() is None:
+                results.append(task.result())
+                continue
+            results.append(defaults[index] if defaults is not None else None)
+        return tuple(results) if len(results) != 1 else results[0]
 
     def _record_timeout(
         self,
@@ -561,6 +711,7 @@ class ReadOnlyCrossVenueCollector:
         timeout = (
             self._op_venue_timeout if stage == "list_events" else self._op_provider_timeout
         )
+        self._timeouts_by_stage[stage] = self._timeouts_by_stage.get(stage, 0) + 1
         self._op_issues.append(
             CollectorIssue(
                 stage=stage,
@@ -592,13 +743,15 @@ class ReadOnlyCrossVenueCollector:
             close = getattr(coro, "close", None)
             if callable(close):
                 close()
-            self._record_timeout(stage, venue, source_id)
             return default, True
         try:
-            return await asyncio.wait_for(coro, timeout=timeout), False
-        except TimeoutError:
-            self._record_timeout(stage, venue, source_id)
-            return default, True
+            payload, timed_out = await self._await_bounded(coro, timeout)
+            if timed_out:
+                self._record_timeout(stage, venue, source_id)
+                return default, True
+            return payload, False
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             self._op_issues.append(
                 CollectorIssue(stage=stage, venue=venue, source_id=source_id, detail=str(exc))
@@ -622,13 +775,13 @@ class ReadOnlyCrossVenueCollector:
             self._record_timeout("list_events", venue)
             return [], {}
         try:
-            payload = await asyncio.wait_for(
-                client.list_events(**filters),
-                timeout=timeout,
-            )
-        except TimeoutError:
+            payload, timed_out = await self._await_bounded(client.list_events(**filters), timeout)
+            if timed_out:
+                self._record_timeout("list_events", venue)
+                return [], {}
+        except asyncio.CancelledError:
             self._record_timeout("list_events", venue)
-            return [], {}
+            raise
         except Exception as exc:
             issues.append(CollectorIssue(stage="list_events", venue=venue, detail=str(exc)))
             venue_health[venue.value] = "unavailable"
@@ -639,6 +792,129 @@ class ReadOnlyCrossVenueCollector:
         if isinstance(payload, dict):
             return _extract_matchbook_items(payload, "events"), payload
         return [], {}
+
+    def _finish_report(
+        self,
+        *,
+        started_at: datetime,
+        started_mono: float,
+        issues: list[CollectorIssue],
+        venue_health: dict[str, str],
+        raw_matchbook_events: list[dict[str, Any]],
+        raw_polymarket_events: list[dict[str, Any]],
+        raw_kalshi_events: list[dict[str, Any]],
+        matchbook_events: list[_NormalizedEvent],
+        polymarket_events: list[_NormalizedEvent],
+        kalshi_events: list[_NormalizedEvent],
+        skipped_out_of_scope: int,
+        skipped_by_reason: dict[str, int],
+        rejected_labels: list[str],
+        clusters: list[FixtureCluster],
+        pair_counts: dict[str, int],
+        normalized_matchbook_markets: int,
+        normalized_polymarket_markets: int,
+        normalized_kalshi_markets: int,
+        matched_market_pairs: int,
+        order_books_fetched: int,
+        config_warnings: list[str],
+        decisions: list[PaperScanDecision],
+        discovered_fixtures: list[DiscoveredFixture],
+        fixture_markets: dict[str, list[FixtureMarketInventoryRow]],
+        cycle_budget: float | None,
+        reserve: float,
+        cancelled: bool,
+    ) -> CollectionReport:
+        assembly_started = monotonic()
+        completed_at = datetime.now(UTC)
+        leftover_n = sum(
+            1
+            for item in discovered_fixtures
+            if item.market_evaluation_state
+            == MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE.value
+        )
+        if leftover_n > 0 and not any(
+            issue.detail == "scan_cycle_deadline_reached" for issue in issues
+        ):
+            issues.append(CollectorIssue(stage="collect", detail="scan_cycle_deadline_reached"))
+        evaluated_n = sum(
+            1
+            for item in discovered_fixtures
+            if item.market_evaluation_state == MarketEvaluationState.EVALUATED.value
+        )
+        qualifying = sum(1 for item in discovered_fixtures if item.solver_is_arbitrage)
+        equivalent = sum(item.matched_equivalent_count or 0 for item in discovered_fixtures)
+        coverage = _target_coverage(clusters)
+        deadline_hit = leftover_n > 0 or cancelled or any(
+            issue.detail == "scan_cycle_deadline_reached" for issue in issues
+        )
+        operator_summary = (
+            f"{len(discovered_fixtures)} fixtures discovered · "
+            f"MB {len(matchbook_events)} · PM {len(polymarket_events)} · "
+            f"K {len(kalshi_events)} · {sum(pair_counts.values())} cross-venue matches · "
+            f"{equivalent} equivalent markets · {qualifying} qualifying arbs · "
+            f"{skipped_out_of_scope} out-of-scope skipped"
+        )
+        if deadline_hit:
+            operator_summary += f" · partial ({leftover_n} not evaluated)"
+        matching_venues = [VenueName.POLYMARKET]
+        if self.kalshi is not None:
+            matching_venues.append(VenueName.KALSHI)
+        total_ms = max(0, int((monotonic() - started_mono) * 1000))
+        assembly_ms = max(0, int((monotonic() - assembly_started) * 1000))
+        diagnostics = {
+            "event_discovery_ms": self._stage_ms.get("event_discovery", 0),
+            "normalize_match_ms": self._stage_ms.get("normalize_match", 0),
+            "cluster_scan_ms": self._stage_ms.get("cluster_scan", 0),
+            "assembly_ms": assembly_ms,
+            "total_ms": total_ms,
+            "cycle_budget_s": cycle_budget,
+            "finalisation_reserve_s": reserve,
+            "soft_deadline_reached": deadline_hit,
+            "cancelled": cancelled,
+            "clusters_total": len(clusters),
+            "clusters_evaluated": evaluated_n,
+            "clusters_leftover": leftover_n,
+            "provider_timeouts": dict(self._timeouts_by_stage),
+            "provider_cancels": self._provider_cancels,
+        }
+        LOGGER.info("scan_diagnostics %s", diagnostics)
+        return CollectionReport(
+            started_at=started_at,
+            completed_at=completed_at,
+            discovery_source=VenueName.MATCHBOOK,
+            discovery_mode="venue_union",
+            matching_venue=VenueName.POLYMARKET,
+            matching_venues=matching_venues,
+            raw_matchbook_events=len(raw_matchbook_events),
+            raw_polymarket_events=len(raw_polymarket_events),
+            raw_kalshi_events=len(raw_kalshi_events),
+            normalized_matchbook_events=len(matchbook_events),
+            normalized_polymarket_events=len(polymarket_events),
+            normalized_kalshi_events=len(kalshi_events),
+            matched_event_pairs=sum(pair_counts.values()),
+            pair_counts=pair_counts,
+            normalized_matchbook_markets=normalized_matchbook_markets,
+            normalized_polymarket_markets=normalized_polymarket_markets,
+            normalized_kalshi_markets=normalized_kalshi_markets,
+            matched_market_pairs=matched_market_pairs,
+            order_books_fetched=order_books_fetched,
+            skipped_out_of_scope=skipped_out_of_scope,
+            skipped_by_reason=skipped_by_reason,
+            rejected_competition_labels=rejected_labels,
+            target_coverage=coverage,
+            config_warnings=config_warnings,
+            operator_summary=operator_summary,
+            venue_health=venue_health,
+            qualifying_arbs=qualifying,
+            paper_decisions=decisions,
+            discovered_fixtures=[
+                item.model_copy(update={"last_seen_at": completed_at})
+                for item in discovered_fixtures
+            ],
+            fixture_markets=fixture_markets,
+            issues=issues,
+            scan_diagnostics=diagnostics,
+        )
 
     async def _scan_cluster(
         self,
@@ -687,6 +963,8 @@ class ReadOnlyCrossVenueCollector:
         fetch_unavailable = False
 
         for mb_event in mb_events:
+            if self._provider_budget_exhausted():
+                break
             mb_listed = True
             try:
                 mb_started = perf_counter()
@@ -749,6 +1027,8 @@ class ReadOnlyCrossVenueCollector:
             market_counts[VenueName.MATCHBOOK] = len(matchbook_markets)
 
         for pm_event in pm_events:
+            if self._provider_budget_exhausted():
+                break
             pm_listed = True
             try:
                 pm_started = perf_counter()
@@ -797,8 +1077,8 @@ class ReadOnlyCrossVenueCollector:
             polymarket_markets, polymarket_inventory
         )
         for right_market in _prioritize_baseline_markets(polymarket_markets):
-            if self._deadline_reached() and not _is_baseline_match_result(right_market.canonical):
-                continue
+            if self._provider_budget_exhausted():
+                break
             book_event = _event_for_source(
                 pm_events, right_market.canonical.event.source_event_id
             ) or pm_event
@@ -830,6 +1110,8 @@ class ReadOnlyCrossVenueCollector:
 
         if self.kalshi is not None:
             for k_event in k_events:
+                if self._provider_budget_exhausted():
+                    break
                 markets, inventory, series, fetched, kalshi_failed = await self._load_kalshi_markets(
                     k_event, issues=issues
                 )
@@ -843,10 +1125,8 @@ class ReadOnlyCrossVenueCollector:
                 kalshi_markets.extend(markets)
                 kalshi_inventory.extend(inventory)
                 for kalshi_market in _prioritize_baseline_markets(markets):
-                    if self._deadline_reached() and not _is_baseline_match_result(
-                        kalshi_market.canonical
-                    ):
-                        continue
+                    if self._provider_budget_exhausted():
+                        break
                     observation, fetched = await self._try_kalshi_observation(
                         k_event, kalshi_market, series=series, issues=issues
                     )
@@ -867,6 +1147,19 @@ class ReadOnlyCrossVenueCollector:
             VenueName.POLYMARKET: polymarket_markets,
             VenueName.KALSHI: kalshi_markets,
         }
+        compared_enough_venues = len(listed_venues) >= 2 or cluster.venue_count < 2
+        if self._provider_budget_exhausted() and not compared_enough_venues:
+            leftover = _fixture_from_cluster(
+                cluster,
+                seen_at=seen_at,
+                polymarket_events=polymarket_events,
+                queried_series_ids=queried_series_ids,
+                leftover=True,
+            )
+            leftover.discovered_market_count = (
+                len(matchbook_inventory) + len(polymarket_inventory) + len(kalshi_inventory)
+            )
+            return leftover, [], [], market_counts, order_books_fetched, 0
         pair_specs = (
             (VenueName.MATCHBOOK, VenueName.POLYMARKET),
             (VenueName.MATCHBOOK, VenueName.KALSHI),
@@ -948,6 +1241,16 @@ class ReadOnlyCrossVenueCollector:
         fixture.discovered_market_count = discovered_count
         fixture.matched_market_count = matched_market_pairs
         compared_enough_venues = len(listed_venues) >= 2 or cluster.venue_count < 2
+        if self._provider_budget_exhausted() and not compared_enough_venues:
+            leftover = _fixture_from_cluster(
+                cluster,
+                seen_at=seen_at,
+                polymarket_events=polymarket_events,
+                queried_series_ids=queried_series_ids,
+                leftover=True,
+            )
+            leftover.discovered_market_count = discovered_count
+            return leftover, decisions, inventory_rows, market_counts, order_books_fetched, 0
         if fetch_unavailable and not compared_enough_venues:
             fixture.market_evaluation_state = MarketEvaluationState.MARKET_FETCH_UNAVAILABLE.value
             fixture.market_evaluation_reason = MARKET_FETCH_UNAVAILABLE_REASON
@@ -1878,3 +2181,41 @@ def _extract_matchbook_items(payload: dict[str, Any], key: str) -> list[dict[str
 
 def _elapsed_ms(started: float) -> int:
     return max(0, round((perf_counter() - started) * 1000))
+
+
+def finalisation_reserve_seconds(cycle_budget: float) -> float:
+    """Hold back a slice of the cycle so leftover assembly beats the coordinator hard timeout."""
+
+    if cycle_budget <= 0:
+        return 0.0
+    return min(SCAN_FINALISATION_RESERVE_SECONDS, cycle_budget * 0.2)
+
+
+def _append_deadline_leftovers(
+    leftover_clusters: list[FixtureCluster],
+    *,
+    discovered_fixtures: list[DiscoveredFixture],
+    issues: list[CollectorIssue],
+    started_at: datetime,
+    polymarket_events: list[_NormalizedEvent],
+    queried_series_ids: list[str] | None,
+) -> None:
+    if leftover_clusters and not any(
+        issue.detail == "scan_cycle_deadline_reached" for issue in issues
+    ):
+        issues.append(CollectorIssue(stage="collect", detail="scan_cycle_deadline_reached"))
+    seen = {item.canonical_event_id for item in discovered_fixtures}
+    for cluster in leftover_clusters:
+        canonical_id = cluster_canonical_event_id(cluster)
+        if canonical_id in seen:
+            continue
+        discovered_fixtures.append(
+            _fixture_from_cluster(
+                cluster,
+                seen_at=started_at,
+                polymarket_events=polymarket_events,
+                queried_series_ids=queried_series_ids,
+                leftover=True,
+            )
+        )
+        seen.add(canonical_id)

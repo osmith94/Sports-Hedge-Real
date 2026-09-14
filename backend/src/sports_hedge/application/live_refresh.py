@@ -20,8 +20,9 @@ class ScanCycleTimeout(TimeoutError):
     """Raised when a live-refresh cycle exceeds its bounded deadline."""
 
 
-# Collector soft-stops at paper_scan_cycle_timeout_seconds. Coordinator waits this
-# extra grace so leftover fixtures can be assembled instead of an empty 504.
+# Collector soft-stops at paper_scan_cycle_timeout_seconds minus a finalisation
+# reserve. Coordinator waits this extra grace for persist/aclose after the
+# collector has already returned a (possibly partial) CollectionReport.
 SCAN_CYCLE_RETURN_GRACE_SECONDS = 5.0
 
 
