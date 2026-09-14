@@ -27,6 +27,10 @@ class ScanCycleTimeout(TimeoutError):
     """Raised when a live-refresh cycle exceeds its bounded deadline."""
 
 
+class ExplicitCollectBusy(RuntimeError):
+    """Raised when an explicit collect cannot start because a scheduled lane is active."""
+
+
 # Collector soft-stops at the per-run cycle timeout minus a finalisation
 # reserve. Coordinator waits this extra grace for persist/aclose after the
 # collector has already returned a (possibly partial) CollectionReport.
@@ -346,6 +350,66 @@ class LiveRefreshCoordinator:
                         finished,
                         self.status.last_error or "scan_cycle_abandoned",
                     )
+
+    def scheduled_collection_active(self) -> bool:
+        return (
+            self._lock.locked()
+            or self.status.cycle_in_progress
+            or self._hot_in_progress
+            or self._universe_in_progress
+        )
+
+    async def run_explicit_collect(self, runner) -> CollectionReport:
+        """Manual diagnostic collect. Does not own HOT/UNIVERSE generation progress."""
+
+        if self.scheduled_collection_active():
+            raise ExplicitCollectBusy("scheduled scan in progress")
+        settings = get_settings()
+        timeout = float(
+            settings.paper_scan_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
+        )
+        async with self._lock:
+            if self._hot_in_progress or self._universe_in_progress or self.status.cycle_in_progress:
+                raise ExplicitCollectBusy("scheduled scan in progress")
+            try:
+                report = await asyncio.wait_for(runner(), timeout=timeout)
+                self.record_explicit_report(report)
+                return report
+            except TimeoutError as exc:
+                message = f"scan_cycle_timeout after {timeout:g}s"
+                raise ScanCycleTimeout(message) from exc
+
+    def record_explicit_report(self, report: CollectionReport) -> None:
+        """Upsert current-state from a manual collect without moving scheduler dues."""
+
+        self._last_report = report
+        self._fixture_state.upsert_from_report(report, scan_lane=ScanLane.UNIVERSE)
+        duration_ms = max(
+            0, int((report.completed_at - report.started_at).total_seconds() * 1000)
+        )
+        inventory = self._fixture_state.inventory(report.completed_at)
+        _hot_count, universe_count = self._fixture_state.membership_counts(report.completed_at)
+        self.status = self.status.model_copy(
+            update={
+                "cycle_in_progress": False,
+                "last_completed_at": report.completed_at,
+                "last_duration_ms": duration_ms,
+                "discovery_mode": report.discovery_mode,
+                "matching_venues": report.matching_venues,
+                "last_matched_event_pairs": report.matched_event_pairs,
+                "last_matched_market_pairs": report.matched_market_pairs,
+                "last_paper_decisions": len(report.paper_decisions),
+                "last_issue_count": len(report.issues),
+                "skipped_out_of_scope": report.skipped_out_of_scope,
+                "operator_summary": _combined_operator_summary(
+                    self.status.hot, self.status.universe, universe_count
+                ),
+                "config_warnings": report.config_warnings,
+                "venue_health": report.venue_health,
+                "discovered_fixtures": inventory,
+                "last_error": None,
+            }
+        )
 
     def record_report(
         self,

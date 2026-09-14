@@ -225,7 +225,7 @@ export function RunPaperScan() {
   const [feeMessage, setFeeMessage] = useState<string | null>(null);
   const payloadRef = useRef<PaperCollectionRequest>({ maximum_execution_risk: 60 });
   const inFlightRef = useRef(false);
-  const collectRef = useRef<() => Promise<void>>(async () => undefined);
+  const lastSeenCycleRef = useRef<string>("");
 
   const buildPayload = useCallback((): PaperCollectionRequest => {
     const capital = optionalPositive(capitalLimit, "Capital limit");
@@ -304,9 +304,43 @@ export function RunPaperScan() {
     }
   }, [buildPayload, refreshEconomics, router]);
 
-  useEffect(() => {
-    collectRef.current = collect;
-  }, [collect]);
+  const applyLiveRefresh = useCallback(
+    (status: LiveRefreshStatus) => {
+      if (status.interval_seconds) {
+        const clamped = clampIntervalSeconds(status.interval_seconds);
+        setIntervalSeconds(clamped);
+        setIntervalDraft(String(clamped));
+      }
+      const completed =
+        status.hot?.last_completed_at ??
+        status.universe?.last_completed_at ??
+        status.last_completed_at ??
+        null;
+      if (completed) setLastCompletedAt(completed);
+      const duration =
+        status.hot?.last_duration_ms ??
+        status.universe?.last_duration_ms ??
+        status.last_duration_ms ??
+        null;
+      if (duration != null) setLastDurationMs(duration);
+      if (status.venue_health) setVenueHealth(status.venue_health);
+      setLiveRefresh(status);
+      const stamp = `${status.hot?.last_completed_at ?? ""}|${status.universe?.last_completed_at ?? ""}`;
+      if (stamp !== lastSeenCycleRef.current) {
+        lastSeenCycleRef.current = stamp;
+        if (stamp !== "|") router.refresh();
+      }
+    },
+    [router],
+  );
+
+  const pollLiveStatus = useCallback(async () => {
+    try {
+      applyLiveRefresh(await getLiveRefreshStatus());
+    } catch {
+      // Status endpoint down: keep prior Fast/Full facts.
+    }
+  }, [applyLiveRefresh]);
 
   useEffect(() => {
     void refreshEconomics();
@@ -325,15 +359,7 @@ export function RunPaperScan() {
     getLiveRefreshStatus()
       .then((status) => {
         if (cancelled) return;
-        if (status.interval_seconds) {
-          const clamped = clampIntervalSeconds(status.interval_seconds);
-          setIntervalSeconds(clamped);
-          setIntervalDraft(String(clamped));
-        }
-        if (status.last_completed_at) setLastCompletedAt(status.last_completed_at);
-        if (status.last_duration_ms != null) setLastDurationMs(status.last_duration_ms);
-        if (status.venue_health) setVenueHealth(status.venue_health);
-        setLiveRefresh(status);
+        applyLiveRefresh(status);
       })
       .catch(() => {
         // Status endpoint down: keep the 30s default cadence.
@@ -341,7 +367,7 @@ export function RunPaperScan() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [applyLiveRefresh]);
 
   useEffect(() => {
     if (!completeFlash) return undefined;
@@ -354,15 +380,15 @@ export function RunPaperScan() {
       setAutoAnchorMs(null);
       return undefined;
     }
-    const cadenceMs = clampIntervalSeconds(intervalSeconds) * 1000;
-    const origin = lastCompletedAt ? Date.parse(lastCompletedAt) : Date.now();
-    setAutoAnchorMs(origin);
-    const wait = Math.max(0, origin + cadenceMs - Date.now());
-    const timer = window.setTimeout(() => {
-      void collectRef.current();
-    }, wait);
-    return () => window.clearTimeout(timer);
-  }, [autoRefresh, intervalSeconds, lastCompletedAt]);
+    const serverOwned = Boolean(liveRefresh?.server_loop_enabled);
+    const cadenceMs = serverOwned ? 2000 : clampIntervalSeconds(intervalSeconds) * 1000;
+    setAutoAnchorMs(Date.now());
+    void pollLiveStatus();
+    const timer = window.setInterval(() => {
+      void pollLiveStatus();
+    }, cadenceMs);
+    return () => window.clearInterval(timer);
+  }, [autoRefresh, intervalSeconds, liveRefresh?.server_loop_enabled, pollLiveStatus]);
 
   useEffect(() => {
     if (!autoRefresh || loading) return undefined;
@@ -410,10 +436,17 @@ export function RunPaperScan() {
 
   const chips = economicsChips(economics);
   const cadenceMs = clampIntervalSeconds(intervalSeconds) * 1000;
-  const nextRefreshSeconds =
-    autoRefresh && autoAnchorMs != null
-      ? Math.max(0, Math.ceil((autoAnchorMs + cadenceMs - nowMs) / 1000))
-      : null;
+  const serverOwned = Boolean(liveRefresh?.server_loop_enabled);
+  const nextHotMs = liveRefresh?.hot?.next_due_at
+    ? Date.parse(liveRefresh.hot.next_due_at)
+    : Number.NaN;
+  const nextRefreshSeconds = !autoRefresh
+    ? null
+    : Number.isFinite(nextHotMs)
+      ? Math.max(0, Math.ceil((nextHotMs - nowMs) / 1000))
+      : autoAnchorMs != null
+        ? Math.max(0, Math.ceil((autoAnchorMs + cadenceMs - nowMs) / 1000))
+        : null;
   const pulsePhase: LiveScanPulsePhase = loading
     ? "scanning"
     : state.kind === "error"
@@ -477,8 +510,13 @@ export function RunPaperScan() {
               type="checkbox"
               checked={autoRefresh}
               onChange={(event) => setAutoRefresh(event.target.checked)}
+              aria-label={
+                serverOwned
+                  ? "Auto refresh Fast scan and Full sweep status"
+                  : "Auto refresh"
+              }
             />
-            Auto refresh
+            {serverOwned ? "Auto refresh view" : "Auto refresh"}
           </label>
           <LiveScanPulse
             phase={pulsePhase}
@@ -496,7 +534,11 @@ export function RunPaperScan() {
           {dualScanStatusLines(liveRefresh).map((line) => (
             <div key={line}>{line}</div>
           ))}
-          {autoRefresh ? " · auto on" : " · auto off"}
+          {autoRefresh
+            ? serverOwned
+              ? " · auto on · view refresh · server owns Fast/Full scans"
+              : " · auto on"
+            : " · auto off"}
         </div>
 
         <details className="scan-advanced">

@@ -408,6 +408,8 @@ Do not ship a single `Last scan` once both lanes exist.
 
 Keep the explicit operator/Windows collect as a **UNIVERSE-shaped** collect with the existing **45s** timeout (the accepted #157/#131 diagnostic contract).
 
+When `PAPER_LIVE_REFRESH_ENABLED=true`, the server-owned HOT/UNIVERSE loop is the only automatic collection owner. Browser auto-refresh must poll `GET /paper/live-refresh` and must **not** `POST /paper/collect`. Explicit collect must not consume or resume scheduled generation work (`generation_work_used_s`, cursor, due times). If a scheduled lane is in progress, explicit collect fails fast (409) rather than waiting behind it.
+
 Rationale: owner-Windows smoke and leftover tests assert 45s/50s, 60 fixtures, leftover truth. Dual-cadence auto-loop is what changes cadence and HOT timeout. Changing explicit collect in the first implementation PR would mix two contracts.
 
 Optional later (not v1): `scan_lane=hot|universe` on the request model (default `universe` for POST). Giving POST the 150s generation budget is a separate decision after the dual-cadence auto-loop lands.
@@ -493,6 +495,8 @@ New module `backend/tests/test_dual_cadence_scheduler.py` (clock injected; no li
 | 17 | **#161 identity seam:** after a HOT upsert of a subset, `FixtureCurrentStateStore.resolve_canonical_id` still maps cluster id, source event id, and paper-decision event id to the same fixture; `test_tracked_fixture_click_through.py` stays PASS. |
 | 18 | **Freshest status vs HOT economics:** an older HOT `in_running=True` snapshot must not pin membership/detail after a later UNIVERSE observation with `in_running=None` beyond the 3h window. Classify from the freshest provider-status observation; Tracked HOT membership still uses HOT economics only. |
 | 19 | **Failed UNIVERSE chunks consume budget:** timed-out/failed UNIVERSE wall time increments `generation_work_used` and closes the generation at 150s; HOT still starts on its due slot. |
+| 20 | **One collection owner:** when `server_loop_enabled`, frontend auto-refresh polls `GET /paper/live-refresh` and does not `POST /paper/collect`. |
+| 21 | **Explicit collect isolation:** `POST /paper/collect` does not increment/reset `generation_work_used_s`, universe cursor, or HOT/UNIVERSE due times. If a scheduled lane is active, it fails fast (409). |
 
 Frontend: health-bar / scan-note tests that Fast scan and Full sweep both render; a single `Last scan` string is insufficient once the API nests lanes.
 

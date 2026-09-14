@@ -16,6 +16,7 @@ from sports_hedge.application.collector import (
     ReadOnlyCrossVenueCollector,
 )
 from sports_hedge.application.live_refresh import (
+    ExplicitCollectBusy,
     LiveRefreshCoordinator,
     SCAN_CYCLE_RETURN_GRACE_SECONDS,
     ScanCycleTimeout,
@@ -720,3 +721,84 @@ async def test_failed_universe_chunks_consume_generation_budget_without_starving
     assert closed.lane != "universe"
     clock.now = coordinator._next_hot_due
     assert coordinator.plan_tick(now=clock.now).lane == "hot"
+
+
+def test_frontend_auto_refresh_does_not_post_collect_when_server_owns_scans() -> None:
+    from pathlib import Path
+
+    scan = (Path(__file__).resolve().parents[2] / "frontend" / "components" / "run-paper-scan.tsx").read_text(
+        encoding="utf-8"
+    )
+    demo = (
+        Path(__file__).resolve().parents[2] / "frontend" / "components" / "demo-walkthrough.tsx"
+    ).read_text(encoding="utf-8")
+    assert "pollLiveStatus" in scan
+    assert "void collectRef.current()" not in scan
+    assert "server owns Fast/Full scans" in scan
+    assert scan.count("runPaperCollection") == 2
+    assert "server_loop_enabled" in demo
+    assert "runPaperCollection" in demo
+
+
+@pytest.mark.asyncio
+async def test_explicit_collect_does_not_consume_universe_generation_progress() -> None:
+    clock = FakeClock(NOW)
+    coordinator = LiveRefreshCoordinator(clock=clock)
+    coordinator._clock = clock
+    live = _fixture("live", kickoff=NOW - timedelta(minutes=5), in_running=True)
+    far = _fixture("t6d", kickoff=NOW + timedelta(days=6))
+    coordinator.record_report(_report([live, far], when=NOW), scan_lane=ScanLane.UNIVERSE)
+    hot_due = NOW + timedelta(seconds=30)
+    universe_due = NOW + timedelta(seconds=180)
+    coordinator._next_hot_due = hot_due
+    coordinator._next_universe_due = universe_due
+    coordinator._universe_generation_started_at = NOW
+    coordinator._universe_work_used = 41.0
+    coordinator._universe_cursor = "a"
+    coordinator._universe_evaluated_ids = {"a"}
+    coordinator.status = coordinator.status.model_copy(
+        update={
+            "universe": coordinator.status.universe.model_copy(
+                update={"generation_work_used_s": 41.0, "resume_cursor": "a"}
+            )
+        }
+    )
+
+    async def runner() -> CollectionReport:
+        extra = _fixture("extra", kickoff=NOW + timedelta(days=2))
+        return _report([extra], when=NOW, scan_lane=ScanLane.UNIVERSE.value)
+
+    await coordinator.run_explicit_collect(runner)
+    assert coordinator._universe_work_used == 41.0
+    assert coordinator._universe_cursor == "a"
+    assert coordinator._universe_evaluated_ids == {"a"}
+    assert coordinator._next_hot_due == hot_due
+    assert coordinator._next_universe_due == universe_due
+    assert coordinator.status.universe.generation_work_used_s == 41.0
+    assert coordinator.status.universe.resume_cursor == "a"
+    assert coordinator.fixture_current_state().resolve_canonical_id("extra") == "extra"
+
+
+@pytest.mark.asyncio
+async def test_explicit_collect_fails_fast_when_scheduled_lane_is_active() -> None:
+    coordinator = LiveRefreshCoordinator()
+    coordinator.status = coordinator.status.model_copy(update={"cycle_in_progress": True})
+    coordinator._hot_in_progress = True
+
+    async def runner() -> CollectionReport:
+        raise AssertionError("explicit collect must not start")
+
+    with pytest.raises(ExplicitCollectBusy, match="scheduled scan in progress"):
+        await coordinator.run_explicit_collect(runner)
+
+    client = TestClient(app)
+    get_live_refresh_coordinator().reset()
+    busy = get_live_refresh_coordinator()
+    busy.status = busy.status.model_copy(update={"cycle_in_progress": True})
+    busy._universe_in_progress = True
+    try:
+        response = client.post("/paper/collect", json={"maximum_execution_risk": 60})
+        assert response.status_code == 409
+        assert "scheduled scan in progress" in response.json()["detail"]
+    finally:
+        busy.reset()

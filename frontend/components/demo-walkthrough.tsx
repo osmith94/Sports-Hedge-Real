@@ -51,8 +51,10 @@ export function DemoWalkthroughBoard() {
   const [discoveryMessage, setDiscoveryMessage] = useState<string | null>(null);
   const [autoLiveRefresh, setAutoLiveRefresh] = useState(true);
   const [intervalSeconds, setIntervalSeconds] = useState(30);
+  const [serverOwned, setServerOwned] = useState(false);
   const collectInFlight = useRef(false);
   const collectRef = useRef<() => Promise<void>>(async () => undefined);
+  const serverOwnedRef = useRef(false);
 
   const refresh = useCallback(async () => {
     const next = await getDemoWalkthrough();
@@ -62,6 +64,27 @@ export function DemoWalkthroughBoard() {
   }, []);
 
   const refreshLiveDiscovery = useCallback(async () => {
+    let owned = serverOwnedRef.current;
+    try {
+      const status = await getLiveRefreshStatus();
+      owned = Boolean(status.server_loop_enabled);
+      serverOwnedRef.current = owned;
+      setServerOwned(owned);
+      if (status.interval_seconds) setIntervalSeconds(status.interval_seconds);
+    } catch {
+      owned = serverOwnedRef.current;
+    }
+    if (owned) {
+      try {
+        await refresh();
+        setDiscoveryMessage(null);
+      } catch (err) {
+        setDiscoveryMessage(
+          err instanceof Error ? err.message : "Live discovery UNAVAILABLE",
+        );
+      }
+      return;
+    }
     if (collectInFlight.current) return;
     collectInFlight.current = true;
     setDiscoveryBusy(true);
@@ -105,6 +128,11 @@ export function DemoWalkthroughBoard() {
       .then((status) => {
         if (!cancelled && status.interval_seconds) {
           setIntervalSeconds(status.interval_seconds);
+        }
+        if (!cancelled) {
+          const owned = Boolean(status.server_loop_enabled);
+          serverOwnedRef.current = owned;
+          setServerOwned(owned);
         }
       })
       .catch(() => {
@@ -274,7 +302,7 @@ export function DemoWalkthroughBoard() {
                 checked={autoLiveRefresh}
                 onChange={(event) => setAutoLiveRefresh(event.target.checked)}
               />
-              Auto {intervalSeconds}s
+              Auto {intervalSeconds}s{serverOwned ? " view" : ""}
             </label>
           </div>
           <p className="section-copy">

@@ -29,6 +29,7 @@ from sports_hedge.application.collector import (
     ReadOnlyCrossVenueCollector,
 )
 from sports_hedge.application.live_refresh import (
+    ExplicitCollectBusy,
     LiveRefreshStatus,
     ScanCycleTimeout,
     get_live_refresh_coordinator,
@@ -735,7 +736,9 @@ async def collect_read_only_market_data(
         )
 
     try:
-        return await coordinator.run_cycle(runner)
+        return await coordinator.run_explicit_collect(runner)
+    except ExplicitCollectBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ScanCycleTimeout as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
     except (MatchbookAuthError, MatchbookDiscoveryError) as exc:

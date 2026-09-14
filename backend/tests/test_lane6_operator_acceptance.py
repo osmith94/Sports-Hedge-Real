@@ -188,6 +188,9 @@ def test_live_scan_pulse_states_are_real_and_last_scan_is_not_invented() -> None
     assert "Fast scan" in scan
     assert "Full sweep" in scan
     assert "dualScanStatusLines" in scan
+    assert "pollLiveStatus" in scan
+    assert "void collectRef.current()" not in scan
+    assert "server owns Fast/Full scans" in scan
     assert "Scanning…" in scan
     assert "setLastCompletedAt(new Date().toISOString())" not in scan
     assert "Keep prior last-scan facts" in scan

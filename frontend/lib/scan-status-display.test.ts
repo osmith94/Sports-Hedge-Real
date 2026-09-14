@@ -60,5 +60,7 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /dualScanStatusLines/);
     assert.doesNotMatch(bar, /Last scan \$\{/);
     assert.doesNotMatch(scan, /Last scan \{lastCompletedAt/);
+    assert.match(scan, /pollLiveStatus/);
+    assert.doesNotMatch(scan, /void collectRef\.current\(\)/);
   });
 });
