@@ -248,6 +248,13 @@ class SqlitePaperScanRepository:
         arbitrage_only: bool = False,
         since: datetime | None = None,
     ) -> list[PaperScanRecord]:
+        """Return newest-first audit rows for a bounded window.
+
+        This is not current scanner radar state. ``LIMIT`` is applied in SQL
+        before decode, so a readable row older than the window stays stored
+        but is omitted from this response. Malformed rows occupy a window
+        slot, are skipped from the decoded list, and remain in SQLite.
+        """
         if limit <= 0:
             raise ValueError("limit must be positive")
         clauses: list[str] = []

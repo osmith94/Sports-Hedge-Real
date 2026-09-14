@@ -78,6 +78,7 @@ export default async function ArbitragePage() {
   let tradesAvailable = true;
 
   try {
+    // Latest-100 paper scan *audit* window. Not FixtureCurrentStateStore radar.
     [scans, summary] = await Promise.all([getPaperScans("limit=100"), getPaperScanSummary()]);
   } catch {
     apiAvailable = false;
@@ -290,9 +291,17 @@ export default async function ArbitragePage() {
         <div className="panel-header">
           <div>
             <div className="panel-title">Paper scan history</div>
-            <div className="panel-meta">Newest matched-market decisions.</div>
+            <div className="panel-meta">
+              Latest 100 audit observations · newest first. Not current scanner radar
+              state.
+              {apiAvailable && scans.length > 0
+                ? ` Showing ${scans.length} loaded row${scans.length === 1 ? "" : "s"}.`
+                : ""}
+            </div>
           </div>
-          <span className="status-badge">{apiAvailable ? "SCANNER DATA" : "NO API CONNECTION"}</span>
+          <span className="status-badge">
+            {apiAvailable ? "LATEST 100 AUDIT" : "NO API CONNECTION"}
+          </span>
         </div>
         {apiAvailable && scans.length === 0 ? (
           <div className="empty-live-compact">No paper scans yet.</div>
