@@ -47,7 +47,7 @@ Or from PowerShell:
 .\scripts\windows\Start-SportsHedge-Demo.ps1
 ```
 
-The launcher sets `PAPER_AUTOFILL_ENABLED=false` so the operator can choose £10 before OPEN. It sets `PAPER_LIVE_REFRESH_ENABLED=true` and `ACCOUNTING_SCHEDULE_ENABLED=true` for this local process only. It never sets `SPORTS_HEDGE_EXECUTION_ENABLED=true`.
+The launcher sets `PAPER_AUTOFILL_ENABLED=true` so qualifying **LIVE_PAPER** opportunities auto-capture through the existing paper autofill path (allocator-sized; fail-closed; no venue orders). The console should show **AUTO PAPER CAPTURE ON** while retaining **PAPER MODE · NO EXECUTION**. Labelled `/demo` fixture replay does **not** inherit that setting: qualify → preview £10 → confirm remains explicit. It sets `PAPER_LIVE_REFRESH_ENABLED=true` and `ACCOUNTING_SCHEDULE_ENABLED=true` for this local process only. It never sets `SPORTS_HEDGE_EXECUTION_ENABLED=true`.
 
 On backend start the accounting scheduler bootstraps the latest published ECB daily USD close when `fx_rates.sqlite` is empty or the persisted USD rate is stale, including Sunday/holiday starts (Friday's close is carried forward). It does **not** substitute the treasury demo FX snapshot (`paper_demo_fx_snapshot`, 0.80) into arb qualification. If ECB/network fetch fails, `/paper/economics-status` stays `missing_fx_rate:USD` and scans fail closed.
 
@@ -61,11 +61,11 @@ Logs: `logs\demo-backend.*.log` and `logs\demo-frontend.*.log`.
 
 ### 1. Live / read-only discovery (`/`)
 
-1. Confirm the console shows **PAPER MODE · NO EXECUTION**.
-2. Open `/health` in a tab if needed: `mode=paper`, `execution_enabled=false`.
-3. Click **Run paper scan** / refresh live discovery. Wait until the scan finishes (bounded; may be degraded if Matchbook is unavailable).
+1. Confirm the console shows **PAPER MODE · NO EXECUTION** and, for the Windows paper demo, **AUTO PAPER CAPTURE ON**.
+2. Open `/health` in a tab if needed: `mode=paper`, `execution_enabled=false`, `paper_autofill_enabled=true` on the launcher process.
+3. Fast scan / Full sweep are server-owned. The browser polls `GET /paper/live-refresh`; do not expect auto-refresh to POST `/paper/collect`.
 4. Inspect venue health: Matchbook `unavailable` without credentials is truthful. Polymarket/Kalshi public data may still populate fixtures.
-5. Open a discovered fixture if one exists. If there is a **preparable** settlement-equivalent opportunity, continue the £10 path on that fixture. If **no qualifying arb**, leave `/` honest and go to `/demo`. Do not paste fixture rows onto `/`.
+5. If a **fresh** observation passes every fail-closed gate and the allocator accepts a sized plan, it should appear as an OPEN paper trade in Paper Portfolio / active trades without an operator click. Tracked/Near rows and historical discovery (including the prior Leeds v Newcastle 1.35% net candidate) are not trades. If **no qualifying live arb**, leave `/` honest and go to `/demo`. Do not paste fixture rows onto `/`.
 
 ### 2. Fixture-replay lifecycle (`/demo`) — use when live has no qualifying arb
 

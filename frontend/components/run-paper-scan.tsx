@@ -466,7 +466,12 @@ export function RunPaperScan() {
           <div className="panel-title">Paper scanner</div>
           <div className="panel-meta">Read-only collection. Min net arb is net after modeled costs.</div>
         </div>
-        <span className="status-badge">PAPER MODE · NO EXECUTION</span>
+        <div className="heading-actions">
+          <span className="status-badge">PAPER MODE · NO EXECUTION</span>
+          {liveRefresh?.paper_autofill_enabled ? (
+            <span className="status-badge">AUTO PAPER CAPTURE ON</span>
+          ) : null}
+        </div>
       </div>
 
       <form className="scan-form" onSubmit={submit}>

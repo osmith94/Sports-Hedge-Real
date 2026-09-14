@@ -88,6 +88,11 @@ export function VenueHealthBar() {
           </span>
         );
       })}
+      {refresh?.paper_autofill_enabled ? (
+        <span className="status-item" aria-label="AUTO PAPER CAPTURE ON">
+          AUTO PAPER CAPTURE ON
+        </span>
+      ) : null}
       {dualScanStatusLines(refresh).map((line) => (
         <span className="status-item muted" key={line} aria-label={line}>
           {line}

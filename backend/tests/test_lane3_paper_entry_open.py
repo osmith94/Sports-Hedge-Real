@@ -128,7 +128,7 @@ def test_lane3_mb_pm_arithmetic_lock_ids_and_open_fields(tmp_path: Path) -> None
         trades = ops.list_active_trades()
         assert len(trades) == 1
         trade = trades[0]
-        _assert_open_surface(trade, provenance=DataProvenance.FIXTURE_DEMO)
+        _assert_open_surface(trade, provenance=DataProvenance.LIVE_PAPER)
         _assert_allocator_sized(ops, trade)
 
         requested = {(leg.venue, leg.currency): leg.requested_stake for leg in trade.legs}
@@ -229,7 +229,7 @@ def test_lane3_mb_k_and_pm_k_lock_correct_pools(tmp_path: Path) -> None:
             venue_costs=_kalshi_costs(),
         )
         trade = ops.list_active_trades()[0]
-        _assert_open_surface(trade, provenance=DataProvenance.FIXTURE_DEMO)
+        _assert_open_surface(trade, provenance=DataProvenance.LIVE_PAPER)
         after = ledger.treasury.snapshot()
         mb = next(leg for leg in trade.legs if leg.venue is VenueName.MATCHBOOK)
         ks = next(leg for leg in trade.legs if leg.venue is VenueName.KALSHI)
@@ -257,7 +257,7 @@ def test_lane3_mb_k_and_pm_k_lock_correct_pools(tmp_path: Path) -> None:
             venue_costs=_pm_kalshi_costs(),
         )
         trade = ops.list_active_trades()[0]
-        _assert_open_surface(trade, provenance=DataProvenance.FIXTURE_DEMO)
+        _assert_open_surface(trade, provenance=DataProvenance.LIVE_PAPER)
         after = ledger.treasury.snapshot()
         pm = next(leg for leg in trade.legs if leg.venue is VenueName.POLYMARKET)
         ks = next(leg for leg in trade.legs if leg.venue is VenueName.KALSHI)
@@ -469,7 +469,7 @@ def test_lane3_fixture_replay_with_production_fill_settings(tmp_path: Path) -> N
         assert replay.execution_enabled is False
         trade = replay.trade
         assert trade is not None
-        _assert_open_surface(trade, provenance=DataProvenance.FIXTURE_DEMO)
+        _assert_open_surface(trade, provenance=DataProvenance.LIVE_PAPER)
         after = ledger.treasury.snapshot()
         for leg in trade.legs:
             pool = after.pool(leg.venue, leg.currency)

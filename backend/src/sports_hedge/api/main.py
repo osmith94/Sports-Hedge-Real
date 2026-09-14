@@ -71,12 +71,14 @@ def health() -> dict[str, object]:
         "status": "ok",
         "mode": settings.sports_hedge_mode,
         "execution_enabled": settings.sports_hedge_execution_enabled,
+        "paper_autofill_enabled": settings.paper_autofill_enabled,
         "live_refresh": {
             "discovery_source": "matchbook",
             "discovery_mode": "venue_union",
             "matching_venue": "polymarket",
             "matching_venues": ["polymarket", "kalshi"],
             "server_loop_enabled": coordinator.status.server_loop_enabled,
+            "paper_autofill_enabled": coordinator.status.paper_autofill_enabled,
             "interval_seconds": coordinator.status.interval_seconds,
         },
     }

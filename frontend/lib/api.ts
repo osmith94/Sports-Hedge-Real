@@ -429,6 +429,7 @@ export type LiveRefreshStatus = {
   matching_venue: Venue;
   matching_venues?: Venue[];
   server_loop_enabled: boolean;
+  paper_autofill_enabled?: boolean;
   interval_seconds: number;
   cycle_in_progress: boolean;
   last_started_at?: string | null;

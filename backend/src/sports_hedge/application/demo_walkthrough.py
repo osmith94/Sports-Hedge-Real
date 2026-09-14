@@ -290,7 +290,7 @@ class DemoWalkthroughService:
         self.operations.persist_triggered_chain(
             decision,
             provenance=DataProvenance.FIXTURE_DEMO,
-            autofill=False if request.qualify_only else None,
+            autofill=False,
         )
         opportunity_id = observation.opportunity_id
         quotes = reverse_quotes_from_observations([left, right])

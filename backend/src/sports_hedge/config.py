@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     paper_liquidity_db_path: str = "./data/paper_liquidity.sqlite"
     paper_ledger_db_path: str = "./data/paper_ledger.sqlite"
     paper_account_fees_db_path: str = "./data/paper_account_fees.sqlite"
+    # Application default off. Windows paper demo may enable this for the local
+    # process so qualifying LIVE_PAPER decisions auto-capture via
+    # persist_triggered_chain. Not a venue order path; fixture replay does not inherit.
     paper_autofill_enabled: bool = False
     watchlist_db_path: str = "./data/near_arb_watchlist.sqlite"
     paper_live_refresh_enabled: bool = False

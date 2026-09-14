@@ -181,7 +181,7 @@ def _ops(
         decision,
         intelligence.market_history(canonical_market_id=decision.canonical_market_id),
     )
-    ops.persist_triggered_chain(decision, provenance=DataProvenance.FIXTURE_DEMO)
+    ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER)
     return scan, watchlist, ops, repository
 
 

@@ -65,6 +65,7 @@ class LiveRefreshStatus(BaseModel):
         default_factory=lambda: [VenueName.POLYMARKET, VenueName.KALSHI]
     )
     server_loop_enabled: bool
+    paper_autofill_enabled: bool = False
     interval_seconds: int = Field(ge=15, le=300)
     cycle_in_progress: bool = False
     last_started_at: datetime | None = None
@@ -141,6 +142,7 @@ class LiveRefreshCoordinator:
         self.status = self.status.model_copy(
             update={
                 "server_loop_enabled": resolved.paper_live_refresh_enabled,
+                "paper_autofill_enabled": resolved.paper_autofill_enabled,
                 "interval_seconds": hot_cadence,
                 "hot": self.status.hot.model_copy(
                     update={

@@ -108,7 +108,17 @@ def _ops_bundle(tmp_path: Path, *, autofill: bool):
     return scan, watchlist, ops, repository, ledger
 
 
-def _observe_and_persist(scan, watchlist, ops, left, right, *, venue_costs, extra=None):
+def _observe_and_persist(
+    scan,
+    watchlist,
+    ops,
+    left,
+    right,
+    *,
+    venue_costs,
+    extra=None,
+    provenance=DataProvenance.LIVE_PAPER,
+):
     kwargs = dict(
         venue_costs=venue_costs,
         fx_snapshots=FX,
@@ -124,7 +134,7 @@ def _observe_and_persist(scan, watchlist, ops, left, right, *, venue_costs, extr
         decision,
         scan.market_intelligence.market_history(canonical_market_id=decision.canonical_market_id),
     )
-    ops.persist_triggered_chain(decision, provenance=DataProvenance.FIXTURE_DEMO)
+    ops.persist_triggered_chain(decision, provenance=provenance)
     return decision
 
 
@@ -326,7 +336,7 @@ def test_generalized_missing_edge_fails_closed_without_implied_sum(tmp_path: Pat
         assert opportunity.status == OpportunityStatus.REJECTED
         assert "missing_net_edge" in opportunity.rejection_reasons
         assert opportunity.implied_probability_sum is None
-        ops.persist_triggered_chain(decision, provenance=DataProvenance.FIXTURE_DEMO)
+        ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER)
         assert ops.list_active_trades() == []
         snap = ledger.treasury.snapshot()
         assert snap.pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
@@ -507,11 +517,11 @@ def test_repeated_autofill_is_idempotent(tmp_path: Path) -> None:
         )
         first_journals = list(ops.journal.list_entries())
         first_snap = ledger.treasury.snapshot()
-        ops.persist_triggered_chain(decision, provenance=DataProvenance.FIXTURE_DEMO)
+        ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER)
         ops.simulate_fill(
             next(iter(ops._plans)),
             simulate_external=True,
-            provenance=DataProvenance.FIXTURE_DEMO,
+            provenance=DataProvenance.LIVE_PAPER,
         )
         assert len(ops.list_active_trades()) == 1
         assert len(ops.journal.list_entries()) == len(first_journals)
@@ -576,7 +586,7 @@ def test_allocator_required_for_autofill(tmp_path: Path) -> None:
             decision,
             scan.market_intelligence.market_history(canonical_market_id=decision.canonical_market_id),
         )
-        ops.persist_triggered_chain(decision, provenance=DataProvenance.FIXTURE_DEMO)
+        ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER)
         assert ops.list_active_trades() == []
         assert any("allocator_size_required" in reason for reason in ops._entry_rejections.values())
     finally:
@@ -687,6 +697,231 @@ def test_watchlist_stale_clock_rejects_autofill_without_open_trade(tmp_path: Pat
         assert after.pool(VenueName.MATCHBOOK, "GBP").available_cash == before.pool(
             VenueName.MATCHBOOK, "GBP"
         ).available_cash
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_qualifying_live_paper_auto_opens_once_with_allocator_size_and_journal(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
+    try:
+        before = ledger.treasury.snapshot()
+        decision = _observe_and_persist(
+            scan,
+            watchlist,
+            ops,
+            _matchbook_btts(),
+            _polymarket_btts(),
+            venue_costs=matchbook_polymarket_costs(),
+            provenance=DataProvenance.LIVE_PAPER,
+        )
+        active = ops.list_active_trades()
+        assert len(active) == 1
+        trade = active[0]
+        assert trade.state is PaperTradeState.OPEN
+        assert trade.provenance is DataProvenance.LIVE_PAPER
+        assert trade.places_orders is False
+        assert trade.paper_only is True
+        _assert_allocator_sized(ops, trade)
+        assert trade.guaranteed_profit_gbp_at_open == decision.allocation.guaranteed_profit
+        journals = list(ops.journal.list_entries())
+        assert journals
+        assert all(entry.provenance is DataProvenance.LIVE_PAPER for entry in journals)
+        after = ledger.treasury.snapshot()
+        mb = after.pool(VenueName.MATCHBOOK, "GBP")
+        pm = after.pool(VenueName.POLYMARKET, "USD")
+        locked_gbp = next(leg.filled_stake for leg in trade.legs if leg.venue is VenueName.MATCHBOOK)
+        locked_usd = next(leg.filled_stake for leg in trade.legs if leg.venue is VenueName.POLYMARKET)
+        assert mb.locked_capital == locked_gbp
+        assert mb.available_cash == before.pool(VenueName.MATCHBOOK, "GBP").available_cash - locked_gbp
+        assert pm.locked_capital == locked_usd
+        assert pm.available_cash == before.pool(VenueName.POLYMARKET, "USD").available_cash - locked_usd
+        health = TestClient(app).get("/health").json()
+        assert health["execution_enabled"] is False
+        assert health["mode"] == "paper"
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_repeated_hot_cycle_observations_are_idempotent(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
+    try:
+        decision = _observe_and_persist(
+            scan,
+            watchlist,
+            ops,
+            _matchbook_btts(),
+            _polymarket_btts(),
+            venue_costs=matchbook_polymarket_costs(),
+        )
+        first = ops.list_active_trades()[0]
+        first_journals = list(ops.journal.list_entries())
+        first_snap = ledger.treasury.snapshot()
+        for _ in range(3):
+            watchlist.observe_paper_decision(
+                decision,
+                scan.market_intelligence.market_history(
+                    canonical_market_id=decision.canonical_market_id
+                ),
+            )
+            ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER)
+        active = ops.list_active_trades()
+        assert len(active) == 1
+        assert active[0].trade_id == first.trade_id
+        assert active[0].state is PaperTradeState.OPEN
+        assert len(ops.journal.list_entries()) == len(first_journals)
+        after = ledger.treasury.snapshot()
+        for venue in (VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI):
+            currency = "GBP" if venue is VenueName.MATCHBOOK else "USD"
+            assert after.pool(venue, currency).available_cash == first_snap.pool(
+                venue, currency
+            ).available_cash
+            assert after.pool(venue, currency).locked_capital == first_snap.pool(
+                venue, currency
+            ).locked_capital
+        assert active[0].guaranteed_profit_gbp_at_open == first.guaranteed_profit_gbp_at_open
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_allocator_rejection_does_not_auto_open_live_paper(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
+    try:
+        before = ledger.treasury.snapshot()
+        decision = scan.scan_pair(
+            _matchbook_btts(),
+            _polymarket_btts(),
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=FX,
+            maximum_execution_risk=100,
+        )
+        assert decision.eligible_for_paper_simulation is True
+        assert decision.allocation is None
+        watchlist.observe_paper_decision(
+            decision,
+            scan.market_intelligence.market_history(canonical_market_id=decision.canonical_market_id),
+        )
+        ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER)
+        assert ops.list_active_trades() == []
+        assert any("allocator_size_required" in reason for reason in ops._entry_rejections.values())
+        after = ledger.treasury.snapshot()
+        assert after.pool(VenueName.MATCHBOOK, "GBP").locked_capital == before.pool(
+            VenueName.MATCHBOOK, "GBP"
+        ).locked_capital
+        assert after.pool(VenueName.POLYMARKET, "USD").locked_capital == before.pool(
+            VenueName.POLYMARKET, "USD"
+        ).locked_capital
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_stale_quote_does_not_auto_open_live_paper(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
+    try:
+        kwargs = dict(
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=FX,
+            maximum_execution_risk=100,
+            liquidity_snapshot=_standing(),
+        )
+        decision = scan.scan_pair(_matchbook_btts(), _polymarket_btts(), **kwargs)
+        assert decision.eligible_for_paper_simulation is True
+        watchlist.observe_paper_decision(
+            decision,
+            scan.market_intelligence.market_history(canonical_market_id=decision.canonical_market_id),
+        )
+        stale_legs = [
+            leg.model_copy(update={"quote_age_ms": 50_000}) for leg in decision.fill_legs
+        ]
+        stale = decision.model_copy(update={"quote_age_ms": 50_000, "fill_legs": stale_legs})
+        before = ledger.treasury.snapshot()
+        ops.persist_triggered_chain(stale, provenance=DataProvenance.LIVE_PAPER)
+        assert ops.list_active_trades() == []
+        assert ops._entry_rejections
+        after = ledger.treasury.snapshot()
+        for venue, currency in (
+            (VenueName.MATCHBOOK, "GBP"),
+            (VenueName.POLYMARKET, "USD"),
+            (VenueName.KALSHI, "USD"),
+        ):
+            assert after.pool(venue, currency).available_cash == before.pool(venue, currency).available_cash
+            assert after.pool(venue, currency).locked_capital == before.pool(venue, currency).locked_capital
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_tracked_or_near_row_does_not_auto_open_live_paper(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
+    try:
+        kwargs = dict(
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=FX,
+            maximum_execution_risk=100,
+            liquidity_snapshot=_standing(),
+        )
+        decision = scan.scan_pair(_matchbook_btts(), _polymarket_btts(), **kwargs)
+        near = decision.model_copy(update={"eligible_for_paper_simulation": False})
+        watchlist.observe_paper_decision(
+            near,
+            scan.market_intelligence.market_history(canonical_market_id=decision.canonical_market_id),
+        )
+        ops.persist_triggered_chain(near, provenance=DataProvenance.LIVE_PAPER)
+        assert ops.list_active_trades() == []
+        snap = ledger.treasury.snapshot()
+        assert snap.pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
+        assert snap.pool(VenueName.POLYMARKET, "USD").locked_capital == 0
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_fixture_demo_does_not_inherit_live_paper_autofill(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
+    try:
+        decision = _observe_and_persist(
+            scan,
+            watchlist,
+            ops,
+            _matchbook_btts(),
+            _polymarket_btts(),
+            venue_costs=matchbook_polymarket_costs(),
+            provenance=DataProvenance.FIXTURE_DEMO,
+        )
+        assert decision.eligible_for_paper_simulation is True
+        assert ops.list_active_trades() == []
+        snap = ledger.treasury.snapshot()
+        assert snap.pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
+        assert snap.pool(VenueName.POLYMARKET, "USD").locked_capital == 0
+        assert ops.journal.list_entries() == []
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_explicit_autofill_false_overrides_live_paper_setting(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
+    try:
+        kwargs = dict(
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=FX,
+            maximum_execution_risk=100,
+            liquidity_snapshot=_standing(),
+        )
+        decision = scan.scan_pair(_matchbook_btts(), _polymarket_btts(), **kwargs)
+        watchlist.observe_paper_decision(
+            decision,
+            scan.market_intelligence.market_history(canonical_market_id=decision.canonical_market_id),
+        )
+        ops.persist_triggered_chain(
+            decision,
+            provenance=DataProvenance.LIVE_PAPER,
+            autofill=False,
+        )
+        assert ops.list_active_trades() == []
     finally:
         repository.close()
         ledger.close()

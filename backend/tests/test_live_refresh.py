@@ -120,9 +120,11 @@ def test_live_refresh_status_is_matchbook_primary_and_server_loop_off_by_default
     assert health.status_code == 200
     body = health.json()
     assert body["execution_enabled"] is False
+    assert body["paper_autofill_enabled"] is False
     assert body["live_refresh"]["discovery_source"] == "matchbook"
     assert body["live_refresh"]["matching_venue"] == "polymarket"
     assert body["live_refresh"]["server_loop_enabled"] is False
+    assert body["live_refresh"]["paper_autofill_enabled"] is False
     assert body["live_refresh"]["interval_seconds"] >= 15
 
     status = client.get("/paper/live-refresh")
@@ -131,6 +133,7 @@ def test_live_refresh_status_is_matchbook_primary_and_server_loop_off_by_default
     assert payload["discovery_source"] == "matchbook"
     assert payload["matching_venue"] == "polymarket"
     assert payload["server_loop_enabled"] is False
+    assert payload["paper_autofill_enabled"] is False
     assert "unavailable_unless_matchbook_payload_includes_scores" in payload["live_scores"]
     assert payload["discovered_fixtures"] == []
     assert payload["hot"]["cadence_seconds"] == 30

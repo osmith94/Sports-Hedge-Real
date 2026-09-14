@@ -187,10 +187,7 @@ class PaperOperationsService:
             if decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage:
                 candidate = _candidate_from_decision(decision, opportunity_id)
                 self.alerts.ingest(candidate)
-            should_autofill = (
-                self.settings.paper_autofill_enabled if autofill is None else autofill
-            )
-            if should_autofill:
+            if self._should_autofill(autofill=autofill, provenance=provenance):
                 try:
                     self._require_allocator_sized_plan(opportunity_id)
                     self.simulate_fill(
@@ -202,6 +199,28 @@ class PaperOperationsService:
                 except PaperOperationsError:
                     pass
         return candidate
+
+    def _should_autofill(
+        self,
+        *,
+        autofill: bool | None,
+        provenance: DataProvenance,
+    ) -> bool:
+        """Inherit the global paper-autofill flag only for LIVE_PAPER.
+
+        Explicit True remains an operator/test override. Explicit False always
+        wins. Fixture replay must pass False (or omit inherit) so a labelled
+        DEMO / FIXTURE REPLAY cannot masquerade as live auto-capture.
+        """
+
+        if autofill is False:
+            return False
+        if autofill is True:
+            return True
+        return (
+            self.settings.paper_autofill_enabled
+            and provenance is DataProvenance.LIVE_PAPER
+        )
 
     def list_preparable(self, canonical_event_id: str | None = None) -> list[PreparablePaperOpportunity]:
         rows: list[PreparablePaperOpportunity] = []

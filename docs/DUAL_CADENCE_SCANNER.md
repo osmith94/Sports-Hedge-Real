@@ -497,6 +497,8 @@ New module `backend/tests/test_dual_cadence_scheduler.py` (clock injected; no li
 | 19 | **Failed UNIVERSE chunks consume budget:** timed-out/failed UNIVERSE wall time increments `generation_work_used` and closes the generation at 150s; HOT still starts on its due slot. |
 | 20 | **One collection owner:** when `server_loop_enabled`, frontend auto-refresh polls `GET /paper/live-refresh` and does not `POST /paper/collect`. |
 | 21 | **Explicit collect isolation:** `POST /paper/collect` does not increment/reset `generation_work_used_s`, universe cursor, or HOT/UNIVERSE due times. If a scheduled lane is active, it fails fast (409). |
+| 22 | **Live paper auto-capture:** a qualifying `LIVE_PAPER` decision with `paper_autofill_enabled` opens once through `persist_triggered_chain`; repeated HOT observations are idempotent; allocator rejection / stale quote / Tracked-Near do not open; treasury/journal provenance is `live_paper`. |
+| 23 | **Demo isolation:** labelled `/demo` fixture replay passes `autofill=False` and does not inherit the global live auto-capture flag. |
 
 Frontend: health-bar / scan-note tests that Fast scan and Full sweep both render; a single `Last scan` string is insufficient once the API nests lanes.
 
@@ -522,6 +524,19 @@ Do not use live Windows as the first proof of classification; clocked unit tests
 - Persistent fixture-inventory SQLite.
 - Changing explicit `POST /paper/collect` off 45s in the first implementation PR.
 - Research surfaces.
+- Reintroducing browser-driven scans to implement paper auto-capture. Qualifying `LIVE_PAPER` auto-capture uses `persist_triggered_chain()` inherit on the server-owned collector persist path only. `/demo` fixture replay stays explicit/manual (`autofill=False`).
+
+## 14a. Paper auto-capture (folded into #162)
+
+Owner product: genuinely qualifying live paper opportunities are automatically paper-traded, not merely displayed.
+
+- Inherit `settings.paper_autofill_enabled` only when provenance is `LIVE_PAPER`. Explicit `autofill=False` always wins; explicit `True` remains a test/operator override.
+- Windows launcher may set `PAPER_AUTOFILL_ENABLED=true` for that local process. Application default stays false. `SPORTS_HEDGE_MODE=paper` and `SPORTS_HEDGE_EXECUTION_ENABLED=false` remain mandatory.
+- Gates are unchanged: canonical equivalence, solver arbitrage, fees/FX, executable depth/liquidity/risk, quote freshness, allocator-accepted positive sized plan. Tracked/Near or a gross price must not open a trade.
+- Size comes from the allocator plan. Do not hard-code £10. Capital/FX/depth/risk blocks fail closed with an auditable `_entry_rejections` reason.
+- Repeated HOT observations of the same still-open opportunity do not duplicate OPEN trades, treasury locks, or realized P&L (`simulate_fill` existing-trade short-circuit).
+- No startup backfill of prior watchlist/discovery rows (including Leeds v Newcastle 1.35% net). First completed live paper trade must be a fresh qualifying observation after this fix.
+- UI: `AUTO PAPER CAPTURE ON` plus retained `PAPER MODE · NO EXECUTION`.
 
 ## 15. Architect decisions (accepted, review `5196716600`)
 

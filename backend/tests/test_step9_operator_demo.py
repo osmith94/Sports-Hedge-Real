@@ -374,6 +374,59 @@ def test_qualify_only_then_confirm_ten_pounds_then_hold_unwind_excludes_settleme
         ledger.close()
 
 
+def test_labelled_fixture_replay_does_not_masquerade_as_live_auto_capture(tmp_path: Path) -> None:
+    settings = Settings(
+        max_slippage_bps=0,
+        fx_spread_bps=0,
+        simulated_latency_ms=0,
+        paper_autofill_enabled=True,
+        paper_treasury_seed_gbp=1000,
+        paper_treasury_demo_usd_gbp_per_unit=0.80,
+        paper_treasury_demo_fx_source="paper_demo_fx_snapshot",
+    )
+    ledger = SqlitePaperLedger(
+        tmp_path / "paper.sqlite",
+        seed_gbp=SEED,
+        usd_gbp_per_unit=FX,
+        fx_source="paper_demo_fx_snapshot",
+    )
+    repository = SqliteMarketIntelligenceRepository()
+    watchlist = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=10_000)
+    ops = PaperOperationsService(
+        watchlist=watchlist,
+        alerts=PriorityAlertService(),
+        settings=settings,
+        ledger=ledger,
+    )
+    demo = DemoWalkthroughService(
+        operations=ops,
+        scan=PaperScanService(MarketIntelligenceService(repository), settings=settings),
+        watchlist=watchlist,
+        ledger=ledger,
+        settings=settings,
+    )
+    try:
+        before = ledger.treasury.snapshot()
+        qualified = demo.replay(FixtureReplayRequest(close_via="hold", qualify_only=True))
+        assert qualified.trade is None
+        assert qualified.qualify_only is True
+        assert ops.list_active_trades() == []
+        stored = watchlist.repository.get(qualified.opportunity_id)
+        assert stored is not None
+        assert stored.data_kind == DEMO_DATA_KIND
+        assert ops.journal.list_entries() == []
+        after = ledger.treasury.snapshot()
+        assert after.pool(VenueName.MATCHBOOK, "GBP").locked_capital == before.pool(
+            VenueName.MATCHBOOK, "GBP"
+        ).locked_capital
+        assert after.pool(VenueName.POLYMARKET, "USD").locked_capital == before.pool(
+            VenueName.POLYMARKET, "USD"
+        ).locked_capital
+    finally:
+        repository.close()
+        ledger.close()
+
+
 def test_qualify_ten_pounds_accepts_with_production_fx_and_slippage(tmp_path: Path) -> None:
     settings = Settings(
         paper_treasury_seed_gbp=1000,
@@ -621,7 +674,8 @@ def test_windows_launcher_scripts_encode_paper_only_contract() -> None:
     assert "SPORTS_HEDGE_EXECUTION_ENABLED" in start_ps1
     assert '"false"' in start_ps1
     assert "PAPER_AUTOFILL_ENABLED" in start_ps1
-    assert '$env:PAPER_AUTOFILL_ENABLED = "false"' in start_ps1
+    assert '$env:PAPER_AUTOFILL_ENABLED = "true"' in start_ps1
+    assert "AUTO PAPER CAPTURE ON" in start_ps1
     assert "PAPER_LIVE_REFRESH_ENABLED" in start_ps1
     assert '$env:PAPER_LIVE_REFRESH_ENABLED = "true"' in start_ps1
     assert '$env:ACCOUNTING_SCHEDULE_ENABLED = "true"' in start_ps1

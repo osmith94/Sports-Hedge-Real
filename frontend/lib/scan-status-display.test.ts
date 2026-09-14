@@ -53,14 +53,19 @@ describe("dual cadence operator copy", () => {
     assert.match(fullSweepCopy(status(), now).detail, /104 universe/);
   });
 
-  it("health bar and scan note no longer ship a single Last scan line", () => {
+    it("health bar and scan note no longer ship a single Last scan line", () => {
     const bar = readFileSync(join(frontendRoot, "components/venue-health-bar.tsx"), "utf8");
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
+    const layout = readFileSync(join(frontendRoot, "app/layout.tsx"), "utf8");
     assert.match(bar, /dualScanStatusLines/);
     assert.match(scan, /dualScanStatusLines/);
     assert.doesNotMatch(bar, /Last scan \$\{/);
     assert.doesNotMatch(scan, /Last scan \{lastCompletedAt/);
     assert.match(scan, /pollLiveStatus/);
     assert.doesNotMatch(scan, /void collectRef\.current\(\)/);
+    assert.match(bar, /AUTO PAPER CAPTURE ON/);
+    assert.match(bar, /paper_autofill_enabled/);
+    assert.match(scan, /AUTO PAPER CAPTURE ON/);
+    assert.match(layout, /PAPER MODE · NO EXECUTION/);
   });
 });

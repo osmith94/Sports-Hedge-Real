@@ -187,7 +187,8 @@ export function DemoWalkthroughBoard() {
           <p className="page-subtitle">
             Reset three native paper pools, inspect live/read-only discovery without substituting
             fixture rows, then qualify a labelled replay and confirm an operator-chosen size
-            (example £10). Phase 1 remains PAPER MODE. execution_enabled=false.
+            (example £10). Live auto-capture on `/` does not apply here. Phase 1 remains
+            PAPER MODE. execution_enabled=false.
           </p>
         </div>
         <div className="heading-actions">
