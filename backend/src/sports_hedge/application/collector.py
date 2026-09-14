@@ -539,16 +539,22 @@ class ReadOnlyCrossVenueCollector:
                     matcher=self.event_matcher,
                     max_event_pairs=max_event_pairs,
                 )
-                clusters = _select_lane_clusters(
-                    clusters,
-                    identity_scope=None if identity_scope is None else hot_scope,
-                    skip_event_ids=skip_ids,
-                    resume_cursor=resume_cursor,
-                    scan_lane=resolved_lane,
-                    seen_at=started_at,
-                    polymarket_events=polymarket_events,
-                    queried_series_ids=queried_series_ids,
-                )
+                if (
+                    identity_scope is not None
+                    or skip_ids
+                    or resume_cursor
+                    or resolved_lane == ScanLane.HOT.value
+                ):
+                    clusters = _select_lane_clusters(
+                        clusters,
+                        identity_scope=None if identity_scope is None else hot_scope,
+                        skip_event_ids=skip_ids,
+                        resume_cursor=resume_cursor,
+                        scan_lane=resolved_lane,
+                        seen_at=started_at,
+                        polymarket_events=polymarket_events,
+                        queried_series_ids=queried_series_ids,
+                    )
 
             scan_kwargs = {
                 "fee_snapshots": fee_snapshots,

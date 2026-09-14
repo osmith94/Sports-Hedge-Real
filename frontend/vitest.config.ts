@@ -8,6 +8,7 @@ export default defineConfig({
       "lib/tracked-markets-display.test.ts",
       "lib/discovered-fixture-display.test.ts",
       "lib/fixture-detail-error.test.ts",
+      "lib/scan-status-display.test.ts",
     ],
   },
 });

@@ -397,13 +397,19 @@ class LiveRefreshCoordinator:
         else:
             self._record_universe_progress(report, duration_ms, evaluated_n, leftover_n, degraded)
         inventory = self._fixture_state.inventory(report.completed_at)
-        hot_count, universe_count = self._fixture_state.membership_counts(report.completed_at)
+        _hot_count, universe_count = self._fixture_state.membership_counts(report.completed_at)
+        compat_completed = self.status.hot.last_completed_at or self.status.universe.last_completed_at
+        compat_duration = self.status.hot.last_duration_ms
+        if compat_duration is None:
+            compat_duration = self.status.universe.last_duration_ms
         self.status = self.status.model_copy(
             update={
                 "cycle_in_progress": False,
-                "last_started_at": self.status.hot.last_started_at,
-                "last_completed_at": self.status.hot.last_completed_at,
-                "last_duration_ms": self.status.hot.last_duration_ms,
+                "last_started_at": self.status.last_started_at
+                or self.status.hot.last_started_at
+                or self.status.universe.last_started_at,
+                "last_completed_at": compat_completed,
+                "last_duration_ms": compat_duration,
                 "discovery_mode": report.discovery_mode,
                 "matching_venues": report.matching_venues,
                 "last_matched_event_pairs": report.matched_event_pairs,
@@ -507,13 +513,16 @@ class LiveRefreshCoordinator:
     def _mark_lane_started(self, lane: ScanLane, started: datetime) -> None:
         self._hot_in_progress = lane is ScanLane.HOT
         self._universe_in_progress = lane is not ScanLane.HOT
+        top = {
+            "cycle_in_progress": True,
+            "last_started_at": started,
+            "last_error": None,
+        }
         if lane is ScanLane.HOT:
             self._hot_due_started = self._next_hot_due or started
             self.status = self.status.model_copy(
                 update={
-                    "cycle_in_progress": True,
-                    "last_started_at": started,
-                    "last_error": None,
+                    **top,
                     "hot": self.status.hot.model_copy(
                         update={
                             "cycle_in_progress": True,
@@ -532,8 +541,7 @@ class LiveRefreshCoordinator:
             self._universe_cursor = None
         self.status = self.status.model_copy(
             update={
-                "cycle_in_progress": True,
-                "last_error": None,
+                **top,
                 "universe": self.status.universe.model_copy(
                     update={
                         "cycle_in_progress": True,
@@ -580,6 +588,8 @@ class LiveRefreshCoordinator:
                     "chunk_last_duration_ms": duration,
                 }
             )
+            if self.status.last_completed_at is None:
+                update["last_completed_at"] = finished
         self.status = self.status.model_copy(update=update)
         self._hot_in_progress = False
         self._universe_in_progress = False

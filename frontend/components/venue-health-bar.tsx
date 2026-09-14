@@ -88,10 +88,14 @@ export function VenueHealthBar() {
           </span>
         );
       })}
-      <span className="status-item muted" aria-label="Fast scan and Full sweep status">
-        {dualScanStatusLines(refresh).join(" · ")}
-        {refresh?.last_error ? ` · ${refresh.last_error}` : ""}
-      </span>
+      {dualScanStatusLines(refresh).map((line) => (
+        <span className="status-item muted" key={line} aria-label={line}>
+          {line}
+        </span>
+      ))}
+      {refresh?.last_error ? (
+        <span className="status-item muted">{refresh.last_error}</span>
+      ) : null}
     </div>
   );
 }

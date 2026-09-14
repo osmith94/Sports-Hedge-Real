@@ -152,6 +152,7 @@ def _observation(event_id: str, market_id: str, *, when: datetime, triggered: bo
         ],
         trigger_net_edge=Decimal("0.01"),
         current_net_edge=Decimal("0.02") if triggered else Decimal("0.004"),
+        implied_probability_sum=Decimal("0.98"),
         solver_is_arbitrage=triggered,
         eligible_for_paper_simulation=triggered,
         guaranteed_profit_gbp=Decimal("1.2") if triggered else None,
@@ -511,14 +512,19 @@ def test_startup_universe_due_immediately_and_tracked_empty() -> None:
     client = TestClient(app)
     get_live_refresh_coordinator().reset()
     assert client.get("/paper/watchlist/tracked").json() == []
+    assert coordinator.universe_due_immediately()
+    assert coordinator._next_universe_due == NOW
     plan = coordinator.plan_tick(now=NOW)
-    # HOT is also due at startup; empty scope still a HOT slot, then UNIVERSE.
+    # Empty HOT is due at the same instant; yield it so UNIVERSE bootstrap is
+    # bounded by next_hot_due + 30s rather than blocked by a due HOT slot.
     if plan.lane == "hot":
         assert plan.identity_scope == []
         coordinator._next_hot_due = NOW + timedelta(seconds=30)
         plan = coordinator.plan_tick(now=NOW)
     assert plan.lane == "universe"
-    assert coordinator.universe_due_immediately() or plan.reason == "universe_chunk"
+    assert plan.reason == "universe_chunk"
+    assert plan.collector_timeout_seconds is not None
+    assert plan.collector_timeout_seconds < 180
 
 
 @pytest.mark.asyncio

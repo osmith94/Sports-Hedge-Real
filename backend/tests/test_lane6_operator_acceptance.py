@@ -185,8 +185,9 @@ def test_live_scan_pulse_states_are_real_and_last_scan_is_not_invented() -> None
     assert "Partial venue failure" in pulse
     assert "Auto refresh off" in pulse
     assert "Waiting for first scan" in pulse
-    assert "Last scan" in scan
-    assert '"never"' in scan
+    assert "Fast scan" in scan
+    assert "Full sweep" in scan
+    assert "dualScanStatusLines" in scan
     assert "Scanning…" in scan
     assert "setLastCompletedAt(new Date().toISOString())" not in scan
     assert "Keep prior last-scan facts" in scan
