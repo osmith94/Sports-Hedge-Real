@@ -2,26 +2,26 @@
 
 **Issue:** #158
 **Status:** Architect direction approved (review `5196716600`; PASS on `48e9b824`). Design only. Do not implement scanner/coordinator code in this PR. Do not merge to `main`. Implementation is a separate draft child of accepted design + current #131.
-**Date:** 14 September 2026 (rebased onto #131 after #157 integration)
+**Date:** 14 September 2026 (rebased onto #131 `292e8109` after #161 identity/current-state merge)
 
 This is a scanner/scheduler/read-model change. It does not add venue write, place, cancel, or sign paths. Phase 1 remains `SPORTS_HEDGE_MODE=paper` / `SPORTS_HEDGE_EXECUTION_ENABLED=false`.
 
 ## 1. Implementation base and stacking
 
-Inspected 14 September 2026; decisions locked by architect review `5196716600`. Prerequisite #157 owner-Windows **PASSED** and #157 is merged into #131.
+Inspected 14 September 2026; dual-cadence decisions locked by architect review `5196716600`. Prerequisite #157 owner-Windows **PASSED**. Identity/current-state blocker **#160/#161 architect-PASS** and merged into #131.
 
 | Object | Ref | Role |
 | --- | --- | --- |
-| #131 (current) | `cursor/paper-demo-consolidation-08fc` @ `3de14fc6dddb73b502d6fa34ba2d3353254c3182` | Paper demo consolidation **plus integrated #157 leftover/budget fix**. **Implementation base.** |
-| #157 (integrated) | was `51fbd24034654bb9e05ca413c8707f1d9d4843ac`; merge commit is #131 `3de14fc6` | Partial live-scan finalisation before the 50s hard timeout. Reuse; do not rewrite. |
+| #131 (current) | `cursor/paper-demo-consolidation-08fc` @ `292e8109cf2d34a23eb39b5efc4555514724537e` | Paper demo consolidation + #157 leftover/budget + **#161 `FixtureCurrentStateStore` identity seam**. **Implementation base.** |
+| #161 / #160 (integrated) | merge commit is #131 `292e8109` | Process-memory canonical fixture current-state + identity aliases for Tracked click-through. **Reuse this store; do not add a second identity system.** |
+| #157 (integrated) | merge commit `3de14fc6` | Partial live-scan finalisation before the 50s hard timeout. Reuse leftover/budget; do not rewrite. |
 | This document | docs-only, stacked on current #131 | Dual-cadence plan with accepted decisions encoded |
 
-Current #131 includes the leftover/budget machinery:
+Current #131 includes:
 
-- 45s collector soft budget for **explicit collect**, 4s leftover-assembly reserve, 5s coordinator grace.
-- Provider waits bound to remaining soft budget, not the 50s hard deadline.
-- Partial `CollectionReport` with `#153` leftovers (`not_evaluated_scan_deadline`; Equivalent 0 only for actually evaluated fixtures).
-- `cycle_in_progress=false` after a truthful partial report; HTTP 200 rather than empty 504.
+- 45s collector soft budget for **explicit collect**, 4s leftover-assembly reserve, 5s coordinator grace (#157).
+- `FixtureCurrentStateStore` (process memory, coordinator-owned) with `replace_from_report()` generation replace and explicit identity aliases (`resolve_canonical_id` / `identities_for`). Drill-down already reads this store. Tracked is **still** latest-completed-cohort via `last_report().paper_decisions`.
+- The store’s own docstring already names dual-cadence (#158/#159) as the next upsert/TTL merge. Implementation must **extend** that class, not create `fixture_current_state.py` a second time.
 
 Auto-loop HOT uses a **separate 25s** collector timeout (see §5.1). Explicit `POST /paper/collect` keeps the current 45s UNIVERSE-shaped diagnostic contract so that accepted Windows collect shape is unchanged.
 
@@ -60,7 +60,8 @@ Non-applicable for this slice: 05–08, 10, 13, 16–18 except that paper-entry 
 
 - Single `interval_seconds` (default 30, settings `paper_live_refresh_interval_seconds`, clamp 15–300).
 - Single `asyncio.Lock` around `run_cycle()`.
-- Single `_last_report: CollectionReport`. `record_report()` **replaces** fixtures, paper decisions, venue health, and operator summary.
+- Single `_last_report: CollectionReport`. `record_report()` still **replaces** status fixtures, paper decisions, venue health, and operator summary from that cycle.
+- Coordinator-owned `FixtureCurrentStateStore` (`application/fixture_current_state.py`, #161). `replace_from_report()` atomically replaces the current **collection generation** and records identity aliases (cluster id, source event ids, paper-decision event ids). `fixture_detail` / `fixture_identities` resolve through that alias map. This is still a latest-generation snapshot, not yet a HOT/UNIVERSE TTL merge.
 - Server loop: tick → sleep `interval_seconds`. If `cycle_in_progress`, it waits 1s then **breaks** (does not overlap). There is no preemption inside a running collect.
 - Cycle timeout: `paper_scan_cycle_timeout_seconds` (45) + `SCAN_CYCLE_RETURN_GRACE_SECONDS` (5).
 
@@ -110,7 +111,7 @@ One ambiguous `Last scan`:
 - `LiveRefreshStatus.last_completed_at` / `last_duration_ms` / `interval_seconds` / `cycle_in_progress` / `discovered_fixtures`.
 - Frontend: `venue-health-bar.tsx` (`Last scan {relativeTime}`), `run-paper-scan.tsx` (`Last scan … · next … · cadence Ns`).
 
-Fixture drill-down (`fixture_detail`) reads **only** `_last_report`. A HOT-only last_report would hide UNIVERSE fixtures from the board and from drill-down.
+Fixture drill-down (`GET /paper/fixtures/{id}`) already uses `FixtureCurrentStateStore.detail()` with #161 aliases. Status `discovered_fixtures` still copies the last cycle list. A HOT-only `replace_from_report()` would still wipe UNIVERSE rows from the store — dual cadence must change that replace into a lane upsert (see §6.6 / §7 slice 2).
 
 ### 4.5 Why the single cycle fails the product
 
@@ -137,8 +138,9 @@ A 45s HOT collector budget would also fail the 30s HOT cadence: one slow HOT cyc
                      leftover/budget rules from #157 unchanged)
                                  │
                                  ▼
-                    CanonicalFixtureState (process memory, v1)
-                    key = canonical_event_id / canonical_market_id
+                    CanonicalFixtureState
+                    FixtureCurrentStateStore (#161, extend — do not fork)
+                    key = canonical_event_id + identity aliases
                                  │
               ┌──────────────────┼──────────────────┐
               ▼                  ▼                  ▼
@@ -212,7 +214,7 @@ Do not pass `cycle_timeout_seconds=150` into a single collector call on the auto
 4. **Promote / demote automatically.** See §5.4. Do not invent “completed” or “live” from missing data or elapsed time alone.
 5. **Qualifying arbs from either lane surface immediately.** Persist watchlist observations during the producing cycle (including a UNIVERSE chunk). Do not buffer UNIVERSE TRIGGERED until the next HOT tick.
 6. **Preserve** settlement equivalence, fees/FX/depth/risk fail-closed, paper-only venues, append-only audit.
-7. **v1 store is process memory.** Restart: Tracked empty until a collection completes (same honesty as today). **UNIVERSE generation 0 is due immediately** on startup — do not wait 180s. SQLite fixture-inventory persistence is out of scope.
+7. **v1 store is the existing process-memory `FixtureCurrentStateStore`.** Restart: Tracked empty until a collection completes. **UNIVERSE generation 0 is due immediately** on startup — do not wait 180s. SQLite fixture-inventory persistence is out of scope. Do not add a second canonical store.
 
 ### 5.4 Promotion / demotion function
 
@@ -327,23 +329,29 @@ A failed lane (no report at all, hard timeout after #157 is supposed to have ret
 
 ### 6.6 Fixture inventory / drill-down
 
-`discovered_fixtures` on `GET /paper/live-refresh` must become the **canonical inventory snapshot**, not the last cycle’s cluster list. Each row carries `scan_lane`, `last_scanned_at`, `market_evaluation_state`, `opportunity_state`. Drill-down (`fixture_detail`) reads the store by `canonical_event_id`.
+`discovered_fixtures` on `GET /paper/live-refresh` must become the **canonical inventory snapshot** from `FixtureCurrentStateStore`, not the last cycle’s cluster list. Each row carries `scan_lane`, `last_scanned_at`, `market_evaluation_state`, `opportunity_state`.
 
-HOT cycles upsert only the fixtures they touched. They must not delete UNIVERSE rows.
+Drill-down already resolves `canonical_event_id` **and** #161 aliases (`source_event_id`, paper-decision event ids, cluster id). Dual cadence must keep that alias map:
+
+- HOT upserts only the fixtures it touched; it must **not** `replace_from_report()` the whole generation.
+- UNIVERSE chunk upserts evaluated identities and records leftovers without deleting other current-state rows.
+- `#161` click-through tests (`test_tracked_fixture_click_through.py`) must stay green: Tracked row identity still opens the same fixture via cluster id, source id, or decision id.
+
+HOT cycles must not delete UNIVERSE rows.
 
 ## 7. Code seams (narrow)
 
-Implement in this order on current #131 (`3de14fc6`). Do not start code in this PR.
+Implement in this order on current #131 (`292e8109`). Do not start code in this PR.
 
 | Slice | Seam | Change |
 | --- | --- | --- |
 | 0 | `#157` leftover/budget now on #131 | **No functional rewrite.** Call with per-run `cycle_timeout_seconds` (HOT 25s; UNIVERSE chunk derived from §5.2.1; explicit POST 45s). |
 | 1 | New `application/scan_lanes.py` | Pure `classify_scan_lane` (including 3h unknown bound), HOT sort key §5.5, TTL helpers. Clock injected. No dislocations import. |
-| 2 | New `application/fixture_current_state.py` | In-process canonical store (coordinator-owned). Upsert by canonical ids. Merge rules §6. **No SQLite inventory in v1.** |
-| 3 | `LiveRefreshCoordinator` | Dual due-logic; HOT 30s / 25s / no self-overlap; UNIVERSE 180s generation / 150s work / chunk-until-HOT; preemption is chunk yield; nested status; startup UNIVERSE due immediately. |
-| 4 | `collect_and_scan(..., scan_lane, identity_scope, resume_cursor)` | HOT: known IDs, skip full pagination. UNIVERSE: discovery + resume. Reuse cluster scan + leftover. |
+| 2 | Existing `application/fixture_current_state.py` (#161) | **Extend, do not replace or fork.** Keep alias resolution. Change generation `replace_from_report` into lane upsert + §6 TTL merge so HOT cannot wipe UNIVERSE rows. **No SQLite inventory in v1.** |
+| 3 | `LiveRefreshCoordinator` | Dual due-logic; HOT 30s / 25s / no self-overlap; UNIVERSE 180s generation / 150s work / chunk-until-HOT; preemption is chunk yield; nested status; startup UNIVERSE due immediately. `record_report` must upsert the existing store, not only `replace_from_report`. |
+| 4 | `collect_and_scan(..., scan_lane, identity_scope, resume_cursor)` | HOT: known IDs from the store (via aliases), skip full pagination. UNIVERSE: discovery + resume. Reuse cluster scan + leftover. |
 | 5 | `server_owned_refresh_tick` | If HOT due and not in progress → HOT. Else if UNIVERSE generation due or in-progress with remaining budget and chunk_wall ≥ min_chunk → UNIVERSE chunk. Explicit POST stays 45s UNIVERSE-shaped (§8.2). |
-| 6 | `GET /paper/watchlist/tracked` | Build cohort ids from current-state store, not `last_report.paper_decisions` only. |
+| 6 | `GET /paper/watchlist/tracked` | Build cohort ids from current-state store, not `last_report.paper_decisions` only. Preserve #161 identity aliases for click-through. |
 | 7 | `WatchObservation` / `NearOpportunity` / `DiscoveredFixture` | Additive: `scan_lane`, `last_scanned_at`, `next_due_at`, `freshness_class`. |
 | 8 | `Settings` | See §9. |
 | 9 | Frontend | Fast scan / Full sweep copy on health bar + scan note. Compact. Diagnostics stay Advanced. |
@@ -482,6 +490,7 @@ New module `backend/tests/test_dual_cadence_scheduler.py` (clock injected; no li
 | 14 | **Slow HOT envelope:** a HOT collect that would run past 25s leftover-stops / aborts so coordinator return is ≤ ~30s (25s + 5s grace). A second HOT is not started while the first is in progress. After return, the next due slot is used (missed slot not queued). |
 | 15 | **T+3h unknown expiry:** kickoff-passed + `in_running None` at T+2h59m is HOT (not live). At T+3h01m it is UNIVERSE, still `in_running is None`, `fixture_status` not rewritten to completed. |
 | 16 | **Startup bootstrap:** new coordinator / empty process-memory store → Tracked `[]`; UNIVERSE is **due immediately** (does not wait 180s); after the first bootstrap chunk records inventory, Tracked may become non-empty; HOT membership is classified from that inventory. |
+| 17 | **#161 identity seam:** after a HOT upsert of a subset, `FixtureCurrentStateStore.resolve_canonical_id` still maps cluster id, source event id, and paper-decision event id to the same fixture; `test_tracked_fixture_click_through.py` stays PASS. |
 
 Frontend: health-bar / scan-note tests that Fast scan and Full sweep both render; a single `Last scan` string is insufficient once the API nests lanes.
 
@@ -490,11 +499,12 @@ Do not use live Windows as the first proof of classification; clocked unit tests
 ## 13. Implementation sequence (separate child PR)
 
 1. ~~Land #157 / #118 timeout correction~~ **Done** — owner-Windows PASS; merged into #131 `3de14fc6`.
-2. Slice 1–2: classifier (3h bound) + process-memory current-state store + Tracked merge tests (fake reports, no HTTP).
-3. Slice 3–5: coordinator dual loop — HOT 25s/30s envelope, UNIVERSE chunks, preemption+cursor, startup bootstrap.
-4. Slice 6–9: API/UI honesty.
-5. Exact-head CI: backend pytest, Ruff F, frontend tests/typecheck/build.
-6. Implement as a **separate draft child** of this accepted design + current #131. Stop for architect review before merge to `main`.
+2. ~~#160/#161 identity/current-state store~~ **Done** — architect PASS; merged into #131 `292e8109`. Dual cadence **extends** this store.
+3. Slice 1 + store upsert: classifier (3h bound) + lane upsert/TTL merge on existing `FixtureCurrentStateStore` + Tracked merge tests (fake reports, no HTTP).
+4. Slice 3–5: coordinator dual loop — HOT 25s/30s envelope, UNIVERSE chunks, preemption+cursor, startup bootstrap.
+5. Slice 6–9: API/UI honesty (Fast vs Full) without breaking #161 click-through.
+6. Exact-head CI: backend pytest, Ruff F, frontend tests/typecheck/build.
+7. Implement as a **separate draft child** of this accepted design + current #131. Stop for architect review before merge to `main`.
 
 ## 14. Out of scope
 
@@ -520,7 +530,7 @@ Do not use live Windows as the first proof of classification; clocked unit tests
 | A | Separate HOT cycle timeout default **25s** so the 30s cadence is physically achievable. #157 4s reserve + 5s grace ⇒ ~30s envelope. HOT must not overlap itself. |
 | B | Each UNIVERSE scheduler run processes a chunk only until `next_hot_due - safety_margin`, persists cursor, yields, resumes. Acceptance must prove forward progress across multiple HOT cycles without starving HOT. |
 
-No remaining open product questions for v1. This PR stays docs-only. Implementation is a separate draft child of current #131 `3de14fc6`.
+No remaining open product questions for v1. This PR stays docs-only. Implementation is a separate draft child of current #131 `292e8109`.
 
 ## 16. Tenet review (this design pass)
 

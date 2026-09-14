@@ -160,7 +160,7 @@ Output includes:
 
 `arbitrage/watchlist/` is a paper-only read model for near opportunities approaching the configured trigger. Below-threshold items are watch candidates, not arbitrage. `TRIGGERED` is reserved for candidates that already pass the existing settlement, cost, depth and risk gates. Lifecycle history is append-only.
 
-Live collection is currently a **single** `LiveRefreshCoordinator` cadence (default 30s) whose Tracked board is the latest completed collection cohort. Issue #158 is an accepted design (review `5196716600`) for one scheduler with HOT (30s cadence, 25s collector timeout) and UNIVERSE (180s generation, 150s chunked work budget) plus a current-state Tracked merge; see `docs/DUAL_CADENCE_SCANNER.md` and `docs/adr/0002-dual-cadence-scanner.md`. Implementation is not in this docs PR; #157 leftover/budget is already on #131 `3de14fc6`.
+Live collection is currently a **single** `LiveRefreshCoordinator` cadence (default 30s) whose Tracked board is the latest completed collection cohort. Fixture drill-down already uses process-memory `FixtureCurrentStateStore` (#161) with identity aliases; that store still generation-replaces on each collect. Issue #158 is an accepted design (review `5196716600`) for one scheduler with HOT (30s cadence, 25s collector timeout) and UNIVERSE (180s generation, 150s chunked work budget) plus a current-state Tracked merge **on that same store**; see `docs/DUAL_CADENCE_SCANNER.md` and `docs/adr/0002-dual-cadence-scanner.md`. Implementation is not in this docs PR. Base: #131 `292e8109`.
 
 ### `liquidity/`
 

@@ -114,7 +114,7 @@ Accepted replacement (full rules: `docs/DUAL_CADENCE_SCANNER.md` §6 and `docs/a
 - Kickoff-passed + unknown in-play is HOT without a live label for 3h, then leaves HOT scheduling; time does not fabricate completed/live.
 - Operator UI shows **Fast scan** and **Full sweep** separately.
 
-Do not start implementation in this docs PR. Stack implementation as a separate draft child of current #131 `3de14fc6`.
+Do not start implementation in this docs PR. Stack implementation as a separate draft child of current #131 `292e8109`. Reuse #161 `FixtureCurrentStateStore`; do not add a second identity store.
 
 ## Safety
 

@@ -2,9 +2,9 @@
 
 **Status:** Accepted direction (Issue #158, architect review `5196716600`; PASS on `48e9b824`). Design only until a separate implementation PR is authorised. Do not merge to `main`. Do not start scanner/coordinator code in this PR.
 
-**Date:** 14 September 2026 (rebased onto #131 after #157 integration)
+**Date:** 14 September 2026 (rebased onto #131 `292e8109` after #161 identity/current-state merge)
 
-**Implementation base:** PR #131 head `3de14fc6dddb73b502d6fa34ba2d3353254c3182` (`cursor/paper-demo-consolidation-08fc`), which includes merged #157 leftover/budget finalisation.
+**Implementation base:** PR #131 head `292e8109cf2d34a23eb39b5efc4555514724537e` (`cursor/paper-demo-consolidation-08fc`), which includes merged #157 leftover/budget finalisation and #161 `FixtureCurrentStateStore`.
 
 ## Context
 
@@ -14,7 +14,7 @@ Issue #158 asks for **one scheduler with two coordinated cohorts**, not two inde
 
 ## Decision
 
-1. Keep a single `LiveRefreshCoordinator` process and a single canonical fixture/market identity store (**process memory for v1**). Restart honesty: Tracked empty until a collection completes; **UNIVERSE bootstrap is due immediately** on startup. SQLite fixture-inventory persistence is later, not this implementation.
+1. Keep a single `LiveRefreshCoordinator` process and **extend the existing** process-memory `FixtureCurrentStateStore` (#161). Do not add a second identity store. Restart honesty: Tracked empty until a collection completes; **UNIVERSE bootstrap is due immediately** on startup. SQLite fixture-inventory persistence is later, not this implementation.
 2. Split work into **HOT** (30s cadence; truthful in-play + ≤60 minutes pre-kickoff + bounded post-kickoff unknown) and **UNIVERSE** (180s generation cadence; 150s per-generation work budget).
 3. **HOT collector timeout is 25s**, not 45s. Reuse #157’s 4s leftover reserve + 5s coordinator grace so the worst-case envelope is ~30s. HOT must not overlap itself.
 4. **150s is a UNIVERSE generation budget, not one continuous job.** Each scheduler run processes a resumable chunk only until `next_hot_due - safety_margin`, persists cursor/progress, yields, lets HOT run, then resumes. A generation must make forward progress across multiple HOT cycles and must not starve HOT.
@@ -33,7 +33,7 @@ Detailed plan, seams, risks, migration, and acceptance tests: [`docs/DUAL_CADENC
 
 - Near-kickoff/live books refresh on a 30s lane whose collector budget can actually finish inside that cadence.
 - Distant fixtures stay on radar; UNIVERSE work survives HOT preemption via chunked resume.
-- Reuses the leftover/partial-finalisation now integrated on #131 (`3de14fc6`) instead of rewriting it.
+- Reuses leftover/partial-finalisation (#157) and the canonical current-state/identity store (#161) now on #131 (`292e8109`) instead of forking either.
 - Preserves one canonical identity (Tenet 03) and paper-only venues (Tenet 02).
 
 ### Negative
