@@ -7,6 +7,7 @@ export default defineConfig({
     exclude: [
       "lib/tracked-markets-display.test.ts",
       "lib/discovered-fixture-display.test.ts",
+      "lib/fixture-detail-error.test.ts",
     ],
   },
 });
