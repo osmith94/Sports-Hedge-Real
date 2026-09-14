@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 
 import { FixtureInventoryWorkspace } from "../../../../components/fixture-inventory";
 import { getFixtureDetail } from "../../../../lib/api";
+import { fixtureDetailUnavailableCopy } from "../../../../lib/fixture-detail-error";
 
 type PageProps = {
   params: Promise<{ eventId: string }>;
@@ -31,7 +32,7 @@ export default async function FixtureDetailPage({ params, searchParams }: PagePr
   try {
     const detail = await getFixtureDetail(canonicalEventId);
     return <FixtureInventoryWorkspace detail={detail} focusOpportunityId={focusOpportunityId} />;
-  } catch {
+  } catch (error) {
     return (
       <>
         <div className="pa-detail-nav">
@@ -39,8 +40,7 @@ export default async function FixtureDetailPage({ params, searchParams }: PagePr
           <span className="pa-chip pa-chip-paper">PAPER MODE</span>
         </div>
         <div className="empty-live">
-          Fixture {canonicalEventId} is not on the latest collection. No demo fixture is
-          substituted. Collect live paper markets, then open the row from the operations console.
+          {fixtureDetailUnavailableCopy(error, canonicalEventId)}
         </div>
       </>
     );

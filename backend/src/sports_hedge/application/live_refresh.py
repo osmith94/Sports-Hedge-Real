@@ -11,6 +11,7 @@ from sports_hedge.application.collector import (
     DiscoveredFixture,
     FixtureDetailReadModel,
 )
+from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookDiscoveryError
@@ -61,6 +62,7 @@ class LiveRefreshCoordinator:
         self._stop = asyncio.Event()
         self._last_request: dict[str, Any] = {}
         self._last_report: CollectionReport | None = None
+        self._fixture_state = FixtureCurrentStateStore()
         self.status = LiveRefreshStatus(
             server_loop_enabled=False,
             interval_seconds=30,
@@ -84,6 +86,7 @@ class LiveRefreshCoordinator:
     def reset(self) -> None:
         self._last_request = {}
         self._last_report = None
+        self._fixture_state.clear()
         self.status = LiveRefreshStatus(
             server_loop_enabled=False,
             interval_seconds=30,
@@ -153,6 +156,7 @@ class LiveRefreshCoordinator:
 
     def record_report(self, report: CollectionReport) -> None:
         self._last_report = report
+        self._fixture_state.replace_from_report(report)
         self.status = self.status.model_copy(
             update={
                 "cycle_in_progress": False,
@@ -178,18 +182,14 @@ class LiveRefreshCoordinator:
     def last_report(self) -> CollectionReport | None:
         return self._last_report
 
+    def fixture_current_state(self) -> FixtureCurrentStateStore:
+        return self._fixture_state
+
     def fixture_detail(self, canonical_event_id: str) -> FixtureDetailReadModel | None:
-        report = self._last_report
-        if report is None:
-            return None
-        wanted = canonical_event_id.strip()
-        for fixture in report.discovered_fixtures:
-            if fixture.canonical_event_id == wanted or fixture.source_event_id == wanted:
-                return FixtureDetailReadModel(
-                    fixture=fixture,
-                    markets=list(report.fixture_markets.get(fixture.canonical_event_id, [])),
-                )
-        return None
+        return self._fixture_state.detail(canonical_event_id)
+
+    def fixture_identities(self, canonical_event_id: str) -> frozenset[str]:
+        return self._fixture_state.identities_for(canonical_event_id)
 
     async def start_server_loop(self, tick) -> None:
         self.configure_from_settings()

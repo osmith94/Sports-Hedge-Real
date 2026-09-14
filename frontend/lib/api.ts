@@ -673,9 +673,23 @@ async function fetchWithTimeout(
 async function request<T>(path: string, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<T> {
   const response = await fetchWithTimeout(`${API_BASE}${path}`, { cache: "no-store" }, timeoutMs);
   if (!response.ok) {
-    throw new Error(await errorDetail(response));
+    throw new ApiRequestError(await errorDetail(response), response.status);
   }
   return response.json() as Promise<T>;
+}
+
+export class ApiRequestError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
+
+export function isNotFoundApiError(error: unknown): boolean {
+  return error instanceof ApiRequestError && error.status === 404;
 }
 
 export function getHistory(query = ""): Promise<MarketSnapshot[]> {

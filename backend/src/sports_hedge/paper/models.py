@@ -79,6 +79,7 @@ class PaperScanDecision(BaseModel):
     market_match: MarketMatchResult
     canonical_event_id: str | None = None
     canonical_market_id: str | None = None
+    fixture_canonical_event_id: str | None = None
     snapshots_recorded: int = Field(default=0, ge=0)
     depth_scan: DepthScanResult | None = None
     payoff_scan: PayoffScanResult | None = None
