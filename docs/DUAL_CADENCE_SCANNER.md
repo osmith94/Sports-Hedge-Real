@@ -1,31 +1,29 @@
 # Dual-cadence scanner — architecture and implementation plan
 
 **Issue:** #158
-**Status:** Architect direction approved (review `5196716600`). Design only. Do not implement scanner/coordinator code yet. Do not merge to `main`. Do not modify #131. Do not land on the #118 child until that timeout correction has owner-Windows acceptance.
-**Date:** 14 September 2026 (revised after architect review)
+**Status:** Architect direction approved (review `5196716600`; PASS on `48e9b824`). Design only. Do not implement scanner/coordinator code in this PR. Do not merge to `main`. Implementation is a separate draft child of accepted design + current #131.
+**Date:** 14 September 2026 (rebased onto #131 after #157 integration)
 
 This is a scanner/scheduler/read-model change. It does not add venue write, place, cancel, or sign paths. Phase 1 remains `SPORTS_HEDGE_MODE=paper` / `SPORTS_HEDGE_EXECUTION_ENABLED=false`.
 
 ## 1. Implementation base and stacking
 
-Inspected 14 September 2026; decisions locked by architect review `5196716600`.
+Inspected 14 September 2026; decisions locked by architect review `5196716600`. Prerequisite #157 owner-Windows **PASSED** and #157 is merged into #131.
 
 | Object | Ref | Role |
 | --- | --- | --- |
-| #131 | `cursor/paper-demo-consolidation-08fc` @ `6fc68e97bb248ea0392f569ea54764464a23b868` | Paper demo consolidation. **Do not modify.** |
-| #157 (Issue #118 child) | `cursor/scan-soft-budget-finalisation-afe6` @ `51fbd24034654bb9e05ca413c8707f1d9d4843ac` | Partial live-scan finalisation before the 50s hard timeout. **Implementation base. Prerequisite.** |
-| This document | docs-only, stacked on #157 | Dual-cadence plan with accepted decisions encoded |
+| #131 (current) | `cursor/paper-demo-consolidation-08fc` @ `3de14fc6dddb73b502d6fa34ba2d3353254c3182` | Paper demo consolidation **plus integrated #157 leftover/budget fix**. **Implementation base.** |
+| #157 (integrated) | was `51fbd24034654bb9e05ca413c8707f1d9d4843ac`; merge commit is #131 `3de14fc6` | Partial live-scan finalisation before the 50s hard timeout. Reuse; do not rewrite. |
+| This document | docs-only, stacked on current #131 | Dual-cadence plan with accepted decisions encoded |
 
-#157 is available and already contains #131 head `6fc68e97`. It is the correct base:
+Current #131 includes the leftover/budget machinery:
 
 - 45s collector soft budget for **explicit collect**, 4s leftover-assembly reserve, 5s coordinator grace.
 - Provider waits bound to remaining soft budget, not the 50s hard deadline.
 - Partial `CollectionReport` with `#153` leftovers (`not_evaluated_scan_deadline`; Equivalent 0 only for actually evaluated fixtures).
 - `cycle_in_progress=false` after a truthful partial report; HTTP 200 rather than empty 504.
 
-**Do not race #157.** Dual-cadence work must reuse that leftover/budget machinery, not rewrite it. Auto-loop HOT uses a **separate 25s** collector timeout (see §5.1). Explicit `POST /paper/collect` keeps the current 45s UNIVERSE-shaped diagnostic contract until #157 is accepted.
-
-Owner-Windows credentialed re-smoke of #157 remains a gate for the timeout lane.
+Auto-loop HOT uses a **separate 25s** collector timeout (see §5.1). Explicit `POST /paper/collect` keeps the current 45s UNIVERSE-shaped diagnostic contract so that accepted Windows collect shape is unchanged.
 
 ## 2. Product decision
 
@@ -335,11 +333,11 @@ HOT cycles upsert only the fixtures they touched. They must not delete UNIVERSE 
 
 ## 7. Code seams (narrow)
 
-Implement in this order after #157 owner-Windows acceptance **and** this design is accepted. Do not start code in this PR.
+Implement in this order on current #131 (`3de14fc6`). Do not start code in this PR.
 
 | Slice | Seam | Change |
 | --- | --- | --- |
-| 0 | `#157` leftover/budget | **No functional change to #157.** Call with per-run `cycle_timeout_seconds` (HOT 25s; UNIVERSE chunk derived from §5.2.1; explicit POST 45s). |
+| 0 | `#157` leftover/budget now on #131 | **No functional rewrite.** Call with per-run `cycle_timeout_seconds` (HOT 25s; UNIVERSE chunk derived from §5.2.1; explicit POST 45s). |
 | 1 | New `application/scan_lanes.py` | Pure `classify_scan_lane` (including 3h unknown bound), HOT sort key §5.5, TTL helpers. Clock injected. No dislocations import. |
 | 2 | New `application/fixture_current_state.py` | In-process canonical store (coordinator-owned). Upsert by canonical ids. Merge rules §6. **No SQLite inventory in v1.** |
 | 3 | `LiveRefreshCoordinator` | Dual due-logic; HOT 30s / 25s / no self-overlap; UNIVERSE 180s generation / 150s work / chunk-until-HOT; preemption is chunk yield; nested status; startup UNIVERSE due immediately. |
@@ -400,11 +398,11 @@ Do not ship a single `Last scan` once both lanes exist.
 
 ### 8.2 `POST /paper/collect`
 
-Keep the explicit operator/Windows collect as a **UNIVERSE-shaped** collect with the existing **45s** timeout while #157 is being accepted.
+Keep the explicit operator/Windows collect as a **UNIVERSE-shaped** collect with the existing **45s** timeout (the accepted #157/#131 diagnostic contract).
 
-Rationale: owner-Windows smoke and #157 tests assert 45s/50s, 60 fixtures, leftover truth. Dual-cadence auto-loop is what changes cadence and HOT timeout. Changing explicit collect in the same implementation would race the timeout lane.
+Rationale: owner-Windows smoke and leftover tests assert 45s/50s, 60 fixtures, leftover truth. Dual-cadence auto-loop is what changes cadence and HOT timeout. Changing explicit collect in the first implementation PR would mix two contracts.
 
-Optional later (not v1): `scan_lane=hot|universe` on the request model (default `universe` for POST). Giving POST the 150s generation budget is a separate decision after #157 acceptance.
+Optional later (not v1): `scan_lane=hot|universe` on the request model (default `universe` for POST). Giving POST the 150s generation budget is a separate decision after the dual-cadence auto-loop lands.
 
 ### 8.3 Watchlist
 
@@ -418,7 +416,7 @@ Optional later (not v1): `scan_lane=hot|universe` on the request model (default 
 | `paper_live_refresh_universe_interval_seconds` | 180 | Generation cadence. ge 60, le 300. |
 | `paper_live_refresh_interval_seconds` | 30 | **Alias of HOT.** Keep for env/launcher compat. |
 | `paper_scan_hot_cycle_timeout_seconds` | **25** | Auto-loop HOT collector timeout. Not the explicit-collect 45s. |
-| `paper_scan_cycle_timeout_seconds` | 45 | Explicit `POST /paper/collect` only (unchanged while #157 in flight). |
+| `paper_scan_cycle_timeout_seconds` | 45 | Explicit `POST /paper/collect` only (accepted #157/#131 contract). |
 | `paper_scan_universe_generation_budget_seconds` | **150** | Accumulated UNIVERSE work per generation. |
 | `paper_universe_hot_yield_safety_margin_seconds` | 2 | Chunk bound: `next_hot_due - now - margin`. |
 | `paper_hot_pre_kickoff_horizon_minutes` | 60 | |
@@ -456,8 +454,8 @@ Provider timeouts stay #157-bounded (`remaining soft budget`, `MIN_PROVIDER_WAIT
 | `LiveRefreshStatus.interval_seconds` / `last_completed_at` | Remain, documented as HOT aliases. UI must switch in the same implementation PR. |
 | `GET /paper/watchlist/tracked` | **Breaking semantics**, additive fields. Same path. Tests in `test_tracked_current_snapshot.py` must be rewritten to the merge/TTL rules, not deleted. |
 | Watchlist SQLite | Additive columns or JSON sidecar on opportunity; old rows: `scan_lane=null` treated as `universe` with `last_seen_at` as `last_scanned_at`. Missing lane + age > universe TTL → omit from Tracked (fail closed). |
-| `#157` hang/partial tests | Must stay green. Do not change leftover reason strings. |
-| Explicit collect 45s/60 pairs | **Unchanged** while #157 is being accepted. |
+| `#157` hang/partial tests now on #131 | Must stay green. Do not change leftover reason strings. |
+| Explicit collect 45s/60 pairs | **Unchanged** in v1 auto-loop work. |
 | Restart | Process-memory inventory empty → Tracked empty until a collection completes. Watchlist history remains. Scheduler must mark UNIVERSE due **immediately** (bootstrap), not after 180s. |
 
 No data backfill job. No second canonical ID migration. No SQLite fixture inventory in this implementation.
@@ -487,16 +485,16 @@ New module `backend/tests/test_dual_cadence_scheduler.py` (clock injected; no li
 
 Frontend: health-bar / scan-note tests that Fast scan and Full sweep both render; a single `Last scan` string is insufficient once the API nests lanes.
 
-Do not use live Windows as the first proof of classification; clocked unit tests first. Owner-Windows smoke is **after** implementation onto the accepted #118 child, not this design PR.
+Do not use live Windows as the first proof of classification; clocked unit tests first. Owner-Windows smoke is **after** the separate implementation child PR, not this design PR.
 
-## 13. Implementation sequence (after #157 acceptance)
+## 13. Implementation sequence (separate child PR)
 
-1. Land #157 / #118 timeout correction (owner-Windows re-smoke). Do not combine with dual cadence.
+1. ~~Land #157 / #118 timeout correction~~ **Done** — owner-Windows PASS; merged into #131 `3de14fc6`.
 2. Slice 1–2: classifier (3h bound) + process-memory current-state store + Tracked merge tests (fake reports, no HTTP).
 3. Slice 3–5: coordinator dual loop — HOT 25s/30s envelope, UNIVERSE chunks, preemption+cursor, startup bootstrap.
 4. Slice 6–9: API/UI honesty.
 5. Exact-head CI: backend pytest, Ruff F, frontend tests/typecheck/build.
-6. Integrate onto accepted #131/#157 line. Stop for architect review before merge to `main`.
+6. Implement as a **separate draft child** of this accepted design + current #131. Stop for architect review before merge to `main`.
 
 ## 14. Out of scope
 
@@ -506,14 +504,14 @@ Do not use live Windows as the first proof of classification; clocked unit tests
 - A single 150s auto-loop `collect_and_scan`.
 - Rewriting or importing the dislocation burst engine.
 - Persistent fixture-inventory SQLite.
-- Changing explicit `POST /paper/collect` off 45s while #157 is in flight.
+- Changing explicit `POST /paper/collect` off 45s in the first implementation PR.
 - Research surfaces.
 
 ## 15. Architect decisions (accepted, review `5196716600`)
 
 | # | Decision |
 | --- | --- |
-| 1 | Explicit `POST /paper/collect` remains the current **45s UNIVERSE-shaped** diagnostic/manual contract while #157 is being accepted. |
+| 1 | Explicit `POST /paper/collect` remains the current **45s UNIVERSE-shaped** diagnostic/manual contract (now the accepted #131/#157 collect shape). |
 | 2 | UNIVERSE **generation** budget is **150s**, not 180s. Keep 30s headroom inside the **180s** sweep cadence. 150s is executed as **resumable chunks**, not one job. |
 | 3 | Radar TTLs: **HOT 90s / UNIVERSE 360s**. Executable quote freshness remains the existing fail-closed ~1s contract. |
 | 4 | Kickoff-passed + unknown in-play: HOT **without a live label**, only within **3h**. After that, expire from HOT scheduling unless the provider explicitly says in-running. Do not claim completed from time. |
@@ -522,7 +520,7 @@ Do not use live Windows as the first proof of classification; clocked unit tests
 | A | Separate HOT cycle timeout default **25s** so the 30s cadence is physically achievable. #157 4s reserve + 5s grace ⇒ ~30s envelope. HOT must not overlap itself. |
 | B | Each UNIVERSE scheduler run processes a chunk only until `next_hot_due - safety_margin`, persists cursor, yields, resumes. Acceptance must prove forward progress across multiple HOT cycles without starving HOT. |
 
-No remaining open product questions for v1. Implementation still waits on #157 owner-Windows acceptance.
+No remaining open product questions for v1. This PR stays docs-only. Implementation is a separate draft child of current #131 `3de14fc6`.
 
 ## 16. Tenet review (this design pass)
 
@@ -538,7 +536,7 @@ No remaining open product questions for v1. Implementation still waits on #157 o
 - 15 — both lanes use existing cost/FX fail-closed.
 - 12 — this review.
 
-**Partial / deferred:** implementation; owner-Windows smoke after stacking on accepted #157; burst overlay; SQLite inventory.
+**Partial / deferred:** implementation (separate child PR); burst overlay; SQLite inventory.
 
 **Conflicts:** none accepted. The Tracked latest-cohort contract **must** change; that is documented, not silent. HOT 45s-on-30s-cadence would have been a silent cadence lie; 25s timeout is the correction.
 

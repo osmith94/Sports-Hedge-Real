@@ -1,10 +1,10 @@
 # ADR 0002 — Adaptive dual-cadence scanner
 
-**Status:** Accepted direction (Issue #158, architect review `5196716600`). Design only until implementation is authorised. Do not merge to `main`. Do not modify #131. Do not land scanner/coordinator code until the #118 child (#157) has owner-Windows acceptance.
+**Status:** Accepted direction (Issue #158, architect review `5196716600`; PASS on `48e9b824`). Design only until a separate implementation PR is authorised. Do not merge to `main`. Do not start scanner/coordinator code in this PR.
 
-**Date:** 14 September 2026 (revised same day after architect review)
+**Date:** 14 September 2026 (rebased onto #131 after #157 integration)
 
-**Implementation base:** PR #157 head `51fbd24034654bb9e05ca413c8707f1d9d4843ac` (`cursor/scan-soft-budget-finalisation-afe6`), child of #131 head `6fc68e97bb248ea0392f569ea54764464a23b868`.
+**Implementation base:** PR #131 head `3de14fc6dddb73b502d6fa34ba2d3353254c3182` (`cursor/paper-demo-consolidation-08fc`), which includes merged #157 leftover/budget finalisation.
 
 ## Context
 
@@ -22,7 +22,7 @@ Issue #158 asks for **one scheduler with two coordinated cohorts**, not two inde
 6. Kickoff-passed + unknown in-play stays HOT **without a live label**, only within a **3h** post-kickoff uncertainty window. After that, leave HOT scheduling unless a provider explicitly says in-running. Do not fabricate completed or live from elapsed time.
 7. Radar TTL: **HOT 90s / UNIVERSE 360s**. Executable quote freshness remains the existing fail-closed ~1s contract.
 8. Replace `Tracked = latest completed collection cohort` with a **per-identity current-state merge**. Qualifying arbs from either lane surface immediately.
-9. Explicit `POST /paper/collect` remains the current **45s UNIVERSE-shaped** diagnostic/manual contract while #157 is being accepted.
+9. Explicit `POST /paper/collect` remains the current **45s UNIVERSE-shaped** diagnostic/manual contract (accepted #131/#157 collect shape).
 10. Expose Fast scan and Full sweep as distinct operator status.
 
 Detailed plan, seams, risks, migration, and acceptance tests: [`docs/DUAL_CADENCE_SCANNER.md`](../DUAL_CADENCE_SCANNER.md).
@@ -33,7 +33,7 @@ Detailed plan, seams, risks, migration, and acceptance tests: [`docs/DUAL_CADENC
 
 - Near-kickoff/live books refresh on a 30s lane whose collector budget can actually finish inside that cadence.
 - Distant fixtures stay on radar; UNIVERSE work survives HOT preemption via chunked resume.
-- Reuses #157 leftover/partial-finalisation instead of racing it.
+- Reuses the leftover/partial-finalisation now integrated on #131 (`3de14fc6`) instead of rewriting it.
 - Preserves one canonical identity (Tenet 03) and paper-only venues (Tenet 02).
 
 ### Negative
@@ -44,4 +44,4 @@ Detailed plan, seams, risks, migration, and acceptance tests: [`docs/DUAL_CADENC
 
 ### Non-decisions (out of scope)
 
-- Live execution, new venues, settlement redesign, treasury redesign, burst-mode rewrite, reducing `max_event_pairs`, stretching HOT to minutes, SQLite fixture-inventory persistence, giving explicit `POST /paper/collect` the 150s generation budget while #157 is still in flight.
+- Live execution, new venues, settlement redesign, treasury redesign, burst-mode rewrite, reducing `max_event_pairs`, stretching HOT to minutes, SQLite fixture-inventory persistence, giving explicit `POST /paper/collect` the 150s generation budget in the first implementation PR.
