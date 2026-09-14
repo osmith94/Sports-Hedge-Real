@@ -150,6 +150,8 @@ Examples include:
 - Champions League multi-match windows;
 - future supported high-liquidity sports such as NBA game clusters.
 
+Phase 1 live collection is still a single 30s loop as of #157. Issue #158 proposes **one scheduler with two cohorts** (HOT ≈ 30s for in-play and ≤60 minutes pre-kickoff; UNIVERSE ≈ 180s full sweep) so high-liquidity windows are refreshed without polling every distant fixture at the same cadence. See `docs/DUAL_CADENCE_SCANNER.md`. That is scan scheduling only; it does not relax quote freshness, settlement equivalence, or the paper-only boundary.
+
 When capacity is constrained, prioritisation should consider:
 
 ```text

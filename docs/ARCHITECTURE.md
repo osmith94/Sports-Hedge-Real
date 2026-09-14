@@ -160,6 +160,8 @@ Output includes:
 
 `arbitrage/watchlist/` is a paper-only read model for near opportunities approaching the configured trigger. Below-threshold items are watch candidates, not arbitrage. `TRIGGERED` is reserved for candidates that already pass the existing settlement, cost, depth and risk gates. Lifecycle history is append-only.
 
+Live collection is currently a **single** `LiveRefreshCoordinator` cadence (default 30s) whose Tracked board is the latest completed collection cohort. Issue #158 proposes one scheduler with HOT (30s) and UNIVERSE (180s) lanes and a current-state Tracked merge; see `docs/DUAL_CADENCE_SCANNER.md` and `docs/adr/0002-dual-cadence-scanner.md`. That change is design-only until architect review and must not race the #118 / #157 scan-timeout correction.
+
 ### `liquidity/`
 
 Purpose: convert quoted prices into executable prices for a requested stake.

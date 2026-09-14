@@ -8,7 +8,7 @@ This document is not a production-readiness claim. The owner Windows click path 
 
 | Surface | Class |
 | --- | --- |
-| `/paper/watchlist/tracked`, `/near`, `/triggered`, `/activity` | `LIVE PAPER` when FastAPI is reachable. Empty live lists stay empty. `demo_fixture_replay` rows are filtered out of these lists. `UNAVAILABLE` if the watchlist API is down — never back-filled with live-looking fixture arbs. |
+| `/paper/watchlist/tracked`, `/near`, `/triggered`, `/activity` | `LIVE PAPER` when FastAPI is reachable. Empty live lists stay empty. `demo_fixture_replay` rows are filtered out of these lists. `UNAVAILABLE` if the watchlist API is down — never back-filled with live-looking fixture arbs. **Tracked (current):** latest completed collection cohort only — see below. **Tracked (proposed #158):** current-state merge; not yet implemented. |
 | `/paper/collect`, `/paper/live-refresh`, venue-union fixtures | `LIVE PAPER` when collection credentials/venues respond; empty discovery stays empty. Missing Matchbook credentials stay honestly `UNAVAILABLE` for Matchbook only — Polymarket and Kalshi still collect independently. Matchbook discovery paginates `GET /edge/rest/events`. Polymarket public Gamma uses bounded per-series pagination (legacy `POLYMARKET_GAMMA_SERIES_ID` is merged into the target EPL+Championship+La Liga set). Kalshi public Trade API v2 is read-only. `/` Operations Console is the normal operator surface. `/demo` is an advanced/test fixture-replay utility and is not opened by the launcher. |
 | `/demo` fixture replay | Always labelled `DEMO / FIXTURE REPLAY`. Same read-only collect path is available there for tests. Fixture replay is never substituted into live rows. |
 | `/paper/scans` | `LIVE PAPER` / empty / `UNAVAILABLE` |
@@ -73,10 +73,10 @@ Unknown costs still fail closed. Native GBP and the two USD venue pools are neve
 | 08 Historical provenance | **PASS** (coverage seam) | Repository-derived counts; missing files → UNAVAILABLE. |
 | 09 Liquidity / capital / priority alerts | **PASS** (paper) | Authoritative 8E native pools; allocator sizes 8F; unwind/clock never spendable; demo ticket still distinct. |
 | 10 Accounting / FX / books | **PASS** (paper subledger) | Append-only journal + 8E postings; GBP carrying ≠ native cash; two USD venues not commingled. Not a production GL. |
-| 11 UI / data honesty | **PASS** | Live vs DEMO / FIXTURE REPLAY labelled; empty live lists not substituted. |
+| 11 UI / data honesty | **PASS** | Live vs DEMO / FIXTURE REPLAY labelled; empty live lists not substituted. Dual-cadence Fast/Full scan copy is **proposed** (#158), not shipped. |
 | 12 Agent review | **PASS** | This document + PR tenet list. |
 | 13 Event intelligence | **PARTIAL** | Existing MI/trends; no invented live scores. |
-| 14 Event-driven dislocation arb | **PARTIAL** | Burst scanner on main; UI does not treat dislocation as arb. |
+| 14 Event-driven dislocation arb | **PARTIAL** | Burst scanner on main; UI does not treat dislocation as arb. Dual-cadence HOT/UNIVERSE scheduler is **proposed** (#158), not shipped. |
 | 15 Effective venue economics | **PARTIAL** | Arb/demo scan uses `VenueCostSnapshot`. Kalshi SELL close unknown → fail closed. Research still uses typed demo snapshots. |
 | 16 External manual legs | **PASS** (paper distinction) | `PAPER_SIMULATED_EXTERNAL` ≠ `MANUAL_EXTERNAL`. No VPN/geo bypass. |
 | 17 Historical market movement | **PARTIAL** | Coverage counts exposed; analogue model UNAVAILABLE. |
@@ -85,6 +85,34 @@ Unknown costs still fail closed. Native GBP and the two USD venue pools are neve
 ### Conflicts / non-weakening
 
 No tenet was silently weakened to make the demo “work”. Kalshi unwind stays fail-closed instead of inventing SELL fees. Fixture replay is not injected into empty live watchlists. Phase 1 collection remains read-only. Clock estimates do not release capital. Paper full-fill success is not treated as proof of simultaneous real fills (Tenet 18).
+
+## Tracked current-state contract
+
+### Current (as of #131 / #157) — latest completed cohort
+
+`GET /paper/watchlist/tracked` is the paper decisions of **the single latest completed** `CollectionReport` (`LiveRefreshCoordinator.last_report()`).
+
+- Empty until a live collection completes. Persisted history/activity may exist; the board stays empty.
+- A later completed cycle **replaces** the board. Markets only present in the previous cohort leave Tracked and remain in activity/history.
+- A degraded completed refresh shows only that cycle’s cohort. It does not silently keep prior rows.
+- `Near` / `Triggered` are not cohort-filtered. They fail closed on executable quote age (`max_quote_age_ms`, default 1000ms, wall-clock aged from `last_seen_at`).
+- Operator UI exposes one `Last scan` / `interval_seconds` (default 30s).
+
+This contract is enforced by `backend/tests/test_tracked_current_snapshot.py`.
+
+### Proposed (Issue #158) — not implemented; pending architect review
+
+Dual cadence cannot keep “Tracked = last cycle only” without either hiding distant fixtures after a HOT pass or mixing stale rows into the current board.
+
+Proposed replacement (full rules: `docs/DUAL_CADENCE_SCANNER.md` §6 and `docs/adr/0002-dual-cadence-scanner.md`):
+
+- Tracked is a **per-identity current-state merge**. HOT observations win for HOT fixtures; UNIVERSE observations remain for distant fixtures until the next sweep or radar TTL.
+- Expired observations are omitted (fail closed). They must not look current.
+- Qualifying / TRIGGERED opportunities from either lane persist in that cycle (no lane delay). Executable quote-age for `/near`, `/triggered`, and paper entry **does not** become 180s.
+- Partial UNIVERSE leftovers do not clobber a previous valid evaluated observation. `#153` Equivalent 0 stays evaluated-only.
+- Operator UI shows **Fast scan** and **Full sweep** separately.
+
+Do not implement this on #131 or race #157. Stack on the accepted #118 child after review.
 
 ## Safety
 

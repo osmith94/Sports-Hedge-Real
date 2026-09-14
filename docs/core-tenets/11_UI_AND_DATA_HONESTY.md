@@ -13,6 +13,8 @@ The UI must never make demo, modelled, historical or stale data look live.
 - Clearly distinguish live market quotes, historical observations, model outputs and illustrative fixtures.
 - Do not fabricate fallback opportunities when an API is offline/empty.
 - Show stale/carried-forward/exception states rather than silently presenting them as fresh.
+- When the scanner has more than one cadence, operator status must name each cadence (for example Fast scan vs Full sweep). A single ambiguous `Last scan` is not sufficient.
+- Tracked current-state must not present expired observations as current. The live contract today is latest-completed-cohort; the proposed dual-cadence merge is `docs/DUAL_CADENCE_SCANNER.md` (Issue #158, not yet implemented).
 - Keep sample size, confidence, stability and data quality visible near analytical claims.
 
 ## Football-style drill-down
