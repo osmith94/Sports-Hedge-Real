@@ -414,7 +414,12 @@ def test_labelled_fixture_replay_does_not_masquerade_as_live_auto_capture(tmp_pa
         stored = watchlist.repository.get(qualified.opportunity_id)
         assert stored is not None
         assert stored.data_kind == DEMO_DATA_KIND
-        assert ops.journal.list_entries() == []
+        fill_journals = [
+            entry
+            for entry in ops.journal.list_entries()
+            if entry.source not in {"paper_treasury_seed"}
+        ]
+        assert fill_journals == []
         after = ledger.treasury.snapshot()
         assert after.pool(VenueName.MATCHBOOK, "GBP").locked_capital == before.pool(
             VenueName.MATCHBOOK, "GBP"

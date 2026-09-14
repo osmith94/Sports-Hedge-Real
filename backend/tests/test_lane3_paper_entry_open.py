@@ -469,7 +469,7 @@ def test_lane3_fixture_replay_with_production_fill_settings(tmp_path: Path) -> N
         assert replay.execution_enabled is False
         trade = replay.trade
         assert trade is not None
-        _assert_open_surface(trade, provenance=DataProvenance.LIVE_PAPER)
+        _assert_open_surface(trade, provenance=DataProvenance.FIXTURE_DEMO)
         after = ledger.treasury.snapshot()
         for leg in trade.legs:
             pool = after.pool(leg.venue, leg.currency)

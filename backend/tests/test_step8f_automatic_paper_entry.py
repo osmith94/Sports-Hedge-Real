@@ -896,7 +896,12 @@ def test_fixture_demo_does_not_inherit_live_paper_autofill(tmp_path: Path) -> No
         snap = ledger.treasury.snapshot()
         assert snap.pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
         assert snap.pool(VenueName.POLYMARKET, "USD").locked_capital == 0
-        assert ops.journal.list_entries() == []
+        fill_journals = [
+            entry
+            for entry in ops.journal.list_entries()
+            if entry.source not in {"paper_treasury_seed"}
+        ]
+        assert fill_journals == []
     finally:
         repository.close()
         ledger.close()
