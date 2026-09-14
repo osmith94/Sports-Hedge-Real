@@ -40,6 +40,7 @@ These tenets should be read alongside:
 - `SCENARIO_RESPONSE_PROFILES.md`
 - `MANAGER_ERA_AND_REGIME_CONTEXT.md`
 - `PRIORITY_ARB_ALERTS.md`
+- `DUAL_CADENCE_SCANNER.md` — HOT/UNIVERSE scan scheduler and Tracked current-state contract (Issue #158; architect direction accepted, design only until implementation)
 - future accounting / FX / historical-data specifications
 
 ## Review rule
