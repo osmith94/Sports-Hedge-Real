@@ -52,6 +52,28 @@ describe("dual cadence operator copy", () => {
     assert.match(fastScanCopy(status(), now).detail, /partial \(2 not evaluated\)/);
     assert.doesNotMatch(fastScanCopy(status(), now).detail, /scan_cycle_timeout/);
     assert.match(fullSweepCopy(status(), now).detail, /104 universe/);
+    const persistFailed = status({
+      last_error: null,
+      hot: {
+        ...status().hot,
+        last_error: null,
+        persist_ok: false,
+        last_persist_error: "audit_write_failed",
+      },
+    });
+    assert.match(fastScanCopy(persistFailed, now).detail, /persist\/auto-capture failed/);
+    assert.doesNotMatch(fastScanCopy(persistFailed, now).detail, /scan_cycle_timeout/);
+    const universePersistFailed = status({
+      last_error: null,
+      universe: {
+        ...status().universe,
+        last_error: null,
+        persist_ok: false,
+        last_persist_error: "audit_write_failed",
+      },
+    });
+    assert.match(fullSweepCopy(universePersistFailed, now).detail, /persist\/auto-capture failed/);
+    assert.doesNotMatch(fullSweepCopy(universePersistFailed, now).detail, /scan_cycle_timeout/);
   });
 
     it("health bar and scan note no longer ship a single Last scan line", () => {

@@ -4,7 +4,9 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import lru_cache
+from logging import getLogger
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -95,6 +97,7 @@ from sports_hedge.venues.matchbook import (
 from sports_hedge.venues.polymarket import PolymarketClient
 
 router = APIRouter(prefix="/paper", tags=["paper"])
+LOGGER = getLogger(__name__)
 
 
 class RawVenueObservationRequest(BaseModel):
@@ -813,6 +816,39 @@ def _persist_collection_report(
         )
 
 
+def persist_scheduled_collection_report(
+    coordinator,
+    report: CollectionReport,
+    *,
+    service: PaperScanService,
+    audit: SqlitePaperScanRepository,
+    watchlist: WatchlistService,
+    scan_lane: ScanLane,
+) -> None:
+    """Persist after the scan envelope. Failures are not scan_cycle_timeout."""
+
+    started = monotonic()
+    try:
+        _persist_collection_report(
+            report, service=service, audit=audit, watchlist=watchlist
+        )
+    except Exception as exc:
+        LOGGER.exception("scheduled persist/auto-capture failed lane=%s", scan_lane)
+        coordinator.record_persist_outcome(
+            ok=False,
+            error=str(exc),
+            duration_ms=int((monotonic() - started) * 1000),
+            scan_lane=scan_lane,
+        )
+        return
+    coordinator.record_persist_outcome(
+        ok=True,
+        error=None,
+        duration_ms=int((monotonic() - started) * 1000),
+        scan_lane=scan_lane,
+    )
+
+
 async def _execute_collection(
     kwargs: dict[str, Any],
     *,
@@ -881,8 +917,13 @@ async def server_owned_refresh_tick() -> None:
         )
     except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, httpx.HTTPError):
         return
-    _persist_collection_report(
-        report, service=service, audit=audit, watchlist=watchlist
+    persist_scheduled_collection_report(
+        coordinator,
+        report,
+        service=service,
+        audit=audit,
+        watchlist=watchlist,
+        scan_lane=ScanLane(plan.lane),
     )
 
 

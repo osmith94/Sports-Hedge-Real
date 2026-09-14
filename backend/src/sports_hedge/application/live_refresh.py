@@ -9,6 +9,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from sports_hedge.application.collector import (
+    DIAGNOSTIC_PROVIDERS,
+    DIAGNOSTIC_STAGES,
     CollectionReport,
     DiscoveredFixture,
     FixtureDetailReadModel,
@@ -34,12 +36,21 @@ class ExplicitCollectBusy(RuntimeError):
 
 # Collector soft-stops at the per-run cycle timeout minus a finalisation
 # reserve. Coordinator waits this extra grace after the collector has
-# already returned a (possibly partial) CollectionReport. Persist is outside
-# the HOT envelope so SQLite/auto-capture cannot turn a partial into
-# scan_cycle_timeout. The envelope itself uses a child task so a late
-# cancel harvests a swallowed-CancelledError partial instead of cancelling
-# the server loop. Harvest is reserved *inside* the envelope (covers leftover
-# assembly plus scheduled HTTP aclose) so the wait never exceeds 30s.
+# already returned a (possibly partial) CollectionReport.
+#
+# Owner-Windows `scan_cycle_timeout after 30s` is the *full scheduled runner*
+# (leftover collect + HTTP aclose + persist/auto-capture) inside one wait.
+# Python 3.12 `asyncio.wait_for(coro)` uses `timeouts.timeout()` and awaits
+# the coroutine on the current task. If that coroutine catches CancelledError
+# and returns, wait_for returns the value — leftover assembly is not by
+# itself TimeoutError. Two overrun shapes:
+# 1. Timeout fires *during* persist/aclose after a timely leftover → TimeoutError.
+# 2. Leftover swallows cancel, then persist still runs and stretches past the
+#    envelope without TimeoutError.
+#
+# Persist therefore stays *outside* `run_cycle`. Collection waits on a child
+# task via asyncio.wait (not wait_for) so envelope expiry cancels the child
+# rather than the scheduler tick, and leftover + aclose finish inside harvest.
 SCAN_CYCLE_RETURN_GRACE_SECONDS = 5.0
 SCAN_CYCLE_PARTIAL_HARVEST_SECONDS = 0.8
 
@@ -60,6 +71,8 @@ class LaneRefreshStatus(BaseModel):
     not_evaluated_count: int = 0
     last_error: str | None = None
     last_diagnostics: dict[str, Any] | None = None
+    last_persist_error: str | None = None
+    persist_ok: bool | None = None
     degraded: bool = False
     resume_cursor: str | None = None
     operator_summary: str | None = None
@@ -468,6 +481,8 @@ class LiveRefreshCoordinator:
                             "fixture_count": hot_count,
                             "degraded": degraded,
                             "last_error": None,
+                            "last_persist_error": None,
+                            "persist_ok": None,
                             "last_diagnostics": _lane_diagnostics(report),
                             "next_due_at": self._next_hot_due,
                             "operator_summary": _hot_operator_summary(
@@ -517,6 +532,58 @@ class LiveRefreshCoordinator:
         self._hot_in_progress = False
         self._universe_in_progress = False
 
+    def record_persist_outcome(
+        self,
+        *,
+        ok: bool,
+        error: str | None,
+        duration_ms: int,
+        scan_lane: ScanLane | str | None = None,
+    ) -> None:
+        """Record scheduled persist/auto-capture after the scan envelope.
+
+        Scanner timing (`last_error`, `last_duration_ms`) stays as the
+        collection result. Persist failure is a separate honesty field.
+        """
+
+        lane = _coerce_lane(scan_lane)
+        persist_stage = {
+            "calls": 1,
+            "elapsed_ms": max(0, int(duration_ms)),
+            "timeouts": 0,
+            "cancels": 0,
+            "ok": ok,
+            "error": error,
+        }
+        current = self.status.hot if lane is ScanLane.HOT else self.status.universe
+        diagnostics = dict(current.last_diagnostics or {})
+        stages = dict(diagnostics.get("stages") or {})
+        stages["persistence"] = persist_stage
+        diagnostics["stages"] = stages
+        summary = current.operator_summary or ""
+        if not ok and "persist/auto-capture failed" not in summary:
+            summary = f"{summary} · persist/auto-capture failed".strip(" ·")
+        updated = current.model_copy(
+            update={
+                "last_diagnostics": diagnostics,
+                "operator_summary": summary or None,
+                "last_persist_error": None if ok else error,
+                "persist_ok": ok,
+                "degraded": current.degraded or (not ok),
+            }
+        )
+        if lane is ScanLane.HOT:
+            self.status = self.status.model_copy(update={"hot": updated})
+        else:
+            self.status = self.status.model_copy(update={"universe": updated})
+        self.status = self.status.model_copy(
+            update={
+                "operator_summary": _combined_operator_summary(
+                    self.status.hot, self.status.universe, self.status.universe.fixture_count
+                )
+            }
+        )
+
     def _record_universe_progress(
         self,
         report: CollectionReport,
@@ -556,6 +623,8 @@ class LiveRefreshCoordinator:
                         "fixture_count": universe_count,
                         "degraded": degraded,
                         "last_error": None,
+                        "last_persist_error": None,
+                        "persist_ok": None,
                         "last_diagnostics": _lane_diagnostics(report),
                         "resume_cursor": self._universe_cursor,
                         "next_due_at": self._next_universe_due,
@@ -630,6 +699,8 @@ class LiveRefreshCoordinator:
                             "cycle_in_progress": True,
                             "last_started_at": started,
                             "last_error": None,
+                            "last_persist_error": None,
+                            "persist_ok": None,
                         }
                     ),
                 }
@@ -644,6 +715,8 @@ class LiveRefreshCoordinator:
                         "cycle_in_progress": True,
                         "last_started_at": started,
                         "last_error": None,
+                        "last_persist_error": None,
+                        "persist_ok": None,
                     }
                 ),
             }
@@ -789,14 +862,13 @@ def _collection_task_result(task: asyncio.Task[Any]) -> CollectionReport:
 
 
 async def _await_collection_runner(runner, timeout: float) -> CollectionReport:
-    """Wait for a collection runner on a child task.
+    """Wait for collection/aclose on a child task; persist stays outside this wait.
 
-    asyncio.wait_for() cancels the *current* task (the server loop / request)
-    when the envelope expires. HOT leftover assembly swallows CancelledError
-    and returns a partial report; converting that into scan_cycle_timeout
-    is the owner-Windows 30s last_error. A child task lets us harvest the
-    partial instead of aborting the scheduler. Cancel is issued before the
-    hard envelope so leftover + aclose still fit inside timeout.
+    `asyncio.wait_for(coro)` is not used here: a timeout context would cancel
+    the scheduler tick, and a swallowed leftover is not TimeoutError. Persist
+    after a timely leftover *inside* that wait is the envelope overrun. This
+    helper cancels only the child and harvests leftover + aclose inside
+    `timeout` so the coordinator envelope stays ≤30s for HOT.
     """
 
     task = asyncio.create_task(runner())
@@ -824,18 +896,44 @@ def _lane_diagnostics(report: CollectionReport) -> dict[str, Any]:
     payload.setdefault("soft_deadline_reached", False)
     payload.setdefault("cancelled", False)
     payload.setdefault("provider_cancels", 0)
+    payload.setdefault("cancel_count", payload.get("provider_cancels", 0))
     payload.setdefault("inflight_orphaned", 0)
+    payload.setdefault("inflight_live", 0)
     payload.setdefault("provider_calls", 0)
     leftover_n = sum(
         1
         for item in report.discovered_fixtures
         if item.market_evaluation_state == "not_evaluated_scan_deadline"
     )
+    evaluated_n = sum(
+        1
+        for item in report.discovered_fixtures
+        if item.market_evaluation_state == "evaluated"
+    )
+    payload.setdefault("evaluated_count", evaluated_n)
+    payload.setdefault("not_evaluated_count", leftover_n)
+    payload.setdefault("timeout_count", 0)
     payload["partial"] = bool(
         leftover_n
         or payload.get("soft_deadline_reached")
         or payload.get("cancelled")
     )
+    providers = dict(payload.get("providers") or {})
+    for name in DIAGNOSTIC_PROVIDERS:
+        providers.setdefault(name, {"calls": 0, "elapsed_ms": 0, "timeouts": 0, "cancels": 0})
+    payload["providers"] = providers
+    stages = dict(payload.get("stages") or {})
+    for name in DIAGNOSTIC_STAGES:
+        if name == "persistence":
+            stages.setdefault(
+                name,
+                {"calls": 0, "elapsed_ms": 0, "timeouts": 0, "cancels": 0, "ok": None, "error": None},
+            )
+        else:
+            stages.setdefault(
+                name, {"calls": 0, "elapsed_ms": 0, "timeouts": 0, "cancels": 0}
+            )
+    payload["stages"] = stages
     return payload
 
 

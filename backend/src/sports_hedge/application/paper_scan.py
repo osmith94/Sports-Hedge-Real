@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from time import monotonic
 
 from sports_hedge.application.complete_set import (
     SOLVER_MODEL_SIMPLE,
@@ -92,6 +93,27 @@ class PaperScanService:
         self.cost_resolver = cost_resolver
         self.liquidity = liquidity
         self.open_trades = open_trades or []
+        self.last_scan_phase_ms: dict[str, int] = {
+            "mapping_equivalence": 0,
+            "fees_fx_risk": 0,
+            "solver_allocation": 0,
+        }
+
+    def _stamp_scan_phases(
+        self,
+        *,
+        mapping_ms: int,
+        fee_started: float,
+        solver_started: float | None = None,
+    ) -> None:
+        now = monotonic()
+        self.last_scan_phase_ms = {
+            "mapping_equivalence": max(0, mapping_ms),
+            "fees_fx_risk": max(0, int(((solver_started or now) - fee_started) * 1000)),
+            "solver_allocation": (
+                0 if solver_started is None else max(0, int((now - solver_started) * 1000))
+            ),
+        }
 
     def record_observation(self, observation: VenueMarketObservation) -> int:
         event_id = canonical_source_event_id(observation.market.event)
@@ -124,7 +146,11 @@ class PaperScanService:
         if not 0 <= minimum_mapping_confidence <= 1:
             raise ValueError("minimum_mapping_confidence must be between 0 and 1")
 
+        map_started = monotonic()
         match = self.market_matcher.match(left.market, right.market)
+        mapping_ms = max(0, int((monotonic() - map_started) * 1000))
+        fee_started = monotonic()
+        solver_started: float | None = None
         fees = list(fee_snapshots or [])
         rejections: list[str] = []
         assumption_labels: list[str] = []
@@ -172,6 +198,7 @@ class PaperScanService:
 
         if not match.matched:
             recorded = self.record_observation(left) + self.record_observation(right)
+            self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
                 snapshots_recorded=recorded,
@@ -211,6 +238,7 @@ class PaperScanService:
             ):
                 ineligible = scan_ineligibility_reason(right.market)
             rejections.append(ineligible)
+            self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
                 canonical_event_id=event_id,
@@ -289,6 +317,7 @@ class PaperScanService:
             for reason in rejections
         )
         if missing_fees or missing_fx or cost_clock_blocked:
+            self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
                 canonical_event_id=event_id,
@@ -307,6 +336,7 @@ class PaperScanService:
                 solver_model=solver_model,
             )
 
+        solver_started = monotonic()
         sources: list[DepthQuoteSource] = []
         configured_spread = Decimal(self.settings.fx_spread_bps)
         configured_fx_slip = Decimal("0")
@@ -477,6 +507,11 @@ class PaperScanService:
                 except FillPlanMappingError as exc:
                     alloc_reasons.append(f"allocation_failed:{exc.reason}")
         rejections.extend(alloc_reasons)
+        self._stamp_scan_phases(
+            mapping_ms=mapping_ms,
+            fee_started=fee_started,
+            solver_started=solver_started,
+        )
         return draft.model_copy(
             update={
                 "eligible_for_paper_simulation": not rejections,

@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 
 from sports_hedge.application.collector import (
+    DIAGNOSTIC_PROVIDERS,
+    DIAGNOSTIC_STAGES,
     CollectionReport,
     DiscoveredFixture,
     MarketEvaluationState,
@@ -21,13 +23,15 @@ from sports_hedge.application.live_refresh import (
     SCAN_CYCLE_RETURN_GRACE_SECONDS,
     ScanCycleTimeout,
 )
+from sports_hedge.application.paper_operations import PaperOperationsService
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
-from sports_hedge.paper.models import FxRateSnapshot
+from sports_hedge.matching.markets import MarketMatchResult
+from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from test_dual_cadence_scheduler import NOW, FakeClock, _fixture, _report
 from test_read_only_collector import FakeMatchbook, FakePolymarket
 from venue_cost_helpers import matchbook_polymarket_costs
@@ -47,15 +51,34 @@ class SlowCancellableMarketsPolymarket(FakePolymarket):
         return []
 
 
-class StickyShortPolymarket(FakePolymarket):
+class CloseTerminatedPolymarket(FakePolymarket):
+    """Ignores CancelledError until aclose(), matching a stuck HTTP client."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._closed = asyncio.Event()
+        self.live_calls = 0
+
+    def reopen(self) -> None:
+        self._closed = asyncio.Event()
+
     async def list_markets(self, event_id: int | str, **filters: Any) -> list[dict[str, Any]]:
         del event_id, filters
+        self.live_calls += 1
         try:
-            await asyncio.sleep(3600)
-        except asyncio.CancelledError:
-            await asyncio.sleep(0.02)
-            raise
-        return []
+            while not self._closed.is_set():
+                try:
+                    await asyncio.wait_for(self._closed.wait(), timeout=0.05)
+                except TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    continue
+            return []
+        finally:
+            self.live_calls -= 1
+
+    async def aclose(self) -> None:
+        self._closed.set()
 
 
 def _hot_leftover_report(*, cancelled: bool = True) -> CollectionReport:
@@ -144,7 +167,7 @@ async def test_hot_uncooperative_books_return_partial_before_envelope() -> None:
     repository = SqliteMarketIntelligenceRepository()
     collector = ReadOnlyCrossVenueCollector(
         matchbook=SlowCancellableMarketsMatchbook(),
-        polymarket=StickyShortPolymarket(),
+        polymarket=CloseTerminatedPolymarket(),
         paper_scan=PaperScanService(MarketIntelligenceService(repository)),
         venue_timeout_seconds=0.2,
         provider_call_timeout_seconds=0.2,
@@ -154,13 +177,16 @@ async def test_hot_uncooperative_books_return_partial_before_envelope() -> None:
     coordinator.reset()
     try:
         async def runner() -> CollectionReport:
-            return await collector.collect_and_scan(
-                venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
-                fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
-                maximum_execution_risk=100,
-                cycle_timeout_seconds=cycle,
-                scan_lane=ScanLane.HOT.value,
-            )
+            try:
+                return await collector.collect_and_scan(
+                    venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+                    fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
+                    maximum_execution_risk=100,
+                    cycle_timeout_seconds=cycle,
+                    scan_lane=ScanLane.HOT.value,
+                )
+            finally:
+                await collector.polymarket.aclose()
 
         started = monotonic()
         report = await coordinator.run_cycle(
@@ -182,8 +208,12 @@ async def test_hot_uncooperative_books_return_partial_before_envelope() -> None:
         assert leftovers or report.scan_diagnostics.get("soft_deadline_reached")
         assert report.scan_diagnostics["inflight_live"] == 0
         assert report.scan_diagnostics["provider_cancels"] >= 1
+        assert report.scan_diagnostics["cancel_count"] >= 1
+        assert report.scan_diagnostics["inflight_orphaned"] >= 1
+        assert report.scan_diagnostics["cancel_count"] >= report.scan_diagnostics["inflight_orphaned"]
         assert "partial" in (coordinator.status.hot.operator_summary or report.operator_summary)
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.08)
+        assert collector.polymarket.live_calls == 0
     finally:
         repository.close()
 
@@ -193,9 +223,10 @@ async def test_repeated_slow_hot_cycles_do_not_accumulate_tasks() -> None:
     cycle = 0.5
     envelope = cycle + 0.2
     repository = SqliteMarketIntelligenceRepository()
+    polymarket = CloseTerminatedPolymarket()
     collector = ReadOnlyCrossVenueCollector(
         matchbook=SlowCancellableMarketsMatchbook(),
-        polymarket=SlowCancellableMarketsPolymarket(),
+        polymarket=polymarket,
         paper_scan=PaperScanService(MarketIntelligenceService(repository)),
         venue_timeout_seconds=0.15,
         provider_call_timeout_seconds=0.15,
@@ -206,13 +237,17 @@ async def test_repeated_slow_hot_cycles_do_not_accumulate_tasks() -> None:
     live_before = {id(task) for task in asyncio.all_tasks()}
 
     async def runner() -> CollectionReport:
-        return await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
-            fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
-            maximum_execution_risk=100,
-            cycle_timeout_seconds=cycle,
-            scan_lane=ScanLane.HOT.value,
-        )
+        polymarket.reopen()
+        try:
+            return await collector.collect_and_scan(
+                venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+                fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
+                maximum_execution_risk=100,
+                cycle_timeout_seconds=cycle,
+                scan_lane=ScanLane.HOT.value,
+            )
+        finally:
+            await polymarket.aclose()
 
     try:
         for _ in range(5):
@@ -223,7 +258,10 @@ async def test_repeated_slow_hot_cycles_do_not_accumulate_tasks() -> None:
             )
             assert coordinator.status.hot.last_error is None
             assert report.scan_diagnostics["inflight_live"] == 0
-        await asyncio.sleep(0.05)
+            assert report.scan_diagnostics["cancel_count"] >= 1
+            assert report.scan_diagnostics["inflight_orphaned"] >= 1
+            await asyncio.sleep(0.08)
+            assert polymarket.live_calls == 0
         leftover = [
             task
             for task in asyncio.all_tasks()
@@ -327,8 +365,227 @@ def test_hot_envelope_defaults_remain_25s_collector_and_30s_coordinator() -> Non
     assert "asyncio.wait_for" not in inspect.getsource(LiveRefreshCoordinator.run_cycle)
     assert "create_task" in inspect.getsource(live_refresh._await_collection_runner)
     assert "_collect_report(" in inspect.getsource(paper_api.server_owned_refresh_tick)
-    persist_idx = inspect.getsource(paper_api.server_owned_refresh_tick).index(
-        "_persist_collection_report"
+    tick_src = inspect.getsource(paper_api.server_owned_refresh_tick)
+    assert tick_src.index("persist_scheduled_collection_report") > tick_src.index("run_cycle")
+
+
+@pytest.mark.asyncio
+async def test_wait_for_returns_swallowed_cancel_and_old_path_times_out_in_persist() -> None:
+    """Pre-fix: swallowed leftover is not TimeoutError; persist inside wait_for is."""
+
+    async def swallowed() -> str:
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            return "partial"
+        raise AssertionError("must be cancelled")
+
+    assert await asyncio.wait_for(swallowed(), timeout=0.1) == "partial"
+
+    phases: dict[str, Any] = {}
+
+    async def old_end_to_end_runner() -> CollectionReport:
+        started = monotonic()
+        phases["phase"] = "collect"
+        report = _hot_leftover_report(cancelled=False)
+        phases["collect_s"] = monotonic() - started
+        phases["phase"] = "persist"
+        persist_started = monotonic()
+        await asyncio.sleep(0.45)
+        phases["persist_s"] = monotonic() - persist_started
+        phases["phase"] = "aclose"
+        await asyncio.sleep(0.05)
+        phases["aclose_done"] = True
+        return report
+
+    envelope = 0.3
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(old_end_to_end_runner(), timeout=envelope)
+    assert phases["collect_s"] < envelope
+    assert phases["phase"] == "persist"
+    assert "persist_s" not in phases
+    assert phases["collect_s"] + 0.45 > envelope
+
+    leftover_phases: dict[str, Any] = {}
+
+    async def leftover_then_persist_still_runs() -> CollectionReport:
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            leftover_phases["cancelling"] = 0 if task is None else task.cancelling()
+            report = _hot_leftover_report(cancelled=True)
+        persist_started = monotonic()
+        await asyncio.sleep(0.2)
+        leftover_phases["persist_after_timeout_s"] = monotonic() - persist_started
+        return report
+
+    started = monotonic()
+    leftover_report = await asyncio.wait_for(leftover_then_persist_still_runs(), timeout=0.05)
+    leftover_elapsed = monotonic() - started
+    assert leftover_report.scan_diagnostics["cancelled"] is True
+    assert leftover_phases["cancelling"] >= 1
+    assert leftover_phases["persist_after_timeout_s"] >= 0.2
+    assert leftover_elapsed >= 0.2
+    assert leftover_elapsed > 0.05
+
+    coordinator = LiveRefreshCoordinator()
+    coordinator.reset()
+
+    async def collect_only() -> CollectionReport:
+        await asyncio.sleep(0.05)
+        return _hot_leftover_report(cancelled=False)
+
+    report = await coordinator.run_cycle(
+        collect_only, timeout_seconds=envelope, scan_lane=ScanLane.HOT
     )
-    run_idx = inspect.getsource(paper_api.server_owned_refresh_tick).index("run_cycle")
-    assert persist_idx > run_idx
+    persist_started = monotonic()
+    await asyncio.sleep(0.45)
+    persist_s = monotonic() - persist_started
+    assert persist_s >= 0.4
+    assert coordinator.status.hot.last_error is None
+    assert report.discovered_fixtures
+
+
+@pytest.mark.asyncio
+async def test_hot_diagnostics_include_provider_and_stage_attribution() -> None:
+    repository = SqliteMarketIntelligenceRepository()
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=FakeMatchbook(),
+        polymarket=FakePolymarket(),
+        paper_scan=PaperScanService(MarketIntelligenceService(repository)),
+        venue_timeout_seconds=0.4,
+        provider_call_timeout_seconds=0.4,
+        cycle_timeout_seconds=8.0,
+    )
+    try:
+        report = await collector.collect_and_scan(
+            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+            fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
+            maximum_execution_risk=100,
+            scan_lane=ScanLane.HOT.value,
+        )
+        diagnostics = report.scan_diagnostics
+        for venue in DIAGNOSTIC_PROVIDERS:
+            assert venue in diagnostics["providers"]
+            assert {"calls", "elapsed_ms", "timeouts", "cancels"} <= set(
+                diagnostics["providers"][venue]
+            )
+        for stage in DIAGNOSTIC_STAGES:
+            assert stage in diagnostics["stages"]
+            assert {"calls", "elapsed_ms", "timeouts", "cancels"} <= set(
+                diagnostics["stages"][stage]
+            )
+        assert diagnostics["providers"]["matchbook"]["calls"] >= 1
+        assert diagnostics["providers"]["polymarket"]["calls"] >= 1
+        assert diagnostics["providers"]["kalshi"]["calls"] == 0
+        assert diagnostics["stages"]["event_lookup"]["elapsed_ms"] >= 0
+        assert diagnostics["stages"]["market_discovery"]["calls"] >= 1
+        assert diagnostics["stages"]["book_depth"]["calls"] >= 0
+        assert diagnostics["stages"]["mapping_equivalence"]["calls"] >= 1
+        assert diagnostics["stages"]["fees_fx_risk"]["calls"] >= 0
+        assert diagnostics["stages"]["solver_allocation"]["calls"] >= 0
+        assert diagnostics["stages"]["current_state_finalization"]["calls"] >= 1
+        assert diagnostics["evaluated_count"] + diagnostics["not_evaluated_count"] >= 1
+        assert "timeout_count" in diagnostics
+        assert "cancel_count" in diagnostics
+    finally:
+        repository.close()
+
+
+@pytest.mark.asyncio
+async def test_cooperative_cancel_is_not_counted_as_orphan() -> None:
+    repository = SqliteMarketIntelligenceRepository()
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=SlowCancellableMarketsMatchbook(),
+        polymarket=SlowCancellableMarketsPolymarket(),
+        paper_scan=PaperScanService(MarketIntelligenceService(repository)),
+        venue_timeout_seconds=0.15,
+        provider_call_timeout_seconds=0.15,
+        cycle_timeout_seconds=0.5,
+    )
+    try:
+        report = await collector.collect_and_scan(
+            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+            fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
+            maximum_execution_risk=100,
+            cycle_timeout_seconds=0.5,
+            scan_lane=ScanLane.HOT.value,
+        )
+        assert report.scan_diagnostics["cancel_count"] >= 1
+        assert report.scan_diagnostics["inflight_orphaned"] == 0
+        assert report.scan_diagnostics["inflight_live"] == 0
+        assert report.scan_diagnostics["cancel_count"] == report.scan_diagnostics["provider_cancels"]
+    finally:
+        repository.close()
+
+
+def test_scheduled_persist_failure_is_visible_without_scan_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sports_hedge.api import paper as paper_api
+
+    coordinator = LiveRefreshCoordinator()
+    coordinator.reset()
+    decision = PaperScanDecision(
+        canonical_event_id="hot-leeds-newcastle",
+        canonical_market_id="mkt-hot-leeds-newcastle",
+        fixture_canonical_event_id="hot-leeds-newcastle",
+        market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=[]),
+        scanned_at=NOW,
+        eligible_for_paper_simulation=True,
+    )
+    report = _hot_leftover_report(cancelled=False).model_copy(
+        update={"paper_decisions": [decision]}
+    )
+    coordinator.record_report(report, scan_lane=ScanLane.HOT)
+    assert coordinator.status.hot.last_error is None
+
+    opened: list[str] = []
+    calls = {"n": 0}
+
+    def persist(report_arg: CollectionReport, **kwargs: Any) -> None:
+        del kwargs
+        calls["n"] += 1
+        for item in report_arg.paper_decisions:
+            mid = item.canonical_market_id or "unknown"
+            if mid in opened:
+                continue
+            opened.append(mid)
+            if calls["n"] == 1:
+                raise RuntimeError("audit_write_failed")
+
+    monkeypatch.setattr(paper_api, "_persist_collection_report", persist)
+    paper_api.persist_scheduled_collection_report(
+        coordinator,
+        report,
+        service=None,  # type: ignore[arg-type]
+        audit=None,  # type: ignore[arg-type]
+        watchlist=None,  # type: ignore[arg-type]
+        scan_lane=ScanLane.HOT,
+    )
+    assert coordinator.status.hot.last_error is None
+    assert coordinator.status.last_error is None
+    assert coordinator.status.hot.persist_ok is False
+    assert coordinator.status.hot.last_persist_error == "audit_write_failed"
+    assert coordinator.status.hot.degraded is True
+    assert "persist/auto-capture failed" in (coordinator.status.hot.operator_summary or "")
+    assert coordinator.status.hot.last_diagnostics is not None
+    assert coordinator.status.hot.last_diagnostics["stages"]["persistence"]["ok"] is False
+    assert opened == ["mkt-hot-leeds-newcastle"]
+
+    paper_api.persist_scheduled_collection_report(
+        coordinator,
+        report,
+        service=None,  # type: ignore[arg-type]
+        audit=None,  # type: ignore[arg-type]
+        watchlist=None,  # type: ignore[arg-type]
+        scan_lane=ScanLane.HOT,
+    )
+    assert coordinator.status.hot.last_error is None
+    assert coordinator.status.hot.persist_ok is True
+    assert coordinator.status.hot.last_persist_error is None
+    assert opened == ["mkt-hot-leeds-newcastle"]
+    assert calls["n"] == 2
+    fill_src = inspect.getsource(PaperOperationsService.simulate_fill)
+    assert "existing is not None" in fill_src
+    result_src = inspect.getsource(PaperOperationsService._result_from_existing_trade)
+    assert "idempotent existing paper trade" in result_src
