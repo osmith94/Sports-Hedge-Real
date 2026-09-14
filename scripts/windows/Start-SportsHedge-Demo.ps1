@@ -148,8 +148,8 @@ if (-not $frontendAlready) {
     )
 }
 
-Wait-HttpOk -Url $BackendHealth -Label "Sports Hedge backend"
-Wait-HttpOk -Url $FrontendHealth -Label "Sports Hedge operator console"
+Wait-HttpOk -Url $BackendHealth -Label "Sports Hedge backend" | Out-Null
+Wait-HttpOk -Url $FrontendHealth -Label "Sports Hedge operator console" | Out-Null
 
 try {
     Start-Process $DemoUrl | Out-Null

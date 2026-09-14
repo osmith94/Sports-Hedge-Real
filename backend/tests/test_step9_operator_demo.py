@@ -634,6 +634,11 @@ def test_windows_launcher_scripts_encode_paper_only_contract() -> None:
     assert "MessageBox" in start_ps1
     assert "127.0.0.1:3000/" in start_ps1
     assert "127.0.0.1:3000/demo" not in start_ps1
+    assert "Wait-HttpOk -Url $BackendHealth -Label \"Sports Hedge backend\" | Out-Null" in start_ps1
+    assert (
+        "Wait-HttpOk -Url $FrontendHealth -Label \"Sports Hedge operator console\" | Out-Null"
+        in start_ps1
+    )
     assert "command_tokens" in start_ps1
     assert "ConvertTo-Json" in start_ps1
     assert "vercel" not in start_ps1.lower()

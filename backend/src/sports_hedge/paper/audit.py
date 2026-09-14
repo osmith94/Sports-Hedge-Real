@@ -49,6 +49,13 @@ class PaperScanRecord(BaseModel):
         return self
 
 
+class PaperScanReadIssue(BaseModel):
+    """Diagnostic for a persisted audit row that cannot become a PaperScanRecord."""
+
+    record_id: str | None = None
+    reason: str
+
+
 class PaperScanSummary(BaseModel):
     since: datetime
     scan_count: int = Field(ge=0)
@@ -58,6 +65,8 @@ class PaperScanSummary(BaseModel):
     top_net_edge: Decimal | None = None
     top_guaranteed_profit_gbp: Decimal | None = None
     latest_scan_at: datetime | None = None
+    malformed_count: int = Field(default=0, ge=0)
+    malformed_issues: list[PaperScanReadIssue] = Field(default_factory=list)
 
 
 class PaperScanAuditSink(Protocol):
