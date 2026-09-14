@@ -82,6 +82,25 @@ def _legacy_scan_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def _table_columns(path: Path) -> set[str]:
+    connection = sqlite3.connect(path)
+    try:
+        return {str(row[1]) for row in connection.execute("PRAGMA table_info(paper_scan_records)")}
+    finally:
+        connection.close()
+
+
+def _index_names(path: Path) -> set[str]:
+    connection = sqlite3.connect(path)
+    try:
+        rows = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'paper_scan_records'"
+        ).fetchall()
+        return {str(row[0]) for row in rows if row[0] is not None}
+    finally:
+        connection.close()
+
+
 def test_file_backed_append_list_summary_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "paper_audit.sqlite"
     repo = SqlitePaperScanRepository(path)
@@ -228,6 +247,111 @@ def test_legacy_schema_missing_optional_columns_migrates_without_deleting(tmp_pa
     finally:
         repo.close()
     assert path.exists()
+
+
+def test_legacy_schema_missing_indexed_column_migrates_then_creates_indexes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-missing-scanned-at.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE paper_scan_records (
+            record_id TEXT PRIMARY KEY,
+            canonical_event_id TEXT NOT NULL,
+            canonical_market_id TEXT NOT NULL,
+            competition TEXT NOT NULL,
+            home_team TEXT NOT NULL,
+            away_team TEXT NOT NULL,
+            kickoff_utc TEXT NOT NULL,
+            market_family TEXT NOT NULL,
+            period TEXT NOT NULL,
+            line TEXT,
+            venues_json TEXT NOT NULL,
+            source_market_ids_json TEXT NOT NULL,
+            mapping_confidence REAL NOT NULL,
+            is_arbitrage INTEGER NOT NULL,
+            eligible_for_paper_simulation INTEGER NOT NULL,
+            gross_edge TEXT,
+            net_edge TEXT,
+            executable_stake_gbp TEXT,
+            guaranteed_profit_gbp TEXT,
+            rejection_reasons_json TEXT NOT NULL,
+            decision_json TEXT NOT NULL
+        );
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO paper_scan_records (
+            record_id, canonical_event_id, canonical_market_id, competition,
+            home_team, away_team, kickoff_utc, market_family, period, line,
+            venues_json, source_market_ids_json, mapping_confidence, is_arbitrage,
+            eligible_for_paper_simulation, gross_edge, net_edge,
+            executable_stake_gbp, guaranteed_profit_gbp, rejection_reasons_json,
+            decision_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "legacy-no-scanned-at",
+            "evt-legacy-indexed",
+            "mkt-legacy-indexed",
+            "Premier League",
+            "Arsenal",
+            "Chelsea",
+            KICKOFF.isoformat(),
+            "both_teams_to_score",
+            "full_time",
+            '["matchbook"]',
+            '["mb-legacy"]',
+            0.98,
+            1,
+            1,
+            "0.04",
+            "0.03",
+            "100",
+            "3",
+            "[]",
+            "{}",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    repo = SqlitePaperScanRepository(path)
+    try:
+        columns = _table_columns(path)
+        assert "scanned_at" in columns
+        assert "eligible_for_paper_simulation" in columns
+        assert "canonical_event_id" in columns
+        assert _index_names(path) >= {
+            "idx_paper_scan_time",
+            "idx_paper_scan_eligible_time",
+            "idx_paper_scan_event_time",
+        }
+
+        assert repo.list_scans(limit=10) == []
+        summary = repo.summary(since=SUMMARY_SINCE)
+        assert summary.scan_count == 0
+        assert summary.malformed_count == 1
+        assert summary.malformed_issues[0].record_id == "legacy-no-scanned-at"
+
+        repo.append_scan(make_record(record_id="current-after-indexed-migration"))
+        assert [row.record_id for row in repo.list_scans(limit=10)] == [
+            "current-after-indexed-migration"
+        ]
+        assert repo.summary(since=SUMMARY_SINCE).malformed_count == 1
+
+        raw = sqlite3.connect(path)
+        remaining = raw.execute(
+            "SELECT record_id FROM paper_scan_records WHERE record_id = ?",
+            ("legacy-no-scanned-at",),
+        ).fetchone()
+        raw.close()
+        assert remaining is not None
+        assert path.exists()
+    finally:
+        repo.close()
 
 
 def test_legacy_row_missing_required_column_is_surfaced_not_deleted(tmp_path: Path) -> None:

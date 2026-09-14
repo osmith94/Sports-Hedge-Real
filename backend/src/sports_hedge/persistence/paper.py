@@ -150,12 +150,6 @@ class SqlitePaperScanRepository:
         connection.executescript(
             f"""
             {_CREATE_PAPER_SCAN_RECORDS_SQL}
-            CREATE INDEX IF NOT EXISTS idx_paper_scan_time
-                ON paper_scan_records(scanned_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_paper_scan_eligible_time
-                ON paper_scan_records(eligible_for_paper_simulation, scanned_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_paper_scan_event_time
-                ON paper_scan_records(canonical_event_id, scanned_at DESC);
             CREATE TABLE IF NOT EXISTS paper_scan_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -171,6 +165,16 @@ class SqlitePaperScanRepository:
                 connection.execute(
                     f"ALTER TABLE paper_scan_records ADD COLUMN {name} {sql_type}"  # noqa: S608
                 )
+        connection.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_paper_scan_time
+                ON paper_scan_records(scanned_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_paper_scan_eligible_time
+                ON paper_scan_records(eligible_for_paper_simulation, scanned_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_paper_scan_event_time
+                ON paper_scan_records(canonical_event_id, scanned_at DESC);
+            """
+        )
         current_row = connection.execute(
             "SELECT value FROM paper_scan_meta WHERE key = 'schema_version'"
         ).fetchone()
