@@ -16,7 +16,7 @@ def fixture_detail(
     canonical_event_id: str,
     operations: PaperOperationsService = Depends(get_paper_operations_service),
 ) -> FixtureDetailReadModel:
-    """Read-only fixture drill-down from the last Matchbook-led collection."""
+    """Read-only fixture drill-down from canonical current-state."""
 
     detail = get_live_refresh_coordinator().fixture_detail(canonical_event_id)
     if detail is None:
@@ -24,11 +24,13 @@ def fixture_detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No collected fixture with that canonical event id. Run a paper collection first.",
         )
-    wanted = detail.fixture.canonical_event_id
+    identities = get_live_refresh_coordinator().fixture_identities(
+        detail.fixture.canonical_event_id
+    )
     trades = [
         trade
         for trade in [*operations.list_active_trades(), *operations.list_closed_trades()]
-        if trade.canonical_event_id == wanted
+        if trade.canonical_event_id in identities
     ]
     entries = [
         FixturePaperEntry(
@@ -46,5 +48,9 @@ def fixture_detail(
         )
         for trade in trades
     ]
-    preparable = operations.list_preparable(wanted)
+    preparable = [
+        item
+        for item in operations.list_preparable()
+        if item.canonical_event_id in identities
+    ]
     return detail.model_copy(update={"paper_entries": entries, "preparable_opportunities": preparable})

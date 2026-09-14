@@ -115,6 +115,7 @@ class PaperScanService:
         recent_volatility_bps: float = 0.0,
         open_trades: list[PaperTrade] | None = None,
         conditionally_releasable: dict | None = None,
+        fixture_canonical_event_id: str | None = None,
     ) -> PaperScanDecision:
         if minimum_net_edge < 0:
             raise ValueError("minimum_net_edge must be non-negative")
@@ -185,8 +186,10 @@ class PaperScanService:
                 quote_age_basis=quote_age_basis,
             )
 
-        event_id = canonical_matched_event_id([left.market.event, right.market.event])
-        market_id = canonical_matched_market_id(event_id, [left.market, right.market])
+        pair_event_id = canonical_matched_event_id([left.market.event, right.market.event])
+        fixture_id = (fixture_canonical_event_id or "").strip() or None
+        event_id = fixture_id or pair_event_id
+        market_id = canonical_matched_market_id(pair_event_id, [left.market, right.market])
         recorded = self._record_with_ids(left, event_id=event_id, market_id=market_id)
         recorded += self._record_with_ids(right, event_id=event_id, market_id=market_id)
 
@@ -212,6 +215,7 @@ class PaperScanService:
                 market_match=match,
                 canonical_event_id=event_id,
                 canonical_market_id=market_id,
+                fixture_canonical_event_id=fixture_id,
                 snapshots_recorded=recorded,
                 rejection_reasons=_dedupe(rejections),
                 fee_snapshots=fees,
@@ -289,6 +293,7 @@ class PaperScanService:
                 market_match=match,
                 canonical_event_id=event_id,
                 canonical_market_id=market_id,
+                fixture_canonical_event_id=fixture_id,
                 snapshots_recorded=recorded,
                 rejection_reasons=_dedupe(rejections),
                 fee_snapshots=fees,
@@ -432,6 +437,7 @@ class PaperScanService:
             market_match=match,
             canonical_event_id=event_id,
             canonical_market_id=market_id,
+            fixture_canonical_event_id=fixture_id,
             snapshots_recorded=recorded,
             depth_scan=depth_scan,
             payoff_scan=payoff_scan,

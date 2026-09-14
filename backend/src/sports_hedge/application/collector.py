@@ -46,6 +46,7 @@ from sports_hedge.fees.kalshi import resolve_kalshi_fee_metadata
 from sports_hedge.application.fixture_clusters import (
     FixtureCluster,
     cluster_canonical_event_id,
+    cluster_identity_aliases,
     cluster_venue_events,
     to_venue_event,
 )
@@ -250,6 +251,7 @@ class CollectionReport(BaseModel):
     paper_decisions: list[PaperScanDecision] = Field(default_factory=list)
     discovered_fixtures: list[DiscoveredFixture] = Field(default_factory=list)
     fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = Field(default_factory=dict)
+    fixture_identity_aliases: dict[str, str] = Field(default_factory=dict)
     issues: list[CollectorIssue] = Field(default_factory=list)
     scan_diagnostics: dict[str, Any] = Field(default_factory=dict)
 
@@ -912,6 +914,9 @@ class ReadOnlyCrossVenueCollector:
                 for item in discovered_fixtures
             ],
             fixture_markets=fixture_markets,
+            fixture_identity_aliases=_fixture_identity_aliases(
+                clusters, discovered_fixtures, decisions
+            ),
             issues=issues,
             scan_diagnostics=diagnostics,
         )
@@ -1195,7 +1200,12 @@ class ReadOnlyCrossVenueCollector:
                     if fixture.current_net_edge is None:
                         fixture.no_comparison_reason = "order_book_unavailable"
                     continue
-                stored = self.paper_scan.scan_pair(left_obs, right_obs, **scan_kwargs)
+                stored = self.paper_scan.scan_pair(
+                    left_obs,
+                    right_obs,
+                    fixture_canonical_event_id=fixture.canonical_event_id,
+                    **scan_kwargs,
+                )
                 if mb_event is not None:
                     state = matchbook_fixture_state(mb_event.raw)
                     stored = stored.model_copy(
@@ -2219,3 +2229,25 @@ def _append_deadline_leftovers(
             )
         )
         seen.add(canonical_id)
+
+
+def _fixture_identity_aliases(
+    clusters: list[FixtureCluster],
+    discovered_fixtures: list[DiscoveredFixture],
+    decisions: list[PaperScanDecision],
+) -> dict[str, str]:
+    current_ids = {item.canonical_event_id for item in discovered_fixtures}
+    aliases: dict[str, str] = {}
+    for cluster in clusters:
+        canonical_id = cluster_canonical_event_id(cluster)
+        if canonical_id not in current_ids:
+            continue
+        aliases.update(cluster_identity_aliases(cluster))
+    for decision in decisions:
+        cluster_id = (decision.fixture_canonical_event_id or "").strip()
+        decision_id = (decision.canonical_event_id or "").strip()
+        if cluster_id and cluster_id in current_ids:
+            aliases[cluster_id] = cluster_id
+            if decision_id:
+                aliases[decision_id] = cluster_id
+    return aliases

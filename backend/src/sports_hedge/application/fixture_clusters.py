@@ -4,7 +4,10 @@ from dataclasses import dataclass, field
 
 from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.events import EventMatcher
-from sports_hedge.normalization.identity import canonical_source_event_id
+from sports_hedge.normalization.identity import (
+    canonical_matched_event_id,
+    canonical_source_event_id,
+)
 
 
 @dataclass
@@ -212,3 +215,36 @@ def to_venue_event(normalized: object, venue: VenueName) -> VenueEvent:
 
 def cluster_canonical_event_id(cluster: FixtureCluster) -> str:
     return canonical_source_event_id(cluster.anchor.canonical)
+
+
+def cluster_member_events(cluster: FixtureCluster) -> list[VenueEvent]:
+    return [
+        *cluster.matchbook_events,
+        *cluster.polymarket_events,
+        *cluster.kalshi_events,
+    ]
+
+
+def cluster_identity_aliases(cluster: FixtureCluster) -> dict[str, str]:
+    """Explicit pair-level and source-id aliases for one collector-cluster fixture.
+
+    Pair paper decisions hash `canonical_matched_event_id` over the two venue
+    events in that scan. Cluster rows hash `canonical_source_event_id` of the
+    cluster anchor. Those strings are not the same when a pair is a subset of a
+    three-venue cluster. Navigation must use this map, never fixture-name fuzzy
+    matching.
+    """
+
+    canonical_id = cluster_canonical_event_id(cluster)
+    aliases = {canonical_id: canonical_id}
+    members = cluster_member_events(cluster)
+    for item in members:
+        source_id = str(item.source_event_id).strip()
+        if source_id:
+            aliases[source_id] = canonical_id
+    for index, left in enumerate(members):
+        for right in members[index + 1 :]:
+            if left.venue is right.venue:
+                continue
+            aliases[canonical_matched_event_id([left.canonical, right.canonical])] = canonical_id
+    return aliases

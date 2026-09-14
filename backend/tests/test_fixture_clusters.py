@@ -2,10 +2,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sports_hedge.application.fixture_clusters import VenueEvent, cluster_venue_events
+from sports_hedge.application.fixture_clusters import (
+    VenueEvent,
+    cluster_canonical_event_id,
+    cluster_identity_aliases,
+    cluster_venue_events,
+)
 from sports_hedge.domain.football import CanonicalEvent
 from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.events import EventMatcher
+from sports_hedge.normalization.identity import (
+    canonical_matched_event_id,
+    canonical_source_event_id,
+)
 
 
 KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
@@ -109,3 +118,31 @@ def test_different_fixtures_stay_separate() -> None:
     )
     assert len(clusters) == 2
     assert counts["polymarket_kalshi"] == 2
+
+
+def test_three_venue_pair_decision_id_differs_from_cluster_id() -> None:
+    matchbook = [_event(VenueName.MATCHBOOK, "mb-leeds")]
+    polymarket = [_event(VenueName.POLYMARKET, "pm-leeds")]
+    kalshi = [_event(VenueName.KALSHI, "k-leeds")]
+    clusters, _counts = cluster_venue_events(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=EventMatcher(),
+        max_event_pairs=25,
+    )
+    assert len(clusters) == 1
+    cluster = clusters[0]
+    cluster_id = cluster_canonical_event_id(cluster)
+    pair_id = canonical_matched_event_id(
+        [matchbook[0].canonical, polymarket[0].canonical]
+    )
+    assert cluster_id == canonical_source_event_id(matchbook[0].canonical)
+    assert pair_id != cluster_id
+    aliases = cluster_identity_aliases(cluster)
+    assert aliases[pair_id] == cluster_id
+    assert aliases[canonical_matched_event_id([matchbook[0].canonical, kalshi[0].canonical])] == cluster_id
+    assert aliases[canonical_matched_event_id([polymarket[0].canonical, kalshi[0].canonical])] == cluster_id
+    assert aliases["mb-leeds"] == cluster_id
+    assert "Leeds United" not in aliases
+
