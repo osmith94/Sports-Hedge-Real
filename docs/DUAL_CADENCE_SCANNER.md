@@ -1,31 +1,31 @@
 # Dual-cadence scanner — architecture and implementation plan
 
 **Issue:** #158
-**Status:** Design only. Stop for architect review. Do not implement, do not merge to `main`, do not modify #131, do not land commits on the #118 child until that timeout correction is accepted.
-**Date:** 14 September 2026
+**Status:** Architect direction approved (review `5196716600`). Design only. Do not implement scanner/coordinator code yet. Do not merge to `main`. Do not modify #131. Do not land on the #118 child until that timeout correction has owner-Windows acceptance.
+**Date:** 14 September 2026 (revised after architect review)
 
 This is a scanner/scheduler/read-model change. It does not add venue write, place, cancel, or sign paths. Phase 1 remains `SPORTS_HEDGE_MODE=paper` / `SPORTS_HEDGE_EXECUTION_ENABLED=false`.
 
 ## 1. Implementation base and stacking
 
-Inspected 14 September 2026:
+Inspected 14 September 2026; decisions locked by architect review `5196716600`.
 
 | Object | Ref | Role |
 | --- | --- | --- |
 | #131 | `cursor/paper-demo-consolidation-08fc` @ `6fc68e97bb248ea0392f569ea54764464a23b868` | Paper demo consolidation. **Do not modify.** |
-| #157 (Issue #118 child) | `cursor/scan-soft-budget-finalisation-afe6` @ `51fbd24034654bb9e05ca413c8707f1d9d4843ac` | Partial live-scan finalisation before the 50s hard timeout. **Proposed implementation base.** |
-| This document | stacked *on* #157 conceptually; this PR is docs-only | Dual-cadence plan |
+| #157 (Issue #118 child) | `cursor/scan-soft-budget-finalisation-afe6` @ `51fbd24034654bb9e05ca413c8707f1d9d4843ac` | Partial live-scan finalisation before the 50s hard timeout. **Implementation base. Prerequisite.** |
+| This document | docs-only, stacked on #157 | Dual-cadence plan with accepted decisions encoded |
 
 #157 is available and already contains #131 head `6fc68e97`. It is the correct base:
 
-- 45s collector soft budget, 4s leftover-assembly reserve, 5s coordinator grace.
+- 45s collector soft budget for **explicit collect**, 4s leftover-assembly reserve, 5s coordinator grace.
 - Provider waits bound to remaining soft budget, not the 50s hard deadline.
 - Partial `CollectionReport` with `#153` leftovers (`not_evaluated_scan_deadline`; Equivalent 0 only for actually evaluated fixtures).
 - `cycle_in_progress=false` after a truthful partial report; HTTP 200 rather than empty 504.
 
-**Do not race #157.** Dual-cadence work must reuse that leftover/budget machinery, not rewrite it. If #157 is superseded by a later accepted #118 child, rebase the implementation onto that child. Until architect review, implementation stays unstarted.
+**Do not race #157.** Dual-cadence work must reuse that leftover/budget machinery, not rewrite it. Auto-loop HOT uses a **separate 25s** collector timeout (see §5.1). Explicit `POST /paper/collect` keeps the current 45s UNIVERSE-shaped diagnostic contract until #157 is accepted.
 
-Owner-Windows credentialed re-smoke of #157 remains a gate for the timeout lane. Dual cadence must not change that 45s/50s contract for a single explicit `POST /paper/collect` until review says otherwise (see §8).
+Owner-Windows credentialed re-smoke of #157 remains a gate for the timeout lane.
 
 ## 2. Product decision
 
@@ -45,7 +45,7 @@ Read before implementation (this pass already did):
 | 03 Canonical equivalence | One identity store. No fuzzy joins across lanes. |
 | 04 Arbitrage operations | Near ≠ triggered. Qualifying arbs from either lane surface. Stale/partial states stay visible. |
 | 09 Capital / priority | No change to native pools; priority is scan scheduling only. |
-| 11 UI / data honesty | Distinct Fast scan vs Full sweep. Stale rows must not look current. Empty stays empty. |
+| 11 UI / data honesty | Distinct Fast scan vs Full sweep. Stale rows must not look current. Empty stays empty. Unknown in-play is not labelled live. |
 | 12 Agent review | This document + PR template. |
 | 14 Event-driven dislocation | Fast lane is the Phase 1 realisation of “increase snapshot frequency for affected/urgent events within rate limits.” Burst scheduler stays a later overlay, not this PR. |
 | 15 Fees / FX | Both lanes run the same fail-closed economics. No invented costs. |
@@ -78,7 +78,7 @@ Each cycle, independently of fixture urgency:
 4. Leftovers appended as `market_evaluation_state=not_evaluated_scan_deadline`.
 5. Persist every `paper_decision` into audit + watchlist.
 
-Cluster order today is `venue_count` descending (`fixture_clusters.py`). There is **no** kickoff / in-play / opportunity ranking in the live collector. The dislocation burst scheduler (`arbitrage/dislocations/scheduler.py`) is a separate ranking utility and is not wired into `collect_and_scan`.
+Cluster order today is `venue_count` descending (`fixture_clusters.py`). There is **no** kickoff / in-play / opportunity ranking in the live collector. The dislocation burst scheduler (`arbitrage/dislocations/scheduler.py`) is a separate ranking utility and is **not** wired into `collect_and_scan`. v1 must not couple it in.
 
 In-play truth is Matchbook-only (`matchbook_fixture_state`): `in_running` from payload flags; live scores only when both numeric scores are present. Missing in-play is `None`, never inferred from prices.
 
@@ -118,88 +118,151 @@ Fixture drill-down (`fixture_detail`) reads **only** `_last_report`. A HOT-only 
 
 On owner-Windows, a 60-fixture universe can consume the entire 45s budget (#118 / #157). Distant weekend cards and the 15:00 in-play window compete equally. Tenet 14 requires prioritisation under high-liquidity concurrency. The current seam for that prioritisation is missing in the live collector.
 
+A 45s HOT collector budget would also fail the 30s HOT cadence: one slow HOT cycle would miss the next due. That is correction **A** below.
+
 ## 5. Target architecture
 
 ```text
-                    ┌─────────────────────────────────────────┐
-                    │     LiveRefreshCoordinator (one)        │
-                    │  HOT due?  ──preempt──►  pause UNIVERSE │
-                    │  UNIVERSE due?  (never starve HOT)      │
-                    └────────────┬──────────────┬─────────────┘
-                                 │              │
-                    Lane A HOT   │              │  Lane B UNIVERSE
-                    30s cadence  │              │  180s cadence
-                    known IDs    │              │  discovery + sweep
-                                 ▼              ▼
+                    ┌──────────────────────────────────────────────┐
+                    │      LiveRefreshCoordinator (one)            │
+                    │  HOT due every 30s, timeout 25s, no overlap  │
+                    │  UNIVERSE generation due 180s / budget 150s  │
+                    │  each UNIVERSE run = chunk until             │
+                    │    next_hot_due - safety_margin              │
+                    └────────────┬─────────────────┬───────────────┘
+                                 │                 │
+                    Lane A HOT   │                 │  Lane B UNIVERSE
+                    known IDs    │                 │  discovery + resume cursor
+                                 ▼                 ▼
                     ReadOnlyCrossVenueCollector.collect_and_scan
                     (scan_lane, identity_scope, cycle_timeout,
                      leftover/budget rules from #157 unchanged)
                                  │
                                  ▼
-                    CanonicalFixtureState (one store)
+                    CanonicalFixtureState (process memory, v1)
                     key = canonical_event_id / canonical_market_id
                                  │
               ┌──────────────────┼──────────────────┐
               ▼                  ▼                  ▼
         Tracked board      Near / Triggered    Operator status
         current-state      executable          Fast scan ≠ Full sweep
-        merge + TTL        freshness 1s        + per-fixture last_scanned
+        merge + TTL        freshness ~1s       + per-fixture last_scanned
 ```
 
 ### 5.1 Lane A — HOT / fast loop
 
-| Parameter | Initial default |
+| Parameter | Accepted default |
 | --- | --- |
-| Cadence | 30 seconds (`paper_live_refresh_hot_interval_seconds`) |
-| Soft budget | 45 seconds (reuse `paper_scan_cycle_timeout_seconds` + #157 4s reserve + 5s grace) |
-| Cohort | (a) fixtures with **truthful** provider in-play (`in_running is True` from Matchbook state), plus (b) fixtures with `kickoff_utc` in `(now, now + 60 minutes]` |
-| In-play labelling | If provider in-play truth is unavailable, kickoff proximity may keep the fixture in HOT, but `in_running` / live-score fields stay unset/false. Do not label it live. |
+| Cadence | 30 seconds (`paper_live_refresh_hot_interval_seconds`). Wall-clock from last HOT **due** (not “sleep 30s after a 25s run”). |
+| Collector timeout | **25 seconds** (`paper_scan_hot_cycle_timeout_seconds`). Separate from explicit-collect 45s. |
+| Envelope | #157 leftover reserve (4s, from the 25s) + coordinator grace (5s) ⇒ worst-case end-to-end **~30s**. Collector cluster work ≤ 21s. |
+| Self-overlap | **Forbidden.** Do not start a second HOT while one is in progress. If a cycle hits the envelope, skip the missed slot and run the next due after return. |
+| Cohort | (a) truthful provider in-play (`in_running is True`); (b) `kickoff_utc` in `(now, now + 60 minutes]`; (c) kickoff-passed + unknown in-play **only while** `(now - kickoff_utc) ≤ 3h` (§5.4). |
+| In-play labelling | `in_running is True` is the only live label. Kickoff proximity / post-kickoff unknown may keep HOT **membership** but must not set `in_running` or live scores. |
 | Identity source | Canonical store (already-known IDs). Prefer `list_markets` / books for those events. Do **not** rediscover the whole world every 30s. |
-| Priority inside the lane | 1. truthful in-play 2. nearest kickoff 3. strongest current opportunity state (TRIGGERED / NEAR / unmatched last) |
-| Output | Refresh executable market/book economics needed for qualification: prices, depth, fees/FX/risk/survivability as already modelled. Bound and return partial truthful state (#157). |
-| Radar TTL | 90s (2× cadence + 30s slack). After TTL with no HOT refresh, the fixture is no longer HOT-current. |
+| Priority inside the lane | Simple v1 key only (§5.5). Do **not** call `arbitrage/dislocations/scheduler.py`. |
+| Output | Refresh executable market/book economics needed for qualification. Bound and return partial truthful state (#157 leftover rules). |
+| Radar TTL | **90s**. Radar-current only. Executable quote freshness stays ~1s fail-closed. |
 
 HOT may include a fixture that UNIVERSE has not fully evaluated yet if kickoff/in-play membership is known from inventory.
 
+Normal hot cohorts should finish well under 25s. The 25s timeout exists so a slow HOT still finishes or aborts inside the 30s cadence instead of stealing the next slot.
+
 ### 5.2 Lane B — UNIVERSE / full sweep
 
-| Parameter | Initial default |
+| Parameter | Accepted default |
 | --- | --- |
-| Cadence | 180 seconds (`paper_live_refresh_universe_interval_seconds`) |
-| Soft budget | 150 seconds (new `paper_scan_universe_cycle_timeout_seconds`, ge 45, le 180). Still leftover-safe with #157 reserve/grace. Architect may pick 120–180; must stay bounded. |
+| Generation cadence | 180 seconds (`paper_live_refresh_universe_interval_seconds`). 30s headroom inside this window is for HOT, not extra UNIVERSE work. |
+| Generation work budget | **150 seconds** (`paper_scan_universe_generation_budget_seconds`). Accumulated collector time across chunks in one generation. **Not** one continuous 150s `collect_and_scan`. |
+| Per-run chunk | Bound by `min(remaining_generation_budget, next_hot_due - now - safety_margin)`. Persist cursor, yield, let HOT run, resume. |
+| Safety margin | `paper_universe_hot_yield_safety_margin_seconds` default **2s**. Chunk wall time must also leave #157 coordinator grace inside that bound (§5.2.1). |
 | Cohort | Full currently captured/in-scope universe, including T+6d. |
 | Purpose | Discover new fixtures/markets; keep distant fixtures on radar; detect initial cross-venue mispricing; promote into HOT as kickoff approaches. |
-| Progress | Resumable cursor (`universe_cursor_canonical_event_id` + generation). Incomplete sweep retains evaluated work and marks the remainder `not_evaluated_scan_deadline`. Next sweep continues; it does not discard completed work from this generation. |
-| Preemption | Between clusters (and at leftover assembly start), if HOT is due or running, UNIVERSE **yields**. Partial report is recorded as a UNIVERSE generation progress snapshot, not as a replacement of HOT state. |
-| Radar TTL | 360s (2× cadence). Distant fixtures remain current-state until TTL or a newer valid observation. |
+| Progress | Resumable cursor (`universe_cursor_canonical_event_id` + generation id). Incomplete chunk retains evaluated work; remainder `not_evaluated_scan_deadline` for **this chunk**, without clobbering prior valid evaluations. |
+| Radar TTL | **360s**. Radar-current only. |
 
-UNIVERSE must never starve HOT. If a sweep cannot finish inside one budget, that is expected: leftover + resume.
+UNIVERSE must never starve HOT. A generation that cannot finish in one 180s window continues via cursor until evaluated or the 150s work budget is consumed; it does not start a second overlapping generation.
+
+### 5.2.1 UNIVERSE chunk wall-clock
+
+Each scheduler tick that is not a HOT run:
+
+```text
+remaining_generation = generation_budget - generation_work_used          # 150s cap
+until_hot = next_hot_due - now - safety_margin                          # default 2s
+chunk_wall = min(remaining_generation, until_hot)
+
+if chunk_wall < min_chunk:          # cannot fit 5s grace + 4s reserve + ≥1 provider wait
+    skip UNIVERSE this slot; wait for HOT
+
+collector_timeout = chunk_wall - SCAN_CYCLE_RETURN_GRACE_SECONDS        # 5s
+# #157 reserve is taken from collector_timeout (min(4s, 20% of collector_timeout))
+run collect_and_scan(scan_lane=universe, cycle_timeout=collector_timeout, resume_cursor=…)
+persist cursor + generation_work_used += actual_duration
+yield to HOT
+```
+
+`min_chunk` initial default: **6s** (5s grace + leftover-safe remainder). If the next HOT is closer than that, UNIVERSE does not start.
+
+Do not pass `cycle_timeout_seconds=150` into a single collector call on the auto-loop.
 
 ### 5.3 Shared-state rules
 
 1. **One canonical identity store.** Both lanes upsert the same `canonical_event_id` / `canonical_market_id` (existing `canonical_source_event_id` / `canonical_matched_market_id` / `watch:{canonical_market_id}`). No second ID system, no fuzzy join between lanes.
-2. **HOT preempts UNIVERSE.** UNIVERSE must not monopolise provider concurrency, collector inflight tasks, or coordinator state when HOT is due.
+2. **HOT preempts UNIVERSE.** UNIVERSE must not monopolise provider concurrency, collector inflight tasks, or coordinator state when HOT is due. Chunks exist so preemption is the normal path, not an emergency cancel of a 150s job.
 3. **Avoid duplicate calls.** UNIVERSE discovery maintains inventory. HOT refreshes known hot IDs. HOT may do a tiny identity repair (`list_events` for a missing kickoff/in-play flag) but not full pagination.
-4. **Promote / demote automatically.** A future fixture becomes HOT when `now >= kickoff - 60m` or truthful `in_running`. After completion/expiry (provider status, or kickoff + configured post-match horizon using existing fixture_status rules), it leaves HOT. Do not invent “completed” from missing data.
-5. **Qualifying arbs from either lane surface immediately.** Persist watchlist observations during the producing cycle, same as today. Do not buffer UNIVERSE TRIGGERED until the next HOT tick.
+4. **Promote / demote automatically.** See §5.4. Do not invent “completed” or “live” from missing data or elapsed time alone.
+5. **Qualifying arbs from either lane surface immediately.** Persist watchlist observations during the producing cycle (including a UNIVERSE chunk). Do not buffer UNIVERSE TRIGGERED until the next HOT tick.
 6. **Preserve** settlement equivalence, fees/FX/depth/risk fail-closed, paper-only venues, append-only audit.
+7. **v1 store is process memory.** Restart: Tracked empty until a collection completes (same honesty as today). **UNIVERSE generation 0 is due immediately** on startup — do not wait 180s. SQLite fixture-inventory persistence is out of scope.
 
 ### 5.4 Promotion / demotion function
 
 Pure, clock-injected, deterministic:
 
 ```text
-classify_scan_lane(fixture, now, *, hot_horizon=60m) -> HOT | UNIVERSE | DROP
+classify_scan_lane(
+    fixture,
+    now,
+    *,
+    hot_horizon=60m,
+    post_kickoff_unknown_horizon=3h,
+) -> HOT | UNIVERSE | DROP
 
-DROP when provider status is completed/settled/void/expired (explicit only)
-HOT  when in_running is True
-     or (kickoff_utc - now) in (0, hot_horizon]
-     or (in_running is not True and kickoff_utc <= now and not DROP)
-        # kickoff-passed, in-play unknown: keep HOT by proximity, do not label live
-UNIVERSE otherwise (including T-6d, T-4h)
+DROP when provider status is completed/settled/void/expired (explicit payload only)
+     NEVER DROP solely because time has passed
+
+HOT  when in_running is True                         # only live label
+     or 0 < (kickoff_utc - now) <= hot_horizon       # pre-kickoff
+     or (
+          in_running is not True
+          and kickoff_utc <= now
+          and (now - kickoff_utc) <= post_kickoff_unknown_horizon
+          and not DROP
+        )
+        # kickoff-passed, in-play unknown: HOT membership, no live label
+
+UNIVERSE otherwise
+     including T-6d, T-4h, and kickoff-passed + unknown in-play after 3h
+     (still not labelled completed or live)
 ```
 
-`in_running is True` is the only live label. Kickoff-passed with `in_running is None` is HOT-by-proximity, `in_running` remains null on the read model.
+`in_running is True` is the only live label. After the 3h unknown window the fixture **leaves HOT scheduling** and is UNIVERSE/radar until a provider says in-running (returns to HOT) or explicit completed (DROP). Elapsed time must not write `fixture_status=completed` or `in_running=true`.
+
+### 5.5 HOT sort key (v1, required)
+
+Simple, stable, no burst-module import:
+
+```text
+(
+  0 if in_running is True else 1,   # truthful in-play first
+  kickoff_utc,                      # nearest kickoff next
+  -opportunity_rank,                # TRIGGERED > NEAR > matched > unmatched
+  canonical_event_id,               # tie-break
+)
+```
+
+Do not couple `arbitrage/dislocations/scheduler.py` into this change.
 
 ## 6. Tracked contract change (required)
 
@@ -217,12 +280,12 @@ For each `canonical_market_id` (opportunity id `watch:{id}`):
 
 | Lane of the latest **valid** observation | Membership rule |
 | --- | --- |
-| HOT | Show the latest HOT observation while `now < last_scanned_at + hot_ttl` (default 90s). If TTL expires with no refresh, drop from Tracked (fail closed). History/activity remain. |
-| UNIVERSE | Show the latest valid UNIVERSE observation while `now < last_scanned_at + universe_ttl` (default 360s) **and** the fixture is not currently HOT. When the fixture is HOT, HOT observation wins; do not display a older UNIVERSE book as if it were the live quote. |
+| HOT | Show the latest HOT observation while `now < last_scanned_at + hot_ttl` (**90s**). If TTL expires with no refresh, drop from Tracked (fail closed). History/activity remain. |
+| UNIVERSE | Show the latest valid UNIVERSE observation while `now < last_scanned_at + universe_ttl` (**360s**) **and** the fixture is not currently HOT. When the fixture is HOT, HOT observation wins; do not display an older UNIVERSE book as if it were the live quote. |
 | Either lane, TRIGGERED / qualifying | Persist immediately. Tracked includes it if the radar TTL for **that observation’s lane** still holds. `/near` and `/triggered` continue to apply **executable** quote-age (`max_quote_age_ms`, default 1000) so a 90s-old UNIVERSE TRIGGERED does **not** remain an executable arb. It can remain on Tracked as radar with `freshness_class` honest. |
-| Leftover `not_evaluated` this pass | Does **not** clobber a previous valid evaluated observation for that identity. Diagnostics record unevaluated-this-pass. Equivalent 0 remains reserved for actually evaluated empty sets (#153). |
-| Expired / completed fixture | Leave Tracked. Do not carry last odds forward as current. |
-| No completed collection yet | Tracked stays `[]` (unchanged honesty). |
+| Leftover `not_evaluated` this chunk | Does **not** clobber a previous valid evaluated observation for that identity. Diagnostics record unevaluated-this-pass. Equivalent 0 remains reserved for actually evaluated empty sets (#153). |
+| Expired / completed fixture | Leave Tracked. Do not carry last odds forward as current. DROP only from explicit provider status. |
+| No completed collection yet (including fresh process) | Tracked stays `[]` (unchanged honesty). |
 
 **Do not** treat an empty HOT cohort as “empty Tracked.” An empty HOT cycle with a live UNIVERSE generation still shows distant current-state rows.
 
@@ -237,8 +300,8 @@ scan_lane: hot | universe
 last_scanned_at
 next_due_at          # now + remaining cadence for that lane
 freshness_class:
-  executable         # passes existing max_quote_age_ms (live quote)
-  radar_current      # inside lane radar TTL, not executable-fresh
+  executable         # passes existing max_quote_age_ms (~1s live quote)
+  radar_current      # inside lane radar TTL (90s / 360s), not executable-fresh
   expired            # past TTL — must not be returned as current
 ```
 
@@ -251,14 +314,14 @@ Paper BET / 8F / priority alerts continue to require `executable`. Radar_current
 Unchanged economically:
 
 - TRIGGERED only when settlement, fees, FX, depth, risk, and **executable quote age** pass.
-- A UNIVERSE qualifying arb is written in that cycle and appears on `/triggered` immediately; the next GET after 1s wall-clock ages it out of TRIGGERED exactly as HOT does today.
-- Do not invent a 180s executable window for far-future arbs. Survivability/freshness stays fail-closed. “Surfaces immediately” means **no lane delay**, not **quotes stay live for the sweep interval**.
+- A UNIVERSE qualifying arb is written in that **chunk** and appears on `/triggered` immediately; the next GET after ~1s wall-clock ages it out of TRIGGERED exactly as HOT does today.
+- Do not invent a 180s or 360s executable window for far-future arbs. Survivability/freshness stays fail-closed. “Surfaces immediately” means **no lane delay**, not **quotes stay live for the sweep interval**.
 
 ### 6.5 Degraded / partial sweeps
 
 Replace `test_degraded_completed_refresh_shows_only_that_cohort`:
 
-- A degraded UNIVERSE sweep that evaluated `{healthy}` and leftover `{rest}` **keeps** previous valid current-state for `{rest}` if still inside universe TTL, and shows `{healthy}` from this sweep.
+- A degraded UNIVERSE **chunk** that evaluated `{healthy}` and leftover `{rest}` **keeps** previous valid current-state for `{rest}` if still inside universe TTL, and shows `{healthy}` from this chunk.
 - Venue health for that **lane** is degraded/timeout as today.
 - Leftover fixtures are listed in that lane’s `not_evaluated_count` / fixture inventory as `not_evaluated_scan_deadline` without wiping prior economics.
 
@@ -272,32 +335,23 @@ HOT cycles upsert only the fixtures they touched. They must not delete UNIVERSE 
 
 ## 7. Code seams (narrow)
 
-Implement in this order after approval. Do not start until architect review.
+Implement in this order after #157 owner-Windows acceptance **and** this design is accepted. Do not start code in this PR.
 
 | Slice | Seam | Change |
 | --- | --- | --- |
-| 0 | `#157` leftover/budget | **No functional change.** Call with per-lane `cycle_timeout_seconds`. |
-| 1 | New `application/scan_lanes.py` | Pure `classify_scan_lane`, HOT sort key, TTL helpers. Clock injected. |
-| 2 | New `application/fixture_current_state.py` | In-process canonical store (coordinator-owned). Upsert by canonical ids. Merge rules §6. Optional SQLite later; Phase 1 process memory + existing watchlist SQLite is enough if restart honesty is “Tracked empty until a collection completes” (already true). |
-| 3 | `LiveRefreshCoordinator` | Two lane schedules; `hot`/`universe` status objects; preemption event; shared provider gate; `last_report` becomes insufficient — keep it as **last completed lane report** for debug, but Tracked/inventory must not use it alone. |
-| 4 | `collect_and_scan(..., scan_lane, identity_scope)` | `identity_scope=None` → current discovery path (UNIVERSE). `identity_scope=list[canonical_event_id]` → skip full `list_events` pagination; fetch markets/books for known source ids on the inventory. Reuse cluster scan + leftover. |
-| 5 | `server_owned_refresh_tick` | Dual due-logic: if HOT due, run HOT; else if UNIVERSE due (and HOT not due), run UNIVERSE. Explicit `POST /paper/collect` stays UNIVERSE-shaped for #118 comparability (§8). |
+| 0 | `#157` leftover/budget | **No functional change to #157.** Call with per-run `cycle_timeout_seconds` (HOT 25s; UNIVERSE chunk derived from §5.2.1; explicit POST 45s). |
+| 1 | New `application/scan_lanes.py` | Pure `classify_scan_lane` (including 3h unknown bound), HOT sort key §5.5, TTL helpers. Clock injected. No dislocations import. |
+| 2 | New `application/fixture_current_state.py` | In-process canonical store (coordinator-owned). Upsert by canonical ids. Merge rules §6. **No SQLite inventory in v1.** |
+| 3 | `LiveRefreshCoordinator` | Dual due-logic; HOT 30s / 25s / no self-overlap; UNIVERSE 180s generation / 150s work / chunk-until-HOT; preemption is chunk yield; nested status; startup UNIVERSE due immediately. |
+| 4 | `collect_and_scan(..., scan_lane, identity_scope, resume_cursor)` | HOT: known IDs, skip full pagination. UNIVERSE: discovery + resume. Reuse cluster scan + leftover. |
+| 5 | `server_owned_refresh_tick` | If HOT due and not in progress → HOT. Else if UNIVERSE generation due or in-progress with remaining budget and chunk_wall ≥ min_chunk → UNIVERSE chunk. Explicit POST stays 45s UNIVERSE-shaped (§8.2). |
 | 6 | `GET /paper/watchlist/tracked` | Build cohort ids from current-state store, not `last_report.paper_decisions` only. |
-| 7 | `WatchObservation` / `NearOpportunity` / `DiscoveredFixture` | Additive: `scan_lane`, `last_scanned_at` (alias of observation time), `next_due_at`, `freshness_class`. |
-| 8 | `Settings` | See §9. Keep `paper_live_refresh_interval_seconds` as alias of HOT interval so old env files work. |
+| 7 | `WatchObservation` / `NearOpportunity` / `DiscoveredFixture` | Additive: `scan_lane`, `last_scanned_at`, `next_due_at`, `freshness_class`. |
+| 8 | `Settings` | See §9. |
 | 9 | Frontend | Fast scan / Full sweep copy on health bar + scan note. Compact. Diagnostics stay Advanced. |
 | 10 | Docs | This file + ADR 0002 + DEMO_READINESS Tracked section. |
 
-**Do not touch:** treasury, allocator, unwind, venue order contracts, Research, dislocation burst engine internals (optional later: HOT sort can call the existing ranking key; not required for v1).
-
-Suggested HOT sort without pulling in burst models:
-
-```text
-(-1 if in_running is True else 0,
-  kickoff_utc,                          # nearest first
- -opportunity_rank,                     # TRIGGERED > NEAR > matched > unmatched
-  canonical_event_id)                   # stable
-```
+**Do not touch:** treasury, allocator, unwind, venue order contracts, Research, dislocation burst engine, SQLite fixture inventory.
 
 ## 8. API / operator status
 
@@ -308,6 +362,7 @@ Additive nested objects. Keep legacy scalars as **HOT** aliases so old UI does n
 ```text
 hot:
   cadence_seconds           # 30
+  cycle_timeout_seconds     # 25
   cycle_in_progress
   last_started_at
   last_completed_at
@@ -319,8 +374,11 @@ hot:
   last_error
   degraded                  # bool
 universe:
-  cadence_seconds           # 180
-  … same shape …
+  cadence_seconds           # 180 generation
+  generation_budget_seconds # 150
+  generation_work_used_s
+  chunk_last_duration_ms
+  … same progress fields …
   fixture_count             # inventory size
   evaluated_count           # this generation
   not_evaluated_count
@@ -335,18 +393,18 @@ Operator copy (compact):
 
 ```text
 Fast scan · 12s ago · 4.1s · next 18s · 7 hot · partial (2 not evaluated)
-Full sweep · 1m ago · 41s · next 2m · 104 universe · 60 evaluated / 44 not evaluated
+Full sweep · chunk 8s · gen 41/150s · next HOT in 18s · 104 universe · 60 evaluated / 44 not evaluated
 ```
 
 Do not ship a single `Last scan` once both lanes exist.
 
 ### 8.2 `POST /paper/collect`
 
-Keep the explicit operator/Windows collect as a **UNIVERSE** (full-scope) collect with the existing 45s timeout **until #118/#157 is accepted and architect agrees to give explicit collect the larger UNIVERSE budget**.
+Keep the explicit operator/Windows collect as a **UNIVERSE-shaped** collect with the existing **45s** timeout while #157 is being accepted.
 
-Rationale: owner-Windows smoke and #157 tests assert 45s/50s, 60 fixtures, leftover truth. Dual-cadence auto-loop is what changes cadence. Changing explicit collect in the same PR would race the timeout lane.
+Rationale: owner-Windows smoke and #157 tests assert 45s/50s, 60 fixtures, leftover truth. Dual-cadence auto-loop is what changes cadence and HOT timeout. Changing explicit collect in the same implementation would race the timeout lane.
 
-Optional later: `scan_lane=hot|universe` on the request model (default `universe` for POST).
+Optional later (not v1): `scan_lane=hot|universe` on the request model (default `universe` for POST). Giving POST the 150s generation budget is a separate decision after #157 acceptance.
 
 ### 8.3 Watchlist
 
@@ -356,15 +414,20 @@ Optional later: `scan_lane=hot|universe` on the request model (default `universe
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| `paper_live_refresh_hot_interval_seconds` | 30 | ge 15, le 60 |
-| `paper_live_refresh_universe_interval_seconds` | 180 | ge 60, le 300 |
+| `paper_live_refresh_hot_interval_seconds` | 30 | ge 15, le 60. Wall-clock cadence. |
+| `paper_live_refresh_universe_interval_seconds` | 180 | Generation cadence. ge 60, le 300. |
 | `paper_live_refresh_interval_seconds` | 30 | **Alias of HOT.** Keep for env/launcher compat. |
+| `paper_scan_hot_cycle_timeout_seconds` | **25** | Auto-loop HOT collector timeout. Not the explicit-collect 45s. |
+| `paper_scan_cycle_timeout_seconds` | 45 | Explicit `POST /paper/collect` only (unchanged while #157 in flight). |
+| `paper_scan_universe_generation_budget_seconds` | **150** | Accumulated UNIVERSE work per generation. |
+| `paper_universe_hot_yield_safety_margin_seconds` | 2 | Chunk bound: `next_hot_due - now - margin`. |
 | `paper_hot_pre_kickoff_horizon_minutes` | 60 | |
-| `paper_hot_current_state_ttl_seconds` | 90 | Radar TTL |
-| `paper_universe_current_state_ttl_seconds` | 360 | Radar TTL |
-| `paper_scan_cycle_timeout_seconds` | 45 | HOT + explicit collect (unchanged) |
-| `paper_scan_universe_cycle_timeout_seconds` | 150 | Auto UNIVERSE only, after #157 accepted |
+| `paper_hot_post_kickoff_unknown_horizon_hours` | **3** | Unknown in-play leaves HOT after this; no fabricated completed/live. |
+| `paper_hot_current_state_ttl_seconds` | **90** | Radar TTL |
+| `paper_universe_current_state_ttl_seconds` | **360** | Radar TTL |
 | venue/provider timeouts | 15 / 8 | Unchanged |
+
+There is **no** `paper_scan_universe_cycle_timeout_seconds=150` on the auto-loop. Per-chunk timeout is derived (§5.2.1).
 
 Windows launcher keeps `PAPER_LIVE_REFRESH_ENABLED=true`. No new execution flags.
 
@@ -372,60 +435,65 @@ Windows launcher keeps `PAPER_LIVE_REFRESH_ENABLED=true`. No new execution flags
 
 | Risk | Why | Mitigation |
 | --- | --- | --- |
-| UNIVERSE holds `run_cycle` lock for 150s | Today one lock; HOT cannot start | Split lane execution: HOT has a high-priority gate. UNIVERSE checks `hot_due` **between clusters** and yields with a partial report. |
-| Two `collect_and_scan` overlap | `_execute_collection` builds **new** HTTP clients per cycle; overlap doubles Matchbook/PM/K QPS | Shared `ProviderGate`: max one cluster-scan inflight per venue; HOT waits ≤ one cluster then preempts. Do not start UNIVERSE `list_events` while HOT is in `list_markets`/books if the gate is busy — HOT wins. |
+| HOT 45s budget misses 30s cadence | Original proposal reused explicit-collect 45s | **25s HOT timeout** + 4s reserve + 5s grace ≈ 30s envelope. No HOT self-overlap. |
+| 150s monolithic UNIVERSE continuously preempted / starves HOT | HOT due every 30s | **Chunk** UNIVERSE to `next_hot_due - safety_margin`; persist cursor; resume after HOT. 150s is generation work, not one job. |
+| Two `collect_and_scan` overlap | New HTTP clients per cycle; doubles QPS | Shared `ProviderGate`. HOT wins. UNIVERSE is not running during HOT. |
 | HOT rediscovers universe | 30s × full Gamma/Kalshi pagination | HOT `identity_scope` from inventory; UNIVERSE owns pagination. |
 | UNIVERSE leftover wipes HOT books | `record_report` replaces `_last_report` | Stop using `_last_report` as Tracked source. Lane reports upsert the store. |
 | SQLite watchlist writers | Two lanes persist decisions | Same repository as today; serialize persist on the coordinator (append-only, short). Do not hold the provider gate during persist. |
-| `#157` cancel/uncooperative HTTP | Still required | UNIVERSE yield uses the same cancel + leftover assembly; do not block on `aclose()`. |
-| Matchbook look-ahead 168h vs HOT 60m | Discovery already returns T+7d | UNIVERSE keeps them; HOT filters membership. Do not shrink `matchbook_fixture_lookahead_hours`. |
-| Burst scheduler unused | Separate module | v1 does not require it. Optional later for in-HOT ranking. Do not run a third loop. |
+| `#157` cancel/uncooperative HTTP | Still required per chunk | Chunk yield uses the same leftover assembly; do not block on `aclose()`. |
+| Stale unresolved fixtures in HOT forever | Kickoff-passed + unknown in-play | **3h** bound; then UNIVERSE only; no fabricated completed/live. |
+| Burst scheduler unused | Separate module | **v1 must not import it.** Simple key §5.5 only. |
+| Restart empty inventory | Process memory | Tracked empty until collect; **immediate UNIVERSE bootstrap**. |
 
-Provider timeouts stay #157-bounded (`remaining soft budget`, `MIN_PROVIDER_WAIT_SECONDS`). HOT’s smaller cohort should usually finish well under 45s; if not, partial leftover still applies.
+Provider timeouts stay #157-bounded (`remaining soft budget`, `MIN_PROVIDER_WAIT_SECONDS`) on whatever collector timeout that run was given (25s HOT or derived chunk).
 
 ## 11. Migration / backward compatibility
 
 | Surface | Compat |
 | --- | --- |
 | Env `PAPER_LIVE_REFRESH_INTERVAL_SECONDS` | Continues to set HOT cadence. |
-| `LiveRefreshStatus.interval_seconds` / `last_completed_at` | Remain, documented as HOT aliases. UI must switch in the same PR as the scheduler or operators will misread UNIVERSE work as “the” scan. |
+| `LiveRefreshStatus.interval_seconds` / `last_completed_at` | Remain, documented as HOT aliases. UI must switch in the same implementation PR. |
 | `GET /paper/watchlist/tracked` | **Breaking semantics**, additive fields. Same path. Tests in `test_tracked_current_snapshot.py` must be rewritten to the merge/TTL rules, not deleted. |
 | Watchlist SQLite | Additive columns or JSON sidecar on opportunity; old rows: `scan_lane=null` treated as `universe` with `last_seen_at` as `last_scanned_at`. Missing lane + age > universe TTL → omit from Tracked (fail closed). |
 | `#157` hang/partial tests | Must stay green. Do not change leftover reason strings. |
-| Explicit collect 45s/60 pairs | Unchanged until architect signs UNIVERSE budget on POST. |
-| Restart | Process memory inventory empty → Tracked empty until a collection completes (same as today). Watchlist history remains. |
+| Explicit collect 45s/60 pairs | **Unchanged** while #157 is being accepted. |
+| Restart | Process-memory inventory empty → Tracked empty until a collection completes. Watchlist history remains. Scheduler must mark UNIVERSE due **immediately** (bootstrap), not after 180s. |
 
-No data backfill job. No second canonical ID migration.
+No data backfill job. No second canonical ID migration. No SQLite fixture inventory in this implementation.
 
 ## 12. Deterministic acceptance tests
 
-New module `backend/tests/test_dual_cadence_scheduler.py` (clock injected; no live HTTP). Fixtures at **T-6d, T-4h, T-59m, kickoff, in-play, completed**.
+New module `backend/tests/test_dual_cadence_scheduler.py` (clock injected; no live HTTP). Fixtures at **T-6d, T-4h, T-59m, kickoff, in-play, T+3h unknown, completed**.
 
 | # | Assertion |
 | --- | --- |
-| 1 | Classifier: T-6d and T-4h → UNIVERSE; T-59m → HOT; kickoff-passed + `in_running True` → HOT live; kickoff-passed + `in_running None` → HOT membership, `in_running` stays None; completed status → DROP. |
-| 2 | T-59m and in-play refresh on HOT cadence without waiting for UNIVERSE (advance clock 30s; HOT ran; UNIVERSE did not). |
-| 3 | T-6d is present on Tracked after UNIVERSE and is **not** in HOT identity_scope on the next HOT cycle (no `list_markets` for that id). |
-| 4 | UNIVERSE in cluster_scan when HOT becomes due: UNIVERSE yields; HOT cycle starts before UNIVERSE budget elapses; HOT `last_completed_at` updates. |
-| 5 | Far-future qualifying paper_decision from UNIVERSE appears on `/triggered` and Tracked in that same cycle (`freshness_class=executable` at `as_of=observed_at`). |
+| 1 | Classifier: T-6d and T-4h → UNIVERSE; T-59m → HOT; kickoff-passed + `in_running True` → HOT live; kickoff-passed + `in_running None` within 3h → HOT membership, `in_running` stays None; completed status → DROP. |
+| 2 | T-59m and in-play refresh on HOT cadence without waiting for UNIVERSE (advance clock 30s; HOT ran; UNIVERSE chunk did not have to finish). |
+| 3 | T-6d is present on Tracked after a UNIVERSE chunk and is **not** in HOT identity_scope on the next HOT cycle (no `list_markets` for that id). |
+| 4 | UNIVERSE chunk yields at `next_hot_due - safety_margin`; HOT starts on time; UNIVERSE **cursor advances** across **repeated** HOT cycles; generation_work_used increases each chunk; HOT is not starved. |
+| 5 | Far-future qualifying paper_decision from a UNIVERSE chunk appears on `/triggered` and Tracked in that same chunk (`freshness_class=executable` at `as_of=observed_at`). |
 | 6 | Clock advance from T-61m to T-59m promotes the fixture into HOT membership automatically. |
-| 7 | Partial UNIVERSE: evaluated ids keep economics; leftovers `not_evaluated_scan_deadline`; previous valid current-state for a leftover id is retained; `not_evaluated_count` explicit. |
+| 7 | Partial UNIVERSE chunk: evaluated ids keep economics; leftovers `not_evaluated_scan_deadline`; previous valid current-state for a leftover id is retained; `not_evaluated_count` explicit. |
 | 8 | Same `canonical_event_id` / `canonical_market_id` across lanes; no duplicate Tracked rows. |
 | 9 | `GET /paper/live-refresh` has distinct hot/universe status; Fast/Full fields independently true. |
-| 10 | HOT TTL expiry drops a vanished in-play row from Tracked; activity history remains. UNIVERSE TTL expiry drops a T-6d row rather than showing it current. |
+| 10 | HOT TTL (90s) expiry drops a vanished in-play row from Tracked; activity history remains. UNIVERSE TTL (360s) expiry drops a T-6d row rather than showing it current. |
 | 11 | Empty HOT cycle does not empty Tracked of in-TTL UNIVERSE rows. |
 | 12 | `execution_enabled=false`; collector/venue modules still have no place/cancel/sign. |
 | 13 | Existing `#157` / `#153` leftover tests remain PASS. |
+| 14 | **Slow HOT envelope:** a HOT collect that would run past 25s leftover-stops / aborts so coordinator return is ≤ ~30s (25s + 5s grace). A second HOT is not started while the first is in progress. After return, the next due slot is used (missed slot not queued). |
+| 15 | **T+3h unknown expiry:** kickoff-passed + `in_running None` at T+2h59m is HOT (not live). At T+3h01m it is UNIVERSE, still `in_running is None`, `fixture_status` not rewritten to completed. |
+| 16 | **Startup bootstrap:** new coordinator / empty process-memory store → Tracked `[]`; UNIVERSE is **due immediately** (does not wait 180s); after the first bootstrap chunk records inventory, Tracked may become non-empty; HOT membership is classified from that inventory. |
 
 Frontend: health-bar / scan-note tests that Fast scan and Full sweep both render; a single `Last scan` string is insufficient once the API nests lanes.
 
-Do not use live Windows as the first proof of classification; clocked unit tests first. Owner-Windows smoke is **after** integration onto the accepted #118 child, not this design PR.
+Do not use live Windows as the first proof of classification; clocked unit tests first. Owner-Windows smoke is **after** implementation onto the accepted #118 child, not this design PR.
 
-## 13. Implementation sequence (post-review)
+## 13. Implementation sequence (after #157 acceptance)
 
 1. Land #157 / #118 timeout correction (owner-Windows re-smoke). Do not combine with dual cadence.
-2. Slice 1–2: classifier + current-state store + Tracked merge tests (can run against fake reports, no HTTP).
-3. Slice 3–5: coordinator dual loop + HOT identity_scope collector path + preemption test.
+2. Slice 1–2: classifier (3h bound) + process-memory current-state store + Tracked merge tests (fake reports, no HTTP).
+3. Slice 3–5: coordinator dual loop — HOT 25s/30s envelope, UNIVERSE chunks, preemption+cursor, startup bootstrap.
 4. Slice 6–9: API/UI honesty.
 5. Exact-head CI: backend pytest, Ruff F, frontend tests/typecheck/build.
 6. Integrate onto accepted #131/#157 line. Stop for architect review before merge to `main`.
@@ -434,19 +502,27 @@ Do not use live Windows as the first proof of classification; clocked unit tests
 
 - Live execution, new venues, betting strategy, settlement redesign, treasury redesign.
 - Changing `max_event_pairs` as a substitute for segmentation.
-- Extending HOT to minutes.
-- Rewriting the dislocation burst engine.
-- Persistent fixture-inventory SQLite (nice later; not required if restart = empty Tracked until collect).
+- Extending HOT to minutes, or giving HOT the 45s explicit-collect budget.
+- A single 150s auto-loop `collect_and_scan`.
+- Rewriting or importing the dislocation burst engine.
+- Persistent fixture-inventory SQLite.
+- Changing explicit `POST /paper/collect` off 45s while #157 is in flight.
 - Research surfaces.
 
-## 15. Architect decisions requested
+## 15. Architect decisions (accepted, review `5196716600`)
 
-1. Explicit `POST /paper/collect` stays 45s UNIVERSE-scope until #157 is accepted — agree?
-2. Auto UNIVERSE soft budget 150s vs 180s?
-3. Radar TTL 2× cadence (90s / 360s) vs 1× + slack?
-4. Kickoff-passed + unknown in-play: HOT-by-proximity without live label (proposed) vs UNIVERSE-only until Matchbook says in-play?
-5. Process-memory inventory vs immediate SQLite fixture store?
-6. Should HOT sort use `arbitrage/dislocations/scheduler.py` in v1 or the simple key in §7?
+| # | Decision |
+| --- | --- |
+| 1 | Explicit `POST /paper/collect` remains the current **45s UNIVERSE-shaped** diagnostic/manual contract while #157 is being accepted. |
+| 2 | UNIVERSE **generation** budget is **150s**, not 180s. Keep 30s headroom inside the **180s** sweep cadence. 150s is executed as **resumable chunks**, not one job. |
+| 3 | Radar TTLs: **HOT 90s / UNIVERSE 360s**. Executable quote freshness remains the existing fail-closed ~1s contract. |
+| 4 | Kickoff-passed + unknown in-play: HOT **without a live label**, only within **3h**. After that, expire from HOT scheduling unless the provider explicitly says in-running. Do not claim completed from time. |
+| 5 | Canonical fixture current-state store: **process memory for v1**. Restart honesty: Tracked empty until collection. **Immediate UNIVERSE bootstrap** on startup. SQLite inventory later. |
+| 6 | HOT ordering: **simple deterministic key** (§5.5). Do not couple the dislocation burst scheduler. |
+| A | Separate HOT cycle timeout default **25s** so the 30s cadence is physically achievable. #157 4s reserve + 5s grace ⇒ ~30s envelope. HOT must not overlap itself. |
+| B | Each UNIVERSE scheduler run processes a chunk only until `next_hot_due - safety_margin`, persists cursor, yields, resumes. Acceptance must prove forward progress across multiple HOT cycles without starving HOT. |
+
+No remaining open product questions for v1. Implementation still waits on #157 owner-Windows acceptance.
 
 ## 16. Tenet review (this design pass)
 
@@ -457,14 +533,14 @@ Do not use live Windows as the first proof of classification; clocked unit tests
 - 02 — paper-only; no execution path.
 - 03 — one canonical identity; no lane-specific IDs.
 - 04 — near ≠ triggered; qualifying from either lane; expired fail closed.
-- 11 — Fast vs Full; radar_current ≠ executable; empty until first collection.
-- 14 — HOT is the bounded priority cadence; no courtsiding.
+- 11 — Fast vs Full; radar_current ≠ executable; empty until first collection; unknown in-play not labelled live; no fabricated completed.
+- 14 — HOT is the bounded priority cadence that can actually meet 30s; no courtsiding; burst scheduler not silently reused.
 - 15 — both lanes use existing cost/FX fail-closed.
 - 12 — this review.
 
-**Partial / deferred:** owner-Windows smoke after implementation; burst overlay; SQLite inventory.
+**Partial / deferred:** implementation; owner-Windows smoke after stacking on accepted #157; burst overlay; SQLite inventory.
 
-**Conflicts:** none accepted. The Tracked latest-cohort contract **must** change; that is documented, not silent.
+**Conflicts:** none accepted. The Tracked latest-cohort contract **must** change; that is documented, not silent. HOT 45s-on-30s-cadence would have been a silent cadence lie; 25s timeout is the correction.
 
 **Data class of this PR:** design/docs only. No live, historical, modelled, or fixture data is shown by this change.
 

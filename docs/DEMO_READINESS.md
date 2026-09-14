@@ -73,10 +73,10 @@ Unknown costs still fail closed. Native GBP and the two USD venue pools are neve
 | 08 Historical provenance | **PASS** (coverage seam) | Repository-derived counts; missing files → UNAVAILABLE. |
 | 09 Liquidity / capital / priority alerts | **PASS** (paper) | Authoritative 8E native pools; allocator sizes 8F; unwind/clock never spendable; demo ticket still distinct. |
 | 10 Accounting / FX / books | **PASS** (paper subledger) | Append-only journal + 8E postings; GBP carrying ≠ native cash; two USD venues not commingled. Not a production GL. |
-| 11 UI / data honesty | **PASS** | Live vs DEMO / FIXTURE REPLAY labelled; empty live lists not substituted. Dual-cadence Fast/Full scan copy is **proposed** (#158), not shipped. |
+| 11 UI / data honesty | **PASS** | Live vs DEMO / FIXTURE REPLAY labelled; empty live lists not substituted. Dual-cadence Fast/Full scan copy is **accepted design** (#158), not shipped. |
 | 12 Agent review | **PASS** | This document + PR tenet list. |
 | 13 Event intelligence | **PARTIAL** | Existing MI/trends; no invented live scores. |
-| 14 Event-driven dislocation arb | **PARTIAL** | Burst scanner on main; UI does not treat dislocation as arb. Dual-cadence HOT/UNIVERSE scheduler is **proposed** (#158), not shipped. |
+| 14 Event-driven dislocation arb | **PARTIAL** | Burst scanner on main; UI does not treat dislocation as arb. Dual-cadence HOT 25s/30s + chunked UNIVERSE 150s/180s is **accepted design** (#158), not shipped. |
 | 15 Effective venue economics | **PARTIAL** | Arb/demo scan uses `VenueCostSnapshot`. Kalshi SELL close unknown → fail closed. Research still uses typed demo snapshots. |
 | 16 External manual legs | **PASS** (paper distinction) | `PAPER_SIMULATED_EXTERNAL` ≠ `MANUAL_EXTERNAL`. No VPN/geo bypass. |
 | 17 Historical market movement | **PARTIAL** | Coverage counts exposed; analogue model UNAVAILABLE. |
@@ -100,19 +100,21 @@ No tenet was silently weakened to make the demo “work”. Kalshi unwind stays 
 
 This contract is enforced by `backend/tests/test_tracked_current_snapshot.py`.
 
-### Proposed (Issue #158) — not implemented; pending architect review
+### Proposed (Issue #158) — architect-accepted; not implemented
 
 Dual cadence cannot keep “Tracked = last cycle only” without either hiding distant fixtures after a HOT pass or mixing stale rows into the current board.
 
-Proposed replacement (full rules: `docs/DUAL_CADENCE_SCANNER.md` §6 and `docs/adr/0002-dual-cadence-scanner.md`):
+Accepted replacement (full rules: `docs/DUAL_CADENCE_SCANNER.md` §6 and `docs/adr/0002-dual-cadence-scanner.md`, review `5196716600`):
 
-- Tracked is a **per-identity current-state merge**. HOT observations win for HOT fixtures; UNIVERSE observations remain for distant fixtures until the next sweep or radar TTL.
+- Tracked is a **per-identity current-state merge**. HOT observations win for HOT fixtures; UNIVERSE observations remain for distant fixtures until the next sweep or radar TTL (HOT 90s / UNIVERSE 360s).
+- Process-memory inventory v1: restart leaves Tracked empty until collection; UNIVERSE bootstrap is due immediately.
 - Expired observations are omitted (fail closed). They must not look current.
-- Qualifying / TRIGGERED opportunities from either lane persist in that cycle (no lane delay). Executable quote-age for `/near`, `/triggered`, and paper entry **does not** become 180s.
-- Partial UNIVERSE leftovers do not clobber a previous valid evaluated observation. `#153` Equivalent 0 stays evaluated-only.
+- Qualifying / TRIGGERED opportunities from either lane persist in that cycle (no lane delay). Executable quote-age for `/near`, `/triggered`, and paper entry **does not** become 180s or 360s.
+- Partial UNIVERSE **chunks** do not clobber a previous valid evaluated observation. `#153` Equivalent 0 stays evaluated-only.
+- Kickoff-passed + unknown in-play is HOT without a live label for 3h, then leaves HOT scheduling; time does not fabricate completed/live.
 - Operator UI shows **Fast scan** and **Full sweep** separately.
 
-Do not implement this on #131 or race #157. Stack on the accepted #118 child after review.
+Do not implement this on #131 or race #157. Stack on the accepted #118 child after owner-Windows acceptance.
 
 ## Safety
 
