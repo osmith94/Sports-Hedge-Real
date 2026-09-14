@@ -33,6 +33,7 @@ from sports_hedge.application.live_refresh import (
     ScanCycleTimeout,
     get_live_refresh_coordinator,
 )
+from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.application.market_observation import (
     KalshiObservationBuilder,
     MatchbookObservationBuilder,
@@ -751,6 +752,12 @@ async def _execute_collection(
     service: PaperScanService,
     audit: SqlitePaperScanRepository,
     watchlist: WatchlistService,
+    scan_lane: str | None = None,
+    identity_scope: list[str] | None = None,
+    resume_cursor: str | None = None,
+    skip_event_ids: list[str] | None = None,
+    known_source_events: dict[str, list[dict[str, Any]]] | None = None,
+    cycle_timeout_seconds: float | None = None,
 ) -> CollectionReport:
     settings = get_settings()
     matchbook = MatchbookClient(settings)
@@ -763,13 +770,23 @@ async def _execute_collection(
         paper_scan=service,
         venue_timeout_seconds=settings.paper_scan_venue_timeout_seconds,
         provider_call_timeout_seconds=settings.paper_scan_provider_timeout_seconds,
-        cycle_timeout_seconds=settings.paper_scan_cycle_timeout_seconds,
+        cycle_timeout_seconds=(
+            settings.paper_scan_cycle_timeout_seconds
+            if cycle_timeout_seconds is None
+            else float(cycle_timeout_seconds)
+        ),
     )
     try:
         report = await collector.collect_and_scan(
             **kwargs,
             polymarket_queried_series_ids=settings.resolved_polymarket_series_ids(),
             config_warnings=settings.polymarket_series_config_warnings(),
+            scan_lane=scan_lane,
+            identity_scope=identity_scope,
+            resume_cursor=resume_cursor,
+            skip_event_ids=skip_event_ids,
+            known_source_events=known_source_events,
+            cycle_timeout_seconds=cycle_timeout_seconds,
         )
         for decision in report.paper_decisions:
             _persist_decision(
@@ -788,6 +805,9 @@ async def server_owned_refresh_tick() -> None:
     """Background tick used when PAPER_LIVE_REFRESH_ENABLED is true."""
 
     coordinator = get_live_refresh_coordinator()
+    plan = coordinator.plan_tick()
+    if plan.lane == "idle":
+        return
     service = get_paper_scan_service(
         get_market_intelligence_service(),
         get_fx_rate_service(),
@@ -806,10 +826,20 @@ async def server_owned_refresh_tick() -> None:
             service=service,
             audit=audit,
             watchlist=watchlist,
+            scan_lane=plan.lane,
+            identity_scope=plan.identity_scope,
+            resume_cursor=plan.resume_cursor,
+            skip_event_ids=plan.skip_event_ids,
+            known_source_events=plan.known_source_events,
+            cycle_timeout_seconds=plan.collector_timeout_seconds,
         )
 
     try:
-        await coordinator.run_cycle(runner)
+        await coordinator.run_cycle(
+            runner,
+            timeout_seconds=plan.coordinator_timeout_seconds,
+            scan_lane=ScanLane(plan.lane),
+        )
     except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, httpx.HTTPError):
         return
 

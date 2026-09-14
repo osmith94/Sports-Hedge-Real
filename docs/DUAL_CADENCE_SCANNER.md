@@ -1,8 +1,8 @@
 # Dual-cadence scanner — architecture and implementation plan
 
 **Issue:** #158
-**Status:** Architect direction approved (review `5196716600`; PASS on `48e9b824`). Design only. Do not implement scanner/coordinator code in this PR. Do not merge to `main`. Implementation is a separate draft child of accepted design + current #131.
-**Date:** 14 September 2026 (rebased onto #131 `292e8109` after #161 identity/current-state merge)
+**Status:** Implementation in progress as a draft child of #131. Do not merge to `main`. Stop for architect review.
+**Date:** 14 September 2026 (implementation on #131 `86afb600`)
 
 This is a scanner/scheduler/read-model change. It does not add venue write, place, cancel, or sign paths. Phase 1 remains `SPORTS_HEDGE_MODE=paper` / `SPORTS_HEDGE_EXECUTION_ENABLED=false`.
 

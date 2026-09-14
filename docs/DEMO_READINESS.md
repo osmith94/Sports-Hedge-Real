@@ -8,7 +8,7 @@ This document is not a production-readiness claim. The owner Windows click path 
 
 | Surface | Class |
 | --- | --- |
-| `/paper/watchlist/tracked`, `/near`, `/triggered`, `/activity` | `LIVE PAPER` when FastAPI is reachable. Empty live lists stay empty. `demo_fixture_replay` rows are filtered out of these lists. `UNAVAILABLE` if the watchlist API is down — never back-filled with live-looking fixture arbs. **Tracked (current):** latest completed collection cohort only — see below. **Tracked (proposed #158):** current-state merge; not yet implemented. |
+| `/paper/watchlist/tracked`, `/near`, `/triggered`, `/activity` | `LIVE PAPER` when FastAPI is reachable. Empty live lists stay empty. `demo_fixture_replay` rows are filtered out of these lists. `UNAVAILABLE` if the watchlist API is down — never back-filled with live-looking fixture arbs. **Tracked:** per-identity current-state radar merge (Issue #158). HOT observations win for HOT fixtures; UNIVERSE observations remain for distant fixtures until sweep/TTL. Expired rows are omitted. `/near` and `/triggered` stay executable-quote-age fail-closed (~1s). |
 | `/paper/collect`, `/paper/live-refresh`, venue-union fixtures | `LIVE PAPER` when collection credentials/venues respond; empty discovery stays empty. Missing Matchbook credentials stay honestly `UNAVAILABLE` for Matchbook only — Polymarket and Kalshi still collect independently. Matchbook discovery paginates `GET /edge/rest/events`. Polymarket public Gamma uses bounded per-series pagination (legacy `POLYMARKET_GAMMA_SERIES_ID` is merged into the target EPL+Championship+La Liga set). Kalshi public Trade API v2 is read-only. `/` Operations Console is the normal operator surface. `/demo` is an advanced/test fixture-replay utility and is not opened by the launcher. |
 | `/demo` fixture replay | Always labelled `DEMO / FIXTURE REPLAY`. Same read-only collect path is available there for tests. Fixture replay is never substituted into live rows. |
 | `/paper/scans` | `LIVE PAPER` / empty / `UNAVAILABLE` |
@@ -88,33 +88,25 @@ No tenet was silently weakened to make the demo “work”. Kalshi unwind stays 
 
 ## Tracked current-state contract
 
-### Current (as of #131 / #157) — latest completed cohort
+### Current (Issue #158) — per-identity radar merge
 
-`GET /paper/watchlist/tracked` is the paper decisions of **the single latest completed** `CollectionReport` (`LiveRefreshCoordinator.last_report()`).
+`GET /paper/watchlist/tracked` is the **current radar board** from `FixtureCurrentStateStore`, not the paper decisions of a single latest `CollectionReport`.
 
 - Empty until a live collection completes. Persisted history/activity may exist; the board stays empty.
-- A later completed cycle **replaces** the board. Markets only present in the previous cohort leave Tracked and remain in activity/history.
-- A degraded completed refresh shows only that cycle’s cohort. It does not silently keep prior rows.
-- `Near` / `Triggered` are not cohort-filtered. They fail closed on executable quote age (`max_quote_age_ms`, default 1000ms, wall-clock aged from `last_seen_at`).
-- Operator UI exposes one `Last scan` / `interval_seconds` (default 30s).
-
-This contract is enforced by `backend/tests/test_tracked_current_snapshot.py`.
-
-### Proposed (Issue #158) — architect-accepted; not implemented
-
-Dual cadence cannot keep “Tracked = last cycle only” without either hiding distant fixtures after a HOT pass or mixing stale rows into the current board.
-
-Accepted replacement (full rules: `docs/DUAL_CADENCE_SCANNER.md` §6 and `docs/adr/0002-dual-cadence-scanner.md`, review `5196716600`):
-
-- Tracked is a **per-identity current-state merge**. HOT observations win for HOT fixtures; UNIVERSE observations remain for distant fixtures until the next sweep or radar TTL (HOT 90s / UNIVERSE 360s).
-- Process-memory inventory v1: restart leaves Tracked empty until collection; UNIVERSE bootstrap is due immediately.
+- HOT observations win for fixtures currently in the HOT cohort (in-play, ≤60m pre-kickoff, or kickoff-passed unknown in-play within 3h).
+- UNIVERSE observations remain for distant fixtures until the next sweep or radar TTL (HOT 90s / UNIVERSE 360s).
+- An empty HOT cycle does not clear in-TTL UNIVERSE rows.
+- Partial UNIVERSE leftovers do not clobber a previous valid in-TTL evaluation.
 - Expired observations are omitted (fail closed). They must not look current.
-- Qualifying / TRIGGERED opportunities from either lane persist in that cycle (no lane delay). Executable quote-age for `/near`, `/triggered`, and paper entry **does not** become 180s or 360s.
-- Partial UNIVERSE **chunks** do not clobber a previous valid evaluated observation. `#153` Equivalent 0 stays evaluated-only.
-- Kickoff-passed + unknown in-play is HOT without a live label for 3h, then leaves HOT scheduling; time does not fabricate completed/live.
-- Operator UI shows **Fast scan** and **Full sweep** separately.
+- Qualifying / TRIGGERED opportunities from either lane persist in that cycle (no lane delay).
+- `Near` / `Triggered` / paper entry stay fail-closed on executable quote age (`max_quote_age_ms`, default 1000ms). `radar_current` is never BET-actionable.
+- Operator UI exposes **Fast scan** and **Full sweep** separately. `interval_seconds` / `last_completed_at` remain HOT aliases.
 
-Do not start implementation in this docs PR. Stack implementation as a separate draft child of current #131 `292e8109`. Reuse #161 `FixtureCurrentStateStore`; do not add a second identity store.
+This contract is enforced by `backend/tests/test_tracked_current_snapshot.py` and `backend/tests/test_dual_cadence_scheduler.py`.
+
+### Previous (as of #131 / #157) — latest completed cohort (superseded)
+
+Tracked was previously only the latest completed collection's paper decisions. Dual cadence cannot keep that rule without hiding distant fixtures after a HOT pass or mixing stale rows into the current board. The replacement is above. Full rules: `docs/DUAL_CADENCE_SCANNER.md` §6.
 
 ## Safety
 

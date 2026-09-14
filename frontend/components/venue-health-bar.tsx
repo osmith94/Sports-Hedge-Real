@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { LiveRefreshStatus, VenueHealth, getLiveRefreshStatus, getVenueHealth } from "../lib/api";
-import { relativeTime } from "../lib/format";
+import { dualScanStatusLines } from "../lib/scan-status-display";
 
 const FIRST_CLASS: Array<{ venue: VenueHealth["venue"]; label: string }> = [
   { venue: "matchbook", label: "Matchbook" },
@@ -88,12 +88,8 @@ export function VenueHealthBar() {
           </span>
         );
       })}
-      <span className="status-item muted">
-        {refresh?.last_completed_at
-          ? `Last scan ${relativeTime(refresh.last_completed_at)}`
-          : refresh?.cycle_in_progress
-            ? "Scan in progress"
-            : "Last scan never"}
+      <span className="status-item muted" aria-label="Fast scan and Full sweep status">
+        {dualScanStatusLines(refresh).join(" · ")}
         {refresh?.last_error ? ` · ${refresh.last_error}` : ""}
       </span>
     </div>

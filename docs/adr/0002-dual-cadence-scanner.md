@@ -1,10 +1,10 @@
 # ADR 0002 — Adaptive dual-cadence scanner
 
-**Status:** Accepted direction (Issue #158, architect review `5196716600`; PASS on `48e9b824`). Design only until a separate implementation PR is authorised. Do not merge to `main`. Do not start scanner/coordinator code in this PR.
+**Status:** Accepted direction implemented as a draft child of #131 (Issue #158). Do not merge to `main` until architect review.
 
-**Date:** 14 September 2026 (rebased onto #131 `292e8109` after #161 identity/current-state merge)
+**Date:** 14 September 2026
 
-**Implementation base:** PR #131 head `292e8109cf2d34a23eb39b5efc4555514724537e` (`cursor/paper-demo-consolidation-08fc`), which includes merged #157 leftover/budget finalisation and #161 `FixtureCurrentStateStore`.
+**Implementation base:** PR #131 head `86afb6008f39d2a386d7aceaa2dc21c498b81a59` (`cursor/paper-demo-consolidation-08fc`), which includes merged #157 leftover/budget finalisation, #161 `FixtureCurrentStateStore`, and the dual-cadence design (#159).
 
 ## Context
 

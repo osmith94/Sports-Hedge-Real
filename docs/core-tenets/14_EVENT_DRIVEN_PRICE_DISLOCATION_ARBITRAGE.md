@@ -150,7 +150,7 @@ Examples include:
 - Champions League multi-match windows;
 - future supported high-liquidity sports such as NBA game clusters.
 
-Phase 1 live collection is still a single 30s loop as of #157. Issue #158 (architect-accepted design) is **one scheduler with two cohorts**: HOT at a 30s cadence with a 25s collector timeout (in-play, ≤60 minutes pre-kickoff, and kickoff-passed unknown in-play only within 3h, never labelled live from time); UNIVERSE at an 180s generation cadence with a 150s work budget executed in chunks that yield before the next HOT due. See `docs/DUAL_CADENCE_SCANNER.md`. That is scan scheduling only; it does not relax quote freshness, settlement equivalence, or the paper-only boundary.
+Phase 1 live collection uses **one scheduler with two cohorts** (Issue #158): HOT at a 30s cadence with a 25s collector timeout (in-play, ≤60 minutes pre-kickoff, and kickoff-passed unknown in-play only within 3h, never labelled live from time); UNIVERSE at an 180s generation cadence with a 150s work budget executed in chunks that yield before the next HOT due. See `docs/DUAL_CADENCE_SCANNER.md`. That is scan scheduling only; it does not relax quote freshness, settlement equivalence, or the paper-only boundary.
 
 When capacity is constrained, prioritisation should consider:
 

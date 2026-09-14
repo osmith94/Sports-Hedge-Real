@@ -168,6 +168,10 @@ class NearOpportunity(BaseModel):
     data_kind: str = "live_paper"
     bet_actionable: bool = False
     bet_blocked_reason: str | None = None
+    scan_lane: str | None = None
+    last_scanned_at: datetime | None = None
+    next_due_at: datetime | None = None
+    freshness_class: str | None = None
 
     @model_validator(mode="after")
     def enforce_non_arbitrage_labelling(self) -> NearOpportunity:

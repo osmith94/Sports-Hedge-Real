@@ -176,6 +176,9 @@ export type DiscoveredFixture = {
   opportunity_state?: string;
   market_evaluation_state?: string | null;
   market_evaluation_reason?: string | null;
+  scan_lane?: string | null;
+  last_scanned_at?: string | null;
+  next_due_at?: string | null;
 };
 
 export type InventoryComparisonStatus =
@@ -400,6 +403,26 @@ export type FixtureDetailReadModel = {
   execution_enabled: boolean;
 };
 
+export type LaneRefreshStatus = {
+  cadence_seconds: number;
+  cycle_timeout_seconds?: number | null;
+  generation_budget_seconds?: number | null;
+  generation_work_used_s?: number;
+  chunk_last_duration_ms?: number | null;
+  cycle_in_progress?: boolean;
+  last_started_at?: string | null;
+  last_completed_at?: string | null;
+  last_duration_ms?: number | null;
+  next_due_at?: string | null;
+  fixture_count?: number;
+  evaluated_count?: number;
+  not_evaluated_count?: number;
+  last_error?: string | null;
+  degraded?: boolean;
+  resume_cursor?: string | null;
+  operator_summary?: string | null;
+};
+
 export type LiveRefreshStatus = {
   discovery_source: Venue;
   discovery_mode?: string;
@@ -422,6 +445,8 @@ export type LiveRefreshStatus = {
   venue_health?: Record<string, string>;
   live_scores: string;
   discovered_fixtures: DiscoveredFixture[];
+  hot?: LaneRefreshStatus;
+  universe?: LaneRefreshStatus;
 };
 
 export type VenueHealth = {
@@ -805,6 +830,10 @@ export type NearOpportunity = {
   observation_count?: number;
   bet_actionable?: boolean;
   bet_blocked_reason?: string | null;
+  scan_lane?: string | null;
+  last_scanned_at?: string | null;
+  next_due_at?: string | null;
+  freshness_class?: "executable" | "radar_current" | "expired" | string | null;
 };
 
 export type OpportunityLifecycleEvent = {

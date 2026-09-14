@@ -7,8 +7,8 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
+from sports_hedge.application.scan_lanes import FRESHNESS_EXECUTABLE
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityLifecycleEvent
-from sports_hedge.arbitrage.watchlist.ranking import tracked_cohort_opportunity_ids
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.application.paper_operations import PaperOperationsService
@@ -88,13 +88,15 @@ def tracked_markets(
     service: WatchlistService = Depends(get_watchlist_service),
     operations: PaperOperationsService = Depends(get_bet_ticket_operations),
 ) -> list[NearOpportunity]:
-    report = get_live_refresh_coordinator().last_report()
-    if report is None:
+    coordinator = get_live_refresh_coordinator()
+    store = coordinator.fixture_current_state()
+    if not store.has_collection():
         return []
-    cohort_ids = tracked_cohort_opportunity_ids(
-        decision.canonical_market_id for decision in report.paper_decisions
-    )
-    return _read_watchlist(
+    now = service._clock()
+    settings = get_settings()
+    radar_kwargs = coordinator.radar_horizon_kwargs(settings)
+    cohort_ids = store.current_tracked_opportunity_ids(now, **radar_kwargs)
+    rows = _read_watchlist(
         service.tracked,
         operations,
         limit=limit,
@@ -102,7 +104,34 @@ def tracked_markets(
         venue=venue,
         market_family=market_family,
         collection_cohort_ids=cohort_ids,
+        as_of=now,
     )
+    annotated: list[NearOpportunity] = []
+    for row in rows:
+        meta = store.radar_meta_for_market(row.canonical_market_id, now, **radar_kwargs)
+        if meta is None:
+            continue
+        freshness = meta.freshness
+        if row.quote_age_ms is not None and row.quote_age_ms < service.max_quote_age_ms:
+            freshness = FRESHNESS_EXECUTABLE
+        executable = freshness == FRESHNESS_EXECUTABLE
+        annotated.append(
+            row.model_copy(
+                update={
+                    "scan_lane": meta.observation_lane.value,
+                    "last_scanned_at": meta.last_scanned_at,
+                    "next_due_at": meta.next_due_at,
+                    "freshness_class": freshness,
+                    "bet_actionable": bool(row.bet_actionable) and executable,
+                    "bet_blocked_reason": (
+                        row.bet_blocked_reason
+                        if executable
+                        else (row.bet_blocked_reason or "radar_current_not_executable")
+                    ),
+                }
+            )
+        )
+    return annotated
 
 
 @router.get("/activity", response_model=list[OpportunityLifecycleEvent])

@@ -14,7 +14,7 @@ The UI must never make demo, modelled, historical or stale data look live.
 - Do not fabricate fallback opportunities when an API is offline/empty.
 - Show stale/carried-forward/exception states rather than silently presenting them as fresh.
 - When the scanner has more than one cadence, operator status must name each cadence (for example Fast scan vs Full sweep). A single ambiguous `Last scan` is not sufficient.
-- Tracked current-state must not present expired observations as current. The live contract today is latest-completed-cohort; the dual-cadence merge (Issue #158, architect-accepted, not yet implemented) is `docs/DUAL_CADENCE_SCANNER.md`. Kickoff-passed unknown in-play must not be labelled live, and elapsed time must not fabricate a completed result.
+- Tracked current-state must not present expired observations as current. Dual-cadence merge (Issue #158): HOT observations for the hot cohort; UNIVERSE observations for distant fixtures until sweep/TTL (HOT 90s / UNIVERSE 360s). Kickoff-passed unknown in-play must not be labelled live, and elapsed time must not fabricate a completed result.
 - Keep sample size, confidence, stability and data quality visible near analytical claims.
 
 ## Football-style drill-down

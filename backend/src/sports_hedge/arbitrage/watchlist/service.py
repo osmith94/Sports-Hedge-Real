@@ -309,12 +309,14 @@ class WatchlistService:
         as_of: datetime | None = None,
         collection_cohort_ids: set[str] | None = None,
     ) -> list[NearOpportunity]:
-        """Current collection-cohort board, including below-break-even net edges.
+        """Current radar board from the dual-cadence current-state merge.
 
-        Pass `collection_cohort_ids` from the latest completed live collection's
-        paper decisions. An empty set is an honest empty current snapshot. Omit
+        Pass `collection_cohort_ids` from FixtureCurrentStateStore radar
+        identities. An empty set is an honest empty current snapshot. Omit
         the argument only for unit tests of ranking/freshness against persisted
         rows. This does not delete persisted observations or lifecycle history.
+        Tracked does not fail-close on executable quote age; that gate stays on
+        Near / Triggered / paper entry. Radar rows may be `radar_current`.
         """
 
         items = self._filtered(
@@ -325,7 +327,10 @@ class WatchlistService:
         if collection_cohort_ids is not None:
             items = filter_tracked_to_cohort(items, collection_cohort_ids)
         evaluated = require_aware_instant(as_of or self._clock(), "as_of")
-        presented = [self._present_freshness(item, evaluated) for item in items]
+        presented = []
+        for item in items:
+            effective = effective_quote_age_ms(item.quote_age_ms, item.last_seen_at, evaluated)
+            presented.append(item.model_copy(update={"quote_age_ms": effective}))
         return rank_tracked_opportunities(presented, limit=limit)
 
     def activity(

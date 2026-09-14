@@ -42,11 +42,13 @@ from sports_hedge.application.market_observation import (
     VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key
 from sports_hedge.fees.kalshi import resolve_kalshi_fee_metadata
 from sports_hedge.application.fixture_clusters import (
     FixtureCluster,
     cluster_canonical_event_id,
     cluster_identity_aliases,
+    cluster_member_events,
     cluster_venue_events,
     to_venue_event,
 )
@@ -196,6 +198,9 @@ class DiscoveredFixture(BaseModel):
     opportunity_state: str = "unmatched"
     market_evaluation_state: str = MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE.value
     market_evaluation_reason: str | None = None
+    scan_lane: str | None = None
+    last_scanned_at: datetime | None = None
+    next_due_at: datetime | None = None
 
 
 class FixturePaperEntry(BaseModel):
@@ -252,8 +257,11 @@ class CollectionReport(BaseModel):
     discovered_fixtures: list[DiscoveredFixture] = Field(default_factory=list)
     fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = Field(default_factory=dict)
     fixture_identity_aliases: dict[str, str] = Field(default_factory=dict)
+    fixture_source_events: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     issues: list[CollectorIssue] = Field(default_factory=list)
     scan_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    scan_lane: str | None = None
+    resume_cursor: str | None = None
 
     @property
     def paper_eligible_count(self) -> int:
@@ -351,6 +359,11 @@ class ReadOnlyCrossVenueCollector:
         venue_timeout_seconds: float | None = None,
         provider_call_timeout_seconds: float | None = None,
         cycle_timeout_seconds: float | None = None,
+        scan_lane: str | None = None,
+        identity_scope: list[str] | None = None,
+        resume_cursor: str | None = None,
+        skip_event_ids: list[str] | None = None,
+        known_source_events: dict[str, list[dict[str, Any]]] | None = None,
     ) -> CollectionReport:
         if max_event_pairs <= 0 or max_market_pairs_per_event <= 0:
             raise ValueError("collector pair limits must be positive")
@@ -411,54 +424,75 @@ class ReadOnlyCrossVenueCollector:
         fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = {}
         discovered_fixtures: list[DiscoveredFixture] = []
         cancelled = False
+        resolved_lane = (scan_lane or "").strip().casefold() or None
+        hot_scope = {item.strip() for item in (identity_scope or []) if item and item.strip()}
+        skip_ids = {item.strip() for item in (skip_event_ids or []) if item and item.strip()}
+        skip_discovery = resolved_lane == ScanLane.HOT.value and identity_scope is not None
         try:
             with self._stage("event_discovery"):
-                mb_task = self._list_raw_events(
-                    self.matchbook,
-                    venue=VenueName.MATCHBOOK,
-                    filters=matchbook_event_filters or {},
-                    issues=issues,
-                    venue_health=venue_health,
-                )
-                pm_task = self._list_raw_events(
-                    self.polymarket,
-                    venue=VenueName.POLYMARKET,
-                    filters=polymarket_event_filters or {},
-                    issues=issues,
-                    venue_health=venue_health,
-                )
-                if self.kalshi is not None:
+                if skip_discovery:
                     (
-                        (raw_matchbook_events, matchbook_payload),
-                        (raw_polymarket_events, _),
-                        (raw_kalshi_events, _),
-                    ) = await self._gather_bounded(
-                        mb_task,
-                        pm_task,
-                        self._list_raw_events(
-                            self.kalshi,
-                            venue=VenueName.KALSHI,
-                            filters={},
-                            issues=issues,
-                            venue_health=venue_health,
-                        ),
-                        default=(
-                            ([], {}),
-                            ([], {}),
-                            ([], {}),
-                        ),
-                    )
+                        raw_matchbook_events,
+                        raw_polymarket_events,
+                        raw_kalshi_events,
+                    ) = _raw_events_from_known_source_events(known_source_events or {})
+                    matchbook_payload: dict[str, Any] = {}
+                    for venue_name, has_events in (
+                        (VenueName.MATCHBOOK, bool(raw_matchbook_events)),
+                        (VenueName.POLYMARKET, bool(raw_polymarket_events)),
+                        (VenueName.KALSHI, bool(raw_kalshi_events)),
+                    ):
+                        if has_events:
+                            venue_health[venue_name.value] = "ok"
+                    if self.kalshi is None:
+                        venue_health[VenueName.KALSHI.value] = "unavailable"
                 else:
-                    (raw_matchbook_events, matchbook_payload), (raw_polymarket_events, _) = (
-                        await self._gather_bounded(
+                    mb_task = self._list_raw_events(
+                        self.matchbook,
+                        venue=VenueName.MATCHBOOK,
+                        filters=matchbook_event_filters or {},
+                        issues=issues,
+                        venue_health=venue_health,
+                    )
+                    pm_task = self._list_raw_events(
+                        self.polymarket,
+                        venue=VenueName.POLYMARKET,
+                        filters=polymarket_event_filters or {},
+                        issues=issues,
+                        venue_health=venue_health,
+                    )
+                    if self.kalshi is not None:
+                        (
+                            (raw_matchbook_events, matchbook_payload),
+                            (raw_polymarket_events, _),
+                            (raw_kalshi_events, _),
+                        ) = await self._gather_bounded(
                             mb_task,
                             pm_task,
-                            default=(([], {}), ([], {})),
+                            self._list_raw_events(
+                                self.kalshi,
+                                venue=VenueName.KALSHI,
+                                filters={},
+                                issues=issues,
+                                venue_health=venue_health,
+                            ),
+                            default=(
+                                ([], {}),
+                                ([], {}),
+                                ([], {}),
+                            ),
                         )
-                    )
-                    raw_kalshi_events = []
-                    venue_health[VenueName.KALSHI.value] = "unavailable"
-                issues.extend(_matchbook_discovery_issues(matchbook_payload))
+                    else:
+                        (raw_matchbook_events, matchbook_payload), (raw_polymarket_events, _) = (
+                            await self._gather_bounded(
+                                mb_task,
+                                pm_task,
+                                default=(([], {}), ([], {})),
+                            )
+                        )
+                        raw_kalshi_events = []
+                        venue_health[VenueName.KALSHI.value] = "unavailable"
+                    issues.extend(_matchbook_discovery_issues(matchbook_payload))
 
             with self._stage("normalize_match"):
                 mb_scope = filter_in_scope_events(
@@ -504,6 +538,16 @@ class ReadOnlyCrossVenueCollector:
                     kalshi=k_items,
                     matcher=self.event_matcher,
                     max_event_pairs=max_event_pairs,
+                )
+                clusters = _select_lane_clusters(
+                    clusters,
+                    identity_scope=None if identity_scope is None else hot_scope,
+                    skip_event_ids=skip_ids,
+                    resume_cursor=resume_cursor,
+                    scan_lane=resolved_lane,
+                    seen_at=started_at,
+                    polymarket_events=polymarket_events,
+                    queried_series_ids=queried_series_ids,
                 )
 
             scan_kwargs = {
@@ -597,6 +641,8 @@ class ReadOnlyCrossVenueCollector:
             cycle_budget=None if cycle_budget is None else float(cycle_budget),
             reserve=reserve,
             cancelled=cancelled,
+            scan_lane=resolved_lane,
+            resume_cursor=resume_cursor,
         )
 
     def _deadline_reached(self) -> bool:
@@ -825,6 +871,8 @@ class ReadOnlyCrossVenueCollector:
         cycle_budget: float | None,
         reserve: float,
         cancelled: bool,
+        scan_lane: str | None = None,
+        resume_cursor: str | None = None,
     ) -> CollectionReport:
         assembly_started = monotonic()
         completed_at = datetime.now(UTC)
@@ -878,6 +926,11 @@ class ReadOnlyCrossVenueCollector:
             "clusters_leftover": leftover_n,
             "provider_timeouts": dict(self._timeouts_by_stage),
             "provider_cancels": self._provider_cancels,
+            "scan_lane": scan_lane,
+            "resume_cursor": resume_cursor,
+            "identity_scope": [
+                item.canonical_event_id for item in discovered_fixtures
+            ],
         }
         LOGGER.info("scan_diagnostics %s", diagnostics)
         return CollectionReport(
@@ -910,15 +963,24 @@ class ReadOnlyCrossVenueCollector:
             qualifying_arbs=qualifying,
             paper_decisions=decisions,
             discovered_fixtures=[
-                item.model_copy(update={"last_seen_at": completed_at})
+                item.model_copy(
+                    update={
+                        "last_seen_at": completed_at,
+                        "scan_lane": scan_lane or item.scan_lane,
+                        "last_scanned_at": item.last_scanned_at or completed_at,
+                    }
+                )
                 for item in discovered_fixtures
             ],
             fixture_markets=fixture_markets,
             fixture_identity_aliases=_fixture_identity_aliases(
                 clusters, discovered_fixtures, decisions
             ),
+            fixture_source_events=_fixture_source_events(clusters, discovered_fixtures),
             issues=issues,
             scan_diagnostics=diagnostics,
+            scan_lane=scan_lane,
+            resume_cursor=resume_cursor,
         )
 
     async def _scan_cluster(
@@ -2251,3 +2313,102 @@ def _fixture_identity_aliases(
             if decision_id:
                 aliases[decision_id] = cluster_id
     return aliases
+
+
+def _raw_events_from_known_source_events(
+    known_source_events: dict[str, list[dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    matchbook: list[dict[str, Any]] = []
+    polymarket: list[dict[str, Any]] = []
+    kalshi: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for rows in known_source_events.values():
+        for row in rows:
+            venue = str(row.get("venue") or "").strip().casefold()
+            raw = row.get("raw")
+            source_id = str(row.get("source_event_id") or "").strip()
+            if not isinstance(raw, dict):
+                continue
+            key = (venue, source_id or str(raw.get("id") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            if venue == VenueName.MATCHBOOK.value:
+                matchbook.append(raw)
+            elif venue == VenueName.POLYMARKET.value:
+                polymarket.append(raw)
+            elif venue == VenueName.KALSHI.value:
+                kalshi.append(raw)
+    return matchbook, polymarket, kalshi
+
+
+def _select_lane_clusters(
+    clusters: list[FixtureCluster],
+    *,
+    identity_scope: set[str] | None,
+    skip_event_ids: set[str],
+    resume_cursor: str | None,
+    scan_lane: str | None,
+    seen_at: datetime,
+    polymarket_events: list[_NormalizedEvent],
+    queried_series_ids: list[str] | None,
+) -> list[FixtureCluster]:
+    selected: list[FixtureCluster] = []
+    for cluster in clusters:
+        canonical_id = cluster_canonical_event_id(cluster)
+        if identity_scope is not None and canonical_id not in identity_scope:
+            continue
+        if canonical_id in skip_event_ids:
+            continue
+        selected.append(cluster)
+    if scan_lane == ScanLane.HOT.value:
+        decorated: list[tuple[tuple, FixtureCluster]] = []
+        for cluster in selected:
+            fixture = _fixture_from_cluster(
+                cluster,
+                seen_at=seen_at,
+                polymarket_events=polymarket_events,
+                queried_series_ids=queried_series_ids,
+            )
+            decorated.append((hot_sort_key(fixture), cluster))
+        decorated.sort(key=lambda item: item[0])
+        return [cluster for _key, cluster in decorated]
+    selected.sort(key=cluster_canonical_event_id)
+    if skip_event_ids:
+        return selected
+    cursor = (resume_cursor or "").strip()
+    if not cursor:
+        return selected
+    # skip_event_ids already dropped evaluated work; keep a stable order after
+    # the cursor as a belt-and-braces resume if ids were not recorded.
+    after: list[FixtureCluster] = []
+    seen_cursor = False
+    for cluster in selected:
+        canonical_id = cluster_canonical_event_id(cluster)
+        if not seen_cursor:
+            if canonical_id == cursor:
+                seen_cursor = True
+            continue
+        after.append(cluster)
+    return after if seen_cursor else selected
+
+
+def _fixture_source_events(
+    clusters: list[FixtureCluster],
+    discovered_fixtures: list[DiscoveredFixture],
+) -> dict[str, list[dict[str, Any]]]:
+    current_ids = {item.canonical_event_id for item in discovered_fixtures}
+    payload: dict[str, list[dict[str, Any]]] = {}
+    for cluster in clusters:
+        canonical_id = cluster_canonical_event_id(cluster)
+        if canonical_id not in current_ids:
+            continue
+        payload[canonical_id] = [
+            {
+                "venue": item.venue.value,
+                "source_event_id": item.source_event_id,
+                "raw": item.raw,
+            }
+            for item in cluster_member_events(cluster)
+        ]
+    return payload

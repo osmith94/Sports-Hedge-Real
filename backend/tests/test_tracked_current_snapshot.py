@@ -7,8 +7,9 @@ from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
 from sports_hedge.api.watchlist import get_watchlist_service
-from sports_hedge.application.collector import CollectionReport
+from sports_hedge.application.collector import CollectionReport, DiscoveredFixture
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
+from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.arbitrage.watchlist.models import OpportunityStatus, WatchLeg, WatchObservation
 from sports_hedge.arbitrage.watchlist.ranking import (
     opportunity_id_for_canonical_market,
@@ -23,6 +24,7 @@ from sports_hedge.matching.markets import MarketMatchResult
 from sports_hedge.paper.models import PaperScanDecision
 
 OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
+FAR_KICKOFF = OBSERVED + timedelta(days=6)
 
 
 def _leg() -> WatchLeg:
@@ -47,10 +49,11 @@ def _observation(
     rejection_reasons: list[str] | None = None,
     quote_age_ms: int | None = 80,
     observed_at: datetime = OBSERVED,
+    event_id: str | None = None,
 ) -> WatchObservation:
     return WatchObservation(
         observed_at=observed_at,
-        canonical_event_id=f"evt-{market_id}",
+        canonical_event_id=event_id or f"evt-{market_id}",
         canonical_market_id=market_id,
         settlement_key="regulation_time|full_time",
         competition="Premier League",
@@ -69,6 +72,7 @@ def _observation(
         quote_age_basis="source",
         limiting_depth_gbp=Decimal("50"),
         guaranteed_profit_gbp=Decimal("1.50") if status_edge_eligible else None,
+        kickoff_utc=FAR_KICKOFF,
     )
 
 
@@ -76,7 +80,24 @@ def _decision(market_id: str) -> PaperScanDecision:
     return PaperScanDecision(
         canonical_event_id=f"evt-{market_id}",
         canonical_market_id=market_id,
+        fixture_canonical_event_id=f"evt-{market_id}",
         market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=[]),
+        scanned_at=OBSERVED,
+    )
+
+
+def _fixture(market_id: str, *, evaluation: str = "evaluated") -> DiscoveredFixture:
+    return DiscoveredFixture(
+        source=VenueName.MATCHBOOK,
+        source_event_id=f"evt-{market_id}",
+        canonical_event_id=f"evt-{market_id}",
+        home_team="Arsenal",
+        away_team="Fulham",
+        competition="Premier League",
+        kickoff_utc=FAR_KICKOFF,
+        last_seen_at=OBSERVED,
+        market_evaluation_state=evaluation,
+        opportunity_state="matched" if evaluation == "evaluated" else "not_evaluated",
     )
 
 
@@ -84,17 +105,26 @@ def _report(
     *market_ids: str,
     venue_health: dict[str, str] | None = None,
     extra_decisions: list[PaperScanDecision] | None = None,
+    fixtures: list[DiscoveredFixture] | None = None,
+    when: datetime = OBSERVED,
+    leftover_ids: list[str] | None = None,
 ) -> CollectionReport:
-    now = datetime.now(UTC)
     decisions = [_decision(market_id) for market_id in market_ids]
     if extra_decisions:
         decisions.extend(extra_decisions)
+    discovered = fixtures
+    if discovered is None:
+        discovered = [_fixture(market_id) for market_id in market_ids]
+        for leftover in leftover_ids or []:
+            discovered.append(_fixture(leftover, evaluation="not_evaluated_scan_deadline"))
     return CollectionReport(
-        started_at=now,
-        completed_at=now,
+        started_at=when,
+        completed_at=when,
         paper_decisions=decisions,
+        discovered_fixtures=discovered,
         venue_health=venue_health or {},
         operator_summary="latest completed live collection",
+        scan_lane=ScanLane.UNIVERSE.value,
     )
 
 
@@ -122,7 +152,7 @@ def test_tracked_is_empty_until_a_live_collection_completes() -> None:
         repository.close()
 
 
-def test_tracked_follows_latest_completed_collection_and_keeps_history() -> None:
+def test_tracked_merges_universe_rows_across_later_hot_cycles() -> None:
     coordinator = get_live_refresh_coordinator()
     coordinator.reset()
     repository = SqliteWatchlistRepository()
@@ -139,7 +169,7 @@ def test_tracked_follows_latest_completed_collection_and_keeps_history() -> None
                 status_edge_eligible=True,
             )
         )
-        coordinator.record_report(_report("mkt-a-only", "mkt-shared"))
+        coordinator.record_report(_report("mkt-a-only", "mkt-shared"), scan_lane=ScanLane.UNIVERSE)
         first = client.get("/paper/watchlist/tracked").json()
         assert {row["canonical_market_id"] for row in first} == {"mkt-a-only", "mkt-shared"}
 
@@ -149,6 +179,7 @@ def test_tracked_follows_latest_completed_collection_and_keeps_history() -> None
                 market_id="mkt-b-only",
                 edge=Decimal("0.009"),
                 observed_at=clock["now"],
+                event_id="evt-hot-b",
             )
         )
         service.observe(
@@ -159,12 +190,53 @@ def test_tracked_follows_latest_completed_collection_and_keeps_history() -> None
                 observed_at=clock["now"],
             )
         )
-        coordinator.record_report(_report("mkt-b-only", "mkt-shared"))
+        hot_fixture = DiscoveredFixture(
+            source=VenueName.MATCHBOOK,
+            source_event_id="evt-hot-b",
+            canonical_event_id="evt-hot-b",
+            home_team="Arsenal",
+            away_team="Fulham",
+            competition="Premier League",
+            kickoff_utc=clock["now"] - timedelta(minutes=5),
+            last_seen_at=clock["now"],
+            in_running=True,
+            market_evaluation_state="evaluated",
+            opportunity_state="matched",
+        )
+        coordinator.record_report(
+            CollectionReport(
+                started_at=clock["now"],
+                completed_at=clock["now"],
+                paper_decisions=[
+                    PaperScanDecision(
+                        canonical_event_id="evt-hot-b",
+                        canonical_market_id="mkt-b-only",
+                        fixture_canonical_event_id="evt-hot-b",
+                        market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=[]),
+                        scanned_at=clock["now"],
+                    ),
+                    PaperScanDecision(
+                        canonical_event_id="evt-mkt-shared",
+                        canonical_market_id="mkt-shared",
+                        fixture_canonical_event_id="evt-mkt-shared",
+                        market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=[]),
+                        scanned_at=clock["now"],
+                    ),
+                ],
+                discovered_fixtures=[
+                    hot_fixture,
+                    _fixture("mkt-shared"),
+                ],
+                scan_lane=ScanLane.HOT.value,
+            ),
+            scan_lane=ScanLane.HOT,
+        )
 
         second = client.get("/paper/watchlist/tracked").json()
-        ids = [row["canonical_market_id"] for row in second]
-        assert "mkt-a-only" not in ids
-        assert set(ids) == {"mkt-b-only", "mkt-shared"}
+        ids = {row["canonical_market_id"] for row in second}
+        assert "mkt-a-only" in ids
+        assert "mkt-b-only" in ids
+        assert "mkt-shared" in ids
 
         persisted_a = repository.get("watch:mkt-a-only")
         assert persisted_a is not None
@@ -181,27 +253,31 @@ def test_tracked_follows_latest_completed_collection_and_keeps_history() -> None
         repository.close()
 
 
-def test_degraded_completed_refresh_shows_only_that_cohort() -> None:
+def test_degraded_universe_chunk_keeps_previous_valid_current_state() -> None:
     coordinator = get_live_refresh_coordinator()
     coordinator.reset()
     repository = SqliteWatchlistRepository()
     service = WatchlistService(repository, clock=lambda: OBSERVED)
     service.observe(_observation(market_id="mkt-previous", edge=Decimal("0.008")))
     service.observe(_observation(market_id="mkt-healthy", edge=Decimal("0.007")))
+    coordinator.record_report(_report("mkt-previous", "mkt-healthy"), scan_lane=ScanLane.UNIVERSE)
     coordinator.record_report(
         _report(
             "mkt-healthy",
+            leftover_ids=["mkt-previous"],
             venue_health={"matchbook": "ok", "polymarket": "unavailable", "kalshi": "ok"},
-        )
+        ),
+        scan_lane=ScanLane.UNIVERSE,
     )
     app.dependency_overrides[get_watchlist_service] = lambda: service
     client = TestClient(app)
     try:
         tracked = client.get("/paper/watchlist/tracked").json()
-        assert [row["canonical_market_id"] for row in tracked] == ["mkt-healthy"]
+        assert {row["canonical_market_id"] for row in tracked} == {"mkt-healthy", "mkt-previous"}
         status = client.get("/paper/live-refresh").json()
         assert status["venue_health"]["polymarket"] == "unavailable"
         assert status["venue_health"]["matchbook"] == "ok"
+        assert "hot" in status and "universe" in status
     finally:
         app.dependency_overrides.clear()
         coordinator.reset()

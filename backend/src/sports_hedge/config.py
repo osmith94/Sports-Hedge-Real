@@ -82,8 +82,17 @@ class Settings(BaseSettings):
     watchlist_db_path: str = "./data/near_arb_watchlist.sqlite"
     paper_live_refresh_enabled: bool = False
     paper_live_refresh_interval_seconds: int = Field(default=30, ge=15, le=300)
+    paper_live_refresh_hot_interval_seconds: int = Field(default=30, ge=15, le=60)
+    paper_live_refresh_universe_interval_seconds: int = Field(default=180, ge=60, le=300)
     # Bounded live-scan budgets. A hung provider must not freeze the operator console.
     paper_scan_cycle_timeout_seconds: int = Field(default=45, ge=10, le=180)
+    paper_scan_hot_cycle_timeout_seconds: int = Field(default=25, ge=10, le=45)
+    paper_scan_universe_generation_budget_seconds: int = Field(default=150, ge=30, le=180)
+    paper_universe_hot_yield_safety_margin_seconds: float = Field(default=2.0, ge=0.5, le=10)
+    paper_hot_pre_kickoff_horizon_minutes: int = Field(default=60, ge=5, le=180)
+    paper_hot_post_kickoff_unknown_horizon_hours: int = Field(default=3, ge=1, le=12)
+    paper_hot_current_state_ttl_seconds: int = Field(default=90, ge=30, le=300)
+    paper_universe_current_state_ttl_seconds: int = Field(default=360, ge=60, le=900)
     paper_scan_venue_timeout_seconds: int = Field(default=15, ge=3, le=60)
     paper_scan_provider_timeout_seconds: int = Field(default=8, ge=2, le=30)
     cors_allow_origins: Annotated[list[str], NoDecode] = Field(
@@ -208,6 +217,9 @@ class Settings(BaseSettings):
             raise ValueError("Phase 1 supports paper mode only")
         if self.sports_hedge_execution_enabled:
             raise ValueError("Live execution is intentionally unavailable in Phase 1")
+        # PAPER_LIVE_REFRESH_INTERVAL_SECONDS remains the HOT cadence alias.
+        hot_cadence = min(60, max(15, self.paper_live_refresh_interval_seconds))
+        self.paper_live_refresh_hot_interval_seconds = hot_cadence
         for warning in self.polymarket_series_config_warnings():
             LOGGER.warning("%s", warning)
         return self

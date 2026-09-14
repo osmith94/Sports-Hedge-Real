@@ -135,11 +135,11 @@ def _report(
     decisions: list[PaperScanDecision],
     aliases: dict[str, str] | None = None,
     fixture_markets: dict | None = None,
+    when: datetime = OBSERVED,
 ) -> CollectionReport:
-    now = datetime.now(UTC)
     return CollectionReport(
-        started_at=now,
-        completed_at=now,
+        started_at=when,
+        completed_at=when,
         paper_decisions=decisions,
         discovered_fixtures=fixtures,
         fixture_markets=fixture_markets or {item.canonical_event_id: [] for item in fixtures},
@@ -251,7 +251,7 @@ def test_collector_stamped_cluster_id_on_tracked_also_resolves() -> None:
         repository.close()
 
 
-def test_refresh_drops_expired_identities_and_keeps_history() -> None:
+def test_refresh_keeps_in_ttl_identities_across_later_upserts() -> None:
     cluster = _three_venue_cluster()
     cluster_id = cluster_canonical_event_id(cluster)
     pair_id = canonical_matched_event_id(
@@ -313,10 +313,8 @@ def test_refresh_drops_expired_identities_and_keeps_history() -> None:
             )
         )
         tracked = client.get("/paper/watchlist/tracked").json()
-        assert {row["canonical_market_id"] for row in tracked} == {"mkt-other"}
-        expired = client.get(f"/operations/fixtures/{pair_id}")
-        assert expired.status_code == 404
-        assert "No collected fixture" in expired.json()["detail"]
+        assert {row["canonical_market_id"] for row in tracked} == {"mkt-leeds", "mkt-other"}
+        assert client.get(f"/operations/fixtures/{pair_id}").status_code == 200
         assert client.get("/operations/fixtures/evt:other-current").status_code == 200
         activity = client.get("/paper/watchlist/activity").json()
         assert any(event["opportunity_id"] == "watch:mkt-leeds" for event in activity)

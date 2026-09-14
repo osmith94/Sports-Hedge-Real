@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import {
   EconomicsStatus,
   EconomicsVenueCostRow,
+  LiveRefreshStatus,
   PaperCollectionReport,
   PaperCollectionRequest,
   getEconomicsStatus,
@@ -15,6 +16,7 @@ import {
   saveMatchbookFee,
 } from "../lib/api";
 import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
+import { dualScanStatusLines } from "../lib/scan-status-display";
 import { LiveScanPulse, LiveScanPulsePhase } from "./live-scan-pulse";
 
 type ScanState =
@@ -212,6 +214,7 @@ export function RunPaperScan() {
   const [intervalDraft, setIntervalDraft] = useState("30");
   const [lastCompletedAt, setLastCompletedAt] = useState<string | null>(null);
   const [lastDurationMs, setLastDurationMs] = useState<number | null>(null);
+  const [liveRefresh, setLiveRefresh] = useState<LiveRefreshStatus | null>(null);
   const [venueHealth, setVenueHealth] = useState<Record<string, string> | null>(null);
   const [completeFlash, setCompleteFlash] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -274,6 +277,11 @@ export function RunPaperScan() {
       if (Number.isFinite(started) && Number.isFinite(completed)) {
         setLastDurationMs(Math.max(0, completed - started));
       }
+      try {
+        setLiveRefresh(await getLiveRefreshStatus());
+      } catch {
+        // Keep the completed report facts if status is briefly unavailable.
+      }
       await refreshEconomics();
     } catch (error) {
       setState({
@@ -285,6 +293,7 @@ export function RunPaperScan() {
         if (status.last_completed_at) setLastCompletedAt(status.last_completed_at);
         if (status.last_duration_ms != null) setLastDurationMs(status.last_duration_ms);
         if (status.venue_health) setVenueHealth(status.venue_health);
+        setLiveRefresh(status);
       } catch {
         // Keep prior last-scan facts. A failed collect is not a completed scan.
       }
@@ -324,6 +333,7 @@ export function RunPaperScan() {
         if (status.last_completed_at) setLastCompletedAt(status.last_completed_at);
         if (status.last_duration_ms != null) setLastDurationMs(status.last_duration_ms);
         if (status.venue_health) setVenueHealth(status.venue_health);
+        setLiveRefresh(status);
       })
       .catch(() => {
         // Status endpoint down: keep the 30s default cadence.
@@ -482,15 +492,11 @@ export function RunPaperScan() {
             </button>
           </div>
         </div>
-        <div className="scan-note">
-          Last scan {lastCompletedAt ? new Date(lastCompletedAt).toLocaleString() : "never"}
-          {lastDurationMs != null ? ` · ${Math.round(lastDurationMs / 100) / 10}s` : ""}
-          {autoRefresh && lastCompletedAt
-            ? ` · next ${new Date(Date.parse(lastCompletedAt) + clampIntervalSeconds(intervalSeconds) * 1000).toLocaleTimeString()}`
-            : autoRefresh
-              ? " · next after this scan"
-              : " · auto off"}
-          {` · cadence ${clampIntervalSeconds(intervalSeconds)}s`}
+        <div className="scan-note" aria-label="Fast scan and Full sweep status">
+          {dualScanStatusLines(liveRefresh).map((line) => (
+            <div key={line}>{line}</div>
+          ))}
+          {autoRefresh ? " · auto on" : " · auto off"}
         </div>
 
         <details className="scan-advanced">

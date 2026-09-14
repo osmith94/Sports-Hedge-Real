@@ -82,7 +82,7 @@ def rank_tracked_opportunities(
     *,
     limit: int,
 ) -> list[NearOpportunity]:
-    """Operator board of the current collection cohort.
+    """Operator board of the current radar merge.
 
     Explicit status/economics order, not a hidden composite score:
     actionable/TRIGGERED first by strongest current net margin, then
