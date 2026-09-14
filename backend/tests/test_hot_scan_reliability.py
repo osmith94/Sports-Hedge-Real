@@ -53,7 +53,7 @@ class StickyShortPolymarket(FakePolymarket):
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.02)
             raise
         return []
 
@@ -183,6 +183,7 @@ async def test_hot_uncooperative_books_return_partial_before_envelope() -> None:
         assert report.scan_diagnostics["inflight_live"] == 0
         assert report.scan_diagnostics["provider_cancels"] >= 1
         assert "partial" in (coordinator.status.hot.operator_summary or report.operator_summary)
+        await asyncio.sleep(0.15)
     finally:
         repository.close()
 

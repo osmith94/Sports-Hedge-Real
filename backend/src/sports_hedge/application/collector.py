@@ -1067,7 +1067,7 @@ class ReadOnlyCrossVenueCollector:
         int,
         int,
     ]:
-        if self._deadline_reached() or self._hard_deadline_reached() or self._provider_budget_exhausted():
+        if self._hard_deadline_reached() or self._provider_budget_exhausted():
             leftover = _fixture_from_cluster(
                 cluster,
                 seen_at=seen_at,
