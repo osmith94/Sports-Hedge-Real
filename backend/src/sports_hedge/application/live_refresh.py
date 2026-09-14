@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -32,9 +33,15 @@ class ExplicitCollectBusy(RuntimeError):
 
 
 # Collector soft-stops at the per-run cycle timeout minus a finalisation
-# reserve. Coordinator waits this extra grace for persist/aclose after the
-# collector has already returned a (possibly partial) CollectionReport.
+# reserve. Coordinator waits this extra grace after the collector has
+# already returned a (possibly partial) CollectionReport. Persist is outside
+# the HOT envelope so SQLite/auto-capture cannot turn a partial into
+# scan_cycle_timeout. The envelope itself uses a child task so a late
+# cancel harvests a swallowed-CancelledError partial instead of cancelling
+# the server loop. Harvest is reserved *inside* the envelope (covers leftover
+# assembly plus scheduled HTTP aclose) so the wait never exceeds 30s.
 SCAN_CYCLE_RETURN_GRACE_SECONDS = 5.0
+SCAN_CYCLE_PARTIAL_HARVEST_SECONDS = 0.8
 
 
 class LaneRefreshStatus(BaseModel):
@@ -52,6 +59,7 @@ class LaneRefreshStatus(BaseModel):
     evaluated_count: int = 0
     not_evaluated_count: int = 0
     last_error: str | None = None
+    last_diagnostics: dict[str, Any] | None = None
     degraded: bool = False
     resume_cursor: str | None = None
     operator_summary: str | None = None
@@ -331,7 +339,7 @@ class LiveRefreshCoordinator:
             started = self.now()
             self._mark_lane_started(lane, started)
             try:
-                report = await asyncio.wait_for(runner(), timeout=timeout)
+                report = await _await_collection_runner(runner, timeout)
                 self.record_report(report, scan_lane=lane)
                 return report
             except TimeoutError as exc:
@@ -374,7 +382,7 @@ class LiveRefreshCoordinator:
             if self._hot_in_progress or self._universe_in_progress or self.status.cycle_in_progress:
                 raise ExplicitCollectBusy("scheduled scan in progress")
             try:
-                report = await asyncio.wait_for(runner(), timeout=timeout)
+                report = await _await_collection_runner(runner, timeout)
                 self.record_explicit_report(report)
                 return report
             except TimeoutError as exc:
@@ -460,6 +468,7 @@ class LiveRefreshCoordinator:
                             "fixture_count": hot_count,
                             "degraded": degraded,
                             "last_error": None,
+                            "last_diagnostics": _lane_diagnostics(report),
                             "next_due_at": self._next_hot_due,
                             "operator_summary": _hot_operator_summary(
                                 report.completed_at,
@@ -547,6 +556,7 @@ class LiveRefreshCoordinator:
                         "fixture_count": universe_count,
                         "degraded": degraded,
                         "last_error": None,
+                        "last_diagnostics": _lane_diagnostics(report),
                         "resume_cursor": self._universe_cursor,
                         "next_due_at": self._next_universe_due,
                         "operator_summary": _universe_operator_summary(
@@ -769,6 +779,64 @@ _COORDINATOR = LiveRefreshCoordinator()
 
 def get_live_refresh_coordinator() -> LiveRefreshCoordinator:
     return _COORDINATOR
+
+
+def _collection_task_result(task: asyncio.Task[Any]) -> CollectionReport:
+    try:
+        return task.result()
+    except asyncio.CancelledError as exc:
+        raise TimeoutError from exc
+
+
+async def _await_collection_runner(runner, timeout: float) -> CollectionReport:
+    """Wait for a collection runner on a child task.
+
+    asyncio.wait_for() cancels the *current* task (the server loop / request)
+    when the envelope expires. HOT leftover assembly swallows CancelledError
+    and returns a partial report; converting that into scan_cycle_timeout
+    is the owner-Windows 30s last_error. A child task lets us harvest the
+    partial instead of aborting the scheduler. Cancel is issued before the
+    hard envelope so leftover + aclose still fit inside timeout.
+    """
+
+    task = asyncio.create_task(runner())
+    started = monotonic()
+    harvest = min(SCAN_CYCLE_PARTIAL_HARVEST_SECONDS, max(0.05, float(timeout) / 2))
+    try:
+        wait_budget = max(0.0, float(timeout) - harvest)
+        done, _pending = await asyncio.wait({task}, timeout=wait_budget)
+        if task in done:
+            return _collection_task_result(task)
+        task.cancel()
+        remaining = max(0.0, float(timeout) - (monotonic() - started))
+        if remaining > 0:
+            await asyncio.wait({task}, timeout=remaining)
+        if task.done():
+            return _collection_task_result(task)
+        raise TimeoutError
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+def _lane_diagnostics(report: CollectionReport) -> dict[str, Any]:
+    payload = dict(report.scan_diagnostics or {})
+    payload.setdefault("soft_deadline_reached", False)
+    payload.setdefault("cancelled", False)
+    payload.setdefault("provider_cancels", 0)
+    payload.setdefault("inflight_orphaned", 0)
+    payload.setdefault("provider_calls", 0)
+    leftover_n = sum(
+        1
+        for item in report.discovered_fixtures
+        if item.market_evaluation_state == "not_evaluated_scan_deadline"
+    )
+    payload["partial"] = bool(
+        leftover_n
+        or payload.get("soft_deadline_reached")
+        or payload.get("cancelled")
+    )
+    return payload
 
 
 def _coerce_lane(value: ScanLane | str | None) -> ScanLane:

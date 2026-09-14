@@ -49,7 +49,8 @@ describe("dual cadence operator copy", () => {
     assert.match(lines[0], /Fast scan/);
     assert.match(lines[1], /Full sweep/);
     assert.doesNotMatch(lines.join(" "), /^Last scan /);
-    assert.match(fastScanCopy(status(), now).detail, /7 hot/);
+    assert.match(fastScanCopy(status(), now).detail, /partial \(2 not evaluated\)/);
+    assert.doesNotMatch(fastScanCopy(status(), now).detail, /scan_cycle_timeout/);
     assert.match(fullSweepCopy(status(), now).detail, /104 universe/);
   });
 

@@ -155,6 +155,21 @@ MIN_PROVIDER_WAIT_SECONDS = 0.05
 PROVIDER_CANCEL_DRAIN_SECONDS = 0.05
 
 
+def acknowledge_task_cancellation() -> None:
+    """Clear a swallowed CancelledError so later awaits (HTTP aclose) can run.
+
+    Python 3.11+ keeps Task.cancelling() > 0 after catching CancelledError.
+    The next await then re-raises, which would discard a leftover CollectionReport
+    and surface as scan_cycle_timeout.
+    """
+
+    task = asyncio.current_task()
+    if task is None or not hasattr(task, "uncancel"):
+        return
+    while task.cancelling() > 0:
+        task.uncancel()
+
+
 class DiscoveredFixture(BaseModel):
     source: VenueName = VenueName.MATCHBOOK
     source_event_id: str
@@ -335,6 +350,8 @@ class ReadOnlyCrossVenueCollector:
         self._stage_ms: dict[str, int] = {}
         self._timeouts_by_stage: dict[str, int] = {}
         self._provider_cancels = 0
+        self._provider_calls = 0
+        self._inflight_orphaned = 0
 
     async def collect_and_scan(
         self,
@@ -392,6 +409,8 @@ class ReadOnlyCrossVenueCollector:
         self._stage_ms = {}
         self._timeouts_by_stage = {}
         self._provider_cancels = 0
+        self._provider_calls = 0
+        self._inflight_orphaned = 0
         self._inflight = set()
         if cycle_budget is None:
             reserve = 0.0
@@ -569,7 +588,7 @@ class ReadOnlyCrossVenueCollector:
             }
             with self._stage("cluster_scan"):
                 for index, cluster in enumerate(clusters):
-                    if self._deadline_reached():
+                    if self._deadline_reached() or self._hard_deadline_reached():
                         self._cancel_inflight()
                         _append_deadline_leftovers(
                             clusters[index:],
@@ -604,6 +623,7 @@ class ReadOnlyCrossVenueCollector:
                         fixture_markets[fixture.canonical_event_id] = inventory
         except asyncio.CancelledError:
             cancelled = True
+            acknowledge_task_cancellation()
             self._cancel_inflight()
             LOGGER.warning(
                 "scan_cancelled_assembling_partial fixtures=%s inflight=%s",
@@ -654,6 +674,9 @@ class ReadOnlyCrossVenueCollector:
     def _deadline_reached(self) -> bool:
         return self._op_soft_deadline is not None and monotonic() >= self._op_soft_deadline
 
+    def _hard_deadline_reached(self) -> bool:
+        return self._op_deadline is not None and monotonic() >= self._op_deadline
+
     def _provider_budget_exhausted(self) -> bool:
         remaining = self._remaining_soft()
         return remaining is not None and remaining < MIN_PROVIDER_WAIT_SECONDS
@@ -669,14 +692,18 @@ class ReadOnlyCrossVenueCollector:
         return max(0.0, self._op_deadline - monotonic())
 
     def _timeout_budget(self, requested: float) -> float:
-        """Cap a provider wait to the remaining soft scan budget, not the hard grace."""
+        """Cap a provider wait to remaining soft budget and the hard collector deadline."""
 
         remaining = self._remaining_soft()
         if remaining is None:
-            return requested
-        if remaining < MIN_PROVIDER_WAIT_SECONDS:
+            remaining = requested
+        elif remaining < MIN_PROVIDER_WAIT_SECONDS:
             return 0.0
-        return min(requested, remaining)
+        hard = self._remaining_assembly()
+        capped = min(requested, remaining, hard)
+        if capped < MIN_PROVIDER_WAIT_SECONDS:
+            return 0.0
+        return capped
 
     @contextmanager
     def _stage(self, name: str) -> Iterator[None]:
@@ -693,6 +720,8 @@ class ReadOnlyCrossVenueCollector:
             if not task.done():
                 task.cancel()
                 self._provider_cancels += 1
+                self._inflight_orphaned += 1
+            self._inflight.discard(task)
 
     async def _await_bounded(self, coro: Any, timeout: float) -> tuple[Any, bool]:
         """Wait up to timeout, then cancel without blocking on uncooperative providers."""
@@ -702,8 +731,15 @@ class ReadOnlyCrossVenueCollector:
             if callable(close):
                 close()
             return None, True
+        timeout = min(timeout, self._remaining_assembly())
+        if timeout <= 0:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            return None, True
         task = asyncio.create_task(coro)
         self._inflight.add(task)
+        self._provider_calls += 1
         try:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
             if task in done:
@@ -717,9 +753,15 @@ class ReadOnlyCrossVenueCollector:
             if task.done() and not task.cancelled():
                 self._inflight.discard(task)
                 return task.result(), False
+            self._inflight.discard(task)
+            if not task.done():
+                self._inflight_orphaned += 1
             return None, True
         except asyncio.CancelledError:
             task.cancel()
+            if not task.done():
+                self._inflight_orphaned += 1
+            self._inflight.discard(task)
             raise
         finally:
             if task.done():
@@ -736,9 +778,19 @@ class ReadOnlyCrossVenueCollector:
                     close()
             return default
         tasks = [asyncio.create_task(coro) for coro in coros]
+        self._provider_calls += len(tasks)
         for task in tasks:
             self._inflight.add(task)
-        done, pending = await asyncio.wait(tasks, timeout=remaining)
+        try:
+            _done, pending = await asyncio.wait(tasks, timeout=remaining)
+        except asyncio.CancelledError:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+                    self._provider_cancels += 1
+                    self._inflight_orphaned += 1
+                self._inflight.discard(task)
+            raise
         for task in pending:
             task.cancel()
             self._provider_cancels += 1
@@ -746,6 +798,9 @@ class ReadOnlyCrossVenueCollector:
             drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
             if drain > 0:
                 await asyncio.wait(pending, timeout=drain)
+            for task in pending:
+                if not task.done():
+                    self._inflight_orphaned += 1
         results: list[Any] = []
         defaults = default if isinstance(default, tuple) and len(default) == len(tasks) else None
         for index, task in enumerate(tasks):
@@ -932,6 +987,9 @@ class ReadOnlyCrossVenueCollector:
             "clusters_leftover": leftover_n,
             "provider_timeouts": dict(self._timeouts_by_stage),
             "provider_cancels": self._provider_cancels,
+            "provider_calls": self._provider_calls,
+            "inflight_orphaned": self._inflight_orphaned,
+            "inflight_live": len(self._inflight),
             "scan_lane": scan_lane,
             "resume_cursor": resume_cursor,
             "identity_scope": [
@@ -1009,6 +1067,15 @@ class ReadOnlyCrossVenueCollector:
         int,
         int,
     ]:
+        if self._deadline_reached() or self._hard_deadline_reached() or self._provider_budget_exhausted():
+            leftover = _fixture_from_cluster(
+                cluster,
+                seen_at=seen_at,
+                polymarket_events=polymarket_events,
+                queried_series_ids=queried_series_ids,
+                leftover=True,
+            )
+            return leftover, [], [], {}, 0, 0
         fixture = _fixture_from_cluster(
             cluster,
             seen_at=seen_at,

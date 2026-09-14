@@ -19,7 +19,6 @@ from sports_hedge.application.live_refresh import (
     ExplicitCollectBusy,
     LiveRefreshCoordinator,
     SCAN_CYCLE_RETURN_GRACE_SECONDS,
-    ScanCycleTimeout,
     get_live_refresh_coordinator,
 )
 from sports_hedge.application.paper_scan import PaperScanService
@@ -549,18 +548,19 @@ async def test_hot_envelope_stops_inside_30s_and_does_not_overlap() -> None:
         return await collector.collect_and_scan(cycle_timeout_seconds=25)
 
     started = monotonic()
-    try:
-        await coordinator.run_cycle(
-            runner,
-            timeout_seconds=25 + SCAN_CYCLE_RETURN_GRACE_SECONDS,
-            scan_lane=ScanLane.HOT,
-        )
-    except ScanCycleTimeout:
-        pass
+    report = await coordinator.run_cycle(
+        runner,
+        timeout_seconds=25 + SCAN_CYCLE_RETURN_GRACE_SECONDS,
+        scan_lane=ScanLane.HOT,
+    )
     elapsed = monotonic() - started
-    assert elapsed < 32
+    assert elapsed < 30
     assert True in in_progress
     assert coordinator.status.hot.cycle_in_progress is False
+    assert coordinator.status.hot.last_error is None
+    assert coordinator.status.last_error is None
+    assert coordinator.status.hot.last_diagnostics is not None
+    assert report.discovered_fixtures
     repository.close()
 
 
@@ -573,6 +573,10 @@ def test_explicit_collect_keeps_45s_universe_contract_and_max_event_pairs() -> N
     settings = Settings()
     assert settings.paper_scan_cycle_timeout_seconds == 45
     assert settings.paper_scan_hot_cycle_timeout_seconds == 25
+    assert (
+        settings.paper_scan_hot_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
+        == 30
+    )
 
 
 def test_hot_upsert_keeps_161_aliases() -> None:

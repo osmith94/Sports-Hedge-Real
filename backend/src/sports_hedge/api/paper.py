@@ -27,6 +27,7 @@ from sports_hedge.application.collector import (
     CollectionReport,
     DEFAULT_MAX_EVENT_PAIRS,
     ReadOnlyCrossVenueCollector,
+    acknowledge_task_cancellation,
 )
 from sports_hedge.application.live_refresh import (
     ExplicitCollectBusy,
@@ -749,12 +750,10 @@ async def collect_read_only_market_data(
         ) from exc
 
 
-async def _execute_collection(
+async def _collect_report(
     kwargs: dict[str, Any],
     *,
     service: PaperScanService,
-    audit: SqlitePaperScanRepository,
-    watchlist: WatchlistService,
     scan_lane: str | None = None,
     identity_scope: list[str] | None = None,
     resume_cursor: str | None = None,
@@ -780,7 +779,7 @@ async def _execute_collection(
         ),
     )
     try:
-        report = await collector.collect_and_scan(
+        return await collector.collect_and_scan(
             **kwargs,
             polymarket_queried_series_ids=settings.resolved_polymarket_series_ids(),
             config_warnings=settings.polymarket_series_config_warnings(),
@@ -791,17 +790,56 @@ async def _execute_collection(
             known_source_events=known_source_events,
             cycle_timeout_seconds=cycle_timeout_seconds,
         )
-        for decision in report.paper_decisions:
-            _persist_decision(
-                decision,
-                service=service,
-                audit=audit,
-                watchlist=watchlist,
-                operations=get_paper_operations_service(watchlist, get_priority_alert_service()),
-            )
-        return report
     finally:
+        acknowledge_task_cancellation()
         await _aclose_soon(matchbook, polymarket, kalshi)
+
+
+def _persist_collection_report(
+    report: CollectionReport,
+    *,
+    service: PaperScanService,
+    audit: SqlitePaperScanRepository,
+    watchlist: WatchlistService,
+) -> None:
+    operations = get_paper_operations_service(watchlist, get_priority_alert_service())
+    for decision in report.paper_decisions:
+        _persist_decision(
+            decision,
+            service=service,
+            audit=audit,
+            watchlist=watchlist,
+            operations=operations,
+        )
+
+
+async def _execute_collection(
+    kwargs: dict[str, Any],
+    *,
+    service: PaperScanService,
+    audit: SqlitePaperScanRepository,
+    watchlist: WatchlistService,
+    scan_lane: str | None = None,
+    identity_scope: list[str] | None = None,
+    resume_cursor: str | None = None,
+    skip_event_ids: list[str] | None = None,
+    known_source_events: dict[str, list[dict[str, Any]]] | None = None,
+    cycle_timeout_seconds: float | None = None,
+) -> CollectionReport:
+    report = await _collect_report(
+        kwargs,
+        service=service,
+        scan_lane=scan_lane,
+        identity_scope=identity_scope,
+        resume_cursor=resume_cursor,
+        skip_event_ids=skip_event_ids,
+        known_source_events=known_source_events,
+        cycle_timeout_seconds=cycle_timeout_seconds,
+    )
+    _persist_collection_report(
+        report, service=service, audit=audit, watchlist=watchlist
+    )
+    return report
 
 
 async def server_owned_refresh_tick() -> None:
@@ -824,11 +862,9 @@ async def server_owned_refresh_tick() -> None:
     kwargs = coordinator.last_request() or PaperCollectionRequest().model_dump()
 
     async def runner() -> CollectionReport:
-        return await _execute_collection(
+        return await _collect_report(
             kwargs,
             service=service,
-            audit=audit,
-            watchlist=watchlist,
             scan_lane=plan.lane,
             identity_scope=plan.identity_scope,
             resume_cursor=plan.resume_cursor,
@@ -838,13 +874,16 @@ async def server_owned_refresh_tick() -> None:
         )
 
     try:
-        await coordinator.run_cycle(
+        report = await coordinator.run_cycle(
             runner,
             timeout_seconds=plan.coordinator_timeout_seconds,
             scan_lane=ScanLane(plan.lane),
         )
     except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, httpx.HTTPError):
         return
+    _persist_collection_report(
+        report, service=service, audit=audit, watchlist=watchlist
+    )
 
 
 @router.get("/trades/summary", response_model=PaperTradeBookSummary)
