@@ -16,9 +16,12 @@ from sports_hedge.application.collector import (
     MarketEvaluationState,
     ReadOnlyCrossVenueCollector,
     SCAN_BUDGET_EXHAUSTED_REASON,
+    SCAN_FINALISATION_RESERVE_SECONDS,
     _is_baseline_match_result,
     _select_prioritized_market_pairs,
+    finalisation_reserve_seconds,
 )
+from sports_hedge.application.live_refresh import SCAN_CYCLE_RETURN_GRACE_SECONDS
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.target_competitions import TargetCompetitionCode
 from sports_hedge.config import Settings
@@ -835,6 +838,10 @@ def test_collect_default_event_capacity_is_sixty_and_timeouts_stay_bounded() -> 
     assert Settings.model_fields["paper_scan_cycle_timeout_seconds"].default == 45
     assert Settings.model_fields["paper_scan_venue_timeout_seconds"].default == 15
     assert Settings.model_fields["paper_scan_provider_timeout_seconds"].default == 8
+    assert SCAN_CYCLE_RETURN_GRACE_SECONDS == 5.0
+    assert SCAN_FINALISATION_RESERVE_SECONDS == 4.0
+    assert finalisation_reserve_seconds(45) == 4.0
+    assert finalisation_reserve_seconds(45) + SCAN_CYCLE_RETURN_GRACE_SECONDS == 9.0
 
 
 @pytest.mark.asyncio

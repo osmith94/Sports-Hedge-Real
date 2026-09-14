@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import lru_cache
@@ -780,9 +781,7 @@ async def _execute_collection(
             )
         return report
     finally:
-        await matchbook.aclose()
-        await polymarket.aclose()
-        await kalshi.aclose()
+        await _aclose_soon(matchbook, polymarket, kalshi)
 
 
 async def server_owned_refresh_tick() -> None:
@@ -979,6 +978,19 @@ def simulate_paper_fill(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _aclose_soon(*clients: Any, timeout: float = 0.5) -> None:
+    """Drop HTTP clients without letting aclose hang past scan finalisation."""
+
+    for client in clients:
+        closer = getattr(client, "aclose", None)
+        if closer is None:
+            continue
+        task = asyncio.create_task(closer())
+        done, _pending = await asyncio.wait({task}, timeout=timeout)
+        if not done:
+            task.cancel()
 
 
 def _persist_decision(

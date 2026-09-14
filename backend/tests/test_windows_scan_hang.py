@@ -11,7 +11,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
-from sports_hedge.application.live_refresh import get_live_refresh_coordinator
+from sports_hedge.application.collector import DEFAULT_MAX_EVENT_PAIRS, MarketEvaluationState
+from sports_hedge.application.live_refresh import (
+    SCAN_CYCLE_RETURN_GRACE_SECONDS,
+    get_live_refresh_coordinator,
+)
 from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.trades import PaperTradeState
@@ -20,6 +24,11 @@ from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import MatchbookClient
 from sports_hedge.venues.polymarket import PolymarketClient
 from test_read_only_collector import FakePolymarket
+from test_scan_timeout import (
+    SixtyResponsiveKalshi,
+    SixtyResponsiveMatchbook,
+    SixtyResponsivePolymarket,
+)
 
 
 def _legacy_paper_schema(connection: sqlite3.Connection) -> None:
@@ -319,3 +328,101 @@ def test_collect_api_returns_partial_fixtures_when_cluster_scan_overruns(
     assert payload["last_completed_at"]
     assert payload["discovered_fixtures"]
     get_live_refresh_coordinator().reset()
+
+
+def test_collect_api_sixty_slow_markets_returns_partial_200_before_hard_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owner-Windows failure shape: 60 fixtures, slow books, 45s soft budget, 200 not 504."""
+
+    get_live_refresh_coordinator().reset()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "paper_scan_venue_timeout_seconds", 15)
+    monkeypatch.setattr(settings, "paper_scan_provider_timeout_seconds", 8)
+    monkeypatch.setattr(settings, "paper_scan_cycle_timeout_seconds", 45)
+    matchbook = SixtyResponsiveMatchbook()
+    polymarket = SixtyResponsivePolymarket()
+    kalshi = SixtyResponsiveKalshi()
+
+    async def mb_events(self, **filters):
+        del self
+        return await matchbook.list_events(**filters)
+
+    async def mb_markets(self, event_id, **filters):
+        del self
+        return await matchbook.list_markets(event_id, **filters)
+
+    async def pm_events(self, **filters):
+        del self
+        return await polymarket.list_events(**filters)
+
+    async def pm_markets(self, event_id, **filters):
+        del self
+        return await polymarket.list_markets(event_id, **filters)
+
+    async def pm_book(self, event_id, market_id, outcome_id=None, **filters):
+        del self
+        return await polymarket.get_order_book(event_id, market_id, outcome_id, **filters)
+
+    async def k_events(self, **filters):
+        del self
+        return await kalshi.list_events(**filters)
+
+    async def k_markets(self, event_id, **filters):
+        del self
+        return await kalshi.list_markets(event_id, **filters)
+
+    async def k_series(self, series_ticker):
+        del self
+        return await kalshi.get_series(series_ticker)
+
+    async def k_book(self, event_id, market_id, outcome_id=None, **filters):
+        del self
+        return await kalshi.get_order_book(event_id, market_id, outcome_id, **filters)
+
+    monkeypatch.setattr(MatchbookClient, "list_events", mb_events)
+    monkeypatch.setattr(MatchbookClient, "list_markets", mb_markets)
+    monkeypatch.setattr(PolymarketClient, "list_events", pm_events)
+    monkeypatch.setattr(PolymarketClient, "list_markets", pm_markets)
+    monkeypatch.setattr(PolymarketClient, "get_order_book", pm_book)
+    monkeypatch.setattr(KalshiClient, "list_events", k_events)
+    monkeypatch.setattr(KalshiClient, "list_markets", k_markets)
+    monkeypatch.setattr(KalshiClient, "get_series", k_series)
+    monkeypatch.setattr(KalshiClient, "get_order_book", k_book)
+
+    hard = settings.paper_scan_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
+    assert hard == 50
+    client = TestClient(app)
+    started = time.monotonic()
+    response = client.post(
+        "/paper/collect",
+        json={"maximum_execution_risk": 100, "max_event_pairs": DEFAULT_MAX_EVENT_PAIRS},
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < hard
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["venue_health"]
+    assert body["venue_health"]["matchbook"]
+    assert body["venue_health"]["polymarket"]
+    assert body["venue_health"]["kalshi"]
+    assert len(body["discovered_fixtures"]) == DEFAULT_MAX_EVENT_PAIRS
+    leftovers = [
+        item
+        for item in body["discovered_fixtures"]
+        if item["market_evaluation_state"]
+        == MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE.value
+    ]
+    assert leftovers
+    assert all(item["matched_equivalent_count"] is None for item in leftovers)
+    assert body["scan_diagnostics"]["soft_deadline_reached"] is True
+    assert "partial" in body["operator_summary"]
+    status = client.get("/paper/live-refresh")
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["cycle_in_progress"] is False
+    assert payload["last_error"] is None
+    assert payload["venue_health"]
+    assert payload["discovered_fixtures"]
+    get_live_refresh_coordinator().reset()
+
