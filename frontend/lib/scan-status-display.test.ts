@@ -55,7 +55,13 @@ describe("dual cadence operator copy", () => {
     const persistFailed = status({
       last_error: null,
       hot: {
-        ...status().hot,
+        cadence_seconds: 30,
+        cycle_timeout_seconds: 25,
+        last_completed_at: "2026-09-14T12:00:00Z",
+        last_duration_ms: 4100,
+        next_due_at: "2026-09-14T12:00:18Z",
+        fixture_count: 7,
+        not_evaluated_count: 2,
         last_error: null,
         persist_ok: false,
         last_persist_error: "audit_write_failed",
@@ -66,7 +72,13 @@ describe("dual cadence operator copy", () => {
     const universePersistFailed = status({
       last_error: null,
       universe: {
-        ...status().universe,
+        cadence_seconds: 180,
+        generation_budget_seconds: 150,
+        generation_work_used_s: 41,
+        chunk_last_duration_ms: 8000,
+        fixture_count: 104,
+        evaluated_count: 60,
+        not_evaluated_count: 44,
         last_error: null,
         persist_ok: false,
         last_persist_error: "audit_write_failed",
