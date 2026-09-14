@@ -227,7 +227,7 @@ class LiveRefreshCoordinator:
                 hours=resolved.paper_hot_post_kickoff_unknown_horizon_hours
             ),
         )
-        if hot_due:
+        if hot_due and hot_scope:
             timeout = float(resolved.paper_scan_hot_cycle_timeout_seconds)
             return DualCadencePlan(
                 lane="hot",
@@ -242,9 +242,11 @@ class LiveRefreshCoordinator:
             remaining = float(resolved.paper_scan_universe_generation_budget_seconds) - self._universe_work_used
             if remaining <= 0:
                 return DualCadencePlan(lane="idle", reason="universe_budget_exhausted")
-            next_hot = self._next_hot_due or (
-                evaluated + timedelta(seconds=resolved.paper_live_refresh_hot_interval_seconds)
-            )
+            hot_cadence = timedelta(seconds=resolved.paper_live_refresh_hot_interval_seconds)
+            next_hot = self._next_hot_due or (evaluated + hot_cadence)
+            if not hot_scope and next_hot <= evaluated:
+                # Empty HOT must not starve generation-0 / empty-scope UNIVERSE.
+                next_hot = evaluated + hot_cadence
             chunk_wall = universe_chunk_wall_seconds(
                 now=evaluated,
                 next_hot_due=next_hot,
@@ -265,6 +267,16 @@ class LiveRefreshCoordinator:
                 resume_cursor=self._universe_cursor,
                 skip_event_ids=sorted(self._universe_evaluated_ids),
                 reason="universe_chunk",
+            )
+        if hot_due:
+            timeout = float(resolved.paper_scan_hot_cycle_timeout_seconds)
+            return DualCadencePlan(
+                lane="hot",
+                collector_timeout_seconds=timeout,
+                coordinator_timeout_seconds=timeout + SCAN_CYCLE_RETURN_GRACE_SECONDS,
+                identity_scope=list(hot_scope),
+                known_source_events=self._fixture_state.known_source_events(hot_scope),
+                reason="hot_due",
             )
         return DualCadencePlan(lane="idle", reason="waiting")
 
@@ -438,15 +450,10 @@ class LiveRefreshCoordinator:
         leftover_n: int,
         degraded: bool,
     ) -> None:
-        settings = get_settings()
         if self._universe_generation_started_at is None:
-            self._universe_generation_id += 1
-            self._universe_generation_started_at = report.started_at
-            self._universe_work_used = 0.0
-            self._universe_evaluated_ids = set()
-            self._universe_cursor = None
+            self._ensure_universe_generation(report.started_at)
         duration_s = max(0.0, (report.completed_at - report.started_at).total_seconds())
-        self._universe_work_used += duration_s
+        budget = self._charge_universe_work(duration_s, report.completed_at)
         newly_evaluated = [
             item.canonical_event_id
             for item in report.discovered_fixtures
@@ -457,17 +464,8 @@ class LiveRefreshCoordinator:
             self._universe_cursor = newly_evaluated[-1]
         elif report.resume_cursor:
             self._universe_cursor = report.resume_cursor
-        budget = float(settings.paper_scan_universe_generation_budget_seconds)
-        generation_complete = leftover_n == 0 or self._universe_work_used >= budget
-        if generation_complete:
-            started = self._universe_generation_started_at or report.completed_at
-            next_due = started + timedelta(
-                seconds=settings.paper_live_refresh_universe_interval_seconds
-            )
-            if next_due <= report.completed_at:
-                next_due = report.completed_at
-            self._next_universe_due = next_due
-            self._universe_generation_started_at = None
+        if leftover_n == 0 and self._universe_generation_started_at is not None:
+            self._close_universe_generation(report.completed_at)
         _hot_count, universe_count = self._fixture_state.membership_counts(report.completed_at)
         self.status = self.status.model_copy(
             update={
@@ -498,6 +496,34 @@ class LiveRefreshCoordinator:
                 )
             }
         )
+
+    def _ensure_universe_generation(self, started: datetime) -> None:
+        if self._universe_generation_started_at is not None:
+            return
+        self._universe_generation_id += 1
+        self._universe_generation_started_at = started
+        self._universe_work_used = 0.0
+        self._universe_evaluated_ids = set()
+        self._universe_cursor = None
+
+    def _charge_universe_work(self, duration_s: float, finished: datetime) -> float:
+        settings = get_settings()
+        budget = float(settings.paper_scan_universe_generation_budget_seconds)
+        self._universe_work_used += max(0.0, duration_s)
+        if self._universe_work_used >= budget:
+            self._close_universe_generation(finished)
+        return budget
+
+    def _close_universe_generation(self, finished: datetime) -> None:
+        settings = get_settings()
+        started = self._universe_generation_started_at or finished
+        next_due = started + timedelta(
+            seconds=settings.paper_live_refresh_universe_interval_seconds
+        )
+        if next_due <= finished:
+            next_due = finished
+        self._next_universe_due = next_due
+        self._universe_generation_started_at = None
 
     def _advance_hot_due(self, now: datetime) -> None:
         settings = get_settings()
@@ -533,12 +559,7 @@ class LiveRefreshCoordinator:
                 }
             )
             return
-        if self._universe_generation_started_at is None:
-            self._universe_generation_id += 1
-            self._universe_generation_started_at = started
-            self._universe_work_used = 0.0
-            self._universe_evaluated_ids = set()
-            self._universe_cursor = None
+        self._ensure_universe_generation(started)
         self.status = self.status.model_copy(
             update={
                 **top,
@@ -579,6 +600,10 @@ class LiveRefreshCoordinator:
             )
             update["last_completed_at"] = finished
         else:
+            self._ensure_universe_generation(started)
+            duration_s = max(0.0, (finished - started).total_seconds())
+            budget = self._charge_universe_work(duration_s, finished)
+            _hot_count, universe_count = self._fixture_state.membership_counts(finished)
             update["universe"] = self.status.universe.model_copy(
                 update={
                     "cycle_in_progress": False,
@@ -586,6 +611,20 @@ class LiveRefreshCoordinator:
                     "last_completed_at": finished,
                     "last_duration_ms": duration,
                     "chunk_last_duration_ms": duration,
+                    "generation_work_used_s": round(self._universe_work_used, 3),
+                    "fixture_count": universe_count,
+                    "degraded": True,
+                    "resume_cursor": self._universe_cursor,
+                    "next_due_at": self._next_universe_due,
+                    "operator_summary": _universe_operator_summary(
+                        duration,
+                        self._universe_work_used,
+                        budget,
+                        self._next_hot_due,
+                        universe_count,
+                        len(self._universe_evaluated_ids),
+                        self.status.universe.not_evaluated_count,
+                    ),
                 }
             )
             if self.status.last_completed_at is None:

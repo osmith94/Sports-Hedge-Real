@@ -489,8 +489,10 @@ New module `backend/tests/test_dual_cadence_scheduler.py` (clock injected; no li
 | 13 | Existing `#157` / `#153` leftover tests remain PASS. |
 | 14 | **Slow HOT envelope:** a HOT collect that would run past 25s leftover-stops / aborts so coordinator return is ≤ ~30s (25s + 5s grace). A second HOT is not started while the first is in progress. After return, the next due slot is used (missed slot not queued). |
 | 15 | **T+3h unknown expiry:** kickoff-passed + `in_running None` at T+2h59m is HOT (not live). At T+3h01m it is UNIVERSE, still `in_running is None`, `fixture_status` not rewritten to completed. |
-| 16 | **Startup bootstrap:** new coordinator / empty process-memory store → Tracked `[]`; UNIVERSE is **due immediately** (does not wait 180s); after the first bootstrap chunk records inventory, Tracked may become non-empty; HOT membership is classified from that inventory. |
+| 16 | **Startup bootstrap:** new coordinator / empty process-memory store → Tracked `[]`; `plan_tick(now=start)` returns **UNIVERSE** (does not wait 180s and does not run an empty HOT cycle first). After the first bootstrap chunk records inventory, Tracked may become non-empty; HOT membership is classified from that inventory. |
 | 17 | **#161 identity seam:** after a HOT upsert of a subset, `FixtureCurrentStateStore.resolve_canonical_id` still maps cluster id, source event id, and paper-decision event id to the same fixture; `test_tracked_fixture_click_through.py` stays PASS. |
+| 18 | **Freshest status vs HOT economics:** an older HOT `in_running=True` snapshot must not pin membership/detail after a later UNIVERSE observation with `in_running=None` beyond the 3h window. Classify from the freshest provider-status observation; Tracked HOT membership still uses HOT economics only. |
+| 19 | **Failed UNIVERSE chunks consume budget:** timed-out/failed UNIVERSE wall time increments `generation_work_used` and closes the generation at 150s; HOT still starts on its due slot. |
 
 Frontend: health-bar / scan-note tests that Fast scan and Full sweep both render; a single `Last scan` string is insufficient once the API nests lanes.
 

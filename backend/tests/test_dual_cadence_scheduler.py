@@ -226,8 +226,14 @@ def test_t6d_is_not_in_hot_identity_scope() -> None:
 async def test_universe_chunk_yields_and_cursor_advances_across_hot_cycles() -> None:
     clock = FakeClock(NOW)
     coordinator = LiveRefreshCoordinator(clock=clock)
+    live = _fixture("live", kickoff=NOW - timedelta(minutes=1), in_running=True)
+    coordinator.record_report(_report([live], when=NOW), scan_lane=ScanLane.HOT)
     coordinator._next_hot_due = NOW + timedelta(seconds=20)
     coordinator._next_universe_due = NOW
+    coordinator._universe_generation_started_at = None
+    coordinator._universe_work_used = 0.0
+    coordinator._universe_evaluated_ids = set()
+    coordinator._universe_cursor = None
 
     async def runner() -> CollectionReport:
         fixture_a = _fixture("a", kickoff=NOW + timedelta(days=2), evaluation="evaluated")
@@ -270,7 +276,7 @@ async def test_universe_chunk_yields_and_cursor_advances_across_hot_cycles() -> 
     assert hot_plan.lane == "hot"
 
     async def hot_runner() -> CollectionReport:
-        return _report([], when=clock.now, scan_lane=ScanLane.HOT.value, decisions=[])
+        return _report([live], when=clock.now, scan_lane=ScanLane.HOT.value)
 
     await coordinator.run_cycle(
         hot_runner,
@@ -514,17 +520,13 @@ def test_startup_universe_due_immediately_and_tracked_empty() -> None:
     assert client.get("/paper/watchlist/tracked").json() == []
     assert coordinator.universe_due_immediately()
     assert coordinator._next_universe_due == NOW
+    assert coordinator._next_hot_due == NOW
     plan = coordinator.plan_tick(now=NOW)
-    # Empty HOT is due at the same instant; yield it so UNIVERSE bootstrap is
-    # bounded by next_hot_due + 30s rather than blocked by a due HOT slot.
-    if plan.lane == "hot":
-        assert plan.identity_scope == []
-        coordinator._next_hot_due = NOW + timedelta(seconds=30)
-        plan = coordinator.plan_tick(now=NOW)
     assert plan.lane == "universe"
     assert plan.reason == "universe_chunk"
     assert plan.collector_timeout_seconds is not None
-    assert plan.collector_timeout_seconds < 180
+    assert plan.collector_timeout_seconds < 30
+    assert coordinator._next_hot_due == NOW
 
 
 @pytest.mark.asyncio
@@ -607,3 +609,114 @@ def test_hot_upsert_keeps_161_aliases() -> None:
     assert store.resolve_canonical_id(source_id) == cluster_id
     assert store.resolve_canonical_id(decision_id) == cluster_id
     coordinator.reset()
+
+
+def test_later_universe_status_unsticks_stale_hot_live_pin() -> None:
+    live_at = NOW
+    kickoff = live_at - timedelta(minutes=10)
+    later = live_at + timedelta(hours=3, minutes=2)
+    coordinator = LiveRefreshCoordinator()
+    coordinator.reset()
+    live = _fixture("stale-live", kickoff=kickoff, in_running=True)
+    coordinator.record_report(_report([live], when=live_at), scan_lane=ScanLane.HOT)
+    store = coordinator.fixture_current_state()
+    assert store.hot_identity_scope(live_at) == ["stale-live"]
+    detail_live = store.detail("stale-live")
+    assert detail_live is not None
+    assert detail_live.fixture.in_running is True
+
+    unknown = _fixture("stale-live", kickoff=kickoff, in_running=None)
+    coordinator.record_report(_report([unknown], when=later), scan_lane=ScanLane.UNIVERSE)
+    assert store.hot_identity_scope(later) == []
+    hot_count, universe_count = store.membership_counts(later)
+    assert hot_count == 0
+    assert universe_count == 1
+    detail = store.detail("stale-live")
+    assert detail is not None
+    assert detail.fixture.in_running is None
+    assert detail.fixture.fixture_status is None
+    inventory = store.inventory(later)
+    assert inventory[0].in_running is None
+    radar = store.current_radar_rows(later)
+    assert radar[0].membership is ScanLane.UNIVERSE
+    assert radar[0].observation_lane is ScanLane.UNIVERSE
+    coordinator.reset()
+
+
+@pytest.mark.asyncio
+async def test_failed_universe_chunks_consume_generation_budget_without_starving_hot() -> None:
+    clock = FakeClock(NOW)
+    coordinator = LiveRefreshCoordinator(clock=clock)
+    coordinator._clock = clock
+    live = _fixture("live", kickoff=NOW - timedelta(minutes=5), in_running=True)
+    far = _fixture("t6d", kickoff=NOW + timedelta(days=6))
+    coordinator.record_report(_report([live, far], when=NOW), scan_lane=ScanLane.UNIVERSE)
+    coordinator._next_hot_due = NOW + timedelta(seconds=20)
+    coordinator._next_universe_due = NOW
+    coordinator._universe_generation_started_at = None
+    coordinator._universe_work_used = 0.0
+
+    async def fail_runner() -> CollectionReport:
+        clock.advance(8)
+        raise RuntimeError("provider_timeout")
+
+    first = coordinator.plan_tick(now=clock.now)
+    assert first.lane == "universe"
+    with pytest.raises(RuntimeError, match="provider_timeout"):
+        await coordinator.run_cycle(
+            fail_runner,
+            timeout_seconds=first.coordinator_timeout_seconds,
+            scan_lane=ScanLane.UNIVERSE,
+        )
+    assert coordinator._universe_work_used == pytest.approx(8.0)
+    assert coordinator.status.universe.generation_work_used_s == pytest.approx(8.0)
+    assert coordinator.status.universe.degraded is True
+
+    second = coordinator.plan_tick(now=clock.now)
+    assert second.lane == "universe"
+    with pytest.raises(RuntimeError, match="provider_timeout"):
+        await coordinator.run_cycle(
+            fail_runner,
+            timeout_seconds=second.coordinator_timeout_seconds,
+            scan_lane=ScanLane.UNIVERSE,
+        )
+    assert coordinator._universe_work_used == pytest.approx(16.0)
+
+    clock.now = NOW + timedelta(seconds=20)
+    hot_plan = coordinator.plan_tick(now=clock.now)
+    assert hot_plan.lane == "hot"
+    assert "live" in hot_plan.identity_scope
+
+    async def hot_runner() -> CollectionReport:
+        return _report([live], when=clock.now, scan_lane=ScanLane.HOT.value)
+
+    await coordinator.run_cycle(
+        hot_runner,
+        timeout_seconds=hot_plan.coordinator_timeout_seconds,
+        scan_lane=ScanLane.HOT,
+    )
+    coordinator._next_hot_due = clock.now + timedelta(seconds=300)
+
+    async def long_fail() -> CollectionReport:
+        clock.advance(50)
+        raise RuntimeError("provider_timeout")
+
+    attempts = 0
+    while coordinator._universe_work_used < 150:
+        attempts += 1
+        assert attempts <= 8
+        plan = coordinator.plan_tick(now=clock.now)
+        assert plan.lane == "universe"
+        with pytest.raises(RuntimeError, match="provider_timeout"):
+            await coordinator.run_cycle(
+                long_fail,
+                timeout_seconds=plan.coordinator_timeout_seconds,
+                scan_lane=ScanLane.UNIVERSE,
+            )
+    assert coordinator._universe_work_used >= 150
+    assert coordinator._universe_generation_started_at is None
+    assert coordinator.status.universe.generation_work_used_s >= 150
+    closed = coordinator.plan_tick(now=clock.now)
+    assert closed.lane != "universe"
+    clock.now = coordinator._next_hot_due
+    assert coordinator.plan_tick(now=clock.now).lane == "hot"

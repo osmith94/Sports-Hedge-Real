@@ -68,6 +68,10 @@ class FixtureCurrentStateStore:
     Coordinator-owned. Dual-cadence HOT/UNIVERSE lanes upsert into this same
     store with TTL merge. One identity map; no second canonical system.
 
+    Membership and displayed provider status use the freshest observation by
+    last_scanned_at. Tracked economics for a HOT-classified fixture still use
+    only the HOT lane observation.
+
     Do not fuzzy-match fixture names. Do not fabricate demo fixtures.
     """
 
@@ -164,7 +168,7 @@ class FixtureCurrentStateStore:
         if canonical_id is None:
             return None
         record = self._rows[canonical_id]
-        displayed = record.display_fixture()
+        displayed = record.status_fixture()
         if displayed is None:
             return None
         return FixtureDetailReadModel(
@@ -186,7 +190,7 @@ class FixtureCurrentStateStore:
     ) -> list[DiscoveredFixture]:
         rows: list[DiscoveredFixture] = []
         for record in self._rows.values():
-            fixture = record.display_fixture()
+            fixture = record.status_fixture()
             if fixture is None:
                 continue
             membership = classify_scan_lane(
@@ -235,7 +239,7 @@ class FixtureCurrentStateStore:
         current: list[FixtureRadarRow] = []
         drop_ids: list[str] = []
         for canonical_id, record in self._rows.items():
-            fixture = record.display_fixture()
+            fixture = record.status_fixture()
             if fixture is None:
                 continue
             membership = classify_scan_lane(
@@ -317,7 +321,7 @@ class FixtureCurrentStateStore:
         )
         fixtures: list[DiscoveredFixture] = []
         for record in self._rows.values():
-            fixture = record.display_fixture()
+            fixture = record.status_fixture()
             if fixture is None:
                 continue
             membership = classify_scan_lane(
@@ -354,7 +358,7 @@ class FixtureCurrentStateStore:
         hot = 0
         universe = 0
         for record in self._rows.values():
-            fixture = record.display_fixture()
+            fixture = record.status_fixture()
             if fixture is None:
                 continue
             membership = classify_scan_lane(fixture, now, **kwargs)
@@ -412,6 +416,8 @@ class _FixtureRecord:
         return None
 
     def selected_observation(self, membership: ScanLane) -> LaneObservation | None:
+        """Lane economics for Tracked. HOT membership never falls back to UNIVERSE prices."""
+
         if membership is ScanLane.HOT:
             if self.hot is not None and self.hot.evaluated:
                 return self.hot
@@ -422,21 +428,41 @@ class _FixtureRecord:
             return self.hot
         return None
 
+    def status_observation(self) -> LaneObservation | None:
+        """Freshest provider-status snapshot. Does not prefer HOT over a newer UNIVERSE."""
+
+        candidates = [item for item in (self.hot, self.universe) if item is not None]
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda item: (
+                item.last_scanned_at,
+                1 if item.scan_lane is ScanLane.UNIVERSE else 0,
+            ),
+        )
+
+    def status_fixture(self) -> DiscoveredFixture | None:
+        observation = self.status_observation()
+        if observation is None:
+            return None
+        fixture = observation.fixture
+        if self.leftover_this_pass and observation.evaluated:
+            return fixture.model_copy(
+                update={
+                    "market_evaluation_reason": observation.fixture.market_evaluation_reason
+                    or MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE.value,
+                }
+            )
+        return fixture
+
     def display_fixture(self) -> DiscoveredFixture | None:
-        for item in (self.hot, self.universe):
-            if item is not None:
-                fixture = item.fixture
-                if self.leftover_this_pass and item.evaluated:
-                    return fixture.model_copy(
-                        update={
-                            "market_evaluation_reason": item.fixture.market_evaluation_reason
-                            or MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE.value,
-                        }
-                    )
-                return fixture
-        return None
+        return self.status_fixture()
 
     def display_markets(self) -> list[FixtureMarketInventoryRow]:
+        status = self.status_observation()
+        if status is not None and status.evaluated:
+            return list(status.markets)
         for item in (self.hot, self.universe):
             if item is not None and item.evaluated:
                 return list(item.markets)
