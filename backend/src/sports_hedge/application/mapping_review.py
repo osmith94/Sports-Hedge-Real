@@ -326,13 +326,11 @@ def evidence_from_markets(
     right: CanonicalMarket,
     *,
     matcher: MarketMatcher | None = None,
-    match: MarketMatchResult | None = None,
     left_raw: dict[str, Any] | None = None,
     right_raw: dict[str, Any] | None = None,
 ) -> MappingReviewCandidate:
-    if match is None:
-        matcher = matcher or MarketMatcher()
-        match = matcher.match(left, right)
+    matcher = matcher or MarketMatcher()
+    match = matcher.match(left, right)
     left_side = _side_from_market(left, raw=left_raw, match_reasons=match.reasons, confidence=match.confidence)
     right_side = _side_from_market(right, raw=right_raw, match_reasons=match.reasons, confidence=match.confidence)
     conflicts: list[str] = []
