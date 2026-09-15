@@ -561,7 +561,7 @@ def _treasury_event_facts(ledger: SqlitePaperLedger, trade_id: str) -> list[tupl
         return [(row[0], row[1]) for row in rows]
 
 
-def test_scheduled_persist_failure_is_visible_without_scan_timeout(
+async def test_scheduled_persist_failure_is_visible_without_scan_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -610,7 +610,7 @@ def test_scheduled_persist_failure_is_visible_without_scan_timeout(
 
         monkeypatch.setattr(paper_api, "_persist_decision", persist_after_open_then_fail_once)
 
-        paper_api.persist_scheduled_collection_report(
+        await paper_api.persist_scheduled_collection_report(
             coordinator,
             report,
             service=scan,
@@ -649,7 +649,7 @@ def test_scheduled_persist_failure_is_visible_without_scan_timeout(
         assert coordinator.status.hot.last_diagnostics is not None
         assert coordinator.status.hot.last_diagnostics["stages"]["persistence"]["ok"] is False
 
-        paper_api.persist_scheduled_collection_report(
+        await paper_api.persist_scheduled_collection_report(
             coordinator,
             report,
             service=scan,

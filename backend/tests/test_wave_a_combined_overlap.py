@@ -174,7 +174,7 @@ def test_disabled_polymarket_cycle_cannot_clear_matchbook_graded_tombstone() -> 
     assert remaining.provider_status == "graded"
 
 
-def test_scheduled_persist_retry_respects_disabled_venues_and_stays_idempotent(
+async def test_scheduled_persist_retry_respects_disabled_venues_and_stays_idempotent(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -208,7 +208,7 @@ def test_scheduled_persist_retry_respects_disabled_venues_and_stays_idempotent(
             return ops
 
         monkeypatch.setattr(paper_api, "get_paper_operations_service", operations_factory)
-        paper_api.persist_scheduled_collection_report(
+        await paper_api.persist_scheduled_collection_report(
             coordinator,
             disabled_pm,
             service=scan,
@@ -229,7 +229,7 @@ def test_scheduled_persist_retry_respects_disabled_venues_and_stays_idempotent(
                 ]
             }
         )
-        paper_api.persist_scheduled_collection_report(
+        await paper_api.persist_scheduled_collection_report(
             coordinator,
             enabled,
             service=scan,
@@ -243,7 +243,7 @@ def test_scheduled_persist_retry_respects_disabled_venues_and_stays_idempotent(
         assert trade.state is PaperTradeState.OPEN
         assert trade.paper_only is True
         assert trade.places_orders is False
-        paper_api.persist_scheduled_collection_report(
+        await paper_api.persist_scheduled_collection_report(
             coordinator,
             enabled,
             service=scan,
