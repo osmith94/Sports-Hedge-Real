@@ -496,4 +496,21 @@ describe("opportunity monitor table contract", () => {
     assert.doesNotMatch(table, /close-now/);
     assert.doesNotMatch(page, /MappingVerificationPanel/);
   });
+
+  it("remains presentation-only: no venue write, simulate-fill, unwind, or settle path", () => {
+    assert.match(table, /Paper describes execution mode, not this table/);
+    assert.match(table, /Current radar only/);
+    for (const banned of [
+      "place_order",
+      "cancel_order",
+      "sign_order",
+      "submit_order",
+      "simulate-fill",
+      "/unwind",
+      "/settle",
+      "geobypass",
+    ]) {
+      assert.doesNotMatch(table, new RegExp(banned));
+    }
+  });
 });
