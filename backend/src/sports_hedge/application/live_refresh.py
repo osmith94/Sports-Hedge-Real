@@ -970,6 +970,8 @@ class LiveRefreshCoordinator:
             **classify,
             hot_interval_seconds=horizon["hot_interval_seconds"],
             universe_interval_seconds=horizon["universe_interval_seconds"],
+            hot_ttl_seconds=horizon["hot_ttl_seconds"],
+            universe_ttl_seconds=horizon["universe_ttl_seconds"],
         )
         hot_count, universe_count = self._fixture_state.membership_counts(now, **classify)
         self.status = self.status.model_copy(

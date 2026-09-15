@@ -243,6 +243,9 @@ export type FixtureMarketInventoryRow = {
   trigger_net_edge?: string | number | null;
   distance_to_trigger_pp?: string | number | null;
   solver_is_arbitrage: boolean;
+  scan_lane?: string | null;
+  last_scanned_at?: string | null;
+  radar_freshness?: "executable" | "radar_current" | "expired" | null;
   matchbook?: VenueMarketFacts | null;
   polymarket?: VenueMarketFacts | null;
 };

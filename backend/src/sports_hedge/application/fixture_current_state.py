@@ -11,8 +11,19 @@ from sports_hedge.application.collector import (
     FixtureMarketInventoryRow,
     MarketEvaluationState,
 )
+from sports_hedge.application.current_market_inventory import (
+    CurrentMarketSlot,
+    apply_current_market_inventory,
+    combined_radar_freshness,
+    merge_current_market_slots,
+    prune_expired_market_slots,
+    stamp_current_market_row,
+    union_paper_market_ids,
+)
+from sports_hedge.application.fixture_inventory import sort_fixture_inventory_rows
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
+    DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     DEFAULT_HOT_HORIZON,
     DEFAULT_HOT_INTERVAL_SECONDS,
     DEFAULT_HOT_TTL_SECONDS,
@@ -85,8 +96,16 @@ class FixtureCurrentStateStore:
     store with TTL merge. One identity map; no second canonical system.
 
     Membership and displayed provider status use the freshest observation by
-    last_scanned_at. Tracked economics for a HOT-classified fixture still use
-    only the HOT lane observation.
+    last_scanned_at. Each fixture owns a merged current market inventory across
+    lanes: a HOT subset refresh updates only the canonical markets it evaluated
+    and must not delete still-current equivalents from the other lane.
+    Fresher HOT state supersedes older UNIVERSE state for the same canonical
+    market. `not_evaluated` does not clobber prior still-valid market rows.
+    Expired or explicitly re-evaluated invalid rows leave/update truthfully.
+
+    Fixture equivalent/qualifying/near counts and best/headline fields derive
+    from that merged current inventory. Radar TTL may keep rows visible;
+    paper eligibility / auto-capture still require executable quote freshness.
 
     Terminal tombstones keep explicit finished/completed/settled truth from
     resurrecting via a later stale UNIVERSE or other-venue unknown snapshot.
@@ -220,7 +239,8 @@ class FixtureCurrentStateStore:
         if canonical_id is None:
             return None
         record = self._rows[canonical_id]
-        displayed = record.status_fixture()
+        record.prune_markets(now, **kwargs)
+        displayed = record.status_fixture(now, **kwargs)
         if displayed is None:
             return None
         if now is not None and classify_scan_lane(
@@ -230,7 +250,7 @@ class FixtureCurrentStateStore:
             return None
         return FixtureDetailReadModel(
             fixture=displayed,
-            markets=list(record.display_markets()),
+            markets=list(record.display_markets(now, **kwargs)),
         )
 
     def tombstone_for(self, identity: str) -> CurrentStateTombstone | None:
@@ -251,15 +271,25 @@ class FixtureCurrentStateStore:
         post_kickoff_unknown_horizon=DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON,
         hot_interval_seconds: int = DEFAULT_HOT_INTERVAL_SECONDS,
         universe_interval_seconds: int = DEFAULT_UNIVERSE_INTERVAL_SECONDS,
+        hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
+        universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+        max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     ) -> list[DiscoveredFixture]:
+        market_kwargs = {
+            "hot_ttl_seconds": hot_ttl_seconds,
+            "universe_ttl_seconds": universe_ttl_seconds,
+            "max_quote_age_ms": max_quote_age_ms,
+        }
         self._evict_non_current(
             now,
             hot_horizon=hot_horizon,
             post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+            **market_kwargs,
         )
         rows: list[DiscoveredFixture] = []
         for record in self._rows.values():
-            fixture = record.status_fixture()
+            record.prune_markets(now, **market_kwargs)
+            fixture = record.status_fixture(now, **market_kwargs)
             if fixture is None:
                 continue
             membership = classify_scan_lane(
@@ -270,9 +300,7 @@ class FixtureCurrentStateStore:
             )
             if membership is ScanLane.DROP:
                 continue
-            observation = record.selected_observation(membership)
-            lane = observation.scan_lane if observation is not None else membership
-            scanned = observation.last_scanned_at if observation is not None else fixture.last_seen_at
+            lane, scanned = record.scheduler_lane_scan(membership, fixture)
             rows.append(
                 fixture.model_copy(
                     update={
@@ -306,13 +334,20 @@ class FixtureCurrentStateStore:
         evaluated = require_aware_instant(now, "now")
         quote_ages = quote_age_ms_by_market or {}
         current: list[FixtureRadarRow] = []
+        market_kwargs = {
+            "hot_ttl_seconds": hot_ttl_seconds,
+            "universe_ttl_seconds": universe_ttl_seconds,
+            "max_quote_age_ms": max_quote_age_ms,
+        }
         self._evict_non_current(
             evaluated,
             hot_horizon=hot_horizon,
             post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+            **market_kwargs,
         )
         for canonical_id, record in self._rows.items():
-            fixture = record.status_fixture()
+            record.prune_markets(evaluated, **market_kwargs)
+            fixture = record.status_fixture(evaluated, **market_kwargs)
             if fixture is None:
                 continue
             membership = classify_scan_lane(
@@ -323,42 +358,59 @@ class FixtureCurrentStateStore:
             )
             if membership is ScanLane.DROP:
                 continue
+            markets = record.display_markets(evaluated, **market_kwargs)
+            paper_ids = record.radar_paper_market_ids(membership, evaluated, **market_kwargs)
             observation = record.selected_observation(membership)
-            if observation is None or not observation.evaluated:
-                continue
-            market_quote_age = None
-            for market_id in observation.paper_market_ids:
-                if market_id in quote_ages:
-                    market_quote_age = quote_ages[market_id]
-                    break
-            freshness = freshness_class(
-                lane=observation.scan_lane,
-                last_scanned_at=observation.last_scanned_at,
-                now=evaluated,
-                quote_age_ms=market_quote_age,
-                max_quote_age_ms=max_quote_age_ms,
-                hot_ttl_seconds=hot_ttl_seconds,
-                universe_ttl_seconds=universe_ttl_seconds,
-            )
-            if freshness == FRESHNESS_EXPIRED:
+            if markets:
+                freshness = combined_radar_freshness(markets)
+                if freshness == FRESHNESS_EXPIRED:
+                    continue
+                lane, scanned = record.scheduler_lane_scan(membership, fixture)
+                radar_fixture = fixture
+                source_events = record.source_events()
+            else:
+                if observation is None or not observation.evaluated:
+                    continue
+                market_quote_age = None
+                for market_id in observation.paper_market_ids:
+                    if market_id in quote_ages:
+                        market_quote_age = quote_ages[market_id]
+                        break
+                freshness = freshness_class(
+                    lane=observation.scan_lane,
+                    last_scanned_at=observation.last_scanned_at,
+                    now=evaluated,
+                    quote_age_ms=market_quote_age,
+                    max_quote_age_ms=max_quote_age_ms,
+                    hot_ttl_seconds=hot_ttl_seconds,
+                    universe_ttl_seconds=universe_ttl_seconds,
+                )
+                if freshness == FRESHNESS_EXPIRED:
+                    continue
+                lane = observation.scan_lane
+                scanned = observation.last_scanned_at
+                radar_fixture = observation.fixture
+                source_events = observation.source_events
+                paper_ids = observation.paper_market_ids
+            if not paper_ids and not markets:
                 continue
             current.append(
                 FixtureRadarRow(
                     canonical_event_id=canonical_id,
-                    fixture=observation.fixture,
-                    markets=list(observation.markets),
+                    fixture=radar_fixture,
+                    markets=list(markets),
                     membership=membership,
-                    observation_lane=observation.scan_lane,
-                    last_scanned_at=observation.last_scanned_at,
-                    paper_market_ids=observation.paper_market_ids,
+                    observation_lane=lane,
+                    last_scanned_at=scanned,
+                    paper_market_ids=paper_ids,
                     freshness=freshness,
                     next_due_at=next_due_at(
-                        observation.last_scanned_at,
-                        observation.scan_lane,
+                        scanned,
+                        lane,
                         hot_interval_seconds=hot_interval_seconds,
                         universe_interval_seconds=universe_interval_seconds,
                     ),
-                    source_events=observation.source_events,
+                    source_events=source_events,
                 )
             )
         return current
@@ -449,14 +501,20 @@ class FixtureCurrentStateStore:
                 if observation.source_events and not previous.source_events:
                     record.set_source_events(observation.source_events)
                 return
+            record.set_lane(observation)
+            record.leftover_this_pass = True
+            return
         record.set_lane(observation)
-        record.leftover_this_pass = not observation.evaluated
+        record.merge_markets(observation)
+        record.leftover_this_pass = False
 
     def _evict_non_current(self, now: datetime, **kwargs: Any) -> None:
         classify_kwargs = _classify_kwargs(kwargs)
+        market_kwargs = _market_ttl_kwargs(kwargs)
         evaluated = require_aware_instant(now, "now")
         for canonical_id, record in list(self._rows.items()):
-            fixture = record.status_fixture()
+            record.prune_markets(evaluated, **market_kwargs)
+            fixture = record.status_fixture(evaluated, **market_kwargs)
             if fixture is None:
                 self._drop_identity(canonical_id)
                 continue
@@ -560,6 +618,7 @@ class _FixtureRecord:
     universe: LaneObservation | None = None
     leftover_this_pass: bool = False
     extra_source_events: tuple[StoredSourceEvent, ...] = ()
+    markets: dict[str, CurrentMarketSlot] | None = None
 
     def set_lane(self, observation: LaneObservation) -> None:
         if observation.scan_lane is ScanLane.HOT:
@@ -570,6 +629,22 @@ class _FixtureRecord:
             self.extra_source_events = _merge_source_events(
                 self.extra_source_events, observation.source_events
             )
+
+    def merge_markets(self, observation: LaneObservation) -> None:
+        self.markets = merge_current_market_slots(
+            self.markets or {},
+            list(observation.markets),
+            scan_lane=observation.scan_lane,
+            scanned_at=observation.last_scanned_at,
+            paper_market_ids=observation.paper_market_ids,
+            evaluated=observation.evaluated,
+        )
+
+    def prune_markets(self, now: datetime | None, **kwargs: Any) -> None:
+        if now is None or not self.markets:
+            return
+        ttl = _market_ttl_kwargs(kwargs)
+        self.markets = prune_expired_market_slots(self.markets, now, **ttl)
 
     def set_source_events(self, events: tuple[StoredSourceEvent, ...]) -> None:
         self.extra_source_events = _merge_source_events(self.extra_source_events, events)
@@ -608,34 +683,81 @@ class _FixtureRecord:
             ),
         )
 
-    def status_fixture(self) -> DiscoveredFixture | None:
+    def live_market_slots(self) -> list[CurrentMarketSlot]:
+        return list((self.markets or {}).values())
+
+    def scheduler_lane_scan(
+        self, membership: ScanLane, fixture: DiscoveredFixture
+    ) -> tuple[ScanLane, datetime]:
+        """HOT/UNIVERSE due times follow membership, not the latest retained market slot."""
+
+        lane_obs = self.lane_observation(membership)
+        if lane_obs is not None:
+            return membership, lane_obs.last_scanned_at
+        selected = self.selected_observation(membership)
+        if selected is not None:
+            return selected.scan_lane, selected.last_scanned_at
+        return membership, fixture.last_seen_at
+
+    def radar_paper_market_ids(
+        self,
+        membership: ScanLane,
+        now: datetime | None = None,
+        **kwargs: Any,
+    ) -> tuple[str, ...]:
+        del now
+        from_slots = union_paper_market_ids(self.live_market_slots())
+        if from_slots:
+            return from_slots
+        observation = self.selected_observation(membership)
+        if observation is None or not observation.evaluated:
+            return ()
+        return observation.paper_market_ids
+
+    def status_fixture(self, now: datetime | None = None, **kwargs: Any) -> DiscoveredFixture | None:
         observation = self.status_observation()
         if observation is None:
             return None
         fixture = observation.fixture
         if self.leftover_this_pass and observation.evaluated:
-            return fixture.model_copy(
+            fixture = fixture.model_copy(
                 update={
                     "market_evaluation_reason": observation.fixture.market_evaluation_reason
                     or MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE.value,
                 }
             )
-        return fixture
+        slots = self.live_market_slots()
+        if not slots:
+            if self.markets is None:
+                return fixture
+            return fixture.model_copy(
+                update={
+                    "discovered_market_count": 0,
+                    "matched_market_count": 0,
+                    "matched_equivalent_count": 0,
+                    "qualifying_market_count": 0,
+                    "near_executable_market_count": 0,
+                    "best_arb_market": None,
+                    "solver_is_arbitrage": False,
+                    "headline_band": "no_executable_arb",
+                    "opportunity_state": "unmatched",
+                    "current_net_edge": None,
+                }
+            )
+        ttl = _market_ttl_kwargs(kwargs)
+        projected, _rows = apply_current_market_inventory(fixture, slots, now=now, **ttl)
+        return projected
 
-    def display_fixture(self) -> DiscoveredFixture | None:
-        return self.status_fixture()
+    def display_fixture(self, now: datetime | None = None, **kwargs: Any) -> DiscoveredFixture | None:
+        return self.status_fixture(now, **kwargs)
 
-    def display_markets(self) -> list[FixtureMarketInventoryRow]:
-        status = self.status_observation()
-        if status is not None and status.evaluated:
-            return list(status.markets)
-        for item in (self.hot, self.universe):
-            if item is not None and item.evaluated:
-                return list(item.markets)
-        for item in (self.hot, self.universe):
-            if item is not None:
-                return list(item.markets)
-        return []
+    def display_markets(self, now: datetime | None = None, **kwargs: Any) -> list[FixtureMarketInventoryRow]:
+        ttl = _market_ttl_kwargs(kwargs)
+        rows = [
+            stamp_current_market_row(slot, now=now, **ttl)
+            for slot in self.live_market_slots()
+        ]
+        return sort_fixture_inventory_rows(rows)
 
     def source_events(self) -> tuple[StoredSourceEvent, ...]:
         merged: dict[tuple[str, str], StoredSourceEvent] = {}
@@ -795,4 +917,15 @@ def _classify_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         allowed["hot_horizon"] = kwargs["hot_horizon"]
     if "post_kickoff_unknown_horizon" in kwargs:
         allowed["post_kickoff_unknown_horizon"] = kwargs["post_kickoff_unknown_horizon"]
+    return allowed
+
+
+def _market_ttl_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    allowed: dict[str, Any] = {}
+    if "hot_ttl_seconds" in kwargs:
+        allowed["hot_ttl_seconds"] = kwargs["hot_ttl_seconds"]
+    if "universe_ttl_seconds" in kwargs:
+        allowed["universe_ttl_seconds"] = kwargs["universe_ttl_seconds"]
+    if "max_quote_age_ms" in kwargs:
+        allowed["max_quote_age_ms"] = kwargs["max_quote_age_ms"]
     return allowed

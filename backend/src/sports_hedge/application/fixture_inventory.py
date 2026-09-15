@@ -104,6 +104,9 @@ class FixtureMarketInventoryRow(BaseModel):
     polymarket: VenueMarketFacts | None = None
     kalshi: VenueMarketFacts | None = None
     pair_results: list["InventoryPairResult"] = Field(default_factory=list)
+    scan_lane: str | None = None
+    last_scanned_at: datetime | None = None
+    radar_freshness: str | None = None
 
 
 class InventoryPairResult(BaseModel):
@@ -936,6 +939,10 @@ def _decision_is_arb(decision: PaperScanDecision | None) -> bool:
     if decision.depth_scan is None:
         return False
     return bool(decision.depth_scan.solution.is_arbitrage)
+
+
+def sort_fixture_inventory_rows(rows: list[FixtureMarketInventoryRow]) -> list[FixtureMarketInventoryRow]:
+    return _sort_rows(rows)
 
 
 def _sort_rows(rows: list[FixtureMarketInventoryRow]) -> list[FixtureMarketInventoryRow]:
