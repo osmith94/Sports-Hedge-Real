@@ -101,12 +101,49 @@ export function promptContainsSecrets(prompt: string): boolean {
   );
 }
 
+/** Declared conflicts that may independently block learned-rule activation. */
+export const STRUCTURAL_BLOCKER_FIELDS = new Set([
+  "sport",
+  "competition",
+  "kickoff",
+  "market_family",
+  "family",
+  "period",
+  "line",
+  "settlement",
+  "settlement_key",
+  "settlement_scope",
+  "outcome_space",
+  "outcome_model",
+]);
+
+const STRUCTURAL_BLOCKER_ALIASES: Record<string, string> = {
+  family: "market_family",
+  settlement_key: "settlement",
+  outcome_model: "outcome_space",
+};
+
+export function canonicalStructuralBlocker(field: string): string | null {
+  const key = field.trim().toLowerCase();
+  if (!key || !STRUCTURAL_BLOCKER_FIELDS.has(key)) return null;
+  return STRUCTURAL_BLOCKER_ALIASES[key] ?? key;
+}
+
+export function structuralConflictsFromDeclared(fields?: string[] | null): string[] {
+  if (!fields) return [];
+  return [...new Set(fields.flatMap((field) => {
+    const canonical = canonicalStructuralBlocker(field);
+    return canonical ? [canonical] : [];
+  }))].sort();
+}
+
 export function canActivateLearnedRule(input: {
   verdict: MappingVerdict | null;
   operatorConfirmed: boolean;
   conflictingFields?: string[] | null;
+  activationBlockedReason?: string | null;
 }): boolean {
   if (input.verdict !== "verified" || input.operatorConfirmed !== true) return false;
-  if (input.conflictingFields && input.conflictingFields.length > 0) return false;
-  return true;
+  if (input.activationBlockedReason) return false;
+  return structuralConflictsFromDeclared(input.conflictingFields).length === 0;
 }

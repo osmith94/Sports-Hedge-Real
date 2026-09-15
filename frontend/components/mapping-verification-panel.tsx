@@ -18,6 +18,7 @@ export type MappingVerificationPanelProps = {
   promptText: string;
   provenance?: MappingProvenance | null;
   proposedRule?: MappingProposedRule | null;
+  activationBlockedReason?: string | null;
   dataClass?: string;
   onCopyPrompt?: (prompt: string) => void;
   onInterpret?: (input: { chatgptText: string; verdict: MappingVerdict }) => void;
@@ -33,6 +34,7 @@ export function MappingVerificationPanel({
   promptText,
   provenance,
   proposedRule,
+  activationBlockedReason = null,
   dataClass = "LIVE PAPER / operator review",
   onCopyPrompt,
   onInterpret,
@@ -50,8 +52,9 @@ export function MappingVerificationPanel({
         verdict,
         operatorConfirmed: confirmed,
         conflictingFields: candidate.conflicting_fields,
+        activationBlockedReason,
       }),
-    [verdict, confirmed, candidate.conflicting_fields],
+    [verdict, confirmed, candidate.conflicting_fields, activationBlockedReason],
   );
 
   return (
@@ -118,6 +121,11 @@ export function MappingVerificationPanel({
       {candidate.conflicting_fields && candidate.conflicting_fields.length > 0 ? (
         <p className="mapping-verify-conflict">
           Conflicting/missing: {candidate.conflicting_fields.join(", ")}
+        </p>
+      ) : null}
+      {activationBlockedReason ? (
+        <p className="mapping-verify-conflict">
+          Activation blocked: {activationBlockedReason}
         </p>
       ) : null}
       <label className="mapping-verify-prompt">

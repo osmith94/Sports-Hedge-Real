@@ -4,6 +4,8 @@ Frozen base: `integration/wave-b-2026-09-15` @ `30c54ce9a7ac839111a7dc73ac3e0081
 
 This lane implements deterministic human-in-the-loop mapping learning. It does **not** merge into Wave B, #179, #131, or `main`.
 
+Parent restack target: latest `integration/wave-b-2026-09-15` (see PR body for exact SHA).
+
 ## Owns
 
 - Learned mapping rule models, inference, and application (`matching/learned_rules.py`)
@@ -35,5 +37,6 @@ No second identity store. `#161` `FixtureCurrentStateStore` aliases are unchange
 - ChatGPT text never activates a rule.
 - `AMBIGUOUS` / `NOT VERIFIED` persist the review only.
 - `VERIFIED` + explicit confirmation still cannot activate a rule when the candidate evidence has competition, kickoff, family, period, line, settlement, or outcome conflicts. The review is persisted with `activation_blocked_reason`; no enabled rule is written.
+- Declared `conflicting_fields` that are naming/label/entity-alias discrepancies (`home_team`, `raw_event_name`, and similar) remain visible review evidence but do **not** independently block activation. Only the structural blocker allowlist (sport, competition, kickoff, family/period/line/settlement/outcome) may augment computed structural conflicts.
 - Disabled/revoked rules stop applying; paper-scan audit rows are not rewritten.
 - Learned mapping alone does not bypass quote freshness, fees, FX, depth, risk, solver, allocator, treasury, or venue-participation gates.

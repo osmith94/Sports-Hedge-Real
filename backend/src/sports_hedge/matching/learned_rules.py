@@ -253,6 +253,48 @@ def _supplied_text(value: str | None) -> str:
     return normalize_text(value or "")
 
 
+# Only these declared conflicting_fields may augment computed structural blockers.
+# Naming / label / entity-alias discrepancies stay visible evidence but do not
+# independently prevent VERIFIED + confirmed activation.
+STRUCTURAL_BLOCKER_FIELDS = frozenset(
+    {
+        "sport",
+        "competition",
+        "kickoff",
+        "market_family",
+        "family",
+        "period",
+        "line",
+        "settlement",
+        "settlement_key",
+        "settlement_scope",
+        "outcome_space",
+        "outcome_model",
+    }
+)
+_STRUCTURAL_BLOCKER_ALIASES = {
+    "family": "market_family",
+    "settlement_key": "settlement",
+    "outcome_model": "outcome_space",
+}
+
+
+def canonical_structural_blocker(field: str) -> str | None:
+    key = field.strip().lower()
+    if not key or key not in STRUCTURAL_BLOCKER_FIELDS:
+        return None
+    return _STRUCTURAL_BLOCKER_ALIASES.get(key, key)
+
+
+def declared_structural_conflicts(fields: Sequence[str]) -> list[str]:
+    found: list[str] = []
+    for item in fields:
+        canonical = canonical_structural_blocker(item or "")
+        if canonical is not None:
+            found.append(canonical)
+    return found
+
+
 def _optional_text_conflict(name: str, left: str | None, right: str | None) -> list[str]:
     left_text = _supplied_text(left)
     right_text = _supplied_text(right)
@@ -321,7 +363,7 @@ def candidate_structural_conflicts(
             found.extend(
                 structural_evidence_conflicts(left, right, kickoff_tolerance=kickoff_tolerance)
             )
-    declared = [item for item in candidate.conflicting_fields if item]
+    declared = declared_structural_conflicts(candidate.conflicting_fields)
     return sorted(set(found).union(declared))
 
 

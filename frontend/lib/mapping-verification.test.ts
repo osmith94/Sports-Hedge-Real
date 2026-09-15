@@ -71,6 +71,21 @@ describe("mapping verification seam", () => {
         conflictingFields: ["market_family", "period", "outcome_space"],
       }),
     ).toBe(false);
+    expect(
+      canActivateLearnedRule({
+        verdict: "verified",
+        operatorConfirmed: true,
+        conflictingFields: ["home_team", "raw_event_name"],
+      }),
+    ).toBe(true);
+    expect(
+      canActivateLearnedRule({
+        verdict: "verified",
+        operatorConfirmed: true,
+        conflictingFields: ["home_team"],
+        activationBlockedReason: "structural_conflicts:settlement",
+      }),
+    ).toBe(false);
   });
 
   it("treats credential-like fragments as secrets that must not appear in prompts", () => {

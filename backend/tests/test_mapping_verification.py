@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from json import loads
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -35,6 +36,7 @@ from sports_hedge.matching.learned_rules import (
     MappingRuleType,
     MappingSideEvidence,
     MappingVerdict,
+    candidate_structural_conflicts,
     infer_learned_rule,
     sanitize_mapping_payload,
     structural_evidence_conflicts,
@@ -414,6 +416,43 @@ def test_verified_confirm_blocks_activation_on_family_period_outcome_mismatch() 
     assert review is not None
     assert review["activated_rule_id"] is None
     assert review["activation_blocked_reason"] == reason
+    store.close()
+
+
+def test_verified_confirm_activates_despite_benign_naming_conflicts() -> None:
+    store = SqliteMappingRuleStore()
+    candidate = MappingReviewCandidate(
+        sides=_candidate().sides,
+        current_confidence=0.9216,
+        current_reasons=["home_team_fuzzy", "away_team_fuzzy"],
+        current_matched=True,
+        conflicting_fields=["home_team", "raw_event_name"],
+    )
+    assert candidate_structural_conflicts(candidate) == []
+    proposal = MappingReviewService(store).confirm(
+        candidate,
+        operator="oliver",
+        operator_confirmed=True,
+        manual_verdict=MappingVerdict.VERIFIED,
+        source=MappingRuleSource.OPERATOR_MANUAL,
+    )
+    assert proposal.verdict is MappingVerdict.VERIFIED
+    assert proposal.operator_confirmed is True
+    assert proposal.activation_blocked_reason is None
+    assert proposal.proposed_rule is not None
+    assert proposal.proposed_rule.rule_type is MappingRuleType.VENUE_SUFFIX_STRIP
+    assert proposal.proposed_rule.venue is VenueName.POLYMARKET
+    assert proposal.proposed_rule.raw_pattern == "fc"
+    assert proposal.proposed_rule.enabled is True
+    review = store.get_review(proposal.review_id)
+    assert review is not None
+    assert review["activated_rule_id"] == proposal.proposed_rule.rule_id
+    assert review["activation_blocked_reason"] is None
+    evidence = loads(review["evidence_json"])
+    assert evidence["conflicting_fields"] == ["home_team", "raw_event_name"]
+    enabled = store.list_enabled()
+    assert len(enabled) == 1
+    assert enabled[0].rule_id == proposal.proposed_rule.rule_id
     store.close()
 
 
