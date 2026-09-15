@@ -172,7 +172,7 @@ describe("dual cadence operator copy", () => {
     assert.match(layout, /PAPER MODE · NO EXECUTION/);
   });
 
-  it("routes primary Fast refresh to HOT and labels full discovery as advanced", () => {
+  it("routes primary Run scan to HOT and labels full discovery as advanced", () => {
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
     const api = readFileSync(join(frontendRoot, "lib/api.ts"), "utf8");
     assert.match(scan, /await collect\("hot"\)/);

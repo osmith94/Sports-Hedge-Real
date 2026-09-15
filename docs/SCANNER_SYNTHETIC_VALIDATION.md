@@ -69,22 +69,22 @@ architecture behavior under the assumptions above; they are not provider SLAs.
 
 | Fixtures | HOT wall | UNIVERSE wall | Cancels | Orphans/live tasks |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 11.3ms | 22.9ms | 0 | 0 |
-| 4 | 44.1ms | 54.6ms | 0 | 0 |
-| 16 | 174.7ms | 191.3ms | 0 | 0 |
-| 50 | 555.4ms | 673.7ms | 0 | 0 |
+| 1 | 10.2ms | 15.5ms | 0 | 0 |
+| 4 | 40.6ms | 44.3ms | 0 | 0 |
+| 16 | 174.5ms | 209.8ms | 0 | 0 |
+| 50 | 568.7ms | 622.9ms | 0 | 0 |
 
 50-fixture attribution:
 
 | Lane | Provider attribution | Stage attribution |
 | --- | --- | --- |
-| HOT | Matchbook 50 calls / 100ms; Polymarket 150 calls / 300ms | market discovery 100 calls / 200ms; book depth 100 / 200ms; mapping 15ms; fees/FX 50 calls; solver 50 calls |
-| UNIVERSE | Matchbook 51 calls / 121ms; Polymarket 151 calls / 342ms | event lookup 4ms; market discovery 100 / 229ms; book depth 100 / 226ms; mapping 59ms; fees/FX 50 calls; solver 50 calls |
+| HOT | Matchbook 50 calls / 109ms; Polymarket 150 calls / 326ms | market discovery 100 calls / 212ms; book depth 100 / 223ms; mapping 51 calls / 13ms; fees/FX 50 calls; solver 50 calls / 1ms |
+| UNIVERSE | Matchbook 51 calls / 124ms; Polymarket 151 calls / 355ms | event lookup 1 stage / 3ms; market discovery 100 / 245ms; book depth 100 / 228ms; mapping 51 / 16ms; fees/FX 50 / 3ms; solver 50 calls |
 
 Repeated 12-cycle × 16-fixture soak produced:
 
-- HOT: 172.7–186.1ms wall time, 183.8ms median;
-- UNIVERSE: 169.9–180.1ms wall time, 177.2ms median;
+- HOT: 170.4–196.9ms wall time, 176.5ms median;
+- UNIVERSE: 166.2–202.5ms wall time, 170.3ms median;
 - task delta 0, cancellations 0, orphans 0 in both lanes.
 
 The second-half latency guard prevents progressive slowdown from passing
