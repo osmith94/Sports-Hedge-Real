@@ -151,9 +151,12 @@ def test_explicit_collect_persists_after_bounded_scan_envelope(monkeypatch) -> N
     collect_src = inspect.getsource(paper_api.collect_read_only_market_data)
     assert "_collect_report(" in collect_src
     assert "_execute_collection(" not in collect_src
-    assert collect_src.index("persist_scheduled_collection_report") > collect_src.index(
+    assert "background_tasks.add_task" in collect_src
+    assert collect_src.index("background_tasks.add_task") > collect_src.index(
         "run_explicit_collect"
     )
+    assert collect_src.index("return report") > collect_src.index("background_tasks.add_task")
+    assert "persist_scheduled_collection_report(" not in collect_src
 
 
 def test_explicit_collect_slow_failing_persist_returns_partial_200_not_504(
@@ -215,9 +218,112 @@ def test_explicit_collect_slow_failing_persist_returns_partial_200_not_504(
     body = response.json()
     assert body["operator_summary"] == "partial leftover after soft deadline"
     assert body["scan_diagnostics"]["soft_deadline_reached"] is True
-    assert body["scan_diagnostics"]["persist_ok"] is False
-    assert body["scan_diagnostics"]["persist_error"] == "audit_write_failed"
-    assert body["scan_diagnostics"]["stages"]["persistence"]["ok"] is False
+    # Persist outcome is live-refresh honesty, not a delayed collect body.
+    assert body["scan_diagnostics"].get("persist_ok") is None
+    assert "persist_error" not in body["scan_diagnostics"]
     assert persist_ok is False
     assert persist_error == "audit_write_failed"
     assert last_error is None
+
+
+class _AsgiBodySentProbe:
+    """Record when the ASGI HTTP body is fully sent, before Starlette background tasks."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+        self.request_started_at: float | None = None
+        self.body_sent_at: float | None = None
+        self.status_code: int | None = None
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            self.request_started_at = time.monotonic()
+
+        async def tracked_send(message):
+            message_type = message.get("type")
+            if message_type == "http.response.start":
+                self.status_code = message.get("status")
+            if message_type == "http.response.body" and not message.get("more_body", False):
+                self.body_sent_at = time.monotonic()
+            await send(message)
+
+        await self.app(scope, receive, tracked_send)
+
+
+def test_explicit_collect_slow_persist_cannot_hold_response_past_scan_budget(
+    monkeypatch,
+) -> None:
+    """Production contract: browser-visible body completes within scan budget.
+
+    Scale the clock down. A persist phase longer than the scan-response budget
+    must not delay ASGI body completion. TestClient itself waits for background
+    tasks; this test therefore timestamps `http.response.body`, not client
+    return. Do not increase PAPER_COLLECTION_TIMEOUT_MS to pass this.
+    """
+
+    from sports_hedge.application import live_refresh as live_refresh_mod
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
+    monkeypatch.setattr(live_refresh_mod, "SCAN_CYCLE_RETURN_GRACE_SECONDS", 0.05)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "paper_scan_cycle_timeout_seconds", 0.1)
+    scan_budget = (
+        settings.paper_scan_cycle_timeout_seconds
+        + live_refresh_mod.SCAN_CYCLE_RETURN_GRACE_SECONDS
+    )
+    persist_delay = 0.45
+    assert persist_delay > scan_budget
+
+    now = datetime(2026, 9, 15, 19, 10, tzinfo=UTC)
+    report = CollectionReport(
+        started_at=now,
+        completed_at=now,
+        operator_summary="partial leftover after soft deadline",
+        scan_diagnostics={"soft_deadline_reached": True, "partial": True},
+    )
+    persist_state: dict[str, float] = {}
+
+    async def fake_collect_report(*args, **kwargs):
+        del args, kwargs
+        return report
+
+    def slow_persist(*args, **kwargs) -> None:
+        del args, kwargs
+        persist_state["start"] = time.monotonic()
+        time.sleep(persist_delay)
+        persist_state["end"] = time.monotonic()
+
+    monkeypatch.setattr(paper_api, "_collect_report", fake_collect_report)
+    monkeypatch.setattr(paper_api, "_persist_collection_report", slow_persist)
+
+    probe = _AsgiBodySentProbe(app)
+    app.dependency_overrides[paper_api.get_paper_scan_service] = lambda: object()
+    app.dependency_overrides[paper_api.get_paper_audit_repository] = lambda: object()
+    app.dependency_overrides[get_watchlist_service] = lambda: object()
+    try:
+        response = TestClient(probe).post("/paper/collect", json={})
+        persist_ok = coordinator.status.universe.persist_ok
+    finally:
+        app.dependency_overrides.clear()
+        coordinator.reset()
+
+    assert response.status_code == 200, response.text
+    assert probe.status_code == 200
+    assert probe.request_started_at is not None
+    assert probe.body_sent_at is not None
+    assert "start" in persist_state
+    response_elapsed = probe.body_sent_at - probe.request_started_at
+    assert response_elapsed < scan_budget
+    assert response_elapsed < persist_delay
+    assert probe.body_sent_at <= persist_state["start"]
+    assert persist_state["end"] - persist_state["start"] >= persist_delay * 0.9
+    body = response.json()
+    assert body["operator_summary"] == "partial leftover after soft deadline"
+    assert body["scan_diagnostics"]["soft_deadline_reached"] is True
+    assert body["scan_diagnostics"].get("persist_ok") is None
+    assert persist_ok is True
+    frontend_api = Path(__file__).resolve().parents[2] / "frontend" / "lib" / "api.ts"
+    assert "PAPER_COLLECTION_TIMEOUT_MS = 60_000" in frontend_api.read_text(
+        encoding="utf-8"
+    )

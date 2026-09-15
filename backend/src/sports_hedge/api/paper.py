@@ -10,7 +10,7 @@ from time import monotonic
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.api.market_intelligence import get_market_intelligence_service
@@ -790,11 +790,18 @@ def put_venue_participation(update: LaneVenueParticipationUpdate) -> LiveRefresh
 )
 async def collect_read_only_market_data(
     request: PaperCollectionRequest,
+    background_tasks: BackgroundTasks,
     service: PaperScanService = Depends(get_paper_scan_service),
     audit: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
     watchlist: WatchlistService = Depends(get_watchlist_service),
 ) -> CollectionReport:
-    """Run one explicit read-only collection/scan cycle and persist watchlist observations."""
+    """Run one explicit read-only collection/scan cycle and persist watchlist observations.
+
+    Persistence/auto-capture is scheduled after Starlette sends the HTTP body so a
+    slow persist cannot hold the browser past PAPER_COLLECTION_TIMEOUT_MS. The
+    scan envelope itself is unchanged: persist failure is live-refresh/persist
+    diagnostics, never scan_cycle_timeout.
+    """
 
     kwargs = request.model_dump()
     coordinator = get_live_refresh_coordinator()
@@ -820,13 +827,13 @@ async def collect_read_only_market_data(
             status_code=502, detail=f"venue market-data request failed: {exc}"
         ) from exc
 
-    persist_scheduled_collection_report(
+    background_tasks.add_task(
+        persist_explicit_collect_after_http_response,
         coordinator,
         report,
         service=service,
         audit=audit,
         watchlist=watchlist,
-        scan_lane=ScanLane.UNIVERSE,
     )
     return report
 
@@ -967,6 +974,30 @@ def _annotate_collection_persist(
     else:
         diagnostics["persist_error"] = error
     report.scan_diagnostics = diagnostics
+
+
+async def persist_explicit_collect_after_http_response(
+    coordinator,
+    report: CollectionReport,
+    *,
+    service: PaperScanService,
+    audit: SqlitePaperScanRepository,
+    watchlist: WatchlistService,
+) -> None:
+    """Starlette BackgroundTask: runs after the collect HTTP body is sent.
+
+    Kept async so SQLite persist stays on the event-loop thread, matching the
+    scheduled path. Failures are recorded on live-refresh persist diagnostics.
+    """
+
+    persist_scheduled_collection_report(
+        coordinator,
+        report,
+        service=service,
+        audit=audit,
+        watchlist=watchlist,
+        scan_lane=ScanLane.UNIVERSE,
+    )
 
 
 def persist_scheduled_collection_report(
