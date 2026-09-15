@@ -28,6 +28,10 @@ INSUFFICIENT_VENUES_WARNING = (
 )
 INSUFFICIENT_VENUES_REASON = "insufficient_enabled_venues"
 VENUE_HEALTH_DISABLED = "disabled"
+MALFORMED_VENUE_SETTINGS_WARNING = (
+    "scanner_configuration: persisted operator venue settings are malformed — "
+    "ignored (fail closed); venues were not silently re-enabled"
+)
 ParticipationSource = Literal["operator", "env_default"]
 
 
@@ -111,6 +115,7 @@ class LaneVenueParticipation(BaseModel):
     updated_at: datetime | None = None
     hot_warning: str | None = None
     universe_warning: str | None = None
+    config_diagnostic: str | None = None
 
     def venues_for(self, lane: ScanLane | str | None) -> tuple[VenueName, ...]:
         resolved = ScanLane(lane) if isinstance(lane, str) else lane
@@ -125,6 +130,7 @@ class LaneVenueParticipation(BaseModel):
                 "universe": list(coerce_operator_venues(self.universe)),
                 "hot_warning": comparison_warning(self.hot),
                 "universe_warning": comparison_warning(self.universe),
+                "config_diagnostic": self.config_diagnostic,
             }
         )
 
@@ -136,6 +142,7 @@ def participation_from_lists(
     source: ParticipationSource = "operator",
     updated_at: datetime | None = None,
     allow_empty: bool = True,
+    config_diagnostic: str | None = None,
 ) -> LaneVenueParticipation:
     hot_venues = coerce_operator_venues(hot)
     universe_venues = coerce_operator_venues(universe)
@@ -147,4 +154,5 @@ def participation_from_lists(
         universe=list(universe_venues),
         source=source,
         updated_at=updated_at or datetime.now(UTC),
+        config_diagnostic=config_diagnostic,
     ).with_warnings()

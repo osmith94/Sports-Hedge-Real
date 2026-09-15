@@ -53,6 +53,11 @@ export function VenueLaneControls({
 
   return (
     <div className="venue-lane-controls" aria-label="Lane venue participation">
+      {status?.venue_participation?.config_diagnostic ? (
+        <p className="venue-lane-warning" role="status">
+          {status.venue_participation.config_diagnostic}
+        </p>
+      ) : null}
       <LaneRow
         label="Fast scan"
         flags={hotFlags}

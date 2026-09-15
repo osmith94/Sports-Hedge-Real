@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -21,6 +23,7 @@ from sports_hedge.application.collector import (
 from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
 from sports_hedge.application.lane_venues import (
     INSUFFICIENT_VENUES_WARNING,
+    MALFORMED_VENUE_SETTINGS_WARNING,
     VENUE_HEALTH_DISABLED,
     coerce_operator_venues,
     comparison_allowed,
@@ -487,3 +490,131 @@ def test_venue_participation_http_persists_and_is_lane_specific(tmp_path: Path) 
         get_lane_venue_settings_store.cache_clear()
         coordinator.reset()
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_all_venues_off_does_not_invent_matchbook_matching_venue() -> None:
+    matchbook = CountingMatchbook()
+    polymarket = CountingPolymarket()
+    kalshi = CountingKalshi()
+    collector = _collector(matchbook, polymarket, kalshi)
+    report = await collector.collect_and_scan(
+        enabled_venues=[],
+        venue_costs=matchbook_polymarket_costs(),
+        fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
+        maximum_execution_risk=100,
+        scan_lane=ScanLane.UNIVERSE.value,
+    )
+    assert report.enabled_venues == []
+    assert report.matching_venues == []
+    assert report.matching_venue is None
+    assert report.venue_health == {
+        "matchbook": VENUE_HEALTH_DISABLED,
+        "polymarket": VENUE_HEALTH_DISABLED,
+        "kalshi": VENUE_HEALTH_DISABLED,
+    }
+    assert INSUFFICIENT_VENUES_WARNING in report.config_warnings
+    assert report.paper_decisions == []
+    assert report.matched_market_pairs == 0
+    assert matchbook.list_events_calls == 0
+    assert polymarket.list_events_calls == 0
+    assert kalshi.list_events_calls == 0
+
+    coordinator = LiveRefreshCoordinator(venue_settings_store=SqliteLaneVenueSettingsStore(":memory:"))
+    coordinator.record_explicit_report(report)
+    assert coordinator.status.matching_venue is None
+    assert coordinator.status.matching_venues == []
+    assert coordinator.status.venue_health == report.venue_health
+    coordinator.apply_venue_participation([], [])
+    assert coordinator.status.hot.pending_venues == []
+    assert coordinator.status.universe.pending_venues == []
+    assert coordinator.status.hot.comparison_ready is False
+    assert coordinator.status.universe.comparison_ready is False
+    assert coordinator.status.hot.venue_warning
+    assert coordinator.status.universe.venue_warning
+
+
+def test_malformed_operator_row_does_not_silently_reenable_venues(tmp_path: Path) -> None:
+    database = tmp_path / "paper_settings.sqlite"
+    store = SqliteLaneVenueSettingsStore(database)
+    store.save(
+        [VenueName.MATCHBOOK, VenueName.KALSHI],
+        [VenueName.MATCHBOOK, VenueName.KALSHI],
+    )
+    store.close()
+    sidecar = sqlite3.connect(database)
+    sidecar.execute(
+        """
+        UPDATE lane_venue_participation
+        SET hot_venues_json = ?, universe_venues_json = ?
+        WHERE id = 1
+        """,
+        ("not-json", '{"venues": true}'),
+    )
+    sidecar.commit()
+    sidecar.close()
+    restarted = SqliteLaneVenueSettingsStore(database)
+    loaded = resolve_lane_venue_participation(restarted)
+    assert loaded.hot == []
+    assert loaded.universe == []
+    assert VenueName.POLYMARKET not in loaded.hot
+    assert VenueName.MATCHBOOK not in loaded.hot
+    assert loaded.source == "operator"
+    assert loaded.config_diagnostic == MALFORMED_VENUE_SETTINGS_WARNING
+    restarted.close()
+
+    empty_valid = tmp_path / "empty_valid.sqlite"
+    valid_store = SqliteLaneVenueSettingsStore(empty_valid)
+    valid_store.save([], [])
+    valid_loaded = valid_store.load()
+    assert valid_loaded is not None
+    assert valid_loaded.hot == []
+    assert valid_loaded.universe == []
+    assert valid_loaded.config_diagnostic is None
+    valid_store.close()
+
+
+def test_concurrent_read_write_restart_keeps_last_durable_settings(tmp_path: Path) -> None:
+    path = tmp_path / "concurrent-settings.sqlite"
+    store = SqliteLaneVenueSettingsStore(path)
+    errors: list[Exception] = []
+    combos = (
+        ([VenueName.MATCHBOOK], [VenueName.MATCHBOOK, VenueName.KALSHI]),
+        ([VenueName.MATCHBOOK, VenueName.KALSHI], list(default_operator_venues())),
+        ([], [VenueName.POLYMARKET, VenueName.KALSHI]),
+        ([VenueName.POLYMARKET], [VenueName.MATCHBOOK]),
+    )
+
+    def write(index: int) -> None:
+        hot, universe = combos[index % len(combos)]
+        store.save(hot, universe)
+
+    def read() -> None:
+        store.load()
+        resolve_lane_venue_participation(store)
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(write, index) for index in range(24)]
+            futures.extend(pool.submit(read) for _ in range(24))
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as exc:
+                    errors.append(exc)
+        assert errors == []
+        expected = store.save(
+            [VenueName.MATCHBOOK, VenueName.KALSHI],
+            list(default_operator_venues()),
+        )
+        store.close()
+        restarted = SqliteLaneVenueSettingsStore(path)
+        loaded = restarted.load()
+        assert loaded is not None
+        assert loaded.hot == expected.hot
+        assert loaded.universe == expected.universe
+        assert loaded.source == "operator"
+        restarted.close()
+    finally:
+        store.close()
+

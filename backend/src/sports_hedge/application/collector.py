@@ -322,8 +322,8 @@ class CollectionReport(BaseModel):
     completed_at: datetime
     discovery_source: VenueName = VenueName.MATCHBOOK
     discovery_mode: str = "venue_union"
-    matching_venue: VenueName = VenueName.POLYMARKET
-    matching_venues: list[VenueName] = Field(default_factory=lambda: [VenueName.POLYMARKET])
+    matching_venue: VenueName | None = None
+    matching_venues: list[VenueName] = Field(default_factory=list)
     enabled_venues: list[VenueName] = Field(
         default_factory=lambda: list(OPERATOR_SCAN_VENUES)
     )
@@ -1145,8 +1145,7 @@ class ReadOnlyCrossVenueCollector:
             ]
         if not matching_venues:
             matching_venues = list(enabled_list)
-        if not matching_venues:
-            matching_venues = [VenueName.MATCHBOOK]
+        matching_venue = matching_venues[0] if matching_venues else None
         comparison_note = comparison_warning(self._op_enabled_venues)
         if comparison_note and comparison_note not in config_warnings:
             config_warnings = [*config_warnings, comparison_note]
@@ -1196,7 +1195,7 @@ class ReadOnlyCrossVenueCollector:
             completed_at=completed_at,
             discovery_source=VenueName.MATCHBOOK,
             discovery_mode="venue_union",
-            matching_venue=matching_venues[0],
+            matching_venue=matching_venue,
             matching_venues=matching_venues,
             enabled_venues=enabled_list,
             raw_matchbook_events=len(raw_matchbook_events),

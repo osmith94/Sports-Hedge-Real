@@ -124,6 +124,8 @@ describe("dual cadence operator copy", () => {
     assert.doesNotMatch(bar, /Last scan \$\{/);
     assert.doesNotMatch(scan, /Last scan \{lastCompletedAt/);
     assert.match(scan, /VenueLaneControls/);
+    const chips = readFileSync(join(frontendRoot, "components/venue-lane-controls.tsx"), "utf8");
+    assert.match(chips, /config_diagnostic/);
     assert.match(scan, /pollLiveStatus/);
     assert.doesNotMatch(scan, /void collectRef\.current\(\)/);
     assert.match(bar, /AUTO PAPER CAPTURE ON/);

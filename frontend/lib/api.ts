@@ -446,6 +446,7 @@ export type LaneVenueParticipation = {
   updated_at?: string | null;
   hot_warning?: string | null;
   universe_warning?: string | null;
+  config_diagnostic?: string | null;
 };
 
 export type LaneVenueParticipationUpdate = {
@@ -456,7 +457,7 @@ export type LaneVenueParticipationUpdate = {
 export type LiveRefreshStatus = {
   discovery_source: Venue;
   discovery_mode?: string;
-  matching_venue: Venue;
+  matching_venue?: Venue | null;
   matching_venues?: Venue[];
   server_loop_enabled: boolean;
   paper_autofill_enabled?: boolean;

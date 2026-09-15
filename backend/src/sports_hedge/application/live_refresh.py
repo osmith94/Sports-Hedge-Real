@@ -17,6 +17,7 @@ from sports_hedge.application.collector import (
 )
 from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
 from sports_hedge.application.lane_venues import (
+    MALFORMED_VENUE_SETTINGS_WARNING,
     LaneVenueParticipation,
     LaneVenueSet,
     default_operator_venues,
@@ -101,7 +102,7 @@ class LaneRefreshStatus(BaseModel):
 class LiveRefreshStatus(BaseModel):
     discovery_source: VenueName = VenueName.MATCHBOOK
     discovery_mode: str = "venue_union"
-    matching_venue: VenueName = VenueName.POLYMARKET
+    matching_venue: VenueName | None = VenueName.POLYMARKET
     matching_venues: list[VenueName] = Field(
         default_factory=lambda: [VenueName.POLYMARKET, VenueName.KALSHI]
     )
@@ -284,6 +285,19 @@ class LiveRefreshCoordinator:
             pending=pending.universe,
             in_progress=self._universe_in_progress,
         )
+        warnings = [
+            item
+            for item in self.status.config_warnings
+            if item != MALFORMED_VENUE_SETTINGS_WARNING
+        ]
+        diagnostic = pending.config_diagnostic
+        if diagnostic and diagnostic not in warnings:
+            warnings.append(diagnostic)
+        hot_warning = hot_set.warning
+        universe_warning = universe_set.warning
+        if diagnostic:
+            hot_warning = diagnostic if hot_warning is None else hot_warning
+            universe_warning = diagnostic if universe_warning is None else universe_warning
         self.status = self.status.model_copy(
             update={
                 "hot": self.status.hot.model_copy(
@@ -291,7 +305,7 @@ class LiveRefreshCoordinator:
                         "active_venues": hot_set.enabled,
                         "pending_venues": hot_set.pending,
                         "comparison_ready": hot_set.comparison_ready,
-                        "venue_warning": hot_set.warning,
+                        "venue_warning": hot_warning,
                         "applies_next_cycle": hot_set.applies_next_cycle,
                     }
                 ),
@@ -300,11 +314,12 @@ class LiveRefreshCoordinator:
                         "active_venues": universe_set.enabled,
                         "pending_venues": universe_set.pending,
                         "comparison_ready": universe_set.comparison_ready,
-                        "venue_warning": universe_set.warning,
+                        "venue_warning": universe_warning,
                         "applies_next_cycle": universe_set.applies_next_cycle,
                     }
                 ),
                 "venue_participation": pending,
+                "config_warnings": warnings,
             }
         )
 
@@ -556,6 +571,7 @@ class LiveRefreshCoordinator:
                 "last_completed_at": report.completed_at,
                 "last_duration_ms": duration_ms,
                 "discovery_mode": report.discovery_mode,
+                "matching_venue": report.matching_venue,
                 "matching_venues": report.matching_venues,
                 "last_matched_event_pairs": report.matched_event_pairs,
                 "last_matched_market_pairs": report.matched_market_pairs,
@@ -651,6 +667,7 @@ class LiveRefreshCoordinator:
                 "last_completed_at": compat_completed,
                 "last_duration_ms": compat_duration,
                 "discovery_mode": report.discovery_mode,
+                "matching_venue": report.matching_venue,
                 "matching_venues": report.matching_venues,
                 "last_matched_event_pairs": report.matched_event_pairs,
                 "last_matched_market_pairs": report.matched_market_pairs,
