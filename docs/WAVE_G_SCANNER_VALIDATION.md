@@ -68,11 +68,39 @@ The deterministic benchmark uses:
 - no real credentials, network variance, provider throttling or production SLA
   assertion.
 
-Measured exact-head results are recorded after the validation command completes.
-Every workload must report provider/stage attribution, zero provider
-cancellations, zero orphans and zero live in-flight tasks. The repeated-cycle
-test also requires no event-loop task delta and no progressive second-half
-slowdown.
+Measured with:
+
+```text
+backend/.venv/bin/pytest -q -s tests/test_scanner_synthetic_stress.py
+10 passed in 5.74s
+```
+
+Stage values are attributed provider-call milliseconds (sub-millisecond local
+fee/solver work rounds to zero); wall time is end-to-end. Independent book
+requests may overlap, so attributed call time is not intended to sum to wall
+time.
+
+| Lane | Fixtures | Provider calls | Event lookup ms | Market discovery ms | Book depth ms | Mapping ms | Fee/FX/risk ms | Solver/allocation ms | Wall ms | Cancels / orphans / live |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| HOT | 1 | 4 | 0 | 4 | 4 | 0 | 0 | 0 | 10.689 | 0 / 0 / 0 |
+| HOT | 4 | 16 | 0 | 16 | 16 | 1 | 0 | 0 | 41.885 | 0 / 0 / 0 |
+| HOT | 16 | 64 | 0 | 64 | 64 | 19 | 0 | 0 | 186.332 | 0 / 0 / 0 |
+| HOT | 50 | 200 | 0 | 200 | 200 | 99 | 0 | 0 | 609.092 | 0 / 0 / 0 |
+| UNIVERSE | 1 | 6 | 2 | 4 | 4 | 0 | 0 | 0 | 12.706 | 0 / 0 / 0 |
+| UNIVERSE | 4 | 18 | 2 | 16 | 16 | 1 | 0 | 0 | 44.580 | 0 / 0 / 0 |
+| UNIVERSE | 16 | 66 | 2 | 64 | 64 | 19 | 0 | 0 | 185.478 | 0 / 0 / 0 |
+| UNIVERSE | 50 | 202 | 2 | 200 | 200 | 99 | 0 | 0 | 619.983 | 0 / 0 / 0 |
+
+Repeated 16-fixture soak:
+
+| Lane | Cycles | First-half median ms | Second-half median ms | Min–max ms | Task delta | Cancels / orphans |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| HOT | 8 | 185.728 | 185.895 | 183.170–215.659 | 0 | 0 / 0 |
+| UNIVERSE | 8 | 187.772 | 186.993 | 184.119–188.638 | 0 | 0 / 0 |
+
+The second-half medians are stable, all provider tasks drain, and 50 fixtures
+remain far inside the synthetic 25s envelope. This is architecture validation
+under the stated fixture latency, not a real-provider SLA.
 
 Bounded concurrency is retained because source/stage attribution and controlled
 latency both identify serial cluster plus venue market/depth work as the scaling
