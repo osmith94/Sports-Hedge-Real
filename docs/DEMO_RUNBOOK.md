@@ -64,7 +64,7 @@ Logs: `logs\demo-backend.*.log` and `logs\demo-frontend.*.log`.
 1. Confirm the console shows **PAPER MODE · NO EXECUTION** and, for the Windows paper demo, **AUTO PAPER CAPTURE ON**.
 2. Open `/health` in a tab if needed: `mode=paper`, `execution_enabled=false`, `paper_autofill_enabled=true` on the launcher process.
 3. Fast scan / Full sweep are server-owned. The browser polls `GET /paper/live-refresh`; do not expect auto-refresh to POST `/paper/collect`.
-4. Primary **Run scan** posts `/paper/collect/hot`: the same current HOT identity/venue scope and bounded timing as Fast Scan, with no full discovery. If a scheduled lane is active, HTTP 409 / BUSY is truthful. Advanced **Run full diagnostic** retains broad `/paper/collect` discovery.
+4. Primary **Run Fast refresh** posts `/paper/collect/hot`: the same current HOT identity/venue scope and bounded timing as Fast Scan, with no full discovery. If a scheduled lane is active, HTTP 409 / BUSY is truthful. Advanced **Run full diagnostic** retains broad, bounded `/paper/collect` discovery and may return partial coverage.
 5. Inspect venue health: Matchbook `unavailable` without credentials is truthful. Polymarket/Kalshi public data may still populate fixtures.
 6. If a **fresh** observation passes every fail-closed gate and the allocator accepts a sized plan, it should appear as an OPEN paper trade in Paper Portfolio / active trades without an operator click. Tracked/Near rows and historical discovery (including the prior Leeds v Newcastle 1.35% net candidate) are not trades. If **no qualifying live arb**, leave `/` honest and go to `/demo`. Do not paste fixture rows onto `/`.
 

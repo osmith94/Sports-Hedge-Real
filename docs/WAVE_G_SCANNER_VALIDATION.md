@@ -15,7 +15,7 @@ No benchmark fixture or opportunity is exposed through the production UI.
 
 ## Manual versus scheduled paths
 
-Primary **Run scan** now calls `POST /paper/collect/hot`.
+Primary **Run Fast refresh** now calls `POST /paper/collect/hot`.
 
 That endpoint asks `LiveRefreshCoordinator.manual_hot_plan()` for the same plan
 shape used by scheduled Fast Scan:
@@ -43,8 +43,9 @@ under Advanced. It intentionally:
 4. fetches venue markets and executable books for each selected cluster;
 5. runs settlement/equivalence, freshness, depth, fee/FX, risk, solver and
    allocation gates;
-6. returns inside its 45s collector plus 5s coordinator envelope, then persists
-   after the HTTP body.
+6. returns a truthful partial inside its 20s collector plus 5s coordinator
+   envelope, omits redundant nested market inventory from the HTTP body, then
+   persists after the body.
 
 The browser's existing 60s diagnostic timeout is only a client guard. Increasing
 it would hide broad one-shot latency rather than make the primary operator action
@@ -59,48 +60,20 @@ The deterministic benchmark uses:
 
 - Matchbook and Polymarket fixture/demo payloads with one settlement-equivalent
   both-teams-to-score market per fixture;
-- fixed 1.5ms latency for every synthetic provider call;
+- fixed 2ms latency for every synthetic provider call;
 - two Polymarket token-book reads per fixture;
-- 25s collector budget;
+- 2s scaled collector budget;
 - 1, 4, 16 and 50 fixture workloads for both HOT and UNIVERSE;
 - HOT seed setup excluded from measured wall time;
-- eight repeated 16-fixture cycles for each lane;
+- twelve repeated 16-fixture cycles for each lane;
 - no real credentials, network variance, provider throttling or production SLA
   assertion.
 
-Measured with:
-
-```text
-backend/.venv/bin/pytest -q -s tests/test_scanner_synthetic_stress.py
-10 passed in 5.74s
-```
-
-Stage values are attributed provider-call milliseconds (sub-millisecond local
-fee/solver work rounds to zero); wall time is end-to-end. Independent book
-requests may overlap, so attributed call time is not intended to sum to wall
-time.
-
-| Lane | Fixtures | Provider calls | Event lookup ms | Market discovery ms | Book depth ms | Mapping ms | Fee/FX/risk ms | Solver/allocation ms | Wall ms | Cancels / orphans / live |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| HOT | 1 | 4 | 0 | 4 | 4 | 0 | 0 | 0 | 10.689 | 0 / 0 / 0 |
-| HOT | 4 | 16 | 0 | 16 | 16 | 1 | 0 | 0 | 41.885 | 0 / 0 / 0 |
-| HOT | 16 | 64 | 0 | 64 | 64 | 19 | 0 | 0 | 186.332 | 0 / 0 / 0 |
-| HOT | 50 | 200 | 0 | 200 | 200 | 99 | 0 | 0 | 609.092 | 0 / 0 / 0 |
-| UNIVERSE | 1 | 6 | 2 | 4 | 4 | 0 | 0 | 0 | 12.706 | 0 / 0 / 0 |
-| UNIVERSE | 4 | 18 | 2 | 16 | 16 | 1 | 0 | 0 | 44.580 | 0 / 0 / 0 |
-| UNIVERSE | 16 | 66 | 2 | 64 | 64 | 19 | 0 | 0 | 185.478 | 0 / 0 / 0 |
-| UNIVERSE | 50 | 202 | 2 | 200 | 200 | 99 | 0 | 0 | 619.983 | 0 / 0 / 0 |
-
-Repeated 16-fixture soak:
-
-| Lane | Cycles | First-half median ms | Second-half median ms | Min–max ms | Task delta | Cancels / orphans |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| HOT | 8 | 185.728 | 185.895 | 183.170–215.659 | 0 | 0 / 0 |
-| UNIVERSE | 8 | 187.772 | 186.993 | 184.119–188.638 | 0 | 0 / 0 |
-
-The second-half medians are stable, all provider tasks drain, and 50 fixtures
-remain far inside the synthetic 25s envelope. This is architecture validation
-under the stated fixture latency, not a real-provider SLA.
+Measured exact-head results are recorded in
+`SCANNER_SYNTHETIC_VALIDATION.md`. Every workload must report provider/stage attribution, zero provider
+cancellations, zero orphans and zero live in-flight tasks. The repeated-cycle
+test also requires no event-loop task delta and no progressive second-half
+slowdown.
 
 No bounded concurrency was retained. The live scheduled evidence is already
 healthy, and synthetic speedup alone would not prove a scheduler bottleneck or
@@ -109,8 +82,11 @@ justify extra provider-rate pressure.
 ## 53 fixtures / zero cross-venue / zero equivalent
 
 `fixtures discovered` is a venue-union inventory count, not a cross-venue count.
-The observed `53 / 0 / 0` state can therefore be legitimate when current
-providers expose disjoint fixtures:
+The compact UI also previously mixed generations: fixture/equivalent totals
+came from merged Fast+Full inventory while cross-venue used the most recently
+completed lane's `last_matched_event_pairs`. Cross-venue now derives from each
+current row's venue flags. The observed `53 / 0 / 0` can still be legitimate
+when current providers expose disjoint fixtures:
 
 - `matched_event_pairs == 0` means no two venue events formed a canonical
   cross-venue cluster;

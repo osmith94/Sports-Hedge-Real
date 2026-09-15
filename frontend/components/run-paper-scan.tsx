@@ -459,7 +459,9 @@ export function RunPaperScan() {
       <div className="panel-header">
         <div>
           <div className="panel-title">Paper scanner</div>
-          <div className="panel-meta">Read-only collection. Min net arb is net after modeled costs.</div>
+          <div className="panel-meta">
+            Server-owned Fast/Full scanner plus manual HOT refresh and bounded diagnostics.
+          </div>
         </div>
         <div className="heading-actions">
           <span className="status-badge">PAPER MODE · NO EXECUTION</span>
@@ -526,13 +528,13 @@ export function RunPaperScan() {
           />
           <div className="scan-action">
             <button className="scan-button" type="submit" disabled={loading} aria-busy={loading}>
-              {loadingMode === "hot" ? "Scanning… (HOT)" : "Run scan"}
+              {loadingMode === "hot" ? "Refreshing HOT…" : "Run Fast refresh"}
             </button>
           </div>
         </div>
         <div className="scan-note">
-          Run scan performs a quick manual Fast Scan / HOT refresh of current known fixtures. It
-          does not rediscover the full universe.
+          Run Fast refresh performs a manual HOT refresh of current known fixtures. It does not
+          rediscover the universe or advance the scheduled Fast Scan / Full Sweep lanes.
         </div>
         <div className="scan-note" aria-label="Fast scan and Full sweep status">
           {dualScanStatusLines(liveRefresh).map((line) => (
@@ -551,7 +553,7 @@ export function RunPaperScan() {
         />
 
         <details className="scan-advanced">
-          <summary>Advanced · FX / fees / provenance</summary>
+          <summary>Advanced · full diagnostic / FX / fees / provenance</summary>
           <div className="scan-action">
             <button
               className="scan-button"
