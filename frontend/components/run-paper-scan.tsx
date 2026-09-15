@@ -528,14 +528,13 @@ export function RunPaperScan() {
           />
           <div className="scan-action">
             <button className="scan-button" type="submit" disabled={loading} aria-busy={loading}>
-              {loadingMode === "hot" ? "Refreshing HOT…" : "Run Fast refresh"}
+              {loadingMode === "hot" ? "Scanning… (HOT)" : "Run scan"}
             </button>
           </div>
         </div>
         <div className="scan-note">
-          Run Fast refresh performs a manual HOT refresh of current known fixtures.
-          It does not rediscover the full universe or advance the scheduled Fast Scan / Full Sweep
-          lanes.
+          Run scan performs a manual HOT refresh of current known fixtures. It does not rediscover
+          the full universe or advance the scheduled Fast Scan / Full Sweep lanes.
         </div>
         <div className="scan-note" aria-label="Fast scan and Full sweep status">
           {dualScanStatusLines(liveRefresh).map((line) => (
@@ -554,7 +553,7 @@ export function RunPaperScan() {
         />
 
         <details className="scan-advanced">
-          <summary>Advanced · FX / fees / provenance · full diagnostic</summary>
+          <summary>Advanced · FX / fees / provenance</summary>
           <div className="scan-action">
             <button
               className="scan-button"
