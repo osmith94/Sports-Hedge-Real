@@ -176,8 +176,11 @@ DIAGNOSTIC_STAGES = (
     "persistence",
 )
 _PROVIDER_CALL_STAGE = {
+    "list_events": "event_lookup",
     "list_markets": "market_discovery",
+    "get_series": "market_discovery",
     "get_order_book": "book_depth",
+    "order_book": "book_depth",
 }
 _WALL_STAGE_NAME = {
     "event_discovery": "event_lookup",
