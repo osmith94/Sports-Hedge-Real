@@ -229,6 +229,44 @@ def test_canonical_keys_are_family_not_display_aliases() -> None:
     assert equivalent_comparison_count([mr, btts]) == 6
 
 
+def test_same_family_distinct_source_markets_do_not_collapse() -> None:
+    complete = _market_row(family="first_team_to_score")
+    incomplete = complete.model_copy(
+        update={
+            "display_name": "First Team To Score incomplete",
+            "entered_solver": False,
+            "reason": "incomplete_outcome_set",
+            "comparison_status": InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL,
+            "matchbook": _facts(
+                VenueName.MATCHBOOK,
+                source_market_id="mb-fts-incomplete",
+                family="first_team_to_score",
+            ),
+            "polymarket": None,
+            "kalshi": None,
+            "pair_results": [],
+        }
+    )
+    store = FixtureCurrentStateStore()
+    store.upsert_from_report(
+        _report(
+            fixture=_fixture(equivalent=1),
+            markets=[complete, incomplete],
+            market_ids=["mkt-fts"],
+            lane=ScanLane.UNIVERSE,
+            when=NOW,
+        ),
+        scan_lane=ScanLane.UNIVERSE,
+        now=NOW,
+    )
+    detail = store.detail(CANONICAL_ID, now=NOW)
+    assert detail is not None
+    fts = [item for item in detail.markets if item.family == "first_team_to_score"]
+    assert len(fts) == 2
+    assert any(item.entered_solver for item in fts)
+    assert any(not item.entered_solver and item.reason == "incomplete_outcome_set" for item in fts)
+
+
 def test_hot_partial_refresh_does_not_collapse_still_current_equivalents() -> None:
     store = FixtureCurrentStateStore()
     store.upsert_from_report(_universe_full(), scan_lane=ScanLane.UNIVERSE, now=NOW)

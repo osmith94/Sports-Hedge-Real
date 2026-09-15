@@ -73,8 +73,19 @@ class CurrentMarketSlot:
 
 
 def canonical_current_market_key(row: FixtureMarketInventoryRow) -> str:
-    """Stable current-state key. Family/period/line/settlement, never display names."""
+    """Stable current-state key. Family/period/line/settlement + source ids, never names."""
 
+    family_id = _family_identity(row)
+    sources = _source_identity(row)
+    if family_id[0]:
+        family, period, line, settlement = family_id
+        return f"canon:{family}|{period}|{line}|{settlement}|{sources}"
+    if sources:
+        return f"source:{sources}"
+    return f"display:{row.display_name}"
+
+
+def _family_identity(row: FixtureMarketInventoryRow) -> tuple[str, str, str, str]:
     family = (row.family or "").strip()
     period = (row.period or "").strip()
     line = "" if row.line is None else format(row.line, "f")
@@ -83,16 +94,43 @@ def canonical_current_market_key(row: FixtureMarketInventoryRow) -> str:
         if facts is not None and facts.settlement_key:
             settlement = facts.settlement_key
             break
-    if family:
-        return f"canon:{family}|{period}|{line}|{settlement}"
-    sources: list[str] = []
+    return family, period, line, settlement
+
+
+def _source_identity(row: FixtureMarketInventoryRow) -> str:
+    parts: list[str] = []
     for facts in (row.matchbook, row.polymarket, row.kalshi):
         if facts is None:
             continue
-        sources.append(f"{facts.venue.value}:{facts.source_market_id}")
-    if sources:
-        return "source:" + "|".join(sources)
-    return f"display:{row.display_name}"
+        parts.append(f"{facts.venue.value}:{facts.source_market_id}")
+    return "|".join(parts)
+
+
+def _source_set(row: FixtureMarketInventoryRow) -> frozenset[str]:
+    identity = _source_identity(row)
+    if not identity:
+        return frozenset()
+    return frozenset(identity.split("|"))
+
+
+def merge_slot_key(existing: dict[str, CurrentMarketSlot], row: FixtureMarketInventoryRow) -> str:
+    """Reuse one slot when source ids overlap the same canonical family identity."""
+
+    exact = canonical_current_market_key(row)
+    if exact in existing:
+        return exact
+    family_id = _family_identity(row)
+    incoming_sources = _source_set(row)
+    if not family_id[0] or not incoming_sources:
+        return exact
+    matches = [
+        key
+        for key, slot in existing.items()
+        if _family_identity(slot.row) == family_id and incoming_sources & _source_set(slot.row)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return exact
 
 
 def merge_current_market_slots(
@@ -112,7 +150,7 @@ def merge_current_market_slots(
     scanned = require_aware_instant(scanned_at, "last_scanned_at")
     lane = ScanLane(scan_lane) if not isinstance(scan_lane, ScanLane) else scan_lane
     for row in incoming_rows:
-        key = canonical_current_market_key(row)
+        key = merge_slot_key(merged, row)
         previous = merged.get(key)
         if previous is not None and not _incoming_supersedes(previous, scanned_at=scanned, scan_lane=lane):
             continue
