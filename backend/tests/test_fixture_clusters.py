@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sports_hedge.application.fixture_clusters import (
     VenueEvent,
@@ -126,7 +126,7 @@ def test_bulk_match_prefilter_never_rejects_a_matching_pair() -> None:
     offset = _event(
         VenueName.POLYMARKET,
         "pm-offset",
-        kickoff=KICKOFF.replace(minute=KICKOFF.minute + 2),
+        kickoff=KICKOFF + timedelta(minutes=1),
     ).canonical
     fuzzy = _event(
         VenueName.POLYMARKET,
