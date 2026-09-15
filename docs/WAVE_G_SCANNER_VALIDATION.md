@@ -4,8 +4,8 @@
 
 This note separates three different evidence classes:
 
-- owner-observed scheduled timings on the failed candidate are live runtime
-  evidence: Fast Scan about 58s and Full Sweep about 148/150s with 53 fixtures;
+- owner-observed scheduled timings are live runtime evidence: Fast Scan about
+  5.8s and Full Sweep chunk/generation about 14.8s;
 - the benchmark in `backend/tests/test_scanner_synthetic_stress.py` uses
   deterministic fixture/demo provider responses and controlled latency;
 - credentialed real-provider benchmarking remains separate and must not inherit
@@ -75,13 +75,9 @@ cancellations, zero orphans and zero live in-flight tasks. The repeated-cycle
 test also requires no event-loop task delta and no progressive second-half
 slowdown.
 
-Bounded concurrency is retained because source/stage attribution and controlled
-latency both identify serial cluster plus venue market/depth work as the scaling
-topology. Cluster fan-out is capped at 8 and explicit provider semaphores cap
-Matchbook/Polymarket/Kalshi at 4/8/4. These limits are settings, appear in scan
-diagnostics together with observed peaks, and do not imply a real-provider SLA.
-See `WAVE_G_SCANNER_PERFORMANCE.md` for higher-latency results and stalled
-provider behavior.
+No bounded concurrency was retained. The live scheduled evidence is already
+healthy, and synthetic speedup alone would not prove a scheduler bottleneck or
+justify extra provider-rate pressure.
 
 ## 53 fixtures / zero cross-venue / zero equivalent
 
