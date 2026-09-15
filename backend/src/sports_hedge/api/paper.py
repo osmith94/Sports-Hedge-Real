@@ -801,16 +801,14 @@ async def collect_read_only_market_data(
     coordinator.remember_request(kwargs)
 
     async def runner() -> CollectionReport:
-        return await _execute_collection(
+        return await _collect_report(
             kwargs,
             service=service,
-            audit=audit,
-            watchlist=watchlist,
             enabled_venues=list(coordinator.running_cycle_venues()),
         )
 
     try:
-        return await coordinator.run_explicit_collect(runner)
+        report = await coordinator.run_explicit_collect(runner)
     except ExplicitCollectBusy as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ScanCycleTimeout as exc:
@@ -821,6 +819,16 @@ async def collect_read_only_market_data(
         raise HTTPException(
             status_code=502, detail=f"venue market-data request failed: {exc}"
         ) from exc
+
+    persist_scheduled_collection_report(
+        coordinator,
+        report,
+        service=service,
+        audit=audit,
+        watchlist=watchlist,
+        scan_lane=ScanLane.UNIVERSE,
+    )
+    return report
 
 
 async def _collect_report(
@@ -933,6 +941,34 @@ def _persist_collection_report(
     _run_paper_position_management(report, operations=operations)
 
 
+def _annotate_collection_persist(
+    report: CollectionReport,
+    *,
+    ok: bool,
+    error: str | None,
+    duration_ms: int,
+) -> None:
+    """Attach persist outcome to the scan report without rewriting scan truth."""
+
+    diagnostics = dict(report.scan_diagnostics or {})
+    stages = dict(diagnostics.get("stages") or {})
+    stages["persistence"] = {
+        "calls": 1,
+        "elapsed_ms": max(0, int(duration_ms)),
+        "timeouts": 0,
+        "cancels": 0,
+        "ok": ok,
+        "error": error,
+    }
+    diagnostics["stages"] = stages
+    diagnostics["persist_ok"] = ok
+    if ok:
+        diagnostics.pop("persist_error", None)
+    else:
+        diagnostics["persist_error"] = error
+    report.scan_diagnostics = diagnostics
+
+
 def persist_scheduled_collection_report(
     coordinator,
     report: CollectionReport,
@@ -950,19 +986,27 @@ def persist_scheduled_collection_report(
             report, service=service, audit=audit, watchlist=watchlist
         )
     except Exception as exc:
-        LOGGER.exception("scheduled persist/auto-capture failed lane=%s", scan_lane)
+        LOGGER.exception("persist/auto-capture failed lane=%s", scan_lane)
+        duration_ms = int((monotonic() - started) * 1000)
         coordinator.record_persist_outcome(
             ok=False,
             error=str(exc),
-            duration_ms=int((monotonic() - started) * 1000),
+            duration_ms=duration_ms,
             scan_lane=scan_lane,
         )
+        _annotate_collection_persist(
+            report, ok=False, error=str(exc), duration_ms=duration_ms
+        )
         return
+    duration_ms = int((monotonic() - started) * 1000)
     coordinator.record_persist_outcome(
         ok=True,
         error=None,
-        duration_ms=int((monotonic() - started) * 1000),
+        duration_ms=duration_ms,
         scan_lane=scan_lane,
+    )
+    _annotate_collection_persist(
+        report, ok=True, error=None, duration_ms=duration_ms
     )
 
 
@@ -980,7 +1024,7 @@ async def _execute_collection(
     cycle_timeout_seconds: float | None = None,
     enabled_venues: list[VenueName] | None = None,
 ) -> CollectionReport:
-    report = await _collect_report(
+    return await _collect_report(
         kwargs,
         service=service,
         scan_lane=scan_lane,
@@ -991,10 +1035,6 @@ async def _execute_collection(
         cycle_timeout_seconds=cycle_timeout_seconds,
         enabled_venues=enabled_venues,
     )
-    _persist_collection_report(
-        report, service=service, audit=audit, watchlist=watchlist
-    )
-    return report
 
 
 async def server_owned_refresh_tick() -> None:

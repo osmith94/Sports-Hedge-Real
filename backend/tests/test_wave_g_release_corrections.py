@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import sqlite3
+import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -11,6 +13,8 @@ from sports_hedge.api import paper as paper_api
 from sports_hedge.api.main import app
 from sports_hedge.api.watchlist import get_watchlist_service
 from sports_hedge.application.collector import CollectionReport
+from sports_hedge.application.live_refresh import get_live_refresh_coordinator
+from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 
@@ -98,6 +102,7 @@ def test_explicit_collect_persists_after_bounded_scan_envelope(monkeypatch) -> N
         def __init__(self) -> None:
             self.inside_scan_envelope = False
             self.persist_seen = False
+            self.persist_outcome_seen = False
 
         def remember_request(self, payload) -> None:
             del payload
@@ -111,6 +116,11 @@ def test_explicit_collect_persists_after_bounded_scan_envelope(monkeypatch) -> N
                 return await runner()
             finally:
                 self.inside_scan_envelope = False
+
+        def record_persist_outcome(self, **kwargs) -> None:
+            del kwargs
+            assert self.inside_scan_envelope is False
+            self.persist_outcome_seen = True
 
     coordinator = FakeCoordinator()
 
@@ -137,3 +147,77 @@ def test_explicit_collect_persists_after_bounded_scan_envelope(monkeypatch) -> N
 
     assert response.status_code == 200, response.text
     assert coordinator.persist_seen is True
+    assert coordinator.persist_outcome_seen is True
+    collect_src = inspect.getsource(paper_api.collect_read_only_market_data)
+    assert "_collect_report(" in collect_src
+    assert "_execute_collection(" not in collect_src
+    assert collect_src.index("persist_scheduled_collection_report") > collect_src.index(
+        "run_explicit_collect"
+    )
+
+
+def test_explicit_collect_slow_failing_persist_returns_partial_200_not_504(
+    monkeypatch,
+) -> None:
+    """Production path: persist after a completed/partial scan cannot become HTTP 504."""
+
+    from sports_hedge.application import live_refresh as live_refresh_mod
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
+    monkeypatch.setattr(live_refresh_mod, "SCAN_CYCLE_RETURN_GRACE_SECONDS", 0.05)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "paper_scan_cycle_timeout_seconds", 0.1)
+    envelope = (
+        settings.paper_scan_cycle_timeout_seconds
+        + live_refresh_mod.SCAN_CYCLE_RETURN_GRACE_SECONDS
+    )
+    assert envelope < 0.25
+
+    now = datetime(2026, 9, 15, 19, 5, tzinfo=UTC)
+    report = CollectionReport(
+        started_at=now,
+        completed_at=now,
+        operator_summary="partial leftover after soft deadline",
+        scan_diagnostics={"soft_deadline_reached": True, "partial": True},
+    )
+    persist_state: dict[str, object] = {}
+
+    async def fake_collect_report(*args, **kwargs):
+        del args, kwargs
+        return report
+
+    def slow_then_fail_persist(*args, **kwargs) -> None:
+        del args, kwargs
+        persist_state["lock_locked"] = coordinator._lock.locked()
+        time.sleep(0.25)
+        raise RuntimeError("audit_write_failed")
+
+    monkeypatch.setattr(paper_api, "_collect_report", fake_collect_report)
+    monkeypatch.setattr(paper_api, "_persist_collection_report", slow_then_fail_persist)
+
+    app.dependency_overrides[paper_api.get_paper_scan_service] = lambda: object()
+    app.dependency_overrides[paper_api.get_paper_audit_repository] = lambda: object()
+    app.dependency_overrides[get_watchlist_service] = lambda: object()
+    try:
+        response = TestClient(app).post("/paper/collect", json={})
+        persist_ok = coordinator.status.universe.persist_ok
+        persist_error = coordinator.status.universe.last_persist_error
+        last_error = coordinator.status.last_error
+    finally:
+        app.dependency_overrides.clear()
+        coordinator.reset()
+
+    assert persist_state["lock_locked"] is False
+    assert response.status_code == 200, response.text
+    assert response.status_code != 504
+    assert "scan_cycle_timeout" not in response.text
+    body = response.json()
+    assert body["operator_summary"] == "partial leftover after soft deadline"
+    assert body["scan_diagnostics"]["soft_deadline_reached"] is True
+    assert body["scan_diagnostics"]["persist_ok"] is False
+    assert body["scan_diagnostics"]["persist_error"] == "audit_write_failed"
+    assert body["scan_diagnostics"]["stages"]["persistence"]["ok"] is False
+    assert persist_ok is False
+    assert persist_error == "audit_write_failed"
+    assert last_error is None
