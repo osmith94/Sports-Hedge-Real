@@ -64,6 +64,8 @@ function ManagementCell({ trade }: { trade: PaperTrade }) {
     </td>
   );
 }
+
+function nativeLocked(trade: PaperTrade): string {
   const parts = Object.entries(trade.capital_locked_native).map(([currency, amount]) =>
     money(amount, currency === "USD" ? "USD" : "GBP"),
   );

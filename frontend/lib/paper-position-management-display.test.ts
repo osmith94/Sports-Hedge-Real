@@ -40,6 +40,7 @@ describe("active-trade position management copy", () => {
         remaining_lock_basis: "modelled",
         remaining_lock_source_class: "modelled",
         remaining_lock_confidence: "0.40",
+        remaining_lock_detail: "8C modelled estimate; advisory only; does not release capital",
       }),
     );
     assert.equal(cell.state, "HOLD");
@@ -50,6 +51,7 @@ describe("active-trade position management copy", () => {
     assert.match(cell.release, /modelled ETA 90m/);
     assert.match(cell.release, /basis modelled/);
     assert.match(cell.release, /confidence 0.40/);
+    assert.match(cell.release, /8C modelled estimate/);
     assert.match(cell.release, /advisory, not spendable/);
     assert.doesNotMatch(cell.release, /spendable cash/i);
 
@@ -57,6 +59,7 @@ describe("active-trade position management copy", () => {
     assert.match(source, /formatPositionManagementCell/);
     assert.match(source, /cell\.economics/);
     assert.match(source, /cell\.release/);
+    assert.match(source, /function nativeLocked/);
     assert.match(source, /Active trades/);
     assert.match(source, /Open paper positions|Management/);
   });

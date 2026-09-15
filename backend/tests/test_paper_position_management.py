@@ -833,9 +833,9 @@ def test_auto_unwind_second_revalidation_abort_and_no_treasury_mutation(tmp_path
         ]
         calls = {"n": 0}
 
-        def quotes_for(_position):
+        def second_quotes_for(_position):
             calls["n"] += 1
-            return good if calls["n"] == 1 else bad
+            return bad
 
         before = {
             (pool.venue, pool.native_currency): (pool.available_cash, pool.locked_capital)
@@ -843,12 +843,14 @@ def test_auto_unwind_second_revalidation_abort_and_no_treasury_mutation(tmp_path
         }
         result = manager.manage_trade(
             trade.trade_id,
-            quotes_for=quotes_for,
+            quotes=good,
+            second_quotes_for=second_quotes_for,
             policy=AUTO_UNWIND_POLICY,
             scarcity=CapitalScarcityInput(pressure=CapitalPressure.ABUNDANT),
             auto_unwind=True,
             now=_eval_at(good),
         )
+        assert calls["n"] == 1
         assert "second_revalidation" in result.aborted_reason
         persisted = ops.trades.get(trade.trade_id)
         assert persisted is not None
@@ -879,12 +881,13 @@ def test_same_timestamp_second_pass_cannot_auto_close(tmp_path: Path) -> None:
             for pool in ledger.treasury.snapshot().pools
         }
 
-        def quotes_for(_position):
+        def second_quotes_for(_position):
             return quotes
 
         result = manager.manage_trade(
             trade.trade_id,
-            quotes_for=quotes_for,
+            quotes=quotes,
+            second_quotes_for=second_quotes_for,
             policy=AUTO_UNWIND_POLICY,
             scarcity=CapitalScarcityInput(pressure=CapitalPressure.ABUNDANT),
             auto_unwind=True,
@@ -932,6 +935,85 @@ def test_missing_second_pass_quotes_cannot_auto_close(tmp_path: Path) -> None:
         ledger.close()
 
 
+def test_first_pass_quotes_for_is_not_reused_for_auto_close(tmp_path: Path) -> None:
+    demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
+    try:
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        trade = opened.trade
+        assert trade is not None
+        quotes = tighten_reverse_quotes(opened.quotes)
+        calls = {"n": 0}
+
+        def quotes_for(_position):
+            calls["n"] += 1
+            return _refresh_quotes(quotes, delta_ms=calls["n"] * 5)
+
+        before = {
+            (pool.venue, pool.native_currency): (pool.available_cash, pool.locked_capital)
+            for pool in ledger.treasury.snapshot().pools
+        }
+        result = manager.manage_trade(
+            trade.trade_id,
+            quotes_for=quotes_for,
+            policy=AUTO_UNWIND_POLICY,
+            scarcity=CapitalScarcityInput(pressure=CapitalPressure.ABUNDANT),
+            auto_unwind=True,
+            now=_eval_at(quotes),
+        )
+        assert calls["n"] == 1
+        assert result.mutated is False
+        assert result.aborted_reason == "second_revalidation_missing_reverse_quote"
+        persisted = ops.trades.get(trade.trade_id)
+        assert persisted is not None
+        assert persisted.state is PaperTradeState.OPEN
+        assert persisted.close_fills == []
+        after = {
+            (pool.venue, pool.native_currency): (pool.available_cash, pool.locked_capital)
+            for pool in ledger.treasury.snapshot().pools
+        }
+        assert after == before
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_production_manage_open_positions_cannot_auto_close_without_fresh_second_pass(
+    tmp_path: Path,
+) -> None:
+    demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
+    try:
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        trade = opened.trade
+        assert trade is not None
+        quotes = tighten_reverse_quotes(opened.quotes)
+        before = {
+            (pool.venue, pool.native_currency): (pool.available_cash, pool.locked_capital)
+            for pool in ledger.treasury.snapshot().pools
+        }
+        results = manager.manage_open_positions(
+            quotes_by_trade={trade.trade_id: quotes},
+            policy=AUTO_UNWIND_POLICY,
+            scarcity=CapitalScarcityInput(pressure=CapitalPressure.ABUNDANT),
+            auto_unwind=True,
+            now=_eval_at(quotes),
+        )
+        assert len(results) == 1
+        assert results[0].mutated is False
+        assert results[0].aborted_reason == "second_revalidation_missing_reverse_quote"
+        persisted = ops.trades.get(trade.trade_id)
+        assert persisted is not None
+        assert persisted.state is PaperTradeState.OPEN
+        assert persisted.close_fills == []
+        after = {
+            (pool.venue, pool.native_currency): (pool.available_cash, pool.locked_capital)
+            for pool in ledger.treasury.snapshot().pools
+        }
+        assert after == before
+    finally:
+        repository.close()
+        ledger.close()
+
+
 def test_auto_unwind_releases_once_and_survives_restart(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
@@ -944,7 +1026,7 @@ def test_auto_unwind_releases_once_and_survives_restart(tmp_path: Path) -> None:
         first = manager.manage_trade(
             trade.trade_id,
             quotes=quotes,
-            quotes_for=_second_pass(quotes),
+            second_quotes_for=_second_pass(quotes),
             policy=policy,
             scarcity=scarcity,
             auto_unwind=True,
@@ -978,7 +1060,7 @@ def test_auto_unwind_releases_once_and_survives_restart(tmp_path: Path) -> None:
         second = manager.manage_trade(
             trade.trade_id,
             quotes=quotes,
-            quotes_for=_second_pass(quotes),
+            second_quotes_for=_second_pass(quotes),
             policy=policy,
             scarcity=scarcity,
             auto_unwind=True,
@@ -1039,7 +1121,7 @@ def test_concurrent_cycles_produce_one_unwind(tmp_path: Path) -> None:
             result = manager.manage_trade(
                 trade.trade_id,
                 quotes=quotes,
-                quotes_for=_second_pass(quotes),
+                second_quotes_for=_second_pass(quotes),
                 policy=policy,
                 scarcity=scarcity,
                 auto_unwind=True,
@@ -1077,7 +1159,7 @@ def test_unwind_then_settlement_remain_mutually_exclusive(tmp_path: Path) -> Non
         manager.manage_trade(
             trade.trade_id,
             quotes=quotes,
-            quotes_for=_second_pass(quotes),
+            second_quotes_for=_second_pass(quotes),
             policy=AUTO_UNWIND_POLICY,
             scarcity=CapitalScarcityInput(pressure=CapitalPressure.ABUNDANT),
             auto_unwind=True,
@@ -1368,7 +1450,7 @@ def test_simulated_external_may_be_auto_managed(tmp_path: Path) -> None:
         result = manager.manage_trade(
             trade.trade_id,
             quotes=tighten_reverse_quotes(opened.quotes),
-            quotes_for=_second_pass(tighten_reverse_quotes(opened.quotes)),
+            second_quotes_for=_second_pass(tighten_reverse_quotes(opened.quotes)),
             policy=AUTO_UNWIND_POLICY,
             scarcity=CapitalScarcityInput(pressure=CapitalPressure.ABUNDANT),
             auto_unwind=True,

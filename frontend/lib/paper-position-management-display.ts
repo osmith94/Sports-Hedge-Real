@@ -57,6 +57,9 @@ export function formatReleaseContext(snapshot: PositionManagementSnapshot): stri
   } else {
     bits.push("ETA unknown");
   }
+  if (snapshot.remaining_lock_detail) {
+    bits.push(snapshot.remaining_lock_detail);
+  }
   bits.push("advisory, not spendable");
   return bits.join(" · ");
 }

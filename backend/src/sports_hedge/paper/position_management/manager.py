@@ -257,7 +257,7 @@ class PaperPositionManager:
             position=position,
             first=decision,
             first_quotes=resolved_quotes,
-            quotes_for=second_quotes_for or quotes_for,
+            second_quotes_for=second_quotes_for,
             policy=policy,
             scarcity=resolved_scarcity,
             occurred=occurred,
@@ -271,7 +271,7 @@ class PaperPositionManager:
         position: OpenPaperPosition,
         first: UnwindDecision,
         first_quotes: list[ReverseQuote],
-        quotes_for: QuoteProvider | None,
+        second_quotes_for: QuoteProvider | None,
         policy: UnwindPolicy,
         scarcity: CapitalScarcityInput,
         occurred: datetime,
@@ -289,7 +289,7 @@ class PaperPositionManager:
         self.operations.trades.save(trade)
         second_quotes, fresh_fail = self._fresh_quotes(
             position,
-            quotes_for=quotes_for,
+            quotes_for=second_quotes_for,
             first_quotes=first_quotes,
             occurred=occurred,
         )
@@ -446,7 +446,13 @@ class PaperPositionManager:
         first_quotes: Sequence[ReverseQuote],
         occurred: datetime,
     ) -> tuple[list[ReverseQuote], str | None]:
-        """Independent second-pass reverse books. Never reuse first-pass facts."""
+        """Independent second-pass reverse books. Never reuse first-pass facts.
+
+        ``quotes_for`` here is only the dedicated second-pass provider. The
+        first-pass ``quotes`` / ``quotes_for`` arguments are intentionally not
+        consulted. Catalog rebuilds are allowed only when they are strictly
+        newer than the first-pass ``quoted_at`` for every filled leg.
+        """
 
         if quotes_for is not None:
             second = list(quotes_for(position))
