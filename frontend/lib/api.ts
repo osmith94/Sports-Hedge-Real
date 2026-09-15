@@ -1109,6 +1109,7 @@ export function confirmMappingReview(payload: {
   chatgpt_text?: string | null;
   manual_verdict?: MappingReviewProposal["verdict"] | null;
   operator_confirmed: boolean;
+  review_id?: string | null;
 }): Promise<MappingReviewProposal> {
   return postJson<MappingReviewProposal>("/paper/mapping-reviews/confirm", {
     operator: "operator",

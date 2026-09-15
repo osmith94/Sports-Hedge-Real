@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   buildMappingReviewPrompt,
@@ -15,6 +15,8 @@ import { MappingVerificationPanel } from "./mapping-verification-panel";
 import {
   MappingProposedRule,
   MappingVerdict,
+  mappingConfirmRequest,
+  structuralActivationBlockedReason,
 } from "../lib/mapping-verification";
 import {
   OBSERVATION_AGE_TICK_MS,
@@ -62,6 +64,7 @@ export function OpportunityMonitor({
   const [proposedById, setProposedById] = useState<Record<string, MappingProposedRule | null>>({});
   const [blockedById, setBlockedById] = useState<Record<string, string | null>>({});
   const [verifyNoteById, setVerifyNoteById] = useState<Record<string, string | null>>({});
+  const reviewIdById = useRef<Record<string, string>>({});
   const rows = useMemo(() => opportunityMonitorRows(items), [items]);
   const sortedRows = useMemo(() => sortOpportunityMonitor(rows, sort), [rows, sort]);
   const summary = useMemo(
@@ -111,12 +114,14 @@ export function OpportunityMonitor({
         chatgpt_text: input.chatgptText,
         manual_verdict: input.verdict,
       });
+      reviewIdById.current[row.id] = proposal.review_id;
+      const structuralBlock = structuralActivationBlockedReason(proposal.activation_blocked_reason);
       setProposedById((current) => ({ ...current, [row.id]: proposal.proposed_rule }));
-      setBlockedById((current) => ({ ...current, [row.id]: proposal.activation_blocked_reason ?? null }));
+      setBlockedById((current) => ({ ...current, [row.id]: structuralBlock }));
       setVerifyNoteById((current) => ({
         ...current,
-        [row.id]: proposal.activation_blocked_reason
-          ? `Interpret only · ${proposal.activation_blocked_reason}`
+        [row.id]: structuralBlock
+          ? `Interpret only · ${structuralBlock}`
           : "Interpreted without saving. Explicit confirmation is still required.",
       }));
     } catch (error) {
@@ -133,12 +138,15 @@ export function OpportunityMonitor({
   ) {
     if (!row.mappingCandidate) return;
     try {
-      const proposal = await confirmMappingReview({
-        candidate: row.mappingCandidate,
-        chatgpt_text: input.chatgptText,
-        manual_verdict: input.verdict,
-        operator_confirmed: true,
-      });
+      const proposal = await confirmMappingReview(
+        mappingConfirmRequest({
+          candidate: row.mappingCandidate,
+          chatgptText: input.chatgptText,
+          verdict: input.verdict,
+          operatorConfirmed: true,
+          reviewId: reviewIdById.current[row.id],
+        }),
+      );
       setProposedById((current) => ({ ...current, [row.id]: proposal.proposed_rule }));
       setBlockedById((current) => ({ ...current, [row.id]: proposal.activation_blocked_reason ?? null }));
       setVerifyNoteById((current) => ({

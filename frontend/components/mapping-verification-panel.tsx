@@ -11,6 +11,7 @@ import {
   mappingConfidencePercent,
   mappingProvenanceLabel,
   shouldOfferMappingVerify,
+  structuralActivationBlockedReason,
 } from "../lib/mapping-verification";
 
 export type MappingVerificationPanelProps = {
@@ -46,6 +47,7 @@ export function MappingVerificationPanel({
   const [verdict, setVerdict] = useState<MappingVerdict>("ambiguous");
   const [confirmed, setConfirmed] = useState(false);
 
+  const structuralBlock = structuralActivationBlockedReason(activationBlockedReason);
   const canSave = useMemo(
     () =>
       canActivateLearnedRule({
@@ -123,9 +125,9 @@ export function MappingVerificationPanel({
           Conflicting/missing: {candidate.conflicting_fields.join(", ")}
         </p>
       ) : null}
-      {activationBlockedReason ? (
+      {structuralBlock ? (
         <p className="mapping-verify-conflict">
-          Activation blocked: {activationBlockedReason}
+          Activation blocked: {structuralBlock}
         </p>
       ) : null}
       <label className="mapping-verify-prompt">

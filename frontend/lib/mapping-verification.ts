@@ -157,6 +157,55 @@ export function canActivateLearnedRule(input: {
   activationBlockedReason?: string | null;
 }): boolean {
   if (input.verdict !== "verified" || input.operatorConfirmed !== true) return false;
-  if (input.activationBlockedReason) return false;
+  if (structuralActivationBlockedReason(input.activationBlockedReason)) return false;
   return structuralConflictsFromDeclared(input.conflictingFields).length === 0;
+}
+
+/** Interpret returns this until the operator explicitly confirms. Not a structural block. */
+export const TRANSITIONAL_ACTIVATION_REASON = "explicit_operator_confirmation_required";
+
+export function isTransitionalActivationReason(reason?: string | null): boolean {
+  return reason === TRANSITIONAL_ACTIVATION_REASON;
+}
+
+export function structuralActivationBlockedReason(
+  reason?: string | null,
+): string | null {
+  if (!reason || isTransitionalActivationReason(reason)) return null;
+  return reason;
+}
+
+export function mappingConfirmRequest(input: {
+  candidate: MappingReviewCandidate;
+  operator?: string;
+  chatgptText?: string | null;
+  verdict?: MappingVerdict | null;
+  operatorConfirmed: boolean;
+  reviewId?: string | null;
+}): {
+  candidate: MappingReviewCandidate;
+  operator: string;
+  chatgpt_text: string | null;
+  manual_verdict: MappingVerdict | null;
+  operator_confirmed: boolean;
+  review_id?: string;
+} {
+  const body: {
+    candidate: MappingReviewCandidate;
+    operator: string;
+    chatgpt_text: string | null;
+    manual_verdict: MappingVerdict | null;
+    operator_confirmed: boolean;
+    review_id?: string;
+  } = {
+    candidate: input.candidate,
+    operator: input.operator ?? "operator",
+    chatgpt_text: input.chatgptText ?? null,
+    manual_verdict: input.verdict ?? null,
+    operator_confirmed: input.operatorConfirmed,
+  };
+  if (input.reviewId) {
+    body.review_id = input.reviewId;
+  }
+  return body;
 }

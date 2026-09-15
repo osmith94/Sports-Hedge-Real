@@ -7,10 +7,12 @@ import {
   canActivateLearnedRule,
   hasSafeReviewCandidate,
   isNativeHundredPercent,
+  mappingConfirmRequest,
   mappingProvenanceLabel,
   promptContainsSecrets,
   shouldOfferMappingVerify,
   shouldOfferMappingVerifyAction,
+  structuralActivationBlockedReason,
 } from "./mapping-verification";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -119,6 +121,68 @@ describe("mapping verification seam", () => {
     ).toBe(false);
   });
 
+  it("keeps VERIFIED interpret confirmable after explicit_operator_confirmation_required", () => {
+    const interpreted = {
+      verdict: "verified" as const,
+      activationBlockedReason: "explicit_operator_confirmation_required",
+      reviewId: "maprev:interpret-1",
+    };
+    expect(structuralActivationBlockedReason(interpreted.activationBlockedReason)).toBeNull();
+    expect(
+      canActivateLearnedRule({
+        verdict: interpreted.verdict,
+        operatorConfirmed: false,
+        activationBlockedReason: interpreted.activationBlockedReason,
+      }),
+    ).toBe(false);
+    expect(
+      canActivateLearnedRule({
+        verdict: interpreted.verdict,
+        operatorConfirmed: true,
+        activationBlockedReason: interpreted.activationBlockedReason,
+      }),
+    ).toBe(true);
+    expect(
+      canActivateLearnedRule({
+        verdict: "verified",
+        operatorConfirmed: true,
+        activationBlockedReason: "structural_conflicts:settlement",
+      }),
+    ).toBe(false);
+    const candidate = {
+      sides: [
+        {
+          venue: "matchbook" as const,
+          source_event_id: "a",
+          source_market_id: "m1",
+          raw_home_team: "Leeds",
+          raw_away_team: "Chelsea",
+          raw_competition: "PL",
+          kickoff_utc: "2026-09-20T15:00:00Z",
+        },
+        {
+          venue: "polymarket" as const,
+          source_event_id: "b",
+          source_market_id: "m2",
+          raw_home_team: "Leeds United FC",
+          raw_away_team: "Chelsea FC",
+          raw_competition: "PL",
+          kickoff_utc: "2026-09-20T15:00:00Z",
+        },
+      ],
+    };
+    const confirmBody = mappingConfirmRequest({
+      candidate,
+      chatgptText: "VERIFIED. Strip FC suffix.",
+      verdict: interpreted.verdict,
+      operatorConfirmed: true,
+      reviewId: interpreted.reviewId,
+    });
+    expect(confirmBody.review_id).toBe("maprev:interpret-1");
+    expect(confirmBody.operator_confirmed).toBe(true);
+    expect(confirmBody.manual_verdict).toBe("verified");
+  });
+
   it("treats credential-like fragments as secrets that must not appear in prompts", () => {
     expect(promptContainsSecrets("Are these two venue markets the same?")).toBe(false);
     expect(promptContainsSecrets("Authorization: Bearer super-secret")).toBe(true);
@@ -137,6 +201,9 @@ describe("mapping verification seam", () => {
     expect(monitor).toContain("buildMappingReviewPrompt");
     expect(monitor).toContain("interpretMappingReview");
     expect(monitor).toContain("confirmMappingReview");
+    expect(monitor).toContain("mappingConfirmRequest");
+    expect(monitor).toContain("reviewId:");
+    expect(monitor).toContain("reviewIdById");
     expect(page).not.toContain("MappingVerificationPanel");
     expect(page).not.toContain("mapping-verification-panel");
   });

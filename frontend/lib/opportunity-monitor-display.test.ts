@@ -392,6 +392,39 @@ describe("opportunity monitor default ordering and user sort", () => {
     assert.deepEqual(first, { column: "age", direction: "desc" });
     assert.deepEqual(nextOpportunityMonitorSort(first, "age"), { column: "age", direction: "asc" });
   });
+
+  it("sorts mapping with unavailable values last in both directions", () => {
+    const rows = [
+      opportunityMonitorRow(watch({ opportunity_id: "missing-map" })),
+      opportunityMonitorRow(
+        watch({
+          opportunity_id: "low-map",
+          mapping_confidence: 0.9,
+          mapping_provenance: { mapping_source: "native_deterministic" },
+        }),
+      ),
+      opportunityMonitorRow(
+        watch({
+          opportunity_id: "high-map",
+          mapping_confidence: 1,
+          mapping_provenance: { mapping_source: "native_deterministic" },
+        }),
+      ),
+    ];
+    assert.equal(rows[0].mappingText, "—");
+    const desc = sortOpportunityMonitor(rows, { column: "mapping", direction: "desc" });
+    const asc = sortOpportunityMonitor(rows, { column: "mapping", direction: "asc" });
+    assert.equal(desc[desc.length - 1].id, "missing-map");
+    assert.equal(asc[asc.length - 1].id, "missing-map");
+    assert.deepEqual(
+      desc.map((row) => row.id),
+      ["low-map", "high-map", "missing-map"],
+    );
+    assert.deepEqual(
+      asc.map((row) => row.id),
+      ["high-map", "low-map", "missing-map"],
+    );
+  });
 });
 
 describe("opportunity monitor age, provenance, navigation, legs, empty honesty", () => {

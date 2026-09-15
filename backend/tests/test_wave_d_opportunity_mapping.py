@@ -307,6 +307,27 @@ def test_missing_current_mapping_evidence_is_unavailable() -> None:
     assert opportunity.mapping_review_candidate is None
 
 
+def test_stale_mi_history_does_not_invent_a_verify_candidate_when_decision_has_none() -> None:
+    stale_observed = datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
+    stale_history = [
+        snapshot.model_copy(update={"observed_at": stale_observed}) for snapshot in _history()
+    ]
+    historical_candidate = evidence_from_snapshots(
+        stale_history,
+        MarketMatchResult(matched=True, confidence=0.96, reasons=["home_team_fuzzy"]),
+    )
+    assert historical_candidate is not None
+    assert len(historical_candidate.sides) == 2
+
+    mapped = observation_from_paper_decision(
+        _decision(confidence=0.96, candidate=None),
+        stale_history,
+    )
+    assert mapped is not None
+    assert mapped.mapping_confidence == 0.96
+    assert mapped.mapping_review_candidate is None
+
+
 def test_incomplete_snapshots_do_not_invent_a_verify_candidate() -> None:
     match = MarketMatchResult(matched=True, confidence=0.94, reasons=["home_team_fuzzy"])
     incomplete = [
