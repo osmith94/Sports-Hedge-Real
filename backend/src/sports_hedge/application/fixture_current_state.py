@@ -300,9 +300,7 @@ class FixtureCurrentStateStore:
             )
             if membership is ScanLane.DROP:
                 continue
-            observation = record.selected_observation(membership)
-            lane = observation.scan_lane if observation is not None else membership
-            scanned = observation.last_scanned_at if observation is not None else fixture.last_seen_at
+            lane, scanned = record.scheduler_lane_scan(membership, fixture)
             rows.append(
                 fixture.model_copy(
                     update={
@@ -367,9 +365,7 @@ class FixtureCurrentStateStore:
                 freshness = combined_radar_freshness(markets)
                 if freshness == FRESHNESS_EXPIRED:
                     continue
-                latest = record.latest_market_slot()
-                lane = latest.scan_lane if latest is not None else membership
-                scanned = latest.last_scanned_at if latest is not None else fixture.last_seen_at
+                lane, scanned = record.scheduler_lane_scan(membership, fixture)
                 radar_fixture = fixture
                 source_events = record.source_events()
             else:
@@ -690,17 +686,18 @@ class _FixtureRecord:
     def live_market_slots(self) -> list[CurrentMarketSlot]:
         return list((self.markets or {}).values())
 
-    def latest_market_slot(self) -> CurrentMarketSlot | None:
-        slots = self.live_market_slots()
-        if not slots:
-            return None
-        return max(
-            slots,
-            key=lambda item: (
-                item.last_scanned_at,
-                1 if item.scan_lane is ScanLane.HOT else 0,
-            ),
-        )
+    def scheduler_lane_scan(
+        self, membership: ScanLane, fixture: DiscoveredFixture
+    ) -> tuple[ScanLane, datetime]:
+        """HOT/UNIVERSE due times follow membership, not the latest retained market slot."""
+
+        lane_obs = self.lane_observation(membership)
+        if lane_obs is not None:
+            return membership, lane_obs.last_scanned_at
+        selected = self.selected_observation(membership)
+        if selected is not None:
+            return selected.scan_lane, selected.last_scanned_at
+        return membership, fixture.last_seen_at
 
     def radar_paper_market_ids(
         self,

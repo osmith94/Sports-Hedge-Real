@@ -73,7 +73,12 @@ class CurrentMarketSlot:
 
 
 def canonical_current_market_key(row: FixtureMarketInventoryRow) -> str:
-    """Stable current-state key. Family/period/line/settlement + source ids, never names."""
+    """Stable current-state key. Family/period/line/settlement + source ids, never names.
+
+    Unproven / unsupported rows with no family and no source-market ids fail
+    closed: they never key or merge by display text. Callers must disambiguate
+    those rows so two partial observations that share a label stay distinct.
+    """
 
     family_id = _family_identity(row)
     sources = _source_identity(row)
@@ -82,7 +87,22 @@ def canonical_current_market_key(row: FixtureMarketInventoryRow) -> str:
         return f"canon:{family}|{period}|{line}|{settlement}|{sources}"
     if sources:
         return f"source:{sources}"
-    return f"display:{row.display_name}"
+    return _unproven_identity_stem(row)
+
+
+def _unproven_identity_stem(row: FixtureMarketInventoryRow) -> str:
+    status = (
+        row.comparison_status.value
+        if hasattr(row.comparison_status, "value")
+        else str(row.comparison_status)
+    )
+    rejections = ",".join(sorted(row.rejection_reasons))
+    return f"unproven:{status}|{row.reason or ''}|{rejections}"
+
+
+def _identity_is_proven(row: FixtureMarketInventoryRow) -> bool:
+    family_id = _family_identity(row)
+    return bool(family_id[0] or _source_identity(row))
 
 
 def _family_identity(row: FixtureMarketInventoryRow) -> tuple[str, str, str, str]:
@@ -117,6 +137,8 @@ def merge_slot_key(existing: dict[str, CurrentMarketSlot], row: FixtureMarketInv
     """Reuse one slot when source ids overlap the same canonical family identity."""
 
     exact = canonical_current_market_key(row)
+    if not _identity_is_proven(row):
+        return _disambiguate_unproven(existing, exact)
     if exact in existing:
         return exact
     family_id = _family_identity(row)
@@ -131,6 +153,15 @@ def merge_slot_key(existing: dict[str, CurrentMarketSlot], row: FixtureMarketInv
     if len(matches) == 1:
         return matches[0]
     return exact
+
+
+def _disambiguate_unproven(existing: dict[str, CurrentMarketSlot], stem: str) -> str:
+    if stem not in existing:
+        return stem
+    index = 2
+    while f"{stem}#{index}" in existing:
+        index += 1
+    return f"{stem}#{index}"
 
 
 def merge_current_market_slots(
@@ -238,23 +269,23 @@ def stamp_current_market_row(
 def equivalent_comparison_count(rows: list[FixtureMarketInventoryRow]) -> int:
     """Count distinct currently valid canonical market comparisons.
 
-    A comparison is a matched-equivalent family/line plus each distinct venue
-    pair on that row. Rows without pair payloads still count as one comparison.
+    A comparison is a matched-equivalent canonical family identity (family,
+    period, line, settlement) plus each distinct venue pair on that row. Rows
+    without pair payloads still count as one comparison. Distinct proven
+    settlement keys stay distinct, matching store identity.
     """
 
-    keys: set[tuple[str, str, str, str]] = set()
+    keys: set[tuple[str, str, str, str, str]] = set()
     for row in rows:
         if row.comparison_status is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
             continue
-        family = row.family or ""
-        period = row.period or ""
-        line = "" if row.line is None else format(row.line, "f")
+        family, period, line, settlement = _family_identity(row)
         pairs = comparable_venue_pairs(row)
         if not pairs:
-            keys.add((family, period, line, "row"))
+            keys.add((family, period, line, settlement, "row"))
             continue
         for left, right in pairs:
-            keys.add((family, period, line, f"{left}|{right}"))
+            keys.add((family, period, line, settlement, f"{left}|{right}"))
     return len(keys)
 
 

@@ -24,7 +24,9 @@ from sports_hedge.application.fixture_inventory import (
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.application.scan_lanes import (
     DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    DEFAULT_HOT_INTERVAL_SECONDS,
     DEFAULT_HOT_TTL_SECONDS,
+    DEFAULT_UNIVERSE_INTERVAL_SECONDS,
     FRESHNESS_RADAR_CURRENT,
     ScanLane,
 )
@@ -43,6 +45,7 @@ def _facts(
     source_market_id: str,
     family: str,
     quote_age_ms: int | None = 80,
+    settlement_key: str = "regulation_time|full_time",
 ) -> VenueMarketFacts:
     if family == "both_teams_to_score":
         quotes = [
@@ -61,7 +64,7 @@ def _facts(
         source_market_id=source_market_id,
         family=family,
         period="full_time",
-        settlement_key="regulation_time|full_time",
+        settlement_key=settlement_key,
         settlement_complete=True,
         best_backs=quotes,
         quote_age_ms=quote_age_ms,
@@ -227,6 +230,151 @@ def test_canonical_keys_are_family_not_display_aliases() -> None:
     assert canonical_current_market_key(mr) != canonical_current_market_key(btts)
     assert "Leeds" not in canonical_current_market_key(alias)
     assert equivalent_comparison_count([mr, btts]) == 6
+
+
+def _unsupported_partial_row(display_name: str) -> FixtureMarketInventoryRow:
+    return FixtureMarketInventoryRow(
+        display_name=display_name,
+        family=None,
+        period=None,
+        comparison_status=InventoryComparisonStatus.UNSUPPORTED_FAMILY,
+        reason="unsupported_family",
+        rejection_reasons=["unsupported_family"],
+        match_reasons=[],
+        entered_solver=False,
+        matchbook=None,
+        polymarket=None,
+        kalshi=None,
+        pair_results=[],
+    )
+
+
+def test_unproven_rows_do_not_merge_by_shared_display_label() -> None:
+    left = _unsupported_partial_row("Novelty same label")
+    right = _unsupported_partial_row("Novelty same label")
+    left_key = canonical_current_market_key(left)
+    right_key = canonical_current_market_key(right)
+    assert "display:" not in left_key
+    assert "display:" not in right_key
+    assert "Novelty" not in left_key
+    assert "Novelty same label" not in left_key
+    assert "Novelty same label" not in right_key
+
+    store = FixtureCurrentStateStore()
+    store.upsert_from_report(
+        _report(
+            fixture=_fixture(equivalent=0, opportunity="unmatched"),
+            markets=[left, right],
+            market_ids=[],
+            lane=ScanLane.UNIVERSE,
+            when=NOW,
+        ),
+        scan_lane=ScanLane.UNIVERSE,
+        now=NOW,
+    )
+    detail = store.detail(CANONICAL_ID, now=NOW)
+    assert detail is not None
+    assert len(detail.markets) == 2
+    assert {item.display_name for item in detail.markets} == {"Novelty same label"}
+    assert all("display:" not in canonical_current_market_key(item) for item in detail.markets)
+    assert all("Novelty" not in canonical_current_market_key(item) for item in detail.markets)
+
+
+def test_equivalent_count_includes_settlement_identity() -> None:
+    regulation = _market_row(family="match_result")
+    extra_time = _market_row(family="match_result").model_copy(
+        update={
+            "matchbook": _facts(
+                VenueName.MATCHBOOK,
+                source_market_id="mb-mr-et",
+                family="match_result",
+                settlement_key="including_extra_time|full_time",
+            ),
+            "polymarket": _facts(
+                VenueName.POLYMARKET,
+                source_market_id="pm-mr-et",
+                family="match_result",
+                settlement_key="including_extra_time|full_time",
+            ),
+            "kalshi": _facts(
+                VenueName.KALSHI,
+                source_market_id="k-mr-et",
+                family="match_result",
+                settlement_key="including_extra_time|full_time",
+            ),
+        }
+    )
+    assert equivalent_comparison_count([regulation]) == 3
+    assert equivalent_comparison_count([regulation, extra_time]) == 6
+    assert canonical_current_market_key(regulation) != canonical_current_market_key(extra_time)
+
+    store = FixtureCurrentStateStore()
+    store.upsert_from_report(
+        _report(
+            fixture=_fixture(equivalent=1),
+            markets=[regulation, extra_time],
+            market_ids=["mkt-mr", "mkt-mr-et"],
+            lane=ScanLane.UNIVERSE,
+            when=NOW,
+        ),
+        scan_lane=ScanLane.UNIVERSE,
+        now=NOW,
+    )
+    inventory = store.inventory(NOW)
+    assert len(inventory) == 1
+    assert inventory[0].matched_equivalent_count == 6
+    detail = store.detail(CANONICAL_ID, now=NOW)
+    assert detail is not None
+    assert len([item for item in detail.markets if item.family == "match_result"]) == 2
+
+
+def test_fixture_next_due_follows_membership_not_latest_market_slot() -> None:
+    store = FixtureCurrentStateStore()
+    store.upsert_from_report(
+        _report(
+            fixture=_fixture(equivalent=1, when=NOW),
+            markets=[_market_row(family="match_result")],
+            market_ids=["mkt-mr"],
+            lane=ScanLane.HOT,
+            when=NOW,
+        ),
+        scan_lane=ScanLane.HOT,
+        now=NOW,
+    )
+    universe_at = NOW + timedelta(seconds=40)
+    store.upsert_from_report(
+        _report(
+            fixture=_fixture(equivalent=1, when=universe_at),
+            markets=[_market_row(family="both_teams_to_score")],
+            market_ids=["mkt-btts"],
+            lane=ScanLane.UNIVERSE,
+            when=universe_at,
+        ),
+        scan_lane=ScanLane.UNIVERSE,
+        now=universe_at,
+    )
+
+    radar = store.current_radar_rows(universe_at)
+    assert len(radar) == 1
+    row = radar[0]
+    assert row.membership is ScanLane.HOT
+    assert row.observation_lane is ScanLane.HOT
+    assert row.last_scanned_at == NOW
+    assert row.next_due_at == NOW + timedelta(seconds=DEFAULT_HOT_INTERVAL_SECONDS)
+    assert row.next_due_at != universe_at + timedelta(seconds=DEFAULT_UNIVERSE_INTERVAL_SECONDS)
+
+    inventory = store.inventory(universe_at)
+    assert len(inventory) == 1
+    assert inventory[0].scan_lane == ScanLane.HOT.value
+    assert inventory[0].next_due_at == NOW + timedelta(seconds=DEFAULT_HOT_INTERVAL_SECONDS)
+
+    detail = store.detail(CANONICAL_ID, now=universe_at)
+    assert detail is not None
+    btts = next(item for item in detail.markets if item.family == "both_teams_to_score")
+    assert btts.scan_lane == ScanLane.UNIVERSE.value
+    assert btts.last_scanned_at == universe_at
+    match_result = next(item for item in detail.markets if item.family == "match_result")
+    assert match_result.scan_lane == ScanLane.HOT.value
 
 
 def test_same_family_distinct_source_markets_do_not_collapse() -> None:
