@@ -81,6 +81,7 @@ from sports_hedge.domain.football import (
     CanonicalEvent,
     CanonicalMarket,
     CanonicalOutcome,
+    CanonicalRunner,
     FootballPeriod,
     MarketFamily,
     SettlementScope,
@@ -181,6 +182,12 @@ _PROVIDER_CALL_STAGE = {
     "get_series": "market_discovery",
     "get_order_book": "book_depth",
     "order_book": "book_depth",
+}
+DEFAULT_CLUSTER_CONCURRENCY = 8
+DEFAULT_PROVIDER_CONCURRENCY = {
+    VenueName.MATCHBOOK: 4,
+    VenueName.POLYMARKET: 8,
+    VenueName.KALSHI: 4,
 }
 _WALL_STAGE_NAME = {
     "event_discovery": "event_lookup",
@@ -378,6 +385,21 @@ class _NormalizedMarket:
         self.canonical = canonical
 
 
+class _VenueSideFetch:
+    """Mutable collector of one venue's markets/books for a single cluster."""
+
+    def __init__(self) -> None:
+        self.markets: list[_NormalizedMarket] = []
+        self.inventory: list[InventoryMarket] = []
+        self.observations: dict[str, VenueMarketObservation] = {}
+        self.listed = False
+        self.failed = False
+        self.books = 0
+        self.latency_ms = 0
+        self.retrieved_at: datetime | None = None
+        self.primary_event: _NormalizedEvent | None = None
+
+
 class ReadOnlyCrossVenueCollector:
     """Discover, match and paper-scan first-class venue markets.
 
@@ -406,6 +428,8 @@ class ReadOnlyCrossVenueCollector:
         venue_timeout_seconds: float = 15.0,
         provider_call_timeout_seconds: float = 8.0,
         cycle_timeout_seconds: float | None = 45.0,
+        cluster_concurrency: int = DEFAULT_CLUSTER_CONCURRENCY,
+        provider_concurrency: dict[VenueName, int] | None = None,
     ) -> None:
         self.matchbook = matchbook
         self.polymarket = polymarket
@@ -422,6 +446,17 @@ class ReadOnlyCrossVenueCollector:
         self._venue_timeout_seconds = venue_timeout_seconds
         self._provider_call_timeout_seconds = provider_call_timeout_seconds
         self._cycle_timeout_seconds = cycle_timeout_seconds
+        self._cluster_concurrency_limit = max(1, int(cluster_concurrency))
+        limits = provider_concurrency or DEFAULT_PROVIDER_CONCURRENCY
+        self._provider_concurrency_limits = {
+            venue: max(1, int(limits.get(venue, DEFAULT_PROVIDER_CONCURRENCY[venue])))
+            for venue in DEFAULT_PROVIDER_CONCURRENCY
+        }
+        self._cluster_sema: asyncio.Semaphore | None = None
+        self._provider_semaphores: dict[VenueName, asyncio.Semaphore] = {}
+        self._peak_inflight = 0
+        self._provider_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
+        self._provider_peak_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
         self._op_issues: list[CollectorIssue] = []
         self._op_venue_health: dict[str, str] = {}
         self._op_enabled_venues: frozenset[VenueName] = frozenset(OPERATOR_SCAN_VENUES)
@@ -506,8 +541,16 @@ class ReadOnlyCrossVenueCollector:
         self._provider_cancels = 0
         self._provider_calls = 0
         self._inflight_orphaned = 0
+        self._peak_inflight = 0
+        self._provider_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
+        self._provider_peak_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
         self._attribution = ScanAttribution()
         self._inflight = set()
+        self._cluster_sema = asyncio.Semaphore(self._cluster_concurrency_limit)
+        self._provider_semaphores = {
+            venue: asyncio.Semaphore(limit)
+            for venue, limit in self._provider_concurrency_limits.items()
+        }
         if cycle_budget is None:
             reserve = 0.0
             self._op_deadline = None
@@ -678,40 +721,27 @@ class ReadOnlyCrossVenueCollector:
                 "recent_volatility_bps": recent_volatility_bps,
             }
             with self._stage("cluster_scan"):
-                for index, cluster in enumerate(clusters):
-                    if self._deadline_reached() or self._hard_deadline_reached():
-                        await self._cancel_inflight()
-                        _append_deadline_leftovers(
-                            clusters[index:],
-                            discovered_fixtures=discovered_fixtures,
-                            issues=issues,
-                            started_at=started_at,
-                            polymarket_events=polymarket_events,
-                            queried_series_ids=queried_series_ids,
-                        )
-                        break
-                    fixture, cluster_decisions, inventory, market_counts, fetched, pairs = (
-                        await self._scan_cluster(
-                            cluster,
-                            seen_at=started_at,
-                            polymarket_events=polymarket_events,
-                            queried_series_ids=queried_series_ids,
-                            matchbook_market_filters=matchbook_market_filters or {},
-                            polymarket_market_filters=polymarket_market_filters or {},
-                            max_market_pairs_per_event=max_market_pairs_per_event,
-                            scan_kwargs=scan_kwargs,
-                            issues=issues,
-                        )
-                    )
-                    decisions.extend(cluster_decisions)
-                    normalized_matchbook_markets += market_counts.get(VenueName.MATCHBOOK, 0)
-                    normalized_polymarket_markets += market_counts.get(VenueName.POLYMARKET, 0)
-                    normalized_kalshi_markets += market_counts.get(VenueName.KALSHI, 0)
-                    matched_market_pairs += pairs
-                    order_books_fetched += fetched
-                    discovered_fixtures.append(fixture)
-                    if inventory:
-                        fixture_markets[fixture.canonical_event_id] = inventory
+                (
+                    cluster_rows,
+                    decisions,
+                    fixture_markets,
+                    normalized_matchbook_markets,
+                    normalized_polymarket_markets,
+                    normalized_kalshi_markets,
+                    matched_market_pairs,
+                    order_books_fetched,
+                ) = await self._scan_clusters_bounded(
+                    clusters,
+                    seen_at=started_at,
+                    polymarket_events=polymarket_events,
+                    queried_series_ids=queried_series_ids,
+                    matchbook_market_filters=matchbook_market_filters or {},
+                    polymarket_market_filters=polymarket_market_filters or {},
+                    max_market_pairs_per_event=max_market_pairs_per_event,
+                    scan_kwargs=scan_kwargs,
+                    issues=issues,
+                )
+                discovered_fixtures.extend(cluster_rows)
         except asyncio.CancelledError:
             cancelled = True
             acknowledge_task_cancellation()
@@ -854,6 +884,8 @@ class ReadOnlyCrossVenueCollector:
         task = asyncio.create_task(coro)
         self._inflight.add(task)
         self._provider_calls += 1
+        if len(self._inflight) > self._peak_inflight:
+            self._peak_inflight = len(self._inflight)
         try:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
             if task in done:
@@ -957,6 +989,31 @@ class ReadOnlyCrossVenueCollector:
         source_id: str | None = None,
         default: Any,
     ) -> tuple[Any, bool]:
+        sem = self._provider_semaphores.get(venue)
+        if sem is None:
+            return await self._wait_provider_unlocked(
+                coro, stage=stage, venue=venue, source_id=source_id, default=default
+            )
+        try:
+            async with sem:
+                return await self._wait_provider_unlocked(
+                    coro, stage=stage, venue=venue, source_id=source_id, default=default
+                )
+        except asyncio.CancelledError:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            raise
+
+    async def _wait_provider_unlocked(
+        self,
+        coro: Any,
+        *,
+        stage: str,
+        venue: VenueName,
+        source_id: str | None = None,
+        default: Any,
+    ) -> tuple[Any, bool]:
         timeout = self._timeout_budget(self._op_provider_timeout)
         started = monotonic()
         if timeout <= 0:
@@ -971,6 +1028,11 @@ class ReadOnlyCrossVenueCollector:
                 timed_out=True,
             )
             return default, True
+        self._provider_inflight[venue] += 1
+        self._provider_peak_inflight[venue] = max(
+            self._provider_peak_inflight[venue],
+            self._provider_inflight[venue],
+        )
         try:
             payload, timed_out = await self._await_bounded(coro, timeout)
             self._attribution.add(
@@ -1001,6 +1063,8 @@ class ReadOnlyCrossVenueCollector:
             if current == "ok":
                 self._op_venue_health[venue.value] = "degraded"
             return default, True
+        finally:
+            self._provider_inflight[venue] -= 1
 
     async def _discovery_task(
         self,
@@ -1041,14 +1105,25 @@ class ReadOnlyCrossVenueCollector:
             self._record_timeout("list_events", venue)
             self._attribution.add(
                 venue=venue.value,
+                stage="list_events",
                 elapsed_ms=0,
                 timed_out=True,
             )
             return [], {}
+        sem = self._provider_semaphores.get(venue)
+
+        async def _call() -> tuple[Any, bool]:
+            return await self._await_bounded(client.list_events(**filters), timeout)
+
         try:
-            payload, timed_out = await self._await_bounded(client.list_events(**filters), timeout)
+            if sem is None:
+                payload, timed_out = await _call()
+            else:
+                async with sem:
+                    payload, timed_out = await _call()
             self._attribution.add(
                 venue=venue.value,
+                stage="list_events",
                 elapsed_ms=max(0, int((monotonic() - started) * 1000)),
                 timed_out=timed_out,
             )
@@ -1058,6 +1133,7 @@ class ReadOnlyCrossVenueCollector:
         except asyncio.CancelledError:
             self._attribution.add(
                 venue=venue.value,
+                stage="list_events",
                 elapsed_ms=max(0, int((monotonic() - started) * 1000)),
                 cancelled=True,
             )
@@ -1193,6 +1269,16 @@ class ReadOnlyCrossVenueCollector:
             "provider_calls": self._provider_calls,
             "inflight_orphaned": self._inflight_orphaned,
             "inflight_live": len(self._inflight),
+            "peak_provider_inflight": self._peak_inflight,
+            "peak_provider_inflight_by_venue": {
+                venue.value: peak
+                for venue, peak in self._provider_peak_inflight.items()
+            },
+            "cluster_concurrency": self._cluster_concurrency_limit,
+            "provider_concurrency": {
+                venue.value: limit
+                for venue, limit in self._provider_concurrency_limits.items()
+            },
             "scan_lane": scan_lane,
             "resume_cursor": resume_cursor,
             "enabled_venues": [item.value for item in self._op_enabled_venues],
@@ -1252,6 +1338,178 @@ class ReadOnlyCrossVenueCollector:
             resume_cursor=resume_cursor,
         )
 
+    def _leftover_cluster_result(
+        self,
+        cluster: FixtureCluster,
+        *,
+        seen_at: datetime,
+        polymarket_events: list[_NormalizedEvent],
+        queried_series_ids: list[str] | None,
+    ) -> tuple[
+        DiscoveredFixture,
+        list[PaperScanDecision],
+        list[FixtureMarketInventoryRow],
+        dict[VenueName, int],
+        int,
+        int,
+    ]:
+        leftover = _fixture_from_cluster(
+            cluster,
+            seen_at=seen_at,
+            polymarket_events=polymarket_events,
+            queried_series_ids=queried_series_ids,
+            leftover=True,
+        )
+        return leftover, [], [], {}, 0, 0
+
+    async def _scan_clusters_bounded(
+        self,
+        clusters: list[FixtureCluster],
+        *,
+        seen_at: datetime,
+        polymarket_events: list[_NormalizedEvent],
+        queried_series_ids: list[str] | None,
+        matchbook_market_filters: dict[str, Any],
+        polymarket_market_filters: dict[str, Any],
+        max_market_pairs_per_event: int,
+        scan_kwargs: dict[str, Any],
+        issues: list[CollectorIssue],
+    ) -> tuple[
+        list[DiscoveredFixture],
+        list[PaperScanDecision],
+        dict[str, list[FixtureMarketInventoryRow]],
+        int,
+        int,
+        int,
+        int,
+        int,
+    ]:
+        results: list[
+            tuple[
+                DiscoveredFixture,
+                list[PaperScanDecision],
+                list[FixtureMarketInventoryRow],
+                dict[VenueName, int],
+                int,
+                int,
+            ]
+            | None
+        ] = [None] * len(clusters)
+
+        async def run(index: int, cluster: FixtureCluster) -> None:
+            try:
+                if self._deadline_reached() or self._hard_deadline_reached():
+                    results[index] = self._leftover_cluster_result(
+                        cluster,
+                        seen_at=seen_at,
+                        polymarket_events=polymarket_events,
+                        queried_series_ids=queried_series_ids,
+                    )
+                    return
+                results[index] = await self._scan_cluster(
+                    cluster,
+                    seen_at=seen_at,
+                    polymarket_events=polymarket_events,
+                    queried_series_ids=queried_series_ids,
+                    matchbook_market_filters=matchbook_market_filters,
+                    polymarket_market_filters=polymarket_market_filters,
+                    max_market_pairs_per_event=max_market_pairs_per_event,
+                    scan_kwargs=scan_kwargs,
+                    issues=issues,
+                )
+            except asyncio.CancelledError:
+                results[index] = self._leftover_cluster_result(
+                    cluster,
+                    seen_at=seen_at,
+                    polymarket_events=polymarket_events,
+                    queried_series_ids=queried_series_ids,
+                )
+
+        pending: dict[int, asyncio.Task[None]] = {}
+        next_index = 0
+        concurrency = self._cluster_concurrency_limit
+        while next_index < len(clusters) or pending:
+            while next_index < len(clusters) and len(pending) < concurrency:
+                if self._deadline_reached() or self._hard_deadline_reached():
+                    break
+                cluster = clusters[next_index]
+                pending[next_index] = asyncio.create_task(run(next_index, cluster))
+                next_index += 1
+                await asyncio.sleep(0)
+            if not pending:
+                break
+            remaining = self._remaining_soft()
+            timeout = None if remaining is None else max(0.0, remaining)
+            done_tasks, _still = await asyncio.wait(
+                set(pending.values()),
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for index, task in list(pending.items()):
+                if task in done_tasks or task.done():
+                    pending.pop(index, None)
+                    if task.done() and not task.cancelled() and task.exception() is not None:
+                        raise task.exception()
+            if timeout is not None and not done_tasks:
+                break
+            if remaining is not None and remaining <= 0:
+                break
+            if self._deadline_reached() or self._hard_deadline_reached():
+                break
+
+        if pending:
+            await self._cancel_inflight()
+            for task in pending.values():
+                if not task.done():
+                    task.cancel()
+            drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
+            if drain > 0:
+                await asyncio.wait(set(pending.values()), timeout=drain)
+
+        discovered: list[DiscoveredFixture] = []
+        decisions: list[PaperScanDecision] = []
+        fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = {}
+        mb_markets = 0
+        pm_markets = 0
+        k_markets = 0
+        matched_pairs = 0
+        books = 0
+        leftover_needed: list[FixtureCluster] = []
+        for index, cluster in enumerate(clusters):
+            row = results[index]
+            if row is None:
+                leftover_needed.append(cluster)
+                continue
+            fixture, cluster_decisions, inventory, market_counts, fetched, pairs = row
+            discovered.append(fixture)
+            decisions.extend(cluster_decisions)
+            mb_markets += market_counts.get(VenueName.MATCHBOOK, 0)
+            pm_markets += market_counts.get(VenueName.POLYMARKET, 0)
+            k_markets += market_counts.get(VenueName.KALSHI, 0)
+            matched_pairs += pairs
+            books += fetched
+            if inventory:
+                fixture_markets[fixture.canonical_event_id] = inventory
+        if leftover_needed:
+            _append_deadline_leftovers(
+                leftover_needed,
+                discovered_fixtures=discovered,
+                issues=issues,
+                started_at=seen_at,
+                polymarket_events=polymarket_events,
+                queried_series_ids=queried_series_ids,
+            )
+        return (
+            discovered,
+            decisions,
+            fixture_markets,
+            mb_markets,
+            pm_markets,
+            k_markets,
+            matched_pairs,
+            books,
+        )
+
     async def _scan_cluster(
         self,
         cluster: FixtureCluster,
@@ -1299,202 +1557,70 @@ class ReadOnlyCrossVenueCollector:
             pm_events = []
         if VenueName.KALSHI not in enabled:
             k_events = []
+        mb_events = [item for item in mb_events if item is not None]
+        pm_events = [item for item in pm_events if item is not None]
+        k_events = [item for item in k_events if item is not None]
         mb_event = mb_events[0] if mb_events else None
-        pm_event = pm_events[0] if pm_events else None
-        matchbook_markets: list[_NormalizedMarket] = []
-        matchbook_inventory: list[InventoryMarket] = []
-        polymarket_markets: list[_NormalizedMarket] = []
-        polymarket_inventory: list[InventoryMarket] = []
-        kalshi_markets: list[_NormalizedMarket] = []
-        kalshi_inventory: list[InventoryMarket] = []
+        matchbook_side = _VenueSideFetch()
+        polymarket_side = _VenueSideFetch()
+        kalshi_side = _VenueSideFetch()
         observations_by_market_id: dict[tuple[VenueName, str], VenueMarketObservation] = {}
         market_counts: dict[VenueName, int] = {}
         order_books_fetched = 0
-        matchbook_retrieved_at = datetime.now(UTC)
-        matchbook_market_latency_ms = 0
-        polymarket_market_latency_ms = 0
         listed_venues: set[VenueName] = set()
         fetch_unavailable = False
-
-        for mb_event in mb_events:
-            if self._provider_budget_exhausted():
-                break
-            mb_listed = True
-            try:
-                mb_started = perf_counter()
-                mb_market_payload, mb_failed = await self._wait_provider(
-                    self.matchbook.list_markets(
-                        mb_event.canonical.source_event_id,
-                        **matchbook_market_filters,
-                    ),
-                    stage="list_markets",
-                    venue=VenueName.MATCHBOOK,
-                    source_id=mb_event.canonical.source_event_id,
-                    default={"markets": []},
-                )
-                matchbook_market_latency_ms = _elapsed_ms(mb_started)
-                matchbook_retrieved_at = datetime.now(UTC)
-                if mb_failed:
-                    fetch_unavailable = True
-                    mb_listed = False
-                    if fixture.no_comparison_reason is None:
-                        fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
-                    mb_market_payload = {"markets": []}
-            except Exception as exc:
-                issues.append(
-                    CollectorIssue(
-                        stage="list_markets",
-                        venue=VenueName.MATCHBOOK,
-                        source_id=mb_event.canonical.source_event_id,
-                        detail=str(exc),
-                    )
-                )
-                fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
-                fetch_unavailable = True
-                mb_listed = False
-                mb_market_payload = {"markets": []}
-            if mb_listed:
-                listed_venues.add(VenueName.MATCHBOOK)
-            raw_matchbook = _extract_matchbook_items(mb_market_payload, "markets")
-            markets, inventory = self._inventory_markets(
-                mb_event, raw_matchbook, venue=VenueName.MATCHBOOK, issues=issues
-            )
-            matchbook_markets.extend(markets)
-            matchbook_inventory.extend(inventory)
-            for left_market in markets:
-                observation = self._try_matchbook_observation(
-                    mb_event,
-                    left_market,
-                    retrieved_at=matchbook_retrieved_at,
-                    latency_ms=matchbook_market_latency_ms,
-                    issues=issues,
-                )
-                if observation is None:
-                    continue
-                observations_by_market_id[
-                    (VenueName.MATCHBOOK, left_market.canonical.source_market_id)
-                ] = observation
-                for item in matchbook_inventory:
-                    if item.source_market_id == left_market.canonical.source_market_id:
-                        item.observation = observation
+        await asyncio.gather(
+            self._fetch_matchbook_cluster_side(
+                mb_events,
+                side=matchbook_side,
+                matchbook_market_filters=matchbook_market_filters,
+                issues=issues,
+                fixture=fixture,
+            ),
+            self._fetch_polymarket_cluster_side(
+                pm_events,
+                side=polymarket_side,
+                polymarket_market_filters=polymarket_market_filters,
+                issues=issues,
+                fixture=fixture,
+            ),
+            self._fetch_kalshi_cluster_side(
+                k_events,
+                side=kalshi_side,
+                issues=issues,
+                fixture=fixture,
+            ),
+        )
+        matchbook_markets = matchbook_side.markets
+        matchbook_inventory = matchbook_side.inventory
+        polymarket_markets = polymarket_side.markets
+        polymarket_inventory = polymarket_side.inventory
+        kalshi_markets = kalshi_side.markets
+        kalshi_inventory = kalshi_side.inventory
+        if matchbook_side.primary_event is not None:
+            mb_event = matchbook_side.primary_event
+        if matchbook_side.listed:
+            listed_venues.add(VenueName.MATCHBOOK)
+        if polymarket_side.listed:
+            listed_venues.add(VenueName.POLYMARKET)
+        if kalshi_side.listed:
+            listed_venues.add(VenueName.KALSHI)
+        fetch_unavailable = matchbook_side.failed or polymarket_side.failed or kalshi_side.failed
+        order_books_fetched = (
+            matchbook_side.books + polymarket_side.books + kalshi_side.books
+        )
+        for source_id, observation in matchbook_side.observations.items():
+            observations_by_market_id[(VenueName.MATCHBOOK, source_id)] = observation
+        for source_id, observation in polymarket_side.observations.items():
+            observations_by_market_id[(VenueName.POLYMARKET, source_id)] = observation
+        for source_id, observation in kalshi_side.observations.items():
+            observations_by_market_id[(VenueName.KALSHI, source_id)] = observation
         if matchbook_markets:
             market_counts[VenueName.MATCHBOOK] = len(matchbook_markets)
-
-        for pm_event in pm_events:
-            if self._provider_budget_exhausted():
-                break
-            pm_listed = True
-            try:
-                pm_started = perf_counter()
-                pm_market_payload, pm_failed = await self._wait_provider(
-                    self.polymarket.list_markets(
-                        pm_event.canonical.source_event_id,
-                        **polymarket_market_filters,
-                    ),
-                    stage="list_markets",
-                    venue=VenueName.POLYMARKET,
-                    source_id=pm_event.canonical.source_event_id,
-                    default=[],
-                )
-                polymarket_market_latency_ms += _elapsed_ms(pm_started)
-                if pm_failed:
-                    fetch_unavailable = True
-                    pm_listed = False
-                    if fixture.no_comparison_reason is None:
-                        fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
-                    pm_market_payload = []
-            except Exception as exc:
-                issues.append(
-                    CollectorIssue(
-                        stage="list_markets",
-                        venue=VenueName.POLYMARKET,
-                        source_id=pm_event.canonical.source_event_id,
-                        detail=str(exc),
-                    )
-                )
-                if fixture.no_comparison_reason is None:
-                    fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
-                fetch_unavailable = True
-                pm_listed = False
-                pm_market_payload = []
-            if pm_listed:
-                listed_venues.add(VenueName.POLYMARKET)
-            markets, inventory = self._inventory_markets(
-                pm_event,
-                [item for item in pm_market_payload if isinstance(item, dict)],
-                venue=VenueName.POLYMARKET,
-                issues=issues,
-            )
-            polymarket_markets.extend(markets)
-            polymarket_inventory.extend(inventory)
-        polymarket_markets, polymarket_inventory = _promote_polymarket_cluster_markets(
-            polymarket_markets, polymarket_inventory
-        )
-        for right_market in _prioritize_baseline_markets(polymarket_markets):
-            if self._provider_budget_exhausted():
-                break
-            book_event = _event_for_source(
-                pm_events, right_market.canonical.event.source_event_id
-            ) or pm_event
-            if book_event is None:
-                continue
-            books_by_token, poly_book_latency_ms, fetched, book_failed = (
-                await self._fetch_polymarket_books(book_event, right_market, issues=issues)
-            )
-            order_books_fetched += fetched
-            if book_failed:
-                continue
-            observation = self._try_polymarket_observation(
-                book_event,
-                right_market,
-                books_by_token,
-                latency_ms=polymarket_market_latency_ms + poly_book_latency_ms,
-                issues=issues,
-            )
-            if observation is None:
-                continue
-            observations_by_market_id[
-                (VenueName.POLYMARKET, right_market.canonical.source_market_id)
-            ] = observation
-            for item in polymarket_inventory:
-                if item.source_market_id == right_market.canonical.source_market_id:
-                    item.observation = observation
         if polymarket_markets:
             market_counts[VenueName.POLYMARKET] = len(polymarket_markets)
-
-        if self.kalshi is not None:
-            for k_event in k_events:
-                if self._provider_budget_exhausted():
-                    break
-                markets, inventory, series, fetched, kalshi_failed = await self._load_kalshi_markets(
-                    k_event, issues=issues
-                )
-                if kalshi_failed:
-                    fetch_unavailable = True
-                    if fixture.no_comparison_reason is None:
-                        fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
-                else:
-                    listed_venues.add(VenueName.KALSHI)
-                order_books_fetched += fetched
-                kalshi_markets.extend(markets)
-                kalshi_inventory.extend(inventory)
-                for kalshi_market in _prioritize_baseline_markets(markets):
-                    if self._provider_budget_exhausted():
-                        break
-                    observation, fetched = await self._try_kalshi_observation(
-                        k_event, kalshi_market, series=series, issues=issues
-                    )
-                    order_books_fetched += fetched
-                    if observation is None:
-                        continue
-                    observations_by_market_id[
-                        (VenueName.KALSHI, kalshi_market.canonical.source_market_id)
-                    ] = observation
-                    for item in kalshi_inventory:
-                        if item.source_market_id == kalshi_market.canonical.source_market_id:
-                            item.observation = observation
-            if kalshi_markets:
-                market_counts[VenueName.KALSHI] = len(kalshi_markets)
+        if kalshi_markets:
+            market_counts[VenueName.KALSHI] = len(kalshi_markets)
 
         venue_markets = {
             VenueName.MATCHBOOK: matchbook_markets,
@@ -1660,6 +1786,218 @@ class ReadOnlyCrossVenueCollector:
             matched_market_pairs,
         )
 
+    async def _fetch_matchbook_cluster_side(
+        self,
+        mb_events: list[_NormalizedEvent],
+        *,
+        side: _VenueSideFetch,
+        matchbook_market_filters: dict[str, Any],
+        issues: list[CollectorIssue],
+        fixture: DiscoveredFixture,
+    ) -> None:
+        if not mb_events:
+            return
+        side.primary_event = mb_events[0]
+        for mb_event in mb_events:
+            if self._provider_budget_exhausted():
+                break
+            mb_listed = True
+            try:
+                mb_started = perf_counter()
+                mb_market_payload, mb_failed = await self._wait_provider(
+                    self.matchbook.list_markets(
+                        mb_event.canonical.source_event_id,
+                        **matchbook_market_filters,
+                    ),
+                    stage="list_markets",
+                    venue=VenueName.MATCHBOOK,
+                    source_id=mb_event.canonical.source_event_id,
+                    default={"markets": []},
+                )
+                side.latency_ms = _elapsed_ms(mb_started)
+                side.retrieved_at = datetime.now(UTC)
+                if mb_failed:
+                    side.failed = True
+                    mb_listed = False
+                    if fixture.no_comparison_reason is None:
+                        fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
+                    mb_market_payload = {"markets": []}
+            except Exception as exc:
+                issues.append(
+                    CollectorIssue(
+                        stage="list_markets",
+                        venue=VenueName.MATCHBOOK,
+                        source_id=mb_event.canonical.source_event_id,
+                        detail=str(exc),
+                    )
+                )
+                fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
+                side.failed = True
+                mb_listed = False
+                mb_market_payload = {"markets": []}
+            if mb_listed:
+                side.listed = True
+            raw_matchbook = _extract_matchbook_items(mb_market_payload, "markets")
+            markets, inventory = self._inventory_markets(
+                mb_event, raw_matchbook, venue=VenueName.MATCHBOOK, issues=issues
+            )
+            side.markets.extend(markets)
+            side.inventory.extend(inventory)
+            retrieved_at = side.retrieved_at or datetime.now(UTC)
+            for left_market in markets:
+                observation = self._try_matchbook_observation(
+                    mb_event,
+                    left_market,
+                    retrieved_at=retrieved_at,
+                    latency_ms=side.latency_ms,
+                    issues=issues,
+                )
+                if observation is None:
+                    continue
+                side.observations[left_market.canonical.source_market_id] = observation
+                for item in side.inventory:
+                    if item.source_market_id == left_market.canonical.source_market_id:
+                        item.observation = observation
+
+    async def _fetch_polymarket_cluster_side(
+        self,
+        pm_events: list[_NormalizedEvent],
+        *,
+        side: _VenueSideFetch,
+        polymarket_market_filters: dict[str, Any],
+        issues: list[CollectorIssue],
+        fixture: DiscoveredFixture,
+    ) -> None:
+        if not pm_events:
+            return
+        pm_event = pm_events[0]
+        for event in pm_events:
+            if self._provider_budget_exhausted():
+                break
+            pm_listed = True
+            try:
+                pm_started = perf_counter()
+                pm_market_payload, pm_failed = await self._wait_provider(
+                    self.polymarket.list_markets(
+                        event.canonical.source_event_id,
+                        **polymarket_market_filters,
+                    ),
+                    stage="list_markets",
+                    venue=VenueName.POLYMARKET,
+                    source_id=event.canonical.source_event_id,
+                    default=[],
+                )
+                side.latency_ms += _elapsed_ms(pm_started)
+                if pm_failed:
+                    side.failed = True
+                    pm_listed = False
+                    if fixture.no_comparison_reason is None:
+                        fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
+                    pm_market_payload = []
+            except Exception as exc:
+                issues.append(
+                    CollectorIssue(
+                        stage="list_markets",
+                        venue=VenueName.POLYMARKET,
+                        source_id=event.canonical.source_event_id,
+                        detail=str(exc),
+                    )
+                )
+                if fixture.no_comparison_reason is None:
+                    fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
+                side.failed = True
+                pm_listed = False
+                pm_market_payload = []
+            if pm_listed:
+                side.listed = True
+            markets, inventory = self._inventory_markets(
+                event,
+                [item for item in pm_market_payload if isinstance(item, dict)],
+                venue=VenueName.POLYMARKET,
+                issues=issues,
+            )
+            side.markets.extend(markets)
+            side.inventory.extend(inventory)
+        side.markets, side.inventory = _promote_polymarket_cluster_markets(
+            side.markets, side.inventory
+        )
+
+        async def _one_market(right_market: _NormalizedMarket) -> None:
+            if self._provider_budget_exhausted():
+                return
+            book_event = _event_for_source(
+                pm_events, right_market.canonical.event.source_event_id
+            ) or pm_event
+            if book_event is None:
+                return
+            books_by_token, poly_book_latency_ms, fetched, book_failed = (
+                await self._fetch_polymarket_books(book_event, right_market, issues=issues)
+            )
+            side.books += fetched
+            if book_failed:
+                return
+            observation = self._try_polymarket_observation(
+                book_event,
+                right_market,
+                books_by_token,
+                latency_ms=side.latency_ms + poly_book_latency_ms,
+                issues=issues,
+            )
+            if observation is None:
+                return
+            side.observations[right_market.canonical.source_market_id] = observation
+            for item in side.inventory:
+                if item.source_market_id == right_market.canonical.source_market_id:
+                    item.observation = observation
+
+        prioritized = _prioritize_baseline_markets(side.markets)
+        if prioritized:
+            await asyncio.gather(*[_one_market(market) for market in prioritized])
+
+    async def _fetch_kalshi_cluster_side(
+        self,
+        k_events: list[_NormalizedEvent],
+        *,
+        side: _VenueSideFetch,
+        issues: list[CollectorIssue],
+        fixture: DiscoveredFixture,
+    ) -> None:
+        if self.kalshi is None or not k_events:
+            return
+        for k_event in k_events:
+            if self._provider_budget_exhausted():
+                break
+            markets, inventory, series, fetched, kalshi_failed = await self._load_kalshi_markets(
+                k_event, issues=issues
+            )
+            if kalshi_failed:
+                side.failed = True
+                if fixture.no_comparison_reason is None:
+                    fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
+            else:
+                side.listed = True
+            side.books += fetched
+            side.markets.extend(markets)
+            side.inventory.extend(inventory)
+
+            async def _one_kalshi(kalshi_market: _NormalizedMarket) -> None:
+                if self._provider_budget_exhausted():
+                    return
+                observation, book_fetched = await self._try_kalshi_observation(
+                    k_event, kalshi_market, series=series, issues=issues
+                )
+                side.books += book_fetched
+                if observation is None:
+                    return
+                side.observations[kalshi_market.canonical.source_market_id] = observation
+                for item in side.inventory:
+                    if item.source_market_id == kalshi_market.canonical.source_market_id:
+                        item.observation = observation
+
+            prioritized = _prioritize_baseline_markets(markets)
+            if prioritized:
+                await asyncio.gather(*[_one_kalshi(market) for market in prioritized])
+
     def _normalize_events(
         self,
         payloads: list[dict[str, Any]],
@@ -1807,7 +2145,14 @@ class ReadOnlyCrossVenueCollector:
         books_by_token: dict[str, dict[str, Any]] = {}
         latency_ms = 0
         fetched = 0
-        for runner in market.canonical.runners:
+        failed = False
+        runners = list(market.canonical.runners)
+
+        async def _one(runner: CanonicalRunner) -> None:
+            nonlocal latency_ms, fetched, failed
+            if failed or self._provider_budget_exhausted():
+                failed = True
+                return
             try:
                 started = perf_counter()
                 raw_book, book_timed_out = await self._wait_provider(
@@ -1822,7 +2167,8 @@ class ReadOnlyCrossVenueCollector:
                     default=None,
                 )
                 if book_timed_out or raw_book is None:
-                    return books_by_token, latency_ms, fetched, True
+                    failed = True
+                    return
                 latency_ms += _elapsed_ms(started)
                 books_by_token[runner.source_runner_id] = raw_book
                 fetched += 1
@@ -1835,8 +2181,11 @@ class ReadOnlyCrossVenueCollector:
                         detail=str(exc),
                     )
                 )
-                return books_by_token, latency_ms, fetched, True
-        return books_by_token, latency_ms, fetched, False
+                failed = True
+
+        if runners:
+            await asyncio.gather(*[_one(runner) for runner in runners])
+        return books_by_token, latency_ms, fetched, failed
 
     def _try_polymarket_observation(
         self,
@@ -2043,10 +2392,20 @@ class ReadOnlyCrossVenueCollector:
         books_by_ticker: dict[str, dict[str, Any]] = {}
         fetched = 0
         latency_ms = 0
-        tickers = {
-            runner.source_runner_id.rsplit(":", 1)[0] for runner in market.canonical.runners
-        }
-        for ticker in tickers:
+        failed = False
+        tickers = sorted(
+            {
+                runner.source_runner_id.rsplit(":", 1)[0]
+                for runner in market.canonical.runners
+            }
+        )
+
+        async def _one(ticker: str) -> None:
+            nonlocal fetched, latency_ms, failed
+            if failed or not ticker or self._provider_budget_exhausted():
+                if ticker:
+                    failed = True
+                return
             try:
                 started = perf_counter()
                 raw_book, book_failed = await self._wait_provider(
@@ -2060,7 +2419,8 @@ class ReadOnlyCrossVenueCollector:
                     default=None,
                 )
                 if book_failed or raw_book is None:
-                    return None, fetched
+                    failed = True
+                    return
                 latency_ms += _elapsed_ms(started)
                 books_by_ticker[ticker] = raw_book
                 fetched += 1
@@ -2073,7 +2433,12 @@ class ReadOnlyCrossVenueCollector:
                         detail=str(exc),
                     )
                 )
-                return None, fetched
+                failed = True
+
+        if tickers:
+            await asyncio.gather(*[_one(ticker) for ticker in tickers])
+        if failed:
+            return None, fetched
         evaluated_at = datetime.now(UTC)
         age = retrieval_quote_age(retrieved_at=evaluated_at, evaluated_at=evaluated_at)
         fee_meta = resolve_kalshi_fee_metadata(
