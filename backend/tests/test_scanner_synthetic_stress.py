@@ -28,6 +28,7 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
+from test_issue_147_market_evaluation_state import THREE_LEAGUE_FIXTURES
 from venue_cost_helpers import matchbook_polymarket_costs
 
 
@@ -61,36 +62,34 @@ class CallTracker:
         self.calls = {}
 
 
-def _teams(index: int) -> tuple[str, str]:
-    return f"Alpha {index:02d} United", f"Beta {index:02d} City"
-
-
-def _kickoff(index: int) -> datetime:
-    """Keep generated fixtures outside EventMatcher's five-minute tolerance."""
-
-    return KICKOFF + timedelta(minutes=index * 10)
+def _fixture_identity(index: int) -> tuple[str, str, str, datetime]:
+    competition, home, away = THREE_LEAGUE_FIXTURES[
+        index % len(THREE_LEAGUE_FIXTURES)
+    ]
+    kickoff = KICKOFF + timedelta(days=index // len(THREE_LEAGUE_FIXTURES))
+    return competition, home, away, kickoff
 
 
 def _matchbook_event(index: int) -> dict[str, Any]:
-    home, away = _teams(index)
+    competition, home, away, kickoff = _fixture_identity(index)
     return {
         "id": 10_000 + index,
         "name": f"{home} vs {away}",
-        "start": _kickoff(index).isoformat(),
-        "competition-name": "Premier League",
+        "start": kickoff.isoformat(),
+        "competition-name": competition,
         "sport-name": "Football",
         "status": "open",
     }
 
 
 def _polymarket_event(index: int) -> dict[str, Any]:
-    home, away = _teams(index)
+    competition, home, away, kickoff = _fixture_identity(index)
     return {
         "id": f"pm-event-{index}",
         "title": f"{home} vs {away}",
-        "startTime": _kickoff(index).isoformat(),
-        "competition": "Premier League",
-        "series": [{"title": "Premier League"}],
+        "startTime": kickoff.isoformat(),
+        "competition": competition,
+        "series": [{"title": competition}],
     }
 
 
