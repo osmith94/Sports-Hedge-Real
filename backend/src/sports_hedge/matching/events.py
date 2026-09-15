@@ -5,26 +5,47 @@ from difflib import SequenceMatcher
 
 from pydantic import BaseModel, Field
 
-from sports_hedge.domain.football import CanonicalEvent
+from sports_hedge.domain.football import CanonicalEvent, CanonicalMarket
 from sports_hedge.facts.aliases import resolve_team_name
+from sports_hedge.matching.learned_rules import (
+    AppliedLearnedRule,
+    LearnedMappingApplicator,
+    MappingProvenance,
+    provenance_from_applied,
+)
 
 
 class EventMatchResult(BaseModel):
     matched: bool
     confidence: float = Field(ge=0.0, le=1.0)
     reasons: list[str]
+    provenance: MappingProvenance = Field(default_factory=MappingProvenance)
 
 
 class EventMatcher:
-    def __init__(self, *, kickoff_tolerance: timedelta = timedelta(minutes=5), threshold: float = 0.92) -> None:
+    def __init__(
+        self,
+        *,
+        kickoff_tolerance: timedelta = timedelta(minutes=5),
+        threshold: float = 0.92,
+        learned_applicator: LearnedMappingApplicator | None = None,
+    ) -> None:
         self.kickoff_tolerance = kickoff_tolerance
         self.threshold = threshold
+        self.learned_applicator = learned_applicator
 
     @staticmethod
     def _similarity(left: str, right: str) -> float:
         return SequenceMatcher(a=left, b=right).ratio()
 
-    def match(self, left: CanonicalEvent, right: CanonicalEvent) -> EventMatchResult:
+    def match(
+        self,
+        left: CanonicalEvent,
+        right: CanonicalEvent,
+        *,
+        left_market: CanonicalMarket | None = None,
+        right_market: CanonicalMarket | None = None,
+    ) -> EventMatchResult:
         reasons: list[str] = []
 
         if left.sport != right.sport:
@@ -32,16 +53,23 @@ class EventMatcher:
 
         kickoff_delta = abs(left.kickoff_utc - right.kickoff_utc)
         if kickoff_delta > self.kickoff_tolerance:
-            return EventMatchResult(matched=False, confidence=0.0, reasons=["kickoff_outside_tolerance"])
+            return EventMatchResult(
+                matched=False,
+                confidence=0.0,
+                reasons=["kickoff_outside_tolerance"],
+            )
 
-        home_score = self._similarity(
-            resolve_team_name(left.home_team),
-            resolve_team_name(right.home_team),
+        left_home, left_away, left_applied = self._resolved_teams(
+            left, right, market=left_market, counterpart_market=right_market
         )
-        away_score = self._similarity(
-            resolve_team_name(left.away_team),
-            resolve_team_name(right.away_team),
+        right_home, right_away, right_applied = self._resolved_teams(
+            right, left, market=right_market, counterpart_market=left_market
         )
+        applied = [*left_applied, *right_applied]
+        provenance = provenance_from_applied(applied)
+
+        home_score = self._similarity(left_home, right_home)
+        away_score = self._similarity(left_away, right_away)
         competition_score = self._competition_score(left.competition, right.competition)
         kickoff_score = 1.0 - (kickoff_delta.total_seconds() / self.kickoff_tolerance.total_seconds())
 
@@ -60,11 +88,37 @@ class EventMatcher:
             reasons.append("competition_fuzzy")
         if kickoff_delta.total_seconds() > 0:
             reasons.append("kickoff_offset")
+        if applied:
+            reasons.append("operator_verified_learned_alias")
+            if provenance.rule_id:
+                reasons.append(f"learned_rule:{provenance.rule_id}:v{provenance.rule_version}")
 
         return EventMatchResult(
             matched=confidence >= self.threshold,
             confidence=round(confidence, 6),
             reasons=reasons,
+            provenance=provenance,
+        )
+
+    def _resolved_teams(
+        self,
+        event: CanonicalEvent,
+        counterpart: CanonicalEvent,
+        *,
+        market: CanonicalMarket | None,
+        counterpart_market: CanonicalMarket | None,
+    ) -> tuple[str, str, list[AppliedLearnedRule]]:
+        if self.learned_applicator is None:
+            return (
+                resolve_team_name(event.home_team),
+                resolve_team_name(event.away_team),
+                [],
+            )
+        return self.learned_applicator.resolve_teams(
+            event,
+            counterpart,
+            market=market,
+            counterpart_market=counterpart_market,
         )
 
     @staticmethod

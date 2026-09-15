@@ -42,6 +42,8 @@ from sports_hedge.fx.models import FxRateUnavailable
 from sports_hedge.fx.service import FxRateService
 from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
+from sports_hedge.matching.events import EventMatcher
+from sports_hedge.matching.learned_rules import LearnedMappingApplicator
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.normalization.identity import (
     canonical_matched_event_id,
@@ -82,9 +84,17 @@ class PaperScanService:
         cost_resolver: VenueCostResolver | None = None,
         liquidity: SqlitePaperLiquidityRepository | None = None,
         open_trades: list[PaperTrade] | None = None,
+        mapping_rule_store: object | None = None,
     ) -> None:
         self.market_intelligence = market_intelligence
-        self.market_matcher = market_matcher or MarketMatcher()
+        if market_matcher is None:
+            applicator = (
+                LearnedMappingApplicator(mapping_rule_store)
+                if mapping_rule_store is not None
+                else None
+            )
+            market_matcher = MarketMatcher(EventMatcher(learned_applicator=applicator))
+        self.market_matcher = market_matcher
         self.depth_scanner = depth_scanner or DepthAwareCompleteSetScanner()
         self.payoff_scanner = payoff_scanner or DepthAwarePayoffScanner()
         self.risk_scorer = risk_scorer or ExecutionRiskScorer()
