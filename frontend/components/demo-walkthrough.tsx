@@ -279,8 +279,9 @@ export function DemoWalkthroughBoard() {
           <div>
             <div className="panel-title">2. Discovery / tracking</div>
             <div className="panel-meta">
-              Read-only live/near-future football via the same `/paper/collect` path as the operations
-              console. Empty stays empty. Fixture replay is never mixed into these rows.
+              Read-only live/near-future football via the broad `/paper/collect` diagnostic path.
+              The operations console primary Run scan uses bounded HOT instead. Empty stays empty.
+              Fixture replay is never mixed into these rows.
             </div>
           </div>
           <span className={discoveryError ? "demo-chip" : "status-badge"}>
