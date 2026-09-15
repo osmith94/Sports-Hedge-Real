@@ -528,7 +528,7 @@ export function RunPaperScan() {
           />
           <div className="scan-action">
             <button className="scan-button" type="submit" disabled={loading} aria-busy={loading}>
-              {loadingMode === "hot" ? "Scanning… Refreshing HOT…" : "Run Fast refresh"}
+              {loadingMode === "hot" ? "Refreshing HOT…" : "Run Fast refresh"}
             </button>
           </div>
         </div>
