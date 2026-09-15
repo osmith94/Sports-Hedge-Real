@@ -190,7 +190,6 @@ DEFAULT_PROVIDER_CONCURRENCY = {
     VenueName.KALSHI: 4,
 }
 _WALL_STAGE_NAME = {
-    "event_discovery": "event_lookup",
     "normalize_match": "mapping_equivalence",
 }
 
@@ -1428,43 +1427,55 @@ class ReadOnlyCrossVenueCollector:
         pending: dict[int, asyncio.Task[None]] = {}
         next_index = 0
         concurrency = self._cluster_concurrency_limit
-        while next_index < len(clusters) or pending:
-            while next_index < len(clusters) and len(pending) < concurrency:
-                if self._deadline_reached() or self._hard_deadline_reached():
-                    break
-                cluster = clusters[next_index]
-                pending[next_index] = asyncio.create_task(run(next_index, cluster))
-                next_index += 1
-                await asyncio.sleep(0)
-            if not pending:
-                break
-            remaining = self._remaining_soft()
-            timeout = None if remaining is None else max(0.0, remaining)
-            done_tasks, _still = await asyncio.wait(
-                set(pending.values()),
-                timeout=timeout,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for index, task in list(pending.items()):
-                if task in done_tasks or task.done():
-                    pending.pop(index, None)
-                    if task.done() and not task.cancelled() and task.exception() is not None:
-                        raise task.exception()
-            if timeout is not None and not done_tasks:
-                break
-            if remaining is not None and remaining <= 0:
-                break
-            if self._deadline_reached() or self._hard_deadline_reached():
-                break
 
-        if pending:
+        async def cancel_pending() -> None:
             await self._cancel_inflight()
             for task in pending.values():
                 if not task.done():
                     task.cancel()
             drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
-            if drain > 0:
+            if drain > 0 and pending:
                 await asyncio.wait(set(pending.values()), timeout=drain)
+
+        try:
+            while next_index < len(clusters) or pending:
+                while next_index < len(clusters) and len(pending) < concurrency:
+                    if self._deadline_reached() or self._hard_deadline_reached():
+                        break
+                    cluster = clusters[next_index]
+                    pending[next_index] = asyncio.create_task(run(next_index, cluster))
+                    next_index += 1
+                    await asyncio.sleep(0)
+                if not pending:
+                    break
+                remaining = self._remaining_soft()
+                timeout = None if remaining is None else max(0.0, remaining)
+                done_tasks, _still = await asyncio.wait(
+                    set(pending.values()),
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for index, task in list(pending.items()):
+                    if task in done_tasks or task.done():
+                        pending.pop(index, None)
+                        if (
+                            task.done()
+                            and not task.cancelled()
+                            and task.exception() is not None
+                        ):
+                            raise task.exception()
+                if timeout is not None and not done_tasks:
+                    break
+                if remaining is not None and remaining <= 0:
+                    break
+                if self._deadline_reached() or self._hard_deadline_reached():
+                    break
+        except asyncio.CancelledError:
+            await cancel_pending()
+            raise
+
+        if pending:
+            await cancel_pending()
 
         discovered: list[DiscoveredFixture] = []
         decisions: list[PaperScanDecision] = []
