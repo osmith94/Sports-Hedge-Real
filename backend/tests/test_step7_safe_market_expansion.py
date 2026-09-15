@@ -49,8 +49,8 @@ from venue_cost_helpers import matchbook_polymarket_costs
 from test_fixture_inventory import _inventory, _market
 
 
-KICKOFF = datetime(2026, 9, 12, 18, 45, tzinfo=UTC)
-OBSERVED = datetime(2026, 9, 12, 16, 45, tzinfo=UTC)
+KICKOFF = datetime(2026, 9, 20, 18, 45, tzinfo=UTC)
+OBSERVED = datetime(2026, 9, 20, 16, 45, tzinfo=UTC)
 
 MB_EVENT = {
     "id": 7001,

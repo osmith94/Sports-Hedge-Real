@@ -42,7 +42,7 @@ from sports_hedge.application.market_observation import (
     VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key
+from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key, should_skip_market_work
 from sports_hedge.fees.kalshi import resolve_kalshi_fee_metadata
 from sports_hedge.application.fixture_clusters import (
     FixtureCluster,
@@ -249,6 +249,7 @@ class DiscoveredFixture(BaseModel):
     polymarket_matched: bool = False
     kalshi_matched: bool = False
     fixture_status: str | None = None
+    fixture_status_source: VenueName | None = None
     in_running: bool | None = None
     live_score_supported: bool = False
     home_score: int | None = None
@@ -1215,6 +1216,8 @@ class ReadOnlyCrossVenueCollector:
             polymarket_events=polymarket_events,
             queried_series_ids=queried_series_ids,
         )
+        if should_skip_market_work(fixture, seen_at):
+            return fixture, [], [], {}, 0, 0
         mb_events = [_as_normalized(item) for item in cluster.events_for(VenueName.MATCHBOOK)]
         pm_events = [_as_normalized(item) for item in cluster.events_for(VenueName.POLYMARKET)]
         k_events = [_as_normalized(item) for item in cluster.events_for(VenueName.KALSHI)]
@@ -2141,6 +2144,7 @@ def _fixture_from_cluster(
         polymarket_matched=cluster.polymarket is not None,
         kalshi_matched=cluster.kalshi is not None,
         fixture_status=state.venue_status if state is not None else None,
+        fixture_status_source=VenueName.MATCHBOOK if state is not None else None,
         in_running=state.in_running if state is not None else None,
         live_score_supported=state.live_score_supported if state is not None else False,
         home_score=state.home_score if state is not None else None,

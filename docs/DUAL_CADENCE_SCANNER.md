@@ -229,8 +229,13 @@ classify_scan_lane(
     post_kickoff_unknown_horizon=3h,
 ) -> HOT | UNIVERSE | DROP
 
-DROP when provider status is completed/settled/void/expired (explicit payload only)
-     NEVER DROP solely because time has passed
+DROP when provider status is completed/settled/void/expired/finished/final/closed/graded
+     (explicit payload only; never fabricate completed/live from elapsed time)
+     Official Matchbook GET /events states: open, suspended, closed, graded.
+     closed and graded are explicit Matchbook terminal event states.
+     Matchbook is a trusted terminal-status source only when Matchbook
+     supplied that lifecycle status (`fixture_status_source=matchbook`).
+     `matchbook_matched` / cluster coverage is not Matchbook lifecycle authority.
 
 HOT  when in_running is True                         # only live label
      or 0 < (kickoff_utc - now) <= hot_horizon       # pre-kickoff
@@ -239,15 +244,21 @@ HOT  when in_running is True                         # only live label
           and kickoff_utc <= now
           and (now - kickoff_utc) <= post_kickoff_unknown_horizon
           and not DROP
+          and not postponed/delayed/rescheduled
         )
         # kickoff-passed, in-play unknown: HOT membership, no live label
 
-UNIVERSE otherwise
-     including T-6d, T-4h, and kickoff-passed + unknown in-play after 3h
+UNIVERSE when the fixture is still current and not HOT
+     including T-6d, T-4h, and explicit postponed/delayed/rescheduled
      (still not labelled completed or live)
+
+DROP also when kickoff-passed + unknown beyond the 3h window (#164)
+     Leaves current radar / HOT identity / Discovery inventory.
+     Does not write fixture_status=completed or in_running=true.
+     Explicit postponed/delayed/rescheduled is not dropped by kickoff arithmetic.
 ```
 
-`in_running is True` is the only live label. After the 3h unknown window the fixture **leaves HOT scheduling** and is UNIVERSE/radar until a provider says in-running (returns to HOT) or explicit completed (DROP). Elapsed time must not write `fixture_status=completed` or `in_running=true`.
+`in_running is True` is the only live label. After the 3h unknown window the fixture **leaves current radar** (not merely HOT scheduling). Elapsed time must not write `fixture_status=completed` or `in_running=true`. Explicit Matchbook/provider terminal status evicts immediately. A Matchbook-confirmed terminal tombstone must not be resurrected by a later Polymarket/Kalshi unknown or postponed/delayed/rescheduled observation. A later Matchbook `open` / `in-play` / `suspended` / `rescheduled` (or Matchbook `in_running=True` with a non-terminal status) may restore current radar.
 
 ### 5.5 HOT sort key (v1, required)
 
@@ -490,7 +501,7 @@ New module `backend/tests/test_dual_cadence_scheduler.py` (clock injected; no li
 | 12 | `execution_enabled=false`; collector/venue modules still have no place/cancel/sign. |
 | 13 | Existing `#157` / `#153` leftover tests remain PASS. |
 | 14 | **Slow HOT envelope:** a HOT collect that would run past 25s leftover-stops / aborts so coordinator return is ≤ ~30s (25s + 5s grace). A second HOT is not started while the first is in progress. After return, the next due slot is used (missed slot not queued). |
-| 15 | **T+3h unknown expiry:** kickoff-passed + `in_running None` at T+2h59m is HOT (not live). At T+3h01m it is UNIVERSE, still `in_running is None`, `fixture_status` not rewritten to completed. |
+| 15 | **T+3h unknown expiry (#164):** kickoff-passed + `in_running None` at T+2h59m is HOT (not live). At T+3h01m it **leaves current radar** (DROP from Discovery/Tracked/HOT identity), still `in_running is None`, `fixture_status` not rewritten to completed. |
 | 16 | **Startup bootstrap:** new coordinator / empty process-memory store → Tracked `[]`; `plan_tick(now=start)` returns **UNIVERSE** (does not wait 180s and does not run an empty HOT cycle first). After the first bootstrap chunk records inventory, Tracked may become non-empty; HOT membership is classified from that inventory. |
 | 17 | **#161 identity seam:** after a HOT upsert of a subset, `FixtureCurrentStateStore.resolve_canonical_id` still maps cluster id, source event id, and paper-decision event id to the same fixture; `test_tracked_fixture_click_through.py` stays PASS. |
 | 18 | **Freshest status vs HOT economics:** an older HOT `in_running=True` snapshot must not pin membership/detail after a later UNIVERSE observation with `in_running=None` beyond the 3h window. Classify from the freshest provider-status observation; Tracked HOT membership still uses HOT economics only. |
@@ -545,7 +556,7 @@ Owner product: genuinely qualifying live paper opportunities are automatically p
 | 1 | Explicit `POST /paper/collect` remains the current **45s UNIVERSE-shaped** diagnostic/manual contract (now the accepted #131/#157 collect shape). |
 | 2 | UNIVERSE **generation** budget is **150s**, not 180s. Keep 30s headroom inside the **180s** sweep cadence. 150s is executed as **resumable chunks**, not one job. |
 | 3 | Radar TTLs: **HOT 90s / UNIVERSE 360s**. Executable quote freshness remains the existing fail-closed ~1s contract. |
-| 4 | Kickoff-passed + unknown in-play: HOT **without a live label**, only within **3h**. After that, expire from HOT scheduling unless the provider explicitly says in-running. Do not claim completed from time. |
+| 4 | Kickoff-passed + unknown in-play: HOT **without a live label**, only within **3h**. After that, expire from **current radar** (#164) unless the provider explicitly says in-running or postponed/delayed/rescheduled. Do not claim completed from time. |
 | 5 | Canonical fixture current-state store: **process memory for v1**. Restart honesty: Tracked empty until collection. **Immediate UNIVERSE bootstrap** on startup. SQLite inventory later. |
 | 6 | HOT ordering: **simple deterministic key** (§5.5). Do not couple the dislocation burst scheduler. |
 | A | Separate HOT cycle timeout default **25s** so the 30s cadence is physically achievable. #157 4s reserve + 5s grace ⇒ ~30s envelope. HOT must not overlap itself. |

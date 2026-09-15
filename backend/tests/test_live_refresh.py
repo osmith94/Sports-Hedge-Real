@@ -69,6 +69,12 @@ def test_matchbook_fixture_state_does_not_invent_scores() -> None:
     assert without_scores.home_score is None
     assert without_scores.away_score is None
 
+    graded = matchbook_fixture_state({"id": 1, "status": "graded", "in-running-flag": False})
+    assert graded.venue_status == "graded"
+    assert graded.in_running is False
+    closed = matchbook_fixture_state({"id": 1, "status": "closed"})
+    assert closed.venue_status == "closed"
+
     with_scores = matchbook_fixture_state(
         {
             "id": 1,

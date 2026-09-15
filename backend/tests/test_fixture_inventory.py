@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -549,7 +549,7 @@ def test_operations_fixture_route_uses_canonical_event_id() -> None:
         home_team="Tottenham",
         away_team="Everton",
         competition="Premier League",
-        kickoff_utc=KICKOFF,
+        kickoff_utc=KICKOFF + timedelta(days=8),
         last_seen_at=KICKOFF,
         discovered_market_count=2,
         matched_equivalent_count=1,

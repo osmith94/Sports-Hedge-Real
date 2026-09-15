@@ -11,6 +11,7 @@ from sports_hedge.application.collector import (
     FixtureMarketInventoryRow,
     MarketEvaluationState,
 )
+from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
     DEFAULT_HOT_HORIZON,
     DEFAULT_HOT_INTERVAL_SECONDS,
@@ -23,9 +24,12 @@ from sports_hedge.application.scan_lanes import (
     classify_scan_lane,
     freshness_class,
     hot_sort_key,
+    is_explicit_terminal,
+    is_trusted_lifecycle_correction,
+    lifecycle_status_source,
     next_due_at,
+    terminal_eviction_reason,
 )
-from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.models import PaperScanDecision
 
@@ -62,6 +66,18 @@ class FixtureRadarRow:
     source_events: tuple[StoredSourceEvent, ...] = ()
 
 
+@dataclass(frozen=True)
+class CurrentStateTombstone:
+    """Current-radar eviction record. Not a fabricated completed/live label."""
+
+    canonical_event_id: str
+    aliases: frozenset[str]
+    reason: str
+    provider_status: str | None
+    source: str | None
+    observed_at: datetime
+
+
 class FixtureCurrentStateStore:
     """Process-memory canonical fixture current-state (v1).
 
@@ -72,6 +88,10 @@ class FixtureCurrentStateStore:
     last_scanned_at. Tracked economics for a HOT-classified fixture still use
     only the HOT lane observation.
 
+    Terminal tombstones keep explicit finished/completed/settled truth from
+    resurrecting via a later stale UNIVERSE or other-venue unknown snapshot.
+    Audit/history is not stored here and is not deleted.
+
     Do not fuzzy-match fixture names. Do not fabricate demo fixtures.
     """
 
@@ -79,13 +99,18 @@ class FixtureCurrentStateStore:
         self._generation = 0
         self._rows: dict[str, _FixtureRecord] = {}
         self._aliases: dict[str, str] = {}
+        self._tombstones: dict[str, CurrentStateTombstone] = {}
+        self._tombstone_aliases: dict[str, str] = {}
         self._has_collection = False
 
-    def clear(self) -> None:
+    def clear(self, *, keep_tombstones: bool = False) -> None:
         self._generation = 0
         self._rows = {}
         self._aliases = {}
         self._has_collection = False
+        if not keep_tombstones:
+            self._tombstones = {}
+            self._tombstone_aliases = {}
 
     @property
     def generation(self) -> int:
@@ -94,7 +119,7 @@ class FixtureCurrentStateStore:
     def replace_from_report(self, report: CollectionReport) -> None:
         """Compatibility generation replace used by explicit diagnostic collects."""
 
-        self.clear()
+        self.clear(keep_tombstones=True)
         self.upsert_from_report(report, scan_lane=ScanLane.UNIVERSE)
 
     def upsert_from_report(
@@ -118,9 +143,25 @@ class FixtureCurrentStateStore:
         source_events = _source_events_from_report(report, fixtures)
         incoming_aliases = _aliases_from_report(report, fixtures)
         for canonical_id, fixture in fixtures.items():
+            aliases = _aliases_for_canonical(canonical_id, incoming_aliases)
+            if self._reject_or_tombstone_incoming(
+                canonical_id,
+                fixture,
+                aliases=aliases,
+                scanned_at=scanned_at,
+            ):
+                continue
             membership = classify_scan_lane(fixture, scanned_at)
             if membership is ScanLane.DROP:
-                self._drop_identity(canonical_id)
+                if is_explicit_terminal(fixture):
+                    self._record_tombstone(
+                        canonical_id,
+                        fixture,
+                        aliases=aliases,
+                        scanned_at=scanned_at,
+                    )
+                else:
+                    self._drop_identity(canonical_id)
                 continue
             evaluated = (
                 fixture.market_evaluation_state == MarketEvaluationState.EVALUATED.value
@@ -148,6 +189,8 @@ class FixtureCurrentStateStore:
         wanted = identity.strip()
         if not wanted:
             return None
+        if self.tombstone_for(wanted) is not None:
+            return None
         canonical_id = self._aliases.get(wanted)
         if canonical_id is None and wanted in self._rows:
             return wanted
@@ -163,7 +206,16 @@ class FixtureCurrentStateStore:
         aliases.add(canonical_id)
         return frozenset(aliases)
 
-    def detail(self, identity: str) -> FixtureDetailReadModel | None:
+    def detail(
+        self,
+        identity: str,
+        now: datetime | None = None,
+        **kwargs: Any,
+    ) -> FixtureDetailReadModel | None:
+        if self.tombstone_for(identity) is not None:
+            return None
+        if now is not None:
+            self._evict_non_current(now, **kwargs)
         canonical_id = self.resolve_canonical_id(identity)
         if canonical_id is None:
             return None
@@ -171,10 +223,22 @@ class FixtureCurrentStateStore:
         displayed = record.status_fixture()
         if displayed is None:
             return None
+        if now is not None and classify_scan_lane(
+            displayed, now, **_classify_kwargs(kwargs)
+        ) is ScanLane.DROP:
+            self._drop_identity(canonical_id)
+            return None
         return FixtureDetailReadModel(
             fixture=displayed,
             markets=list(record.display_markets()),
         )
+
+    def tombstone_for(self, identity: str) -> CurrentStateTombstone | None:
+        wanted = identity.strip()
+        if not wanted:
+            return None
+        canonical_id = self._tombstone_aliases.get(wanted, wanted)
+        return self._tombstones.get(canonical_id)
 
     def has_collection(self) -> bool:
         return self._has_collection
@@ -188,6 +252,11 @@ class FixtureCurrentStateStore:
         hot_interval_seconds: int = DEFAULT_HOT_INTERVAL_SECONDS,
         universe_interval_seconds: int = DEFAULT_UNIVERSE_INTERVAL_SECONDS,
     ) -> list[DiscoveredFixture]:
+        self._evict_non_current(
+            now,
+            hot_horizon=hot_horizon,
+            post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+        )
         rows: list[DiscoveredFixture] = []
         for record in self._rows.values():
             fixture = record.status_fixture()
@@ -237,7 +306,11 @@ class FixtureCurrentStateStore:
         evaluated = require_aware_instant(now, "now")
         quote_ages = quote_age_ms_by_market or {}
         current: list[FixtureRadarRow] = []
-        drop_ids: list[str] = []
+        self._evict_non_current(
+            evaluated,
+            hot_horizon=hot_horizon,
+            post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+        )
         for canonical_id, record in self._rows.items():
             fixture = record.status_fixture()
             if fixture is None:
@@ -249,7 +322,6 @@ class FixtureCurrentStateStore:
                 post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
             )
             if membership is ScanLane.DROP:
-                drop_ids.append(canonical_id)
                 continue
             observation = record.selected_observation(membership)
             if observation is None or not observation.evaluated:
@@ -289,8 +361,6 @@ class FixtureCurrentStateStore:
                     source_events=observation.source_events,
                 )
             )
-        for canonical_id in drop_ids:
-            self._drop_identity(canonical_id)
         return current
 
     def current_tracked_opportunity_ids(self, now: datetime, **kwargs: Any) -> set[str]:
@@ -315,10 +385,8 @@ class FixtureCurrentStateStore:
 
     def hot_identity_scope(self, now: datetime, **kwargs: Any) -> list[str]:
         evaluated = require_aware_instant(now, "now")
-        hot_horizon = kwargs.get("hot_horizon", DEFAULT_HOT_HORIZON)
-        post = kwargs.get(
-            "post_kickoff_unknown_horizon", DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON
-        )
+        classify_kwargs = _classify_kwargs(kwargs)
+        self._evict_non_current(evaluated, **classify_kwargs)
         fixtures: list[DiscoveredFixture] = []
         for record in self._rows.values():
             fixture = record.status_fixture()
@@ -327,8 +395,7 @@ class FixtureCurrentStateStore:
             membership = classify_scan_lane(
                 fixture,
                 evaluated,
-                hot_horizon=hot_horizon,
-                post_kickoff_unknown_horizon=post,
+                **classify_kwargs,
             )
             if membership is ScanLane.HOT:
                 fixtures.append(fixture)
@@ -355,13 +422,15 @@ class FixtureCurrentStateStore:
         return payload
 
     def membership_counts(self, now: datetime, **kwargs: Any) -> tuple[int, int]:
+        classify_kwargs = _classify_kwargs(kwargs)
+        self._evict_non_current(now, **classify_kwargs)
         hot = 0
         universe = 0
         for record in self._rows.values():
             fixture = record.status_fixture()
             if fixture is None:
                 continue
-            membership = classify_scan_lane(fixture, now, **kwargs)
+            membership = classify_scan_lane(fixture, now, **classify_kwargs)
             if membership is ScanLane.HOT:
                 hot += 1
             elif membership is ScanLane.UNIVERSE:
@@ -382,6 +451,101 @@ class FixtureCurrentStateStore:
                 return
         record.set_lane(observation)
         record.leftover_this_pass = not observation.evaluated
+
+    def _evict_non_current(self, now: datetime, **kwargs: Any) -> None:
+        classify_kwargs = _classify_kwargs(kwargs)
+        evaluated = require_aware_instant(now, "now")
+        for canonical_id, record in list(self._rows.items()):
+            fixture = record.status_fixture()
+            if fixture is None:
+                self._drop_identity(canonical_id)
+                continue
+            membership = classify_scan_lane(fixture, evaluated, **classify_kwargs)
+            if membership is ScanLane.DROP:
+                if is_explicit_terminal(fixture):
+                    aliases = {
+                        alias
+                        for alias, target in self._aliases.items()
+                        if target == canonical_id
+                    }
+                    aliases.add(canonical_id)
+                    self._record_tombstone(
+                        canonical_id,
+                        fixture,
+                        aliases=aliases,
+                        scanned_at=evaluated,
+                    )
+                else:
+                    self._drop_identity(canonical_id)
+
+    def _reject_or_tombstone_incoming(
+        self,
+        canonical_id: str,
+        fixture: DiscoveredFixture,
+        *,
+        aliases: set[str],
+        scanned_at: datetime,
+    ) -> bool:
+        tombstone = self.tombstone_for(canonical_id)
+        if tombstone is None:
+            for alias in aliases:
+                tombstone = self.tombstone_for(alias)
+                if tombstone is not None:
+                    break
+        if tombstone is None:
+            return False
+        if is_trusted_lifecycle_correction(
+            fixture,
+            observed_at=scanned_at,
+            tombstone_observed_at=tombstone.observed_at,
+            tombstone_reason=tombstone.reason,
+            tombstone_source=tombstone.source,
+        ):
+            self._clear_tombstone(tombstone.canonical_event_id)
+            return False
+        if is_explicit_terminal(fixture) and scanned_at >= tombstone.observed_at:
+            self._record_tombstone(
+                canonical_id,
+                fixture,
+                aliases=aliases | set(tombstone.aliases),
+                scanned_at=scanned_at,
+            )
+        return True
+
+    def _record_tombstone(
+        self,
+        canonical_id: str,
+        fixture: DiscoveredFixture,
+        *,
+        aliases: set[str],
+        scanned_at: datetime,
+    ) -> None:
+        existing = self._tombstones.get(canonical_id)
+        merged = set(aliases)
+        merged.add(canonical_id)
+        if existing is not None:
+            merged.update(existing.aliases)
+        status_source = lifecycle_status_source(fixture)
+        tombstone = CurrentStateTombstone(
+            canonical_event_id=canonical_id,
+            aliases=frozenset(merged),
+            reason=terminal_eviction_reason(fixture),
+            provider_status=fixture.fixture_status,
+            source=status_source,
+            observed_at=scanned_at,
+        )
+        self._tombstones[canonical_id] = tombstone
+        for alias in tombstone.aliases:
+            self._tombstone_aliases[alias] = canonical_id
+        self._drop_identity(canonical_id)
+
+    def _clear_tombstone(self, canonical_id: str) -> None:
+        tombstone = self._tombstones.pop(canonical_id, None)
+        if tombstone is None:
+            return
+        for alias in tombstone.aliases:
+            if self._tombstone_aliases.get(alias) == canonical_id:
+                self._tombstone_aliases.pop(alias, None)
 
     def _drop_identity(self, canonical_id: str) -> None:
         self._rows.pop(canonical_id, None)
@@ -594,3 +758,18 @@ def _alias_decision(
         return
     if decision_id and decision_id in fixtures:
         aliases[decision_id] = decision_id
+
+
+def _aliases_for_canonical(canonical_id: str, aliases: dict[str, str]) -> set[str]:
+    found = {alias for alias, target in aliases.items() if target == canonical_id}
+    found.add(canonical_id)
+    return found
+
+
+def _classify_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    allowed = {}
+    if "hot_horizon" in kwargs:
+        allowed["hot_horizon"] = kwargs["hot_horizon"]
+    if "post_kickoff_unknown_horizon" in kwargs:
+        allowed["post_kickoff_unknown_horizon"] = kwargs["post_kickoff_unknown_horizon"]
+    return allowed
