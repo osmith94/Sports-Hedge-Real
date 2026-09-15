@@ -553,6 +553,7 @@ class LiveRefreshCoordinator:
             or self.status.cycle_in_progress
             or self._hot_in_progress
             or self._universe_in_progress
+            or self._manual_hot_in_progress
         )
 
     async def run_manual_hot(
