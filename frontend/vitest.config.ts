@@ -10,6 +10,7 @@ export default defineConfig({
       "lib/fixture-detail-error.test.ts",
       "lib/scan-status-display.test.ts",
       "lib/paper-scan-history-display.test.ts",
+      "lib/paper-position-management-display.test.ts",
     ],
   },
 });
