@@ -229,9 +229,13 @@ classify_scan_lane(
     post_kickoff_unknown_horizon=3h,
 ) -> HOT | UNIVERSE | DROP
 
-DROP when provider status is completed/settled/void/expired/finished/final
-     (explicit payload only; Matchbook is a trusted terminal-status source)
-     NEVER fabricate completed/live from elapsed time
+DROP when provider status is completed/settled/void/expired/finished/final/closed/graded
+     (explicit payload only; never fabricate completed/live from elapsed time)
+     Official Matchbook GET /events states: open, suspended, closed, graded.
+     closed and graded are explicit Matchbook terminal event states.
+     Matchbook is a trusted terminal-status source only when Matchbook
+     supplied that lifecycle status (`fixture_status_source=matchbook`).
+     `matchbook_matched` / cluster coverage is not Matchbook lifecycle authority.
 
 HOT  when in_running is True                         # only live label
      or 0 < (kickoff_utc - now) <= hot_horizon       # pre-kickoff
@@ -254,7 +258,7 @@ DROP also when kickoff-passed + unknown beyond the 3h window (#164)
      Explicit postponed/delayed/rescheduled is not dropped by kickoff arithmetic.
 ```
 
-`in_running is True` is the only live label. After the 3h unknown window the fixture **leaves current radar** (not merely HOT scheduling). Elapsed time must not write `fixture_status=completed` or `in_running=true`. Explicit Matchbook/provider terminal status evicts immediately and must not be resurrected by a later stale UNIVERSE or other-venue unknown observation.
+`in_running is True` is the only live label. After the 3h unknown window the fixture **leaves current radar** (not merely HOT scheduling). Elapsed time must not write `fixture_status=completed` or `in_running=true`. Explicit Matchbook/provider terminal status evicts immediately. A Matchbook-confirmed terminal tombstone must not be resurrected by a later Polymarket/Kalshi unknown or postponed/delayed/rescheduled observation. A later Matchbook `open` / `in-play` / `suspended` / `rescheduled` (or Matchbook `in_running=True` with a non-terminal status) may restore current radar.
 
 ### 5.5 HOT sort key (v1, required)
 

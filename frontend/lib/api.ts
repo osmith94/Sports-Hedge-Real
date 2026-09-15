@@ -146,6 +146,7 @@ export type DiscoveredFixture = {
   polymarket_matched: boolean;
   kalshi_matched?: boolean;
   fixture_status?: string | null;
+  fixture_status_source?: string | null;
   in_running?: boolean | null;
   live_score_supported: boolean;
   home_score?: number | null;

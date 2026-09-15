@@ -18,9 +18,15 @@ from sports_hedge.application.fixture_current_state import FixtureCurrentStateSt
 from sports_hedge.application.live_refresh import LiveRefreshCoordinator
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import (
+    EVICTION_TERMINAL,
     EVICTION_TERMINAL_FROM_MATCHBOOK,
+    MATCHBOOK_TERMINAL_EVENT_STATES,
     ScanLane,
     classify_scan_lane,
+    is_matchbook_lifecycle_status,
+    is_trusted_lifecycle_correction,
+    should_skip_market_work,
+    terminal_eviction_reason,
 )
 from sports_hedge.arbitrage.watchlist.models import WatchLeg, WatchObservation
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
@@ -41,12 +47,17 @@ def _fixture(
     kickoff: datetime,
     in_running: bool | None = None,
     fixture_status: str | None = None,
+    fixture_status_source: VenueName | None = None,
     source: VenueName = VenueName.MATCHBOOK,
     source_event_id: str | None = None,
     matchbook_matched: bool = True,
     polymarket_matched: bool = False,
+    kalshi_matched: bool = False,
     evaluation: str = "evaluated",
 ) -> DiscoveredFixture:
+    status_source = fixture_status_source
+    if status_source is None and fixture_status is not None:
+        status_source = source
     return DiscoveredFixture(
         source=source,
         source_event_id=source_event_id or f"src-{canonical_id}",
@@ -58,8 +69,10 @@ def _fixture(
         last_seen_at=NOW,
         in_running=in_running,
         fixture_status=fixture_status,
+        fixture_status_source=status_source,
         matchbook_matched=matchbook_matched,
         polymarket_matched=polymarket_matched,
+        kalshi_matched=kalshi_matched,
         market_evaluation_state=evaluation,
         opportunity_state="matched",
     )
@@ -175,8 +188,10 @@ def test_explicit_completed_evicts_current_radar_aliases_and_detail() -> None:
     tombstone = store.tombstone_for("norwich-wba")
     assert tombstone is not None
     assert tombstone.reason == EVICTION_TERMINAL_FROM_MATCHBOOK
+    assert tombstone.source == "matchbook"
     assert tombstone.provider_status == "finished"
     assert done.fixture_status == "finished"
+    assert done.fixture_status_source is VenueName.MATCHBOOK
 
 
 def test_stale_universe_unknown_cannot_resurrect_terminal_fixture() -> None:
@@ -241,7 +256,163 @@ def test_three_hour_window_is_not_applied_to_explicit_terminal() -> None:
     assert fixture.fixture_status == "completed"
 
 
-def test_postponed_can_restore_after_terminal_when_provider_corrects() -> None:
+def test_matchbook_graded_and_closed_are_explicit_terminal() -> None:
+    kickoff = NOW - timedelta(minutes=20)
+    for status in MATCHBOOK_TERMINAL_EVENT_STATES:
+        fixture = _fixture("done", kickoff=kickoff, fixture_status=status)
+        assert classify_scan_lane(fixture, NOW) is ScanLane.DROP
+        assert should_skip_market_work(fixture, NOW) is True
+        assert is_matchbook_lifecycle_status(fixture) is True
+        assert terminal_eviction_reason(fixture) == EVICTION_TERMINAL_FROM_MATCHBOOK
+        store = FixtureCurrentStateStore()
+        store.upsert_from_report(_report([fixture]), scan_lane=ScanLane.HOT)
+        assert store.inventory(NOW) == []
+        tombstone = store.tombstone_for("done")
+        assert tombstone is not None
+        assert tombstone.reason == EVICTION_TERMINAL_FROM_MATCHBOOK
+        assert tombstone.provider_status == status
+        assert tombstone.source == "matchbook"
+        assert fixture.in_running is None
+
+
+def test_matchbook_matched_does_not_make_other_venue_status_matchbook_confirmed() -> None:
+    fixture = _fixture(
+        "clustered",
+        kickoff=NOW - timedelta(minutes=20),
+        fixture_status="finished",
+        fixture_status_source=VenueName.POLYMARKET,
+        source=VenueName.POLYMARKET,
+        matchbook_matched=True,
+        polymarket_matched=True,
+    )
+    assert is_matchbook_lifecycle_status(fixture) is False
+    assert terminal_eviction_reason(fixture) == EVICTION_TERMINAL
+    store = FixtureCurrentStateStore()
+    store.upsert_from_report(_report([fixture]), scan_lane=ScanLane.HOT)
+    tombstone = store.tombstone_for("clustered")
+    assert tombstone is not None
+    assert tombstone.reason == EVICTION_TERMINAL
+    assert tombstone.source == "polymarket"
+
+
+@pytest.mark.parametrize("terminal_status", ("finished", "graded", "closed"))
+@pytest.mark.parametrize(
+    ("later_status", "later_source", "matchbook_matched", "polymarket_matched"),
+    [
+        (None, VenueName.POLYMARKET, True, True),
+        ("postponed", VenueName.POLYMARKET, True, True),
+        ("delayed", VenueName.POLYMARKET, True, True),
+        ("rescheduled", VenueName.POLYMARKET, True, True),
+        (None, VenueName.KALSHI, True, False),
+        ("postponed", VenueName.KALSHI, True, False),
+        ("delayed", VenueName.KALSHI, True, False),
+        ("rescheduled", VenueName.KALSHI, True, False),
+    ],
+)
+def test_matchbook_terminal_not_cleared_by_later_pm_or_kalshi_unknown_or_schedule_exception(
+    terminal_status: str,
+    later_status: str | None,
+    later_source: VenueName,
+    matchbook_matched: bool,
+    polymarket_matched: bool,
+) -> None:
+    store = FixtureCurrentStateStore()
+    store.upsert_from_report(
+        _report(
+            [
+                _fixture(
+                    "qpr-boro",
+                    kickoff=NOW - timedelta(hours=1),
+                    fixture_status=terminal_status,
+                    fixture_status_source=VenueName.MATCHBOOK,
+                )
+            ]
+        ),
+        scan_lane=ScanLane.HOT,
+    )
+    tombstone = store.tombstone_for("qpr-boro")
+    assert tombstone is not None
+    assert tombstone.reason == EVICTION_TERMINAL_FROM_MATCHBOOK
+    later = NOW + timedelta(minutes=5)
+    incoming = _fixture(
+        "qpr-boro",
+        kickoff=NOW + timedelta(days=2) if later_status else NOW - timedelta(hours=1),
+        fixture_status=later_status,
+        fixture_status_source=later_source,
+        source=later_source,
+        matchbook_matched=matchbook_matched,
+        polymarket_matched=polymarket_matched,
+        kalshi_matched=later_source is VenueName.KALSHI,
+    )
+    assert is_matchbook_lifecycle_status(incoming) is False
+    assert (
+        is_trusted_lifecycle_correction(
+            incoming,
+            observed_at=later,
+            tombstone_observed_at=tombstone.observed_at,
+            tombstone_reason=tombstone.reason,
+            tombstone_source=tombstone.source,
+        )
+        is False
+    )
+    store.upsert_from_report(_report([incoming], when=later), scan_lane=ScanLane.UNIVERSE)
+    assert store.inventory(later) == []
+    assert store.detail("qpr-boro", now=later) is None
+    assert store.hot_identity_scope(later) == []
+    assert store.resolve_canonical_id("src-qpr-boro") is None
+    remaining = store.tombstone_for("qpr-boro")
+    assert remaining is not None
+    assert remaining.reason == EVICTION_TERMINAL_FROM_MATCHBOOK
+    assert remaining.provider_status == terminal_status
+
+
+@pytest.mark.parametrize(
+    ("correction_status", "in_running"),
+    [
+        ("open", None),
+        ("in-play", True),
+        ("suspended", False),
+        ("rescheduled", None),
+    ],
+)
+def test_later_matchbook_correction_restores_current_radar(
+    correction_status: str,
+    in_running: bool | None,
+) -> None:
+    store = FixtureCurrentStateStore()
+    store.upsert_from_report(
+        _report(
+            [
+                _fixture(
+                    "qpr-boro",
+                    kickoff=NOW - timedelta(hours=1),
+                    fixture_status="graded",
+                    fixture_status_source=VenueName.MATCHBOOK,
+                )
+            ]
+        ),
+        scan_lane=ScanLane.HOT,
+    )
+    assert store.tombstone_for("qpr-boro") is not None
+    later = NOW + timedelta(minutes=5)
+    kickoff = NOW + timedelta(days=2) if correction_status == "rescheduled" else NOW - timedelta(hours=1)
+    corrected = _fixture(
+        "qpr-boro",
+        kickoff=kickoff,
+        fixture_status=correction_status,
+        fixture_status_source=VenueName.MATCHBOOK,
+        in_running=in_running,
+    )
+    store.upsert_from_report(_report([corrected], when=later), scan_lane=ScanLane.UNIVERSE)
+    inventory = store.inventory(later)
+    assert [item.canonical_event_id for item in inventory] == ["qpr-boro"]
+    assert inventory[0].fixture_status == correction_status
+    assert inventory[0].fixture_status_source is VenueName.MATCHBOOK
+    assert store.tombstone_for("qpr-boro") is None
+    assert store.detail("qpr-boro", now=later) is not None
+
+
+def test_later_matchbook_in_running_without_terminal_status_restores() -> None:
     store = FixtureCurrentStateStore()
     store.upsert_from_report(
         _report(
@@ -250,18 +421,57 @@ def test_postponed_can_restore_after_terminal_when_provider_corrects() -> None:
                     "qpr-boro",
                     kickoff=NOW - timedelta(hours=1),
                     fixture_status="finished",
+                    fixture_status_source=VenueName.MATCHBOOK,
                 )
             ]
         ),
         scan_lane=ScanLane.HOT,
     )
-    corrected = _fixture("qpr-boro", kickoff=NOW + timedelta(days=2), fixture_status="postponed")
     later = NOW + timedelta(minutes=5)
-    store.upsert_from_report(_report([corrected], when=later), scan_lane=ScanLane.UNIVERSE)
+    corrected = _fixture(
+        "qpr-boro",
+        kickoff=NOW - timedelta(hours=1),
+        fixture_status=None,
+        fixture_status_source=VenueName.MATCHBOOK,
+        in_running=True,
+    )
+    store.upsert_from_report(_report([corrected], when=later), scan_lane=ScanLane.HOT)
     inventory = store.inventory(later)
     assert [item.canonical_event_id for item in inventory] == ["qpr-boro"]
-    assert inventory[0].fixture_status == "postponed"
+    assert inventory[0].in_running is True
+    assert inventory[0].fixture_status is None
     assert store.tombstone_for("qpr-boro") is None
+
+
+def test_matchbook_postponed_or_delayed_does_not_clear_matchbook_terminal() -> None:
+    store = FixtureCurrentStateStore()
+    store.upsert_from_report(
+        _report(
+            [
+                _fixture(
+                    "qpr-boro",
+                    kickoff=NOW - timedelta(hours=1),
+                    fixture_status="finished",
+                    fixture_status_source=VenueName.MATCHBOOK,
+                )
+            ]
+        ),
+        scan_lane=ScanLane.HOT,
+    )
+    later = NOW + timedelta(minutes=5)
+    for status in ("postponed", "delayed"):
+        incoming = _fixture(
+            "qpr-boro",
+            kickoff=NOW + timedelta(days=2),
+            fixture_status=status,
+            fixture_status_source=VenueName.MATCHBOOK,
+        )
+        store.upsert_from_report(_report([incoming], when=later), scan_lane=ScanLane.UNIVERSE)
+        assert store.inventory(later) == []
+        remaining = store.tombstone_for("qpr-boro")
+        assert remaining is not None
+        assert remaining.reason == EVICTION_TERMINAL_FROM_MATCHBOOK
+        assert remaining.provider_status == "finished"
 
 
 def test_audit_history_remains_after_current_state_eviction() -> None:
@@ -501,6 +711,7 @@ async def test_matchbook_finished_stops_hot_market_book_and_economics_calls() ->
         finished_id = finished_report.discovered_fixtures[0].canonical_event_id
         assert store.tombstone_for(finished_id) is not None
         assert finished_report.discovered_fixtures[0].fixture_status == "finished"
+        assert finished_report.discovered_fixtures[0].fixture_status_source is VenueName.MATCHBOOK
         assert finished_report.discovered_fixtures[0].in_running is False
 
         clock["now"] = clock["now"] + timedelta(seconds=30)
@@ -524,6 +735,54 @@ async def test_matchbook_finished_stops_hot_market_book_and_economics_calls() ->
         assert coordinator.public_status().discovered_fixtures == []
         assert live_report.discovered_fixtures
         assert live_report.paper_decisions
+    finally:
+        repository.close()
+        coordinator.reset()
+
+
+@pytest.mark.asyncio
+async def test_matchbook_graded_skips_market_book_and_economics_and_is_matchbook_confirmed() -> None:
+    kickoff = datetime.now(UTC) - timedelta(minutes=25)
+    repository = SqliteMarketIntelligenceRepository()
+    intelligence = MarketIntelligenceService(repository)
+    matchbook = LifecycleMatchbook(kickoff=kickoff, status="graded", in_running=False)
+    polymarket = LifecyclePolymarket(kickoff=kickoff)
+    paper_scan = CountingPaperScan(intelligence)
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        paper_scan=paper_scan,
+    )
+    now = kickoff + timedelta(minutes=25)
+    coordinator = LiveRefreshCoordinator(clock=lambda: now)
+    coordinator.reset()
+    coordinator._clock = lambda: now
+    try:
+        report = await collector.collect_and_scan(
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=[
+                FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75")),
+                FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal("1")),
+            ],
+            maximum_execution_risk=100,
+            scan_lane=ScanLane.UNIVERSE.value,
+        )
+        coordinator.record_report(report, scan_lane=ScanLane.UNIVERSE)
+        assert matchbook.list_markets_calls == []
+        assert polymarket.list_markets_calls == []
+        assert polymarket.book_calls == []
+        assert paper_scan.scan_pair_calls == 0
+        assert report.discovered_fixtures
+        fixture = report.discovered_fixtures[0]
+        assert fixture.fixture_status == "graded"
+        assert fixture.fixture_status_source is VenueName.MATCHBOOK
+        store = coordinator.fixture_current_state()
+        assert store.inventory(now) == []
+        tombstone = store.tombstone_for(fixture.canonical_event_id)
+        assert tombstone is not None
+        assert tombstone.reason == EVICTION_TERMINAL_FROM_MATCHBOOK
+        assert tombstone.source == "matchbook"
+        assert tombstone.provider_status == "graded"
     finally:
         repository.close()
         coordinator.reset()

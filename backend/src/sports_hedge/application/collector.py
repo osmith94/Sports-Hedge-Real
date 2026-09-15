@@ -168,6 +168,7 @@ class DiscoveredFixture(BaseModel):
     polymarket_matched: bool = False
     kalshi_matched: bool = False
     fixture_status: str | None = None
+    fixture_status_source: VenueName | None = None
     in_running: bool | None = None
     live_score_supported: bool = False
     home_score: int | None = None
@@ -1927,6 +1928,7 @@ def _fixture_from_cluster(
         polymarket_matched=cluster.polymarket is not None,
         kalshi_matched=cluster.kalshi is not None,
         fixture_status=state.venue_status if state is not None else None,
+        fixture_status_source=VenueName.MATCHBOOK if state is not None else None,
         in_running=state.in_running if state is not None else None,
         live_score_supported=state.live_score_supported if state is not None else False,
         home_score=state.home_score if state is not None else None,

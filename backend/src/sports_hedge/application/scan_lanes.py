@@ -41,6 +41,7 @@ TERMINAL_STATUSES = frozenset(
         "voided",
         "expired",
         "closed",
+        "graded",
         "finished",
         "final",
         "settled-complete",
@@ -50,6 +51,8 @@ TERMINAL_STATUSES = frozenset(
         "paid",
     }
 )
+# Official Matchbook GET /events states: open, suspended, closed, graded.
+MATCHBOOK_TERMINAL_EVENT_STATES = frozenset({"closed", "graded"})
 SCHEDULE_EXCEPTION_STATUSES = frozenset(
     {
         "postponed",
@@ -58,7 +61,11 @@ SCHEDULE_EXCEPTION_STATUSES = frozenset(
         "abandoned-postponed",
     }
 )
-MATCHBOOK_REVERSAL_STATUSES = frozenset({"open", "in-play", "inplay", "suspended"})
+# Later Matchbook-supplied statuses that may restore a terminal tombstone.
+MATCHBOOK_TRUSTED_CORRECTION_STATUSES = frozenset(
+    {"open", "in-play", "inplay", "suspended", "rescheduled"}
+)
+MATCHBOOK_LIFECYCLE_SOURCE = "matchbook"
 EVICTION_TERMINAL_FROM_MATCHBOOK = "terminal_status_from_matchbook"
 EVICTION_TERMINAL = "terminal_status"
 
@@ -119,15 +126,41 @@ def is_schedule_exception(fixture: Any) -> bool:
     return fixture_status_value(fixture) in SCHEDULE_EXCEPTION_STATUSES
 
 
-def is_matchbook_sourced(fixture: Any) -> bool:
-    source = getattr(fixture, "source", None)
-    if source is not None and str(source).strip().casefold() == "matchbook":
+def lifecycle_status_source(fixture: Any) -> str | None:
+    """Venue that actually supplied fixture_status, not cluster coverage."""
+
+    raw = getattr(fixture, "fixture_status_source", None)
+    if raw is None:
+        return None
+    text = str(raw).strip().casefold()
+    return text or None
+
+
+def is_matchbook_lifecycle_status(fixture: Any) -> bool:
+    """True only when Matchbook supplied the lifecycle status being evaluated.
+
+    `matchbook_matched` or a Matchbook cluster anchor is not enough: a
+    Polymarket/Kalshi status on a Matchbook-matched fixture is not
+    Matchbook-confirmed.
+    """
+
+    return lifecycle_status_source(fixture) == MATCHBOOK_LIFECYCLE_SOURCE
+
+
+def is_matchbook_confirmed_tombstone(
+    *,
+    reason: str | None = None,
+    source: str | None = None,
+) -> bool:
+    if reason == EVICTION_TERMINAL_FROM_MATCHBOOK:
         return True
-    return bool(getattr(fixture, "matchbook_matched", False))
+    if source is None:
+        return False
+    return str(source).strip().casefold() == MATCHBOOK_LIFECYCLE_SOURCE
 
 
 def terminal_eviction_reason(fixture: Any) -> str:
-    if is_matchbook_sourced(fixture):
+    if is_matchbook_lifecycle_status(fixture):
         return EVICTION_TERMINAL_FROM_MATCHBOOK
     return EVICTION_TERMINAL
 
@@ -148,22 +181,27 @@ def is_trusted_lifecycle_correction(
     *,
     observed_at: datetime,
     tombstone_observed_at: datetime,
+    tombstone_reason: str | None = None,
+    tombstone_source: str | None = None,
 ) -> bool:
     """Return True when a later observation may restore a tombstoned fixture.
 
-    Stale/unknown observations from other venues never resurrect terminal truth.
+    Lifecycle authority is provenance-specific. A Matchbook-confirmed
+    terminal tombstone is not cleared by a later Polymarket/Kalshi unknown
+    or postponed/delayed/rescheduled observation. Only a later Matchbook-supplied
+    open / in-play / suspended / rescheduled status (or Matchbook in_running
+    True with a non-terminal status) may restore current radar.
     """
 
     scanned = require_aware_instant(observed_at, "observed_at")
     stamped = require_aware_instant(tombstone_observed_at, "tombstone_observed_at")
     if scanned < stamped:
         return False
-    if is_schedule_exception(fixture):
-        return True
-    if not is_matchbook_sourced(fixture):
+    if not is_matchbook_lifecycle_status(fixture):
         return False
+    del tombstone_reason, tombstone_source
     status = fixture_status_value(fixture)
-    if status in MATCHBOOK_REVERSAL_STATUSES:
+    if status in MATCHBOOK_TRUSTED_CORRECTION_STATUSES:
         return True
     return getattr(fixture, "in_running", None) is True and status not in TERMINAL_STATUSES
 

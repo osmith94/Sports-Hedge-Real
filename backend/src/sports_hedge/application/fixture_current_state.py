@@ -26,6 +26,7 @@ from sports_hedge.application.scan_lanes import (
     hot_sort_key,
     is_explicit_terminal,
     is_trusted_lifecycle_correction,
+    lifecycle_status_source,
     next_due_at,
     terminal_eviction_reason,
 )
@@ -497,6 +498,8 @@ class FixtureCurrentStateStore:
             fixture,
             observed_at=scanned_at,
             tombstone_observed_at=tombstone.observed_at,
+            tombstone_reason=tombstone.reason,
+            tombstone_source=tombstone.source,
         ):
             self._clear_tombstone(tombstone.canonical_event_id)
             return False
@@ -522,13 +525,13 @@ class FixtureCurrentStateStore:
         merged.add(canonical_id)
         if existing is not None:
             merged.update(existing.aliases)
-        source = getattr(fixture, "source", None)
+        status_source = lifecycle_status_source(fixture)
         tombstone = CurrentStateTombstone(
             canonical_event_id=canonical_id,
             aliases=frozenset(merged),
             reason=terminal_eviction_reason(fixture),
             provider_status=fixture.fixture_status,
-            source=None if source is None else str(source),
+            source=status_source,
             observed_at=scanned_at,
         )
         self._tombstones[canonical_id] = tombstone
