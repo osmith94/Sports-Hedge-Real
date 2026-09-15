@@ -45,6 +45,8 @@ class EventMatcher:
     def bulk_snapshot(self) -> EventMatcher:
         """Freeze enabled learned rules once for one deterministic bulk pass."""
 
+        if type(self) is not EventMatcher:
+            return self
         if self.learned_applicator is None:
             return self
         rules = self.learned_applicator.enabled_rules()

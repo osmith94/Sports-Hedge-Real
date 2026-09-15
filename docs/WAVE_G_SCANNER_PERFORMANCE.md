@@ -12,7 +12,8 @@ the synthetic stress topology confirmed the critical-path problem:
 1. fixture clusters were scanned one at a time;
 2. Matchbook, Polymarket and Kalshi market discovery ran serially inside each cluster;
 3. Polymarket/Kalshi depth calls ran serially per market/runner; and
-4. each provider call could consume its bounded timeout before the next independent call began.
+4. each provider call could consume its bounded timeout before the next independent call began; and
+5. bulk event matching re-read enabled mapping rules for every candidate event pair.
 
 For `N` fixtures with controlled latency `L`, the representative Matchbook/Polymarket workload had a
 serial provider floor of:
@@ -41,6 +42,9 @@ does not increase the 45s collector budget, 25s HOT budget, 60s browser timeout,
 - Provider tasks retain bounded timeout, cancellation drain, orphan and live-task diagnostics.
 - Diagnostics now expose configured cluster/provider limits and observed peak provider concurrency.
 - HOT with known source events still bypasses `list_events`; it scans only the requested identities.
+- Bulk event matching snapshots enabled deterministic mapping rules once, then uses a conservative
+  confidence upper-bound prefilter. The prefilter cannot reject a pair capable of reaching the
+  existing match threshold.
 
 Mapping Verify does not perform a ChatGPT/OpenAI call in collection. Deterministic equivalence remains
 required in `MarketMatcher`; operator evidence packaging runs after the executable branch's economics
@@ -110,6 +114,10 @@ Every report retains provider totals and these stages:
 
 Elapsed stage totals are attribution (parallel call time can exceed wall clock), while top-level
 `event_discovery_ms`, `cluster_scan_ms`, `assembly_ms` and `total_ms` remain wall-clock measures.
+
+The 60-fixture manual diagnostic regression measured `normalize_match` at about 3.6s before the
+mapping-rule snapshot and 66ms after it on the local runner. This is synthetic/test timing, not a
+real-provider claim; it records the CPU-side cause isolated by exact-head CI.
 
 ## Deferred evidence
 
