@@ -34,6 +34,9 @@ AUDIT_SOURCE = Path(__file__).resolve().parents[1] / "src" / "sports_hedge" / "p
 API_SOURCE = Path(__file__).resolve().parents[1] / "src" / "sports_hedge" / "api" / "paper.py"
 PAGE_SOURCE = Path(__file__).resolve().parents[2] / "frontend" / "app" / "page.tsx"
 API_TS_SOURCE = Path(__file__).resolve().parents[2] / "frontend" / "lib" / "api.ts"
+TABLE_SOURCE = (
+    Path(__file__).resolve().parents[2] / "frontend" / "components" / "paper-scan-history-table.tsx"
+)
 
 
 def _newer(offset: int, *, record_id: str) -> PaperScanRecord:
@@ -276,3 +279,9 @@ def test_frontend_paper_scan_history_is_latest_100_audit_not_radar() -> None:
     assert "scans.filter" not in page
     assert "dedupe" not in page.lower()
     assert "current_radar_rows" not in page
+    assert "PaperScanHistoryTable" in page
+    table = TABLE_SOURCE.read_text(encoding="utf-8")
+    assert ".filter(" not in table
+    assert "current_radar_rows" not in table
+    assert "item.scanned_at" in table
+    assert "sortPaperScanHistory(scans, sort)" in table

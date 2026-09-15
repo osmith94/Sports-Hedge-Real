@@ -5,6 +5,7 @@ import { LiquidityPools } from "../components/liquidity-pools";
 import { OpportunityCard } from "../components/opportunity-card";
 import { PaperTradeBook } from "../components/paper-trade-book";
 import { RunPaperScan } from "../components/run-paper-scan";
+import { PaperScanHistoryTable } from "../components/paper-scan-history-table";
 import { TrackedMarketsBoard } from "../components/tracked-markets";
 import { PriorityAlertsSeam } from "../components/arbitrage/priority-alerts/priority-alerts-seam";
 import { ExternalLegWorkflow } from "../components/arbitrage/priority-alerts/external-leg-workflow";
@@ -27,6 +28,7 @@ import {
   OpportunityLifecycleEvent,
   PaperLiquiditySnapshot,
   PaperScanRecord,
+  PaperScanSummary,
   PaperTrade,
   PaperTradeBookSummary,
   PaperTreasurySnapshot,
@@ -35,9 +37,8 @@ import {
   DEFAULT_SCANNER_ASSUMPTIONS,
   DEMO_MANUAL_EXTERNAL,
   buildCapitalSnapshot,
-  marketLabel,
 } from "../lib/arbitrage-ops";
-import { money, percent } from "../lib/format";
+import { percent } from "../lib/format";
 import {
   activityFromWatchlist,
   nearOpportunitiesFromWatchlist,
@@ -46,12 +47,6 @@ import {
 } from "../lib/watchlist";
 
 export const dynamic = "force-dynamic";
-
-function statusText(item: PaperScanRecord): string {
-  if (item.eligible_for_paper_simulation) return "Paper eligible";
-  if (item.rejection_reasons.length) return item.rejection_reasons.join(", ").replaceAll("_", " ");
-  return item.is_arbitrage ? "Filtered" : "No arbitrage";
-}
 
 async function settledValue<T>(promise: Promise<T>, fallback: T): Promise<{ value: T; available: boolean }> {
   try {
@@ -293,7 +288,8 @@ export default async function ArbitragePage() {
             <div className="panel-title">Paper scan history</div>
             <div className="panel-meta">
               Latest 100 audit observations · newest first. Not current scanner radar
-              state.
+              state. Age uses each row&apos;s scanned_at. Sorting applies to this loaded
+              window only, not the full audit store.
               {apiAvailable && scans.length > 0
                 ? ` Showing ${scans.length} loaded row${scans.length === 1 ? "" : "s"}.`
                 : ""}
@@ -309,42 +305,7 @@ export default async function ArbitragePage() {
         {!apiAvailable ? (
           <div className="empty-live-compact">Paper API unreachable. No fabricated scan history.</div>
         ) : null}
-        {scans.length > 0 ? (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Event</th><th>Market</th><th>Venues</th><th>Gross edge</th><th>Net edge</th>
-                  <th>Executable</th><th>Guaranteed profit</th><th>Risk</th><th>Mapping</th><th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {scans.map((item) => {
-                  const net = item.net_edge == null ? null : Number(item.net_edge);
-                  return (
-                  <tr key={item.record_id}>
-                    <td className="row-title">{item.home_team} v {item.away_team}</td>
-                    <td>{marketLabel(item)}</td>
-                    <td className="muted">{item.venues.join(" / ")}</td>
-                    <td>{percent(item.gross_edge)}</td>
-                    <td className={net !== null && net < 0 ? "edge-negative" : net !== null ? "edge" : ""}>
-                      {percent(item.net_edge)}
-                      {net !== null && net < 0 ? " · below break-even" : ""}
-                    </td>
-                    <td>{money(item.executable_stake_gbp)}</td>
-                    <td className={item.guaranteed_profit_gbp !== null && item.guaranteed_profit_gbp !== undefined ? "edge" : ""}>{money(item.guaranteed_profit_gbp)}</td>
-                    <td className={item.execution_risk_band === "low" ? "risk-low" : "risk-medium"}>
-                      {item.execution_risk_score ?? "—"}{item.execution_risk_band ? ` · ${item.execution_risk_band}` : ""}
-                    </td>
-                    <td>{(item.mapping_confidence * 100).toFixed(1)}%</td>
-                    <td>{statusText(item)}</td>
-                  </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : null}
+        {scans.length > 0 ? <PaperScanHistoryTable scans={scans} /> : null}
       </section>
 
       <details className="demo-walkthrough" id="demo-walkthrough">

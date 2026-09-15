@@ -1,0 +1,208 @@
+import { PaperScanRecord } from "./api";
+import { marketLabel } from "./arbitrage-ops";
+import { number } from "./format";
+
+export const AUDIT_AGE_TICK_MS = 1000;
+
+export const PAPER_SCAN_HISTORY_SORT_COLUMNS = [
+  "age",
+  "event",
+  "market",
+  "venues",
+  "grossEdge",
+  "netEdge",
+  "executable",
+  "guaranteedProfit",
+  "risk",
+  "mapping",
+  "status",
+] as const;
+
+export type PaperScanHistorySortColumn = (typeof PAPER_SCAN_HISTORY_SORT_COLUMNS)[number];
+export type SortDirection = "asc" | "desc";
+
+export type PaperScanHistorySortState = {
+  column: PaperScanHistorySortColumn;
+  direction: SortDirection;
+};
+
+export const DEFAULT_PAPER_SCAN_HISTORY_SORT: PaperScanHistorySortState = {
+  column: "age",
+  direction: "desc",
+};
+
+export const PAPER_SCAN_HISTORY_SORT_LABELS: Record<PaperScanHistorySortColumn, string> = {
+  age: "Scanned / Age",
+  event: "Event",
+  market: "Market",
+  venues: "Venues",
+  grossEdge: "Gross edge",
+  netEdge: "Net edge",
+  executable: "Executable",
+  guaranteedProfit: "Guaranteed profit",
+  risk: "Risk",
+  mapping: "Mapping",
+  status: "Status",
+};
+
+const NUMERIC_COLUMNS = new Set<PaperScanHistorySortColumn>([
+  "grossEdge",
+  "netEdge",
+  "executable",
+  "guaranteedProfit",
+  "risk",
+  "mapping",
+]);
+
+const TIME_COLUMNS = new Set<PaperScanHistorySortColumn>(["age"]);
+
+export function paperScanHistoryStatusText(item: PaperScanRecord): string {
+  if (item.eligible_for_paper_simulation) return "Paper eligible";
+  if (item.rejection_reasons.length) return item.rejection_reasons.join(", ").replaceAll("_", " ");
+  return item.is_arbitrage ? "Filtered" : "No arbitrage";
+}
+
+export function paperScanEventLabel(item: PaperScanRecord): string {
+  return `${item.home_team} v ${item.away_team}`;
+}
+
+export function parseAuditScannedAtMs(scannedAt: string | null | undefined): number | null {
+  if (!scannedAt) return null;
+  const parsed = Date.parse(scannedAt);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function formatAuditScanAge(
+  scannedAt: string | null | undefined,
+  nowMs: number,
+): string {
+  const timestampMs = parseAuditScannedAtMs(scannedAt);
+  if (timestampMs === null || !Number.isFinite(nowMs)) return "—";
+  const elapsedMs = Math.max(0, nowMs - timestampMs);
+  const elapsedSec = Math.floor(elapsedMs / 1000);
+  if (elapsedSec < 60) return `${elapsedSec}s`;
+  const elapsedMin = Math.floor(elapsedSec / 60);
+  if (elapsedMin < 60) return `${elapsedMin}m`;
+  const elapsedHours = Math.floor(elapsedMin / 60);
+  if (elapsedHours < 24) return `${elapsedHours}h`;
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  return `${elapsedDays}d`;
+}
+
+export function auditScanTimestampTitle(scannedAt: string | null | undefined): string {
+  return scannedAt && scannedAt.trim() ? scannedAt : "scanned_at unavailable";
+}
+
+export function initialPaperScanHistoryDirection(column: PaperScanHistorySortColumn): SortDirection {
+  if (TIME_COLUMNS.has(column) || NUMERIC_COLUMNS.has(column)) return "desc";
+  return "asc";
+}
+
+export function nextPaperScanHistorySort(
+  current: PaperScanHistorySortState | null,
+  clicked: PaperScanHistorySortColumn,
+): PaperScanHistorySortState {
+  if (current?.column === clicked) {
+    return { column: clicked, direction: current.direction === "asc" ? "desc" : "asc" };
+  }
+  return { column: clicked, direction: initialPaperScanHistoryDirection(clicked) };
+}
+
+export function ariaSortForPaperScanColumn(
+  column: PaperScanHistorySortColumn,
+  current: PaperScanHistorySortState | null,
+): "ascending" | "descending" | "none" {
+  if (!current || current.column !== column) return "none";
+  return current.direction === "asc" ? "ascending" : "descending";
+}
+
+export function paperScanSortIndicator(
+  column: PaperScanHistorySortColumn,
+  current: PaperScanHistorySortState | null,
+): "▲" | "▼" | "" {
+  if (!current || current.column !== column) return "";
+  return current.direction === "asc" ? "▲" : "▼";
+}
+
+function isMissing(value: number | string | null | undefined): boolean {
+  if (value === null || value === undefined || value === "") return true;
+  return typeof value === "number" && !Number.isFinite(value);
+}
+
+function sortValue(
+  item: PaperScanRecord,
+  column: PaperScanHistorySortColumn,
+): number | string | null {
+  switch (column) {
+    case "age":
+      return parseAuditScannedAtMs(item.scanned_at);
+    case "event":
+      return paperScanEventLabel(item).toLocaleLowerCase();
+    case "market":
+      return marketLabel(item).toLocaleLowerCase();
+    case "venues":
+      return item.venues.join(" / ").toLocaleLowerCase();
+    case "grossEdge":
+      return number(item.gross_edge);
+    case "netEdge":
+      return number(item.net_edge);
+    case "executable":
+      return number(item.executable_stake_gbp);
+    case "guaranteedProfit":
+      return number(item.guaranteed_profit_gbp);
+    case "risk":
+      return number(item.execution_risk_score);
+    case "mapping": {
+      const confidence = number(item.mapping_confidence);
+      return confidence;
+    }
+    case "status":
+      return paperScanHistoryStatusText(item).toLocaleLowerCase();
+  }
+}
+
+export function sortPaperScanHistory(
+  items: readonly PaperScanRecord[],
+  sort: PaperScanHistorySortState | null,
+): PaperScanRecord[] {
+  const decorated = items.map((item, index) => ({ item, index }));
+  decorated.sort((left, right) => {
+    if (!sort) return left.index - right.index;
+    const leftValue = sortValue(left.item, sort.column);
+    const rightValue = sortValue(right.item, sort.column);
+    if (isMissing(leftValue) && isMissing(rightValue)) return left.index - right.index;
+    if (isMissing(leftValue)) return 1;
+    if (isMissing(rightValue)) return -1;
+    if (typeof leftValue === "number" && typeof rightValue === "number") {
+      const delta = leftValue - rightValue;
+      const cmp = delta === 0 ? 0 : sort.direction === "asc" ? (delta < 0 ? -1 : 1) : delta < 0 ? 1 : -1;
+      return cmp !== 0 ? cmp : left.index - right.index;
+    }
+    const cmp = String(leftValue).localeCompare(String(rightValue), undefined, {
+      numeric: true,
+      sensitivity: "base",
+    });
+    const directed = sort.direction === "asc" ? cmp : -cmp;
+    return directed !== 0 ? directed : left.index - right.index;
+  });
+  return decorated.map((entry) => entry.item);
+}
+
+type SharedAgeTimerOptions = {
+  now?: () => number;
+  setInterval?: (handler: () => void, ms: number) => ReturnType<typeof setInterval>;
+  clearInterval?: (id: ReturnType<typeof setInterval>) => void;
+  tickMs?: number;
+};
+
+export function startSharedAuditAgeTimer(
+  onTick: (nowMs: number) => void,
+  options: SharedAgeTimerOptions = {},
+): () => void {
+  const now = options.now ?? Date.now;
+  const schedule = options.setInterval ?? setInterval;
+  const cancel = options.clearInterval ?? clearInterval;
+  const tickMs = options.tickMs ?? AUDIT_AGE_TICK_MS;
+  const id = schedule(() => onTick(now()), tickMs);
+  return () => cancel(id);
+}
