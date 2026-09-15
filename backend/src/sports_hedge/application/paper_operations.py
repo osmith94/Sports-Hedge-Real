@@ -1153,6 +1153,7 @@ class PaperOperationsService:
         policy: UnwindPolicy | None = None,
         scarcity: CapitalScarcityInput | None = None,
         evaluated_at: datetime | None = None,
+        record_audit: bool = True,
     ) -> UnwindDecision:
         """Analytical close plan. Does not post journals or mutate pool balances."""
 
@@ -1179,17 +1180,18 @@ class PaperOperationsService:
                 evaluated_at=evaluated_at,
             )
         )
-        trade.audit.append(
-            PaperTradeAuditEvent(
-                occurred_at=evaluated_at or datetime.now(UTC),
-                event_type=PaperTradeAuditEventType.CLOSE_PLAN_EVALUATED,
-                detail=(
-                    f"{decision.recommendation.value}:{decision.decision_reason};"
-                    "conditionally_releasable_is_not_spendable"
-                ),
+        if record_audit:
+            trade.audit.append(
+                PaperTradeAuditEvent(
+                    occurred_at=evaluated_at or datetime.now(UTC),
+                    event_type=PaperTradeAuditEventType.CLOSE_PLAN_EVALUATED,
+                    detail=(
+                        f"{decision.recommendation.value}:{decision.decision_reason};"
+                        "conditionally_releasable_is_not_spendable"
+                    ),
+                )
             )
-        )
-        self.trades.save(trade)
+            self.trades.save(trade)
         return decision
 
     def complete_validated_unwind(
@@ -1201,6 +1203,7 @@ class PaperOperationsService:
         policy: UnwindPolicy | None = None,
         scarcity: CapitalScarcityInput | None = None,
         now: datetime | None = None,
+        record_evaluation_audit: bool = True,
     ) -> PaperTradeDetail:
         """PAPER-ONLY: post a fully validated 8D close through 8E. Never places orders."""
 
@@ -1235,6 +1238,7 @@ class PaperOperationsService:
             policy=policy,
             scarcity=scarcity,
             evaluated_at=occurred,
+            record_audit=record_evaluation_audit,
         )
         if decision.recommendation is not UnwindRecommendation.UNWIND_ELIGIBLE:
             raise PaperOperationsError(f"unwind_not_eligible:{decision.decision_reason}")
@@ -1381,10 +1385,13 @@ class PaperOperationsService:
             return position
         minutes = hours * Decimal(60)
         basis_label = allocation.expected_lock_basis or "8C modelled estimate"
+        estimate = getattr(allocation, "estimated_time_to_release", None)
+        confidence = None if estimate is None else getattr(estimate, "confidence", None)
         return position.model_copy(
             update={
                 "remaining_lock_minutes": minutes,
                 "remaining_lock_basis": RemainingLockSource.MODELLED,
+                "remaining_lock_confidence": confidence,
                 "remaining_lock_detail": (
                     f"{basis_label}; advisory only; does not release capital"
                 ),

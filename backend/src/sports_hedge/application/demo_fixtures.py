@@ -26,7 +26,7 @@ from sports_hedge.fees.cost import (
     OrderRole,
     VenueCostSnapshot,
 )
-from sports_hedge.fees.kalshi import kalshi_cost_from_series
+from sports_hedge.fees.kalshi import kalshi_closing_cost_from_series, kalshi_cost_from_series
 from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.paper.unwind.models import ReverseQuote
@@ -255,8 +255,8 @@ def reverse_quotes_from_observations(
 ) -> list[ReverseQuote]:
     """Build 8D reverse-side quotes from the same labelled fixture books.
 
-    Kalshi SELL fees are not modelled in Phase 1; those quotes carry an
-    explicit unknown closing cost and fail closed rather than inventing a fee.
+    Matchbook uses deferred net-win commission. Polymarket demo SELL is
+    none_confirmed. Kalshi SELL uses the authorised series quadratic snapshot.
     """
 
     when = quoted_at or datetime.now(UTC)
@@ -288,7 +288,7 @@ def reverse_quotes_from_observations(
 def tighten_reverse_quotes(quotes: list[ReverseQuote]) -> list[ReverseQuote]:
     """Labelled DEMO tighter reverse book for proving 8E unwind.
 
-    Identity and Kalshi unknown SELL costs are preserved. Not a live touch.
+    Identity is preserved. Not a live touch.
     """
 
     tightened: list[ReverseQuote] = []
@@ -356,13 +356,6 @@ def _closing_cost(venue: VenueName, *, captured_at: datetime) -> VenueCostSnapsh
             currency="USD",
             detail="DEMO / FIXTURE REPLAY Polymarket closing sell; none_confirmed",
         )
-    return VenueCostSnapshot(
-        venue=venue,
-        action=MarketAction.SELL,
-        fee_basis=FeeBasis.UNKNOWN,
-        known_status=CostKnownStatus.UNKNOWN,
-        captured_at=captured_at,
-        source="demo_fixture_replay",
-        currency="USD",
-        detail="Kalshi SELL close fees are not modelled; unwind fails closed",
-    )
+    if venue is VenueName.KALSHI:
+        return kalshi_closing_cost_from_series(KALSHI_SERIES, captured_at=captured_at)
+    raise ValueError(f"unsupported demo venue: {venue}")

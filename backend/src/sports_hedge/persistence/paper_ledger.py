@@ -29,6 +29,7 @@ from sports_hedge.paper.trades import (
     PaperTradeLeg,
     PaperTradeState,
 )
+from sports_hedge.paper.position_management.models import PositionManagementSnapshot
 from sports_hedge.paper.risk_snapshot import PaperExecutionRiskSnapshot
 
 LOGGER = logging.getLogger(__name__)
@@ -213,6 +214,8 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                         trade.close_risks.append(item)
             if existing.close_fills and not trade.close_fills:
                 trade.close_fills = list(existing.close_fills)
+            if existing.position_management is not None and trade.position_management is None:
+                trade.position_management = existing.position_management
         payload = (
             trade.trade_id,
             trade.opportunity_id,
@@ -245,6 +248,11 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             json.dumps(trade.entry_risk.model_dump(mode="json") if trade.entry_risk else None),
             json.dumps([item.model_dump(mode="json") for item in trade.close_risks]),
             json.dumps([item.model_dump(mode="json") for item in trade.close_fills]),
+            json.dumps(
+                trade.position_management.model_dump(mode="json")
+                if trade.position_management is not None
+                else None
+            ),
         )
         self._connection.execute(
             """
@@ -255,8 +263,8 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 guaranteed_profit_gbp_at_open, realised_pnl_gbp, capital_locked_native_json,
                 capital_locked_gbp, settlement_outcome, settlement_source, settlement_source_id,
                 settlement_detail, provenance, fx_snapshots_json, venue_costs_json,
-                entry_risk_json, close_risks_json, close_fills_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                entry_risk_json, close_risks_json, close_fills_json, position_management_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(trade_id) DO UPDATE SET
                 opportunity_id = excluded.opportunity_id,
                 canonical_event_id = excluded.canonical_event_id,
@@ -287,7 +295,8 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 venue_costs_json = excluded.venue_costs_json,
                 entry_risk_json = COALESCE(paper_trades.entry_risk_json, excluded.entry_risk_json),
                 close_risks_json = excluded.close_risks_json,
-                close_fills_json = excluded.close_fills_json
+                close_fills_json = excluded.close_fills_json,
+                position_management_json = excluded.position_management_json
             """,
             payload,
         )
@@ -417,6 +426,7 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             entry_risk=_entry_risk_from_row(row),
             close_risks=_close_risks_from_row(row),
             close_fills=_models_from_json(_row_value(row, "close_fills_json"), PaperCloseFill),
+            position_management=_position_management_from_row(row),
             audit=audit,
         )
 
@@ -545,7 +555,8 @@ class SqlitePaperLedger:
                 venue_costs_json TEXT NOT NULL,
                 entry_risk_json TEXT,
                 close_risks_json TEXT NOT NULL DEFAULT '[]',
-                close_fills_json TEXT NOT NULL DEFAULT '[]'
+                close_fills_json TEXT NOT NULL DEFAULT '[]',
+                position_management_json TEXT
             );
 
             CREATE TABLE IF NOT EXISTS paper_trade_legs (
@@ -658,6 +669,7 @@ class SqlitePaperLedger:
         self._ensure_treasury_lock_fact_columns()
         self._ensure_risk_snapshot_columns()
         self._ensure_close_fills_column()
+        self._ensure_position_management_column()
         self._ensure_trade_leg_compat_columns()
         self._ensure_treasury_pool_fx_columns()
 
@@ -677,6 +689,12 @@ class SqlitePaperLedger:
             self._connection.execute(
                 "ALTER TABLE paper_trades ADD COLUMN close_fills_json TEXT NOT NULL DEFAULT '[]'"
             )
+        self._connection.commit()
+
+    def _ensure_position_management_column(self) -> None:
+        trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
+        if "position_management_json" not in trade_cols:
+            self._connection.execute("ALTER TABLE paper_trades ADD COLUMN position_management_json TEXT")
         self._connection.commit()
 
     def _ensure_unwind_identity_columns(self) -> None:
@@ -855,6 +873,22 @@ def _dec(value: Decimal | None) -> str | None:
 
 def _decimal(value: str | None) -> Decimal | None:
     return None if value is None else Decimal(value)
+
+
+def _position_management_from_row(row: sqlite3.Row) -> PositionManagementSnapshot | None:
+    if "position_management_json" not in row.keys():
+        return None
+    raw = row["position_management_json"]
+    if not raw or raw == "null":
+        return None
+    try:
+        payload = json.loads(raw)
+        if not payload:
+            return None
+        return PositionManagementSnapshot.model_validate(payload)
+    except Exception:
+        LOGGER.exception("skipping unreadable position_management_json for trade %s", row["trade_id"])
+        return None
 
 
 def _entry_risk_from_row(row: sqlite3.Row) -> PaperExecutionRiskSnapshot | None:

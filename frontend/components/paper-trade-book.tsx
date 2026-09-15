@@ -11,6 +11,7 @@ import {
   settlePaperTrade,
 } from "../lib/api";
 import { money, relativeTime } from "../lib/format";
+import { formatPositionManagementCell } from "../lib/paper-position-management-display";
 
 type Props = {
   summary: PaperTradeBookSummary | null;
@@ -39,6 +40,32 @@ function riskTooltip(snapshot: PaperTrade["entry_risk"]): string {
     snapshot.maximum_execution_risk != null ? `threshold ${snapshot.maximum_execution_risk}` : null,
   ].filter(Boolean);
   return bits.join(" · ") || "Execution-time risk snapshot";
+}
+
+function managementHint(trade: PaperTrade): string {
+  const snapshot = trade.position_management;
+  if (!snapshot) return "No position-management evaluation yet.";
+  const bits = [
+    snapshot.capital_pressure ? `capital ${snapshot.capital_pressure}` : null,
+    snapshot.opportunity_cost_gbp != null ? `opp-cost ${money(snapshot.opportunity_cost_gbp)}` : null,
+    snapshot.quote_age_ms != null ? `age ${snapshot.quote_age_ms}ms` : null,
+    snapshot.auto_action === "unwind_pending_confirmation"
+      ? "awaiting newer reverse-book confirmation"
+      : null,
+    snapshot.decision_reason?.replaceAll("_", " "),
+  ].filter(Boolean);
+  return bits.join(" · ");
+}
+
+function ManagementCell({ trade }: { trade: PaperTrade }) {
+  const cell = formatPositionManagementCell(trade.position_management);
+  return (
+    <td title={managementHint(trade)}>
+      <span className="status-badge">{cell.state}</span>
+      <div className="panel-meta">{cell.economics}</div>
+      <div className="panel-meta">{cell.release}</div>
+    </td>
+  );
 }
 
 function nativeLocked(trade: PaperTrade): string {
@@ -246,13 +273,14 @@ function TradeTable({
               <th>Risk at entry</th>
               <th>Guaranteed at open</th>
               <th>Realised P&L</th>
+              <th>Management</th>
               <th>Status</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={8} className="empty-live">{empty}</td>
+                <td colSpan={9} className="empty-live">{empty}</td>
               </tr>
             ) : (
               rows.map((trade) => (
@@ -279,13 +307,14 @@ function TradeTable({
                     <td title={riskTooltip(trade.entry_risk)}>{riskAtEntry(trade)}</td>
                     <td>{money(trade.guaranteed_profit_gbp_at_open)}</td>
                     <td>{trade.state === "CLOSED" ? money(trade.realised_pnl_gbp) : "—"}</td>
+                    <ManagementCell trade={trade} />
                     <td>
                       <span className="status-badge">{trade.state}</span>
                     </td>
                   </tr>
                   {openId === trade.trade_id && detail?.trade_id === trade.trade_id ? (
                     <tr>
-                      <td colSpan={8}>
+                      <td colSpan={9}>
                         <AuditBlock trade={detail} busy={busy} onSettle={onSettle} />
                       </td>
                     </tr>

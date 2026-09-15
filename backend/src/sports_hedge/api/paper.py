@@ -79,7 +79,8 @@ from sports_hedge.paper.trades import (
     PaperTradeBookSummary,
     PaperTradeDetail,
 )
-from sports_hedge.paper.unwind.models import PaperClosePlanRequest, UnwindDecision
+from sports_hedge.paper.unwind.models import PaperClosePlanRequest, UnwindDecision, UnwindPolicy
+from sports_hedge.paper.position_management.models import PositionManagementSnapshot
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.persistence.matchbook_account_fee import (
     MatchbookAccountFeeStatus,
@@ -314,6 +315,25 @@ def get_paper_scan_service(
         liquidity=liquidity,
         open_trades=open_trades,
         mapping_rule_store=get_mapping_rule_store(),
+        reverse_catalog=get_reverse_book_catalog(),
+    )
+
+
+@lru_cache
+def get_reverse_book_catalog():
+    from sports_hedge.paper.position_management.quotes import LatestObservationCatalog
+
+    return LatestObservationCatalog()
+
+
+@lru_cache
+def get_paper_position_manager():
+    from sports_hedge.paper.position_management import PaperPositionManager
+
+    return PaperPositionManager(
+        get_paper_journal_holder(),
+        observation_catalog=get_reverse_book_catalog(),
+        cost_resolver=get_venue_cost_resolver(),
     )
 
 
@@ -852,6 +872,47 @@ async def _collect_report(
         await _aclose_soon(matchbook, polymarket, kalshi)
 
 
+def _run_paper_position_management(
+    report: CollectionReport,
+    *,
+    operations: PaperOperationsService,
+    manager=None,
+    policy: UnwindPolicy | None = None,
+    now=None,
+    quotes_by_trade=None,
+):
+    """Evaluate OPEN paper trades against the just-scanned reverse books.
+
+    Failures here must not roll back scan persist or invent a settlement.
+    Automatic close uses two-scan confirmation: cycle N pends UNWIND_ELIGIBLE,
+    cycle N+1 may call complete_validated_unwind() only on strictly newer
+    exact-ID books. Same-scan catalog facts never mutate treasury.
+    """
+
+    try:
+        from sports_hedge.paper.position_management.scarcity import competing_from_paper_decisions
+
+        resolved = manager if manager is not None else get_paper_position_manager()
+        resolved.operations = operations
+        exclude = {
+            trade.opportunity_id
+            for trade in operations.list_active_trades()
+        }
+        competing = competing_from_paper_decisions(
+            report.paper_decisions,
+            exclude_opportunity_ids=exclude,
+        )
+        return resolved.manage_open_positions(
+            competing=competing,
+            policy=policy,
+            now=now,
+            quotes_by_trade=quotes_by_trade,
+        )
+    except Exception:
+        LOGGER.exception("paper position management cycle failed")
+        return []
+
+
 def _persist_collection_report(
     report: CollectionReport,
     *,
@@ -869,6 +930,7 @@ def _persist_collection_report(
             operations=operations,
             refreshed_venues=report.enabled_venues,
         )
+    _run_paper_position_management(report, operations=operations)
 
 
 def persist_scheduled_collection_report(
@@ -1004,6 +1066,36 @@ def closed_paper_trades(
     operations: PaperOperationsService = Depends(get_paper_operations_service),
 ) -> list[PaperTrade]:
     return operations.list_closed_trades()
+
+
+@router.get("/trades/position-management", response_model=list[PositionManagementSnapshot])
+def paper_position_management_states(
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> list[PositionManagementSnapshot]:
+    """Reusable #168 seam: latest HOLD / UNWIND ELIGIBLE / NOT SAFE per active trade."""
+
+    return [
+        trade.position_management
+        for trade in operations.list_active_trades()
+        if trade.position_management is not None
+    ]
+
+
+@router.get(
+    "/trades/{trade_id}/position-management",
+    response_model=PositionManagementSnapshot,
+)
+def paper_trade_position_management(
+    trade_id: str,
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> PositionManagementSnapshot:
+    try:
+        detail = operations.trade_detail(trade_id)
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if detail.position_management is None:
+        raise HTTPException(status_code=404, detail="position_management_unavailable")
+    return detail.position_management
 
 
 @router.get("/trades/{trade_id}", response_model=PaperTradeDetail)

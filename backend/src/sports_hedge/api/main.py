@@ -74,6 +74,7 @@ def health() -> dict[str, object]:
         "mode": settings.sports_hedge_mode,
         "execution_enabled": settings.sports_hedge_execution_enabled,
         "paper_autofill_enabled": settings.paper_autofill_enabled,
+        "paper_auto_unwind_enabled": settings.paper_auto_unwind_enabled,
         "live_refresh": {
             "discovery_source": "matchbook",
             "discovery_mode": "venue_union",
