@@ -129,10 +129,6 @@ class Settings(BaseSettings):
     mapping_rules_db_path: str = "./data/mapping_rules.sqlite"
     paper_scan_venue_timeout_seconds: int = Field(default=15, ge=3, le=60)
     paper_scan_provider_timeout_seconds: int = Field(default=8, ge=2, le=30)
-    paper_scan_cluster_concurrency: int = Field(default=8, ge=1, le=32)
-    paper_scan_matchbook_concurrency: int = Field(default=4, ge=1, le=16)
-    paper_scan_polymarket_concurrency: int = Field(default=8, ge=1, le=32)
-    paper_scan_kalshi_concurrency: int = Field(default=4, ge=1, le=16)
     cors_allow_origins: Annotated[list[str], NoDecode] = Field(
         default=[
             "http://localhost:3000",

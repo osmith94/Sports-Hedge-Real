@@ -167,7 +167,6 @@ class PaperScanService:
             left.market,
             right.market,
             matcher=self.market_matcher,
-            match=match,
             left_raw=left.metadata if isinstance(left.metadata, dict) else None,
             right_raw=right.metadata if isinstance(right.metadata, dict) else None,
         )
