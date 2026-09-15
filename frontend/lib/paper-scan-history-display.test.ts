@@ -64,6 +64,9 @@ describe("paper scan history surface", () => {
     assert.match(page, /Sorting applies to this loaded/);
     assert.match(page, /Age uses each row/);
     assert.match(page, /<PaperScanHistoryTable scans=\{scans\}/);
+    assert.match(page, /OpportunityMonitor/);
+    assert.match(page, /audit-disclosure/);
+    assert.doesNotMatch(page, /panel-title">Paper scan history/);
     assert.doesNotMatch(page, /scans\.filter/);
     assert.doesNotMatch(page, /current_radar_rows/);
     assert.doesNotMatch(page, /SCANNER DATA/);
@@ -237,7 +240,9 @@ describe("paper scan history table contract", () => {
     assert.match(table, /dateTime=\{item\.scanned_at\}/);
     assert.equal([...table.matchAll(/setInterval/g)].length, 0);
     assert.equal([...table.matchAll(/startSharedAuditAgeTimer\(/g)].length, 1);
-    assert.match(display, /schedule\(\(\) => onTick\(now\(\)\)/);
+    assert.match(display, /sortPaperScanHistory/);
+    const age = readFileSync(join(frontendRoot, "lib/observation-age.ts"), "utf8");
+    assert.match(age, /schedule\(\(\) => onTick\(now\(\)\)/);
     assert.doesNotMatch(table, /scans\.map\([\s\S]*setInterval/);
   });
 

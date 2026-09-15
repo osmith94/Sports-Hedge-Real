@@ -1,8 +1,22 @@
 import { PaperScanRecord } from "./api";
 import { marketLabel } from "./arbitrage-ops";
 import { number } from "./format";
+import {
+  OBSERVATION_AGE_TICK_MS,
+  formatObservationAge,
+  observationTimestampTitle,
+  parseObservationTimestampMs,
+  startSharedObservationAgeTimer,
+} from "./observation-age";
 
-export const AUDIT_AGE_TICK_MS = 1000;
+export const AUDIT_AGE_TICK_MS = OBSERVATION_AGE_TICK_MS;
+export const parseAuditScannedAtMs = parseObservationTimestampMs;
+export const formatAuditScanAge = formatObservationAge;
+export const startSharedAuditAgeTimer = startSharedObservationAgeTimer;
+
+export function auditScanTimestampTitle(scannedAt: string | null | undefined): string {
+  return observationTimestampTitle(scannedAt, "scanned_at unavailable");
+}
 
 export const PAPER_SCAN_HISTORY_SORT_COLUMNS = [
   "age",
@@ -64,33 +78,6 @@ export function paperScanHistoryStatusText(item: PaperScanRecord): string {
 
 export function paperScanEventLabel(item: PaperScanRecord): string {
   return `${item.home_team} v ${item.away_team}`;
-}
-
-export function parseAuditScannedAtMs(scannedAt: string | null | undefined): number | null {
-  if (!scannedAt) return null;
-  const parsed = Date.parse(scannedAt);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-export function formatAuditScanAge(
-  scannedAt: string | null | undefined,
-  nowMs: number,
-): string {
-  const timestampMs = parseAuditScannedAtMs(scannedAt);
-  if (timestampMs === null || !Number.isFinite(nowMs)) return "—";
-  const elapsedMs = Math.max(0, nowMs - timestampMs);
-  const elapsedSec = Math.floor(elapsedMs / 1000);
-  if (elapsedSec < 60) return `${elapsedSec}s`;
-  const elapsedMin = Math.floor(elapsedSec / 60);
-  if (elapsedMin < 60) return `${elapsedMin}m`;
-  const elapsedHours = Math.floor(elapsedMin / 60);
-  if (elapsedHours < 24) return `${elapsedHours}h`;
-  const elapsedDays = Math.floor(elapsedHours / 24);
-  return `${elapsedDays}d`;
-}
-
-export function auditScanTimestampTitle(scannedAt: string | null | undefined): string {
-  return scannedAt && scannedAt.trim() ? scannedAt : "scanned_at unavailable";
 }
 
 export function initialPaperScanHistoryDirection(column: PaperScanHistorySortColumn): SortDirection {
@@ -186,23 +173,4 @@ export function sortPaperScanHistory(
     return directed !== 0 ? directed : left.index - right.index;
   });
   return decorated.map((entry) => entry.item);
-}
-
-type SharedAgeTimerOptions = {
-  now?: () => number;
-  setInterval?: (handler: () => void, ms: number) => ReturnType<typeof setInterval>;
-  clearInterval?: (id: ReturnType<typeof setInterval>) => void;
-  tickMs?: number;
-};
-
-export function startSharedAuditAgeTimer(
-  onTick: (nowMs: number) => void,
-  options: SharedAgeTimerOptions = {},
-): () => void {
-  const now = options.now ?? Date.now;
-  const schedule = options.setInterval ?? setInterval;
-  const cancel = options.clearInterval ?? clearInterval;
-  const tickMs = options.tickMs ?? AUDIT_AGE_TICK_MS;
-  const id = schedule(() => onTick(now()), tickMs);
-  return () => cancel(id);
 }
