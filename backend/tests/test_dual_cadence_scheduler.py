@@ -8,6 +8,7 @@ from time import monotonic
 import pytest
 from fastapi.testclient import TestClient
 
+from sports_hedge.api import paper as paper_api
 from sports_hedge.api.main import app
 from sports_hedge.api.watchlist import get_watchlist_service
 from sports_hedge.application.collector import (
@@ -806,3 +807,100 @@ async def test_explicit_collect_fails_fast_when_scheduled_lane_is_active() -> No
         assert "scheduled scan in progress" in response.json()["detail"]
     finally:
         busy.reset()
+
+
+def test_manual_hot_plan_is_the_scheduled_fast_scan_contract() -> None:
+    clock = FakeClock(NOW)
+    coordinator = LiveRefreshCoordinator(clock=clock)
+    hot = _fixture("t59m", kickoff=NOW + timedelta(minutes=59))
+    far = _fixture("t6d", kickoff=NOW + timedelta(days=6))
+    coordinator.record_explicit_report(_report([hot, far], when=NOW))
+    coordinator._next_hot_due = NOW
+    coordinator._next_universe_due = NOW + timedelta(minutes=3)
+
+    scheduled = coordinator.plan_tick(now=NOW)
+    manual = coordinator.manual_hot_plan(now=NOW)
+
+    assert scheduled.lane == manual.lane == ScanLane.HOT.value
+    assert scheduled.identity_scope == manual.identity_scope == ["t59m"]
+    assert scheduled.known_source_events == manual.known_source_events
+    assert scheduled.enabled_venues == manual.enabled_venues
+    assert scheduled.collector_timeout_seconds == manual.collector_timeout_seconds == 25
+    assert scheduled.coordinator_timeout_seconds == manual.coordinator_timeout_seconds == 30
+    assert "t6d" not in manual.identity_scope
+    assert manual.reason == "manual_hot"
+
+
+@pytest.mark.asyncio
+async def test_manual_hot_refresh_does_not_advance_scheduled_progress() -> None:
+    clock = FakeClock(NOW)
+    coordinator = LiveRefreshCoordinator(clock=clock)
+    hot = _fixture("live", kickoff=NOW - timedelta(minutes=5), in_running=True)
+    coordinator.record_explicit_report(_report([hot], when=NOW))
+    coordinator._next_hot_due = NOW + timedelta(seconds=10)
+    coordinator._next_universe_due = NOW + timedelta(seconds=100)
+    coordinator._universe_generation_started_at = NOW - timedelta(seconds=40)
+    coordinator._universe_work_used = 41.0
+    coordinator._universe_cursor = "prior"
+    coordinator._universe_evaluated_ids = {"prior"}
+    due_before = (coordinator._next_hot_due, coordinator._next_universe_due)
+
+    async def runner() -> CollectionReport:
+        return _report([hot], when=NOW, scan_lane=ScanLane.HOT.value)
+
+    report = await coordinator.run_manual_hot(runner, timeout_seconds=0.5)
+
+    assert report.scan_lane == ScanLane.HOT.value
+    assert (coordinator._next_hot_due, coordinator._next_universe_due) == due_before
+    assert coordinator._universe_work_used == 41.0
+    assert coordinator._universe_cursor == "prior"
+    assert coordinator._universe_evaluated_ids == {"prior"}
+    assert coordinator.status.cycle_in_progress is False
+    assert coordinator.status.hot.cycle_in_progress is False
+
+
+def test_manual_hot_http_reuses_known_events_without_universe_discovery(monkeypatch) -> None:
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
+    now = coordinator.now()
+    hot = _fixture("manual-hot", kickoff=now + timedelta(minutes=30), last_seen=now)
+    far = _fixture("manual-far", kickoff=now + timedelta(days=4), last_seen=now)
+    coordinator.record_explicit_report(_report([hot, far], when=now))
+    captured: dict[str, object] = {}
+
+    async def fake_collect_report(_kwargs, **kwargs):
+        captured.update(kwargs)
+        return _report([hot], when=now, scan_lane=ScanLane.HOT.value)
+
+    monkeypatch.setattr(paper_api, "_collect_report", fake_collect_report)
+    monkeypatch.setattr(paper_api, "_persist_collection_report", lambda *args, **kwargs: None)
+    app.dependency_overrides[paper_api.get_paper_scan_service] = lambda: object()
+    app.dependency_overrides[paper_api.get_paper_audit_repository] = lambda: object()
+    app.dependency_overrides[get_watchlist_service] = lambda: object()
+    try:
+        response = TestClient(app).post("/paper/collect/hot", json={"maximum_execution_risk": 60})
+    finally:
+        app.dependency_overrides.clear()
+        coordinator.reset()
+
+    assert response.status_code == 200, response.text
+    assert captured["scan_lane"] == ScanLane.HOT.value
+    assert captured["identity_scope"] == ["manual-hot"]
+    known = captured["known_source_events"]
+    assert isinstance(known, dict)
+    assert set(known) == {"manual-hot"}
+    assert captured["cycle_timeout_seconds"] == 25
+    assert captured["enabled_venues"] == list(coordinator.pending_venues_for(ScanLane.HOT))
+
+
+def test_manual_hot_http_returns_busy_when_scheduled_lane_owns_coordinator() -> None:
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
+    coordinator._universe_in_progress = True
+    try:
+        response = TestClient(app).post("/paper/collect/hot", json={})
+    finally:
+        coordinator.reset()
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "scheduled scan in progress"
