@@ -12,6 +12,7 @@ from sports_hedge.paper.fills import PaperOpportunityLeg
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.models import FeeSnapshot
+from sports_hedge.matching.learned_rules import MappingReviewCandidate
 from sports_hedge.matching.markets import MarketMatchResult
 from sports_hedge.risk.execution import ExecutionRiskInputs, ExecutionRiskResult
 
@@ -99,6 +100,7 @@ class PaperScanDecision(BaseModel):
     maximum_execution_risk: int = Field(default=100, ge=0, le=100)
     quote_age_ms: int | None = Field(default=None, ge=0)
     quote_age_basis: str | None = None
+    mapping_review_candidate: MappingReviewCandidate | None = None
     fixture_discovery_source: VenueName | None = None
     fixture_status: str | None = None
     in_running: bool | None = None

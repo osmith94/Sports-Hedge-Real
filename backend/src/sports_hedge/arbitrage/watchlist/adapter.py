@@ -9,6 +9,7 @@ from sports_hedge.arbitrage.watchlist.economics import (
     quantized_edge,
 )
 from sports_hedge.arbitrage.watchlist.models import WatchLeg, WatchObservation
+from sports_hedge.application.mapping_review import safe_mapping_review_candidate
 from sports_hedge.domain.football import MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.models import MarketSnapshot
@@ -71,6 +72,7 @@ def observation_from_paper_decision(
                     outcome=quote.outcome,
                     venue=quote.venue,
                     source_market_id=quote.source_market_id,
+                    source_runner_id=quote.source_runner_id,
                     currency=venue_currency,
                     native_stake=native_stake,
                     gbp_per_unit=gbp_rate,
@@ -108,6 +110,7 @@ def observation_from_paper_decision(
                     outcome=quote.outcome,
                     venue=quote.venue,
                     source_market_id=quote.source_market_id,
+                    source_runner_id=quote.source_runner_id,
                     currency=venue_currency,
                     native_stake=native_stake,
                     gbp_per_unit=gbp_rate,
@@ -135,6 +138,9 @@ def observation_from_paper_decision(
 
     resolved_quote_age = quote_age_ms if quote_age_ms is not None else decision.quote_age_ms
     resolved_basis = quote_age_basis if quote_age_basis is not None else decision.quote_age_basis
+    # Fail closed: Verify uses the current decision's candidate only. MI history may
+    # contain older venue snapshots and must not invent a current-looking candidate.
+    mapping_candidate = safe_mapping_review_candidate(decision.mapping_review_candidate)
 
     return WatchObservation(
         observed_at=decision.scanned_at,
@@ -173,6 +179,11 @@ def observation_from_paper_decision(
         live_score_supported=decision.live_score_supported,
         home_score=decision.home_score if decision.live_score_supported else None,
         away_score=decision.away_score if decision.live_score_supported else None,
+        mapping_confidence=decision.market_match.confidence,
+        mapping_matched=decision.market_match.matched,
+        mapping_reasons=list(decision.market_match.reasons),
+        mapping_provenance=decision.market_match.provenance,
+        mapping_review_candidate=mapping_candidate,
     )
 
 

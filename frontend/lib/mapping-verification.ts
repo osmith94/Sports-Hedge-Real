@@ -71,6 +71,19 @@ export function shouldOfferMappingVerify(confidence: number | null | undefined):
   return confidence < 1;
 }
 
+export function hasSafeReviewCandidate(
+  candidate?: MappingReviewCandidate | null,
+): boolean {
+  return Boolean(candidate && Array.isArray(candidate.sides) && candidate.sides.length >= 2);
+}
+
+export function shouldOfferMappingVerifyAction(
+  confidence: number | null | undefined,
+  candidate?: MappingReviewCandidate | null,
+): boolean {
+  return shouldOfferMappingVerify(confidence) && hasSafeReviewCandidate(candidate);
+}
+
 export function isNativeHundredPercent(
   confidence: number | null | undefined,
   provenance?: MappingProvenance | null,
@@ -144,6 +157,154 @@ export function canActivateLearnedRule(input: {
   activationBlockedReason?: string | null;
 }): boolean {
   if (input.verdict !== "verified" || input.operatorConfirmed !== true) return false;
-  if (input.activationBlockedReason) return false;
+  if (structuralActivationBlockedReason(input.activationBlockedReason)) return false;
   return structuralConflictsFromDeclared(input.conflictingFields).length === 0;
+}
+
+/** Interpret returns this until the operator explicitly confirms. Not a structural block. */
+export const TRANSITIONAL_ACTIVATION_REASON = "explicit_operator_confirmation_required";
+
+export function isTransitionalActivationReason(reason?: string | null): boolean {
+  return reason === TRANSITIONAL_ACTIVATION_REASON;
+}
+
+export function structuralActivationBlockedReason(
+  reason?: string | null,
+): string | null {
+  if (!reason || isTransitionalActivationReason(reason)) return null;
+  return reason;
+}
+
+export function mappingConfirmRequest(input: {
+  candidate: MappingReviewCandidate;
+  operator?: string;
+  chatgptText?: string | null;
+  verdict?: MappingVerdict | null;
+  operatorConfirmed: boolean;
+  reviewId?: string | null;
+}): {
+  candidate: MappingReviewCandidate;
+  operator: string;
+  chatgpt_text: string | null;
+  manual_verdict: MappingVerdict | null;
+  operator_confirmed: boolean;
+  review_id?: string;
+} {
+  const body: {
+    candidate: MappingReviewCandidate;
+    operator: string;
+    chatgpt_text: string | null;
+    manual_verdict: MappingVerdict | null;
+    operator_confirmed: boolean;
+    review_id?: string;
+  } = {
+    candidate: input.candidate,
+    operator: input.operator ?? "operator",
+    chatgpt_text: input.chatgptText ?? null,
+    manual_verdict: input.verdict ?? null,
+    operator_confirmed: input.operatorConfirmed,
+  };
+  if (input.reviewId) {
+    body.review_id = input.reviewId;
+  }
+  return body;
+}
+
+/** Confirm/Interpret must bind to this exact current-radar evidence, not just opportunity_id. */
+export const VERIFY_EVIDENCE_CHANGED = "mapping_verify_evidence_changed";
+
+export type MappingVerifyEvidence = {
+  opportunityId: string;
+  observedAt?: string | null;
+  mappingConfidence?: number | null;
+  candidate: MappingReviewCandidate;
+};
+
+export function snapshotMappingCandidate(
+  candidate: MappingReviewCandidate,
+): MappingReviewCandidate {
+  return JSON.parse(JSON.stringify(candidate)) as MappingReviewCandidate;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return `{${entries
+    .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+    .join(",")}}`;
+}
+
+export function mappingVerifyEvidenceFingerprint(input: MappingVerifyEvidence): string {
+  return stableJson({
+    opportunity_id: input.opportunityId,
+    observed_at: input.observedAt ?? null,
+    mapping_confidence:
+      input.mappingConfidence == null || !Number.isFinite(input.mappingConfidence)
+        ? null
+        : input.mappingConfidence,
+    candidate: snapshotMappingCandidate(input.candidate),
+  });
+}
+
+export function fingerprintOpportunityVerifyRow(row: {
+  id: string;
+  observedAt: string | null;
+  mappingConfidence: number | null;
+  mappingCandidate: MappingReviewCandidate | null;
+}): string | null {
+  if (!row.mappingCandidate) return null;
+  return mappingVerifyEvidenceFingerprint({
+    opportunityId: row.id,
+    observedAt: row.observedAt,
+    mappingConfidence: row.mappingConfidence,
+    candidate: row.mappingCandidate,
+  });
+}
+
+export function verifySessionMatchesCurrent(
+  sessionFingerprint: string | null | undefined,
+  currentFingerprint: string | null | undefined,
+): boolean {
+  return Boolean(
+    sessionFingerprint &&
+      currentFingerprint &&
+      sessionFingerprint === currentFingerprint,
+  );
+}
+
+export type MappingVerifyConfirmDecision =
+  | { ok: true; request: ReturnType<typeof mappingConfirmRequest> }
+  | { ok: false; reason: typeof VERIFY_EVIDENCE_CHANGED };
+
+export function mappingVerifyConfirmDecision(input: {
+  sessionFingerprint: string | null | undefined;
+  currentFingerprint: string | null | undefined;
+  sessionCandidate: MappingReviewCandidate | null | undefined;
+  chatgptText?: string | null;
+  verdict?: MappingVerdict | null;
+  reviewId?: string | null;
+}): MappingVerifyConfirmDecision {
+  if (
+    !verifySessionMatchesCurrent(input.sessionFingerprint, input.currentFingerprint) ||
+    !input.sessionCandidate
+  ) {
+    return { ok: false, reason: VERIFY_EVIDENCE_CHANGED };
+  }
+  return {
+    ok: true,
+    request: mappingConfirmRequest({
+      candidate: input.sessionCandidate,
+      chatgptText: input.chatgptText,
+      verdict: input.verdict,
+      operatorConfirmed: true,
+      reviewId: input.reviewId,
+    }),
+  };
 }

@@ -492,6 +492,110 @@ def test_verified_requires_explicit_confirmation_and_chatgpt_alone_activates_not
     store.close()
 
 
+def test_interpret_then_confirm_threads_the_same_review_id() -> None:
+    store = SqliteMappingRuleStore()
+    service = MappingReviewService(store)
+    interpreted = service.interpret(
+        _candidate(),
+        operator="oliver",
+        chatgpt_text="VERIFIED. Strip FC suffix on Polymarket team names.",
+        operator_confirmed=False,
+    )
+    assert interpreted.verdict is MappingVerdict.VERIFIED
+    assert interpreted.activation_blocked_reason == "explicit_operator_confirmation_required"
+    assert interpreted.proposed_rule is not None
+    assert store.list_enabled() == []
+
+    confirmed = service.confirm(
+        _candidate(),
+        operator="oliver",
+        operator_confirmed=True,
+        chatgpt_text="VERIFIED. Strip FC suffix on Polymarket team names.",
+        manual_verdict=MappingVerdict.VERIFIED,
+        review_id=interpreted.review_id,
+    )
+    assert confirmed.review_id == interpreted.review_id
+    assert confirmed.activation_blocked_reason is None
+    assert confirmed.proposed_rule is not None
+    assert confirmed.proposed_rule.review_id == interpreted.review_id
+    review = store.get_review(interpreted.review_id)
+    assert review is not None
+    assert review["activated_rule_id"] == confirmed.proposed_rule.rule_id
+    enabled = store.list_enabled()
+    assert len(enabled) == 1
+    assert enabled[0].review_id == interpreted.review_id
+    assert enabled[0].rule_id == confirmed.proposed_rule.rule_id
+    store.close()
+
+
+def test_confirm_does_not_overwrite_review_when_candidate_changes() -> None:
+    store = SqliteMappingRuleStore()
+    service = MappingReviewService(store)
+    candidate_a = _candidate()
+    interpreted = service.interpret(
+        candidate_a,
+        operator="oliver",
+        chatgpt_text="VERIFIED. Strip FC suffix on Polymarket team names.",
+        operator_confirmed=False,
+    )
+    review_a = store.get_review(interpreted.review_id)
+    assert review_a is not None
+    evidence_a = review_a["evidence_json"]
+
+    candidate_b = _candidate()
+    candidate_b.sides[1].source_event_id = "pm-leeds-refreshed"
+    candidate_b.current_confidence = 0.88
+    mismatched = service.confirm(
+        candidate_b,
+        operator="oliver",
+        operator_confirmed=True,
+        chatgpt_text="VERIFIED. Strip FC suffix on Polymarket team names.",
+        manual_verdict=MappingVerdict.VERIFIED,
+        review_id=interpreted.review_id,
+    )
+    assert mismatched.activation_blocked_reason == "review_evidence_changed"
+    assert mismatched.proposed_rule is None
+    assert mismatched.operator_confirmed is False
+    assert store.list_enabled() == []
+    unchanged = store.get_review(interpreted.review_id)
+    assert unchanged is not None
+    assert unchanged["evidence_json"] == evidence_a
+    assert unchanged["activated_rule_id"] is None
+
+    confirmed_a = service.confirm(
+        candidate_a,
+        operator="oliver",
+        operator_confirmed=True,
+        chatgpt_text="VERIFIED. Strip FC suffix on Polymarket team names.",
+        manual_verdict=MappingVerdict.VERIFIED,
+        review_id=interpreted.review_id,
+    )
+    assert confirmed_a.review_id == interpreted.review_id
+    assert confirmed_a.proposed_rule is not None
+    assert confirmed_a.proposed_rule.review_id == interpreted.review_id
+
+    interpreted_b = service.interpret(
+        candidate_b,
+        operator="oliver",
+        chatgpt_text="VERIFIED. Strip FC suffix on Polymarket team names.",
+        operator_confirmed=False,
+    )
+    assert interpreted_b.review_id != interpreted.review_id
+    confirmed_b = service.confirm(
+        candidate_b,
+        operator="oliver",
+        operator_confirmed=True,
+        chatgpt_text="VERIFIED. Strip FC suffix on Polymarket team names.",
+        manual_verdict=MappingVerdict.VERIFIED,
+        review_id=interpreted_b.review_id,
+    )
+    assert confirmed_b.review_id == interpreted_b.review_id
+    assert confirmed_b.proposed_rule is not None
+    assert confirmed_b.proposed_rule.review_id == interpreted_b.review_id
+    assert store.get_review(interpreted.review_id)["activated_rule_id"] == confirmed_a.proposed_rule.rule_id
+    store.close()
+
+
 def test_ambiguous_and_not_verified_activate_nothing() -> None:
     store = SqliteMappingRuleStore()
     service = MappingReviewService(store)
@@ -711,6 +815,47 @@ def test_mapping_review_api_confirm_and_prompt(tmp_path) -> None:
         rules = client.get("/paper/mapping-reviews/rules")
         assert rules.status_code == 200
         assert len(rules.json()) == 1
+    finally:
+        app.dependency_overrides.clear()
+        store.close()
+
+
+def test_mapping_review_api_interpret_then_confirm_same_review(tmp_path) -> None:
+    store = SqliteMappingRuleStore(tmp_path / "mapping-interpret-confirm.sqlite")
+    app.dependency_overrides[get_mapping_rule_store] = lambda: store
+    app.dependency_overrides[get_mapping_review_service] = lambda: MappingReviewService(store)
+    client = TestClient(app)
+    try:
+        payload = {
+            "candidate": _candidate().model_dump(mode="json"),
+            "operator": "oliver",
+            "chatgpt_text": "VERIFIED. Strip FC suffix on Polymarket team names.",
+            "manual_verdict": "verified",
+        }
+        interpreted = client.post("/paper/mapping-reviews/interpret", json=payload)
+        assert interpreted.status_code == 200
+        interpret_body = interpreted.json()
+        assert interpret_body["verdict"] == "verified"
+        assert interpret_body["activation_blocked_reason"] == "explicit_operator_confirmation_required"
+        review_id = interpret_body["review_id"]
+        assert review_id
+        assert store.list_enabled() == []
+
+        confirmed = client.post(
+            "/paper/mapping-reviews/confirm",
+            json={**payload, "operator_confirmed": True, "review_id": review_id},
+        )
+        assert confirmed.status_code == 200
+        confirm_body = confirmed.json()
+        assert confirm_body["review_id"] == review_id
+        assert confirm_body["proposed_rule"]["review_id"] == review_id
+        fetched = client.get(f"/paper/mapping-reviews/{review_id}")
+        assert fetched.status_code == 200
+        assert fetched.json()["activated_rule_id"] == confirm_body["proposed_rule"]["rule_id"]
+        rules = client.get("/paper/mapping-reviews/rules")
+        assert rules.status_code == 200
+        assert len(rules.json()) == 1
+        assert rules.json()[0]["review_id"] == review_id
     finally:
         app.dependency_overrides.clear()
         store.close()

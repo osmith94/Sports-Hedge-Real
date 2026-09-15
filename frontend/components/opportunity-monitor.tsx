@@ -4,7 +4,24 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
-import { LiveRefreshStatus, NearOpportunity } from "../lib/api";
+import {
+  buildMappingReviewPrompt,
+  confirmMappingReview,
+  interpretMappingReview,
+  LiveRefreshStatus,
+  NearOpportunity,
+} from "../lib/api";
+import { MappingVerificationPanel } from "./mapping-verification-panel";
+import {
+  MappingProposedRule,
+  MappingReviewCandidate,
+  MappingVerdict,
+  fingerprintOpportunityVerifyRow,
+  mappingVerifyConfirmDecision,
+  snapshotMappingCandidate,
+  structuralActivationBlockedReason,
+  verifySessionMatchesCurrent,
+} from "../lib/mapping-verification";
 import {
   OBSERVATION_AGE_TICK_MS,
   formatObservationAge,
@@ -31,6 +48,18 @@ import {
 } from "../lib/opportunity-monitor-display";
 import { shouldNavigateFromRowClick } from "../lib/tracked-markets-display";
 
+type MappingVerifySession = {
+  fingerprint: string;
+  candidate: MappingReviewCandidate;
+  prompt: string;
+  reviewId?: string;
+  proposed: MappingProposedRule | null;
+  blocked: string | null;
+};
+
+const EVIDENCE_CHANGED_NOTE =
+  "Current mapping evidence changed. Start a fresh Verify. Previous interpretation was not confirmed.";
+
 export function OpportunityMonitor({
   items,
   available,
@@ -46,6 +75,9 @@ export function OpportunityMonitor({
   const [sort, setSort] = useState<OpportunityMonitorSortState | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [verifyId, setVerifyId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<Record<string, MappingVerifySession>>({});
+  const [verifyNoteById, setVerifyNoteById] = useState<Record<string, string | null>>({});
   const rows = useMemo(() => opportunityMonitorRows(items), [items]);
   const sortedRows = useMemo(() => sortOpportunityMonitor(rows, sort), [rows, sort]);
   const summary = useMemo(
@@ -58,6 +90,42 @@ export function OpportunityMonitor({
     return startSharedObservationAgeTimer(setNowMs, { tickMs: OBSERVATION_AGE_TICK_MS });
   }, []);
 
+  useEffect(() => {
+    const fingerprintById = new Map(
+      rows.map((row) => [row.id, fingerprintOpportunityVerifyRow(row)]),
+    );
+    const staleIds = Object.entries(sessions)
+      .filter(([id, session]) => fingerprintById.get(id) !== session.fingerprint)
+      .map(([id]) => id);
+    if (staleIds.length === 0) return;
+    setSessions((existing) => {
+      const next = { ...existing };
+      for (const id of staleIds) {
+        delete next[id];
+      }
+      return next;
+    });
+    setVerifyNoteById((notes) => {
+      const next = { ...notes };
+      for (const id of staleIds) {
+        next[id] = EVIDENCE_CHANGED_NOTE;
+      }
+      return next;
+    });
+    setVerifyId((id) => (id && staleIds.includes(id) ? null : id));
+  }, [rows, sessions]);
+
+  function failClosedEvidenceChanged(id: string) {
+    setSessions((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    setVerifyId((current) => (current === id ? null : current));
+    setVerifyNoteById((current) => ({ ...current, [id]: EVIDENCE_CHANGED_NOTE }));
+  }
+
   function toggleExpanded(id: string) {
     setExpanded((current) => {
       const next = new Set(current);
@@ -65,6 +133,136 @@ export function OpportunityMonitor({
       else next.add(id);
       return next;
     });
+  }
+
+  async function openVerify(row: OpportunityMonitorRow) {
+    if (!row.offerVerify || !row.mappingCandidate) return;
+    const fingerprint = fingerprintOpportunityVerifyRow(row);
+    if (!fingerprint) return;
+    setExpanded((current) => new Set(current).add(row.id));
+    setVerifyId(row.id);
+    const existing = sessions[row.id];
+    if (existing && verifySessionMatchesCurrent(existing.fingerprint, fingerprint) && existing.prompt) {
+      setVerifyNoteById((current) => ({ ...current, [row.id]: null }));
+      return;
+    }
+    const snapshot = snapshotMappingCandidate(row.mappingCandidate);
+    setSessions((current) => ({
+      ...current,
+      [row.id]: {
+        fingerprint,
+        candidate: snapshot,
+        prompt: "",
+        proposed: null,
+        blocked: null,
+      },
+    }));
+    setVerifyNoteById((current) => ({ ...current, [row.id]: null }));
+    try {
+      const bundle = await buildMappingReviewPrompt(snapshot);
+      setSessions((current) => {
+        const live = current[row.id];
+        if (!live || live.fingerprint !== fingerprint) return current;
+        return { ...current, [row.id]: { ...live, prompt: bundle.prompt_text } };
+      });
+    } catch (error) {
+      setVerifyNoteById((current) => ({
+        ...current,
+        [row.id]: error instanceof Error ? error.message : "mapping prompt unavailable",
+      }));
+    }
+  }
+
+  async function interpretVerify(
+    row: OpportunityMonitorRow,
+    input: { chatgptText: string; verdict: MappingVerdict },
+  ) {
+    const fingerprint = fingerprintOpportunityVerifyRow(row);
+    const session = sessions[row.id];
+    if (
+      !verifySessionMatchesCurrent(session?.fingerprint, fingerprint) ||
+      !session?.candidate
+    ) {
+      failClosedEvidenceChanged(row.id);
+      return;
+    }
+    try {
+      const proposal = await interpretMappingReview({
+        candidate: session.candidate,
+        chatgpt_text: input.chatgptText,
+        manual_verdict: input.verdict,
+      });
+      setSessions((current) => {
+        const live = current[row.id];
+        if (!live || live.fingerprint !== fingerprint) return current;
+        return {
+          ...current,
+          [row.id]: {
+            ...live,
+            reviewId: proposal.review_id,
+            proposed: proposal.proposed_rule,
+            blocked: structuralActivationBlockedReason(proposal.activation_blocked_reason),
+          },
+        };
+      });
+      const structuralBlock = structuralActivationBlockedReason(proposal.activation_blocked_reason);
+      setVerifyNoteById((current) => ({
+        ...current,
+        [row.id]: structuralBlock
+          ? `Interpret only · ${structuralBlock}`
+          : "Interpreted without saving. Explicit confirmation is still required.",
+      }));
+    } catch (error) {
+      setVerifyNoteById((current) => ({
+        ...current,
+        [row.id]: error instanceof Error ? error.message : "interpret failed",
+      }));
+    }
+  }
+
+  async function confirmVerify(
+    row: OpportunityMonitorRow,
+    input: { chatgptText: string; verdict: MappingVerdict },
+  ) {
+    const fingerprint = fingerprintOpportunityVerifyRow(row);
+    const session = sessions[row.id];
+    const decision = mappingVerifyConfirmDecision({
+      sessionFingerprint: session?.fingerprint,
+      currentFingerprint: fingerprint,
+      sessionCandidate: session?.candidate,
+      chatgptText: input.chatgptText,
+      verdict: input.verdict,
+      reviewId: session?.reviewId,
+    });
+    if (!decision.ok) {
+      failClosedEvidenceChanged(row.id);
+      return;
+    }
+    try {
+      const proposal = await confirmMappingReview(decision.request);
+      setSessions((current) => {
+        const live = current[row.id];
+        if (!live || live.fingerprint !== fingerprint) return current;
+        return {
+          ...current,
+          [row.id]: {
+            ...live,
+            proposed: proposal.proposed_rule,
+            blocked: structuralActivationBlockedReason(proposal.activation_blocked_reason),
+          },
+        };
+      });
+      setVerifyNoteById((current) => ({
+        ...current,
+        [row.id]:
+          "Learned rule saved. operator_verified provenance appears after a later scan applies it; this row stays current-scan mapping.",
+      }));
+    } catch (error) {
+      setVerifyNoteById((current) => ({
+        ...current,
+        [row.id]: error instanceof Error ? error.message : "confirm failed",
+      }));
+    }
   }
 
   return (
@@ -124,19 +322,41 @@ export function OpportunityMonitor({
             <tbody>
               {sortedRows.map((row) => {
                 const open = expanded.has(row.id);
+                const session = sessions[row.id];
+                const currentFingerprint = fingerprintOpportunityVerifyRow(row);
+                const sessionLive = Boolean(
+                  session &&
+                    verifySessionMatchesCurrent(session.fingerprint, currentFingerprint),
+                );
+                const liveSession = sessionLive ? session : undefined;
                 return (
                   <Fragment key={row.id}>
                     <MonitorRow
                       nowMs={nowMs}
                       onExpand={() => toggleExpanded(row.id)}
                       onNavigate={(href) => router.push(href)}
+                      onVerify={() => void openVerify(row)}
                       open={open}
                       row={row}
                     />
                     {open ? (
                       <tr className="opportunity-detail-row">
                         <td colSpan={OPPORTUNITY_MONITOR_SORT_COLUMNS.length + 1}>
-                          <OpportunityRowDetail row={row} />
+                          <OpportunityRowDetail
+                            blockedReason={liveSession?.blocked ?? null}
+                            note={verifyNoteById[row.id] ?? null}
+                            onConfirm={(input) => void confirmVerify(row, input)}
+                            onCopyPrompt={(prompt) => {
+                              void navigator.clipboard?.writeText(prompt);
+                            }}
+                            onInterpret={(input) => void interpretVerify(row, input)}
+                            promptText={liveSession?.prompt ?? ""}
+                            proposedRule={liveSession?.proposed ?? null}
+                            row={row}
+                            sessionCandidate={liveSession?.candidate ?? null}
+                            sessionKey={liveSession?.fingerprint ?? null}
+                            verifying={verifyId === row.id && sessionLive}
+                          />
                         </td>
                       </tr>
                     ) : null}
@@ -211,12 +431,14 @@ function MonitorRow({
   nowMs,
   onExpand,
   onNavigate,
+  onVerify,
 }: {
   row: OpportunityMonitorRow;
   open: boolean;
   nowMs: number;
   onExpand: () => void;
   onNavigate: (href: string) => void;
+  onVerify: () => void;
 }) {
   const tone = opportunityMonitorStateTone(row.state);
   return (
@@ -290,7 +512,21 @@ function MonitorRow({
         {formatMonitorMoney(row.guaranteedProfitGbp)}
       </td>
       <td>{row.riskScore ?? "—"}</td>
-      <td title={row.mappingTitle}>{row.mappingText}</td>
+      <td className="opportunity-mapping" title={row.mappingTitle}>
+        <div>{row.mappingText}</div>
+        {row.offerVerify ? (
+          <button
+            className="opportunity-mapping-verify"
+            onClick={(event) => {
+              event.stopPropagation();
+              onVerify();
+            }}
+            type="button"
+          >
+            Verify
+          </button>
+        ) : null}
+      </td>
       <td>
         <span className={`ops-status is-${tone}`} title={row.stateTitle}>
           {row.state}
@@ -304,12 +540,40 @@ function MonitorRow({
   );
 }
 
-function OpportunityRowDetail({ row }: { row: OpportunityMonitorRow }) {
+function OpportunityRowDetail({
+  row,
+  verifying,
+  promptText,
+  proposedRule,
+  blockedReason,
+  note,
+  sessionCandidate,
+  sessionKey,
+  onCopyPrompt,
+  onInterpret,
+  onConfirm,
+}: {
+  row: OpportunityMonitorRow;
+  verifying: boolean;
+  promptText: string;
+  proposedRule: MappingProposedRule | null;
+  blockedReason: string | null;
+  note: string | null;
+  sessionCandidate: MappingReviewCandidate | null;
+  sessionKey: string | null;
+  onCopyPrompt: (prompt: string) => void;
+  onInterpret: (input: { chatgptText: string; verdict: MappingVerdict }) => void;
+  onConfirm: (input: { chatgptText: string; verdict: MappingVerdict }) => void;
+}) {
   return (
     <div className="opportunity-detail">
       <p className="panel-meta">{row.rejectionDetail}</p>
       <p className="panel-meta">
         Exact observation {observationTimestampTitle(row.observedAt)} · quote {row.quoteAgeLabel}
+      </p>
+      <p className="panel-meta" title={row.mappingTitle}>
+        Mapping {row.mappingText}
+        {row.offerVerify ? " · Verify available for current evidence" : ""}
       </p>
       {row.legs.length === 0 ? (
         <div className="empty-live-compact">
@@ -321,10 +585,25 @@ function OpportunityRowDetail({ row }: { row: OpportunityMonitorRow }) {
           {row.legs.map((leg, index) => (
             <li key={`${row.id}-${leg.venue}-${leg.outcome}-${index}`}>
               {formatOpportunityLegLine(leg)}
+              {leg.sourceRunnerId !== "—" ? ` · runner ${leg.sourceRunnerId}` : ""}
             </li>
           ))}
         </ul>
       )}
+      {verifying && sessionCandidate && sessionKey ? (
+        <MappingVerificationPanel
+          activationBlockedReason={blockedReason}
+          candidate={sessionCandidate}
+          key={sessionKey}
+          onConfirm={onConfirm}
+          onCopyPrompt={onCopyPrompt}
+          onInterpret={onInterpret}
+          promptText={promptText}
+          proposedRule={proposedRule}
+          provenance={row.mappingProvenance}
+        />
+      ) : null}
+      {note ? <p className="panel-meta">{note}</p> : null}
     </div>
   );
 }

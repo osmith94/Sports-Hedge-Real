@@ -392,6 +392,39 @@ describe("opportunity monitor default ordering and user sort", () => {
     assert.deepEqual(first, { column: "age", direction: "desc" });
     assert.deepEqual(nextOpportunityMonitorSort(first, "age"), { column: "age", direction: "asc" });
   });
+
+  it("sorts mapping with unavailable values last in both directions", () => {
+    const rows = [
+      opportunityMonitorRow(watch({ opportunity_id: "missing-map" })),
+      opportunityMonitorRow(
+        watch({
+          opportunity_id: "low-map",
+          mapping_confidence: 0.9,
+          mapping_provenance: { mapping_source: "native_deterministic" },
+        }),
+      ),
+      opportunityMonitorRow(
+        watch({
+          opportunity_id: "high-map",
+          mapping_confidence: 1,
+          mapping_provenance: { mapping_source: "native_deterministic" },
+        }),
+      ),
+    ];
+    assert.equal(rows[0].mappingText, "—");
+    const desc = sortOpportunityMonitor(rows, { column: "mapping", direction: "desc" });
+    const asc = sortOpportunityMonitor(rows, { column: "mapping", direction: "asc" });
+    assert.equal(desc[desc.length - 1].id, "missing-map");
+    assert.equal(asc[asc.length - 1].id, "missing-map");
+    assert.deepEqual(
+      desc.map((row) => row.id),
+      ["high-map", "low-map", "missing-map"],
+    );
+    assert.deepEqual(
+      asc.map((row) => row.id),
+      ["low-map", "high-map", "missing-map"],
+    );
+  });
 });
 
 describe("opportunity monitor age, provenance, navigation, legs, empty honesty", () => {
@@ -441,9 +474,163 @@ describe("opportunity monitor age, provenance, navigation, legs, empty honesty",
     assert.match(lines[2], /away — kalshi @ 4.2/);
     assert.match(lines[0], /action —/);
     assert.match(lines[0], /depth/);
+    assert.match(lines[0], /source mb-1/);
+    assert.match(lines[0], /stake —/);
     assert.equal(mappingDisplay().text, "—");
     assert.equal(mappingDisplay().title, MAPPING_UNAVAILABLE_TITLE);
     assert.equal(row.mappingText, "—");
+    assert.equal(row.offerVerify, false);
+  });
+
+  it("renders a 2-way selected-solver pair with exact source ids and unknown action", () => {
+    const twoWay = watch({
+      opportunity_id: "two-way",
+      legs: [
+        {
+          outcome: "yes",
+          venue: "matchbook",
+          source_market_id: "mb-yes",
+          source_runner_id: "y",
+          currency: "GBP",
+          gbp_stake: 40,
+          net_decimal_odds: 2.2,
+          cumulative_depth_gbp: 40,
+        },
+        {
+          outcome: "no",
+          venue: "polymarket",
+          source_market_id: "pm-no",
+          source_runner_id: "n",
+          currency: "USD",
+          gbp_stake: 60,
+          net_decimal_odds: 1.9,
+          cumulative_depth_gbp: 60,
+        },
+      ],
+    });
+    const lines = opportunityLegViews(twoWay).map(formatOpportunityLegLine);
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /yes — matchbook @ 2.2/);
+    assert.match(lines[1], /no — polymarket @ 1.9/);
+    assert.match(lines[0], /action —/);
+    assert.match(lines[1], /action —/);
+    assert.match(lines[0], /source mb-yes/);
+    assert.match(lines[1], /source pm-no/);
+    assert.match(lines[0], /stake/);
+  });
+
+  it("shows current mapping confidence and Verify only with a safe current candidate", () => {
+    const candidate = {
+      sides: [
+        {
+          venue: "matchbook" as const,
+          source_event_id: "mb-leeds",
+          source_market_id: "mb-mkt",
+          raw_home_team: "Leeds United",
+          raw_away_team: "Chelsea",
+          raw_competition: "Premier League",
+          kickoff_utc: "2026-09-20T15:00:00.000Z",
+        },
+        {
+          venue: "polymarket" as const,
+          source_event_id: "pm-leeds",
+          source_market_id: "pm-mkt",
+          raw_home_team: "Leeds United FC",
+          raw_away_team: "Chelsea FC",
+          raw_competition: "Premier League",
+          kickoff_utc: "2026-09-20T15:00:00.000Z",
+        },
+      ],
+      current_confidence: 0.96,
+      current_reasons: ["home_team_fuzzy"],
+      current_matched: true,
+    };
+    const below = opportunityMonitorRow(
+      watch({
+        opportunity_id: "map-below",
+        mapping_confidence: 0.96,
+        mapping_reasons: ["home_team_fuzzy"],
+        mapping_provenance: { mapping_source: "native_deterministic" },
+        mapping_review_candidate: candidate,
+      }),
+    );
+    assert.match(below.mappingText, /96\.0%/);
+    assert.equal(below.offerVerify, true);
+    assert.ok(below.mappingCandidate);
+
+    const native = opportunityMonitorRow(
+      watch({
+        opportunity_id: "map-native",
+        mapping_confidence: 1,
+        mapping_provenance: { mapping_source: "native_deterministic" },
+        mapping_review_candidate: candidate,
+      }),
+    );
+    assert.match(native.mappingText, /100\.0%/);
+    assert.match(native.mappingText, /native deterministic/);
+    assert.equal(native.offerVerify, false);
+
+    const learned = opportunityMonitorRow(
+      watch({
+        opportunity_id: "map-learned",
+        mapping_confidence: 1,
+        mapping_provenance: {
+          mapping_source: "operator_verified",
+          rule_id: "maprule:abc",
+          rule_version: 2,
+        },
+        mapping_review_candidate: candidate,
+      }),
+    );
+    assert.match(learned.mappingText, /operator_verified \/ learned alias maprule:abc v2/);
+    assert.equal(learned.offerVerify, false);
+
+    const missingCandidate = opportunityMonitorRow(
+      watch({
+        opportunity_id: "map-no-candidate",
+        mapping_confidence: 0.94,
+        mapping_provenance: { mapping_source: "native_deterministic" },
+      }),
+    );
+    assert.match(missingCandidate.mappingText, /94\.0%/);
+    assert.equal(missingCandidate.offerVerify, false);
+  });
+
+  it("does not let richer mapping metadata turn a radar-current trigger into QUALIFYING", () => {
+    const aged = watch({
+      opportunity_id: "aged-mapped",
+      status: "TRIGGERED",
+      classification: "triggered_opportunity",
+      is_arbitrage: true,
+      freshness_class: "radar_current",
+      bet_actionable: false,
+      mapping_confidence: 0.96,
+      mapping_review_candidate: {
+        sides: [
+          {
+            venue: "matchbook",
+            source_event_id: "a",
+            source_market_id: "m1",
+            raw_home_team: "Leeds",
+            raw_away_team: "Newcastle",
+            raw_competition: "PL",
+            kickoff_utc: "2026-09-20T15:00:00Z",
+          },
+          {
+            venue: "kalshi",
+            source_event_id: "k",
+            source_market_id: "m2",
+            raw_home_team: "Leeds United",
+            raw_away_team: "Newcastle",
+            raw_competition: "PL",
+            kickoff_utc: "2026-09-20T15:00:00Z",
+          },
+        ],
+      },
+    });
+    assert.equal(opportunityMonitorState(aged), "STALE");
+    assert.notEqual(opportunityMonitorState(aged), "QUALIFYING");
+    assert.equal(opportunityMonitorRow(aged).offerVerify, true);
   });
 
   it("keeps empty current radar empty and uses live-refresh venues when present", () => {
@@ -480,6 +667,8 @@ describe("opportunity monitor table contract", () => {
     assert.match(table, /fixture-link tracked-market-link/);
     assert.match(table, /Toggle outcome legs/);
     assert.match(table, /loaded current set only/);
+    assert.match(table, /MappingVerificationPanel/);
+    assert.match(table, /opportunity-mapping-verify/);
     assert.doesNotMatch(table, /tabIndex=\{0\}/);
   });
 

@@ -114,6 +114,11 @@ class SqliteWatchlistRepository:
             "observation_count": "INTEGER",
             "quote_age_basis": "TEXT",
             "data_kind": "TEXT",
+            "mapping_confidence": "TEXT",
+            "mapping_matched": "INTEGER",
+            "mapping_reasons_json": "TEXT",
+            "mapping_provenance_json": "TEXT",
+            "mapping_review_candidate_json": "TEXT",
         }
         for name, ddl in extras.items():
             if name not in columns:
@@ -144,11 +149,13 @@ class SqliteWatchlistRepository:
                 fixture_discovery_source, fixture_status, in_running,
                 live_score_supported, home_score, away_score, strike_narrative,
                 previous_net_edge, previous_distance_to_trigger_pp, observation_count,
-                quote_age_basis, data_kind
+                quote_age_basis, data_kind, mapping_confidence, mapping_matched,
+                mapping_reasons_json, mapping_provenance_json, mapping_review_candidate_json
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?
             )
             ON CONFLICT(opportunity_id) DO UPDATE SET
                 canonical_event_id = excluded.canonical_event_id,
@@ -191,7 +198,12 @@ class SqliteWatchlistRepository:
                 previous_distance_to_trigger_pp = excluded.previous_distance_to_trigger_pp,
                 observation_count = excluded.observation_count,
                 quote_age_basis = excluded.quote_age_basis,
-                data_kind = excluded.data_kind
+                data_kind = excluded.data_kind,
+                mapping_confidence = excluded.mapping_confidence,
+                mapping_matched = excluded.mapping_matched,
+                mapping_reasons_json = excluded.mapping_reasons_json,
+                mapping_provenance_json = excluded.mapping_provenance_json,
+                mapping_review_candidate_json = excluded.mapping_review_candidate_json
             """,
             (
                 opportunity.opportunity_id,
@@ -238,6 +250,15 @@ class SqliteWatchlistRepository:
                 opportunity.observation_count,
                 opportunity.quote_age_basis,
                 opportunity.data_kind,
+                _stringify_float(opportunity.mapping_confidence),
+                None if opportunity.mapping_matched is None else int(opportunity.mapping_matched),
+                json.dumps(opportunity.mapping_reasons),
+                json.dumps(opportunity.mapping_provenance.model_dump(mode="json"))
+                if opportunity.mapping_provenance is not None
+                else None,
+                json.dumps(opportunity.mapping_review_candidate.model_dump(mode="json"))
+                if opportunity.mapping_review_candidate is not None
+                else None,
             ),
         )
         self._connection.commit()
@@ -385,6 +406,11 @@ def _opportunity_from_row(row: sqlite3.Row) -> NearOpportunity:
         observation_count=int(_row_get(row, "observation_count") or 0),
         quote_age_basis=_row_get(row, "quote_age_basis"),
         data_kind=_row_get(row, "data_kind") or "live_paper",
+        mapping_confidence=_float(_row_get(row, "mapping_confidence")),
+        mapping_matched=_optional_bool(_row_get(row, "mapping_matched")),
+        mapping_reasons=_json_list(_row_get(row, "mapping_reasons_json")),
+        mapping_provenance=_mapping_provenance(_row_get(row, "mapping_provenance_json")),
+        mapping_review_candidate=_mapping_candidate(_row_get(row, "mapping_review_candidate_json")),
     )
 
 
@@ -403,6 +429,16 @@ def _event_from_row(row: sqlite3.Row) -> OpportunityLifecycleEvent:
 
 def _stringify(value: Decimal | None) -> str | None:
     return None if value is None else str(value)
+
+
+def _stringify_float(value: float | None) -> str | None:
+    return None if value is None else str(value)
+
+
+def _float(value: str | None) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
 
 
 def _decimal(value: str | None) -> Decimal | None:
@@ -442,3 +478,40 @@ def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed]
+
+
+def _mapping_provenance(value: str | None):
+    if not value:
+        return None
+    try:
+        from sports_hedge.matching.learned_rules import MappingProvenance
+
+        return MappingProvenance.model_validate(json.loads(value))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _mapping_candidate(value: str | None):
+    if not value:
+        return None
+    try:
+        from sports_hedge.matching.learned_rules import MappingReviewCandidate
+
+        candidate = MappingReviewCandidate.model_validate(json.loads(value))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if len(candidate.sides) < 2:
+        return None
+    return candidate

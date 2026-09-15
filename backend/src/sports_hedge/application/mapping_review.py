@@ -6,13 +6,16 @@ Ambiguous / not-verified verdicts persist the review only.
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from sports_hedge.domain.football import CanonicalMarket
+from sports_hedge.market_intelligence.models import MarketSnapshot
 from sports_hedge.matching.learned_rules import (
     MappingReviewCandidate,
     MappingRule,
@@ -24,7 +27,7 @@ from sports_hedge.matching.learned_rules import (
     infer_learned_rule,
     sanitize_mapping_payload,
 )
-from sports_hedge.matching.markets import MarketMatcher
+from sports_hedge.matching.markets import MarketMatchResult, MarketMatcher
 from sports_hedge.persistence.mapping_rules import SqliteMappingRuleStore
 
 _VERDICT_PATTERN = re.compile(
@@ -187,6 +190,9 @@ class MappingReviewService:
         manual_verdict: MappingVerdict | None = None,
         review_id: str | None = None,
     ) -> MappingReviewProposal:
+        mismatched = self._reject_changed_review_evidence(candidate, review_id=review_id)
+        if mismatched is not None:
+            return mismatched
         proposal = self.interpret(
             candidate,
             operator=operator,
@@ -254,8 +260,51 @@ class MappingReviewService:
             activation_blocked_reason=None,
         )
 
+    def _reject_changed_review_evidence(
+        self,
+        candidate: MappingReviewCandidate,
+        *,
+        review_id: str | None,
+    ) -> MappingReviewProposal | None:
+        """Fail closed if Confirm tries to reuse a review against different evidence."""
+
+        if not review_id:
+            return None
+        existing = self.store.get_review(review_id)
+        if existing is None:
+            return None
+        stored = _stored_review_evidence(existing)
+        incoming = sanitize_mapping_payload(candidate.model_dump(mode="json"))
+        if stored == incoming:
+            return None
+        verdict = MappingVerdict.AMBIGUOUS
+        raw_verdict = existing.get("verdict")
+        if raw_verdict:
+            try:
+                verdict = MappingVerdict(raw_verdict)
+            except ValueError:
+                verdict = MappingVerdict.AMBIGUOUS
+        return MappingReviewProposal(
+            review_id=review_id,
+            verdict=verdict,
+            operator_confirmed=False,
+            proposed_rule=None,
+            prompt_text=existing.get("prompt_text") or "",
+            chatgpt_text=existing.get("chatgpt_text"),
+            activation_blocked_reason="review_evidence_changed",
+        )
+
     def disable(self, rule_id: str, *, operator: str, revoke: bool = False) -> MappingRule:
         return self.store.disable_rule(rule_id, operator=operator, revoke=revoke)
+
+
+def _stored_review_evidence(row: dict[str, Any]) -> Any:
+    raw = row.get("evidence_json")
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw
 
 
 def parse_chatgpt_verdict(text: str | None) -> MappingVerdict | None:
@@ -299,6 +348,117 @@ def evidence_from_markets(
         current_reasons=match.reasons,
         current_matched=match.matched,
         conflicting_fields=conflicts,
+    )
+
+
+def safe_mapping_review_candidate(
+    candidate: MappingReviewCandidate | None,
+) -> MappingReviewCandidate | None:
+    """Return a candidate only when both venue sides are present for Verify."""
+
+    if candidate is None or len(candidate.sides) < 2:
+        return None
+    return candidate
+
+
+def evidence_from_snapshots(
+    history: Sequence[MarketSnapshot],
+    match: MarketMatchResult,
+) -> MappingReviewCandidate | None:
+    """Build current mapping-review evidence from current-market snapshots.
+
+    This uses Fixture/MI current observations, never the append-only /paper/scans
+    audit window. Incomplete sides fail closed to no candidate.
+    """
+
+    latest_by_venue: dict[str, MarketSnapshot] = {}
+    outcomes_by_venue: dict[str, list[str]] = {}
+    for snapshot in history:
+        key = snapshot.venue.value
+        previous = latest_by_venue.get(key)
+        if previous is None or snapshot.observed_at >= previous.observed_at:
+            latest_by_venue[key] = snapshot
+        outcomes = outcomes_by_venue.setdefault(key, [])
+        if snapshot.canonical_outcome not in outcomes:
+            outcomes.append(snapshot.canonical_outcome)
+    sides: list[MappingSideEvidence] = []
+    for venue_key, snapshot in latest_by_venue.items():
+        side = _side_from_snapshot(
+            snapshot,
+            match_reasons=match.reasons,
+            confidence=match.confidence,
+            outcome_space=outcomes_by_venue.get(venue_key, []),
+        )
+        if side is not None:
+            sides.append(side)
+    if len(sides) < 2:
+        return None
+    conflicts: list[str] = []
+    left, right = sides[0], sides[1]
+    if left.family and right.family and left.family != right.family:
+        conflicts.append("market_family")
+    if left.period and right.period and left.period != right.period:
+        conflicts.append("period")
+    if (left.line or "") != (right.line or ""):
+        conflicts.append("line")
+    if left.settlement_key and right.settlement_key and left.settlement_key != right.settlement_key:
+        conflicts.append("settlement")
+    return MappingReviewCandidate(
+        sides=sides[:3],
+        current_confidence=match.confidence,
+        current_reasons=list(match.reasons),
+        current_matched=match.matched,
+        conflicting_fields=conflicts,
+    )
+
+
+def _side_from_snapshot(
+    snapshot: MarketSnapshot,
+    *,
+    match_reasons: list[str],
+    confidence: float,
+    outcome_space: list[str],
+) -> MappingSideEvidence | None:
+    if not snapshot.source_event_id or not snapshot.source_market_id:
+        return None
+    if not snapshot.home_team or not snapshot.away_team:
+        return None
+    if snapshot.kickoff_utc is None:
+        return None
+    raw = sanitize_mapping_payload(snapshot.metadata if isinstance(snapshot.metadata, dict) else {})
+    event_name = None
+    market_name = None
+    market_type = None
+    runner_labels: list[str] = []
+    if isinstance(raw, dict):
+        event_name = _first_str(raw, ("name", "title", "event_name", "raw_event_name"))
+        market_name = _first_str(raw, ("market_name", "question", "raw_market_name"))
+        market_type = _first_str(raw, ("market_type", "sportsMarketType", "raw_market_type"))
+        labels = raw.get("raw_runner_labels")
+        if isinstance(labels, list):
+            runner_labels = [str(item) for item in labels if str(item).strip()]
+    return MappingSideEvidence(
+        venue=snapshot.venue,
+        source_event_id=snapshot.source_event_id,
+        source_market_id=snapshot.source_market_id,
+        raw_event_name=event_name,
+        raw_home_team=snapshot.home_team,
+        raw_away_team=snapshot.away_team,
+        raw_competition=snapshot.competition or "",
+        kickoff_utc=snapshot.kickoff_utc,
+        raw_market_name=market_name,
+        raw_market_type=market_type,
+        raw_runner_labels=runner_labels,
+        sport="football",
+        family=snapshot.market_family.value,
+        period=snapshot.period.value,
+        line="" if snapshot.market_line is None else format(snapshot.market_line, "f"),
+        settlement_key=snapshot.settlement_key,
+        settlement_scope=snapshot.settlement_scope.value,
+        outcome_space=outcome_space,
+        current_canonical_candidate=f"{snapshot.home_team} vs {snapshot.away_team}",
+        confidence=confidence,
+        match_reasons=match_reasons,
     )
 
 
