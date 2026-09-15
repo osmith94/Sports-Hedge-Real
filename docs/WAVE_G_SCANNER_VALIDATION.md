@@ -15,7 +15,7 @@ No benchmark fixture or opportunity is exposed through the production UI.
 
 ## Manual versus scheduled paths
 
-Primary **Run Fast refresh** now calls `POST /paper/collect/hot`.
+Primary **Run scan** now calls `POST /paper/collect/hot`.
 
 That endpoint asks `LiveRefreshCoordinator.manual_hot_plan()` for the same plan
 shape used by scheduled Fast Scan:

@@ -560,9 +560,9 @@ class LiveRefreshCoordinator:
         """Coordinator envelope for manual diagnostic collect.
 
         Scheduled Fast/Full keep their own HOT 25s / UNIVERSE-chunk budgets.
-        Manual Run scan is a bounded one-shot and must return before the
-        frontend's 60s PAPER_COLLECTION_TIMEOUT_MS rather than competing with
-        the 150s Full Sweep generation.
+        Advanced full diagnostic is a bounded one-shot and must return before
+        the frontend's 60s PAPER_COLLECTION_TIMEOUT_MS rather than competing
+        with the 150s Full Sweep generation.
         """
 
         resolved = settings or get_settings()

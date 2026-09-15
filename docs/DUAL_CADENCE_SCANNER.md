@@ -417,7 +417,7 @@ Do not ship a single `Last scan` once both lanes exist.
 
 ### 8.2 Manual HOT and full diagnostic collection
 
-The primary operator **Run Fast refresh** action calls `POST /paper/collect/hot`. It uses
+The primary operator **Run scan** action calls `POST /paper/collect/hot`. It uses
 the same current HOT identity scope, retained source events, HOT venue
 participation, 25s collector timeout and 5s coordinator grace as server-owned
 Fast Scan. A non-null empty HOT scope remains empty and must not trigger

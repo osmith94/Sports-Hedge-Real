@@ -19,7 +19,7 @@ request. Do not use that browser timeout as a Fast/Full latency measurement.
 | --- | --- | --- |
 | Fast Scan / HOT | Known current identities; skips venue event discovery; server-owned cadence | 25s collector + 5s coordinator grace |
 | Full Sweep / UNIVERSE | Venue-union discovery; resumable chunks yield to HOT | 150s generation budget split across chunks |
-| Manual Fast refresh | Same known HOT identity/venue plan as Fast Scan; does not advance scheduler state | 25s collector + 5s coordinator grace |
+| Manual HOT (**Run scan**) | Same known HOT identity/venue plan as Fast Scan; does not advance scheduler state | 25s collector + 5s coordinator grace |
 | Full diagnostic | One venue-union discovery and serial market/depth sweep, up to 60 fixtures; does not advance scheduler state | 20s collector + 5s coordinator grace |
 
 Before this change, manual collect used the general 45s collector budget plus
@@ -30,7 +30,7 @@ inside the frontend's fixed 60s abort. Scheduled lanes can remain healthy
 because HOT skips discovery and UNIVERSE yields/resumes; the manual request does
 neither.
 
-The primary UI action is now **Run Fast refresh** and calls
+The primary UI action is now **Run scan** and calls
 `POST /paper/collect/hot`; broad discovery is explicitly Advanced **Run full
 diagnostic**. Both manual endpoints tag their collection kind and omit the
 redundant nested `fixture_markets` body. The full diagnostic returns a truthful

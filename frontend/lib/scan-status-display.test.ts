@@ -177,7 +177,7 @@ describe("dual cadence operator copy", () => {
     const api = readFileSync(join(frontendRoot, "lib/api.ts"), "utf8");
     assert.match(scan, /await collect\("hot"\)/);
     assert.match(scan, /runPaperHotRefresh\(payload\)/);
-    assert.match(scan, /Run Fast refresh/);
+    assert.match(scan, /Run scan/);
     assert.match(scan, /Run full diagnostic/);
     assert.match(scan, /collect\("diagnostic"\)/);
     assert.match(scan, /does not rediscover the full universe/);

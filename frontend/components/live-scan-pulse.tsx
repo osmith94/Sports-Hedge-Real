@@ -37,7 +37,7 @@ function statusCopy(
     };
   }
   if (phase === "paused") {
-    return { title: "Auto refresh off", detail: "Run Fast refresh or resume status refresh" };
+    return { title: "Auto refresh off", detail: "Run scan or resume status refresh" };
   }
   return {
     title: "Live scan",
