@@ -739,6 +739,7 @@ class LiveRefreshCoordinator:
                                 self._next_hot_due,
                                 hot_count,
                                 leftover_n,
+                                degraded,
                             ),
                         }
                     )
@@ -1285,6 +1286,7 @@ def _hot_operator_summary(
     next_due: datetime | None,
     fixture_count: int,
     leftover_n: int,
+    degraded: bool,
 ) -> str:
     duration_s = round(duration_ms / 1000, 1)
     next_s = "—"
@@ -1296,6 +1298,8 @@ def _hot_operator_summary(
     )
     if leftover_n:
         summary += f" · partial ({leftover_n} not evaluated)"
+    elif degraded:
+        summary += " · partial (provider degraded)"
     return summary
 
 
