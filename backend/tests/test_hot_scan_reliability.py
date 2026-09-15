@@ -4,6 +4,7 @@ import asyncio
 import inspect
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from time import monotonic
 from typing import Any
 
@@ -23,17 +24,25 @@ from sports_hedge.application.live_refresh import (
     SCAN_CYCLE_RETURN_GRACE_SECONDS,
     ScanCycleTimeout,
 )
-from sports_hedge.application.paper_operations import PaperOperationsService
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
-from sports_hedge.matching.markets import MarketMatchResult
-from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+from sports_hedge.paper.models import FxRateSnapshot
+from sports_hedge.paper.trades import PaperTradeState
+from sports_hedge.persistence.paper import SqlitePaperScanRepository
+from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from test_dual_cadence_scheduler import NOW, FakeClock, _fixture, _report
 from test_read_only_collector import FakeMatchbook, FakePolymarket
+from test_step8f_automatic_paper_entry import (
+    FX as AUTOFILL_FX,
+    _matchbook_btts,
+    _ops_bundle,
+    _polymarket_btts,
+    _standing,
+)
 from venue_cost_helpers import matchbook_polymarket_costs
 
 
@@ -520,72 +529,156 @@ async def test_cooperative_cancel_is_not_counted_as_orphan() -> None:
         repository.close()
 
 
-def test_scheduled_persist_failure_is_visible_without_scan_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+def _native_lock_facts(ledger: SqlitePaperLedger, trade_id: str) -> list[tuple[str, ...]]:
+    with ledger.exclusive():
+        rows = ledger._connection.execute(
+            """
+            SELECT venue, native_currency, locked_native, COALESCE(fill_id, lock_id)
+            FROM paper_treasury_locks
+            WHERE trade_id = ?
+            ORDER BY venue, native_currency, lock_id
+            """,
+            (trade_id,),
+        ).fetchall()
+        return [(row[0], row[1], str(row[2]), str(row[3])) for row in rows]
+
+
+def _journal_source_facts(ledger: SqlitePaperLedger, opportunity_id: str) -> list[tuple[str, str]]:
+    entries = ledger.journal.list_entries(opportunity_id=opportunity_id)
+    return sorted((entry.source, entry.source_id) for entry in entries)
+
+
+def _treasury_event_facts(ledger: SqlitePaperLedger, trade_id: str) -> list[tuple[str, str]]:
+    with ledger.exclusive():
+        rows = ledger._connection.execute(
+            """
+            SELECT source, source_id FROM paper_treasury_events
+            WHERE trade_id = ?
+            ORDER BY source, source_id
+            """,
+            (trade_id,),
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+
+def test_scheduled_persist_failure_is_visible_without_scan_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production persist: fail after a real OPEN, retry without double lock/journal."""
+
     from sports_hedge.api import paper as paper_api
 
-    coordinator = LiveRefreshCoordinator()
-    coordinator.reset()
-    decision = PaperScanDecision(
-        canonical_event_id="hot-leeds-newcastle",
-        canonical_market_id="mkt-hot-leeds-newcastle",
-        fixture_canonical_event_id="hot-leeds-newcastle",
-        market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=[]),
-        scanned_at=NOW,
-        eligible_for_paper_simulation=True,
-    )
-    report = _hot_leftover_report(cancelled=False).model_copy(
-        update={"paper_decisions": [decision]}
-    )
-    coordinator.record_report(report, scan_lane=ScanLane.HOT)
-    assert coordinator.status.hot.last_error is None
+    scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
+    audit = SqlitePaperScanRepository(tmp_path / "paper-audit.sqlite")
+    try:
+        decision = scan.scan_pair(
+            _matchbook_btts(),
+            _polymarket_btts(),
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=AUTOFILL_FX,
+            maximum_execution_risk=100,
+            liquidity_snapshot=_standing(),
+        )
+        assert decision.eligible_for_paper_simulation is True, decision.rejection_reasons
+        assert decision.canonical_market_id
+        assert decision.allocation is not None and decision.allocation.accepted
 
-    opened: list[str] = []
-    calls = {"n": 0}
+        coordinator = LiveRefreshCoordinator()
+        coordinator.reset()
+        report = _hot_leftover_report(cancelled=False).model_copy(
+            update={"paper_decisions": [decision]}
+        )
+        coordinator.record_report(report, scan_lane=ScanLane.HOT)
+        assert coordinator.status.hot.last_error is None
 
-    def persist(report_arg: CollectionReport, **kwargs: Any) -> None:
-        del kwargs
-        calls["n"] += 1
-        for item in report_arg.paper_decisions:
-            mid = item.canonical_market_id or "unknown"
-            if mid in opened:
-                continue
-            opened.append(mid)
-            if calls["n"] == 1:
+        def operations_factory(watchlist_arg=None, alerts=None):
+            del alerts
+            if watchlist_arg is not None:
+                ops.watchlist = watchlist_arg
+            return ops
+
+        monkeypatch.setattr(paper_api, "get_paper_operations_service", operations_factory)
+        real_persist = paper_api._persist_decision
+        persist_calls = {"n": 0}
+
+        def persist_after_open_then_fail_once(decision_arg: Any, **kwargs: Any) -> None:
+            real_persist(decision_arg, **kwargs)
+            persist_calls["n"] += 1
+            if persist_calls["n"] == 1:
                 raise RuntimeError("audit_write_failed")
 
-    monkeypatch.setattr(paper_api, "_persist_collection_report", persist)
-    paper_api.persist_scheduled_collection_report(
-        coordinator,
-        report,
-        service=None,  # type: ignore[arg-type]
-        audit=None,  # type: ignore[arg-type]
-        watchlist=None,  # type: ignore[arg-type]
-        scan_lane=ScanLane.HOT,
-    )
-    assert coordinator.status.hot.last_error is None
-    assert coordinator.status.last_error is None
-    assert coordinator.status.hot.persist_ok is False
-    assert coordinator.status.hot.last_persist_error == "audit_write_failed"
-    assert coordinator.status.hot.degraded is True
-    assert "persist/auto-capture failed" in (coordinator.status.hot.operator_summary or "")
-    assert coordinator.status.hot.last_diagnostics is not None
-    assert coordinator.status.hot.last_diagnostics["stages"]["persistence"]["ok"] is False
-    assert opened == ["mkt-hot-leeds-newcastle"]
+        monkeypatch.setattr(paper_api, "_persist_decision", persist_after_open_then_fail_once)
 
-    paper_api.persist_scheduled_collection_report(
-        coordinator,
-        report,
-        service=None,  # type: ignore[arg-type]
-        audit=None,  # type: ignore[arg-type]
-        watchlist=None,  # type: ignore[arg-type]
-        scan_lane=ScanLane.HOT,
-    )
-    assert coordinator.status.hot.last_error is None
-    assert coordinator.status.hot.persist_ok is True
-    assert coordinator.status.hot.last_persist_error is None
-    assert opened == ["mkt-hot-leeds-newcastle"]
-    assert calls["n"] == 2
-    fill_src = inspect.getsource(PaperOperationsService.simulate_fill)
-    assert "existing is not None" in fill_src
-    result_src = inspect.getsource(PaperOperationsService._result_from_existing_trade)
-    assert "idempotent existing paper trade" in result_src
+        paper_api.persist_scheduled_collection_report(
+            coordinator,
+            report,
+            service=scan,
+            audit=audit,
+            watchlist=watchlist,
+            scan_lane=ScanLane.HOT,
+        )
+        active = ops.list_active_trades()
+        assert len(active) == 1
+        trade = active[0]
+        assert trade.state is PaperTradeState.OPEN
+        assert trade.paper_only is True
+        assert trade.places_orders is False
+        filled_legs = [leg for leg in trade.legs if leg.filled_stake > 0]
+        assert filled_legs
+        lock_facts = _native_lock_facts(ledger, trade.trade_id)
+        assert len(lock_facts) == len(filled_legs)
+        journal_facts = _journal_source_facts(ledger, trade.opportunity_id)
+        event_facts = _treasury_event_facts(ledger, trade.trade_id)
+        assert journal_facts
+        assert len(journal_facts) == len(set(journal_facts))
+        assert len(event_facts) == len(set(event_facts))
+        snapshot = ledger.treasury.snapshot()
+        locked_after_open = {
+            (pool.venue.value, pool.native_currency): pool.locked_capital
+            for pool in snapshot.pools
+            if pool.locked_capital > 0
+        }
+        assert locked_after_open
+        assert coordinator.status.hot.last_error is None
+        assert coordinator.status.last_error is None
+        assert coordinator.status.hot.persist_ok is False
+        assert coordinator.status.hot.last_persist_error == "audit_write_failed"
+        assert coordinator.status.hot.degraded is True
+        assert "persist/auto-capture failed" in (coordinator.status.hot.operator_summary or "")
+        assert coordinator.status.hot.last_diagnostics is not None
+        assert coordinator.status.hot.last_diagnostics["stages"]["persistence"]["ok"] is False
+
+        paper_api.persist_scheduled_collection_report(
+            coordinator,
+            report,
+            service=scan,
+            audit=audit,
+            watchlist=watchlist,
+            scan_lane=ScanLane.HOT,
+        )
+        retried = ops.list_active_trades()
+        assert len(retried) == 1
+        assert retried[0].trade_id == trade.trade_id
+        assert retried[0].state is PaperTradeState.OPEN
+        assert persist_calls["n"] == 2
+        assert _native_lock_facts(ledger, trade.trade_id) == lock_facts
+        retry_journal = _journal_source_facts(ledger, trade.opportunity_id)
+        retry_events = _treasury_event_facts(ledger, trade.trade_id)
+        assert retry_journal == journal_facts
+        assert retry_events == event_facts
+        retry_snapshot = ledger.treasury.snapshot()
+        locked_after_retry = {
+            (pool.venue.value, pool.native_currency): pool.locked_capital
+            for pool in retry_snapshot.pools
+            if pool.locked_capital > 0
+        }
+        assert locked_after_retry == locked_after_open
+        assert coordinator.status.hot.last_error is None
+        assert coordinator.status.hot.persist_ok is True
+        assert coordinator.status.hot.last_persist_error is None
+        assert coordinator.status.hot.last_diagnostics["stages"]["persistence"]["ok"] is True
+        assert ledger.reconcile().ok
+    finally:
+        repository.close()
+        ledger.close()
