@@ -6,9 +6,10 @@ PAPER-ONLY. Data class: modelled / fixture. No venue writes.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -64,6 +65,7 @@ from sports_hedge.paper.unwind.models import (
     CapitalScarcityInput,
     OpenPaperLeg,
     OpenPaperPosition,
+    RemainingLockSource,
     ReverseQuote,
     UnwindEvaluationRequest,
     UnwindPolicy,
@@ -88,6 +90,22 @@ def _eval_at(quotes) -> datetime:
 
     times = [quote.quoted_at for quote in quotes if quote.quoted_at is not None]
     return max(times) if times else datetime.now(UTC)
+
+
+def _refresh_quotes(quotes: list[ReverseQuote], *, delta_ms: int = 1) -> list[ReverseQuote]:
+    return [
+        item.model_copy(update={"quoted_at": item.quoted_at + timedelta(milliseconds=delta_ms)})
+        for item in quotes
+    ]
+
+
+def _second_pass(first: list[ReverseQuote], second: list[ReverseQuote] | None = None):
+    refreshed = second if second is not None else _refresh_quotes(first)
+
+    def quotes_for(_position):
+        return refreshed
+
+    return quotes_for
 
 
 def _pm_taker_sell() -> VenueCostSnapshot:
@@ -553,6 +571,99 @@ def test_manager_scarce_opportunity_cost_marks_prediction_sell_eligible(tmp_path
     ledger.close()
 
 
+def test_hold_snapshot_carries_modelled_eta_and_unknown_eta(tmp_path: Path) -> None:
+    ledger = SqlitePaperLedger(tmp_path / "eta.sqlite")
+    watchlist = WatchlistService(SqliteWatchlistRepository(tmp_path / "wl.sqlite"))
+    settings = Settings(paper_auto_unwind_enabled=False)
+    ops = PaperOperationsService(watchlist=watchlist, settings=settings, ledger=ledger)
+    trade = PaperTrade(
+        trade_id="ptrade-eta",
+        opportunity_id="opp-eta",
+        canonical_event_id="evt-1",
+        canonical_market_id="mkt-1",
+        settlement_key=FINGERPRINT,
+        state=PaperTradeState.OPEN,
+        opened_at=NOW,
+        last_updated_at=NOW,
+        guaranteed_profit_gbp_at_open=Decimal("10"),
+        legs=[
+            PaperTradeLeg(
+                venue=VenueName.POLYMARKET,
+                outcome="home",
+                currency="USD",
+                requested_stake=Decimal("50"),
+                filled_stake=Decimal("50"),
+                displayed_odds=Decimal("2.00"),
+                filled_odds=Decimal("2.00"),
+                source_market_id="pm-1x2",
+                source_event_id="pm-evt",
+                source_runner_id="pm-home",
+                opening_action=MarketAction.BUY,
+                canonical_state="home",
+                settlement_fingerprint_key=FINGERPRINT,
+                fill_id="pm-fill",
+                fill_kind=PaperLegFillKind.INTERNAL_SIMULATED,
+            )
+        ],
+        fx_snapshots=[
+            FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"), captured_at=NOW, source="test")
+        ],
+    )
+    ledger.trades.save(trade)
+    manager = PaperPositionManager(ops, settings=settings)
+    quotes = [
+        _quote(
+            venue=VenueName.POLYMARKET,
+            cost=_pm_taker_sell(),
+            currency="USD",
+            runner="pm-home",
+            market="pm-1x2",
+            event="pm-evt",
+            levels=FEE_BEARING_PM_CLOSE,
+        )
+    ]
+    unknown = manager.manage_trade(
+        trade.trade_id,
+        quotes=quotes,
+        policy=UnwindPolicy(max_profit_give_up_gbp=Decimal("0"), max_execution_risk=100),
+        auto_unwind=False,
+        now=NOW,
+    )
+    assert unknown.snapshot.recommendation is UnwindRecommendation.HOLD
+    assert unknown.snapshot.hold_pnl_gbp == Decimal("10")
+    assert unknown.snapshot.validated_exit_pnl_gbp is not None
+    assert unknown.snapshot.unwind_cost_gbp is not None and unknown.snapshot.unwind_cost_gbp > 0
+    assert unknown.snapshot.remaining_lock_basis is RemainingLockSource.UNKNOWN
+    assert unknown.snapshot.remaining_lock_minutes is None
+    assert unknown.snapshot.normal_release_context == "after authoritative settlement"
+    assert unknown.snapshot.remaining_lock_advisory is True
+    assert unknown.snapshot.spendable is False
+    ops._plans[trade.opportunity_id] = SimpleNamespace(
+        decision=SimpleNamespace(
+            allocation=SimpleNamespace(
+                expected_lock_duration_hours=Decimal("1.5"),
+                expected_lock_basis="modelled remaining elapsed",
+                estimated_time_to_release=SimpleNamespace(confidence=Decimal("0.40")),
+            )
+        )
+    )
+    modelled = manager.manage_trade(
+        trade.trade_id,
+        quotes=quotes,
+        policy=UnwindPolicy(max_profit_give_up_gbp=Decimal("0"), max_execution_risk=100),
+        auto_unwind=False,
+        now=NOW,
+    )
+    assert modelled.snapshot.recommendation is UnwindRecommendation.HOLD
+    assert modelled.snapshot.remaining_lock_basis is RemainingLockSource.MODELLED
+    assert modelled.snapshot.remaining_lock_minutes == Decimal("90")
+    assert modelled.snapshot.remaining_lock_confidence == Decimal("0.40")
+    assert modelled.snapshot.remaining_lock_advisory is True
+    assert modelled.snapshot.normal_release_context == "after authoritative settlement"
+    assert modelled.snapshot.spendable is False
+    ledger.close()
+
+
 def test_insufficient_depth_stale_unknown_fx_and_partial_leg_fail_closed() -> None:
     engine = PaperUnwindEngine()
     mb = _open_leg(
@@ -712,9 +823,10 @@ def test_auto_unwind_second_revalidation_abort_and_no_treasury_mutation(tmp_path
         bad = [
             quote.model_copy(
                 update={
+                    "quoted_at": quote.quoted_at + timedelta(milliseconds=1),
                     "levels": [
                         BookLevel(decimal_odds=Decimal("8.00"), available_stake=Decimal("1"))
-                    ]
+                    ],
                 }
             )
             for quote in good
@@ -755,6 +867,71 @@ def test_auto_unwind_second_revalidation_abort_and_no_treasury_mutation(tmp_path
         ledger.close()
 
 
+def test_same_timestamp_second_pass_cannot_auto_close(tmp_path: Path) -> None:
+    demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
+    try:
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        trade = opened.trade
+        assert trade is not None
+        quotes = tighten_reverse_quotes(opened.quotes)
+        before = {
+            (pool.venue, pool.native_currency): (pool.available_cash, pool.locked_capital)
+            for pool in ledger.treasury.snapshot().pools
+        }
+
+        def quotes_for(_position):
+            return quotes
+
+        result = manager.manage_trade(
+            trade.trade_id,
+            quotes_for=quotes_for,
+            policy=AUTO_UNWIND_POLICY,
+            scarcity=CapitalScarcityInput(pressure=CapitalPressure.ABUNDANT),
+            auto_unwind=True,
+            now=_eval_at(quotes),
+        )
+        assert result.mutated is False
+        assert result.aborted_reason == "second_revalidation_not_fresh"
+        persisted = ops.trades.get(trade.trade_id)
+        assert persisted is not None
+        assert persisted.state is PaperTradeState.OPEN
+        assert persisted.close_fills == []
+        after = {
+            (pool.venue, pool.native_currency): (pool.available_cash, pool.locked_capital)
+            for pool in ledger.treasury.snapshot().pools
+        }
+        assert after == before
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_missing_second_pass_quotes_cannot_auto_close(tmp_path: Path) -> None:
+    demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
+    try:
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        trade = opened.trade
+        assert trade is not None
+        quotes = tighten_reverse_quotes(opened.quotes)
+        result = manager.manage_trade(
+            trade.trade_id,
+            quotes=quotes,
+            policy=AUTO_UNWIND_POLICY,
+            scarcity=CapitalScarcityInput(pressure=CapitalPressure.ABUNDANT),
+            auto_unwind=True,
+            now=_eval_at(quotes),
+        )
+        assert result.mutated is False
+        assert result.aborted_reason == "second_revalidation_missing_reverse_quote"
+        persisted = ops.trades.get(trade.trade_id)
+        assert persisted is not None
+        assert persisted.state is PaperTradeState.OPEN
+        assert persisted.close_fills == []
+    finally:
+        repository.close()
+        ledger.close()
+
+
 def test_auto_unwind_releases_once_and_survives_restart(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
@@ -767,6 +944,7 @@ def test_auto_unwind_releases_once_and_survives_restart(tmp_path: Path) -> None:
         first = manager.manage_trade(
             trade.trade_id,
             quotes=quotes,
+            quotes_for=_second_pass(quotes),
             policy=policy,
             scarcity=scarcity,
             auto_unwind=True,
@@ -800,6 +978,7 @@ def test_auto_unwind_releases_once_and_survives_restart(tmp_path: Path) -> None:
         second = manager.manage_trade(
             trade.trade_id,
             quotes=quotes,
+            quotes_for=_second_pass(quotes),
             policy=policy,
             scarcity=scarcity,
             auto_unwind=True,
@@ -860,6 +1039,7 @@ def test_concurrent_cycles_produce_one_unwind(tmp_path: Path) -> None:
             result = manager.manage_trade(
                 trade.trade_id,
                 quotes=quotes,
+                quotes_for=_second_pass(quotes),
                 policy=policy,
                 scarcity=scarcity,
                 auto_unwind=True,
@@ -897,6 +1077,7 @@ def test_unwind_then_settlement_remain_mutually_exclusive(tmp_path: Path) -> Non
         manager.manage_trade(
             trade.trade_id,
             quotes=quotes,
+            quotes_for=_second_pass(quotes),
             policy=AUTO_UNWIND_POLICY,
             scarcity=CapitalScarcityInput(pressure=CapitalPressure.ABUNDANT),
             auto_unwind=True,
@@ -1132,10 +1313,9 @@ def test_paper_only_boundary_and_feature_gate_default() -> None:
     health = TestClient(app).get("/health").json()
     assert health["execution_enabled"] is False
     assert health["paper_auto_unwind_enabled"] is False
-    start_ps1 = Path("/workspace/scripts/windows/Start-SportsHedge-Demo.ps1").read_text(
-        encoding="utf-8"
-    )
-    assert "PAPER_AUTO_UNWIND_ENABLED" not in start_ps1
+    start_ps1 = Path(__file__).resolve().parents[2] / "scripts" / "windows" / "Start-SportsHedge-Demo.ps1"
+    assert start_ps1.is_file()
+    assert "PAPER_AUTO_UNWIND_ENABLED" not in start_ps1.read_text(encoding="utf-8")
 
 
 def test_position_management_api_seam(tmp_path: Path) -> None:
@@ -1163,6 +1343,9 @@ def test_position_management_api_seam(tmp_path: Path) -> None:
         assert body[0]["paper_only"] is True
         assert body[0]["places_orders"] is False
         assert body[0]["spendable"] is False
+        assert body[0]["normal_release_context"] == "after authoritative settlement"
+        assert body[0]["remaining_lock_advisory"] is True
+        assert "remaining_lock_basis" in body[0]
         one = client.get(f"/paper/trades/{trade.trade_id}/position-management")
         assert one.status_code == 200
         assert one.json()["recommendation"] in {"HOLD", "UNWIND_ELIGIBLE", "UNWIND_NOT_SAFE"}
@@ -1185,6 +1368,7 @@ def test_simulated_external_may_be_auto_managed(tmp_path: Path) -> None:
         result = manager.manage_trade(
             trade.trade_id,
             quotes=tighten_reverse_quotes(opened.quotes),
+            quotes_for=_second_pass(tighten_reverse_quotes(opened.quotes)),
             policy=AUTO_UNWIND_POLICY,
             scarcity=CapitalScarcityInput(pressure=CapitalPressure.ABUNDANT),
             auto_unwind=True,

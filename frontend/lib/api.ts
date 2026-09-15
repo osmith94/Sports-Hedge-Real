@@ -1329,6 +1329,14 @@ export type PositionManagementSnapshot = {
   auto_action?: string;
   auto_unwind_enabled?: boolean;
   auto_close_allowed?: boolean;
+  remaining_lock_minutes?: string | number | null;
+  remaining_lock_basis?: string | null;
+  remaining_lock_source_class?: string | null;
+  remaining_lock_confidence?: string | number | null;
+  remaining_lock_detail?: string | null;
+  expected_settlement_at?: string | null;
+  remaining_lock_advisory?: boolean;
+  normal_release_context?: string;
   paper_only?: boolean;
   places_orders?: boolean;
   spendable?: boolean;

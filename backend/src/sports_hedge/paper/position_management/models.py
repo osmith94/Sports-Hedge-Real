@@ -15,7 +15,10 @@ from pydantic import BaseModel, Field, model_validator
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.paper.unwind.models import (
     CapitalPressure,
+    EstimatedTimeToRelease,
     IncrementalCloseCapitalStatus,
+    RemainingLockClass,
+    RemainingLockSource,
     UnwindRecommendation,
 )
 
@@ -57,6 +60,14 @@ class PositionManagementSnapshot(BaseModel):
     close_execution_risk_score: int | None = None
     quote_age_ms: int | None = Field(default=None, ge=0)
     quote_age_basis: str | None = None
+    remaining_lock_minutes: Decimal | None = None
+    remaining_lock_basis: RemainingLockSource = RemainingLockSource.UNKNOWN
+    remaining_lock_source_class: RemainingLockClass = RemainingLockClass.UNKNOWN
+    remaining_lock_confidence: Decimal | None = Field(default=None, ge=0, le=1)
+    remaining_lock_detail: str | None = None
+    expected_settlement_at: datetime | None = None
+    remaining_lock_advisory: bool = True
+    normal_release_context: str = "after authoritative settlement"
     incremental_close_capital_status: IncrementalCloseCapitalStatus = (
         IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
     )
@@ -74,6 +85,25 @@ class PositionManagementSnapshot(BaseModel):
         self.paper_only = True
         self.places_orders = False
         self.spendable = False
+        self.remaining_lock_advisory = True
+        self.normal_release_context = "after authoritative settlement"
+        if self.expected_settlement_at is not None:
+            self.expected_settlement_at = require_aware_instant(
+                self.expected_settlement_at, "expected_settlement_at"
+            )
+        estimate = EstimatedTimeToRelease(
+            remaining_lock_minutes=self.remaining_lock_minutes,
+            expected_settlement_at=self.expected_settlement_at,
+            basis=self.remaining_lock_basis,
+            confidence=self.remaining_lock_confidence,
+            detail=self.remaining_lock_detail,
+        )
+        self.remaining_lock_minutes = estimate.remaining_lock_minutes
+        self.expected_settlement_at = estimate.expected_settlement_at
+        self.remaining_lock_basis = estimate.basis
+        self.remaining_lock_source_class = estimate.source_class
+        self.remaining_lock_confidence = estimate.confidence
+        self.remaining_lock_detail = estimate.detail
         if not self.close_executable:
             self.releasable_native = {}
         return self

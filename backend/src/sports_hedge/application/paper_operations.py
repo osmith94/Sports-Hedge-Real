@@ -1385,10 +1385,13 @@ class PaperOperationsService:
             return position
         minutes = hours * Decimal(60)
         basis_label = allocation.expected_lock_basis or "8C modelled estimate"
+        estimate = getattr(allocation, "estimated_time_to_release", None)
+        confidence = None if estimate is None else getattr(estimate, "confidence", None)
         return position.model_copy(
             update={
                 "remaining_lock_minutes": minutes,
                 "remaining_lock_basis": RemainingLockSource.MODELLED,
+                "remaining_lock_confidence": confidence,
                 "remaining_lock_detail": (
                     f"{basis_label}; advisory only; does not release capital"
                 ),

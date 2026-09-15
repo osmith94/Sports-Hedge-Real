@@ -185,6 +185,7 @@ class PaperPositionManager:
             snapshot = _empty_snapshot(trade_id, occurred, str(exc), auto_unwind_enabled=auto_unwind)
             self._persist_snapshot(trade, snapshot, occurred, audit=True)
             return PositionManagementCycleResult(trade_id=trade_id, snapshot=snapshot)
+        position = self.operations._overlay_modelled_remaining_lock(trade, position)
 
         resolved_quotes = self._resolve_quotes(
             position, quotes_for=quotes_for, quotes=quotes, occurred=occurred
@@ -286,36 +287,29 @@ class PaperPositionManager:
             "automatic paper unwind second revalidation",
         )
         self.operations.trades.save(trade)
-        second_quotes = self._fresh_quotes(
+        second_quotes, fresh_fail = self._fresh_quotes(
             position,
             quotes_for=quotes_for,
-            fallback=first_quotes,
+            first_quotes=first_quotes,
             occurred=occurred,
         )
+        if fresh_fail is not None:
+            return self._abort_revalidation(
+                trade,
+                first,
+                occurred,
+                scarcity,
+                fresh_fail,
+            )
         second = self._evaluate(position, second_quotes, policy, scarcity, occurred)
         abort = _revalidation_abort_reason(first, second)
         if abort is not None:
-            snapshot = snapshot_from_decision(
-                second,
-                evaluated_at=occurred,
-                auto_unwind_enabled=True,
-                auto_close_allowed=True,
-                auto_action=PositionManagementAutoAction.UNWIND_ABORTED,
-                opportunity_cost_detail=scarcity.detail,
-            )
-            snapshot = snapshot.model_copy(update={"decision_reason": abort})
-            self._persist_snapshot(trade, snapshot, occurred, audit=True, extra_detail=abort)
-            self._append_audit(
+            return self._abort_revalidation(
                 trade,
+                second,
                 occurred,
-                PaperTradeAuditEventType.UNWIND_ABORTED,
+                scarcity,
                 abort,
-            )
-            self.operations.trades.save(trade)
-            return PositionManagementCycleResult(
-                trade_id=trade_id,
-                snapshot=snapshot,
-                aborted_reason=abort,
             )
         try:
             self.operations.complete_validated_unwind(
@@ -368,6 +362,44 @@ class PaperPositionManager:
             mutated=True,
         )
 
+    def _abort_revalidation(
+        self,
+        trade: PaperTrade,
+        decision: UnwindDecision,
+        occurred: datetime,
+        scarcity: CapitalScarcityInput,
+        reason: str,
+    ) -> PositionManagementCycleResult:
+        snapshot = snapshot_from_decision(
+            decision,
+            evaluated_at=occurred,
+            auto_unwind_enabled=True,
+            auto_close_allowed=True,
+            auto_action=PositionManagementAutoAction.UNWIND_ABORTED,
+            opportunity_cost_detail=scarcity.detail,
+        )
+        snapshot = snapshot.model_copy(
+            update={
+                "recommendation": UnwindRecommendation.UNWIND_NOT_SAFE,
+                "decision_reason": reason,
+                "close_executable": False,
+                "releasable_native": {},
+            }
+        )
+        self._persist_snapshot(trade, snapshot, occurred, audit=True, extra_detail=reason)
+        self._append_audit(
+            trade,
+            occurred,
+            PaperTradeAuditEventType.UNWIND_ABORTED,
+            reason,
+        )
+        self.operations.trades.save(trade)
+        return PositionManagementCycleResult(
+            trade_id=trade.trade_id,
+            snapshot=snapshot,
+            aborted_reason=reason,
+        )
+
     def _evaluate(
         self,
         position: OpenPaperPosition,
@@ -411,20 +443,21 @@ class PaperPositionManager:
         position: OpenPaperPosition,
         *,
         quotes_for: QuoteProvider | None,
-        fallback: Sequence[ReverseQuote],
+        first_quotes: Sequence[ReverseQuote],
         occurred: datetime,
-    ) -> list[ReverseQuote]:
-        """Second-pass quotes must be rebuilt, not assumed equal to the first pass."""
+    ) -> tuple[list[ReverseQuote], str | None]:
+        """Independent second-pass reverse books. Never reuse first-pass facts."""
 
         if quotes_for is not None:
-            return list(quotes_for(position))
-        rebuilt = reverse_quotes_for_position(
-            position,
-            self.catalog.observations(),
-            cost_resolver=self.cost_resolver,
-            evaluated_at=occurred,
-        )
-        return rebuilt or list(fallback)
+            second = list(quotes_for(position))
+        else:
+            second = reverse_quotes_for_position(
+                position,
+                self.catalog.observations(),
+                cost_resolver=self.cost_resolver,
+                evaluated_at=occurred,
+            )
+        return second, _second_pass_freshness_failure(position, list(first_quotes), second)
 
     def _scarcity_for(
         self,
@@ -529,6 +562,13 @@ def snapshot_from_decision(
         close_execution_risk_score=None if decision.execution_risk is None else decision.execution_risk.score,
         quote_age_ms=max(ages) if ages else None,
         quote_age_basis=bases[0] if bases else None,
+        remaining_lock_minutes=decision.estimated_time_to_release.remaining_lock_minutes,
+        remaining_lock_basis=decision.estimated_time_to_release.basis,
+        remaining_lock_source_class=decision.estimated_time_to_release.source_class,
+        remaining_lock_confidence=decision.estimated_time_to_release.confidence,
+        remaining_lock_detail=decision.estimated_time_to_release.detail,
+        expected_settlement_at=decision.estimated_time_to_release.expected_settlement_at,
+        remaining_lock_advisory=True,
         incremental_close_capital_status=decision.incremental_close_capital_status,
         auto_action=auto_action,
         auto_unwind_enabled=auto_unwind_enabled,
@@ -581,6 +621,34 @@ def _facts_diverged(first: UnwindDecision, second: UnwindDecision) -> bool:
     if first.validated_exit_pnl_gbp != second.validated_exit_pnl_gbp:
         return True
     return False
+
+
+def _quote_identity(quote: ReverseQuote) -> tuple:
+    return (quote.venue, quote.source_market_id, quote.source_runner_id, quote.canonical_outcome)
+
+
+def _second_pass_freshness_failure(
+    position: OpenPaperPosition,
+    first_quotes: Sequence[ReverseQuote],
+    second_quotes: Sequence[ReverseQuote],
+) -> str | None:
+    """Fail closed unless every required leg has a strictly newer reverse book."""
+
+    first_by = {_quote_identity(item): item for item in first_quotes}
+    second_by = {_quote_identity(item): item for item in second_quotes}
+    for leg in position.legs:
+        if leg.filled_size <= 0:
+            continue
+        key = (leg.venue, leg.source_market_id, leg.source_runner_id, leg.canonical_outcome)
+        nxt = second_by.get(key)
+        if nxt is None:
+            return "second_revalidation_missing_reverse_quote"
+        prev = first_by.get(key)
+        if prev is None:
+            continue
+        if nxt.quoted_at <= prev.quoted_at:
+            return "second_revalidation_not_fresh"
+    return None
 
 
 def _empty_snapshot(
