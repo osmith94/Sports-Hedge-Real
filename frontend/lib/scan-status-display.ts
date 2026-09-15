@@ -36,9 +36,13 @@ export function fastScanCopy(
   const leftover = hot.not_evaluated_count
     ? ` · partial (${hot.not_evaluated_count} not evaluated)`
     : "";
+  const persist =
+    hot.persist_ok === false || hot.last_persist_error
+      ? " · persist/auto-capture failed"
+      : "";
   return {
     label: "Fast scan",
-    detail: `${when} · ${durationLabel(hot.last_duration_ms)} · next ${nextDueLabel(hot.next_due_at, now)} · ${hot.fixture_count} hot${leftover}`,
+    detail: `${when} · ${durationLabel(hot.last_duration_ms)} · next ${nextDueLabel(hot.next_due_at, now)} · ${hot.fixture_count} hot${leftover}${persist}`,
   };
 }
 
@@ -58,9 +62,13 @@ export function fullSweepCopy(
   const budget = universe.generation_budget_seconds ?? 150;
   const leftover = universe.not_evaluated_count ?? 0;
   const evaluated = universe.evaluated_count ?? 0;
+  const persist =
+    universe.persist_ok === false || universe.last_persist_error
+      ? " · persist/auto-capture failed"
+      : "";
   return {
     label: "Full sweep",
-    detail: `chunk ${durationLabel(universe.chunk_last_duration_ms ?? universe.last_duration_ms)} · gen ${Math.round(work)}/${Math.round(budget)}s · next HOT in ${nextDueLabel(hot?.next_due_at, now)} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${leftover} not evaluated`,
+    detail: `chunk ${durationLabel(universe.chunk_last_duration_ms ?? universe.last_duration_ms)} · gen ${Math.round(work)}/${Math.round(budget)}s · next HOT in ${nextDueLabel(hot?.next_due_at, now)} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${leftover} not evaluated${persist}`,
   };
 }
 

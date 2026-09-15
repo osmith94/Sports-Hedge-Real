@@ -49,8 +49,43 @@ describe("dual cadence operator copy", () => {
     assert.match(lines[0], /Fast scan/);
     assert.match(lines[1], /Full sweep/);
     assert.doesNotMatch(lines.join(" "), /^Last scan /);
-    assert.match(fastScanCopy(status(), now).detail, /7 hot/);
+    assert.match(fastScanCopy(status(), now).detail, /partial \(2 not evaluated\)/);
+    assert.doesNotMatch(fastScanCopy(status(), now).detail, /scan_cycle_timeout/);
     assert.match(fullSweepCopy(status(), now).detail, /104 universe/);
+    const persistFailed = status({
+      last_error: null,
+      hot: {
+        cadence_seconds: 30,
+        cycle_timeout_seconds: 25,
+        last_completed_at: "2026-09-14T12:00:00Z",
+        last_duration_ms: 4100,
+        next_due_at: "2026-09-14T12:00:18Z",
+        fixture_count: 7,
+        not_evaluated_count: 2,
+        last_error: null,
+        persist_ok: false,
+        last_persist_error: "audit_write_failed",
+      },
+    });
+    assert.match(fastScanCopy(persistFailed, now).detail, /persist\/auto-capture failed/);
+    assert.doesNotMatch(fastScanCopy(persistFailed, now).detail, /scan_cycle_timeout/);
+    const universePersistFailed = status({
+      last_error: null,
+      universe: {
+        cadence_seconds: 180,
+        generation_budget_seconds: 150,
+        generation_work_used_s: 41,
+        chunk_last_duration_ms: 8000,
+        fixture_count: 104,
+        evaluated_count: 60,
+        not_evaluated_count: 44,
+        last_error: null,
+        persist_ok: false,
+        last_persist_error: "audit_write_failed",
+      },
+    });
+    assert.match(fullSweepCopy(universePersistFailed, now).detail, /persist\/auto-capture failed/);
+    assert.doesNotMatch(fullSweepCopy(universePersistFailed, now).detail, /scan_cycle_timeout/);
   });
 
     it("health bar and scan note no longer ship a single Last scan line", () => {

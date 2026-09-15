@@ -154,6 +154,87 @@ SCAN_FINALISATION_RESERVE_SECONDS = 4.0
 MIN_PROVIDER_WAIT_SECONDS = 0.05
 PROVIDER_CANCEL_DRAIN_SECONDS = 0.05
 
+DIAGNOSTIC_PROVIDERS = ("matchbook", "polymarket", "kalshi")
+DIAGNOSTIC_STAGES = (
+    "event_lookup",
+    "market_discovery",
+    "book_depth",
+    "mapping_equivalence",
+    "fees_fx_risk",
+    "solver_allocation",
+    "current_state_finalization",
+    "persistence",
+)
+_PROVIDER_CALL_STAGE = {
+    "list_markets": "market_discovery",
+    "get_order_book": "book_depth",
+}
+_WALL_STAGE_NAME = {
+    "event_discovery": "event_lookup",
+    "normalize_match": "mapping_equivalence",
+}
+
+
+def _empty_timing() -> dict[str, int]:
+    return {"calls": 0, "elapsed_ms": 0, "timeouts": 0, "cancels": 0}
+
+
+class ScanAttribution:
+    """Wave-A Item 2: provider/stage elapsed, timeouts and cancels."""
+
+    def __init__(self) -> None:
+        self.providers = {name: _empty_timing() for name in DIAGNOSTIC_PROVIDERS}
+        self.stages = {name: _empty_timing() for name in DIAGNOSTIC_STAGES}
+
+    def add(
+        self,
+        *,
+        venue: str | None = None,
+        stage: str | None = None,
+        elapsed_ms: int = 0,
+        timed_out: bool = False,
+        cancelled: bool = False,
+        calls: int = 1,
+    ) -> None:
+        elapsed_ms = max(0, int(elapsed_ms))
+        mapped = _PROVIDER_CALL_STAGE.get(stage or "", stage)
+        for bucket in self._buckets(venue, mapped):
+            bucket["calls"] += calls
+            bucket["elapsed_ms"] += elapsed_ms
+            if timed_out:
+                bucket["timeouts"] += 1
+            if cancelled:
+                bucket["cancels"] += 1
+
+    def _buckets(self, venue: str | None, stage: str | None) -> list[dict[str, int]]:
+        found: list[dict[str, int]] = []
+        if venue in self.providers:
+            found.append(self.providers[venue])
+        if stage in self.stages:
+            found.append(self.stages[stage])
+        return found
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "providers": {name: dict(bucket) for name, bucket in self.providers.items()},
+            "stages": {name: dict(bucket) for name, bucket in self.stages.items()},
+        }
+
+
+def acknowledge_task_cancellation() -> None:
+    """Clear a swallowed CancelledError so later awaits (HTTP aclose) can run.
+
+    Python 3.11+ keeps Task.cancelling() > 0 after catching CancelledError.
+    The next await then re-raises, which would discard a leftover CollectionReport
+    and surface as scan_cycle_timeout.
+    """
+
+    task = asyncio.current_task()
+    if task is None or not hasattr(task, "uncancel"):
+        return
+    while task.cancelling() > 0:
+        task.uncancel()
+
 
 class DiscoveredFixture(BaseModel):
     source: VenueName = VenueName.MATCHBOOK
@@ -335,6 +416,9 @@ class ReadOnlyCrossVenueCollector:
         self._stage_ms: dict[str, int] = {}
         self._timeouts_by_stage: dict[str, int] = {}
         self._provider_cancels = 0
+        self._provider_calls = 0
+        self._inflight_orphaned = 0
+        self._attribution = ScanAttribution()
 
     async def collect_and_scan(
         self,
@@ -392,6 +476,9 @@ class ReadOnlyCrossVenueCollector:
         self._stage_ms = {}
         self._timeouts_by_stage = {}
         self._provider_cancels = 0
+        self._provider_calls = 0
+        self._inflight_orphaned = 0
+        self._attribution = ScanAttribution()
         self._inflight = set()
         if cycle_budget is None:
             reserve = 0.0
@@ -569,8 +656,8 @@ class ReadOnlyCrossVenueCollector:
             }
             with self._stage("cluster_scan"):
                 for index, cluster in enumerate(clusters):
-                    if self._deadline_reached():
-                        self._cancel_inflight()
+                    if self._deadline_reached() or self._hard_deadline_reached():
+                        await self._cancel_inflight()
                         _append_deadline_leftovers(
                             clusters[index:],
                             discovered_fixtures=discovered_fixtures,
@@ -604,7 +691,8 @@ class ReadOnlyCrossVenueCollector:
                         fixture_markets[fixture.canonical_event_id] = inventory
         except asyncio.CancelledError:
             cancelled = True
-            self._cancel_inflight()
+            acknowledge_task_cancellation()
+            await self._cancel_inflight()
             LOGGER.warning(
                 "scan_cancelled_assembling_partial fixtures=%s inflight=%s",
                 len(discovered_fixtures),
@@ -654,6 +742,9 @@ class ReadOnlyCrossVenueCollector:
     def _deadline_reached(self) -> bool:
         return self._op_soft_deadline is not None and monotonic() >= self._op_soft_deadline
 
+    def _hard_deadline_reached(self) -> bool:
+        return self._op_deadline is not None and monotonic() >= self._op_deadline
+
     def _provider_budget_exhausted(self) -> bool:
         remaining = self._remaining_soft()
         return remaining is not None and remaining < MIN_PROVIDER_WAIT_SECONDS
@@ -669,14 +760,18 @@ class ReadOnlyCrossVenueCollector:
         return max(0.0, self._op_deadline - monotonic())
 
     def _timeout_budget(self, requested: float) -> float:
-        """Cap a provider wait to the remaining soft scan budget, not the hard grace."""
+        """Cap a provider wait to remaining soft budget and the hard collector deadline."""
 
         remaining = self._remaining_soft()
         if remaining is None:
-            return requested
-        if remaining < MIN_PROVIDER_WAIT_SECONDS:
+            remaining = requested
+        elif remaining < MIN_PROVIDER_WAIT_SECONDS:
             return 0.0
-        return min(requested, remaining)
+        hard = self._remaining_assembly()
+        capped = min(requested, remaining, hard)
+        if capped < MIN_PROVIDER_WAIT_SECONDS:
+            return 0.0
+        return capped
 
     @contextmanager
     def _stage(self, name: str) -> Iterator[None]:
@@ -686,13 +781,38 @@ class ReadOnlyCrossVenueCollector:
         finally:
             duration_ms = max(0, int((monotonic() - started) * 1000))
             self._stage_ms[name] = duration_ms
+            mapped = _WALL_STAGE_NAME.get(name)
+            if mapped is not None:
+                self._attribution.add(stage=mapped, elapsed_ms=duration_ms, calls=1)
             LOGGER.info("scan_stage %s duration_ms=%s", name, duration_ms)
 
-    def _cancel_inflight(self) -> None:
+    def _request_cancel(self, task: asyncio.Task[Any]) -> None:
+        if task.done():
+            return
+        task.cancel()
+        self._provider_cancels += 1
+
+    def _count_orphan_after_drain(self, task: asyncio.Task[Any]) -> None:
+        """Orphans are tasks still pending after drain, not every cancel request."""
+
+        if not task.done():
+            self._inflight_orphaned += 1
+
+    async def _cancel_inflight(self) -> None:
+        pending: list[asyncio.Task[Any]] = []
         for task in list(self._inflight):
             if not task.done():
-                task.cancel()
-                self._provider_cancels += 1
+                self._request_cancel(task)
+                pending.append(task)
+            else:
+                self._inflight.discard(task)
+        if pending:
+            drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
+            if drain > 0:
+                await asyncio.wait(set(pending), timeout=drain)
+        for task in pending:
+            self._count_orphan_after_drain(task)
+            self._inflight.discard(task)
 
     async def _await_bounded(self, coro: Any, timeout: float) -> tuple[Any, bool]:
         """Wait up to timeout, then cancel without blocking on uncooperative providers."""
@@ -702,24 +822,37 @@ class ReadOnlyCrossVenueCollector:
             if callable(close):
                 close()
             return None, True
+        timeout = min(timeout, self._remaining_assembly())
+        if timeout <= 0:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            return None, True
         task = asyncio.create_task(coro)
         self._inflight.add(task)
+        self._provider_calls += 1
         try:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
             if task in done:
                 self._inflight.discard(task)
                 return task.result(), False
-            task.cancel()
-            self._provider_cancels += 1
+            self._request_cancel(task)
             drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
             if drain > 0:
                 await asyncio.wait({task}, timeout=drain)
             if task.done() and not task.cancelled():
                 self._inflight.discard(task)
                 return task.result(), False
+            self._count_orphan_after_drain(task)
+            self._inflight.discard(task)
             return None, True
         except asyncio.CancelledError:
-            task.cancel()
+            self._request_cancel(task)
+            drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
+            if drain > 0 and not task.done():
+                await asyncio.wait({task}, timeout=drain)
+            self._count_orphan_after_drain(task)
+            self._inflight.discard(task)
             raise
         finally:
             if task.done():
@@ -735,13 +868,21 @@ class ReadOnlyCrossVenueCollector:
                 if callable(close):
                     close()
             return default
+        # Wrapper tasks only; inner `_await_bounded` owns provider call/cancel/orphan counts.
         tasks = [asyncio.create_task(coro) for coro in coros]
-        for task in tasks:
-            self._inflight.add(task)
-        done, pending = await asyncio.wait(tasks, timeout=remaining)
+        try:
+            _done, pending = await asyncio.wait(tasks, timeout=remaining)
+        except asyncio.CancelledError:
+            still_pending = [task for task in tasks if not task.done()]
+            for task in still_pending:
+                task.cancel()
+            if still_pending:
+                drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
+                if drain > 0:
+                    await asyncio.wait(set(still_pending), timeout=drain)
+            raise
         for task in pending:
             task.cancel()
-            self._provider_cancels += 1
         if pending:
             drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
             if drain > 0:
@@ -749,7 +890,6 @@ class ReadOnlyCrossVenueCollector:
         results: list[Any] = []
         defaults = default if isinstance(default, tuple) and len(default) == len(tasks) else None
         for index, task in enumerate(tasks):
-            self._inflight.discard(task)
             if task.done() and not task.cancelled() and task.exception() is None:
                 results.append(task.result())
                 continue
@@ -793,18 +933,38 @@ class ReadOnlyCrossVenueCollector:
         default: Any,
     ) -> tuple[Any, bool]:
         timeout = self._timeout_budget(self._op_provider_timeout)
+        started = monotonic()
         if timeout <= 0:
             close = getattr(coro, "close", None)
             if callable(close):
                 close()
+            self._record_timeout(stage, venue, source_id)
+            self._attribution.add(
+                venue=venue.value,
+                stage=stage,
+                elapsed_ms=0,
+                timed_out=True,
+            )
             return default, True
         try:
             payload, timed_out = await self._await_bounded(coro, timeout)
+            self._attribution.add(
+                venue=venue.value,
+                stage=stage,
+                elapsed_ms=max(0, int((monotonic() - started) * 1000)),
+                timed_out=timed_out,
+            )
             if timed_out:
                 self._record_timeout(stage, venue, source_id)
                 return default, True
             return payload, False
         except asyncio.CancelledError:
+            self._attribution.add(
+                venue=venue.value,
+                stage=stage,
+                elapsed_ms=max(0, int((monotonic() - started) * 1000)),
+                cancelled=True,
+            )
             raise
         except Exception as exc:
             self._op_issues.append(
@@ -825,16 +985,31 @@ class ReadOnlyCrossVenueCollector:
         venue_health: dict[str, str],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         timeout = self._timeout_budget(self._op_venue_timeout)
+        started = monotonic()
         if timeout <= 0:
             self._record_timeout("list_events", venue)
+            self._attribution.add(
+                venue=venue.value,
+                elapsed_ms=0,
+                timed_out=True,
+            )
             return [], {}
         try:
             payload, timed_out = await self._await_bounded(client.list_events(**filters), timeout)
+            self._attribution.add(
+                venue=venue.value,
+                elapsed_ms=max(0, int((monotonic() - started) * 1000)),
+                timed_out=timed_out,
+            )
             if timed_out:
                 self._record_timeout("list_events", venue)
                 return [], {}
         except asyncio.CancelledError:
-            self._record_timeout("list_events", venue)
+            self._attribution.add(
+                venue=venue.value,
+                elapsed_ms=max(0, int((monotonic() - started) * 1000)),
+                cancelled=True,
+            )
             raise
         except Exception as exc:
             issues.append(CollectorIssue(stage="list_events", venue=venue, detail=str(exc)))
@@ -917,6 +1092,13 @@ class ReadOnlyCrossVenueCollector:
             matching_venues.append(VenueName.KALSHI)
         total_ms = max(0, int((monotonic() - started_mono) * 1000))
         assembly_ms = max(0, int((monotonic() - assembly_started) * 1000))
+        self._attribution.add(
+            stage="current_state_finalization",
+            elapsed_ms=assembly_ms,
+            calls=1,
+        )
+        attributed = self._attribution.snapshot()
+        timeout_count = sum(bucket["timeouts"] for bucket in attributed["providers"].values())
         diagnostics = {
             "event_discovery_ms": self._stage_ms.get("event_discovery", 0),
             "normalize_match_ms": self._stage_ms.get("normalize_match", 0),
@@ -930,8 +1112,17 @@ class ReadOnlyCrossVenueCollector:
             "clusters_total": len(clusters),
             "clusters_evaluated": evaluated_n,
             "clusters_leftover": leftover_n,
+            "evaluated_count": evaluated_n,
+            "not_evaluated_count": leftover_n,
+            "timeout_count": timeout_count,
+            "cancel_count": self._provider_cancels,
+            "providers": attributed["providers"],
+            "stages": attributed["stages"],
             "provider_timeouts": dict(self._timeouts_by_stage),
             "provider_cancels": self._provider_cancels,
+            "provider_calls": self._provider_calls,
+            "inflight_orphaned": self._inflight_orphaned,
+            "inflight_live": len(self._inflight),
             "scan_lane": scan_lane,
             "resume_cursor": resume_cursor,
             "identity_scope": [
@@ -1009,6 +1200,15 @@ class ReadOnlyCrossVenueCollector:
         int,
         int,
     ]:
+        if self._hard_deadline_reached() or self._provider_budget_exhausted():
+            leftover = _fixture_from_cluster(
+                cluster,
+                seen_at=seen_at,
+                polymarket_events=polymarket_events,
+                queried_series_ids=queried_series_ids,
+                leftover=True,
+            )
+            return leftover, [], [], {}, 0, 0
         fixture = _fixture_from_cluster(
             cluster,
             seen_at=seen_at,
@@ -1273,6 +1473,22 @@ class ReadOnlyCrossVenueCollector:
                     right_obs,
                     fixture_canonical_event_id=fixture.canonical_event_id,
                     **scan_kwargs,
+                )
+                phases = getattr(self.paper_scan, "last_scan_phase_ms", None) or {}
+                self._attribution.add(
+                    stage="mapping_equivalence",
+                    elapsed_ms=int(phases.get("mapping_equivalence", 0)),
+                    calls=1,
+                )
+                self._attribution.add(
+                    stage="fees_fx_risk",
+                    elapsed_ms=int(phases.get("fees_fx_risk", 0)),
+                    calls=1,
+                )
+                self._attribution.add(
+                    stage="solver_allocation",
+                    elapsed_ms=int(phases.get("solver_allocation", 0)),
+                    calls=1,
                 )
                 if mb_event is not None:
                     state = matchbook_fixture_state(mb_event.raw)
