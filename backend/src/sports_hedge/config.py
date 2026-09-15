@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     # process so qualifying LIVE_PAPER decisions auto-capture via
     # persist_triggered_chain. Not a venue order path; fixture replay does not inherit.
     paper_autofill_enabled: bool = False
+    # Paper-only automatic unwind after a second revalidation. Default off.
+    # Windows launcher must not enable this until the Wave-B lane is reviewed.
+    paper_auto_unwind_enabled: bool = False
     watchlist_db_path: str = "./data/near_arb_watchlist.sqlite"
     paper_live_refresh_enabled: bool = False
     paper_live_refresh_interval_seconds: int = Field(default=30, ge=15, le=300)

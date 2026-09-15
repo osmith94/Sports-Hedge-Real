@@ -108,6 +108,7 @@ class LiveRefreshStatus(BaseModel):
     )
     server_loop_enabled: bool
     paper_autofill_enabled: bool = False
+    paper_auto_unwind_enabled: bool = False
     interval_seconds: int = Field(ge=15, le=300)
     cycle_in_progress: bool = False
     last_started_at: datetime | None = None
@@ -207,6 +208,7 @@ class LiveRefreshCoordinator:
             update={
                 "server_loop_enabled": resolved.paper_live_refresh_enabled,
                 "paper_autofill_enabled": resolved.paper_autofill_enabled,
+                "paper_auto_unwind_enabled": resolved.paper_auto_unwind_enabled,
                 "interval_seconds": hot_cadence,
                 "hot": self.status.hot.model_copy(
                     update={

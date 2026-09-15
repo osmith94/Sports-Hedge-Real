@@ -41,6 +41,33 @@ function riskTooltip(snapshot: PaperTrade["entry_risk"]): string {
   return bits.join(" · ") || "Execution-time risk snapshot";
 }
 
+function managementLabel(trade: PaperTrade): string {
+  const snapshot = trade.position_management;
+  if (!snapshot) return "—";
+  const state =
+    snapshot.recommendation === "UNWIND_ELIGIBLE"
+      ? "UNWIND ELIGIBLE"
+      : snapshot.recommendation === "UNWIND_NOT_SAFE"
+        ? "NOT SAFE"
+        : "HOLD";
+  return state;
+}
+
+function managementHint(trade: PaperTrade): string {
+  const snapshot = trade.position_management;
+  if (!snapshot) return "No position-management evaluation yet.";
+  const bits = [
+    `hold ${money(snapshot.hold_pnl_gbp)}`,
+    snapshot.validated_exit_pnl_gbp != null ? `close-now ${money(snapshot.validated_exit_pnl_gbp)}` : null,
+    snapshot.unwind_cost_gbp != null ? `give-up ${money(snapshot.unwind_cost_gbp)}` : null,
+    snapshot.capital_pressure ? `capital ${snapshot.capital_pressure}` : null,
+    snapshot.opportunity_cost_gbp != null ? `opp-cost ${money(snapshot.opportunity_cost_gbp)}` : null,
+    snapshot.quote_age_ms != null ? `age ${snapshot.quote_age_ms}ms` : null,
+    snapshot.decision_reason?.replaceAll("_", " "),
+  ].filter(Boolean);
+  return bits.join(" · ");
+}
+
 function nativeLocked(trade: PaperTrade): string {
   const parts = Object.entries(trade.capital_locked_native).map(([currency, amount]) =>
     money(amount, currency === "USD" ? "USD" : "GBP"),
@@ -246,13 +273,14 @@ function TradeTable({
               <th>Risk at entry</th>
               <th>Guaranteed at open</th>
               <th>Realised P&L</th>
+              <th>Management</th>
               <th>Status</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={8} className="empty-live">{empty}</td>
+                <td colSpan={9} className="empty-live">{empty}</td>
               </tr>
             ) : (
               rows.map((trade) => (
@@ -279,13 +307,16 @@ function TradeTable({
                     <td title={riskTooltip(trade.entry_risk)}>{riskAtEntry(trade)}</td>
                     <td>{money(trade.guaranteed_profit_gbp_at_open)}</td>
                     <td>{trade.state === "CLOSED" ? money(trade.realised_pnl_gbp) : "—"}</td>
+                    <td title={managementHint(trade)}>
+                      <span className="status-badge">{managementLabel(trade)}</span>
+                    </td>
                     <td>
                       <span className="status-badge">{trade.state}</span>
                     </td>
                   </tr>
                   {openId === trade.trade_id && detail?.trade_id === trade.trade_id ? (
                     <tr>
-                      <td colSpan={8}>
+                      <td colSpan={9}>
                         <AuditBlock trade={detail} busy={busy} onSettle={onSettle} />
                       </td>
                     </tr>

@@ -284,9 +284,11 @@ def apply_closing_action_costs(
             deferred_profit_commission=True,
         )
     if basis is FeeBasis.FORMULA:
-        raise CostRuleError(
-            "unsupported_fee_basis",
-            "FORMULA fee basis has no authorised close rule registered for this snapshot",
+        return _formula_close_economics(
+            snapshot,
+            action=action,
+            gross_proceeds=gross_proceeds,
+            matched_stake=matched_stake,
         )
     fee = Decimal("0")
     if basis is FeeBasis.PAYOUT:
@@ -311,4 +313,69 @@ def apply_closing_action_costs(
         net_proceeds=gross_proceeds - fee,
         fee_snapshot_id=snapshot.snapshot_id,
         fee_basis=basis,
+    )
+
+
+def _formula_close_economics(
+    snapshot: VenueCostSnapshot,
+    *,
+    action: MarketAction,
+    gross_proceeds: Decimal,
+    matched_stake: Decimal,
+) -> EffectiveCloseEconomics:
+    """Price an authorised FORMULA SELL/LAY close from shares and proceeds.
+
+    Polymarket and Kalshi taker formulas are defined on contracts C and price p.
+    A SELL close supplies C as matched size and proceeds as C × p. Reusing the
+    BUY stake/odds interface would be wrong if those quantities were missing.
+    """
+
+    from sports_hedge.fees.kalshi import KALSHI_QUADRATIC_FORMULA, apply_kalshi_quadratic
+    from sports_hedge.fees.polymarket import POLYMARKET_TAKER_FORMULA, apply_polymarket_taker
+
+    if matched_stake <= 0:
+        raise CostRuleError(
+            "invalid_stake",
+            "FORMULA close requires positive matched size (shares or contracts)",
+        )
+    if gross_proceeds <= 0:
+        raise CostRuleError(
+            "invalid_stake",
+            "FORMULA close requires positive proceeds so contract price p is defined",
+        )
+    price = gross_proceeds / matched_stake
+    if price <= 0 or price >= 1:
+        raise CostRuleError(
+            "unsupported_fee_basis",
+            "FORMULA close price p must be in (0, 1)",
+        )
+    odds = Decimal("1") / price
+    try:
+        if snapshot.formula_name == KALSHI_QUADRATIC_FORMULA:
+            fee, _ = apply_kalshi_quadratic(
+                snapshot,
+                gross_decimal_odds=odds,
+                stake=gross_proceeds,
+            )
+        elif snapshot.formula_name == POLYMARKET_TAKER_FORMULA:
+            fee, _ = apply_polymarket_taker(
+                snapshot,
+                gross_decimal_odds=odds,
+                stake=gross_proceeds,
+            )
+        else:
+            raise CostRuleError(
+                "unsupported_fee_basis",
+                "FORMULA fee basis has no authorised close rule registered for this snapshot",
+            )
+    except ValueError as exc:
+        raise CostRuleError("unsupported_fee_basis", str(exc)) from exc
+    return EffectiveCloseEconomics(
+        action=action,
+        venue_fee=fee,
+        other_known_leg_costs=Decimal("0"),
+        gross_proceeds=gross_proceeds,
+        net_proceeds=gross_proceeds - fee,
+        fee_snapshot_id=snapshot.snapshot_id,
+        fee_basis=snapshot.fee_basis,
     )

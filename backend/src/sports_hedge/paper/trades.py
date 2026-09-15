@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -61,6 +62,9 @@ class PaperTradeAuditEventType(StrEnum):
     UNWIND_COMPLETED = "unwind_completed"
     UNWIND_IDEMPOTENT = "unwind_idempotent"
     UNWIND_RISK_RECORDED = "unwind_risk_recorded"
+    POSITION_MANAGEMENT_CHANGED = "position_management_changed"
+    UNWIND_ATTEMPTED = "unwind_attempted"
+    UNWIND_ABORTED = "unwind_aborted"
     DEMO_STORE_REINITIALIZED = "demo_store_reinitialized"
 
 
@@ -177,6 +181,9 @@ class PaperTrade(BaseModel):
     entry_risk: PaperExecutionRiskSnapshot | None = None
     close_risks: list[PaperExecutionRiskSnapshot] = Field(default_factory=list)
     close_fills: list[PaperCloseFill] = Field(default_factory=list)
+    # Runtime type is PositionManagementSnapshot | None. Imported lazily to
+    # avoid trades <-> unwind.models <-> position_management cycles.
+    position_management: Any | None = None
     audit: list[PaperTradeAuditEvent] = Field(default_factory=list)
 
     @model_validator(mode="after")

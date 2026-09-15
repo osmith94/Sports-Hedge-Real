@@ -1301,6 +1301,40 @@ export type PaperExecutionRiskSnapshot = {
   eligible_for_paper_simulation?: boolean | null;
 };
 
+export type UnwindRecommendation = "HOLD" | "UNWIND_ELIGIBLE" | "UNWIND_NOT_SAFE";
+
+export type PositionManagementSnapshot = {
+  trade_id: string;
+  recommendation: UnwindRecommendation;
+  decision_reason: string;
+  evaluated_at: string;
+  hold_pnl_gbp?: string | number | null;
+  validated_exit_pnl_gbp?: string | number | null;
+  unwind_cost_gbp?: string | number | null;
+  closing_fees?: Array<{
+    venue: string;
+    native_currency: string;
+    closing_fee_native: string | number;
+    fee_snapshot_id?: string | null;
+    deferred_profit_commission?: boolean;
+  }>;
+  releasable_native?: Record<string, string | number>;
+  capital_pressure?: string;
+  opportunity_cost_gbp?: string | number | null;
+  opportunity_cost_detail?: string | null;
+  close_executable?: boolean;
+  close_execution_risk_score?: number | null;
+  quote_age_ms?: number | null;
+  quote_age_basis?: string | null;
+  auto_action?: string;
+  auto_unwind_enabled?: boolean;
+  auto_close_allowed?: boolean;
+  paper_only?: boolean;
+  places_orders?: boolean;
+  spendable?: boolean;
+  data_kind?: string;
+};
+
 export type PaperTrade = {
   trade_id: string;
   opportunity_id: string;
@@ -1331,6 +1365,7 @@ export type PaperTrade = {
   places_orders?: boolean;
   legs: PaperTradeLeg[];
   close_fills?: PaperCloseFill[];
+  position_management?: PositionManagementSnapshot | null;
   entry_risk?: PaperExecutionRiskSnapshot | null;
   close_risks?: PaperExecutionRiskSnapshot[];
   audit: PaperTradeAuditEvent[];
@@ -1387,6 +1422,16 @@ export function getPaperTrade(tradeId: string): Promise<PaperTradeDetail> {
   return request(`/paper/trades/${encodeURIComponent(tradeId)}`);
 }
 
+export function getPaperPositionManagement(): Promise<PositionManagementSnapshot[]> {
+  return request("/paper/trades/position-management");
+}
+
+export function getTradePositionManagement(
+  tradeId: string,
+): Promise<PositionManagementSnapshot> {
+  return request(`/paper/trades/${encodeURIComponent(tradeId)}/position-management`);
+}
+
 export async function settlePaperTrade(
   tradeId: string,
   payload: {
@@ -1411,8 +1456,6 @@ export async function settlePaperTrade(
   }
   return response.json() as Promise<PaperTradeDetail>;
 }
-
-export type UnwindRecommendation = "HOLD" | "UNWIND_ELIGIBLE" | "UNWIND_NOT_SAFE";
 
 export type EstimatedTimeToRelease = {
   remaining_lock_minutes?: string | number | null;

@@ -63,6 +63,7 @@ from sports_hedge.arbitrage.allocation.engine import allocate
 from sports_hedge.arbitrage.allocation.models import AllocatedStake, AllocationResult
 from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+from sports_hedge.paper.position_management.quotes import LatestObservationCatalog
 from sports_hedge.paper.trades import PaperTrade
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.risk.execution import ExecutionRiskInputs, ExecutionRiskScorer
@@ -85,6 +86,7 @@ class PaperScanService:
         liquidity: SqlitePaperLiquidityRepository | None = None,
         open_trades: list[PaperTrade] | None = None,
         mapping_rule_store: object | None = None,
+        reverse_catalog: LatestObservationCatalog | None = None,
     ) -> None:
         self.market_intelligence = market_intelligence
         if market_matcher is None:
@@ -103,6 +105,7 @@ class PaperScanService:
         self.cost_resolver = cost_resolver
         self.liquidity = liquidity
         self.open_trades = open_trades or []
+        self.reverse_catalog = reverse_catalog
         self.last_scan_phase_ms: dict[str, int] = {
             "mapping_equivalence": 0,
             "fees_fx_risk": 0,
@@ -593,6 +596,8 @@ class PaperScanService:
         )
         for snapshot in snapshots:
             self.market_intelligence.record_snapshot(snapshot)
+        if self.reverse_catalog is not None:
+            self.reverse_catalog.remember([observation])
         return len(snapshots)
 
     def _risk_inputs(
