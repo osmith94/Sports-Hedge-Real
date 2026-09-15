@@ -67,7 +67,7 @@ Then inspect:
 
 ## One-click local demo (Windows)
 
-Double-click `scripts/windows/Start-SportsHedge-Demo.bat`. It starts the Python backend and Next.js operator console hidden, waits until they are healthy, and opens `/` (Operations Console). Fixture replay remains a labelled advanced/test path at `/demo` and is not the normal operator surface. The console runs the existing read-only `/paper/collect` path (Run scan and the auto-refresh cadence). A companion `Stop-SportsHedge-Demo.bat` stops only the launcher-started processes after verifying PID command/path identity; a reused PID is not killed. Logs are written under `logs/`. The launcher forces paper mode (`execution_enabled=false`), enables local paper autofill and the read-only live-refresh loop for that process only, and does not add venue write, wallet, or trading-auth capability. It is not a Vercel/cloud deploy.
+Double-click `scripts/windows/Start-SportsHedge-Demo.bat`. It starts the Python backend and Next.js operator console hidden, waits until they are healthy, and opens `/` (Operations Console). Fixture replay remains a labelled advanced/test path at `/demo` and is not the normal operator surface. Fast/Full auto-refresh is server-owned; the browser polls status. Primary **Run scan** posts a bounded current-identity HOT refresh to `/paper/collect/hot`, while broad `/paper/collect` discovery is explicitly labelled **Run full diagnostic** under Advanced. A companion `Stop-SportsHedge-Demo.bat` stops only the launcher-started processes after verifying PID command/path identity; a reused PID is not killed. Logs are written under `logs/`. The launcher forces paper mode (`execution_enabled=false`), enables local paper autofill and the read-only live-refresh loop for that process only, and does not add venue write, wallet, or trading-auth capability. It is not a Vercel/cloud deploy.
 
 Requires a local `backend/.venv` with the package installed and Node.js `npm` on PATH. If the backend or frontend is already healthy on ports 8000/3000, the launcher reuses them instead of starting duplicates.
 
@@ -85,7 +85,7 @@ cd frontend
 npm run dev
 ```
 
-CORS is a **restrictive allowlist** (`CORS_ALLOW_ORIGINS`), defaulting to `http://localhost:3000` and `http://127.0.0.1:3000`. It is not `*` and does not grant trading permissions. Server-rendered GETs do not exercise this path; clicking **Run read-only scan** does (`POST /paper/collect`).
+CORS is a **restrictive allowlist** (`CORS_ALLOW_ORIGINS`), defaulting to `http://localhost:3000` and `http://127.0.0.1:3000`. It is not `*` and does not grant trading permissions. Server-rendered GETs do not exercise this path; clicking **Run scan** does (`POST /paper/collect/hot`).
 
 ## Current implementation
 
