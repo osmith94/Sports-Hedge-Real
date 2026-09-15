@@ -1,10 +1,8 @@
 # Wave B lane — Mapping verification (#169)
 
-Frozen base: `integration/wave-b-2026-09-15` @ `30c54ce9a7ac839111a7dc73ac3e0081d7bb6505`.
+Restacked onto `integration/wave-b-2026-09-15` @ `6cb6b3fbea547fede220dbfd5bc97cb39bf8370f` (includes architect-passed #184 audit Age/sort and #165 current-market inventory). Original lane start was `30c54ce9a7ac839111a7dc73ac3e0081d7bb6505`.
 
 This lane implements deterministic human-in-the-loop mapping learning. It does **not** merge into Wave B, #179, #131, or `main`.
-
-Parent restack target: latest `integration/wave-b-2026-09-15` (see PR body for exact SHA).
 
 ## Owns
 
