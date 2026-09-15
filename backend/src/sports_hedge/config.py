@@ -105,6 +105,7 @@ class Settings(BaseSettings):
         default_factory=lambda: ["matchbook", "polymarket", "kalshi"]
     )
     paper_settings_db_path: str = "./data/paper_settings.sqlite"
+    mapping_rules_db_path: str = "./data/mapping_rules.sqlite"
     paper_scan_venue_timeout_seconds: int = Field(default=15, ge=3, le=60)
     paper_scan_provider_timeout_seconds: int = Field(default=8, ge=2, le=30)
     cors_allow_origins: Annotated[list[str], NoDecode] = Field(

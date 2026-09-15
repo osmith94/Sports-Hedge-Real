@@ -590,15 +590,21 @@ def test_radar_current_rows_stay_visible_without_paper_eligibility() -> None:
 
 def test_identity_click_through_survives_hot_partial_and_has_no_demo_fallback() -> None:
     coordinator = get_live_refresh_coordinator()
+    original_clock = coordinator._clock
+    # HTTP fixture_detail evaluates freshness via coordinator.now(). Pin that
+    # clock to the recorded HOT instant so restack CI is not wall-clock-flaky.
+    # #165 inventory merge/count/headline production logic is unchanged.
+    hot_at = NOW + timedelta(seconds=25)
     coordinator.reset()
+    coordinator._clock = lambda: hot_at
     coordinator.record_report(_universe_full(), scan_lane=ScanLane.UNIVERSE)
     coordinator.record_report(
         _report(
-            fixture=_fixture(equivalent=1, when=NOW + timedelta(seconds=25)),
+            fixture=_fixture(equivalent=1, when=hot_at),
             markets=[_market_row(family="match_result")],
             market_ids=["mkt-mr"],
             lane=ScanLane.HOT,
-            when=NOW + timedelta(seconds=25),
+            when=hot_at,
         ),
         scan_lane=ScanLane.HOT,
     )
@@ -624,4 +630,5 @@ def test_identity_click_through_survives_hot_partial_and_has_no_demo_fallback() 
         health = client.get("/health").json()
         assert health["execution_enabled"] is False
     finally:
+        coordinator._clock = original_clock
         coordinator.reset()

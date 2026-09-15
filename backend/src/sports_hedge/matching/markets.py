@@ -4,12 +4,18 @@ from pydantic import BaseModel, Field
 
 from sports_hedge.domain.football import CanonicalMarket
 from sports_hedge.matching.events import EventMatcher
+from sports_hedge.matching.learned_rules import (
+    MappingProvenance,
+    MappingRuleType,
+    economic_mismatch_reasons,
+)
 
 
 class MarketMatchResult(BaseModel):
     matched: bool
     confidence: float = Field(ge=0.0, le=1.0)
     reasons: list[str]
+    provenance: MappingProvenance = Field(default_factory=MappingProvenance)
 
 
 class MarketMatcher:
@@ -17,48 +23,46 @@ class MarketMatcher:
 
     Event labels may be fuzzy, but market economics are not. Settlement semantics,
     family, period and line must match exactly before a pair is considered tradable.
+    Learned naming rules may help event identity; they cannot override settlement,
+    period, line, family or outcome-model mismatch.
     """
 
     def __init__(self, event_matcher: EventMatcher | None = None) -> None:
         self.event_matcher = event_matcher or EventMatcher()
 
     def match(self, left: CanonicalMarket, right: CanonicalMarket) -> MarketMatchResult:
-        event_result = self.event_matcher.match(left.event, right.event)
+        event_result = self.event_matcher.match(
+            left.event,
+            right.event,
+            left_market=left,
+            right_market=right,
+        )
         if not event_result.matched:
             return MarketMatchResult(
                 matched=False,
                 confidence=event_result.confidence,
                 reasons=["event_mismatch", *event_result.reasons],
+                provenance=event_result.provenance,
             )
 
-        reasons: list[str] = []
-        if left.family != right.family:
-            reasons.append("market_family_mismatch")
-        if left.period != right.period:
-            reasons.append("period_mismatch")
-        if left.line != right.line:
-            reasons.append("line_mismatch")
-        left_complete = left.settlement.is_economically_complete()
-        right_complete = right.settlement.is_economically_complete()
-        if not left_complete or not right_complete:
-            reasons.append("incomplete_settlement")
-        elif left.settlement.deterministic_key() != right.settlement.deterministic_key():
-            reasons.append("settlement_mismatch")
-
-        left_outcomes = {runner.outcome for runner in left.runners}
-        right_outcomes = {runner.outcome for runner in right.runners}
-        if left_outcomes != right_outcomes:
-            reasons.append("outcome_space_mismatch")
-
+        reasons = economic_mismatch_reasons(left, right)
         if reasons:
             return MarketMatchResult(
                 matched=False,
                 confidence=min(event_result.confidence, left.confidence, right.confidence),
                 reasons=reasons,
+                provenance=event_result.provenance,
             )
 
+        match_reasons = list(event_result.reasons)
+        if (
+            event_result.provenance.rule_type
+            is MappingRuleType.VENUE_MARKET_LABEL_CONVENTION
+        ):
+            match_reasons.append("operator_verified_market_label")
         return MarketMatchResult(
             matched=True,
             confidence=min(event_result.confidence, left.confidence, right.confidence),
-            reasons=event_result.reasons,
+            reasons=match_reasons,
+            provenance=event_result.provenance,
         )

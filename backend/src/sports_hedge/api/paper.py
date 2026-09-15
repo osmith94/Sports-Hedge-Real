@@ -86,6 +86,7 @@ from sports_hedge.persistence.matchbook_account_fee import (
     MatchbookFeeUpdate,
     SqliteMatchbookAccountFeeStore,
 )
+from sports_hedge.persistence.mapping_rules import get_mapping_rule_store
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.treasury.models import (
@@ -312,6 +313,7 @@ def get_paper_scan_service(
         cost_resolver=costs,
         liquidity=liquidity,
         open_trades=open_trades,
+        mapping_rule_store=get_mapping_rule_store(),
     )
 
 
@@ -822,6 +824,8 @@ async def _collect_report(
         polymarket=polymarket,
         kalshi=kalshi,
         paper_scan=service,
+        event_matcher=service.market_matcher.event_matcher,
+        market_matcher=service.market_matcher,
         venue_timeout_seconds=settings.paper_scan_venue_timeout_seconds,
         provider_call_timeout_seconds=settings.paper_scan_provider_timeout_seconds,
         cycle_timeout_seconds=(
