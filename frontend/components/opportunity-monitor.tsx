@@ -23,7 +23,7 @@ import {
   formatOpportunityLegLine,
   newestObservationAgeLabel,
   nextOpportunityMonitorSort,
-  opportunityMonitorRow,
+  opportunityMonitorRows,
   opportunityMonitorStateTone,
   opportunityMonitorSummary,
   opportunitySortIndicator,
@@ -46,7 +46,7 @@ export function OpportunityMonitor({
   const [sort, setSort] = useState<OpportunityMonitorSortState | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
-  const rows = useMemo(() => items.map(opportunityMonitorRow), [items]);
+  const rows = useMemo(() => opportunityMonitorRows(items), [items]);
   const sortedRows = useMemo(() => sortOpportunityMonitor(rows, sort), [rows, sort]);
   const summary = useMemo(
     () => opportunityMonitorSummary(rows, liveRefresh, available, liveRefreshAvailable, nowMs),
@@ -79,7 +79,7 @@ export function OpportunityMonitor({
           </div>
         </div>
         <span className={available ? "status-badge" : "demo-chip"}>
-          {available ? (items.length ? "LIVE PAPER" : "EMPTY") : "UNAVAILABLE"}
+          {available ? (rows.length ? "LIVE PAPER" : "EMPTY") : "UNAVAILABLE"}
         </span>
       </div>
 
@@ -90,14 +90,14 @@ export function OpportunityMonitor({
           Current opportunity radar unavailable. No fabricated opportunities.
         </div>
       ) : null}
-      {available && items.length === 0 ? (
+      {available && rows.length === 0 ? (
         <div className="empty-live-compact">
           No current cross-venue opportunities. Empty current radar is not back-filled from
           audit history or demo fixtures.
         </div>
       ) : null}
 
-      {available && sortedRows.length > 0 ? (
+      {available && rows.length > 0 ? (
         <div className="table-wrap">
           <table>
             <caption className="scan-history-caption">

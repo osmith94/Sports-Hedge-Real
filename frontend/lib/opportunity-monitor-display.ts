@@ -110,6 +110,7 @@ const TIME_COLUMNS = new Set<OpportunityMonitorSortColumn>(["age"]);
 const QUALIFYING_STATUSES = new Set(["TRIGGERED"]);
 const NEAR_STATUSES = new Set(["WATCHING", "APPROACHING"]);
 const REJECTED_STATUSES = new Set(["REJECTED", "EXPIRED"]);
+const CAPTURED_LIFECYCLE_STATUSES = new Set(["PAPER_FILLING", "PARTIAL"]);
 const STALE_REASONS = new Set(["stale_quote", "rejected_stale_quote", "unknown_quote_age"]);
 
 export const MAPPING_UNAVAILABLE_TITLE =
@@ -165,8 +166,24 @@ export function isExecutableRadarFreshness(freshness: string | null | undefined)
   return (freshness || "").toLowerCase() === "executable";
 }
 
-export function isStoredTrigger(item: NearOpportunity): boolean {
-  return QUALIFYING_STATUSES.has(item.status) || item.is_arbitrage === true;
+export function isPreTradeTrigger(item: NearOpportunity): boolean {
+  return QUALIFYING_STATUSES.has(item.status);
+}
+
+export function isCapturedLifecycleStatus(status: string | null | undefined): boolean {
+  return CAPTURED_LIFECYCLE_STATUSES.has(status ?? "");
+}
+
+export function visibleOpportunityMonitorItems(
+  items: readonly NearOpportunity[],
+): NearOpportunity[] {
+  return items.filter((item) => !isCapturedLifecycleStatus(item.status));
+}
+
+export function opportunityMonitorRows(
+  items: readonly NearOpportunity[],
+): OpportunityMonitorRow[] {
+  return visibleOpportunityMonitorItems(items).map(opportunityMonitorRow);
 }
 
 export function opportunityMonitorState(item: NearOpportunity): OpportunityMonitorStateBadge {
@@ -177,12 +194,12 @@ export function opportunityMonitorState(item: NearOpportunity): OpportunityMonit
   if (freshness === "expired" || item.status === "EXPIRED" || reasons.some((reason) => STALE_REASONS.has(reason))) {
     return "STALE";
   }
-  if (isStoredTrigger(item) && isExecutableRadarFreshness(item.freshness_class)) {
+  if (isPreTradeTrigger(item) && isExecutableRadarFreshness(item.freshness_class)) {
     return "QUALIFYING";
   }
-  // Historical TRIGGERED/solver-arb remaining on radar after the ~1s executable gate.
-  // Do not infer executable freshness from stored status or quote_age_ms.
-  if (isStoredTrigger(item)) {
+  // Historical TRIGGERED remaining on radar after the ~1s executable gate.
+  // Do not infer executable freshness from stored status, is_arbitrage, or quote_age_ms.
+  if (isPreTradeTrigger(item)) {
     return "STALE";
   }
   const net = number(item.current_net_edge);
@@ -216,7 +233,7 @@ export function opportunityMonitorStateTitle(item: NearOpportunity): string {
   const classification = item.classification.replaceAll("_", " ");
   const parts = [status, classification];
   if (reasons) parts.push(reasons);
-  if (isStoredTrigger(item) && !isExecutableRadarFreshness(item.freshness_class)) {
+  if (isPreTradeTrigger(item) && !isExecutableRadarFreshness(item.freshness_class)) {
     const freshness = freshnessLabel(item.freshness_class);
     parts.push(
       freshness === "—"

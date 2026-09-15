@@ -16,6 +16,7 @@ import {
   nextOpportunityMonitorSort,
   opportunityLegViews,
   opportunityMonitorRow,
+  opportunityMonitorRows,
   opportunityMonitorState,
   opportunityMonitorSummary,
   opportunityObservationTimestamp,
@@ -244,6 +245,63 @@ describe("opportunity monitor state badges", () => {
     const summary = opportunityMonitorSummary([agedRow, liveRow], refresh(), true, true);
     assert.equal(summary.qualifyingCount, 1);
     assert.equal(summary.nearCount, 0);
+  });
+
+  it("does not treat executable PAPER_FILLING or PARTIAL as a new qualifying opportunity", () => {
+    const filling = watch({
+      opportunity_id: "filling",
+      status: "PAPER_FILLING",
+      classification: "paper_fill",
+      is_arbitrage: true,
+      freshness_class: "executable",
+      bet_actionable: true,
+      guaranteed_profit_gbp: 0.9,
+      current_net_edge: 0.02,
+    });
+    const partial = watch({
+      opportunity_id: "partial",
+      status: "PARTIAL",
+      classification: "paper_fill",
+      is_arbitrage: true,
+      freshness_class: "executable",
+      bet_actionable: true,
+      guaranteed_profit_gbp: 0.4,
+      current_net_edge: 0.018,
+    });
+    const triggered = watch({
+      opportunity_id: "live-trigger",
+      status: "TRIGGERED",
+      classification: "triggered_opportunity",
+      is_arbitrage: true,
+      freshness_class: "executable",
+      bet_actionable: true,
+      current_net_edge: 0.014,
+    });
+    const aged = watch({
+      opportunity_id: "aged-trigger",
+      status: "TRIGGERED",
+      classification: "triggered_opportunity",
+      is_arbitrage: true,
+      freshness_class: "radar_current",
+      bet_actionable: false,
+      current_net_edge: 0.021,
+    });
+    assert.notEqual(opportunityMonitorState(filling), "QUALIFYING");
+    assert.notEqual(opportunityMonitorState(partial), "QUALIFYING");
+    assert.equal(opportunityMonitorState(triggered), "QUALIFYING");
+    assert.equal(opportunityMonitorState(aged), "STALE");
+    const rows = opportunityMonitorRows([filling, partial, triggered, aged]);
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      ["live-trigger", "aged-trigger"],
+    );
+    assert.equal(
+      rows.filter((row) => row.state === "QUALIFYING").length,
+      1,
+    );
+    const summary = opportunityMonitorSummary(rows, refresh(), true, true);
+    assert.equal(summary.qualifyingCount, 1);
+    assert.ok(!rows.some((row) => row.id === "filling" || row.id === "partial"));
   });
 });
 
