@@ -17,13 +17,13 @@ Inspected 14 September 2026; dual-cadence decisions locked by architect review `
 | #157 (integrated) | merge commit `3de14fc6` | Partial live-scan finalisation before the 50s hard timeout. Reuse leftover/budget; do not rewrite. |
 | This document | docs-only, stacked on current #131 | Dual-cadence plan with accepted decisions encoded |
 
-Current #131 includes:
+Original #131 implementation base included:
 
-- 45s collector soft budget for **explicit collect**, 4s leftover-assembly reserve, 5s coordinator grace (#157).
+- 45s collector soft budget for **explicit collect**, 4s leftover-assembly reserve, 5s coordinator grace (#157). Wave G later replaced the browser-facing manual contract with a 20s bounded diagnostic; see `SCANNER_SYNTHETIC_VALIDATION.md`.
 - `FixtureCurrentStateStore` (process memory, coordinator-owned) with `replace_from_report()` generation replace and explicit identity aliases (`resolve_canonical_id` / `identities_for`). Drill-down already reads this store. Tracked is **still** latest-completed-cohort via `last_report().paper_decisions`.
 - The store’s own docstring already names dual-cadence (#158/#159) as the next upsert/TTL merge. Implementation must **extend** that class, not create `fixture_current_state.py` a second time.
 
-Auto-loop HOT uses a **separate 25s** collector timeout (see §5.1). Explicit `POST /paper/collect` keeps the current 45s UNIVERSE-shaped diagnostic contract so that accepted Windows collect shape is unchanged.
+Auto-loop HOT uses a **separate 25s** collector timeout (see §5.1). Explicit `POST /paper/collect` is now a bounded 20s diagnostic (+5s coordinator grace) and does not represent either scheduled lane.
 
 ## 2. Product decision
 
@@ -154,7 +154,7 @@ A 45s HOT collector budget would also fail the 30s HOT cadence: one slow HOT cyc
 | Parameter | Accepted default |
 | --- | --- |
 | Cadence | 30 seconds (`paper_live_refresh_hot_interval_seconds`). Wall-clock from last HOT **due** (not “sleep 30s after a 25s run”). |
-| Collector timeout | **25 seconds** (`paper_scan_hot_cycle_timeout_seconds`). Separate from explicit-collect 45s. |
+| Collector timeout | **25 seconds** (`paper_scan_hot_cycle_timeout_seconds`). Separate from the 20s manual diagnostic. |
 | Envelope | #157 leftover reserve (4s, from the 25s) + coordinator grace (5s) ⇒ worst-case end-to-end **~30s**. Collector cluster work ≤ 21s. |
 | Self-overlap | **Forbidden.** Do not start a second HOT while one is in progress. If a cycle hits the envelope, skip the missed slot and run the next due after return. |
 | Cohort | (a) truthful provider in-play (`in_running is True`); (b) `kickoff_utc` in `(now, now + 60 minutes]`; (c) kickoff-passed + unknown in-play **only while** `(now - kickoff_utc) ≤ 3h` (§5.4). |
@@ -356,12 +356,12 @@ Implement in this order on current #131 (`292e8109`). Do not start code in this 
 
 | Slice | Seam | Change |
 | --- | --- | --- |
-| 0 | `#157` leftover/budget now on #131 | **No functional rewrite.** Call with per-run `cycle_timeout_seconds` (HOT 25s; UNIVERSE chunk derived from §5.2.1; explicit POST 45s). |
+| 0 | `#157` leftover/budget now on #131 | Call with per-run `cycle_timeout_seconds` (HOT 25s; UNIVERSE chunk derived from §5.2.1; explicit diagnostic 20s). |
 | 1 | New `application/scan_lanes.py` | Pure `classify_scan_lane` (including 3h unknown bound), HOT sort key §5.5, TTL helpers. Clock injected. No dislocations import. |
 | 2 | Existing `application/fixture_current_state.py` (#161) | **Extend, do not replace or fork.** Keep alias resolution. Change generation `replace_from_report` into lane upsert + §6 TTL merge so HOT cannot wipe UNIVERSE rows. **No SQLite inventory in v1.** |
 | 3 | `LiveRefreshCoordinator` | Dual due-logic; HOT 30s / 25s / no self-overlap; UNIVERSE 180s generation / 150s work / chunk-until-HOT; preemption is chunk yield; nested status; startup UNIVERSE due immediately. `record_report` must upsert the existing store, not only `replace_from_report`. |
 | 4 | `collect_and_scan(..., scan_lane, identity_scope, resume_cursor)` | HOT: known IDs from the store (via aliases), skip full pagination. UNIVERSE: discovery + resume. Reuse cluster scan + leftover. |
-| 5 | `server_owned_refresh_tick` | If HOT due and not in progress → HOT. Else if UNIVERSE generation due or in-progress with remaining budget and chunk_wall ≥ min_chunk → UNIVERSE chunk. Explicit POST stays 45s UNIVERSE-shaped (§8.2). |
+| 5 | `server_owned_refresh_tick` | If HOT due and not in progress → HOT. Else if UNIVERSE generation due or in-progress with remaining budget and chunk_wall ≥ min_chunk → UNIVERSE chunk. Explicit POST remains a separate bounded diagnostic (§8.2). |
 | 6 | `GET /paper/watchlist/tracked` | Build cohort ids from current-state store, not `last_report.paper_decisions` only. Preserve #161 identity aliases for click-through. |
 | 7 | `WatchObservation` / `NearOpportunity` / `DiscoveredFixture` | Additive: `scan_lane`, `last_scanned_at`, `next_due_at`, `freshness_class`. |
 | 8 | `Settings` | See §9. |
@@ -417,11 +417,17 @@ Do not ship a single `Last scan` once both lanes exist.
 
 ### 8.2 `POST /paper/collect`
 
-Keep the explicit operator/Windows collect as a **UNIVERSE-shaped** collect with the existing **45s** timeout (the accepted #157/#131 diagnostic contract).
+The explicit operator/Windows collect is a **bounded manual diagnostic**, not a
+scheduled Full Sweep. It uses a **20s collector timeout** plus 5s coordinator
+grace, may return truthful partial coverage, and omits redundant nested market
+inventory from its HTTP response. This Wave G correction supersedes the earlier
+45s browser-facing contract.
 
 When `PAPER_LIVE_REFRESH_ENABLED=true`, the server-owned HOT/UNIVERSE loop is the only automatic collection owner. Browser auto-refresh must poll `GET /paper/live-refresh` and must **not** `POST /paper/collect`. Explicit collect must not consume or resume scheduled generation work (`generation_work_used_s`, cursor, due times). If a scheduled lane is in progress, explicit collect fails fast (409) rather than waiting behind it.
 
-Rationale: owner-Windows smoke and leftover tests assert 45s/50s, 60 fixtures, leftover truth. Dual-cadence auto-loop is what changes cadence and HOT timeout. Changing explicit collect in the first implementation PR would mix two contracts.
+Rationale: owner-Windows evidence showed the scheduled lanes healthy while the
+manual request hit the frontend's 60s abort. A smaller diagnostic envelope and
+lean response preserve leftover truth without changing scheduled cadence.
 
 Optional later (not v1): `scan_lane=hot|universe` on the request model (default `universe` for POST). Giving POST the 150s generation budget is a separate decision after the dual-cadence auto-loop lands.
 
@@ -436,8 +442,9 @@ Optional later (not v1): `scan_lane=hot|universe` on the request model (default 
 | `paper_live_refresh_hot_interval_seconds` | 30 | ge 15, le 60. Wall-clock cadence. |
 | `paper_live_refresh_universe_interval_seconds` | 180 | Generation cadence. ge 60, le 300. |
 | `paper_live_refresh_interval_seconds` | 30 | **Alias of HOT.** Keep for env/launcher compat. |
-| `paper_scan_hot_cycle_timeout_seconds` | **25** | Auto-loop HOT collector timeout. Not the explicit-collect 45s. |
-| `paper_scan_cycle_timeout_seconds` | 45 | Explicit `POST /paper/collect` only (accepted #157/#131 contract). |
+| `paper_scan_hot_cycle_timeout_seconds` | **25** | Auto-loop HOT collector timeout. |
+| `paper_scan_cycle_timeout_seconds` | 45 | General collector fallback; scheduled lane plans pass their own timeout. |
+| `paper_scan_manual_diagnostic_timeout_seconds` | **20** | Explicit `POST /paper/collect` collector bound (+5s coordinator grace). |
 | `paper_scan_universe_generation_budget_seconds` | **150** | Accumulated UNIVERSE work per generation. |
 | `paper_universe_hot_yield_safety_margin_seconds` | 2 | Chunk bound: `next_hot_due - now - margin`. |
 | `paper_hot_pre_kickoff_horizon_minutes` | 60 | |
@@ -476,7 +483,7 @@ Provider timeouts stay #157-bounded (`remaining soft budget`, `MIN_PROVIDER_WAIT
 | `GET /paper/watchlist/tracked` | **Breaking semantics**, additive fields. Same path. Tests in `test_tracked_current_snapshot.py` must be rewritten to the merge/TTL rules, not deleted. |
 | Watchlist SQLite | Additive columns or JSON sidecar on opportunity; old rows: `scan_lane=null` treated as `universe` with `last_seen_at` as `last_scanned_at`. Missing lane + age > universe TTL → omit from Tracked (fail closed). |
 | `#157` hang/partial tests now on #131 | Must stay green. Do not change leftover reason strings. |
-| Explicit collect 45s/60 pairs | **Unchanged** in v1 auto-loop work. |
+| Explicit diagnostic / 60-pair cap | 20s bounded partial response; does not advance scheduler state. |
 | Restart | Process-memory inventory empty → Tracked empty until a collection completes. Watchlist history remains. Scheduler must mark UNIVERSE due **immediately** (bootstrap), not after 180s. |
 
 No data backfill job. No second canonical ID migration. No SQLite fixture inventory in this implementation.
@@ -533,7 +540,7 @@ Do not use live Windows as the first proof of classification; clocked unit tests
 - A single 150s auto-loop `collect_and_scan`.
 - Rewriting or importing the dislocation burst engine.
 - Persistent fixture-inventory SQLite.
-- Changing explicit `POST /paper/collect` off 45s in the first implementation PR.
+- Giving explicit `POST /paper/collect` the 150s Full Sweep generation budget.
 - Research surfaces.
 - Reintroducing browser-driven scans to implement paper auto-capture. Qualifying `LIVE_PAPER` auto-capture uses `persist_triggered_chain()` inherit on the server-owned collector persist path only. `/demo` fixture replay stays explicit/manual (`autofill=False`).
 
@@ -553,7 +560,7 @@ Owner product: genuinely qualifying live paper opportunities are automatically p
 
 | # | Decision |
 | --- | --- |
-| 1 | Explicit `POST /paper/collect` remains the current **45s UNIVERSE-shaped** diagnostic/manual contract (now the accepted #131/#157 collect shape). |
+| 1 | Wave G correction: explicit `POST /paper/collect` is a bounded **20s manual diagnostic** (+5s coordinator grace), separate from scheduled Fast/Full. |
 | 2 | UNIVERSE **generation** budget is **150s**, not 180s. Keep 30s headroom inside the **180s** sweep cadence. 150s is executed as **resumable chunks**, not one job. |
 | 3 | Radar TTLs: **HOT 90s / UNIVERSE 360s**. Executable quote freshness remains the existing fail-closed ~1s contract. |
 | 4 | Kickoff-passed + unknown in-play: HOT **without a live label**, only within **3h**. After that, expire from **current radar** (#164) unless the provider explicitly says in-running or postponed/delayed/rescheduled. Do not claim completed from time. |

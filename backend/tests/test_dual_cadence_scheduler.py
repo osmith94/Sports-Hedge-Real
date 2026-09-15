@@ -564,7 +564,7 @@ async def test_hot_envelope_stops_inside_30s_and_does_not_overlap() -> None:
     repository.close()
 
 
-def test_explicit_collect_keeps_45s_universe_contract_and_max_event_pairs() -> None:
+def test_explicit_collect_is_bounded_diagnostic_and_keeps_max_event_pairs() -> None:
     from sports_hedge.api.paper import PaperCollectionRequest
     from sports_hedge.application.collector import DEFAULT_MAX_EVENT_PAIRS
 
@@ -572,7 +572,13 @@ def test_explicit_collect_keeps_45s_universe_contract_and_max_event_pairs() -> N
     assert request.max_event_pairs == DEFAULT_MAX_EVENT_PAIRS == 60
     settings = Settings()
     assert settings.paper_scan_cycle_timeout_seconds == 45
+    assert settings.paper_scan_manual_diagnostic_timeout_seconds == 20
     assert settings.paper_scan_hot_cycle_timeout_seconds == 25
+    assert (
+        settings.paper_scan_manual_diagnostic_timeout_seconds
+        + SCAN_CYCLE_RETURN_GRACE_SECONDS
+        == 25
+    )
     assert (
         settings.paper_scan_hot_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
         == 30

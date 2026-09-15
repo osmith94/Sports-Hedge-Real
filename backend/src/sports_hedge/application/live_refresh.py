@@ -531,15 +531,27 @@ class LiveRefreshCoordinator:
             or self._universe_in_progress
         )
 
+    def explicit_collect_timeout_seconds(self, settings: Settings | None = None) -> float:
+        """Coordinator envelope for manual diagnostic collect.
+
+        Scheduled Fast/Full keep their own HOT 25s / UNIVERSE-chunk budgets.
+        Manual Run scan is a bounded one-shot and must return before the
+        frontend's 60s PAPER_COLLECTION_TIMEOUT_MS rather than competing with
+        the 150s Full Sweep generation.
+        """
+
+        resolved = settings or get_settings()
+        return float(
+            resolved.paper_scan_manual_diagnostic_timeout_seconds
+            + SCAN_CYCLE_RETURN_GRACE_SECONDS
+        )
+
     async def run_explicit_collect(self, runner) -> CollectionReport:
         """Manual diagnostic collect. Does not own HOT/UNIVERSE generation progress."""
 
         if self.scheduled_collection_active():
             raise ExplicitCollectBusy("scheduled scan in progress")
-        settings = get_settings()
-        timeout = float(
-            settings.paper_scan_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
-        )
+        timeout = self.explicit_collect_timeout_seconds()
         async with self._lock:
             if self._hot_in_progress or self._universe_in_progress or self.status.cycle_in_progress:
                 raise ExplicitCollectBusy("scheduled scan in progress")

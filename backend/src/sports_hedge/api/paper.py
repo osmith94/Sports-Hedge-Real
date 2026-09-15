@@ -795,23 +795,29 @@ async def collect_read_only_market_data(
     audit: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
     watchlist: WatchlistService = Depends(get_watchlist_service),
 ) -> CollectionReport:
-    """Run one explicit read-only collection/scan cycle and persist watchlist observations.
+    """Run one explicit bounded diagnostic collection/scan and persist after the HTTP body.
 
-    Persistence/auto-capture is scheduled after Starlette sends the HTTP body so a
-    slow persist cannot hold the browser past PAPER_COLLECTION_TIMEOUT_MS. The
-    scan envelope itself is unchanged: persist failure is live-refresh/persist
-    diagnostics, never scan_cycle_timeout.
+    This is not Fast Scan and not a Full Sweep generation chunk. Scheduled lanes
+    keep their own 25s HOT / chunked UNIVERSE budgets. Persistence/auto-capture
+    is scheduled after Starlette sends the HTTP body so a slow persist cannot
+    hold the browser past PAPER_COLLECTION_TIMEOUT_MS. Persistence remains
+    outside the bounded scan envelope: persist failure is live-refresh/persist
+    diagnostics, never scan_cycle_timeout. The HTTP body omits fixture_markets;
+    drill-down reads current-state inventory instead of this diagnostic payload.
     """
 
     kwargs = request.model_dump()
     coordinator = get_live_refresh_coordinator()
     coordinator.remember_request(kwargs)
+    settings = get_settings()
+    diagnostic_timeout = float(settings.paper_scan_manual_diagnostic_timeout_seconds)
 
     async def runner() -> CollectionReport:
         return await _collect_report(
             kwargs,
             service=service,
             enabled_venues=list(coordinator.running_cycle_venues()),
+            cycle_timeout_seconds=diagnostic_timeout,
         )
 
     try:
@@ -827,6 +833,10 @@ async def collect_read_only_market_data(
             status_code=502, detail=f"venue market-data request failed: {exc}"
         ) from exc
 
+    diagnostics = dict(report.scan_diagnostics or {})
+    diagnostics["collection_kind"] = "manual_diagnostic"
+    diagnostics["scheduled_fast_full_unchanged"] = True
+    report.scan_diagnostics = diagnostics
     background_tasks.add_task(
         persist_explicit_collect_after_http_response,
         coordinator,
@@ -835,7 +845,7 @@ async def collect_read_only_market_data(
         audit=audit,
         watchlist=watchlist,
     )
-    return report
+    return report.model_copy(update={"fixture_markets": {}})
 
 
 async def _collect_report(

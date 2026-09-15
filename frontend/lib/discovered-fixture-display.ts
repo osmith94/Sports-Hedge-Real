@@ -281,6 +281,18 @@ export function technicalDetailLines(item: DiscoveredFixture): string[] {
   ].filter((line): line is string => Boolean(line));
 }
 
+export function venuePresenceCount(item: DiscoveredFixture): number {
+  return [
+    venuePresent(item.matchbook_matched),
+    venuePresent(item.polymarket_matched),
+    venuePresent(item.kalshi_matched),
+  ].filter(Boolean).length;
+}
+
+export function fixtureIsCrossVenue(item: DiscoveredFixture): boolean {
+  return venuePresenceCount(item) >= 2;
+}
+
 export type DiscoveryCompactCounts = {
   fixtures: number;
   crossVenue: number;
@@ -293,11 +305,22 @@ export function discoveryCompactCounts(status: LiveRefreshStatus | null): Discov
   const fixtures = status?.discovered_fixtures ?? [];
   return {
     fixtures: fixtures.length,
-    crossVenue: status?.last_matched_event_pairs ?? 0,
+    crossVenue: fixtures.filter(fixtureIsCrossVenue).length,
     equivalent: fixtures.reduce((sum, item) => sum + (item.matched_equivalent_count ?? 0), 0),
     qualifying: fixtures.filter((item) => item.solver_is_arbitrage).length,
     skipped: status?.skipped_out_of_scope ?? 0,
   };
+}
+
+export function discoveryEmptyMatchNote(counts: DiscoveryCompactCounts): string | null {
+  if (counts.fixtures <= 0) return null;
+  if (counts.crossVenue > 0 && counts.equivalent === 0) {
+    return "Multi-venue fixture overlap exists; no settlement-equivalent markets.";
+  }
+  if (counts.crossVenue === 0) {
+    return "No current multi-venue identity overlap; inspect source coverage before changing mapping.";
+  }
+  return null;
 }
 
 export function discoveryCompactSummaryLabel(
@@ -308,10 +331,11 @@ export function discoveryCompactSummaryLabel(
     return "Fixture Discovery · status unavailable";
   }
   const counts = discoveryCompactCounts(status);
-  return (
+  const note = discoveryEmptyMatchNote(counts);
+  const headline =
     `Fixture Discovery · ${counts.fixtures} fixtures · ${counts.crossVenue} cross-venue · ` +
-    `${counts.equivalent} equivalent · ${counts.qualifying} qualifying · ${counts.skipped} skipped`
-  );
+    `${counts.equivalent} equivalent · ${counts.qualifying} qualifying · ${counts.skipped} skipped`;
+  return note ? `${headline} · ${note}` : headline;
 }
 
 export function discoveryStatusBadgeLabel(available: boolean): string {

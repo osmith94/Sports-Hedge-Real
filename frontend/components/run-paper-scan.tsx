@@ -452,7 +452,9 @@ export function RunPaperScan() {
       <div className="panel-header">
         <div>
           <div className="panel-title">Paper scanner</div>
-          <div className="panel-meta">Read-only collection. Min net arb is net after modeled costs.</div>
+          <div className="panel-meta">
+            Server-owned Fast/Full scanner plus a bounded read-only manual diagnostic.
+          </div>
         </div>
         <div className="heading-actions">
           <span className="status-badge">PAPER MODE · NO EXECUTION</span>
@@ -519,9 +521,13 @@ export function RunPaperScan() {
           />
           <div className="scan-action">
             <button className="scan-button" type="submit" disabled={loading} aria-busy={loading}>
-              {loading ? "Scanning…" : "Run scan"}
+              {loading ? "Running diagnostic…" : "Run diagnostic"}
             </button>
           </div>
+        </div>
+        <div className="scan-note">
+          Run diagnostic performs a bounded one-shot provider sweep and may return partial coverage.
+          It does not measure or advance the scheduled Fast Scan / Full Sweep lanes.
         </div>
         <div className="scan-note" aria-label="Fast scan and Full sweep status">
           {dualScanStatusLines(liveRefresh).map((line) => (

@@ -132,6 +132,20 @@ export type PaperCollectionReport = {
   paper_decisions: PaperCollectionDecision[];
   discovered_fixtures?: DiscoveredFixture[];
   issues: PaperCollectionIssue[];
+  scan_diagnostics?: {
+    collection_kind?: string | null;
+    matching_coverage?: {
+      fixtures?: number;
+      single_venue_clusters?: number;
+      cross_venue_clusters?: number;
+      matched_event_pairs?: number;
+      inventory_cross_venue_fixtures?: number;
+      equivalent_markets?: number;
+      qualifying_arbs?: number;
+      matching_state?: string;
+    };
+    [key: string]: unknown;
+  };
 };
 
 export type DiscoveredFixture = {
@@ -675,7 +689,7 @@ export type EventReaction = {
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_SPORTS_HEDGE_API_URL ?? "http://localhost:8000";
-/** Slightly above backend cycle timeout (45s) plus return grace (5s) so Scanning always resolves. */
+/** Browser abort for the bounded manual diagnostic. Do not raise this to wait out Full Sweep. */
 export const PAPER_COLLECTION_TIMEOUT_MS = 60_000;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -907,7 +921,7 @@ export async function runPaperCollection(
       cache: "no-store",
     },
     PAPER_COLLECTION_TIMEOUT_MS,
-    `Scan timed out after ${Math.round(PAPER_COLLECTION_TIMEOUT_MS / 1000)}s. Check venue health and retry.`,
+    `Manual diagnostic timed out after ${Math.round(PAPER_COLLECTION_TIMEOUT_MS / 1000)}s. Fast Scan and Full Sweep are separate server-owned lanes; check those timings before retrying the diagnostic.`,
   );
   if (!response.ok) {
     throw new Error(await errorDetail(response));
