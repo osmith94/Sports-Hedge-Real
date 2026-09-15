@@ -498,6 +498,7 @@ describe("opportunity monitor table contract", () => {
   });
 
   it("remains presentation-only: no venue write, simulate-fill, unwind, or settle path", () => {
+    // Near-only / non-arb radar rows stay display-only; paper capture is server persist, not this table.
     assert.match(table, /Paper describes execution mode, not this table/);
     assert.match(table, /Current radar only/);
     for (const banned of [

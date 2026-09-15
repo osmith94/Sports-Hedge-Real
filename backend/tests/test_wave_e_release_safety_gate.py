@@ -29,6 +29,7 @@ from sports_hedge.application.scan_lanes import (
     freshness_class,
 )
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
+from sports_hedge.arbitrage.watchlist.models import OpportunityClassification, OpportunityStatus
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.config import Settings
@@ -433,10 +434,50 @@ def test_wave_e_allocator_reject_or_size_zero_does_not_auto_open(tmp_path: Path)
 def test_wave_e_near_only_does_not_auto_open(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger = _ops(tmp_path)
     try:
-        decision = _scan(scan)
-        near = decision.model_copy(update={"eligible_for_paper_simulation": False})
-        _observe_persist(scan, watchlist, ops, near)
+        pm_event, pm_market, books = polymarket_payloads()
+        # Same equivalent BTTS pair as the positive chain, but the No ask is
+        # worsened so production solver ROI sits under the 0.50% trigger.
+        near_books = {
+            **books,
+            "no-token": {
+                "asset_id": "no-token",
+                "bids": [{"price": "0.41", "size": "300"}],
+                "asks": [{"price": "0.536", "size": "160"}],
+            },
+        }
+        near_pm = PolymarketObservationBuilder().build(
+            pm_event, pm_market, near_books, observed_at=OBSERVED, quote_age_ms=180
+        )
+        before = ledger.treasury.snapshot()
+        decision = _scan(scan, right=near_pm)
+        assert decision.market_match.matched is True
+        assert decision.depth_scan is not None
+        assert decision.depth_scan.solution.is_arbitrage is True
+        assert 0 < decision.depth_scan.solution.roi < decision.minimum_net_edge
+        assert decision.eligible_for_paper_simulation is False
+        assert decision.rejection_reasons == ["net_edge_below_threshold"]
+
+        watched = watchlist.observe_paper_decision(decision, _history(scan, decision))
+        assert watched is not None
+        assert watched.status is OpportunityStatus.APPROACHING
+        assert watched.classification is OpportunityClassification.NEAR_OPPORTUNITY
+        assert watched.is_arbitrage is False
+        assert watched.status is not OpportunityStatus.TRIGGERED
+
+        ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER)
         _assert_zero_capture(ops, ledger)
+        after = ledger.treasury.snapshot()
+        for venue, currency in (
+            (VenueName.MATCHBOOK, "GBP"),
+            (VenueName.POLYMARKET, "USD"),
+            (VenueName.KALSHI, "USD"),
+        ):
+            assert after.pool(venue, currency).available_cash == before.pool(
+                venue, currency
+            ).available_cash
+            assert after.pool(venue, currency).locked_capital == before.pool(
+                venue, currency
+            ).locked_capital
     finally:
         repository.close()
         ledger.close()
