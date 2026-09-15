@@ -146,6 +146,16 @@ describe("Market Comparison operator decision", () => {
     expect(decisionBadgeClass(decision.tone)).toContain("is-hot");
   });
 
+  it("does not treat radar-current rows as paper eligible", () => {
+    const decision = operatorDecision({
+      ...qualified,
+      radar_freshness: "radar_current",
+    });
+    expect(decision.status).not.toBe("paper_eligible");
+    expect(decision.label).toBe("Radar current");
+    expect(decision.tone).toBe("caution");
+  });
+
   it("labels a single venue as Venue only", () => {
     const decision = operatorDecision(
       row({

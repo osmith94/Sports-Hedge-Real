@@ -146,6 +146,9 @@ export function operatorDecision(
   pairs = classifyPairs(row),
 ): OperatorDecision {
   if (row.solver_is_arbitrage) {
+    if (row.radar_freshness === "radar_current" || row.radar_freshness === "expired") {
+      return { status: "near_trigger", label: "Radar current", tone: "caution" };
+    }
     return { status: "paper_eligible", label: "Paper eligible", tone: "eligible" };
   }
   if (hasSolverDecision(row)) {
