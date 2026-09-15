@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { LiveRefreshStatus, VenueHealth, getLiveRefreshStatus, getVenueHealth } from "../lib/api";
 import { dualScanStatusLines } from "../lib/scan-status-display";
+import { scanHealthTone, venueHealthCaption } from "../lib/venue-health-display";
 
 const FIRST_CLASS: Array<{ venue: VenueHealth["venue"]; label: string }> = [
   { venue: "matchbook", label: "Matchbook" },
@@ -11,32 +12,16 @@ const FIRST_CLASS: Array<{ venue: VenueHealth["venue"]; label: string }> = [
   { venue: "kalshi", label: "Kalshi" },
 ];
 
-function scanTone(value: string | undefined): "ok" | "warn" | "down" | "unknown" | null {
-  if (!value) return null;
-  if (value === "ok") return "ok";
-  if (value === "degraded" || value === "timeout") return "warn";
-  if (value === "unavailable") return "down";
-  return "unknown";
-}
-
-function tone(row: VenueHealth | undefined, scan?: string): "ok" | "warn" | "down" | "unknown" {
-  const fromScan = scanTone(scan);
+function tone(
+  row: VenueHealth | undefined,
+  scan?: string,
+): "ok" | "warn" | "down" | "unknown" | "off" {
+  const fromScan = scanHealthTone(scan);
   if (fromScan) return fromScan;
   if (!row) return "unknown";
   if (!row.ok) return "down";
   if (row.authenticated) return "ok";
   return "warn";
-}
-
-function caption(row: VenueHealth | undefined, label: string, scan?: string): string {
-  if (scan === "degraded") return `${label} degraded`;
-  if (scan === "timeout") return `${label} timeout`;
-  if (scan === "unavailable") return `${label} unavailable`;
-  if (scan === "ok") return row?.authenticated ? `${label} data` : `${label} read-only`;
-  if (!row) return `${label} health unknown`;
-  if (!row.ok) return `${label} unavailable`;
-  if (row.authenticated) return `${label} data`;
-  return `${label} read-only`;
 }
 
 export function VenueHealthBar() {
@@ -82,9 +67,9 @@ export function VenueHealthBar() {
         const scan = scanHealth[item.venue];
         const kind = tone(row, scan);
         return (
-          <span className="status-item" key={item.venue} title={row?.detail ?? caption(row, item.label, scan)}>
+          <span className="status-item" key={item.venue} title={row?.detail ?? venueHealthCaption(item.label, scan, row)}>
             <span className={`status-dot ${kind}`} />
-            {caption(row, item.label, scan)}
+            {venueHealthCaption(item.label, scan, row)}
           </span>
         );
       })}

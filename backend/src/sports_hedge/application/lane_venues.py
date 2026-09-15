@@ -24,13 +24,16 @@ OPERATOR_SCAN_VENUES: tuple[VenueName, ...] = (
 MIN_VENUES_FOR_COMPARISON = 2
 INSUFFICIENT_VENUES_WARNING = (
     "scanner_configuration: fewer than two venues enabled — "
-    "arbitrage comparison is not executable"
+    "arbitrage comparison is not executable "
+    "(operator venue selection, not a provider outage)"
 )
 INSUFFICIENT_VENUES_REASON = "insufficient_enabled_venues"
 VENUE_HEALTH_DISABLED = "disabled"
+PROVIDER_HEALTH_FAILURES = frozenset({"unavailable", "timeout", "degraded", "error", "failed"})
 MALFORMED_VENUE_SETTINGS_WARNING = (
     "scanner_configuration: persisted operator venue settings are malformed — "
-    "ignored (fail closed); venues were not silently re-enabled"
+    "ignored (fail closed); venues were not silently re-enabled. "
+    "This is configuration, not a provider outage."
 )
 ParticipationSource = Literal["operator", "env_default"]
 
@@ -79,6 +82,14 @@ def comparison_warning(venues: Iterable[VenueName] | None) -> str | None:
 
 def venue_enabled(venues: Iterable[VenueName] | None, venue: VenueName) -> bool:
     return venue in coerce_operator_venues(venues)
+
+
+def is_operator_disabled_health(status: str | None) -> bool:
+    return status == VENUE_HEALTH_DISABLED
+
+
+def is_provider_health_failure(status: str | None) -> bool:
+    return status in PROVIDER_HEALTH_FAILURES
 
 
 class LaneVenueSet(BaseModel):

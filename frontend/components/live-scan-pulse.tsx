@@ -1,5 +1,7 @@
 "use client";
 
+import { isOperatorDisabledHealth, pulseVenueTone } from "../lib/venue-health-display";
+
 export type LiveScanPulsePhase = "idle" | "scanning" | "complete" | "error" | "degraded" | "paused";
 
 const VENUES: Array<{ key: string; label: string }> = [
@@ -8,19 +10,8 @@ const VENUES: Array<{ key: string; label: string }> = [
   { key: "kalshi", label: "Kalshi" },
 ];
 
-function venueTone(value: string | undefined): "ok" | "down" | "unknown" {
-  if (!value) return "unknown";
-  if (value === "ok") return "ok";
-  if (
-    value === "unavailable" ||
-    value === "error" ||
-    value === "failed" ||
-    value === "timeout" ||
-    value === "degraded"
-  ) {
-    return "down";
-  }
-  return "unknown";
+function venueTone(value: string | undefined): "ok" | "down" | "unknown" | "off" {
+  return pulseVenueTone(value);
 }
 
 function statusCopy(
@@ -85,12 +76,16 @@ export function LiveScanPulse({
         {showVenues ? (
           <span className="live-scan-pulse-venues">
             {VENUES.map((venue) => {
-              const tone = venueTone(venueHealth?.[venue.key]);
+              const value = venueHealth?.[venue.key];
+              const tone = venueTone(value);
+              const healthLabel = isOperatorDisabledHealth(value)
+                ? "off (operator)"
+                : value ?? "unknown";
               return (
                 <span
                   key={venue.key}
                   className={`live-scan-pulse-venue live-scan-pulse-venue-${tone}`}
-                  title={`${venue.label}: ${venueHealth?.[venue.key] ?? "unknown"}`}
+                  title={`${venue.label}: ${healthLabel}`}
                 >
                   {venue.label}
                 </span>

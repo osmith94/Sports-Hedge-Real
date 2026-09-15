@@ -13,6 +13,8 @@ export default defineConfig({
       "lib/paper-scan-history-display.test.ts",
       "lib/paper-position-management-display.test.ts",
       "lib/opportunity-monitor-display.test.ts",
+      "lib/venue-health-display.test.ts",
+      "lib/config-warning-display.test.ts",
     ],
   },
 });

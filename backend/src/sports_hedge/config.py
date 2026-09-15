@@ -10,6 +10,24 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 LOGGER = getLogger(__name__)
 
+EMPTY_LEGACY_POLYMARKET_SERIES_WARNING = (
+    "scanner_configuration: POLYMARKET_GAMMA_SERIES_ID is empty, so Gamma series "
+    "filtering is disabled. Championship/La Liga coverage is no longer guaranteed "
+    "by the target-series allowlist. Unset the empty legacy variable to restore "
+    "target-series filtering, or set POLYMARKET_GAMMA_SERIES_IDS explicitly. "
+    "This is configuration, not a provider outage."
+)
+
+
+def legacy_extra_polymarket_series_warning(single: str, resolved: list[str]) -> str:
+    return (
+        "scanner_configuration: legacy POLYMARKET_GAMMA_SERIES_ID "
+        f"({single}) was merged into POLYMARKET_GAMMA_SERIES_IDS "
+        f"({', '.join(resolved)}) rather than replacing the target set. Unset the "
+        "legacy variable and add any extra series to POLYMARKET_GAMMA_SERIES_IDS. "
+        "This is configuration hygiene, not a provider outage."
+    )
+
 
 class Settings(BaseSettings):
     """Runtime configuration for the Phase 1 paper-only service."""
@@ -216,21 +234,25 @@ class Settings(BaseSettings):
         return merged
 
     def polymarket_series_config_warnings(self) -> list[str]:
+        """Operator-facing series warnings only. Absent legacy is silent.
+
+        Supported ``POLYMARKET_GAMMA_SERIES_IDS`` is the default path and must
+        not emit an obsolete single-series warning merely because it is in use.
+        A leftover non-empty legacy ID that is already in the plural set is a
+        no-op merge — not an operator warning. Empty or coverage-changing
+        legacy values stay explicit.
+        """
+
         if self.polymarket_gamma_series_id is None:
             return []
         single = self.polymarket_gamma_series_id.strip()
         if not single:
-            return [
-                "POLYMARKET_GAMMA_SERIES_ID is empty, so Gamma series filtering is disabled. "
-                "Championship/La Liga coverage is no longer guaranteed by the target-series allowlist."
-            ]
+            return [EMPTY_LEGACY_POLYMARKET_SERIES_WARNING]
+        targets = list(self.polymarket_gamma_series_ids)
+        if single in targets:
+            return []
         resolved = self.resolved_polymarket_series_ids()
-        return [
-            "POLYMARKET_GAMMA_SERIES_ID is a legacy single-series setting "
-            f"({single}); it was merged into the target series set "
-            f"({', '.join(resolved)}) rather than replacing it. Unset the legacy "
-            "variable and use POLYMARKET_GAMMA_SERIES_IDS."
-        ]
+        return [legacy_extra_polymarket_series_warning(single, resolved)]
 
     @model_validator(mode="after")
     def enforce_phase_one_safety(self) -> Settings:

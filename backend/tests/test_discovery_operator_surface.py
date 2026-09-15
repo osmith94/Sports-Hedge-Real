@@ -103,13 +103,15 @@ def test_discovery_ui_renders_target_rows_from_backend_fields() -> None:
     assert "Operator demo" not in sidebar
     layout = (FRONTEND / "app" / "layout.tsx").read_text(encoding="utf-8")
     health = (FRONTEND / "components" / "venue-health-bar.tsx").read_text(encoding="utf-8")
+    health_display = (FRONTEND / "lib" / "venue-health-display.ts").read_text(encoding="utf-8")
     assert "VenueHealthBar" in layout
     assert "getVenueHealth" in health
     assert "kalshi" in health
     assert "matchbook" in health
     assert "polymarket" in health
-    assert 'scan === "timeout"' in health
-    assert "${label} timeout" in health
+    assert 'scan === "timeout"' in health_display
+    assert "${label} timeout" in health_display
+    assert "off (operator)" in health_display
     main = (FRONTEND.parent / "backend" / "src" / "sports_hedge" / "api" / "main.py").read_text(
         encoding="utf-8"
     )

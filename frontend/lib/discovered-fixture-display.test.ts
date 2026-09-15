@@ -152,7 +152,8 @@ describe("fixture discovery collapsed-by-default disclosure", () => {
   it("preserves the expanded warning banner and discovery table in the existing panel", () => {
     const panel = readFileSync(join(frontendRoot, "components/discovered-fixtures.tsx"), "utf8");
     assert.match(panel, /status\.config_warnings/);
-    assert.match(panel, /scan-message scan-message-error/);
+    assert.match(panel, /CONFIG_WARNING_BANNER_CLASS/);
+    assert.doesNotMatch(panel, /scan-message scan-message-error/);
     assert.match(panel, /table className="discovery-compact"/);
     assert.match(panel, /Discovery status unavailable\. No fabricated fixtures\./);
   });
