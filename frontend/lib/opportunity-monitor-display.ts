@@ -161,6 +161,14 @@ export function quoteAgeLabel(item: NearOpportunity): string {
   return `${age}${basis} at last evaluation`;
 }
 
+export function isExecutableRadarFreshness(freshness: string | null | undefined): boolean {
+  return (freshness || "").toLowerCase() === "executable";
+}
+
+export function isStoredTrigger(item: NearOpportunity): boolean {
+  return QUALIFYING_STATUSES.has(item.status) || item.is_arbitrage === true;
+}
+
 export function opportunityMonitorState(item: NearOpportunity): OpportunityMonitorStateBadge {
   const freshness = (item.freshness_class || "").toLowerCase();
   const reasons = [...item.rejection_reasons, ...item.insufficiency_reasons].map((reason) =>
@@ -169,8 +177,13 @@ export function opportunityMonitorState(item: NearOpportunity): OpportunityMonit
   if (freshness === "expired" || item.status === "EXPIRED" || reasons.some((reason) => STALE_REASONS.has(reason))) {
     return "STALE";
   }
-  if (QUALIFYING_STATUSES.has(item.status) || item.is_arbitrage === true) {
+  if (isStoredTrigger(item) && isExecutableRadarFreshness(item.freshness_class)) {
     return "QUALIFYING";
+  }
+  // Historical TRIGGERED/solver-arb remaining on radar after the ~1s executable gate.
+  // Do not infer executable freshness from stored status or quote_age_ms.
+  if (isStoredTrigger(item)) {
+    return "STALE";
   }
   const net = number(item.current_net_edge);
   if (net !== null && net < 0) {
@@ -201,8 +214,17 @@ export function opportunityMonitorStateTitle(item: NearOpportunity): string {
     .join("; ");
   const status = item.status.replaceAll("_", " ");
   const classification = item.classification.replaceAll("_", " ");
-  if (reasons) return `${status} · ${classification} · ${reasons}`;
-  return `${status} · ${classification}`;
+  const parts = [status, classification];
+  if (reasons) parts.push(reasons);
+  if (isStoredTrigger(item) && !isExecutableRadarFreshness(item.freshness_class)) {
+    const freshness = freshnessLabel(item.freshness_class);
+    parts.push(
+      freshness === "—"
+        ? "not currently executable · freshness unknown"
+        : `not currently executable · ${freshness}`,
+    );
+  }
+  return parts.join(" · ");
 }
 
 export function mappingDisplay(): { text: string; title: string } {

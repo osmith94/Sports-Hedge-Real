@@ -141,7 +141,16 @@ describe("opportunity monitor current-vs-audit separation", () => {
 describe("opportunity monitor state badges", () => {
   it("maps canonical watchlist states onto compact badges without using rejection prose as the badge", () => {
     assert.equal(
-      opportunityMonitorState(watch({ opportunity_id: "q", status: "TRIGGERED", classification: "triggered_opportunity", is_arbitrage: true })),
+      opportunityMonitorState(
+        watch({
+          opportunity_id: "q",
+          status: "TRIGGERED",
+          classification: "triggered_opportunity",
+          is_arbitrage: true,
+          freshness_class: "executable",
+          bet_actionable: true,
+        }),
+      ),
       "QUALIFYING",
     );
     assert.equal(opportunityMonitorState(watch({ opportunity_id: "n" })), "NEAR");
@@ -182,6 +191,60 @@ describe("opportunity monitor state badges", () => {
     assert.match(rejected.stateTitle, /insufficient depth/);
     assert.notEqual(rejected.state, rejected.stateTitle);
   });
+
+  it("labels a radar-current historical trigger STALE and excludes it from qualifying count", () => {
+    const aged = watch({
+      opportunity_id: "aged-trigger",
+      status: "TRIGGERED",
+      classification: "triggered_opportunity",
+      is_arbitrage: true,
+      freshness_class: "radar_current",
+      bet_actionable: false,
+      bet_blocked_reason: "radar_current_not_executable",
+      quote_age_ms: 5000,
+      guaranteed_profit_gbp: 1.24,
+      current_net_edge: 0.021,
+    });
+    const live = watch({
+      opportunity_id: "live-trigger",
+      status: "TRIGGERED",
+      classification: "triggered_opportunity",
+      is_arbitrage: true,
+      freshness_class: "executable",
+      bet_actionable: true,
+      quote_age_ms: 180,
+      guaranteed_profit_gbp: 0.88,
+      current_net_edge: 0.014,
+    });
+    const agedRow = opportunityMonitorRow(aged);
+    const liveRow = opportunityMonitorRow(live);
+    assert.equal(opportunityMonitorState(aged), "STALE");
+    assert.notEqual(opportunityMonitorState(aged), "QUALIFYING");
+    assert.equal(agedRow.state, "STALE");
+    assert.match(agedRow.stateTitle, /not currently executable/);
+    assert.match(agedRow.stateTitle, /radar current/);
+    assert.equal(agedRow.netEdge, 0.021);
+    assert.equal(agedRow.guaranteedProfitGbp, 1.24);
+    assert.equal(agedRow.freshnessLabel, "radar current");
+    assert.equal(opportunityMonitorState(live), "QUALIFYING");
+    assert.equal(liveRow.state, "QUALIFYING");
+    assert.doesNotMatch(liveRow.stateTitle, /not currently executable/);
+    const unknownFreshness = opportunityMonitorState(
+      watch({
+        opportunity_id: "unknown-trigger",
+        status: "TRIGGERED",
+        classification: "triggered_opportunity",
+        is_arbitrage: true,
+        freshness_class: null,
+        bet_actionable: false,
+        quote_age_ms: 120,
+      }),
+    );
+    assert.equal(unknownFreshness, "STALE");
+    const summary = opportunityMonitorSummary([agedRow, liveRow], refresh(), true, true);
+    assert.equal(summary.qualifyingCount, 1);
+    assert.equal(summary.nearCount, 0);
+  });
 });
 
 describe("opportunity monitor default ordering and user sort", () => {
@@ -215,6 +278,8 @@ describe("opportunity monitor default ordering and user sort", () => {
           status: "TRIGGERED",
           classification: "triggered_opportunity",
           is_arbitrage: true,
+          freshness_class: "executable",
+          bet_actionable: true,
           current_net_edge: 0.011,
           last_scanned_at: "2026-09-15T12:00:30.000Z",
         }),
@@ -225,6 +290,8 @@ describe("opportunity monitor default ordering and user sort", () => {
           status: "TRIGGERED",
           classification: "triggered_opportunity",
           is_arbitrage: true,
+          freshness_class: "executable",
+          bet_actionable: true,
           current_net_edge: 0.03,
           last_scanned_at: "2026-09-15T12:00:12.000Z",
         }),
