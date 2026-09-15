@@ -34,5 +34,6 @@ No second identity store. `#161` `FixtureCurrentStateStore` aliases are unchange
 
 - ChatGPT text never activates a rule.
 - `AMBIGUOUS` / `NOT VERIFIED` persist the review only.
+- `VERIFIED` + explicit confirmation still cannot activate a rule when the candidate evidence has competition, kickoff, family, period, line, settlement, or outcome conflicts. The review is persisted with `activation_blocked_reason`; no enabled rule is written.
 - Disabled/revoked rules stop applying; paper-scan audit rows are not rewritten.
 - Learned mapping alone does not bypass quote freshness, fees, FX, depth, risk, solver, allocator, treasury, or venue-participation gates.

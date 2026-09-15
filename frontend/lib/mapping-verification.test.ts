@@ -57,6 +57,20 @@ describe("mapping verification seam", () => {
     expect(
       canActivateLearnedRule({ verdict: "verified", operatorConfirmed: true }),
     ).toBe(true);
+    expect(
+      canActivateLearnedRule({
+        verdict: "verified",
+        operatorConfirmed: true,
+        conflictingFields: ["settlement"],
+      }),
+    ).toBe(false);
+    expect(
+      canActivateLearnedRule({
+        verdict: "verified",
+        operatorConfirmed: true,
+        conflictingFields: ["market_family", "period", "outcome_space"],
+      }),
+    ).toBe(false);
   });
 
   it("treats credential-like fragments as secrets that must not appear in prompts", () => {

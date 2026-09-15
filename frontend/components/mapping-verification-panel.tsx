@@ -45,8 +45,13 @@ export function MappingVerificationPanel({
   const [confirmed, setConfirmed] = useState(false);
 
   const canSave = useMemo(
-    () => canActivateLearnedRule({ verdict, operatorConfirmed: confirmed }),
-    [verdict, confirmed],
+    () =>
+      canActivateLearnedRule({
+        verdict,
+        operatorConfirmed: confirmed,
+        conflictingFields: candidate.conflicting_fields,
+      }),
+    [verdict, confirmed, candidate.conflicting_fields],
   );
 
   return (

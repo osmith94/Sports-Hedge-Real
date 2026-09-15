@@ -249,14 +249,101 @@ def _prefix_delta(raw: str, counterpart: str) -> str | None:
     return extra[0]
 
 
+def _supplied_text(value: str | None) -> str:
+    return normalize_text(value or "")
+
+
+def _optional_text_conflict(name: str, left: str | None, right: str | None) -> list[str]:
+    left_text = _supplied_text(left)
+    right_text = _supplied_text(right)
+    if not left_text and not right_text:
+        return []
+    if left_text != right_text:
+        return [name]
+    return []
+
+
+def structural_evidence_conflicts(
+    left: MappingSideEvidence,
+    right: MappingSideEvidence,
+    *,
+    kickoff_tolerance: timedelta = timedelta(minutes=5),
+) -> list[str]:
+    """Return structural mismatches that must block learned-rule activation.
+
+    Naming evidence may be fuzzy. Competition, kickoff, and any supplied market
+    family/period/line/settlement/outcome semantics must already agree.
+    """
+
+    conflicts: list[str] = []
+    if _supplied_text(left.sport) != _supplied_text(right.sport):
+        conflicts.append("sport")
+
+    left_code = competition_code_for(left.raw_competition)
+    right_code = competition_code_for(right.raw_competition)
+    if left_code is not None or right_code is not None:
+        if left_code != right_code:
+            conflicts.append("competition")
+    elif _supplied_text(left.raw_competition) != _supplied_text(right.raw_competition):
+        conflicts.append("competition")
+
+    kickoff_delta = abs((left.kickoff_utc - right.kickoff_utc).total_seconds())
+    if kickoff_delta > kickoff_tolerance.total_seconds():
+        conflicts.append("kickoff")
+
+    conflicts.extend(_optional_text_conflict("market_family", left.family, right.family))
+    conflicts.extend(_optional_text_conflict("period", left.period, right.period))
+    conflicts.extend(_optional_text_conflict("line", left.line, right.line))
+    conflicts.extend(_optional_text_conflict("settlement", left.settlement_key, right.settlement_key))
+    conflicts.extend(
+        _optional_text_conflict("settlement_scope", left.settlement_scope, right.settlement_scope)
+    )
+
+    left_outcomes = sorted({_supplied_text(item) for item in left.outcome_space if _supplied_text(item)})
+    right_outcomes = sorted(
+        {_supplied_text(item) for item in right.outcome_space if _supplied_text(item)}
+    )
+    if left_outcomes or right_outcomes:
+        if left_outcomes != right_outcomes:
+            conflicts.append("outcome_space")
+    return conflicts
+
+
+def candidate_structural_conflicts(
+    candidate: MappingReviewCandidate,
+    *,
+    kickoff_tolerance: timedelta = timedelta(minutes=5),
+) -> list[str]:
+    found: list[str] = []
+    sides = list(candidate.sides)
+    for index, left in enumerate(sides):
+        for right in sides[index + 1 :]:
+            found.extend(
+                structural_evidence_conflicts(left, right, kickoff_tolerance=kickoff_tolerance)
+            )
+    declared = [item for item in candidate.conflicting_fields if item]
+    return sorted(set(found).union(declared))
+
+
+def activation_block_reason(conflicts: Sequence[str]) -> str:
+    unique = sorted({item for item in conflicts if item})
+    return "structural_conflicts:" + ",".join(unique)
+
+
 def infer_guardrails(
     left: MappingSideEvidence,
     right: MappingSideEvidence,
     *,
     kickoff_tolerance: timedelta = timedelta(minutes=5),
 ) -> MappingGuardrails:
-    code = competition_code_for(left.raw_competition) or competition_code_for(right.raw_competition)
-    outcomes = sorted(set(left.outcome_space) | set(right.outcome_space))
+    code = competition_code_for(left.raw_competition)
+    if code is None:
+        code = competition_code_for(right.raw_competition)
+    left_outcomes = sorted({_supplied_text(item) for item in left.outcome_space if _supplied_text(item)})
+    right_outcomes = sorted(
+        {_supplied_text(item) for item in right.outcome_space if _supplied_text(item)}
+    )
+    outcomes = left_outcomes if left_outcomes == right_outcomes else []
     settlement = left.settlement_key if left.settlement_key == right.settlement_key else None
     family = left.family if left.family == right.family else None
     period = left.period if left.period == right.period else None
@@ -286,6 +373,8 @@ def infer_learned_rule(
 ) -> MappingRule | None:
     """Return the narrowest safe reusable venue-scoped rule supported by evidence."""
 
+    if structural_evidence_conflicts(left, right, kickoff_tolerance=kickoff_tolerance):
+        return None
     guardrails = infer_guardrails(left, right, kickoff_tolerance=kickoff_tolerance)
     created = datetime.now(UTC)
 

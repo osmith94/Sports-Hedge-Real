@@ -104,6 +104,9 @@ export function promptContainsSecrets(prompt: string): boolean {
 export function canActivateLearnedRule(input: {
   verdict: MappingVerdict | null;
   operatorConfirmed: boolean;
+  conflictingFields?: string[] | null;
 }): boolean {
-  return input.verdict === "verified" && input.operatorConfirmed === true;
+  if (input.verdict !== "verified" || input.operatorConfirmed !== true) return false;
+  if (input.conflictingFields && input.conflictingFields.length > 0) return false;
+  return true;
 }

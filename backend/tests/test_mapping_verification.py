@@ -37,6 +37,7 @@ from sports_hedge.matching.learned_rules import (
     MappingVerdict,
     infer_learned_rule,
     sanitize_mapping_payload,
+    structural_evidence_conflicts,
 )
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.paper.audit import PaperScanRecord
@@ -72,6 +73,7 @@ def _market(
     *,
     extra_time: bool = False,
     family: MarketFamily = MarketFamily.MATCH_RESULT,
+    period: FootballPeriod = FootballPeriod.FULL_TIME,
     source_market_id: str | None = None,
 ) -> CanonicalMarket:
     scope = SettlementScope.INCLUDING_EXTRA_TIME if extra_time else SettlementScope.REGULATION_TIME
@@ -90,10 +92,10 @@ def _market(
         source_venue=event.source_venue,
         source_market_id=source_market_id or f"{event.source_venue.value}-mkt",
         family=family,
-        period=FootballPeriod.FULL_TIME,
+        period=period,
         settlement=SettlementFingerprint(
             scope=scope,
-            period=FootballPeriod.FULL_TIME,
+            period=period,
             extra_time_included=extra_time,
             penalties_included=False,
         ),
@@ -110,10 +112,14 @@ def _side(
     kickoff: datetime = KICKOFF,
     source_event_id: str = "evt",
     extra_time: bool = False,
+    family: MarketFamily = MarketFamily.MATCH_RESULT,
+    period: FootballPeriod = FootballPeriod.FULL_TIME,
 ) -> MappingSideEvidence:
     market = _market(
         _event(venue, home, away, competition=competition, kickoff=kickoff, source_event_id=source_event_id),
         extra_time=extra_time,
+        family=family,
+        period=period,
     )
     return MappingSideEvidence(
         venue=venue,
@@ -126,7 +132,7 @@ def _side(
         kickoff_utc=kickoff,
         raw_market_name="Match Result",
         raw_market_type="match_odds",
-        raw_runner_labels=["Home", "Draw", "Away"],
+        raw_runner_labels=[runner.label for runner in market.runners],
         family=market.family.value,
         period=market.period.value,
         settlement_key=market.settlement.deterministic_key(),
@@ -318,6 +324,96 @@ def test_settlement_mismatch_cannot_be_overridden_by_naming_rule() -> None:
     assert result.matched is False
     assert "settlement_mismatch" in result.reasons
     assert result.provenance.mapping_source is MappingProvenanceSource.OPERATOR_VERIFIED
+    store.close()
+
+
+def test_verified_confirm_blocks_activation_on_settlement_mismatch() -> None:
+    store = SqliteMappingRuleStore()
+    candidate = MappingReviewCandidate(
+        sides=[
+            _side(VenueName.MATCHBOOK, "Leeds United", "Chelsea", source_event_id="mb-set"),
+            _side(
+                VenueName.POLYMARKET,
+                "Leeds United FC",
+                "Chelsea FC",
+                source_event_id="pm-set",
+                extra_time=True,
+            ),
+        ],
+        current_confidence=0.92,
+        current_reasons=["settlement_mismatch"],
+        current_matched=False,
+        conflicting_fields=["settlement"],
+    )
+    assert "settlement" in structural_evidence_conflicts(candidate.sides[0], candidate.sides[1])
+    proposal = MappingReviewService(store).confirm(
+        candidate,
+        operator="oliver",
+        operator_confirmed=True,
+        manual_verdict=MappingVerdict.VERIFIED,
+    )
+    assert proposal.verdict is MappingVerdict.VERIFIED
+    assert proposal.operator_confirmed is True
+    assert proposal.proposed_rule is None
+    assert proposal.activation_blocked_reason is not None
+    assert "settlement" in proposal.activation_blocked_reason
+    assert store.list_enabled() == []
+    review = store.get_review(proposal.review_id)
+    assert review is not None
+    assert review["activated_rule_id"] is None
+    assert review["activation_blocked_reason"] == proposal.activation_blocked_reason
+    assert review["verdict"] == "verified"
+    store.close()
+
+
+def test_verified_confirm_blocks_activation_on_family_period_outcome_mismatch() -> None:
+    store = SqliteMappingRuleStore()
+    candidate = MappingReviewCandidate(
+        sides=[
+            _side(
+                VenueName.MATCHBOOK,
+                "Leeds United",
+                "Chelsea",
+                source_event_id="mb-fam",
+                family=MarketFamily.MATCH_RESULT,
+                period=FootballPeriod.FULL_TIME,
+            ),
+            _side(
+                VenueName.POLYMARKET,
+                "Leeds United FC",
+                "Chelsea FC",
+                source_event_id="pm-fam",
+                family=MarketFamily.BOTH_TEAMS_TO_SCORE,
+                period=FootballPeriod.FIRST_HALF,
+            ),
+        ],
+        current_confidence=0.88,
+        current_reasons=["market_family_mismatch", "period_mismatch", "outcome_space_mismatch"],
+        current_matched=False,
+        conflicting_fields=["market_family", "period", "outcome_space"],
+    )
+    conflicts = structural_evidence_conflicts(candidate.sides[0], candidate.sides[1])
+    assert "market_family" in conflicts
+    assert "period" in conflicts
+    assert "outcome_space" in conflicts
+    proposal = MappingReviewService(store).confirm(
+        candidate,
+        operator="oliver",
+        operator_confirmed=True,
+        manual_verdict=MappingVerdict.VERIFIED,
+    )
+    assert proposal.proposed_rule is None
+    assert proposal.activation_blocked_reason is not None
+    reason = proposal.activation_blocked_reason
+    assert reason.startswith("structural_conflicts:")
+    assert "market_family" in reason
+    assert "period" in reason
+    assert "outcome_space" in reason
+    assert store.list_enabled() == []
+    review = store.get_review(proposal.review_id)
+    assert review is not None
+    assert review["activated_rule_id"] is None
+    assert review["activation_blocked_reason"] == reason
     store.close()
 
 

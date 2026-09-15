@@ -19,6 +19,8 @@ from sports_hedge.matching.learned_rules import (
     MappingRuleSource,
     MappingSideEvidence,
     MappingVerdict,
+    activation_block_reason,
+    candidate_structural_conflicts,
     infer_learned_rule,
     sanitize_mapping_payload,
 )
@@ -131,22 +133,25 @@ class MappingReviewService:
 
         proposed: MappingRule | None = None
         blocked: str | None = None
+        structural_conflicts = candidate_structural_conflicts(candidate)
         if verdict is MappingVerdict.VERIFIED:
-            proposed = infer_learned_rule(
-                candidate.sides[0],
-                candidate.sides[1],
-                operator=operator,
-                source=source,
-                evidence=chatgpt_text or "operator_manual_evidence",
-                review_id=review_id,
-            )
-            if proposed is None:
-                blocked = "no_safe_reusable_or_fixture_rule_from_evidence"
+            if structural_conflicts:
+                blocked = activation_block_reason(structural_conflicts)
+            else:
+                proposed = infer_learned_rule(
+                    candidate.sides[0],
+                    candidate.sides[1],
+                    operator=operator,
+                    source=source,
+                    evidence=chatgpt_text or "operator_manual_evidence",
+                    review_id=review_id,
+                )
+                if proposed is None:
+                    blocked = "no_safe_reusable_or_fixture_rule_from_evidence"
+                elif not operator_confirmed:
+                    blocked = "explicit_operator_confirmation_required"
         else:
             blocked = f"verdict_{verdict.value}_activates_nothing"
-
-        if verdict is MappingVerdict.VERIFIED and not operator_confirmed:
-            blocked = "explicit_operator_confirmation_required"
 
         review = self.store.save_review(
             operator=operator,
@@ -159,6 +164,7 @@ class MappingReviewService:
             confirmed_at=None,
             activated_rule_id=None,
             review_id=review_id,
+            activation_blocked_reason=blocked,
         )
         return MappingReviewProposal(
             review_id=review["review_id"],
@@ -192,10 +198,34 @@ class MappingReviewService:
         )
         if not operator_confirmed:
             return proposal
-        if proposal.verdict is not MappingVerdict.VERIFIED:
-            return proposal
-        if proposal.proposed_rule is None:
-            return proposal
+        confirmed_at = datetime.now(UTC)
+        if (
+            proposal.verdict is not MappingVerdict.VERIFIED
+            or proposal.proposed_rule is None
+            or proposal.activation_blocked_reason is not None
+        ):
+            self.store.save_review(
+                operator=operator,
+                source=source,
+                prompt_text=proposal.prompt_text,
+                evidence=sanitize_mapping_payload(candidate.model_dump(mode="json")),
+                verdict=proposal.verdict,
+                chatgpt_text=chatgpt_text,
+                proposed_rule=None,
+                confirmed_at=confirmed_at,
+                activated_rule_id=None,
+                review_id=proposal.review_id,
+                activation_blocked_reason=proposal.activation_blocked_reason,
+            )
+            return MappingReviewProposal(
+                review_id=proposal.review_id,
+                verdict=proposal.verdict,
+                operator_confirmed=True,
+                proposed_rule=None,
+                prompt_text=proposal.prompt_text,
+                chatgpt_text=chatgpt_text,
+                activation_blocked_reason=proposal.activation_blocked_reason,
+            )
 
         rule = proposal.proposed_rule.model_copy(
             update={"review_id": proposal.review_id, "enabled": True, "revoked": False}
@@ -209,9 +239,10 @@ class MappingReviewService:
             verdict=proposal.verdict,
             chatgpt_text=chatgpt_text,
             proposed_rule=saved,
-            confirmed_at=datetime.now(UTC),
+            confirmed_at=confirmed_at,
             activated_rule_id=saved.rule_id,
             review_id=proposal.review_id,
+            activation_blocked_reason=None,
         )
         return MappingReviewProposal(
             review_id=proposal.review_id,

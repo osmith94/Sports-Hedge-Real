@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS mapping_reviews (
     proposed_rule_json TEXT,
     confirmed_at TEXT,
     activated_rule_id TEXT,
+    activation_blocked_reason TEXT,
     evidence_json TEXT NOT NULL
 );
 """
@@ -127,6 +128,13 @@ class SqliteMappingRuleStore:
 
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         connection.executescript(_CREATE_SQL)
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(mapping_reviews)")
+        }
+        if "activation_blocked_reason" not in columns:
+            connection.execute(
+                "ALTER TABLE mapping_reviews ADD COLUMN activation_blocked_reason TEXT"
+            )
 
     def list_enabled(self) -> list[MappingRule]:
         with self._connect() as connection:
@@ -265,6 +273,7 @@ class SqliteMappingRuleStore:
         confirmed_at: datetime | None = None,
         activated_rule_id: str | None = None,
         review_id: str | None = None,
+        activation_blocked_reason: str | None = None,
     ) -> dict[str, Any]:
         review_id = review_id or f"maprev:{uuid4().hex[:16]}"
         created = datetime.now(UTC)
@@ -281,6 +290,7 @@ class SqliteMappingRuleStore:
             else proposed_rule.model_dump_json(),
             "confirmed_at": None if confirmed_at is None else confirmed_at.isoformat(),
             "activated_rule_id": activated_rule_id,
+            "activation_blocked_reason": activation_blocked_reason,
             "evidence_json": json.dumps(evidence, default=str),
         }
         with self._connect() as connection:
@@ -294,11 +304,11 @@ class SqliteMappingRuleStore:
                     INSERT INTO mapping_reviews (
                         review_id, created_at, operator, source, verdict, prompt_text,
                         chatgpt_text, proposed_rule_json, confirmed_at, activated_rule_id,
-                        evidence_json
+                        activation_blocked_reason, evidence_json
                     ) VALUES (
                         :review_id, :created_at, :operator, :source, :verdict, :prompt_text,
                         :chatgpt_text, :proposed_rule_json, :confirmed_at, :activated_rule_id,
-                        :evidence_json
+                        :activation_blocked_reason, :evidence_json
                     )
                     """,
                     row,
@@ -315,6 +325,7 @@ class SqliteMappingRuleStore:
                         proposed_rule_json = :proposed_rule_json,
                         confirmed_at = :confirmed_at,
                         activated_rule_id = :activated_rule_id,
+                        activation_blocked_reason = :activation_blocked_reason,
                         evidence_json = :evidence_json
                     WHERE review_id = :review_id
                     """,
