@@ -1,7 +1,7 @@
 # Wave G scanner performance correction
 
-**Branch:** `fix/wave-g-scanner-performance`  
-**Required base:** `f0553d35e06dd49434b771af378ec7b49aaf80c1`  
+**Branch:** `fix/wave-g-scanner-performance`
+**Required base:** `f0553d35e06dd49434b771af378ec7b49aaf80c1`
 **Data class:** deterministic fixture/demo synthetic provider data, not a real-provider SLA
 
 ## Root cause
