@@ -533,8 +533,9 @@ export function RunPaperScan() {
           </div>
         </div>
         <div className="scan-note">
-          Run Fast refresh performs a manual HOT refresh of current known fixtures. It does not
-          rediscover the full universe or advance the scheduled Fast Scan / Full Sweep lanes.
+          Run Fast refresh performs a manual HOT refresh of current known fixtures.
+          It does not rediscover the full universe or advance the scheduled Fast Scan / Full Sweep
+          lanes.
         </div>
         <div className="scan-note" aria-label="Fast scan and Full sweep status">
           {dualScanStatusLines(liveRefresh).map((line) => (
