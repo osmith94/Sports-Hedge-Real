@@ -5,14 +5,19 @@ import { fileURLToPath } from "node:url";
 
 import {
   canActivateLearnedRule,
+  fingerprintOpportunityVerifyRow,
   hasSafeReviewCandidate,
   isNativeHundredPercent,
   mappingConfirmRequest,
   mappingProvenanceLabel,
+  mappingVerifyConfirmDecision,
+  mappingVerifyEvidenceFingerprint,
   promptContainsSecrets,
   shouldOfferMappingVerify,
   shouldOfferMappingVerifyAction,
+  snapshotMappingCandidate,
   structuralActivationBlockedReason,
+  verifySessionMatchesCurrent,
 } from "./mapping-verification";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -183,6 +188,107 @@ describe("mapping verification seam", () => {
     expect(confirmBody.manual_verdict).toBe("verified");
   });
 
+  it("binds Verify to exact evidence and fails closed when the same opportunity refreshes", () => {
+    const candidateA = {
+      sides: [
+        {
+          venue: "matchbook" as const,
+          source_event_id: "a",
+          source_market_id: "m1",
+          raw_home_team: "Leeds",
+          raw_away_team: "Chelsea",
+          raw_competition: "PL",
+          kickoff_utc: "2026-09-20T15:00:00Z",
+        },
+        {
+          venue: "polymarket" as const,
+          source_event_id: "b",
+          source_market_id: "m2",
+          raw_home_team: "Leeds United FC",
+          raw_away_team: "Chelsea FC",
+          raw_competition: "PL",
+          kickoff_utc: "2026-09-20T15:00:00Z",
+        },
+      ],
+      current_confidence: 0.96,
+    };
+    const candidateB = {
+      ...candidateA,
+      current_confidence: 0.91,
+      sides: [
+        candidateA.sides[0],
+        {
+          ...candidateA.sides[1],
+          raw_home_team: "Leeds United",
+          source_event_id: "pm-leeds-b",
+        },
+      ],
+    };
+    const rowA = {
+      id: "opp-1",
+      observedAt: "2026-09-15T12:00:00.000Z",
+      mappingConfidence: 0.96,
+      mappingCandidate: candidateA,
+    };
+    const rowB = {
+      id: "opp-1",
+      observedAt: "2026-09-15T12:00:45.000Z",
+      mappingConfidence: 0.91,
+      mappingCandidate: candidateB,
+    };
+    const fingerprintA = fingerprintOpportunityVerifyRow(rowA);
+    const fingerprintB = fingerprintOpportunityVerifyRow(rowB);
+    expect(fingerprintA).not.toBe(fingerprintB);
+    expect(verifySessionMatchesCurrent(fingerprintA, fingerprintB)).toBe(false);
+    const interpreted = mappingVerifyConfirmDecision({
+      sessionFingerprint: fingerprintA,
+      currentFingerprint: fingerprintA,
+      sessionCandidate: snapshotMappingCandidate(candidateA),
+      chatgptText: "VERIFIED. Strip FC suffix.",
+      verdict: "verified",
+      reviewId: "maprev:a",
+    });
+    expect(interpreted.ok).toBe(true);
+    if (interpreted.ok) {
+      expect(interpreted.request.review_id).toBe("maprev:a");
+      expect(interpreted.request.candidate.sides[1].source_event_id).toBe("b");
+    }
+    const refreshed = mappingVerifyConfirmDecision({
+      sessionFingerprint: fingerprintA,
+      currentFingerprint: fingerprintB,
+      sessionCandidate: candidateA,
+      chatgptText: "VERIFIED. Strip FC suffix.",
+      verdict: "verified",
+      reviewId: "maprev:a",
+    });
+    expect(refreshed.ok).toBe(false);
+    if (!refreshed.ok) {
+      expect(refreshed.reason).toBe("mapping_verify_evidence_changed");
+    }
+    const freshB = mappingVerifyConfirmDecision({
+      sessionFingerprint: fingerprintB,
+      currentFingerprint: fingerprintB,
+      sessionCandidate: snapshotMappingCandidate(candidateB),
+      chatgptText: "VERIFIED. Strip FC suffix.",
+      verdict: "verified",
+      reviewId: "maprev:b",
+    });
+    expect(freshB.ok).toBe(true);
+    if (freshB.ok) {
+      expect(freshB.request.review_id).toBe("maprev:b");
+      expect(freshB.request.candidate.sides[1].source_event_id).toBe("pm-leeds-b");
+      expect(freshB.request.review_id).not.toBe("maprev:a");
+    }
+    expect(
+      mappingVerifyEvidenceFingerprint({
+        opportunityId: "opp-1",
+        observedAt: rowA.observedAt,
+        mappingConfidence: 0.96,
+        candidate: candidateA,
+      }),
+    ).toBe(fingerprintA);
+  });
+
   it("treats credential-like fragments as secrets that must not appear in prompts", () => {
     expect(promptContainsSecrets("Are these two venue markets the same?")).toBe(false);
     expect(promptContainsSecrets("Authorization: Bearer super-secret")).toBe(true);
@@ -201,9 +307,11 @@ describe("mapping verification seam", () => {
     expect(monitor).toContain("buildMappingReviewPrompt");
     expect(monitor).toContain("interpretMappingReview");
     expect(monitor).toContain("confirmMappingReview");
-    expect(monitor).toContain("mappingConfirmRequest");
-    expect(monitor).toContain("reviewId:");
-    expect(monitor).toContain("reviewIdById");
+    expect(monitor).toContain("mappingVerifyConfirmDecision");
+    expect(monitor).toContain("fingerprintOpportunityVerifyRow");
+    expect(monitor).toContain("snapshotMappingCandidate");
+    expect(monitor).toContain("session.candidate");
+    expect(monitor).toContain("failClosedEvidenceChanged");
     expect(page).not.toContain("MappingVerificationPanel");
     expect(page).not.toContain("mapping-verification-panel");
   });

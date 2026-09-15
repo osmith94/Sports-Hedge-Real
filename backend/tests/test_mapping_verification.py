@@ -528,6 +528,74 @@ def test_interpret_then_confirm_threads_the_same_review_id() -> None:
     store.close()
 
 
+def test_confirm_does_not_overwrite_review_when_candidate_changes() -> None:
+    store = SqliteMappingRuleStore()
+    service = MappingReviewService(store)
+    candidate_a = _candidate()
+    interpreted = service.interpret(
+        candidate_a,
+        operator="oliver",
+        chatgpt_text="VERIFIED. Strip FC suffix on Polymarket team names.",
+        operator_confirmed=False,
+    )
+    review_a = store.get_review(interpreted.review_id)
+    assert review_a is not None
+    evidence_a = review_a["evidence_json"]
+
+    candidate_b = _candidate()
+    candidate_b.sides[1].source_event_id = "pm-leeds-refreshed"
+    candidate_b.current_confidence = 0.88
+    mismatched = service.confirm(
+        candidate_b,
+        operator="oliver",
+        operator_confirmed=True,
+        chatgpt_text="VERIFIED. Strip FC suffix on Polymarket team names.",
+        manual_verdict=MappingVerdict.VERIFIED,
+        review_id=interpreted.review_id,
+    )
+    assert mismatched.activation_blocked_reason == "review_evidence_changed"
+    assert mismatched.proposed_rule is None
+    assert mismatched.operator_confirmed is False
+    assert store.list_enabled() == []
+    unchanged = store.get_review(interpreted.review_id)
+    assert unchanged is not None
+    assert unchanged["evidence_json"] == evidence_a
+    assert unchanged["activated_rule_id"] is None
+
+    confirmed_a = service.confirm(
+        candidate_a,
+        operator="oliver",
+        operator_confirmed=True,
+        chatgpt_text="VERIFIED. Strip FC suffix on Polymarket team names.",
+        manual_verdict=MappingVerdict.VERIFIED,
+        review_id=interpreted.review_id,
+    )
+    assert confirmed_a.review_id == interpreted.review_id
+    assert confirmed_a.proposed_rule is not None
+    assert confirmed_a.proposed_rule.review_id == interpreted.review_id
+
+    interpreted_b = service.interpret(
+        candidate_b,
+        operator="oliver",
+        chatgpt_text="VERIFIED. Strip FC suffix on Polymarket team names.",
+        operator_confirmed=False,
+    )
+    assert interpreted_b.review_id != interpreted.review_id
+    confirmed_b = service.confirm(
+        candidate_b,
+        operator="oliver",
+        operator_confirmed=True,
+        chatgpt_text="VERIFIED. Strip FC suffix on Polymarket team names.",
+        manual_verdict=MappingVerdict.VERIFIED,
+        review_id=interpreted_b.review_id,
+    )
+    assert confirmed_b.review_id == interpreted_b.review_id
+    assert confirmed_b.proposed_rule is not None
+    assert confirmed_b.proposed_rule.review_id == interpreted_b.review_id
+    assert store.get_review(interpreted.review_id)["activated_rule_id"] == confirmed_a.proposed_rule.rule_id
+    store.close()
+
+
 def test_ambiguous_and_not_verified_activate_nothing() -> None:
     store = SqliteMappingRuleStore()
     service = MappingReviewService(store)

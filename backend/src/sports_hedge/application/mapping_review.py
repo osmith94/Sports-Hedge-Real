@@ -6,6 +6,7 @@ Ambiguous / not-verified verdicts persist the review only.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -189,6 +190,9 @@ class MappingReviewService:
         manual_verdict: MappingVerdict | None = None,
         review_id: str | None = None,
     ) -> MappingReviewProposal:
+        mismatched = self._reject_changed_review_evidence(candidate, review_id=review_id)
+        if mismatched is not None:
+            return mismatched
         proposal = self.interpret(
             candidate,
             operator=operator,
@@ -256,8 +260,51 @@ class MappingReviewService:
             activation_blocked_reason=None,
         )
 
+    def _reject_changed_review_evidence(
+        self,
+        candidate: MappingReviewCandidate,
+        *,
+        review_id: str | None,
+    ) -> MappingReviewProposal | None:
+        """Fail closed if Confirm tries to reuse a review against different evidence."""
+
+        if not review_id:
+            return None
+        existing = self.store.get_review(review_id)
+        if existing is None:
+            return None
+        stored = _stored_review_evidence(existing)
+        incoming = sanitize_mapping_payload(candidate.model_dump(mode="json"))
+        if stored == incoming:
+            return None
+        verdict = MappingVerdict.AMBIGUOUS
+        raw_verdict = existing.get("verdict")
+        if raw_verdict:
+            try:
+                verdict = MappingVerdict(raw_verdict)
+            except ValueError:
+                verdict = MappingVerdict.AMBIGUOUS
+        return MappingReviewProposal(
+            review_id=review_id,
+            verdict=verdict,
+            operator_confirmed=False,
+            proposed_rule=None,
+            prompt_text=existing.get("prompt_text") or "",
+            chatgpt_text=existing.get("chatgpt_text"),
+            activation_blocked_reason="review_evidence_changed",
+        )
+
     def disable(self, rule_id: str, *, operator: str, revoke: bool = False) -> MappingRule:
         return self.store.disable_rule(rule_id, operator=operator, revoke=revoke)
+
+
+def _stored_review_evidence(row: dict[str, Any]) -> Any:
+    raw = row.get("evidence_json")
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw
 
 
 def parse_chatgpt_verdict(text: str | None) -> MappingVerdict | None:
