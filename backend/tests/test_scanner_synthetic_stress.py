@@ -65,12 +65,18 @@ def _teams(index: int) -> tuple[str, str]:
     return f"Alpha {index:02d} United", f"Beta {index:02d} City"
 
 
+def _kickoff(index: int) -> datetime:
+    """Keep generated fixtures outside EventMatcher's five-minute tolerance."""
+
+    return KICKOFF + timedelta(minutes=index * 10)
+
+
 def _matchbook_event(index: int) -> dict[str, Any]:
     home, away = _teams(index)
     return {
         "id": 10_000 + index,
         "name": f"{home} vs {away}",
-        "start": KICKOFF.isoformat(),
+        "start": _kickoff(index).isoformat(),
         "competition-name": "Premier League",
         "sport-name": "Football",
         "status": "open",
@@ -82,7 +88,7 @@ def _polymarket_event(index: int) -> dict[str, Any]:
     return {
         "id": f"pm-event-{index}",
         "title": f"{home} vs {away}",
-        "startTime": KICKOFF.isoformat(),
+        "startTime": _kickoff(index).isoformat(),
         "competition": "Premier League",
         "series": [{"title": "Premier League"}],
     }
