@@ -45,7 +45,10 @@ now uses sport, kickoff and `SequenceMatcher.quick_ratio()` upper bounds before
 the unchanged matcher. A pair is skipped only when its maximum possible
 confidence is below the existing threshold. This is a sequential CPU prefilter,
 not provider/cluster concurrency; matching thresholds, aliases and settlement
-rules are unchanged. The timeout regression passed five consecutive local runs.
+rules are unchanged. Already-enabled learned mapping rules are snapshotted once
+per clustering pass instead of reloaded for every candidate pair; the snapshot
+remains required deterministic equivalence data, not prompt generation. The
+timeout regression passed five consecutive local runs.
 
 ## Deterministic benchmark assumptions
 

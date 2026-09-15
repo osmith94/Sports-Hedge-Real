@@ -34,6 +34,18 @@ class EventMatcher:
         self.threshold = threshold
         self.learned_applicator = learned_applicator
 
+    def bulk_snapshot(self) -> EventMatcher:
+        """Freeze enabled learned rules once for one deterministic bulk pass."""
+
+        if self.learned_applicator is None:
+            return self
+        rules = self.learned_applicator.enabled_rules()
+        return EventMatcher(
+            kickoff_tolerance=self.kickoff_tolerance,
+            threshold=self.threshold,
+            learned_applicator=LearnedMappingApplicator(rules=rules) if rules else None,
+        )
+
     @staticmethod
     def _similarity(left: str, right: str) -> float:
         if left == right:
