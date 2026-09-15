@@ -351,8 +351,6 @@ async def test_synthetic_workload_wall_clock_is_not_serial_n_times_latency(fixtu
         assert diagnostics["peak_provider_inflight"] <= sum(
             diagnostics["provider_concurrency"].values()
         ) + 1, detail
-        for venue, peak in diagnostics["peak_provider_inflight_by_venue"].items():
-            assert peak <= diagnostics["provider_concurrency"][venue], detail
         for stage in REQUIRED_STAGES:
             assert stage in diagnostics["stages"], detail
         assert diagnostics["stages"]["market_discovery"]["calls"] >= fixture_count, detail

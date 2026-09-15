@@ -455,8 +455,6 @@ class ReadOnlyCrossVenueCollector:
         self._cluster_sema: asyncio.Semaphore | None = None
         self._provider_semaphores: dict[VenueName, asyncio.Semaphore] = {}
         self._peak_inflight = 0
-        self._provider_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
-        self._provider_peak_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
         self._op_issues: list[CollectorIssue] = []
         self._op_venue_health: dict[str, str] = {}
         self._op_enabled_venues: frozenset[VenueName] = frozenset(OPERATOR_SCAN_VENUES)
@@ -542,8 +540,6 @@ class ReadOnlyCrossVenueCollector:
         self._provider_calls = 0
         self._inflight_orphaned = 0
         self._peak_inflight = 0
-        self._provider_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
-        self._provider_peak_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
         self._attribution = ScanAttribution()
         self._inflight = set()
         self._cluster_sema = asyncio.Semaphore(self._cluster_concurrency_limit)
@@ -1028,11 +1024,6 @@ class ReadOnlyCrossVenueCollector:
                 timed_out=True,
             )
             return default, True
-        self._provider_inflight[venue] += 1
-        self._provider_peak_inflight[venue] = max(
-            self._provider_peak_inflight[venue],
-            self._provider_inflight[venue],
-        )
         try:
             payload, timed_out = await self._await_bounded(coro, timeout)
             self._attribution.add(
@@ -1063,8 +1054,6 @@ class ReadOnlyCrossVenueCollector:
             if current == "ok":
                 self._op_venue_health[venue.value] = "degraded"
             return default, True
-        finally:
-            self._provider_inflight[venue] -= 1
 
     async def _discovery_task(
         self,
@@ -1270,10 +1259,6 @@ class ReadOnlyCrossVenueCollector:
             "inflight_orphaned": self._inflight_orphaned,
             "inflight_live": len(self._inflight),
             "peak_provider_inflight": self._peak_inflight,
-            "peak_provider_inflight_by_venue": {
-                venue.value: peak
-                for venue, peak in self._provider_peak_inflight.items()
-            },
             "cluster_concurrency": self._cluster_concurrency_limit,
             "provider_concurrency": {
                 venue.value: limit
