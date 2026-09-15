@@ -784,6 +784,73 @@ def put_venue_participation(update: LaneVenueParticipationUpdate) -> LiveRefresh
 
 
 @router.post(
+    "/collect/hot",
+    response_model=CollectionReport,
+    status_code=status.HTTP_200_OK,
+)
+async def refresh_hot_read_only_market_data(
+    request: PaperCollectionRequest,
+    background_tasks: BackgroundTasks,
+    service: PaperScanService = Depends(get_paper_scan_service),
+    audit: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+    watchlist: WatchlistService = Depends(get_watchlist_service),
+) -> CollectionReport:
+    """Refresh the current HOT identity scope with the scheduled Fast Scan contract.
+
+    This primary operator action reuses current known source events, HOT venue
+    participation, and the HOT timeout envelope. It never falls through to
+    universe discovery. Persistence/auto-capture remains after the HTTP response
+    and retains all normal paper qualification gates.
+    """
+
+    kwargs = request.model_dump()
+    coordinator = get_live_refresh_coordinator()
+    coordinator.remember_request(kwargs)
+    plan = coordinator.manual_hot_plan()
+
+    async def runner() -> CollectionReport:
+        return await _collect_report(
+            kwargs,
+            service=service,
+            scan_lane=plan.lane,
+            identity_scope=plan.identity_scope,
+            known_source_events=plan.known_source_events,
+            cycle_timeout_seconds=plan.collector_timeout_seconds,
+            enabled_venues=plan.enabled_venues,
+        )
+
+    try:
+        report = await coordinator.run_manual_hot(
+            runner,
+            timeout_seconds=plan.coordinator_timeout_seconds,
+        )
+    except ExplicitCollectBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ScanCycleTimeout as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except (MatchbookAuthError, MatchbookDiscoveryError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"venue market-data request failed: {exc}"
+        ) from exc
+
+    diagnostics = dict(report.scan_diagnostics or {})
+    diagnostics["collection_kind"] = "manual_hot_refresh"
+    diagnostics["scheduled_fast_full_unchanged"] = True
+    report.scan_diagnostics = diagnostics
+    background_tasks.add_task(
+        persist_manual_hot_after_http_response,
+        coordinator,
+        report,
+        service=service,
+        audit=audit,
+        watchlist=watchlist,
+    )
+    return report.model_copy(update={"fixture_markets": {}})
+
+
+@router.post(
     "/collect",
     response_model=CollectionReport,
     status_code=status.HTTP_200_OK,
@@ -795,7 +862,7 @@ async def collect_read_only_market_data(
     audit: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
     watchlist: WatchlistService = Depends(get_watchlist_service),
 ) -> CollectionReport:
-    """Run one explicit bounded diagnostic collection/scan and persist after the HTTP body.
+    """Run one bounded full-universe diagnostic and persist after the HTTP body.
 
     This is not Fast Scan and not a Full Sweep generation chunk. Scheduled lanes
     keep their own 25s HOT / chunked UNIVERSE budgets. Persistence/auto-capture
@@ -1007,6 +1074,26 @@ async def persist_explicit_collect_after_http_response(
         audit=audit,
         watchlist=watchlist,
         scan_lane=ScanLane.UNIVERSE,
+    )
+
+
+async def persist_manual_hot_after_http_response(
+    coordinator,
+    report: CollectionReport,
+    *,
+    service: PaperScanService,
+    audit: SqlitePaperScanRepository,
+    watchlist: WatchlistService,
+) -> None:
+    """Persist a manual Fast Scan result with HOT provenance after response."""
+
+    await persist_scheduled_collection_report(
+        coordinator,
+        report,
+        service=service,
+        audit=audit,
+        watchlist=watchlist,
+        scan_lane=ScanLane.HOT,
     )
 
 

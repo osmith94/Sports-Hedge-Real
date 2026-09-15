@@ -332,6 +332,51 @@ async def test_matching_diagnostics_report_no_multi_venue_identity_without_fabri
         repository.close()
 
 
+@pytest.mark.asyncio
+async def test_repeated_universe_cycles_do_not_accumulate_tasks_or_latency() -> None:
+    fixture_count = 16
+    collector, repository, _matchbook, _polymarket = _collector(fixture_count)
+    try:
+        wall_samples: list[float] = []
+        live_tasks_before = len(
+            [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+        )
+        for _ in range(SYNTHETIC_SOAK_CYCLES):
+            report, wall_seconds = await _run_universe(collector)
+            _assert_stable_report(report, fixture_count)
+            wall_samples.append(wall_seconds)
+            assert collector._inflight == set()
+        live_tasks_after = len(
+            [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+        )
+        assert live_tasks_after <= live_tasks_before
+        assert max(wall_samples) < SYNTHETIC_CYCLE_BUDGET_SECONDS * 0.8
+        first_half = sum(wall_samples[:6]) / 6
+        second_half = sum(wall_samples[6:]) / 6
+        assert second_half <= first_half * 1.75 + 0.02
+        print(
+            json.dumps(
+                {
+                    "lane": "universe_soak",
+                    "fixtures": fixture_count,
+                    "cycles": SYNTHETIC_SOAK_CYCLES,
+                    "wall_ms_min": round(min(wall_samples) * 1000, 3),
+                    "wall_ms_median": round(
+                        sorted(wall_samples)[len(wall_samples) // 2] * 1000,
+                        3,
+                    ),
+                    "wall_ms_max": round(max(wall_samples) * 1000, 3),
+                    "task_delta": live_tasks_after - live_tasks_before,
+                    "cancels": report.scan_diagnostics["provider_cancels"],
+                    "orphans": report.scan_diagnostics["inflight_orphaned"],
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        repository.close()
+
+
 @pytest.mark.parametrize("fixture_count", SYNTHETIC_WORKLOADS)
 @pytest.mark.asyncio
 async def test_synthetic_hot_stress_skips_discovery_and_has_no_orphans(

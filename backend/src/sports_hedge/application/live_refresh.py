@@ -172,6 +172,7 @@ class LiveRefreshCoordinator:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._hot_in_progress = False
         self._universe_in_progress = False
+        self._manual_hot_in_progress = False
         self._next_hot_due: datetime | None = None
         self._next_universe_due: datetime | None = None
         self._hot_due_started: datetime | None = None
@@ -338,6 +339,7 @@ class LiveRefreshCoordinator:
         self._fixture_state.clear()
         self._hot_in_progress = False
         self._universe_in_progress = False
+        self._manual_hot_in_progress = False
         self._next_hot_due = None
         self._next_universe_due = None
         self._hot_due_started = None
@@ -388,29 +390,17 @@ class LiveRefreshCoordinator:
         resolved = settings or get_settings()
         evaluated = require_aware_instant(now or self.now(), "now")
         self._ensure_due_times(evaluated, resolved)
-        if self._hot_in_progress or self.status.cycle_in_progress:
+        if (
+            self._hot_in_progress
+            or self._manual_hot_in_progress
+            or self.status.cycle_in_progress
+        ):
             return DualCadencePlan(lane="idle", reason="cycle_in_progress")
         hot_due = self._next_hot_due is not None and evaluated >= self._next_hot_due
-        hot_scope = self._fixture_state.hot_identity_scope(
-            evaluated,
-            hot_horizon=timedelta(minutes=resolved.paper_hot_pre_kickoff_horizon_minutes),
-            post_kickoff_unknown_horizon=timedelta(
-                hours=resolved.paper_hot_post_kickoff_unknown_horizon_hours
-            ),
-        )
-        hot_venues = list(self.pending_venues_for(ScanLane.HOT))
+        hot_scope = self._hot_identity_scope(evaluated, resolved)
         universe_venues = list(self.pending_venues_for(ScanLane.UNIVERSE))
         if hot_due and hot_scope:
-            timeout = float(resolved.paper_scan_hot_cycle_timeout_seconds)
-            return DualCadencePlan(
-                lane="hot",
-                collector_timeout_seconds=timeout,
-                coordinator_timeout_seconds=timeout + SCAN_CYCLE_RETURN_GRACE_SECONDS,
-                identity_scope=list(hot_scope),
-                known_source_events=self._fixture_state.known_source_events(hot_scope),
-                enabled_venues=hot_venues,
-                reason="hot_due",
-            )
+            return self._hot_plan(hot_scope, resolved, reason="hot_due")
         universe_due = self._universe_generation_open(evaluated, resolved)
         if universe_due:
             remaining = float(resolved.paper_scan_universe_generation_budget_seconds) - self._universe_work_used
@@ -444,17 +434,51 @@ class LiveRefreshCoordinator:
                 reason="universe_chunk",
             )
         if hot_due:
-            timeout = float(resolved.paper_scan_hot_cycle_timeout_seconds)
-            return DualCadencePlan(
-                lane="hot",
-                collector_timeout_seconds=timeout,
-                coordinator_timeout_seconds=timeout + SCAN_CYCLE_RETURN_GRACE_SECONDS,
-                identity_scope=list(hot_scope),
-                known_source_events=self._fixture_state.known_source_events(hot_scope),
-                enabled_venues=hot_venues,
-                reason="hot_due",
-            )
+            return self._hot_plan(hot_scope, resolved, reason="hot_due")
         return DualCadencePlan(lane="idle", reason="waiting")
+
+    def manual_hot_plan(
+        self,
+        now: datetime | None = None,
+        settings: Settings | None = None,
+    ) -> DualCadencePlan:
+        """Build the same bounded identity/venue plan as a scheduled HOT scan.
+
+        An empty known scope deliberately remains an empty HOT refresh. Manual
+        operator intent must never fall through to universe-wide discovery.
+        """
+
+        resolved = settings or get_settings()
+        evaluated = require_aware_instant(now or self.now(), "now")
+        hot_scope = self._hot_identity_scope(evaluated, resolved)
+        return self._hot_plan(hot_scope, resolved, reason="manual_hot")
+
+    def _hot_identity_scope(self, now: datetime, settings: Settings) -> list[str]:
+        return self._fixture_state.hot_identity_scope(
+            now,
+            hot_horizon=timedelta(minutes=settings.paper_hot_pre_kickoff_horizon_minutes),
+            post_kickoff_unknown_horizon=timedelta(
+                hours=settings.paper_hot_post_kickoff_unknown_horizon_hours
+            ),
+        )
+
+    def _hot_plan(
+        self,
+        hot_scope: list[str],
+        settings: Settings,
+        *,
+        reason: str,
+    ) -> DualCadencePlan:
+        timeout = float(settings.paper_scan_hot_cycle_timeout_seconds)
+        return DualCadencePlan(
+            lane=ScanLane.HOT.value,
+            collector_timeout_seconds=timeout,
+            coordinator_timeout_seconds=timeout + SCAN_CYCLE_RETURN_GRACE_SECONDS,
+            identity_scope=list(hot_scope),
+            known_source_events=self._fixture_state.known_source_events(hot_scope),
+            enabled_venues=list(self.pending_venues_for(ScanLane.HOT)),
+            reason=reason,
+        )
 
     def seconds_until_next_work(
         self,
@@ -529,6 +553,7 @@ class LiveRefreshCoordinator:
             or self.status.cycle_in_progress
             or self._hot_in_progress
             or self._universe_in_progress
+            or self._manual_hot_in_progress
         )
 
     def explicit_collect_timeout_seconds(self, settings: Settings | None = None) -> float:
@@ -545,6 +570,72 @@ class LiveRefreshCoordinator:
             resolved.paper_scan_manual_diagnostic_timeout_seconds
             + SCAN_CYCLE_RETURN_GRACE_SECONDS
         )
+
+    async def run_manual_hot(
+        self,
+        runner,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CollectionReport:
+        """Run a manual HOT refresh without moving scheduled lane due-times."""
+
+        if self._manual_hot_in_progress:
+            raise ExplicitCollectBusy("manual HOT refresh in progress")
+        if self.scheduled_collection_active():
+            raise ExplicitCollectBusy("scheduled scan in progress")
+        settings = get_settings()
+        timeout = float(
+            settings.paper_scan_hot_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
+            if timeout_seconds is None
+            else timeout_seconds
+        )
+        self._manual_hot_in_progress = True
+        started = self.now()
+        try:
+            async with self._lock:
+                if self._hot_in_progress or self._universe_in_progress:
+                    raise ExplicitCollectBusy("scheduled scan in progress")
+                self._mark_manual_hot_started(started)
+                try:
+                    report = await _await_collection_runner(runner, timeout)
+                    self.record_report(
+                        report,
+                        scan_lane=ScanLane.HOT,
+                        advance_hot_due=False,
+                    )
+                    return report
+                except TimeoutError as exc:
+                    message = f"scan_cycle_timeout after {timeout:g}s"
+                    self._mark_lane_error(
+                        ScanLane.HOT,
+                        started,
+                        self.now(),
+                        message,
+                        advance_hot_due=False,
+                    )
+                    raise ScanCycleTimeout(message) from exc
+                except Exception as exc:
+                    self._mark_lane_error(
+                        ScanLane.HOT,
+                        started,
+                        self.now(),
+                        str(exc),
+                        advance_hot_due=False,
+                    )
+                    raise
+                finally:
+                    if self.status.cycle_in_progress:
+                        self._mark_lane_error(
+                            ScanLane.HOT,
+                            started,
+                            self.now(),
+                            self.status.last_error or "scan_cycle_abandoned",
+                            advance_hot_due=False,
+                        )
+        finally:
+            self._manual_hot_in_progress = False
+            self._cycle_enabled_venues = None
+            self._sync_venue_status()
 
     async def run_explicit_collect(self, runner) -> CollectionReport:
         """Manual diagnostic collect. Does not own HOT/UNIVERSE generation progress."""
@@ -608,6 +699,7 @@ class LiveRefreshCoordinator:
         report: CollectionReport,
         *,
         scan_lane: ScanLane | str | None = None,
+        advance_hot_due: bool = True,
     ) -> None:
         lane = _coerce_lane(scan_lane or report.scan_lane)
         self._last_report = report
@@ -629,7 +721,8 @@ class LiveRefreshCoordinator:
             is_provider_health_failure(value) for value in report.venue_health.values()
         )
         if lane is ScanLane.HOT:
-            self._advance_hot_due(report.completed_at)
+            if advance_hot_due:
+                self._advance_hot_due(report.completed_at)
             hot_count, _universe_count = self._fixture_state.membership_counts(
                 report.completed_at,
                 hot_horizon=timedelta(minutes=get_settings().paper_hot_pre_kickoff_horizon_minutes),
@@ -659,6 +752,7 @@ class LiveRefreshCoordinator:
                                 self._next_hot_due,
                                 hot_count,
                                 leftover_n,
+                                degraded,
                             ),
                         }
                     )
@@ -902,12 +996,37 @@ class LiveRefreshCoordinator:
         )
         self._sync_venue_status()
 
+    def _mark_manual_hot_started(self, started: datetime) -> None:
+        """Expose manual HOT activity without claiming a scheduled due slot."""
+
+        self._cycle_hot_venues = self._pending_participation.venues_for(ScanLane.HOT)
+        self._cycle_enabled_venues = self._cycle_hot_venues
+        self.status = self.status.model_copy(
+            update={
+                "cycle_in_progress": True,
+                "last_started_at": started,
+                "last_error": None,
+                "hot": self.status.hot.model_copy(
+                    update={
+                        "cycle_in_progress": True,
+                        "last_started_at": started,
+                        "last_error": None,
+                        "last_persist_error": None,
+                        "persist_ok": None,
+                    }
+                ),
+            }
+        )
+        self._sync_venue_status()
+
     def _mark_lane_error(
         self,
         lane: ScanLane,
         started: datetime,
         finished: datetime,
         message: str,
+        *,
+        advance_hot_due: bool = True,
     ) -> None:
         duration = max(0, int((finished - started).total_seconds() * 1000))
         update: dict[str, Any] = {
@@ -917,7 +1036,8 @@ class LiveRefreshCoordinator:
             "last_duration_ms": duration,
         }
         if lane is ScanLane.HOT:
-            self._advance_hot_due(finished)
+            if advance_hot_due:
+                self._advance_hot_due(finished)
             update["hot"] = self.status.hot.model_copy(
                 update={
                     "cycle_in_progress": False,
@@ -1179,6 +1299,7 @@ def _hot_operator_summary(
     next_due: datetime | None,
     fixture_count: int,
     leftover_n: int,
+    degraded: bool,
 ) -> str:
     duration_s = round(duration_ms / 1000, 1)
     next_s = "—"
@@ -1190,6 +1311,8 @@ def _hot_operator_summary(
     )
     if leftover_n:
         summary += f" · partial ({leftover_n} not evaluated)"
+    elif degraded:
+        summary += " · partial (provider degraded)"
     return summary
 
 

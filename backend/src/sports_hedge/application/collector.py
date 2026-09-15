@@ -1138,7 +1138,7 @@ class ReadOnlyCrossVenueCollector:
         coverage = _target_coverage(clusters)
         deadline_hit = leftover_n > 0 or cancelled or any(
             issue.detail == "scan_cycle_deadline_reached" for issue in issues
-        )
+        ) or self._provider_cancels > 0
         operator_summary = (
             f"{len(discovered_fixtures)} fixtures discovered · "
             f"MB {len(matchbook_events)} · PM {len(polymarket_events)} · "
@@ -1183,6 +1183,9 @@ class ReadOnlyCrossVenueCollector:
             "total_ms": total_ms,
             "cycle_budget_s": cycle_budget,
             "finalisation_reserve_s": reserve,
+            # A timed-out provider call requests cancellation even when the
+            # collector's own soft deadline has not elapsed. Keep this signal
+            # truthful for callers that must present a partial/degraded cycle.
             "soft_deadline_reached": deadline_hit,
             "cancelled": cancelled,
             "clusters_total": len(clusters),

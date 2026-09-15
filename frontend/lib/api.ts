@@ -103,6 +103,7 @@ export type PaperCollectionDecision = {
 export type PaperCollectionReport = {
   started_at: string;
   completed_at: string;
+  scan_lane?: "hot" | "universe" | string | null;
   discovery_source?: Venue;
   discovery_mode?: string;
   matching_venue?: Venue;
@@ -691,6 +692,8 @@ export type EventReaction = {
 const API_BASE = process.env.NEXT_PUBLIC_SPORTS_HEDGE_API_URL ?? "http://localhost:8000";
 /** Browser abort for the bounded manual diagnostic. Do not raise this to wait out Full Sweep. */
 export const PAPER_COLLECTION_TIMEOUT_MS = 60_000;
+/** Slightly above the shared 25s HOT collector + 5s coordinator envelope. */
+export const PAPER_HOT_REFRESH_TIMEOUT_MS = 35_000;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 
 async function errorDetail(response: Response): Promise<string> {
@@ -922,6 +925,26 @@ export async function runPaperCollection(
     },
     PAPER_COLLECTION_TIMEOUT_MS,
     `Manual diagnostic timed out after ${Math.round(PAPER_COLLECTION_TIMEOUT_MS / 1000)}s. Fast Scan and Full Sweep are separate server-owned lanes; check those timings before retrying the diagnostic.`,
+  );
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<PaperCollectionReport>;
+}
+
+export async function runPaperHotRefresh(
+  payload: PaperCollectionRequest,
+): Promise<PaperCollectionReport> {
+  const response = await fetchWithTimeout(
+    `${API_BASE}/paper/collect/hot`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    },
+    PAPER_HOT_REFRESH_TIMEOUT_MS,
+    `Fast Scan timed out after ${Math.round(PAPER_HOT_REFRESH_TIMEOUT_MS / 1000)}s. Check venue health and retry.`,
   );
   if (!response.ok) {
     throw new Error(await errorDetail(response));

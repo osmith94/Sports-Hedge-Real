@@ -415,21 +415,34 @@ Full sweep · chunk 8s · gen 41/150s · next HOT in 18s · 104 universe · 60 e
 
 Do not ship a single `Last scan` once both lanes exist.
 
-### 8.2 `POST /paper/collect`
+### 8.2 Manual HOT and full diagnostic collection
 
-The explicit operator/Windows collect is a **bounded manual diagnostic**, not a
-scheduled Full Sweep. It uses a **20s collector timeout** plus 5s coordinator
-grace, may return truthful partial coverage, and omits redundant nested market
-inventory from its HTTP response. This Wave G correction supersedes the earlier
-45s browser-facing contract.
+The primary operator **Run Fast refresh** action calls `POST /paper/collect/hot`. It uses
+the same current HOT identity scope, retained source events, HOT venue
+participation, 25s collector timeout and 5s coordinator grace as server-owned
+Fast Scan. A non-null empty HOT scope remains empty and must not trigger
+universe-wide discovery.
 
-When `PAPER_LIVE_REFRESH_ENABLED=true`, the server-owned HOT/UNIVERSE loop is the only automatic collection owner. Browser auto-refresh must poll `GET /paper/live-refresh` and must **not** `POST /paper/collect`. Explicit collect must not consume or resume scheduled generation work (`generation_work_used_s`, cursor, due times). If a scheduled lane is in progress, explicit collect fails fast (409) rather than waiting behind it.
+`POST /paper/collect` remains a **UNIVERSE-shaped full diagnostic**, but now
+uses a 20s collector timeout plus 5s coordinator grace, may return truthful
+partial coverage, and omits redundant nested market inventory from its HTTP
+response. The UI exposes it only as Advanced **Run full diagnostic**. This Wave
+G correction supersedes the earlier 45s browser-facing contract.
 
-Rationale: owner-Windows evidence showed the scheduled lanes healthy while the
-manual request hit the frontend's 60s abort. A smaller diagnostic envelope and
-lean response preserve leftover truth without changing scheduled cadence.
+When `PAPER_LIVE_REFRESH_ENABLED=true`, the server-owned HOT/UNIVERSE loop is the
+only automatic collection owner. Browser auto-refresh polls
+`GET /paper/live-refresh` and does not POST either collection endpoint. Manual
+HOT and full diagnostic collection must not consume or resume scheduled
+generation work (`generation_work_used_s`, cursor, due times). If a scheduled
+lane is in progress, either manual action fails fast (409) rather than waiting
+behind it.
 
-Optional later (not v1): `scan_lane=hot|universe` on the request model (default `universe` for POST). Giving POST the 150s generation budget is a separate decision after the dual-cadence auto-loop lands.
+Rationale: the owner-observed 5.8s Fast Scan and 14.8s Full Sweep chunk are
+healthy. The 60s browser failure belonged to the separate broad manual path, so
+the primary action now expresses HOT intent and the advanced diagnostic returns
+partial state with margin before the frontend abort. Collector topology is
+unchanged. Giving a full diagnostic the 150s generation budget remains a
+separate decision.
 
 ### 8.3 Watchlist
 
@@ -514,7 +527,7 @@ New module `backend/tests/test_dual_cadence_scheduler.py` (clock injected; no li
 | 18 | **Freshest status vs HOT economics:** an older HOT `in_running=True` snapshot must not pin membership/detail after a later UNIVERSE observation with `in_running=None` beyond the 3h window. Classify from the freshest provider-status observation; Tracked HOT membership still uses HOT economics only. |
 | 19 | **Failed UNIVERSE chunks consume budget:** timed-out/failed UNIVERSE wall time increments `generation_work_used` and closes the generation at 150s; HOT still starts on its due slot. |
 | 20 | **One collection owner:** when `server_loop_enabled`, frontend auto-refresh polls `GET /paper/live-refresh` and does not `POST /paper/collect`. |
-| 21 | **Explicit collect isolation:** `POST /paper/collect` does not increment/reset `generation_work_used_s`, universe cursor, or HOT/UNIVERSE due times. If a scheduled lane is active, it fails fast (409). |
+| 21 | **Manual collect isolation:** primary `POST /paper/collect/hot` and Advanced `POST /paper/collect` do not increment/reset `generation_work_used_s`, universe cursor, or HOT/UNIVERSE due times. If a scheduled lane is active, either fails fast (409). |
 | 22 | **Live paper auto-capture:** a qualifying `LIVE_PAPER` decision with `paper_autofill_enabled` opens once through `persist_triggered_chain`; repeated HOT observations are idempotent; allocator rejection / stale quote / Tracked-Near do not open; treasury/journal provenance is `live_paper`. |
 | 23 | **Demo isolation:** labelled `/demo` fixture replay passes `autofill=False` and does not inherit the global live auto-capture flag. |
 

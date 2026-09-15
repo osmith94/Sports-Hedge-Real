@@ -191,8 +191,9 @@ def test_live_scan_pulse_states_are_real_and_last_scan_is_not_invented() -> None
     assert "pollLiveStatus" in scan
     assert "void collectRef.current()" not in scan
     assert "server owns Fast/Full scans" in scan
-    assert "Running diagnostic…" in scan
-    assert "Run diagnostic" in scan
+    assert "Refreshing HOT…" in scan
+    assert "Run Fast refresh" in scan
+    assert "Run full diagnostic" in scan
     assert "setLastCompletedAt(new Date().toISOString())" not in scan
     assert "Keep prior last-scan facts" in scan
     assert 'phase === "scanning"' in pulse
