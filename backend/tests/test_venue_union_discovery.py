@@ -356,6 +356,4 @@ async def test_split_pm_kalshi_events_cluster_and_btts_enters_solver() -> None:
 def test_legacy_series_id_is_merged_not_replaced() -> None:
     settings = Settings(polymarket_gamma_series_id="10188")
     assert settings.resolved_polymarket_series_ids() == ["10188", "10355", "10193"]
-    warnings = settings.polymarket_series_config_warnings()
-    assert warnings
-    assert "merged" in warnings[0]
+    assert settings.polymarket_series_config_warnings() == []

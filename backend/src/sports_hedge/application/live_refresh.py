@@ -21,6 +21,7 @@ from sports_hedge.application.lane_venues import (
     LaneVenueParticipation,
     LaneVenueSet,
     default_operator_venues,
+    is_provider_health_failure,
     participation_from_lists,
 )
 from sports_hedge.application.quote_freshness import require_aware_instant
@@ -613,8 +614,7 @@ class LiveRefreshCoordinator:
             if item.market_evaluation_state == "not_evaluated_scan_deadline"
         )
         degraded = leftover_n > 0 or any(
-            value in {"timeout", "degraded", "unavailable"}
-            for value in report.venue_health.values()
+            is_provider_health_failure(value) for value in report.venue_health.values()
         )
         if lane is ScanLane.HOT:
             self._advance_hot_due(report.completed_at)

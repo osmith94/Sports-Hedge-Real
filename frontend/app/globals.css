@@ -49,6 +49,7 @@ button, input, select { font: inherit; }
 .status-dot.readonly, .status-dot.warn { background: var(--amber); }
 .status-dot.ok { background: var(--accent); }
 .status-dot.down { background: var(--red); }
+.status-dot.off { background: var(--muted-2); }
 .status-dot.unknown { background: var(--muted-2); }
 .clock { font-variant-numeric: tabular-nums; color: var(--muted-2); }
 
@@ -97,6 +98,7 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 .live-scan-pulse-venue { font-size: 8px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-2); }
 .live-scan-pulse-venue-ok { color: var(--accent); }
 .live-scan-pulse-venue-down { color: var(--red); }
+.live-scan-pulse-venue-off { color: var(--muted-2); }
 .live-scan-pulse-idle .live-scan-pulse-core { background: var(--accent); animation: live-scan-idle-pulse 2.1s ease-in-out infinite; }
 .live-scan-pulse-idle .live-scan-pulse-ring { animation: live-scan-idle-ring 2.1s ease-in-out infinite; }
 .live-scan-pulse-scanning .live-scan-pulse-core { background: var(--accent); }
@@ -171,6 +173,7 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 .venue-lane-pending { margin: 0; color: var(--muted-2); font-size: 9px; line-height: 1.4; }
 .scan-message { margin-top: 11px; border-radius: 8px; padding: 9px 10px; font-size: 10px; line-height: 1.45; }
 .scan-message-success { color: var(--accent); border: 1px solid rgba(124, 242, 176, .2); background: var(--accent-soft); }
+.scan-message-config { color: var(--amber); border: 1px solid rgba(241, 191, 105, .28); background: rgba(241, 191, 105, .08); }
 .scan-message-error { color: var(--red); border: 1px solid rgba(240, 130, 130, .22); background: rgba(240, 130, 130, .07); }
 
 .table-wrap { overflow-x: auto; }

@@ -118,7 +118,8 @@ function LaneRow({
       </div>
       {count < 2 ? (
         <p className="venue-lane-warning" role="status">
-          Fewer than two venues enabled — arbitrage comparison is not executable for {label}.
+          Fewer than two venues enabled — arbitrage comparison is not executable for {label}
+          (operator selection, not a provider outage).
         </p>
       ) : null}
       {appliesNext ? (

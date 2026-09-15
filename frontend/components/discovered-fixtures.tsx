@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { DiscoveredFixture, LiveRefreshStatus } from "../lib/api";
+import { CONFIG_WARNING_BANNER_CLASS } from "../lib/config-warning-display";
 import {
   BEST_ARB_MARKET_HELP,
   DISCOVERY_TABLE_HEADERS,
@@ -180,7 +181,7 @@ export function DiscoveredFixturesPanel({
         {status.last_error ? ` Last error: ${status.last_error}` : ""}
       </p>
       {warnings.length ? (
-        <div className="scan-message scan-message-error" role="status">
+        <div className={CONFIG_WARNING_BANNER_CLASS} role="status">
           {warnings.join(" ")}
         </div>
       ) : null}

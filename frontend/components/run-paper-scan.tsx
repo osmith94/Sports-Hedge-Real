@@ -17,6 +17,8 @@ import {
 } from "../lib/api";
 import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
 import { dualScanStatusLines } from "../lib/scan-status-display";
+import { CONFIG_WARNING_BANNER_CLASS } from "../lib/config-warning-display";
+import { venueHealthIsDegraded } from "../lib/venue-health-display";
 import { LiveScanPulse, LiveScanPulsePhase } from "./live-scan-pulse";
 import { VenueLaneControls } from "./venue-lane-controls";
 
@@ -58,21 +60,6 @@ function reportSummary(report: PaperCollectionReport): string {
     (decision) => decision.eligible_for_paper_simulation,
   ).length;
   return `${report.matched_event_pairs} event pair${report.matched_event_pairs === 1 ? "" : "s"} · ${report.matched_market_pairs} market pair${report.matched_market_pairs === 1 ? "" : "s"} · ${eligible} paper-eligible · ${report.issues.length} genuine issue${report.issues.length === 1 ? "" : "s"}`;
-}
-
-function venueHealthIsDegraded(health: Record<string, string> | undefined): boolean {
-  if (!health) return false;
-  const firstClass = ["matchbook", "polymarket", "kalshi"];
-  return firstClass.some((venue) => {
-    const value = health[venue];
-    return (
-      value === "unavailable" ||
-      value === "error" ||
-      value === "failed" ||
-      value === "timeout" ||
-      value === "degraded"
-    );
-  });
 }
 
 function clampIntervalSeconds(value: number): number {
@@ -625,10 +612,15 @@ export function RunPaperScan() {
         {state.kind === "success" ? (
           <div className="scan-message scan-message-success" role="status">
             {reportSummary(state.report)}
-            {state.report.config_warnings?.length ? ` · ${state.report.config_warnings[0]}` : ""}
             {state.report.issues.length > 0
               ? ` · ${state.report.issues.length} genuine issue${state.report.issues.length === 1 ? "" : "s"}`
               : ""}
+          </div>
+        ) : null}
+
+        {state.kind === "success" && state.report.config_warnings?.length ? (
+          <div className={CONFIG_WARNING_BANNER_CLASS} role="status">
+            {state.report.config_warnings.join(" ")}
           </div>
         ) : null}
 

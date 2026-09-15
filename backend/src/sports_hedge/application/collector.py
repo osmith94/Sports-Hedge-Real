@@ -922,6 +922,10 @@ class ReadOnlyCrossVenueCollector:
         venue: VenueName,
         source_id: str | None = None,
     ) -> None:
+        health = self._op_venue_health
+        current = health.get(venue.value)
+        if current == VENUE_HEALTH_DISABLED:
+            return
         timeout = (
             self._op_venue_timeout if stage == "list_events" else self._op_provider_timeout
         )
@@ -934,8 +938,6 @@ class ReadOnlyCrossVenueCollector:
                 detail=f"{stage}_timeout after {timeout:g}s",
             )
         )
-        health = self._op_venue_health
-        current = health.get(venue.value)
         if stage == "list_events":
             health[venue.value] = "timeout"
         elif current == "ok":
@@ -991,6 +993,8 @@ class ReadOnlyCrossVenueCollector:
                 CollectorIssue(stage=stage, venue=venue, source_id=source_id, detail=str(exc))
             )
             current = self._op_venue_health.get(venue.value)
+            if current == VENUE_HEALTH_DISABLED:
+                return default, True
             if current == "ok":
                 self._op_venue_health[venue.value] = "degraded"
             return default, True
@@ -1057,7 +1061,8 @@ class ReadOnlyCrossVenueCollector:
             raise
         except Exception as exc:
             issues.append(CollectorIssue(stage="list_events", venue=venue, detail=str(exc)))
-            venue_health[venue.value] = "unavailable"
+            if venue_health.get(venue.value) != VENUE_HEALTH_DISABLED:
+                venue_health[venue.value] = "unavailable"
             return [], {}
         venue_health[venue.value] = "ok"
         if isinstance(payload, list):
