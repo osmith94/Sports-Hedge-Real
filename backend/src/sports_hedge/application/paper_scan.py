@@ -163,13 +163,22 @@ class PaperScanService:
         map_started = monotonic()
         match = self.market_matcher.match(left.market, right.market)
         mapping_ms = max(0, int((monotonic() - map_started) * 1000))
-        mapping_review_candidate = evidence_from_markets(
-            left.market,
-            right.market,
-            matcher=self.market_matcher,
-            left_raw=left.metadata if isinstance(left.metadata, dict) else None,
-            right_raw=right.metadata if isinstance(right.metadata, dict) else None,
-        )
+
+        def mapping_review_evidence():
+            """Package operator evidence only after executable work for this branch."""
+
+            nonlocal mapping_ms
+            review_started = monotonic()
+            candidate = evidence_from_markets(
+                left.market,
+                right.market,
+                matcher=self.market_matcher,
+                match=match,
+                left_raw=left.metadata if isinstance(left.metadata, dict) else None,
+                right_raw=right.metadata if isinstance(right.metadata, dict) else None,
+            )
+            mapping_ms += max(0, int((monotonic() - review_started) * 1000))
+            return candidate
         fee_started = monotonic()
         solver_started: float | None = None
         fees = list(fee_snapshots or [])
@@ -219,6 +228,7 @@ class PaperScanService:
 
         if not match.matched:
             recorded = self.record_observation(left) + self.record_observation(right)
+            mapping_review_candidate = mapping_review_evidence()
             self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
@@ -260,6 +270,7 @@ class PaperScanService:
             ):
                 ineligible = scan_ineligibility_reason(right.market)
             rejections.append(ineligible)
+            mapping_review_candidate = mapping_review_evidence()
             self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
@@ -340,6 +351,7 @@ class PaperScanService:
             for reason in rejections
         )
         if missing_fees or missing_fx or cost_clock_blocked:
+            mapping_review_candidate = mapping_review_evidence()
             self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
@@ -507,7 +519,6 @@ class PaperScanService:
             maximum_execution_risk=maximum_execution_risk,
             quote_age_ms=quote_age_ms,
             quote_age_basis=quote_age_basis,
-            mapping_review_candidate=mapping_review_candidate,
             fill_legs=fill_legs,
             execution_modes=execution_modes,
             solver_model=solver_model,
@@ -532,6 +543,7 @@ class PaperScanService:
                 except FillPlanMappingError as exc:
                     alloc_reasons.append(f"allocation_failed:{exc.reason}")
         rejections.extend(alloc_reasons)
+        mapping_review_candidate = mapping_review_evidence()
         self._stamp_scan_phases(
             mapping_ms=mapping_ms,
             fee_started=fee_started,
@@ -541,6 +553,7 @@ class PaperScanService:
             update={
                 "eligible_for_paper_simulation": not rejections,
                 "rejection_reasons": _dedupe(rejections),
+                "mapping_review_candidate": mapping_review_candidate,
             }
         )
 
