@@ -71,6 +71,19 @@ export function shouldOfferMappingVerify(confidence: number | null | undefined):
   return confidence < 1;
 }
 
+export function hasSafeReviewCandidate(
+  candidate?: MappingReviewCandidate | null,
+): boolean {
+  return Boolean(candidate && Array.isArray(candidate.sides) && candidate.sides.length >= 2);
+}
+
+export function shouldOfferMappingVerifyAction(
+  confidence: number | null | undefined,
+  candidate?: MappingReviewCandidate | null,
+): boolean {
+  return shouldOfferMappingVerify(confidence) && hasSafeReviewCandidate(candidate);
+}
+
 export function isNativeHundredPercent(
   confidence: number | null | undefined,
   provenance?: MappingProvenance | null,

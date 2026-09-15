@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import VenueName
+from sports_hedge.matching.learned_rules import MappingProvenance, MappingReviewCandidate
 
 
 class OpportunityStatus(StrEnum):
@@ -61,6 +62,7 @@ class WatchLeg(BaseModel):
     outcome: str
     venue: VenueName
     source_market_id: str
+    source_runner_id: str | None = None
     currency: str
     native_stake: Decimal | None = Field(default=None, ge=0)
     gbp_per_unit: Decimal | None = Field(default=None, gt=0)
@@ -112,6 +114,11 @@ class WatchObservation(BaseModel):
     home_score: int | None = Field(default=None, ge=0)
     away_score: int | None = Field(default=None, ge=0)
     data_kind: str = "live_paper"
+    mapping_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    mapping_matched: bool | None = None
+    mapping_reasons: list[str] = Field(default_factory=list)
+    mapping_provenance: MappingProvenance | None = None
+    mapping_review_candidate: MappingReviewCandidate | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> WatchObservation:
@@ -172,6 +179,11 @@ class NearOpportunity(BaseModel):
     last_scanned_at: datetime | None = None
     next_due_at: datetime | None = None
     freshness_class: str | None = None
+    mapping_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    mapping_matched: bool | None = None
+    mapping_reasons: list[str] = Field(default_factory=list)
+    mapping_provenance: MappingProvenance | None = None
+    mapping_review_candidate: MappingReviewCandidate | None = None
 
     @model_validator(mode="after")
     def enforce_non_arbitrage_labelling(self) -> NearOpportunity:

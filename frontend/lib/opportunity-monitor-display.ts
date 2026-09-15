@@ -1,6 +1,14 @@
 import { LiveRefreshStatus, NearOpportunity, Venue, WatchLeg } from "./api";
 import { money, number, percent } from "./format";
 import {
+  MappingProvenance,
+  MappingReviewCandidate,
+  hasSafeReviewCandidate,
+  mappingConfidencePercent,
+  mappingProvenanceLabel,
+  shouldOfferMappingVerifyAction,
+} from "./mapping-verification";
+import {
   formatObservationAge,
   parseObservationTimestampMs,
 } from "./observation-age";
@@ -55,9 +63,12 @@ export type OpportunityMonitorStateBadge =
 export type OpportunityMonitorLegView = {
   outcome: string;
   venue: string;
+  sourceMarketId: string;
+  sourceRunnerId: string;
   action: string;
   price: string;
   executableDepth: string;
+  stake: string;
   freshness: string;
 };
 
@@ -77,6 +88,10 @@ export type OpportunityMonitorRow = {
   riskScore: number | null;
   mappingText: string;
   mappingTitle: string;
+  mappingConfidence: number | null;
+  offerVerify: boolean;
+  mappingCandidate: MappingReviewCandidate | null;
+  mappingProvenance: MappingProvenance | null;
   state: OpportunityMonitorStateBadge;
   stateTitle: string;
   laneLabel: string;
@@ -114,7 +129,7 @@ const CAPTURED_LIFECYCLE_STATUSES = new Set(["PAPER_FILLING", "PARTIAL"]);
 const STALE_REASONS = new Set(["stale_quote", "rejected_stale_quote", "unknown_quote_age"]);
 
 export const MAPPING_UNAVAILABLE_TITLE =
-  "Mapping confidence/provenance is not on the current radar read model";
+  "Current mapping confidence/provenance is not on this radar observation";
 
 export function opportunityObservationTimestamp(item: NearOpportunity): string | null {
   return item.last_scanned_at || item.last_seen_at || null;
@@ -244,8 +259,44 @@ export function opportunityMonitorStateTitle(item: NearOpportunity): string {
   return parts.join(" · ");
 }
 
-export function mappingDisplay(): { text: string; title: string } {
-  return { text: "—", title: MAPPING_UNAVAILABLE_TITLE };
+export function mappingDisplay(item?: NearOpportunity | null): {
+  text: string;
+  title: string;
+  offerVerify: boolean;
+  candidate: MappingReviewCandidate | null;
+  provenance: MappingProvenance | null;
+  confidence: number | null;
+} {
+  const confidence = item?.mapping_confidence;
+  const candidate = hasSafeReviewCandidate(item?.mapping_review_candidate)
+    ? item?.mapping_review_candidate ?? null
+    : null;
+  const provenance = (item?.mapping_provenance as MappingProvenance | null | undefined) ?? null;
+  if (confidence == null || !Number.isFinite(confidence)) {
+    return {
+      text: "—",
+      title: MAPPING_UNAVAILABLE_TITLE,
+      offerVerify: false,
+      candidate: null,
+      provenance: null,
+      confidence: null,
+    };
+  }
+  const provenanceLabel = mappingProvenanceLabel(provenance);
+  const reasons = (item?.mapping_reasons ?? []).join("; ");
+  const titleParts = [
+    mappingConfidencePercent(confidence),
+    provenanceLabel,
+    reasons,
+  ].filter(Boolean);
+  return {
+    text: `${mappingConfidencePercent(confidence)} · ${provenanceLabel}`,
+    title: titleParts.join(" · "),
+    offerVerify: shouldOfferMappingVerifyAction(confidence, candidate),
+    candidate,
+    provenance,
+    confidence,
+  };
 }
 
 export function opportunityLegViews(item: NearOpportunity): OpportunityMonitorLegView[] {
@@ -254,24 +305,35 @@ export function opportunityLegViews(item: NearOpportunity): OpportunityMonitorLe
 }
 
 export function opportunityLegView(leg: WatchLeg, freshness: string): OpportunityMonitorLegView {
+  const gbpStake = number(leg.gbp_stake);
+  const nativeStake = number(leg.native_stake);
+  let stake = "—";
+  if (gbpStake !== null) {
+    stake = money(gbpStake);
+  } else if (nativeStake !== null) {
+    stake = `${money(nativeStake, leg.currency === "USD" ? "USD" : "GBP")} ${leg.currency}`;
+  }
   return {
     outcome: leg.outcome || "—",
     venue: leg.venue || "—",
+    sourceMarketId: leg.source_market_id || "—",
+    sourceRunnerId: leg.source_runner_id || "—",
     // WatchLeg has no BACK/LAY/BUY/SELL action. Do not invent one.
     action: "—",
     price: leg.net_decimal_odds == null ? "—" : String(leg.net_decimal_odds),
     executableDepth:
       leg.cumulative_depth_gbp == null ? "—" : money(leg.cumulative_depth_gbp),
+    stake,
     freshness,
   };
 }
 
 export function formatOpportunityLegLine(leg: OpportunityMonitorLegView): string {
-  return `${leg.outcome} — ${leg.venue} @ ${leg.price} · action ${leg.action} · depth ${leg.executableDepth} · freshness ${leg.freshness}`;
+  return `${leg.outcome} — ${leg.venue} @ ${leg.price} · action ${leg.action} · depth ${leg.executableDepth} · stake ${leg.stake} · source ${leg.sourceMarketId} · freshness ${leg.freshness}`;
 }
 
 export function opportunityMonitorRow(item: NearOpportunity): OpportunityMonitorRow {
-  const mapping = mappingDisplay();
+  const mapping = mappingDisplay(item);
   return {
     id: item.opportunity_id,
     canonicalEventId: item.canonical_event_id || null,
@@ -288,6 +350,10 @@ export function opportunityMonitorRow(item: NearOpportunity): OpportunityMonitor
     riskScore: item.execution_risk_score ?? null,
     mappingText: mapping.text,
     mappingTitle: mapping.title,
+    mappingConfidence: mapping.confidence,
+    offerVerify: mapping.offerVerify,
+    mappingCandidate: mapping.candidate,
+    mappingProvenance: mapping.provenance,
     state: opportunityMonitorState(item),
     stateTitle: opportunityMonitorStateTitle(item),
     laneLabel: scanLaneLabel(item.scan_lane),
@@ -458,7 +524,7 @@ function sortValue(
     case "risk":
       return row.riskScore;
     case "mapping":
-      return null;
+      return row.mappingText.toLocaleLowerCase();
     case "state":
       return row.state;
     case "lane":

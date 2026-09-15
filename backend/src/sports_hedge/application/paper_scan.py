@@ -14,6 +14,7 @@ from sports_hedge.application.complete_set import (
     solver_eligible_market,
     solver_model_for_pair,
 )
+from sports_hedge.application.mapping_review import evidence_from_markets
 from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.executable_liquidity import (
     DEFAULT_OPENING_MAX_QUOTE_AGE_MS,
@@ -162,6 +163,13 @@ class PaperScanService:
         map_started = monotonic()
         match = self.market_matcher.match(left.market, right.market)
         mapping_ms = max(0, int((monotonic() - map_started) * 1000))
+        mapping_review_candidate = evidence_from_markets(
+            left.market,
+            right.market,
+            matcher=self.market_matcher,
+            left_raw=left.metadata if isinstance(left.metadata, dict) else None,
+            right_raw=right.metadata if isinstance(right.metadata, dict) else None,
+        )
         fee_started = monotonic()
         solver_started: float | None = None
         fees = list(fee_snapshots or [])
@@ -224,6 +232,7 @@ class PaperScanService:
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
+                mapping_review_candidate=mapping_review_candidate,
             )
 
         pair_event_id = canonical_matched_event_id([left.market.event, right.market.event])
@@ -267,6 +276,7 @@ class PaperScanService:
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
+                mapping_review_candidate=mapping_review_candidate,
                 solver_model=None,
             )
 
@@ -346,6 +356,7 @@ class PaperScanService:
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
+                mapping_review_candidate=mapping_review_candidate,
                 solver_model=solver_model,
             )
 
@@ -496,6 +507,7 @@ class PaperScanService:
             maximum_execution_risk=maximum_execution_risk,
             quote_age_ms=quote_age_ms,
             quote_age_basis=quote_age_basis,
+            mapping_review_candidate=mapping_review_candidate,
             fill_legs=fill_legs,
             execution_modes=execution_modes,
             solver_model=solver_model,

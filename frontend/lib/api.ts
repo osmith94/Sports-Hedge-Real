@@ -814,6 +814,7 @@ export type WatchLeg = {
   outcome: string;
   venue: Venue;
   source_market_id: string;
+  source_runner_id?: string | null;
   currency: string;
   native_stake?: string | number | null;
   gbp_per_unit?: string | number | null;
@@ -870,6 +871,17 @@ export type NearOpportunity = {
   last_scanned_at?: string | null;
   next_due_at?: string | null;
   freshness_class?: "executable" | "radar_current" | "expired" | string | null;
+  mapping_confidence?: number | null;
+  mapping_matched?: boolean | null;
+  mapping_reasons?: string[];
+  mapping_provenance?: {
+    mapping_source?: "native_deterministic" | "operator_verified" | null;
+    rule_id?: string | null;
+    rule_version?: number | null;
+    rule_type?: string | null;
+    applied_rule_ids?: string[];
+  } | null;
+  mapping_review_candidate?: import("./mapping-verification").MappingReviewCandidate | null;
 };
 
 export type OpportunityLifecycleEvent = {
@@ -1038,6 +1050,70 @@ export function getTrackedWatchlist(query = "limit=100"): Promise<NearOpportunit
 
 export function getWatchlistActivity(query = "limit=100"): Promise<OpportunityLifecycleEvent[]> {
   return request(`/paper/watchlist/activity${query ? `?${query}` : ""}`);
+}
+
+export type MappingPromptBundle = {
+  prompt_text: string;
+  candidate: NonNullable<NearOpportunity["mapping_review_candidate"]>;
+  excluded_secret_fields?: string[];
+};
+
+export type MappingReviewProposal = {
+  review_id: string;
+  verdict: "verified" | "not_verified" | "ambiguous";
+  operator_confirmed: boolean;
+  proposed_rule: import("./mapping-verification").MappingProposedRule | null;
+  prompt_text: string;
+  chatgpt_text?: string | null;
+  activation_blocked_reason?: string | null;
+};
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetchWithTimeout(
+    `${API_BASE}${path}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store",
+    },
+    DEFAULT_REQUEST_TIMEOUT_MS,
+  );
+  if (!response.ok) {
+    throw new ApiRequestError(await errorDetail(response), response.status);
+  }
+  return response.json() as Promise<T>;
+}
+
+export function buildMappingReviewPrompt(
+  candidate: NonNullable<NearOpportunity["mapping_review_candidate"]>,
+): Promise<MappingPromptBundle> {
+  return postJson<MappingPromptBundle>("/paper/mapping-reviews/prompt", { candidate });
+}
+
+export function interpretMappingReview(payload: {
+  candidate: NonNullable<NearOpportunity["mapping_review_candidate"]>;
+  operator?: string;
+  chatgpt_text?: string | null;
+  manual_verdict?: MappingReviewProposal["verdict"] | null;
+}): Promise<MappingReviewProposal> {
+  return postJson<MappingReviewProposal>("/paper/mapping-reviews/interpret", {
+    operator: "operator",
+    ...payload,
+  });
+}
+
+export function confirmMappingReview(payload: {
+  candidate: NonNullable<NearOpportunity["mapping_review_candidate"]>;
+  operator?: string;
+  chatgpt_text?: string | null;
+  manual_verdict?: MappingReviewProposal["verdict"] | null;
+  operator_confirmed: boolean;
+}): Promise<MappingReviewProposal> {
+  return postJson<MappingReviewProposal>("/paper/mapping-reviews/confirm", {
+    operator: "operator",
+    ...payload,
+  });
 }
 
 export type PaperLiquidityPool = {

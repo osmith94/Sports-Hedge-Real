@@ -26,8 +26,8 @@ export type MappingVerificationPanelProps = {
 };
 
 /**
- * Reusable Verify-mapping seam for #169.
- * #168 owns Opportunity Monitor placement; this panel is not wired into that layout here.
+ * Reusable Verify-mapping seam for #169 / Wave D Opportunity Monitor.
+ * Opportunity Monitor mounts this panel with current radar evidence only.
  */
 export function MappingVerificationPanel({
   candidate,

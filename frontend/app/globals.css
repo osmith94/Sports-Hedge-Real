@@ -450,6 +450,11 @@ tr:last-child td { border-bottom: none; }
   font-size: 11px;
   line-height: 1.5;
 }
+.opportunity-mapping { white-space: normal; }
+.opportunity-mapping-verify {
+  margin-top: 4px;
+  font-size: 11px;
+}
 .opportunity-monitor { margin-bottom: 16px; }
 .audit-disclosure { margin: 0 0 16px; }
 .audit-summary {

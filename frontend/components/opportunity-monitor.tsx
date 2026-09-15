@@ -4,7 +4,18 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
-import { LiveRefreshStatus, NearOpportunity } from "../lib/api";
+import {
+  buildMappingReviewPrompt,
+  confirmMappingReview,
+  interpretMappingReview,
+  LiveRefreshStatus,
+  NearOpportunity,
+} from "../lib/api";
+import { MappingVerificationPanel } from "./mapping-verification-panel";
+import {
+  MappingProposedRule,
+  MappingVerdict,
+} from "../lib/mapping-verification";
 import {
   OBSERVATION_AGE_TICK_MS,
   formatObservationAge,
@@ -46,6 +57,11 @@ export function OpportunityMonitor({
   const [sort, setSort] = useState<OpportunityMonitorSortState | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [verifyId, setVerifyId] = useState<string | null>(null);
+  const [promptById, setPromptById] = useState<Record<string, string>>({});
+  const [proposedById, setProposedById] = useState<Record<string, MappingProposedRule | null>>({});
+  const [blockedById, setBlockedById] = useState<Record<string, string | null>>({});
+  const [verifyNoteById, setVerifyNoteById] = useState<Record<string, string | null>>({});
   const rows = useMemo(() => opportunityMonitorRows(items), [items]);
   const sortedRows = useMemo(() => sortOpportunityMonitor(rows, sort), [rows, sort]);
   const summary = useMemo(
@@ -65,6 +81,77 @@ export function OpportunityMonitor({
       else next.add(id);
       return next;
     });
+  }
+
+  async function openVerify(row: OpportunityMonitorRow) {
+    if (!row.offerVerify || !row.mappingCandidate) return;
+    setExpanded((current) => new Set(current).add(row.id));
+    setVerifyId(row.id);
+    setVerifyNoteById((current) => ({ ...current, [row.id]: null }));
+    if (promptById[row.id]) return;
+    try {
+      const bundle = await buildMappingReviewPrompt(row.mappingCandidate);
+      setPromptById((current) => ({ ...current, [row.id]: bundle.prompt_text }));
+    } catch (error) {
+      setVerifyNoteById((current) => ({
+        ...current,
+        [row.id]: error instanceof Error ? error.message : "mapping prompt unavailable",
+      }));
+    }
+  }
+
+  async function interpretVerify(
+    row: OpportunityMonitorRow,
+    input: { chatgptText: string; verdict: MappingVerdict },
+  ) {
+    if (!row.mappingCandidate) return;
+    try {
+      const proposal = await interpretMappingReview({
+        candidate: row.mappingCandidate,
+        chatgpt_text: input.chatgptText,
+        manual_verdict: input.verdict,
+      });
+      setProposedById((current) => ({ ...current, [row.id]: proposal.proposed_rule }));
+      setBlockedById((current) => ({ ...current, [row.id]: proposal.activation_blocked_reason ?? null }));
+      setVerifyNoteById((current) => ({
+        ...current,
+        [row.id]: proposal.activation_blocked_reason
+          ? `Interpret only · ${proposal.activation_blocked_reason}`
+          : "Interpreted without saving. Explicit confirmation is still required.",
+      }));
+    } catch (error) {
+      setVerifyNoteById((current) => ({
+        ...current,
+        [row.id]: error instanceof Error ? error.message : "interpret failed",
+      }));
+    }
+  }
+
+  async function confirmVerify(
+    row: OpportunityMonitorRow,
+    input: { chatgptText: string; verdict: MappingVerdict },
+  ) {
+    if (!row.mappingCandidate) return;
+    try {
+      const proposal = await confirmMappingReview({
+        candidate: row.mappingCandidate,
+        chatgpt_text: input.chatgptText,
+        manual_verdict: input.verdict,
+        operator_confirmed: true,
+      });
+      setProposedById((current) => ({ ...current, [row.id]: proposal.proposed_rule }));
+      setBlockedById((current) => ({ ...current, [row.id]: proposal.activation_blocked_reason ?? null }));
+      setVerifyNoteById((current) => ({
+        ...current,
+        [row.id]:
+          "Learned rule saved. operator_verified provenance appears after a later scan applies it; this row stays current-scan mapping.",
+      }));
+    } catch (error) {
+      setVerifyNoteById((current) => ({
+        ...current,
+        [row.id]: error instanceof Error ? error.message : "confirm failed",
+      }));
+    }
   }
 
   return (
@@ -130,13 +217,26 @@ export function OpportunityMonitor({
                       nowMs={nowMs}
                       onExpand={() => toggleExpanded(row.id)}
                       onNavigate={(href) => router.push(href)}
+                      onVerify={() => void openVerify(row)}
                       open={open}
                       row={row}
                     />
                     {open ? (
                       <tr className="opportunity-detail-row">
                         <td colSpan={OPPORTUNITY_MONITOR_SORT_COLUMNS.length + 1}>
-                          <OpportunityRowDetail row={row} />
+                          <OpportunityRowDetail
+                            blockedReason={blockedById[row.id] ?? null}
+                            note={verifyNoteById[row.id] ?? null}
+                            onConfirm={(input) => void confirmVerify(row, input)}
+                            onCopyPrompt={(prompt) => {
+                              void navigator.clipboard?.writeText(prompt);
+                            }}
+                            onInterpret={(input) => void interpretVerify(row, input)}
+                            promptText={promptById[row.id] ?? ""}
+                            proposedRule={proposedById[row.id] ?? null}
+                            row={row}
+                            verifying={verifyId === row.id}
+                          />
                         </td>
                       </tr>
                     ) : null}
@@ -211,12 +311,14 @@ function MonitorRow({
   nowMs,
   onExpand,
   onNavigate,
+  onVerify,
 }: {
   row: OpportunityMonitorRow;
   open: boolean;
   nowMs: number;
   onExpand: () => void;
   onNavigate: (href: string) => void;
+  onVerify: () => void;
 }) {
   const tone = opportunityMonitorStateTone(row.state);
   return (
@@ -290,7 +392,21 @@ function MonitorRow({
         {formatMonitorMoney(row.guaranteedProfitGbp)}
       </td>
       <td>{row.riskScore ?? "—"}</td>
-      <td title={row.mappingTitle}>{row.mappingText}</td>
+      <td className="opportunity-mapping" title={row.mappingTitle}>
+        <div>{row.mappingText}</div>
+        {row.offerVerify ? (
+          <button
+            className="opportunity-mapping-verify"
+            onClick={(event) => {
+              event.stopPropagation();
+              onVerify();
+            }}
+            type="button"
+          >
+            Verify
+          </button>
+        ) : null}
+      </td>
       <td>
         <span className={`ops-status is-${tone}`} title={row.stateTitle}>
           {row.state}
@@ -304,12 +420,36 @@ function MonitorRow({
   );
 }
 
-function OpportunityRowDetail({ row }: { row: OpportunityMonitorRow }) {
+function OpportunityRowDetail({
+  row,
+  verifying,
+  promptText,
+  proposedRule,
+  blockedReason,
+  note,
+  onCopyPrompt,
+  onInterpret,
+  onConfirm,
+}: {
+  row: OpportunityMonitorRow;
+  verifying: boolean;
+  promptText: string;
+  proposedRule: MappingProposedRule | null;
+  blockedReason: string | null;
+  note: string | null;
+  onCopyPrompt: (prompt: string) => void;
+  onInterpret: (input: { chatgptText: string; verdict: MappingVerdict }) => void;
+  onConfirm: (input: { chatgptText: string; verdict: MappingVerdict }) => void;
+}) {
   return (
     <div className="opportunity-detail">
       <p className="panel-meta">{row.rejectionDetail}</p>
       <p className="panel-meta">
         Exact observation {observationTimestampTitle(row.observedAt)} · quote {row.quoteAgeLabel}
+      </p>
+      <p className="panel-meta" title={row.mappingTitle}>
+        Mapping {row.mappingText}
+        {row.offerVerify ? " · Verify available for current evidence" : ""}
       </p>
       {row.legs.length === 0 ? (
         <div className="empty-live-compact">
@@ -321,10 +461,24 @@ function OpportunityRowDetail({ row }: { row: OpportunityMonitorRow }) {
           {row.legs.map((leg, index) => (
             <li key={`${row.id}-${leg.venue}-${leg.outcome}-${index}`}>
               {formatOpportunityLegLine(leg)}
+              {leg.sourceRunnerId !== "—" ? ` · runner ${leg.sourceRunnerId}` : ""}
             </li>
           ))}
         </ul>
       )}
+      {verifying && row.mappingCandidate ? (
+        <MappingVerificationPanel
+          activationBlockedReason={blockedReason}
+          candidate={row.mappingCandidate}
+          onConfirm={onConfirm}
+          onCopyPrompt={onCopyPrompt}
+          onInterpret={onInterpret}
+          promptText={promptText}
+          proposedRule={proposedRule}
+          provenance={row.mappingProvenance}
+        />
+      ) : null}
+      {note ? <p className="panel-meta">{note}</p> : null}
     </div>
   );
 }

@@ -5,10 +5,12 @@ import { fileURLToPath } from "node:url";
 
 import {
   canActivateLearnedRule,
+  hasSafeReviewCandidate,
   isNativeHundredPercent,
   mappingProvenanceLabel,
   promptContainsSecrets,
   shouldOfferMappingVerify,
+  shouldOfferMappingVerifyAction,
 } from "./mapping-verification";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -19,6 +21,35 @@ describe("mapping verification seam", () => {
     expect(shouldOfferMappingVerify(0.96)).toBe(true);
     expect(shouldOfferMappingVerify(1)).toBe(false);
     expect(shouldOfferMappingVerify(0)).toBe(true);
+  });
+
+  it("does not offer Verify without a safe current review candidate", () => {
+    expect(hasSafeReviewCandidate(null)).toBe(false);
+    expect(shouldOfferMappingVerifyAction(0.96, null)).toBe(false);
+    expect(
+      shouldOfferMappingVerifyAction(0.96, {
+        sides: [
+          {
+            venue: "matchbook",
+            source_event_id: "a",
+            source_market_id: "m1",
+            raw_home_team: "Leeds",
+            raw_away_team: "Chelsea",
+            raw_competition: "PL",
+            kickoff_utc: "2026-09-20T15:00:00Z",
+          },
+          {
+            venue: "polymarket",
+            source_event_id: "b",
+            source_market_id: "m2",
+            raw_home_team: "Leeds United FC",
+            raw_away_team: "Chelsea FC",
+            raw_competition: "PL",
+            kickoff_utc: "2026-09-20T15:00:00Z",
+          },
+        ],
+      }),
+    ).toBe(true);
   });
 
   it("does not require Verify on a 100% native mapping", () => {
@@ -94,14 +125,18 @@ describe("mapping verification seam", () => {
     expect(promptContainsSecrets("matchbook password=demo")).toBe(true);
   });
 
-  it("keeps the verification panel as a reusable seam and does not wire Opportunity Monitor layout", () => {
+  it("keeps the verification panel reusable and wires it through Opportunity Monitor, not page.tsx", () => {
     const panel = readFileSync(
       join(frontendRoot, "components/mapping-verification-panel.tsx"),
       "utf8",
     );
     const page = readFileSync(join(frontendRoot, "app/page.tsx"), "utf8");
+    const monitor = readFileSync(join(frontendRoot, "components/opportunity-monitor.tsx"), "utf8");
     expect(panel).toContain("Copy verification prompt");
-    expect(panel).toContain("#168 owns Opportunity Monitor placement");
+    expect(monitor).toContain("MappingVerificationPanel");
+    expect(monitor).toContain("buildMappingReviewPrompt");
+    expect(monitor).toContain("interpretMappingReview");
+    expect(monitor).toContain("confirmMappingReview");
     expect(page).not.toContain("MappingVerificationPanel");
     expect(page).not.toContain("mapping-verification-panel");
   });

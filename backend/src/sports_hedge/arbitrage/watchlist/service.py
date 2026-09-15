@@ -139,6 +139,11 @@ class WatchlistService:
             home_score=observation.home_score if observation.live_score_supported else None,
             away_score=observation.away_score if observation.live_score_supported else None,
             data_kind=observation.data_kind,
+            mapping_confidence=observation.mapping_confidence,
+            mapping_matched=observation.mapping_matched,
+            mapping_reasons=list(observation.mapping_reasons),
+            mapping_provenance=observation.mapping_provenance,
+            mapping_review_candidate=observation.mapping_review_candidate,
         )
         self.repository.append_observation(
             OpportunityObservationPoint(
