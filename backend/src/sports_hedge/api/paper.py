@@ -1430,14 +1430,22 @@ def simulate_paper_fill(
 async def _aclose_soon(*clients: Any, timeout: float = 0.5) -> None:
     """Drop HTTP clients without letting aclose hang past scan finalisation."""
 
+    tasks: list[asyncio.Task[Any]] = []
     for client in clients:
         closer = getattr(client, "aclose", None)
         if closer is None:
             continue
-        task = asyncio.create_task(closer())
-        done, _pending = await asyncio.wait({task}, timeout=timeout)
-        if not done:
-            task.cancel()
+        tasks.append(asyncio.create_task(closer()))
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(set(tasks), timeout=timeout)
+    for task in pending:
+        task.cancel()
+    for task in done:
+        try:
+            task.result()
+        except Exception as exc:
+            LOGGER.warning("venue_client_close_failed error=%s", exc)
 
 
 def _persist_decision(
