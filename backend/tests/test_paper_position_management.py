@@ -1608,7 +1608,15 @@ def test_paper_only_boundary_and_feature_gate_default() -> None:
     assert health["paper_auto_unwind_enabled"] is False
     start_ps1 = Path(__file__).resolve().parents[2] / "scripts" / "windows" / "Start-SportsHedge-Demo.ps1"
     assert start_ps1.is_file()
-    assert "PAPER_AUTO_UNWIND_ENABLED" not in start_ps1.read_text(encoding="utf-8")
+    launcher = start_ps1.read_text(encoding="utf-8")
+    assert '$env:PAPER_AUTO_UNWIND_ENABLED = "true"' in launcher
+    assert "AUTO PAPER POSITION MANAGEMENT ON" in launcher
+    assert "two-scan fail-closed" in launcher
+    assert "no live execution" in launcher
+    assert "no automatic authoritative settlement" in launcher
+    assert '$env:SPORTS_HEDGE_EXECUTION_ENABLED = "false"' in launcher
+    assert "place_order" not in launcher
+    assert "cancel_order" not in launcher
 
 
 def test_position_management_api_seam(tmp_path: Path) -> None:

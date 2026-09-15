@@ -115,6 +115,7 @@ function Write-DemoPidIdentity {
 $env:SPORTS_HEDGE_MODE = "paper"
 $env:SPORTS_HEDGE_EXECUTION_ENABLED = "false"
 $env:PAPER_AUTOFILL_ENABLED = "true"
+$env:PAPER_AUTO_UNWIND_ENABLED = "true"
 $env:PAPER_LIVE_REFRESH_ENABLED = "true"
 $env:ACCOUNTING_SCHEDULE_ENABLED = "true"
 $env:NEXT_PUBLIC_SPORTS_HEDGE_API_URL = "http://127.0.0.1:8000"
@@ -159,6 +160,6 @@ try {
 
 Write-Host "Sports Hedge paper demo is running."
 Write-Host "Operator console: $DemoUrl"
-Write-Host "PAPER MODE. execution_enabled=false. PAPER_AUTOFILL_ENABLED=true (AUTO PAPER CAPTURE ON for qualifying LIVE_PAPER only; allocator-sized; no venue orders). PAPER_LIVE_REFRESH_ENABLED=true and ACCOUNTING_SCHEDULE_ENABLED=true for this local demo only (ECB USD bootstrap + daily 16:15 UK refresh)."
+Write-Host "PAPER MODE. execution_enabled=false. PAPER_AUTOFILL_ENABLED=true (AUTO PAPER CAPTURE ON for qualifying LIVE_PAPER only; allocator-sized; no venue orders). PAPER_AUTO_UNWIND_ENABLED=true (AUTO PAPER POSITION MANAGEMENT ON; paper-only; two-scan fail-closed confirmation; no live execution; no automatic authoritative settlement). PAPER_LIVE_REFRESH_ENABLED=true and ACCOUNTING_SCHEDULE_ENABLED=true for this local demo only (ECB USD bootstrap + daily 16:15 UK refresh)."
 Write-Host "Logs: $Logs"
 exit 0
