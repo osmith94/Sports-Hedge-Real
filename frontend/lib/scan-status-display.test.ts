@@ -180,7 +180,7 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /Run Fast refresh/);
     assert.match(scan, /Run full diagnostic/);
     assert.match(scan, /collect\("diagnostic"\)/);
-    assert.match(scan, /does not rediscover the full universe/);
+    assert.match(scan, /does not\s+rediscover the full universe/);
     assert.match(api, /\/paper\/collect\/hot/);
     assert.match(api, /PAPER_HOT_REFRESH_TIMEOUT_MS = 35_000/);
     assert.match(api, /\/paper\/collect`/);

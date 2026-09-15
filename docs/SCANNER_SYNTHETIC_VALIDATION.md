@@ -69,21 +69,26 @@ architecture behavior under the assumptions above; they are not provider SLAs.
 
 | Fixtures | HOT wall | UNIVERSE wall | Cancels | Orphans/live tasks |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 11.1ms | 17.3ms | 0 | 0 |
-| 4 | 44.5ms | 47.6ms | 0 | 0 |
-| 16 | 177.2ms | 180.3ms | 0 | 0 |
-| 50 | 542.8ms | 628.9ms | 0 | 0 |
+| 1 | 11.3ms | 22.9ms | 0 | 0 |
+| 4 | 44.1ms | 54.6ms | 0 | 0 |
+| 16 | 174.7ms | 191.3ms | 0 | 0 |
+| 50 | 555.4ms | 673.7ms | 0 | 0 |
 
 50-fixture attribution:
 
 | Lane | Provider attribution | Stage attribution |
 | --- | --- | --- |
-| HOT | Matchbook 50 calls / 100ms; Polymarket 150 calls / 300ms | market discovery 100 calls / 200ms; book depth 100 / 200ms; mapping 13ms; fees/FX 50 calls; solver 50 calls |
-| UNIVERSE | Matchbook 51 calls / 102ms; Polymarket 151 calls / 302ms | event lookup 2ms; market discovery 100 / 200ms; book depth 100 / 200ms; mapping 22ms; fees/FX 50 calls; solver 50 calls / 50ms |
+| HOT | Matchbook 50 calls / 100ms; Polymarket 150 calls / 300ms | market discovery 100 calls / 200ms; book depth 100 / 200ms; mapping 15ms; fees/FX 50 calls; solver 50 calls |
+| UNIVERSE | Matchbook 51 calls / 121ms; Polymarket 151 calls / 342ms | event lookup 4ms; market discovery 100 / 229ms; book depth 100 / 226ms; mapping 59ms; fees/FX 50 calls; solver 50 calls |
 
-Repeated HOT soak: 12 cycles × 16 fixtures produced 176.8–188.1ms wall time,
-180.1ms median, task delta 0, cancellations 0, and orphans 0. The second-half
-latency guard prevents progressive slowdown from passing silently.
+Repeated 12-cycle × 16-fixture soak produced:
+
+- HOT: 172.7–186.1ms wall time, 183.8ms median;
+- UNIVERSE: 169.9–180.1ms wall time, 177.2ms median;
+- task delta 0, cancellations 0, orphans 0 in both lanes.
+
+The second-half latency guard prevents progressive slowdown from passing
+silently.
 
 The controlled 50-fixture run is below 1s and shows no task accumulation.
 Therefore this evidence does **not** justify collector concurrency. The
