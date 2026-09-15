@@ -525,7 +525,7 @@ function sortValue(
       return row.riskScore;
     case "mapping":
       if (row.mappingConfidence == null || row.mappingText === "—") return null;
-      return row.mappingText.toLocaleLowerCase();
+      return row.mappingConfidence;
     case "state":
       return row.state;
     case "lane":

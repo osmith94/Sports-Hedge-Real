@@ -418,11 +418,11 @@ describe("opportunity monitor default ordering and user sort", () => {
     assert.equal(asc[asc.length - 1].id, "missing-map");
     assert.deepEqual(
       desc.map((row) => row.id),
-      ["low-map", "high-map", "missing-map"],
+      ["high-map", "low-map", "missing-map"],
     );
     assert.deepEqual(
       asc.map((row) => row.id),
-      ["high-map", "low-map", "missing-map"],
+      ["low-map", "high-map", "missing-map"],
     );
   });
 });
