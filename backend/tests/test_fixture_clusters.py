@@ -11,6 +11,7 @@ from sports_hedge.application.fixture_clusters import (
 from sports_hedge.domain.football import CanonicalEvent
 from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.events import EventMatcher
+from sports_hedge.matching.learned_rules import LearnedMappingApplicator
 from sports_hedge.normalization.identity import (
     canonical_matched_event_id,
     canonical_source_event_id,
@@ -147,6 +148,49 @@ def test_bulk_match_prefilter_never_rejects_a_matching_pair() -> None:
     ).canonical
     assert matcher.match(exact, unrelated).matched is False
     assert matcher.could_match(exact, unrelated) is False
+
+
+def test_bulk_clustering_snapshots_enabled_rules_once() -> None:
+    class RuleStore:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def list_enabled(self) -> list:
+            self.calls += 1
+            return []
+
+    store = RuleStore()
+    matcher = EventMatcher(learned_applicator=LearnedMappingApplicator(store))
+    polymarket = [
+        _event(VenueName.POLYMARKET, "pm-leeds"),
+        _event(
+            VenueName.POLYMARKET,
+            "pm-newcastle",
+            home="Newcastle United",
+            away="Chelsea",
+        ),
+    ]
+    kalshi = [
+        _event(VenueName.KALSHI, "k-leeds"),
+        _event(
+            VenueName.KALSHI,
+            "k-newcastle",
+            home="Newcastle United",
+            away="Chelsea",
+        ),
+    ]
+
+    clusters, counts = cluster_venue_events(
+        matchbook=[],
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=matcher,
+        max_event_pairs=25,
+    )
+
+    assert len(clusters) == 2
+    assert counts["polymarket_kalshi"] == 2
+    assert store.calls == 1
 
 
 def test_three_venue_pair_decision_id_differs_from_cluster_id() -> None:

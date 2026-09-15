@@ -155,12 +155,14 @@ def cluster_venue_events(
         (VenueName.KALSHI, VenueName.POLYMARKET): "polymarket_kalshi",
     }
 
-    could_match = getattr(matcher, "could_match", None)
+    snapshot_for_bulk = getattr(matcher, "bulk_snapshot", None)
+    bulk_matcher = snapshot_for_bulk() if callable(snapshot_for_bulk) else matcher
+    could_match = getattr(bulk_matcher, "could_match", None)
     for left_index, left in enumerate(items):
         for right in items[left_index + 1 :]:
             if callable(could_match) and not could_match(left.canonical, right.canonical):
                 continue
-            match = matcher.match(left.canonical, right.canonical)
+            match = bulk_matcher.match(left.canonical, right.canonical)
             if not match.matched:
                 continue
             if left.venue is right.venue:
