@@ -356,6 +356,7 @@ def recent_scans(
     since: datetime | None = None,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
 ) -> list[PaperScanRecord]:
+    """Newest-first paper scan *audit* window. Not radar current-state."""
     return repository.list_scans(
         limit=limit,
         eligible_only=eligible_only,
