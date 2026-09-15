@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { DiscoveredFixture, LiveRefreshStatus } from "./api";
 import {
   discoveryCompactCounts,
+  discoveryEmptyMatchNote,
   discoveryCompactSummaryLabel,
   discoveryStatusBadgeLabel,
 } from "./discovered-fixture-display";
@@ -55,17 +56,20 @@ describe("fixture discovery compact summary", () => {
         ...Array.from({ length: 97 }, (_, index) =>
           fixture({
             canonical_event_id: `evt/${index}`,
+            matchbook_matched: index < 66,
             matched_equivalent_count: 0,
             solver_is_arbitrage: false,
           }),
         ),
         fixture({
           canonical_event_id: "evt/equivalent-a",
+          matchbook_matched: true,
           matched_equivalent_count: 5,
           solver_is_arbitrage: false,
         }),
         fixture({
           canonical_event_id: "evt/qualifying",
+          matchbook_matched: true,
           matched_equivalent_count: 4,
           solver_is_arbitrage: true,
         }),
@@ -114,6 +118,39 @@ describe("fixture discovery compact summary", () => {
       qualifying: 0,
       skipped: 0,
     });
+  });
+
+  it("explains fixture coverage with no shared canonical fixture without inventing a regression", () => {
+    const counts = discoveryCompactCounts(
+      status({
+        last_matched_event_pairs: 53,
+        discovered_fixtures: [
+          fixture({
+            matchbook_matched: false,
+            polymarket_matched: true,
+            matched_equivalent_count: 0,
+          }),
+        ],
+      }),
+    );
+    assert.equal(counts.crossVenue, 0);
+    assert.match(discoveryEmptyMatchNote(counts) ?? "", /no current multi-venue identity overlap/i);
+  });
+
+  it("distinguishes event matches from missing settlement-equivalent markets", () => {
+    const counts = discoveryCompactCounts(
+      status({
+        discovered_fixtures: [
+          fixture({
+            matchbook_matched: true,
+            polymarket_matched: true,
+            matched_equivalent_count: 0,
+          }),
+        ],
+      }),
+    );
+    assert.equal(counts.crossVenue, 1);
+    assert.match(discoveryEmptyMatchNote(counts) ?? "", /no settlement-equivalent markets/i);
   });
 });
 

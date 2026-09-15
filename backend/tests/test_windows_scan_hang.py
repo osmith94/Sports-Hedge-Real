@@ -288,6 +288,7 @@ def test_collect_api_returns_partial_fixtures_when_cluster_scan_overruns(
     monkeypatch.setattr(settings, "paper_scan_venue_timeout_seconds", 0.4)
     monkeypatch.setattr(settings, "paper_scan_provider_timeout_seconds", 8)
     monkeypatch.setattr(settings, "paper_scan_cycle_timeout_seconds", 1)
+    monkeypatch.setattr(settings, "paper_scan_manual_diagnostic_timeout_seconds", 1)
     polymarket = FakePolymarket()
 
     async def empty_matchbook(self, **filters):
@@ -333,13 +334,14 @@ def test_collect_api_returns_partial_fixtures_when_cluster_scan_overruns(
 def test_collect_api_sixty_slow_markets_returns_partial_200_before_hard_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Owner-Windows failure shape: 60 fixtures, slow books, 45s soft budget, 200 not 504."""
+    """Manual diagnostic: 60 slow fixtures return bounded partial 200, not browser timeout."""
 
     get_live_refresh_coordinator().reset()
     settings = get_settings()
     monkeypatch.setattr(settings, "paper_scan_venue_timeout_seconds", 15)
     monkeypatch.setattr(settings, "paper_scan_provider_timeout_seconds", 8)
     monkeypatch.setattr(settings, "paper_scan_cycle_timeout_seconds", 45)
+    monkeypatch.setattr(settings, "paper_scan_manual_diagnostic_timeout_seconds", 2)
     matchbook = SixtyResponsiveMatchbook()
     polymarket = SixtyResponsivePolymarket()
     kalshi = SixtyResponsiveKalshi()
@@ -390,8 +392,11 @@ def test_collect_api_sixty_slow_markets_returns_partial_200_before_hard_timeout(
     monkeypatch.setattr(KalshiClient, "get_series", k_series)
     monkeypatch.setattr(KalshiClient, "get_order_book", k_book)
 
-    hard = settings.paper_scan_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
-    assert hard == 50
+    hard = (
+        settings.paper_scan_manual_diagnostic_timeout_seconds
+        + SCAN_CYCLE_RETURN_GRACE_SECONDS
+    )
+    assert hard == 7
     client = TestClient(app)
     started = time.monotonic()
     response = client.post(
@@ -416,6 +421,9 @@ def test_collect_api_sixty_slow_markets_returns_partial_200_before_hard_timeout(
     assert leftovers
     assert all(item["matched_equivalent_count"] is None for item in leftovers)
     assert body["scan_diagnostics"]["soft_deadline_reached"] is True
+    assert body["scan_diagnostics"]["collection_kind"] == "manual_diagnostic"
+    assert body["scan_diagnostics"]["scheduled_fast_full_unchanged"] is True
+    assert body["fixture_markets"] == {}
     assert "partial" in body["operator_summary"]
     status = client.get("/paper/live-refresh")
     assert status.status_code == 200

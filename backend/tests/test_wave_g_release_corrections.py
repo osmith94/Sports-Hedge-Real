@@ -146,12 +146,17 @@ def test_explicit_collect_persists_after_bounded_scan_envelope(monkeypatch) -> N
         app.dependency_overrides.clear()
 
     assert response.status_code == 200, response.text
+    assert response.json()["scan_diagnostics"]["collection_kind"] == "manual_diagnostic"
+    assert response.json()["scan_diagnostics"]["scheduled_fast_full_unchanged"] is True
+    assert response.json()["fixture_markets"] == {}
     assert coordinator.persist_seen is True
     assert coordinator.persist_outcome_seen is True
     collect_src = inspect.getsource(paper_api.collect_read_only_market_data)
     assert "_collect_report(" in collect_src
     assert "_execute_collection(" not in collect_src
     assert "background_tasks.add_task" in collect_src
+    assert "paper_scan_manual_diagnostic_timeout_seconds" in collect_src
+    assert "cycle_timeout_seconds=diagnostic_timeout" in collect_src
     assert collect_src.index("background_tasks.add_task") > collect_src.index(
         "run_explicit_collect"
     )

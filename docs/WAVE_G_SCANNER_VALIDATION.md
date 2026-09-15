@@ -15,7 +15,7 @@ No benchmark fixture or opportunity is exposed through the production UI.
 
 ## Manual versus scheduled paths
 
-Primary **Run scan** now calls `POST /paper/collect/hot`.
+Primary **Run Fast refresh** now calls `POST /paper/collect/hot`.
 
 That endpoint asks `LiveRefreshCoordinator.manual_hot_plan()` for the same plan
 shape used by scheduled Fast Scan:
@@ -43,8 +43,9 @@ under Advanced. It intentionally:
 4. fetches venue markets and executable books for each selected cluster;
 5. runs settlement/equivalence, freshness, depth, fee/FX, risk, solver and
    allocation gates;
-6. returns inside its 45s collector plus 5s coordinator envelope, then persists
-   after the HTTP body.
+6. returns a truthful partial inside its 20s collector plus 5s coordinator
+   envelope, omits redundant nested market inventory from the HTTP body, then
+   persists after the body.
 
 The browser's existing 60s diagnostic timeout is only a client guard. Increasing
 it would hide broad one-shot latency rather than make the primary operator action
@@ -59,17 +60,17 @@ The deterministic benchmark uses:
 
 - Matchbook and Polymarket fixture/demo payloads with one settlement-equivalent
   both-teams-to-score market per fixture;
-- fixed 1.5ms latency for every synthetic provider call;
+- fixed 2ms latency for every synthetic provider call;
 - two Polymarket token-book reads per fixture;
-- 25s collector budget;
+- 2s scaled collector budget;
 - 1, 4, 16 and 50 fixture workloads for both HOT and UNIVERSE;
 - HOT seed setup excluded from measured wall time;
-- eight repeated 16-fixture cycles for each lane;
+- twelve repeated 16-fixture cycles for each lane;
 - no real credentials, network variance, provider throttling or production SLA
   assertion.
 
-Measured exact-head results are recorded after the validation command completes.
-Every workload must report provider/stage attribution, zero provider
+Measured exact-head results are recorded in
+`SCANNER_SYNTHETIC_VALIDATION.md`. Every workload must report provider/stage attribution, zero provider
 cancellations, zero orphans and zero live in-flight tasks. The repeated-cycle
 test also requires no event-loop task delta and no progressive second-half
 slowdown.
@@ -79,14 +80,17 @@ latency both identify serial cluster plus venue market/depth work as the scaling
 topology. Cluster fan-out is capped at 8 and explicit provider semaphores cap
 Matchbook/Polymarket/Kalshi at 4/8/4. These limits are settings, appear in scan
 diagnostics together with observed peaks, and do not imply a real-provider SLA.
-See `WAVE_G_SCANNER_PERFORMANCE.md` for the 40ms controlled-latency results and
-stalled-provider behavior.
+See `WAVE_G_SCANNER_PERFORMANCE.md` for higher-latency results and stalled
+provider behavior.
 
 ## 53 fixtures / zero cross-venue / zero equivalent
 
 `fixtures discovered` is a venue-union inventory count, not a cross-venue count.
-The observed `53 / 0 / 0` state can therefore be legitimate when current
-providers expose disjoint fixtures:
+The compact UI also previously mixed generations: fixture/equivalent totals
+came from merged Fast+Full inventory while cross-venue used the most recently
+completed lane's `last_matched_event_pairs`. Cross-venue now derives from each
+current row's venue flags. The observed `53 / 0 / 0` can still be legitimate
+when current providers expose disjoint fixtures:
 
 - `matched_event_pairs == 0` means no two venue events formed a canonical
   cross-venue cluster;

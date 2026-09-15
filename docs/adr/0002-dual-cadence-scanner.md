@@ -22,7 +22,13 @@ Issue #158 asks for **one scheduler with two coordinated cohorts**, not two inde
 6. Kickoff-passed + unknown in-play stays HOT **without a live label**, only within a **3h** post-kickoff uncertainty window. After that, leave **current radar** (#164) unless a provider explicitly says in-running or postponed/delayed/rescheduled. Do not fabricate completed or live from elapsed time. Explicit Matchbook/provider terminal status (including Matchbook `closed` / `graded`) evicts immediately. Lifecycle authority is provenance-specific: a status is Matchbook-confirmed only when Matchbook supplied it. A Matchbook terminal tombstone is not cleared by later Polymarket/Kalshi unknown or schedule-exception observations; a later Matchbook `open` / `in-play` / `suspended` / reschedule may restore.
 7. Radar TTL: **HOT 90s / UNIVERSE 360s**. Executable quote freshness remains the existing fail-closed ~1s contract.
 8. Replace `Tracked = latest completed collection cohort` with a **per-identity current-state merge**. Qualifying arbs from either lane surface immediately.
-9. Explicit `POST /paper/collect` remains the current **45s UNIVERSE-shaped** diagnostic/manual contract (accepted #131/#157 collect shape).
+9. Primary **Run Fast refresh** calls `POST /paper/collect/hot` with the same
+   current identity plan and 25s collector budget as HOT without advancing
+   scheduled due-times. Explicit `POST /paper/collect` is the separate
+   **bounded 20s full diagnostic** (+5s coordinator grace). It may return
+   partial coverage and does not advance either scheduled lane. This Wave G
+   correction supersedes the original 45s browser-facing contract; see
+   [`SCANNER_SYNTHETIC_VALIDATION.md`](../SCANNER_SYNTHETIC_VALIDATION.md).
 10. Expose Fast scan and Full sweep as distinct operator status.
 
 Detailed plan, seams, risks, migration, and acceptance tests: [`docs/DUAL_CADENCE_SCANNER.md`](../DUAL_CADENCE_SCANNER.md).

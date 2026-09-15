@@ -1201,6 +1201,13 @@ class ReadOnlyCrossVenueCollector:
         )
         qualifying = sum(1 for item in discovered_fixtures if item.solver_is_arbitrage)
         equivalent = sum(item.matched_equivalent_count or 0 for item in discovered_fixtures)
+        matching_coverage = _matching_coverage(
+            clusters,
+            discovered_fixtures,
+            pair_counts=pair_counts,
+            equivalent=equivalent,
+            qualifying=qualifying,
+        )
         coverage = _target_coverage(clusters)
         deadline_hit = leftover_n > 0 or cancelled or any(
             issue.detail == "scan_cycle_deadline_reached" for issue in issues
@@ -1284,6 +1291,7 @@ class ReadOnlyCrossVenueCollector:
             "identity_scope": [
                 item.canonical_event_id for item in discovered_fixtures
             ],
+            "matching_coverage": matching_coverage,
         }
         LOGGER.info("scan_diagnostics %s", diagnostics)
         return CollectionReport(
@@ -3001,6 +3009,49 @@ def _fixture_identity_aliases(
             if decision_id:
                 aliases[decision_id] = cluster_id
     return aliases
+
+
+def _matching_coverage(
+    clusters: list[FixtureCluster],
+    discovered_fixtures: list[DiscoveredFixture],
+    *,
+    pair_counts: dict[str, int],
+    equivalent: int,
+    qualifying: int,
+) -> dict[str, Any]:
+    """Honest current-cycle matching counts. Zero is a valid empty result."""
+
+    single_venue = sum(1 for cluster in clusters if cluster.venue_count < 2)
+    cross_venue = sum(1 for cluster in clusters if cluster.venue_count >= 2)
+    inventory_cross_venue = sum(
+        1
+        for item in discovered_fixtures
+        if sum(
+            bool(flag)
+            for flag in (
+                item.matchbook_matched,
+                item.polymarket_matched,
+                item.kalshi_matched,
+            )
+        )
+        >= 2
+    )
+    if cross_venue == 0:
+        meaning = "no_multi_venue_identity_match"
+    elif equivalent == 0:
+        meaning = "multi_venue_identity_without_settlement_equivalent"
+    else:
+        meaning = "cross_venue_equivalent_present"
+    return {
+        "fixtures": len(discovered_fixtures),
+        "single_venue_clusters": single_venue,
+        "cross_venue_clusters": cross_venue,
+        "matched_event_pairs": sum(pair_counts.values()),
+        "inventory_cross_venue_fixtures": inventory_cross_venue,
+        "equivalent_markets": equivalent,
+        "qualifying_arbs": qualifying,
+        "matching_state": meaning,
+    }
 
 
 def _filter_known_source_events(

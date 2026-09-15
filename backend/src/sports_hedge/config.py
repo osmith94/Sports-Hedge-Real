@@ -111,6 +111,9 @@ class Settings(BaseSettings):
     # Bounded live-scan budgets. A hung provider must not freeze the operator console.
     paper_scan_cycle_timeout_seconds: int = Field(default=45, ge=10, le=180)
     paper_scan_hot_cycle_timeout_seconds: int = Field(default=25, ge=10, le=45)
+    # Manual POST /paper/collect is a bounded diagnostic one-shot, not Fast/Full.
+    # Keep this strictly below the frontend PAPER_COLLECTION_TIMEOUT_MS (60s) envelope.
+    paper_scan_manual_diagnostic_timeout_seconds: int = Field(default=20, ge=10, le=45)
     paper_scan_universe_generation_budget_seconds: int = Field(default=150, ge=30, le=180)
     paper_universe_hot_yield_safety_margin_seconds: float = Field(default=2.0, ge=0.5, le=10)
     paper_hot_pre_kickoff_horizon_minutes: int = Field(default=60, ge=5, le=180)

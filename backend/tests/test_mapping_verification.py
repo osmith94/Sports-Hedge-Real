@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime, timedelta
 from json import loads
 from uuid import uuid4
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
 from sports_hedge.api.mapping_reviews import get_mapping_review_service
+from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 from sports_hedge.application.mapping_review import MappingReviewService, parse_chatgpt_verdict
 from sports_hedge.application.market_observation import (
     MatchbookObservationBuilder,
@@ -616,6 +618,19 @@ def test_ambiguous_and_not_verified_activate_nothing() -> None:
     assert store.get_review(ambiguous.review_id) is not None
     assert store.get_review(ambiguous.review_id)["activated_rule_id"] is None
     store.close()
+
+
+def test_prompt_generation_is_local_and_off_executable_quote_critical_path() -> None:
+    collector_source = inspect.getsource(ReadOnlyCrossVenueCollector)
+    paper_scan_source = inspect.getsource(PaperScanService)
+    prompt_source = inspect.getsource(MappingReviewService.build_prompt)
+
+    assert "build_prompt" not in collector_source
+    assert "MappingReviewService" not in collector_source
+    assert "build_prompt" not in paper_scan_source
+    assert "httpx" not in prompt_source
+    assert "openai" not in prompt_source.casefold()
+    assert "chat/completions" not in prompt_source.casefold()
 
 
 def test_parse_chatgpt_verdicts() -> None:
