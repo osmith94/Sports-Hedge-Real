@@ -29,6 +29,7 @@ class PositionManagementAutoAction(StrEnum):
     UNWIND_ATTEMPTED = "unwind_attempted"
     UNWIND_ABORTED = "unwind_aborted"
     UNWIND_COMPLETED = "unwind_completed"
+    UNWIND_PENDING_CONFIRMATION = "unwind_pending_confirmation"
     SKIPPED_AWAITING_MANUAL_EXTERNAL = "skipped_awaiting_manual_external"
     SKIPPED_MANUAL_EXTERNAL = "skipped_manual_external"
 
@@ -39,6 +40,49 @@ class CloseFeeByVenue(BaseModel):
     closing_fee_native: Decimal = Decimal("0")
     fee_snapshot_id: str | None = None
     deferred_profit_commission: bool = False
+
+
+class PendingQuoteStamp(BaseModel):
+    """Exact-identity quote clock from cycle N. Not executable depth."""
+
+    venue: str
+    source_market_id: str
+    source_runner_id: str
+    canonical_outcome: str
+    quoted_at: datetime
+
+    @model_validator(mode="after")
+    def aware(self) -> PendingQuoteStamp:
+        self.quoted_at = require_aware_instant(self.quoted_at, "quoted_at")
+        return self
+
+
+class PendingCloseLegFact(BaseModel):
+    """Cycle-N close economics used to detect a changed confirmation book."""
+
+    weighted_closing_price: Decimal | None = None
+    closing_fee: Decimal = Decimal("0")
+    available_closing_capacity: Decimal = Decimal("0")
+    quote_age_ms: int | None = Field(default=None, ge=0)
+    fee_snapshot_id: str | None = None
+
+
+class PendingUnwindConfirmation(BaseModel):
+    """Two-scan confirmation candidate. Does not release capital."""
+
+    captured_at: datetime
+    quotes: list[PendingQuoteStamp] = Field(default_factory=list)
+    validated_exit_pnl_gbp: Decimal | None = None
+    legs: list[PendingCloseLegFact] = Field(default_factory=list)
+    paper_only: bool = True
+    spendable: bool = False
+
+    @model_validator(mode="after")
+    def honesty(self) -> PendingUnwindConfirmation:
+        self.captured_at = require_aware_instant(self.captured_at, "captured_at")
+        self.paper_only = True
+        self.spendable = False
+        return self
 
 
 class PositionManagementSnapshot(BaseModel):
@@ -72,6 +116,7 @@ class PositionManagementSnapshot(BaseModel):
         IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
     )
     auto_action: PositionManagementAutoAction = PositionManagementAutoAction.NONE
+    pending_confirmation: PendingUnwindConfirmation | None = None
     auto_unwind_enabled: bool = False
     auto_close_allowed: bool = False
     paper_only: bool = True

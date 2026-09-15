@@ -1327,6 +1327,17 @@ export type PositionManagementSnapshot = {
   quote_age_ms?: number | null;
   quote_age_basis?: string | null;
   auto_action?: string;
+  pending_confirmation?: {
+    captured_at: string;
+    quotes?: Array<{
+      venue: string;
+      source_market_id: string;
+      source_runner_id: string;
+      canonical_outcome: string;
+      quoted_at: string;
+    }>;
+    validated_exit_pnl_gbp?: string | number | null;
+  } | null;
   auto_unwind_enabled?: boolean;
   auto_close_allowed?: boolean;
   remaining_lock_minutes?: string | number | null;

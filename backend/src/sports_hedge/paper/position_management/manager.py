@@ -17,6 +17,9 @@ from sports_hedge.fees.resolver import VenueCostResolver
 from sports_hedge.paper.position_management.models import (
     CloseFeeByVenue,
     CompetingOpportunityInput,
+    PendingCloseLegFact,
+    PendingQuoteStamp,
+    PendingUnwindConfirmation,
     PositionManagementAutoAction,
     PositionManagementCycleResult,
     PositionManagementSnapshot,
@@ -242,26 +245,206 @@ class PaperPositionManager:
             opportunity_cost_detail=resolved_scarcity.detail,
         )
         previous = trade.position_management
-        material = _recommendation_changed(previous, snapshot)
-        self._persist_snapshot(trade, snapshot, occurred, audit=material)
+        if awaiting or manual:
+            material = _recommendation_changed(previous, snapshot)
+            self._persist_snapshot(trade, snapshot, occurred, audit=material)
+            return PositionManagementCycleResult(trade_id=trade_id, snapshot=snapshot)
+        if not auto_unwind:
+            material = _recommendation_changed(previous, snapshot)
+            self._persist_snapshot(trade, snapshot, occurred, audit=material)
+            return PositionManagementCycleResult(trade_id=trade_id, snapshot=snapshot)
+        if snapshot.recommendation is not UnwindRecommendation.UNWIND_ELIGIBLE:
+            if previous is not None and previous.pending_confirmation is not None:
+                return self._drop_pending_candidate(
+                    trade,
+                    snapshot,
+                    occurred,
+                    f"pending_confirmation_not_eligible:{snapshot.decision_reason}",
+                )
+            material = _recommendation_changed(previous, snapshot)
+            self._persist_snapshot(trade, snapshot, occurred, audit=material)
+            return PositionManagementCycleResult(trade_id=trade_id, snapshot=snapshot)
 
-        if awaiting:
-            return PositionManagementCycleResult(trade_id=trade_id, snapshot=snapshot)
-        if manual:
-            return PositionManagementCycleResult(trade_id=trade_id, snapshot=snapshot)
-        if not auto_unwind or snapshot.recommendation is not UnwindRecommendation.UNWIND_ELIGIBLE:
-            return PositionManagementCycleResult(trade_id=trade_id, snapshot=snapshot)
-
-        return self._attempt_auto_unwind(
-            trade_id,
+        if second_quotes_for is not None:
+            material = _recommendation_changed(previous, snapshot)
+            self._persist_snapshot(trade, snapshot, occurred, audit=material)
+            return self._attempt_auto_unwind(
+                trade_id,
+                position=position,
+                first=decision,
+                first_quotes=resolved_quotes,
+                second_quotes_for=second_quotes_for,
+                policy=policy,
+                scarcity=resolved_scarcity,
+                occurred=occurred,
+                snapshot=snapshot,
+            )
+        return self._two_scan_confirm(
+            trade,
             position=position,
-            first=decision,
-            first_quotes=resolved_quotes,
-            second_quotes_for=second_quotes_for,
+            decision=decision,
+            quotes=resolved_quotes,
             policy=policy,
             scarcity=resolved_scarcity,
             occurred=occurred,
             snapshot=snapshot,
+            previous=previous,
+        )
+
+    def _two_scan_confirm(
+        self,
+        trade: PaperTrade,
+        *,
+        position: OpenPaperPosition,
+        decision: UnwindDecision,
+        quotes: list[ReverseQuote],
+        policy: UnwindPolicy,
+        scarcity: CapitalScarcityInput,
+        occurred: datetime,
+        snapshot: PositionManagementSnapshot,
+        previous: PositionManagementSnapshot | None,
+    ) -> PositionManagementCycleResult:
+        """Cycle N pends; cycle N+1 may close only on strictly newer exact-ID books."""
+
+        pending = None if previous is None else previous.pending_confirmation
+        if pending is None:
+            confirmed = snapshot.model_copy(
+                update={
+                    "auto_action": PositionManagementAutoAction.UNWIND_PENDING_CONFIRMATION,
+                    "pending_confirmation": _pending_from(decision, quotes, occurred),
+                }
+            )
+            self._persist_snapshot(
+                trade,
+                confirmed,
+                occurred,
+                audit=_recommendation_changed(previous, confirmed),
+            )
+            return PositionManagementCycleResult(trade_id=trade.trade_id, snapshot=confirmed)
+
+        fresh_fail = _pending_freshness_failure(position, pending, quotes)
+        if fresh_fail == "second_revalidation_not_fresh":
+            waiting = snapshot.model_copy(
+                update={
+                    "auto_action": PositionManagementAutoAction.UNWIND_PENDING_CONFIRMATION,
+                    "pending_confirmation": pending,
+                    "decision_reason": decision.decision_reason,
+                }
+            )
+            self._persist_snapshot(
+                trade,
+                waiting,
+                occurred,
+                audit=_recommendation_changed(previous, waiting),
+            )
+            return PositionManagementCycleResult(trade_id=trade.trade_id, snapshot=waiting)
+        if fresh_fail is not None:
+            return self._drop_pending_candidate(trade, snapshot, occurred, fresh_fail)
+
+        abort = _pending_revalidation_abort(pending, decision)
+        if abort is not None:
+            if decision.recommendation is UnwindRecommendation.UNWIND_ELIGIBLE:
+                retried = snapshot.model_copy(
+                    update={
+                        "auto_action": PositionManagementAutoAction.UNWIND_PENDING_CONFIRMATION,
+                        "pending_confirmation": _pending_from(decision, quotes, occurred),
+                        "decision_reason": abort,
+                    }
+                )
+                self._persist_snapshot(trade, retried, occurred, audit=True, extra_detail=abort)
+                self._append_audit(
+                    trade,
+                    occurred,
+                    PaperTradeAuditEventType.UNWIND_ABORTED,
+                    abort,
+                )
+                self.operations.trades.save(trade)
+                return PositionManagementCycleResult(
+                    trade_id=trade.trade_id,
+                    snapshot=retried,
+                    aborted_reason=abort,
+                )
+            failed = snapshot.model_copy(
+                update={
+                    "auto_action": PositionManagementAutoAction.UNWIND_ABORTED,
+                    "pending_confirmation": None,
+                    "decision_reason": abort,
+                    "close_executable": False,
+                    "releasable_native": {},
+                }
+            )
+            self._persist_snapshot(trade, failed, occurred, audit=True, extra_detail=abort)
+            self._append_audit(
+                trade,
+                occurred,
+                PaperTradeAuditEventType.UNWIND_ABORTED,
+                abort,
+            )
+            self.operations.trades.save(trade)
+            return PositionManagementCycleResult(
+                trade_id=trade.trade_id,
+                snapshot=failed,
+                aborted_reason=abort,
+            )
+
+        self._append_audit(
+            trade,
+            occurred,
+            PaperTradeAuditEventType.UNWIND_ATTEMPTED,
+            "automatic paper unwind two-scan confirmation",
+        )
+        self.operations.trades.save(trade)
+        try:
+            self.operations.complete_validated_unwind(
+                trade.trade_id,
+                quotes=quotes,
+                policy=policy,
+                scarcity=scarcity,
+                now=occurred,
+                record_evaluation_audit=False,
+            )
+        except PaperOperationsError as exc:
+            reason = str(exc)
+            failed = snapshot.model_copy(
+                update={
+                    "auto_action": PositionManagementAutoAction.UNWIND_ABORTED,
+                    "pending_confirmation": pending,
+                    "decision_reason": reason,
+                    "close_executable": False,
+                    "releasable_native": {},
+                }
+            )
+            self._persist_snapshot(trade, failed, occurred, audit=True, extra_detail=reason)
+            self._append_audit(
+                trade,
+                occurred,
+                PaperTradeAuditEventType.UNWIND_ABORTED,
+                reason,
+            )
+            self.operations.trades.save(trade)
+            return PositionManagementCycleResult(
+                trade_id=trade.trade_id,
+                snapshot=failed,
+                aborted_reason=reason,
+            )
+        closed = self.operations.trades.get(trade.trade_id)
+        if closed is None:
+            raise PaperOperationsError("unknown_trade")
+        done = snapshot_from_decision(
+            decision,
+            evaluated_at=occurred,
+            auto_unwind_enabled=True,
+            auto_close_allowed=True,
+            auto_action=PositionManagementAutoAction.UNWIND_COMPLETED,
+            opportunity_cost_detail=scarcity.detail,
+            pending_confirmation=None,
+        )
+        closed.position_management = done
+        self.operations.trades.save(closed)
+        return PositionManagementCycleResult(
+            trade_id=trade.trade_id,
+            snapshot=done,
+            mutated=True,
         )
 
     def _attempt_auto_unwind(
@@ -360,6 +543,36 @@ class PaperPositionManager:
             trade_id=trade_id,
             snapshot=snapshot,
             mutated=True,
+        )
+
+    def _drop_pending_candidate(
+        self,
+        trade: PaperTrade,
+        snapshot: PositionManagementSnapshot,
+        occurred: datetime,
+        reason: str,
+    ) -> PositionManagementCycleResult:
+        failed = snapshot.model_copy(
+            update={
+                "auto_action": PositionManagementAutoAction.UNWIND_ABORTED,
+                "pending_confirmation": None,
+                "decision_reason": reason,
+                "close_executable": False,
+                "releasable_native": {},
+            }
+        )
+        self._persist_snapshot(trade, failed, occurred, audit=True, extra_detail=reason)
+        self._append_audit(
+            trade,
+            occurred,
+            PaperTradeAuditEventType.UNWIND_ABORTED,
+            reason,
+        )
+        self.operations.trades.save(trade)
+        return PositionManagementCycleResult(
+            trade_id=trade.trade_id,
+            snapshot=failed,
+            aborted_reason=reason,
         )
 
     def _abort_revalidation(
@@ -538,6 +751,7 @@ def snapshot_from_decision(
     auto_close_allowed: bool,
     auto_action: PositionManagementAutoAction,
     opportunity_cost_detail: str | None = None,
+    pending_confirmation: PendingUnwindConfirmation | None = None,
 ) -> PositionManagementSnapshot:
     ages = [leg.quote_age_ms for leg in decision.close_plan.legs if leg.quote_age_ms is not None]
     bases = [leg.quote_age_basis for leg in decision.close_plan.legs if leg.quote_age_basis]
@@ -577,6 +791,7 @@ def snapshot_from_decision(
         remaining_lock_advisory=True,
         incremental_close_capital_status=decision.incremental_close_capital_status,
         auto_action=auto_action,
+        pending_confirmation=pending_confirmation,
         auto_unwind_enabled=auto_unwind_enabled,
         auto_close_allowed=auto_close_allowed,
         data_kind="modelled_paper_position_management",
@@ -627,6 +842,90 @@ def _facts_diverged(first: UnwindDecision, second: UnwindDecision) -> bool:
     if first.validated_exit_pnl_gbp != second.validated_exit_pnl_gbp:
         return True
     return False
+
+
+def _pending_from(
+    decision: UnwindDecision,
+    quotes: Sequence[ReverseQuote],
+    occurred: datetime,
+) -> PendingUnwindConfirmation:
+    return PendingUnwindConfirmation(
+        captured_at=occurred,
+        quotes=[
+            PendingQuoteStamp(
+                venue=quote.venue.value,
+                source_market_id=quote.source_market_id,
+                source_runner_id=quote.source_runner_id,
+                canonical_outcome=quote.canonical_outcome,
+                quoted_at=quote.quoted_at,
+            )
+            for quote in quotes
+        ],
+        validated_exit_pnl_gbp=decision.validated_exit_pnl_gbp,
+        legs=[
+            PendingCloseLegFact(
+                weighted_closing_price=leg.weighted_closing_price,
+                closing_fee=leg.closing_fee,
+                available_closing_capacity=leg.available_closing_capacity,
+                quote_age_ms=leg.quote_age_ms,
+                fee_snapshot_id=leg.fee_snapshot_id,
+            )
+            for leg in decision.close_plan.legs
+        ],
+    )
+
+
+def _pending_freshness_failure(
+    position: OpenPaperPosition,
+    pending: PendingUnwindConfirmation,
+    second_quotes: Sequence[ReverseQuote],
+) -> str | None:
+    first_by = {
+        (item.venue, item.source_market_id, item.source_runner_id, item.canonical_outcome): item.quoted_at
+        for item in pending.quotes
+    }
+    second_by = {_quote_identity(item): item for item in second_quotes}
+    for leg in position.legs:
+        if leg.filled_size <= 0:
+            continue
+        key = (leg.venue.value, leg.source_market_id, leg.source_runner_id, leg.canonical_outcome)
+        nxt = second_by.get((leg.venue, leg.source_market_id, leg.source_runner_id, leg.canonical_outcome))
+        if nxt is None:
+            return "second_revalidation_missing_reverse_quote"
+        prev = first_by.get(key)
+        if prev is None:
+            continue
+        if nxt.quoted_at <= prev:
+            return "second_revalidation_not_fresh"
+    return None
+
+
+def _pending_revalidation_abort(
+    pending: PendingUnwindConfirmation,
+    second: UnwindDecision,
+) -> str | None:
+    if second.recommendation is not UnwindRecommendation.UNWIND_ELIGIBLE:
+        return f"second_revalidation_not_eligible:{second.decision_reason}"
+    if not second.close_plan.fully_executable:
+        return "second_revalidation_not_executable"
+    if _pending_facts_diverged(pending, second):
+        return "second_revalidation_facts_changed"
+    return None
+
+
+def _pending_facts_diverged(pending: PendingUnwindConfirmation, second: UnwindDecision) -> bool:
+    if len(pending.legs) != len(second.close_plan.legs):
+        return True
+    for stored, right in zip(pending.legs, second.close_plan.legs, strict=True):
+        if stored.weighted_closing_price != right.weighted_closing_price:
+            return True
+        if stored.closing_fee != right.closing_fee:
+            return True
+        if stored.available_closing_capacity != right.available_closing_capacity:
+            return True
+        if stored.fee_snapshot_id != right.fee_snapshot_id:
+            return True
+    return pending.validated_exit_pnl_gbp != second.validated_exit_pnl_gbp
 
 
 def _quote_identity(quote: ReverseQuote) -> tuple:

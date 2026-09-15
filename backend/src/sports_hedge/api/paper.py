@@ -79,7 +79,7 @@ from sports_hedge.paper.trades import (
     PaperTradeBookSummary,
     PaperTradeDetail,
 )
-from sports_hedge.paper.unwind.models import PaperClosePlanRequest, UnwindDecision
+from sports_hedge.paper.unwind.models import PaperClosePlanRequest, UnwindDecision, UnwindPolicy
 from sports_hedge.paper.position_management.models import PositionManagementSnapshot
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.persistence.matchbook_account_fee import (
@@ -876,17 +876,24 @@ def _run_paper_position_management(
     report: CollectionReport,
     *,
     operations: PaperOperationsService,
-) -> None:
+    manager=None,
+    policy: UnwindPolicy | None = None,
+    now=None,
+    quotes_by_trade=None,
+):
     """Evaluate OPEN paper trades against the just-scanned reverse books.
 
     Failures here must not roll back scan persist or invent a settlement.
+    Automatic close uses two-scan confirmation: cycle N pends UNWIND_ELIGIBLE,
+    cycle N+1 may call complete_validated_unwind() only on strictly newer
+    exact-ID books. Same-scan catalog facts never mutate treasury.
     """
 
     try:
         from sports_hedge.paper.position_management.scarcity import competing_from_paper_decisions
 
-        manager = get_paper_position_manager()
-        manager.operations = operations
+        resolved = manager if manager is not None else get_paper_position_manager()
+        resolved.operations = operations
         exclude = {
             trade.opportunity_id
             for trade in operations.list_active_trades()
@@ -895,9 +902,15 @@ def _run_paper_position_management(
             report.paper_decisions,
             exclude_opportunity_ids=exclude,
         )
-        manager.manage_open_positions(competing=competing)
+        return resolved.manage_open_positions(
+            competing=competing,
+            policy=policy,
+            now=now,
+            quotes_by_trade=quotes_by_trade,
+        )
     except Exception:
         LOGGER.exception("paper position management cycle failed")
+        return []
 
 
 def _persist_collection_report(

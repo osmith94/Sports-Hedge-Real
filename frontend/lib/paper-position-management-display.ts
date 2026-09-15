@@ -19,12 +19,16 @@ export function formatPositionManagementCell(
       release: `${AUTHORITATIVE_RELEASE_CONTEXT} · ETA unknown · advisory, not spendable`,
     };
   }
-  const state =
+  const baseState =
     snapshot.recommendation === "UNWIND_ELIGIBLE"
       ? "UNWIND ELIGIBLE"
       : snapshot.recommendation === "UNWIND_NOT_SAFE"
         ? "NOT SAFE"
         : "HOLD";
+  const state =
+    snapshot.auto_action === "unwind_pending_confirmation"
+      ? `${baseState} · PENDING CONFIRMATION`
+      : baseState;
   const closeNow =
     snapshot.validated_exit_pnl_gbp == null ? "n/a" : money(snapshot.validated_exit_pnl_gbp);
   const giveUp = snapshot.unwind_cost_gbp == null ? "n/a" : money(snapshot.unwind_cost_gbp);

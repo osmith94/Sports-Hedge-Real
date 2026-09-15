@@ -81,4 +81,17 @@ describe("active-trade position management copy", () => {
       `${AUTHORITATIVE_RELEASE_CONTEXT} · ETA unknown · advisory, not spendable`,
     );
   });
+
+  it("names two-scan pending confirmation on the visible cell", () => {
+    const cell = formatPositionManagementCell(
+      snapshot({
+        recommendation: "UNWIND_ELIGIBLE",
+        auto_action: "unwind_pending_confirmation",
+      }),
+    );
+    assert.equal(cell.state, "UNWIND ELIGIBLE · PENDING CONFIRMATION");
+    assert.match(cell.economics, /hold/);
+    assert.match(cell.economics, /close-now/);
+    assert.match(cell.release, new RegExp(AUTHORITATIVE_RELEASE_CONTEXT));
+  });
 });

@@ -49,6 +49,9 @@ function managementHint(trade: PaperTrade): string {
     snapshot.capital_pressure ? `capital ${snapshot.capital_pressure}` : null,
     snapshot.opportunity_cost_gbp != null ? `opp-cost ${money(snapshot.opportunity_cost_gbp)}` : null,
     snapshot.quote_age_ms != null ? `age ${snapshot.quote_age_ms}ms` : null,
+    snapshot.auto_action === "unwind_pending_confirmation"
+      ? "awaiting newer reverse-book confirmation"
+      : null,
     snapshot.decision_reason?.replaceAll("_", " "),
   ].filter(Boolean);
   return bits.join(" · ");

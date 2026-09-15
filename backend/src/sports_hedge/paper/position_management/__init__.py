@@ -3,6 +3,7 @@
 from sports_hedge.paper.position_management.models import (
     CloseFeeByVenue,
     CompetingOpportunityInput,
+    PendingUnwindConfirmation,
     PositionManagementAutoAction,
     PositionManagementCycleResult,
     PositionManagementSnapshot,
@@ -13,6 +14,7 @@ __all__ = [
     "CompetingOpportunityInput",
     "LatestObservationCatalog",
     "PaperPositionManager",
+    "PendingUnwindConfirmation",
     "PositionManagementAutoAction",
     "PositionManagementCycleResult",
     "PositionManagementSnapshot",

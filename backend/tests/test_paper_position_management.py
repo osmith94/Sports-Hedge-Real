@@ -15,6 +15,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
+from sports_hedge.api.paper import _run_paper_position_management
+from sports_hedge.application.collector import CollectionReport
 from sports_hedge.application.demo_fixtures import tighten_reverse_quotes
 from sports_hedge.application.demo_walkthrough import DemoWalkthroughService, FixtureReplayRequest
 from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
@@ -909,13 +911,29 @@ def test_same_timestamp_second_pass_cannot_auto_close(tmp_path: Path) -> None:
         ledger.close()
 
 
-def test_missing_second_pass_quotes_cannot_auto_close(tmp_path: Path) -> None:
+def _treasury_fingerprint(ledger: SqlitePaperLedger) -> dict:
+    return {
+        (pool.venue, pool.native_currency): (
+            pool.available_cash,
+            pool.locked_capital,
+            pool.realised_pnl_native,
+        )
+        for pool in ledger.treasury.snapshot().pools
+    }
+
+
+def _collection_report() -> CollectionReport:
+    return CollectionReport(started_at=NOW, completed_at=NOW)
+
+
+def test_first_eligible_cycle_pends_without_closing(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
         opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
+        before = _treasury_fingerprint(ledger)
         result = manager.manage_trade(
             trade.trade_id,
             quotes=quotes,
@@ -925,11 +943,14 @@ def test_missing_second_pass_quotes_cannot_auto_close(tmp_path: Path) -> None:
             now=_eval_at(quotes),
         )
         assert result.mutated is False
-        assert result.aborted_reason == "second_revalidation_missing_reverse_quote"
+        assert result.aborted_reason is None
+        assert result.snapshot.auto_action is PositionManagementAutoAction.UNWIND_PENDING_CONFIRMATION
+        assert result.snapshot.pending_confirmation is not None
         persisted = ops.trades.get(trade.trade_id)
         assert persisted is not None
         assert persisted.state is PaperTradeState.OPEN
         assert persisted.close_fills == []
+        assert _treasury_fingerprint(ledger) == before
     finally:
         repository.close()
         ledger.close()
@@ -948,10 +969,7 @@ def test_first_pass_quotes_for_is_not_reused_for_auto_close(tmp_path: Path) -> N
             calls["n"] += 1
             return _refresh_quotes(quotes, delta_ms=calls["n"] * 5)
 
-        before = {
-            (pool.venue, pool.native_currency): (pool.available_cash, pool.locked_capital)
-            for pool in ledger.treasury.snapshot().pools
-        }
+        before = _treasury_fingerprint(ledger)
         result = manager.manage_trade(
             trade.trade_id,
             quotes_for=quotes_for,
@@ -962,22 +980,19 @@ def test_first_pass_quotes_for_is_not_reused_for_auto_close(tmp_path: Path) -> N
         )
         assert calls["n"] == 1
         assert result.mutated is False
-        assert result.aborted_reason == "second_revalidation_missing_reverse_quote"
+        assert result.aborted_reason is None
+        assert result.snapshot.auto_action is PositionManagementAutoAction.UNWIND_PENDING_CONFIRMATION
         persisted = ops.trades.get(trade.trade_id)
         assert persisted is not None
         assert persisted.state is PaperTradeState.OPEN
         assert persisted.close_fills == []
-        after = {
-            (pool.venue, pool.native_currency): (pool.available_cash, pool.locked_capital)
-            for pool in ledger.treasury.snapshot().pools
-        }
-        assert after == before
+        assert _treasury_fingerprint(ledger) == before
     finally:
         repository.close()
         ledger.close()
 
 
-def test_production_manage_open_positions_cannot_auto_close_without_fresh_second_pass(
+def test_production_manage_open_positions_first_cycle_does_not_auto_close(
     tmp_path: Path,
 ) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
@@ -986,10 +1001,7 @@ def test_production_manage_open_positions_cannot_auto_close_without_fresh_second
         trade = opened.trade
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
-        before = {
-            (pool.venue, pool.native_currency): (pool.available_cash, pool.locked_capital)
-            for pool in ledger.treasury.snapshot().pools
-        }
+        before = _treasury_fingerprint(ledger)
         results = manager.manage_open_positions(
             quotes_by_trade={trade.trade_id: quotes},
             policy=AUTO_UNWIND_POLICY,
@@ -999,16 +1011,215 @@ def test_production_manage_open_positions_cannot_auto_close_without_fresh_second
         )
         assert len(results) == 1
         assert results[0].mutated is False
-        assert results[0].aborted_reason == "second_revalidation_missing_reverse_quote"
+        assert results[0].snapshot.auto_action is PositionManagementAutoAction.UNWIND_PENDING_CONFIRMATION
         persisted = ops.trades.get(trade.trade_id)
         assert persisted is not None
         assert persisted.state is PaperTradeState.OPEN
         assert persisted.close_fills == []
-        after = {
-            (pool.venue, pool.native_currency): (pool.available_cash, pool.locked_capital)
-            for pool in ledger.treasury.snapshot().pools
-        }
-        assert after == before
+        assert _treasury_fingerprint(ledger) == before
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_scheduled_two_scan_closes_once_on_newer_qualifying_cycle(tmp_path: Path) -> None:
+    demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
+    try:
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        trade = opened.trade
+        assert trade is not None
+        quotes = tighten_reverse_quotes(opened.quotes)
+        before = _treasury_fingerprint(ledger)
+        first = _run_paper_position_management(
+            _collection_report(),
+            operations=ops,
+            manager=manager,
+            policy=AUTO_UNWIND_POLICY,
+            now=_eval_at(quotes),
+            quotes_by_trade={trade.trade_id: quotes},
+        )
+        assert len(first) == 1
+        assert first[0].mutated is False
+        assert first[0].snapshot.auto_action is PositionManagementAutoAction.UNWIND_PENDING_CONFIRMATION
+        pending = ops.trades.get(trade.trade_id)
+        assert pending is not None
+        assert pending.state is PaperTradeState.OPEN
+        assert pending.close_fills == []
+        assert _treasury_fingerprint(ledger) == before
+
+        same_scan = _run_paper_position_management(
+            _collection_report(),
+            operations=ops,
+            manager=manager,
+            policy=AUTO_UNWIND_POLICY,
+            now=_eval_at(quotes),
+            quotes_by_trade={trade.trade_id: quotes},
+        )
+        assert same_scan[0].mutated is False
+        still_open = ops.trades.get(trade.trade_id)
+        assert still_open is not None
+        assert still_open.state is PaperTradeState.OPEN
+        assert still_open.position_management is not None
+        assert (
+            still_open.position_management.auto_action
+            is PositionManagementAutoAction.UNWIND_PENDING_CONFIRMATION
+        )
+        assert _treasury_fingerprint(ledger) == before
+
+        newer = _refresh_quotes(quotes)
+        closed_cycle = _run_paper_position_management(
+            _collection_report(),
+            operations=ops,
+            manager=manager,
+            policy=AUTO_UNWIND_POLICY,
+            now=_eval_at(newer),
+            quotes_by_trade={trade.trade_id: newer},
+        )
+        assert closed_cycle[0].mutated is True
+        closed = ops.trades.get(trade.trade_id)
+        assert closed is not None
+        assert closed.state is PaperTradeState.CLOSED
+        assert closed.settlement_source == PAPER_UNWIND_SOURCE
+        assert closed.settlement_source_id == paper_unwind_source_id(trade.trade_id)
+        assert closed.close_fills
+        after_close = _treasury_fingerprint(ledger)
+        assert after_close != before
+
+        unwind_ids = [
+            entry.source_id
+            for entry in ops.journal.list_entries(opportunity_id=trade.opportunity_id)
+            if entry.source == PAPER_UNWIND_SOURCE
+        ]
+        assert unwind_ids
+        third = _run_paper_position_management(
+            _collection_report(),
+            operations=ops,
+            manager=manager,
+            policy=AUTO_UNWIND_POLICY,
+            now=_eval_at(_refresh_quotes(newer, delta_ms=2)),
+            quotes_by_trade={trade.trade_id: _refresh_quotes(newer, delta_ms=2)},
+        )
+        assert third == []
+        again = ops.trades.get(trade.trade_id)
+        assert again is not None
+        assert again.state is PaperTradeState.CLOSED
+        assert [
+            entry.source_id
+            for entry in ops.journal.list_entries(opportunity_id=trade.opportunity_id)
+            if entry.source == PAPER_UNWIND_SOURCE
+        ] == unwind_ids
+        assert _treasury_fingerprint(ledger) == after_close
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_scheduled_two_scan_non_eligible_newer_cycle_stays_open(tmp_path: Path) -> None:
+    demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
+    try:
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        trade = opened.trade
+        assert trade is not None
+        quotes = tighten_reverse_quotes(opened.quotes)
+        before = _treasury_fingerprint(ledger)
+        _run_paper_position_management(
+            _collection_report(),
+            operations=ops,
+            manager=manager,
+            policy=AUTO_UNWIND_POLICY,
+            now=_eval_at(quotes),
+            quotes_by_trade={trade.trade_id: quotes},
+        )
+        bad = [
+            quote.model_copy(
+                update={
+                    "quoted_at": quote.quoted_at + timedelta(milliseconds=1),
+                    "levels": [
+                        BookLevel(decimal_odds=Decimal("8.00"), available_stake=Decimal("1"))
+                    ],
+                }
+            )
+            for quote in quotes
+        ]
+        later = _run_paper_position_management(
+            _collection_report(),
+            operations=ops,
+            manager=manager,
+            policy=AUTO_UNWIND_POLICY,
+            now=_eval_at(bad),
+            quotes_by_trade={trade.trade_id: bad},
+        )
+        assert later[0].mutated is False
+        assert later[0].aborted_reason is not None
+        persisted = ops.trades.get(trade.trade_id)
+        assert persisted is not None
+        assert persisted.state is PaperTradeState.OPEN
+        assert persisted.close_fills == []
+        assert persisted.position_management is not None
+        assert persisted.position_management.pending_confirmation is None
+        assert persisted.position_management.auto_action is PositionManagementAutoAction.UNWIND_ABORTED
+        assert _treasury_fingerprint(ledger) == before
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_scheduled_two_scan_changed_eligible_facts_stay_open(tmp_path: Path) -> None:
+    demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
+    try:
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        trade = opened.trade
+        assert trade is not None
+        quotes = tighten_reverse_quotes(opened.quotes)
+        before = _treasury_fingerprint(ledger)
+        _run_paper_position_management(
+            _collection_report(),
+            operations=ops,
+            manager=manager,
+            policy=AUTO_UNWIND_POLICY,
+            now=_eval_at(quotes),
+            quotes_by_trade={trade.trade_id: quotes},
+        )
+        shifted = [
+            quote.model_copy(
+                update={
+                    "quoted_at": quote.quoted_at + timedelta(milliseconds=1),
+                    "levels": [
+                        level.model_copy(
+                            update={
+                                "decimal_odds": max(
+                                    Decimal("1.01"),
+                                    level.decimal_odds - Decimal("0.01"),
+                                )
+                            }
+                        )
+                        for level in quote.levels
+                    ],
+                }
+            )
+            for quote in quotes
+        ]
+        later = _run_paper_position_management(
+            _collection_report(),
+            operations=ops,
+            manager=manager,
+            policy=AUTO_UNWIND_POLICY,
+            now=_eval_at(shifted),
+            quotes_by_trade={trade.trade_id: shifted},
+        )
+        assert later[0].mutated is False
+        assert later[0].aborted_reason == "second_revalidation_facts_changed"
+        persisted = ops.trades.get(trade.trade_id)
+        assert persisted is not None
+        assert persisted.state is PaperTradeState.OPEN
+        assert persisted.close_fills == []
+        assert persisted.position_management is not None
+        assert persisted.position_management.pending_confirmation is not None
+        assert (
+            persisted.position_management.auto_action
+            is PositionManagementAutoAction.UNWIND_PENDING_CONFIRMATION
+        )
+        assert _treasury_fingerprint(ledger) == before
     finally:
         repository.close()
         ledger.close()
