@@ -2,16 +2,15 @@
 
 **Date:** 15 September 2026
 **Branch base:** `f0553d35e06dd49434b771af378ec7b49aaf80c1`
-**Scope:** deterministic validation only; no collector concurrency or provider topology change.
+**Scope:** deterministic validation of bounded collector concurrency and manual diagnostics.
 
 ## Corrected owner observation
 
-The owner-Windows screenshot shows Fast Scan at about **5.8s** and a Full Sweep
-chunk/generation at about **14.8s / 14.8s of 150s**. Those scheduled lanes are
-healthy. They are not evidence for a 58s/148s scheduler bottleneck.
-
-The red 60s failure belongs to the separate manual `POST /paper/collect`
-request. Do not use that browser timeout as a Fast/Full latency measurement.
+Owner-Windows evidence on the failed candidate recorded Fast Scan at about
+**58s**, Full Sweep at about **148/150s** with 53 fixtures, and the separate
+manual `POST /paper/collect` reaching the 60s browser timeout. The scheduled
+figures establish a throughput problem; the browser timeout is still a separate
+manual-diagnostic envelope.
 
 ## Why the manual request differs
 
@@ -20,7 +19,7 @@ request. Do not use that browser timeout as a Fast/Full latency measurement.
 | Fast Scan / HOT | Known current identities; skips venue event discovery; server-owned cadence | 25s collector + 5s coordinator grace |
 | Full Sweep / UNIVERSE | Venue-union discovery; resumable chunks yield to HOT | 150s generation budget split across chunks |
 | Manual Fast refresh | Same known HOT identity/venue plan as Fast Scan; does not advance scheduler state | 25s collector + 5s coordinator grace |
-| Full diagnostic | One venue-union discovery and serial market/depth sweep, up to 60 fixtures; does not advance scheduler state | 20s collector + 5s coordinator grace |
+| Full diagnostic | One venue-union discovery and bounded-concurrent market/depth sweep, up to 60 fixtures; does not advance scheduler state | 20s collector + 5s coordinator grace |
 
 Before this change, manual collect used the general 45s collector budget plus
 5s coordinator grace, returned the entire nested `fixture_markets` response,
@@ -69,32 +68,29 @@ architecture behavior under the assumptions above; they are not provider SLAs.
 
 | Fixtures | HOT wall | UNIVERSE wall | Cancels | Orphans/live tasks |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 11.3ms | 22.9ms | 0 | 0 |
-| 4 | 44.1ms | 54.6ms | 0 | 0 |
-| 16 | 174.7ms | 191.3ms | 0 | 0 |
-| 50 | 555.4ms | 673.7ms | 0 | 0 |
+| 1 | 6.3ms | 8.7ms | 0 | 0 |
+| 4 | 10.6ms | 12.8ms | 0 | 0 |
+| 16 | 31.6ms | 32.7ms | 0 | 0 |
+| 50 | 92.4ms | 92.2ms | 0 | 0 |
 
 50-fixture attribution:
 
 | Lane | Provider attribution | Stage attribution |
 | --- | --- | --- |
-| HOT | Matchbook 50 calls / 100ms; Polymarket 150 calls / 300ms | market discovery 100 calls / 200ms; book depth 100 / 200ms; mapping 15ms; fees/FX 50 calls; solver 50 calls |
-| UNIVERSE | Matchbook 51 calls / 121ms; Polymarket 151 calls / 342ms | event lookup 4ms; market discovery 100 / 229ms; book depth 100 / 226ms; mapping 59ms; fees/FX 50 calls; solver 50 calls |
+| HOT | Matchbook 50 calls / 147ms; Polymarket 150 calls / 438ms | market discovery 100 calls / 299ms; book depth 100 / 286ms; mapping 12ms; fees/FX 50 calls; solver 50 calls / 1ms |
+| UNIVERSE | Matchbook 51 calls / 149ms; Polymarket 151 calls / 430ms | event lookup 2 calls / 4ms; market discovery 100 / 295ms; book depth 100 / 280ms; mapping 10ms; fees/FX 50 calls; solver 50 calls |
 
-Repeated 12-cycle × 16-fixture soak produced:
-
-- HOT: 172.7–186.1ms wall time, 183.8ms median;
-- UNIVERSE: 169.9–180.1ms wall time, 177.2ms median;
-- task delta 0, cancellations 0, orphans 0 in both lanes.
-
-The second-half latency guard prevents progressive slowdown from passing
-silently.
+Repeated 16-fixture soak produced 31.2–70.8ms HOT wall time (31.8ms median)
+and 33.1–34.0ms UNIVERSE wall time (33.7ms median) across 12 cycles per lane,
+with task delta 0, cancellations 0, and orphans 0. The second-half latency guard
+prevents progressive slowdown from passing silently.
 
 The controlled 50-fixture run is below 1s and shows no task accumulation.
-Therefore this evidence does **not** justify collector concurrency. The
-production owner timings are also healthy, so bounded concurrency is deferred
-unless credentialed evidence independently demonstrates a provider/rate-limit
-bottleneck.
+The higher-latency benchmark in `WAVE_G_SCANNER_PERFORMANCE.md` uses 40ms calls
+and demonstrates an 8.38× relative speedup at 50 fixtures versus the explicit
+serial provider bound. Cluster fan-out is capped at 8; Matchbook, Polymarket and
+Kalshi calls are separately capped at 4/8/4. These synthetic results justify
+the topology correction but do not assert a real-provider SLA.
 
 ## 53 fixtures / 0 cross-venue / 0 equivalent
 
@@ -138,7 +134,7 @@ activates nothing.
 
 ## Safety and tenet review
 
-Applicable tenets: 02, 03, 04, 08, 09, 11, 12, 14, 15.
+Applicable tenets: 02, 03, 04, 08, 09, 11, 12, 14, 15, 18.
 
 - Paper-only/read-only venue boundary: satisfied; no place/cancel/sign method.
 - Canonical and settlement equivalence: satisfied; fail-closed rules unchanged.
@@ -149,7 +145,7 @@ Applicable tenets: 02, 03, 04, 08, 09, 11, 12, 14, 15.
 - Audit append-only semantics and SQLite retention: satisfied; no deletion,
   reset, migration, or destructive write added.
 - Data class: owner observations are live-paper operator evidence; benchmark
-  values are synthetic/modelled test measurements; no historical or fixture
+  values are fixture/demo synthetic test measurements; no historical or fixture
   result is presented as live.
 - Partial/deferred: credentialed provider benchmark #170 and owner-Windows
   smoke remain external acceptance steps.
