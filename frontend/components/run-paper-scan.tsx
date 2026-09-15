@@ -13,6 +13,7 @@ import {
   getLiveRefreshStatus,
   resetMatchbookFee,
   runPaperCollection,
+  runPaperHotRefresh,
   saveMatchbookFee,
 } from "../lib/api";
 import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
@@ -26,6 +27,8 @@ type ScanState =
   | { kind: "idle" }
   | { kind: "success"; report: PaperCollectionReport }
   | { kind: "error"; message: string };
+
+type ScanMode = "hot" | "diagnostic";
 
 type StripChip = {
   key: string;
@@ -195,7 +198,7 @@ export function RunPaperScan() {
     String(DEFAULT_SCANNER_ASSUMPTIONS.minimumNetArb * 100),
   );
   const [maxRisk, setMaxRisk] = useState(String(DEFAULT_SCANNER_ASSUMPTIONS.maximumExecutionRisk));
-  const [loading, setLoading] = useState(false);
+  const [loadingMode, setLoadingMode] = useState<ScanMode | null>(null);
   const [state, setState] = useState<ScanState>({ kind: "idle" });
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [intervalSeconds, setIntervalSeconds] = useState(30);
@@ -246,15 +249,18 @@ export function RunPaperScan() {
     }
   }, []);
 
-  const collect = useCallback(async () => {
+  const collect = useCallback(async (mode: ScanMode) => {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
-    setLoading(true);
+    setLoadingMode(mode);
     setState({ kind: "idle" });
     try {
       const payload = buildPayload();
       payloadRef.current = payload;
-      const report = await runPaperCollection(payload);
+      const report =
+        mode === "hot"
+          ? await runPaperHotRefresh(payload)
+          : await runPaperCollection(payload);
       setState({ kind: "success", report });
       setLastCompletedAt(report.completed_at);
       setVenueHealth(report.venue_health ?? null);
@@ -287,7 +293,7 @@ export function RunPaperScan() {
       }
     } finally {
       inFlightRef.current = false;
-      setLoading(false);
+      setLoadingMode(null);
       router.refresh();
     }
   }, [buildPayload, refreshEconomics, router]);
@@ -379,14 +385,14 @@ export function RunPaperScan() {
   }, [autoRefresh, intervalSeconds, liveRefresh?.server_loop_enabled, pollLiveStatus]);
 
   useEffect(() => {
-    if (!autoRefresh || loading) return undefined;
+    if (!autoRefresh || loadingMode !== null) return undefined;
     const timer = window.setInterval(() => setNowMs(Date.now()), 250);
     return () => window.clearInterval(timer);
-  }, [autoRefresh, loading]);
+  }, [autoRefresh, loadingMode]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await collect();
+    await collect("hot");
   }
 
   async function saveMatchbookCommission() {
@@ -423,6 +429,7 @@ export function RunPaperScan() {
   }
 
   const chips = economicsChips(economics);
+  const loading = loadingMode !== null;
   const cadenceMs = clampIntervalSeconds(intervalSeconds) * 1000;
   const serverOwned = Boolean(liveRefresh?.server_loop_enabled);
   const nextHotMs = liveRefresh?.hot?.next_due_at
@@ -519,9 +526,13 @@ export function RunPaperScan() {
           />
           <div className="scan-action">
             <button className="scan-button" type="submit" disabled={loading} aria-busy={loading}>
-              {loading ? "Scanning…" : "Run scan"}
+              {loadingMode === "hot" ? "Refreshing HOT…" : "Run scan"}
             </button>
           </div>
+        </div>
+        <div className="scan-note">
+          Run scan performs a quick manual Fast Scan / HOT refresh of current known fixtures. It
+          does not rediscover the full universe.
         </div>
         <div className="scan-note" aria-label="Fast scan and Full sweep status">
           {dualScanStatusLines(liveRefresh).map((line) => (
@@ -540,7 +551,23 @@ export function RunPaperScan() {
         />
 
         <details className="scan-advanced">
-          <summary>Advanced · FX / fees / provenance</summary>
+          <summary>Advanced · full diagnostic / FX / fees / provenance</summary>
+          <div className="scan-action">
+            <button
+              className="scan-button"
+              type="button"
+              disabled={loading}
+              aria-busy={loadingMode === "diagnostic"}
+              onClick={() => void collect("diagnostic")}
+            >
+              {loadingMode === "diagnostic" ? "Running full diagnostic…" : "Run full diagnostic"}
+            </button>
+          </div>
+          <p className="scan-advanced-copy">
+            Full diagnostic sweep performs broad venue discovery and can take substantially longer
+            than the HOT refresh. It is read-only and remains bounded by the diagnostic scan
+            envelope.
+          </p>
           <div className="econ-strip" aria-label="Backend-resolved FX and venue costs">
             {chips.map((chip) => (
               <span
