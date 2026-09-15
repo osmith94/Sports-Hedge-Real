@@ -5,7 +5,7 @@
 **Base:** `integration/foundations-1-5-2026-09-15`  
 **Date:** 14 September 2026
 
-This note answers why rows disappear from the operations-console **Paper scan history** table. It does **not** redesign Opportunity Monitor (#168), treasury, or audit storage. Items 8/9 (Age + loaded-set sorting) are presentation-only on the historical latest-N table.
+This note answers why rows disappear from the operations-console **scan audit history** table (formerly titled Paper scan history). Opportunity Monitor (#168) is the current-radar primary view and must not be driven from this latest-N audit window. Items 8/9 (Age + loaded-set sorting) remain presentation-only on the historical latest-N table.
 
 Data class: **historical paper audit observations** (live paper when the API is reachable). Not radar current-state, not modelled, not demo fixtures.
 
@@ -85,7 +85,7 @@ Repeated same-market scans **do** stack in this table until the rolling window d
 | --- | --- | --- |
 | **8** | Live **Age** from audit `scanned_at` (`0s..59s`, then `1m`…), tooltip = exact timestamp, one shared timer | Age uses the audit row’s `scanned_at`, not browser receipt time. This remains an audit-window table unless Item 11 lands. |
 | **9** | Sortable headers on the loaded set (numeric/time DESC first; text ASC; nulls last) | Sort only the **loaded latest-N**, and say so. Do not imply server-wide order. |
-| **11** | Opportunity Monitor IA (#168): **current radar** as the primary operational view; audit history secondary/collapsible | Do **not** implement by deleting or rewriting `paper_scan_records`. Drive the primary table from `FixtureCurrentStateStore` / watchlist radar. Keep this audit window labelled historical. HOT must not wipe valid UNIVERSE; expired radar rows leave the primary view by TTL, not by audit `LIMIT`. |
+| **11** | Opportunity Monitor IA (#168): **current radar** as the primary operational view; audit history secondary/collapsible | Drive the primary table from `FixtureCurrentStateStore` / watchlist radar (`GET /paper/watchlist/tracked`). Keep this audit window labelled historical and collapsed. Do **not** implement by deleting or rewriting `paper_scan_records`. HOT must not wipe valid UNIVERSE; expired radar rows leave the primary view by TTL, not by audit `LIMIT`. |
 
 ## Tenets
 

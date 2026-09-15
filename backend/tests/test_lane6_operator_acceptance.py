@@ -149,7 +149,7 @@ def test_operator_console_hierarchy_is_treasury_then_scan_then_discovery() -> No
         "<LiquidityPools",
         "<RunPaperScan",
         "<FixtureDiscoverySection",
-        "<span>Tracked</span>",
+        "<OpportunityMonitor",
         "Open paper positions",
         "<ActivityFeed",
         "<CapitalSummary",
