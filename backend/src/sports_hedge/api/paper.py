@@ -986,11 +986,11 @@ async def persist_explicit_collect_after_http_response(
 ) -> None:
     """Starlette BackgroundTask: runs after the collect HTTP body is sent.
 
-    Kept async so SQLite persist stays on the event-loop thread, matching the
-    scheduled path. Failures are recorded on live-refresh persist diagnostics.
+    Uses the same event-loop-safe persist wrapper as scheduled Fast/Full ticks.
+    Failures are recorded on live-refresh persist diagnostics.
     """
 
-    persist_scheduled_collection_report(
+    await persist_scheduled_collection_report(
         coordinator,
         report,
         service=service,
@@ -1000,7 +1000,7 @@ async def persist_explicit_collect_after_http_response(
     )
 
 
-def persist_scheduled_collection_report(
+async def persist_scheduled_collection_report(
     coordinator,
     report: CollectionReport,
     *,
@@ -1009,12 +1009,22 @@ def persist_scheduled_collection_report(
     watchlist: WatchlistService,
     scan_lane: ScanLane,
 ) -> None:
-    """Persist after the scan envelope. Failures are not scan_cycle_timeout."""
+    """Persist after the scan envelope without blocking FastAPI's event loop.
+
+    Only synchronous SQLite / auto-capture / position-management work runs in a
+    worker thread. Coordinator persist status and report diagnostic mutation stay
+    on the event loop after that worker returns. Failures are not
+    scan_cycle_timeout.
+    """
 
     started = monotonic()
     try:
-        _persist_collection_report(
-            report, service=service, audit=audit, watchlist=watchlist
+        await asyncio.to_thread(
+            _persist_collection_report,
+            report,
+            service=service,
+            audit=audit,
+            watchlist=watchlist,
         )
     except Exception as exc:
         LOGGER.exception("persist/auto-capture failed lane=%s", scan_lane)
@@ -1108,7 +1118,7 @@ async def server_owned_refresh_tick() -> None:
         )
     except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, httpx.HTTPError):
         return
-    persist_scheduled_collection_report(
+    await persist_scheduled_collection_report(
         coordinator,
         report,
         service=service,
