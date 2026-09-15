@@ -115,6 +115,44 @@ describe("dual cadence operator copy", () => {
     assert.match(fullSweepCopy(withVenues, now).detail, /MB·PM·K/);
   });
 
+  it("keeps persist-failure copy together with lane venue names", () => {
+    const now = Date.parse("2026-09-14T12:00:12Z");
+    const combined = status({
+      last_error: null,
+      hot: {
+        cadence_seconds: 30,
+        cycle_timeout_seconds: 25,
+        last_completed_at: "2026-09-14T12:00:00Z",
+        last_duration_ms: 4100,
+        next_due_at: "2026-09-14T12:00:18Z",
+        fixture_count: 7,
+        not_evaluated_count: 2,
+        persist_ok: false,
+        last_persist_error: "audit_write_failed",
+        active_venues: ["matchbook", "kalshi"],
+      },
+      universe: {
+        cadence_seconds: 180,
+        generation_budget_seconds: 150,
+        generation_work_used_s: 41,
+        chunk_last_duration_ms: 8000,
+        fixture_count: 104,
+        evaluated_count: 60,
+        not_evaluated_count: 44,
+        persist_ok: false,
+        last_persist_error: "audit_write_failed",
+        active_venues: ["matchbook", "polymarket"],
+      },
+    });
+    assert.match(fastScanCopy(combined, now).detail, /MB·K/);
+    assert.match(fastScanCopy(combined, now).detail, /persist\/auto-capture failed/);
+    assert.match(fastScanCopy(combined, now).detail, /partial \(2 not evaluated\)/);
+    assert.doesNotMatch(fastScanCopy(combined, now).detail, /scan_cycle_timeout/);
+    assert.match(fullSweepCopy(combined, now).detail, /MB·PM/);
+    assert.match(fullSweepCopy(combined, now).detail, /persist\/auto-capture failed/);
+    assert.doesNotMatch(fullSweepCopy(combined, now).detail, /scan_cycle_timeout/);
+  });
+
   it("health bar and scan note no longer ship a single Last scan line", () => {
     const bar = readFileSync(join(frontendRoot, "components/venue-health-bar.tsx"), "utf8");
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
