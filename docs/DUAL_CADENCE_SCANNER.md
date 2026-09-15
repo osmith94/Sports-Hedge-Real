@@ -435,11 +435,11 @@ generation work (`generation_work_used_s`, cursor, due times). If a scheduled
 lane is in progress, either manual action fails fast (409) rather than waiting
 behind it.
 
-Rationale: the failed candidate's owner-observed Fast Scan was about 58s and
-Full Sweep was about 148/150s with 53 fixtures. The primary action now expresses
-HOT intent without stretching a timeout, while bounded cluster/provider
-concurrency corrects the serial market/depth topology for every lane. Giving a
-full diagnostic the 150s generation budget remains a separate decision.
+Rationale: the owner-observed 5.8s Fast Scan and 14.8s Full Sweep chunk are
+healthy. The 60s browser failure belonged to the separate broad manual path, so
+the primary action now expresses HOT intent without stretching a timeout or
+changing collector topology. Giving a full diagnostic the 150s generation
+budget remains a separate decision.
 
 ### 8.3 Watchlist
 
@@ -461,8 +461,6 @@ full diagnostic the 150s generation budget remains a separate decision.
 | `paper_hot_current_state_ttl_seconds` | **90** | Radar TTL |
 | `paper_universe_current_state_ttl_seconds` | **360** | Radar TTL |
 | venue/provider timeouts | 15 / 8 | Unchanged |
-| scanner cluster concurrency | 8 | Bounded active clusters. |
-| Matchbook / Polymarket / Kalshi concurrency | 4 / 8 / 4 | Explicit per-provider semaphore caps. |
 
 There is **no** `paper_scan_universe_cycle_timeout_seconds=150` on the auto-loop. Per-chunk timeout is derived (§5.2.1).
 
