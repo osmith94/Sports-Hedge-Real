@@ -926,6 +926,12 @@ async def _collect_report(
         market_matcher=service.market_matcher,
         venue_timeout_seconds=settings.paper_scan_venue_timeout_seconds,
         provider_call_timeout_seconds=settings.paper_scan_provider_timeout_seconds,
+        cluster_concurrency=settings.paper_scan_cluster_concurrency,
+        provider_concurrency={
+            VenueName.MATCHBOOK: settings.paper_scan_matchbook_concurrency,
+            VenueName.POLYMARKET: settings.paper_scan_polymarket_concurrency,
+            VenueName.KALSHI: settings.paper_scan_kalshi_concurrency,
+        },
         cycle_timeout_seconds=(
             settings.paper_scan_cycle_timeout_seconds
             if cycle_timeout_seconds is None
