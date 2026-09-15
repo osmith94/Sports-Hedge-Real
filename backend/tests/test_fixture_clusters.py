@@ -126,7 +126,7 @@ def test_bulk_match_prefilter_never_rejects_a_matching_pair() -> None:
     offset = _event(
         VenueName.POLYMARKET,
         "pm-offset",
-        kickoff=KICKOFF.replace(minute=KICKOFF.minute + 2),
+        kickoff=KICKOFF.replace(minute=KICKOFF.minute + 1),
     ).canonical
     fuzzy = _event(
         VenueName.POLYMARKET,

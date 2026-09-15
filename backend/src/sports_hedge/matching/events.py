@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from difflib import SequenceMatcher
+from functools import lru_cache
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +14,13 @@ from sports_hedge.matching.learned_rules import (
     MappingProvenance,
     provenance_from_applied,
 )
+
+
+@lru_cache(maxsize=4096)
+def _resolve_static_team_name(value: str) -> str:
+    """Cache immutable curated aliases used repeatedly during bulk clustering."""
+
+    return resolve_team_name(value)
 
 
 class EventMatchResult(BaseModel):
@@ -154,8 +162,8 @@ class EventMatcher:
     ) -> tuple[str, str, list[AppliedLearnedRule]]:
         if self.learned_applicator is None:
             return (
-                resolve_team_name(event.home_team),
-                resolve_team_name(event.away_team),
+                _resolve_static_team_name(event.home_team),
+                _resolve_static_team_name(event.away_team),
                 [],
             )
         return self.learned_applicator.resolve_teams(
