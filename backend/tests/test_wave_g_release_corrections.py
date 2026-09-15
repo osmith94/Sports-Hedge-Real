@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import sqlite3
 import time
@@ -17,6 +18,16 @@ from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
+
+
+def test_venue_clients_close_concurrently_inside_one_finalisation_bound() -> None:
+    class SlowClose:
+        async def aclose(self) -> None:
+            await asyncio.sleep(0.2)
+
+    started = time.monotonic()
+    asyncio.run(paper_api._aclose_soon(SlowClose(), SlowClose(), SlowClose(), timeout=0.5))
+    assert time.monotonic() - started < 0.45
 
 
 def test_legacy_null_liquidity_balances_repair_to_zero_across_restart(tmp_path: Path) -> None:
