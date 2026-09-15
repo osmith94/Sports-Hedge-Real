@@ -155,8 +155,11 @@ def cluster_venue_events(
         (VenueName.KALSHI, VenueName.POLYMARKET): "polymarket_kalshi",
     }
 
+    could_match = getattr(matcher, "could_match", None)
     for left_index, left in enumerate(items):
         for right in items[left_index + 1 :]:
+            if callable(could_match) and not could_match(left.canonical, right.canonical):
+                continue
             match = matcher.match(left.canonical, right.canonical)
             if not match.matched:
                 continue

@@ -36,7 +36,51 @@ class EventMatcher:
 
     @staticmethod
     def _similarity(left: str, right: str) -> float:
+        if left == right:
+            return 1.0
         return SequenceMatcher(a=left, b=right).ratio()
+
+    def could_match(
+        self,
+        left: CanonicalEvent,
+        right: CanonicalEvent,
+        *,
+        left_market: CanonicalMarket | None = None,
+        right_market: CanonicalMarket | None = None,
+    ) -> bool:
+        """Cheap conservative prefilter for bulk clustering.
+
+        ``SequenceMatcher.quick_ratio`` is an upper bound on ``ratio``. Using
+        the maximum possible competition score means ``False`` cannot exclude
+        a pair that could reach this matcher's unchanged confidence threshold.
+        """
+
+        if left.sport != right.sport:
+            return False
+        kickoff_delta = abs(left.kickoff_utc - right.kickoff_utc)
+        if kickoff_delta > self.kickoff_tolerance:
+            return False
+        left_home, left_away, _ = self._resolved_teams(
+            left, right, market=left_market, counterpart_market=right_market
+        )
+        right_home, right_away, _ = self._resolved_teams(
+            right, left, market=right_market, counterpart_market=left_market
+        )
+        home_upper = SequenceMatcher(a=left_home, b=right_home).quick_ratio()
+        away_upper = SequenceMatcher(a=left_away, b=right_away).quick_ratio()
+        tolerance_seconds = self.kickoff_tolerance.total_seconds()
+        kickoff_score = (
+            1.0
+            if tolerance_seconds <= 0
+            else 1.0 - (kickoff_delta.total_seconds() / tolerance_seconds)
+        )
+        confidence_upper = (
+            0.35 * home_upper
+            + 0.35 * away_upper
+            + 0.10
+            + 0.20 * kickoff_score
+        )
+        return confidence_upper >= self.threshold
 
     def match(
         self,

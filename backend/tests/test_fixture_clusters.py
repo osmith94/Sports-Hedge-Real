@@ -120,6 +120,35 @@ def test_different_fixtures_stay_separate() -> None:
     assert counts["polymarket_kalshi"] == 2
 
 
+def test_bulk_match_prefilter_never_rejects_a_matching_pair() -> None:
+    matcher = EventMatcher()
+    exact = _event(VenueName.MATCHBOOK, "mb-exact").canonical
+    offset = _event(
+        VenueName.POLYMARKET,
+        "pm-offset",
+        kickoff=KICKOFF.replace(minute=KICKOFF.minute + 2),
+    ).canonical
+    fuzzy = _event(
+        VenueName.POLYMARKET,
+        "pm-fuzzy",
+        home="Leeds Utd",
+        away="Leicester",
+    ).canonical
+
+    for counterpart in (offset, fuzzy):
+        assert matcher.match(exact, counterpart).matched is True
+        assert matcher.could_match(exact, counterpart) is True
+
+    unrelated = _event(
+        VenueName.POLYMARKET,
+        "pm-unrelated",
+        home="Newcastle United",
+        away="Chelsea",
+    ).canonical
+    assert matcher.match(exact, unrelated).matched is False
+    assert matcher.could_match(exact, unrelated) is False
+
+
 def test_three_venue_pair_decision_id_differs_from_cluster_id() -> None:
     matchbook = [_event(VenueName.MATCHBOOK, "mb-leeds")]
     polymarket = [_event(VenueName.POLYMARKET, "pm-leeds")]
