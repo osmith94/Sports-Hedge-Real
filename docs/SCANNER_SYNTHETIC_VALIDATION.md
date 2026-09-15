@@ -38,6 +38,15 @@ partial report at its bound. Current fixture drill-down remains available from
 the coordinator-owned current-state inventory. The frontend diagnostic timeout
 stays at 60s.
 
+Exact-head CI also exposed synchronous event clustering as an envelope risk:
+the scaled 60-fixture diagnostic could spend long enough comparing impossible
+event pairs to return after its 7s test envelope. `EventMatcher.could_match()`
+now uses sport, kickoff and `SequenceMatcher.quick_ratio()` upper bounds before
+the unchanged matcher. A pair is skipped only when its maximum possible
+confidence is below the existing threshold. This is a sequential CPU prefilter,
+not provider/cluster concurrency; matching thresholds, aliases and settlement
+rules are unchanged. The timeout regression passed five consecutive local runs.
+
 ## Deterministic benchmark assumptions
 
 `backend/tests/test_scanner_synthetic_stress.py` uses only synthetic providers:
@@ -69,22 +78,22 @@ architecture behavior under the assumptions above; they are not provider SLAs.
 
 | Fixtures | HOT wall | UNIVERSE wall | Cancels | Orphans/live tasks |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 10.2ms | 15.5ms | 0 | 0 |
-| 4 | 40.6ms | 44.3ms | 0 | 0 |
-| 16 | 174.5ms | 209.8ms | 0 | 0 |
-| 50 | 568.7ms | 622.9ms | 0 | 0 |
+| 1 | 10.5ms | 15.0ms | 0 | 0 |
+| 4 | 41.2ms | 44.0ms | 0 | 0 |
+| 16 | 165.2ms | 168.1ms | 0 | 0 |
+| 50 | 515.5ms | 518.9ms | 0 | 0 |
 
 50-fixture attribution:
 
 | Lane | Provider attribution | Stage attribution |
 | --- | --- | --- |
-| HOT | Matchbook 50 calls / 109ms; Polymarket 150 calls / 326ms | market discovery 100 calls / 212ms; book depth 100 / 223ms; mapping 51 calls / 13ms; fees/FX 50 calls; solver 50 calls / 1ms |
-| UNIVERSE | Matchbook 51 calls / 124ms; Polymarket 151 calls / 355ms | event lookup 1 stage / 3ms; market discovery 100 / 245ms; book depth 100 / 228ms; mapping 51 / 16ms; fees/FX 50 / 3ms; solver 50 calls |
+| HOT | Matchbook 50 calls / 100ms; Polymarket 150 calls / 300ms | market discovery 100 calls / 200ms; book depth 100 / 200ms; mapping 51 calls / 5ms; fees/FX 50 calls; solver 50 calls |
+| UNIVERSE | Matchbook 51 calls / 102ms; Polymarket 151 calls / 302ms | event lookup 1 stage / 2ms; market discovery 100 / 200ms; book depth 100 / 200ms; mapping 51 / 3ms; fees/FX 50 calls; solver 50 calls |
 
 Repeated 12-cycle × 16-fixture soak produced:
 
-- HOT: 170.4–196.9ms wall time, 176.5ms median;
-- UNIVERSE: 166.2–202.5ms wall time, 170.3ms median;
+- HOT: 163.4–166.6ms wall time, 165.1ms median;
+- UNIVERSE: 166.7–193.7ms wall time, 167.4ms median;
 - task delta 0, cancellations 0, orphans 0 in both lanes.
 
 The second-half latency guard prevents progressive slowdown from passing
