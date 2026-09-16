@@ -178,7 +178,7 @@ Normal hot cohorts should finish well under 25s. The 25s timeout exists so a slo
 | Safety margin | `paper_universe_hot_yield_safety_margin_seconds` default **2s**. Chunk wall time must also leave #157 coordinator grace inside that bound (§5.2.1). |
 | Cohort | Full currently captured/in-scope universe, including T+6d. |
 | Purpose | Discover new fixtures/markets; keep distant fixtures on radar; detect initial cross-venue mispricing; promote into HOT as kickoff approaches. |
-| Progress | Resumable cursor (`universe_cursor_canonical_event_id` + generation id). Incomplete chunk retains evaluated work; remainder `not_evaluated_scan_deadline` for **this chunk**, without clobbering prior valid evaluations. |
+| Progress | Resumable cursor (`universe_cursor_canonical_event_id` + generation id). Incomplete chunk retains evaluated work; remainder `not_evaluated_scan_deadline` for **this chunk**, without clobbering prior valid evaluations. Generation-local skip/cursor/work is bound to `universe_generation_id` and **reset when that generation closes** (complete leftover_n=0 or 150s budget). HOT preemption inside an open generation keeps skip/cursor. A newly due generation plans with empty skip/cursor and a new generation id. Completeness diagnostics distinguish deadline leftovers, a genuine empty universe, and stale-generation skip bugs (which the scheduler must not emit). |
 | Radar TTL | **360s**. Radar-current only. |
 
 UNIVERSE must never starve HOT. A generation that cannot finish in one 180s window continues via cursor until evaluated or the 150s work budget is consumed; it does not start a second overlapping generation.

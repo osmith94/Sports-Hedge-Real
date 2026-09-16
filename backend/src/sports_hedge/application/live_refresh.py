@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from sports_hedge.application.collector import (
     DIAGNOSTIC_PROVIDERS,
     DIAGNOSTIC_STAGES,
+    UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE,
     CollectionReport,
     DiscoveredFixture,
     FixtureDetailReadModel,
@@ -149,6 +150,8 @@ class DualCadencePlan(BaseModel):
     identity_scope: list[str] | None = None
     resume_cursor: str | None = None
     skip_event_ids: list[str] = Field(default_factory=list)
+    universe_generation_id: int = 0
+    generation_resume: bool = False
     known_source_events: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     enabled_venues: list[VenueName] = Field(
         default_factory=lambda: list(default_operator_venues())
@@ -183,6 +186,11 @@ class LiveRefreshCoordinator:
         self._universe_work_used = 0.0
         self._universe_cursor: str | None = None
         self._universe_evaluated_ids: set[str] = set()
+        self._universe_progress_generation_id: int | None = None
+        self._universe_closed_generation_id = 0
+        self._universe_closed_work_used = 0.0
+        self._universe_closed_cursor: str | None = None
+        self._universe_closed_evaluated_count = 0
         self._venue_store = venue_settings_store
         self._pending_participation = participation_from_lists(
             default_operator_venues(),
@@ -363,6 +371,11 @@ class LiveRefreshCoordinator:
             self._universe_work_used = 0.0
             self._universe_cursor = None
             self._universe_evaluated_ids = set()
+            self._universe_progress_generation_id = None
+            self._universe_closed_generation_id = 0
+            self._universe_closed_work_used = 0.0
+            self._universe_closed_cursor = None
+            self._universe_closed_evaluated_count = 0
             self._cycle_hot_venues = None
             self._cycle_universe_venues = None
             self._cycle_enabled_venues = None
@@ -396,8 +409,8 @@ class LiveRefreshCoordinator:
                 "universe": self.status.universe.model_copy(
                     update={
                         "next_due_at": self._next_universe_due,
-                        "resume_cursor": self._universe_cursor,
-                        "generation_work_used_s": round(self._universe_work_used, 3),
+                        "resume_cursor": self._status_universe_cursor(),
+                        "generation_work_used_s": round(self._status_universe_work_used(), 3),
                     }
                 ),
             }
@@ -422,8 +435,12 @@ class LiveRefreshCoordinator:
             next_universe_due = self._next_universe_due
             universe_work_used = self._universe_work_used
             universe_generation_started_at = self._universe_generation_started_at
-            universe_cursor = self._universe_cursor
-            skip_event_ids = sorted(self._universe_evaluated_ids)
+            (
+                universe_cursor,
+                skip_event_ids,
+                universe_generation_id,
+                generation_resume,
+            ) = self._universe_plan_resume_state_unlocked()
             universe_venues = list(self._pending_participation.venues_for(ScanLane.UNIVERSE))
         hot_due = next_hot_due is not None and evaluated >= next_hot_due
         hot_scope = self._hot_identity_scope(evaluated, resolved)
@@ -436,7 +453,12 @@ class LiveRefreshCoordinator:
         else:
             universe_due = next_universe_due is not None and evaluated >= next_universe_due
         if universe_due:
-            remaining = float(resolved.paper_scan_universe_generation_budget_seconds) - universe_work_used
+            budget = float(resolved.paper_scan_universe_generation_budget_seconds)
+            remaining = (
+                budget - universe_work_used
+                if universe_generation_started_at is not None
+                else budget
+            )
             if remaining <= 0:
                 return DualCadencePlan(lane="idle", reason="universe_budget_exhausted")
             hot_cadence = timedelta(seconds=resolved.paper_live_refresh_hot_interval_seconds)
@@ -463,6 +485,8 @@ class LiveRefreshCoordinator:
                 coordinator_timeout_seconds=chunk_wall,
                 resume_cursor=universe_cursor,
                 skip_event_ids=skip_event_ids,
+                universe_generation_id=universe_generation_id,
+                generation_resume=generation_resume,
                 enabled_venues=universe_venues,
                 reason="universe_chunk",
             )
@@ -912,7 +936,6 @@ class LiveRefreshCoordinator:
         if self._universe_generation_started_at is None:
             self._ensure_universe_generation(report.started_at)
         duration_s = max(0.0, (report.completed_at - report.started_at).total_seconds())
-        budget = self._charge_universe_work(duration_s, report.completed_at)
         newly_evaluated = [
             item.canonical_event_id
             for item in report.discovered_fixtures
@@ -923,8 +946,17 @@ class LiveRefreshCoordinator:
             self._universe_cursor = newly_evaluated[-1]
         elif report.resume_cursor:
             self._universe_cursor = report.resume_cursor
-        if leftover_n == 0 and self._universe_generation_started_at is not None:
+        budget = self._charge_universe_work(duration_s, report.completed_at)
+        completeness = (report.scan_diagnostics or {}).get("completeness")
+        if (
+            leftover_n == 0
+            and self._universe_generation_started_at is not None
+            and completeness != UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE
+        ):
             self._close_universe_generation(report.completed_at)
+        work_used = self._status_universe_work_used()
+        evaluated_count = self._status_universe_evaluated_count()
+        resume_cursor = self._status_universe_cursor()
         self.status = self.status.model_copy(
             update={
                 "universe": self.status.universe.model_copy(
@@ -933,8 +965,8 @@ class LiveRefreshCoordinator:
                         "last_completed_at": report.completed_at,
                         "last_duration_ms": duration_ms,
                         "chunk_last_duration_ms": duration_ms,
-                        "generation_work_used_s": round(self._universe_work_used, 3),
-                        "evaluated_count": len(self._universe_evaluated_ids),
+                        "generation_work_used_s": round(work_used, 3),
+                        "evaluated_count": evaluated_count,
                         "not_evaluated_count": leftover_n,
                         "fixture_count": universe_count,
                         "degraded": degraded,
@@ -942,21 +974,64 @@ class LiveRefreshCoordinator:
                         "last_persist_error": None,
                         "persist_ok": None,
                         "last_diagnostics": _lane_diagnostics(report),
-                        "resume_cursor": self._universe_cursor,
+                        "resume_cursor": resume_cursor,
                         "next_due_at": self._next_universe_due,
                         "operator_summary": _universe_operator_summary(
                             duration_ms,
-                            self._universe_work_used,
+                            work_used,
                             budget,
                             self._next_hot_due,
                             universe_count,
-                            len(self._universe_evaluated_ids),
+                            evaluated_count,
                             leftover_n,
                         ),
                     }
                 )
             }
         )
+
+    def _universe_plan_resume_state_unlocked(
+        self,
+    ) -> tuple[str | None, list[str], int, bool]:
+        """Bind skip/cursor to the open generation. Closed gens plan empty resume."""
+
+        if self._universe_generation_started_at is None:
+            return (None, [], self._universe_generation_id + 1, False)
+        progress_id = self._universe_progress_generation_id
+        if progress_id is not None and progress_id != self._universe_generation_id:
+            return (None, [], self._universe_generation_id + 1, False)
+        plan_id = self._universe_generation_id if self._universe_generation_id > 0 else 1
+        return (
+            self._universe_cursor,
+            sorted(self._universe_evaluated_ids),
+            plan_id,
+            True,
+        )
+
+    def _status_universe_work_used(self) -> float:
+        if self._universe_generation_started_at is not None:
+            return self._universe_work_used
+        return self._universe_closed_work_used
+
+    def _status_universe_cursor(self) -> str | None:
+        if self._universe_generation_started_at is not None:
+            return self._universe_cursor
+        return self._universe_closed_cursor
+
+    def _status_universe_evaluated_count(self) -> int:
+        if self._universe_generation_started_at is not None:
+            return len(self._universe_evaluated_ids)
+        return self._universe_closed_evaluated_count
+
+    def _clear_universe_generation_local_state(self) -> None:
+        self._universe_closed_generation_id = self._universe_generation_id
+        self._universe_closed_work_used = self._universe_work_used
+        self._universe_closed_cursor = self._universe_cursor
+        self._universe_closed_evaluated_count = len(self._universe_evaluated_ids)
+        self._universe_evaluated_ids = set()
+        self._universe_cursor = None
+        self._universe_work_used = 0.0
+        self._universe_progress_generation_id = None
 
     def _ensure_universe_generation(self, started: datetime) -> None:
         if self._universe_generation_started_at is not None:
@@ -966,23 +1041,29 @@ class LiveRefreshCoordinator:
         self._universe_work_used = 0.0
         self._universe_evaluated_ids = set()
         self._universe_cursor = None
+        self._universe_progress_generation_id = self._universe_generation_id
 
     def _charge_universe_work(self, duration_s: float, finished: datetime) -> float:
         settings = get_settings()
         budget = float(settings.paper_scan_universe_generation_budget_seconds)
+        if self._universe_generation_started_at is None:
+            return budget
         self._universe_work_used += max(0.0, duration_s)
         if self._universe_work_used >= budget:
             self._close_universe_generation(finished)
         return budget
 
     def _close_universe_generation(self, finished: datetime) -> None:
+        if self._universe_generation_started_at is None:
+            return
         settings = get_settings()
-        started = self._universe_generation_started_at or finished
+        started = self._universe_generation_started_at
         next_due = started + timedelta(
             seconds=settings.paper_live_refresh_universe_interval_seconds
         )
         next_due = max(finished, next_due)
         self._next_universe_due = next_due
+        self._clear_universe_generation_local_state()
         self._universe_generation_started_at = None
 
     def _advance_hot_due(self, now: datetime) -> None:
@@ -1109,6 +1190,8 @@ class LiveRefreshCoordinator:
                 self._ensure_universe_generation(started)
                 duration_s = max(0.0, (finished - started).total_seconds())
                 budget = self._charge_universe_work(duration_s, finished)
+                work_used = self._status_universe_work_used()
+                evaluated_count = self._status_universe_evaluated_count()
                 update["universe"] = self.status.universe.model_copy(
                     update={
                         "cycle_in_progress": False,
@@ -1116,18 +1199,18 @@ class LiveRefreshCoordinator:
                         "last_completed_at": finished,
                         "last_duration_ms": duration,
                         "chunk_last_duration_ms": duration,
-                        "generation_work_used_s": round(self._universe_work_used, 3),
+                        "generation_work_used_s": round(work_used, 3),
                         "fixture_count": universe_count,
                         "degraded": True,
-                        "resume_cursor": self._universe_cursor,
+                        "resume_cursor": self._status_universe_cursor(),
                         "next_due_at": self._next_universe_due,
                         "operator_summary": _universe_operator_summary(
                             duration,
-                            self._universe_work_used,
+                            work_used,
                             budget,
                             self._next_hot_due,
                             universe_count,
-                            len(self._universe_evaluated_ids),
+                            evaluated_count,
                             self.status.universe.not_evaluated_count,
                         ),
                     }
@@ -1306,10 +1389,20 @@ def _lane_diagnostics(report: CollectionReport) -> dict[str, Any]:
     payload.setdefault("evaluated_count", evaluated_n)
     payload.setdefault("not_evaluated_count", leftover_n)
     payload.setdefault("timeout_count", 0)
+    completeness = payload.get("completeness")
+    if completeness is None:
+        if leftover_n or payload.get("soft_deadline_reached") or payload.get("cancelled"):
+            completeness = "deadline_leftover"
+        elif evaluated_n == 0:
+            completeness = "empty_universe"
+        else:
+            completeness = "complete"
+        payload["completeness"] = completeness
     payload["partial"] = bool(
         leftover_n
         or payload.get("soft_deadline_reached")
         or payload.get("cancelled")
+        or completeness == UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE
     )
     providers = dict(payload.get("providers") or {})
     for name in DIAGNOSTIC_PROVIDERS:
