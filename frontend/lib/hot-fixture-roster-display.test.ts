@@ -217,7 +217,8 @@ describe("HOT roster console placement", () => {
     assert.ok(hotIndex > discoveryIndex);
     assert.ok(monitorIndex > hotIndex);
     assert.match(page, /from "\.\.\/components\/hot-fixtures-panel"/);
-    assert.match(panel, new RegExp(HOT_ROSTER_TITLE));
+    assert.equal(HOT_ROSTER_TITLE, "HOT Fixtures / Fast Scan");
+    assert.match(panel, /HOT_ROSTER_TITLE/);
     assert.match(panel, /hotFixtureRows/);
     assert.doesNotMatch(panel, /getTrackedWatchlist/);
     assert.doesNotMatch(panel, /DEMO_/);
