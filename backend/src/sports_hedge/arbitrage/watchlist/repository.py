@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from sports_hedge.arbitrage.watchlist.models import (
     LifecycleEventType,
@@ -19,14 +21,76 @@ from sports_hedge.arbitrage.watchlist.models import (
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import VenueName
 
+_PROTECTED_LIFECYCLE_STATUSES = (
+    "PAPER_FILLING",
+    "PARTIAL",
+    "FILLED",
+    "CLOSED",
+    "EXPIRED",
+)
+_OBSERVATION_STATUSES = (
+    "WATCHING",
+    "APPROACHING",
+    "TRIGGERED",
+    "REJECTED",
+)
+_PROTECTED_SQL = ", ".join(f"'{status}'" for status in _PROTECTED_LIFECYCLE_STATUSES)
+_OBSERVATION_SQL = ", ".join(f"'{status}'" for status in _OBSERVATION_STATUSES)
+_PRESERVE_FILL_LIFECYCLE_SQL = (
+    f"watchlist_opportunities.status IN ({_PROTECTED_SQL}) "
+    f"AND excluded.status IN ({_OBSERVATION_SQL})"
+)
+
 
 class SqliteWatchlistRepository:
-    """Current-opportunity snapshot plus append-only lifecycle events."""
+    """Current-opportunity snapshot plus append-only lifecycle events.
+
+    sqlite3.Connection is not safe for concurrent use, even with
+    ``check_same_thread=False``. FastAPI paper persist and scan observe share
+    this repository from a thread pool, so every connection use is serialized.
+    Lifecycle observe/fill read-modify-write also uses ``BEGIN IMMEDIATE`` so
+    a second worker connection cannot regress a durable FILLED row.
+    """
 
     def __init__(self, database: str | Path = ":memory:") -> None:
-        self._connection = sqlite3.connect(str(database), check_same_thread=False)
+        self._lock = threading.RLock()
+        self._tx_depth = 0
+        self._connection = sqlite3.connect(
+            str(database),
+            check_same_thread=False,
+            timeout=30.0,
+        )
         self._connection.row_factory = sqlite3.Row
+        self._connection.isolation_level = None
+        self._connection.execute("PRAGMA busy_timeout=5000")
         self._create_schema()
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        with self._lock:
+            yield
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self._lock:
+            self._tx_depth += 1
+            started = self._tx_depth == 1
+            if started:
+                self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                if started:
+                    self._connection.commit()
+            except Exception:
+                if started:
+                    self._connection.rollback()
+                raise
+            finally:
+                self._tx_depth -= 1
+
+    def _commit(self) -> None:
+        if self._tx_depth == 0:
+            self._connection.commit()
 
     def _create_schema(self) -> None:
         self._connection.executescript(
@@ -125,18 +189,24 @@ class SqliteWatchlistRepository:
                 self._connection.execute(
                     f"ALTER TABLE watchlist_opportunities ADD COLUMN {name} {ddl}"
                 )
-        self._connection.commit()
+        self._commit()
 
     def get(self, opportunity_id: str) -> NearOpportunity | None:
-        row = self._connection.execute(
-            "SELECT * FROM watchlist_opportunities WHERE opportunity_id = ?",
-            (opportunity_id,),
-        ).fetchone()
-        return None if row is None else _opportunity_from_row(row)
+        with self.exclusive():
+            row = self._connection.execute(
+                "SELECT * FROM watchlist_opportunities WHERE opportunity_id = ?",
+                (opportunity_id,),
+            ).fetchone()
+            return None if row is None else _opportunity_from_row(row)
 
     def upsert_opportunity(self, opportunity: NearOpportunity) -> None:
+        with self.exclusive():
+            self._upsert_opportunity_locked(opportunity)
+            self._commit()
+
+    def _upsert_opportunity_locked(self, opportunity: NearOpportunity) -> None:
         self._connection.execute(
-            """
+            f"""
             INSERT INTO watchlist_opportunities (
                 opportunity_id, canonical_event_id, canonical_market_id, settlement_key,
                 competition, home_team, away_team, market_family, period, venues_json,
@@ -168,9 +238,21 @@ class SqliteWatchlistRepository:
                 period = excluded.period,
                 venues_json = excluded.venues_json,
                 legs_json = excluded.legs_json,
-                status = excluded.status,
-                classification = excluded.classification,
-                is_arbitrage = excluded.is_arbitrage,
+                status = CASE
+                    WHEN {_PRESERVE_FILL_LIFECYCLE_SQL}
+                    THEN watchlist_opportunities.status
+                    ELSE excluded.status
+                END,
+                classification = CASE
+                    WHEN {_PRESERVE_FILL_LIFECYCLE_SQL}
+                    THEN watchlist_opportunities.classification
+                    ELSE excluded.classification
+                END,
+                is_arbitrage = CASE
+                    WHEN {_PRESERVE_FILL_LIFECYCLE_SQL}
+                    THEN watchlist_opportunities.is_arbitrage
+                    ELSE excluded.is_arbitrage
+                END,
                 trigger_net_edge = excluded.trigger_net_edge,
                 current_net_edge = excluded.current_net_edge,
                 gross_edge = excluded.gross_edge,
@@ -261,47 +343,48 @@ class SqliteWatchlistRepository:
                 else None,
             ),
         )
-        self._connection.commit()
 
     def append_event(self, event: OpportunityLifecycleEvent) -> None:
-        self._connection.execute(
-            """
-            INSERT INTO watchlist_lifecycle_events (
-                event_id, opportunity_id, occurred_at, event_type, status,
-                current_net_edge, distance_to_trigger_pp, detail
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event.event_id,
-                event.opportunity_id,
-                event.occurred_at.isoformat(),
-                event.event_type.value,
-                event.status.value,
-                _stringify(event.current_net_edge),
-                _stringify(event.distance_to_trigger_pp),
-                event.detail,
-            ),
-        )
-        self._connection.commit()
+        with self.exclusive():
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO watchlist_lifecycle_events (
+                    event_id, opportunity_id, occurred_at, event_type, status,
+                    current_net_edge, distance_to_trigger_pp, detail
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.event_id,
+                    event.opportunity_id,
+                    event.occurred_at.isoformat(),
+                    event.event_type.value,
+                    event.status.value,
+                    _stringify(event.current_net_edge),
+                    _stringify(event.distance_to_trigger_pp),
+                    event.detail,
+                ),
+            )
+            self._commit()
 
     def append_observation(self, point: OpportunityObservationPoint) -> None:
-        self._connection.execute(
-            """
-            INSERT INTO watchlist_observation_history (
-                opportunity_id, observed_at, current_net_edge, distance_to_trigger_pp,
-                quote_age_ms, status
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                point.opportunity_id,
-                point.observed_at.isoformat(),
-                _stringify(point.current_net_edge),
-                _stringify(point.distance_to_trigger_pp),
-                point.quote_age_ms,
-                point.status.value,
-            ),
-        )
-        self._connection.commit()
+        with self.exclusive():
+            self._connection.execute(
+                """
+                INSERT INTO watchlist_observation_history (
+                    opportunity_id, observed_at, current_net_edge, distance_to_trigger_pp,
+                    quote_age_ms, status
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    point.opportunity_id,
+                    point.observed_at.isoformat(),
+                    _stringify(point.current_net_edge),
+                    _stringify(point.distance_to_trigger_pp),
+                    point.quote_age_ms,
+                    point.status.value,
+                ),
+            )
+            self._commit()
 
     def list_observations(
         self,
@@ -311,24 +394,26 @@ class SqliteWatchlistRepository:
     ) -> list[OpportunityObservationPoint]:
         if limit <= 0:
             raise ValueError("limit must be positive")
-        rows = self._connection.execute(
-            """
-            SELECT * FROM watchlist_observation_history
-            WHERE opportunity_id = ?
-            ORDER BY observed_at DESC, id DESC
-            LIMIT ?
-            """,
-            (opportunity_id, limit),
-        ).fetchall()
-        points = [_observation_from_row(row) for row in rows]
-        points.reverse()
-        return points
+        with self.exclusive():
+            rows = self._connection.execute(
+                """
+                SELECT * FROM watchlist_observation_history
+                WHERE opportunity_id = ?
+                ORDER BY observed_at DESC, id DESC
+                LIMIT ?
+                """,
+                (opportunity_id, limit),
+            ).fetchall()
+            points = [_observation_from_row(row) for row in rows]
+            points.reverse()
+            return points
 
     def list_opportunities(self) -> list[NearOpportunity]:
-        rows = self._connection.execute(
-            "SELECT * FROM watchlist_opportunities ORDER BY last_seen_at DESC"
-        ).fetchall()
-        return [_opportunity_from_row(row) for row in rows]
+        with self.exclusive():
+            rows = self._connection.execute(
+                "SELECT * FROM watchlist_opportunities ORDER BY last_seen_at DESC"
+            ).fetchall()
+            return [_opportunity_from_row(row) for row in rows]
 
     def list_events(
         self,
@@ -349,15 +434,17 @@ class SqliteWatchlistRepository:
             parameters.append(since.isoformat())
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         parameters.append(limit)
-        rows = self._connection.execute(
-            f"SELECT * FROM watchlist_lifecycle_events{where} "  # noqa: S608
-            "ORDER BY occurred_at DESC, event_id DESC LIMIT ?",
-            parameters,
-        ).fetchall()
-        return [_event_from_row(row) for row in rows]
+        with self.exclusive():
+            rows = self._connection.execute(
+                f"SELECT * FROM watchlist_lifecycle_events{where} "  # noqa: S608
+                "ORDER BY occurred_at DESC, event_id DESC LIMIT ?",
+                parameters,
+            ).fetchall()
+            return [_event_from_row(row) for row in rows]
 
     def close(self) -> None:
-        self._connection.close()
+        with self.exclusive():
+            self._connection.close()
 
 
 def _opportunity_from_row(row: sqlite3.Row) -> NearOpportunity:

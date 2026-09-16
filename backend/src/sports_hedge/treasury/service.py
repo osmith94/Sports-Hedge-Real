@@ -716,6 +716,19 @@ class PaperTreasuryService(SerializedLedgerBound):
         occurred_at: datetime,
         provenance: DataProvenance,
     ) -> PaperJournalEntry:
+        with self._ledger.transaction():
+            return self._lock_one_in_transaction(
+                session, request, occurred_at=occurred_at, provenance=provenance
+            )
+
+    def _lock_one_in_transaction(
+        self,
+        session: PaperTreasurySession,
+        request: TreasuryLockRequest,
+        *,
+        occurred_at: datetime,
+        provenance: DataProvenance,
+    ) -> PaperJournalEntry:
         if request.amount_native <= 0:
             raise PaperTreasuryError("invalid_lock_amount")
         existing = self._lock_row(request.lock_id)
@@ -723,9 +736,11 @@ class PaperTreasuryService(SerializedLedgerBound):
             if not _lock_facts_match(existing, request):
                 raise PaperTreasuryError("conflicting_lock_facts")
             posted = self._ledger.journal.get(request.source, request.lock_id)
-            if posted is None:
-                raise PaperTreasuryError("duplicate_lock")
-            return posted
+            if posted is not None:
+                return posted
+            return self._repair_lock_journal(
+                session, request, existing, occurred_at=occurred_at, provenance=provenance
+            )
         pool = self._pool_row(session.session_id, request.venue, request.native_currency)
         available = Decimal(pool["available_cash"])
         locked = Decimal(pool["locked_capital"])
@@ -768,6 +783,58 @@ class PaperTreasuryService(SerializedLedgerBound):
                 request.fill_id or request.lock_id,
             ),
         )
+        return self._post_lock_journal_and_event(
+            session,
+            request,
+            pool_id=pool["pool_id"],
+            journal_rate=journal_rate,
+            fx_source=fx_source,
+            amount_gbp=amount_gbp,
+            capital_source=capital_source,
+            occurred_at=occurred_at,
+            provenance=provenance,
+        )
+
+    def _repair_lock_journal(
+        self,
+        session: PaperTreasurySession,
+        request: TreasuryLockRequest,
+        existing: Any,
+        *,
+        occurred_at: datetime,
+        provenance: DataProvenance,
+    ) -> PaperJournalEntry:
+        """Post the missing journal for a committed lock without mutating balances again."""
+
+        pool = self._pool_row(session.session_id, request.venue, request.native_currency)
+        journal_rate, fx_source = self._authoritative_lock_fx(pool, request)
+        amount_gbp = request.amount_native * journal_rate
+        capital_source = parse_capital_source(request.capital_source)
+        return self._post_lock_journal_and_event(
+            session,
+            request,
+            pool_id=existing["pool_id"],
+            journal_rate=journal_rate,
+            fx_source=fx_source,
+            amount_gbp=amount_gbp,
+            capital_source=capital_source,
+            occurred_at=occurred_at,
+            provenance=provenance,
+        )
+
+    def _post_lock_journal_and_event(
+        self,
+        session: PaperTreasurySession,
+        request: TreasuryLockRequest,
+        *,
+        pool_id: str,
+        journal_rate: Decimal,
+        fx_source: str,
+        amount_gbp: Decimal,
+        capital_source: CapitalSource,
+        occurred_at: datetime,
+        provenance: DataProvenance,
+    ) -> PaperJournalEntry:
         posted, _created = self._ledger.journal.append_idempotent(
             PaperJournalEntry(
                 source=request.source,
@@ -789,27 +856,28 @@ class PaperTreasuryService(SerializedLedgerBound):
                 ),
             )
         )
-        self._insert_event(
-            PaperTreasuryEvent(
-                event_id=str(uuid4()),
-                session_id=session.session_id,
-                pool_id=pool["pool_id"],
-                venue=request.venue,
-                native_currency=request.native_currency,
-                event_type=PaperTreasuryEventType.LOCK,
-                native_amount=request.amount_native,
-                occurred_at=occurred_at,
-                trade_id=request.trade_id,
-                opportunity_id=request.opportunity_id,
-                lock_id=request.lock_id,
-                source=request.source,
-                source_id=request.lock_id,
-                reason=request.reason,
-                fx_rate_gbp_per_unit=journal_rate,
-                fx_source=fx_source,
-                journal_id=posted.journal_id,
+        if not self._event_exists(request.source, request.lock_id):
+            self._insert_event(
+                PaperTreasuryEvent(
+                    event_id=f"lock:{request.lock_id}",
+                    session_id=session.session_id,
+                    pool_id=pool_id,
+                    venue=request.venue,
+                    native_currency=request.native_currency,
+                    event_type=PaperTreasuryEventType.LOCK,
+                    native_amount=request.amount_native,
+                    occurred_at=occurred_at,
+                    trade_id=request.trade_id,
+                    opportunity_id=request.opportunity_id,
+                    lock_id=request.lock_id,
+                    source=request.source,
+                    source_id=request.lock_id,
+                    reason=request.reason,
+                    fx_rate_gbp_per_unit=journal_rate,
+                    fx_source=fx_source,
+                    journal_id=posted.journal_id,
+                )
             )
-        )
         return posted
 
     def _apply_leg_settlement(

@@ -333,31 +333,49 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                     leg.execution_mode,
                 ),
             )
-        existing_events = {
-            row["event_id"]
-            for row in self._connection.execute(
-                "SELECT event_id FROM paper_trade_events WHERE trade_id = ?",
-                (trade.trade_id,),
-            )
-        }
         for event in trade.audit:
-            if event.event_id in existing_events:
+            if self._same_trade_event(event, trade.trade_id):
                 continue
-            self._connection.execute(
-                """
-                INSERT INTO paper_trade_events (event_id, trade_id, occurred_at, event_type, detail)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    event.event_id,
-                    trade.trade_id,
-                    event.occurred_at.isoformat(),
-                    event.event_type.value,
-                    event.detail,
-                ),
-            )
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO paper_trade_events (event_id, trade_id, occurred_at, event_type, detail)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.event_id,
+                        trade.trade_id,
+                        event.occurred_at.isoformat(),
+                        event.event_type.value,
+                        event.detail,
+                    ),
+                )
+            except IntegrityError:
+                if self._same_trade_event(event, trade.trade_id):
+                    continue
+                raise
         self._ledger._commit()
         return trade
+
+    def _same_trade_event(self, event: PaperTradeAuditEvent, trade_id: str) -> bool:
+        """True only when the existing PK row is this deterministic event identity."""
+
+        row = self._connection.execute(
+            """
+            SELECT event_id, trade_id, event_type, detail
+            FROM paper_trade_events
+            WHERE event_id = ?
+            """,
+            (event.event_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        return (
+            str(row["event_id"]) == event.event_id
+            and str(row["trade_id"]) == trade_id
+            and str(row["event_type"]) == event.event_type.value
+            and row["detail"] == event.detail
+        )
 
     def _trade_from_row(self, row: sqlite3.Row) -> PaperTrade:
         legs = []

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -131,6 +132,39 @@ class PaperOperationsError(ValueError):
     """Fail-closed paper operational chain."""
 
 
+_AUTOFILL_GATE_REASONS = frozenset(
+    {
+        "allocator_size_required",
+        "fill_plan_not_allocator_sized",
+        "stale_before_fill",
+        "stale_quote",
+        "missing_paper_fill_plan",
+        "no_positive_opening_legs",
+        "no_internal_paper_legs",
+        "paper_fill_rejected",
+        "incomplete_opening_hedge",
+        "insufficient_spendable_treasury",
+        "missing_treasury_pool",
+        "manual_external_confirmation_required",
+        "external_confirmation_venue_mismatch",
+        "remaining_hedge_revalidation_failed",
+        "unknown_opportunity",
+        "must_not_auto_capture",
+    }
+)
+
+
+def _is_expected_autofill_gate(exc: BaseException) -> bool:
+    """True for fail-closed non-captures; false for persist/crash inconsistency."""
+
+    reason = str(exc)
+    if reason.startswith("inconsistent_paper_state"):
+        return False
+    if reason in _AUTOFILL_GATE_REASONS:
+        return True
+    return reason.startswith("allocation_failed:")
+
+
 class PaperOperationsService:
     """Wire scan → optional autofill/priority alert → paper fill → journal → settlement.
 
@@ -165,6 +199,7 @@ class PaperOperationsService:
         self._latest_preparation_by_opportunity: dict[str, str] = {}
         self._external_confirmations: dict[str, ExternalLegConfirmation] = {}
         self._entry_rejections: dict[str, str] = {}
+        self._fill_persist_lock = threading.RLock()
 
     def persist_triggered_chain(
         self,
@@ -208,14 +243,22 @@ class PaperOperationsService:
             ):
                 try:
                     self._require_allocator_sized_plan(opportunity_id)
-                    self.simulate_fill(
-                        opportunity_id,
-                        simulate_external=True,
-                        provenance=provenance,
-                        operator_note="PAPER-ONLY autofill; no venue order placed",
-                    )
                 except PaperOperationsError:
+                    # Allocator/plan gates are fail-closed non-captures, not persist crashes.
                     pass
+                else:
+                    try:
+                        self.simulate_fill(
+                            opportunity_id,
+                            simulate_external=True,
+                            provenance=provenance,
+                            operator_note="PAPER-ONLY autofill; no venue order placed",
+                        )
+                    except PaperOperationsError as exc:
+                        if _is_expected_autofill_gate(exc):
+                            pass
+                        else:
+                            raise
         return candidate
 
     def _should_autofill(
@@ -799,6 +842,146 @@ class PaperOperationsService:
         )
         return self.trades.save(trade)
 
+    def _complete_or_repeat_existing(
+        self,
+        trade: PaperTrade,
+        *,
+        simulated_at: datetime,
+        operator_note: str,
+    ) -> SimulatePaperFillResult | None:
+        """Complete missing durable side effects for an existing trade, or repeat.
+
+        PENDING/PARTIAL fall through so the opening fill path can finish them.
+        OPEN repairs missing locks/journals/watchlist FILLED, then repeats.
+        AWAITING_MANUAL_EXTERNAL without confirmation repeats; confirmation
+        bypasses this method and continues the opening path.
+        """
+
+        if trade.state in {PaperTradeState.PENDING, PaperTradeState.PARTIAL}:
+            return None
+        if trade.state is PaperTradeState.OPEN:
+            self._repair_opening_side_effects(trade, occurred_at=simulated_at)
+            self._record_watchlist_fill(
+                trade.opportunity_id,
+                stage=OpportunityStatus.FILLED,
+                occurred_at=simulated_at,
+                detail=operator_note,
+            )
+            if not self._opening_side_effects_complete(trade):
+                raise PaperOperationsError("inconsistent_paper_state:incomplete_opening_side_effects")
+        noted = self._note_repeat_observation(trade, simulated_at)
+        return self._result_from_existing_trade(noted, simulated_at)
+
+    def _lock_source_for_leg(self, leg: PaperTradeLeg) -> tuple[str, CapitalSource]:
+        if leg.fill_kind is PaperLegFillKind.PAPER_SIMULATED_EXTERNAL:
+            return "paper_simulated_external", CapitalSource.PAPER_SIMULATED_EXTERNAL
+        if leg.fill_kind is PaperLegFillKind.MANUAL_EXTERNAL:
+            return "manual_external_confirmation", CapitalSource.MANUAL_EXTERNAL
+        return "paper_fill_simulator", CapitalSource.AUTO_POOL
+
+    def _lock_requests_from_trade(self, trade: PaperTrade) -> list[TreasuryLockRequest]:
+        requests: list[TreasuryLockRequest] = []
+        for leg in trade.legs:
+            if leg.filled_stake <= 0 or not leg.fill_id:
+                continue
+            source, capital = self._lock_source_for_leg(leg)
+            rate = self._lock_fx_rate(
+                leg.venue, leg.currency, {item.currency: item for item in trade.fx_snapshots}
+            )
+            requests.append(
+                TreasuryLockRequest(
+                    venue=leg.venue,
+                    native_currency=leg.currency,
+                    amount_native=leg.filled_stake,
+                    lock_id=leg.fill_id,
+                    fill_id=leg.fill_id,
+                    trade_id=trade.trade_id,
+                    opportunity_id=trade.opportunity_id,
+                    source=source,
+                    reason="PAPER-ONLY capital lock on validated paper fill",
+                    fx_rate_gbp_per_unit=rate,
+                    capital_source=capital.value,
+                )
+            )
+        return requests
+
+    def _repair_opening_side_effects(self, trade: PaperTrade, *, occurred_at: datetime) -> None:
+        if self.ledger is None:
+            return
+        requests = self._lock_requests_from_trade(trade)
+        if not requests:
+            if any(leg.filled_stake > 0 for leg in trade.legs):
+                raise PaperOperationsError("inconsistent_paper_state:missing_lock_identity")
+            return
+        try:
+            self.ledger.treasury.lock_capital(
+                requests, occurred_at=occurred_at, provenance=trade.provenance
+            )
+        except PaperTreasuryError as exc:
+            raise PaperOperationsError(f"inconsistent_paper_state:{exc}") from exc
+
+    def _opening_side_effects_complete(self, trade: PaperTrade) -> bool:
+        if trade.state is not PaperTradeState.OPEN:
+            return False
+        watch = self.watchlist.repository.get(trade.opportunity_id)
+        if watch is None or watch.status is not OpportunityStatus.FILLED:
+            return False
+        if self.ledger is None:
+            return True
+        for leg in trade.legs:
+            if leg.filled_stake <= 0:
+                continue
+            if not leg.fill_id:
+                return False
+            lock = self.ledger.treasury._lock_row(leg.fill_id)
+            if lock is None:
+                return False
+            source, _capital = self._lock_source_for_leg(leg)
+            if self.journal.get(source, leg.fill_id) is None:
+                return False
+        return True
+
+    def _record_watchlist_fill(
+        self,
+        opportunity_id: str,
+        *,
+        stage: OpportunityStatus,
+        occurred_at: datetime,
+        detail: str,
+    ):
+        try:
+            return self.watchlist.record_paper_fill(
+                opportunity_id,
+                stage=stage,
+                occurred_at=occurred_at,
+                detail=detail,
+            )
+        except ValueError as exc:
+            current = self.watchlist.repository.get(opportunity_id)
+            if current is not None and current.status is OpportunityStatus.FILLED:
+                return current
+            raise PaperOperationsError(str(exc)) from exc
+
+    def _append_trade_event_once(
+        self,
+        trade: PaperTrade,
+        *,
+        event_type: PaperTradeAuditEventType,
+        occurred_at: datetime,
+        detail: str | None,
+    ) -> None:
+        event_id = f"{trade.trade_id}:{event_type.value}"
+        if any(event.event_id == event_id for event in trade.audit):
+            return
+        trade.audit.append(
+            PaperTradeAuditEvent(
+                event_id=event_id,
+                occurred_at=occurred_at,
+                event_type=event_type,
+                detail=detail,
+            )
+        )
+
     def simulate_fill(
         self,
         opportunity_id: str,
@@ -815,6 +998,36 @@ class PaperOperationsService:
     ) -> SimulatePaperFillResult:
         simulated_at = now or datetime.now(UTC)
         require_complete = simulate_external
+        with self._fill_persist_lock:
+            return self._simulate_fill_locked(
+                opportunity_id,
+                config=config,
+                capital_source=capital_source,
+                confirm_external=confirm_external,
+                simulated_at=simulated_at,
+                provenance=provenance,
+                operator_note=operator_note,
+                simulate_external=simulate_external,
+                prepared_deployment_id=prepared_deployment_id,
+                requested_size_gbp=requested_size_gbp,
+                require_complete=require_complete,
+            )
+
+    def _simulate_fill_locked(
+        self,
+        opportunity_id: str,
+        *,
+        config: PaperFillConfig | None,
+        capital_source: CapitalSource,
+        confirm_external: ExternalLegConfirmation | None,
+        simulated_at: datetime,
+        provenance: DataProvenance,
+        operator_note: str,
+        simulate_external: bool,
+        prepared_deployment_id: str | None,
+        requested_size_gbp: Decimal | None,
+        require_complete: bool,
+    ) -> SimulatePaperFillResult:
         existing = self._get_trade_by_opportunity(opportunity_id)
         if existing is not None:
             completing_awaiting = (
@@ -822,8 +1035,13 @@ class PaperOperationsService:
                 and confirm_external is not None
             )
             if not completing_awaiting:
-                noted = self._note_repeat_observation(existing, simulated_at)
-                return self._result_from_existing_trade(noted, simulated_at)
+                completed = self._complete_or_repeat_existing(
+                    existing,
+                    simulated_at=simulated_at,
+                    operator_note=operator_note,
+                )
+                if completed is not None:
+                    return completed
 
         plan = self._plans.get(opportunity_id)
         if plan is None:
@@ -958,7 +1176,7 @@ class PaperOperationsService:
         if require_complete and trade is not None and trade.state is not PaperTradeState.OPEN:
             self._fail_entry(opportunity_id, "incomplete_opening_hedge", simulated_at)
 
-        opportunity = self.watchlist.record_paper_fill(
+        opportunity = self._record_watchlist_fill(
             opportunity_id,
             stage=stage,
             occurred_at=simulated_at,
@@ -1667,15 +1885,14 @@ class PaperOperationsService:
                 )
                 if snapshot is not None:
                     trade.entry_risk = snapshot
-                    trade.audit.append(
-                        PaperTradeAuditEvent(
-                            occurred_at=occurred_at,
-                            event_type=PaperTradeAuditEventType.ENTRY_RISK_RECORDED,
-                            detail=(
-                                f"score={snapshot.score} band={snapshot.band} "
-                                f"threshold={snapshot.maximum_execution_risk}"
-                            ),
-                        )
+                    self._append_trade_event_once(
+                        trade,
+                        event_type=PaperTradeAuditEventType.ENTRY_RISK_RECORDED,
+                        occurred_at=occurred_at,
+                        detail=(
+                            f"score={snapshot.score} band={snapshot.band} "
+                            f"threshold={snapshot.maximum_execution_risk}"
+                        ),
                     )
         elif partial:
             trade.state = PaperTradeState.PARTIAL
@@ -1684,44 +1901,39 @@ class PaperOperationsService:
             trade.state = PaperTradeState.PENDING
             trade.guaranteed_profit_gbp_at_open = None
         if autofill:
-            trade.audit.append(
-                PaperTradeAuditEvent(
-                    occurred_at=occurred_at,
-                    event_type=PaperTradeAuditEventType.PAPER_AUTOFILL,
-                    detail="configurable paper autofill; simulated only",
-                )
+            self._append_trade_event_once(
+                trade,
+                event_type=PaperTradeAuditEventType.PAPER_AUTOFILL,
+                occurred_at=occurred_at,
+                detail="configurable paper autofill; simulated only",
             )
         if simulate_external and any(
             leg.fill_kind is PaperLegFillKind.PAPER_SIMULATED_EXTERNAL for leg in legs
         ):
-            trade.audit.append(
-                PaperTradeAuditEvent(
-                    occurred_at=occurred_at,
-                    event_type=PaperTradeAuditEventType.PAPER_SIMULATED_EXTERNAL_FILL,
-                    detail="PAPER_SIMULATED_EXTERNAL is not MANUAL_EXTERNAL confirmation",
-                )
+            self._append_trade_event_once(
+                trade,
+                event_type=PaperTradeAuditEventType.PAPER_SIMULATED_EXTERNAL_FILL,
+                occurred_at=occurred_at,
+                detail="PAPER_SIMULATED_EXTERNAL is not MANUAL_EXTERNAL confirmation",
             )
         if confirmation is not None:
-            trade.audit.append(
-                PaperTradeAuditEvent(
-                    occurred_at=occurred_at,
-                    event_type=PaperTradeAuditEventType.MANUAL_EXTERNAL_CONFIRMED,
-                    detail=f"reference={confirmation.operator_counterparty_reference}",
-                )
-            )
-            trade.audit.append(
-                PaperTradeAuditEvent(
-                    occurred_at=occurred_at,
-                    event_type=PaperTradeAuditEventType.HEDGE_REVALIDATED,
-                    detail="remaining hedge revalidated after MANUAL_EXTERNAL confirmation",
-                )
-            )
-        trade.audit.append(
-            PaperTradeAuditEvent(
+            self._append_trade_event_once(
+                trade,
+                event_type=PaperTradeAuditEventType.MANUAL_EXTERNAL_CONFIRMED,
                 occurred_at=occurred_at,
-                event_type=PaperTradeAuditEventType.FILLS_RECORDED,
-                detail=f"state={trade.state.value}",
+                detail=f"reference={confirmation.operator_counterparty_reference}",
             )
+            self._append_trade_event_once(
+                trade,
+                event_type=PaperTradeAuditEventType.HEDGE_REVALIDATED,
+                occurred_at=occurred_at,
+                detail="remaining hedge revalidated after MANUAL_EXTERNAL confirmation",
+            )
+        self._append_trade_event_once(
+            trade,
+            event_type=PaperTradeAuditEventType.FILLS_RECORDED,
+            occurred_at=occurred_at,
+            detail=f"state={trade.state.value}",
         )
         return self.trades.save(trade)
 
@@ -1761,6 +1973,7 @@ class PaperOperationsService:
             venue_costs=list(plan.venue_costs),
             audit=[
                 PaperTradeAuditEvent(
+                    event_id=f"{paper_trade_id(plan.opportunity_id)}:{PaperTradeAuditEventType.TRADE_OPENED.value}",
                     occurred_at=occurred_at,
                     event_type=PaperTradeAuditEventType.TRADE_OPENED,
                     detail="paper trade opened; guaranteed opening profit is recorded only after the complete hedge validates",
