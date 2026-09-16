@@ -97,12 +97,22 @@ class FixtureCurrentStateStore:
     Coordinator-owned. Dual-cadence HOT/UNIVERSE lanes upsert into this same
     store with TTL merge. One identity map; no second canonical system.
 
+    Sequential re-anchor / alias convergence MERGES into the existing current
+    row when trusted source IDs prove continuity. A later Polymarket-only
+    cluster of the same match must not fork a second `evt:` identity or leave
+    the abandoned Matchbook-anchored row opportunity-promoted. Ambiguous
+    opponent/source evidence fails closed and does not fuzzy-join fixtures.
+
     Membership and displayed provider status use the freshest observation by
     last_scanned_at. Each fixture owns a merged current market inventory across
     lanes: a HOT subset refresh updates only the canonical markets it evaluated
     and must not delete still-current equivalents from the other lane.
     Fresher HOT state supersedes older UNIVERSE state for the same canonical
-    market. `not_evaluated` does not clobber prior still-valid market rows.
+    market. `not_evaluated` / provider-unavailable does not clobber prior
+    still-valid market rows. An evaluated observation with no comparable
+    current market records explicit evaluated-absence so stale proving slots
+    cannot survive as omitted rows. Older lane snapshots cannot install into
+    an empty lane when a newer status observation already exists.
     Expired or explicitly re-evaluated invalid rows leave/update truthfully.
 
     Fixture equivalent/qualifying/near counts and best/headline fields derive
@@ -186,6 +196,7 @@ class FixtureCurrentStateStore:
         paper_ids = _paper_market_ids_by_fixture(report)
         source_events = _source_events_from_report(report, fixtures)
         incoming_aliases = _aliases_from_report(report, fixtures)
+        merge_map: dict[str, str] = {}
         for canonical_id, fixture in fixtures.items():
             aliases = _aliases_for_canonical(canonical_id, incoming_aliases)
             if self._reject_or_tombstone_incoming(
@@ -195,34 +206,45 @@ class FixtureCurrentStateStore:
                 scanned_at=scanned_at,
             ):
                 continue
+            target_id = self._merge_target_identity(canonical_id, aliases)
+            merge_map[canonical_id] = target_id
             membership = classify_scan_lane(fixture, scanned_at)
             if membership is ScanLane.DROP:
                 if is_explicit_terminal(fixture):
                     self._record_tombstone(
-                        canonical_id,
+                        target_id,
                         fixture,
-                        aliases=aliases,
+                        aliases=aliases | {canonical_id, target_id},
                         scanned_at=scanned_at,
                     )
                 else:
-                    self._drop_identity(canonical_id)
+                    self._drop_identity(target_id)
+                    if target_id != canonical_id:
+                        self._drop_identity(canonical_id)
                 continue
             evaluated = (
                 fixture.market_evaluation_state == MarketEvaluationState.EVALUATED.value
             )
+            stored_fixture = fixture
+            if target_id != canonical_id:
+                stored_fixture = fixture.model_copy(update={"canonical_event_id": target_id})
             observation = LaneObservation(
-                fixture=_stamp_fixture(fixture, lane=lane, last_scanned_at=scanned_at),
-                markets=list(markets.get(canonical_id, [])),
+                fixture=_stamp_fixture(stored_fixture, lane=lane, last_scanned_at=scanned_at),
+                markets=list(markets.get(canonical_id) or markets.get(target_id, [])),
                 scan_lane=lane,
                 last_scanned_at=scanned_at,
-                paper_market_ids=paper_ids.get(canonical_id, ()),
-                source_events=source_events.get(canonical_id, ()),
+                paper_market_ids=paper_ids.get(canonical_id) or paper_ids.get(target_id, ()),
+                source_events=source_events.get(canonical_id) or source_events.get(target_id, ()),
                 evaluated=evaluated,
             )
-            self._upsert_observation(canonical_id, observation)
-        for alias, canonical_id in incoming_aliases.items():
-            if canonical_id in self._rows:
-                self._aliases[alias] = canonical_id
+            self._upsert_observation(target_id, observation)
+            self._bind_aliases(aliases | {canonical_id, target_id}, target_id)
+            for event in observation.source_events:
+                self._bind_alias(event.source_event_id, target_id)
+        for alias, incoming_id in incoming_aliases.items():
+            target = merge_map.get(incoming_id, incoming_id)
+            if target in self._rows:
+                self._bind_alias(alias, target)
         for alias, canonical_id in list(self._aliases.items()):
             if canonical_id not in self._rows:
                 self._aliases.pop(alias, None)
@@ -609,6 +631,62 @@ class FixtureCurrentStateStore:
             return ScanLane.HOT
         return lifecycle
 
+    def _merge_target_identity(self, canonical_id: str, aliases: set[str]) -> str:
+        """Reuse the live row proved by trusted source/canonical aliases.
+
+        Fail closed when aliases point at more than one live identity or when
+        there is no overlapping source/canonical evidence.
+        """
+
+        if canonical_id in self._rows:
+            return canonical_id
+        existing = self._aliases.get(canonical_id)
+        if existing is not None and existing in self._rows:
+            return existing
+        targets: set[str] = set()
+        for alias in aliases:
+            if self._tombstone_for_unlocked(alias) is not None:
+                continue
+            resolved = self._aliases.get(alias)
+            if resolved is not None and resolved in self._rows:
+                targets.add(resolved)
+            elif alias in self._rows:
+                targets.add(alias)
+        if len(targets) != 1:
+            return canonical_id
+        target = next(iter(targets))
+        if not self._has_trusted_source_overlap(target, aliases | {canonical_id}):
+            return canonical_id
+        return target
+
+    def _has_trusted_source_overlap(self, target_id: str, incoming_ids: set[str]) -> bool:
+        existing: set[str] = {target_id}
+        record = self._rows.get(target_id)
+        if record is not None:
+            for event in record.source_events():
+                existing.add(event.source_event_id)
+            status = record.status_observation()
+            if status is not None:
+                existing.add(status.fixture.source_event_id)
+                existing.add(status.fixture.canonical_event_id)
+        for alias, dest in self._aliases.items():
+            if dest == target_id:
+                existing.add(alias)
+        return bool({item for item in incoming_ids if item} & existing)
+
+    def _bind_alias(self, alias: str, target_id: str) -> None:
+        key = alias.strip()
+        if not key or target_id not in self._rows:
+            return
+        current = self._aliases.get(key)
+        if current is not None and current in self._rows and current != target_id:
+            return
+        self._aliases[key] = target_id
+
+    def _bind_aliases(self, aliases: set[str], target_id: str) -> None:
+        for alias in aliases:
+            self._bind_alias(alias, target_id)
+
     def _upsert_observation(self, canonical_id: str, observation: LaneObservation) -> None:
         record = self._rows.get(canonical_id)
         if record is None:
@@ -621,12 +699,12 @@ class FixtureCurrentStateStore:
                 if observation.source_events and not previous.source_events:
                     record.set_source_events(observation.source_events)
                 return
-            record.set_lane(observation)
-            record.leftover_this_pass = True
+            if record.set_lane(observation):
+                record.leftover_this_pass = True
             return
-        record.set_lane(observation)
-        record.merge_markets(observation)
-        record.leftover_this_pass = False
+        if record.set_lane(observation):
+            record.merge_markets(observation)
+            record.leftover_this_pass = False
 
     def _evict_non_current(self, now: datetime, **kwargs: Any) -> None:
         classify_kwargs = _classify_kwargs(kwargs)
@@ -748,6 +826,14 @@ class _FixtureRecord:
                     self.extra_source_events, observation.source_events
                 )
             return False
+        if current is None:
+            status = self.status_observation()
+            if status is not None and observation.last_scanned_at < status.last_scanned_at:
+                if observation.source_events:
+                    self.extra_source_events = _merge_source_events(
+                        self.extra_source_events, observation.source_events
+                    )
+                return False
         if observation.scan_lane is ScanLane.HOT:
             self.hot = observation
         else:
@@ -812,7 +898,11 @@ class _FixtureRecord:
         )
 
     def live_market_slots(self) -> list[CurrentMarketSlot]:
-        return list((self.markets or {}).values())
+        return [
+            slot
+            for slot in (self.markets or {}).values()
+            if not slot.evaluated_absent
+        ]
 
     def scheduler_lane_scan(
         self, membership: ScanLane, fixture: DiscoveredFixture
@@ -1007,6 +1097,18 @@ def _aliases_from_report(
         source_id = str(fixture.source_event_id).strip()
         if source_id:
             aliases[source_id] = fixture.canonical_event_id
+    for canonical_id, rows in (getattr(report, "fixture_source_events", {}) or {}).items():
+        if canonical_id not in fixtures:
+            continue
+        for row in rows:
+            if isinstance(row, StoredSourceEvent):
+                source_id = row.source_event_id.strip()
+            elif isinstance(row, dict):
+                source_id = str(row.get("source_event_id") or "").strip()
+            else:
+                continue
+            if source_id:
+                aliases[source_id] = canonical_id
     for alias, canonical_id in report.fixture_identity_aliases.items():
         key = alias.strip()
         target = canonical_id.strip()
