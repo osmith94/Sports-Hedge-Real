@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import re
 from datetime import UTC, datetime
@@ -1936,6 +1937,23 @@ _MARKET_DESCRIPTOR_SUFFIX = re.compile(
     r"spread|asian handicap|draw no bet)\s*$",
     re.IGNORECASE,
 )
+# Proven Kalshi GAME event decoration only. Do not strip Extra Time, Penalties,
+# Women, U21, or arbitrary colon suffixes — those remain fail-closed identity.
+_EVENT_SETTLEMENT_DECORATION_SUFFIX = re.compile(
+    r"(?:\s*[:|]\s*|\s+[–—-]\s+)regulation(?:[-\s]+time)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _title_for_participant_parse(title: str) -> str:
+    """Decode entities and drop proven terminal settlement decoration.
+
+    Raw provider titles stay on the payload. Regulation-time meaning for the
+    settlement/equivalence layer remains on market rules and labels.
+    """
+
+    clean = html.unescape(title).strip()
+    return _EVENT_SETTLEMENT_DECORATION_SUFFIX.sub("", clean).strip()
 
 
 def _strip_market_descriptor(part: str) -> str:
@@ -1945,16 +1963,17 @@ def _strip_market_descriptor(part: str) -> str:
     suffixes are not part of the team name and must not pollute identity.
     """
 
-    current = part.strip(" -–—:|")
+    current = _EVENT_SETTLEMENT_DECORATION_SUFFIX.sub("", part).strip(" -–—:|")
     previous = None
     while current != previous:
         previous = current
         current = _MARKET_DESCRIPTOR_SUFFIX.sub("", current).strip(" -–—:|")
+        current = _EVENT_SETTLEMENT_DECORATION_SUFFIX.sub("", current).strip(" -–—:|")
     return current
 
 
 def _split_fixture_title(title: str) -> tuple[str, str]:
-    clean = title.strip()
+    clean = _title_for_participant_parse(title)
     parts = [part.strip(" -") for part in _FIXTURE_SEPARATOR.split(clean) if part.strip(" -")]
     if len(parts) != 2:
         raise VenueNormalizationError(f"Cannot safely split football fixture title: {title}")

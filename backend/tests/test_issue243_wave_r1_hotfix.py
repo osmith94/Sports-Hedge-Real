@@ -6,6 +6,9 @@ Frozen-base reproductions at Wave R head `8c001fd96bcc6618f05045a5bd5d7b4debd6e8
   0 evaluated and no generation progress.
 - B. Production EventMatcher (threshold 0.92) split FC Bayern München /
   Bayern Munich and Málaga / Malaga CF provider variants.
+- C. Kalshi event titles carrying terminal `: Regulation Time` (and Matchbook
+  `&amp;` entities) polluted participant identity so the same senior fixture
+  split across venues.
 
 Data class: deterministic fixture/demo providers. Not live, historical, or
 modelled venue quotes. Paper-only; execution stays disabled.
@@ -31,9 +34,12 @@ from sports_hedge.application.collector import (
 from sports_hedge.application.fixture_clusters import VenueEvent, cluster_venue_events
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane, UNIVERSE_MIN_CHUNK_SECONDS
-from sports_hedge.application.target_competitions import EVENT_IDENTITY_MISMATCH
+from sports_hedge.application.target_competitions import (
+    EVENT_IDENTITY_MISMATCH,
+    resolve_target_competition,
+)
 from sports_hedge.config import Settings
-from sports_hedge.domain.football import CanonicalEvent
+from sports_hedge.domain.football import CanonicalEvent, SettlementScope
 from sports_hedge.domain.models import VenueName
 from sports_hedge.facts.aliases import resolve_team_name
 from sports_hedge.facts.identity import canonical_team_id
@@ -42,6 +48,7 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.events import EventMatcher
 from sports_hedge.normalization.text import normalize_text
+from sports_hedge.normalization.venues import KalshiNormalizer, MatchbookNormalizer
 from sports_hedge.paper.models import FxRateSnapshot
 from venue_cost_helpers import matchbook_polymarket_costs, profit_commission_cost
 
@@ -55,6 +62,22 @@ BUNDESLIGA_KALSHI_SERIES = {
     "fee_multiplier": 1,
     "settlement_sources": [{"name": "Opta"}],
 }
+
+
+def _kalshi_series_for_competition(competition: str) -> dict[str, Any]:
+    resolved = resolve_target_competition(competition)
+    ticker = "KXGAME"
+    if resolved is not None and resolved.kalshi_series_prefixes:
+        ticker = f"{resolved.kalshi_series_prefixes[0]}GAME"
+    return {
+        "ticker": ticker,
+        "title": competition,
+        "fee_type": "quadratic",
+        "fee_multiplier": 1,
+        "settlement_sources": [{"name": "Opta"}],
+    }
+
+
 Q1_OVERLAP_FIXTURES: list[tuple[str, str, str]] = [
     ("Premier League", "Arsenal", "Chelsea"),
     ("Premier League", "Liverpool", "Manchester City"),
@@ -298,11 +321,20 @@ class OverlapKalshi:
 
 
 class NamedMatchbook:
-    def __init__(self, *, home: str, away: str, competition: str, event_id: int = 8801) -> None:
+    def __init__(
+        self,
+        *,
+        home: str,
+        away: str,
+        competition: str,
+        event_id: int = 8801,
+        event_name: str | None = None,
+    ) -> None:
         self.home = home
         self.away = away
         self.competition = competition
         self.event_id = event_id
+        self.event_name = event_name
         self.list_events_calls = 0
         self.list_markets_calls: list[str] = []
 
@@ -313,7 +345,7 @@ class NamedMatchbook:
             "events": [
                 {
                     "id": self.event_id,
-                    "name": f"{self.home} vs {self.away}",
+                    "name": self.event_name or f"{self.home} vs {self.away}",
                     "start": KICKOFF.isoformat(),
                     "sport-name": "Football",
                     "competition-name": self.competition,
@@ -365,20 +397,29 @@ class NamedPolymarket:
 
 
 class NamedKalshi:
-    def __init__(self, *, home: str, away: str, competition: str = "Bundesliga") -> None:
+    def __init__(
+        self,
+        *,
+        home: str,
+        away: str,
+        competition: str = "Bundesliga",
+        event_title: str | None = None,
+    ) -> None:
         self.home = home
         self.away = away
         self.competition = competition
+        self.event_title = event_title
         self.list_events_calls = 0
         self.list_markets_calls: list[str] = []
 
     async def list_events(self, **filters: Any) -> dict[str, Any]:
         del filters
         self.list_events_calls += 1
+        series = _kalshi_series_for_competition(self.competition)
         event = _kalshi_btts_event(
-            ticker="KXBUNDESLIGAGAME-26SEP16BAYUNI",
-            title=f"{self.home} vs {self.away}",
-            competition_series="KXBUNDESLIGAGAME",
+            ticker=f"{series['ticker']}-26SEP16NAMED",
+            title=self.event_title or f"{self.home} vs {self.away}",
+            competition_series=str(series["ticker"]),
         )
         event["competition"] = self.competition
         return {"events": [event]}
@@ -404,8 +445,9 @@ class NamedKalshi:
         }
 
     async def get_series(self, series_ticker: str) -> dict[str, Any]:
-        del series_ticker
-        return BUNDESLIGA_KALSHI_SERIES
+        series = _kalshi_series_for_competition(self.competition)
+        series["ticker"] = series_ticker or series["ticker"]
+        return series
 
 
 def _scan_costs():
@@ -853,3 +895,245 @@ def test_diagnostics_keys_distinguish_failure_classes() -> None:
     assert MARKET_FETCH_UNAVAILABLE_REASON != SCAN_BUDGET_EXHAUSTED_REASON
     assert EVENT_IDENTITY_MISMATCH != SCAN_BUDGET_EXHAUSTED_REASON
     assert EVENT_IDENTITY_MISMATCH != MARKET_FETCH_UNAVAILABLE_REASON
+
+
+OWNER_REGULATION_TITLES = (
+    (
+        "Manchester United v Brighton &amp; Hove Albion",
+        "Manchester United v Brighton: Regulation Time",
+        "Premier League",
+        "Brighton & Hove Albion",
+        "Brighton",
+    ),
+    (
+        "Coventry City v Aston Villa",
+        "Coventry v Aston Villa: Regulation Time",
+        "Championship",
+        "Aston Villa",
+        "Aston Villa",
+    ),
+)
+
+
+def _owner_matchbook_payload(title: str, competition: str, event_id: str = "mb-owner") -> dict[str, Any]:
+    return {
+        "id": event_id,
+        "name": title,
+        "start": KICKOFF.isoformat(),
+        "sport-name": "Football",
+        "competition-name": competition,
+        "status": "open",
+    }
+
+
+def _owner_kalshi_payload(title: str, competition: str, ticker: str = "KX-OWNER") -> dict[str, Any]:
+    series_ticker = str(_kalshi_series_for_competition(competition)["ticker"])
+    event_ticker = ticker if ticker != "KX-OWNER" else f"{series_ticker}-OWNER"
+    return {
+        "event_ticker": event_ticker,
+        "series_ticker": series_ticker,
+        "title": title,
+        "category": "Sports",
+        "strike_date": KICKOFF.isoformat(),
+        "competition": competition,
+        "markets": [
+            {
+                "ticker": f"{event_ticker}-BTTS",
+                "event_ticker": event_ticker,
+                "title": "Both Teams To Score",
+                "yes_sub_title": "Yes",
+                "rules_primary": "Resolves on 90 minutes of regulation time. Extra time and penalties do not count.",
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("mb_title", "kalshi_title", "competition", "mb_away", "kalshi_away"),
+    OWNER_REGULATION_TITLES,
+)
+def test_production_normalizers_cluster_regulation_time_event_titles(
+    mb_title: str,
+    kalshi_title: str,
+    competition: str,
+    mb_away: str,
+    kalshi_away: str,
+) -> None:
+    matcher = EventMatcher()
+    assert matcher.threshold == 0.92
+    mb_payload = _owner_matchbook_payload(mb_title, competition)
+    kalshi_payload = _owner_kalshi_payload(kalshi_title, competition)
+    mb_event = MatchbookNormalizer().normalize_event(mb_payload)
+    kalshi_event = KalshiNormalizer().normalize_event(kalshi_payload)
+
+    assert mb_payload["name"] == mb_title
+    assert kalshi_payload["title"] == kalshi_title
+    assert mb_event.away_team == mb_away
+    assert kalshi_event.away_team == kalshi_away
+    assert "regulation" not in mb_event.away_team.casefold()
+    assert "regulation" not in kalshi_event.away_team.casefold()
+    assert "&amp;" not in mb_event.away_team
+
+    result = matcher.match(mb_event, kalshi_event)
+    assert result.matched is True
+    assert result.confidence >= 0.92
+
+    clusters, counts = cluster_venue_events(
+        matchbook=[
+            VenueEvent(
+                venue=VenueName.MATCHBOOK,
+                raw=mb_payload,
+                canonical=mb_event,
+                source_event_id=mb_event.source_event_id,
+            )
+        ],
+        polymarket=[],
+        kalshi=[
+            VenueEvent(
+                venue=VenueName.KALSHI,
+                raw=kalshi_payload,
+                canonical=kalshi_event,
+                source_event_id=kalshi_event.source_event_id,
+            )
+        ],
+        matcher=matcher,
+        max_event_pairs=8,
+    )
+    assert len(clusters) == 1
+    assert counts["matchbook_kalshi"] == 1
+
+    market = KalshiNormalizer().normalize_market(kalshi_event, kalshi_payload["markets"][0])
+    assert market.settlement.scope == SettlementScope.REGULATION_TIME
+    assert market.settlement.extra_time_included is False
+    assert market.settlement.penalties_included is False
+
+
+def test_regulation_time_title_does_not_set_settlement_without_market_rules() -> None:
+    payload = _owner_kalshi_payload(
+        "Manchester United v Brighton: Regulation Time",
+        "Premier League",
+    )
+    payload["markets"][0]["rules_primary"] = "See contract terms."
+    payload["markets"][0]["rules_secondary"] = ""
+    payload["markets"][0]["description"] = ""
+    event = KalshiNormalizer().normalize_event(payload)
+    market = KalshiNormalizer().normalize_market(event, payload["markets"][0])
+    assert event.away_team == "Brighton"
+    assert payload["title"] == "Manchester United v Brighton: Regulation Time"
+    assert market.settlement.scope == SettlementScope.UNKNOWN
+
+
+def test_regulation_time_decoration_does_not_collapse_youth_women_or_arbitrary_suffixes() -> None:
+    matcher = EventMatcher()
+    assert matcher.threshold == 0.92
+    mb = MatchbookNormalizer()
+    kalshi = KalshiNormalizer()
+
+    senior = mb.normalize_event(
+        _owner_matchbook_payload("Arsenal v Chelsea", "Premier League", "mb-senior")
+    )
+    women = kalshi.normalize_event(
+        _owner_kalshi_payload(
+            "Arsenal v Chelsea Women: Regulation Time",
+            "Premier League",
+            "k-women",
+        )
+    )
+    u21 = kalshi.normalize_event(
+        _owner_kalshi_payload("Arsenal v Chelsea U21: Regulation Time", "Premier League", "k-u21")
+    )
+    reserves = kalshi.normalize_event(
+        _owner_kalshi_payload("Arsenal v Chelsea II: Regulation Time", "Premier League", "k-ii")
+    )
+    kickoff_special = kalshi.normalize_event(
+        _owner_kalshi_payload("Arsenal v Chelsea: Kickoff Special", "Premier League", "k-special")
+    )
+    extra_time = kalshi.normalize_event(
+        _owner_kalshi_payload("Arsenal v Chelsea: Extra Time", "Premier League", "k-et")
+    )
+
+    assert women.away_team == "Chelsea Women"
+    assert u21.away_team == "Chelsea U21"
+    assert reserves.away_team == "Chelsea II"
+    assert kickoff_special.away_team == "Chelsea: Kickoff Special"
+    assert extra_time.away_team == "Chelsea: Extra Time"
+    assert matcher.match(senior, women).matched is False
+    assert matcher.match(senior, u21).matched is False
+    assert matcher.match(senior, reserves).matched is False
+    assert matcher.match(senior, kickoff_special).matched is False
+    assert matcher.match(senior, extra_time).matched is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mb_home", "mb_away", "mb_title", "kalshi_home", "kalshi_away", "kalshi_title", "competition"),
+    [
+        (
+            "Manchester United",
+            "Brighton &amp; Hove Albion",
+            "Manchester United v Brighton &amp; Hove Albion",
+            "Manchester United",
+            "Brighton",
+            "Manchester United v Brighton: Regulation Time",
+            "Premier League",
+        ),
+        (
+            "Coventry City",
+            "Aston Villa",
+            "Coventry City v Aston Villa",
+            "Coventry",
+            "Aston Villa",
+            "Coventry v Aston Villa: Regulation Time",
+            "Championship",
+        ),
+    ],
+)
+async def test_collector_clusters_owner_regulation_time_titles(
+    mb_home: str,
+    mb_away: str,
+    mb_title: str,
+    kalshi_home: str,
+    kalshi_away: str,
+    kalshi_title: str,
+    competition: str,
+) -> None:
+    repository = SqliteMarketIntelligenceRepository()
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=NamedMatchbook(
+            home=mb_home,
+            away=mb_away,
+            competition=competition,
+            event_name=mb_title,
+        ),
+        polymarket=NamedPolymarket(home="Unrelated", away="Club", competition="La Liga"),
+        kalshi=NamedKalshi(
+            home=kalshi_home,
+            away=kalshi_away,
+            competition=competition,
+            event_title=kalshi_title,
+        ),
+        paper_scan=PaperScanService(MarketIntelligenceService(repository)),
+    )
+    try:
+        report = await collector.collect_and_scan(venue_costs=_scan_costs())
+        clustered = [
+            item
+            for item in report.discovered_fixtures
+            if item.matchbook_matched and item.kalshi_matched
+        ]
+        assert clustered, [
+            (item.home_team, item.away_team, item.no_comparison_reason)
+            for item in report.discovered_fixtures
+        ]
+        fixture = clustered[0]
+        assert fixture.market_evaluation_state == MarketEvaluationState.EVALUATED.value
+        assert fixture.no_comparison_reason != EVENT_IDENTITY_MISMATCH
+        raw_titles = [
+            event.get("raw", {}).get("name") or event.get("raw", {}).get("title")
+            for rows in report.fixture_source_events.values()
+            for event in rows
+        ]
+        assert mb_title in raw_titles
+        assert kalshi_title in raw_titles
+    finally:
+        repository.close()

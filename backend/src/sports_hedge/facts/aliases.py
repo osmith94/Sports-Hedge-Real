@@ -21,6 +21,8 @@ def _registry() -> AliasRegistry:
         "Tottenham": "Tottenham Hotspur",
         "West Ham": "West Ham United",
         "Brighton": "Brighton and Hove Albion",
+        "Brighton & Hove Albion": "Brighton and Hove Albion",
+        "Brighton and Hove Albion": "Brighton and Hove Albion",
         "Leicester": "Leicester City",
         "Leeds": "Leeds United",
         "Ipswich": "Ipswich Town",
