@@ -196,6 +196,7 @@ export type DiscoveredFixture = {
   scan_lane?: string | null;
   last_scanned_at?: string | null;
   next_due_at?: string | null;
+  hot_reasons?: string[] | null;
 };
 
 export type InventoryComparisonStatus =

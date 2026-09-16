@@ -36,6 +36,7 @@ from sports_hedge.application.scan_lanes import (
     ScanLane,
     classify_scan_lane,
     freshness_class,
+    hot_reason_labels,
     hot_sort_key,
     is_explicit_terminal,
     is_trusted_lifecycle_correction,
@@ -358,19 +359,28 @@ class FixtureCurrentStateStore:
                 fixture = record.status_fixture(now, **market_kwargs)
                 if fixture is None:
                     continue
+                classify_kwargs = {
+                    "hot_horizon": hot_horizon,
+                    "post_kickoff_unknown_horizon": post_kickoff_unknown_horizon,
+                }
                 membership = self._identity_membership(
                     record,
                     fixture,
                     now,
-                    classify_kwargs={
-                        "hot_horizon": hot_horizon,
-                        "post_kickoff_unknown_horizon": post_kickoff_unknown_horizon,
-                    },
+                    classify_kwargs=classify_kwargs,
                     market_kwargs=market_kwargs,
                 )
                 if membership is ScanLane.DROP:
                     continue
                 lane, scanned = record.scheduler_lane_scan(membership, fixture)
+                lifecycle = classify_scan_lane(fixture, now, **classify_kwargs)
+                qualifying_promotion = False
+                if membership is ScanLane.HOT and lifecycle is ScanLane.UNIVERSE:
+                    qualifying_promotion = current_slots_prove_qualifying_opportunity(
+                        record.live_market_slots(),
+                        now=now,
+                        **market_kwargs,
+                    )
                 rows.append(
                     fixture.model_copy(
                         update={
@@ -381,6 +391,14 @@ class FixtureCurrentStateStore:
                                 lane,
                                 hot_interval_seconds=hot_interval_seconds,
                                 universe_interval_seconds=universe_interval_seconds,
+                            ),
+                            "hot_reasons": hot_reason_labels(
+                                fixture,
+                                now,
+                                membership=membership,
+                                lifecycle=lifecycle,
+                                qualifying_promotion=qualifying_promotion,
+                                hot_horizon=hot_horizon,
                             ),
                         }
                     )

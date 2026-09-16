@@ -173,14 +173,16 @@ describe("fixture discovery collapsed-by-default disclosure", () => {
     assert.match(source, /<DiscoveredFixturesPanel status=\{status\} available=\{available\} \/>/);
   });
 
-  it("keeps Opportunity Monitor as the first substantial opportunity table after the compact discovery summary", () => {
+  it("places HOT Fixtures / Fast Scan after discovery and keeps Opportunity Monitor as the current-opportunity table", () => {
     const page = readFileSync(join(frontendRoot, "app/page.tsx"), "utf8");
     const discoveryIndex = page.indexOf("<FixtureDiscoverySection");
+    const hotIndex = page.indexOf("<HotFixturesPanel");
     const monitorIndex = page.indexOf("<OpportunityMonitor");
     const positionsIndex = page.indexOf("<span>Open paper positions</span>");
     const auditIndex = page.indexOf("audit-disclosure");
     assert.ok(discoveryIndex >= 0);
-    assert.ok(monitorIndex > discoveryIndex);
+    assert.ok(hotIndex > discoveryIndex);
+    assert.ok(monitorIndex > hotIndex);
     assert.ok(positionsIndex > monitorIndex);
     assert.ok(auditIndex > positionsIndex);
     assert.doesNotMatch(page, /<span>Tracked<\/span>/);

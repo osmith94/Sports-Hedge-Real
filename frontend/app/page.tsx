@@ -1,6 +1,7 @@
 import { ActivityFeed } from "../components/activity-feed";
 import { CapitalSummary } from "../components/capital-summary";
 import { FixtureDiscoverySection } from "../components/fixture-discovery-section";
+import { HotFixturesPanel } from "../components/hot-fixtures-panel";
 import { LiquidityPools } from "../components/liquidity-pools";
 import { OpportunityCard } from "../components/opportunity-card";
 import { OpportunityMonitor } from "../components/opportunity-monitor";
@@ -149,6 +150,8 @@ export default async function ArbitragePage() {
       <PriorityAlertsSeam liveAvailable={livePriorityAvailable} liveCount={livePriorityCount} />
 
       <FixtureDiscoverySection status={liveRefresh} available={liveRefreshAvailable} />
+
+      <HotFixturesPanel status={liveRefresh} available={liveRefreshAvailable} />
 
       <OpportunityMonitor
         items={tracked.available ? tracked.value : []}

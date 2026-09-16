@@ -457,6 +457,21 @@ tr:last-child td { border-bottom: none; }
   font-size: 11px;
 }
 .opportunity-monitor { margin-bottom: 16px; }
+.hot-fixtures-panel { margin-bottom: 16px; }
+.hot-fixtures-table td { vertical-align: top; }
+.hot-reason-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.hot-reason-chip {
+  display: inline-flex;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  color: var(--accent);
+  border: 1px solid rgba(124, 242, 176, .22);
+  background: var(--accent-soft);
+  white-space: nowrap;
+}
 .audit-disclosure { margin: 0 0 16px; }
 .audit-summary {
   display: flex;

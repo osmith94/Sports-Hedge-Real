@@ -31,6 +31,11 @@ DEFAULT_UNIVERSE_INTERVAL_SECONDS = 180
 DEFAULT_EXECUTABLE_QUOTE_AGE_MS = 1000
 UNIVERSE_MIN_CHUNK_SECONDS = 6.0
 
+# Operator-facing HOT membership reasons. Read-model only; not scheduler input.
+HOT_REASON_IN_PLAY = "IN PLAY"
+HOT_REASON_POST_KICKOFF_STATUS_PENDING = "POST-KICKOFF STATUS PENDING"
+HOT_REASON_ARB_PROMOTION = "ARB PROMOTION"
+
 # Explicit provider statuses only. Elapsed time must never fabricate these.
 TERMINAL_STATUSES = frozenset(
     {
@@ -118,6 +123,51 @@ def classify_scan_lane(
         # rewrite fixture_status or in_running from elapsed time.
         return ScanLane.DROP
     return ScanLane.UNIVERSE
+
+
+def kickoff_horizon_reason_label(hot_horizon: timedelta = DEFAULT_HOT_HORIZON) -> str:
+    minutes = max(1, int(hot_horizon.total_seconds() // 60))
+    return f"KICKOFF < {minutes}M"
+
+
+def hot_reason_labels(
+    fixture: Any,
+    now: datetime,
+    *,
+    membership: ScanLane | str,
+    lifecycle: ScanLane | str,
+    qualifying_promotion: bool,
+    hot_horizon: timedelta = DEFAULT_HOT_HORIZON,
+) -> list[str]:
+    """Return truthful current-state HOT reasons. Empty when membership is not HOT.
+
+    Does not re-decide HOT membership. Callers pass the store's lifecycle
+    classification and whether current-state economics promoted a UNIVERSE
+    fixture. ARB PROMOTION is only labelled when lifecycle would otherwise be
+    UNIVERSE. Elapsed time never fabricates live or completed status.
+    """
+
+    resolved_membership = ScanLane(membership) if not isinstance(membership, ScanLane) else membership
+    if resolved_membership is not ScanLane.HOT:
+        return []
+    resolved_lifecycle = ScanLane(lifecycle) if not isinstance(lifecycle, ScanLane) else lifecycle
+    labels: list[str] = []
+    in_running = getattr(fixture, "in_running", None) is True
+    if in_running:
+        labels.append(HOT_REASON_IN_PLAY)
+    else:
+        kickoff = getattr(fixture, "kickoff_utc", None)
+        if kickoff is not None:
+            evaluated = require_aware_instant(now, "now")
+            kickoff_utc = require_aware_instant(kickoff, "kickoff_utc")
+            until_kickoff = kickoff_utc - evaluated
+            if timedelta(0) < until_kickoff <= hot_horizon:
+                labels.append(kickoff_horizon_reason_label(hot_horizon))
+            elif kickoff_utc <= evaluated and resolved_lifecycle is ScanLane.HOT:
+                labels.append(HOT_REASON_POST_KICKOFF_STATUS_PENDING)
+    if qualifying_promotion and resolved_lifecycle is ScanLane.UNIVERSE:
+        labels.append(HOT_REASON_ARB_PROMOTION)
+    return labels
 
 
 def fixture_status_value(fixture: Any) -> str | None:
