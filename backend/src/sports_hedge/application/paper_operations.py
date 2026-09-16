@@ -149,6 +149,7 @@ _AUTOFILL_GATE_REASONS = frozenset(
         "external_confirmation_venue_mismatch",
         "remaining_hedge_revalidation_failed",
         "unknown_opportunity",
+        "must_not_auto_capture",
     }
 )
 
