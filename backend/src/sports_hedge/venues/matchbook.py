@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import math
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
+from time import monotonic
 from typing import Any
 
 import httpx
 
-from sports_hedge.config import Settings
+from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueHealth, VenueName
 from sports_hedge.normalization.text import normalize_text
 from sports_hedge.venues.base import ReadOnlyVenue, market_data_http_timeout
@@ -17,9 +22,27 @@ _ASSOCIATION_FOOTBALL_SPORT_NAMES = frozenset(
     {"football", "soccer", "association football"}
 )
 
+MATCHBOOK_SESSION_PATH = "/bpapi/rest/security/session"
+DEFAULT_LOGIN_COOLDOWN_SECONDS = 30.0
+MAX_LOGIN_COOLDOWN_SECONDS = 300.0
+
+_shared_client_lock = threading.Lock()
+_shared_matchbook_client: MatchbookClient | None = None
+
 
 class MatchbookAuthError(RuntimeError):
     pass
+
+
+class MatchbookRateLimitedError(MatchbookAuthError):
+    """Login is cooling down after HTTP 429 from POST /security/session."""
+
+    def __init__(self, retry_after_seconds: float) -> None:
+        self.retry_after_seconds = max(0.0, float(retry_after_seconds))
+        wait_s = max(1, int(math.ceil(self.retry_after_seconds)))
+        super().__init__(
+            f"Matchbook authentication rate-limited (HTTP 429); retry after {wait_s}s"
+        )
 
 
 class MatchbookDiscoveryError(RuntimeError):
@@ -37,10 +60,24 @@ class MatchbookClient(ReadOnlyVenue):
         *,
         client: httpx.AsyncClient | None = None,
         clock: Callable[[], datetime] | None = None,
+        monotonic_clock: Callable[[], float] | None = None,
+        login_cooldown_seconds: float | None = None,
+        login_cooldown_max_seconds: float | None = None,
     ) -> None:
         self.settings = settings
         self._owns_client = client is None
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._monotonic = monotonic_clock or monotonic
+        self._login_cooldown_seconds = (
+            DEFAULT_LOGIN_COOLDOWN_SECONDS
+            if login_cooldown_seconds is None
+            else float(login_cooldown_seconds)
+        )
+        self._login_cooldown_max_seconds = (
+            MAX_LOGIN_COOLDOWN_SECONDS
+            if login_cooldown_max_seconds is None
+            else float(login_cooldown_max_seconds)
+        )
         self._client = client or httpx.AsyncClient(
             base_url=settings.matchbook_base_url.rstrip("/"),
             timeout=market_data_http_timeout(),
@@ -52,8 +89,25 @@ class MatchbookClient(ReadOnlyVenue):
         )
         self._session_token: str | None = None
         self._football_sport_id: int | None = None
+        self._login_lock = asyncio.Lock()
+        self._login_cooldown_until: float | None = None
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     async def login(self) -> str:
+        """Authenticate once under a lock. Existing tokens are reused."""
+
+        self._raise_if_cooling_down()
+        async with self._login_lock:
+            if self._session_token:
+                return self._session_token
+            self._raise_if_cooling_down()
+            return await self._authenticate()
+
+    async def _authenticate(self) -> str:
         username = self.settings.matchbook_username
         password = self.settings.matchbook_password
         if not username or not password:
@@ -61,15 +115,19 @@ class MatchbookClient(ReadOnlyVenue):
                 "MATCHBOOK_USERNAME and MATCHBOOK_PASSWORD are required for Matchbook API access"
             )
 
+        # Credential payload is never logged. Only status/retry metadata may be reported.
         payload: dict[str, str] = {"username": username, "password": password}
         if self.settings.matchbook_mfa_code:
             payload["mfa-code"] = self.settings.matchbook_mfa_code
 
         response = await self._client.post(
-            "/bpapi/rest/security/session",
+            MATCHBOOK_SESSION_PATH,
             json=payload,
             headers={"Content-Type": "application/json"},
         )
+        if response.status_code == 429:
+            retry_after = self._enter_login_cooldown(response)
+            raise MatchbookRateLimitedError(retry_after)
         response.raise_for_status()
 
         body = response.json()
@@ -85,17 +143,54 @@ class MatchbookClient(ReadOnlyVenue):
         self._client.headers["session-token"] = self._session_token
         return self._session_token
 
+    def _cooldown_remaining_seconds(self) -> float:
+        if self._login_cooldown_until is None:
+            return 0.0
+        remaining = self._login_cooldown_until - self._monotonic()
+        if remaining <= 0:
+            self._login_cooldown_until = None
+            return 0.0
+        return remaining
+
+    def _raise_if_cooling_down(self) -> None:
+        remaining = self._cooldown_remaining_seconds()
+        if remaining > 0:
+            raise MatchbookRateLimitedError(remaining)
+
+    def _enter_login_cooldown(self, response: httpx.Response) -> float:
+        retry_after = _retry_after_seconds(
+            response,
+            now=self._clock(),
+            fallback_seconds=self._login_cooldown_seconds,
+            max_seconds=self._login_cooldown_max_seconds,
+        )
+        self._login_cooldown_until = self._monotonic() + retry_after
+        self._clear_session_token()
+        return retry_after
+
+    def _clear_session_token(self) -> None:
+        self._session_token = None
+        self._client.headers.pop("session-token", None)
+
     async def _ensure_session(self) -> None:
-        if not self._session_token:
-            await self.login()
+        if self._session_token:
+            return
+        await self.login()
+
+    async def _reauthenticate(self, rejected_token: str | None) -> None:
+        async with self._login_lock:
+            if self._session_token and self._session_token != rejected_token:
+                return
+            self._clear_session_token()
+            self._raise_if_cooling_down()
+            await self._authenticate()
 
     async def _get(self, path: str, *, params: dict[str, Any]) -> dict[str, Any]:
         await self._ensure_session()
+        rejected_token = self._session_token
         response = await self._client.get(path, params=params)
         if response.status_code == 401:
-            self._session_token = None
-            self._client.headers.pop("session-token", None)
-            await self.login()
+            await self._reauthenticate(rejected_token)
             response = await self._client.get(path, params=params)
         response.raise_for_status()
         payload = response.json()
@@ -301,6 +396,10 @@ class MatchbookClient(ReadOnlyVenue):
             )
 
     async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._clear_session_token()
         if self._owns_client:
             await self._client.aclose()
 
@@ -349,3 +448,77 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _retry_after_seconds(
+    response: httpx.Response,
+    *,
+    now: datetime,
+    fallback_seconds: float,
+    max_seconds: float,
+) -> float:
+    """Honor Retry-After when valid; otherwise a bounded fallback cooldown."""
+
+    cap = max(0.0, float(max_seconds))
+    fallback = min(max(float(fallback_seconds), 1.0), cap if cap > 0 else float(fallback_seconds))
+    raw = response.headers.get("Retry-After")
+    if raw is None:
+        return fallback
+    text = str(raw).strip()
+    if not text:
+        return fallback
+    try:
+        delta = float(text)
+    except ValueError:
+        delta = None
+    else:
+        if delta <= 0:
+            return fallback
+        return min(delta, cap) if cap > 0 else delta
+
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    remaining = (when - now).total_seconds()
+    if remaining <= 0:
+        return fallback
+    return min(remaining, cap) if cap > 0 else remaining
+
+
+def get_shared_matchbook_client(settings: Settings | None = None) -> MatchbookClient:
+    """Return the process-local Matchbook market-data client, creating it once."""
+
+    global _shared_matchbook_client
+    with _shared_client_lock:
+        current = _shared_matchbook_client
+        if current is None or current.closed:
+            _shared_matchbook_client = MatchbookClient(settings or get_settings())
+        return _shared_matchbook_client
+
+
+def set_shared_matchbook_client(client: MatchbookClient | None) -> None:
+    """Test helper: install or clear the process-local Matchbook client."""
+
+    global _shared_matchbook_client
+    with _shared_client_lock:
+        _shared_matchbook_client = client
+
+
+async def aclose_shared_matchbook_client() -> None:
+    """Close the shared client exactly once. Safe to call when none exists."""
+
+    global _shared_matchbook_client
+    with _shared_client_lock:
+        client = _shared_matchbook_client
+        _shared_matchbook_client = None
+    if client is not None:
+        await client.aclose()
+
+
+async def reset_shared_matchbook_client() -> None:
+    """Drop singleton state so later tests/process recreation start clean."""
+
+    await aclose_shared_matchbook_client()

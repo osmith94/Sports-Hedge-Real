@@ -21,7 +21,10 @@ from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueCapabilities, VenueName
 from sports_hedge.venues.kalshi import KalshiClient
-from sports_hedge.venues.matchbook import MatchbookClient
+from sports_hedge.venues.matchbook import (
+    aclose_shared_matchbook_client,
+    get_shared_matchbook_client,
+)
 from sports_hedge.venues.polymarket import PolymarketClient
 
 
@@ -37,6 +40,7 @@ async def lifespan(_app: FastAPI):
     finally:
         await schedule.stop()
         await coordinator.stop_server_loop()
+        await aclose_shared_matchbook_client()
 
 
 app = FastAPI(
@@ -128,11 +132,12 @@ async def venue_health() -> list[dict[str, object]]:
 
     settings = get_settings()
     timeout = settings.paper_scan_provider_timeout_seconds
-    clients = (
-        MatchbookClient(settings),
+    matchbook = get_shared_matchbook_client(settings)
+    ephemeral = (
         PolymarketClient(settings),
         KalshiClient(settings),
     )
+    clients = (matchbook, *ephemeral)
 
     async def _one(client) -> dict[str, object]:
         try:
@@ -158,5 +163,5 @@ async def venue_health() -> list[dict[str, object]]:
     try:
         return list(await asyncio.gather(*(_one(client) for client in clients)))
     finally:
-        for client in clients:
+        for client in ephemeral:
             await client.aclose()
