@@ -311,6 +311,7 @@ class DiscoveredFixture(BaseModel):
     scan_lane: str | None = None
     last_scanned_at: datetime | None = None
     next_due_at: datetime | None = None
+    hot_reasons: list[str] = Field(default_factory=list)
 
 
 class FixturePaperEntry(BaseModel):

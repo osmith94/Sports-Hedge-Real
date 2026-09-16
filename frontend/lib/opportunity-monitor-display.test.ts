@@ -128,10 +128,11 @@ describe("opportunity monitor current-vs-audit separation", () => {
     assert.doesNotMatch(page, /panel-title">Paper scan history/);
     assert.doesNotMatch(page, /<span>Tracked<\/span>/);
     assert.doesNotMatch(page, /TrackedMarketsBoard/);
+    const hotIdx = page.indexOf("<HotFixturesPanel");
     const monitorIdx = page.indexOf("<OpportunityMonitor");
     const positionsIdx = page.indexOf("Open paper positions");
     const auditIdx = page.indexOf("audit-disclosure");
-    assert.ok(monitorIdx > 0 && positionsIdx > monitorIdx && auditIdx > positionsIdx);
+    assert.ok(hotIdx > 0 && monitorIdx > hotIdx && positionsIdx > monitorIdx && auditIdx > positionsIdx);
     assert.match(monitor, /Current radar set from tracked watchlist/);
     assert.doesNotMatch(monitor, /getPaperScans/);
     assert.doesNotMatch(monitor, /DEMO_NEAR_ARB/);

@@ -53,9 +53,13 @@ export function venueHealthCaption(
   if (scan === "unavailable" || scan === "error" || scan === "failed") {
     return `${label} unavailable`;
   }
-  if (scan === "ok") return row?.authenticated ? `${label} data` : `${label} read-only`;
+  if (scan === "ok") return healthyFeedCaption(label);
   if (!row) return `${label} health unknown`;
   if (!row.ok) return `${label} unavailable`;
-  if (row.authenticated) return `${label} data`;
-  return `${label} read-only`;
+  return healthyFeedCaption(label);
+}
+
+export function healthyFeedCaption(label: string): string {
+  if (label === "Kalshi") return "Kalshi live data";
+  return `${label} data`;
 }

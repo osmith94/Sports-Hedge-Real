@@ -48,6 +48,7 @@ from sports_hedge.application.market_observation import (
 )
 from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.scan_cycle_audit import build_paper_scan_cycle_record
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
@@ -62,6 +63,7 @@ from sports_hedge.fx.service import FxRateService
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.normalization.venues import VenueNormalizationError
 from sports_hedge.paper.audit import (
+    PaperScanCycleRecord,
     PaperScanRecord,
     PaperScanSummary,
     build_paper_scan_record,
@@ -426,6 +428,15 @@ def scan_summary(
     return repository.summary(since=resolved_since)
 
 
+@router.get("/scan-cycles", response_model=list[PaperScanCycleRecord])
+def recent_scan_cycles(
+    limit: int = Query(default=100, ge=1, le=1000),
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> list[PaperScanCycleRecord]:
+    """Newest-first completed HOT/UNIVERSE refresh cycles. Not market-decision rows."""
+    return repository.list_cycles(limit=limit)
+
+
 @router.get("/treasury", response_model=PaperTreasurySnapshot)
 def paper_treasury(
     ledger: SqlitePaperLedger = Depends(get_paper_ledger),
@@ -756,11 +767,32 @@ def reset_matchbook_fee(
     return costs.matchbook_account_status(as_of=datetime.now(UTC))
 
 
+def _cycles_from(repository: Any, limit: int = 100) -> list[PaperScanCycleRecord]:
+    """Latest completed cycles. Missing/unreadable store stays empty, never fabricated."""
+
+    list_cycles = getattr(repository, "list_cycles", None)
+    if not callable(list_cycles):
+        return []
+    try:
+        return list_cycles(limit=limit)
+    except Exception:
+        return []
+
+
+def _status_with_scan_cycles(
+    status: LiveRefreshStatus,
+    repository: Any,
+) -> LiveRefreshStatus:
+    return status.model_copy(update={"recent_scan_cycles": _cycles_from(repository)})
+
+
 @router.get("/live-refresh", response_model=LiveRefreshStatus)
-def live_refresh_status() -> LiveRefreshStatus:
+def live_refresh_status(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
     coordinator = get_live_refresh_coordinator()
     coordinator.configure_from_settings()
-    return coordinator.public_status()
+    return _status_with_scan_cycles(coordinator.public_status(), repository)
 
 
 @router.get("/venue-participation", response_model=LaneVenueParticipation)
@@ -776,12 +808,15 @@ def get_venue_participation() -> LaneVenueParticipation:
 
 
 @router.put("/venue-participation", response_model=LiveRefreshStatus)
-def put_venue_participation(update: LaneVenueParticipationUpdate) -> LiveRefreshStatus:
+def put_venue_participation(
+    update: LaneVenueParticipationUpdate,
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
     """Persist operator lane venue toggles. Applies at the next safe cycle boundary."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_venue_participation(update.hot.as_venues(), update.universe.as_venues())
-    return coordinator.public_status()
+    return _status_with_scan_cycles(coordinator.public_status(), repository)
 
 
 @router.post(
@@ -1022,7 +1057,11 @@ def _persist_collection_report(
     service: PaperScanService,
     audit: SqlitePaperScanRepository,
     watchlist: WatchlistService,
+    scan_lane: ScanLane | str | None = None,
 ) -> None:
+    audit.append_cycle(
+        build_paper_scan_cycle_record(report, scan_lane=scan_lane or report.scan_lane)
+    )
     operations = get_paper_operations_service(watchlist, get_priority_alert_service())
     for decision in report.paper_decisions:
         _persist_decision(
@@ -1133,6 +1172,7 @@ async def persist_scheduled_collection_report(
             service=service,
             audit=audit,
             watchlist=watchlist,
+            scan_lane=scan_lane,
         )
     except Exception as exc:
         LOGGER.exception("persist/auto-capture failed lane=%s", scan_lane)

@@ -75,6 +75,30 @@ export type PaperScanRecord = {
   decision_json?: string;
 };
 
+export type PaperScanCycleRecord = {
+  cycle_id: string;
+  started_at: string;
+  completed_at: string;
+  scan_lane: string;
+  duration_ms: number;
+  fixture_count: number;
+  evaluated_count: number;
+  not_evaluated_count: number;
+  matched_event_pairs: number;
+  matched_market_pairs: number;
+  paper_decision_count: number;
+  qualifying_arb_count: number;
+  venue_health?: Record<string, string>;
+  degraded?: boolean;
+  last_error?: string | null;
+  universe_generation_id?: number | null;
+  resume_cursor?: string | null;
+  completeness?: string | null;
+  generation_resume?: boolean | null;
+  generation_work_used_s?: number | null;
+  operator_summary?: string | null;
+};
+
 export type PaperScanSummary = {
   since: string;
   scan_count: number;
@@ -196,6 +220,7 @@ export type DiscoveredFixture = {
   scan_lane?: string | null;
   last_scanned_at?: string | null;
   next_due_at?: string | null;
+  hot_reasons?: string[] | null;
 };
 
 export type InventoryComparisonStatus =
@@ -499,6 +524,7 @@ export type LiveRefreshStatus = {
   hot?: LaneRefreshStatus;
   universe?: LaneRefreshStatus;
   venue_participation?: LaneVenueParticipation | null;
+  recent_scan_cycles?: PaperScanCycleRecord[];
 };
 
 export type VenueHealth = {
@@ -785,6 +811,10 @@ export function getEventReaction(eventId: string, annotationId: string): Promise
 
 export function getPaperScans(query = "limit=100"): Promise<PaperScanRecord[]> {
   return request(`/paper/scans${query ? `?${query}` : ""}`);
+}
+
+export function getPaperScanCycles(query = "limit=100"): Promise<PaperScanCycleRecord[]> {
+  return request(`/paper/scan-cycles${query ? `?${query}` : ""}`);
 }
 
 export function getPaperScanSummary(query = ""): Promise<PaperScanSummary> {

@@ -40,6 +40,15 @@ describe("operator-disabled venue health vs provider failure", () => {
     );
   });
 
+  it("does not treat healthy public Kalshi data as read-only merely because it is unauthenticated", () => {
+    assert.equal(venueHealthCaption("Kalshi", "ok", { ok: true, authenticated: false }), "Kalshi live data");
+    assert.equal(venueHealthCaption("Kalshi", undefined, { ok: true, authenticated: false }), "Kalshi live data");
+    assert.equal(venueHealthCaption("Polymarket", "ok", { ok: true, authenticated: false }), "Polymarket data");
+    assert.equal(venueHealthCaption("Matchbook", "ok", { ok: true, authenticated: true }), "Matchbook data");
+    assert.doesNotMatch(venueHealthCaption("Kalshi", "ok", { ok: true, authenticated: false }), /read-only/i);
+    assert.equal(venueHealthCaption("Kalshi", "unavailable"), "Kalshi unavailable");
+  });
+
   it("does not mark a scan degraded merely because a venue is operator-disabled", () => {
     assert.equal(
       venueHealthIsDegraded({
@@ -68,5 +77,9 @@ describe("operator-disabled venue health vs provider failure", () => {
     assert.match(pulse, /pulseVenueTone/);
     assert.match(scan, /venueHealthIsDegraded/);
     assert.doesNotMatch(bar, /scan === "unavailable".*disabled/);
+    assert.match(pulse, /Scan failed/);
+    assert.match(pulse, /Partial venue failure/);
+    assert.match(pulse, /Provider unhealthy/);
+    assert.doesNotMatch(pulse, /phase === "degraded"[\s\S]*Scan failed/);
   });
 });
