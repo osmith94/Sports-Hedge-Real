@@ -359,5 +359,9 @@ def test_paper_only_execution_boundary_unchanged() -> None:
     assert "place_order" not in main_src
     assert "aclose_shared_matchbook_client()" in lifespan_src
     assert "get_shared_matchbook_client(settings)" in paper_src
-    assert "audit.append_cycle(" in inspect.getsource(paper_api._persist_collection_report)
-    assert "recent_scan_cycles" in inspect.getsource(paper_api.live_refresh_status)
+    persist_src = inspect.getsource(paper_api._persist_collection_report)
+    status_src = inspect.getsource(paper_api.live_refresh_status)
+    helper_src = inspect.getsource(paper_api._status_with_scan_cycles)
+    assert "audit.append_cycle(" in persist_src
+    assert "_status_with_scan_cycles(" in status_src
+    assert "recent_scan_cycles" in helper_src
