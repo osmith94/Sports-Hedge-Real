@@ -266,7 +266,7 @@ class SqliteWatchlistRepository:
     def append_event(self, event: OpportunityLifecycleEvent) -> None:
         self._connection.execute(
             """
-            INSERT INTO watchlist_lifecycle_events (
+            INSERT OR IGNORE INTO watchlist_lifecycle_events (
                 event_id, opportunity_id, occurred_at, event_type, status,
                 current_net_edge, distance_to_trigger_pp, detail
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)

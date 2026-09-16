@@ -343,19 +343,22 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
         for event in trade.audit:
             if event.event_id in existing_events:
                 continue
-            self._connection.execute(
-                """
-                INSERT INTO paper_trade_events (event_id, trade_id, occurred_at, event_type, detail)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    event.event_id,
-                    trade.trade_id,
-                    event.occurred_at.isoformat(),
-                    event.event_type.value,
-                    event.detail,
-                ),
-            )
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO paper_trade_events (event_id, trade_id, occurred_at, event_type, detail)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.event_id,
+                        trade.trade_id,
+                        event.occurred_at.isoformat(),
+                        event.event_type.value,
+                        event.detail,
+                    ),
+                )
+            except IntegrityError:
+                continue
         self._ledger._commit()
         return trade
 

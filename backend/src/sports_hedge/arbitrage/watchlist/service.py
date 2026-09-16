@@ -186,6 +186,8 @@ class WatchlistService:
         current = self.repository.get(opportunity_id)
         if current is None:
             raise ValueError(f"unknown opportunity: {opportunity_id}")
+        if current.status is OpportunityStatus.FILLED and stage is OpportunityStatus.FILLED:
+            return current
         if current.status not in {
             OpportunityStatus.TRIGGERED,
             OpportunityStatus.PAPER_FILLING,
@@ -208,6 +210,7 @@ class WatchlistService:
         self.repository.upsert_opportunity(updated)
         self.repository.append_event(
             OpportunityLifecycleEvent(
+                event_id=f"{opportunity_id}:{event_type.value}",
                 opportunity_id=opportunity_id,
                 occurred_at=occurred_at,
                 event_type=event_type,
