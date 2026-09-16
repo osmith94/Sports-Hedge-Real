@@ -65,8 +65,38 @@ _RESULT_EXTENSION_RE = re.compile(
     r"goes to extra time|"
     r"extra time applies|"
     r"penalties (?:to )?decide|"
-    r"decided (?:on|by) penalties"
+    r"decided (?:on|by) penalties|"
+    r"play(?:s|ed|ing)?(?: out)? to a (?:finish|result|conclusion|winner)|"
+    r"play(?:s|ed|ing)? until (?:a |the |there is a )?(?:winner|result|finish)|"
+    r"until (?:a |there is a )winner|"
+    r"must (?:be|produce) a winner"
     r")\b"
+)
+# Token classes for result determination that can extend beyond ordinary
+# regulation / normal time. These are semantic families, not a denylist of
+# quoted O1 strings. Bare "so" is not a token: it is a common English word.
+_RESULT_EXTENSION_TOKEN_SEQS = (
+    ("golden", "goal"),
+    ("golden", "goals"),
+    ("silver", "goal"),
+    ("silver", "goals"),
+    ("sudden", "death"),
+    ("sos",),
+    ("s", "o"),
+    ("s", "o", "s"),
+    ("so", "count"),
+    ("so", "counts"),
+    ("so", "counted"),
+    ("from", "the", "spot"),
+    ("from", "the", "penalty", "spot"),
+    ("spot", "kick"),
+    ("spot", "kicks"),
+    ("winner", "on", "the", "day"),
+    ("winner", "on", "the", "night"),
+    ("to", "a", "finish"),
+    ("to", "a", "conclusion"),
+    ("until", "a", "winner"),
+    ("until", "there", "is", "a", "winner"),
 )
 _REMAIN_OPEN_POSTPONE_RE = re.compile(
     r"if the (?:game|match) is postponed.{0,160}remain open"
@@ -874,8 +904,23 @@ def _unparsed_abandon_postpone_void(text: str) -> bool:
     return False
 
 
-def _unparsed_result_extension(text: str, extra_time: bool | None, penalties: bool | None) -> bool:
+def _has_result_extension_language(text: str) -> bool:
+    """True when wording indicates the result can be decided beyond regulation.
+
+    Covers sudden-death / golden-goal / silver-goal, shootout abbreviations
+    and synonyms, spot-kick deciders, and play-to-a-result / winner-on-the-day
+    language. Presence is enough to refuse a regulation-time claim; it does
+    not newly prove extra-time or penalties inclusion.
+    """
+
     if _RESULT_EXTENSION_RE.search(text):
+        return True
+    tokens = _tokens_of(text)
+    return any(_has_token_seq(tokens, seq) for seq in _RESULT_EXTENSION_TOKEN_SEQS)
+
+
+def _unparsed_result_extension(text: str, extra_time: bool | None, penalties: bool | None) -> bool:
+    if _has_result_extension_language(text):
         return True
     if extra_time is None and _has_extra_time_token(text):
         return True
@@ -909,7 +954,7 @@ def classify_settlement_wording(text: str) -> tuple[SettlementScope, bool | None
 
     Fail closed: negation must not parse as inclusion, compound extra-time plus
     penalties must not collapse, and 90-minute markers must not hide unparsed
-    extra-time/shootout/tie/void/abbreviation/refund language.
+    extra-time/shootout/tie/void/abbreviation/refund/result-extension language.
     """
 
     normalized = normalize_text(text)
