@@ -49,6 +49,9 @@ describe("dual cadence operator copy", () => {
     assert.match(lines[0], /Fast scan/);
     assert.match(lines[1], /Full sweep/);
     assert.doesNotMatch(lines.join(" "), /^Last scan /);
+    assert.match(fastScanCopy(status(), now).detail, /completed 12s ago/);
+    assert.match(fastScanCopy(status(), now).detail, /next due in 6s/);
+    assert.match(fastScanCopy(status(), now).detail, /ran 4.1s/);
     assert.match(fastScanCopy(status(), now).detail, /partial \(2 not evaluated\)/);
     assert.doesNotMatch(fastScanCopy(status(), now).detail, /scan_cycle_timeout/);
     assert.match(fullSweepCopy(status(), now).detail, /104 universe/);
@@ -109,10 +112,11 @@ describe("dual cadence operator copy", () => {
         not_evaluated_count: 44,
         active_venues: ["matchbook", "polymarket", "kalshi"],
       },
+      venue_health: { matchbook: "ok", polymarket: "ok", kalshi: "ok" },
     });
-    assert.match(fastScanCopy(withVenues, now).detail, /MB·K/);
+    assert.match(fastScanCopy(withVenues, now).detail, /last scan MB·K/);
     assert.doesNotMatch(fastScanCopy(withVenues, now).detail, /PM/);
-    assert.match(fullSweepCopy(withVenues, now).detail, /MB·PM·K/);
+    assert.match(fullSweepCopy(withVenues, now).detail, /last scan MB·PM·K/);
   });
 
   it("keeps persist-failure copy together with lane venue names", () => {
@@ -143,12 +147,13 @@ describe("dual cadence operator copy", () => {
         last_persist_error: "audit_write_failed",
         active_venues: ["matchbook", "polymarket"],
       },
+      venue_health: { matchbook: "ok", kalshi: "ok", polymarket: "ok" },
     });
-    assert.match(fastScanCopy(combined, now).detail, /MB·K/);
+    assert.match(fastScanCopy(combined, now).detail, /last scan MB·K/);
     assert.match(fastScanCopy(combined, now).detail, /persist\/auto-capture failed/);
     assert.match(fastScanCopy(combined, now).detail, /partial \(2 not evaluated\)/);
     assert.doesNotMatch(fastScanCopy(combined, now).detail, /scan_cycle_timeout/);
-    assert.match(fullSweepCopy(combined, now).detail, /MB·PM/);
+    assert.match(fullSweepCopy(combined, now).detail, /last scan MB·PM/);
     assert.match(fullSweepCopy(combined, now).detail, /persist\/auto-capture failed/);
     assert.doesNotMatch(fullSweepCopy(combined, now).detail, /scan_cycle_timeout/);
   });

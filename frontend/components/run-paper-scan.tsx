@@ -208,7 +208,7 @@ export function RunPaperScan() {
   const [liveRefresh, setLiveRefresh] = useState<LiveRefreshStatus | null>(null);
   const [venueHealth, setVenueHealth] = useState<Record<string, string> | null>(null);
   const [completeFlash, setCompleteFlash] = useState(false);
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [nowMs, setNowMs] = useState<number | null>(null);
   const [autoAnchorMs, setAutoAnchorMs] = useState<number | null>(null);
   const [economics, setEconomics] = useState<EconomicsStatus | null>(null);
   const [matchbookCommissionPercent, setMatchbookCommissionPercent] = useState("2.00");
@@ -386,6 +386,7 @@ export function RunPaperScan() {
 
   useEffect(() => {
     if (!autoRefresh || loadingMode !== null) return undefined;
+    setNowMs(Date.now());
     const timer = window.setInterval(() => setNowMs(Date.now()), 250);
     return () => window.clearInterval(timer);
   }, [autoRefresh, loadingMode]);
@@ -435,7 +436,7 @@ export function RunPaperScan() {
   const nextHotMs = liveRefresh?.hot?.next_due_at
     ? Date.parse(liveRefresh.hot.next_due_at)
     : Number.NaN;
-  const nextRefreshSeconds = !autoRefresh
+  const nextRefreshSeconds = !autoRefresh || nowMs == null
     ? null
     : Number.isFinite(nextHotMs)
       ? Math.max(0, Math.ceil((nextHotMs - nowMs) / 1000))
@@ -538,7 +539,7 @@ export function RunPaperScan() {
           lanes.
         </div>
         <div className="scan-note" aria-label="Fast scan and Full sweep status">
-          {dualScanStatusLines(liveRefresh).map((line) => (
+          {dualScanStatusLines(liveRefresh, nowMs).map((line) => (
             <div key={line}>{line}</div>
           ))}
           {autoRefresh

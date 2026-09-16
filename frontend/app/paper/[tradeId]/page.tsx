@@ -2,7 +2,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { getPaperTrade } from "../../../lib/api";
-import { money, relativeTime } from "../../../lib/format";
+import { money } from "../../../lib/format";
+import { HydratedRelativeTime } from "../../../components/hydrated-relative-time";
 
 export const dynamic = "force-dynamic";
 
@@ -41,7 +42,9 @@ export default async function PaperTradeDetailPage({
         </div>
         <div className="metric-card">
           <div className="metric-label">Opened</div>
-          <div className="metric-value" style={{ fontSize: 18 }}>{relativeTime(trade.opened_at)}</div>
+          <div className="metric-value" style={{ fontSize: 18 }}>
+            <HydratedRelativeTime iso={trade.opened_at} />
+          </div>
         </div>
         <div className="metric-card">
           <div className="metric-label">Risk at entry</div>
@@ -161,7 +164,7 @@ export default async function PaperTradeDetailPage({
           <ol>
             {trade.audit.map((event) => (
               <li key={event.event_id}>
-                {event.event_type} · {relativeTime(event.occurred_at)} · {event.detail ?? "—"}
+                {event.event_type} · <HydratedRelativeTime iso={event.occurred_at} /> · {event.detail ?? "—"}
               </li>
             ))}
           </ol>

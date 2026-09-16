@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { LiveRefreshStatus, VenueHealth, getLiveRefreshStatus, getVenueHealth } from "../lib/api";
+import { useHydratedNowMs } from "./hydrated-relative-time";
 import { dualScanStatusLines } from "../lib/scan-status-display";
 import { scanHealthTone, venueHealthCaption } from "../lib/venue-health-display";
 
@@ -27,6 +28,7 @@ function tone(
 export function VenueHealthBar() {
   const [rows, setRows] = useState<VenueHealth[] | null>(null);
   const [refresh, setRefresh] = useState<LiveRefreshStatus | null>(null);
+  const nowMs = useHydratedNowMs();
 
   useEffect(() => {
     let cancelled = false;
@@ -78,7 +80,7 @@ export function VenueHealthBar() {
           AUTO PAPER CAPTURE ON
         </span>
       ) : null}
-      {dualScanStatusLines(refresh).map((line) => (
+      {dualScanStatusLines(refresh, nowMs).map((line) => (
         <span className="status-item muted" key={line} aria-label={line}>
           {line}
         </span>

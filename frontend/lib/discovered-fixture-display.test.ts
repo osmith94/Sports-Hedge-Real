@@ -87,7 +87,8 @@ describe("fixture discovery compact summary", () => {
       discoveryCompactSummaryLabel(live, true),
       "Fixture Discovery · 99 fixtures · 68 cross-venue · 9 equivalent · 1 qualifying · 200 skipped",
     );
-    assert.equal(discoveryStatusBadgeLabel(true), "LIVE PAPER · MB / PM / K");
+    assert.equal(discoveryStatusBadgeLabel(true, live), "LIVE PAPER · LAST SCAN VENUES UNKNOWN");
+    assert.doesNotMatch(discoveryStatusBadgeLabel(true, live), /MB \/ PM \/ K/);
   });
 
   it("does not fabricate counts when discovery status is unavailable", () => {
@@ -96,6 +97,7 @@ describe("fixture discovery compact summary", () => {
       "Fixture Discovery · status unavailable",
     );
     assert.equal(discoveryStatusBadgeLabel(false), "DISCOVERY STATUS UNAVAILABLE");
+    assert.doesNotMatch(discoveryStatusBadgeLabel(true), /MB \/ PM \/ K/);
     assert.deepEqual(discoveryCompactCounts(null), {
       fixtures: 0,
       crossVenue: 0,

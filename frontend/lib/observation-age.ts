@@ -8,8 +8,11 @@ export function parseObservationTimestampMs(value: string | null | undefined): n
 
 export function formatObservationAge(
   observedAt: string | null | undefined,
-  nowMs: number,
+  nowMs: number | null | undefined,
 ): string {
+  if (nowMs == null) {
+    return observedAt && observedAt.trim() ? observedAt : "—";
+  }
   const timestampMs = parseObservationTimestampMs(observedAt);
   if (timestampMs === null || !Number.isFinite(nowMs)) return "—";
   const elapsedMs = Math.max(0, nowMs - timestampMs);

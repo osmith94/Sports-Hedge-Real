@@ -23,6 +23,7 @@ from sports_hedge.application.lane_venues import (
     LaneVenueSet,
     default_operator_venues,
     is_provider_health_failure,
+    last_scan_venue_clause,
     participation_from_lists,
 )
 from sports_hedge.application.quote_freshness import require_aware_instant
@@ -795,6 +796,8 @@ class LiveRefreshCoordinator:
                                     hot_count,
                                     leftover_n,
                                     degraded,
+                                    venue_health=report.venue_health,
+                                    active_venues=self.status.hot.active_venues,
                                 ),
                             }
                         )
@@ -952,6 +955,8 @@ class LiveRefreshCoordinator:
                             universe_count,
                             len(self._universe_evaluated_ids),
                             leftover_n,
+                            venue_health=report.venue_health,
+                            active_venues=self.status.universe.active_venues,
                         ),
                     }
                 )
@@ -1129,6 +1134,8 @@ class LiveRefreshCoordinator:
                             universe_count,
                             len(self._universe_evaluated_ids),
                             self.status.universe.not_evaluated_count,
+                            venue_health=self.status.venue_health,
+                            active_venues=self.status.universe.active_venues,
                         ),
                     }
                 )
@@ -1341,13 +1348,11 @@ def _coerce_lane(value: ScanLane | str | None) -> ScanLane:
     return ScanLane.UNIVERSE
 
 
-def _ago_label(moment: datetime | None, now: datetime | None = None) -> str:
+def _iso_stamp(moment: datetime | None) -> str:
     if moment is None:
-        return "never"
-    current = now or datetime.now(UTC)
-    delta = int((current - moment).total_seconds())
-    delta = max(delta, 0)
-    return f"{delta}s ago"
+        return "—"
+    aware = moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+    return aware.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _hot_operator_summary(
@@ -1357,14 +1362,15 @@ def _hot_operator_summary(
     fixture_count: int,
     leftover_n: int,
     degraded: bool,
+    *,
+    venue_health: dict[str, str] | None = None,
+    active_venues: list[VenueName] | None = None,
 ) -> str:
     duration_s = round(duration_ms / 1000, 1)
-    next_s = "—"
-    if next_due is not None:
-        next_s = f"{max(0, int((next_due - completed_at).total_seconds()))}s"
+    venue_clause = last_scan_venue_clause(venue_health, configured=active_venues)
     summary = (
-        f"Fast scan · {_ago_label(completed_at, completed_at)} · {duration_s}s · "
-        f"next {next_s} · {fixture_count} hot"
+        f"Fast scan · completed at {_iso_stamp(completed_at)} · ran {duration_s}s · "
+        f"next due {_iso_stamp(next_due)} · {fixture_count} hot · {venue_clause}"
     )
     if leftover_n:
         summary += f" · partial ({leftover_n} not evaluated)"
@@ -1381,15 +1387,16 @@ def _universe_operator_summary(
     fixture_count: int,
     evaluated_n: int,
     leftover_n: int,
+    *,
+    venue_health: dict[str, str] | None = None,
+    active_venues: list[VenueName] | None = None,
 ) -> str:
     chunk_s = round(duration_ms / 1000, 1)
-    next_hot_s = "—"
-    if next_hot is not None:
-        next_hot_s = f"{max(0, int((next_hot - datetime.now(UTC)).total_seconds()))}s"
+    venue_clause = last_scan_venue_clause(venue_health, configured=active_venues)
     return (
-        f"Full sweep · chunk {chunk_s}s · gen {int(work_used)}/{int(budget)}s · "
-        f"next HOT in {next_hot_s} · {fixture_count} universe · "
-        f"{evaluated_n} evaluated / {leftover_n} not evaluated"
+        f"Full sweep · chunk ran {chunk_s}s · gen {int(work_used)}/{int(budget)}s · "
+        f"HOT next due {_iso_stamp(next_hot)} · {fixture_count} universe · "
+        f"{evaluated_n} evaluated / {leftover_n} not evaluated · {venue_clause}"
     )
 
 
@@ -1399,7 +1406,7 @@ def _combined_operator_summary(
     universe_count: int,
 ) -> str:
     fast = hot.operator_summary or (
-        f"Fast scan · never · — · next — · {hot.fixture_count} hot"
+        f"Fast scan · never · ran — · next due — · {hot.fixture_count} hot"
     )
     full = universe.operator_summary or (
         f"Full sweep · chunk — · gen 0/{int(universe.generation_budget_seconds or 150)}s · "

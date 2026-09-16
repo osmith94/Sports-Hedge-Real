@@ -13,7 +13,7 @@ export function FixtureDiscoverySection({
   available: boolean;
 }) {
   const summary = discoveryCompactSummaryLabel(status, available);
-  const badge = discoveryStatusBadgeLabel(available);
+  const badge = discoveryStatusBadgeLabel(available, status);
 
   return (
     <section className="ops-section ops-section-compact">
