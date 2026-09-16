@@ -16,11 +16,12 @@ from datetime import datetime
 from decimal import Decimal
 
 from sports_hedge.application.executable_liquidity import (
+    HARD_NON_EXECUTABLE_REASONS,
     NO_EXECUTABLE_ARB,
+    PASSIVE_REJECTION_REASONS,
     FixtureHeadlineCandidate,
     HeadlineBand,
     LiquidityRole,
-    PASSIVE_REJECTION_REASONS,
     best_arb_market_label,
     headline_band_for,
     select_fixture_headline,
@@ -59,6 +60,22 @@ _MAPPING_INCOMPATIBLE = frozenset(
         "unproven_handicap_semantics",
         "generalized_split_line_not_modelled",
         "unknown_draw_void_semantics",
+    }
+)
+# Fail-closed reasons that must never fabricate HOT opportunity promotion.
+PROMOTION_FAIL_CLOSED_REASONS = frozenset(
+    {
+        *HARD_NON_EXECUTABLE_REASONS,
+        *_MAPPING_INCOMPATIBLE,
+        "missing_costs",
+        "missing_fx",
+        "missing_fx_rate",
+        "unknown_required_cost",
+        "unknown_fees",
+        "allocator_size_required",
+        "allocator_rejected",
+        "fill_plan_not_allocator_sized",
+        "insufficient_venue_equivalence",
     }
 )
 
@@ -457,6 +474,65 @@ def combined_radar_freshness(rows: list[FixtureMarketInventoryRow]) -> str:
     if FRESHNESS_RADAR_CURRENT in classes:
         return FRESHNESS_RADAR_CURRENT
     return FRESHNESS_EXPIRED
+
+
+def stored_row_proves_qualifying_executable(
+    row: FixtureMarketInventoryRow,
+    *,
+    max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+) -> bool:
+    """True when stored current-state economics proved a qualifying executable arb.
+
+    Uses observation-time quote age and stored solver/equivalence truth. Does
+    not re-apply wall-clock executable freshness: that remains a paper-entry
+    gate. Radar TTL decides whether the slot is still current.
+    """
+
+    if row.comparison_status is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
+        return False
+    if not row.entered_solver or not row.solver_is_arbitrage:
+        return False
+    if set(row.rejection_reasons) & PROMOTION_FAIL_CLOSED_REASONS:
+        return False
+    if row.current_net_edge is None:
+        return False
+    if row.trigger_net_edge is not None and row.current_net_edge < row.trigger_net_edge:
+        return False
+    quote_age = row_quote_age_ms(row)
+    if quote_age is None or quote_age >= max_quote_age_ms:
+        return False
+    venues = [
+        facts
+        for facts in (row.matchbook, row.polymarket, row.kalshi)
+        if facts is not None
+    ]
+    return len(venues) >= 2
+
+
+def current_slots_prove_qualifying_opportunity(
+    slots: list[CurrentMarketSlot],
+    *,
+    now: datetime,
+    hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
+    universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+) -> bool:
+    """True when a radar-current merged slot still proves a qualifying executable arb."""
+
+    evaluated = require_aware_instant(now, "now")
+    for slot in slots:
+        freshness = slot_freshness(
+            slot,
+            now=evaluated,
+            hot_ttl_seconds=hot_ttl_seconds,
+            universe_ttl_seconds=universe_ttl_seconds,
+            max_quote_age_ms=max_quote_age_ms,
+        )
+        if freshness == FRESHNESS_EXPIRED:
+            continue
+        if stored_row_proves_qualifying_executable(slot.row, max_quote_age_ms=max_quote_age_ms):
+            return True
+    return False
 
 
 def row_quote_age_ms(row: FixtureMarketInventoryRow) -> int | None:

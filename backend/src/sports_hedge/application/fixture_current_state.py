@@ -15,6 +15,7 @@ from sports_hedge.application.current_market_inventory import (
     CurrentMarketSlot,
     apply_current_market_inventory,
     combined_radar_freshness,
+    current_slots_prove_qualifying_opportunity,
     merge_current_market_slots,
     prune_expired_market_slots,
     stamp_current_market_row,
@@ -106,6 +107,14 @@ class FixtureCurrentStateStore:
     Fixture equivalent/qualifying/near counts and best/headline fields derive
     from that merged current inventory. Radar TTL may keep rows visible;
     paper eligibility / auto-capture still require executable quote freshness.
+
+    HOT identity is the union of lifecycle HOT membership (in-play / <=60m
+    pre-kickoff / bounded post-kickoff unknown) and current fixtures whose
+    latest valid merged current-state proves a qualifying executable arb
+    (Issue #200). Opportunity promotion is not a second identity store and
+    does not change `classify_scan_lane`. Promotion disappears when the
+    merged current-state ceases to qualify unless another lifecycle HOT
+    reason still applies.
 
     Terminal tombstones keep explicit finished/completed/settled truth from
     resurrecting via a later stale UNIVERSE or other-venue unknown snapshot.
@@ -292,11 +301,15 @@ class FixtureCurrentStateStore:
             fixture = record.status_fixture(now, **market_kwargs)
             if fixture is None:
                 continue
-            membership = classify_scan_lane(
+            membership = self._identity_membership(
+                record,
                 fixture,
                 now,
-                hot_horizon=hot_horizon,
-                post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+                classify_kwargs={
+                    "hot_horizon": hot_horizon,
+                    "post_kickoff_unknown_horizon": post_kickoff_unknown_horizon,
+                },
+                market_kwargs=market_kwargs,
             )
             if membership is ScanLane.DROP:
                 continue
@@ -350,11 +363,15 @@ class FixtureCurrentStateStore:
             fixture = record.status_fixture(evaluated, **market_kwargs)
             if fixture is None:
                 continue
-            membership = classify_scan_lane(
+            membership = self._identity_membership(
+                record,
                 fixture,
                 evaluated,
-                hot_horizon=hot_horizon,
-                post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+                classify_kwargs={
+                    "hot_horizon": hot_horizon,
+                    "post_kickoff_unknown_horizon": post_kickoff_unknown_horizon,
+                },
+                market_kwargs=market_kwargs,
             )
             if membership is ScanLane.DROP:
                 continue
@@ -438,18 +455,28 @@ class FixtureCurrentStateStore:
     def hot_identity_scope(self, now: datetime, **kwargs: Any) -> list[str]:
         evaluated = require_aware_instant(now, "now")
         classify_kwargs = _classify_kwargs(kwargs)
-        self._evict_non_current(evaluated, **classify_kwargs)
+        market_kwargs = _market_ttl_kwargs(kwargs)
+        self._evict_non_current(evaluated, **classify_kwargs, **market_kwargs)
         fixtures: list[DiscoveredFixture] = []
         for record in self._rows.values():
-            fixture = record.status_fixture()
+            record.prune_markets(evaluated, **market_kwargs)
+            fixture = record.status_fixture(evaluated, **market_kwargs)
             if fixture is None:
                 continue
-            membership = classify_scan_lane(
+            membership = self._identity_membership(
+                record,
                 fixture,
                 evaluated,
-                **classify_kwargs,
+                classify_kwargs=classify_kwargs,
+                market_kwargs=market_kwargs,
             )
             if membership is ScanLane.HOT:
+                if current_slots_prove_qualifying_opportunity(
+                    record.live_market_slots(),
+                    now=evaluated,
+                    **market_kwargs,
+                ):
+                    fixture = fixture.model_copy(update={"solver_is_arbitrage": True})
                 fixtures.append(fixture)
         fixtures.sort(key=hot_sort_key)
         return [item.canonical_event_id for item in fixtures]
@@ -475,19 +502,53 @@ class FixtureCurrentStateStore:
 
     def membership_counts(self, now: datetime, **kwargs: Any) -> tuple[int, int]:
         classify_kwargs = _classify_kwargs(kwargs)
-        self._evict_non_current(now, **classify_kwargs)
+        market_kwargs = _market_ttl_kwargs(kwargs)
+        self._evict_non_current(now, **classify_kwargs, **market_kwargs)
         hot = 0
         universe = 0
         for record in self._rows.values():
-            fixture = record.status_fixture()
+            record.prune_markets(now, **market_kwargs)
+            fixture = record.status_fixture(now, **market_kwargs)
             if fixture is None:
                 continue
-            membership = classify_scan_lane(fixture, now, **classify_kwargs)
+            membership = self._identity_membership(
+                record,
+                fixture,
+                now,
+                classify_kwargs=classify_kwargs,
+                market_kwargs=market_kwargs,
+            )
             if membership is ScanLane.HOT:
                 hot += 1
             elif membership is ScanLane.UNIVERSE:
                 universe += 1
         return hot, universe
+
+    def _identity_membership(
+        self,
+        record: _FixtureRecord,
+        fixture: DiscoveredFixture,
+        now: datetime,
+        *,
+        classify_kwargs: dict[str, Any],
+        market_kwargs: dict[str, Any],
+    ) -> ScanLane:
+        """HOT identity = lifecycle HOT or current qualifying-opportunity promotion.
+
+        `classify_scan_lane` remains the lifecycle classifier. Promotion reads
+        merged current-state market truth, not UI labels or historical audit.
+        """
+
+        lifecycle = classify_scan_lane(fixture, now, **classify_kwargs)
+        if lifecycle is ScanLane.DROP or lifecycle is ScanLane.HOT:
+            return lifecycle
+        if current_slots_prove_qualifying_opportunity(
+            record.live_market_slots(),
+            now=now,
+            **market_kwargs,
+        ):
+            return ScanLane.HOT
+        return lifecycle
 
     def _upsert_observation(self, canonical_id: str, observation: LaneObservation) -> None:
         record = self._rows.get(canonical_id)

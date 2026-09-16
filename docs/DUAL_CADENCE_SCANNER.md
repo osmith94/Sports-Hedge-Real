@@ -157,7 +157,7 @@ A 45s HOT collector budget would also fail the 30s HOT cadence: one slow HOT cyc
 | Collector timeout | **25 seconds** (`paper_scan_hot_cycle_timeout_seconds`). Separate from the 20s manual diagnostic. |
 | Envelope | #157 leftover reserve (4s, from the 25s) + coordinator grace (5s) ⇒ worst-case end-to-end **~30s**. Collector cluster work ≤ 21s. |
 | Self-overlap | **Forbidden.** Do not start a second HOT while one is in progress. If a cycle hits the envelope, skip the missed slot and run the next due after return. |
-| Cohort | (a) truthful provider in-play (`in_running is True`); (b) `kickoff_utc` in `(now, now + 60 minutes]`; (c) kickoff-passed + unknown in-play **only while** `(now - kickoff_utc) ≤ 3h` (§5.4). |
+| Cohort | (a) truthful provider in-play (`in_running is True`); (b) `kickoff_utc` in `(now, now + 60 minutes]`; (c) kickoff-passed + unknown in-play **only while** `(now - kickoff_utc) ≤ 3h` (§5.4); **(d) Issue #200:** any still-current fixture whose latest valid merged current-state proves a qualifying/executable arb, even if kickoff is days away. Kickoff/in-play are additional HOT reasons, not requirements that suppress a live arb. |
 | In-play labelling | `in_running is True` is the only live label. Kickoff proximity / post-kickoff unknown may keep HOT **membership** but must not set `in_running` or live scores. |
 | Identity source | Canonical store (already-known IDs). Prefer `list_markets` / books for those events. Do **not** rediscover the whole world every 30s. |
 | Priority inside the lane | Simple v1 key only (§5.5). Do **not** call `arbitrage/dislocations/scheduler.py`. |
@@ -211,7 +211,7 @@ Do not pass `cycle_timeout_seconds=150` into a single collector call on the auto
 1. **One canonical identity store.** Both lanes upsert the same `canonical_event_id` / `canonical_market_id` (existing `canonical_source_event_id` / `canonical_matched_market_id` / `watch:{canonical_market_id}`). No second ID system, no fuzzy join between lanes.
 2. **HOT preempts UNIVERSE.** UNIVERSE must not monopolise provider concurrency, collector inflight tasks, or coordinator state when HOT is due. Chunks exist so preemption is the normal path, not an emergency cancel of a 150s job.
 3. **Avoid duplicate calls.** UNIVERSE discovery maintains inventory. HOT refreshes known hot IDs. HOT may do a tiny identity repair (`list_events` for a missing kickoff/in-play flag) but not full pagination.
-4. **Promote / demote automatically.** See §5.4. Do not invent “completed” or “live” from missing data or elapsed time alone.
+4. **Promote / demote automatically.** See §5.4. Do not invent “completed” or “live” from missing data or elapsed time alone. Issue #200: a UNIVERSE-discovered qualifying executable arb is promoted into subsequent HOT identity immediately, using known source events for repricing. Promotion is not permanent: when the merged current-state ceases to qualify, the fixture leaves opportunity-promoted HOT membership unless another lifecycle HOT reason still applies.
 5. **Qualifying arbs from either lane surface immediately.** Persist watchlist observations during the producing cycle (including a UNIVERSE chunk). Do not buffer UNIVERSE TRIGGERED until the next HOT tick.
 6. **Preserve** settlement equivalence, fees/FX/depth/risk fail-closed, paper-only venues, append-only audit.
 7. **v1 store is the existing process-memory `FixtureCurrentStateStore`.** Restart: Tracked empty until a collection completes. **UNIVERSE generation 0 is due immediately** on startup — do not wait 180s. SQLite fixture-inventory persistence is out of scope. Do not add a second canonical store.
@@ -251,6 +251,12 @@ HOT  when in_running is True                         # only live label
 UNIVERSE when the fixture is still current and not HOT
      including T-6d, T-4h, and explicit postponed/delayed/rescheduled
      (still not labelled completed or live)
+     A T-6d (or other distant) fixture is HOT *identity* when the latest
+     valid merged current-state proves a qualifying executable arb
+     (Issue #200). That is opportunity promotion, not a change to this
+     lifecycle function. Unknown/ambiguous settlement, stale quotes,
+     missing executable depth, unknown fees/FX, allocator rejection,
+     risk rejection, or insufficient venue equivalence do not promote.
 
 DROP also when kickoff-passed + unknown beyond the 3h window (#164)
      Leaves current radar / HOT identity / Discovery inventory.
@@ -511,7 +517,7 @@ New module `backend/tests/test_dual_cadence_scheduler.py` (clock injected; no li
 | --- | --- |
 | 1 | Classifier: T-6d and T-4h → UNIVERSE; T-59m → HOT; kickoff-passed + `in_running True` → HOT live; kickoff-passed + `in_running None` within 3h → HOT membership, `in_running` stays None; completed status → DROP. |
 | 2 | T-59m and in-play refresh on HOT cadence without waiting for UNIVERSE (advance clock 30s; HOT ran; UNIVERSE chunk did not have to finish). |
-| 3 | T-6d is present on Tracked after a UNIVERSE chunk and is **not** in HOT identity_scope on the next HOT cycle (no `list_markets` for that id). |
+| 3 | T-6d is present on Tracked after a UNIVERSE chunk. A T-6d fixture **without** a current qualifying executable arb is **not** in HOT identity_scope. A T-6d fixture whose latest valid merged current-state proves a qualifying executable arb **is** in the next HOT identity_scope; HOT then uses known source events and does not rediscover the universe (Issue #200). |
 | 4 | UNIVERSE chunk yields at `next_hot_due - safety_margin`; HOT starts on time; UNIVERSE **cursor advances** across **repeated** HOT cycles; generation_work_used increases each chunk; HOT is not starved. |
 | 5 | Far-future qualifying paper_decision from a UNIVERSE chunk appears on `/triggered` and Tracked in that same chunk (`freshness_class=executable` at `as_of=observed_at`). |
 | 6 | Clock advance from T-61m to T-59m promotes the fixture into HOT membership automatically. |

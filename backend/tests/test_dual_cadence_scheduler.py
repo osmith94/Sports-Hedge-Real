@@ -212,6 +212,7 @@ def test_t59m_and_in_play_are_hot_without_waiting_for_universe() -> None:
 
 
 def test_t6d_is_not_in_hot_identity_scope() -> None:
+    """Non-qualifying distant fixtures stay UNIVERSE-only (Issue #200 contrast)."""
     coordinator = get_live_refresh_coordinator()
     coordinator.reset()
     far = _fixture("t6d", kickoff=NOW + timedelta(days=6))

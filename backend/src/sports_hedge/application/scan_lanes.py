@@ -79,6 +79,12 @@ def classify_scan_lane(
 ) -> ScanLane:
     """Return HOT, UNIVERSE, or DROP. Never labels live/completed from time.
 
+    This is the *lifecycle* classifier only: in-play, pre-kickoff horizon,
+    bounded post-kickoff unknown, schedule exception, and explicit terminal.
+    Qualifying-opportunity promotion into HOT identity is applied separately
+    by `FixtureCurrentStateStore` from merged current-state economics
+    (Issue #200). Do not fold solver/UI labels into this function.
+
     Issue #164: explicit terminal provider status leaves current radar immediately.
     Kickoff-passed + unknown may stay HOT only inside the bounded uncertainty
     window; after that it leaves current radar without fabricating a status.

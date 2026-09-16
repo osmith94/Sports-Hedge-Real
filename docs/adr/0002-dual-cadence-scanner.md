@@ -15,7 +15,7 @@ Issue #158 asks for **one scheduler with two coordinated cohorts**, not two inde
 ## Decision
 
 1. Keep a single `LiveRefreshCoordinator` process and **extend the existing** process-memory `FixtureCurrentStateStore` (#161). Do not add a second identity store. Restart honesty: Tracked empty until a collection completes; **UNIVERSE bootstrap is due immediately** on startup. SQLite fixture-inventory persistence is later, not this implementation.
-2. Split work into **HOT** (30s cadence; truthful in-play + ≤60 minutes pre-kickoff + bounded post-kickoff unknown) and **UNIVERSE** (180s generation cadence; 150s per-generation work budget).
+2. Split work into **HOT** (30s cadence; truthful in-play + ≤60 minutes pre-kickoff + bounded post-kickoff unknown + **Issue #200 opportunity-promoted qualifying executable arbs**) and **UNIVERSE** (180s generation cadence; 150s per-generation work budget).
 3. **HOT collector timeout is 25s**, not 45s. Reuse #157’s 4s leftover reserve + 5s coordinator grace so the worst-case envelope is ~30s. HOT must not overlap itself.
 4. **150s is a UNIVERSE generation budget, not one continuous job.** Each scheduler run processes a resumable chunk only until `next_hot_due - safety_margin`, persists cursor/progress, yields, lets HOT run, then resumes. A generation must make forward progress across multiple HOT cycles and must not starve HOT.
 5. HOT preempts UNIVERSE. HOT ordering uses the **simple deterministic key** (truthful in-play → nearest kickoff → current opportunity state). Do not couple the dislocation burst scheduler.
