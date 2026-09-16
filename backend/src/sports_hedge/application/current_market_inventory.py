@@ -87,6 +87,7 @@ class CurrentMarketSlot:
     scan_lane: ScanLane
     last_scanned_at: datetime
     paper_market_ids: tuple[str, ...]
+    evaluated_absent: bool = False
 
 
 def canonical_current_market_key(row: FixtureMarketInventoryRow) -> str:
@@ -190,7 +191,14 @@ def merge_current_market_slots(
     paper_market_ids: tuple[str, ...],
     evaluated: bool,
 ) -> dict[str, CurrentMarketSlot]:
-    """Upsert evaluated canonical markets. Partial/not_evaluated work is a no-op."""
+    """Upsert evaluated canonical markets. Partial/not_evaluated work is a no-op.
+
+    An evaluated observation with no comparable rows is explicit absence for
+    this identity's current slots: stale proving promotion must not survive
+    merely because omission was represented as no row. Older snapshots cannot
+    tombstone newer slots. A non-empty evaluated subset still upserts only the
+    keys it carries and leaves other-lane families in place.
+    """
 
     if not evaluated:
         return dict(existing)
@@ -208,8 +216,39 @@ def merge_current_market_slots(
             scan_lane=lane,
             last_scanned_at=scanned,
             paper_market_ids=paper_market_ids,
+            evaluated_absent=False,
+        )
+    if not incoming_rows:
+        merged = mark_evaluated_absence(
+            merged,
+            scanned_at=scanned,
+            scan_lane=lane,
         )
     return merged
+
+
+def mark_evaluated_absence(
+    existing: dict[str, CurrentMarketSlot],
+    *,
+    scanned_at: datetime,
+    scan_lane: ScanLane,
+) -> dict[str, CurrentMarketSlot]:
+    """Record identity-level evaluated absence without inventing a market row."""
+
+    updated: dict[str, CurrentMarketSlot] = {}
+    for key, slot in existing.items():
+        if not _incoming_supersedes(slot, scanned_at=scanned_at, scan_lane=scan_lane):
+            updated[key] = slot
+            continue
+        updated[key] = CurrentMarketSlot(
+            key=key,
+            row=slot.row,
+            scan_lane=scan_lane,
+            last_scanned_at=scanned_at,
+            paper_market_ids=(),
+            evaluated_absent=True,
+        )
+    return updated
 
 
 def prune_expired_market_slots(
@@ -385,8 +424,11 @@ def apply_current_market_inventory(
     stamped = [
         stamp_current_market_row(slot, now=now, **ttl)
         for slot in slots
-        if now is None
-        or slot_freshness(slot, now=now, **ttl) != FRESHNESS_EXPIRED
+        if not slot.evaluated_absent
+        and (
+            now is None
+            or slot_freshness(slot, now=now, **ttl) != FRESHNESS_EXPIRED
+        )
     ]
     stamped = sort_fixture_inventory_rows(stamped)
     if not stamped:
@@ -396,7 +438,8 @@ def apply_current_market_inventory(
     live_slots = [
         slot
         for slot in slots
-        if now is None or slot_freshness(slot, now=now, **ttl) != FRESHNESS_EXPIRED
+        if not slot.evaluated_absent
+        and (now is None or slot_freshness(slot, now=now, **ttl) != FRESHNESS_EXPIRED)
     ]
     candidates = [candidate_from_current_slot(slot, now=now, **ttl) for slot in live_slots]
     qualifying = sum(1 for item in candidates if headline_band_for(item) is HeadlineBand.QUALIFYING)
@@ -521,6 +564,8 @@ def current_slots_prove_qualifying_opportunity(
 
     evaluated = require_aware_instant(now, "now")
     for slot in slots:
+        if slot.evaluated_absent:
+            continue
         freshness = slot_freshness(
             slot,
             now=evaluated,
