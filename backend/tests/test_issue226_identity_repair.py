@@ -23,7 +23,6 @@ from test_issue200_universe_hot_promotion import (
 from test_issue211_identity_continuity import (
     CANONICAL_ID,
     MB_ANCHORED,
-    MB_SOURCE,
     PM_ANCHORED,
     PM_SOURCE,
     _mb_pm_qualifying_report,
