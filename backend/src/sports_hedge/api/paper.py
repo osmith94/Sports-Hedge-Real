@@ -8,6 +8,7 @@ from logging import getLogger
 from pathlib import Path
 from time import monotonic
 from typing import Any
+from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -1181,6 +1182,18 @@ async def _execute_collection(
     )
 
 
+def scheduled_collection_kwargs() -> dict[str, Any]:
+    """Stable server-owned collect settings. Manual request kwargs never apply."""
+
+    settings = get_settings()
+    return PaperCollectionRequest(
+        minimum_net_edge=Decimal(str(settings.min_net_edge)),
+        maximum_execution_risk=int(settings.max_execution_risk),
+        minimum_mapping_confidence=float(settings.min_mapping_confidence),
+        assumed_latency_ms=int(settings.simulated_latency_ms),
+    ).model_dump()
+
+
 async def server_owned_refresh_tick() -> None:
     """Background tick used when PAPER_LIVE_REFRESH_ENABLED is true."""
 
@@ -1198,7 +1211,7 @@ async def server_owned_refresh_tick() -> None:
     from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
 
     watchlist = get_watchlist_service(get_watchlist_repository())
-    kwargs = coordinator.last_request() or PaperCollectionRequest().model_dump()
+    kwargs = scheduled_collection_kwargs()
 
     async def runner() -> CollectionReport:
         return await _collect_report(
@@ -1460,6 +1473,8 @@ def _persist_decision(
 ) -> None:
     if not decision.canonical_market_id:
         return
+    if not decision.paper_audit_record_id:
+        decision.paper_audit_record_id = str(uuid4())
     history = service.market_intelligence.market_history(
         canonical_market_id=decision.canonical_market_id,
     )

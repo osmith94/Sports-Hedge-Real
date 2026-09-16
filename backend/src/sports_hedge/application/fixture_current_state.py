@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -124,6 +125,7 @@ class FixtureCurrentStateStore:
     """
 
     def __init__(self) -> None:
+        self._lock = threading.RLock()
         self._generation = 0
         self._rows: dict[str, _FixtureRecord] = {}
         self._aliases: dict[str, str] = {}
@@ -132,17 +134,19 @@ class FixtureCurrentStateStore:
         self._has_collection = False
 
     def clear(self, *, keep_tombstones: bool = False) -> None:
-        self._generation = 0
-        self._rows = {}
-        self._aliases = {}
-        self._has_collection = False
-        if not keep_tombstones:
-            self._tombstones = {}
-            self._tombstone_aliases = {}
+        with self._lock:
+            self._generation = 0
+            self._rows = {}
+            self._aliases = {}
+            self._has_collection = False
+            if not keep_tombstones:
+                self._tombstones = {}
+                self._tombstone_aliases = {}
 
     @property
     def generation(self) -> int:
-        return self._generation
+        with self._lock:
+            return self._generation
 
     def replace_from_report(self, report: CollectionReport) -> None:
         """Compatibility generation replace used by explicit diagnostic collects."""
@@ -151,6 +155,18 @@ class FixtureCurrentStateStore:
         self.upsert_from_report(report, scan_lane=ScanLane.UNIVERSE)
 
     def upsert_from_report(
+        self,
+        report: CollectionReport,
+        *,
+        scan_lane: ScanLane | str = ScanLane.UNIVERSE,
+        now: datetime | None = None,
+    ) -> None:
+        with self._lock:
+            self._upsert_from_report_unlocked(
+                report, scan_lane=scan_lane, now=now
+            )
+
+    def _upsert_from_report_unlocked(
         self,
         report: CollectionReport,
         *,
@@ -214,10 +230,14 @@ class FixtureCurrentStateStore:
         self._has_collection = True
 
     def resolve_canonical_id(self, identity: str) -> str | None:
+        with self._lock:
+            return self._resolve_canonical_id_unlocked(identity)
+
+    def _resolve_canonical_id_unlocked(self, identity: str) -> str | None:
         wanted = identity.strip()
         if not wanted:
             return None
-        if self.tombstone_for(wanted) is not None:
+        if self._tombstone_for_unlocked(wanted) is not None:
             return None
         canonical_id = self._aliases.get(wanted)
         if canonical_id is None and wanted in self._rows:
@@ -227,12 +247,15 @@ class FixtureCurrentStateStore:
         return canonical_id
 
     def identities_for(self, identity: str) -> frozenset[str]:
-        canonical_id = self.resolve_canonical_id(identity)
-        if canonical_id is None:
-            return frozenset()
-        aliases = {alias for alias, target in self._aliases.items() if target == canonical_id}
-        aliases.add(canonical_id)
-        return frozenset(aliases)
+        with self._lock:
+            canonical_id = self._resolve_canonical_id_unlocked(identity)
+            if canonical_id is None:
+                return frozenset()
+            aliases = {
+                alias for alias, target in self._aliases.items() if target == canonical_id
+            }
+            aliases.add(canonical_id)
+            return frozenset(aliases)
 
     def detail(
         self,
@@ -240,29 +263,34 @@ class FixtureCurrentStateStore:
         now: datetime | None = None,
         **kwargs: Any,
     ) -> FixtureDetailReadModel | None:
-        if self.tombstone_for(identity) is not None:
-            return None
-        if now is not None:
-            self._evict_non_current(now, **kwargs)
-        canonical_id = self.resolve_canonical_id(identity)
-        if canonical_id is None:
-            return None
-        record = self._rows[canonical_id]
-        record.prune_markets(now, **kwargs)
-        displayed = record.status_fixture(now, **kwargs)
-        if displayed is None:
-            return None
-        if now is not None and classify_scan_lane(
-            displayed, now, **_classify_kwargs(kwargs)
-        ) is ScanLane.DROP:
-            self._drop_identity(canonical_id)
-            return None
-        return FixtureDetailReadModel(
-            fixture=displayed,
-            markets=list(record.display_markets(now, **kwargs)),
-        )
+        with self._lock:
+            if self._tombstone_for_unlocked(identity) is not None:
+                return None
+            if now is not None:
+                self._evict_non_current(now, **kwargs)
+            canonical_id = self._resolve_canonical_id_unlocked(identity)
+            if canonical_id is None:
+                return None
+            record = self._rows[canonical_id]
+            record.prune_markets(now, **kwargs)
+            displayed = record.status_fixture(now, **kwargs)
+            if displayed is None:
+                return None
+            if now is not None and classify_scan_lane(
+                displayed, now, **_classify_kwargs(kwargs)
+            ) is ScanLane.DROP:
+                self._drop_identity(canonical_id)
+                return None
+            return FixtureDetailReadModel(
+                fixture=displayed,
+                markets=list(record.display_markets(now, **kwargs)),
+            )
 
     def tombstone_for(self, identity: str) -> CurrentStateTombstone | None:
+        with self._lock:
+            return self._tombstone_for_unlocked(identity)
+
+    def _tombstone_for_unlocked(self, identity: str) -> CurrentStateTombstone | None:
         wanted = identity.strip()
         if not wanted:
             return None
@@ -270,7 +298,8 @@ class FixtureCurrentStateStore:
         return self._tombstones.get(canonical_id)
 
     def has_collection(self) -> bool:
-        return self._has_collection
+        with self._lock:
+            return self._has_collection
 
     def inventory(
         self,
@@ -284,54 +313,81 @@ class FixtureCurrentStateStore:
         universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
         max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     ) -> list[DiscoveredFixture]:
-        market_kwargs = {
-            "hot_ttl_seconds": hot_ttl_seconds,
-            "universe_ttl_seconds": universe_ttl_seconds,
-            "max_quote_age_ms": max_quote_age_ms,
-        }
-        self._evict_non_current(
-            now,
-            hot_horizon=hot_horizon,
-            post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
-            **market_kwargs,
-        )
-        rows: list[DiscoveredFixture] = []
-        for record in self._rows.values():
-            record.prune_markets(now, **market_kwargs)
-            fixture = record.status_fixture(now, **market_kwargs)
-            if fixture is None:
-                continue
-            membership = self._identity_membership(
-                record,
-                fixture,
+        with self._lock:
+            market_kwargs = {
+                "hot_ttl_seconds": hot_ttl_seconds,
+                "universe_ttl_seconds": universe_ttl_seconds,
+                "max_quote_age_ms": max_quote_age_ms,
+            }
+            self._evict_non_current(
                 now,
-                classify_kwargs={
-                    "hot_horizon": hot_horizon,
-                    "post_kickoff_unknown_horizon": post_kickoff_unknown_horizon,
-                },
-                market_kwargs=market_kwargs,
+                hot_horizon=hot_horizon,
+                post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+                **market_kwargs,
             )
-            if membership is ScanLane.DROP:
-                continue
-            lane, scanned = record.scheduler_lane_scan(membership, fixture)
-            rows.append(
-                fixture.model_copy(
-                    update={
-                        "scan_lane": lane.value,
-                        "last_scanned_at": scanned,
-                        "next_due_at": next_due_at(
-                            scanned,
-                            lane,
-                            hot_interval_seconds=hot_interval_seconds,
-                            universe_interval_seconds=universe_interval_seconds,
-                        ),
-                    }
+            rows: list[DiscoveredFixture] = []
+            for record in list(self._rows.values()):
+                record.prune_markets(now, **market_kwargs)
+                fixture = record.status_fixture(now, **market_kwargs)
+                if fixture is None:
+                    continue
+                membership = self._identity_membership(
+                    record,
+                    fixture,
+                    now,
+                    classify_kwargs={
+                        "hot_horizon": hot_horizon,
+                        "post_kickoff_unknown_horizon": post_kickoff_unknown_horizon,
+                    },
+                    market_kwargs=market_kwargs,
                 )
-            )
-        rows.sort(key=lambda item: (item.kickoff_utc, item.canonical_event_id))
-        return rows
+                if membership is ScanLane.DROP:
+                    continue
+                lane, scanned = record.scheduler_lane_scan(membership, fixture)
+                rows.append(
+                    fixture.model_copy(
+                        update={
+                            "scan_lane": lane.value,
+                            "last_scanned_at": scanned,
+                            "next_due_at": next_due_at(
+                                scanned,
+                                lane,
+                                hot_interval_seconds=hot_interval_seconds,
+                                universe_interval_seconds=universe_interval_seconds,
+                            ),
+                        }
+                    )
+                )
+            rows.sort(key=lambda item: (item.kickoff_utc, item.canonical_event_id))
+            return rows
 
     def current_radar_rows(
+        self,
+        now: datetime,
+        *,
+        hot_horizon=DEFAULT_HOT_HORIZON,
+        post_kickoff_unknown_horizon=DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON,
+        hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
+        universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+        hot_interval_seconds: int = DEFAULT_HOT_INTERVAL_SECONDS,
+        universe_interval_seconds: int = DEFAULT_UNIVERSE_INTERVAL_SECONDS,
+        quote_age_ms_by_market: dict[str, int | None] | None = None,
+        max_quote_age_ms: int = 1000,
+    ) -> list[FixtureRadarRow]:
+        with self._lock:
+            return self._current_radar_rows_unlocked(
+                now,
+                hot_horizon=hot_horizon,
+                post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+                hot_ttl_seconds=hot_ttl_seconds,
+                universe_ttl_seconds=universe_ttl_seconds,
+                hot_interval_seconds=hot_interval_seconds,
+                universe_interval_seconds=universe_interval_seconds,
+                quote_age_ms_by_market=quote_age_ms_by_market,
+                max_quote_age_ms=max_quote_age_ms,
+            )
+
+    def _current_radar_rows_unlocked(
         self,
         now: datetime,
         *,
@@ -453,76 +509,79 @@ class FixtureCurrentStateStore:
         return None
 
     def hot_identity_scope(self, now: datetime, **kwargs: Any) -> list[str]:
-        evaluated = require_aware_instant(now, "now")
-        classify_kwargs = _classify_kwargs(kwargs)
-        market_kwargs = _market_ttl_kwargs(kwargs)
-        self._evict_non_current(evaluated, **classify_kwargs, **market_kwargs)
-        fixtures: list[DiscoveredFixture] = []
-        for record in self._rows.values():
-            record.prune_markets(evaluated, **market_kwargs)
-            fixture = record.status_fixture(evaluated, **market_kwargs)
-            if fixture is None:
-                continue
-            membership = self._identity_membership(
-                record,
-                fixture,
-                evaluated,
-                classify_kwargs=classify_kwargs,
-                market_kwargs=market_kwargs,
-            )
-            if membership is ScanLane.HOT:
-                if current_slots_prove_qualifying_opportunity(
-                    record.live_market_slots(),
-                    now=evaluated,
-                    **market_kwargs,
-                ):
-                    fixture = fixture.model_copy(update={"solver_is_arbitrage": True})
-                fixtures.append(fixture)
-        fixtures.sort(key=hot_sort_key)
-        return [item.canonical_event_id for item in fixtures]
+        with self._lock:
+            evaluated = require_aware_instant(now, "now")
+            classify_kwargs = _classify_kwargs(kwargs)
+            market_kwargs = _market_ttl_kwargs(kwargs)
+            self._evict_non_current(evaluated, **classify_kwargs, **market_kwargs)
+            fixtures: list[DiscoveredFixture] = []
+            for record in list(self._rows.values()):
+                record.prune_markets(evaluated, **market_kwargs)
+                fixture = record.status_fixture(evaluated, **market_kwargs)
+                if fixture is None:
+                    continue
+                membership = self._identity_membership(
+                    record,
+                    fixture,
+                    evaluated,
+                    classify_kwargs=classify_kwargs,
+                    market_kwargs=market_kwargs,
+                )
+                if membership is ScanLane.HOT:
+                    if current_slots_prove_qualifying_opportunity(
+                        record.live_market_slots(),
+                        now=evaluated,
+                        **market_kwargs,
+                    ):
+                        fixture = fixture.model_copy(update={"solver_is_arbitrage": True})
+                    fixtures.append(fixture)
+            fixtures.sort(key=hot_sort_key)
+            return [item.canonical_event_id for item in fixtures]
 
     def known_source_events(self, canonical_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
-        payload: dict[str, list[dict[str, Any]]] = {}
-        for canonical_id in canonical_ids:
-            record = self._rows.get(canonical_id)
-            if record is None:
-                continue
-            events = record.source_events()
-            if not events:
-                continue
-            payload[canonical_id] = [
-                {
-                    "venue": item.venue.value,
-                    "source_event_id": item.source_event_id,
-                    "raw": item.raw,
-                }
-                for item in events
-            ]
-        return payload
+        with self._lock:
+            payload: dict[str, list[dict[str, Any]]] = {}
+            for canonical_id in canonical_ids:
+                record = self._rows.get(canonical_id)
+                if record is None:
+                    continue
+                events = record.source_events()
+                if not events:
+                    continue
+                payload[canonical_id] = [
+                    {
+                        "venue": item.venue.value,
+                        "source_event_id": item.source_event_id,
+                        "raw": item.raw,
+                    }
+                    for item in events
+                ]
+            return payload
 
     def membership_counts(self, now: datetime, **kwargs: Any) -> tuple[int, int]:
-        classify_kwargs = _classify_kwargs(kwargs)
-        market_kwargs = _market_ttl_kwargs(kwargs)
-        self._evict_non_current(now, **classify_kwargs, **market_kwargs)
-        hot = 0
-        universe = 0
-        for record in self._rows.values():
-            record.prune_markets(now, **market_kwargs)
-            fixture = record.status_fixture(now, **market_kwargs)
-            if fixture is None:
-                continue
-            membership = self._identity_membership(
-                record,
-                fixture,
-                now,
-                classify_kwargs=classify_kwargs,
-                market_kwargs=market_kwargs,
-            )
-            if membership is ScanLane.HOT:
-                hot += 1
-            elif membership is ScanLane.UNIVERSE:
-                universe += 1
-        return hot, universe
+        with self._lock:
+            classify_kwargs = _classify_kwargs(kwargs)
+            market_kwargs = _market_ttl_kwargs(kwargs)
+            self._evict_non_current(now, **classify_kwargs, **market_kwargs)
+            hot = 0
+            universe = 0
+            for record in list(self._rows.values()):
+                record.prune_markets(now, **market_kwargs)
+                fixture = record.status_fixture(now, **market_kwargs)
+                if fixture is None:
+                    continue
+                membership = self._identity_membership(
+                    record,
+                    fixture,
+                    now,
+                    classify_kwargs=classify_kwargs,
+                    market_kwargs=market_kwargs,
+                )
+                if membership is ScanLane.HOT:
+                    hot += 1
+                elif membership is ScanLane.UNIVERSE:
+                    universe += 1
+            return hot, universe
 
     def _identity_membership(
         self,
@@ -681,7 +740,14 @@ class _FixtureRecord:
     extra_source_events: tuple[StoredSourceEvent, ...] = ()
     markets: dict[str, CurrentMarketSlot] | None = None
 
-    def set_lane(self, observation: LaneObservation) -> None:
+    def set_lane(self, observation: LaneObservation) -> bool:
+        current = self.hot if observation.scan_lane is ScanLane.HOT else self.universe
+        if current is not None and observation.last_scanned_at < current.last_scanned_at:
+            if observation.source_events:
+                self.extra_source_events = _merge_source_events(
+                    self.extra_source_events, observation.source_events
+                )
+            return False
         if observation.scan_lane is ScanLane.HOT:
             self.hot = observation
         else:
@@ -690,6 +756,7 @@ class _FixtureRecord:
             self.extra_source_events = _merge_source_events(
                 self.extra_source_events, observation.source_events
             )
+        return True
 
     def merge_markets(self, observation: LaneObservation) -> None:
         self.markets = merge_current_market_slots(

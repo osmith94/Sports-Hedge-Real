@@ -199,45 +199,51 @@ class SqlitePaperScanRepository:
         return int(row["value"])
 
     def append_scan(self, record: PaperScanRecord) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO paper_scan_records (
-                    record_id, scanned_at, canonical_event_id, canonical_market_id,
-                    competition, home_team, away_team, kickoff_utc, market_family,
-                    period, line, venues_json, source_market_ids_json,
-                    mapping_confidence, is_arbitrage, eligible_for_paper_simulation,
-                    gross_edge, net_edge, executable_stake_gbp, guaranteed_profit_gbp,
-                    execution_risk_score, execution_risk_band, rejection_reasons_json,
-                    decision_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record.record_id,
-                    record.scanned_at.isoformat(),
-                    record.canonical_event_id,
-                    record.canonical_market_id,
-                    record.competition,
-                    record.home_team,
-                    record.away_team,
-                    record.kickoff_utc.isoformat(),
-                    record.market_family.value,
-                    record.period.value,
-                    _stringify_decimal(record.line),
-                    json.dumps([venue.value for venue in record.venues]),
-                    json.dumps(record.source_market_ids),
-                    record.mapping_confidence,
-                    int(record.is_arbitrage),
-                    int(record.eligible_for_paper_simulation),
-                    _stringify_decimal(record.gross_edge),
-                    _stringify_decimal(record.net_edge),
-                    _stringify_decimal(record.executable_stake_gbp),
-                    _stringify_decimal(record.guaranteed_profit_gbp),
-                    record.execution_risk_score,
-                    record.execution_risk_band,
-                    json.dumps(record.rejection_reasons),
-                    record.decision_json,
-                ),
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO paper_scan_records (
+                        record_id, scanned_at, canonical_event_id, canonical_market_id,
+                        competition, home_team, away_team, kickoff_utc, market_family,
+                        period, line, venues_json, source_market_ids_json,
+                        mapping_confidence, is_arbitrage, eligible_for_paper_simulation,
+                        gross_edge, net_edge, executable_stake_gbp, guaranteed_profit_gbp,
+                        execution_risk_score, execution_risk_band, rejection_reasons_json,
+                        decision_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.record_id,
+                        record.scanned_at.isoformat(),
+                        record.canonical_event_id,
+                        record.canonical_market_id,
+                        record.competition,
+                        record.home_team,
+                        record.away_team,
+                        record.kickoff_utc.isoformat(),
+                        record.market_family.value,
+                        record.period.value,
+                        _stringify_decimal(record.line),
+                        json.dumps([venue.value for venue in record.venues]),
+                        json.dumps(record.source_market_ids),
+                        record.mapping_confidence,
+                        int(record.is_arbitrage),
+                        int(record.eligible_for_paper_simulation),
+                        _stringify_decimal(record.gross_edge),
+                        _stringify_decimal(record.net_edge),
+                        _stringify_decimal(record.executable_stake_gbp),
+                        _stringify_decimal(record.guaranteed_profit_gbp),
+                        record.execution_risk_score,
+                        record.execution_risk_band,
+                        json.dumps(record.rejection_reasons),
+                        record.decision_json,
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            LOGGER.info(
+                "paper_scan_audit_same_persist_attempt record_id=%s",
+                record.record_id,
             )
 
     def list_scans(

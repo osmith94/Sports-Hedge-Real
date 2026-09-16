@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from sports_hedge.domain.models import VenueName
@@ -93,6 +94,113 @@ def _sort_events(items: list[VenueEvent]) -> list[VenueEvent]:
     return sorted(items, key=lambda item: item.source_event_id)
 
 
+_PAIR_KIND = {
+    (VenueName.MATCHBOOK, VenueName.POLYMARKET): "matchbook_polymarket",
+    (VenueName.POLYMARKET, VenueName.MATCHBOOK): "matchbook_polymarket",
+    (VenueName.MATCHBOOK, VenueName.KALSHI): "matchbook_kalshi",
+    (VenueName.KALSHI, VenueName.MATCHBOOK): "matchbook_kalshi",
+    (VenueName.POLYMARKET, VenueName.KALSHI): "polymarket_kalshi",
+    (VenueName.KALSHI, VenueName.POLYMARKET): "polymarket_kalshi",
+}
+
+
+class ClusterPass:
+    """Deterministic union-find clustering that can yield between comparisons."""
+
+    def __init__(
+        self,
+        *,
+        matchbook: list[VenueEvent],
+        polymarket: list[VenueEvent],
+        kalshi: list[VenueEvent],
+        matcher: EventMatcher,
+        max_event_pairs: int,
+    ) -> None:
+        if max_event_pairs <= 0:
+            raise ValueError("max_event_pairs must be positive")
+        self.items = [*matchbook, *polymarket, *kalshi]
+        self.parent: dict[tuple[VenueName, str], tuple[VenueName, str]] = {}
+        self.nodes: dict[tuple[VenueName, str], VenueEvent] = {}
+        self.pair_kinds: dict[tuple[VenueName, str], set[str]] = {}
+        for item in self.items:
+            key = _key(item.venue, item.source_event_id)
+            self.nodes[key] = item
+            self.parent.setdefault(key, key)
+        snapshot_for_bulk = getattr(matcher, "bulk_snapshot", None)
+        self.bulk_matcher = snapshot_for_bulk() if callable(snapshot_for_bulk) else matcher
+        self.could_match = getattr(self.bulk_matcher, "could_match", None)
+
+    def pairs(self) -> Iterator[tuple[VenueEvent, VenueEvent]]:
+        for left_index, left in enumerate(self.items):
+            for right in self.items[left_index + 1 :]:
+                yield left, right
+
+    def _find(self, key: tuple[VenueName, str]) -> tuple[VenueName, str]:
+        parent = self.parent
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    def _union(self, left: VenueEvent, right: VenueEvent) -> None:
+        a = self._find(_key(left.venue, left.source_event_id))
+        b = self._find(_key(right.venue, right.source_event_id))
+        if a != b:
+            self.parent[b] = a
+
+    def consider(self, left: VenueEvent, right: VenueEvent) -> None:
+        could_match = self.could_match
+        if callable(could_match) and not could_match(left.canonical, right.canonical):
+            return
+        match = self.bulk_matcher.match(left.canonical, right.canonical)
+        if not match.matched:
+            return
+        if left.venue is right.venue:
+            self._union(left, right)
+            return
+        kind = _PAIR_KIND.get((left.venue, right.venue))
+        if kind is None:
+            self._union(left, right)
+            return
+        self._union(left, right)
+        for item in (left, right):
+            self.pair_kinds.setdefault(_key(item.venue, item.source_event_id), set()).add(kind)
+
+    def finalize(self) -> tuple[list[FixtureCluster], dict[str, int]]:
+        grouped: dict[tuple[VenueName, str], FixtureCluster] = {}
+        for key, item in self.nodes.items():
+            root = self._find(key)
+            cluster = grouped.setdefault(root, FixtureCluster())
+            if item.venue is VenueName.MATCHBOOK:
+                cluster.matchbook_events.append(item)
+            elif item.venue is VenueName.POLYMARKET:
+                cluster.polymarket_events.append(item)
+            elif item.venue is VenueName.KALSHI:
+                cluster.kalshi_events.append(item)
+            cluster.pair_kinds.update(self.pair_kinds.get(key, set()))
+
+        clusters: list[FixtureCluster] = []
+        for cluster in grouped.values():
+            cluster.matchbook_events = _sort_events(cluster.matchbook_events)
+            cluster.polymarket_events = _sort_events(cluster.polymarket_events)
+            cluster.kalshi_events = _sort_events(cluster.kalshi_events)
+            clusters.append(cluster)
+
+        clusters.sort(key=lambda item: -item.venue_count)
+        counts = {
+            "matchbook_polymarket": sum(
+                1 for item in clusters if item.matchbook_events and item.polymarket_events
+            ),
+            "matchbook_kalshi": sum(
+                1 for item in clusters if item.matchbook_events and item.kalshi_events
+            ),
+            "polymarket_kalshi": sum(
+                1 for item in clusters if item.polymarket_events and item.kalshi_events
+            ),
+        }
+        return clusters, counts
+
+
 def cluster_venue_events(
     *,
     matchbook: list[VenueEvent],
@@ -113,99 +221,16 @@ def cluster_venue_events(
     leftovers remain visible so unmatched coverage is not silently dropped.
     """
 
-    if max_event_pairs <= 0:
-        raise ValueError("max_event_pairs must be positive")
-    items = [*matchbook, *polymarket, *kalshi]
-    parent: dict[tuple[VenueName, str], tuple[VenueName, str]] = {}
-    nodes: dict[tuple[VenueName, str], VenueEvent] = {}
-
-    def add_node(item: VenueEvent) -> None:
-        key = _key(item.venue, item.source_event_id)
-        nodes[key] = item
-        parent.setdefault(key, key)
-
-    for item in items:
-        add_node(item)
-
-    def find(key: tuple[VenueName, str]) -> tuple[VenueName, str]:
-        while parent[key] != key:
-            parent[key] = parent[parent[key]]
-            key = parent[key]
-        return key
-
-    def union(left: VenueEvent, right: VenueEvent) -> None:
-        a = find(_key(left.venue, left.source_event_id))
-        b = find(_key(right.venue, right.source_event_id))
-        if a != b:
-            parent[b] = a
-
-    pair_kinds: dict[tuple[VenueName, str], set[str]] = {}
-
-    def mark_pair(left: VenueEvent, right: VenueEvent, kind: str) -> None:
-        union(left, right)
-        for item in (left, right):
-            pair_kinds.setdefault(_key(item.venue, item.source_event_id), set()).add(kind)
-
-    pair_kind = {
-        (VenueName.MATCHBOOK, VenueName.POLYMARKET): "matchbook_polymarket",
-        (VenueName.POLYMARKET, VenueName.MATCHBOOK): "matchbook_polymarket",
-        (VenueName.MATCHBOOK, VenueName.KALSHI): "matchbook_kalshi",
-        (VenueName.KALSHI, VenueName.MATCHBOOK): "matchbook_kalshi",
-        (VenueName.POLYMARKET, VenueName.KALSHI): "polymarket_kalshi",
-        (VenueName.KALSHI, VenueName.POLYMARKET): "polymarket_kalshi",
-    }
-
-    snapshot_for_bulk = getattr(matcher, "bulk_snapshot", None)
-    bulk_matcher = snapshot_for_bulk() if callable(snapshot_for_bulk) else matcher
-    could_match = getattr(bulk_matcher, "could_match", None)
-    for left_index, left in enumerate(items):
-        for right in items[left_index + 1 :]:
-            if callable(could_match) and not could_match(left.canonical, right.canonical):
-                continue
-            match = bulk_matcher.match(left.canonical, right.canonical)
-            if not match.matched:
-                continue
-            if left.venue is right.venue:
-                union(left, right)
-                continue
-            kind = pair_kind.get((left.venue, right.venue))
-            if kind is None:
-                union(left, right)
-            else:
-                mark_pair(left, right, kind)
-
-    grouped: dict[tuple[VenueName, str], FixtureCluster] = {}
-    for key, item in nodes.items():
-        root = find(key)
-        cluster = grouped.setdefault(root, FixtureCluster())
-        if item.venue is VenueName.MATCHBOOK:
-            cluster.matchbook_events.append(item)
-        elif item.venue is VenueName.POLYMARKET:
-            cluster.polymarket_events.append(item)
-        elif item.venue is VenueName.KALSHI:
-            cluster.kalshi_events.append(item)
-        cluster.pair_kinds.update(pair_kinds.get(key, set()))
-
-    clusters: list[FixtureCluster] = []
-    for cluster in grouped.values():
-        cluster.matchbook_events = _sort_events(cluster.matchbook_events)
-        cluster.polymarket_events = _sort_events(cluster.polymarket_events)
-        cluster.kalshi_events = _sort_events(cluster.kalshi_events)
-        clusters.append(cluster)
-
-    clusters.sort(key=lambda item: -item.venue_count)
-    counts = {
-        "matchbook_polymarket": sum(
-            1 for item in clusters if item.matchbook_events and item.polymarket_events
-        ),
-        "matchbook_kalshi": sum(
-            1 for item in clusters if item.matchbook_events and item.kalshi_events
-        ),
-        "polymarket_kalshi": sum(
-            1 for item in clusters if item.polymarket_events and item.kalshi_events
-        ),
-    }
-    return clusters, counts
+    cluster_pass = ClusterPass(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=matcher,
+        max_event_pairs=max_event_pairs,
+    )
+    for left, right in cluster_pass.pairs():
+        cluster_pass.consider(left, right)
+    return cluster_pass.finalize()
 
 
 def to_venue_event(normalized: object, venue: VenueName) -> VenueEvent:

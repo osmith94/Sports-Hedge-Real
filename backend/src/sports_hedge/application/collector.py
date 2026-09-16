@@ -20,11 +20,11 @@ from sports_hedge.application.executable_liquidity import (
     select_fixture_headline,
 )
 from sports_hedge.application.fixture_clusters import (
+    ClusterPass,
     FixtureCluster,
     cluster_canonical_event_id,
     cluster_identity_aliases,
     cluster_member_events,
-    cluster_venue_events,
     to_venue_event,
 )
 from sports_hedge.application.fixture_inventory import (
@@ -184,6 +184,8 @@ _PROVIDER_CALL_STAGE = {
     "order_book": "book_depth",
 }
 DEFAULT_CLUSTER_CONCURRENCY = 8
+CLUSTER_COMPARISON_YIELD_EVERY = 8
+NORMALIZE_EVENT_YIELD_EVERY = 8
 DEFAULT_PROVIDER_CONCURRENCY = {
     VenueName.MATCHBOOK: 4,
     VenueName.POLYMARKET: 8,
@@ -581,6 +583,7 @@ class ReadOnlyCrossVenueCollector:
         fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = {}
         discovered_fixtures: list[DiscoveredFixture] = []
         cancelled = False
+        clustering_truncated = False
         resolved_lane = (scan_lane or "").strip().casefold() or None
         hot_scope = {item.strip() for item in (identity_scope or []) if item and item.strip()}
         skip_ids = {item.strip() for item in (skip_event_ids or []) if item and item.strip()}
@@ -664,13 +667,13 @@ class ReadOnlyCrossVenueCollector:
                     50,
                 )
                 skipped_out_of_scope = mb_scope.skipped + pm_scope.skipped + k_scope.skipped
-                matchbook_events = self._normalize_events(
+                matchbook_events = await self._normalize_events(
                     mb_scope.allowed, venue=VenueName.MATCHBOOK, issues=issues
                 )
-                polymarket_events = self._normalize_events(
+                polymarket_events = await self._normalize_events(
                     pm_scope.allowed, venue=VenueName.POLYMARKET, issues=issues
                 )
-                kalshi_events = self._normalize_events(
+                kalshi_events = await self._normalize_events(
                     k_scope.allowed, venue=VenueName.KALSHI, issues=issues
                 )
                 queried_series_ids = _resolved_queried_series_ids(
@@ -684,13 +687,18 @@ class ReadOnlyCrossVenueCollector:
                     to_venue_event(event, VenueName.POLYMARKET) for event in polymarket_events
                 ]
                 k_items = [to_venue_event(event, VenueName.KALSHI) for event in kalshi_events]
-                clusters, pair_counts = cluster_venue_events(
+                clusters, pair_counts, clustering_truncated = await self._cluster_venue_events_cooperative(
                     matchbook=mb_items,
                     polymarket=pm_items,
                     kalshi=k_items,
-                    matcher=self.event_matcher,
                     max_event_pairs=max_event_pairs,
                 )
+                if clustering_truncated and not any(
+                    issue.detail == "scan_cycle_deadline_reached" for issue in issues
+                ):
+                    issues.append(
+                        CollectorIssue(stage="normalize_match", detail="scan_cycle_deadline_reached")
+                    )
                 if (
                     identity_scope is not None
                     or skip_ids
@@ -719,28 +727,40 @@ class ReadOnlyCrossVenueCollector:
                 "assumed_latency_ms": assumed_latency_ms,
                 "recent_volatility_bps": recent_volatility_bps,
             }
-            with self._stage("cluster_scan"):
-                (
-                    cluster_rows,
-                    decisions,
-                    fixture_markets,
-                    normalized_matchbook_markets,
-                    normalized_polymarket_markets,
-                    normalized_kalshi_markets,
-                    matched_market_pairs,
-                    order_books_fetched,
-                ) = await self._scan_clusters_bounded(
+            if clustering_truncated and (
+                self._deadline_reached() or self._hard_deadline_reached()
+            ):
+                _append_deadline_leftovers(
                     clusters,
-                    seen_at=started_at,
+                    discovered_fixtures=discovered_fixtures,
+                    issues=issues,
+                    started_at=started_at,
                     polymarket_events=polymarket_events,
                     queried_series_ids=queried_series_ids,
-                    matchbook_market_filters=matchbook_market_filters or {},
-                    polymarket_market_filters=polymarket_market_filters or {},
-                    max_market_pairs_per_event=max_market_pairs_per_event,
-                    scan_kwargs=scan_kwargs,
-                    issues=issues,
                 )
-                discovered_fixtures.extend(cluster_rows)
+            else:
+                with self._stage("cluster_scan"):
+                    (
+                        cluster_rows,
+                        decisions,
+                        fixture_markets,
+                        normalized_matchbook_markets,
+                        normalized_polymarket_markets,
+                        normalized_kalshi_markets,
+                        matched_market_pairs,
+                        order_books_fetched,
+                    ) = await self._scan_clusters_bounded(
+                        clusters,
+                        seen_at=started_at,
+                        polymarket_events=polymarket_events,
+                        queried_series_ids=queried_series_ids,
+                        matchbook_market_filters=matchbook_market_filters or {},
+                        polymarket_market_filters=polymarket_market_filters or {},
+                        max_market_pairs_per_event=max_market_pairs_per_event,
+                        scan_kwargs=scan_kwargs,
+                        issues=issues,
+                    )
+                    discovered_fixtures.extend(cluster_rows)
         except asyncio.CancelledError:
             cancelled = True
             acknowledge_task_cancellation()
@@ -2017,7 +2037,33 @@ class ReadOnlyCrossVenueCollector:
             if prioritized:
                 await asyncio.gather(*[_one_kalshi(market) for market in prioritized])
 
-    def _normalize_events(
+    async def _cluster_venue_events_cooperative(
+        self,
+        *,
+        matchbook: list[Any],
+        polymarket: list[Any],
+        kalshi: list[Any],
+        max_event_pairs: int,
+    ) -> tuple[list[FixtureCluster], dict[str, int], bool]:
+        cluster_pass = ClusterPass(
+            matchbook=matchbook,
+            polymarket=polymarket,
+            kalshi=kalshi,
+            matcher=self.event_matcher,
+            max_event_pairs=max_event_pairs,
+        )
+        truncated = False
+        for index, (left, right) in enumerate(cluster_pass.pairs()):
+            if index % CLUSTER_COMPARISON_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+                if self._deadline_reached() or self._hard_deadline_reached():
+                    truncated = True
+                    break
+            cluster_pass.consider(left, right)
+        clusters, counts = cluster_pass.finalize()
+        return clusters, counts, truncated
+
+    async def _normalize_events(
         self,
         payloads: list[dict[str, Any]],
         *,
@@ -2032,7 +2078,9 @@ class ReadOnlyCrossVenueCollector:
             if venue == VenueName.POLYMARKET
             else self.kalshi_normalizer
         )
-        for payload in payloads:
+        for index, payload in enumerate(payloads):
+            if index % NORMALIZE_EVENT_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
             source_id = str(
                 payload.get("id") or payload.get("event_ticker") or payload.get("ticker") or ""
             ) or None

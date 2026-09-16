@@ -27,6 +27,28 @@ class VenueNormalizationError(ValueError):
 
 _FIXTURE_SEPARATOR = re.compile(r"\s+(?:v|vs\.?|versus)\s+", re.IGNORECASE)
 _NUMBER = re.compile(r"(?<!\d)(\d+(?:\.\d+)?)(?!\d)")
+_NEGATION_PREFIXES = (
+    "not",
+    "no",
+    "without",
+    "excluding",
+    "except",
+    "never",
+    "does not",
+    "do not",
+    "doesn t",
+    "don t",
+    "doesnt",
+    "dont",
+)
+_COMPOUND_INCLUDE_ET_PENALTIES = re.compile(
+    r"including extra time(?: and| plus)? penalties"
+)
+_COMPOUND_EXCLUDE_ET_PENALTIES = re.compile(
+    r"(?:not including|excluding|without) extra time(?: and| plus)? penalties"
+    r"|extra time and penalties do not count"
+    r"|extra time and penalties don t count"
+)
 
 
 class MatchbookNormalizer:
@@ -594,6 +616,93 @@ def _kalshi_market_family(
     raise VenueNormalizationError(f"Unsupported Kalshi sports market: {title}")
 
 
+def _prefix_negates(prefix: str) -> bool:
+    words = " ".join(prefix.split()).split()
+    if not words:
+        return False
+    last = words[-1]
+    last_two = " ".join(words[-2:]) if len(words) >= 2 else last
+    return last in _NEGATION_PREFIXES or last_two in _NEGATION_PREFIXES
+
+
+def _phrase_polarity(text: str, phrase: str) -> bool | None:
+    """True if phrase is affirmed, False if negated, None if absent or conflicted."""
+
+    affirmed = False
+    negated = False
+    start = 0
+    while True:
+        pos = text.find(phrase, start)
+        if pos < 0:
+            break
+        if _prefix_negates(text[:pos]):
+            negated = True
+        else:
+            affirmed = True
+        start = pos + len(phrase)
+    if affirmed and negated:
+        return None
+    if affirmed:
+        return True
+    if negated:
+        return False
+    return None
+
+
+def classify_settlement_wording(text: str) -> tuple[SettlementScope, bool | None, bool | None]:
+    """Map rules text onto the fingerprint model, or UNKNOWN when incomplete.
+
+    Fail closed: negation must not parse as inclusion, and compound extra-time
+    plus penalties must not collapse to a partial extra-time-only truth.
+    """
+
+    normalized = normalize_text(text)
+    if not normalized or normalized in {"[]"}:
+        return SettlementScope.UNKNOWN, None, None
+
+    include_matches = list(_COMPOUND_INCLUDE_ET_PENALTIES.finditer(normalized))
+    exclude_matches = list(_COMPOUND_EXCLUDE_ET_PENALTIES.finditer(normalized))
+    include_affirmed = any(
+        not _prefix_negates(normalized[:match.start()]) for match in include_matches
+    )
+    include_negated = bool(exclude_matches) or any(
+        _prefix_negates(normalized[:match.start()]) for match in include_matches
+    )
+    if include_affirmed and include_negated:
+        return SettlementScope.UNKNOWN, None, None
+    if include_negated:
+        return SettlementScope.REGULATION_TIME, False, False
+    if include_affirmed:
+        return SettlementScope.INCLUDING_PENALTIES, True, True
+
+    extra_time = _phrase_polarity(normalized, "including extra time")
+    if extra_time is None and "including extra time" not in normalized:
+        extra_time = _phrase_polarity(normalized, "include extra time")
+    if extra_time is None and "including extra time" not in normalized and "include extra time" not in normalized:
+        extra_time = _phrase_polarity(normalized, "includes extra time")
+    penalties = _phrase_polarity(normalized, "including penalties")
+    if penalties is None and "including penalties" not in normalized:
+        penalties = _phrase_polarity(normalized, "include penalties")
+
+    if extra_time is True and penalties is True:
+        return SettlementScope.INCLUDING_PENALTIES, True, True
+    if extra_time is True and penalties is not True:
+        return SettlementScope.INCLUDING_EXTRA_TIME, True, False
+    if extra_time is False and penalties is True:
+        return SettlementScope.UNKNOWN, None, None
+    if extra_time is False:
+        return SettlementScope.REGULATION_TIME, False, False
+    if penalties is True:
+        return SettlementScope.INCLUDING_PENALTIES, True, True
+    if penalties is False and extra_time is None:
+        if "90 minutes" in normalized or "regulation time" in normalized:
+            return SettlementScope.REGULATION_TIME, False, False
+        return SettlementScope.UNKNOWN, None, None
+    if "90 minutes" in normalized or "regulation time" in normalized:
+        return SettlementScope.REGULATION_TIME, False, False
+    return SettlementScope.UNKNOWN, None, None
+
+
 def _kalshi_settlement(
     payload: dict[str, Any],
     *,
@@ -616,33 +725,9 @@ def _kalshi_settlement(
                 json.dumps(series.get("settlement_sources") or []),
             ]
         )
-    text = normalize_text(" ".join(str(value) for value in parts if value))
-    if not text.strip() or text.strip() in {"[]", ""}:
-        return SettlementFingerprint(
-            scope=SettlementScope.UNKNOWN,
-            period=period,
-            line=line if family in {MarketFamily.TOTAL_GOALS, MarketFamily.ASIAN_HANDICAP} else None,
-            push_possible=_family_push_possible(family, line),
-            extra_time_included=None,
-            penalties_included=None,
-            source_rule_version=str(_first(payload, "ticker", "market_ticker") or "") or None,
-        )
-    if "including penalties" in text:
-        scope = SettlementScope.INCLUDING_PENALTIES
-        extra_time = True
-        penalties = True
-    elif "including extra time" in text:
-        scope = SettlementScope.INCLUDING_EXTRA_TIME
-        extra_time = True
-        penalties = False
-    elif "90 minutes" in text or "regulation time" in text or "regulation-time" in text:
-        scope = SettlementScope.REGULATION_TIME
-        extra_time = False
-        penalties = False
-    else:
-        scope = SettlementScope.UNKNOWN
-        extra_time = None
-        penalties = None
+    scope, extra_time, penalties = classify_settlement_wording(
+        " ".join(str(value) for value in parts if value)
+    )
     return SettlementFingerprint(
         scope=scope,
         period=period,
@@ -1419,23 +1504,7 @@ def _polymarket_settlement(
         )
         if value
     )
-    text = normalize_text(rules_text)
-    if "including penalties" in text:
-        scope = SettlementScope.INCLUDING_PENALTIES
-        extra_time = True
-        penalties = True
-    elif "including extra time" in text:
-        scope = SettlementScope.INCLUDING_EXTRA_TIME
-        extra_time = True
-        penalties = False
-    elif "90 minutes" in text or "regulation time" in text:
-        scope = SettlementScope.REGULATION_TIME
-        extra_time = False
-        penalties = False
-    else:
-        scope = SettlementScope.UNKNOWN
-        extra_time = None
-        penalties = None
+    scope, extra_time, penalties = classify_settlement_wording(rules_text)
     if family is MarketFamily.TO_QUALIFY:
         period = FootballPeriod.FULL_TIME
         line = None

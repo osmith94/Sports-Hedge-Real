@@ -107,6 +107,7 @@ class PaperScanDecision(BaseModel):
     live_score_supported: bool = False
     home_score: int | None = Field(default=None, ge=0)
     away_score: int | None = Field(default=None, ge=0)
+    paper_audit_record_id: str | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> "PaperScanDecision":

@@ -131,6 +131,7 @@ def build_paper_scan_record(
     venues = sorted({item.venue for item in history}, key=lambda venue: venue.value)
 
     return PaperScanRecord(
+        record_id=decision.paper_audit_record_id or str(uuid4()),
         scanned_at=decision.scanned_at,
         canonical_event_id=decision.canonical_event_id,
         canonical_market_id=decision.canonical_market_id,
