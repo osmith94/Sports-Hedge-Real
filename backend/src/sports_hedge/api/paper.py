@@ -102,8 +102,8 @@ from sports_hedge.treasury.service import PaperTreasuryError
 from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import (
     MatchbookAuthError,
-    MatchbookClient,
     MatchbookDiscoveryError,
+    get_shared_matchbook_client,
 )
 from sports_hedge.venues.polymarket import PolymarketClient
 
@@ -966,7 +966,7 @@ async def _collect_report(
     enabled_venues: list[VenueName] | None = None,
 ) -> CollectionReport:
     settings = get_settings()
-    matchbook = MatchbookClient(settings)
+    matchbook = get_shared_matchbook_client(settings)
     polymarket = PolymarketClient(settings)
     kalshi = KalshiClient(settings)
     collector = ReadOnlyCrossVenueCollector(
@@ -1007,7 +1007,9 @@ async def _collect_report(
         )
     finally:
         acknowledge_task_cancellation()
-        await _aclose_soon(matchbook, polymarket, kalshi)
+        # Reuse the process-local Matchbook session across HOT/UNIVERSE/manual
+        # collections. Close Polymarket/Kalshi HTTP clients only.
+        await _aclose_soon(polymarket, kalshi)
 
 
 def _run_paper_position_management(
