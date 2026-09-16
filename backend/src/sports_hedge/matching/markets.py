@@ -8,6 +8,7 @@ from sports_hedge.matching.learned_rules import (
     MappingProvenance,
     MappingRuleType,
     economic_mismatch_reasons,
+    participant_identity_preserved,
 )
 
 
@@ -54,6 +55,16 @@ class MarketMatcher:
                     "competition_identity_unproven",
                     *event_result.reasons,
                 ],
+                provenance=event_result.provenance,
+            )
+        if not (
+            participant_identity_preserved(left.event.home_team, right.event.home_team)
+            and participant_identity_preserved(left.event.away_team, right.event.away_team)
+        ):
+            return MarketMatchResult(
+                matched=False,
+                confidence=event_result.confidence,
+                reasons=["event_mismatch", "participant_identity_unproven", *event_result.reasons],
                 provenance=event_result.provenance,
             )
 
