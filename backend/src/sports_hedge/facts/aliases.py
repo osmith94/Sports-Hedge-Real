@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from sports_hedge.normalization.text import AliasRegistry
 
+# Conservative affixes only. Never drop United/City/Athletic-style identity terms.
+SAFE_TEAM_AFFIX_TOKENS = frozenset({"fc", "cf", "afc", "sc"})
+
 
 def _registry() -> AliasRegistry:
     aliases = AliasRegistry()
@@ -55,6 +58,7 @@ def _registry() -> AliasRegistry:
         "Alaves": "Deportivo Alaves",
         "Mallorca": "Mallorca",
         "Villarreal": "Villarreal",
+        "Villarreal CF": "Villarreal",
         "Sevilla": "Sevilla",
         "Valencia": "Valencia",
         "Osasuna": "Osasuna",
@@ -67,6 +71,22 @@ def _registry() -> AliasRegistry:
         "Elche": "Elche",
         "Elche CF": "Elche",
         "Levante": "Levante",
+        "Malaga": "Malaga",
+        "Malaga CF": "Malaga",
+        "Málaga": "Malaga",
+        "Málaga CF": "Malaga",
+        # Bundesliga / observed Matchbook vs Kalshi provider variants
+        "Bayern Munich": "Bayern Munich",
+        "FC Bayern München": "Bayern Munich",
+        "FC Bayern Munchen": "Bayern Munich",
+        "Bayern München": "Bayern Munich",
+        "Bayern Munchen": "Bayern Munich",
+        "FC Bayern Munich": "Bayern Munich",
+        "FC Bayern": "Bayern Munich",
+        "Union Berlin": "Union Berlin",
+        "1. FC Union Berlin": "Union Berlin",
+        "1 FC Union Berlin": "Union Berlin",
+        "FC Union Berlin": "Union Berlin",
     }
     for alias, canonical in pairs.items():
         aliases.add(alias, canonical)
@@ -75,7 +95,45 @@ def _registry() -> AliasRegistry:
 
 
 football_alias_registry = _registry()
+_CANONICAL_TEAM_NAMES = frozenset(football_alias_registry.aliases.values())
+
+
+def _canonical_remainder_after_safe_affixes(normalized: str) -> str | None:
+    """Rewrite only when the remainder is already a curated canonical club.
+
+    This is not a global FC/CF strip. Unknown remainder stays unchanged so
+    senior vs youth/women/reserves and same-city clubs remain fail-closed.
+    """
+
+    tokens = normalized.split()
+    if len(tokens) < 2:
+        return None
+    if tokens[-1] in SAFE_TEAM_AFFIX_TOKENS:
+        remainder = " ".join(tokens[:-1])
+        if remainder in _CANONICAL_TEAM_NAMES:
+            return remainder
+    if tokens[0] in SAFE_TEAM_AFFIX_TOKENS:
+        remainder = " ".join(tokens[1:])
+        if remainder in _CANONICAL_TEAM_NAMES:
+            return remainder
+    if tokens[0].isdigit() and len(tokens) >= 3 and tokens[1] in SAFE_TEAM_AFFIX_TOKENS:
+        remainder = " ".join(tokens[2:])
+        if remainder in _CANONICAL_TEAM_NAMES:
+            return remainder
+    return None
+
+
+def curated_team_names_conflict(left: str, right: str) -> bool:
+    """True when both names are curated canonicals and they are different clubs."""
+
+    if left == right:
+        return False
+    return left in _CANONICAL_TEAM_NAMES and right in _CANONICAL_TEAM_NAMES
 
 
 def resolve_team_name(value: str) -> str:
-    return football_alias_registry.resolve(value)
+    resolved = football_alias_registry.resolve(value)
+    if resolved in _CANONICAL_TEAM_NAMES:
+        return resolved
+    stripped = _canonical_remainder_after_safe_affixes(resolved)
+    return stripped if stripped is not None else resolved

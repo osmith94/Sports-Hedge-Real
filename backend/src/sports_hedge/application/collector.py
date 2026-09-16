@@ -168,6 +168,9 @@ DEFAULT_MAX_EVENT_PAIRS = 60
 SCAN_FINALISATION_RESERVE_SECONDS = 4.0
 MIN_PROVIDER_WAIT_SECONDS = 0.05
 PROVIDER_CANCEL_DRAIN_SECONDS = 0.05
+# list_events of one hung venue must not consume the entire soft budget before
+# clustering/evaluation of fixtures already returned by healthy venues.
+MIN_POST_DISCOVERY_SOFT_SECONDS = 1.5
 
 DIAGNOSTIC_PROVIDERS = ("matchbook", "polymarket", "kalshi")
 DIAGNOSTIC_STAGES = (
@@ -751,40 +754,31 @@ class ReadOnlyCrossVenueCollector:
                 "assumed_latency_ms": assumed_latency_ms,
                 "recent_volatility_bps": recent_volatility_bps,
             }
-            if clustering_truncated and (
-                self._deadline_reached() or self._hard_deadline_reached()
-            ):
-                _append_deadline_leftovers(
+            # Truncated clustering still scans whatever union-find completed.
+            # Skipping scan here leftovered the whole discovered universe as
+            # scan_budget_exhausted even when healthy venues had already returned.
+            with self._stage("cluster_scan"):
+                (
+                    cluster_rows,
+                    decisions,
+                    fixture_markets,
+                    normalized_matchbook_markets,
+                    normalized_polymarket_markets,
+                    normalized_kalshi_markets,
+                    matched_market_pairs,
+                    order_books_fetched,
+                ) = await self._scan_clusters_bounded(
                     clusters,
-                    discovered_fixtures=discovered_fixtures,
-                    issues=issues,
-                    started_at=started_at,
+                    seen_at=started_at,
                     polymarket_events=polymarket_events,
                     queried_series_ids=queried_series_ids,
+                    matchbook_market_filters=matchbook_market_filters or {},
+                    polymarket_market_filters=polymarket_market_filters or {},
+                    max_market_pairs_per_event=max_market_pairs_per_event,
+                    scan_kwargs=scan_kwargs,
+                    issues=issues,
                 )
-            else:
-                with self._stage("cluster_scan"):
-                    (
-                        cluster_rows,
-                        decisions,
-                        fixture_markets,
-                        normalized_matchbook_markets,
-                        normalized_polymarket_markets,
-                        normalized_kalshi_markets,
-                        matched_market_pairs,
-                        order_books_fetched,
-                    ) = await self._scan_clusters_bounded(
-                        clusters,
-                        seen_at=started_at,
-                        polymarket_events=polymarket_events,
-                        queried_series_ids=queried_series_ids,
-                        matchbook_market_filters=matchbook_market_filters or {},
-                        polymarket_market_filters=polymarket_market_filters or {},
-                        max_market_pairs_per_event=max_market_pairs_per_event,
-                        scan_kwargs=scan_kwargs,
-                        issues=issues,
-                    )
-                    discovered_fixtures.extend(cluster_rows)
+                discovered_fixtures.extend(cluster_rows)
         except asyncio.CancelledError:
             cancelled = True
             acknowledge_task_cancellation()
@@ -870,6 +864,29 @@ class ReadOnlyCrossVenueCollector:
             return 0.0
         hard = self._remaining_assembly()
         capped = min(requested, remaining, hard)
+        if capped < MIN_PROVIDER_WAIT_SECONDS:
+            return 0.0
+        return capped
+
+    def _discovery_timeout_budget(self, requested: float) -> float:
+        """Cap list_events so clustering and evaluation keep a reserved soft slice.
+
+        Long cycles still use the configured venue timeout. Short Full Sweep
+        chunks reserve ``MIN_POST_DISCOVERY_SOFT_SECONDS`` so a hung/degraded
+        venue cannot leftover the whole discovered universe unevaluated.
+        """
+
+        remaining_soft = self._remaining_soft()
+        hard = self._remaining_assembly()
+        if remaining_soft is None:
+            capped = requested if self._op_deadline is None else min(requested, hard)
+            return 0.0 if capped < MIN_PROVIDER_WAIT_SECONDS else capped
+        reserved = MIN_POST_DISCOVERY_SOFT_SECONDS
+        if remaining_soft <= reserved + MIN_PROVIDER_WAIT_SECONDS:
+            available = remaining_soft * 0.5
+        else:
+            available = remaining_soft - reserved
+        capped = min(requested, max(0.0, available), hard)
         if capped < MIN_PROVIDER_WAIT_SECONDS:
             return 0.0
         return capped
@@ -972,6 +989,8 @@ class ReadOnlyCrossVenueCollector:
                     close()
             return default
         # Wrapper tasks only; inner `_await_bounded` owns provider call/cancel/orphan counts.
+        # Inner list_events already uses the discovery budget, so wait the remaining
+        # soft slice here and let timed-out venues record health before returning.
         tasks = [asyncio.create_task(coro) for coro in coros]
         try:
             _done, pending = await asyncio.wait(tasks, timeout=remaining)
@@ -1147,7 +1166,7 @@ class ReadOnlyCrossVenueCollector:
         issues: list[CollectorIssue],
         venue_health: dict[str, str],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        timeout = self._timeout_budget(self._op_venue_timeout)
+        timeout = self._discovery_timeout_budget(self._op_venue_timeout)
         started = monotonic()
         if timeout <= 0:
             self._record_timeout("list_events", venue)
@@ -1253,6 +1272,24 @@ class ReadOnlyCrossVenueCollector:
             for item in discovered_fixtures
             if item.market_evaluation_state == MarketEvaluationState.EVALUATED.value
         )
+        identity_unmatched_n = sum(
+            1
+            for item in discovered_fixtures
+            if item.market_evaluation_state == MarketEvaluationState.EVALUATED.value
+            and item.no_comparison_reason == EVENT_IDENTITY_MISMATCH
+        )
+        no_comparable_n = sum(
+            1
+            for item in discovered_fixtures
+            if item.market_evaluation_state == MarketEvaluationState.EVALUATED.value
+            and (item.matched_equivalent_count or 0) == 0
+        )
+        fetch_unavailable_n = sum(
+            1
+            for item in discovered_fixtures
+            if item.market_evaluation_state
+            == MarketEvaluationState.MARKET_FETCH_UNAVAILABLE.value
+        )
         qualifying = sum(1 for item in discovered_fixtures if item.solver_is_arbitrage)
         equivalent = sum(item.matched_equivalent_count or 0 for item in discovered_fixtures)
         matching_coverage = _matching_coverage(
@@ -1335,6 +1372,16 @@ class ReadOnlyCrossVenueCollector:
             "clusters_leftover": leftover_n,
             "evaluated_count": evaluated_n,
             "not_evaluated_count": leftover_n,
+            "identity_unmatched_count": identity_unmatched_n,
+            "no_comparable_markets_count": no_comparable_n,
+            "market_fetch_unavailable_count": fetch_unavailable_n,
+            "generation_resume_pending": bool(leftover_n > 0 and generation_resume),
+            "provider_unavailable": {
+                venue: health
+                for venue, health in venue_health.items()
+                if health in {"unavailable", "timeout", VENUE_HEALTH_DISABLED}
+            },
+            "scan_deadline_exhausted": leftover_n > 0 or self._deadline_reached() or cancelled,
             "timeout_count": timeout_count,
             "cancel_count": self._provider_cancels,
             "providers": attributed["providers"],
@@ -2114,7 +2161,10 @@ class ReadOnlyCrossVenueCollector:
         for index, (left, right) in enumerate(cluster_pass.pairs()):
             if index % CLUSTER_COMPARISON_YIELD_EVERY == 0:
                 await asyncio.sleep(0)
-                if self._deadline_reached() or self._hard_deadline_reached():
+                # Identity clustering is in-process. Abort only on the hard
+                # deadline so a just-elapsed soft budget cannot freeze splits
+                # before any consider() runs.
+                if self._hard_deadline_reached():
                     truncated = True
                     break
             cluster_pass.consider(left, right)

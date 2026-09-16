@@ -7,7 +7,7 @@ from functools import lru_cache
 from pydantic import BaseModel, Field
 
 from sports_hedge.domain.football import CanonicalEvent, CanonicalMarket
-from sports_hedge.facts.aliases import resolve_team_name
+from sports_hedge.facts.aliases import curated_team_names_conflict, resolve_team_name
 from sports_hedge.matching.learned_rules import (
     AppliedLearnedRule,
     LearnedMappingApplicator,
@@ -93,6 +93,10 @@ class EventMatcher:
         right_home, right_away, _ = self._resolved_teams(
             right, left, market=right_market, counterpart_market=left_market
         )
+        if curated_team_names_conflict(left_home, right_home) or curated_team_names_conflict(
+            left_away, right_away
+        ):
+            return False
         home_upper = SequenceMatcher(a=left_home, b=right_home).quick_ratio()
         away_upper = SequenceMatcher(a=left_away, b=right_away).quick_ratio()
         tolerance_seconds = self.kickoff_tolerance.total_seconds()
@@ -147,6 +151,15 @@ class EventMatcher:
         )
         applied = [*left_applied, *right_applied]
         provenance = provenance_from_applied(applied)
+        if curated_team_names_conflict(left_home, right_home) or curated_team_names_conflict(
+            left_away, right_away
+        ):
+            return EventMatchResult(
+                matched=False,
+                confidence=0.0,
+                reasons=["curated_team_mismatch"],
+                provenance=provenance,
+            )
 
         home_score = self._similarity(left_home, right_home)
         away_score = self._similarity(left_away, right_away)
