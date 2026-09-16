@@ -24,7 +24,9 @@ import {
   venuePresent,
   venuePriceLabel,
 } from "../lib/discovered-fixture-display";
-import { kickoffLocalLabel, kickoffRelativeLabel } from "../lib/format";
+import { kickoffLocalLabel } from "../lib/format";
+import { dualScanStatusLines } from "../lib/scan-status-display";
+import { useHydratedNowMs } from "./hydrated-relative-time";
 
 function HelpMark({ label, text }: { label: string; text: string }) {
   return (
@@ -56,10 +58,10 @@ function VenueCell({
   );
 }
 
-function FixtureRow({ item }: { item: DiscoveredFixture }) {
+function FixtureRow({ item, nowMs }: { item: DiscoveredFixture; nowMs: number | null }) {
   const details = technicalDetailLines(item);
   const tone = edgeTone(item);
-  const context = kickoffContextLines(item);
+  const context = kickoffContextLines(item, nowMs);
   return (
     <>
       <tr>
@@ -134,7 +136,7 @@ function FixtureRow({ item }: { item: DiscoveredFixture }) {
         >
           {riskLabel(item)}
         </td>
-        <td>{lastRefreshLabel(item)}</td>
+        <td>{lastRefreshLabel(item, nowMs)}</td>
       </tr>
       <tr className="discovery-detail-row">
         <td colSpan={DISCOVERY_TABLE_HEADERS.length}>
@@ -159,6 +161,7 @@ export function DiscoveredFixturesPanel({
   status: LiveRefreshStatus | null;
   available: boolean;
 }) {
+  const nowMs = useHydratedNowMs();
   if (!available || !status) {
     return (
       <div className="empty-live-compact">
@@ -169,15 +172,14 @@ export function DiscoveredFixturesPanel({
 
   const items = status.discovered_fixtures;
   const warnings = status.config_warnings ?? [];
+  const snapshot = status.operator_summary
+    ? `Stamped scan snapshot (not live age) · ${status.operator_summary}`
+    : dualScanStatusLines(status, nowMs).join(" · ");
 
   return (
     <>
       <p className="section-copy">
-        {status.operator_summary
-          ? status.operator_summary
-          : `PL / Championship / La Liga. Last collection ${
-              status.last_completed_at ? kickoffRelativeLabel(status.last_completed_at) ?? "just now" : "never"
-            }.`}
+        {snapshot}
         {status.last_error ? ` Last error: ${status.last_error}` : ""}
       </p>
       {warnings.length ? (
@@ -216,7 +218,7 @@ export function DiscoveredFixturesPanel({
             </thead>
             <tbody>
               {items.map((item) => (
-                <FixtureRow item={item} key={item.canonical_event_id} />
+                <FixtureRow item={item} key={item.canonical_event_id} nowMs={nowMs} />
               ))}
             </tbody>
           </table>

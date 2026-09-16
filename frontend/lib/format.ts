@@ -24,10 +24,11 @@ export function money(
     : new Intl.NumberFormat("en-GB", { style: "currency", currency }).format(parsed);
 }
 
-export function relativeTime(iso: string | null | undefined, now = Date.now()): string {
+export function relativeTime(iso: string | null | undefined, now?: number | null): string {
   if (!iso) return "—";
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return "—";
+  if (now == null || !Number.isFinite(now)) return iso;
   const deltaSec = Math.round((now - then) / 1000);
   if (Math.abs(deltaSec) < 60) return `${deltaSec}s ago`;
   const deltaMin = Math.round(deltaSec / 60);
@@ -53,11 +54,12 @@ export function kickoffLocalLabel(iso: string | null | undefined): string {
 
 export function kickoffRelativeLabel(
   iso: string | null | undefined,
-  now = Date.now(),
+  now?: number | null,
 ): string | null {
   if (!iso) return null;
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return null;
+  if (now == null || !Number.isFinite(now)) return iso;
   const deltaMs = date.getTime() - now;
   const abs = Math.abs(deltaMs);
   const minutes = Math.round(abs / 60_000);

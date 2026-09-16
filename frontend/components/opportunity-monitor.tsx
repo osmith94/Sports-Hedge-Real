@@ -73,7 +73,7 @@ export function OpportunityMonitor({
 }) {
   const router = useRouter();
   const [sort, setSort] = useState<OpportunityMonitorSortState | null>(null);
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [nowMs, setNowMs] = useState<number | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Record<string, MappingVerifySession>>({});
@@ -377,7 +377,7 @@ function OpportunitySummaryStrip({
   available,
 }: {
   summary: ReturnType<typeof opportunityMonitorSummary>;
-  nowMs: number;
+  nowMs: number | null;
   available: boolean;
 }) {
   const cells = [
@@ -401,7 +401,7 @@ function OpportunitySummaryStrip({
         : "no current observation",
     },
     {
-      label: "Active venues",
+      label: "Last scan venues",
       value: summary.activeVenues,
     },
     {
@@ -435,7 +435,7 @@ function MonitorRow({
 }: {
   row: OpportunityMonitorRow;
   open: boolean;
-  nowMs: number;
+  nowMs: number | null;
   onExpand: () => void;
   onNavigate: (href: string) => void;
   onVerify: () => void;

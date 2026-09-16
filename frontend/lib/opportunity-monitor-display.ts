@@ -8,12 +8,10 @@ import {
   mappingProvenanceLabel,
   shouldOfferMappingVerifyAction,
 } from "./mapping-verification";
-import {
-  formatObservationAge,
-  parseObservationTimestampMs,
-} from "./observation-age";
+import { formatObservationAge, parseObservationTimestampMs } from "./observation-age";
 import { fastScanCopy, fullSweepCopy } from "./scan-status-display";
 import { trackedMarketHref } from "./tracked-markets-display";
+import { lastScanVenuesLabel } from "./venue-participation-display";
 
 export const OPPORTUNITY_MONITOR_SORT_COLUMNS = [
   "age",
@@ -368,17 +366,7 @@ export function activeVenueSetLabel(
   status: LiveRefreshStatus | null,
   available: boolean,
 ): string {
-  if (!available || !status) return "—";
-  const listed = [
-    ...(status.hot?.active_venues ?? []),
-    ...(status.universe?.active_venues ?? []),
-  ];
-  const unique = [...new Set(listed)];
-  if (status.hot?.active_venues == null && status.universe?.active_venues == null) {
-    return "—";
-  }
-  if (unique.length === 0) return "no venues";
-  return unique.join(" · ");
+  return lastScanVenuesLabel(status, available);
 }
 
 export function opportunityMonitorSummary(
@@ -386,7 +374,7 @@ export function opportunityMonitorSummary(
   status: LiveRefreshStatus | null,
   available: boolean,
   liveRefreshAvailable: boolean,
-  nowMs = Date.now(),
+  nowMs: number | null = null,
 ): OpportunityMonitorSummary {
   const fast = liveRefreshAvailable ? fastScanCopy(status, nowMs) : null;
   const full = liveRefreshAvailable ? fullSweepCopy(status, nowMs) : null;
@@ -428,7 +416,7 @@ export function opportunityMonitorSummary(
 
 export function newestObservationAgeLabel(
   summary: OpportunityMonitorSummary,
-  nowMs: number,
+  nowMs: number | null,
 ): string {
   if (summary.newestObservedAt == null) return "—";
   return formatObservationAge(summary.newestObservedAt, nowMs);

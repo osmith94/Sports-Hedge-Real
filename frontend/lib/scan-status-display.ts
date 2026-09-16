@@ -1,5 +1,6 @@
 import { LiveRefreshStatus } from "./api";
-import { relativeTime } from "./format";
+import { formatObservationAge } from "./observation-age";
+import { lastScanVenueClause } from "./venue-participation-display";
 
 export type LaneScanCopy = {
   label: string;
@@ -11,41 +12,34 @@ function durationLabel(ms: number | null | undefined): string {
   return `${Math.round(ms / 100) / 10}s`;
 }
 
-function nextDueLabel(iso: string | null | undefined, now = Date.now()): string {
-  if (!iso) return "—";
-  const then = Date.parse(iso);
-  if (!Number.isFinite(then)) return "—";
-  const delta = Math.max(0, Math.round((then - now) / 1000));
-  return `${delta}s`;
+function completedClock(iso: string | null | undefined, now?: number | null): string {
+  if (!iso) return "never";
+  if (now == null || !Number.isFinite(now)) return `completed at ${iso}`;
+  return `completed ${formatObservationAge(iso, now)} ago`;
 }
 
-function venueShortList(venues: string[] | undefined): string | null {
-  if (venues == null) return null;
-  if (venues.length === 0) return "no venues";
-  const short: Record<string, string> = {
-    matchbook: "MB",
-    polymarket: "PM",
-    kalshi: "K",
-  };
-  return venues.map((venue) => short[venue] ?? venue).join("·");
+function nextDueClock(iso: string | null | undefined, now?: number | null): string {
+  if (!iso) return "next due —";
+  if (now == null || !Number.isFinite(now)) return `next due ${iso}`;
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "next due —";
+  const delta = Math.max(0, Math.round((then - now) / 1000));
+  return `next due in ${delta}s`;
 }
 
 export function fastScanCopy(
   status: LiveRefreshStatus | null,
-  now = Date.now(),
+  now: number | null = null,
 ): LaneScanCopy {
   const hot = status?.hot;
   if (!hot) {
     return { label: "Fast scan", detail: "never" };
   }
-  const venues = venueShortList(hot.active_venues);
+  const venues = lastScanVenueClause(status, "hot");
   const venueSuffix = venues ? ` · ${venues}` : "";
   if (hot.cycle_in_progress) {
     return { label: "Fast scan", detail: `in progress${venueSuffix}` };
   }
-  const when = hot.last_completed_at
-    ? relativeTime(hot.last_completed_at, now)
-    : "never";
   const leftover = hot.not_evaluated_count
     ? ` · partial (${hot.not_evaluated_count} not evaluated)`
     : "";
@@ -55,20 +49,20 @@ export function fastScanCopy(
       : "";
   return {
     label: "Fast scan",
-    detail: `${when} · ${durationLabel(hot.last_duration_ms)} · next ${nextDueLabel(hot.next_due_at, now)} · ${hot.fixture_count} hot${venueSuffix}${leftover}${persist}`,
+    detail: `${completedClock(hot.last_completed_at, now)} · ran ${durationLabel(hot.last_duration_ms)} · ${nextDueClock(hot.next_due_at, now)} · ${hot.fixture_count} hot${venueSuffix}${leftover}${persist}`,
   };
 }
 
 export function fullSweepCopy(
   status: LiveRefreshStatus | null,
-  now = Date.now(),
+  now: number | null = null,
 ): LaneScanCopy {
   const universe = status?.universe;
   const hot = status?.hot;
   if (!universe) {
     return { label: "Full sweep", detail: "never" };
   }
-  const venues = venueShortList(universe.active_venues);
+  const venues = lastScanVenueClause(status, "universe");
   const venueSuffix = venues ? ` · ${venues}` : "";
   if (universe.cycle_in_progress) {
     return { label: "Full sweep", detail: `chunk in progress${venueSuffix}` };
@@ -83,13 +77,13 @@ export function fullSweepCopy(
       : "";
   return {
     label: "Full sweep",
-    detail: `chunk ${durationLabel(universe.chunk_last_duration_ms ?? universe.last_duration_ms)} · gen ${Math.round(work)}/${Math.round(budget)}s · next HOT in ${nextDueLabel(hot?.next_due_at, now)} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${leftover} not evaluated${venueSuffix}${persist}`,
+    detail: `chunk ran ${durationLabel(universe.chunk_last_duration_ms ?? universe.last_duration_ms)} · gen ${Math.round(work)}/${Math.round(budget)}s · HOT ${nextDueClock(hot?.next_due_at, now)} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${leftover} not evaluated${venueSuffix}${persist}`,
   };
 }
 
 export function dualScanStatusLines(
   status: LiveRefreshStatus | null,
-  now = Date.now(),
+  now: number | null = null,
 ): string[] {
   const fast = fastScanCopy(status, now);
   const full = fullSweepCopy(status, now);

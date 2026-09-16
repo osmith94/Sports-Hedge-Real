@@ -1,7 +1,8 @@
 import { ArbitrageOpportunity } from "../lib/arbitrage-ops";
 import { betBlockedReason, isBetActionable, opportunityBetHref } from "../lib/bet-ticket";
 import { grossPricesEffectivelyEqual } from "../lib/comfort-threshold";
-import { money, percent, percentPoints, relativeTime } from "../lib/format";
+import { money, percent, percentPoints } from "../lib/format";
+import { HydratedRelativeTime } from "./hydrated-relative-time";
 
 function provenanceLabel(value: ArbitrageOpportunity["provenance"]): string {
   return value === "LIVE_PAPER" ? "LIVE PAPER" : "DEMO / FIXTURE";
@@ -93,7 +94,9 @@ export function OpportunityCard({
         <span>{item.currencies.join(" · ")}</span>
         <span>lock {item.expectedLock ?? "—"}</span>
         <span>age at last evaluation {item.quoteFreshness ?? "—"}</span>
-        <span>updated {relativeTime(item.scannedAt)}</span>
+        <span>
+          updated <HydratedRelativeTime iso={item.scannedAt} />
+        </span>
         <span>
           narrative{" "}
           {item.strikeNarrative === "approaching"

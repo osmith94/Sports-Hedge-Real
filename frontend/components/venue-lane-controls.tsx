@@ -1,6 +1,12 @@
 "use client";
 
 import { LiveRefreshStatus, LaneVenueFlags, Venue, saveVenueParticipation } from "../lib/api";
+import {
+  OPERATOR_SCAN_VENUES,
+  laneVenueTruths,
+  venueChipLabel,
+  venueChipTitle,
+} from "../lib/venue-participation-display";
 
 type OperatorVenue = keyof LaneVenueFlags;
 
@@ -11,7 +17,7 @@ const VENUES: Array<{ venue: OperatorVenue; short: string; label: string }> = [
 ];
 
 function flagsFromVenues(venues: Venue[] | undefined): LaneVenueFlags {
-  const set = new Set(venues ?? ["matchbook", "polymarket", "kalshi"]);
+  const set = new Set(venues ?? OPERATOR_SCAN_VENUES);
   return {
     matchbook: set.has("matchbook"),
     kalshi: set.has("kalshi"),
@@ -60,7 +66,9 @@ export function VenueLaneControls({
       ) : null}
       <LaneRow
         label="Fast scan"
+        lane="hot"
         flags={hotFlags}
+        status={status}
         warning={status?.hot?.venue_warning}
         appliesNext={Boolean(status?.hot?.applies_next_cycle)}
         disabled={disabled}
@@ -68,7 +76,9 @@ export function VenueLaneControls({
       />
       <LaneRow
         label="Full sweep"
+        lane="universe"
         flags={universeFlags}
+        status={status}
         warning={status?.universe?.venue_warning}
         appliesNext={Boolean(status?.universe?.applies_next_cycle)}
         disabled={disabled}
@@ -80,38 +90,62 @@ export function VenueLaneControls({
 
 function LaneRow({
   label,
+  lane,
   flags,
+  status,
   warning,
   appliesNext,
   disabled,
   onToggle,
 }: {
   label: string;
+  lane: "hot" | "universe";
   flags: LaneVenueFlags;
+  status: LiveRefreshStatus | null;
   warning?: string | null;
   appliesNext: boolean;
   disabled?: boolean;
   onToggle: (venue: OperatorVenue) => void;
 }) {
   const count = enabledCount(flags);
+  const truths = laneVenueTruths(status, lane);
   return (
     <div className="venue-lane-row">
       <div className="venue-lane-label">{label}</div>
       <div className="venue-lane-chips" role="group" aria-label={`${label} venues`}>
         {VENUES.map((item) => {
           const on = flags[item.venue];
+          const truth = truths.find((row) => row.venue === item.venue) ?? {
+            venue: item.venue,
+            short: item.short,
+            configured: on,
+            participated: false,
+            providerFailed: false,
+            operatorDisabled: !on,
+            health: undefined,
+          };
+          const chipLabel = venueChipLabel({ ...truth, configured: on });
+          const unavailable = on && truth.providerFailed;
           return (
             <button
               key={item.venue}
               type="button"
-              className={on ? "venue-lane-chip on" : "venue-lane-chip off"}
+              className={
+                unavailable
+                  ? "venue-lane-chip on unavail"
+                  : on
+                    ? "venue-lane-chip on"
+                    : "venue-lane-chip off"
+              }
               aria-pressed={on}
-              aria-label={`${label} ${item.label} ${on ? "on" : "off"}`}
-              title={`${item.label} ${on ? "ON — provider calls on the next cycle" : "OFF — no discovery/market/book calls for this lane"}`}
+              aria-label={`${label} ${item.label} ${on ? "configured on" : "configured off"}${
+                unavailable ? `, last scan ${truth.health}` : ""
+              }`}
+              title={venueChipTitle({ ...truth, configured: on }, label)}
               disabled={disabled}
               onClick={() => onToggle(item.venue)}
             >
-              {item.short} {on ? "ON" : "OFF"}
+              {chipLabel}
             </button>
           );
         })}

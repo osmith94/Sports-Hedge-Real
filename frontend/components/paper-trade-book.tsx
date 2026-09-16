@@ -10,8 +10,9 @@ import {
   getPaperTrade,
   settlePaperTrade,
 } from "../lib/api";
-import { money, relativeTime } from "../lib/format";
+import { money, percent } from "../lib/format";
 import { formatPositionManagementCell } from "../lib/paper-position-management-display";
+import { HydratedRelativeTime } from "./hydrated-relative-time";
 
 type Props = {
   summary: PaperTradeBookSummary | null;
@@ -299,8 +300,12 @@ function TradeTable({
                       </Link>
                     </td>
                     <td>
-                      {relativeTime(trade.opened_at)}
-                      {trade.settled_at ? <div className="panel-meta">Settled {relativeTime(trade.settled_at)}</div> : null}
+                      <HydratedRelativeTime iso={trade.opened_at} />
+                      {trade.settled_at ? (
+                        <div className="panel-meta">
+                          Settled <HydratedRelativeTime iso={trade.settled_at} />
+                        </div>
+                      ) : null}
                     </td>
                     <td>{legsLine(trade)}</td>
                     <td>{nativeLocked(trade)}</td>
@@ -349,7 +354,7 @@ function AuditBlock({
       <ol>
         {trade.audit.map((event) => (
           <li key={event.event_id}>
-            <strong>{event.event_type}</strong> · {relativeTime(event.occurred_at)} · {event.detail ?? "—"}
+            <strong>{event.event_type}</strong> · <HydratedRelativeTime iso={event.occurred_at} /> · {event.detail ?? "—"}
           </li>
         ))}
       </ol>

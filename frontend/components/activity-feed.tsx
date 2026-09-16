@@ -1,5 +1,5 @@
 import { ActivityEvent } from "../lib/arbitrage-ops";
-import { relativeTime } from "../lib/format";
+import { HydratedRelativeTime } from "./hydrated-relative-time";
 
 export function ActivityFeed({
   items,
@@ -32,7 +32,9 @@ export function ActivityFeed({
               </div>
               <div className="feed-detail">{item.detail}</div>
             </div>
-            <div className="feed-time">{relativeTime(item.at)}</div>
+            <div className="feed-time">
+              <HydratedRelativeTime iso={item.at} />
+            </div>
           </div>
         ))}
       </div>

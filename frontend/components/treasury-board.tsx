@@ -9,7 +9,8 @@ import {
   getPaperLedgerReconciliation,
   resetPaperSession,
 } from "../lib/api";
-import { money, relativeTime } from "../lib/format";
+import { money } from "../lib/format";
+import { HydratedRelativeTime } from "./hydrated-relative-time";
 
 const VENUE_LABEL: Record<string, string> = {
   matchbook: "Matchbook",
@@ -171,7 +172,9 @@ export function TreasuryBoard({
                 ) : (
                   snapshot.events.map((event) => (
                     <tr key={event.event_id}>
-                      <td className="muted">{relativeTime(event.occurred_at)}</td>
+                      <td className="muted">
+                        <HydratedRelativeTime iso={event.occurred_at} />
+                      </td>
                       <td>{event.event_type}</td>
                       <td>{VENUE_LABEL[event.venue] ?? event.venue}</td>
                       <td>{cash(event.native_amount, event.native_currency)}</td>

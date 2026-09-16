@@ -1,5 +1,10 @@
 import { DiscoveredFixture, LiveRefreshStatus } from "./api";
 import { kickoffLocalLabel, kickoffRelativeLabel, percent, percentPoints } from "./format";
+import {
+  VENUE_SHORT,
+  discoveryFailedVenues,
+  discoveryParticipatedVenues,
+} from "./venue-participation-display";
 
 export const DISCOVERY_TABLE_HEADERS = [
   "Fixture",
@@ -87,7 +92,7 @@ export function fixturePhaseLabel(item: DiscoveredFixture): string {
   return "PRE";
 }
 
-export function kickoffContextLines(item: DiscoveredFixture, now = Date.now()): string[] {
+export function kickoffContextLines(item: DiscoveredFixture, now?: number | null): string[] {
   const relative = kickoffRelativeLabel(item.kickoff_utc, now);
   const live = fixturePhaseLabel(item) === "LIVE";
   const finished = fixturePhaseLabel(item) === "FT";
@@ -178,8 +183,9 @@ export function freshnessLabel(item: DiscoveredFixture): string {
   return `${item.quote_age_ms}ms${basis}`;
 }
 
-export function lastRefreshLabel(item: DiscoveredFixture, now = Date.now()): string {
+export function lastRefreshLabel(item: DiscoveredFixture, now?: number | null): string {
   if (item.last_seen_at) {
+    if (now == null || !Number.isFinite(now)) return item.last_seen_at;
     const relative = kickoffRelativeLabel(item.last_seen_at, now);
     if (relative?.endsWith("ago")) return relative;
     if (relative === "<1m ago" || relative === "in <1m") return relative;
@@ -338,6 +344,25 @@ export function discoveryCompactSummaryLabel(
   return note ? `${headline} · ${note}` : headline;
 }
 
-export function discoveryStatusBadgeLabel(available: boolean): string {
-  return available ? "LIVE PAPER · MB / PM / K" : "DISCOVERY STATUS UNAVAILABLE";
+export function discoveryStatusBadgeLabel(
+  available: boolean,
+  status?: LiveRefreshStatus | null,
+): string {
+  if (!available) return "DISCOVERY STATUS UNAVAILABLE";
+  if (!status) return "LIVE PAPER · VENUE SET UNKNOWN";
+  const health = status.venue_health;
+  if (health == null || Object.keys(health).length === 0) {
+    return "LIVE PAPER · LAST SCAN VENUES UNKNOWN";
+  }
+  const participated = discoveryParticipatedVenues(status);
+  const failed = discoveryFailedVenues(status);
+  const participatedLabel = participated.length
+    ? participated.map((venue) => VENUE_SHORT[venue] ?? venue).join(" / ")
+    : "NO VENUE DATA";
+  const failedLabel = failed
+    .map((item) => `${item.short} ${String(item.health).toUpperCase()}`)
+    .join(" · ");
+  return failedLabel
+    ? `LIVE PAPER · ${participatedLabel} · ${failedLabel}`
+    : `LIVE PAPER · ${participatedLabel}`;
 }

@@ -15,6 +15,8 @@ export default defineConfig({
       "lib/opportunity-monitor-display.test.ts",
       "lib/venue-health-display.test.ts",
       "lib/config-warning-display.test.ts",
+      "lib/venue-participation-display.test.ts",
+      "lib/live-refresh-poll-guard.test.ts",
     ],
   },
 });

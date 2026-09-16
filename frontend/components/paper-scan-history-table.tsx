@@ -25,7 +25,7 @@ import {
 
 export function PaperScanHistoryTable({ scans }: { scans: PaperScanRecord[] }) {
   const [sort, setSort] = useState<PaperScanHistorySortState>(DEFAULT_PAPER_SCAN_HISTORY_SORT);
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [nowMs, setNowMs] = useState<number | null>(null);
   const sortedScans = useMemo(() => sortPaperScanHistory(scans, sort), [scans, sort]);
 
   useEffect(() => {

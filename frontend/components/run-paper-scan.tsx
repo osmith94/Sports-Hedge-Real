@@ -19,6 +19,7 @@ import {
 import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
 import { dualScanStatusLines } from "../lib/scan-status-display";
 import { CONFIG_WARNING_BANNER_CLASS } from "../lib/config-warning-display";
+import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-refresh-poll-guard";
 import { venueHealthIsDegraded } from "../lib/venue-health-display";
 import { LiveScanPulse, LiveScanPulsePhase } from "./live-scan-pulse";
 import { VenueLaneControls } from "./venue-lane-controls";
@@ -208,7 +209,7 @@ export function RunPaperScan() {
   const [liveRefresh, setLiveRefresh] = useState<LiveRefreshStatus | null>(null);
   const [venueHealth, setVenueHealth] = useState<Record<string, string> | null>(null);
   const [completeFlash, setCompleteFlash] = useState(false);
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [nowMs, setNowMs] = useState<number | null>(null);
   const [autoAnchorMs, setAutoAnchorMs] = useState<number | null>(null);
   const [economics, setEconomics] = useState<EconomicsStatus | null>(null);
   const [matchbookCommissionPercent, setMatchbookCommissionPercent] = useState("2.00");
@@ -217,6 +218,7 @@ export function RunPaperScan() {
   const payloadRef = useRef<PaperCollectionRequest>({ maximum_execution_risk: 60 });
   const inFlightRef = useRef(false);
   const lastSeenCycleRef = useRef<string>("");
+  const liveRefreshPollGuardRef = useRef(createLiveRefreshPollGuard());
 
   const buildPayload = useCallback((): PaperCollectionRequest => {
     const capital = optionalPositive(capitalLimit, "Capital limit");
@@ -249,55 +251,6 @@ export function RunPaperScan() {
     }
   }, []);
 
-  const collect = useCallback(async (mode: ScanMode) => {
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
-    setLoadingMode(mode);
-    setState({ kind: "idle" });
-    try {
-      const payload = buildPayload();
-      payloadRef.current = payload;
-      const report =
-        mode === "hot"
-          ? await runPaperHotRefresh(payload)
-          : await runPaperCollection(payload);
-      setState({ kind: "success", report });
-      setLastCompletedAt(report.completed_at);
-      setVenueHealth(report.venue_health ?? null);
-      setCompleteFlash(true);
-      setNowMs(Date.now());
-      const started = Date.parse(report.started_at);
-      const completed = Date.parse(report.completed_at);
-      if (Number.isFinite(started) && Number.isFinite(completed)) {
-        setLastDurationMs(Math.max(0, completed - started));
-      }
-      try {
-        setLiveRefresh(await getLiveRefreshStatus());
-      } catch {
-        // Keep the completed report facts if status is briefly unavailable.
-      }
-      await refreshEconomics();
-    } catch (error) {
-      setState({
-        kind: "error",
-        message: error instanceof Error ? error.message : "Read-only scan failed.",
-      });
-      try {
-        const status = await getLiveRefreshStatus();
-        if (status.last_completed_at) setLastCompletedAt(status.last_completed_at);
-        if (status.last_duration_ms != null) setLastDurationMs(status.last_duration_ms);
-        if (status.venue_health) setVenueHealth(status.venue_health);
-        setLiveRefresh(status);
-      } catch {
-        // Keep prior last-scan facts. A failed collect is not a completed scan.
-      }
-    } finally {
-      inFlightRef.current = false;
-      setLoadingMode(null);
-      router.refresh();
-    }
-  }, [buildPayload, refreshEconomics, router]);
-
   const applyLiveRefresh = useCallback(
     (status: LiveRefreshStatus) => {
       if (status.interval_seconds) {
@@ -328,9 +281,67 @@ export function RunPaperScan() {
     [router],
   );
 
+  const collect = useCallback(async (mode: ScanMode) => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    liveRefreshPollGuardRef.current.begin();
+    setLoadingMode(mode);
+    setState({ kind: "idle" });
+    try {
+      const payload = buildPayload();
+      payloadRef.current = payload;
+      const report =
+        mode === "hot"
+          ? await runPaperHotRefresh(payload)
+          : await runPaperCollection(payload);
+      setState({ kind: "success", report });
+      setLastCompletedAt(report.completed_at);
+      setVenueHealth(report.venue_health ?? null);
+      setCompleteFlash(true);
+      setNowMs(Date.now());
+      const started = Date.parse(report.started_at);
+      const completed = Date.parse(report.completed_at);
+      if (Number.isFinite(started) && Number.isFinite(completed)) {
+        setLastDurationMs(Math.max(0, completed - started));
+      }
+      try {
+        await applyLatestLiveRefresh(
+          liveRefreshPollGuardRef.current,
+          getLiveRefreshStatus,
+          applyLiveRefresh,
+        );
+      } catch {
+        // Keep the completed report facts if status is briefly unavailable.
+      }
+      await refreshEconomics();
+    } catch (error) {
+      setState({
+        kind: "error",
+        message: error instanceof Error ? error.message : "Read-only scan failed.",
+      });
+      try {
+        await applyLatestLiveRefresh(
+          liveRefreshPollGuardRef.current,
+          getLiveRefreshStatus,
+          applyLiveRefresh,
+        );
+      } catch {
+        // Keep prior last-scan facts. A failed collect is not a completed scan.
+      }
+    } finally {
+      inFlightRef.current = false;
+      setLoadingMode(null);
+      router.refresh();
+    }
+  }, [applyLiveRefresh, buildPayload, refreshEconomics, router]);
+
   const pollLiveStatus = useCallback(async () => {
     try {
-      applyLiveRefresh(await getLiveRefreshStatus());
+      await applyLatestLiveRefresh(
+        liveRefreshPollGuardRef.current,
+        getLiveRefreshStatus,
+        applyLiveRefresh,
+      );
     } catch {
       // Status endpoint down: keep prior Fast/Full facts.
     }
@@ -350,14 +361,16 @@ export function RunPaperScan() {
 
   useEffect(() => {
     let cancelled = false;
-    getLiveRefreshStatus()
-      .then((status) => {
+    void applyLatestLiveRefresh(
+      liveRefreshPollGuardRef.current,
+      getLiveRefreshStatus,
+      (status) => {
         if (cancelled) return;
         applyLiveRefresh(status);
-      })
-      .catch(() => {
-        // Status endpoint down: keep the 30s default cadence.
-      });
+      },
+    ).catch(() => {
+      // Status endpoint down: keep the 30s default cadence.
+    });
     return () => {
       cancelled = true;
     };
@@ -386,6 +399,7 @@ export function RunPaperScan() {
 
   useEffect(() => {
     if (!autoRefresh || loadingMode !== null) return undefined;
+    setNowMs(Date.now());
     const timer = window.setInterval(() => setNowMs(Date.now()), 250);
     return () => window.clearInterval(timer);
   }, [autoRefresh, loadingMode]);
@@ -435,7 +449,7 @@ export function RunPaperScan() {
   const nextHotMs = liveRefresh?.hot?.next_due_at
     ? Date.parse(liveRefresh.hot.next_due_at)
     : Number.NaN;
-  const nextRefreshSeconds = !autoRefresh
+  const nextRefreshSeconds = !autoRefresh || nowMs == null
     ? null
     : Number.isFinite(nextHotMs)
       ? Math.max(0, Math.ceil((nextHotMs - nowMs) / 1000))
@@ -538,7 +552,7 @@ export function RunPaperScan() {
           lanes.
         </div>
         <div className="scan-note" aria-label="Fast scan and Full sweep status">
-          {dualScanStatusLines(liveRefresh).map((line) => (
+          {dualScanStatusLines(liveRefresh, nowMs).map((line) => (
             <div key={line}>{line}</div>
           ))}
           {autoRefresh

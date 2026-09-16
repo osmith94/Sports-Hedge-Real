@@ -30,6 +30,11 @@ INSUFFICIENT_VENUES_WARNING = (
 INSUFFICIENT_VENUES_REASON = "insufficient_enabled_venues"
 VENUE_HEALTH_DISABLED = "disabled"
 PROVIDER_HEALTH_FAILURES = frozenset({"unavailable", "timeout", "degraded", "error", "failed"})
+VENUE_SHORT_LABELS: dict[VenueName, str] = {
+    VenueName.MATCHBOOK: "MB",
+    VenueName.POLYMARKET: "PM",
+    VenueName.KALSHI: "K",
+}
 MALFORMED_VENUE_SETTINGS_WARNING = (
     "scanner_configuration: persisted operator venue settings are malformed — "
     "ignored (fail closed); venues were not silently re-enabled. "
@@ -90,6 +95,41 @@ def is_operator_disabled_health(status: str | None) -> bool:
 
 def is_provider_health_failure(status: str | None) -> bool:
     return status in PROVIDER_HEALTH_FAILURES
+
+
+def last_scan_venue_clause(
+    venue_health: dict[str, str] | None,
+    *,
+    configured: Iterable[VenueName] | None = None,
+) -> str:
+    """Operator copy for last-scan participation vs configured intent."""
+
+    ordered = coerce_operator_venues(configured) if configured is not None else OPERATOR_SCAN_VENUES
+    if venue_health is None or not venue_health:
+        if not ordered:
+            return "last scan venues unknown"
+        shorts = "·".join(VENUE_SHORT_LABELS[venue] for venue in ordered)
+        return f"configured {shorts} (availability not in this snapshot)"
+    participated = [
+        venue
+        for venue in OPERATOR_SCAN_VENUES
+        if venue in ordered and venue_health.get(venue.value) == "ok"
+    ]
+    failed = [
+        venue
+        for venue in OPERATOR_SCAN_VENUES
+        if venue in ordered and is_provider_health_failure(venue_health.get(venue.value))
+    ]
+    bits: list[str] = []
+    if participated:
+        bits.append(
+            "last scan " + "·".join(VENUE_SHORT_LABELS[venue] for venue in participated)
+        )
+    else:
+        bits.append("last scan no venue data")
+    for venue in failed:
+        bits.append(f"{VENUE_SHORT_LABELS[venue]} {venue_health.get(venue.value)}")
+    return " · ".join(bits)
 
 
 class LaneVenueSet(BaseModel):
