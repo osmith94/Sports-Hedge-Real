@@ -7,6 +7,7 @@ Phase 1 remains paper-only / read-only toward venues.
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
@@ -33,7 +34,13 @@ from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
-from sports_hedge.paper.trades import PaperTradeAuditEventType, PaperTradeState, PAPER_UNWIND_SOURCE
+from sports_hedge.paper.trades import (
+    PAPER_UNWIND_SOURCE,
+    PaperTrade,
+    PaperTradeAuditEvent,
+    PaperTradeAuditEventType,
+    PaperTradeState,
+)
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.treasury.models import TreasuryLockRequest
@@ -994,3 +1001,183 @@ def test_unwind_after_failure_retry_is_idempotent_one_realised_pnl(tmp_path: Pat
     finally:
         repository.close()
         ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Architect correction: paper_trade_events IntegrityError is identity-proven
+# ---------------------------------------------------------------------------
+
+
+def test_paper_trade_event_duplicate_same_identity_is_idempotent(tmp_path: Path) -> None:
+    ledger = SqlitePaperLedger(tmp_path / "same-event.sqlite")
+    when = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
+    event = PaperTradeAuditEvent(
+        event_id="ptrade-1:fills_recorded",
+        occurred_at=when,
+        event_type=PaperTradeAuditEventType.FILLS_RECORDED,
+        detail="state=OPEN",
+    )
+    trade = PaperTrade(
+        trade_id="ptrade-1",
+        opportunity_id="opp-1",
+        state=PaperTradeState.OPEN,
+        opened_at=when,
+        last_updated_at=when,
+        audit=[event, event],
+    )
+    try:
+        ledger.trades.save(trade)
+        ledger.trades.save(
+            trade.model_copy(
+                update={"audit": [event, event.model_copy()]}
+            )
+        )
+        rows = list(
+            ledger._connection.execute(
+                "SELECT event_id, trade_id, event_type, detail FROM paper_trade_events"
+            )
+        )
+        assert len(rows) == 1, rows
+        assert rows[0]["event_id"] == "ptrade-1:fills_recorded"
+        assert rows[0]["trade_id"] == "ptrade-1"
+        assert rows[0]["event_type"] == PaperTradeAuditEventType.FILLS_RECORDED.value
+        assert rows[0]["detail"] == "state=OPEN"
+        reloaded = ledger.trades.get("ptrade-1")
+        assert reloaded is not None
+        assert [item.event_id for item in reloaded.audit] == ["ptrade-1:fills_recorded"]
+    finally:
+        ledger.close()
+
+
+def test_paper_trade_event_unrelated_integrity_error_propagates(tmp_path: Path) -> None:
+    ledger = SqlitePaperLedger(tmp_path / "unrelated-event.sqlite")
+    when = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
+    first = PaperTradeAuditEvent(
+        event_id="evt-a",
+        occurred_at=when,
+        event_type=PaperTradeAuditEventType.FILLS_RECORDED,
+        detail="shared-detail",
+    )
+    trade = PaperTrade(
+        trade_id="ptrade-1",
+        opportunity_id="opp-1",
+        state=PaperTradeState.OPEN,
+        opened_at=when,
+        last_updated_at=when,
+        audit=[first],
+    )
+    try:
+        ledger.trades.save(trade)
+        ledger._connection.execute(
+            "CREATE UNIQUE INDEX paper_trade_events_detail_unique "
+            "ON paper_trade_events(detail)"
+        )
+        second = PaperTradeAuditEvent(
+            event_id="evt-b",
+            occurred_at=when,
+            event_type=PaperTradeAuditEventType.TRADE_OPENED,
+            detail="shared-detail",
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            ledger.trades.save(trade.model_copy(update={"audit": [first, second]}))
+        remaining = list(
+            ledger._connection.execute(
+                "SELECT event_id, trade_id, event_type, detail FROM paper_trade_events"
+            )
+        )
+        assert [row["event_id"] for row in remaining] == ["evt-a"]
+        assert remaining[0]["detail"] == "shared-detail"
+
+        clash = PaperTrade(
+            trade_id="ptrade-2",
+            opportunity_id="opp-2",
+            state=PaperTradeState.OPEN,
+            opened_at=when,
+            last_updated_at=when,
+            audit=[
+                PaperTradeAuditEvent(
+                    event_id="evt-a",
+                    occurred_at=when,
+                    event_type=PaperTradeAuditEventType.TRADE_OPENED,
+                    detail="other-detail",
+                )
+            ],
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            ledger.trades.save(clash)
+        after_clash = list(
+            ledger._connection.execute(
+                "SELECT event_id, trade_id, event_type, detail FROM paper_trade_events"
+            )
+        )
+        assert [row["event_id"] for row in after_clash] == ["evt-a"]
+        assert after_clash[0]["trade_id"] == "ptrade-1"
+        assert after_clash[0]["event_type"] == PaperTradeAuditEventType.FILLS_RECORDED.value
+        assert after_clash[0]["detail"] == "shared-detail"
+    finally:
+        ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Architect correction: interrupted PENDING/PARTIAL retry is not a healthy repeat
+# ---------------------------------------------------------------------------
+
+
+def test_interrupted_pending_partial_retry_completes_or_fails_closed(tmp_path: Path) -> None:
+    for interrupted_state in (PaperTradeState.PENDING, PaperTradeState.PARTIAL):
+        case_dir = tmp_path / interrupted_state.value
+        case_dir.mkdir()
+        scan, watchlist, ops, repository, ledger = _ops_bundle(case_dir, autofill=False)
+        try:
+            decision = _qualifying_decision(scan, watchlist)
+            ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER)
+            opportunity_id = next(iter(ops._plans))
+            plan = ops._plans[opportunity_id]
+            opportunity = ops.watchlist.repository.get(opportunity_id)
+            assert opportunity is not None
+            shell = ops._new_trade_shell(
+                plan, opportunity, datetime.now(UTC), DataProvenance.LIVE_PAPER
+            )
+            shell.state = interrupted_state
+            ops.trades.save(shell)
+            before = _state_report(
+                ops=ops, ledger=ledger, watchlist=watchlist, opportunity_id=opportunity_id
+            )
+            assert before["trade_state"] == interrupted_state.value, before
+            assert before["locks"] == 0, before
+            assert before["fill_journals"] == 0, before
+            assert before["watch_status"] != OpportunityStatus.FILLED.value, before
+
+            retry = ops.simulate_fill(
+                opportunity_id,
+                simulate_external=True,
+                provenance=DataProvenance.LIVE_PAPER,
+            )
+            loaded = ops.list_active_trades()
+            assert len(loaded) == 1, loaded
+            assert loaded[0].trade_id == shell.trade_id
+            assert loaded[0].state is PaperTradeState.OPEN, loaded[0].state
+            actual = _state_report(
+                ops=ops, ledger=ledger, watchlist=watchlist, opportunity_id=opportunity_id
+            )
+            expected = {
+                "open_trades": 1,
+                "trade_state": PaperTradeState.OPEN.value,
+                "locks": 2,
+                "fill_journals": 2,
+                "watch_status": OpportunityStatus.FILLED.value,
+                "autofill_events": 1,
+                "fills_recorded_events": 1,
+                "fill_complete_events": 1,
+            }
+            for key, value in expected.items():
+                assert actual[key] == value, (interrupted_state, key, actual)
+            assert retry.entry_complete is True
+            assert retry.trade_id == shell.trade_id
+            assert PaperTradeAuditEventType.REPEAT_OBSERVATION_NO_TOP_UP not in _audit_types(
+                ops, shell.trade_id
+            )
+        finally:
+            repository.close()
+            ledger.close()
+

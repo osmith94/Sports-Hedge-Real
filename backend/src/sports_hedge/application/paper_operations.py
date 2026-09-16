@@ -852,8 +852,13 @@ class PaperOperationsService:
         """Complete missing durable side effects for an existing trade, or repeat.
 
         PENDING/PARTIAL fall through so the opening fill path can finish them.
+        OPEN repairs missing locks/journals/watchlist FILLED, then repeats.
+        AWAITING_MANUAL_EXTERNAL without confirmation repeats; confirmation
+        bypasses this method and continues the opening path.
         """
 
+        if trade.state in {PaperTradeState.PENDING, PaperTradeState.PARTIAL}:
+            return None
         if trade.state is PaperTradeState.OPEN:
             self._repair_opening_side_effects(trade, occurred_at=simulated_at)
             self._record_watchlist_fill(

@@ -774,24 +774,48 @@ def test_repeat_submit_is_idempotent_in_every_active_state(tmp_path: Path) -> No
         assert pending_retry.trade_id == pending.trade_id
         loaded_pending = ops.list_active_trades()
         assert len(loaded_pending) == 1
-        assert loaded_pending[0].state is PaperTradeState.PENDING
-        assert loaded_pending[0].capital_locked_native == {}
-        assert ops.journal.list_entries(opportunity_id=opportunity_id) == []
+        assert loaded_pending[0].state is PaperTradeState.OPEN
+        assert loaded_pending[0].capital_locked_native
+        assert ops.journal.list_entries(opportunity_id=opportunity_id)
+        opened_locks = dict(loaded_pending[0].capital_locked_native)
+        open_retry = ops.simulate_fill(
+            opportunity_id, simulate_external=True, provenance=DataProvenance.FIXTURE_DEMO
+        )
+        assert open_retry.trade_id == pending.trade_id
+        after_open = ops.list_active_trades()[0]
+        assert after_open.state is PaperTradeState.OPEN
+        assert after_open.capital_locked_native == opened_locks
         assert any(
             event.event_type is PaperTradeAuditEventType.REPEAT_OBSERVATION_NO_TOP_UP
-            for event in loaded_pending[0].audit
+            for event in after_open.audit
         )
-        ops.trades.save(
-            loaded_pending[0].model_copy(
-                update={"state": PaperTradeState.PARTIAL, "capital_locked_native": {}}
-            )
-        )
+    finally:
+        repository.close()
+        ledger.close()
+
+    ledger = SqlitePaperLedger(tmp_path / "paper-partial.sqlite")
+    _scan, watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
+    try:
+        opportunity_id = next(iter(ops._plans))
+        plan = ops._plans[opportunity_id]
+        opportunity = ops.watchlist.repository.get(opportunity_id)
+        assert opportunity is not None
+        partial = ops._new_trade_shell(plan, opportunity, OBSERVED, DataProvenance.FIXTURE_DEMO)
+        partial.state = PaperTradeState.PARTIAL
+        ops.trades.save(partial)
         partial_retry = ops.simulate_fill(
             opportunity_id, simulate_external=True, provenance=DataProvenance.FIXTURE_DEMO
         )
-        assert partial_retry.trade_id == pending.trade_id
-        assert ops.list_active_trades()[0].state is PaperTradeState.PARTIAL
-        assert ops.journal.list_entries(opportunity_id=opportunity_id) == []
+        assert partial_retry.trade_id == partial.trade_id
+        loaded_partial = ops.list_active_trades()
+        assert len(loaded_partial) == 1
+        assert loaded_partial[0].state is PaperTradeState.OPEN
+        assert loaded_partial[0].capital_locked_native
+        assert ops.journal.list_entries(opportunity_id=opportunity_id)
+        assert not any(
+            event.event_type is PaperTradeAuditEventType.REPEAT_OBSERVATION_NO_TOP_UP
+            for event in loaded_partial[0].audit
+        )
     finally:
         repository.close()
         ledger.close()
