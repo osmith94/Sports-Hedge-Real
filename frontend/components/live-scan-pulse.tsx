@@ -25,11 +25,11 @@ function statusCopy(
     return { title: "Live scan", detail: "Last refreshed just now" };
   }
   if (phase === "error") {
-    return { title: "Scan failed", detail: "Not a healthy refresh" };
+    return { title: "Scan failed", detail: "Scanner error — not provider health" };
   }
   if (phase === "degraded") {
     return {
-      title: "Live scan",
+      title: "Provider unhealthy",
       detail:
         nextRefreshSeconds != null
           ? `Partial venue failure · next in ${nextRefreshSeconds}s`

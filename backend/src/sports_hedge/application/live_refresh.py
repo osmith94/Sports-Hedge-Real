@@ -34,6 +34,7 @@ from sports_hedge.application.scan_lanes import (
 )
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
+from sports_hedge.paper.audit import PaperScanCycleRecord
 from sports_hedge.persistence.lane_venue_settings import (
     SqliteLaneVenueSettingsStore,
     get_lane_venue_settings_store,
@@ -143,6 +144,7 @@ class LiveRefreshStatus(BaseModel):
         )
     )
     venue_participation: LaneVenueParticipation | None = None
+    recent_scan_cycles: list[PaperScanCycleRecord] = Field(default_factory=list)
 
 
 class DualCadencePlan(BaseModel):
@@ -1398,6 +1400,8 @@ def _lane_diagnostics(report: CollectionReport) -> dict[str, Any]:
     )
     payload.setdefault("evaluated_count", evaluated_n)
     payload.setdefault("not_evaluated_count", leftover_n)
+    payload.setdefault("paper_decision_count", len(report.paper_decisions))
+    payload.setdefault("qualifying_arb_count", report.qualifying_arbs)
     payload.setdefault("timeout_count", 0)
     completeness = payload.get("completeness")
     if completeness is None:

@@ -13,7 +13,10 @@ import {
   HOT_ROSTER_EMPTY,
   HOT_ROSTER_TITLE,
   HOT_ROSTER_UNAVAILABLE,
+  HOT_ZONE_KICKER,
+  fastScanRosterSummary,
   hotEquivalentLabel,
+  hotEvaluationLabel,
   hotFixtureRow,
   hotFixtureRows,
   hotFixtures,
@@ -55,7 +58,7 @@ function status(overrides: Partial<LiveRefreshStatus> = {}): LiveRefreshStatus {
     cycle_in_progress: false,
     live_scores: "unavailable_unless_matchbook_payload_includes_scores",
     discovered_fixtures: [],
-    hot: { cadence_seconds: 30, fixture_count: 0 },
+    hot: { cadence_seconds: 30, fixture_count: 0, evaluated_count: 0 },
     universe: { cadence_seconds: 180, fixture_count: 0 },
     ...overrides,
   };
@@ -210,6 +213,7 @@ describe("HOT roster console placement", () => {
   it("places HOT Fixtures / Fast Scan after discovery and before Opportunity Monitor", () => {
     const page = readFileSync(join(frontendRoot, "app/page.tsx"), "utf8");
     const panel = readFileSync(join(frontendRoot, "components/hot-fixtures-panel.tsx"), "utf8");
+    const css = readFileSync(join(frontendRoot, "app/globals.css"), "utf8");
     const discoveryIndex = page.indexOf("<FixtureDiscoverySection");
     const hotIndex = page.indexOf("<HotFixturesPanel");
     const monitorIndex = page.indexOf("<OpportunityMonitor");
@@ -218,8 +222,12 @@ describe("HOT roster console placement", () => {
     assert.ok(monitorIndex > hotIndex);
     assert.match(page, /from "\.\.\/components\/hot-fixtures-panel"/);
     assert.equal(HOT_ROSTER_TITLE, "HOT Fixtures / Fast Scan");
+    assert.equal(HOT_ZONE_KICKER, "HOT Zone");
+    assert.match(panel, /HOT_ZONE_KICKER/);
     assert.match(panel, /HOT_ROSTER_TITLE/);
+    assert.match(panel, /fastScanRosterSummary/);
     assert.match(panel, /hotFixtureRows/);
+    assert.match(css, /hot-zone-panel/);
     assert.doesNotMatch(panel, /getTrackedWatchlist/);
     assert.doesNotMatch(panel, /DEMO_/);
     assert.doesNotMatch(panel, /getPaperScans/);
@@ -231,5 +239,52 @@ describe("HOT roster console placement", () => {
     assert.match(page, /items=\{tracked\.available \? tracked\.value : \[\]\}/);
     assert.doesNotMatch(page, /<OpportunityMonitor[\s\S]*discovered_fixtures/);
     assert.match(monitor, /Current radar set from tracked watchlist/);
+  });
+});
+
+describe("HOT Zone evaluation state and Fast Scan summary", () => {
+  it("shows current evaluation state and reason on HOT rows with no opportunity", () => {
+    const evaluated = hotFixtureRow(
+      fixture({
+        solver_is_arbitrage: false,
+        current_net_edge: null,
+        market_evaluation_state: "evaluated",
+        no_comparison_reason: "no_comparable_markets",
+        hot_reasons: [HOT_REASON_IN_PLAY],
+      }),
+    );
+    assert.equal(evaluated.hasQualifyingOpportunity, false);
+    assert.equal(evaluated.evaluationLabel, "evaluated · no_comparable_markets");
+    assert.equal(
+      hotEvaluationLabel(
+        fixture({
+          market_evaluation_state: "not_evaluated_scan_deadline",
+          market_evaluation_reason: "scan_budget_exhausted",
+        }),
+      ),
+      "Not evaluated — scan budget exhausted · scan_budget_exhausted",
+    );
+    assert.equal(
+      hotEvaluationLabel(fixture({ solver_is_arbitrage: true, market_evaluation_state: "evaluated" })),
+      "qualifying",
+    );
+  });
+
+  it("summarizes Fast Scan from truthful HOT lane fields", () => {
+    const live = status({
+      last_paper_decisions: 99,
+      last_completed_at: "2026-09-16T18:05:00Z",
+      discovered_fixtures: [fixture()],
+      hot: {
+        cadence_seconds: 30,
+        fixture_count: 4,
+        evaluated_count: 3,
+        last_completed_at: "2026-09-16T18:05:00Z",
+        last_diagnostics: { paper_decision_count: 2 },
+      },
+      universe: { cadence_seconds: 180, last_completed_at: "2026-09-16T18:04:00Z" },
+    });
+    assert.equal(fastScanRosterSummary(live), "4 HOT · 3 evaluated · 2 paper decisions");
+    assert.equal(fastScanRosterSummary(status()), "0 HOT · 0 evaluated · — paper decisions");
   });
 });

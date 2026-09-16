@@ -18,6 +18,7 @@ export default defineConfig({
       "lib/venue-participation-display.test.ts",
       "lib/live-refresh-poll-guard.test.ts",
       "lib/hot-fixture-roster-display.test.ts",
+      "lib/scan-cycle-history-display.test.ts",
     ],
   },
 });

@@ -14,11 +14,42 @@ from pydantic import ValidationError
 
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import VenueName
-from sports_hedge.paper.audit import PaperScanReadIssue, PaperScanRecord, PaperScanSummary
+from sports_hedge.paper.audit import (
+    PaperScanCycleRecord,
+    PaperScanReadIssue,
+    PaperScanRecord,
+    PaperScanSummary,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 PAPER_SCAN_SCHEMA_VERSION = 1
+
+_CREATE_PAPER_SCAN_CYCLES_SQL = """
+CREATE TABLE IF NOT EXISTS paper_scan_cycles (
+    cycle_id TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    scan_lane TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    fixture_count INTEGER NOT NULL,
+    evaluated_count INTEGER NOT NULL,
+    not_evaluated_count INTEGER NOT NULL,
+    matched_event_pairs INTEGER NOT NULL,
+    matched_market_pairs INTEGER NOT NULL,
+    paper_decision_count INTEGER NOT NULL,
+    qualifying_arb_count INTEGER NOT NULL,
+    venue_health_json TEXT NOT NULL,
+    degraded INTEGER NOT NULL,
+    last_error TEXT,
+    universe_generation_id INTEGER,
+    resume_cursor TEXT,
+    completeness TEXT,
+    generation_resume INTEGER,
+    generation_work_used_s TEXT,
+    operator_summary TEXT
+);
+"""
 
 _CREATE_PAPER_SCAN_RECORDS_SQL = """
 CREATE TABLE IF NOT EXISTS paper_scan_records (
@@ -150,6 +181,7 @@ class SqlitePaperScanRepository:
         connection.executescript(
             f"""
             {_CREATE_PAPER_SCAN_RECORDS_SQL}
+            {_CREATE_PAPER_SCAN_CYCLES_SQL}
             CREATE TABLE IF NOT EXISTS paper_scan_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -173,6 +205,8 @@ class SqlitePaperScanRepository:
                 ON paper_scan_records(eligible_for_paper_simulation, scanned_at DESC);
             CREATE INDEX IF NOT EXISTS idx_paper_scan_event_time
                 ON paper_scan_records(canonical_event_id, scanned_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_paper_scan_cycle_completed
+                ON paper_scan_cycles(completed_at DESC, started_at DESC);
             """
         )
         current_row = connection.execute(
@@ -269,6 +303,104 @@ class SqlitePaperScanRepository:
             and str(row["canonical_market_id"]) == record.canonical_market_id
             and str(row["scanned_at"]) == record.scanned_at.isoformat()
         )
+
+    def append_cycle(self, record: PaperScanCycleRecord) -> None:
+        """Insert one completed scan-cycle row. Retry of the same cycle is a no-op."""
+
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO paper_scan_cycles (
+                        cycle_id, started_at, completed_at, scan_lane, duration_ms,
+                        fixture_count, evaluated_count, not_evaluated_count,
+                        matched_event_pairs, matched_market_pairs,
+                        paper_decision_count, qualifying_arb_count,
+                        venue_health_json, degraded, last_error,
+                        universe_generation_id, resume_cursor, completeness,
+                        generation_resume, generation_work_used_s, operator_summary
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.cycle_id,
+                        record.started_at.isoformat(),
+                        record.completed_at.isoformat(),
+                        record.scan_lane,
+                        record.duration_ms,
+                        record.fixture_count,
+                        record.evaluated_count,
+                        record.not_evaluated_count,
+                        record.matched_event_pairs,
+                        record.matched_market_pairs,
+                        record.paper_decision_count,
+                        record.qualifying_arb_count,
+                        json.dumps(record.venue_health),
+                        int(record.degraded),
+                        record.last_error,
+                        record.universe_generation_id,
+                        record.resume_cursor,
+                        record.completeness,
+                        None if record.generation_resume is None else int(record.generation_resume),
+                        None
+                        if record.generation_work_used_s is None
+                        else str(record.generation_work_used_s),
+                        record.operator_summary,
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            if self._same_cycle_persist_attempt(record):
+                LOGGER.info(
+                    "paper_scan_cycle_same_persist_attempt cycle_id=%s",
+                    record.cycle_id,
+                )
+                return
+            raise
+
+    def _same_cycle_persist_attempt(self, record: PaperScanCycleRecord) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT cycle_id, scan_lane, started_at, completed_at
+                FROM paper_scan_cycles
+                WHERE cycle_id = ?
+                """,
+                (record.cycle_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        return (
+            str(row["cycle_id"]) == record.cycle_id
+            and str(row["scan_lane"]) == record.scan_lane
+            and str(row["started_at"]) == record.started_at.isoformat()
+            and str(row["completed_at"]) == record.completed_at.isoformat()
+        )
+
+    def list_cycles(self, *, limit: int = 100) -> list[PaperScanCycleRecord]:
+        """Return newest-first completed scan cycles for a bounded window."""
+
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM paper_scan_cycles
+                ORDER BY completed_at DESC, started_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        cycles: list[PaperScanCycleRecord] = []
+        for row in rows:
+            mapping = _row_mapping(row)
+            try:
+                cycles.append(_cycle_from_mapping(mapping))
+            except _ROW_DECODE_ERRORS as exc:
+                LOGGER.warning(
+                    "paper scan cycle row could not be reconstructed: cycle_id=%s reason=%s",
+                    mapping.get("cycle_id"),
+                    f"{type(exc).__name__}: {exc}",
+                )
+        return cycles
 
     def list_scans(
         self,
@@ -414,6 +546,39 @@ def _record_from_mapping(mapping: dict[str, Any]) -> PaperScanRecord:
     )
 
 
+def _cycle_from_mapping(mapping: dict[str, Any]) -> PaperScanCycleRecord:
+    generation_resume = mapping.get("generation_resume")
+    work_used = mapping.get("generation_work_used_s")
+    generation_id = mapping.get("universe_generation_id")
+    return PaperScanCycleRecord(
+        cycle_id=_required_str(mapping, "cycle_id"),
+        started_at=datetime.fromisoformat(_required_str(mapping, "started_at")),
+        completed_at=datetime.fromisoformat(_required_str(mapping, "completed_at")),
+        scan_lane=_required_str(mapping, "scan_lane"),
+        duration_ms=int(_required_value(mapping, "duration_ms")),
+        fixture_count=int(_required_value(mapping, "fixture_count")),
+        evaluated_count=int(_required_value(mapping, "evaluated_count")),
+        not_evaluated_count=int(_required_value(mapping, "not_evaluated_count")),
+        matched_event_pairs=int(_required_value(mapping, "matched_event_pairs")),
+        matched_market_pairs=int(_required_value(mapping, "matched_market_pairs")),
+        paper_decision_count=int(_required_value(mapping, "paper_decision_count")),
+        qualifying_arb_count=int(_required_value(mapping, "qualifying_arb_count")),
+        venue_health=_json_object(mapping.get("venue_health_json")),
+        degraded=_required_bool(mapping, "degraded"),
+        last_error=None if mapping.get("last_error") is None else str(mapping.get("last_error")),
+        universe_generation_id=None if generation_id is None else int(generation_id),
+        resume_cursor=None
+        if mapping.get("resume_cursor") is None
+        else str(mapping.get("resume_cursor")),
+        completeness=None if mapping.get("completeness") is None else str(mapping.get("completeness")),
+        generation_resume=None if generation_resume is None else bool(generation_resume),
+        generation_work_used_s=None if work_used in (None, "") else float(work_used),
+        operator_summary=None
+        if mapping.get("operator_summary") is None
+        else str(mapping.get("operator_summary")),
+    )
+
+
 def _required_value(mapping: dict[str, Any], key: str) -> Any:
     if key not in mapping:
         raise KeyError(f"missing column {key}")
@@ -429,6 +594,15 @@ def _required_str(mapping: dict[str, Any], key: str) -> str:
 
 def _required_bool(mapping: dict[str, Any], key: str) -> bool:
     return bool(_required_value(mapping, key))
+
+
+def _json_object(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    parsed = json.loads(value) if isinstance(value, (str, bytes, bytearray)) else value
+    if not isinstance(parsed, dict):
+        raise ValueError("expected JSON object")
+    return {str(key): str(item) for key, item in parsed.items()}
 
 
 def _json_list(value: Any) -> list[Any]:

@@ -458,6 +458,25 @@ tr:last-child td { border-bottom: none; }
 }
 .opportunity-monitor { margin-bottom: 16px; }
 .hot-fixtures-panel { margin-bottom: 16px; }
+.hot-zone-panel {
+  border-color: rgba(124, 242, 176, .32);
+  box-shadow: 0 0 0 1px rgba(124, 242, 176, .1);
+}
+.hot-zone-kicker {
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.hot-fast-scan-summary {
+  margin-top: 6px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
 .hot-fixtures-table td { vertical-align: top; }
 .hot-reason-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .hot-reason-chip {
@@ -472,6 +491,8 @@ tr:last-child td { border-bottom: none; }
   background: var(--accent-soft);
   white-space: nowrap;
 }
+.scan-cycle-history-panel { margin-bottom: 16px; }
+.scan-cycle-table td { vertical-align: top; }
 .audit-disclosure { margin: 0 0 16px; }
 .audit-summary {
   display: flex;

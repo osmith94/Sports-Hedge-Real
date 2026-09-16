@@ -9,6 +9,8 @@ import {
   HOT_ROSTER_HEADERS,
   HOT_ROSTER_TITLE,
   HOT_ROSTER_UNAVAILABLE,
+  HOT_ZONE_KICKER,
+  fastScanRosterSummary,
   hotFixtureRows,
   hotRosterBadgeLabel,
 } from "../lib/hot-fixture-roster-display";
@@ -25,13 +27,16 @@ export function HotFixturesPanel({
   const nowMs = useHydratedNowMs();
   const rows = available ? hotFixtureRows(status, nowMs) : [];
   const badge = hotRosterBadgeLabel(available, status);
+  const summary = available && status ? fastScanRosterSummary(status) : null;
 
   return (
-    <section className="panel hot-fixtures-panel">
+    <section className="panel hot-fixtures-panel hot-zone-panel">
       <div className="panel-header">
         <div>
+          <div className="hot-zone-kicker">{HOT_ZONE_KICKER}</div>
           <div className="panel-title">{HOT_ROSTER_TITLE}</div>
           <div className="panel-meta">{HOT_ROSTER_COPY}</div>
+          {summary ? <div className="hot-fast-scan-summary">{summary}</div> : null}
         </div>
         <span className={available ? "status-badge" : "demo-chip"}>{badge}</span>
       </div>
@@ -82,6 +87,11 @@ export function HotFixturesPanel({
                     ) : (
                       <span className="muted">HOT</span>
                     )}
+                  </td>
+                  <td className="wrap">
+                    <span className={row.hasQualifyingOpportunity ? undefined : "muted"}>
+                      {row.evaluationLabel}
+                    </span>
                   </td>
                   <td>{row.venuesLabel}</td>
                   <td className="muted">{row.lastRefresh}</td>

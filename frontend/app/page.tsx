@@ -8,6 +8,7 @@ import { OpportunityMonitor } from "../components/opportunity-monitor";
 import { PaperTradeBook } from "../components/paper-trade-book";
 import { RunPaperScan } from "../components/run-paper-scan";
 import { PaperScanHistoryTable } from "../components/paper-scan-history-table";
+import { ScanCycleHistoryPanel } from "../components/scan-cycle-history-panel";
 import { PriorityAlertsSeam } from "../components/arbitrage/priority-alerts/priority-alerts-seam";
 import { ExternalLegWorkflow } from "../components/arbitrage/priority-alerts/external-leg-workflow";
 import { getPriorityAlert } from "../lib/priority-alerts/provider";
@@ -16,6 +17,7 @@ import {
   getLivePriorityAlerts,
   getLiveRefreshStatus,
   getPaperLiquidityPools,
+  getPaperScanCycles,
   getPaperScanSummary,
   getPaperScans,
   getPaperTradeSummary,
@@ -26,6 +28,7 @@ import {
   NearOpportunity,
   OpportunityLifecycleEvent,
   PaperLiquiditySnapshot,
+  PaperScanCycleRecord,
   PaperScanRecord,
   PaperTrade,
   PaperTradeBookSummary,
@@ -50,6 +53,8 @@ async function settledValue<T>(promise: Promise<T>, fallback: T): Promise<{ valu
 
 export default async function ArbitragePage() {
   let scans: PaperScanRecord[] = [];
+  let scanCycles: PaperScanCycleRecord[] = [];
+  let scanCyclesAvailable = true;
   let summary: Awaited<ReturnType<typeof getPaperScanSummary>> | null = null;
   let apiAvailable = true;
   let livePriorityAvailable = true;
@@ -69,6 +74,12 @@ export default async function ArbitragePage() {
     [scans, summary] = await Promise.all([getPaperScans("limit=100"), getPaperScanSummary()]);
   } catch {
     apiAvailable = false;
+  }
+
+  try {
+    scanCycles = await getPaperScanCycles("limit=100");
+  } catch {
+    scanCyclesAvailable = false;
   }
 
   const tracked = await settledValue(getTrackedWatchlist("limit=100"), [] as NearOpportunity[]);
@@ -160,6 +171,15 @@ export default async function ArbitragePage() {
         liveRefreshAvailable={liveRefreshAvailable}
       />
 
+      <ScanCycleHistoryPanel
+        cycles={
+          liveRefreshAvailable && liveRefresh
+            ? (liveRefresh.recent_scan_cycles ?? scanCycles)
+            : scanCycles
+        }
+        available={scanCyclesAvailable || liveRefreshAvailable}
+      />
+
       {livePriorityCount > 0 ? (
         <section className="ops-section ops-section-compact">
           <div className="section-label">
@@ -199,8 +219,8 @@ export default async function ArbitragePage() {
         <summary className="audit-summary">
           <span className="discovery-chevron" aria-hidden="true" />
           <span className="audit-summary-copy">
-            Activity / scan audit history · latest 100 append-only observations. Not current
-            scanner radar.
+            Activity / market-decision audit · latest 100 append-only observations. Not
+            current scanner radar. Scan-cycle history is a separate surface.
           </span>
           <span className={apiAvailable ? "status-badge" : "demo-chip"}>
             {apiAvailable ? "LATEST 100 AUDIT" : "NO API CONNECTION"}

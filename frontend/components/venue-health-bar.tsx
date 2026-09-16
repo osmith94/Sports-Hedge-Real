@@ -22,8 +22,7 @@ function tone(
   if (fromScan) return fromScan;
   if (!row) return "unknown";
   if (!row.ok) return "down";
-  if (row.authenticated) return "ok";
-  return "warn";
+  return "ok";
 }
 
 export function VenueHealthBar() {

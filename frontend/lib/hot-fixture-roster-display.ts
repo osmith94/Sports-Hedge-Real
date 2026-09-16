@@ -1,5 +1,7 @@
 import { DiscoveredFixture, LiveRefreshStatus } from "./api";
 import {
+  NOT_EVALUATED_MARKET_FETCH_LABEL,
+  NOT_EVALUATED_SCAN_BUDGET_LABEL,
   fixtureHref,
   kickoffContextLines,
   lastRefreshLabel,
@@ -7,6 +9,7 @@ import {
 } from "./discovered-fixture-display";
 import { percent } from "./format";
 
+export const HOT_ZONE_KICKER = "HOT Zone";
 export const HOT_ROSTER_TITLE = "HOT Fixtures / Fast Scan";
 
 export const HOT_ROSTER_COPY =
@@ -27,6 +30,7 @@ export const HOT_ROSTER_HEADERS = [
   "Fixture",
   "Kickoff / in-play",
   "Why HOT",
+  "Evaluation",
   "Venues",
   "Last refresh",
   "Equivalent",
@@ -41,6 +45,7 @@ export type HotFixtureRow = {
   kickoffUtc: string;
   kickoffLines: string[];
   reasons: string[];
+  evaluationLabel: string;
   venuesLabel: string;
   lastRefresh: string;
   equivalentLabel: string;
@@ -102,6 +107,58 @@ export function hotRosterBadgeLabel(
   return count ? `${count} HOT` : "EMPTY";
 }
 
+function diagnosticCount(diagnostics: Record<string, unknown> | null | undefined, key: string): number | null {
+  const value = diagnostics?.[key];
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+export function hotPaperDecisionCount(status: LiveRefreshStatus | null): number | null {
+  if (!status) return null;
+  const fromHot = diagnosticCount(status.hot?.last_diagnostics ?? null, "paper_decision_count");
+  if (fromHot != null) return fromHot;
+  const hotCompleted = status.hot?.last_completed_at;
+  if (hotCompleted && status.last_completed_at === hotCompleted && status.last_paper_decisions != null) {
+    return status.last_paper_decisions;
+  }
+  if (hotCompleted && !status.universe?.last_completed_at && status.last_paper_decisions != null) {
+    return status.last_paper_decisions;
+  }
+  return null;
+}
+
+export function fastScanRosterSummary(status: LiveRefreshStatus | null): string {
+  const hotCount = status?.hot?.fixture_count ?? hotFixtures(status).length;
+  const evaluated = status?.hot?.evaluated_count ?? 0;
+  const decisions = hotPaperDecisionCount(status);
+  const decisionLabel = decisions == null ? "— paper decisions" : `${decisions} paper decisions`;
+  return `${hotCount} HOT · ${evaluated} evaluated · ${decisionLabel}`;
+}
+
+export function hotEvaluationLabel(item: DiscoveredFixture): string {
+  if (item.solver_is_arbitrage === true) return "qualifying";
+  if (item.market_evaluation_state === "not_evaluated_scan_deadline") {
+    return item.market_evaluation_reason
+      ? `${NOT_EVALUATED_SCAN_BUDGET_LABEL} · ${item.market_evaluation_reason}`
+      : NOT_EVALUATED_SCAN_BUDGET_LABEL;
+  }
+  if (item.market_evaluation_state === "market_fetch_unavailable") {
+    return item.market_evaluation_reason
+      ? `${NOT_EVALUATED_MARKET_FETCH_LABEL} · ${item.market_evaluation_reason}`
+      : NOT_EVALUATED_MARKET_FETCH_LABEL;
+  }
+  const reason = item.market_evaluation_reason || item.no_comparison_reason;
+  if (item.market_evaluation_state === "evaluated") {
+    return reason ? `evaluated · ${reason}` : "evaluated · no qualifying opportunity";
+  }
+  if (reason) return reason.replaceAll("_", " ");
+  return "—";
+}
+
 export function hotFixtureRow(item: DiscoveredFixture, nowMs: number | null = null): HotFixtureRow {
   return {
     id: item.canonical_event_id,
@@ -111,6 +168,7 @@ export function hotFixtureRow(item: DiscoveredFixture, nowMs: number | null = nu
     kickoffUtc: item.kickoff_utc,
     kickoffLines: kickoffContextLines(item, nowMs),
     reasons: hotReasonLabels(item),
+    evaluationLabel: hotEvaluationLabel(item),
     venuesLabel: hotVenuePresenceLabel(item),
     lastRefresh: lastRefreshLabel(item, nowMs),
     equivalentLabel: hotEquivalentLabel(item),
