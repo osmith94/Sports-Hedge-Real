@@ -159,6 +159,10 @@ class MarketEvaluationState(StrEnum):
 NOT_EVALUATED_SCAN_DEADLINE_REASON = "not_evaluated_scan_deadline"
 SCAN_BUDGET_EXHAUSTED_REASON = "scan_budget_exhausted"
 MARKET_FETCH_UNAVAILABLE_REASON = "list_markets_unavailable"
+UNIVERSE_COMPLETENESS_COMPLETE = "complete"
+UNIVERSE_COMPLETENESS_DEADLINE_LEFTOVER = "deadline_leftover"
+UNIVERSE_COMPLETENESS_EMPTY_UNIVERSE = "empty_universe"
+UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE = "stale_generation_state"
 DEFAULT_MAX_EVENT_PAIRS = 60
 # Keep ~4s of the 45s operator cycle for leftover assembly before coordinator grace.
 SCAN_FINALISATION_RESERVE_SECONDS = 4.0
@@ -501,6 +505,8 @@ class ReadOnlyCrossVenueCollector:
         identity_scope: list[str] | None = None,
         resume_cursor: str | None = None,
         skip_event_ids: list[str] | None = None,
+        universe_generation_id: int | None = None,
+        generation_resume: bool = False,
         known_source_events: dict[str, list[dict[str, Any]]] | None = None,
         enabled_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
     ) -> CollectionReport:
@@ -587,6 +593,9 @@ class ReadOnlyCrossVenueCollector:
         resolved_lane = (scan_lane or "").strip().casefold() or None
         hot_scope = {item.strip() for item in (identity_scope or []) if item and item.strip()}
         skip_ids = {item.strip() for item in (skip_event_ids or []) if item and item.strip()}
+        clusters_before_resume = 0
+        skipped_by_resume = 0
+        stale_generation_state_ignored = False
         skip_discovery = resolved_lane == ScanLane.HOT.value and identity_scope is not None
         try:
             with self._stage("event_discovery"):
@@ -699,22 +708,37 @@ class ReadOnlyCrossVenueCollector:
                     issues.append(
                         CollectorIssue(stage="normalize_match", detail="scan_cycle_deadline_reached")
                     )
+                clusters_before_resume = len(clusters)
+                effective_skip = skip_ids
+                effective_cursor = resume_cursor
+                if (
+                    resolved_lane != ScanLane.HOT.value
+                    and (skip_ids or (resume_cursor or "").strip())
+                    and not generation_resume
+                ):
+                    # Skip/cursor from a closed generation must never empty a new sweep.
+                    stale_generation_state_ignored = True
+                    effective_skip = set()
+                    effective_cursor = None
                 if (
                     identity_scope is not None
-                    or skip_ids
-                    or resume_cursor
+                    or effective_skip
+                    or effective_cursor
                     or resolved_lane == ScanLane.HOT.value
                 ):
                     clusters = _select_lane_clusters(
                         clusters,
                         identity_scope=None if identity_scope is None else hot_scope,
-                        skip_event_ids=skip_ids,
-                        resume_cursor=resume_cursor,
+                        skip_event_ids=effective_skip,
+                        resume_cursor=effective_cursor,
                         scan_lane=resolved_lane,
                         seen_at=started_at,
                         polymarket_events=polymarket_events,
                         queried_series_ids=queried_series_ids,
                     )
+                skipped_by_resume = 0
+                if resolved_lane != ScanLane.HOT.value:
+                    skipped_by_resume = max(0, clusters_before_resume - len(clusters))
 
             scan_kwargs = {
                 "fee_snapshots": fee_snapshots,
@@ -809,6 +833,11 @@ class ReadOnlyCrossVenueCollector:
             cancelled=cancelled,
             scan_lane=resolved_lane,
             resume_cursor=resume_cursor,
+            universe_generation_id=universe_generation_id,
+            generation_resume=generation_resume,
+            clusters_before_resume=clusters_before_resume,
+            skipped_by_resume=skipped_by_resume,
+            stale_generation_state_ignored=stale_generation_state_ignored,
         )
 
     def _deadline_reached(self) -> bool:
@@ -1201,6 +1230,11 @@ class ReadOnlyCrossVenueCollector:
         cancelled: bool,
         scan_lane: str | None = None,
         resume_cursor: str | None = None,
+        universe_generation_id: int | None = None,
+        generation_resume: bool = False,
+        clusters_before_resume: int = 0,
+        skipped_by_resume: int = 0,
+        stale_generation_state_ignored: bool = False,
     ) -> CollectionReport:
         assembly_started = monotonic()
         completed_at = datetime.now(UTC)
@@ -1232,6 +1266,19 @@ class ReadOnlyCrossVenueCollector:
         deadline_hit = leftover_n > 0 or cancelled or any(
             issue.detail == "scan_cycle_deadline_reached" for issue in issues
         ) or self._provider_cancels > 0
+        universe_lane = (scan_lane or "").strip().casefold() != ScanLane.HOT.value
+        completeness = (
+            universe_sweep_completeness(
+                leftover_n=leftover_n,
+                evaluated_n=evaluated_n,
+                clusters_before_resume=clusters_before_resume,
+                skipped_by_resume=skipped_by_resume,
+                deadline_hit=deadline_hit,
+                generation_resume=generation_resume,
+            )
+            if universe_lane
+            else None
+        )
         operator_summary = (
             f"{len(discovered_fixtures)} fixtures discovered · "
             f"MB {len(matchbook_events)} · PM {len(polymarket_events)} · "
@@ -1241,6 +1288,8 @@ class ReadOnlyCrossVenueCollector:
         )
         if deadline_hit:
             operator_summary += f" · partial ({leftover_n} not evaluated)"
+        elif completeness == UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE:
+            operator_summary += " · partial (stale generation state)"
         enabled_list = [
             venue for venue in OPERATOR_SCAN_VENUES if venue in self._op_enabled_venues
         ]
@@ -1307,6 +1356,15 @@ class ReadOnlyCrossVenueCollector:
             },
             "scan_lane": scan_lane,
             "resume_cursor": resume_cursor,
+            "universe_generation_id": universe_generation_id,
+            "generation_resume": generation_resume,
+            "clusters_before_resume": clusters_before_resume,
+            "skipped_by_resume_count": skipped_by_resume,
+            "stale_generation_state_ignored": stale_generation_state_ignored,
+            "completeness": completeness,
+            "partial": bool(
+                deadline_hit or completeness == UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE
+            ),
             "enabled_venues": [item.value for item in self._op_enabled_venues],
             "identity_scope": [
                 item.canonical_event_id for item in discovered_fixtures
@@ -3100,6 +3158,35 @@ def _matching_coverage(
         "qualifying_arbs": qualifying,
         "matching_state": meaning,
     }
+
+
+def universe_sweep_completeness(
+    *,
+    leftover_n: int,
+    evaluated_n: int,
+    clusters_before_resume: int,
+    skipped_by_resume: int,
+    deadline_hit: bool,
+    generation_resume: bool,
+) -> str:
+    """Distinguish deadline leftovers, a genuine empty universe, and skip leaks.
+
+    A closed generation's skip/cursor must never make a new sweep look complete.
+    """
+
+    if (
+        not generation_resume
+        and skipped_by_resume > 0
+        and evaluated_n == 0
+        and leftover_n == 0
+        and clusters_before_resume > 0
+    ):
+        return UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE
+    if leftover_n > 0 or deadline_hit:
+        return UNIVERSE_COMPLETENESS_DEADLINE_LEFTOVER
+    if clusters_before_resume == 0 and evaluated_n == 0:
+        return UNIVERSE_COMPLETENESS_EMPTY_UNIVERSE
+    return UNIVERSE_COMPLETENESS_COMPLETE
 
 
 def _filter_known_source_events(

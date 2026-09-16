@@ -714,7 +714,7 @@ async def test_failed_universe_chunks_consume_generation_budget_without_starving
         raise RuntimeError("provider_timeout")
 
     attempts = 0
-    while coordinator._universe_work_used < 150:
+    while coordinator._universe_generation_started_at is not None:
         attempts += 1
         assert attempts <= 8
         plan = coordinator.plan_tick(now=clock.now)
@@ -725,7 +725,7 @@ async def test_failed_universe_chunks_consume_generation_budget_without_starving
                 timeout_seconds=plan.coordinator_timeout_seconds,
                 scan_lane=ScanLane.UNIVERSE,
             )
-    assert coordinator._universe_work_used >= 150
+    assert coordinator._universe_work_used == 0.0
     assert coordinator._universe_generation_started_at is None
     assert coordinator.status.universe.generation_work_used_s >= 150
     closed = coordinator.plan_tick(now=clock.now)
