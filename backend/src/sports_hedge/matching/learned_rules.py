@@ -548,6 +548,28 @@ def apply_text_rule(rule: MappingRule, value: str) -> str:
     return normalized
 
 
+def participant_identity_preserved(original: str, transformed: str) -> bool:
+    """True when a learned rename is a naming variant, not a different club.
+
+    Operator mappings may strip safe FC-style tokens or apply curated aliases.
+    They must not replace Arsenal with Chelsea (or any disjoint participant).
+    """
+
+    left = resolve_team_name(original)
+    right = resolve_team_name(transformed)
+    if not left and not right:
+        return True
+    if left == right:
+        return True
+    left_tokens = set(_tokens(left)) - SAFE_TEAM_SUFFIX_TOKENS - SAFE_TEAM_PREFIX_TOKENS
+    right_tokens = set(_tokens(right)) - SAFE_TEAM_SUFFIX_TOKENS - SAFE_TEAM_PREFIX_TOKENS
+    if left_tokens and right_tokens and (left_tokens <= right_tokens or right_tokens <= left_tokens):
+        return True
+    if len(left) >= 4 and len(right) >= 4 and (left in right or right in left):
+        return True
+    return False
+
+
 def _parse_fixture_fields(payload: str) -> dict[str, str]:
     parsed: dict[str, str] = {}
     for part in payload.split("|"):
@@ -593,6 +615,10 @@ class LearnedMappingApplicator:
                 continue
             new_home = self._apply_team(rule, event, "home", home)
             new_away = self._apply_team(rule, event, "away", away)
+            if not participant_identity_preserved(home, new_home) or not participant_identity_preserved(
+                away, new_away
+            ):
+                continue
             if new_home != normalize_text(home) or new_away != normalize_text(away):
                 applied.append(
                     AppliedLearnedRule(
@@ -622,7 +648,11 @@ class LearnedMappingApplicator:
             if not (home_ok and away_ok and src_ok and kickoff_ok):
                 return normalize_text(current)
             mapped = transformation.get(side)
-            return mapped if mapped else normalize_text(current)
+            if not mapped:
+                return normalize_text(current)
+            if not participant_identity_preserved(current, mapped):
+                return normalize_text(current)
+            return mapped
         return apply_text_rule(rule, current)
 
     def _team_rule_applies(
