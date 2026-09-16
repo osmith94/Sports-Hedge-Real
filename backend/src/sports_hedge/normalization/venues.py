@@ -71,6 +71,13 @@ _RESULT_EXTENSION_RE = re.compile(
 _REMAIN_OPEN_POSTPONE_RE = re.compile(
     r"if the (?:game|match) is postponed.{0,160}remain open"
 )
+_STANDARD_CANCEL_NO_MAKEUP_RE = re.compile(
+    r"if the (?:game|match) is cancel(?:l?ed|led) entirely.{0,200}"
+    r"(?:no make[- ]?up|this market will resolve)"
+)
+_DRAW_VOID_RE = re.compile(r"\bdraw voids?\b")
+_ET_INCLUSION_PHRASES = ("including extra time", "include extra time", "includes extra time")
+_PENALTY_INCLUSION_PHRASES = ("including penalties", "include penalties")
 _TEAM_TOTAL_TOKENS = ("team total", "home total", "away total", "participant total")
 
 
@@ -697,29 +704,64 @@ def _explicitly_excludes(text: str, subject: str) -> bool:
     )
 
 
+def _has_unnegated_phrase(text: str, phrase: str) -> bool:
+    start = 0
+    while True:
+        pos = text.find(phrase, start)
+        if pos < 0:
+            return False
+        if not _prefix_negates(text[:pos]):
+            return True
+        start = pos + len(phrase)
+
+
+def _inclusion_exclusion_conflict(text: str, extra_time: bool | None, penalties: bool | None) -> bool:
+    """True when the same subject is both affirmatively included and explicitly excluded."""
+
+    extra_excluded = _explicitly_excludes(text, "extra time")
+    penalties_excluded = _explicitly_excludes(text, "penalties")
+    if extra_excluded and (
+        extra_time is True or any(_has_unnegated_phrase(text, phrase) for phrase in _ET_INCLUSION_PHRASES)
+    ):
+        return True
+    if penalties_excluded and (
+        penalties is True
+        or any(_has_unnegated_phrase(text, phrase) for phrase in _PENALTY_INCLUSION_PHRASES)
+    ):
+        return True
+    return False
+
+
 def _has_regulation_marker(text: str) -> bool:
     return "90 minutes" in text or "regulation time" in text or "regulation-time" in text
 
 
 def _unparsed_abandon_postpone_void(text: str) -> bool:
-    """True when abandon/postpone/match-void language is present but unproven.
+    """True when abandon/postpone/cancel/reschedule/void language is unproven.
 
-    Standard Polymarket "remain open until completed" postponement is understood
-    and does not by itself change 90-minute settlement. Draw-void wording is
-    handled by family/push semantics, not this check. Any other abandon,
-    postponement-void, or unparsed postpone clause must fail closed.
+    Understood clauses that do not fail closed:
+    - standard Polymarket postponed / remain-open-until-completed
+    - standard Polymarket canceled-entirely / no-makeup / resolve Yes or No
+    - draw-void wording, which is family/push semantics rather than match void
     """
 
+    remain_open = bool(_REMAIN_OPEN_POSTPONE_RE.search(text))
+    standard_cancel = bool(_STANDARD_CANCEL_NO_MAKEUP_RE.search(text))
     has_abandon = "abandon" in text
     has_postpone = "postpon" in text
-    if not has_abandon and not has_postpone:
-        return False
-    remain_open = bool(_REMAIN_OPEN_POSTPONE_RE.search(text))
-    if has_abandon:
+    has_reschedule = "reschedul" in text
+    has_cancel = bool(re.search(r"\bcancel", text))
+    remaining_void = _DRAW_VOID_RE.sub(" ", text)
+    has_other_void = bool(re.search(r"\bvoid", remaining_void))
+    if has_abandon or has_reschedule:
         return True
-    if has_postpone and remain_open:
-        return False
-    return True
+    if has_postpone and not remain_open:
+        return True
+    if has_cancel and not standard_cancel:
+        return True
+    if has_other_void:
+        return True
+    return False
 
 
 def _unparsed_result_extension(text: str, extra_time: bool | None, penalties: bool | None) -> bool:
@@ -769,6 +811,8 @@ def classify_settlement_wording(text: str) -> tuple[SettlementScope, bool | None
     if include_negated:
         return _claim_regulation(normalized, False, False)
     if include_affirmed:
+        if _inclusion_exclusion_conflict(normalized, True, True):
+            return SettlementScope.UNKNOWN, None, None
         return SettlementScope.INCLUDING_PENALTIES, True, True
     if _AMBIGUOUS_ET_PENALTIES.search(normalized):
         return SettlementScope.UNKNOWN, None, None
@@ -781,6 +825,8 @@ def classify_settlement_wording(text: str) -> tuple[SettlementScope, bool | None
     penalties = _phrase_polarity(normalized, "including penalties")
     if penalties is None and "including penalties" not in normalized:
         penalties = _phrase_polarity(normalized, "include penalties")
+    if _inclusion_exclusion_conflict(normalized, extra_time, penalties):
+        return SettlementScope.UNKNOWN, None, None
     if extra_time is None and _explicitly_excludes(normalized, "extra time"):
         extra_time = False
     if penalties is None and _explicitly_excludes(normalized, "penalties"):

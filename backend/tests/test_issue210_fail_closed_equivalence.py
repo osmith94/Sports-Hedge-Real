@@ -94,6 +94,19 @@ C4_TITLES = (
     "Total Goals Over 2.5 Arsenal",
     "Arsenal team total 2.5",
 )
+AFFIRMATIVE_EXCLUSION_CONFLICTS = (
+    "Penalties do not count. Winner including penalties.",
+    "penalties do not count including penalties",
+    "Resolves including penalties. Penalties do not count.",
+    "Including extra time. Extra time does not count.",
+    "Winner including extra time and penalties. Penalties do not count.",
+)
+UNSUPPORTED_CANCEL_RESCHEDULE_VOID = (
+    "Resolves based on 90 minutes of regulation time. If the game is cancelled, this market will void.",
+    "Resolves based on 90 minutes of regulation time. If rescheduled, bets are void.",
+    "Resolves based on 90 minutes of regulation time. This market voids if the fixture is not played.",
+    "Resolves based on 90 minutes of regulation time. Cancelled matches void all bets.",
+)
 
 MB_EVENT = {
     "id": 21001,
@@ -525,6 +538,73 @@ def test_abandon_void_postponement_unparsed_fails_closed() -> None:
         False,
         False,
     )
+
+
+@pytest.mark.parametrize("text", AFFIRMATIVE_EXCLUSION_CONFLICTS)
+def test_affirmative_and_explicit_exclusion_conflict_fails_closed(text: str) -> None:
+    scope, extra_time, penalties = classify_settlement_wording(text)
+    assert scope is SettlementScope.UNKNOWN
+    assert extra_time is None
+    assert penalties is None
+
+
+def test_affirmative_exclusion_conflict_does_not_enter_solver() -> None:
+    left_event = PolymarketNormalizer().normalize_event(PM_EVENT)
+    true_et_pen = PolymarketNormalizer().normalize_market(
+        left_event,
+        _pm_1x2(ET_AND_PENALTIES, market_id="pm-true-conflict-control"),
+    )
+    conflicted = PolymarketNormalizer().normalize_market(
+        left_event,
+        _pm_1x2(AFFIRMATIVE_EXCLUSION_CONFLICTS[0], market_id="pm-pen-conflict"),
+    )
+    match = MarketMatcher().match(true_et_pen, conflicted)
+    assert conflicted.settlement.scope is SettlementScope.UNKNOWN
+    assert match.matched is False
+    assert scan_eligible_pair(true_et_pen, conflicted, match) is False
+
+    decision, matchbook, polymarket = _scan(
+        _mb_1x2(),
+        _pm_1x2(AFFIRMATIVE_EXCLUSION_CONFLICTS[0], market_id="pm-pen-conflict-scan"),
+        _pm_books("h", "d", "a"),
+    )
+    _assert_not_in_solver(decision, matchbook, polymarket)
+
+    et_conflict, mb_1x2, pm_et_conflict = _scan(
+        _mb_1x2(),
+        _pm_1x2(AFFIRMATIVE_EXCLUSION_CONFLICTS[3], market_id="pm-et-conflict-scan"),
+        _pm_books("h", "d", "a"),
+    )
+    _assert_not_in_solver(et_conflict, mb_1x2, pm_et_conflict)
+
+
+@pytest.mark.parametrize("text", UNSUPPORTED_CANCEL_RESCHEDULE_VOID)
+def test_unparsed_cancel_reschedule_void_fails_closed(text: str) -> None:
+    scope, extra_time, penalties = classify_settlement_wording(text)
+    assert scope is SettlementScope.UNKNOWN
+    assert extra_time is None
+    assert penalties is None
+
+
+def test_unparsed_cancel_reschedule_void_does_not_enter_solver() -> None:
+    for index, text in enumerate(UNSUPPORTED_CANCEL_RESCHEDULE_VOID):
+        decision, matchbook, polymarket = _scan(
+            _mb_1x2(),
+            _pm_1x2(text, market_id=f"pm-cancel-void-{index}"),
+            _pm_books("h", "d", "a"),
+        )
+        assert polymarket.market.settlement.scope is SettlementScope.UNKNOWN
+        _assert_not_in_solver(decision, matchbook, polymarket)
+
+    remain_open, _mb, pm_gamma = _scan(
+        _mb_1x2(),
+        _pm_1x2(GAMMA_POSTPONE, market_id="pm-gamma-cancel-positive"),
+        _pm_books("h", "d", "a"),
+    )
+    assert pm_gamma.market.settlement.scope is SettlementScope.REGULATION_TIME
+    assert remain_open.market_match.matched is True
+    assert remain_open.solver_model == "simple_complete_set"
+    assert scan_eligible_pair(_mb.market, pm_gamma.market, remain_open.market_match) is True
 
 
 def test_learned_mapping_cannot_override_participant_identity() -> None:
