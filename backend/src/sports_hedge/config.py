@@ -58,11 +58,22 @@ class Settings(BaseSettings):
 
     polymarket_gamma_base_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_base_url: str = "https://clob.polymarket.com"
-    # Public Gamma GET /sports (2026-09-12): epl=10188, elc=10355, lal=10193.
+    # Public Gamma GET /sports (2026-09-16): epl=10188, elc=10355, lal=10193,
+    # efl=10329 (EFL CUP), efa=10307 (FA Cup), fif=10238 (FIFA Friendlies),
+    # bun=10194 (Bundesliga), sea=10203 (Serie A).
     # Empty single-id override disables series filtering.
     polymarket_gamma_series_id: str | None = None
     polymarket_gamma_series_ids: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["10188", "10355", "10193"]
+        default_factory=lambda: [
+            "10188",
+            "10355",
+            "10193",
+            "10329",
+            "10307",
+            "10238",
+            "10194",
+            "10203",
+        ]
     )
     polymarket_gamma_page_limit: int = Field(default=100, ge=1, le=100)
     polymarket_gamma_max_pages_per_series: int = Field(default=5, ge=1, le=20)
@@ -86,6 +97,25 @@ class Settings(BaseSettings):
             "KXLALIGABTTS",
             "KXLALIGATOTAL",
             "KXLALIGAFTTS",
+            "KXEFLCUPGAME",
+            "KXEFLCUPBTTS",
+            "KXEFLCUPTOTAL",
+            "KXEFLCUPFTTS",
+            "KXFACUPGAME",
+            "KXFACUPBTTS",
+            "KXFACUPTOTAL",
+            "KXFACUPFTTS",
+            "KXINTLFRIENDLYGAME",
+            "KXINTLFRIENDLYBTTS",
+            "KXINTLFRIENDLYTOTAL",
+            "KXBUNDESLIGAGAME",
+            "KXBUNDESLIGABTTS",
+            "KXBUNDESLIGATOTAL",
+            "KXBUNDESLIGAFTTS",
+            "KXSERIEAGAME",
+            "KXSERIEABTTS",
+            "KXSERIEATOTAL",
+            "KXSERIEAFTTS",
         ]
     )
 
@@ -223,8 +253,8 @@ class Settings(BaseSettings):
         """Target-series coverage with a safe legacy-ID merge.
 
         A stale ``POLYMARKET_GAMMA_SERIES_ID`` must not silently replace the
-        EPL + Championship + La Liga set. The legacy value is merged into the
-        current list. An explicit empty single-id still disables series
+        current target-competition series set. The legacy value is merged into
+        the current list. An explicit empty single-id still disables series
         filtering (operator-opt-in) and is warned.
         """
 

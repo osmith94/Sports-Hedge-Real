@@ -22,7 +22,10 @@ from sports_hedge.api.paper import (
 )
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.target_competitions import UNMATCHED_POLYMARKET_COVERAGE
+from sports_hedge.application.target_competitions import (
+    UNMATCHED_POLYMARKET_COVERAGE,
+    polymarket_series_ids_for_targets,
+)
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.resolver import VenueCostResolver
@@ -252,7 +255,7 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
     discovered = {item.source_event_id: item for item in report.discovered_fixtures}
     assert set(discovered) == {"8801", "8802", "8803"}
     assert not any(item.source_event_id.startswith("100") for item in report.discovered_fixtures)
-    assert Settings().resolved_polymarket_series_ids() == ["10188", "10355", "10193"]
+    assert Settings().resolved_polymarket_series_ids() == polymarket_series_ids_for_targets()
 
     epl = discovered["8801"]
     assert epl.polymarket_matched is True

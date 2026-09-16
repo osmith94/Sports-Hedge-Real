@@ -174,7 +174,7 @@ export function DiscoveredFixturesPanel({
   const warnings = status.config_warnings ?? [];
   const snapshot = status.operator_summary
     ? `Stamped scan snapshot (not live age) · ${status.operator_summary}`
-    : dualScanStatusLines(status, nowMs).join(" · ");
+    : `Target football competitions only. ${dualScanStatusLines(status, nowMs).join(" · ")}`;
 
   return (
     <>

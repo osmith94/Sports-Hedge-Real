@@ -13,6 +13,7 @@ from sports_hedge.application.target_competitions import (
     EVENT_IDENTITY_MISMATCH,
     SERIES_NOT_QUERIED,
     UNMATCHED_POLYMARKET_COVERAGE,
+    polymarket_series_ids_for_targets,
 )
 from sports_hedge.config import Settings
 from sports_hedge.domain.football import CanonicalEvent
@@ -287,7 +288,7 @@ def test_legacy_single_series_already_in_targets_is_not_an_operator_warning(
 ) -> None:
     with caplog.at_level("WARNING", logger="sports_hedge.config"):
         settings = Settings(polymarket_gamma_series_id="10188")
-    assert settings.resolved_polymarket_series_ids() == ["10188", "10355", "10193"]
+    assert settings.resolved_polymarket_series_ids() == polymarket_series_ids_for_targets()
     assert settings.polymarket_series_config_warnings() == []
     assert not any("legacy single-series" in record.message for record in caplog.records)
     assert not any("POLYMARKET_GAMMA_SERIES_ID" in record.message for record in caplog.records)
