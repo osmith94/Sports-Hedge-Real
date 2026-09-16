@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 from datetime import UTC, datetime
-from email.utils import format_datetime
 from typing import Any
 
 import httpx
@@ -31,12 +30,12 @@ from sports_hedge.venues.matchbook import (
     MATCHBOOK_SESSION_PATH,
     MatchbookClient,
     MatchbookRateLimitedError,
-    _retry_after_seconds,
     aclose_shared_matchbook_client,
     get_shared_matchbook_client,
     reset_shared_matchbook_client,
     set_shared_matchbook_client,
 )
+from sports_hedge.venues.rate_limit import ProviderCooldown
 
 PASSWORD = "test-password-never-log"
 USERNAME = "test-user"
@@ -371,33 +370,13 @@ async def test_429_without_retry_after_uses_bounded_fallback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_429_retry_after_http_date_and_cap() -> None:
-    now = datetime(2026, 9, 16, 20, 30, tzinfo=UTC)
-    retry_at = datetime(2026, 9, 16, 20, 40, tzinfo=UTC)
-    response = httpx.Response(
-        429,
-        headers={"Retry-After": format_datetime(retry_at, usegmt=True)},
-    )
-    assert _retry_after_seconds(
-        response,
-        now=now,
-        fallback_seconds=5,
-        max_seconds=30,
-    ) == 30
-    uncapped = _retry_after_seconds(
-        response,
-        now=now,
-        fallback_seconds=5,
-        max_seconds=900,
-    )
-    assert uncapped == 600
-    missing = httpx.Response(429)
-    assert _retry_after_seconds(
-        missing,
-        now=now,
-        fallback_seconds=5,
-        max_seconds=30,
-    ) == 5
+async def test_matchbook_login_cooldown_uses_shared_provider_primitive() -> None:
+    venue = MatchbookClient(_settings())
+    try:
+        assert isinstance(venue._login_cooldown, ProviderCooldown)
+        assert venue._login_cooldown.policy.provider == "Matchbook"
+    finally:
+        await venue.aclose()
 
 
 @pytest.mark.asyncio

@@ -5,8 +5,6 @@ import math
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from email.utils import parsedate_to_datetime
-from time import monotonic
 from typing import Any
 
 import httpx
@@ -15,6 +13,7 @@ from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueHealth, VenueName
 from sports_hedge.normalization.text import normalize_text
 from sports_hedge.venues.base import ReadOnlyVenue, market_data_http_timeout
+from sports_hedge.venues.rate_limit import ProviderCooldown, RateLimitPolicy
 
 # Official lookups/sports names that mean association football only.
 # NCAA / American / Gaelic football are not in this set and must not match.
@@ -67,16 +66,22 @@ class MatchbookClient(ReadOnlyVenue):
         self.settings = settings
         self._owns_client = client is None
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._monotonic = monotonic_clock or monotonic
-        self._login_cooldown_seconds = (
-            DEFAULT_LOGIN_COOLDOWN_SECONDS
-            if login_cooldown_seconds is None
-            else float(login_cooldown_seconds)
-        )
-        self._login_cooldown_max_seconds = (
-            MAX_LOGIN_COOLDOWN_SECONDS
-            if login_cooldown_max_seconds is None
-            else float(login_cooldown_max_seconds)
+        self._login_cooldown = ProviderCooldown(
+            RateLimitPolicy(
+                fallback_seconds=(
+                    DEFAULT_LOGIN_COOLDOWN_SECONDS
+                    if login_cooldown_seconds is None
+                    else float(login_cooldown_seconds)
+                ),
+                max_seconds=(
+                    MAX_LOGIN_COOLDOWN_SECONDS
+                    if login_cooldown_max_seconds is None
+                    else float(login_cooldown_max_seconds)
+                ),
+                provider="Matchbook",
+            ),
+            monotonic_clock=monotonic_clock,
+            wall_clock=self._clock,
         )
         self._client = client or httpx.AsyncClient(
             base_url=settings.matchbook_base_url.rstrip("/"),
@@ -90,7 +95,6 @@ class MatchbookClient(ReadOnlyVenue):
         self._session_token: str | None = None
         self._football_sport_id: int | None = None
         self._login_lock = asyncio.Lock()
-        self._login_cooldown_until: float | None = None
         self._closed = False
 
     @property
@@ -125,8 +129,13 @@ class MatchbookClient(ReadOnlyVenue):
             json=payload,
             headers={"Content-Type": "application/json"},
         )
-        if response.status_code == 429:
-            retry_after = self._enter_login_cooldown(response)
+        retry_after = self._login_cooldown.observe_status(
+            response.status_code,
+            response.headers,
+            now=self._clock(),
+        )
+        if retry_after is not None:
+            self._clear_session_token()
             raise MatchbookRateLimitedError(retry_after)
         response.raise_for_status()
 
@@ -143,30 +152,10 @@ class MatchbookClient(ReadOnlyVenue):
         self._client.headers["session-token"] = self._session_token
         return self._session_token
 
-    def _cooldown_remaining_seconds(self) -> float:
-        if self._login_cooldown_until is None:
-            return 0.0
-        remaining = self._login_cooldown_until - self._monotonic()
-        if remaining <= 0:
-            self._login_cooldown_until = None
-            return 0.0
-        return remaining
-
     def _raise_if_cooling_down(self) -> None:
-        remaining = self._cooldown_remaining_seconds()
+        remaining = self._login_cooldown.remaining_seconds()
         if remaining > 0:
             raise MatchbookRateLimitedError(remaining)
-
-    def _enter_login_cooldown(self, response: httpx.Response) -> float:
-        retry_after = _retry_after_seconds(
-            response,
-            now=self._clock(),
-            fallback_seconds=self._login_cooldown_seconds,
-            max_seconds=self._login_cooldown_max_seconds,
-        )
-        self._login_cooldown_until = self._monotonic() + retry_after
-        self._clear_session_token()
-        return retry_after
 
     def _clear_session_token(self) -> None:
         self._session_token = None
@@ -448,44 +437,6 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _retry_after_seconds(
-    response: httpx.Response,
-    *,
-    now: datetime,
-    fallback_seconds: float,
-    max_seconds: float,
-) -> float:
-    """Honor Retry-After when valid; otherwise a bounded fallback cooldown."""
-
-    cap = max(0.0, float(max_seconds))
-    fallback = min(max(float(fallback_seconds), 1.0), cap if cap > 0 else float(fallback_seconds))
-    raw = response.headers.get("Retry-After")
-    if raw is None:
-        return fallback
-    text = str(raw).strip()
-    if not text:
-        return fallback
-    try:
-        delta = float(text)
-    except ValueError:
-        delta = None
-    else:
-        if delta <= 0:
-            return fallback
-        return min(delta, cap) if cap > 0 else delta
-
-    try:
-        when = parsedate_to_datetime(text)
-    except (TypeError, ValueError, OverflowError):
-        return fallback
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    remaining = (when - now).total_seconds()
-    if remaining <= 0:
-        return fallback
-    return min(remaining, cap) if cap > 0 else remaining
 
 
 def get_shared_matchbook_client(settings: Settings | None = None) -> MatchbookClient:
