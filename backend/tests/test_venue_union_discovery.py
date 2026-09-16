@@ -8,6 +8,7 @@ import pytest
 
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.target_competitions import polymarket_series_ids_for_targets
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
@@ -355,5 +356,5 @@ async def test_split_pm_kalshi_events_cluster_and_btts_enters_solver() -> None:
 
 def test_legacy_series_id_is_merged_not_replaced() -> None:
     settings = Settings(polymarket_gamma_series_id="10188")
-    assert settings.resolved_polymarket_series_ids() == ["10188", "10355", "10193"]
+    assert settings.resolved_polymarket_series_ids() == polymarket_series_ids_for_targets()
     assert settings.polymarket_series_config_warnings() == []

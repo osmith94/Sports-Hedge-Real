@@ -521,19 +521,14 @@ def _kalshi_competition(payload: dict[str, Any], series: dict[str, Any] | None) 
 
 
 def _kalshi_competition_from_series_ticker(series_ticker: str) -> str | None:
-    from sports_hedge.application.target_competitions import resolve_target_competition
+    from sports_hedge.application.target_competitions import resolve_target_competition_from_kalshi_ticker
 
     ticker = series_ticker.upper()
-    if ticker.startswith("KXEPL"):
-        resolved = resolve_target_competition("Premier League")
-        return resolved.display_name if resolved else "English Premier League"
-    if ticker.startswith("KXEFLCHAMPIONSHIP"):
-        resolved = resolve_target_competition("Championship")
-        return resolved.display_name if resolved else "EFL Championship"
-    if ticker.startswith("KXLALIGA") and not ticker.startswith("KXLALIGA2"):
-        resolved = resolve_target_competition("La Liga")
-        return resolved.display_name if resolved else "Spain La Liga"
-    return None
+    # La Liga 2 is a distinct Kalshi family. The KXLALIGA prefix must not claim it.
+    if ticker.startswith("KXLALIGA2"):
+        return None
+    resolved = resolve_target_competition_from_kalshi_ticker(series_ticker)
+    return resolved.display_name if resolved is not None else None
 
 
 def _kalshi_market_family(

@@ -175,7 +175,7 @@ export function DiscoveredFixturesPanel({
       <p className="section-copy">
         {status.operator_summary
           ? status.operator_summary
-          : `PL / Championship / La Liga. Last collection ${
+          : `Target football competitions only. Last collection ${
               status.last_completed_at ? kickoffRelativeLabel(status.last_completed_at) ?? "just now" : "never"
             }.`}
         {status.last_error ? ` Last error: ${status.last_error}` : ""}

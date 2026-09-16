@@ -13,6 +13,11 @@ class TargetCompetitionCode(StrEnum):
     PREMIER_LEAGUE = "premier_league"
     CHAMPIONSHIP = "championship"
     LA_LIGA = "la_liga"
+    CARABAO_CUP = "carabao_cup"
+    FA_CUP = "fa_cup"
+    INTERNATIONAL_FRIENDLIES = "international_friendlies"
+    BUNDESLIGA = "bundesliga"
+    SERIE_A = "serie_a"
 
 
 class TargetCompetition(BaseModel):
@@ -24,9 +29,20 @@ class TargetCompetition(BaseModel):
     kalshi_series_prefixes: tuple[str, ...] = Field(default_factory=tuple)
 
 
-# Public Gamma GET /sports (retrieved 2026-09-12): epl=10188, elc=10355, lal=10193.
-# Series IDs are coverage claims for those competitions only. Empty series_id means
-# Sports Hedge must not invent Polymarket markets for that competition.
+# Provider coverage is claimed only from read-only metadata. Empty series_id /
+# empty Kalshi prefixes means Sports Hedge must not invent that venue's markets.
+#
+# Public Gamma GET /sports (retrieved 2026-09-16):
+#   epl=10188, elc=10355, lal=10193, efl=10329 (EFL CUP), efa=10307 (FA Cup),
+#   fif=10238 (FIFA Friendlies), bun=10194 (Bundesliga), sea=10203 (Serie A).
+# Near-neighbor Gamma series left unmatched: bl2=10670 (2. Bundesliga),
+# itsb=10676 (Serie B), clf=12410 (Club Friendlies), ecu1=11863 (LigaPro Serie A).
+#
+# Public Kalshi GET /series (retrieved 2026-09-16): KXEFLCUP*, KXFACUP*,
+# KXINTLFRIENDLY*, plus match-level Bundesliga/Serie A GAME/BTTS/TOTAL/FTTS.
+# Short KXBUNDESLIGA/KXSERIEA prefixes are not used: they would also match
+# KXBUNDESLIGA2GAME (2. Bundesliga) and KXSERIEAWGAME (Serie A Femminile).
+#
 # Aliases include observed Matchbook / Gamma / Kalshi label shapes. Matching is
 # exact after normalize_text; unknown labels fail closed.
 TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
@@ -97,6 +113,113 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
         polymarket_gamma_series_id="10193",
         polymarket_gamma_sport="lal",
         kalshi_series_prefixes=("KXLALIGA",),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.CARABAO_CUP,
+        display_name="Carabao Cup",
+        aliases=(
+            "carabao cup",
+            "the carabao cup",
+            "efl cup",
+            "the efl cup",
+            "league cup",
+            "the league cup",
+            "english league cup",
+            "england league cup",
+            "football league cup",
+            "english football league cup",
+            "carabao cup 2026/27",
+            "efl cup 2026/27",
+            "league cup 2026/27",
+        ),
+        polymarket_gamma_series_id="10329",
+        polymarket_gamma_sport="efl",
+        kalshi_series_prefixes=("KXEFLCUP",),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.FA_CUP,
+        display_name="FA Cup",
+        aliases=(
+            "fa cup",
+            "the fa cup",
+            "emirates fa cup",
+            "the emirates fa cup",
+            "english fa cup",
+            "england fa cup",
+            "fa cup 2026/27",
+            "emirates fa cup 2026/27",
+        ),
+        polymarket_gamma_series_id="10307",
+        polymarket_gamma_sport="efa",
+        kalshi_series_prefixes=("KXFACUP",),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.INTERNATIONAL_FRIENDLIES,
+        display_name="International Friendlies",
+        aliases=(
+            "international friendlies",
+            "international friendly",
+            "fifa friendlies",
+            "fifa friendly",
+            "senior international friendlies",
+            "senior international friendly",
+            "mens international friendlies",
+            "men's international friendlies",
+            "senior mens international friendlies",
+            "senior men's international friendlies",
+            "international friendly matches",
+        ),
+        polymarket_gamma_series_id="10238",
+        polymarket_gamma_sport="fif",
+        kalshi_series_prefixes=("KXINTLFRIENDLY",),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.BUNDESLIGA,
+        display_name="Bundesliga",
+        aliases=(
+            "bundesliga",
+            "german bundesliga",
+            "germany bundesliga",
+            "1 bundesliga",
+            "bundesliga 1",
+            "fussball bundesliga",
+            "fußball-bundesliga",
+            "bundesliga 2026/27",
+            "german bundesliga 2026/27",
+        ),
+        polymarket_gamma_series_id="10194",
+        polymarket_gamma_sport="bun",
+        # Match-level prefixes only. Short KXBUNDESLIGA also matches 2. Bundesliga.
+        kalshi_series_prefixes=(
+            "KXBUNDESLIGAGAME",
+            "KXBUNDESLIGABTTS",
+            "KXBUNDESLIGATOTAL",
+            "KXBUNDESLIGAFTTS",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.SERIE_A,
+        display_name="Serie A",
+        aliases=(
+            "serie a",
+            "italian serie a",
+            "italy serie a",
+            "serie a italy",
+            "serie a tim",
+            "serie a enilive",
+            "lega serie a",
+            "serie a 2026/27",
+            "italian serie a 2026/27",
+        ),
+        polymarket_gamma_series_id="10203",
+        polymarket_gamma_sport="sea",
+        # Match-level prefixes only. Short KXSERIEA also matches Serie A Femminile.
+        kalshi_series_prefixes=(
+            "KXSERIEAGAME",
+            "KXSERIEABTTS",
+            "KXSERIEATOTAL",
+            "KXSERIEAFTTS",
+        ),
     ),
 )
 
@@ -188,11 +311,16 @@ def resolve_target_competition_from_kalshi_ticker(series_ticker: str | None) -> 
     ticker = str(series_ticker or "").strip().upper()
     if not ticker:
         return None
+    matches: list[tuple[int, TargetCompetition]] = []
     for item in TARGET_COMPETITIONS:
         for prefix in item.kalshi_series_prefixes:
             if ticker.startswith(prefix):
-                return item
-    return None
+                matches.append((len(prefix), item))
+                break
+    if not matches:
+        return None
+    matches.sort(key=lambda pair: pair[0], reverse=True)
+    return matches[0][1]
 
 
 def polymarket_series_ids_for_targets() -> list[str]:

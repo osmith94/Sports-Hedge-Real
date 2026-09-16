@@ -9,11 +9,18 @@ import pytest
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.target_competitions import (
+    TARGET_COMPETITIONS,
     UNMATCHED_POLYMARKET_COVERAGE,
     TargetCompetitionCode,
+    polymarket_series_ids_for_targets,
     resolve_target_competition,
+    resolve_target_competition_from_kalshi_ticker,
+    resolve_target_competition_from_series_id,
+    scope_kalshi_event,
     scope_matchbook_event,
+    scope_polymarket_event,
 )
+from sports_hedge.config import Settings
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
@@ -48,6 +55,47 @@ VARIANT_LABELS = {
         "Spanish La Liga",
         "Spain La Liga",
     ),
+    TargetCompetitionCode.CARABAO_CUP: (
+        "Carabao Cup",
+        "EFL Cup",
+        "League Cup",
+        "English League Cup",
+        "Football League Cup",
+        "Carabao Cup 2026/27",
+        "EFL CUP",
+    ),
+    TargetCompetitionCode.FA_CUP: (
+        "FA Cup",
+        "The FA Cup",
+        "Emirates FA Cup",
+        "English FA Cup",
+        "FA Cup 2026/27",
+    ),
+    TargetCompetitionCode.INTERNATIONAL_FRIENDLIES: (
+        "International Friendlies",
+        "International Friendly",
+        "FIFA Friendlies",
+        "FIFA Friendly",
+        "Senior International Friendlies",
+        "Men's International Friendlies",
+    ),
+    TargetCompetitionCode.BUNDESLIGA: (
+        "Bundesliga",
+        "German Bundesliga",
+        "Germany Bundesliga",
+        "1. Bundesliga",
+        "Bundesliga 1",
+        "Fußball-Bundesliga",
+        "Bundesliga 2026/27",
+    ),
+    TargetCompetitionCode.SERIE_A: (
+        "Serie A",
+        "Italian Serie A",
+        "Italy Serie A",
+        "Serie A TIM",
+        "Serie A Enilive",
+        "Serie A 2026/27",
+    ),
 }
 
 REJECTED_LABELS = (
@@ -55,13 +103,40 @@ REJECTED_LABELS = (
     "Rugby Union",
     "3. Liga",
     "Germany 3. Liga",
-    "Bundesliga",
     "USL Championship",
     "LaLiga2",
-    "EFL CUP",
     "Champions League",
-    "Serie A",
     "",
+    "EFL Trophy",
+    "Vertu Trophy",
+    "League One",
+    "EFL League One",
+    "League Two",
+    "EFL League Two",
+    "2. Bundesliga",
+    "Bundesliga 2",
+    "Women's Bundesliga",
+    "Frauen-Bundesliga",
+    "Austria Bundesliga",
+    "Serie B",
+    "Brazilian Serie A",
+    "Serie A Brazil",
+    "Serie A Femminile",
+    "Women's Serie A",
+    "FA Trophy",
+    "FA Vase",
+    "FA Youth Cup",
+    "Women's FA Cup",
+    "Adobe Women's FA Cup",
+    "U21 International Friendlies",
+    "U20 International Friendlies",
+    "U19 International Friendlies",
+    "Youth International Friendlies",
+    "Women's International Friendlies",
+    "Club Friendlies",
+    "Club Friendly",
+    "Friendly",
+    "Scottish League Cup",
 )
 
 
@@ -95,6 +170,189 @@ def test_matchbook_scope_excludes_unrelated_sport_even_if_label_looks_plausible(
     )
     assert cricket.allowed is False
     assert cricket.reason == "non_football_sport"
+
+
+@pytest.mark.parametrize(
+    ("label", "code"),
+    [
+        ("Carabao Cup", TargetCompetitionCode.CARABAO_CUP),
+        ("EFL Cup", TargetCompetitionCode.CARABAO_CUP),
+        ("FA Cup", TargetCompetitionCode.FA_CUP),
+        ("International Friendlies", TargetCompetitionCode.INTERNATIONAL_FRIENDLIES),
+        ("Bundesliga", TargetCompetitionCode.BUNDESLIGA),
+        ("Serie A", TargetCompetitionCode.SERIE_A),
+    ],
+)
+def test_matchbook_scope_accepts_new_target_competitions(
+    label: str, code: TargetCompetitionCode
+) -> None:
+    decision = scope_matchbook_event(
+        {
+            "id": 10,
+            "name": "Home vs Away",
+            "sport-name": "Football",
+            "competition-name": label,
+        }
+    )
+    assert decision.allowed is True
+    assert decision.competition is not None
+    assert decision.competition.code == code
+
+
+@pytest.mark.parametrize(
+    "label",
+    (
+        "League One",
+        "League Two",
+        "EFL Trophy",
+        "Vertu Trophy",
+        "2. Bundesliga",
+        "Serie B",
+        "Women's FA Cup",
+        "Club Friendlies",
+        "U21 International Friendlies",
+    ),
+)
+def test_matchbook_scope_rejects_out_of_scope_and_near_neighbors(label: str) -> None:
+    decision = scope_matchbook_event(
+        {
+            "id": 11,
+            "name": "Home vs Away",
+            "sport-name": "Football",
+            "competition-name": label,
+        }
+    )
+    assert decision.allowed is False
+    assert decision.reason == "unknown_or_ambiguous_competition"
+
+
+@pytest.mark.parametrize(
+    ("series_id", "code"),
+    [
+        ("10188", TargetCompetitionCode.PREMIER_LEAGUE),
+        ("10355", TargetCompetitionCode.CHAMPIONSHIP),
+        ("10193", TargetCompetitionCode.LA_LIGA),
+        ("10329", TargetCompetitionCode.CARABAO_CUP),
+        ("10307", TargetCompetitionCode.FA_CUP),
+        ("10238", TargetCompetitionCode.INTERNATIONAL_FRIENDLIES),
+        ("10194", TargetCompetitionCode.BUNDESLIGA),
+        ("10203", TargetCompetitionCode.SERIE_A),
+    ],
+)
+def test_verified_polymarket_series_ids_resolve(
+    series_id: str, code: TargetCompetitionCode
+) -> None:
+    resolved = resolve_target_competition_from_series_id(series_id)
+    assert resolved is not None
+    assert resolved.code == code
+    assert resolved.polymarket_gamma_series_id == series_id
+
+
+@pytest.mark.parametrize(
+    "series_id",
+    (
+        "10670",  # Gamma bl2 = 2. Bundesliga
+        "10676",  # Gamma itsb = Serie B
+        "12410",  # Gamma clf = Club Friendlies
+        "11863",  # Gamma ecu1 = LigaPro Serie A
+        "99999",
+    ),
+)
+def test_unverified_or_near_neighbor_polymarket_series_ids_are_not_claimed(
+    series_id: str,
+) -> None:
+    assert resolve_target_competition_from_series_id(series_id) is None
+
+
+def test_polymarket_scope_uses_verified_series_coverage() -> None:
+    bun = scope_polymarket_event(
+        {
+            "id": "pm-bun-1",
+            "title": "Bayern Munich vs Dortmund",
+            "series": [{"id": "10194", "title": "Bundesliga"}],
+        }
+    )
+    assert bun.allowed is True
+    assert bun.competition is not None
+    assert bun.competition.code == TargetCompetitionCode.BUNDESLIGA
+
+    second_div = scope_polymarket_event(
+        {
+            "id": "pm-bl2-1",
+            "title": "Aachen vs Essen",
+            "competition": "2. Bundesliga",
+            "series": [{"id": "10670", "title": "2. Bundesliga"}],
+        }
+    )
+    assert second_div.allowed is False
+
+
+@pytest.mark.parametrize(
+    ("ticker", "code"),
+    [
+        ("KXEPLGAME", TargetCompetitionCode.PREMIER_LEAGUE),
+        ("KXEFLCHAMPIONSHIPGAME", TargetCompetitionCode.CHAMPIONSHIP),
+        ("KXLALIGAGAME", TargetCompetitionCode.LA_LIGA),
+        ("KXEFLCUPGAME", TargetCompetitionCode.CARABAO_CUP),
+        ("KXEFLCUPBTTS", TargetCompetitionCode.CARABAO_CUP),
+        ("KXFACUPGAME", TargetCompetitionCode.FA_CUP),
+        ("KXINTLFRIENDLYGAME", TargetCompetitionCode.INTERNATIONAL_FRIENDLIES),
+        ("KXBUNDESLIGAGAME", TargetCompetitionCode.BUNDESLIGA),
+        ("KXBUNDESLIGABTTS", TargetCompetitionCode.BUNDESLIGA),
+        ("KXSERIEAGAME", TargetCompetitionCode.SERIE_A),
+        ("KXSERIEATOTAL", TargetCompetitionCode.SERIE_A),
+    ],
+)
+def test_verified_kalshi_tickers_resolve(ticker: str, code: TargetCompetitionCode) -> None:
+    resolved = resolve_target_competition_from_kalshi_ticker(ticker)
+    assert resolved is not None
+    assert resolved.code == code
+
+
+@pytest.mark.parametrize(
+    "ticker",
+    (
+        "KXBUNDESLIGA2GAME",
+        "KXBUNDESLIGA2BTTS",
+        "KXSERIEAWGAME",
+        "KXSERIEBGAME",
+        "KXBRASILEIROGAME",
+        "KXCLUBFGAME",
+        "KXEFLTROPHYGAME",
+        "KXFIFAWGAME",
+    ),
+)
+def test_kalshi_near_neighbor_tickers_are_not_claimed(ticker: str) -> None:
+    assert resolve_target_competition_from_kalshi_ticker(ticker) is None
+
+
+def test_kalshi_scope_accepts_verified_series_and_rejects_neighbors() -> None:
+    accepted = scope_kalshi_event(
+        {
+            "event_ticker": "KXFACUPGAME-26JAN10ARSLIV",
+            "series_ticker": "KXFACUPGAME",
+            "title": "Arsenal vs Liverpool",
+        }
+    )
+    assert accepted.allowed is True
+    assert accepted.competition is not None
+    assert accepted.competition.code == TargetCompetitionCode.FA_CUP
+
+    rejected = scope_kalshi_event(
+        {
+            "event_ticker": "KXSERIEAWGAME-26JAN10JUVERO",
+            "series_ticker": "KXSERIEAWGAME",
+            "title": "Juventus vs Roma",
+            "competition": "Serie A Femminile",
+        }
+    )
+    assert rejected.allowed is False
+
+
+def test_display_name_for_league_cup_is_carabao_cup() -> None:
+    resolved = resolve_target_competition("EFL Cup")
+    assert resolved is not None
+    assert resolved.display_name == "Carabao Cup"
 
 
 def _event(
@@ -152,9 +410,17 @@ class ScopedMatchbook:
                 _event(1001, "Newcastle United vs Chelsea", "Premier League"),
                 _event(2001, "Leeds United vs Leicester City", "EFL Championship"),
                 _event(3001, "Real Madrid vs Barcelona", "La Liga"),
+                _event(5001, "Arsenal vs Liverpool", "Carabao Cup"),
+                _event(5002, "Manchester City vs Chelsea", "FA Cup"),
+                _event(5003, "England vs France", "International Friendlies"),
+                _event(5004, "Bayern Munich vs Dortmund", "Bundesliga"),
+                _event(5005, "Inter vs Milan", "Serie A"),
                 _event(4001, "England Women vs India Women", "Women's Cricket", sport="Cricket"),
                 _event(4002, "England vs France", "Rugby Union", sport="Rugby Union"),
                 _event(4003, "Aachen vs Essen", "3. Liga"),
+                _event(4004, "Charlton vs Bolton", "League One"),
+                _event(4005, "Salford vs Grimsby", "League Two"),
+                _event(4006, "Peterborough vs Wigan", "EFL Trophy"),
             ]
         }
 
@@ -241,13 +507,16 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
             maximum_execution_risk=100,
         )
         ids = {item.source_event_id: item for item in report.discovered_fixtures}
-        assert set(ids) == {"1001", "2001", "3001"}
+        assert set(ids) == {"1001", "2001", "3001", "5001", "5002", "5003", "5004", "5005"}
         assert "4001" not in ids
         assert "4002" not in ids
         assert "4003" not in ids
-        assert report.skipped_out_of_scope >= 3
+        assert "4004" not in ids
+        assert "4005" not in ids
+        assert "4006" not in ids
+        assert report.skipped_out_of_scope >= 6
         assert not any(issue.stage == "target_competition" for issue in report.issues)
-        assert "3. Liga" in report.rejected_competition_labels or report.skipped_out_of_scope >= 3
+        assert "3. Liga" in report.rejected_competition_labels or report.skipped_out_of_scope >= 6
 
         epl = ids["1001"]
         assert epl.polymarket_matched is True
@@ -275,6 +544,76 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
         assert la_liga.target_competition_code == "la_liga"
         assert la_liga.polymarket_matched is False
         assert la_liga.no_comparison_reason == UNMATCHED_POLYMARKET_COVERAGE
-        assert set(matchbook.list_markets_calls) == {"1001", "2001", "3001"}
+
+        carabao = ids["5001"]
+        assert carabao.target_competition_code == "carabao_cup"
+        assert carabao.polymarket_matched is False
+        assert carabao.no_comparison_reason == UNMATCHED_POLYMARKET_COVERAGE
+
+        fa_cup = ids["5002"]
+        assert fa_cup.target_competition_code == "fa_cup"
+        assert fa_cup.polymarket_matched is False
+        assert fa_cup.no_comparison_reason == UNMATCHED_POLYMARKET_COVERAGE
+
+        friendlies = ids["5003"]
+        assert friendlies.target_competition_code == "international_friendlies"
+        assert friendlies.polymarket_matched is False
+        assert friendlies.no_comparison_reason == UNMATCHED_POLYMARKET_COVERAGE
+
+        bundesliga = ids["5004"]
+        assert bundesliga.target_competition_code == "bundesliga"
+        assert bundesliga.polymarket_matched is False
+        assert bundesliga.no_comparison_reason == UNMATCHED_POLYMARKET_COVERAGE
+
+        serie_a = ids["5005"]
+        assert serie_a.target_competition_code == "serie_a"
+        assert serie_a.polymarket_matched is False
+        assert serie_a.no_comparison_reason == UNMATCHED_POLYMARKET_COVERAGE
+        assert set(matchbook.list_markets_calls) == {
+            "1001",
+            "2001",
+            "3001",
+            "5001",
+            "5002",
+            "5003",
+            "5004",
+            "5005",
+        }
     finally:
         repository.close()
+
+
+def test_target_set_excludes_league_one_two_and_efl_trophy() -> None:
+    codes = {item.code for item in TARGET_COMPETITIONS}
+    assert TargetCompetitionCode.PREMIER_LEAGUE in codes
+    assert TargetCompetitionCode.CHAMPIONSHIP in codes
+    assert TargetCompetitionCode.LA_LIGA in codes
+    assert codes == {
+        TargetCompetitionCode.PREMIER_LEAGUE,
+        TargetCompetitionCode.CHAMPIONSHIP,
+        TargetCompetitionCode.LA_LIGA,
+        TargetCompetitionCode.CARABAO_CUP,
+        TargetCompetitionCode.FA_CUP,
+        TargetCompetitionCode.INTERNATIONAL_FRIENDLIES,
+        TargetCompetitionCode.BUNDESLIGA,
+        TargetCompetitionCode.SERIE_A,
+    }
+    for label in ("League One", "League Two", "EFL Trophy", "Vertu Trophy"):
+        assert resolve_target_competition(label) is None
+
+
+def test_default_settings_query_verified_coverage_without_inventing_tickers() -> None:
+    settings = Settings()
+    assert settings.resolved_polymarket_series_ids() == polymarket_series_ids_for_targets()
+    assert settings.resolved_polymarket_series_ids()[:3] == ["10188", "10355", "10193"]
+    tickers = settings.kalshi_series_tickers
+    assert "KXEPLGAME" in tickers
+    assert "KXEFLCUPGAME" in tickers
+    assert "KXFACUPGAME" in tickers
+    assert "KXINTLFRIENDLYGAME" in tickers
+    assert "KXBUNDESLIGAGAME" in tickers
+    assert "KXSERIEAGAME" in tickers
+    assert "KXINTLFRIENDLYFTTS" not in tickers
+    assert "KXBUNDESLIGA2GAME" not in tickers
+    assert "KXSERIEAWGAME" not in tickers
+    assert "KXCLUBFGAME" not in tickers

@@ -17,6 +17,7 @@ from sports_hedge.application.lane_venues import (
 )
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
+from sports_hedge.application.target_competitions import polymarket_series_ids_for_targets
 from sports_hedge.config import (
     EMPTY_LEGACY_POLYMARKET_SERIES_WARNING,
     Settings,
@@ -84,14 +85,17 @@ def _collector(
 
 def test_supported_plural_multi_series_has_no_obsolete_legacy_warning() -> None:
     settings = _settings()
-    assert settings.resolved_polymarket_series_ids() == ["10188", "10355", "10193"]
+    assert settings.resolved_polymarket_series_ids() == polymarket_series_ids_for_targets()
+    assert "10188" in settings.resolved_polymarket_series_ids()
+    assert "10355" in settings.resolved_polymarket_series_ids()
+    assert "10193" in settings.resolved_polymarket_series_ids()
     assert settings.polymarket_series_config_warnings() == []
 
 
 def test_absent_legacy_variable_has_no_legacy_warning() -> None:
     settings = _settings(polymarket_gamma_series_id=None)
     assert settings.polymarket_gamma_series_id is None
-    assert settings.resolved_polymarket_series_ids() == ["10188", "10355", "10193"]
+    assert settings.resolved_polymarket_series_ids() == polymarket_series_ids_for_targets()
     assert settings.polymarket_series_config_warnings() == []
 
 
@@ -100,7 +104,7 @@ def test_nonempty_legacy_already_in_targets_merges_without_obsolete_warning(
 ) -> None:
     with caplog.at_level("WARNING", logger="sports_hedge.config"):
         settings = _settings(polymarket_gamma_series_id="10188")
-    assert settings.resolved_polymarket_series_ids() == ["10188", "10355", "10193"]
+    assert settings.resolved_polymarket_series_ids() == polymarket_series_ids_for_targets()
     assert settings.polymarket_series_config_warnings() == []
     assert not any("legacy single-series" in record.message for record in caplog.records)
     assert not any("POLYMARKET_GAMMA_SERIES_ID" in record.message for record in caplog.records)
@@ -109,7 +113,7 @@ def test_nonempty_legacy_already_in_targets_merges_without_obsolete_warning(
 def test_nonempty_legacy_extra_id_merges_with_actionable_hygiene_copy() -> None:
     settings = _settings(polymarket_gamma_series_id="99999")
     resolved = settings.resolved_polymarket_series_ids()
-    assert resolved == ["10188", "10355", "10193", "99999"]
+    assert resolved == [*polymarket_series_ids_for_targets(), "99999"]
     warnings = settings.polymarket_series_config_warnings()
     assert warnings == [legacy_extra_polymarket_series_warning("99999", resolved)]
     text = warnings[0]

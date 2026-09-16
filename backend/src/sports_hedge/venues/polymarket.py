@@ -44,9 +44,9 @@ class PolymarketClient(ReadOnlyVenue):
     async def list_events(self, **filters: Any) -> list[dict[str, Any]]:
         """List public Gamma events for configured target-competition series.
 
-        Default series IDs come from public ``GET /sports`` (EPL, EFL Championship,
-        La Liga). Pagination is per-series, bounded, and read-only. Empty series
-        results stay empty rather than inventing Championship/La Liga markets.
+        Default series IDs come from public ``GET /sports`` for the current
+        target competitions. Pagination is per-series, bounded, and read-only.
+        Empty series results stay empty rather than inventing markets.
         """
 
         page_limit = self.settings.polymarket_gamma_page_limit
