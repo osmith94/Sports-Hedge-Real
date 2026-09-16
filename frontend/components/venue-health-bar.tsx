@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { LiveRefreshStatus, VenueHealth, getLiveRefreshStatus, getVenueHealth } from "../lib/api";
 import { useHydratedNowMs } from "./hydrated-relative-time";
+import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-refresh-poll-guard";
 import { dualScanStatusLines } from "../lib/scan-status-display";
 import { scanHealthTone, venueHealthCaption } from "../lib/venue-health-display";
 
@@ -29,16 +30,16 @@ export function VenueHealthBar() {
   const [rows, setRows] = useState<VenueHealth[] | null>(null);
   const [refresh, setRefresh] = useState<LiveRefreshStatus | null>(null);
   const nowMs = useHydratedNowMs();
+  const liveRefreshPollGuardRef = useRef(createLiveRefreshPollGuard());
 
   useEffect(() => {
     let cancelled = false;
-    void getLiveRefreshStatus()
-      .then((status) => {
-        if (!cancelled) setRefresh(status);
-      })
-      .catch(() => {
-        if (!cancelled) setRefresh(null);
-      });
+    const pollLiveRefresh = () =>
+      applyLatestLiveRefresh(liveRefreshPollGuardRef.current, getLiveRefreshStatus, (status) => {
+        if (cancelled) return;
+        setRefresh(status);
+      }).catch(() => undefined);
+    void pollLiveRefresh();
     void getVenueHealth()
       .then((health) => {
         if (!cancelled) setRows(health);
@@ -47,11 +48,7 @@ export function VenueHealthBar() {
         if (!cancelled) setRows([]);
       });
     const timer = window.setInterval(() => {
-      void getLiveRefreshStatus()
-        .then((status) => {
-          if (!cancelled) setRefresh(status);
-        })
-        .catch(() => undefined);
+      void pollLiveRefresh();
     }, 5000);
     return () => {
       cancelled = true;

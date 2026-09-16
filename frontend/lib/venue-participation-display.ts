@@ -45,12 +45,22 @@ export function laneConfiguredVenues(
   return configured;
 }
 
+export function laneLastScanHealth(
+  status: LiveRefreshStatus | null | undefined,
+  lane: "hot" | "universe",
+): Record<string, string> | undefined {
+  const laneStatus = lane === "hot" ? status?.hot : status?.universe;
+  const health = laneStatus?.venue_health;
+  if (health == null || Object.keys(health).length === 0) return undefined;
+  return health;
+}
+
 export function laneVenueTruths(
   status: LiveRefreshStatus | null | undefined,
   lane: "hot" | "universe",
 ): VenueTruth[] {
   const configured = new Set(laneConfiguredVenues(status, lane));
-  const health = status?.venue_health ?? {};
+  const health = laneLastScanHealth(status, lane) ?? {};
   return OPERATOR_SCAN_VENUES.map((venue) => {
     const value = health[venue];
     const providerFailed = isProviderHealthFailure(value);
@@ -77,7 +87,7 @@ export function lastScanVenueClause(
   lane: "hot" | "universe",
 ): string | null {
   const truths = laneVenueTruths(status, lane);
-  const health = status?.venue_health;
+  const health = laneLastScanHealth(status, lane);
   const configured = truths.filter((item) => item.configured);
   if (!configured.length && (health == null || Object.keys(health).length === 0)) {
     return null;

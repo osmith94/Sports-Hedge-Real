@@ -125,6 +125,7 @@ def test_record_report_does_not_imply_matchbook_participation_when_unavailable()
     )
     status = coordinator.public_status()
     assert status.venue_health["matchbook"] == "unavailable"
+    assert status.hot.venue_health["matchbook"] == "unavailable"
     assert status.hot.active_venues == [
         VenueName.MATCHBOOK,
         VenueName.POLYMARKET,
@@ -188,3 +189,73 @@ def test_scheduled_then_manual_scan_keeps_named_clocks() -> None:
     assert status.hot.last_completed_at == NOW
     hot_summary = status.hot.operator_summary or ""
     assert "completed at 2026-09-16T12:00:00Z" in hot_summary
+    assert status.hot.venue_health["matchbook"] == "ok"
+    assert status.venue_health["matchbook"] == "timeout"
+
+
+def test_hot_last_scan_truth_survives_later_universe_recovery() -> None:
+    coordinator = LiveRefreshCoordinator(clock=lambda: NOW)
+    coordinator.reset()
+    coordinator.record_report(
+        _report(
+            venue_health={
+                "matchbook": "unavailable",
+                "polymarket": "ok",
+                "kalshi": "ok",
+            }
+        ),
+        scan_lane=ScanLane.HOT,
+    )
+    coordinator.record_report(
+        _report(
+            when=NOW + timedelta(seconds=40),
+            scan_lane=ScanLane.UNIVERSE.value,
+            venue_health={"matchbook": "ok", "polymarket": "ok", "kalshi": "ok"},
+        ),
+        scan_lane=ScanLane.UNIVERSE,
+    )
+    status = coordinator.public_status()
+    assert status.venue_health["matchbook"] == "ok"
+    assert status.hot.venue_health["matchbook"] == "unavailable"
+    assert status.universe.venue_health["matchbook"] == "ok"
+    hot_summary = status.hot.operator_summary or ""
+    universe_summary = status.universe.operator_summary or ""
+    assert "last scan PM·K" in hot_summary
+    assert "MB unavailable" in hot_summary
+    assert "last scan MB·PM·K" in universe_summary
+    assert "MB unavailable" not in universe_summary
+    assert status.hot.last_completed_at == NOW
+    assert status.universe.last_completed_at == NOW + timedelta(seconds=40)
+
+
+def test_universe_last_scan_truth_survives_later_hot_recovery() -> None:
+    coordinator = LiveRefreshCoordinator(clock=lambda: NOW)
+    coordinator.reset()
+    coordinator.record_report(
+        _report(
+            scan_lane=ScanLane.UNIVERSE.value,
+            venue_health={
+                "matchbook": "unavailable",
+                "polymarket": "ok",
+                "kalshi": "ok",
+            },
+        ),
+        scan_lane=ScanLane.UNIVERSE,
+    )
+    coordinator.record_report(
+        _report(
+            when=NOW + timedelta(seconds=30),
+            venue_health={"matchbook": "ok", "polymarket": "ok", "kalshi": "ok"},
+        ),
+        scan_lane=ScanLane.HOT,
+    )
+    status = coordinator.public_status()
+    assert status.venue_health["matchbook"] == "ok"
+    assert status.universe.venue_health["matchbook"] == "unavailable"
+    assert status.hot.venue_health["matchbook"] == "ok"
+    universe_summary = status.universe.operator_summary or ""
+    hot_summary = status.hot.operator_summary or ""
+    assert "last scan PM·K" in universe_summary
+    assert "MB unavailable" in universe_summary
+    assert "last scan MB·PM·K" in hot_summary
+    assert "MB unavailable" not in hot_summary

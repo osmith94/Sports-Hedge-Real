@@ -449,6 +449,7 @@ export type LaneRefreshStatus = {
   comparison_ready?: boolean;
   venue_warning?: string | null;
   applies_next_cycle?: boolean;
+  venue_health?: Record<string, string>;
 };
 
 export type LaneVenueFlags = {

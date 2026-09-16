@@ -4,13 +4,19 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { LiveRefreshStatus } from "./api";
+import { LaneRefreshStatus, LiveRefreshStatus } from "./api";
 import { dualScanStatusLines, fastScanCopy, fullSweepCopy } from "./scan-status-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = join(here, "..");
 
-function status(overrides: Partial<LiveRefreshStatus> = {}): LiveRefreshStatus {
+function status(
+  overrides: Omit<Partial<LiveRefreshStatus>, "hot" | "universe"> & {
+    hot?: Partial<LaneRefreshStatus>;
+    universe?: Partial<LaneRefreshStatus>;
+  } = {},
+): LiveRefreshStatus {
+  const { hot, universe, ...rest } = overrides;
   return {
     discovery_source: "matchbook",
     matching_venue: "polymarket",
@@ -27,6 +33,7 @@ function status(overrides: Partial<LiveRefreshStatus> = {}): LiveRefreshStatus {
       next_due_at: "2026-09-14T12:00:18Z",
       fixture_count: 7,
       not_evaluated_count: 2,
+      ...hot,
     },
     universe: {
       cadence_seconds: 180,
@@ -36,8 +43,9 @@ function status(overrides: Partial<LiveRefreshStatus> = {}): LiveRefreshStatus {
       fixture_count: 104,
       evaluated_count: 60,
       not_evaluated_count: 44,
+      ...universe,
     },
-    ...overrides,
+    ...rest,
   };
 }
 
@@ -101,6 +109,7 @@ describe("dual cadence operator copy", () => {
         next_due_at: "2026-09-14T12:00:18Z",
         fixture_count: 7,
         active_venues: ["matchbook", "kalshi"],
+        venue_health: { matchbook: "ok", kalshi: "ok" },
       },
       universe: {
         cadence_seconds: 180,
@@ -111,6 +120,7 @@ describe("dual cadence operator copy", () => {
         evaluated_count: 60,
         not_evaluated_count: 44,
         active_venues: ["matchbook", "polymarket", "kalshi"],
+        venue_health: { matchbook: "ok", polymarket: "ok", kalshi: "ok" },
       },
       venue_health: { matchbook: "ok", polymarket: "ok", kalshi: "ok" },
     });
@@ -134,6 +144,7 @@ describe("dual cadence operator copy", () => {
         persist_ok: false,
         last_persist_error: "audit_write_failed",
         active_venues: ["matchbook", "kalshi"],
+        venue_health: { matchbook: "ok", kalshi: "ok" },
       },
       universe: {
         cadence_seconds: 180,
@@ -146,6 +157,7 @@ describe("dual cadence operator copy", () => {
         persist_ok: false,
         last_persist_error: "audit_write_failed",
         active_venues: ["matchbook", "polymarket"],
+        venue_health: { matchbook: "ok", polymarket: "ok" },
       },
       venue_health: { matchbook: "ok", kalshi: "ok", polymarket: "ok" },
     });
@@ -170,6 +182,7 @@ describe("dual cadence operator copy", () => {
     const chips = readFileSync(join(frontendRoot, "components/venue-lane-controls.tsx"), "utf8");
     assert.match(chips, /config_diagnostic/);
     assert.match(scan, /pollLiveStatus/);
+    assert.match(scan, /applyLatestLiveRefresh/);
     assert.doesNotMatch(scan, /void collectRef\.current\(\)/);
     assert.match(bar, /AUTO PAPER CAPTURE ON/);
     assert.match(bar, /paper_autofill_enabled/);

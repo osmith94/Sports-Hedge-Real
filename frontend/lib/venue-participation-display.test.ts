@@ -4,22 +4,29 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { LiveRefreshStatus } from "./api";
+import { LaneRefreshStatus, LiveRefreshStatus } from "./api";
 import { discoveryStatusBadgeLabel } from "./discovered-fixture-display";
 import { formatObservationAge } from "./observation-age";
 import {
   lastScanVenueClause,
   lastScanVenuesLabel,
+  laneLastScanHealth,
   laneVenueTruths,
   venueChipLabel,
   venueChipTitle,
 } from "./venue-participation-display";
-import { dualScanStatusLines, fastScanCopy } from "./scan-status-display";
+import { dualScanStatusLines, fastScanCopy, fullSweepCopy } from "./scan-status-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = join(here, "..");
 
-function status(overrides: Partial<LiveRefreshStatus> = {}): LiveRefreshStatus {
+function status(
+  overrides: Omit<Partial<LiveRefreshStatus>, "hot" | "universe"> & {
+    hot?: Partial<LaneRefreshStatus>;
+    universe?: Partial<LaneRefreshStatus>;
+  } = {},
+): LiveRefreshStatus {
+  const { hot, universe, ...rest } = overrides;
   return {
     discovery_source: "matchbook",
     matching_venue: "polymarket",
@@ -36,30 +43,34 @@ function status(overrides: Partial<LiveRefreshStatus> = {}): LiveRefreshStatus {
       fixture_count: 7,
       active_venues: ["matchbook", "polymarket", "kalshi"],
       pending_venues: ["matchbook", "polymarket", "kalshi"],
+      ...hot,
     },
     universe: {
       cadence_seconds: 180,
       active_venues: ["matchbook", "polymarket", "kalshi"],
       pending_venues: ["matchbook", "polymarket", "kalshi"],
       fixture_count: 40,
+      ...universe,
     },
     venue_participation: {
       hot: ["matchbook", "polymarket", "kalshi"],
       universe: ["matchbook", "polymarket", "kalshi"],
       source: "operator",
     },
-    ...overrides,
+    ...rest,
   };
 }
 
 describe("Wave N4 venue participation honesty", () => {
   it("does not treat configured-on Matchbook as last-scan data when unavailable", () => {
+    const health = {
+      matchbook: "unavailable",
+      polymarket: "ok",
+      kalshi: "ok",
+    };
     const live = status({
-      venue_health: {
-        matchbook: "unavailable",
-        polymarket: "ok",
-        kalshi: "ok",
-      },
+      venue_health: health,
+      hot: { venue_health: health },
     });
     const now = Date.parse("2026-09-16T12:00:57Z");
     const mb = laneVenueTruths(live, "hot").find((row) => row.venue === "matchbook");
@@ -82,8 +93,10 @@ describe("Wave N4 venue participation honesty", () => {
   });
 
   it("recovers Matchbook participation after provider health returns ok", () => {
+    const recoveredHealth = { matchbook: "ok", polymarket: "ok", kalshi: "ok" };
     const recovered = status({
-      venue_health: { matchbook: "ok", polymarket: "ok", kalshi: "ok" },
+      venue_health: recoveredHealth,
+      hot: { venue_health: recoveredHealth },
     });
     const mb = laneVenueTruths(recovered, "hot").find((row) => row.venue === "matchbook");
     assert.equal(venueChipLabel(mb!), "MB ON");
@@ -103,6 +116,11 @@ describe("Wave N4 venue participation honesty", () => {
         fixture_count: 4,
         active_venues: ["polymarket", "kalshi"],
         pending_venues: ["polymarket", "kalshi"],
+        venue_health: {
+          matchbook: "disabled",
+          polymarket: "ok",
+          kalshi: "ok",
+        },
       },
       venue_participation: {
         hot: ["polymarket", "kalshi"],
@@ -127,6 +145,7 @@ describe("Wave N4 venue participation honesty", () => {
     const now = Date.parse("2026-09-16T12:00:57Z");
     const live = status({
       venue_health: { matchbook: "ok", polymarket: "ok", kalshi: "ok" },
+      hot: { venue_health: { matchbook: "ok", polymarket: "ok", kalshi: "ok" } },
     });
     const detail = fastScanCopy(live, now).detail;
     assert.match(detail, /completed 57s ago/);
@@ -150,12 +169,62 @@ describe("Wave N4 venue participation honesty", () => {
         fixture_count: 7,
         active_venues: ["matchbook", "polymarket", "kalshi"],
         pending_venues: ["matchbook", "polymarket", "kalshi"],
+        venue_health: { matchbook: "unavailable", polymarket: "ok", kalshi: "ok" },
       },
       venue_health: { matchbook: "unavailable", polymarket: "ok", kalshi: "ok" },
     });
     assert.match(fastScanCopy(live, Date.parse("2026-09-16T12:00:57Z")).detail, /in progress/);
     assert.match(fastScanCopy(live).detail, /last scan PM·K/);
     assert.doesNotMatch(fastScanCopy(live).detail, /completed 0s ago|just now/);
+  });
+
+  it("keeps Fast Scan last-scan truth after a later Full Sweep recovery", () => {
+    const hotFailed = { matchbook: "unavailable", polymarket: "ok", kalshi: "ok" };
+    const universeOk = { matchbook: "ok", polymarket: "ok", kalshi: "ok" };
+    const live = status({
+      venue_health: universeOk,
+      hot: { venue_health: hotFailed },
+      universe: { venue_health: universeOk },
+    });
+    assert.deepEqual(laneLastScanHealth(live, "hot"), hotFailed);
+    assert.deepEqual(laneLastScanHealth(live, "universe"), universeOk);
+    const hotMb = laneVenueTruths(live, "hot").find((row) => row.venue === "matchbook");
+    const universeMb = laneVenueTruths(live, "universe").find((row) => row.venue === "matchbook");
+    assert.equal(venueChipLabel(hotMb!), "MB ON · UNAVAILABLE");
+    assert.equal(venueChipLabel(universeMb!), "MB ON");
+    assert.equal(lastScanVenueClause(live, "hot"), "last scan PM·K · MB unavailable");
+    assert.equal(lastScanVenueClause(live, "universe"), "last scan MB·PM·K");
+    assert.match(fastScanCopy(live).detail, /last scan PM·K/);
+    assert.match(fastScanCopy(live).detail, /MB unavailable/);
+    assert.doesNotMatch(fastScanCopy(live).detail, /last scan MB·PM·K/);
+    assert.match(fullSweepCopy(live).detail, /last scan MB·PM·K/);
+    assert.doesNotMatch(fullSweepCopy(live).detail, /MB unavailable/);
+    assert.equal(discoveryStatusBadgeLabel(true, live), "LIVE PAPER · MB / PM / K");
+  });
+
+  it("keeps Full Sweep last-scan truth after a later Fast Scan recovery", () => {
+    const universeFailed = { matchbook: "unavailable", polymarket: "ok", kalshi: "ok" };
+    const hotOk = { matchbook: "ok", polymarket: "ok", kalshi: "ok" };
+    const live = status({
+      venue_health: hotOk,
+      hot: { venue_health: hotOk },
+      universe: { venue_health: universeFailed },
+    });
+    assert.equal(lastScanVenueClause(live, "hot"), "last scan MB·PM·K");
+    assert.equal(lastScanVenueClause(live, "universe"), "last scan PM·K · MB unavailable");
+    assert.match(fastScanCopy(live).detail, /last scan MB·PM·K/);
+    assert.doesNotMatch(fastScanCopy(live).detail, /MB unavailable/);
+    assert.match(fullSweepCopy(live).detail, /last scan PM·K/);
+    assert.match(fullSweepCopy(live).detail, /MB unavailable/);
+  });
+
+  it("does not borrow global latest health for a lane with no last-scan snapshot", () => {
+    const live = status({
+      venue_health: { matchbook: "ok", polymarket: "ok", kalshi: "ok" },
+    });
+    assert.equal(laneLastScanHealth(live, "hot"), undefined);
+    assert.match(lastScanVenueClause(live, "hot") ?? "", /availability not in this snapshot/);
+    assert.doesNotMatch(fastScanCopy(live).detail, /last scan MB·PM·K/);
   });
 
   it("renders absolute timestamps until a client clock is supplied", () => {
@@ -185,5 +254,8 @@ describe("Wave N4 operator surface contracts", () => {
     assert.match(monitor, /useState<number \| null>\(null\)/);
     assert.match(history, /useState<number \| null>\(null\)/);
     assert.match(monitor, /Last scan venues/);
+    const display = readFileSync(join(frontendRoot, "lib/venue-participation-display.ts"), "utf8");
+    assert.match(display, /laneLastScanHealth/);
+    assert.match(display, /laneStatus\?\.venue_health/);
   });
 });

@@ -100,6 +100,7 @@ class LaneRefreshStatus(BaseModel):
     comparison_ready: bool = True
     venue_warning: str | None = None
     applies_next_cycle: bool = False
+    venue_health: dict[str, str] = Field(default_factory=dict)
 
 
 class LiveRefreshStatus(BaseModel):
@@ -789,6 +790,7 @@ class LiveRefreshCoordinator:
                                 "persist_ok": None,
                                 "last_diagnostics": _lane_diagnostics(report),
                                 "next_due_at": self._next_hot_due,
+                                "venue_health": _frozen_venue_health(report.venue_health),
                                 "operator_summary": _hot_operator_summary(
                                     report.completed_at,
                                     duration_ms,
@@ -947,6 +949,7 @@ class LiveRefreshCoordinator:
                         "last_diagnostics": _lane_diagnostics(report),
                         "resume_cursor": self._universe_cursor,
                         "next_due_at": self._next_universe_due,
+                        "venue_health": _frozen_venue_health(report.venue_health),
                         "operator_summary": _universe_operator_summary(
                             duration_ms,
                             self._universe_work_used,
@@ -1134,7 +1137,7 @@ class LiveRefreshCoordinator:
                             universe_count,
                             len(self._universe_evaluated_ids),
                             self.status.universe.not_evaluated_count,
-                            venue_health=self.status.venue_health,
+                            venue_health=self.status.universe.venue_health,
                             active_venues=self.status.universe.active_venues,
                         ),
                     }
@@ -1346,6 +1349,12 @@ def _coerce_lane(value: ScanLane | str | None) -> ScanLane:
     if text == ScanLane.HOT.value:
         return ScanLane.HOT
     return ScanLane.UNIVERSE
+
+
+def _frozen_venue_health(venue_health: dict[str, str] | None) -> dict[str, str]:
+    """Copy a completed scan's provider-health map so later lanes cannot mutate it."""
+
+    return dict(venue_health or {})
 
 
 def _iso_stamp(moment: datetime | None) -> str:

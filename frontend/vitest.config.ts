@@ -16,6 +16,7 @@ export default defineConfig({
       "lib/venue-health-display.test.ts",
       "lib/config-warning-display.test.ts",
       "lib/venue-participation-display.test.ts",
+      "lib/live-refresh-poll-guard.test.ts",
     ],
   },
 });
