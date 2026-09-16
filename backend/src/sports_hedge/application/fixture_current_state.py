@@ -100,7 +100,9 @@ class FixtureCurrentStateStore:
     Sequential re-anchor / alias convergence MERGES into the existing current
     row when trusted source IDs prove continuity. A later Polymarket-only
     cluster of the same match must not fork a second `evt:` identity or leave
-    the abandoned Matchbook-anchored row opportunity-promoted. Ambiguous
+    the abandoned Matchbook-anchored row opportunity-promoted. If two live rows
+    later present overlapping trusted source/canonical IDs, they converge into
+    one identity; aliases cannot steal another live fixture. Ambiguous
     opponent/source evidence fails closed and does not fuzzy-join fixtures.
 
     Membership and displayed provider status use the freshest observation by
@@ -129,7 +131,10 @@ class FixtureCurrentStateStore:
 
     Terminal tombstones keep explicit finished/completed/settled truth from
     resurrecting via a later stale UNIVERSE or other-venue unknown snapshot.
-    Audit/history is not stored here and is not deleted.
+    Ingest tombstones retain previously bound cross-venue aliases and source
+    IDs even when the terminal observation is a source subset, so a later
+    non-authoritative venue cannot recreate the same fixture. Audit/history is
+    not stored here and is not deleted.
 
     Do not fuzzy-match fixture names. Do not fabricate demo fixtures.
     """
@@ -634,15 +639,49 @@ class FixtureCurrentStateStore:
     def _merge_target_identity(self, canonical_id: str, aliases: set[str]) -> str:
         """Reuse the live row proved by trusted source/canonical aliases.
 
-        Fail closed when aliases point at more than one live identity or when
-        there is no overlapping source/canonical evidence.
+        Incoming aliases may converge several already-live rows of one fixture
+        when trusted source/canonical IDs overlap. A cluster cannot steal another
+        live fixture without those overlapping source IDs.
         """
 
+        incoming_ids = {item for item in (aliases | {canonical_id}) if item}
+        live_targets = self._live_targets_for_aliases(incoming_ids)
+        if canonical_id in self._rows:
+            live_targets.add(canonical_id)
+        mergeable = self._mergeable_identities(live_targets, incoming_ids)
+        if len(mergeable) > 1:
+            tight = {
+                item
+                for item in mergeable
+                if not (self._recorded_source_ids(item) - incoming_ids)
+            }
+            if len(tight) > 1:
+                survivor = self._choose_survivor(tight, incoming_ids, canonical_id)
+                for item in tight:
+                    if item != survivor:
+                        self._absorb_live_identity(item, survivor)
+                return survivor
+            if len(tight) == 1:
+                survivor = next(iter(tight))
+                if canonical_id in self._rows and canonical_id != survivor:
+                    incoming_extra = self._recorded_source_ids(canonical_id) - incoming_ids
+                    if not incoming_extra:
+                        self._absorb_live_identity(canonical_id, survivor)
+                return survivor
+            return canonical_id
         if canonical_id in self._rows:
             return canonical_id
         existing = self._aliases.get(canonical_id)
         if existing is not None and existing in self._rows:
             return existing
+        if len(mergeable) != 1:
+            return canonical_id
+        target = next(iter(mergeable))
+        if not self._has_trusted_source_overlap(target, incoming_ids):
+            return canonical_id
+        return target
+
+    def _live_targets_for_aliases(self, aliases: set[str]) -> set[str]:
         targets: set[str] = set()
         for alias in aliases:
             if self._tombstone_for_unlocked(alias) is not None:
@@ -652,27 +691,77 @@ class FixtureCurrentStateStore:
                 targets.add(resolved)
             elif alias in self._rows:
                 targets.add(alias)
-        if len(targets) != 1:
-            return canonical_id
-        target = next(iter(targets))
-        if not self._has_trusted_source_overlap(target, aliases | {canonical_id}):
-            return canonical_id
-        return target
+        return targets
 
-    def _has_trusted_source_overlap(self, target_id: str, incoming_ids: set[str]) -> bool:
+    def _recorded_source_ids(self, target_id: str) -> set[str]:
+        record = self._rows.get(target_id)
+        if record is None:
+            return set()
+        return {
+            event.source_event_id
+            for event in record.source_events()
+            if event.source_event_id
+        }
+
+    def _mergeable_identities(self, live_targets: set[str], incoming_ids: set[str]) -> set[str]:
+        return {
+            target
+            for target in live_targets
+            if self._has_trusted_source_overlap(target, incoming_ids)
+        }
+
+    def _choose_survivor(
+        self,
+        candidates: set[str],
+        incoming_ids: set[str],
+        incoming_canonical: str,
+    ) -> str:
+        scored: list[tuple[int, int, str]] = []
+        for item in candidates:
+            score = len(incoming_ids & self._identity_membership_keys(item))
+            incoming_penalty = 1 if item == incoming_canonical else 0
+            scored.append((-score, incoming_penalty, item))
+        scored.sort()
+        return scored[0][2]
+
+    def _identity_membership_keys(self, target_id: str) -> set[str]:
         existing: set[str] = {target_id}
         record = self._rows.get(target_id)
         if record is not None:
             for event in record.source_events():
-                existing.add(event.source_event_id)
+                if event.source_event_id:
+                    existing.add(event.source_event_id)
             status = record.status_observation()
             if status is not None:
-                existing.add(status.fixture.source_event_id)
-                existing.add(status.fixture.canonical_event_id)
+                source_id = str(status.fixture.source_event_id or "").strip()
+                if source_id:
+                    existing.add(source_id)
+                canonical = str(status.fixture.canonical_event_id or "").strip()
+                if canonical:
+                    existing.add(canonical)
         for alias, dest in self._aliases.items():
             if dest == target_id:
                 existing.add(alias)
-        return bool({item for item in incoming_ids if item} & existing)
+        return {item for item in existing if item}
+
+    def _has_trusted_source_overlap(self, target_id: str, incoming_ids: set[str]) -> bool:
+        return bool({item for item in incoming_ids if item} & self._identity_membership_keys(target_id))
+
+    def _absorb_live_identity(self, source_id: str, target_id: str) -> None:
+        """Merge one live row into another. Incoming canonical becomes an alias."""
+
+        if source_id == target_id:
+            return
+        source = self._rows.get(source_id)
+        target = self._rows.get(target_id)
+        if source is None or target is None:
+            return
+        target.absorb_record(source, target_id=target_id)
+        for alias, dest in list(self._aliases.items()):
+            if dest == source_id:
+                self._aliases[alias] = target_id
+        self._aliases[source_id] = target_id
+        self._rows.pop(source_id, None)
 
     def _bind_alias(self, alias: str, target_id: str) -> None:
         key = alias.strip()
@@ -742,10 +831,10 @@ class FixtureCurrentStateStore:
         aliases: set[str],
         scanned_at: datetime,
     ) -> bool:
-        tombstone = self.tombstone_for(canonical_id)
+        tombstone = self._tombstone_for_unlocked(canonical_id)
         if tombstone is None:
             for alias in aliases:
-                tombstone = self.tombstone_for(alias)
+                tombstone = self._tombstone_for_unlocked(alias)
                 if tombstone is not None:
                     break
         if tombstone is None:
@@ -759,14 +848,45 @@ class FixtureCurrentStateStore:
         ):
             self._clear_tombstone(tombstone.canonical_event_id)
             return False
+        extra = set(aliases)
+        extra.add(canonical_id)
+        live_to_bury: set[str] = set()
+        if canonical_id in self._rows:
+            live_to_bury.add(canonical_id)
+        bound = self._aliases.get(canonical_id)
+        if bound is not None and bound in self._rows:
+            live_to_bury.add(bound)
+        for live_id in live_to_bury:
+            extra.update(self._identity_membership_keys(live_id))
         if is_explicit_terminal(fixture) and scanned_at >= tombstone.observed_at:
             self._record_tombstone(
-                canonical_id,
+                tombstone.canonical_event_id,
                 fixture,
-                aliases=aliases | set(tombstone.aliases),
+                aliases=extra | set(tombstone.aliases),
                 scanned_at=scanned_at,
             )
+        else:
+            self._extend_tombstone_aliases(tombstone, extra)
+        for live_id in live_to_bury:
+            if live_id in self._rows:
+                self._drop_identity(live_id)
         return True
+
+    def _extend_tombstone_aliases(
+        self, tombstone: CurrentStateTombstone, extra: set[str]
+    ) -> None:
+        merged = {item for item in (set(tombstone.aliases) | extra | {tombstone.canonical_event_id}) if item}
+        updated = CurrentStateTombstone(
+            canonical_event_id=tombstone.canonical_event_id,
+            aliases=frozenset(merged),
+            reason=tombstone.reason,
+            provider_status=tombstone.provider_status,
+            source=tombstone.source,
+            observed_at=tombstone.observed_at,
+        )
+        self._tombstones[tombstone.canonical_event_id] = updated
+        for alias in updated.aliases:
+            self._tombstone_aliases[alias] = tombstone.canonical_event_id
 
     def _record_tombstone(
         self,
@@ -781,6 +901,12 @@ class FixtureCurrentStateStore:
         merged.add(canonical_id)
         if existing is not None:
             merged.update(existing.aliases)
+        live_id = canonical_id
+        if live_id not in self._rows:
+            resolved = self._aliases.get(canonical_id)
+            if resolved is not None and resolved in self._rows:
+                live_id = resolved
+        merged.update(self._identity_membership_keys(live_id))
         status_source = lifecycle_status_source(fixture)
         tombstone = CurrentStateTombstone(
             canonical_event_id=canonical_id,
@@ -862,6 +988,38 @@ class _FixtureRecord:
 
     def set_source_events(self, events: tuple[StoredSourceEvent, ...]) -> None:
         self.extra_source_events = _merge_source_events(self.extra_source_events, events)
+
+    def absorb_record(self, other: _FixtureRecord, *, target_id: str) -> None:
+        """Keep newer lane clocks and market slots from another live identity."""
+
+        self.extra_source_events = _merge_source_events(
+            self.extra_source_events,
+            _merge_source_events(other.extra_source_events, other.source_events()),
+        )
+        for observation in (other.universe, other.hot):
+            if observation is None:
+                continue
+            rewritten = LaneObservation(
+                fixture=observation.fixture.model_copy(
+                    update={"canonical_event_id": target_id}
+                ),
+                markets=list(observation.markets),
+                scan_lane=observation.scan_lane,
+                last_scanned_at=observation.last_scanned_at,
+                paper_market_ids=observation.paper_market_ids,
+                source_events=observation.source_events,
+                evaluated=observation.evaluated,
+            )
+            self.set_lane(rewritten)
+        if other.markets:
+            if self.markets is None:
+                self.markets = dict(other.markets)
+            else:
+                for key, slot in other.markets.items():
+                    previous = self.markets.get(key)
+                    if previous is None or slot.last_scanned_at >= previous.last_scanned_at:
+                        self.markets[key] = slot
+        self.leftover_this_pass = self.leftover_this_pass or other.leftover_this_pass
 
     def lane_observation(self, lane: ScanLane) -> LaneObservation | None:
         if lane is ScanLane.HOT:
