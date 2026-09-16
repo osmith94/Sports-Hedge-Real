@@ -6,11 +6,10 @@ Not live, historical, or modelled venue quotes.
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import threading
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -27,7 +26,6 @@ from sports_hedge.application.live_refresh import LiveRefreshCoordinator
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.domain.football import FootballPeriod, MarketFamily, SettlementScope
-from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.events import EventMatcher
