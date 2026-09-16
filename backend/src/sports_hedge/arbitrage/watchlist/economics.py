@@ -137,6 +137,17 @@ def native_amounts_are_commingled(legs: list[WatchLeg]) -> bool:
     return len(currencies) > 1
 
 
+LIFECYCLE_STATUSES_PROTECTED_FROM_OBSERVATION = frozenset(
+    {
+        OpportunityStatus.PAPER_FILLING,
+        OpportunityStatus.PARTIAL,
+        OpportunityStatus.FILLED,
+        OpportunityStatus.CLOSED,
+        OpportunityStatus.EXPIRED,
+    }
+)
+
+
 def classify_status(
     observation: WatchObservation,
     *,
@@ -144,13 +155,7 @@ def classify_status(
     max_quote_age_ms: int,
     previous: OpportunityStatus | None = None,
 ) -> tuple[OpportunityStatus, list[str]]:
-    fill_statuses = {
-        OpportunityStatus.PAPER_FILLING,
-        OpportunityStatus.PARTIAL,
-        OpportunityStatus.FILLED,
-        OpportunityStatus.CLOSED,
-    }
-    if previous in fill_statuses and previous != OpportunityStatus.PAPER_FILLING:
+    if previous in LIFECYCLE_STATUSES_PROTECTED_FROM_OBSERVATION:
         return previous, list(observation.rejection_reasons)
 
     rejections: list[str] = []
@@ -197,9 +202,6 @@ def classify_status(
     )
     if triggered:
         return OpportunityStatus.TRIGGERED, _dedupe(reasons)
-
-    if previous == OpportunityStatus.PAPER_FILLING:
-        return OpportunityStatus.PAPER_FILLING, _dedupe(reasons)
 
     # Near-arb is only for candidates that passed every non-economic gate and
     # remain strictly below the configured trigger.

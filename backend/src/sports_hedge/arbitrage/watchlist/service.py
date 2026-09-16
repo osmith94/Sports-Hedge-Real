@@ -10,6 +10,7 @@ from sports_hedge.application.quote_freshness import (
 )
 from sports_hedge.arbitrage.watchlist.adapter import observation_from_paper_decision
 from sports_hedge.arbitrage.watchlist.economics import (
+    LIFECYCLE_STATUSES_PROTECTED_FROM_OBSERVATION,
     classification_for,
     classify_status,
     distance_to_trigger_pp,
@@ -78,6 +79,10 @@ class WatchlistService:
         return self.observe(observation)
 
     def observe(self, observation: WatchObservation) -> NearOpportunity:
+        with self.repository.transaction():
+            return self._observe_locked(observation)
+
+    def _observe_locked(self, observation: WatchObservation) -> NearOpportunity:
         opportunity_id = opportunity_id_for_canonical_market(observation.canonical_market_id)
         previous = self.repository.get(opportunity_id)
         status, reasons = classify_status(
@@ -86,6 +91,11 @@ class WatchlistService:
             max_quote_age_ms=self.max_quote_age_ms,
             previous=previous.status if previous is not None else None,
         )
+        if (
+            previous is not None
+            and previous.status in LIFECYCLE_STATUSES_PROTECTED_FROM_OBSERVATION
+        ):
+            status = previous.status
         distance = None
         if observation.current_net_edge is not None:
             distance = distance_to_trigger_pp(
@@ -177,6 +187,19 @@ class WatchlistService:
         occurred_at,
         detail: str | None = None,
     ) -> NearOpportunity:
+        with self.repository.transaction():
+            return self._record_paper_fill_locked(
+                opportunity_id, stage=stage, occurred_at=occurred_at, detail=detail
+            )
+
+    def _record_paper_fill_locked(
+        self,
+        opportunity_id: str,
+        *,
+        stage: OpportunityStatus,
+        occurred_at,
+        detail: str | None = None,
+    ) -> NearOpportunity:
         if stage not in {
             OpportunityStatus.PAPER_FILLING,
             OpportunityStatus.PARTIAL,
@@ -231,21 +254,22 @@ class WatchlistService:
     ) -> NearOpportunity | None:
         """Surface a failed paper-entry attempt without OPEN/PARTIAL/FILLED mutation."""
 
-        current = self.repository.get(opportunity_id)
-        if current is None:
-            return None
-        self.repository.append_event(
-            OpportunityLifecycleEvent(
-                opportunity_id=opportunity_id,
-                occurred_at=occurred_at,
-                event_type=LifecycleEventType.PAPER_FILL_REJECTED,
-                status=current.status,
-                current_net_edge=current.current_net_edge,
-                distance_to_trigger_pp=current.distance_to_trigger_pp,
-                detail=detail,
+        with self.repository.transaction():
+            current = self.repository.get(opportunity_id)
+            if current is None:
+                return None
+            self.repository.append_event(
+                OpportunityLifecycleEvent(
+                    opportunity_id=opportunity_id,
+                    occurred_at=occurred_at,
+                    event_type=LifecycleEventType.PAPER_FILL_REJECTED,
+                    status=current.status,
+                    current_net_edge=current.current_net_edge,
+                    distance_to_trigger_pp=current.distance_to_trigger_pp,
+                    detail=detail,
+                )
             )
-        )
-        return current
+            return current
 
     def close(
         self, opportunity_id: str, *, occurred_at, detail: str | None = None
@@ -404,28 +428,47 @@ class WatchlistService:
             return item.model_copy(update={"quote_age_ms": effective})
 
         reason = "unknown_quote_age" if effective is None else "stale_quote"
-        reasons = list(dict.fromkeys([*item.rejection_reasons, reason]))
-        persisted = item.model_copy(
-            update={
-                "status": OpportunityStatus.REJECTED,
-                "classification": classification_for(OpportunityStatus.REJECTED),
-                "is_arbitrage": False,
-                "guaranteed_profit_gbp": None,
-                "rejection_reasons": reasons,
-            }
-        )
-        if item.status in {
+        if item.status not in {
             OpportunityStatus.WATCHING,
             OpportunityStatus.APPROACHING,
             OpportunityStatus.TRIGGERED,
         }:
+            persisted = item.model_copy(
+                update={
+                    "status": OpportunityStatus.REJECTED,
+                    "classification": classification_for(OpportunityStatus.REJECTED),
+                    "is_arbitrage": False,
+                    "guaranteed_profit_gbp": None,
+                    "rejection_reasons": list(dict.fromkeys([*item.rejection_reasons, reason])),
+                }
+            )
+            return persisted.model_copy(update={"quote_age_ms": effective})
+
+        with self.repository.transaction():
+            current = self.repository.get(item.opportunity_id)
+            if current is None or current.status in fill_or_terminal:
+                latest = current if current is not None else item
+                latest_effective = effective_quote_age_ms(
+                    latest.quote_age_ms, latest.last_seen_at, as_of
+                )
+                return latest.model_copy(update={"quote_age_ms": latest_effective})
+            reasons = list(dict.fromkeys([*current.rejection_reasons, reason]))
+            persisted = current.model_copy(
+                update={
+                    "status": OpportunityStatus.REJECTED,
+                    "classification": classification_for(OpportunityStatus.REJECTED),
+                    "is_arbitrage": False,
+                    "guaranteed_profit_gbp": None,
+                    "rejection_reasons": reasons,
+                }
+            )
             self.repository.upsert_opportunity(persisted)
             events = [
                 self._event(
                     persisted, LifecycleEventType.REJECTED_STALE_QUOTE, detail=reason
                 ).model_copy(update={"occurred_at": as_of})
             ]
-            if item.status == OpportunityStatus.TRIGGERED:
+            if current.status == OpportunityStatus.TRIGGERED:
                 events.append(
                     self._event(
                         persisted,
@@ -435,7 +478,7 @@ class WatchlistService:
                 )
             for event in events:
                 self.repository.append_event(event)
-        return persisted.model_copy(update={"quote_age_ms": effective})
+            return persisted.model_copy(update={"quote_age_ms": effective})
 
     def _filtered(
         self,
@@ -471,31 +514,32 @@ class WatchlistService:
         occurred_at,
         detail: str | None,
     ) -> NearOpportunity:
-        current = self.repository.get(opportunity_id)
-        if current is None:
-            raise ValueError(f"unknown opportunity: {opportunity_id}")
-        updated = current.model_copy(
-            update={
-                "status": status,
-                "classification": classification_for(status),
-                "is_arbitrage": False,
-                "guaranteed_profit_gbp": None,
-                "last_seen_at": occurred_at,
-            }
-        )
-        self.repository.upsert_opportunity(updated)
-        self.repository.append_event(
-            OpportunityLifecycleEvent(
-                opportunity_id=opportunity_id,
-                occurred_at=occurred_at,
-                event_type=event_type,
-                status=status,
-                current_net_edge=updated.current_net_edge,
-                distance_to_trigger_pp=updated.distance_to_trigger_pp,
-                detail=detail,
+        with self.repository.transaction():
+            current = self.repository.get(opportunity_id)
+            if current is None:
+                raise ValueError(f"unknown opportunity: {opportunity_id}")
+            updated = current.model_copy(
+                update={
+                    "status": status,
+                    "classification": classification_for(status),
+                    "is_arbitrage": False,
+                    "guaranteed_profit_gbp": None,
+                    "last_seen_at": occurred_at,
+                }
             )
-        )
-        return updated
+            self.repository.upsert_opportunity(updated)
+            self.repository.append_event(
+                OpportunityLifecycleEvent(
+                    opportunity_id=opportunity_id,
+                    occurred_at=occurred_at,
+                    event_type=event_type,
+                    status=status,
+                    current_net_edge=updated.current_net_edge,
+                    distance_to_trigger_pp=updated.distance_to_trigger_pp,
+                    detail=detail,
+                )
+            )
+            return updated
 
     def _append_lifecycle(
         self,
