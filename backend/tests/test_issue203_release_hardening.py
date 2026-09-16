@@ -331,6 +331,100 @@ def test_live_refresh_status_does_not_lose_last_error_under_concurrent_writes() 
     assert None not in seen[-10:] or final.last_error is not None
 
 
+def test_public_status_vs_manual_explicit_report_does_not_lose_completion() -> None:
+    coordinator = LiveRefreshCoordinator()
+    coordinator.reset()
+    coordinator._mark_lane_error(
+        ScanLane.HOT, NOW, NOW + timedelta(seconds=1), "scan_failed_seed"
+    )
+    completed = NOW + timedelta(seconds=9)
+    report = _report(
+        [_fixture(CANONICAL_ID, kickoff=DISTANT_KICKOFF, arb=True, qualifying=1)],
+        when=completed,
+        scan_lane=ScanLane.UNIVERSE.value,
+        markets={CANONICAL_ID: [_market_row()]},
+    )
+    barrier = threading.Barrier(4)
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        barrier.wait()
+        try:
+            for _ in range(50):
+                coordinator.record_explicit_report(report)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def reader() -> None:
+        barrier.wait()
+        try:
+            for _ in range(50):
+                coordinator.public_status()
+                coordinator.plan_tick(now=completed)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=writer),
+        threading.Thread(target=writer),
+        threading.Thread(target=reader),
+        threading.Thread(target=reader),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    final = coordinator.public_status()
+    assert final.last_error is None
+    assert final.last_completed_at == completed
+    assert final.cycle_in_progress is False
+
+
+def test_public_status_vs_manual_hot_started_keeps_in_progress() -> None:
+    coordinator = LiveRefreshCoordinator()
+    coordinator.reset()
+    coordinator._mark_lane_error(
+        ScanLane.HOT, NOW, NOW + timedelta(seconds=1), "scan_failed_seed"
+    )
+    started = NOW + timedelta(seconds=3)
+    barrier = threading.Barrier(3)
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        barrier.wait()
+        try:
+            for index in range(50):
+                coordinator._mark_manual_hot_started(started + timedelta(milliseconds=index))
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def reader() -> None:
+        barrier.wait()
+        try:
+            for _ in range(50):
+                coordinator.public_status()
+                coordinator.plan_tick(now=started)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=writer),
+        threading.Thread(target=reader),
+        threading.Thread(target=reader),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    final = coordinator.public_status()
+    assert final.cycle_in_progress is True
+    assert final.hot.cycle_in_progress is True
+    assert final.last_error is None
+    assert final.last_started_at is not None
+
+
 # ---------------------------------------------------------------------------
 # 4. FixtureCurrentStateStore concurrent safety + tombstones + promotion
 # ---------------------------------------------------------------------------
@@ -644,5 +738,50 @@ async def test_persist_retry_does_not_duplicate_audit_but_new_scans_append(
 
 def test_append_scan_source_stays_insert_not_upsert() -> None:
     source = inspect.getsource(SqlitePaperScanRepository.append_scan)
+    helper = inspect.getsource(SqlitePaperScanRepository._same_stamped_persist_attempt)
     assert "ON CONFLICT" not in source
     assert "IntegrityError" in source
+    assert "_same_stamped_persist_attempt" in source
+    assert "WHERE record_id" in helper
+
+
+def test_append_scan_duplicate_same_attempt_is_idempotent(tmp_path: Path) -> None:
+    from test_paper_audit_repository import make_record
+
+    repo = SqlitePaperScanRepository(tmp_path / "same-attempt.sqlite")
+    try:
+        record = make_record(record_id="stamped-attempt-1")
+        repo.append_scan(record)
+        repo.append_scan(record)
+        rows = repo.list_scans(limit=10)
+        assert [item.record_id for item in rows] == ["stamped-attempt-1"]
+    finally:
+        repo.close()
+
+
+def test_append_scan_unrelated_integrity_error_propagates(tmp_path: Path) -> None:
+    import sqlite3
+    from test_paper_audit_repository import make_record
+
+    repo = SqlitePaperScanRepository(tmp_path / "unrelated-integrity.sqlite")
+    try:
+        first = make_record(record_id="attempt-a", canonical_market_id="mkt-1")
+        repo.append_scan(first)
+        with repo._connect() as connection:
+            connection.execute(
+                "CREATE UNIQUE INDEX paper_scan_market_unique "
+                "ON paper_scan_records(canonical_market_id)"
+            )
+        second = make_record(record_id="attempt-b", canonical_market_id="mkt-1")
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.append_scan(second)
+        assert [item.record_id for item in repo.list_scans(limit=10)] == ["attempt-a"]
+
+        clash = make_record(record_id="attempt-a", canonical_market_id="mkt-other")
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.append_scan(clash)
+        remaining = repo.list_scans(limit=10)
+        assert [item.record_id for item in remaining] == ["attempt-a"]
+        assert remaining[0].canonical_market_id == "mkt-1"
+    finally:
+        repo.close()

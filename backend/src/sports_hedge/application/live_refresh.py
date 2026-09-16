@@ -234,8 +234,8 @@ class LiveRefreshCoordinator:
                     ),
                 }
             )
-            self._sync_venue_status()
-            self._ensure_due_times(self.now(), resolved)
+            self._sync_venue_status_unlocked()
+            self._ensure_due_times_unlocked(self.now(), resolved)
 
     def _resolved_store(self, settings: Settings | None = None) -> SqliteLaneVenueSettingsStore:
         if self._venue_store is None:
@@ -243,9 +243,11 @@ class LiveRefreshCoordinator:
         return self._venue_store
 
     def bind_venue_store(self, store: SqliteLaneVenueSettingsStore) -> None:
-        self._venue_store = store
-        self._pending_participation = resolve_lane_venue_participation(store)
-        self._sync_venue_status()
+        pending = resolve_lane_venue_participation(store)
+        with self._state_lock:
+            self._venue_store = store
+            self._pending_participation = pending
+            self._sync_venue_status_unlocked()
 
     def apply_venue_participation(
         self,
@@ -253,9 +255,11 @@ class LiveRefreshCoordinator:
         universe: list[VenueName] | tuple[VenueName, ...],
     ) -> LaneVenueParticipation:
         store = self._resolved_store()
-        self._pending_participation = store.save(hot, universe, source="operator")
-        self._sync_venue_status()
-        return self._pending_participation
+        pending = store.save(hot, universe, source="operator")
+        with self._state_lock:
+            self._pending_participation = pending
+            self._sync_venue_status_unlocked()
+            return self._pending_participation
 
     def pending_venues_for(self, lane: ScanLane | str | None) -> tuple[VenueName, ...]:
         return self._pending_participation.venues_for(lane)
@@ -344,30 +348,37 @@ class LiveRefreshCoordinator:
             return dict(self._last_request)
 
     def reset(self) -> None:
-        self._last_request = {}
-        self._last_report = None
         self._fixture_state.clear()
-        self._hot_in_progress = False
-        self._universe_in_progress = False
-        self._manual_hot_in_progress = False
-        self._next_hot_due = None
-        self._next_universe_due = None
-        self._hot_due_started = None
-        self._universe_generation_id = 0
-        self._universe_generation_started_at = None
-        self._universe_work_used = 0.0
-        self._universe_cursor = None
-        self._universe_evaluated_ids = set()
-        self._cycle_hot_venues = None
-        self._cycle_universe_venues = None
-        self._cycle_enabled_venues = None
-        self.status = LiveRefreshStatus(
-            server_loop_enabled=False,
-            interval_seconds=30,
-        )
+        with self._state_lock:
+            self._last_request = {}
+            self._last_report = None
+            self._hot_in_progress = False
+            self._universe_in_progress = False
+            self._manual_hot_in_progress = False
+            self._next_hot_due = None
+            self._next_universe_due = None
+            self._hot_due_started = None
+            self._universe_generation_id = 0
+            self._universe_generation_started_at = None
+            self._universe_work_used = 0.0
+            self._universe_cursor = None
+            self._universe_evaluated_ids = set()
+            self._cycle_hot_venues = None
+            self._cycle_universe_venues = None
+            self._cycle_enabled_venues = None
+            self.status = LiveRefreshStatus(
+                server_loop_enabled=False,
+                interval_seconds=30,
+            )
         self.configure_from_settings()
 
     def _ensure_due_times(self, now: datetime, settings: Settings | None = None) -> None:
+        with self._state_lock:
+            self._ensure_due_times_unlocked(now, settings)
+
+    def _ensure_due_times_unlocked(
+        self, now: datetime, settings: Settings | None = None
+    ) -> None:
         resolved = settings or get_settings()
         if self._next_universe_due is None:
             # UNIVERSE generation 0 is due immediately on startup.
@@ -399,25 +410,37 @@ class LiveRefreshCoordinator:
     ) -> DualCadencePlan:
         resolved = settings or get_settings()
         evaluated = require_aware_instant(now or self.now(), "now")
-        self._ensure_due_times(evaluated, resolved)
-        if (
-            self._hot_in_progress
-            or self._manual_hot_in_progress
-            or self.status.cycle_in_progress
-        ):
-            return DualCadencePlan(lane="idle", reason="cycle_in_progress")
-        hot_due = self._next_hot_due is not None and evaluated >= self._next_hot_due
+        with self._state_lock:
+            self._ensure_due_times_unlocked(evaluated, resolved)
+            if (
+                self._hot_in_progress
+                or self._manual_hot_in_progress
+                or self.status.cycle_in_progress
+            ):
+                return DualCadencePlan(lane="idle", reason="cycle_in_progress")
+            next_hot_due = self._next_hot_due
+            next_universe_due = self._next_universe_due
+            universe_work_used = self._universe_work_used
+            universe_generation_started_at = self._universe_generation_started_at
+            universe_cursor = self._universe_cursor
+            skip_event_ids = sorted(self._universe_evaluated_ids)
+            universe_venues = list(self._pending_participation.venues_for(ScanLane.UNIVERSE))
+        hot_due = next_hot_due is not None and evaluated >= next_hot_due
         hot_scope = self._hot_identity_scope(evaluated, resolved)
-        universe_venues = list(self.pending_venues_for(ScanLane.UNIVERSE))
         if hot_due and hot_scope:
             return self._hot_plan(hot_scope, resolved, reason="hot_due")
-        universe_due = self._universe_generation_open(evaluated, resolved)
+        if universe_generation_started_at is not None:
+            universe_due = universe_work_used < float(
+                resolved.paper_scan_universe_generation_budget_seconds
+            )
+        else:
+            universe_due = next_universe_due is not None and evaluated >= next_universe_due
         if universe_due:
-            remaining = float(resolved.paper_scan_universe_generation_budget_seconds) - self._universe_work_used
+            remaining = float(resolved.paper_scan_universe_generation_budget_seconds) - universe_work_used
             if remaining <= 0:
                 return DualCadencePlan(lane="idle", reason="universe_budget_exhausted")
             hot_cadence = timedelta(seconds=resolved.paper_live_refresh_hot_interval_seconds)
-            next_hot = self._next_hot_due or (evaluated + hot_cadence)
+            next_hot = next_hot_due or (evaluated + hot_cadence)
             if not hot_scope and next_hot <= evaluated:
                 # Empty HOT must not starve generation-0 / empty-scope UNIVERSE.
                 next_hot = evaluated + hot_cadence
@@ -438,8 +461,8 @@ class LiveRefreshCoordinator:
                 lane="universe",
                 collector_timeout_seconds=collector_timeout,
                 coordinator_timeout_seconds=chunk_wall,
-                resume_cursor=self._universe_cursor,
-                skip_event_ids=sorted(self._universe_evaluated_ids),
+                resume_cursor=universe_cursor,
+                skip_event_ids=skip_event_ids,
                 enabled_venues=universe_venues,
                 reason="universe_chunk",
             )
@@ -599,7 +622,8 @@ class LiveRefreshCoordinator:
             if timeout_seconds is None
             else timeout_seconds
         )
-        self._manual_hot_in_progress = True
+        with self._state_lock:
+            self._manual_hot_in_progress = True
         started = self.now()
         try:
             async with self._lock:
@@ -643,9 +667,10 @@ class LiveRefreshCoordinator:
                             advance_hot_due=False,
                         )
         finally:
-            self._manual_hot_in_progress = False
-            self._cycle_enabled_venues = None
-            self._sync_venue_status()
+            with self._state_lock:
+                self._manual_hot_in_progress = False
+                self._cycle_enabled_venues = None
+                self._sync_venue_status_unlocked()
 
     async def run_explicit_collect(self, runner) -> CollectionReport:
         """Manual diagnostic collect. Does not own HOT/UNIVERSE generation progress."""
@@ -668,8 +693,9 @@ class LiveRefreshCoordinator:
                 message = f"scan_cycle_timeout after {timeout:g}s"
                 raise ScanCycleTimeout(message) from exc
             finally:
-                self._cycle_enabled_venues = None
-                self._sync_venue_status()
+                with self._state_lock:
+                    self._cycle_enabled_venues = None
+                    self._sync_venue_status_unlocked()
 
     def record_explicit_report(self, report: CollectionReport) -> None:
         """Upsert current-state from a manual collect without moving scheduler dues."""
@@ -681,28 +707,29 @@ class LiveRefreshCoordinator:
         )
         inventory = self._fixture_state.inventory(report.completed_at)
         _hot_count, universe_count = self._fixture_state.membership_counts(report.completed_at)
-        self.status = self.status.model_copy(
-            update={
-                "cycle_in_progress": False,
-                "last_completed_at": report.completed_at,
-                "last_duration_ms": duration_ms,
-                "discovery_mode": report.discovery_mode,
-                "matching_venue": report.matching_venue,
-                "matching_venues": report.matching_venues,
-                "last_matched_event_pairs": report.matched_event_pairs,
-                "last_matched_market_pairs": report.matched_market_pairs,
-                "last_paper_decisions": len(report.paper_decisions),
-                "last_issue_count": len(report.issues),
-                "skipped_out_of_scope": report.skipped_out_of_scope,
-                "operator_summary": _combined_operator_summary(
-                    self.status.hot, self.status.universe, universe_count
-                ),
-                "config_warnings": report.config_warnings,
-                "venue_health": report.venue_health,
-                "discovered_fixtures": inventory,
-                "last_error": None,
-            }
-        )
+        with self._state_lock:
+            self.status = self.status.model_copy(
+                update={
+                    "cycle_in_progress": False,
+                    "last_completed_at": report.completed_at,
+                    "last_duration_ms": duration_ms,
+                    "discovery_mode": report.discovery_mode,
+                    "matching_venue": report.matching_venue,
+                    "matching_venues": report.matching_venues,
+                    "last_matched_event_pairs": report.matched_event_pairs,
+                    "last_matched_market_pairs": report.matched_market_pairs,
+                    "last_paper_decisions": len(report.paper_decisions),
+                    "last_issue_count": len(report.issues),
+                    "skipped_out_of_scope": report.skipped_out_of_scope,
+                    "operator_summary": _combined_operator_summary(
+                        self.status.hot, self.status.universe, universe_count
+                    ),
+                    "config_warnings": report.config_warnings,
+                    "venue_health": report.venue_health,
+                    "discovered_fixtures": inventory,
+                    "last_error": None,
+                }
+            )
 
     def record_report(
         self,
@@ -1024,25 +1051,26 @@ class LiveRefreshCoordinator:
     def _mark_manual_hot_started(self, started: datetime) -> None:
         """Expose manual HOT activity without claiming a scheduled due slot."""
 
-        self._cycle_hot_venues = self._pending_participation.venues_for(ScanLane.HOT)
-        self._cycle_enabled_venues = self._cycle_hot_venues
-        self.status = self.status.model_copy(
-            update={
-                "cycle_in_progress": True,
-                "last_started_at": started,
-                "last_error": None,
-                "hot": self.status.hot.model_copy(
-                    update={
-                        "cycle_in_progress": True,
-                        "last_started_at": started,
-                        "last_error": None,
-                        "last_persist_error": None,
-                        "persist_ok": None,
-                    }
-                ),
-            }
-        )
-        self._sync_venue_status()
+        with self._state_lock:
+            self._cycle_hot_venues = self._pending_participation.venues_for(ScanLane.HOT)
+            self._cycle_enabled_venues = self._cycle_hot_venues
+            self.status = self.status.model_copy(
+                update={
+                    "cycle_in_progress": True,
+                    "last_started_at": started,
+                    "last_error": None,
+                    "hot": self.status.hot.model_copy(
+                        update={
+                            "cycle_in_progress": True,
+                            "last_started_at": started,
+                            "last_error": None,
+                            "last_persist_error": None,
+                            "persist_ok": None,
+                        }
+                    ),
+                }
+            )
+            self._sync_venue_status_unlocked()
 
     def _mark_lane_error(
         self,

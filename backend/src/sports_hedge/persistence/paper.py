@@ -241,10 +241,34 @@ class SqlitePaperScanRepository:
                     ),
                 )
         except sqlite3.IntegrityError:
-            LOGGER.info(
-                "paper_scan_audit_same_persist_attempt record_id=%s",
-                record.record_id,
-            )
+            if self._same_stamped_persist_attempt(record):
+                LOGGER.info(
+                    "paper_scan_audit_same_persist_attempt record_id=%s",
+                    record.record_id,
+                )
+                return
+            raise
+
+    def _same_stamped_persist_attempt(self, record: PaperScanRecord) -> bool:
+        """True only when the existing PK row is this stamped persist attempt."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT record_id, canonical_event_id, canonical_market_id, scanned_at
+                FROM paper_scan_records
+                WHERE record_id = ?
+                """,
+                (record.record_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        return (
+            str(row["record_id"]) == record.record_id
+            and str(row["canonical_event_id"]) == record.canonical_event_id
+            and str(row["canonical_market_id"]) == record.canonical_market_id
+            and str(row["scanned_at"]) == record.scanned_at.isoformat()
+        )
 
     def list_scans(
         self,
