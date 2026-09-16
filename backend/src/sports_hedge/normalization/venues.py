@@ -41,13 +41,113 @@ _NEGATION_PREFIXES = (
     "doesnt",
     "dont",
 )
+# Conjunction is required. Optional and/plus previously classified
+# "including extra time penalties do not count" as ET+penalties.
 _COMPOUND_INCLUDE_ET_PENALTIES = re.compile(
-    r"including extra time(?: and| plus)? penalties"
+    r"including extra time(?: and| plus) penalties"
 )
 _COMPOUND_EXCLUDE_ET_PENALTIES = re.compile(
-    r"(?:not including|excluding|without) extra time(?: and| plus)? penalties"
+    r"(?:not including|excluding|without) extra time(?: and| plus) penalties"
     r"|extra time and penalties do not count"
     r"|extra time and penalties don t count"
+    r"|extra time plus penalties do not count"
+    r"|extra time plus penalties don t count"
+)
+_AMBIGUOUS_ET_PENALTIES = re.compile(r"including extra time penalties")
+_RESULT_EXTENSION_RE = re.compile(
+    r"\b(?:"
+    r"shoot[- ]?outs?|"
+    r"spot kicks?|"
+    r"penalty shoot|"
+    r"if (?:the )?(?:match|game) is tied|"
+    r"if (?:the )?scores? (?:are )?level|"
+    r"in the event of a (?:tie|draw)|"
+    r"goes to extra time|"
+    r"extra time applies|"
+    r"penalties (?:to )?decide|"
+    r"decided (?:on|by) penalties|"
+    r"play(?:s|ed|ing)?(?: out)? to a (?:finish|result|conclusion|winner)|"
+    r"play(?:s|ed|ing)? until (?:a |the |there is a )?(?:winner|result|finish)|"
+    r"until (?:a |there is a )winner|"
+    r"must (?:be|produce) a winner"
+    r")\b"
+)
+# Token classes for result determination that can extend beyond ordinary
+# regulation / normal time. These are semantic families, not a denylist of
+# quoted O1 strings. Bare "so" is not a token: it is a common English word.
+_RESULT_EXTENSION_TOKEN_SEQS = (
+    ("golden", "goal"),
+    ("golden", "goals"),
+    ("silver", "goal"),
+    ("silver", "goals"),
+    ("sudden", "death"),
+    ("sos",),
+    ("s", "o"),
+    ("s", "o", "s"),
+    ("so", "count"),
+    ("so", "counts"),
+    ("so", "counted"),
+    ("from", "the", "spot"),
+    ("from", "the", "penalty", "spot"),
+    ("spot", "kick"),
+    ("spot", "kicks"),
+    ("winner", "on", "the", "day"),
+    ("winner", "on", "the", "night"),
+    ("to", "a", "finish"),
+    ("to", "a", "conclusion"),
+    ("until", "a", "winner"),
+    ("until", "there", "is", "a", "winner"),
+)
+_REMAIN_OPEN_POSTPONE_RE = re.compile(
+    r"if the (?:game|match) is postponed.{0,160}remain open"
+)
+_STANDARD_CANCEL_NO_MAKEUP_RE = re.compile(
+    r"if the (?:game|match) is cancel(?:l?ed|led) entirely.{0,200}"
+    r"(?:no make[- ]?up|this market will resolve)"
+)
+_DRAW_VOID_RE = re.compile(r"\bdraw voids?\b")
+_ET_INCLUSION_PHRASES = ("including extra time", "include extra time", "includes extra time")
+_PENALTY_INCLUSION_PHRASES = ("including penalties", "include penalties", "includes penalties")
+_TEAM_TOTAL_TOKENS = ("team total", "home total", "away total", "participant total")
+_OVER_UNDER_ABBREV_RE = re.compile(r"\bo u\b")
+_TEAM_GOALS_RE = re.compile(r"\bteam goals?\b")
+_HOME_ROLE_RE = re.compile(r"\bhome(?:\s+team)?\b")
+_AWAY_ROLE_RE = re.compile(r"\baway(?:\s+team)?\b")
+_CALLED_OFF_RE = re.compile(r"\b(?:called off|call off)\b")
+_REFUND_RE = re.compile(
+    r"\b(?:refund(?:s|ed)?|stakes? returned|bets? (?:are )?(?:refunded|returned))\b"
+)
+_NEGATED_EXCLUSION_RE = re.compile(
+    r"\b(?:not|never)\s+(?:excluding|exclude|without)\b"
+    r"|\bdoes not exclude\b"
+    r"|\bdo not exclude\b"
+    r"|\bdoesn t exclude\b"
+    r"|\bdon t exclude\b"
+)
+_EXTRA_TIME_TOKEN_SEQS = (
+    ("extra", "time"),
+    ("aet",),
+    ("a", "e", "t"),
+    ("et",),
+    ("120", "minutes"),
+    ("120", "minute"),
+    ("120", "mins"),
+    ("120", "min"),
+)
+_PENALTY_TOKEN_SEQS = (
+    ("penalties",),
+    ("penalty",),
+    ("pks",),
+    ("pk",),
+    ("pens",),
+    ("p", "k"),
+    ("p", "k", "s"),
+    ("penalty", "kicks"),
+    ("penalty", "kick"),
+)
+_SINGLE_NEGATION_PREFIXES = frozenset(prefix for prefix in _NEGATION_PREFIXES if " " not in prefix)
+_MULTI_NEGATION_PREFIXES = tuple(
+    tuple(prefix.split()) for prefix in _NEGATION_PREFIXES if " " in prefix
 )
 
 
@@ -575,6 +675,14 @@ def _kalshi_market_family(
     if "total goal" in combined or ("over" in combined and "under" in combined) or (
         "over" in combined and "goal" in combined
     ):
+        if _is_named_team_or_participant_total(
+            f"{title} {yes_label}",
+            home_team=home_team,
+            away_team=away_team,
+        ):
+            raise VenueNormalizationError(
+                "Kalshi team/participant totals are not inferred as match totals"
+            )
         if line is None:
             raise VenueNormalizationError("Kalshi totals market has no line")
         if line_push_possible(line) is not False:
@@ -616,13 +724,33 @@ def _kalshi_market_family(
     raise VenueNormalizationError(f"Unsupported Kalshi sports market: {title}")
 
 
-def _prefix_negates(prefix: str) -> bool:
+def _prefix_negation_count(prefix: str) -> int:
+    """Count a trailing chain of negation tokens. Stacked negations are not evaluated."""
+
     words = " ".join(prefix.split()).split()
-    if not words:
-        return False
-    last = words[-1]
-    last_two = " ".join(words[-2:]) if len(words) >= 2 else last
-    return last in _NEGATION_PREFIXES or last_two in _NEGATION_PREFIXES
+    count = 0
+    index = len(words)
+    while index > 0:
+        matched = False
+        for seq in sorted(_MULTI_NEGATION_PREFIXES, key=len, reverse=True):
+            width = len(seq)
+            if index >= width and tuple(words[index - width : index]) == seq:
+                count += 1
+                index -= width
+                matched = True
+                break
+        if matched:
+            continue
+        if words[index - 1] in _SINGLE_NEGATION_PREFIXES:
+            count += 1
+            index -= 1
+            continue
+        break
+    return count
+
+
+def _prefix_negates(prefix: str) -> bool:
+    return _prefix_negation_count(prefix) >= 1
 
 
 def _phrase_polarity(text: str, phrase: str) -> bool | None:
@@ -630,17 +758,21 @@ def _phrase_polarity(text: str, phrase: str) -> bool | None:
 
     affirmed = False
     negated = False
+    ambiguous = False
     start = 0
     while True:
         pos = text.find(phrase, start)
         if pos < 0:
             break
-        if _prefix_negates(text[:pos]):
+        depth = _prefix_negation_count(text[:pos])
+        if depth == 0:
+            affirmed = True
+        elif depth == 1:
             negated = True
         else:
-            affirmed = True
+            ambiguous = True
         start = pos + len(phrase)
-    if affirmed and negated:
+    if ambiguous or (affirmed and negated):
         return None
     if affirmed:
         return True
@@ -649,57 +781,238 @@ def _phrase_polarity(text: str, phrase: str) -> bool | None:
     return None
 
 
+def _exclusion_phrases(subject: str) -> tuple[str, ...]:
+    return (
+        f"{subject} do not count",
+        f"{subject} does not count",
+        f"{subject} don t count",
+        f"{subject} doesnt count",
+        f"{subject} is not included",
+        f"{subject} are not included",
+        f"not including {subject}",
+        f"excluding {subject}",
+        f"without {subject}",
+        f"exclude {subject}",
+        f"excludes {subject}",
+    )
+
+
+def _explicitly_excludes(text: str, subject: str) -> bool:
+    return any(_has_unnegated_phrase(text, phrase) for phrase in _exclusion_phrases(subject))
+
+
+def _has_unnegated_phrase(text: str, phrase: str) -> bool:
+    start = 0
+    while True:
+        pos = text.find(phrase, start)
+        if pos < 0:
+            return False
+        if _prefix_negation_count(text[:pos]) == 0:
+            return True
+        start = pos + len(phrase)
+
+
+def _tokens_of(text: str) -> list[str]:
+    return text.split() if text else []
+
+
+def _has_token_seq(tokens: list[str], seq: tuple[str, ...]) -> bool:
+    width = len(seq)
+    return any(tuple(tokens[index : index + width]) == seq for index in range(len(tokens) - width + 1))
+
+
+def _has_extra_time_token(text: str) -> bool:
+    tokens = _tokens_of(text)
+    return any(_has_token_seq(tokens, seq) for seq in _EXTRA_TIME_TOKEN_SEQS)
+
+
+def _has_penalties_token(text: str) -> bool:
+    tokens = _tokens_of(text)
+    return any(_has_token_seq(tokens, seq) for seq in _PENALTY_TOKEN_SEQS)
+
+
+def _negated_exclusion_ambiguous(text: str) -> bool:
+    """True when an exclusion construction is itself negated (double-negation / polarity)."""
+
+    if _NEGATED_EXCLUSION_RE.search(text) and (
+        _has_extra_time_token(text) or _has_penalties_token(text)
+    ):
+        return True
+    for subject in ("extra time", "penalties"):
+        for phrase in _exclusion_phrases(subject):
+            start = 0
+            while True:
+                pos = text.find(phrase, start)
+                if pos < 0:
+                    break
+                if _prefix_negation_count(text[:pos]) >= 1:
+                    return True
+                start = pos + len(phrase)
+    return False
+
+
+def _inclusion_exclusion_conflict(text: str, extra_time: bool | None, penalties: bool | None) -> bool:
+    """True when the same subject is both affirmatively included and explicitly excluded."""
+
+    extra_excluded = _explicitly_excludes(text, "extra time")
+    penalties_excluded = _explicitly_excludes(text, "penalties")
+    if extra_excluded and (
+        extra_time is True or any(_has_unnegated_phrase(text, phrase) for phrase in _ET_INCLUSION_PHRASES)
+    ):
+        return True
+    if penalties_excluded and (
+        penalties is True
+        or any(_has_unnegated_phrase(text, phrase) for phrase in _PENALTY_INCLUSION_PHRASES)
+    ):
+        return True
+    return False
+
+
+def _has_regulation_marker(text: str) -> bool:
+    return "90 minutes" in text or "regulation time" in text or "regulation-time" in text
+
+
+def _unparsed_abandon_postpone_void(text: str) -> bool:
+    """True when abandon/postpone/cancel/reschedule/void language is unproven.
+
+    Understood clauses that do not fail closed:
+    - standard Polymarket postponed / remain-open-until-completed
+    - standard Polymarket canceled-entirely / no-makeup / resolve Yes or No
+    - draw-void wording, which is family/push semantics rather than match void
+    """
+
+    remain_open = bool(_REMAIN_OPEN_POSTPONE_RE.search(text))
+    standard_cancel = bool(_STANDARD_CANCEL_NO_MAKEUP_RE.search(text))
+    has_abandon = "abandon" in text
+    has_postpone = "postpon" in text
+    has_reschedule = "reschedul" in text
+    has_cancel = bool(re.search(r"\bcancel", text))
+    remaining_void = _DRAW_VOID_RE.sub(" ", text)
+    has_other_void = bool(re.search(r"\bvoid", remaining_void))
+    if _CALLED_OFF_RE.search(text):
+        return True
+    if _REFUND_RE.search(text) and not (remain_open or standard_cancel):
+        return True
+    if has_abandon or has_reschedule:
+        return True
+    if has_postpone and not remain_open:
+        return True
+    if has_cancel and not standard_cancel:
+        return True
+    if has_other_void:
+        return True
+    return False
+
+
+def _has_result_extension_language(text: str) -> bool:
+    """True when wording indicates the result can be decided beyond regulation.
+
+    Covers sudden-death / golden-goal / silver-goal, shootout abbreviations
+    and synonyms, spot-kick deciders, and play-to-a-result / winner-on-the-day
+    language. Presence is enough to refuse a regulation-time claim; it does
+    not newly prove extra-time or penalties inclusion.
+    """
+
+    if _RESULT_EXTENSION_RE.search(text):
+        return True
+    tokens = _tokens_of(text)
+    return any(_has_token_seq(tokens, seq) for seq in _RESULT_EXTENSION_TOKEN_SEQS)
+
+
+def _unparsed_result_extension(text: str, extra_time: bool | None, penalties: bool | None) -> bool:
+    if _has_result_extension_language(text):
+        return True
+    if extra_time is None and _has_extra_time_token(text):
+        return True
+    if penalties is None and _has_penalties_token(text):
+        return True
+    return False
+
+
+def _claim_regulation(
+    text: str, extra_time: bool | None, penalties: bool | None
+) -> tuple[SettlementScope, bool | None, bool | None]:
+    if extra_time is True or penalties is True:
+        return SettlementScope.UNKNOWN, None, None
+    if _unparsed_result_extension(text, extra_time, penalties):
+        return SettlementScope.UNKNOWN, None, None
+    return SettlementScope.REGULATION_TIME, False, False
+
+
+def _first_defined_polarity(text: str, phrases: tuple[str, ...]) -> bool | None:
+    for phrase in phrases:
+        polarity = _phrase_polarity(text, phrase)
+        if polarity is not None:
+            return polarity
+        if phrase in text:
+            return None
+    return None
+
+
 def classify_settlement_wording(text: str) -> tuple[SettlementScope, bool | None, bool | None]:
     """Map rules text onto the fingerprint model, or UNKNOWN when incomplete.
 
-    Fail closed: negation must not parse as inclusion, and compound extra-time
-    plus penalties must not collapse to a partial extra-time-only truth.
+    Fail closed: negation must not parse as inclusion, compound extra-time plus
+    penalties must not collapse, and 90-minute markers must not hide unparsed
+    extra-time/shootout/tie/void/abbreviation/refund/result-extension language.
     """
 
     normalized = normalize_text(text)
     if not normalized or normalized in {"[]"}:
         return SettlementScope.UNKNOWN, None, None
+    if _unparsed_abandon_postpone_void(normalized):
+        return SettlementScope.UNKNOWN, None, None
+    if _negated_exclusion_ambiguous(normalized):
+        return SettlementScope.UNKNOWN, None, None
 
     include_matches = list(_COMPOUND_INCLUDE_ET_PENALTIES.finditer(normalized))
     exclude_matches = list(_COMPOUND_EXCLUDE_ET_PENALTIES.finditer(normalized))
-    include_affirmed = any(
-        not _prefix_negates(normalized[:match.start()]) for match in include_matches
-    )
-    include_negated = bool(exclude_matches) or any(
-        _prefix_negates(normalized[:match.start()]) for match in include_matches
-    )
+    include_depths = [_prefix_negation_count(normalized[:match.start()]) for match in include_matches]
+    if any(depth >= 2 for depth in include_depths):
+        return SettlementScope.UNKNOWN, None, None
+    include_affirmed = any(depth == 0 for depth in include_depths)
+    include_negated = bool(exclude_matches) or any(depth == 1 for depth in include_depths)
     if include_affirmed and include_negated:
         return SettlementScope.UNKNOWN, None, None
     if include_negated:
-        return SettlementScope.REGULATION_TIME, False, False
+        return _claim_regulation(normalized, False, False)
     if include_affirmed:
+        if _inclusion_exclusion_conflict(normalized, True, True):
+            return SettlementScope.UNKNOWN, None, None
         return SettlementScope.INCLUDING_PENALTIES, True, True
+    if _AMBIGUOUS_ET_PENALTIES.search(normalized):
+        return SettlementScope.UNKNOWN, None, None
 
-    extra_time = _phrase_polarity(normalized, "including extra time")
-    if extra_time is None and "including extra time" not in normalized:
-        extra_time = _phrase_polarity(normalized, "include extra time")
-    if extra_time is None and "including extra time" not in normalized and "include extra time" not in normalized:
-        extra_time = _phrase_polarity(normalized, "includes extra time")
-    penalties = _phrase_polarity(normalized, "including penalties")
-    if penalties is None and "including penalties" not in normalized:
-        penalties = _phrase_polarity(normalized, "include penalties")
+    extra_time = _first_defined_polarity(normalized, _ET_INCLUSION_PHRASES)
+    penalties = _first_defined_polarity(normalized, _PENALTY_INCLUSION_PHRASES)
+    if _inclusion_exclusion_conflict(normalized, extra_time, penalties):
+        return SettlementScope.UNKNOWN, None, None
+    if extra_time is None and _explicitly_excludes(normalized, "extra time"):
+        extra_time = False
+    if penalties is None and _explicitly_excludes(normalized, "penalties"):
+        penalties = False
 
     if extra_time is True and penalties is True:
         return SettlementScope.INCLUDING_PENALTIES, True, True
     if extra_time is True and penalties is not True:
+        if _has_regulation_marker(normalized):
+            return SettlementScope.UNKNOWN, None, None
         return SettlementScope.INCLUDING_EXTRA_TIME, True, False
     if extra_time is False and penalties is True:
         return SettlementScope.UNKNOWN, None, None
     if extra_time is False:
-        return SettlementScope.REGULATION_TIME, False, False
+        return _claim_regulation(normalized, extra_time, penalties)
     if penalties is True:
+        # Positive penalties token cannot override contrary 90-minute / ET-exclusion.
+        if extra_time is not True and _has_regulation_marker(normalized):
+            return SettlementScope.UNKNOWN, None, None
         return SettlementScope.INCLUDING_PENALTIES, True, True
     if penalties is False and extra_time is None:
-        if "90 minutes" in normalized or "regulation time" in normalized:
-            return SettlementScope.REGULATION_TIME, False, False
+        if _has_regulation_marker(normalized):
+            return _claim_regulation(normalized, extra_time, penalties)
         return SettlementScope.UNKNOWN, None, None
-    if "90 minutes" in normalized or "regulation time" in normalized:
-        return SettlementScope.REGULATION_TIME, False, False
+    if _has_regulation_marker(normalized):
+        return _claim_regulation(normalized, extra_time, penalties)
     return SettlementScope.UNKNOWN, None, None
 
 
@@ -1108,10 +1421,7 @@ def _matchbook_market_family(
         return MarketFamily.CARDS, line
     if "asian handicap" in text or text.startswith("handicap"):
         return MarketFamily.ASIAN_HANDICAP, line
-    if any(
-        token in text
-        for token in ("team total", "home total", "away total", "participant total")
-    ):
+    if any(token in text for token in _TEAM_TOTAL_TOKENS):
         return MarketFamily.TEAM_TOTAL, line
     if _matchbook_looks_like_match_total(text):
         if _matchbook_is_participant_or_team_total(
@@ -1122,6 +1432,12 @@ def _matchbook_market_family(
         ):
             return MarketFamily.TEAM_TOTAL, line
         return MarketFamily.TOTAL_GOALS, line
+    if _looks_like_totals_surface(text) and _is_named_team_or_participant_total(
+        text,
+        home_team=home_team,
+        away_team=away_team,
+    ):
+        return MarketFamily.TEAM_TOTAL, line
     if "correct score" in text:
         return MarketFamily.CORRECT_SCORE, None
     if "half time full time" in text:
@@ -1165,7 +1481,15 @@ def _polymarket_market_family(
         return MarketFamily.PLAYER_PROPS, line
     if "both teams to score" in combined or "btts" in combined:
         return MarketFamily.BOTH_TEAMS_TO_SCORE, None
-    if "total goal" in combined or "over under" in combined and "goal" in combined:
+    if "total goal" in combined or ("over under" in combined and "goal" in combined):
+        extra = normalize_text(str(_first(payload, "groupItemTitle", "group_item_title") or ""))
+        scoped = f"{combined} {extra}".strip()
+        if _is_named_team_or_participant_total(
+            scoped,
+            home_team=home_team,
+            away_team=away_team,
+        ):
+            return MarketFamily.TEAM_TOTAL, line
         return MarketFamily.TOTAL_GOALS, line
     if "handicap" in combined or "spread" in sports_type:
         return MarketFamily.ASIAN_HANDICAP, line
@@ -1314,6 +1638,30 @@ def _matchbook_looks_like_match_total(text: str) -> bool:
     return "total goal" in text or ("over under" in text and "goal" in text)
 
 
+def _has_exactly_one_role_side(text: str) -> bool:
+    home_role = bool(_HOME_ROLE_RE.search(text))
+    away_role = bool(_AWAY_ROLE_RE.search(text))
+    return home_role != away_role
+
+
+def _looks_like_totals_surface(text: str) -> bool:
+    """Totals-like wording used only to fail closed into TEAM_TOTAL, never to invent match totals."""
+
+    if _matchbook_looks_like_match_total(text):
+        return True
+    if _TEAM_GOALS_RE.search(text):
+        return True
+    if _OVER_UNDER_ABBREV_RE.search(text) and (
+        "goal" in text or "team" in text or _has_exactly_one_role_side(text)
+    ):
+        return True
+    if ("over" in text or "under" in text) and (
+        "goal" in text or "team" in text or _has_exactly_one_role_side(text)
+    ):
+        return True
+    return False
+
+
 def _scalar_id(value: Any) -> str | None:
     if value is None or value == "":
         return None
@@ -1353,6 +1701,28 @@ def _text_mentions_exactly_one_team(text: str, *, home_team: str, away_team: str
     return home_in != away_in
 
 
+def _is_named_team_or_participant_total(
+    text: str,
+    *,
+    home_team: str,
+    away_team: str,
+) -> bool:
+    """True when a totals label is team-scoped, not a proven full-match total."""
+
+    normalized = normalize_text(text)
+    if any(token in normalized for token in _TEAM_TOTAL_TOKENS):
+        return True
+    if _TEAM_GOALS_RE.search(normalized):
+        return True
+    if _has_exactly_one_role_side(normalized):
+        return True
+    return _text_mentions_exactly_one_team(
+        normalized,
+        home_team=home_team,
+        away_team=away_team,
+    )
+
+
 def _matchbook_is_participant_or_team_total(
     name: str,
     payload: dict[str, Any],
@@ -1367,12 +1737,11 @@ def _matchbook_is_participant_or_team_total(
     """
 
     text = normalize_text(name)
-    if any(
-        token in text
-        for token in ("team total", "home total", "away total", "participant total")
+    if _is_named_team_or_participant_total(
+        text,
+        home_team=home_team,
+        away_team=away_team,
     ):
-        return True
-    if _text_mentions_exactly_one_team(text, home_team=home_team, away_team=away_team):
         return True
     if _matchbook_market_participant_id(payload):
         return True

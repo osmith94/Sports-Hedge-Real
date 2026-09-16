@@ -7,6 +7,7 @@ must never override settlement, period, line, or outcome-model mismatch.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
@@ -23,6 +24,10 @@ from sports_hedge.normalization.text import normalize_text
 
 SAFE_TEAM_SUFFIX_TOKENS = frozenset({"fc", "cf", "afc", "sc"})
 SAFE_TEAM_PREFIX_TOKENS = frozenset({"fc", "cf", "afc"})
+_SQUAD_GENDER_TOKENS = frozenset({"women", "woman", "womens", "ladies", "lady", "girls", "girl", "wfc", "w"})
+_SQUAD_ACADEMY_TOKENS = frozenset({"academy", "academies", "youth", "development"})
+_SQUAD_RESERVE_TOKENS = frozenset({"reserves", "reserve", "b", "ii", "iii", "xi"})
+_SQUAD_AGE_RE = re.compile(r"^u(\d{2})s?$")
 
 SECRET_KEY_FRAGMENTS = (
     "password",
@@ -225,6 +230,35 @@ def competition_code_for(label: str) -> str | None:
 def _tokens(value: str) -> list[str]:
     normalized = normalize_text(value)
     return normalized.split() if normalized else []
+
+
+def squad_category_fingerprint(name: str) -> frozenset[str]:
+    """Stable squad-category markers (age grade, women, academy, reserves).
+
+    Senior clubs carry an empty fingerprint. Variants such as U21, Women,
+    academy and reserves are distinct participant identities.
+    """
+
+    tokens = _tokens(name)
+    categories: set[str] = set()
+    for index, token in enumerate(tokens):
+        if token in _SQUAD_GENDER_TOKENS:
+            categories.add("gender:women")
+        if token in _SQUAD_ACADEMY_TOKENS:
+            categories.add("dev:academy")
+        if token in _SQUAD_RESERVE_TOKENS:
+            categories.add("dev:reserves")
+        age = _SQUAD_AGE_RE.fullmatch(token)
+        if age:
+            categories.add(f"age:u{age.group(1)}")
+        if token == "under" and index + 1 < len(tokens) and tokens[index + 1].isdigit():
+            age_number = tokens[index + 1].zfill(2)
+            categories.add(f"age:u{age_number}")
+    return frozenset(categories)
+
+
+def squad_categories_compatible(left: str, right: str) -> bool:
+    return squad_category_fingerprint(left) == squad_category_fingerprint(right)
 
 
 def _suffix_delta(raw: str, counterpart: str) -> str | None:
@@ -465,7 +499,7 @@ def infer_learned_rule(
         suffixes = {token for token in (home_suffix, away_suffix) if token is not None}
         if len(suffixes) == 1:
             token = next(iter(suffixes))
-            if token in SAFE_TEAM_SUFFIX_TOKENS:
+            if token in SAFE_TEAM_SUFFIX_TOKENS and not squad_category_fingerprint(token):
                 return _build(
                     venue=venue_side.venue,
                     rule_type=MappingRuleType.VENUE_SUFFIX_STRIP,
@@ -479,7 +513,7 @@ def infer_learned_rule(
         prefixes = {token for token in (home_prefix, away_prefix) if token is not None}
         if len(prefixes) == 1:
             token = next(iter(prefixes))
-            if token in SAFE_TEAM_PREFIX_TOKENS:
+            if token in SAFE_TEAM_PREFIX_TOKENS and not squad_category_fingerprint(token):
                 return _build(
                     venue=venue_side.venue,
                     rule_type=MappingRuleType.VENUE_PREFIX_STRIP,
@@ -494,6 +528,11 @@ def infer_learned_rule(
     left_away = normalize_text(left.raw_away_team)
     right_away = normalize_text(right.raw_away_team)
     if left_home != right_home or left_away != right_away:
+        if not (
+            participant_identity_preserved(left.raw_home_team, right.raw_home_team)
+            and participant_identity_preserved(left.raw_away_team, right.raw_away_team)
+        ):
+            return None
         kickoff = kickoff_bucket(left.kickoff_utc).isoformat()
         pattern = (
             f"home={left_home}|away={left_away}|kickoff={kickoff}|src={left.source_event_id}"
@@ -548,6 +587,32 @@ def apply_text_rule(rule: MappingRule, value: str) -> str:
     return normalized
 
 
+def participant_identity_preserved(original: str, transformed: str) -> bool:
+    """True when a learned rename is a naming variant, not a different club.
+
+    Operator mappings may strip safe FC-style tokens or apply curated aliases.
+    They must not replace Arsenal with Chelsea, collapse senior vs U21/women/
+    academy/reserve squads, or otherwise rewrite a disjoint participant.
+    """
+
+    if not squad_categories_compatible(original, transformed):
+        return False
+    left = resolve_team_name(original)
+    right = resolve_team_name(transformed)
+    if not left and not right:
+        return True
+    if left == right:
+        return True
+    left_tokens = set(_tokens(left)) - SAFE_TEAM_SUFFIX_TOKENS - SAFE_TEAM_PREFIX_TOKENS
+    right_tokens = set(_tokens(right)) - SAFE_TEAM_SUFFIX_TOKENS - SAFE_TEAM_PREFIX_TOKENS
+    if left_tokens and right_tokens and (left_tokens <= right_tokens or right_tokens <= left_tokens):
+        if squad_categories_compatible(left, right):
+            return True
+    if len(left) >= 4 and len(right) >= 4 and (left in right or right in left):
+        return squad_categories_compatible(left, right)
+    return False
+
+
 def _parse_fixture_fields(payload: str) -> dict[str, str]:
     parsed: dict[str, str] = {}
     for part in payload.split("|"):
@@ -593,6 +658,10 @@ class LearnedMappingApplicator:
                 continue
             new_home = self._apply_team(rule, event, "home", home)
             new_away = self._apply_team(rule, event, "away", away)
+            if not participant_identity_preserved(home, new_home) or not participant_identity_preserved(
+                away, new_away
+            ):
+                continue
             if new_home != normalize_text(home) or new_away != normalize_text(away):
                 applied.append(
                     AppliedLearnedRule(
@@ -622,7 +691,11 @@ class LearnedMappingApplicator:
             if not (home_ok and away_ok and src_ok and kickoff_ok):
                 return normalize_text(current)
             mapped = transformation.get(side)
-            return mapped if mapped else normalize_text(current)
+            if not mapped:
+                return normalize_text(current)
+            if not participant_identity_preserved(current, mapped):
+                return normalize_text(current)
+            return mapped
         return apply_text_rule(rule, current)
 
     def _team_rule_applies(

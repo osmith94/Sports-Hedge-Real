@@ -13,6 +13,7 @@ from sports_hedge.matching.learned_rules import (
     LearnedMappingApplicator,
     MappingProvenance,
     provenance_from_applied,
+    squad_categories_compatible,
 )
 
 
@@ -79,6 +80,10 @@ class EventMatcher:
 
         if left.sport != right.sport:
             return False
+        if not squad_categories_compatible(left.home_team, right.home_team) or not squad_categories_compatible(
+            left.away_team, right.away_team
+        ):
+            return False
         kickoff_delta = abs(left.kickoff_utc - right.kickoff_utc)
         if kickoff_delta > self.kickoff_tolerance:
             return False
@@ -116,6 +121,15 @@ class EventMatcher:
 
         if left.sport != right.sport:
             return EventMatchResult(matched=False, confidence=0.0, reasons=["sport_mismatch"])
+
+        if not squad_categories_compatible(left.home_team, right.home_team) or not squad_categories_compatible(
+            left.away_team, right.away_team
+        ):
+            return EventMatchResult(
+                matched=False,
+                confidence=0.0,
+                reasons=["participant_squad_category_mismatch"],
+            )
 
         kickoff_delta = abs(left.kickoff_utc - right.kickoff_utc)
         if kickoff_delta > self.kickoff_tolerance:

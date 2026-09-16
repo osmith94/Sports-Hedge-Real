@@ -8,6 +8,7 @@ from sports_hedge.matching.learned_rules import (
     MappingProvenance,
     MappingRuleType,
     economic_mismatch_reasons,
+    participant_identity_preserved,
 )
 
 
@@ -21,10 +22,11 @@ class MarketMatchResult(BaseModel):
 class MarketMatcher:
     """Strict economic-equivalence matcher.
 
-    Event labels may be fuzzy, but market economics are not. Settlement semantics,
-    family, period and line must match exactly before a pair is considered tradable.
-    Learned naming rules may help event identity; they cannot override settlement,
-    period, line, family or outcome-model mismatch.
+    Event labels may be fuzzy for discovery, but paper-eligible identity is not.
+    Settlement semantics, family, period and line must match exactly. Near-name
+    competition fuzz is not paper-eligible without a mapped competition identity.
+    Learned naming rules may help aliases; they cannot override settlement,
+    period, line, family, outcome-model mismatch, or fixture participant identity.
     """
 
     def __init__(self, event_matcher: EventMatcher | None = None) -> None:
@@ -42,6 +44,27 @@ class MarketMatcher:
                 matched=False,
                 confidence=event_result.confidence,
                 reasons=["event_mismatch", *event_result.reasons],
+                provenance=event_result.provenance,
+            )
+        if "competition_fuzzy" in event_result.reasons:
+            return MarketMatchResult(
+                matched=False,
+                confidence=event_result.confidence,
+                reasons=[
+                    "event_mismatch",
+                    "competition_identity_unproven",
+                    *event_result.reasons,
+                ],
+                provenance=event_result.provenance,
+            )
+        if not (
+            participant_identity_preserved(left.event.home_team, right.event.home_team)
+            and participant_identity_preserved(left.event.away_team, right.event.away_team)
+        ):
+            return MarketMatchResult(
+                matched=False,
+                confidence=event_result.confidence,
+                reasons=["event_mismatch", "participant_identity_unproven", *event_result.reasons],
                 provenance=event_result.provenance,
             )
 
