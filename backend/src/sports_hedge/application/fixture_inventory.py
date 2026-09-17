@@ -614,9 +614,13 @@ def _classify_pair(
         return InventoryComparisonStatus.OTHER, match.reasons[0] if match.reasons else "not_equivalent", list(match.reasons), False
     if not scan_eligible_pair(left_market, right_market, match):
         from sports_hedge.catalogue.admission import assess_catalogue_admission
+        from sports_hedge.catalogue.states import CatalogueApprovalState
 
         admission = assess_catalogue_admission(left_market, right_market)
-        if not admission.allowed:
+        if (
+            not admission.allowed
+            and admission.assessment.state is not CatalogueApprovalState.UNSUPPORTED
+        ):
             reason = admission.rejection_reason or "catalogue_review_required"
             return (
                 InventoryComparisonStatus.OTHER,
