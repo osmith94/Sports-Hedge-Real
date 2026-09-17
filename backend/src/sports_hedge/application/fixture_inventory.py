@@ -971,6 +971,26 @@ def _sort_rows(rows: list[FixtureMarketInventoryRow]) -> list[FixtureMarketInven
     )
 
 
+def _kalshi_catalogue_admission(
+    row: FixtureMarketInventoryRow,
+    kalshi_item: InventoryMarket,
+    *,
+    matchbook_markets: list[InventoryMarket],
+    polymarket_markets: list[InventoryMarket],
+):
+    if kalshi_item.canonical is None:
+        return None
+    from sports_hedge.catalogue.admission import assess_catalogue_admission
+
+    for canonical in _row_canonicals(
+        row,
+        matchbook_markets=matchbook_markets,
+        polymarket_markets=polymarket_markets,
+    ):
+        return assess_catalogue_admission(canonical, kalshi_item.canonical)
+    return None
+
+
 def _row_canonicals(
     row: FixtureMarketInventoryRow,
     *,
@@ -1175,6 +1195,26 @@ def _attach_kalshi(
                 )
         return
     _clear_stale_venue_only(row)
+    catalogue = _kalshi_catalogue_admission(
+        row,
+        kalshi_item,
+        matchbook_markets=matchbook_markets,
+        polymarket_markets=polymarket_markets,
+    )
+    if catalogue is not None and not catalogue.allowed:
+        reason = catalogue.rejection_reason or "catalogue_review_required"
+        row.comparison_status = InventoryComparisonStatus.OTHER
+        row.reason = reason
+        if reason not in row.rejection_reasons:
+            row.rejection_reasons.append(reason)
+        detail = catalogue.assessment.reason
+        if detail and detail not in row.rejection_reasons:
+            row.rejection_reasons.append(detail)
+        row.entered_solver = False
+        row.solver_model = None
+        row.current_net_edge = None
+        row.solver_is_arbitrage = False
+        return
     if pair_summaries:
         best = max(
             pair_summaries,

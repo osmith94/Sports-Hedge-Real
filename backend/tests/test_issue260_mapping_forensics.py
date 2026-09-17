@@ -1101,7 +1101,7 @@ async def test_to_qualify_still_nonequivalent_with_catalog_secondary() -> None:
     assert qualify
     assert all(row.comparison_status.value != "matched_equivalent" for row in qualify)
     assert census.equivalent_market_pairs == 1
-    assert census.market_family_breakdown.get("match_result") == 1
+    assert census.market_family_breakdown.get("match_result") in {None, 0}
 
 
 @pytest.mark.asyncio
@@ -1144,7 +1144,7 @@ async def test_hot_and_universe_agree_on_live_shaped_incomplete_kalshi() -> None
     assert universe_snap == hot_snap
     assert universe_snap["identity"]["home_team"] == BETIS
     assert universe_snap["identity"]["away_team"] == GETAFE
-    assert universe_snap["matched_equivalent"] == 1
+    assert universe_snap["matched_equivalent"] == 0
     assert universe_snap["both_complete_3way"] == 1
     assert universe_snap["both_settlement_complete"] == 0
     kalshi_venues = [
@@ -1857,7 +1857,7 @@ async def test_hot_and_universe_agree_on_gamewin_contract_family() -> None:
     assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics) == (
         _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
     )
-    assert universe_census.equivalent_market_pairs == 0
+    assert universe_census.equivalent_market_pairs == 1
     assert universe_kalshi.contract_terms_calls == [GAMEWIN_URL]
     assert hot_kalshi.contract_terms_calls == [GAMEWIN_URL]
 
