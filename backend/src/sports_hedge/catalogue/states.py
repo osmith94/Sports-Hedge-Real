@@ -21,6 +21,12 @@ class CatalogueArchetype(StrEnum):
     TOTAL_GOALS_HALF_LINE = "total_goals_half_line"
     TOTAL_GOALS_INTEGER = "total_goals_integer"
     FIRST_TEAM_TO_SCORE = "first_team_to_score"
+    TEAM_TOTAL_GOALS = "team_total_goals"
+    HANDICAP = "handicap"
+    DRAW_NO_BET = "draw_no_bet"
+    DOUBLE_CHANCE = "double_chance"
+    TEAM_TO_SCORE = "team_to_score"
+    TEAM_CLEAN_SHEET = "team_clean_sheet"
 
 
 CENSUS_V1_FAMILIES: frozenset[MarketFamily] = frozenset(
@@ -29,6 +35,10 @@ CENSUS_V1_FAMILIES: frozenset[MarketFamily] = frozenset(
         MarketFamily.BOTH_TEAMS_TO_SCORE,
         MarketFamily.TOTAL_GOALS,
         MarketFamily.FIRST_TEAM_TO_SCORE,
+        MarketFamily.TEAM_TOTAL,
+        MarketFamily.ASIAN_HANDICAP,
+        MarketFamily.DRAW_NO_BET,
+        MarketFamily.DOUBLE_CHANCE,
     }
 )
 
@@ -40,6 +50,16 @@ REQUIRED_OUTCOMES: dict[MarketFamily, frozenset[CanonicalOutcome]] = {
     MarketFamily.TOTAL_GOALS: frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER}),
     MarketFamily.FIRST_TEAM_TO_SCORE: frozenset(
         {CanonicalOutcome.HOME, CanonicalOutcome.AWAY, CanonicalOutcome.NO_GOAL}
+    ),
+    MarketFamily.TEAM_TOTAL: frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER}),
+    MarketFamily.ASIAN_HANDICAP: frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY}),
+    MarketFamily.DRAW_NO_BET: frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY}),
+    MarketFamily.DOUBLE_CHANCE: frozenset(
+        {
+            CanonicalOutcome.HOME_OR_DRAW,
+            CanonicalOutcome.HOME_OR_AWAY,
+            CanonicalOutcome.DRAW_OR_AWAY,
+        }
     ),
 }
 
@@ -67,4 +87,12 @@ def family_to_archetype(
         if integer_line is False:
             return CatalogueArchetype.TOTAL_GOALS_HALF_LINE
         return CatalogueArchetype.TOTAL_GOALS_HALF_LINE
+    if family is MarketFamily.TEAM_TOTAL:
+        return CatalogueArchetype.TEAM_TOTAL_GOALS
+    if family is MarketFamily.ASIAN_HANDICAP:
+        return CatalogueArchetype.HANDICAP
+    if family is MarketFamily.DRAW_NO_BET:
+        return CatalogueArchetype.DRAW_NO_BET
+    if family is MarketFamily.DOUBLE_CHANCE:
+        return CatalogueArchetype.DOUBLE_CHANCE
     return None

@@ -197,6 +197,146 @@ PAIRWISE_MATRIX: tuple[PairwiseCell, ...] = (
         reason="Approved when both sides are complete 3-state regulation FTTS.",
         sibling_states=["REVIEW_REQUIRED: Polymarket unknown settlement or missing NO_GOAL"],
     ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.TEAM_TOTAL_GOALS,
+        venue_pair="matchbook_polymarket",
+        state=CatalogueApprovalState.REVIEW_REQUIRED,
+        solver_path="none",
+        reason=(
+            "Matchbook and Polymarket can recognize TEAM_TOTAL, but CanonicalMarket "
+            "does not extract the named-team parameter and the solver cannot model "
+            "team totals. Do not invent operational approval."
+        ),
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.TEAM_TOTAL_GOALS,
+        venue_pair="matchbook_kalshi",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="Kalshi team/participant totals are not inferred as match or team totals.",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.TEAM_TOTAL_GOALS,
+        venue_pair="kalshi_polymarket",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="Kalshi does not normalize team totals.",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.HANDICAP,
+        venue_pair="matchbook_polymarket",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason=(
+            "Asian Handicap is recognized on Matchbook/Polymarket but handicap "
+            "semantics remain unproven and solver-ineligible."
+        ),
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.HANDICAP,
+        venue_pair="matchbook_kalshi",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="Kalshi Asian Handicap is not inferred from titles.",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.HANDICAP,
+        venue_pair="kalshi_polymarket",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="Kalshi does not normalize handicap contracts.",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.DRAW_NO_BET,
+        venue_pair="matchbook_polymarket",
+        state=CatalogueApprovalState.APPROVED_EQUIVALENT,
+        solver_path="generalized_payoff",
+        reason=(
+            "HOME/AWAY with proven draw-void (push_possible True) and complete "
+            "regulation fingerprints; generalized payoff already models draw."
+        ),
+        sibling_states=["REVIEW_REQUIRED: unknown draw-void wording"],
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.DRAW_NO_BET,
+        venue_pair="matchbook_kalshi",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="Kalshi Draw No Bet remains deferred until draw-refund rules are proven.",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.DRAW_NO_BET,
+        venue_pair="kalshi_polymarket",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="Kalshi Draw No Bet is not assembled.",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.DOUBLE_CHANCE,
+        venue_pair="matchbook_polymarket",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason=(
+            "Matchbook recognizes Double Chance. Polymarket has no Double Chance "
+            "recogniser. No solver model. Do not invent support."
+        ),
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.DOUBLE_CHANCE,
+        venue_pair="matchbook_kalshi",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="Kalshi Double Chance is not recognized.",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.DOUBLE_CHANCE,
+        venue_pair="kalshi_polymarket",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="Kalshi Double Chance is not recognized.",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.TEAM_TO_SCORE,
+        venue_pair="matchbook_kalshi",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="No distinct Team To Score recogniser (not First Team To Score).",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.TEAM_TO_SCORE,
+        venue_pair="matchbook_polymarket",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="No distinct Team To Score recogniser or solver model.",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.TEAM_TO_SCORE,
+        venue_pair="kalshi_polymarket",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="No distinct Team To Score recogniser or solver model.",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.TEAM_CLEAN_SHEET,
+        venue_pair="matchbook_kalshi",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="No Team Clean Sheet recogniser.",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.TEAM_CLEAN_SHEET,
+        venue_pair="matchbook_polymarket",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="No Team Clean Sheet recogniser.",
+    ),
+    PairwiseCell(
+        archetype=CatalogueArchetype.TEAM_CLEAN_SHEET,
+        venue_pair="kalshi_polymarket",
+        state=CatalogueApprovalState.UNSUPPORTED,
+        solver_path="none",
+        reason="No Team Clean Sheet recogniser.",
+    ),
 )
 
 
@@ -218,6 +358,12 @@ def render_matrix_markdown() -> str:
         CatalogueArchetype.TOTAL_GOALS_HALF_LINE,
         CatalogueArchetype.TOTAL_GOALS_INTEGER,
         CatalogueArchetype.FIRST_TEAM_TO_SCORE,
+        CatalogueArchetype.TEAM_TOTAL_GOALS,
+        CatalogueArchetype.HANDICAP,
+        CatalogueArchetype.DRAW_NO_BET,
+        CatalogueArchetype.DOUBLE_CHANCE,
+        CatalogueArchetype.TEAM_TO_SCORE,
+        CatalogueArchetype.TEAM_CLEAN_SHEET,
     )
     labels = {
         CatalogueArchetype.MATCH_RESULT_1X2: "Match Result / 1X2",
@@ -225,6 +371,12 @@ def render_matrix_markdown() -> str:
         CatalogueArchetype.TOTAL_GOALS_HALF_LINE: "Total Goals O/U (half-line)",
         CatalogueArchetype.TOTAL_GOALS_INTEGER: "Total Goals O/U (integer)",
         CatalogueArchetype.FIRST_TEAM_TO_SCORE: "First Team To Score",
+        CatalogueArchetype.TEAM_TOTAL_GOALS: "Team Total Goals O/U",
+        CatalogueArchetype.HANDICAP: "Handicap",
+        CatalogueArchetype.DRAW_NO_BET: "Draw No Bet",
+        CatalogueArchetype.DOUBLE_CHANCE: "Double Chance",
+        CatalogueArchetype.TEAM_TO_SCORE: "Team To Score",
+        CatalogueArchetype.TEAM_CLEAN_SHEET: "Team Clean Sheet",
     }
     for archetype in order:
         cells = {

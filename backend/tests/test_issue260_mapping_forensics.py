@@ -628,7 +628,7 @@ async def test_live_shaped_kalshi_without_rules_maps_ordinary_1x2() -> None:
     assert mbk.cross_venue_fixtures_with_both_match_result == 1
     assert mbk.both_complete_3way == 1
     assert mbk.both_settlement_complete == 0
-    assert mbk.matched_equivalent == 1
+    assert mbk.matched_equivalent == 0
     assert any(
         "settlement_unknown_not_contradictory" in item.matcher_reasons
         for item in forensics.candidates
@@ -729,7 +729,7 @@ async def test_get_market_empty_or_ambiguous_rules_stay_incomplete() -> None:
     empty = BetisKalshiGetMarket(rules_text="")
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), empty)
     assert census.equivalent_market_pairs == 1
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
     assert census.kalshi_match_result_rule_enrichment["rules_empty"] == 3
     assert census.kalshi_match_result_rule_enrichment["empty"] == 3
@@ -737,7 +737,7 @@ async def test_get_market_empty_or_ambiguous_rules_stay_incomplete() -> None:
     ambiguous = BetisKalshiGetMarket(rules_text=AMBIGUOUS)
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), ambiguous)
     assert census.equivalent_market_pairs == 1
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
 
 
 def test_merge_prefers_get_market_rules_over_ambiguous_list_text() -> None:
@@ -949,13 +949,13 @@ async def test_ambiguous_current_and_get_market_rules_stay_incomplete() -> None:
     event_ambiguous = BetisKalshiGetMarket(rules_text=AMBIGUOUS, event_rules_text=AMBIGUOUS)
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), event_ambiguous)
     assert census.equivalent_market_pairs == 1
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
     assert sorted(event_ambiguous.get_market_calls) == sorted(_betis_kalshi_tickers())
 
     nested_ambiguous = BetisKalshiGetMarket(rules_text=AMBIGUOUS, market_rules_text=AMBIGUOUS)
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), nested_ambiguous)
     assert census.equivalent_market_pairs == 1
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
     assert sorted(nested_ambiguous.get_market_calls) == sorted(_betis_kalshi_tickers())
     assert census.kalshi_match_result_rule_enrichment["attempted"] == 3
     assert census.kalshi_match_result_rule_enrichment["unchanged_existing"] == 3
@@ -999,7 +999,7 @@ async def test_catalog_secondary_does_not_complete_from_retired_precedence() -> 
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
     assert census.equivalent_market_pairs == 1
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
     rendered = render_forensics(forensics)
     assert REGULATION not in rendered
@@ -1056,7 +1056,7 @@ async def test_contradictory_secondary_stays_nonequivalent() -> None:
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
     assert census.equivalent_market_pairs == 1
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
 
 
 @pytest.mark.asyncio
@@ -1068,7 +1068,7 @@ async def test_unclassified_primary_plus_catalog_secondary_stays_incomplete() ->
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
     assert census.equivalent_market_pairs == 1
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
     get_layer = next(
         layer
@@ -1551,7 +1551,7 @@ async def test_live_shaped_template_plus_structured_get_market_stays_incomplete(
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
     assert census.equivalent_market_pairs == 1
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
     assert sorted(kalshi.get_market_calls) == sorted(_betis_kalshi_tickers())
     rendered = render_forensics(forensics)
@@ -1782,7 +1782,7 @@ async def test_live_shaped_gamewin_contract_terms_stay_incomplete() -> None:
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
     assert census.equivalent_market_pairs == 1
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
     assert kalshi.contract_terms_calls == [GAMEWIN_URL]
     rendered = render_forensics(forensics)
@@ -1857,7 +1857,7 @@ async def test_hot_and_universe_agree_on_gamewin_contract_family() -> None:
     assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics) == (
         _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
     )
-    assert universe_census.equivalent_market_pairs == 1
+    assert universe_census.equivalent_market_pairs == 0
     assert universe_kalshi.contract_terms_calls == [GAMEWIN_URL]
     assert hot_kalshi.contract_terms_calls == [GAMEWIN_URL]
 

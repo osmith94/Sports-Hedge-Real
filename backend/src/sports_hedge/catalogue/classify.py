@@ -1,9 +1,8 @@
 """Deterministic Tenet 20 classification. Confidence is never executable permission.
 
-Incomplete settlement is REVIEW_REQUIRED even when MarketMatcher currently admits
-Matchbook↔Kalshi GAMEWIN-unknown ordinary 1X2 into the simple solver. That matcher
-narrowing is recorded as a known conflict; this census does not silently treat it
-as APPROVED_EQUIVALENT.
+Incomplete settlement is REVIEW_REQUIRED even when MarketMatcher currently matches
+Matchbook↔Kalshi GAMEWIN-unknown ordinary 1X2. Production solver/paper admission
+requires APPROVED_EQUIVALENT via the shared HOT/UNIVERSE catalogue gate.
 """
 
 from __future__ import annotations
@@ -84,7 +83,7 @@ def venue_pair_key(left: VenueName, right: VenueName) -> str:
 
 def classify_normalization_error(exc: Exception) -> tuple[CatalogueApprovalState, str]:
     message = str(exc).casefold()
-    if "integer/quarter" in message or "remain deferred" in message:
+    if "integer/quarter" in message or "deferred" in message:
         return CatalogueApprovalState.UNSUPPORTED, "venue_deferred_until_rules_proven"
     if "not inferred" in message:
         return CatalogueApprovalState.UNSUPPORTED, "explicitly_not_inferred"
@@ -183,7 +182,7 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
     )
     if conflict:
         notes.append(
-            "current_matcher_still_admits_to_solver; catalogue_does_not_approve"
+            "legacy_matcher_may_still_match; catalogue_blocks_solver_admission"
         )
     return CataloguePairAssessment(
         state=state,
@@ -272,6 +271,17 @@ def _economic_state(
         return CatalogueApprovalState.KNOWN_CONTRADICTION, "settlement_key_mismatch", notes
     if left.family is MarketFamily.TOTAL_GOALS and line_push_possible(left.line) is None:
         return CatalogueApprovalState.REVIEW_REQUIRED, "unproven_split_line_push", notes
+    if left.family is MarketFamily.TEAM_TOTAL:
+        notes.append("canonical_market_has_no_team_scope_parameter")
+        return (
+            CatalogueApprovalState.REVIEW_REQUIRED,
+            "team_scope_not_extracted_on_canonical_market",
+            notes,
+        )
+    if left.family is MarketFamily.ASIAN_HANDICAP:
+        return CatalogueApprovalState.UNSUPPORTED, "unproven_handicap_semantics", notes
+    if left.family is MarketFamily.DOUBLE_CHANCE:
+        return CatalogueApprovalState.UNSUPPORTED, "double_chance_solver_not_modelled", notes
 
     solver_model = solver_model_for_pair(left, right)
     if solver_model is None:

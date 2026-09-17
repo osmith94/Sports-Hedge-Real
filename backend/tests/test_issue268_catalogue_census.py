@@ -1,23 +1,44 @@
-"""Issue #268 catalogue census v1: pairwise approval, corpus, coverage.
+"""Issue #268 catalogue census v1: pairwise approval, corpus, production gate.
 
-Deterministic fixture/demo only. Does not change matcher admission, HOT/UNIVERSE
-concurrency, paper autofill, or execution.
+Deterministic fixture/demo plus cited captured public payloads. Matcher
+recognition, HOT/UNIVERSE concurrency, paper autofill, and execution are
+unchanged. Solver/paper admission requires APPROVED_EQUIVALENT.
 """
 
 from __future__ import annotations
 
 import inspect
+import json
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
+from venue_cost_helpers import matchbook_polymarket_costs
+
+from sports_hedge.application.complete_set import scan_eligible_pair
+from sports_hedge.application.market_observation import (
+    KalshiObservationBuilder,
+    MatchbookObservationBuilder,
+    PolymarketObservationBuilder,
+)
+from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.catalogue.admission import (
+    assess_catalogue_admission,
+    catalogue_allows_solver,
+)
 from sports_hedge.catalogue.classify import (
     CataloguePairAssessment,
+    PayloadSide,
     classify_pair,
     classify_payload_pair,
+    normalize_payload_side,
 )
 from sports_hedge.catalogue.corpus import (
     CENSUS_KICKOFF,
     GAMEWIN_TEMPLATE,
     KALSHI_GAMEWIN_SERIES,
+    MB_EVENT,
+    PM_EVENT,
     _kalshi,
     _kalshi_1x2,
     _mb,
@@ -41,7 +62,17 @@ from sports_hedge.domain.football import (
     SettlementScope,
 )
 from sports_hedge.domain.models import VenueName
+from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
+from sports_hedge.market_intelligence.service import MarketIntelligenceService
+from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.matching.ordinary_1x2 import allow_unknown_settlement_for_ordinary_1x2
+from sports_hedge.normalization.venues import VenueNormalizationError
+from sports_hedge.paper.models import FxRateSnapshot
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+PINNED_GAMMA_934146 = FIXTURES / "polymarket_gamma_event_934146_chelsea_hull.json"
+PINNED_MATCHBOOK_CHELSEA_HULL = FIXTURES / "matchbook_event_chelsea_hull.json"
+OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
 
 CENSUS_DOC = Path(__file__).resolve().parents[2] / "docs" / "APPROVED_MARKET_CATALOGUE_CENSUS_V1.md"
 
@@ -49,11 +80,19 @@ CENSUS_DOC = Path(__file__).resolve().parents[2] / "docs" / "APPROVED_MARKET_CAT
 def test_classifier_has_no_scan_lane_and_is_shared_by_hot_and_universe() -> None:
     assert "scan_lane" not in inspect.signature(classify_pair).parameters
     assert "scan_lane" not in inspect.signature(classify_payload_pair).parameters
+    assert "scan_lane" not in inspect.signature(assess_catalogue_admission).parameters
+    assert "scan_lane" not in inspect.signature(scan_eligible_pair).parameters
     sample = next(item for item in census_corpus() if item.entry_id == "good-1x2-mb-pm")
     assessment = classify_payload_pair(sample.left, sample.right)
     assert assessment.catalogue_shared_by == ("hot", "universe")
     assert assessment.execution_eligible is False
     assert assessment.data_class == "deterministic_fixture"
+    admission = assess_catalogue_admission(
+        normalize_payload_side(sample.left),
+        normalize_payload_side(sample.right),
+    )
+    assert admission.catalogue_shared_by == ("hot", "universe")
+    assert admission.allowed is True
 
 
 def test_execution_remains_disabled() -> None:
@@ -62,7 +101,7 @@ def test_execution_remains_disabled() -> None:
     assert settings.sports_hedge_execution_enabled is False
 
 
-def test_pairwise_matrix_covers_four_archetypes_and_three_pairs() -> None:
+def test_pairwise_matrix_covers_intended_catalogue_and_three_pairs() -> None:
     pairs = {"matchbook_kalshi", "matchbook_polymarket", "kalshi_polymarket"}
     archetypes = set(CatalogueArchetype)
     observed = {(cell.archetype, cell.venue_pair) for cell in PAIRWISE_MATRIX}
@@ -74,6 +113,24 @@ def test_pairwise_matrix_covers_four_archetypes_and_three_pairs() -> None:
     assert matrix_cell(
         CatalogueArchetype.MATCH_RESULT_1X2, "matchbook_polymarket"
     ).state is CatalogueApprovalState.APPROVED_EQUIVALENT
+    assert matrix_cell(
+        CatalogueArchetype.TEAM_TOTAL_GOALS, "matchbook_polymarket"
+    ).state is CatalogueApprovalState.REVIEW_REQUIRED
+    assert matrix_cell(
+        CatalogueArchetype.HANDICAP, "matchbook_polymarket"
+    ).state is CatalogueApprovalState.UNSUPPORTED
+    assert matrix_cell(
+        CatalogueArchetype.DRAW_NO_BET, "matchbook_polymarket"
+    ).state is CatalogueApprovalState.APPROVED_EQUIVALENT
+    assert matrix_cell(
+        CatalogueArchetype.DOUBLE_CHANCE, "matchbook_polymarket"
+    ).state is CatalogueApprovalState.UNSUPPORTED
+    assert matrix_cell(
+        CatalogueArchetype.TEAM_TO_SCORE, "matchbook_polymarket"
+    ).state is CatalogueApprovalState.UNSUPPORTED
+    assert matrix_cell(
+        CatalogueArchetype.TEAM_CLEAN_SHEET, "matchbook_polymarket"
+    ).state is CatalogueApprovalState.UNSUPPORTED
 
 
 def test_corpus_classifications_match_expected_states() -> None:
@@ -81,7 +138,7 @@ def test_corpus_classifications_match_expected_states() -> None:
     assert len(corpus) >= 20
     known_good = [item for item in corpus if item.known_kind == "known_good"]
     known_bad = [item for item in corpus if item.known_kind == "known_bad"]
-    assert len(known_good) == 13
+    assert len(known_good) == 14
     assert known_bad
     for entry in corpus:
         assessment = classify_payload_pair(entry.left, entry.right)
@@ -108,12 +165,11 @@ def test_gamewin_unknown_1x2_is_review_required_despite_matcher_admission() -> N
     assert assessment.matcher_admits_unknown_1x2 is True
     assert assessment.solver_model == "simple_complete_set"
     assert assessment.known_conflict_with_current_matcher is True
-    from sports_hedge.catalogue.classify import normalize_payload_side
-
     matchbook = normalize_payload_side(entry.left)
     kalshi = normalize_payload_side(entry.right)
     assert allow_unknown_settlement_for_ordinary_1x2(matchbook, kalshi) is True
     assert kalshi.settlement.is_economically_complete() is False
+    assert catalogue_allows_solver(matchbook, kalshi) is False
 
 
 def test_high_confidence_does_not_approve_incomplete_settlement() -> None:
@@ -181,6 +237,7 @@ def test_review_required_examples_are_explicit() -> None:
         "bad-btts-k-ambiguous-rules",
         "bad-ftts-missing-no-goal-both",
         "bad-ftts-k-unproven-regulation",
+        "review-team-total-mb-pm",
     }
     by_id = {item.entry_id: item for item in census_corpus()}
     for entry_id in ids:
@@ -222,6 +279,24 @@ def test_unsupported_and_parameter_and_contradiction_examples() -> None:
         ).state
         is CatalogueApprovalState.UNSUPPORTED
     )
+    assert (
+        classify_payload_pair(
+            by_id["bad-dnb-mb-k"].left, by_id["bad-dnb-mb-k"].right
+        ).state
+        is CatalogueApprovalState.UNSUPPORTED
+    )
+    assert (
+        classify_payload_pair(
+            by_id["bad-double-chance-mb-pm"].left, by_id["bad-double-chance-mb-pm"].right
+        ).state
+        is CatalogueApprovalState.UNSUPPORTED
+    )
+    assert (
+        classify_payload_pair(
+            by_id["good-dnb-mb-pm"].left, by_id["good-dnb-mb-pm"].right
+        ).state
+        is CatalogueApprovalState.APPROVED_EQUIVALENT
+    )
 
 
 def test_kalshi_ftts_and_btts_pairs_are_approved_when_complete() -> None:
@@ -242,7 +317,7 @@ def test_family_coverage_report_has_no_silent_regressions() -> None:
     assert report.data_class == "deterministic_fixture"
     assert report.unexpected_known_good_regressions == 0
     assert report.unexpected_known_bad_approvals == 0
-    assert report.known_good_retained == 13
+    assert report.known_good_retained == 14
     assert report.matcher_catalogue_conflicts == 1
     assert report.conflict_entry_ids == ["bad-1x2-mb-k-gamewin-unknown"]
     assert report.families["match_result_1x2"].after_approved == 3
@@ -273,3 +348,200 @@ def test_gamewin_payload_helpers_remain_available_for_review() -> None:
     assert classify_payload_pair(_mb([_mb_1x2()]), _pm([_pm_1x2()])).state is (
         CatalogueApprovalState.APPROVED_EQUIVALENT
     )
+
+
+def _priced_matchbook(market: dict) -> dict:
+    priced = dict(market)
+    runners = []
+    for index, runner in enumerate(market["runners"]):
+        item = dict(runner)
+        item["prices"] = [
+            {"side": "back", "odds": "2.10", "available-amount": "80"},
+            {"side": "lay", "odds": "2.20", "available-amount": "80"},
+        ]
+        if index:
+            item["prices"][0]["odds"] = "3.50"
+        runners.append(item)
+    priced["runners"] = runners
+    return priced
+
+
+def _pm_books(tokens: list[str]) -> dict[str, dict]:
+    books: dict[str, dict] = {}
+    for token in tokens:
+        books[token] = {
+            "asset_id": token,
+            "bids": [{"price": "0.40", "size": "200"}],
+            "asks": [{"price": "0.45", "size": "200"}],
+        }
+    return books
+
+
+def _scan_service() -> tuple[PaperScanService, SqliteMarketIntelligenceRepository]:
+    repository = SqliteMarketIntelligenceRepository()
+    return PaperScanService(MarketIntelligenceService(repository)), repository
+
+
+def test_approved_catalogue_pair_reaches_solver_eligibility() -> None:
+    entry = next(item for item in census_corpus() if item.entry_id == "good-1x2-mb-pm")
+    left = normalize_payload_side(entry.left)
+    right = normalize_payload_side(entry.right)
+    match = MarketMatcher().match(left, right)
+    assert match.matched is True
+    assert catalogue_allows_solver(left, right) is True
+    assert scan_eligible_pair(left, right, match) is True
+
+    service, repository = _scan_service()
+    try:
+        matchbook = MatchbookObservationBuilder().build(
+            MB_EVENT,
+            _priced_matchbook(_mb_1x2()),
+            observed_at=OBSERVED,
+            quote_age_ms=80,
+        )
+        polymarket = PolymarketObservationBuilder().build(
+            PM_EVENT,
+            {
+                "id": "pm-1x2",
+                "question": "Match result?",
+                "sportsMarketType": "moneyline",
+                "outcomes": '["Tottenham", "Draw", "Everton"]',
+                "clobTokenIds": '["h", "d", "a"]',
+                "description": "Resolves based on 90 minutes of regulation time.",
+            },
+            _pm_books(["h", "d", "a"]),
+            observed_at=OBSERVED,
+            quote_age_ms=90,
+        )
+        decision = service.scan_pair(
+            matchbook,
+            polymarket,
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=[
+                FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="test_fx")
+            ],
+            maximum_execution_risk=100,
+        )
+        assert decision.market_match.matched is True
+        assert decision.solver_model == "simple_complete_set"
+        assert not any(reason.startswith("catalogue_") for reason in decision.rejection_reasons)
+        assert Settings().sports_hedge_execution_enabled is False
+    finally:
+        repository.close()
+
+
+def test_review_required_gamewin_is_blocked_even_if_legacy_matcher_matches() -> None:
+    entry = next(
+        item for item in census_corpus() if item.entry_id == "bad-1x2-mb-k-gamewin-unknown"
+    )
+    left = normalize_payload_side(entry.left)
+    right = normalize_payload_side(entry.right)
+    match = MarketMatcher().match(left, right)
+    assert match.matched is True
+    assert allow_unknown_settlement_for_ordinary_1x2(left, right) is True
+    admission = assess_catalogue_admission(left, right)
+    assert admission.allowed is False
+    assert admission.assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
+    assert admission.rejection_reason == "catalogue_review_required"
+    assert scan_eligible_pair(left, right, match) is False
+    assert catalogue_allows_solver(left, right) is False
+
+    service, repository = _scan_service()
+    try:
+        matchbook = MatchbookObservationBuilder().build(
+            MB_EVENT,
+            _priced_matchbook(_mb_1x2()),
+            observed_at=OBSERVED,
+            quote_age_ms=80,
+        )
+        kalshi = KalshiObservationBuilder().build(
+            entry.right.event,
+            entry.right.markets,
+            {},
+            series=entry.right.series,
+            observed_at=OBSERVED,
+            quote_age_ms=90,
+        )
+        decision = service.scan_pair(
+            matchbook,
+            kalshi,
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=[
+                FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="test_fx")
+            ],
+            maximum_execution_risk=100,
+        )
+        assert decision.market_match.matched is True
+        assert "catalogue_review_required" in decision.rejection_reasons
+        assert decision.solver_model is None
+        assert decision.depth_scan is None
+        assert decision.eligible_for_paper_simulation is False
+    finally:
+        repository.close()
+
+
+def test_unsupported_mismatch_and_contradiction_are_blocked_from_solver() -> None:
+    by_id = {item.entry_id: item for item in census_corpus()}
+    cases = {
+        "bad-totals-integer-mb-k": "catalogue_unsupported",
+        "bad-totals-line-mismatch": "catalogue_approved_parameter_mismatch",
+        "bad-1x2-et-contradiction": "catalogue_known_contradiction",
+        "bad-handicap-mb-pm": "catalogue_unsupported",
+        "review-team-total-mb-pm": "catalogue_review_required",
+    }
+    for entry_id, rejection in cases.items():
+        entry = by_id[entry_id]
+        assessment = classify_payload_pair(entry.left, entry.right)
+        assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT, entry_id
+        try:
+            left = normalize_payload_side(entry.left)
+            right = normalize_payload_side(entry.right)
+        except (VenueNormalizationError, ValueError):
+            continue
+        match = MarketMatcher().match(left, right)
+        admission = assess_catalogue_admission(left, right)
+        assert admission.allowed is False, entry_id
+        assert admission.rejection_reason == rejection, entry_id
+        assert scan_eligible_pair(left, right, match) is False, entry_id
+
+
+def test_hot_and_universe_use_the_same_catalogue_gate() -> None:
+    entry = next(
+        item for item in census_corpus() if item.entry_id == "bad-1x2-mb-k-gamewin-unknown"
+    )
+    left = normalize_payload_side(entry.left)
+    right = normalize_payload_side(entry.right)
+    hot = assess_catalogue_admission(left, right)
+    universe = assess_catalogue_admission(left, right)
+    assert hot.allowed is False
+    assert universe.allowed is False
+    assert hot.assessment.state is universe.assessment.state
+    assert hot.rejection_reason == universe.rejection_reason
+    assert hot.catalogue_shared_by == ("hot", "universe")
+    assert universe.catalogue_shared_by == ("hot", "universe")
+    source = inspect.getsource(scan_eligible_pair)
+    assert "catalogue_allows_solver" in source
+    assert "scan_lane" not in inspect.signature(scan_eligible_pair).parameters
+
+
+def test_pinned_public_gamma_binary_moneyline_is_not_approved_1x2() -> None:
+    gamma = json.loads(PINNED_GAMMA_934146.read_text(encoding="utf-8"))
+    matchbook = json.loads(PINNED_MATCHBOOK_CHELSEA_HULL.read_text(encoding="utf-8"))
+    assert gamma["source"] == "https://gamma-api.polymarket.com/events/934146"
+    assert "not authenticated live" in matchbook["identified_as"].casefold() or (
+        "not authenticated" in matchbook["identified_as"].casefold()
+    )
+    mb_event = matchbook["payload"]
+    mb_market = next(item for item in mb_event["markets"] if item["name"] == "Match Odds")
+    pm_event = gamma["payload"]
+    pm_market = pm_event["markets"][0]
+    assessment = classify_payload_pair(
+        PayloadSide(venue=VenueName.MATCHBOOK, event=mb_event, markets=[mb_market]),
+        PayloadSide(venue=VenueName.POLYMARKET, event=pm_event, markets=[pm_market]),
+    )
+    assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
+    assert assessment.state in {
+        CatalogueApprovalState.REVIEW_REQUIRED,
+        CatalogueApprovalState.UNSUPPORTED,
+        CatalogueApprovalState.KNOWN_CONTRADICTION,
+    }

@@ -122,9 +122,11 @@ def coverage_from_corpus(
             "Deterministic fixture corpus. Not owner-live evidence.",
             "HOT and UNIVERSE share this catalogue; classifier has no scan_lane.",
             (
-                "Before = current matcher+solver admission on the same corpus. "
-                "After = Tenet 20 catalogue state. GAMEWIN-unknown 1X2 is the "
-                "documented matcher/catalogue conflict."
+                "Before = matcher.matched and solver_model_for_pair capability. "
+                "After = Tenet 20 catalogue state. Production scan_eligible_pair "
+                "and paper_scan require APPROVED_EQUIVALENT. GAMEWIN-unknown 1X2 "
+                "is the documented matcher/catalogue conflict and is blocked from "
+                "solver/paper admission."
             ),
         ],
     )

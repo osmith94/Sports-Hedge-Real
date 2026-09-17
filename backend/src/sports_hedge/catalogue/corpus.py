@@ -442,7 +442,7 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
         CorpusEntry(
             entry_id="bad-totals-team-vs-match",
             archetype=CatalogueArchetype.TOTAL_GOALS_HALF_LINE,
-            expected_state=unsupported,
+            expected_state=contradiction,
             known_kind="known_bad",
             left=_mb([_mb_totals("2.5", team=True)]),
             right=_pm([_pm_totals("2.5")]),
@@ -510,5 +510,251 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
             known_kind="known_bad",
             left=_mb([_mb_ftts()]),
             right=_pm([_pm_ftts(description=ET_RULES)]),
+        ),
+        CorpusEntry(
+            entry_id="review-team-total-mb-pm",
+            archetype=CatalogueArchetype.TEAM_TOTAL_GOALS,
+            expected_state=review,
+            known_kind="known_bad",
+            left=_mb([_mb_totals("2.5", team=True)]),
+            right=_pm(
+                [
+                    {
+                        "id": "pm-tt-25",
+                        "question": "Tottenham total goals 2.5",
+                        "sportsMarketType": "total goals",
+                        "groupItemTitle": "Tottenham",
+                        "line": "2.5",
+                        "outcomes": '["Over", "Under"]',
+                        "clobTokenIds": '["o", "u"]',
+                        "description": PM_REGULATION,
+                    }
+                ]
+            ),
+        ),
+        CorpusEntry(
+            entry_id="bad-team-total-mb-k",
+            archetype=CatalogueArchetype.TEAM_TOTAL_GOALS,
+            expected_state=unsupported,
+            known_kind="known_bad",
+            left=_mb([_mb_totals("2.5", team=True)]),
+            right=_kalshi(
+                [
+                    {
+                        "ticker": "KX-TT",
+                        "title": "Tottenham Total Goals 2.5",
+                        "yes_sub_title": "Over 2.5",
+                        "rules_primary": REGULATION,
+                        "strike": "2.5",
+                    }
+                ]
+            ),
+        ),
+        CorpusEntry(
+            entry_id="bad-handicap-mb-pm",
+            archetype=CatalogueArchetype.HANDICAP,
+            expected_state=unsupported,
+            known_kind="known_bad",
+            left=_mb(
+                [
+                    {
+                        "id": 26850,
+                        "name": "Asian Handicap -0.5",
+                        "runners": [
+                            {"id": 1, "name": "Tottenham"},
+                            {"id": 2, "name": "Everton"},
+                        ],
+                    }
+                ]
+            ),
+            right=_pm(
+                [
+                    {
+                        "id": "pm-ah",
+                        "question": "Asian handicap -0.5",
+                        "sportsMarketType": "handicap",
+                        "outcomes": '["Tottenham", "Everton"]',
+                        "clobTokenIds": '["h", "a"]',
+                        "description": PM_REGULATION,
+                    }
+                ]
+            ),
+        ),
+        CorpusEntry(
+            entry_id="bad-handicap-mb-k",
+            archetype=CatalogueArchetype.HANDICAP,
+            expected_state=unsupported,
+            known_kind="known_bad",
+            left=_mb(
+                [
+                    {
+                        "id": 26851,
+                        "name": "Asian Handicap -0.5",
+                        "runners": [
+                            {"id": 1, "name": "Tottenham"},
+                            {"id": 2, "name": "Everton"},
+                        ],
+                    }
+                ]
+            ),
+            right=_kalshi(
+                [
+                    {
+                        "ticker": "KX-AH",
+                        "title": "Asian Handicap",
+                        "yes_sub_title": "Tottenham",
+                        "rules_primary": REGULATION,
+                    }
+                ]
+            ),
+        ),
+        CorpusEntry(
+            entry_id="good-dnb-mb-pm",
+            archetype=CatalogueArchetype.DRAW_NO_BET,
+            expected_state=good,
+            known_kind="known_good",
+            left=_mb(
+                [
+                    {
+                        "id": 26860,
+                        "name": "Draw No Bet",
+                        "runners": [
+                            {"id": 1, "name": "Tottenham"},
+                            {"id": 2, "name": "Everton"},
+                        ],
+                    }
+                ]
+            ),
+            right=_pm(
+                [
+                    {
+                        "id": "pm-dnb",
+                        "question": "Draw no bet",
+                        "sportsMarketType": "draw no bet",
+                        "outcomes": '["Tottenham", "Everton"]',
+                        "clobTokenIds": '["h", "a"]',
+                        "description": "Resolves based on 90 minutes of regulation time. Draw voids.",
+                    }
+                ]
+            ),
+        ),
+        CorpusEntry(
+            entry_id="bad-dnb-mb-k",
+            archetype=CatalogueArchetype.DRAW_NO_BET,
+            expected_state=unsupported,
+            known_kind="known_bad",
+            left=_mb(
+                [
+                    {
+                        "id": 26861,
+                        "name": "Draw No Bet",
+                        "runners": [
+                            {"id": 1, "name": "Tottenham"},
+                            {"id": 2, "name": "Everton"},
+                        ],
+                    }
+                ]
+            ),
+            right=_kalshi(
+                [
+                    {
+                        "ticker": "KX-DNB",
+                        "title": "Draw No Bet",
+                        "yes_sub_title": "Tottenham",
+                        "rules_primary": REGULATION,
+                    }
+                ]
+            ),
+        ),
+        CorpusEntry(
+            entry_id="bad-double-chance-mb-pm",
+            archetype=CatalogueArchetype.DOUBLE_CHANCE,
+            expected_state=unsupported,
+            known_kind="known_bad",
+            left=_mb(
+                [
+                    {
+                        "id": 26870,
+                        "name": "Double Chance",
+                        "runners": [
+                            {"id": 1, "name": "Home or Draw"},
+                            {"id": 2, "name": "Home or Away"},
+                            {"id": 3, "name": "Draw or Away"},
+                        ],
+                    }
+                ]
+            ),
+            right=_pm(
+                [
+                    {
+                        "id": "pm-dc",
+                        "question": "Double chance",
+                        "sportsMarketType": "double chance",
+                        "outcomes": '["Home or Draw", "Home or Away", "Draw or Away"]',
+                        "clobTokenIds": '["1x", "12", "x2"]',
+                        "description": PM_REGULATION,
+                    }
+                ]
+            ),
+        ),
+        CorpusEntry(
+            entry_id="bad-team-to-score-mb-pm",
+            archetype=CatalogueArchetype.TEAM_TO_SCORE,
+            expected_state=unsupported,
+            known_kind="known_bad",
+            left=_mb(
+                [
+                    {
+                        "id": 26880,
+                        "name": "Tottenham To Score",
+                        "runners": [
+                            {"id": 1, "name": "Yes"},
+                            {"id": 2, "name": "No"},
+                        ],
+                    }
+                ]
+            ),
+            right=_pm(
+                [
+                    {
+                        "id": "pm-tts",
+                        "question": "Will Tottenham score?",
+                        "sportsMarketType": "team to score",
+                        "outcomes": '["Yes", "No"]',
+                        "clobTokenIds": '["y", "n"]',
+                        "description": PM_REGULATION,
+                    }
+                ]
+            ),
+        ),
+        CorpusEntry(
+            entry_id="bad-clean-sheet-mb-pm",
+            archetype=CatalogueArchetype.TEAM_CLEAN_SHEET,
+            expected_state=unsupported,
+            known_kind="known_bad",
+            left=_mb(
+                [
+                    {
+                        "id": 26890,
+                        "name": "Tottenham Clean Sheet",
+                        "runners": [
+                            {"id": 1, "name": "Yes"},
+                            {"id": 2, "name": "No"},
+                        ],
+                    }
+                ]
+            ),
+            right=_pm(
+                [
+                    {
+                        "id": "pm-cs",
+                        "question": "Tottenham clean sheet?",
+                        "sportsMarketType": "clean sheet",
+                        "outcomes": '["Yes", "No"]',
+                        "clobTokenIds": '["y", "n"]',
+                        "description": PM_REGULATION,
+                    }
+                ]
+            ),
         ),
     )

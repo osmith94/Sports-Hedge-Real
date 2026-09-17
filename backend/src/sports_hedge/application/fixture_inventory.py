@@ -613,6 +613,17 @@ def _classify_pair(
             )
         return InventoryComparisonStatus.OTHER, match.reasons[0] if match.reasons else "not_equivalent", list(match.reasons), False
     if not scan_eligible_pair(left_market, right_market, match):
+        from sports_hedge.catalogue.admission import assess_catalogue_admission
+
+        admission = assess_catalogue_admission(left_market, right_market)
+        if not admission.allowed:
+            reason = admission.rejection_reason or "catalogue_review_required"
+            return (
+                InventoryComparisonStatus.OTHER,
+                reason,
+                [reason, admission.assessment.reason, *match.reasons],
+                False,
+            )
         ineligible = (
             scan_ineligibility_reason(left_market)
             if not solver_eligible_market(left_market) and not generalized_payoff_eligible_market(left_market)
@@ -658,6 +669,8 @@ def _status_from_rejections(rejections: list[str]) -> InventoryComparisonStatus:
 
 
 def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
+    if reason.startswith("catalogue_"):
+        return InventoryComparisonStatus.OTHER
     if reason.startswith("missing_venue_cost") or reason in {
         "missing_costs",
         "legacy_fee_snapshot_not_cost_truth",

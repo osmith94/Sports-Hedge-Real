@@ -267,6 +267,34 @@ class PaperScanService:
             if not allow_unknown_settlement_for_ordinary_1x2(left.market, right.market):
                 rejections.append("unknown_settlement_scope")
 
+        from sports_hedge.catalogue.admission import assess_catalogue_admission
+
+        catalogue_admission = assess_catalogue_admission(left.market, right.market)
+        if not catalogue_admission.allowed:
+            rejections.append(
+                catalogue_admission.rejection_reason or "catalogue_review_required"
+            )
+            mapping_review_candidate = mapping_review_evidence()
+            self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
+            return PaperScanDecision(
+                market_match=match,
+                canonical_event_id=event_id,
+                canonical_market_id=market_id,
+                fixture_canonical_event_id=fixture_id,
+                snapshots_recorded=recorded,
+                rejection_reasons=_dedupe(rejections),
+                fee_snapshots=fees,
+                venue_costs=costs,
+                fx_snapshots=fx,
+                cost_assumption_labels=assumption_labels,
+                minimum_net_edge=minimum_net_edge,
+                maximum_execution_risk=maximum_execution_risk,
+                quote_age_ms=quote_age_ms,
+                quote_age_basis=quote_age_basis,
+                mapping_review_candidate=mapping_review_candidate,
+                solver_model=None,
+            )
+
         solver_model = solver_model_for_pair(left.market, right.market)
         if solver_model is None:
             ineligible = scan_ineligibility_reason(left.market)

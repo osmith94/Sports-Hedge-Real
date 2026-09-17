@@ -12,7 +12,6 @@ from typing import Any
 
 import pytest
 
-from sports_hedge.application.complete_set import SOLVER_MODEL_SIMPLE
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
 from sports_hedge.application.mapping_census import CENSUS_DATA_CLASS_FIXTURE, census_from_report
@@ -26,13 +25,6 @@ from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.application.universe_mapping_census import (
     OWNER_LIVE_CENSUS_MATCHBOOK_KALSHI_ONLY_ENV,
     resolve_census_venue_scope,
-)
-from sports_hedge.arbitrage.allocation.engine import allocate
-from sports_hedge.arbitrage.allocation.models import (
-    AllocationBalance,
-    AllocationLeg,
-    AllocationRequest,
-    AllocationResult,
 )
 from sports_hedge.config import Settings
 from sports_hedge.domain.football import (
@@ -59,7 +51,7 @@ from sports_hedge.normalization.kalshi_contract_terms import (
     GAMEWIN_SCOPE_UNAVAILABLE_REASON,
     SOCCERGAMEWIN_SHA256,
 )
-from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+from sports_hedge.paper.models import FxRateSnapshot
 from venue_cost_helpers import matchbook_polymarket_costs
 
 KICKOFF = datetime(2026, 9, 20, 19, 0, tzinfo=UTC)
@@ -110,68 +102,6 @@ def _costs():
         *matchbook_polymarket_costs("0.02", "0.02", captured_at=captured),
         kalshi_cost_from_series(KALSHI_GAME_SERIES, captured_at=captured),
     ]
-
-
-def _allocate_solver_opportunity(decision: PaperScanDecision) -> AllocationResult:
-    """Feed a production solver arb through the production allocator (Gate 1)."""
-
-    scan = decision.depth_scan
-    assert scan is not None
-    fx = {item.currency.upper(): item.gbp_per_unit for item in decision.fx_snapshots}
-    fx.setdefault("GBP", Decimal("1"))
-    currency_by_venue = {leg.venue: leg.currency for leg in decision.fill_legs}
-    legs: list[AllocationLeg] = []
-    venues: set[VenueName] = set()
-    for stake in scan.solution.stakes:
-        if stake.stake <= 0:
-            continue
-        quote = next(
-            item
-            for item in scan.selected_quotes
-            if item.outcome == stake.outcome and item.venue == stake.venue
-        )
-        currency = currency_by_venue.get(stake.venue, "GBP")
-        rate = fx.get(str(currency).upper(), Decimal("1"))
-        legs.append(
-            AllocationLeg(
-                leg_id=(
-                    f"{stake.venue.value}:{stake.source_market_id}:"
-                    f"{quote.source_runner_id}:{stake.outcome}"
-                ),
-                outcome=stake.outcome,
-                venue=stake.venue,
-                source_market_id=stake.source_market_id,
-                source_runner_id=quote.source_runner_id,
-                solver_stake=stake.stake,
-                max_stake=max(stake.stake, quote.cumulative_depth),
-                native_currency=currency,
-                gbp_per_unit=rate,
-            )
-        )
-        venues.add(stake.venue)
-    balances = [
-        AllocationBalance(
-            venue=venue,
-            currency=currency_by_venue.get(venue, "GBP"),
-            available=Decimal("5000"),
-            gbp_per_unit=fx.get(str(currency_by_venue.get(venue, "GBP")).upper(), Decimal("1")),
-        )
-        for venue in venues
-    ]
-    return allocate(
-        AllocationRequest(
-            solver_model=SOLVER_MODEL_SIMPLE,
-            is_arbitrage=True,
-            canonical_event_id=decision.canonical_event_id,
-            roi=scan.solution.roi,
-            guaranteed_profit_at_solver_size=scan.solution.guaranteed_profit,
-            committed_capital_at_solver_size=scan.solution.total_stake,
-            legs=legs,
-            balances=balances,
-            expected_lock_duration_hours=Decimal("2"),
-            expected_lock_basis="time_to_kickoff",
-        )
-    )
 
 
 def _event(venue: VenueName, home: str, away: str, source_id: str) -> CanonicalEvent:
@@ -617,10 +547,10 @@ async def test_evening_census_matches_ordinary_gamewin_unknown_1x2s() -> None:
     assert census.discovered_fixtures == 17
     assert census.cross_venue_matched_events == 15
     assert census.equivalent_market_pairs == 12
-    assert census.market_family_breakdown.get("match_result") == 12
+    assert census.market_family_breakdown.get("match_result") in {None, 0}
     assert census.ordinary_1x2_structural_admissions == 12
-    assert census.qualifying_arbs >= 1
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 12
+    assert census.qualifying_arbs == 0
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 1
     assert kalshi.contract_terms_calls
     assert all(url == GAMEWIN_URL for url in kalshi.contract_terms_calls)
@@ -634,7 +564,9 @@ async def test_evening_census_matches_ordinary_gamewin_unknown_1x2s() -> None:
     ]
     assert len(ordinary_rows) == 12
     assert all(
-        row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
+        row.comparison_status is InventoryComparisonStatus.OTHER
+        and row.reason == "catalogue_review_required"
+        and row.entered_solver is False
         for row in ordinary_rows
     )
 
@@ -649,7 +581,7 @@ async def test_evening_census_matches_ordinary_gamewin_unknown_1x2s() -> None:
     assert by_home[CONTROL_MB_ONLY[1]].matched_equivalent_count == 0
     assert by_home[CONTROL_KALSHI_ONLY[0]].matched_equivalent_count == 0
     for _event_id, home, _away, _suffix in ORDINARY_FIXTURES:
-        assert by_home[home].matched_equivalent_count == 1
+        assert by_home[home].matched_equivalent_count == 0
 
     rendered = render_forensics(forensics)
     assert "settlement_unknown_not_contradictory" in rendered
@@ -660,26 +592,12 @@ async def test_evening_census_matches_ordinary_gamewin_unknown_1x2s() -> None:
         f"ordinary_1x2_structural_admissions={census.ordinary_1x2_structural_admissions}"
     )
 
-    arb_decisions = [
+    solver_decisions = [
         decision
         for decision in report.paper_decisions
-        if decision.market_match.matched
-        and decision.depth_scan is not None
-        and decision.depth_scan.solution.is_arbitrage
+        if decision.solver_model is not None or decision.depth_scan is not None
     ]
-    assert arb_decisions
-    winner = arb_decisions[0]
-    assert winner.depth_scan is not None
-    assert winner.depth_scan.solution.is_arbitrage is True
-    assert winner.depth_scan.solution.stakes
-    assert winner.depth_scan.solution.guaranteed_profit > 0
-    assert winner.solver_model == "simple_complete_set"
-    assert GAMEWIN_ORDINARY_1X2_AUDIT_REASON in winner.market_match.reasons
-    allocation = _allocate_solver_opportunity(winner)
-    assert allocation.accepted is True
-    assert allocation.paper_only is True
-    assert allocation.places_orders is False
-    assert any(stake.stake_native > 0 for stake in allocation.recommended_stakes)
+    assert solver_decisions == []
 
 
 @pytest.mark.asyncio
@@ -702,7 +620,7 @@ async def test_resumed_universe_still_reaches_ordinary_1x2_matches() -> None:
     assert ORDINARY_FIXTURES[1][1] not in remaining_homes
     assert census.equivalent_market_pairs == 10
     assert census.ordinary_1x2_structural_admissions == 10
-    assert census.market_family_breakdown.get("match_result") == 10
+    assert census.market_family_breakdown.get("match_result") in {None, 0}
 
 
 @pytest.mark.asyncio
@@ -767,26 +685,21 @@ async def test_hot_and_universe_agree_on_unknown_1x2() -> None:
         assert hot_kalshi.list_events_calls == 0
         assert universe.matched_market_pairs == 12
         assert hot.matched_market_pairs == 1
-        assert hot_row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
-        assert universe_row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
+        assert hot_row.comparison_status is InventoryComparisonStatus.OTHER
+        assert universe_row.comparison_status is InventoryComparisonStatus.OTHER
+        assert hot_row.reason == "catalogue_review_required"
+        assert universe_row.reason == "catalogue_review_required"
+        assert hot_row.entered_solver is False
+        assert universe_row.entered_solver is False
         assert set(hot_row.match_reasons) >= {
             UNKNOWN_SETTLEMENT_ALLOWED_REASON,
             GAMEWIN_ORDINARY_1X2_AUDIT_REASON,
         }
-        universe_decision = next(
-            item
-            for item in universe.paper_decisions
-            if item.market_match.matched
-            and GAMEWIN_ORDINARY_1X2_AUDIT_REASON in item.market_match.reasons
-            and item.canonical_event_id == fixture.canonical_event_id
+        assert set(universe_row.match_reasons) == set(hot_row.match_reasons)
+        assert not any(
+            item.solver_model is not None or item.depth_scan is not None
+            for item in (*universe.paper_decisions, *hot.paper_decisions)
         )
-        hot_decision = next(
-            item
-            for item in hot.paper_decisions
-            if item.market_match.matched
-            and GAMEWIN_ORDINARY_1X2_AUDIT_REASON in item.market_match.reasons
-        )
-        assert set(universe_decision.market_match.reasons) == set(hot_decision.market_match.reasons)
     finally:
         hot_repo.close()
 
