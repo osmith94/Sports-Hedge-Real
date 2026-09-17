@@ -581,6 +581,38 @@ async def test_kalshi_client_paginates_events_and_has_no_trading_methods() -> No
 
 
 @pytest.mark.asyncio
+async def test_kalshi_get_market_reads_contract_rules_and_caches() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "market": {
+                    "ticker": "KXEPLGAME-BET",
+                    "event_ticker": "KXEPLGAME-26SEP20BETGET",
+                    "rules_primary": REGULATION,
+                    "rules_secondary": "Secondary contract terms.",
+                }
+            },
+        )
+
+    settings = Settings()
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        venue = KalshiClient(settings, client=http)
+        first = await venue.get_market("KXEPLGAME-BET")
+        second = await venue.get_market("KXEPLGAME-BET")
+
+    assert first["rules_primary"] == REGULATION
+    assert first["rules_secondary"] == "Secondary contract terms."
+    assert second is first
+    assert seen == ["/trade-api/v2/markets/KXEPLGAME-BET"]
+    assert not hasattr(venue, "place_order")
+
+
+@pytest.mark.asyncio
 async def test_kalshi_orderbook_rejects_deprecated_cent_only_payload() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"orderbook": {"yes": [[7, 10]], "no": [[93, 10]]}})

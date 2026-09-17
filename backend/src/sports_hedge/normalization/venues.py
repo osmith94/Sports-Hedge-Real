@@ -389,6 +389,44 @@ class KalshiNormalizer:
             assembled.append(self._assemble_group(event, items))
         return assembled
 
+    def match_result_tickers_missing_contract_rules(
+        self,
+        event: CanonicalEvent,
+        payloads: list[dict[str, Any]],
+        *,
+        series: dict[str, Any] | None = None,
+        event_payload: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """Tickers classified as ordinary Match Result with no contract-rule text.
+
+        Event-level rules, when present, already complete MATCH_RESULT settlement
+        without a Get Market call. GAME / Opta / series names are not used.
+        """
+
+        if kalshi_payload_has_rule_text(event_payload):
+            return []
+        tickers: list[str] = []
+        seen: set[str] = set()
+        for payload in payloads:
+            try:
+                classified = self._classify_contract(
+                    event,
+                    payload,
+                    series=series,
+                    event_payload=event_payload,
+                )
+            except (VenueNormalizationError, ValueError):
+                continue
+            if classified.family is not MarketFamily.MATCH_RESULT:
+                continue
+            if kalshi_payload_has_rule_text(payload):
+                continue
+            if classified.ticker in seen:
+                continue
+            seen.add(classified.ticker)
+            tickers.append(classified.ticker)
+        return tickers
+
     def _classify_contract(
         self,
         event: CanonicalEvent,
@@ -1020,6 +1058,32 @@ def classify_settlement_wording(text: str) -> tuple[SettlementScope, bool | None
     if _has_regulation_marker(normalized):
         return _claim_regulation(normalized, extra_time, penalties)
     return SettlementScope.UNKNOWN, None, None
+
+
+KALSHI_CONTRACT_RULE_KEYS = ("rules_primary", "rules_secondary", "rules")
+
+
+def kalshi_payload_has_rule_text(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return any(str(payload.get(key) or "").strip() for key in KALSHI_CONTRACT_RULE_KEYS)
+
+
+def merge_kalshi_contract_rules(target: dict[str, Any], source: dict[str, Any] | None) -> bool:
+    """Copy documented contract-rule fields only. Never copies titles or prices."""
+
+    if not isinstance(source, dict):
+        return False
+    applied = False
+    for key in KALSHI_CONTRACT_RULE_KEYS:
+        if str(target.get(key) or "").strip():
+            continue
+        value = str(source.get(key) or "").strip()
+        if not value:
+            continue
+        target[key] = value
+        applied = True
+    return applied
 
 
 def _kalshi_settlement(

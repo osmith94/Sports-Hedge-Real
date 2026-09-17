@@ -89,6 +89,14 @@ class OwnerLiveCensusResult(BaseModel):
     forensics: MappingForensics
 
 
+class CensusVenueScope(BaseModel):
+    venue_scope: str
+    enabled_venues: list[VenueName]
+    participation_source: str | None = None
+    participation_db_path: str | None = None
+    operator_row_present: bool | None = None
+
+
 def owner_live_census_enabled(environ: dict[str, str] | None = None) -> bool:
     env = environ if environ is not None else os.environ
     return str(env.get(OWNER_LIVE_CENSUS_ENV) or "").strip() == "1"
@@ -109,21 +117,39 @@ def resolve_census_venue_scope(
     *,
     settings: Settings,
     environ: dict[str, str] | None = None,
-) -> tuple[str, list[VenueName], str | None]:
+) -> CensusVenueScope:
     """UNIVERSE lane by default. All-venue forensic is explicit and labelled.
 
     Does not write operator lane participation.
     """
 
     env = environ if environ is not None else os.environ
+    db_path = str(getattr(settings, "paper_settings_db_path", "") or "")
     if str(env.get(OWNER_LIVE_CENSUS_ALL_VENUES_ENV) or "").strip() == "1":
-        return VENUE_SCOPE_ALL, list(OPERATOR_SCAN_VENUES), "explicit_all_venues"
-    participation = resolve_lane_venue_participation(
-        get_lane_venue_settings_store(),
-        settings,
+        return CensusVenueScope(
+            venue_scope=VENUE_SCOPE_ALL,
+            enabled_venues=list(OPERATOR_SCAN_VENUES),
+            participation_source="explicit_all_venues",
+            participation_db_path=db_path or None,
+            operator_row_present=None,
+        )
+    store = get_lane_venue_settings_store()
+    db_path = str(getattr(store, "_database", "") or db_path or "")
+    operator_row = None
+    loader = getattr(store, "load", None)
+    if callable(loader):
+        try:
+            operator_row = loader()
+        except Exception:
+            operator_row = None
+    participation = resolve_lane_venue_participation(store, settings)
+    return CensusVenueScope(
+        venue_scope=VENUE_SCOPE_UNIVERSE,
+        enabled_venues=list(participation.venues_for(ScanLane.UNIVERSE)),
+        participation_source=participation.source,
+        participation_db_path=db_path or None,
+        operator_row_present=operator_row is not None,
     )
-    venues = list(participation.venues_for(ScanLane.UNIVERSE))
-    return VENUE_SCOPE_UNIVERSE, venues, participation.source
 
 
 async def run_owner_live_universe_census(
@@ -142,10 +168,13 @@ async def run_owner_live_universe_census(
     resolved = settings or get_settings()
     assert_paper_only_read_only(resolved)
     env = {str(key): str(value) for key, value in (environ or os.environ).items()}
-    venue_scope, enabled_venues, participation_source = resolve_census_venue_scope(
+    scope = resolve_census_venue_scope(
         settings=resolved,
         environ=env,
     )
+    venue_scope = scope.venue_scope
+    enabled_venues = scope.enabled_venues
+    participation_source = scope.participation_source
     intelligence_store = SqliteMarketIntelligenceRepository()
     fx_store = SqliteFxRateRepository()
     liquidity = SqlitePaperLiquidityRepository()
@@ -201,6 +230,8 @@ async def run_owner_live_universe_census(
         venue_scope=venue_scope,
         enabled_venues=enabled_names,
         participation_source=participation_source,
+        participation_db_path=scope.participation_db_path,
+        operator_row_present=scope.operator_row_present,
         fixture_filter=parse_fixture_filter(env.get(OWNER_LIVE_CENSUS_FIXTURE_ENV)),
         detail=str(env.get(OWNER_LIVE_CENSUS_DETAIL_ENV) or "").strip() == "1",
         match_result_sample=_sample_size(env.get(OWNER_LIVE_CENSUS_SAMPLE_ENV)),

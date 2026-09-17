@@ -97,6 +97,7 @@ from sports_hedge.normalization.venues import (
     MatchbookNormalizer,
     PolymarketNormalizer,
     VenueNormalizationError,
+    merge_kalshi_contract_rules,
     promote_polymarket_complete_match_result,
 )
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
@@ -481,6 +482,12 @@ class ReadOnlyCrossVenueCollector:
         self._provider_calls = 0
         self._inflight_orphaned = 0
         self._attribution = ScanAttribution()
+        self._kalshi_rule_enrichment = {
+            "attempted": 0,
+            "applied": 0,
+            "empty": 0,
+            "failed": 0,
+        }
 
     async def collect_and_scan(
         self,
@@ -556,6 +563,12 @@ class ReadOnlyCrossVenueCollector:
         self._provider_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
         self._provider_peak_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
         self._attribution = ScanAttribution()
+        self._kalshi_rule_enrichment = {
+            "attempted": 0,
+            "applied": 0,
+            "empty": 0,
+            "failed": 0,
+        }
         self._inflight = set()
         self._cluster_sema = asyncio.Semaphore(self._cluster_concurrency_limit)
         self._provider_semaphores = {
@@ -1414,6 +1427,7 @@ class ReadOnlyCrossVenueCollector:
                 deadline_hit or completeness == UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE
             ),
             "enabled_venues": [item.value for item in self._op_enabled_venues],
+            "kalshi_match_result_rule_enrichment": dict(self._kalshi_rule_enrichment),
             "identity_scope": [
                 item.canonical_event_id for item in discovered_fixtures
             ],
@@ -2465,6 +2479,12 @@ class ReadOnlyCrossVenueCollector:
                     )
                 )
                 return [], [], series, 0, True
+        await self._enrich_kalshi_match_result_rules(
+            event,
+            raw_markets,
+            series=series,
+            issues=issues,
+        )
         inventory: list[InventoryMarket] = []
         normalized: list[_NormalizedMarket] = []
         try:
@@ -2553,6 +2573,75 @@ class ReadOnlyCrossVenueCollector:
                 )
             )
         return normalized, inventory, series, 0, False
+
+    async def _enrich_kalshi_match_result_rules(
+        self,
+        event: _NormalizedEvent,
+        raw_markets: list[dict[str, Any]],
+        *,
+        series: dict[str, Any] | None,
+        issues: list[CollectorIssue],
+    ) -> None:
+        """Fetch documented Get Market rules for ordinary Match Result only.
+
+        Nested list payloads often omit `rules_primary`. Do not call this for
+        the full Kalshi book, and do not infer regulation from GAME/Opta names.
+        Missing or empty rules stay incomplete.
+        """
+
+        getter = getattr(self.kalshi, "get_market", None)
+        if getter is None or not raw_markets:
+            return
+        tickers = self.kalshi_normalizer.match_result_tickers_missing_contract_rules(
+            event.canonical,
+            raw_markets,
+            series=series,
+            event_payload=event.raw if isinstance(event.raw, dict) else None,
+        )
+        if not tickers:
+            return
+        by_ticker = {
+            str(item.get("ticker") or "").strip(): item
+            for item in raw_markets
+            if str(item.get("ticker") or "").strip()
+        }
+        self._kalshi_rule_enrichment["attempted"] += len(tickers)
+        results = await asyncio.gather(
+            *[
+                self._wait_provider(
+                    getter(ticker),
+                    stage="get_market",
+                    venue=VenueName.KALSHI,
+                    source_id=ticker,
+                    default=None,
+                )
+                for ticker in tickers
+            ],
+            return_exceptions=True,
+        )
+        for ticker, result in zip(tickers, results, strict=True):
+            target = by_ticker.get(ticker)
+            if target is None:
+                continue
+            if isinstance(result, Exception):
+                self._kalshi_rule_enrichment["failed"] += 1
+                issues.append(
+                    CollectorIssue(
+                        stage="get_market",
+                        venue=VenueName.KALSHI,
+                        source_id=ticker,
+                        detail=str(result),
+                    )
+                )
+                continue
+            payload, failed = result if isinstance(result, tuple) else (None, True)
+            if failed or not isinstance(payload, dict):
+                self._kalshi_rule_enrichment["failed"] += 1
+                continue
+            if merge_kalshi_contract_rules(target, payload):
+                self._kalshi_rule_enrichment["applied"] += 1
+            else:
+                self._kalshi_rule_enrichment["empty"] += 1
 
     async def _try_kalshi_observation(
         self,

@@ -408,6 +408,11 @@ async def test_live_shaped_kalshi_without_rules_is_not_equivalent() -> None:
     assert mb.complete_3way_home_draw_away == 1
     assert kalshi.complete_3way_home_draw_away == 1
     assert report.matched_event_pairs >= 1
+    mbk = forensics.matchbook_kalshi_match_result
+    assert mbk.cross_venue_fixtures_with_both_match_result == 1
+    assert mbk.both_complete_3way == 1
+    assert mbk.both_settlement_complete == 0
+    assert mbk.matched_equivalent == 0
 
 
 @pytest.mark.asyncio
@@ -420,6 +425,49 @@ async def test_live_shaped_kalshi_event_rules_maps_ordinary_1x2() -> None:
     assert census.equivalent_market_pairs == 1
     assert census.market_family_breakdown.get("match_result") == 1
     assert any(item.comparison_status == "matched_equivalent" for item in forensics.candidates)
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 1
+
+
+class BetisKalshiGetMarket(BetisKalshi):
+    def __init__(self, *, rules_text: str = REGULATION) -> None:
+        super().__init__(rules_on_event=False, rules_on_markets=False)
+        self.rules_text = rules_text
+        self.get_market_calls: list[str] = []
+
+    async def get_market(self, ticker: str) -> dict[str, Any]:
+        self.get_market_calls.append(str(ticker))
+        nested = next((item for item in self._markets() if item.get("ticker") == ticker), {})
+        return {
+            **nested,
+            "ticker": ticker,
+            "rules_primary": self.rules_text,
+            "rules_secondary": "",
+        }
+
+
+@pytest.mark.asyncio
+async def test_get_market_rules_map_ordinary_1x2_without_name_inference() -> None:
+    kalshi = BetisKalshiGetMarket(rules_text=REGULATION)
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 1
+    assert sorted(kalshi.get_market_calls) == sorted(
+        item["ticker"] for item in BetisKalshi()._markets()
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_market_empty_or_ambiguous_rules_stay_incomplete() -> None:
+    empty = BetisKalshiGetMarket(rules_text="")
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), empty)
+    assert census.equivalent_market_pairs == 0
+    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    ambiguous = BetisKalshiGetMarket(rules_text="Winner of the match.")
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), ambiguous)
+    assert census.equivalent_market_pairs == 0
+    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
 
 
 @pytest.mark.asyncio
@@ -487,18 +535,18 @@ def test_fixture_filter_and_venue_scope_contract(monkeypatch: pytest.MonkeyPatch
         "sports_hedge.application.universe_mapping_census.get_lane_venue_settings_store",
         lambda: object(),
     )
-    scope, venues, source = resolve_census_venue_scope(settings=Settings(), environ={})
-    assert scope == VENUE_SCOPE_UNIVERSE
-    assert source == "operator"
-    assert VenueName.POLYMARKET not in venues
-    assert VenueName.MATCHBOOK in venues
-    all_scope, all_venues, all_source = resolve_census_venue_scope(
+    scope = resolve_census_venue_scope(settings=Settings(), environ={})
+    assert scope.venue_scope == VENUE_SCOPE_UNIVERSE
+    assert scope.participation_source == "operator"
+    assert VenueName.POLYMARKET not in scope.enabled_venues
+    assert VenueName.MATCHBOOK in scope.enabled_venues
+    all_scope = resolve_census_venue_scope(
         settings=Settings(),
         environ={OWNER_LIVE_CENSUS_ALL_VENUES_ENV: "1"},
     )
-    assert all_scope == VENUE_SCOPE_ALL
-    assert VenueName.POLYMARKET in all_venues
-    assert all_source == "explicit_all_venues"
+    assert all_scope.venue_scope == VENUE_SCOPE_ALL
+    assert VenueName.POLYMARKET in all_scope.enabled_venues
+    assert all_scope.participation_source == "explicit_all_venues"
 
 
 def test_polymarket_moneyline_yes_outcome_from_live_shaped_question() -> None:

@@ -46,6 +46,7 @@ class KalshiClient(ReadOnlyVenue):
         self._owns_client = client is None
         self._clock = clock or (lambda: datetime.now(UTC))
         self._base_url = settings.resolved_kalshi_base_url().rstrip("/")
+        self._market_cache: dict[str, dict[str, Any]] = {}
         self._client = client or httpx.AsyncClient(
             timeout=market_data_http_timeout(),
             headers={
@@ -224,6 +225,28 @@ class KalshiClient(ReadOnlyVenue):
             limit=limit,
             max_pages=self.settings.kalshi_event_max_pages,
         )
+
+    async def get_market(self, ticker: str) -> dict[str, Any]:
+        """Documented read-only Get Market. Source of `rules_primary` / `rules_secondary`.
+
+        Nested `/events?with_nested_markets=true` and `/markets` list pages may
+        omit contract-rule text. Do not infer settlement from GAME/Opta names.
+        Cached per ticker for the life of this client instance.
+        """
+
+        key = str(ticker or "").strip()
+        if not key:
+            raise KalshiDiscoveryError("Kalshi get_market requires a ticker")
+        cached = self._market_cache.get(key)
+        if cached is not None:
+            return cached
+        payload = await self._get(f"/markets/{key}")
+        market = payload.get("market")
+        resolved = market if isinstance(market, dict) else payload
+        if not isinstance(resolved, dict) or not resolved:
+            raise KalshiDiscoveryError(f"Kalshi get_market {key} returned no market object")
+        self._market_cache[key] = resolved
+        return resolved
 
     async def get_order_book(
         self,

@@ -85,6 +85,16 @@ class MatchResultVenueCounts(BaseModel):
     total: int = 0
 
 
+class MatchbookKalshiMatchResultAssessment(BaseModel):
+    """Matchbook↔Kalshi ordinary 1X2 coverage. Polymarket is excluded."""
+
+    cross_venue_fixtures_with_both_match_result: int = 0
+    both_complete_3way: int = 0
+    both_settlement_complete: int = 0
+    matched_equivalent: int = 0
+    sample: list[SafeCandidateView] = Field(default_factory=list)
+
+
 class MappingForensics(BaseModel):
     """Owner-live/read-only mapping forensics. Fixture/demo when built from tests."""
 
@@ -92,12 +102,17 @@ class MappingForensics(BaseModel):
     venue_scope: str
     enabled_venues: list[str] = Field(default_factory=list)
     participation_source: str | None = None
+    participation_db_path: str | None = None
+    operator_row_present: bool | None = None
     fixture_filter: list[str] = Field(default_factory=list)
     match_result_by_venue: dict[str, MatchResultVenueCounts] = Field(default_factory=dict)
     candidate_rejection_histogram: dict[str, int] = Field(default_factory=dict)
     cross_venue_match_result_candidates: int = 0
     reported_candidates: int = 0
     candidates: list[SafeCandidateView] = Field(default_factory=list)
+    matchbook_kalshi_match_result: MatchbookKalshiMatchResultAssessment = Field(
+        default_factory=MatchbookKalshiMatchResultAssessment
+    )
     notes: list[str] = Field(default_factory=list)
 
 
@@ -158,6 +173,8 @@ def forensics_from_report(
     venue_scope: str,
     enabled_venues: list[str],
     participation_source: str | None = None,
+    participation_db_path: str | None = None,
+    operator_row_present: bool | None = None,
     fixture_filter: list[str] | None = None,
     detail: bool = False,
     match_result_sample: int = 0,
@@ -226,13 +243,28 @@ def forensics_from_report(
         ),
         "Does not output credentials, tokens, session ids, or order-book prices/sizes.",
     ]
+    if participation_source == "env_default":
+        notes.append(
+            "participation_source=env_default: no operator UNIVERSE row was loaded "
+            f"from {participation_db_path or 'paper_settings_db_path'}. A detached "
+            "census process does not inherit a UI Polymarket-off toggle. "
+            "Matchbook↔Kalshi metrics are reported separately."
+        )
+    elif operator_row_present is False:
+        notes.append(
+            "operator_row_present=false; UNIVERSE venues came from env defaults, "
+            "not the operator UI store."
+        )
     if tokens:
         notes.append("fixture_filter=" + " / ".join(tokens))
+    mb_kalshi = _matchbook_kalshi_match_result_assessment(all_candidates)
     return MappingForensics(
         data_class=data_class,
         venue_scope=venue_scope,
         enabled_venues=list(enabled_venues),
         participation_source=participation_source,
+        participation_db_path=participation_db_path,
+        operator_row_present=operator_row_present,
         fixture_filter=tokens,
         match_result_by_venue={
             venue: counts for venue, counts in sorted(match_result_counts.items())
@@ -241,6 +273,7 @@ def forensics_from_report(
         cross_venue_match_result_candidates=cross_venue_mr,
         reported_candidates=len(sampled),
         candidates=sampled,
+        matchbook_kalshi_match_result=mb_kalshi,
         notes=notes,
     )
 
@@ -252,6 +285,8 @@ def render_forensics(forensics: MappingForensics) -> str:
         f"venue_scope={forensics.venue_scope}",
         f"enabled_venues={','.join(forensics.enabled_venues) or '{}'}",
         f"participation_source={forensics.participation_source or 'n/a'}",
+        f"participation_db_path={forensics.participation_db_path or 'n/a'}",
+        f"operator_row_present={forensics.operator_row_present}",
         "match_result_by_venue:",
     ]
     for venue, counts in forensics.match_result_by_venue.items():
@@ -275,6 +310,19 @@ def render_forensics(forensics: MappingForensics) -> str:
         f"cross_venue_match_result_candidates={forensics.cross_venue_match_result_candidates}"
     )
     lines.append(f"reported_candidates={forensics.reported_candidates}")
+    mbk = forensics.matchbook_kalshi_match_result
+    lines.append("matchbook_kalshi_match_result:")
+    lines.append(
+        f"  cross_venue_fixtures_with_both_match_result={mbk.cross_venue_fixtures_with_both_match_result}"
+    )
+    lines.append(f"  both_complete_3way={mbk.both_complete_3way}")
+    lines.append(f"  both_settlement_complete={mbk.both_settlement_complete}")
+    lines.append(f"  matched_equivalent={mbk.matched_equivalent}")
+    for item in mbk.sample:
+        lines.append(
+            f"  sample fixture={_safe_text(item.fixture_label)} status={item.comparison_status} "
+            f"matcher_reasons={','.join(item.matcher_reasons) or 'none'}"
+        )
     for note in forensics.notes:
         lines.append(f"note: {note}")
     for item in forensics.candidates:
@@ -358,6 +406,41 @@ def _candidates_sharing_family_period_line(
             )
         )
     return candidates
+
+
+def _matchbook_kalshi_match_result_assessment(
+    candidates: list[SafeCandidateView],
+) -> MatchbookKalshiMatchResultAssessment:
+    fixtures_both: set[str] = set()
+    both_3way = 0
+    both_complete = 0
+    matched = 0
+    sample: list[SafeCandidateView] = []
+    for item in candidates:
+        if item.family != MarketFamily.MATCH_RESULT.value:
+            continue
+        by_venue = {venue.venue: venue for venue in item.venues}
+        mb = by_venue.get(VenueName.MATCHBOOK.value)
+        kalshi = by_venue.get(VenueName.KALSHI.value)
+        if mb is None or kalshi is None:
+            continue
+        fixtures_both.add(item.fixture_label)
+        mb_3way = mb.match_result_shape == COMPLETE_3WAY
+        kalshi_3way = kalshi.match_result_shape == COMPLETE_3WAY
+        if mb_3way and kalshi_3way:
+            both_3way += 1
+        if mb.settlement_complete is True and kalshi.settlement_complete is True:
+            both_complete += 1
+        if item.comparison_status == "matched_equivalent":
+            matched += 1
+        sample.append(item)
+    return MatchbookKalshiMatchResultAssessment(
+        cross_venue_fixtures_with_both_match_result=len(fixtures_both),
+        both_complete_3way=both_3way,
+        both_settlement_complete=both_complete,
+        matched_equivalent=matched,
+        sample=sample[:8],
+    )
 
 
 def _row_group_key(row: FixtureMarketInventoryRow) -> tuple[str, str, str] | None:
