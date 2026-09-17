@@ -11,6 +11,7 @@ from sports_hedge.domain.football import (
     line_push_possible,
 )
 from sports_hedge.matching.markets import MarketMatchResult
+from sports_hedge.matching.ordinary_1x2 import allow_unknown_settlement_for_ordinary_1x2
 
 # Step 7 allowlist: conventional families whose listed outcomes are mutually
 # exclusive AND exhaustive for the existing complete-set solver (no unmodelled
@@ -207,6 +208,14 @@ def generalized_payoff_eligible_pair(left: CanonicalMarket, right: CanonicalMark
 def solver_model_for_pair(left: CanonicalMarket, right: CanonicalMarket) -> str | None:
     if solver_eligible_market(left) and solver_eligible_market(right):
         return SOLVER_MODEL_SIMPLE
+    if allow_unknown_settlement_for_ordinary_1x2(left, right):
+        if (
+            has_complete_canonical_outcomes(left)
+            and has_complete_canonical_outcomes(right)
+            and left.settlement.push_possible is not True
+            and right.settlement.push_possible is not True
+        ):
+            return SOLVER_MODEL_SIMPLE
     if generalized_payoff_eligible_pair(left, right):
         return SOLVER_MODEL_GENERALIZED
     return None

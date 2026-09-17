@@ -993,6 +993,8 @@ def _kalshi_related_to_row(row: FixtureMarketInventoryRow, item: InventoryMarket
     }
     kalshi_key = item.canonical.settlement.deterministic_key()
     if settlement_keys and kalshi_key not in settlement_keys:
+        if item.canonical.family is MarketFamily.MATCH_RESULT:
+            return True
         return False
     return True
 
@@ -1135,6 +1137,13 @@ def _attach_kalshi(
     row.pair_results = pair_summaries
     if best_decision is not None:
         _apply_decision_fx(row, best_decision)
+    if proven:
+        for match in matches:
+            if not match.matched:
+                continue
+            for reason in match.reasons:
+                if reason not in row.match_reasons:
+                    row.match_reasons.append(reason)
     if not proven:
         mismatch_reasons = [reason for match in matches for reason in match.reasons]
         for reason in mismatch_reasons:

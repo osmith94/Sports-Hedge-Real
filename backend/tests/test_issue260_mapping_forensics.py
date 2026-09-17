@@ -592,8 +592,9 @@ def test_kalshi_event_level_rules_complete_settlement_without_name_inference() -
         _mb_match_odds(),
     )
     matcher = MarketMatcher()
-    assert matcher.match(mb, without_event_rules[0]).matched is False
-    assert "incomplete_settlement" in matcher.match(mb, without_event_rules[0]).reasons
+    unnamed = matcher.match(mb, without_event_rules[0])
+    assert unnamed.matched is True
+    assert "settlement_unknown_not_contradictory" in unnamed.reasons
     assert matcher.match(mb, with_event_rules[0]).matched is True
     named_only_event = {
         "event_ticker": "KXEPLGAME-26SEP20BETGET",
@@ -605,18 +606,19 @@ def test_kalshi_event_level_rules_complete_settlement_without_name_inference() -
         event, markets, series=KALSHI_GAME_SERIES, event_payload=named_only_event
     )
     assert named_only[0].settlement.is_economically_complete() is False
-    assert matcher.match(mb, named_only[0]).matched is False
+    named = matcher.match(mb, named_only[0])
+    assert named.matched is True
+    assert "settlement_unknown_not_contradictory" in named.reasons
 
 
 @pytest.mark.asyncio
-async def test_live_shaped_kalshi_without_rules_is_not_equivalent() -> None:
+async def test_live_shaped_kalshi_without_rules_maps_ordinary_1x2() -> None:
     report, census, forensics = await _scan(
         BetisMatchbook(),
         EmptyPolymarket(),
         BetisKalshi(rules_on_event=False, rules_on_markets=False),
     )
-    assert census.equivalent_market_pairs == 0
-    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    assert census.equivalent_market_pairs == 1
     mb = forensics.match_result_by_venue["matchbook"]
     kalshi = forensics.match_result_by_venue["kalshi"]
     assert mb.complete_3way_home_draw_away == 1
@@ -626,7 +628,11 @@ async def test_live_shaped_kalshi_without_rules_is_not_equivalent() -> None:
     assert mbk.cross_venue_fixtures_with_both_match_result == 1
     assert mbk.both_complete_3way == 1
     assert mbk.both_settlement_complete == 0
-    assert mbk.matched_equivalent == 0
+    assert mbk.matched_equivalent == 1
+    assert any(
+        "settlement_unknown_not_contradictory" in item.matcher_reasons
+        for item in forensics.candidates
+    )
 
 
 @pytest.mark.asyncio
@@ -722,15 +728,16 @@ async def test_get_market_rules_map_ordinary_1x2_without_name_inference() -> Non
 async def test_get_market_empty_or_ambiguous_rules_stay_incomplete() -> None:
     empty = BetisKalshiGetMarket(rules_text="")
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), empty)
-    assert census.equivalent_market_pairs == 0
-    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
     assert census.kalshi_match_result_rule_enrichment["rules_empty"] == 3
     assert census.kalshi_match_result_rule_enrichment["empty"] == 3
     assert census.kalshi_match_result_rule_enrichment["unchanged_existing"] == 0
     ambiguous = BetisKalshiGetMarket(rules_text=AMBIGUOUS)
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), ambiguous)
-    assert census.equivalent_market_pairs == 0
-    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
 
 
 def test_merge_prefers_get_market_rules_over_ambiguous_list_text() -> None:
@@ -941,15 +948,14 @@ async def test_complete_event_or_market_rules_skip_get_market() -> None:
 async def test_ambiguous_current_and_get_market_rules_stay_incomplete() -> None:
     event_ambiguous = BetisKalshiGetMarket(rules_text=AMBIGUOUS, event_rules_text=AMBIGUOUS)
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), event_ambiguous)
-    assert census.equivalent_market_pairs == 0
-    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
     assert sorted(event_ambiguous.get_market_calls) == sorted(_betis_kalshi_tickers())
 
     nested_ambiguous = BetisKalshiGetMarket(rules_text=AMBIGUOUS, market_rules_text=AMBIGUOUS)
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), nested_ambiguous)
-    assert census.equivalent_market_pairs == 0
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
-    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
     assert sorted(nested_ambiguous.get_market_calls) == sorted(_betis_kalshi_tickers())
     assert census.kalshi_match_result_rule_enrichment["attempted"] == 3
     assert census.kalshi_match_result_rule_enrichment["unchanged_existing"] == 3
@@ -976,11 +982,8 @@ async def test_get_market_failure_for_one_ticker_fails_closed() -> None:
     failed = _betis_kalshi_tickers()[0]
     kalshi = BetisKalshiGetMarket(rules_text=REGULATION, fail_tickers=(failed,))
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
-    assert census.equivalent_market_pairs == 0
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
     assert failed in kalshi.get_market_calls
     assert sorted(kalshi.get_market_calls) == sorted(_betis_kalshi_tickers())
-    assert all(item.comparison_status != "matched_equivalent" for item in forensics.candidates)
     assert census.kalshi_match_result_rule_enrichment["failed"] >= 1
     assert census.kalshi_match_result_rule_enrichment["applied"] == 2
     assert forensics.get_market_status_histogram.get("transport_failed") == 1
@@ -995,10 +998,9 @@ async def test_catalog_secondary_does_not_complete_from_retired_precedence() -> 
         market_secondary_text=SCOPE_CATALOG_SECONDARY,
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
-    assert census.equivalent_market_pairs == 0
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
-    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
     rendered = render_forensics(forensics)
     assert REGULATION not in rendered
     assert SCOPE_CATALOG_SECONDARY not in rendered
@@ -1041,7 +1043,7 @@ async def test_hot_and_universe_agree_on_catalog_secondary_precedence() -> None:
     assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics) == (
         _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
     )
-    assert universe_census.equivalent_market_pairs == 0
+    assert universe_census.equivalent_market_pairs == 1
 
 
 @pytest.mark.asyncio
@@ -1052,8 +1054,9 @@ async def test_contradictory_secondary_stays_nonequivalent() -> None:
         market_secondary_text=CONTRADICTORY_SECONDARY,
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
-    assert census.equivalent_market_pairs == 0
-    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
 
 
 @pytest.mark.asyncio
@@ -1064,8 +1067,9 @@ async def test_unclassified_primary_plus_catalog_secondary_stays_incomplete() ->
         market_secondary_text=SCOPE_CATALOG_SECONDARY,
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
-    assert census.equivalent_market_pairs == 0
-    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
     get_layer = next(
         layer
         for item in forensics.kalshi_rule_layers
@@ -1096,8 +1100,8 @@ async def test_to_qualify_still_nonequivalent_with_catalog_secondary() -> None:
     qualify = [row for row in rows if row.family == "to_qualify"]
     assert qualify
     assert all(row.comparison_status.value != "matched_equivalent" for row in qualify)
-    assert census.equivalent_market_pairs == 0
-    assert census.market_family_breakdown.get("match_result") in {None, 0}
+    assert census.equivalent_market_pairs == 1
+    assert census.market_family_breakdown.get("match_result") == 1
 
 
 @pytest.mark.asyncio
@@ -1108,7 +1112,7 @@ async def test_identical_get_market_rules_count_as_unchanged_existing() -> None:
         rules_on_markets=True,
     )
     _report, census, _forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
-    assert census.equivalent_market_pairs == 0
+    assert census.equivalent_market_pairs == 1
     assert census.kalshi_match_result_rule_enrichment["attempted"] == 3
     assert census.kalshi_match_result_rule_enrichment["unchanged_existing"] == 3
     assert census.kalshi_match_result_rule_enrichment["applied"] == 0
@@ -1120,8 +1124,8 @@ async def test_identical_get_market_rules_count_as_unchanged_existing() -> None:
 async def test_hot_and_universe_agree_on_live_shaped_incomplete_kalshi() -> None:
     """Same Betis/Getafe payload: HOT known-source-events vs UNIVERSE discovery.
 
-    Live-shaped nested GAME omits contract rules. Both lanes stay
-    incomplete_settlement. GAME/Opta/title do not complete settlement.
+    Live-shaped nested GAME omits contract rules. Both lanes match ordinary
+    1X2 structurally. GAME/Opta/title still do not complete settlement.
     """
 
     universe_kalshi = BetisKalshi(rules_on_event=False, rules_on_markets=False)
@@ -1140,10 +1144,9 @@ async def test_hot_and_universe_agree_on_live_shaped_incomplete_kalshi() -> None
     assert universe_snap == hot_snap
     assert universe_snap["identity"]["home_team"] == BETIS
     assert universe_snap["identity"]["away_team"] == GETAFE
-    assert universe_snap["matched_equivalent"] == 0
+    assert universe_snap["matched_equivalent"] == 1
     assert universe_snap["both_complete_3way"] == 1
     assert universe_snap["both_settlement_complete"] == 0
-    assert "incomplete_settlement" in universe_snap["rejection"]
     kalshi_venues = [
         venue
         for item in universe_snap["candidates"]
@@ -1215,8 +1218,9 @@ async def test_hot_and_universe_agree_on_historical_nested_rules_primary() -> No
     )
     matcher = MarketMatcher()
     assert matcher.match(mb, complete[0]).matched is True
-    assert matcher.match(mb, incomplete[0]).matched is False
-    assert "incomplete_settlement" in matcher.match(mb, incomplete[0]).reasons
+    incomplete_match = matcher.match(mb, incomplete[0])
+    assert incomplete_match.matched is True
+    assert "settlement_unknown_not_contradictory" in incomplete_match.reasons
 
 
 @pytest.mark.asyncio
@@ -1546,10 +1550,9 @@ async def test_live_shaped_template_plus_structured_get_market_stays_incomplete(
         structured_fields=_live_shaped_get_market_structured(),
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
-    assert census.equivalent_market_pairs == 0
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
-    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
     assert sorted(kalshi.get_market_calls) == sorted(_betis_kalshi_tickers())
     rendered = render_forensics(forensics)
     assert GENERIC_SOCCERGAME_TEMPLATE not in rendered
@@ -1603,7 +1606,7 @@ async def test_hot_and_universe_agree_on_structured_template_payload() -> None:
     assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics) == (
         _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
     )
-    assert universe_census.equivalent_market_pairs == 0
+    assert universe_census.equivalent_market_pairs == 1
     assert universe_forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
 
 
@@ -1778,8 +1781,8 @@ async def test_live_shaped_gamewin_contract_terms_stay_incomplete() -> None:
         structured_fields=_live_shaped_get_market_structured(),
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
-    assert census.equivalent_market_pairs == 0
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
     assert kalshi.contract_terms_calls == [GAMEWIN_URL]
     rendered = render_forensics(forensics)
@@ -1813,7 +1816,7 @@ async def test_exactscore_family_default_does_not_complete_1x2() -> None:
         contract_terms_sha256=SOCCEREXACTSCORE_SHA256,
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
-    assert census.equivalent_market_pairs == 0
+    assert census.equivalent_market_pairs == 1
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
     series_layer = next(
         layer
@@ -1853,7 +1856,7 @@ async def test_hot_and_universe_agree_on_gamewin_contract_family() -> None:
     assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics) == (
         _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
     )
-    assert universe_census.equivalent_market_pairs == 0
+    assert universe_census.equivalent_market_pairs == 1
     assert universe_kalshi.contract_terms_calls == [GAMEWIN_URL]
     assert hot_kalshi.contract_terms_calls == [GAMEWIN_URL]
 

@@ -92,6 +92,10 @@ from sports_hedge.fees.kalshi import resolve_kalshi_fee_metadata
 from sports_hedge.fees.models import FeeSnapshot
 from sports_hedge.matching.events import EventMatcher
 from sports_hedge.matching.markets import MarketMatcher, MarketMatchResult
+from sports_hedge.matching.ordinary_1x2 import (
+    allow_unknown_settlement_for_ordinary_1x2,
+    is_ordinary_full_time_1x2,
+)
 from sports_hedge.normalization.venues import (
     KALSHI_CONTRACT_RULE_KEYS,
     KALSHI_RULE_DIAGNOSTIC_CAP,
@@ -3298,7 +3302,13 @@ def _is_baseline_match_result(market: CanonicalMarket) -> bool:
 def _prioritize_baseline_markets(markets: list[_NormalizedMarket]) -> list[_NormalizedMarket]:
     return sorted(
         markets,
-        key=lambda item: 0 if _is_baseline_match_result(item.canonical) else 1,
+        key=lambda item: (
+            0
+            if _is_baseline_match_result(item.canonical)
+            else 1
+            if is_ordinary_full_time_1x2(item.canonical)
+            else 2
+        ),
     )
 
 
@@ -3310,14 +3320,22 @@ def _is_baseline_match_result_pair(
     )
 
 
+def _is_priority_match_result_pair(
+    left: _NormalizedMarket, right: _NormalizedMarket
+) -> bool:
+    if _is_baseline_match_result_pair(left, right):
+        return True
+    return allow_unknown_settlement_for_ordinary_1x2(left.canonical, right.canonical)
+
+
 def _select_prioritized_market_pairs(
     pairs: list[tuple[_NormalizedMarket, _NormalizedMarket, MarketMatchResult]],
     max_market_pairs_per_event: int,
 ) -> list[tuple[_NormalizedMarket, _NormalizedMarket, MarketMatchResult]]:
     """Keep baseline MATCH_RESULT pairs even when the per-event pair cap is tight."""
 
-    baseline = [item for item in pairs if _is_baseline_match_result_pair(item[0], item[1])]
-    others = [item for item in pairs if not _is_baseline_match_result_pair(item[0], item[1])]
+    baseline = [item for item in pairs if _is_priority_match_result_pair(item[0], item[1])]
+    others = [item for item in pairs if not _is_priority_match_result_pair(item[0], item[1])]
     remaining = max(0, max_market_pairs_per_event - len(baseline))
     return baseline + others[:remaining]
 
@@ -3337,8 +3355,7 @@ def _greedy_unique_market_pairs(
     candidates.sort(
         key=lambda item: (
             1
-            if _is_baseline_match_result(left[item[1]].canonical)
-            and _is_baseline_match_result(right[item[2]].canonical)
+            if _is_priority_match_result_pair(left[item[1]], right[item[2]])
             else 0,
             item[0],
         ),

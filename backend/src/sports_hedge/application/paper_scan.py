@@ -260,7 +260,12 @@ class PaperScanService:
             left.market.settlement.scope == SettlementScope.UNKNOWN
             or right.market.settlement.scope == SettlementScope.UNKNOWN
         ):
-            rejections.append("unknown_settlement_scope")
+            from sports_hedge.matching.ordinary_1x2 import (
+                allow_unknown_settlement_for_ordinary_1x2,
+            )
+
+            if not allow_unknown_settlement_for_ordinary_1x2(left.market, right.market):
+                rejections.append("unknown_settlement_scope")
 
         solver_model = solver_model_for_pair(left.market, right.market)
         if solver_model is None:

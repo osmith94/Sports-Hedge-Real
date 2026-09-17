@@ -5,6 +5,12 @@ Windows usage (repository root, existing `.env`):
     $env:SPORTS_HEDGE_OWNER_LIVE_CENSUS = "1"
     python -m sports_hedge.application.universe_mapping_census
 
+Matchbook + Kalshi only (Polymarket off; paper demo acceptance gate):
+
+    $env:SPORTS_HEDGE_OWNER_LIVE_CENSUS = "1"
+    $env:SPORTS_HEDGE_OWNER_LIVE_CENSUS_MATCHBOOK_KALSHI_ONLY = "1"
+    python -m sports_hedge.application.universe_mapping_census
+
 Detail / fixture filter / match-result sample (optional):
 
     $env:SPORTS_HEDGE_OWNER_LIVE_CENSUS_DETAIL = "1"
@@ -16,9 +22,9 @@ forensic (does not change production toggles):
 
     $env:SPORTS_HEDGE_OWNER_LIVE_CENSUS_ALL_VENUES = "1"
 
-Normal pytest / CI must not run this. One bounded UNIVERSE collect. No venue
-writes, no credential output, no login retry loop. Matchbook 400 auth-fault
-latch and 429 cooldown are left in place.
+Requires paper mode and execution disabled. One bounded UNIVERSE collect. No
+venue writes, no credential output, no login retry loop. Matchbook 400
+auth-fault latch and 429 cooldown are left in place.
 """
 
 from __future__ import annotations
@@ -78,6 +84,9 @@ OWNER_LIVE_CENSUS_DETAIL_ENV = "SPORTS_HEDGE_OWNER_LIVE_CENSUS_DETAIL"
 OWNER_LIVE_CENSUS_FIXTURE_ENV = "SPORTS_HEDGE_OWNER_LIVE_CENSUS_FIXTURE"
 OWNER_LIVE_CENSUS_SAMPLE_ENV = "SPORTS_HEDGE_OWNER_LIVE_CENSUS_SAMPLE_MATCH_RESULT"
 OWNER_LIVE_CENSUS_ALL_VENUES_ENV = "SPORTS_HEDGE_OWNER_LIVE_CENSUS_ALL_VENUES"
+OWNER_LIVE_CENSUS_MATCHBOOK_KALSHI_ONLY_ENV = (
+    "SPORTS_HEDGE_OWNER_LIVE_CENSUS_MATCHBOOK_KALSHI_ONLY"
+)
 
 
 class CensusSafetyError(RuntimeError):
@@ -125,6 +134,14 @@ def resolve_census_venue_scope(
 
     env = environ if environ is not None else os.environ
     db_path = str(getattr(settings, "paper_settings_db_path", "") or "")
+    if str(env.get(OWNER_LIVE_CENSUS_MATCHBOOK_KALSHI_ONLY_ENV) or "").strip() == "1":
+        return CensusVenueScope(
+            venue_scope=VENUE_SCOPE_UNIVERSE,
+            enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
+            participation_source="explicit_matchbook_kalshi_only",
+            participation_db_path=db_path or None,
+            operator_row_present=None,
+        )
     if str(env.get(OWNER_LIVE_CENSUS_ALL_VENUES_ENV) or "").strip() == "1":
         return CensusVenueScope(
             venue_scope=VENUE_SCOPE_ALL,

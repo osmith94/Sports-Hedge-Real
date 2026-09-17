@@ -17,7 +17,7 @@ from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
     VenueMarketFacts,
 )
-from sports_hedge.domain.football import CanonicalOutcome, MarketFamily
+from sports_hedge.domain.football import CanonicalOutcome, FootballPeriod, MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.normalization.text import normalize_text
 
@@ -50,6 +50,8 @@ MATCHER_REASON_KEYS = (
     "incomplete_settlement",
     "settlement_mismatch",
     "outcome_space_mismatch",
+    "ordinary_match_result_1x2",
+    "settlement_unknown_not_contradictory",
 )
 SECRET_FRAGMENTS = ("password", "username", "token", "session", "mfa", "authorization", "secret")
 
@@ -76,6 +78,10 @@ class SafeCandidateView(BaseModel):
     line: str | None = None
     comparison_status: str | None = None
     matcher_reasons: list[str] = Field(default_factory=list)
+    event_confidence: float | None = None
+    identity_reasons: list[str] = Field(default_factory=list)
+    hda_complete: bool | None = None
+    settlement_status: str | None = None
     venues: list[SafeVenueMarketView] = Field(default_factory=list)
 
 
@@ -336,7 +342,10 @@ def forensics_from_report(
         "separately from combined concatenation. Rule-field precedence is "
         "diagnostic-only. Official Get Market strike_type/custom_strike/market_type "
         "do not select SOCCERGAME result scope. Generic multi-scope template "
-        "wording stays unknown."
+        "wording stays unknown. Ordinary Matchbook↔Kalshi full-time HOME/DRAW/AWAY "
+        "1X2 matching treats Kalshi unknown settlement as not contradictory; proven "
+        "extra-time/penalties/full-match conflicts still reject. No provisional/"
+        "verified product tiers."
     )
     return MappingForensics(
         data_class=data_class,
@@ -478,6 +487,9 @@ def render_forensics(forensics: MappingForensics) -> str:
         lines.append(
             f"candidate fixture={_safe_text(item.fixture_label)} family={item.family} "
             f"period={item.period} line={item.line or ''} status={item.comparison_status} "
+            f"hda_complete={item.hda_complete} settlement_status={item.settlement_status} "
+            f"event_confidence={item.event_confidence} "
+            f"identity_reasons={','.join(item.identity_reasons) or 'none'} "
             f"matcher_reasons={','.join(item.matcher_reasons) or 'none'}"
         )
         for venue in item.venues:
@@ -811,6 +823,11 @@ def _candidates_sharing_family_period_line(
             if any(item in {"incomplete_settlement", "settlement_mismatch"} for item in reasons)
             else reasons[0]
         )
+        venues = [_venue_view(item) for item in facts_list]
+        if not reasons and any(
+            item.settlement_complete is not True for item in facts_list
+        ):
+            reasons = ["ordinary_match_result_1x2", "settlement_unknown_not_contradictory"]
         candidates.append(
             SafeCandidateView(
                 fixture_label=f"{fixture.home_team} vs {fixture.away_team}",
@@ -819,7 +836,9 @@ def _candidates_sharing_family_period_line(
                 line=key[2] or None,
                 comparison_status=status,
                 matcher_reasons=reasons,
-                venues=[_venue_view(item) for item in facts_list],
+                hda_complete=_candidate_hda_complete(venues, key[0], key[1] or None),
+                settlement_status=_candidate_settlement_status(venues, reasons),
+                venues=venues,
             )
         )
     return candidates
@@ -890,8 +909,26 @@ def _economic_reasons_from_facts(left: VenueMarketFacts, right: VenueMarketFacts
     right_line = "" if right.line is None else format(right.line, "f")
     if left_line != right_line:
         reasons.append("line_mismatch")
-    if left.settlement_complete is not True or right.settlement_complete is not True:
-        reasons.append("incomplete_settlement")
+    left_scope = _scope_from_key(left.settlement_key)
+    right_scope = _scope_from_key(right.settlement_key)
+    venues = {left.venue, right.venue}
+    ordinary_mb_kalshi = (
+        venues == {VenueName.MATCHBOOK, VenueName.KALSHI}
+        and left.family == MarketFamily.MATCH_RESULT.value
+        and right.family == MarketFamily.MATCH_RESULT.value
+        and (left.period or "") == FootballPeriod.FULL_TIME.value
+        and (right.period or "") == FootballPeriod.FULL_TIME.value
+        and classify_match_result_shape(left) == COMPLETE_3WAY
+        and classify_match_result_shape(right) == COMPLETE_3WAY
+    )
+    contradict = _facts_settlement_contradict(left, right)
+    if contradict:
+        reasons.append("settlement_mismatch")
+    elif left.settlement_complete is not True or right.settlement_complete is not True:
+        if not ordinary_mb_kalshi:
+            reasons.append("incomplete_settlement")
+        elif left_scope not in {None, "unknown"} and right_scope not in {None, "unknown"} and left_scope != right_scope:
+            reasons.append("settlement_mismatch")
     elif left.settlement_key != right.settlement_key:
         reasons.append("settlement_mismatch")
     left_shape = classify_match_result_shape(left)
@@ -904,6 +941,46 @@ def _economic_reasons_from_facts(left: VenueMarketFacts, right: VenueMarketFacts
         if left_out and right_out and left_out != right_out:
             reasons.append("outcome_space_mismatch")
     return reasons
+
+
+def _scope_from_key(key: str | None) -> str | None:
+    if not key:
+        return None
+    return str(key).split("|", 1)[0] or None
+
+
+def _optional_bool_from_key(key: str | None, index: int) -> bool | None:
+    parts = str(key or "").split("|")
+    if len(parts) <= index:
+        return None
+    raw = parts[index]
+    if raw in {"", "None"}:
+        return None
+    if raw == "True":
+        return True
+    if raw == "False":
+        return False
+    return None
+
+
+def _facts_settlement_contradict(left: VenueMarketFacts, right: VenueMarketFacts) -> bool:
+    left_scope = _scope_from_key(left.settlement_key)
+    right_scope = _scope_from_key(right.settlement_key)
+    if (
+        left_scope not in {None, "unknown"}
+        and right_scope not in {None, "unknown"}
+        and left_scope != right_scope
+    ):
+        return True
+    left_et = _optional_bool_from_key(left.settlement_key, 5)
+    right_et = _optional_bool_from_key(right.settlement_key, 5)
+    if left_et is not None and right_et is not None and left_et != right_et:
+        return True
+    left_pen = _optional_bool_from_key(left.settlement_key, 4)
+    right_pen = _optional_bool_from_key(right.settlement_key, 4)
+    if left_pen is not None and right_pen is not None and left_pen != right_pen:
+        return True
+    return False
 
 
 def _count_match_result_facts(
@@ -956,6 +1033,11 @@ def _candidate_view(
     row: FixtureMarketInventoryRow,
     reasons: list[str],
 ) -> SafeCandidateView:
+    venues = [
+        _venue_view(facts)
+        for facts in (row.matchbook, row.polymarket, row.kalshi)
+        if facts is not None
+    ]
     return SafeCandidateView(
         fixture_label=f"{fixture.home_team} vs {fixture.away_team}",
         family=row.family,
@@ -963,12 +1045,45 @@ def _candidate_view(
         line=None if row.line is None else format(row.line, "f"),
         comparison_status=str(row.comparison_status.value if row.comparison_status else None),
         matcher_reasons=reasons,
-        venues=[
-            _venue_view(facts)
-            for facts in (row.matchbook, row.polymarket, row.kalshi)
-            if facts is not None
+        identity_reasons=[
+            item
+            for item in reasons
+            if item.startswith("event_") or item in {"participant_identity_unproven", "competition_identity_unproven"}
         ],
+        hda_complete=_candidate_hda_complete(venues, row.family, row.period),
+        settlement_status=_candidate_settlement_status(venues, reasons),
+        venues=venues,
     )
+
+
+def _candidate_hda_complete(
+    venues: list[SafeVenueMarketView],
+    family: str | None,
+    period: str | None,
+) -> bool | None:
+    if family != MarketFamily.MATCH_RESULT.value:
+        return None
+    if period and period != FootballPeriod.FULL_TIME.value:
+        return False
+    if not venues:
+        return None
+    return all(item.match_result_shape == COMPLETE_3WAY for item in venues)
+
+
+def _candidate_settlement_status(
+    venues: list[SafeVenueMarketView],
+    reasons: list[str],
+) -> str | None:
+    if any(item in {"settlement_mismatch"} for item in reasons):
+        return "conflict"
+    scopes = {item.settlement_scope for item in venues if item.settlement_scope}
+    if not scopes:
+        return None
+    if "unknown" in scopes or any(item.settlement_complete is False for item in venues):
+        return "unknown"
+    if len(scopes) > 1:
+        return "conflict"
+    return "known"
 
 
 def _venue_view(facts: VenueMarketFacts) -> SafeVenueMarketView:
