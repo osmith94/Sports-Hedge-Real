@@ -19,13 +19,16 @@ from sports_hedge.application.collector import (
     FixtureDetailReadModel,
 )
 from sports_hedge.application.universe_checkpoint import (
+    SERIES_TERMINAL_STATES,
     SWEEP_EVALUATED,
     SWEEP_FINAL_FAILED,
+    SWEEP_OK,
     SWEEP_PENDING,
     SWEEP_RUNNING,
     SWEEP_RETRY_WAIT,
     SWEEP_SKIPPED_UNSUPPORTED,
     SWEEP_TERMINAL_STATES,
+    SeriesWorkUnit,
     SweepWorkUnit,
     discovery_event_snapshot,
     merge_series_reports,
@@ -33,6 +36,7 @@ from sports_hedge.application.universe_checkpoint import (
     checkpoint_from_payload,
     collection_report_from_snapshot,
     collection_report_snapshot,
+    series_work_key,
     universe_provider_backoff_seconds,
     universe_work_retry_backoff_seconds,
 )
@@ -161,6 +165,11 @@ class LaneRefreshStatus(BaseModel):
     canonical_retryable: int = 0
     canonical_final_failed: int = 0
     canonical_remaining: int = 0
+    series_work_total: int = 0
+    series_ok: int = 0
+    series_retryable: int = 0
+    series_final_failed: int = 0
+    series_skipped: int = 0
 
 
 class LiveRefreshStatus(BaseModel):
@@ -284,6 +293,8 @@ class LiveRefreshCoordinator:
         self._universe_work: dict[str, SweepWorkUnit] = {}
         self._universe_raw_events: dict[str, int] = {}
         self._universe_series_results: dict[str, list[dict[str, Any]]] = {}
+        self._universe_series_work: dict[str, SeriesWorkUnit] = {}
+        self._universe_series_applied_this_cycle: set[str] = set()
         self._universe_checkpoint_store = universe_checkpoint_store
         self._universe_checkpoint_restored = False
         self._venue_store = venue_settings_store
@@ -498,6 +509,8 @@ class LiveRefreshCoordinator:
             self._universe_work = {}
             self._universe_raw_events = {}
             self._universe_series_results = {}
+            self._universe_series_work = {}
+            self._universe_series_applied_this_cycle = set()
             self._clear_universe_checkpoint_unlocked()
             self._universe_checkpoint_restored = False
             self._cycle_hot_venues = None
@@ -608,15 +621,7 @@ class LiveRefreshCoordinator:
             )
             sweep_id = self._universe_sweep_id
             universe_venues = list(self._pending_participation.venues_for(ScanLane.UNIVERSE))
-            retry_series = {
-                venue: [
-                    str(item.get("series"))
-                    for item in rows
-                    if item.get("retryable") and item.get("series")
-                ]
-                for venue, rows in self._universe_series_results.items()
-            }
-            retry_series = {key: value for key, value in retry_series.items() if value}
+            retry_series = self._due_retry_series_unlocked(evaluated)
         work_retry_at = self._earliest_retry_wait_unlocked(evaluated)
         if work_retry_at is not None and evaluated < work_retry_at:
             return DualCadencePlan(lane="idle", reason="universe_retry_wait")
@@ -1182,6 +1187,9 @@ class LiveRefreshCoordinator:
             self._universe_series_results = merge_series_reports(
                 self._universe_series_results, report.series_results
             )
+            self._apply_series_reports_unlocked(
+                report.series_results, scanned=report.completed_at
+            )
         if report.sweep_id:
             self._universe_sweep_id = report.sweep_id
         completeness = (report.scan_diagnostics or {}).get("completeness")
@@ -1219,8 +1227,9 @@ class LiveRefreshCoordinator:
                     scanned=report.completed_at,
                 )
         counts = self._lane_progress_fields()
+        series_snapshot = dict(self._universe_series_work)
         self._universe_discovered_total = counts["canonical_work_total"] or self._universe_discovered_total
-        degraded = degraded or counts["canonical_retryable"] > 0
+        degraded = degraded or counts["canonical_retryable"] > 0 or counts["series_retryable"] > 0
         budget = self._charge_successful_universe_work(
             duration_s,
             report.completed_at,
@@ -1258,12 +1267,14 @@ class LiveRefreshCoordinator:
                         "last_error": None,
                         "last_persist_error": None,
                         "persist_ok": None,
-                        "last_diagnostics": _lane_diagnostics(report),
+                        "last_diagnostics": _lane_diagnostics(
+                            report, series_work=series_snapshot
+                        ),
                         "resume_cursor": resume_cursor,
                         "next_due_at": self._next_universe_due,
                         "venue_health": _honest_universe_venue_health(
                             _frozen_venue_health(report.venue_health),
-                            retryable=counts["canonical_retryable"],
+                            retryable=counts["canonical_retryable"] + counts["series_retryable"],
                         ),
                         "operation_health": dict(report.operation_health or {}),
                         "operator_summary": _universe_operator_summary(
@@ -1294,6 +1305,7 @@ class LiveRefreshCoordinator:
                 self._universe_series_results = merge_series_reports(
                     self._universe_series_results, series
                 )
+                self._apply_series_reports_unlocked(series, scanned=self.now())
             self._universe_discovery_snapshot = discovery_event_snapshot(snapshot)
             self._universe_raw_events = {
                 key: len(value or [])
@@ -1421,7 +1433,7 @@ class LiveRefreshCoordinator:
             self._persist_universe_checkpoint_unlocked()
             venue_health = _honest_universe_venue_health(
                 self.status.universe.venue_health,
-                retryable=counts["canonical_retryable"],
+                retryable=counts["canonical_retryable"] + counts["series_retryable"],
             )
             self.status = self.status.model_copy(
                 update={
@@ -1497,6 +1509,116 @@ class LiveRefreshCoordinator:
             unit.reason = state
         self._universe_work[canonical_id] = unit
 
+    def _apply_series_reports_unlocked(
+        self,
+        incoming: dict[str, list[dict[str, Any]]] | None,
+        *,
+        scanned: datetime,
+    ) -> None:
+        for venue, rows in (incoming or {}).items():
+            for row in rows or []:
+                if isinstance(row, dict):
+                    self._apply_series_result_unlocked(str(venue), row, scanned)
+
+    def _apply_series_result_unlocked(
+        self,
+        venue: str,
+        row: dict[str, Any],
+        scanned: datetime,
+    ) -> None:
+        series = str(row.get("series") or "").strip()
+        if not series:
+            return
+        key = series_work_key(venue, series)
+        unit = self._universe_series_work.get(key) or SeriesWorkUnit(venue=venue, series=series)
+        status = str(row.get("status") or "").strip()
+        retryable_flag = bool(row.get("retryable"))
+        reason = str(row.get("reason") or status or "")
+        event_count = int(row.get("event_count") or 0)
+        if key in self._universe_series_applied_this_cycle:
+            if status == "ok" and unit.state != SWEEP_OK:
+                unit.state = SWEEP_OK
+                unit.retryable = False
+                unit.reason = None
+                unit.next_retry_at = None
+                unit.event_count = event_count
+                unit.last_attempted_at = scanned
+                self._universe_series_work[key] = unit
+            return
+        self._universe_series_applied_this_cycle.add(key)
+        if unit.state == SWEEP_OK and status == "ok":
+            unit.event_count = max(unit.event_count, event_count)
+            unit.last_attempted_at = scanned
+            self._universe_series_work[key] = unit
+            return
+        if unit.state in {SWEEP_FINAL_FAILED, SWEEP_SKIPPED_UNSUPPORTED} and status != "ok":
+            self._universe_series_work[key] = unit
+            return
+        settings = get_settings()
+        max_attempts = int(settings.paper_universe_work_max_attempts)
+        unit.last_attempted_at = scanned
+        unit.event_count = event_count
+        if status == "ok":
+            unit.state = SWEEP_OK
+            unit.retryable = False
+            unit.reason = None
+            unit.next_retry_at = None
+        elif status in {"unsupported", "skipped_unsupported"}:
+            unit.state = SWEEP_SKIPPED_UNSUPPORTED
+            unit.retryable = False
+            unit.reason = reason or status
+            unit.next_retry_at = None
+            if unit.attempt_count == 0:
+                unit.attempt_count = 1
+        elif status == HEALTH_AUTH_FAILURE or (not retryable_flag and status == "auth_failure"):
+            unit.state = SWEEP_FINAL_FAILED
+            unit.retryable = False
+            unit.reason = reason or status
+            unit.next_retry_at = None
+            if unit.attempt_count == 0:
+                unit.attempt_count = 1
+        elif retryable_flag or status in {
+            HEALTH_DISCOVERY_TIMEOUT,
+            HEALTH_MARKET_TIMEOUT,
+            HEALTH_UNAVAILABLE,
+            "rate_limited",
+            "timeout",
+        }:
+            unit.attempt_count += 1
+            unit.reason = reason or status
+            if unit.attempt_count >= max_attempts:
+                unit.state = SWEEP_FINAL_FAILED
+                unit.retryable = False
+                unit.next_retry_at = None
+            else:
+                unit.state = SWEEP_RETRY_WAIT
+                unit.retryable = True
+                unit.next_retry_at = scanned + timedelta(
+                    seconds=universe_work_retry_backoff_seconds(unit.attempt_count)
+                )
+        elif status and not retryable_flag:
+            unit.state = SWEEP_FINAL_FAILED
+            unit.retryable = False
+            unit.reason = reason or status
+            unit.next_retry_at = None
+            if unit.attempt_count == 0:
+                unit.attempt_count = 1
+        self._universe_series_work[key] = unit
+
+    def _due_retry_series_unlocked(self, now: datetime) -> dict[str, list[str]]:
+        retry: dict[str, list[str]] = {}
+        for unit in self._universe_series_work.values():
+            if unit.state not in {SWEEP_PENDING, SWEEP_RETRY_WAIT}:
+                continue
+            if (
+                unit.state == SWEEP_RETRY_WAIT
+                and unit.next_retry_at is not None
+                and now < unit.next_retry_at
+            ):
+                continue
+            retry.setdefault(unit.venue, []).append(unit.series)
+        return {key: value for key, value in retry.items() if value}
+
     def universe_collect_callbacks(
         self,
     ) -> tuple[Callable[..., None], Callable[..., None], Callable[..., None]]:
@@ -1543,11 +1665,13 @@ class LiveRefreshCoordinator:
         return sorted(self._universe_evaluated_ids)
 
     def _earliest_retry_wait_unlocked(self, now: datetime) -> datetime | None:
-        if any(unit.state == SWEEP_PENDING for unit in self._universe_work.values()):
+        if any(
+            unit.state in {SWEEP_PENDING, SWEEP_RUNNING} for unit in self._universe_work.values()
+        ) or any(unit.state == SWEEP_PENDING for unit in self._universe_series_work.values()):
             return None
         times = [
             unit.next_retry_at
-            for unit in self._universe_work.values()
+            for unit in (*self._universe_work.values(), *self._universe_series_work.values())
             if unit.state == SWEEP_RETRY_WAIT and unit.next_retry_at is not None
         ]
         if not times:
@@ -1574,16 +1698,34 @@ class LiveRefreshCoordinator:
             "remaining": remaining,
         }
 
+    def _universe_series_is_terminal_unlocked(self) -> bool:
+        return all(
+            unit.state in SERIES_TERMINAL_STATES for unit in self._universe_series_work.values()
+        )
+
     def _universe_sweep_is_complete_unlocked(self) -> bool:
-        if not self._universe_work:
+        series_terminal = self._universe_series_is_terminal_unlocked()
+        if self._universe_series_work and not series_terminal:
             return False
-        return all(unit.state in SWEEP_TERMINAL_STATES for unit in self._universe_work.values())
+        if self._universe_work:
+            return all(unit.state in SWEEP_TERMINAL_STATES for unit in self._universe_work.values())
+        return bool(self._universe_series_work) and series_terminal
 
     def _lane_progress_fields(self) -> dict[str, Any]:
         counts = self._canonical_counts_unlocked()
+        series = self._universe_series_work
         return {
             **counts,
             "raw_events_discovered_by_venue": dict(self._universe_raw_events),
+            "series_work_total": len(series),
+            "series_ok": sum(1 for unit in series.values() if unit.state == SWEEP_OK),
+            "series_retryable": sum(1 for unit in series.values() if unit.state == SWEEP_RETRY_WAIT),
+            "series_final_failed": sum(
+                1 for unit in series.values() if unit.state == SWEEP_FINAL_FAILED
+            ),
+            "series_skipped": sum(
+                1 for unit in series.values() if unit.state == SWEEP_SKIPPED_UNSUPPORTED
+            ),
         }
 
     def _status_universe_work_used(self) -> float:
@@ -1615,6 +1757,9 @@ class LiveRefreshCoordinator:
             self._universe_closed_evaluated_count = len(self._universe_evaluated_ids)
         self._universe_evaluated_ids = set()
         self._universe_work = {}
+        self._universe_series_work = {}
+        self._universe_series_results = {}
+        self._universe_series_applied_this_cycle = set()
         self._universe_cursor = None
         self._universe_work_used = 0.0
         self._universe_progress_generation_id = None
@@ -1656,6 +1801,7 @@ class LiveRefreshCoordinator:
             raw_events_by_venue=dict(self._universe_raw_events),
             work_units=dict(self._universe_work),
             series_results=dict(self._universe_series_results),
+            series_work=dict(self._universe_series_work),
         )
         try:
             store.save(
@@ -1738,6 +1884,15 @@ class LiveRefreshCoordinator:
                 key: list(value)
                 for key, value in (checkpoint.series_results or {}).items()
             }
+            self._universe_series_work = {
+                key: value if isinstance(value, SeriesWorkUnit) else SeriesWorkUnit.model_validate(value)
+                for key, value in (checkpoint.series_work or {}).items()
+            }
+            self._universe_series_applied_this_cycle = set()
+            if not self._universe_series_work and checkpoint.series_results:
+                self._apply_series_reports_unlocked(
+                    checkpoint.series_results, scanned=checkpoint.updated_at
+                )
             self._universe_work = {
                 key: value if isinstance(value, SweepWorkUnit) else SweepWorkUnit.model_validate(value)
                 for key, value in (checkpoint.work_units or {}).items()
@@ -1799,6 +1954,8 @@ class LiveRefreshCoordinator:
         self._universe_work = {}
         self._universe_raw_events = {}
         self._universe_series_results = {}
+        self._universe_series_work = {}
+        self._universe_series_applied_this_cycle = set()
         self._persist_universe_checkpoint_unlocked()
 
     def _charge_successful_universe_work(
@@ -1814,7 +1971,7 @@ class LiveRefreshCoordinator:
         if self._universe_generation_started_at is None:
             return budget
         self._universe_work_used += max(0.0, duration_s)
-        if self._universe_work:
+        if self._universe_work or self._universe_series_work:
             complete = self._universe_sweep_is_complete_unlocked()
         else:
             complete = leftover_n == 0
@@ -1879,6 +2036,7 @@ class LiveRefreshCoordinator:
                 self._cycle_enabled_venues = self._cycle_hot_venues
             else:
                 self._universe_in_progress = True
+                self._universe_series_applied_this_cycle = set()
                 self._cycle_universe_venues = self._pending_participation.venues_for(
                     ScanLane.UNIVERSE
                 )
@@ -2260,8 +2418,16 @@ async def _await_collection_runner(runner, timeout: float | None) -> CollectionR
             task.cancel()
 
 
-def _lane_diagnostics(report: CollectionReport) -> dict[str, Any]:
+def _lane_diagnostics(
+    report: CollectionReport,
+    *,
+    series_work: dict[str, SeriesWorkUnit] | None = None,
+) -> dict[str, Any]:
     payload = dict(report.scan_diagnostics or {})
+    if series_work:
+        payload["series_work"] = {
+            key: unit.model_dump(mode="json") for key, unit in series_work.items()
+        }
     payload.setdefault("soft_deadline_reached", False)
     payload.setdefault("cancelled", False)
     payload.setdefault("provider_cancels", 0)

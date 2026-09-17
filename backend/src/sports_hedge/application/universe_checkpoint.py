@@ -23,11 +23,15 @@ UNIVERSE_WORK_RETRY_BACKOFF_SECONDS = (2.0, 5.0, 10.0)
 SWEEP_PENDING = "pending"
 SWEEP_RUNNING = "running"
 SWEEP_EVALUATED = "evaluated"
+SWEEP_OK = "ok"
 SWEEP_RETRY_WAIT = "retry_wait"
 SWEEP_FINAL_FAILED = "final_failed"
 SWEEP_SKIPPED_UNSUPPORTED = "skipped_unsupported"
 SWEEP_TERMINAL_STATES = frozenset(
     {SWEEP_EVALUATED, SWEEP_FINAL_FAILED, SWEEP_SKIPPED_UNSUPPORTED}
+)
+SERIES_TERMINAL_STATES = frozenset(
+    {SWEEP_OK, SWEEP_FINAL_FAILED, SWEEP_SKIPPED_UNSUPPORTED}
 )
 
 
@@ -41,6 +45,22 @@ class SweepWorkUnit(BaseModel):
     retryable: bool = False
     provider: str | None = None
     series: str | None = None
+
+
+class SeriesWorkUnit(BaseModel):
+    venue: str
+    series: str
+    state: str = SWEEP_PENDING
+    reason: str | None = None
+    attempt_count: int = 0
+    last_attempted_at: datetime | None = None
+    next_retry_at: datetime | None = None
+    retryable: bool = False
+    event_count: int = 0
+
+
+def series_work_key(venue: str, series: str) -> str:
+    return f"{venue}:{series}"
 
 
 class UniverseGenerationCheckpoint(BaseModel):
@@ -70,6 +90,7 @@ class UniverseGenerationCheckpoint(BaseModel):
     raw_events_by_venue: dict[str, int] = Field(default_factory=dict)
     work_units: dict[str, SweepWorkUnit] = Field(default_factory=dict)
     series_results: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    series_work: dict[str, SeriesWorkUnit] = Field(default_factory=dict)
 
 
 _VENUE_SNAPSHOT_KEYS = frozenset({"matchbook", "polymarket", "kalshi"})
