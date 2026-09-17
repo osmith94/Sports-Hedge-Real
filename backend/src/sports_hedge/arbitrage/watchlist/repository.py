@@ -199,12 +199,15 @@ class SqliteWatchlistRepository:
             ).fetchone()
             return None if row is None else _opportunity_from_row(row)
 
-    def upsert_opportunity(self, opportunity: NearOpportunity) -> None:
+    def upsert_opportunity(self, opportunity: NearOpportunity, *, force_status: bool = False) -> None:
         with self.exclusive():
-            self._upsert_opportunity_locked(opportunity)
+            self._upsert_opportunity_locked(opportunity, force_status=force_status)
             self._commit()
 
-    def _upsert_opportunity_locked(self, opportunity: NearOpportunity) -> None:
+    def _upsert_opportunity_locked(
+        self, opportunity: NearOpportunity, *, force_status: bool = False
+    ) -> None:
+        preserve = "0" if force_status else _PRESERVE_FILL_LIFECYCLE_SQL
         self._connection.execute(
             f"""
             INSERT INTO watchlist_opportunities (
@@ -239,17 +242,17 @@ class SqliteWatchlistRepository:
                 venues_json = excluded.venues_json,
                 legs_json = excluded.legs_json,
                 status = CASE
-                    WHEN {_PRESERVE_FILL_LIFECYCLE_SQL}
+                    WHEN {preserve}
                     THEN watchlist_opportunities.status
                     ELSE excluded.status
                 END,
                 classification = CASE
-                    WHEN {_PRESERVE_FILL_LIFECYCLE_SQL}
+                    WHEN {preserve}
                     THEN watchlist_opportunities.classification
                     ELSE excluded.classification
                 END,
                 is_arbitrage = CASE
-                    WHEN {_PRESERVE_FILL_LIFECYCLE_SQL}
+                    WHEN {preserve}
                     THEN watchlist_opportunities.is_arbitrage
                     ELSE excluded.is_arbitrage
                 END,

@@ -60,6 +60,7 @@ class WatchlistService:
         self.approaching_band_pp = approaching_band_pp
         self.max_quote_age_ms = max_quote_age_ms
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._active_bound_attempts: set[str] = set()
 
     def observe_paper_decision(
         self,
@@ -211,9 +212,11 @@ class WatchlistService:
         if current is None:
             raise ValueError(f"unknown opportunity: {opportunity_id}")
         if current.status is OpportunityStatus.FILLED and stage is OpportunityStatus.FILLED:
+            self.clear_bound_autofill_attempt(opportunity_id)
             return current
         if current.status is OpportunityStatus.REJECTED and stage is OpportunityStatus.PAPER_FILLING:
-            current = self._revive_presentation_stale_for_bound_entry(current)
+            if opportunity_id in self._active_bound_attempts:
+                current = self._revive_presentation_stale_for_bound_entry(current)
             if current.status is OpportunityStatus.REJECTED:
                 raise ValueError("paper fill can only be recorded for a triggered paper opportunity")
         if current.status not in {
@@ -228,6 +231,8 @@ class WatchlistService:
             OpportunityStatus.PARTIAL: LifecycleEventType.PAPER_FILL_PARTIAL,
             OpportunityStatus.FILLED: LifecycleEventType.PAPER_FILL_COMPLETE,
         }[stage]
+        if stage is OpportunityStatus.FILLED:
+            self.clear_bound_autofill_attempt(opportunity_id)
         updated = current.model_copy(
             update={
                 "status": stage,
@@ -256,32 +261,64 @@ class WatchlistService:
         *,
         occurred_at,
         detail: str | None = None,
+        bind_snapshot: bool = False,
     ) -> NearOpportunity:
-        """Mark a bound snapshot attempt before freshness/fill evaluation.
+        """Mark a fill attempt before freshness/fill evaluation.
 
-        Presentation-time stale REJECTED rows may be revived only when the
-        rejection is wall-clock aging of an already-qualified TRIGGERED
-        snapshot. Semantic/cost/depth rejections stay fail-closed.
+        `bind_snapshot=True` is autofill-only: the attempt must start from a
+        current TRIGGERED (or already PAPER_FILLING) row. Presentation-stale
+        REJECTED rows are not revived to start a new attempt.
         """
 
         with self.repository.transaction():
-            return self._record_paper_fill_locked(
+            current = self.repository.get(opportunity_id)
+            if current is None:
+                raise ValueError(f"unknown opportunity: {opportunity_id}")
+            if bind_snapshot:
+                if current.status not in {
+                    OpportunityStatus.TRIGGERED,
+                    OpportunityStatus.PAPER_FILLING,
+                }:
+                    raise ValueError(
+                        "bound snapshot attempt requires a current TRIGGERED snapshot"
+                    )
+            updated = self._record_paper_fill_locked(
                 opportunity_id,
                 stage=OpportunityStatus.PAPER_FILLING,
                 occurred_at=occurred_at,
                 detail=detail or "paper_fill_attempted_bound_snapshot",
             )
+            if bind_snapshot:
+                self._active_bound_attempts.add(opportunity_id)
+            return updated
 
-    def allows_bound_snapshot_entry(self, current: NearOpportunity) -> bool:
+    def allows_bound_snapshot_entry(
+        self, current: NearOpportunity, *, bound_autofill: bool = False
+    ) -> bool:
         if current.status in {
             OpportunityStatus.TRIGGERED,
             OpportunityStatus.PAPER_FILLING,
             OpportunityStatus.PARTIAL,
         }:
             return True
-        return current.status is OpportunityStatus.REJECTED and _presentation_stale_only(
-            current.rejection_reasons
+        if not bound_autofill:
+            return False
+        return (
+            current.status is OpportunityStatus.REJECTED
+            and _presentation_stale_only(current.rejection_reasons)
+            and self.has_active_bound_attempt(current.opportunity_id)
         )
+
+    def has_active_bound_attempt(self, opportunity_id: str) -> bool:
+        """True only while a paper-fill attempt is in flight, not after it ends."""
+
+        if opportunity_id in self._active_bound_attempts:
+            return True
+        current = self.repository.get(opportunity_id)
+        return current is not None and current.status is OpportunityStatus.PAPER_FILLING
+
+    def clear_bound_autofill_attempt(self, opportunity_id: str) -> None:
+        self._active_bound_attempts.discard(opportunity_id)
 
     def _revive_presentation_stale_for_bound_entry(
         self, current: NearOpportunity
@@ -327,7 +364,7 @@ class WatchlistService:
                         "last_seen_at": occurred_at,
                     }
                 )
-                self.repository.upsert_opportunity(current)
+                self.repository.upsert_opportunity(current, force_status=True)
                 status = current.status
             self.repository.append_event(
                 OpportunityLifecycleEvent(
@@ -340,6 +377,7 @@ class WatchlistService:
                     detail=detail,
                 )
             )
+            self.clear_bound_autofill_attempt(opportunity_id)
             return current
 
     def close(
@@ -816,10 +854,7 @@ class WatchlistService:
         )
 
     def _fill_attempt_started(self, opportunity_id: str) -> bool:
-        return any(
-            event.event_type is LifecycleEventType.PAPER_FILL_ATTEMPTED
-            for event in self.repository.list_events(opportunity_id=opportunity_id)
-        )
+        return self.has_active_bound_attempt(opportunity_id)
 
 
 def _presentation_stale_only(reasons: list[str]) -> bool:

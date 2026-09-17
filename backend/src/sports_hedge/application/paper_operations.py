@@ -58,6 +58,7 @@ from sports_hedge.paper.chain import (
 from sports_hedge.paper.entry_freshness import (
     MARKET_REVALIDATION_FAILED,
     assess_paper_entry_freshness,
+    conservative_quote_age_at_decision_ms,
 )
 from sports_hedge.paper.fills import (
     PaperFillConfig,
@@ -217,6 +218,7 @@ class PaperOperationsService:
         provenance: DataProvenance = DataProvenance.LIVE_PAPER,
         autofill: bool | None = None,
         refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
+        now: datetime | None = None,
     ) -> PriorityAlertCandidate | None:
         if not decision.canonical_market_id:
             return None
@@ -243,6 +245,12 @@ class PaperOperationsService:
                 and opening_legs
                 and self._venues_refreshed_this_cycle(opening_legs, refreshed_venues)
             ):
+                dispatched = now or datetime.now(UTC)
+                bound_started = current_watch is not None and current_watch.status in {
+                    OpportunityStatus.PAPER_FILLING,
+                    OpportunityStatus.PARTIAL,
+                    OpportunityStatus.FILLED,
+                }
                 if current_watch is None or current_watch.status not in {
                     OpportunityStatus.PAPER_FILLING,
                     OpportunityStatus.PARTIAL,
@@ -251,23 +259,27 @@ class PaperOperationsService:
                     try:
                         self.watchlist.begin_paper_fill_attempt(
                             opportunity_id,
-                            occurred_at=datetime.now(UTC),
+                            occurred_at=dispatched,
                             detail="paper_fill_attempted_bound_snapshot",
+                            bind_snapshot=True,
                         )
+                        bound_started = True
                     except ValueError:
-                        pass
-                try:
-                    self.simulate_fill(
-                        opportunity_id,
-                        simulate_external=True,
-                        provenance=provenance,
-                        operator_note="PAPER-ONLY autofill; no venue order placed",
-                    )
-                except PaperOperationsError as exc:
-                    if _is_expected_autofill_gate(exc):
-                        pass
-                    else:
-                        raise
+                        bound_started = False
+                if bound_started:
+                    try:
+                        self.simulate_fill(
+                            opportunity_id,
+                            simulate_external=True,
+                            provenance=provenance,
+                            operator_note="PAPER-ONLY autofill; no venue order placed",
+                            now=dispatched,
+                        )
+                    except PaperOperationsError as exc:
+                        if _is_expected_autofill_gate(exc):
+                            pass
+                        else:
+                            raise
         return candidate
 
     def _should_autofill(
@@ -1060,7 +1072,10 @@ class PaperOperationsService:
             raise PaperOperationsError("unknown_opportunity")
         if current.data_kind == "demo_fixture_replay":
             provenance = DataProvenance.FIXTURE_DEMO
-        if not self.watchlist.allows_bound_snapshot_entry(current):
+        bound_autofill = self.watchlist.has_active_bound_attempt(opportunity_id)
+        if not self.watchlist.allows_bound_snapshot_entry(
+            current, bound_autofill=bound_autofill
+        ):
             self._fail_entry(opportunity_id, MARKET_REVALIDATION_FAILED, simulated_at)
 
         fill_config = config or PaperFillConfig(
@@ -1073,20 +1088,22 @@ class PaperOperationsService:
             if fill_config.max_quote_age_ms is not None
             else self.settings.paper_entry_max_quote_age_ms
         )
-        quote_age_at_decision = _bound_snapshot_quote_age_ms(plan)
         freshness = assess_paper_entry_freshness(
             decision_at=plan.decision_at,
             dispatched_at=simulated_at,
-            quote_age_at_decision_ms=quote_age_at_decision,
+            quote_age_at_decision_ms=plan.quote_age_ms,
             simulated_latency_ms=fill_config.assumed_latency_ms,
             paper_entry_max_quote_age_ms=max_age,
             quote_captured_at=plan.quote_captured_at,
+            legs=plan.legs,
+            snapshot_bound=bound_autofill,
         )
         plan = plan.model_copy(
             update={
                 "autofill_dispatched_at": simulated_at,
                 "simulated_latency_ms": fill_config.assumed_latency_ms,
                 "paper_entry_max_quote_age_ms": max_age,
+                "quote_age_at_decision_ms": freshness.quote_age_at_decision_ms,
                 "entry_freshness": freshness,
             }
         )
@@ -1162,7 +1179,7 @@ class PaperOperationsService:
             fill_legs,
             fill_config,
             opportunity_id=opportunity_id,
-            now=plan.decision_at,
+            now=plan.decision_at if bound_autofill else simulated_at,
         )
         fills = _with_stable_fill_ids(fills, opportunity_id, modes, simulate_external=simulate_external)
         if require_complete and not _complete_opening_fills(fills, opening_legs):
@@ -1706,6 +1723,12 @@ class PaperOperationsService:
                 continue
             if captured_at is None or leg.quote_captured_at < captured_at:
                 captured_at = leg.quote_captured_at
+        quote_age_at_decision = conservative_quote_age_at_decision_ms(
+            decision_at=decision.scanned_at,
+            known_age_ms=decision.quote_age_ms,
+            quote_captured_at=captured_at,
+            legs=opening_legs,
+        )
         gross = None
         if decision.depth_scan is not None:
             gross = gross_edge_from_quotes(decision.depth_scan.selected_quotes)
@@ -1716,7 +1739,7 @@ class PaperOperationsService:
             canonical_market_id=decision.canonical_market_id,
             scanned_at=decision.scanned_at,
             quote_age_ms=decision.quote_age_ms,
-            quote_age_at_decision_ms=decision.quote_age_ms,
+            quote_age_at_decision_ms=quote_age_at_decision,
             quote_captured_at=captured_at,
             simulated_latency_ms=self.settings.simulated_latency_ms,
             paper_entry_max_quote_age_ms=self.settings.paper_entry_max_quote_age_ms,
@@ -2316,25 +2339,6 @@ def _with_stable_fill_ids(
             )
         )
     return fills.model_copy(update={"fills": rewritten})
-
-
-def _bound_snapshot_quote_age_ms(plan: PaperFillPlan) -> int | None:
-    """Oldest frozen quote age on the bound snapshot. Unknown stays unknown."""
-
-    ages: list[int] = []
-    if plan.quote_age_at_decision_ms is not None:
-        ages.append(plan.quote_age_at_decision_ms)
-    elif plan.quote_age_ms is not None:
-        ages.append(plan.quote_age_ms)
-    for leg in plan.legs:
-        if leg.requested_stake <= 0:
-            continue
-        if leg.quote_age_ms is None:
-            return None
-        ages.append(leg.quote_age_ms)
-    if not ages:
-        return None
-    return max(ages)
 
 
 def _fill_stage(fills: PaperOpportunityFills) -> OpportunityStatus | None:

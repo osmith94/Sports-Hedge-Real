@@ -27,9 +27,11 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.entry_freshness import (
+    MARKET_REVALIDATION_FAILED,
     SNAPSHOT_STALE_AT_DECISION,
     SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL,
     assess_paper_entry_freshness,
+    conservative_quote_age_at_decision_ms,
     snapshot_freshness_rejection,
 )
 from sports_hedge.paper.trades import PaperTradeState
@@ -83,8 +85,14 @@ def _freshness_bundle(
     return scan, watchlist, ops, repository, ledger, settings
 
 
-def _with_quote_age(decision, age_ms: int, *, scanned_at: datetime = T1):
-    captured = scanned_at - timedelta(milliseconds=age_ms)
+def _with_quote_age(
+    decision,
+    age_ms: int,
+    *,
+    scanned_at: datetime = T1,
+    processing_delay_ms: int = 0,
+):
+    captured = scanned_at - timedelta(milliseconds=processing_delay_ms)
     legs = [
         leg.model_copy(update={"quote_age_ms": age_ms, "quote_captured_at": captured})
         for leg in decision.fill_legs
@@ -94,7 +102,13 @@ def _with_quote_age(decision, age_ms: int, *, scanned_at: datetime = T1):
     )
 
 
-def _qualify(scan, *, age_ms: int, scanned_at: datetime = T1):
+def _qualify(
+    scan,
+    *,
+    age_ms: int,
+    scanned_at: datetime = T1,
+    processing_delay_ms: int = 0,
+):
     decision = scan.scan_pair(
         _matchbook_btts(),
         _polymarket_btts(),
@@ -105,7 +119,9 @@ def _qualify(scan, *, age_ms: int, scanned_at: datetime = T1):
     )
     assert decision.eligible_for_paper_simulation is True, decision.rejection_reasons
     assert decision.allocation is not None and decision.allocation.accepted
-    return _with_quote_age(decision, age_ms, scanned_at=scanned_at)
+    return _with_quote_age(
+        decision, age_ms, scanned_at=scanned_at, processing_delay_ms=processing_delay_ms
+    )
 
 
 def _observe(scan, watchlist, decision):
@@ -139,6 +155,7 @@ def test_snapshot_freshness_ignores_backend_dispatch_delay() -> None:
         quote_age_at_decision_ms=300,
         simulated_latency_ms=500,
         paper_entry_max_quote_age_ms=2000,
+        snapshot_bound=True,
     )
     assert freshness.accepted is True
     assert freshness.simulated_arrival_quote_age_ms == 800
@@ -151,24 +168,47 @@ def test_snapshot_freshness_ignores_backend_dispatch_delay() -> None:
     ) is None
 
 
+def test_conservative_quote_age_includes_capture_to_decision_elapsed() -> None:
+    captured = T1 - timedelta(milliseconds=400)
+    age = conservative_quote_age_at_decision_ms(
+        decision_at=T1,
+        known_age_ms=300,
+        quote_captured_at=captured,
+    )
+    assert age == 700
+    freshness = assess_paper_entry_freshness(
+        decision_at=T1,
+        dispatched_at=T1 + timedelta(milliseconds=1500),
+        quote_age_at_decision_ms=300,
+        simulated_latency_ms=500,
+        paper_entry_max_quote_age_ms=2000,
+        quote_captured_at=captured,
+        snapshot_bound=True,
+    )
+    assert freshness.quote_age_at_decision_ms == 700
+    assert freshness.simulated_arrival_quote_age_ms == 1200
+    assert freshness.accepted is True
+
+
 def test_backend_delay_does_not_create_false_stale_rejection(tmp_path: Path) -> None:
-    scan, watchlist, ops, repository, ledger, settings = _freshness_bundle(tmp_path, autofill=False)
+    scan, watchlist, ops, repository, ledger, settings = _freshness_bundle(tmp_path, autofill=True)
     try:
         decision = _qualify(scan, age_ms=300)
         seeded = _observe(scan, watchlist, decision)
         assert seeded.status is OpportunityStatus.TRIGGERED
-        ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER, autofill=False)
-        opportunity_id = seeded.opportunity_id
         dispatch_at = T1 + timedelta(milliseconds=1500)
         presented = watchlist.triggered(as_of=dispatch_at, limit=10)
-        assert [row.opportunity_id for row in presented] == [opportunity_id]
-        result = ops.simulate_fill(
-            opportunity_id,
-            simulate_external=True,
+        assert [row.opportunity_id for row in presented] == [seeded.opportunity_id]
+        ops.persist_triggered_chain(
+            decision,
             provenance=DataProvenance.LIVE_PAPER,
+            autofill=True,
             now=dispatch_at,
         )
-        freshness = result.entry_freshness
+        trades = ops.list_active_trades()
+        assert len(trades) == 1
+        plan = ops._plans[seeded.opportunity_id]
+        freshness = plan.entry_freshness
         assert freshness is not None
         assert freshness.simulated_arrival_quote_age_ms == 800
         assert freshness.decision_to_autofill_dispatch_ms == 1500
@@ -176,8 +216,6 @@ def test_backend_delay_does_not_create_false_stale_rejection(tmp_path: Path) -> 
         assert freshness.simulated_latency_ms == 500
         assert freshness.paper_entry_max_quote_age_ms == 2000
         assert freshness.accepted is True
-        trades = ops.list_active_trades()
-        assert len(trades) == 1
         assert trades[0].state is PaperTradeState.OPEN
         assert trades[0].places_orders is False
         assert trades[0].paper_only is True
@@ -195,13 +233,17 @@ def test_presentation_aging_after_trigger_does_not_false_stale_bound_entry(
         decision = _qualify(scan, age_ms=300)
         seeded = _observe(scan, watchlist, decision)
         ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER, autofill=False)
+        watchlist.begin_paper_fill_attempt(
+            seeded.opportunity_id,
+            occurred_at=T1,
+            bind_snapshot=True,
+        )
         dispatch_at = T1 + timedelta(milliseconds=1800)
         aged = watchlist.triggered(as_of=dispatch_at, limit=10)
         assert aged == []
         row = watchlist.repository.get(seeded.opportunity_id)
         assert row is not None
-        assert row.status is OpportunityStatus.REJECTED
-        assert "stale_quote" in row.rejection_reasons
+        assert row.status is OpportunityStatus.PAPER_FILLING
         result = ops.simulate_fill(
             seeded.opportunity_id,
             simulate_external=True,
@@ -229,25 +271,53 @@ def test_presentation_aging_after_trigger_does_not_false_stale_bound_entry(
         ledger.close()
 
 
-def test_genuine_stale_at_simulated_arrival_fails(tmp_path: Path) -> None:
+def test_manual_fill_does_not_revive_aged_rejected_snapshot(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=False)
     try:
-        decision = _qualify(scan, age_ms=1700)
+        decision = _qualify(scan, age_ms=300)
         seeded = _observe(scan, watchlist, decision)
-        assert seeded.status is OpportunityStatus.TRIGGERED
         ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER, autofill=False)
-        with pytest.raises(PaperOperationsError, match=SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL):
+        dispatch_at = T1 + timedelta(milliseconds=1800)
+        aged = watchlist.triggered(as_of=dispatch_at, limit=10)
+        assert aged == []
+        row = watchlist.repository.get(seeded.opportunity_id)
+        assert row is not None
+        assert row.status is OpportunityStatus.REJECTED
+        assert "stale_quote" in row.rejection_reasons
+        with pytest.raises(PaperOperationsError, match=MARKET_REVALIDATION_FAILED):
             ops.simulate_fill(
                 seeded.opportunity_id,
                 simulate_external=True,
                 provenance=DataProvenance.LIVE_PAPER,
-                now=T1 + timedelta(milliseconds=1500),
+                now=dispatch_at,
             )
+        assert ops.list_active_trades() == []
+        events = watchlist.activity(opportunity_id=seeded.opportunity_id)
+        assert not any(event.event_type is LifecycleEventType.PAPER_FILL_COMPLETE for event in events)
+        assert any(event.event_type is LifecycleEventType.TRIGGER_LOST_BEFORE_FILL for event in events)
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_genuine_stale_at_simulated_arrival_fails(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=True)
+    try:
+        decision = _qualify(scan, age_ms=1700)
+        seeded = _observe(scan, watchlist, decision)
+        assert seeded.status is OpportunityStatus.TRIGGERED
+        ops.persist_triggered_chain(
+            decision,
+            provenance=DataProvenance.LIVE_PAPER,
+            autofill=True,
+            now=T1 + timedelta(milliseconds=1500),
+        )
         plan = ops._plans[seeded.opportunity_id]
         assert plan.entry_freshness is not None
         assert plan.entry_freshness.quote_age_at_decision_ms == 1700
         assert plan.entry_freshness.simulated_arrival_quote_age_ms == 2200
         assert plan.entry_freshness.decision_to_autofill_dispatch_ms == 1500
+        assert plan.entry_freshness.rejection_reason == SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
         assert ops._entry_rejections[seeded.opportunity_id] == SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
         assert ops.list_active_trades() == []
         snap = ledger.treasury.snapshot()
@@ -277,6 +347,93 @@ def test_stale_at_decision_fails(tmp_path: Path) -> None:
             )
         assert ops.list_active_trades() == []
         assert ops._entry_rejections[seeded.opportunity_id] == SNAPSHOT_STALE_AT_DECISION
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_processing_delay_between_capture_and_t1_counts_toward_arrival_age(
+    tmp_path: Path,
+) -> None:
+    scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=True)
+    try:
+        decision = _qualify(scan, age_ms=300, processing_delay_ms=400)
+        seeded = _observe(scan, watchlist, decision)
+        ops.persist_triggered_chain(
+            decision,
+            provenance=DataProvenance.LIVE_PAPER,
+            autofill=True,
+            now=T1 + timedelta(milliseconds=1500),
+        )
+        plan = ops._plans[seeded.opportunity_id]
+        freshness = plan.entry_freshness
+        assert freshness is not None
+        assert freshness.quote_age_at_decision_ms == 700
+        assert freshness.simulated_arrival_quote_age_ms == 1200
+        assert freshness.decision_to_autofill_dispatch_ms == 1500
+        assert freshness.accepted is True
+        assert ops.list_active_trades()[0].state is PaperTradeState.OPEN
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_processing_delay_can_make_simulated_arrival_stale(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=True)
+    try:
+        decision = _qualify(scan, age_ms=300, processing_delay_ms=1300)
+        seeded = _observe(scan, watchlist, decision)
+        ops.persist_triggered_chain(
+            decision,
+            provenance=DataProvenance.LIVE_PAPER,
+            autofill=True,
+            now=T1 + timedelta(milliseconds=1500),
+        )
+        plan = ops._plans[seeded.opportunity_id]
+        freshness = plan.entry_freshness
+        assert freshness is not None
+        assert freshness.quote_age_at_decision_ms == 1600
+        assert freshness.simulated_arrival_quote_age_ms == 2100
+        assert freshness.rejection_reason == SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
+        assert ops.list_active_trades() == []
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_rejected_attempt_does_not_suppress_later_trigger_lost(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=True)
+    try:
+        stale = _qualify(scan, age_ms=1700)
+        seeded = _observe(scan, watchlist, stale)
+        ops.persist_triggered_chain(
+            stale,
+            provenance=DataProvenance.LIVE_PAPER,
+            autofill=True,
+            now=T1,
+        )
+        assert ops.list_active_trades() == []
+        assert ops._entry_rejections[seeded.opportunity_id] == SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
+        assert watchlist.has_active_bound_attempt(seeded.opportunity_id) is False
+
+        later = T1 + timedelta(seconds=3)
+        fresh = _qualify(scan, age_ms=300, scanned_at=later)
+        retriggered = _observe(scan, watchlist, fresh)
+        assert retriggered.status is OpportunityStatus.TRIGGERED
+        lost_at = later + timedelta(seconds=3)
+        aged = watchlist.triggered(as_of=lost_at, limit=10)
+        assert aged == []
+        row = watchlist.repository.get(seeded.opportunity_id)
+        assert row is not None
+        assert row.status is OpportunityStatus.REJECTED
+        lost = [
+            event
+            for event in watchlist.activity(opportunity_id=seeded.opportunity_id)
+            if event.event_type is LifecycleEventType.TRIGGER_LOST_BEFORE_FILL
+            and event.occurred_at >= later
+        ]
+        assert lost
+        assert watchlist.has_active_bound_attempt(seeded.opportunity_id) is False
     finally:
         repository.close()
         ledger.close()

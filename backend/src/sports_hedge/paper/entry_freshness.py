@@ -2,25 +2,29 @@
 
 Phase-1 paper economic simulation ages the qualified snapshot by configured
 simulated execution latency only. Backend persistence / UI dispatch delay is
-telemetry, not venue quote age.
+telemetry, not venue quote age — and only for an already-started autofill
+attempt.
 
 T0 quote capture
 T1 qualified decision (`PaperScanDecision.scanned_at`)
 T2 autofill dispatch (wall-clock telemetry)
 T3 simulated market arrival = T1 + simulated_execution_latency
 
-quote_age_at_decision = T1 - T0
+quote_age_at_decision = max over required legs of
+    known provider/source age at capture + (T1 - capture/observation)
 simulated_arrival_age = quote_age_at_decision + simulated_execution_latency
 reject if simulated_arrival_age >= paper_entry_max_quote_age_ms
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.application.quote_freshness import require_aware_instant
+from sports_hedge.paper.fills import PaperOpportunityLeg
 
 SNAPSHOT_STALE_AT_DECISION = "snapshot_stale_at_decision"
 SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL = "snapshot_stale_at_simulated_arrival"
@@ -87,6 +91,51 @@ class PaperEntryFreshness(BaseModel):
         return " ".join(parts)
 
 
+def _elapsed_ms(start: datetime, end: datetime) -> int:
+    return max(0, int((end - start).total_seconds() * 1000))
+
+
+def conservative_quote_age_at_decision_ms(
+    *,
+    decision_at: datetime,
+    known_age_ms: int | None = None,
+    quote_captured_at: datetime | None = None,
+    legs: Sequence[PaperOpportunityLeg] = (),
+) -> int | None:
+    """T1 quote age: known provider/source age plus capture → decision elapsed.
+
+    Conservatively uses the oldest required opening leg. A required leg with
+    neither provider age nor a capture/observation timestamp is unknown.
+    """
+
+    decision = require_aware_instant(decision_at, "decision_at")
+    ages: list[int] = []
+    required = [leg for leg in legs if leg.requested_stake > 0]
+    if required:
+        for leg in required:
+            if leg.quote_age_ms is None and leg.quote_captured_at is None:
+                return None
+            elapsed = 0
+            if leg.quote_captured_at is not None:
+                captured = require_aware_instant(leg.quote_captured_at, "quote_captured_at")
+                elapsed = _elapsed_ms(captured, decision)
+            provider_age = 0 if leg.quote_age_ms is None else leg.quote_age_ms
+            ages.append(provider_age + elapsed)
+    captured = None
+    if quote_captured_at is not None:
+        captured = require_aware_instant(quote_captured_at, "quote_captured_at")
+        plan_elapsed = _elapsed_ms(captured, decision)
+        if known_age_ms is None:
+            ages.append(plan_elapsed)
+        else:
+            ages.append(known_age_ms + plan_elapsed)
+    elif known_age_ms is not None:
+        ages.append(known_age_ms)
+    if not ages:
+        return None
+    return max(ages)
+
+
 def snapshot_freshness_rejection(
     *,
     quote_age_at_decision_ms: int | None,
@@ -119,29 +168,46 @@ def assess_paper_entry_freshness(
     simulated_latency_ms: int,
     paper_entry_max_quote_age_ms: int,
     quote_captured_at: datetime | None = None,
+    legs: Sequence[PaperOpportunityLeg] = (),
+    snapshot_bound: bool = False,
 ) -> PaperEntryFreshness:
-    """Evaluate bound-snapshot freshness and record T2 dispatch as telemetry only."""
+    """Evaluate paper-entry freshness.
+
+    `snapshot_bound=True` is for an already-started autofill attempt: T2 dispatch
+    is telemetry only. Manual/public fills include T1→T2 elapsed in the
+    current-age gate so an aged radar row cannot be revived from T1 alone.
+    """
 
     decision = require_aware_instant(decision_at, "decision_at")
     dispatched = require_aware_instant(dispatched_at, "autofill_dispatched_at")
     captured = None
     if quote_captured_at is not None:
         captured = require_aware_instant(quote_captured_at, "quote_captured_at")
-    elapsed_ms = int((dispatched - decision).total_seconds() * 1000)
-    dispatch_ms = max(0, elapsed_ms)
-    arrival_age = None
-    if quote_age_at_decision_ms is not None:
-        arrival_age = quote_age_at_decision_ms + simulated_latency_ms
+    derived_age = conservative_quote_age_at_decision_ms(
+        decision_at=decision,
+        known_age_ms=quote_age_at_decision_ms,
+        quote_captured_at=captured,
+        legs=legs,
+    )
+    dispatch_ms = _elapsed_ms(decision, dispatched)
+    arrival_age = None if derived_age is None else derived_age + simulated_latency_ms
     reason = snapshot_freshness_rejection(
-        quote_age_at_decision_ms=quote_age_at_decision_ms,
+        quote_age_at_decision_ms=derived_age,
         simulated_latency_ms=simulated_latency_ms,
         paper_entry_max_quote_age_ms=paper_entry_max_quote_age_ms,
     )
+    if reason is None and not snapshot_bound and derived_age is not None:
+        current_age = derived_age + dispatch_ms
+        arrival_age = current_age + simulated_latency_ms
+        if current_age >= paper_entry_max_quote_age_ms:
+            reason = MARKET_REVALIDATION_FAILED
+        elif arrival_age >= paper_entry_max_quote_age_ms:
+            reason = SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
     return PaperEntryFreshness(
         decision_at=decision,
         autofill_dispatched_at=dispatched,
         quote_captured_at=captured,
-        quote_age_at_decision_ms=quote_age_at_decision_ms,
+        quote_age_at_decision_ms=derived_age,
         simulated_latency_ms=simulated_latency_ms,
         paper_entry_max_quote_age_ms=paper_entry_max_quote_age_ms,
         simulated_arrival_quote_age_ms=arrival_age,
@@ -158,5 +224,6 @@ __all__ = [
     "SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL",
     "UNKNOWN_QUOTE_AGE",
     "assess_paper_entry_freshness",
+    "conservative_quote_age_at_decision_ms",
     "snapshot_freshness_rejection",
 ]
