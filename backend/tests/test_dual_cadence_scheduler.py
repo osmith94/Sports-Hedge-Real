@@ -656,7 +656,7 @@ def test_later_universe_status_unsticks_stale_hot_live_pin() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failed_universe_chunks_consume_generation_budget_without_starving_hot() -> None:
+async def test_failed_universe_chunks_do_not_consume_successful_budget_or_starve_hot() -> None:
     clock = FakeClock(NOW)
     coordinator = LiveRefreshCoordinator(clock=clock)
     coordinator._clock = clock
@@ -667,6 +667,7 @@ async def test_failed_universe_chunks_consume_generation_budget_without_starving
     coordinator._next_universe_due = NOW
     coordinator._universe_generation_started_at = None
     coordinator._universe_work_used = 0.0
+    open_generation = None
 
     async def fail_runner() -> CollectionReport:
         clock.advance(8)
@@ -674,25 +675,21 @@ async def test_failed_universe_chunks_consume_generation_budget_without_starving
 
     first = coordinator.plan_tick(now=clock.now)
     assert first.lane == "universe"
+    open_generation = first.universe_generation_id
     with pytest.raises(RuntimeError, match="provider_timeout"):
         await coordinator.run_cycle(
             fail_runner,
             timeout_seconds=first.coordinator_timeout_seconds,
             scan_lane=ScanLane.UNIVERSE,
         )
-    assert coordinator._universe_work_used == pytest.approx(8.0)
-    assert coordinator.status.universe.generation_work_used_s == pytest.approx(8.0)
+    assert coordinator._universe_work_used == pytest.approx(0.0)
+    assert coordinator.status.universe.generation_work_used_s == pytest.approx(0.0)
     assert coordinator.status.universe.degraded is True
-
-    second = coordinator.plan_tick(now=clock.now)
-    assert second.lane == "universe"
-    with pytest.raises(RuntimeError, match="provider_timeout"):
-        await coordinator.run_cycle(
-            fail_runner,
-            timeout_seconds=second.coordinator_timeout_seconds,
-            scan_lane=ScanLane.UNIVERSE,
-        )
-    assert coordinator._universe_work_used == pytest.approx(16.0)
+    assert coordinator._universe_generation_started_at is not None
+    assert coordinator._universe_retry_at is not None
+    assert coordinator._universe_retry_at > clock.now
+    assert coordinator.plan_tick(now=clock.now).lane == "idle"
+    assert coordinator.plan_tick(now=clock.now).reason == "universe_provider_backoff"
 
     clock.now = NOW + timedelta(seconds=20)
     hot_plan = coordinator.plan_tick(now=clock.now)
@@ -708,30 +705,11 @@ async def test_failed_universe_chunks_consume_generation_budget_without_starving
         scan_lane=ScanLane.HOT,
     )
     coordinator._next_hot_due = clock.now + timedelta(seconds=300)
-
-    async def long_fail() -> CollectionReport:
-        clock.advance(50)
-        raise RuntimeError("provider_timeout")
-
-    attempts = 0
-    while coordinator._universe_generation_started_at is not None:
-        attempts += 1
-        assert attempts <= 8
-        plan = coordinator.plan_tick(now=clock.now)
-        assert plan.lane == "universe"
-        with pytest.raises(RuntimeError, match="provider_timeout"):
-            await coordinator.run_cycle(
-                long_fail,
-                timeout_seconds=plan.coordinator_timeout_seconds,
-                scan_lane=ScanLane.UNIVERSE,
-            )
-    assert coordinator._universe_work_used == 0.0
-    assert coordinator._universe_generation_started_at is None
-    assert coordinator.status.universe.generation_work_used_s >= 150
-    closed = coordinator.plan_tick(now=clock.now)
-    assert closed.lane != "universe"
-    clock.now = coordinator._next_hot_due
-    assert coordinator.plan_tick(now=clock.now).lane == "hot"
+    clock.now = coordinator._universe_retry_at
+    resumed = coordinator.plan_tick(now=clock.now)
+    assert resumed.lane == "universe"
+    assert resumed.universe_generation_id == open_generation
+    assert coordinator._universe_work_used == pytest.approx(0.0)
 
 
 def test_frontend_auto_refresh_does_not_post_collect_when_server_owns_scans() -> None:

@@ -50,12 +50,26 @@ export function scanCycleDurationLabel(ms: number | null | undefined): string {
 }
 
 export function scanCycleHealthLabel(cycle: PaperScanCycleRecord): string {
-  if (cycle.last_error) return `scanner error · ${cycle.last_error}`;
+  if (cycle.last_error) {
+    const error = String(cycle.last_error);
+    if (/timeout|list_events|429/i.test(error)) return `provider failure · ${error}`;
+    return `scanner error · ${error}`;
+  }
   const health = cycle.venue_health ?? {};
   const failed = Object.entries(health)
     .filter(([, value]) => value === "unavailable" || value === "timeout" || value === "degraded" || value === "error" || value === "failed")
     .map(([venue, value]) => `${venue} ${value}`);
   if (failed.length) return failed.join(" · ");
+  if ((cycle.not_evaluated_count ?? 0) > 0) {
+    return `partial · ${cycle.not_evaluated_count} not evaluated`;
+  }
+  const skippedNote = String(cycle.operator_summary || "");
+  if (/unsupported markets skipped/i.test(skippedNote)) {
+    return "unsupported markets skipped";
+  }
+  if ((cycle.matched_event_pairs ?? 0) > 0 && (cycle.matched_market_pairs ?? 0) === 0) {
+    return "evaluated · 0 equivalent markets";
+  }
   if (cycle.degraded) return "degraded";
   const ok = Object.keys(health).length ? "venues ok" : "health unknown";
   return ok;

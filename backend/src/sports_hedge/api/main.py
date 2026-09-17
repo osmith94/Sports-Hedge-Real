@@ -19,6 +19,7 @@ from sports_hedge.api.priority_alerts import router as priority_alerts_router
 from sports_hedge.api.watchlist import router as watchlist_router
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.config import emit_dotenv_operator_diagnostics, get_settings, inspect_dotenv_sources
+from sports_hedge.persistence.universe_checkpoint import get_universe_checkpoint_store
 from sports_hedge.domain.models import VenueCapabilities, VenueName
 from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import (
@@ -32,6 +33,7 @@ from sports_hedge.venues.polymarket import PolymarketClient
 async def lifespan(_app: FastAPI):
     emit_dotenv_operator_diagnostics(force=True)
     coordinator = get_live_refresh_coordinator()
+    coordinator.bind_universe_checkpoint_store(get_universe_checkpoint_store())
     coordinator.configure_from_settings()
     schedule = get_accounting_schedule()
     await coordinator.start_server_loop(server_owned_refresh_tick)

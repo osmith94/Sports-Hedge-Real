@@ -391,19 +391,33 @@ async def test_provider_failure_does_not_leak_skip_into_next_generation() -> Non
         )
     assert coordinator._universe_generation_id == open_generation
     assert "a" in coordinator._universe_evaluated_ids
-    while coordinator._universe_generation_started_at is not None:
-        coordinator._next_hot_due = clock.now + timedelta(seconds=300)
-        plan = coordinator.plan_tick(now=clock.now)
-        assert plan.lane == "universe"
-        with pytest.raises(RuntimeError, match="provider_timeout"):
-            await coordinator.run_cycle(
-                fail_runner,
-                timeout_seconds=plan.coordinator_timeout_seconds,
-                scan_lane=ScanLane.UNIVERSE,
-            )
-    assert coordinator._universe_evaluated_ids == set()
-    assert coordinator._universe_cursor is None
-    assert coordinator._universe_work_used == 0.0
+    assert coordinator._universe_work_used == pytest.approx(2.0)
+    assert coordinator._universe_generation_started_at is not None
+    retry_at = coordinator._universe_retry_at
+    assert retry_at is not None
+    clock.now = retry_at
+    coordinator._next_hot_due = clock.now + timedelta(seconds=1_000)
+    resumed = coordinator.plan_tick(now=clock.now)
+    assert resumed.lane == "universe"
+    assert resumed.generation_resume is True
+    assert resumed.universe_generation_id == open_generation
+    assert "a" in resumed.skip_event_ids
+    assert resumed.resume_cursor == "a"
+
+    async def finish_runner():
+        when = clock.now
+        return _report(
+            [_fixture("b", kickoff=NOW + timedelta(days=3), evaluation="evaluated")],
+            when=when,
+            scan_lane=ScanLane.UNIVERSE.value,
+        ).model_copy(update={"completed_at": when + timedelta(seconds=1)})
+
+    await coordinator.run_cycle(
+        finish_runner,
+        timeout_seconds=resumed.coordinator_timeout_seconds,
+        scan_lane=ScanLane.UNIVERSE,
+    )
+    assert coordinator._universe_generation_started_at is None
     clock.now = coordinator._next_universe_due
     coordinator._next_hot_due = clock.now + timedelta(seconds=1_000)
     nxt = coordinator.plan_tick(now=clock.now)
@@ -434,21 +448,22 @@ async def test_cancellation_does_not_leak_closed_generation_skip() -> None:
             scan_lane=ScanLane.UNIVERSE,
         )
     assert coordinator._universe_generation_started_at is not None
+    retry_at = coordinator._universe_retry_at
+    assert retry_at is not None
+    clock.now = retry_at
+    coordinator._next_hot_due = clock.now + timedelta(seconds=10_000)
     resumed = coordinator.plan_tick(now=clock.now)
     assert resumed.lane == "universe"
     assert resumed.universe_generation_id == plan.universe_generation_id
     coordinator._universe_evaluated_ids = {f"ev-{index}" for index in range(SKIP_N)}
     coordinator._universe_cursor = "ev-7"
-    while coordinator._universe_generation_started_at is not None:
-        coordinator._next_hot_due = clock.now + timedelta(seconds=300)
-        fail_plan = coordinator.plan_tick(now=clock.now)
-        assert fail_plan.lane == "universe"
-        with pytest.raises(RuntimeError, match="scan_cancelled"):
-            await coordinator.run_cycle(
-                cancel_runner,
-                timeout_seconds=fail_plan.coordinator_timeout_seconds,
-                scan_lane=ScanLane.UNIVERSE,
-            )
+    coordinator.record_report(
+        _report(_universe_fixtures(), when=clock.now, scan_lane=ScanLane.UNIVERSE.value).model_copy(
+            update={"completed_at": clock.now + timedelta(seconds=1)}
+        ),
+        scan_lane=ScanLane.UNIVERSE,
+    )
+    assert coordinator._universe_generation_started_at is None
     clock.now = coordinator._next_universe_due
     nxt = coordinator.plan_tick(now=clock.now)
     assert nxt.lane == "universe"

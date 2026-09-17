@@ -6,10 +6,17 @@ paper_decisions. Distinct from per-market ``paper_scan_records``.
 
 from __future__ import annotations
 
-from sports_hedge.application.collector import CollectionReport
+from sports_hedge.application.collector import CollectionReport, CollectorIssue
 from sports_hedge.application.lane_venues import is_provider_health_failure
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.paper.audit import PaperScanCycleRecord, scan_cycle_identity
+
+SCAN_CYCLE_DEADLINE_DETAIL = "scan_cycle_deadline_reached"
+UNSUPPORTED_MARKET_STAGES = frozenset({"normalize_market"})
+PER_ITEM_SKIP_STAGES = frozenset({"normalize_market", "normalize_event"})
+PROVIDER_FAILURE_STAGES = frozenset(
+    {"list_events", "list_markets", "get_order_book", "get_series", "order_book"}
+)
 
 
 def coerce_cycle_lane(scan_lane: ScanLane | str | None) -> str:
@@ -45,11 +52,22 @@ def build_paper_scan_cycle_record(
     duration_ms = max(
         0, int((report.completed_at - report.started_at).total_seconds() * 1000)
     )
-    last_error = _cycle_last_error(report, diagnostics)
+    last_error = cycle_last_error(report, diagnostics)
+    skipped_unsupported = sum(
+        1 for issue in report.issues if issue_is_unsupported_market_skip(issue)
+    )
     degraded = bool(
         not_evaluated_count > 0
         or last_error
         or any(is_provider_health_failure(value) for value in report.venue_health.values())
+    )
+    operator_summary = _cycle_operator_summary(
+        report.operator_summary,
+        last_error=last_error,
+        not_evaluated_count=not_evaluated_count,
+        skipped_unsupported=skipped_unsupported,
+        matched_event_pairs=report.matched_event_pairs,
+        matched_market_pairs=report.matched_market_pairs,
     )
     generation_id = diagnostics.get("universe_generation_id")
     work_used = diagnostics.get("generation_work_used_s")
@@ -76,7 +94,7 @@ def build_paper_scan_cycle_record(
         completeness=None if completeness is None else str(completeness),
         generation_resume=None if generation_resume is None else bool(generation_resume),
         generation_work_used_s=None if work_used is None else float(work_used),
-        operator_summary=report.operator_summary or None,
+        operator_summary=operator_summary,
     )
 
 
@@ -99,12 +117,73 @@ def _count_or_diagnostic(
         return counted
 
 
-def _cycle_last_error(report: CollectionReport, diagnostics: dict) -> str | None:
-    persist_error = diagnostics.get("persist_error")
+def cycle_last_error(report: CollectionReport, diagnostics: dict | None = None) -> str | None:
+    payload = diagnostics if diagnostics is not None else dict(report.scan_diagnostics or {})
+    persist_error = payload.get("persist_error")
     if persist_error:
         return str(persist_error)
-    if report.issues:
-        detail = report.issues[0].detail
-        if detail:
-            return str(detail)
+    for issue in report.issues:
+        if issue_is_provider_failure(issue):
+            detail = issue.detail
+            if detail:
+                return str(detail)
     return None
+
+
+def issue_is_deadline_partial(issue: CollectorIssue | object) -> bool:
+    detail = str(getattr(issue, "detail", "") or "").strip()
+    return detail == SCAN_CYCLE_DEADLINE_DETAIL
+
+
+def issue_is_unsupported_market_skip(issue: CollectorIssue | object) -> bool:
+    stage = str(getattr(issue, "stage", "") or "").strip()
+    detail = str(getattr(issue, "detail", "") or "")
+    if stage in UNSUPPORTED_MARKET_STAGES:
+        return True
+    return "Unsupported Matchbook market:" in detail
+
+
+def issue_is_per_item_skip(issue: CollectorIssue | object) -> bool:
+    if issue_is_deadline_partial(issue) or issue_is_unsupported_market_skip(issue):
+        return True
+    stage = str(getattr(issue, "stage", "") or "").strip()
+    return stage in PER_ITEM_SKIP_STAGES
+
+
+def issue_is_provider_failure(issue: CollectorIssue | object) -> bool:
+    if issue_is_per_item_skip(issue):
+        return False
+    stage = str(getattr(issue, "stage", "") or "").strip()
+    detail = str(getattr(issue, "detail", "") or "").casefold()
+    if stage in PROVIDER_FAILURE_STAGES:
+        return True
+    if "timeout" in detail or "429" in detail:
+        return True
+    return False
+
+
+def _cycle_operator_summary(
+    existing: str | None,
+    *,
+    last_error: str | None,
+    not_evaluated_count: int,
+    skipped_unsupported: int,
+    matched_event_pairs: int,
+    matched_market_pairs: int,
+) -> str | None:
+    notes: list[str] = []
+    if last_error:
+        notes.append(f"provider failure · {last_error}")
+    elif not_evaluated_count > 0:
+        notes.append(f"partial · {not_evaluated_count} not evaluated")
+    elif skipped_unsupported:
+        notes.append(f"{skipped_unsupported} unsupported markets skipped")
+    elif matched_event_pairs > 0 and matched_market_pairs == 0:
+        notes.append("evaluated · 0 equivalent markets")
+    if existing and existing.strip():
+        if notes:
+            extra = " · ".join(notes)
+            if extra not in existing:
+                return f"{existing.strip()} · {extra}"
+        return existing.strip()
+    return " · ".join(notes) or None

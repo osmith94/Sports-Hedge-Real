@@ -35,13 +35,14 @@ function cycle(overrides: Partial<PaperScanCycleRecord> = {}): PaperScanCycleRec
     qualifying_arb_count: 0,
     venue_health: { matchbook: "ok", polymarket: "ok", kalshi: "ok" },
     degraded: false,
+    last_error: null,
     ...overrides,
   };
 }
 
 describe("scan cycle history presentation", () => {
   it("renders a zero-decision completed cycle without synthesizing market rows", () => {
-    const row = scanCycleRow(cycle({ paper_decision_count: 0, qualifying_arb_count: 0 }));
+    const row = scanCycleRow(cycle({ paper_decision_count: 0, qualifying_arb_count: 0, not_evaluated_count: 0 }));
     assert.equal(row.laneLabel, "HOT");
     assert.equal(row.paperDecisionLabel, "0");
     assert.equal(row.qualifyingLabel, "0");
@@ -67,7 +68,52 @@ describe("scan cycle history presentation", () => {
     );
     assert.match(row.healthLabel, /kalshi unavailable/);
     assert.doesNotMatch(row.healthLabel, /scan failed/i);
-    assert.equal(scanCycleHealthLabel(cycle({ last_error: "scan_cycle_timeout after 25s" })), "scanner error · scan_cycle_timeout after 25s");
+    assert.equal(
+      scanCycleHealthLabel(cycle({ last_error: "scan_cycle_timeout after 25s" })),
+      "provider failure · scan_cycle_timeout after 25s",
+    );
+    assert.equal(
+      scanCycleHealthLabel(cycle({ last_error: "list_events_timeout after 15s" })),
+      "provider failure · list_events_timeout after 15s",
+    );
+  });
+
+  it("does not promote unsupported Matchbook market skips or deadline leftovers to scanner error", () => {
+    assert.equal(
+      scanCycleHealthLabel(
+        cycle({
+          last_error: null,
+          not_evaluated_count: 12,
+          degraded: true,
+          operator_summary: "Full sweep · partial · 12 not evaluated",
+        }),
+      ),
+      "partial · 12 not evaluated",
+    );
+    assert.equal(
+      scanCycleHealthLabel(
+        cycle({
+          last_error: null,
+          not_evaluated_count: 0,
+          matched_event_pairs: 37,
+          matched_market_pairs: 0,
+          operator_summary: "2 unsupported markets skipped",
+        }),
+      ),
+      "unsupported markets skipped",
+    );
+    assert.equal(
+      scanCycleHealthLabel(
+        cycle({
+          last_error: null,
+          not_evaluated_count: 0,
+          matched_event_pairs: 37,
+          matched_market_pairs: 0,
+          operator_summary: "Full sweep",
+        }),
+      ),
+      "evaluated · 0 equivalent markets",
+    );
   });
 
   it("keeps empty and unavailable states honest", () => {

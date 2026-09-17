@@ -178,10 +178,10 @@ Normal hot cohorts should finish well under 25s. The 25s timeout exists so a slo
 | Safety margin | `paper_universe_hot_yield_safety_margin_seconds` default **2s**. Chunk wall time must also leave #157 coordinator grace inside that bound (§5.2.1). |
 | Cohort | Full currently captured/in-scope universe, including T+6d. |
 | Purpose | Discover new fixtures/markets; keep distant fixtures on radar; detect initial cross-venue mispricing; promote into HOT as kickoff approaches. |
-| Progress | Resumable cursor (`universe_cursor_canonical_event_id` + generation id). Incomplete chunk retains evaluated work; remainder `not_evaluated_scan_deadline` for **this chunk**, without clobbering prior valid evaluations. Generation-local skip/cursor/work is bound to `universe_generation_id` and **reset when that generation closes** (complete leftover_n=0 or 150s budget). HOT preemption inside an open generation keeps skip/cursor. A newly due generation plans with empty skip/cursor and a new generation id. Completeness diagnostics distinguish deadline leftovers, a genuine empty universe, and stale-generation skip bugs (which the scheduler must not emit). |
+| Progress | Resumable cursor (`universe_cursor_canonical_event_id` + generation id) persisted in the local paper-settings SQLite checkpoint. Incomplete chunk retains evaluated work; remainder `not_evaluated_scan_deadline` for **this chunk**, without clobbering prior valid evaluations. Generation-local skip/cursor/successful-work is bound to `universe_generation_id` and **reset only when that generation genuinely completes** (`leftover_n=0`) or an explicit coordinator reset/invalid checkpoint proves it cannot resume. A provider timeout/exception does **not** consume successful-generation budget or erase cursor/evaluated IDs. If the 150s successful-work budget is exhausted with leftovers, **pause** until the next UNIVERSE continuation window and keep the same generation/cursor/evaluated IDs; resume later with a fresh 150s window. HOT preemption inside an open generation keeps skip/cursor. A newly due generation (after a real close) plans with empty skip/cursor and a new generation id. Completeness diagnostics distinguish deadline leftovers, a genuine empty universe, and stale-generation skip bugs (which the scheduler must not emit). |
 | Radar TTL | **360s**. Radar-current only. |
 
-UNIVERSE must never starve HOT. A generation that cannot finish in one 180s window continues via cursor until evaluated or the 150s work budget is consumed; it does not start a second overlapping generation.
+UNIVERSE must never starve HOT. A generation that cannot finish in one 180s window continues via cursor until evaluated; exhausting the 150s successful-work budget pauses the same generation rather than forgetting it. Failed provider chunks use bounded backoff and do not start a second overlapping generation.
 
 ### 5.2.1 UNIVERSE chunk wall-clock
 
@@ -198,7 +198,9 @@ if chunk_wall < min_chunk:          # cannot fit 5s grace + 4s reserve + ≥1 pr
 collector_timeout = chunk_wall - SCAN_CYCLE_RETURN_GRACE_SECONDS        # 5s
 # #157 reserve is taken from collector_timeout (min(4s, 20% of collector_timeout))
 run collect_and_scan(scan_lane=universe, cycle_timeout=collector_timeout, resume_cursor=…)
-persist cursor + generation_work_used += actual_duration
+on successful report: persist checkpoint + generation_work_used += successful_duration
+on provider exception/timeout: do not charge successful-work; keep cursor/evaluated IDs; bounded backoff
+if successful-work budget exhausted with leftovers: pause same generation until next continuation window
 yield to HOT
 ```
 
@@ -505,7 +507,7 @@ Provider timeouts stay #157-bounded (`remaining soft budget`, `MIN_PROVIDER_WAIT
 | Watchlist SQLite | Additive columns or JSON sidecar on opportunity; old rows: `scan_lane=null` treated as `universe` with `last_seen_at` as `last_scanned_at`. Missing lane + age > universe TTL → omit from Tracked (fail closed). |
 | `#157` hang/partial tests now on #131 | Must stay green. Do not change leftover reason strings. |
 | Explicit diagnostic / 60-pair cap | 20s bounded partial response; does not advance scheduler state. |
-| Restart | Process-memory inventory empty → Tracked empty until a collection completes. Watchlist history remains. Scheduler must mark UNIVERSE due **immediately** (bootstrap), not after 180s. |
+| Restart | Open UNIVERSE generation checkpoint in the local paper-settings SQLite restores generation id, successful-work accounting, cursor, evaluated IDs, and the last successful partial roster. Empty checkpoint: Tracked empty until a collection completes; scheduler still marks UNIVERSE due **immediately** (bootstrap), not after 180s. Watchlist history remains. Explicit coordinator reset clears the checkpoint. |
 
 No data backfill job. No second canonical ID migration. No SQLite fixture inventory in this implementation.
 
@@ -533,7 +535,7 @@ New module `backend/tests/test_dual_cadence_scheduler.py` (clock injected; no li
 | 16 | **Startup bootstrap:** new coordinator / empty process-memory store → Tracked `[]`; `plan_tick(now=start)` returns **UNIVERSE** (does not wait 180s and does not run an empty HOT cycle first). After the first bootstrap chunk records inventory, Tracked may become non-empty; HOT membership is classified from that inventory. |
 | 17 | **#161 identity seam:** after a HOT upsert of a subset, `FixtureCurrentStateStore.resolve_canonical_id` still maps cluster id, source event id, and paper-decision event id to the same fixture; `test_tracked_fixture_click_through.py` stays PASS. |
 | 18 | **Freshest status vs HOT economics:** an older HOT `in_running=True` snapshot must not pin membership/detail after a later UNIVERSE observation with `in_running=None` beyond the 3h window. Classify from the freshest provider-status observation; Tracked HOT membership still uses HOT economics only. |
-| 19 | **Failed UNIVERSE chunks consume budget:** timed-out/failed UNIVERSE wall time increments `generation_work_used` and closes the generation at 150s; HOT still starts on its due slot. |
+| 19 | **Failed UNIVERSE chunks do not consume successful-work budget:** a provider timeout/exception keeps cursor/evaluated IDs, applies bounded backoff, and does not close the generation. HOT still starts on its due slot. Successful-work budget exhaustion with leftovers **pauses** the same generation until the next continuation window. |
 | 20 | **One collection owner:** when `server_loop_enabled`, frontend auto-refresh polls `GET /paper/live-refresh` and does not `POST /paper/collect`. |
 | 21 | **Manual collect isolation:** primary `POST /paper/collect/hot` and Advanced `POST /paper/collect` do not increment/reset `generation_work_used_s`, universe cursor, or HOT/UNIVERSE due times. If a scheduled lane is active, either fails fast (409). |
 | 22 | **Live paper auto-capture:** a qualifying `LIVE_PAPER` decision with `paper_autofill_enabled` opens once through `persist_triggered_chain`; repeated HOT observations are idempotent; allocator rejection / stale quote / Tracked-Near do not open; treasury/journal provenance is `live_paper`. |

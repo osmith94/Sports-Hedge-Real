@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -16,6 +17,13 @@ from sports_hedge.application.collector import (
     CollectionReport,
     DiscoveredFixture,
     FixtureDetailReadModel,
+)
+from sports_hedge.application.universe_checkpoint import (
+    UniverseGenerationCheckpoint,
+    checkpoint_from_payload,
+    collection_report_from_snapshot,
+    collection_report_snapshot,
+    universe_provider_backoff_seconds,
 )
 from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
 from sports_hedge.application.lane_venues import (
@@ -40,7 +48,10 @@ from sports_hedge.persistence.lane_venue_settings import (
     get_lane_venue_settings_store,
     resolve_lane_venue_participation,
 )
+from sports_hedge.persistence.universe_checkpoint import SqliteUniverseCheckpointStore
 from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookDiscoveryError
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ScanCycleTimeout(TimeoutError):
@@ -170,6 +181,7 @@ class LiveRefreshCoordinator:
         self,
         clock: Callable[[], datetime] | None = None,
         venue_settings_store: SqliteLaneVenueSettingsStore | None = None,
+        universe_checkpoint_store: SqliteUniverseCheckpointStore | None = None,
     ) -> None:
         self._lock = asyncio.Lock()
         self._state_lock = threading.RLock()
@@ -195,6 +207,12 @@ class LiveRefreshCoordinator:
         self._universe_closed_work_used = 0.0
         self._universe_closed_cursor: str | None = None
         self._universe_closed_evaluated_count = 0
+        self._universe_budget_paused = False
+        self._universe_retry_at: datetime | None = None
+        self._universe_provider_failures = 0
+        self._universe_last_report_snapshot: dict[str, Any] | None = None
+        self._universe_checkpoint_store = universe_checkpoint_store
+        self._universe_checkpoint_restored = False
         self._venue_store = venue_settings_store
         self._pending_participation = participation_from_lists(
             default_operator_venues(),
@@ -248,11 +266,18 @@ class LiveRefreshCoordinator:
             )
             self._sync_venue_status_unlocked()
             self._ensure_due_times_unlocked(self.now(), resolved)
+        self._restore_universe_checkpoint()
 
     def _resolved_store(self, settings: Settings | None = None) -> SqliteLaneVenueSettingsStore:
         if self._venue_store is None:
             self._venue_store = get_lane_venue_settings_store()
         return self._venue_store
+
+    def bind_universe_checkpoint_store(self, store: SqliteUniverseCheckpointStore) -> None:
+        with self._state_lock:
+            self._universe_checkpoint_store = store
+            self._universe_checkpoint_restored = False
+        self._restore_universe_checkpoint()
 
     def bind_venue_store(self, store: SqliteLaneVenueSettingsStore) -> None:
         pending = resolve_lane_venue_participation(store)
@@ -380,6 +405,12 @@ class LiveRefreshCoordinator:
             self._universe_closed_work_used = 0.0
             self._universe_closed_cursor = None
             self._universe_closed_evaluated_count = 0
+            self._universe_budget_paused = False
+            self._universe_retry_at = None
+            self._universe_provider_failures = 0
+            self._universe_last_report_snapshot = None
+            self._clear_universe_checkpoint_unlocked()
+            self._universe_checkpoint_restored = False
             self._cycle_hot_venues = None
             self._cycle_universe_venues = None
             self._cycle_enabled_venues = None
@@ -439,6 +470,8 @@ class LiveRefreshCoordinator:
             next_universe_due = self._next_universe_due
             universe_work_used = self._universe_work_used
             universe_generation_started_at = self._universe_generation_started_at
+            universe_retry_at = self._universe_retry_at
+            universe_budget_paused = self._universe_budget_paused
             (
                 universe_cursor,
                 skip_event_ids,
@@ -450,6 +483,21 @@ class LiveRefreshCoordinator:
         hot_scope = self._hot_identity_scope(evaluated, resolved)
         if hot_due and hot_scope:
             return self._hot_plan(hot_scope, resolved, reason="hot_due")
+        if universe_retry_at is not None and evaluated < universe_retry_at:
+            return DualCadencePlan(lane="idle", reason="universe_provider_backoff")
+        if universe_budget_paused:
+            if next_universe_due is None or evaluated < next_universe_due:
+                return DualCadencePlan(lane="idle", reason="universe_budget_paused")
+            with self._state_lock:
+                self._refresh_paused_universe_window_unlocked()
+                universe_work_used = self._universe_work_used
+                universe_generation_started_at = self._universe_generation_started_at
+                (
+                    universe_cursor,
+                    skip_event_ids,
+                    universe_generation_id,
+                    generation_resume,
+                ) = self._universe_plan_resume_state_unlocked()
         if universe_generation_started_at is not None:
             universe_due = universe_work_used < float(
                 resolved.paper_scan_universe_generation_budget_seconds
@@ -464,7 +512,7 @@ class LiveRefreshCoordinator:
                 else budget
             )
             if remaining <= 0:
-                return DualCadencePlan(lane="idle", reason="universe_budget_exhausted")
+                return DualCadencePlan(lane="idle", reason="universe_budget_paused")
             hot_cadence = timedelta(seconds=resolved.paper_live_refresh_hot_interval_seconds)
             next_hot = next_hot_due or (evaluated + hot_cadence)
             if not hot_scope and next_hot <= evaluated:
@@ -553,7 +601,12 @@ class LiveRefreshCoordinator:
         candidates: list[float] = []
         if self._next_hot_due is not None:
             candidates.append((self._next_hot_due - evaluated).total_seconds())
-        if self._next_universe_due is not None:
+        if self._universe_retry_at is not None:
+            candidates.append((self._universe_retry_at - evaluated).total_seconds())
+        include_universe_due = (
+            self._universe_generation_started_at is None or self._universe_budget_paused
+        )
+        if include_universe_due and self._next_universe_due is not None:
             candidates.append((self._next_universe_due - evaluated).total_seconds())
         if not candidates:
             return float(self.status.interval_seconds)
@@ -953,14 +1006,17 @@ class LiveRefreshCoordinator:
             self._universe_cursor = newly_evaluated[-1]
         elif report.resume_cursor:
             self._universe_cursor = report.resume_cursor
-        budget = self._charge_universe_work(duration_s, report.completed_at)
+        self._universe_provider_failures = 0
+        self._universe_retry_at = None
+        self._universe_last_report_snapshot = collection_report_snapshot(report)
         completeness = (report.scan_diagnostics or {}).get("completeness")
-        if (
-            leftover_n == 0
-            and self._universe_generation_started_at is not None
-            and completeness != UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE
-        ):
-            self._close_universe_generation(report.completed_at)
+        budget = self._charge_successful_universe_work(
+            duration_s,
+            report.completed_at,
+            leftover_n=leftover_n,
+            completeness=completeness,
+        )
+        self._persist_universe_checkpoint_unlocked()
         work_used = self._status_universe_work_used()
         evaluated_count = self._status_universe_evaluated_count()
         resume_cursor = self._status_universe_cursor()
@@ -1043,6 +1099,111 @@ class LiveRefreshCoordinator:
         self._universe_work_used = 0.0
         self._universe_progress_generation_id = None
 
+    def _persist_universe_checkpoint_unlocked(self) -> None:
+        store = self._universe_checkpoint_store
+        if store is None:
+            return
+        if self._universe_generation_started_at is None:
+            try:
+                store.clear()
+            except Exception:
+                LOGGER.warning("failed to clear universe generation checkpoint", exc_info=True)
+            return
+        checkpoint = UniverseGenerationCheckpoint(
+            generation_id=max(1, self._universe_generation_id),
+            generation_started_at=self._universe_generation_started_at,
+            successful_work_used_s=self._universe_work_used,
+            resume_cursor=self._universe_cursor,
+            evaluated_ids=sorted(self._universe_evaluated_ids),
+            next_universe_due=self._next_universe_due,
+            provider_failure_count=self._universe_provider_failures,
+            retry_at=self._universe_retry_at,
+            budget_paused=self._universe_budget_paused,
+            report=self._universe_last_report_snapshot,
+            updated_at=self.now(),
+        )
+        try:
+            store.save(
+                checkpoint.model_dump(mode="json"),
+                updated_at=checkpoint.updated_at.isoformat(),
+            )
+        except Exception:
+            LOGGER.warning("failed to persist universe generation checkpoint", exc_info=True)
+
+    def _clear_universe_checkpoint_unlocked(self) -> None:
+        store = self._universe_checkpoint_store
+        if store is None:
+            return
+        try:
+            store.clear()
+        except Exception:
+            LOGGER.warning("failed to clear universe generation checkpoint", exc_info=True)
+
+    def _restore_universe_checkpoint(self) -> None:
+        with self._state_lock:
+            if self._universe_checkpoint_restored:
+                return
+            self._universe_checkpoint_restored = True
+            if self._universe_generation_started_at is not None:
+                return
+            store = self._universe_checkpoint_store
+        if store is None:
+            return
+        try:
+            payload = store.load()
+        except Exception:
+            LOGGER.warning("failed to load universe generation checkpoint", exc_info=True)
+            return
+        checkpoint = checkpoint_from_payload(payload)
+        if checkpoint is None:
+            if payload is not None:
+                try:
+                    store.clear()
+                except Exception:
+                    LOGGER.warning(
+                        "failed to invalidate unsafe universe checkpoint",
+                        exc_info=True,
+                    )
+            return
+        report = collection_report_from_snapshot(checkpoint.report)
+        if report is not None:
+            self._last_report = report
+            self._fixture_state.upsert_from_report(report, scan_lane=ScanLane.UNIVERSE)
+        inventory = self._fixture_state.inventory(self.now())
+        _hot_count, universe_count = self._fixture_state.membership_counts(self.now())
+        with self._state_lock:
+            self._universe_generation_id = checkpoint.generation_id
+            self._universe_generation_started_at = checkpoint.generation_started_at
+            self._universe_work_used = checkpoint.successful_work_used_s
+            self._universe_cursor = checkpoint.resume_cursor
+            self._universe_evaluated_ids = set(checkpoint.evaluated_ids)
+            self._universe_progress_generation_id = checkpoint.generation_id
+            if checkpoint.next_universe_due is not None:
+                self._next_universe_due = checkpoint.next_universe_due
+            self._universe_provider_failures = checkpoint.provider_failure_count
+            self._universe_retry_at = checkpoint.retry_at
+            self._universe_budget_paused = checkpoint.budget_paused
+            self._universe_last_report_snapshot = checkpoint.report
+            status_update: dict[str, Any] = {
+                "discovered_fixtures": inventory,
+                "universe": self.status.universe.model_copy(
+                    update={
+                        "generation_work_used_s": round(self._universe_work_used, 3),
+                        "evaluated_count": len(self._universe_evaluated_ids),
+                        "resume_cursor": self._universe_cursor,
+                        "fixture_count": universe_count,
+                        "next_due_at": self._next_universe_due,
+                        "degraded": self._universe_budget_paused
+                        or self._universe_provider_failures > 0,
+                    }
+                ),
+            }
+            if report is not None:
+                status_update["last_matched_event_pairs"] = report.matched_event_pairs
+                status_update["last_matched_market_pairs"] = report.matched_market_pairs
+                status_update["last_completed_at"] = report.completed_at
+            self.status = self.status.model_copy(update=status_update)
+
     def _ensure_universe_generation(self, started: datetime) -> None:
         if self._universe_generation_started_at is not None:
             return
@@ -1052,16 +1213,41 @@ class LiveRefreshCoordinator:
         self._universe_evaluated_ids = set()
         self._universe_cursor = None
         self._universe_progress_generation_id = self._universe_generation_id
+        self._persist_universe_checkpoint_unlocked()
 
-    def _charge_universe_work(self, duration_s: float, finished: datetime) -> float:
+    def _charge_successful_universe_work(
+        self,
+        duration_s: float,
+        finished: datetime,
+        *,
+        leftover_n: int,
+        completeness: str | None,
+    ) -> float:
         settings = get_settings()
         budget = float(settings.paper_scan_universe_generation_budget_seconds)
         if self._universe_generation_started_at is None:
             return budget
         self._universe_work_used += max(0.0, duration_s)
-        if self._universe_work_used >= budget:
+        if leftover_n == 0 and completeness != UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE:
             self._close_universe_generation(finished)
+        elif self._universe_work_used >= budget:
+            self._pause_universe_generation(finished)
         return budget
+
+    def _pause_universe_generation(self, finished: datetime) -> None:
+        if self._universe_generation_started_at is None:
+            return
+        settings = get_settings()
+        interval = timedelta(seconds=settings.paper_live_refresh_universe_interval_seconds)
+        self._next_universe_due = finished + interval
+        self._universe_budget_paused = True
+
+    def _refresh_paused_universe_window_unlocked(self) -> None:
+        if not self._universe_budget_paused:
+            return
+        self._universe_work_used = 0.0
+        self._universe_budget_paused = False
+        self._persist_universe_checkpoint_unlocked()
 
     def _close_universe_generation(self, finished: datetime) -> None:
         if self._universe_generation_started_at is None:
@@ -1075,6 +1261,11 @@ class LiveRefreshCoordinator:
         self._next_universe_due = next_due
         self._clear_universe_generation_local_state()
         self._universe_generation_started_at = None
+        self._universe_budget_paused = False
+        self._universe_retry_at = None
+        self._universe_provider_failures = 0
+        self._universe_last_report_snapshot = None
+        self._persist_universe_checkpoint_unlocked()
 
     def _advance_hot_due(self, now: datetime) -> None:
         settings = get_settings()
@@ -1198,10 +1389,13 @@ class LiveRefreshCoordinator:
                 update["last_completed_at"] = finished
             else:
                 self._ensure_universe_generation(started)
-                duration_s = max(0.0, (finished - started).total_seconds())
-                budget = self._charge_universe_work(duration_s, finished)
+                self._universe_provider_failures += 1
+                delay = universe_provider_backoff_seconds(self._universe_provider_failures)
+                self._universe_retry_at = finished + timedelta(seconds=delay)
+                budget = float(get_settings().paper_scan_universe_generation_budget_seconds)
                 work_used = self._status_universe_work_used()
                 evaluated_count = self._status_universe_evaluated_count()
+                self._persist_universe_checkpoint_unlocked()
                 update["universe"] = self.status.universe.model_copy(
                     update={
                         "cycle_in_progress": False,
@@ -1210,6 +1404,7 @@ class LiveRefreshCoordinator:
                         "last_duration_ms": duration,
                         "chunk_last_duration_ms": duration,
                         "generation_work_used_s": round(work_used, 3),
+                        "evaluated_count": evaluated_count,
                         "fixture_count": universe_count,
                         "degraded": True,
                         "resume_cursor": self._status_universe_cursor(),
