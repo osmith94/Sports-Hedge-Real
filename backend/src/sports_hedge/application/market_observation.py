@@ -318,7 +318,9 @@ class KalshiObservationBuilder:
     ) -> VenueMarketObservation:
         event = self.normalizer.normalize_event(event_payload, series=series)
         payloads = market_payloads if isinstance(market_payloads, list) else [market_payloads]
-        assembled = self.normalizer.assemble_canonical_markets(event, payloads, series=series)
+        assembled = self.normalizer.assemble_canonical_markets(
+            event, payloads, series=series, event_payload=event_payload
+        )
         if len(assembled) != 1:
             raise ValueError("Kalshi observation builder requires one canonical market group")
         market = assembled[0]

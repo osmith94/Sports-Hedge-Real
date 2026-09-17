@@ -1,0 +1,531 @@
+"""Safe mapping forensics over a CollectionReport.
+
+Prints only mapping metadata. Never includes credentials, tokens, session ids,
+order-book prices/sizes, or write-path data.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+from sports_hedge.application.collector import CollectionReport, DiscoveredFixture
+from sports_hedge.application.fixture_inventory import (
+    FixtureMarketInventoryRow,
+    VenueMarketFacts,
+)
+from sports_hedge.domain.football import CanonicalOutcome, MarketFamily
+from sports_hedge.domain.models import VenueName
+from sports_hedge.normalization.text import normalize_text
+
+VENUE_SCOPE_UNIVERSE = "universe_lane_participation"
+VENUE_SCOPE_ALL = "all_operator_venues_forensic"
+COMPLETE_3WAY = "complete_3way_home_draw_away"
+INCOMPLETE_BINARY = "incomplete_or_binary_yes_no"
+INCOMPLETE_OTHER = "incomplete_other"
+THREE_WAY_OUTCOMES = {
+    CanonicalOutcome.HOME.value,
+    CanonicalOutcome.DRAW.value,
+    CanonicalOutcome.AWAY.value,
+}
+BINARY_YES_NO = {CanonicalOutcome.YES.value, CanonicalOutcome.NO.value}
+PRICE_FIELD_NAMES = (
+    "decimal_odds",
+    "size_at_touch",
+    "usable_depth_at_touch",
+    "best_backs",
+    "current_net_edge",
+    "bids",
+    "asks",
+    "available-amount",
+    "available_amount",
+)
+MATCHER_REASON_KEYS = (
+    "market_family_mismatch",
+    "period_mismatch",
+    "line_mismatch",
+    "incomplete_settlement",
+    "settlement_mismatch",
+    "outcome_space_mismatch",
+)
+SECRET_FRAGMENTS = ("password", "username", "token", "session", "mfa", "authorization", "secret")
+
+
+class SafeVenueMarketView(BaseModel):
+    venue: str
+    raw_market_name: str | None = None
+    raw_market_type: str | None = None
+    raw_runner_labels: list[str] = Field(default_factory=list)
+    family: str | None = None
+    period: str | None = None
+    line: str | None = None
+    settlement_scope: str | None = None
+    settlement_key: str | None = None
+    settlement_complete: bool | None = None
+    outcome_space: list[str] = Field(default_factory=list)
+    match_result_shape: str | None = None
+
+
+class SafeCandidateView(BaseModel):
+    fixture_label: str
+    family: str | None = None
+    period: str | None = None
+    line: str | None = None
+    comparison_status: str | None = None
+    matcher_reasons: list[str] = Field(default_factory=list)
+    venues: list[SafeVenueMarketView] = Field(default_factory=list)
+
+
+class MatchResultVenueCounts(BaseModel):
+    complete_3way_home_draw_away: int = 0
+    incomplete_or_binary_yes_no: int = 0
+    incomplete_other: int = 0
+    total: int = 0
+
+
+class MappingForensics(BaseModel):
+    """Owner-live/read-only mapping forensics. Fixture/demo when built from tests."""
+
+    data_class: str
+    venue_scope: str
+    enabled_venues: list[str] = Field(default_factory=list)
+    participation_source: str | None = None
+    fixture_filter: list[str] = Field(default_factory=list)
+    match_result_by_venue: dict[str, MatchResultVenueCounts] = Field(default_factory=dict)
+    candidate_rejection_histogram: dict[str, int] = Field(default_factory=dict)
+    cross_venue_match_result_candidates: int = 0
+    reported_candidates: int = 0
+    candidates: list[SafeCandidateView] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+def parse_fixture_filter(raw: str | None) -> list[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    parts: list[str] = []
+    for chunk in text.replace(";", "/").replace("|", "/").split("/"):
+        for item in chunk.split(","):
+            token = " ".join(item.strip().split())
+            if token:
+                parts.append(token)
+    return parts
+
+
+def fixture_label_matches_filter(label: str, tokens: list[str]) -> bool:
+    if not tokens:
+        return True
+    haystack = normalize_text(label)
+    return all(normalize_text(token) in haystack for token in tokens)
+
+
+def is_cross_venue_fixture(fixture: DiscoveredFixture) -> bool:
+    return (
+        sum(
+            [
+                bool(fixture.matchbook_matched),
+                bool(fixture.polymarket_matched),
+                bool(fixture.kalshi_matched),
+            ]
+        )
+        >= 2
+    )
+
+
+def classify_match_result_shape(facts: VenueMarketFacts) -> str | None:
+    if str(facts.family or "") != MarketFamily.MATCH_RESULT.value:
+        return None
+    outcomes = [item.casefold() for item in _outcome_space(facts)]
+    present = set(outcomes)
+    if THREE_WAY_OUTCOMES <= present:
+        return COMPLETE_3WAY
+    if present == BINARY_YES_NO or BINARY_YES_NO <= present:
+        return INCOMPLETE_BINARY
+    labels = {normalize_text(item) for item in facts.raw_runner_labels}
+    if labels and labels <= {"yes", "no"}:
+        return INCOMPLETE_BINARY
+    if "draw" in labels and len(labels) >= 3:
+        return COMPLETE_3WAY
+    return INCOMPLETE_OTHER
+
+
+def forensics_from_report(
+    report: CollectionReport,
+    *,
+    data_class: str,
+    venue_scope: str,
+    enabled_venues: list[str],
+    participation_source: str | None = None,
+    fixture_filter: list[str] | None = None,
+    detail: bool = False,
+    match_result_sample: int = 0,
+) -> MappingForensics:
+    tokens = list(fixture_filter or [])
+    match_result_counts = {
+        venue.value: MatchResultVenueCounts() for venue in VenueName if venue in (
+            VenueName.MATCHBOOK,
+            VenueName.POLYMARKET,
+            VenueName.KALSHI,
+        )
+    }
+    histogram: Counter[str] = Counter()
+    all_candidates: list[SafeCandidateView] = []
+
+    for rows in (report.fixture_markets or {}).values():
+        for row in rows:
+            _count_match_result_facts(row, match_result_counts)
+
+    for fixture in report.discovered_fixtures:
+        if not is_cross_venue_fixture(fixture):
+            continue
+        rows = list(report.fixture_markets.get(fixture.canonical_event_id) or [])
+        for candidate in _candidates_sharing_family_period_line(fixture, rows):
+            all_candidates.append(candidate)
+            matcher_hits = [item for item in candidate.matcher_reasons if item in MATCHER_REASON_KEYS]
+            for reason in matcher_hits:
+                histogram[reason] += 1
+            if not matcher_hits:
+                histogram[
+                    "matched"
+                    if candidate.comparison_status == "matched_equivalent"
+                    else (candidate.matcher_reasons[0] if candidate.matcher_reasons else "no_matcher_reason")
+                ] += 1
+
+    cross_venue_mr = sum(
+        1 for item in all_candidates if item.family == MarketFamily.MATCH_RESULT.value
+    )
+    filtered = [
+        item
+        for item in all_candidates
+        if fixture_label_matches_filter(item.fixture_label, tokens)
+    ]
+    sampled: list[SafeCandidateView]
+    if match_result_sample > 0:
+        sampled = [
+            item for item in filtered if item.family == MarketFamily.MATCH_RESULT.value
+        ][: max(0, int(match_result_sample))]
+    elif detail:
+        sampled = filtered
+    elif tokens:
+        sampled = [
+            item for item in filtered if item.family == MarketFamily.MATCH_RESULT.value
+        ][:8]
+    else:
+        sampled = []
+
+    notes = [
+        "PAPER MODE · EXECUTION DISABLED · mapping metadata only",
+        (
+            "venue_scope=universe_lane_participation mirrors the UNIVERSE operator "
+            "lane. This is not a change to production venue toggles."
+            if venue_scope == VENUE_SCOPE_UNIVERSE
+            else "venue_scope=all_operator_venues_forensic is an explicit all-venue "
+            "diagnostic and does not mirror a Polymarket-disabled UNIVERSE lane."
+        ),
+        "Does not output credentials, tokens, session ids, or order-book prices/sizes.",
+    ]
+    if tokens:
+        notes.append("fixture_filter=" + " / ".join(tokens))
+    return MappingForensics(
+        data_class=data_class,
+        venue_scope=venue_scope,
+        enabled_venues=list(enabled_venues),
+        participation_source=participation_source,
+        fixture_filter=tokens,
+        match_result_by_venue={
+            venue: counts for venue, counts in sorted(match_result_counts.items())
+        },
+        candidate_rejection_histogram=dict(sorted(histogram.items())),
+        cross_venue_match_result_candidates=cross_venue_mr,
+        reported_candidates=len(sampled),
+        candidates=sampled,
+        notes=notes,
+    )
+
+
+def render_forensics(forensics: MappingForensics) -> str:
+    lines = [
+        "OWNER-LIVE / READ-ONLY MAPPING FORENSICS",
+        f"data_class={forensics.data_class}",
+        f"venue_scope={forensics.venue_scope}",
+        f"enabled_venues={','.join(forensics.enabled_venues) or '{}'}",
+        f"participation_source={forensics.participation_source or 'n/a'}",
+        "match_result_by_venue:",
+    ]
+    for venue, counts in forensics.match_result_by_venue.items():
+        lines.append(
+            f"  {venue}: total={counts.total} complete_3way={counts.complete_3way_home_draw_away} "
+            f"binary_yes_no={counts.incomplete_or_binary_yes_no} other={counts.incomplete_other}"
+        )
+    lines.append(
+        "candidate_rejection_histogram="
+        + (
+            "{"
+            + ", ".join(
+                f"{key}={value}" for key, value in forensics.candidate_rejection_histogram.items()
+            )
+            + "}"
+            if forensics.candidate_rejection_histogram
+            else "{}"
+        )
+    )
+    lines.append(
+        f"cross_venue_match_result_candidates={forensics.cross_venue_match_result_candidates}"
+    )
+    lines.append(f"reported_candidates={forensics.reported_candidates}")
+    for note in forensics.notes:
+        lines.append(f"note: {note}")
+    for item in forensics.candidates:
+        lines.append(
+            f"candidate fixture={_safe_text(item.fixture_label)} family={item.family} "
+            f"period={item.period} line={item.line or ''} status={item.comparison_status} "
+            f"matcher_reasons={','.join(item.matcher_reasons) or 'none'}"
+        )
+        for venue in item.venues:
+            lines.append(
+                "  "
+                f"venue={venue.venue} raw_name={_safe_text(venue.raw_market_name)} "
+                f"raw_type={_safe_text(venue.raw_market_type)} "
+                f"runners={venue.raw_runner_labels} family={venue.family} "
+                f"period={venue.period} line={venue.line or ''} "
+                f"scope={venue.settlement_scope} complete={venue.settlement_complete} "
+                f"outcomes={venue.outcome_space} shape={venue.match_result_shape} "
+                f"settlement_key={venue.settlement_key}"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def forensics_as_public_dict(forensics: MappingForensics) -> dict[str, Any]:
+    payload = forensics.model_dump(mode="json")
+    return _strip_price_fields(payload)
+
+
+def _candidates_sharing_family_period_line(
+    fixture: DiscoveredFixture,
+    rows: list[FixtureMarketInventoryRow],
+) -> list[SafeCandidateView]:
+    """Compare markets that share family/period/line even when inventory splits them.
+
+    Production Kalshi attach currently requires an identical settlement key, so
+    a complete Matchbook 1X2 and an incomplete Kalshi GAME stay venue_only.
+    Forensics still groups those candidates to show the matcher rejection.
+    """
+
+    grouped_rows = [row for row in rows if _is_grouped_candidate(row)]
+    used_keys: set[tuple[str, str, str]] = set()
+    candidates: list[SafeCandidateView] = []
+    for row in grouped_rows:
+        key = _row_group_key(row)
+        if key is not None:
+            used_keys.add(key)
+        candidates.append(_candidate_view(fixture, row, _matcher_reasons(row)))
+
+    by_key: dict[tuple[str, str, str], list[VenueMarketFacts]] = {}
+    for row in rows:
+        for facts in (row.matchbook, row.polymarket, row.kalshi):
+            if facts is None or not facts.family:
+                continue
+            key = (
+                str(facts.family),
+                str(facts.period or ""),
+                "" if facts.line is None else format(facts.line, "f"),
+            )
+            existing = by_key.setdefault(key, [])
+            if any(item.venue is facts.venue for item in existing):
+                continue
+            existing.append(facts)
+
+    for key, facts_list in by_key.items():
+        if len(facts_list) < 2 or key in used_keys:
+            continue
+        reasons = _economic_reasons_from_facts_group(facts_list)
+        status = "matched_equivalent" if not reasons else (
+            "settlement_mismatch"
+            if any(item in {"incomplete_settlement", "settlement_mismatch"} for item in reasons)
+            else reasons[0]
+        )
+        candidates.append(
+            SafeCandidateView(
+                fixture_label=f"{fixture.home_team} vs {fixture.away_team}",
+                family=key[0],
+                period=key[1] or None,
+                line=key[2] or None,
+                comparison_status=status,
+                matcher_reasons=reasons,
+                venues=[_venue_view(item) for item in facts_list],
+            )
+        )
+    return candidates
+
+
+def _row_group_key(row: FixtureMarketInventoryRow) -> tuple[str, str, str] | None:
+    if not row.family:
+        return None
+    return (
+        str(row.family),
+        str(row.period or ""),
+        "" if row.line is None else format(row.line, "f"),
+    )
+
+
+def _economic_reasons_from_facts_group(facts_list: list[VenueMarketFacts]) -> list[str]:
+    reasons: list[str] = []
+    for index, left in enumerate(facts_list):
+        for right in facts_list[index + 1 :]:
+            for reason in _economic_reasons_from_facts(left, right):
+                if reason not in reasons:
+                    reasons.append(reason)
+    return reasons
+
+
+def _economic_reasons_from_facts(left: VenueMarketFacts, right: VenueMarketFacts) -> list[str]:
+    reasons: list[str] = []
+    if left.family != right.family:
+        reasons.append("market_family_mismatch")
+    if (left.period or "") != (right.period or ""):
+        reasons.append("period_mismatch")
+    left_line = "" if left.line is None else format(left.line, "f")
+    right_line = "" if right.line is None else format(right.line, "f")
+    if left_line != right_line:
+        reasons.append("line_mismatch")
+    if left.settlement_complete is not True or right.settlement_complete is not True:
+        reasons.append("incomplete_settlement")
+    elif left.settlement_key != right.settlement_key:
+        reasons.append("settlement_mismatch")
+    left_shape = classify_match_result_shape(left)
+    right_shape = classify_match_result_shape(right)
+    if left_shape and right_shape and left_shape != right_shape:
+        reasons.append("outcome_space_mismatch")
+    elif left_shape is None or right_shape is None:
+        left_out = {item.casefold() for item in _outcome_space(left)}
+        right_out = {item.casefold() for item in _outcome_space(right)}
+        if left_out and right_out and left_out != right_out:
+            reasons.append("outcome_space_mismatch")
+    return reasons
+
+
+def _count_match_result_facts(
+    row: FixtureMarketInventoryRow,
+    counts: dict[str, MatchResultVenueCounts],
+) -> None:
+    for facts in (row.matchbook, row.polymarket, row.kalshi):
+        if facts is None:
+            continue
+        shape = classify_match_result_shape(facts)
+        if shape is None:
+            continue
+        bucket = counts.setdefault(facts.venue.value, MatchResultVenueCounts())
+        bucket.total += 1
+        if shape == COMPLETE_3WAY:
+            bucket.complete_3way_home_draw_away += 1
+        elif shape == INCOMPLETE_BINARY:
+            bucket.incomplete_or_binary_yes_no += 1
+        else:
+            bucket.incomplete_other += 1
+
+
+def _is_grouped_candidate(row: FixtureMarketInventoryRow) -> bool:
+    """Inventory row already groups a family/period/line comparison."""
+
+    present = sum(
+        1 for facts in (row.matchbook, row.polymarket, row.kalshi) if facts is not None
+    )
+    if present < 2:
+        return False
+    return bool(row.family)
+
+
+def _matcher_reasons(row: FixtureMarketInventoryRow) -> list[str]:
+    reasons: list[str] = []
+    for item in list(row.match_reasons or []) + list(row.rejection_reasons or []):
+        text = str(item or "").strip()
+        if not text or text in reasons:
+            continue
+        if _looks_secret(text):
+            continue
+        reasons.append(text)
+    if row.reason and row.reason not in reasons and not _looks_secret(row.reason):
+        reasons.append(row.reason)
+    return reasons
+
+
+def _candidate_view(
+    fixture: DiscoveredFixture,
+    row: FixtureMarketInventoryRow,
+    reasons: list[str],
+) -> SafeCandidateView:
+    return SafeCandidateView(
+        fixture_label=f"{fixture.home_team} vs {fixture.away_team}",
+        family=row.family,
+        period=row.period,
+        line=None if row.line is None else format(row.line, "f"),
+        comparison_status=str(row.comparison_status.value if row.comparison_status else None),
+        matcher_reasons=reasons,
+        venues=[
+            _venue_view(facts)
+            for facts in (row.matchbook, row.polymarket, row.kalshi)
+            if facts is not None
+        ],
+    )
+
+
+def _venue_view(facts: VenueMarketFacts) -> SafeVenueMarketView:
+    scope = None
+    if facts.settlement_key:
+        scope = str(facts.settlement_key).split("|", 1)[0] or None
+    return SafeVenueMarketView(
+        venue=facts.venue.value,
+        raw_market_name=_safe_text(facts.raw_market_name),
+        raw_market_type=_safe_text(facts.raw_market_type),
+        raw_runner_labels=[_safe_text(item) or item for item in facts.raw_runner_labels if item],
+        family=facts.family,
+        period=facts.period,
+        line=None if facts.line is None else format(facts.line, "f"),
+        settlement_scope=scope,
+        settlement_key=facts.settlement_key,
+        settlement_complete=facts.settlement_complete,
+        outcome_space=_outcome_space(facts),
+        match_result_shape=classify_match_result_shape(facts),
+    )
+
+
+def _outcome_space(facts: VenueMarketFacts) -> list[str]:
+    outcomes: list[str] = []
+    for quote in facts.best_backs:
+        value = str(quote.outcome or "").strip()
+        if value and value not in outcomes:
+            outcomes.append(value)
+    if outcomes:
+        return outcomes
+    for label in facts.raw_runner_labels:
+        text = str(label or "").strip()
+        if text and text not in outcomes:
+            outcomes.append(text)
+    return outcomes
+
+
+def _safe_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if _looks_secret(value):
+        return "[redacted]"
+    return value
+
+
+def _looks_secret(value: str) -> bool:
+    lowered = value.casefold()
+    return any(fragment in lowered for fragment in SECRET_FRAGMENTS)
+
+
+def _strip_price_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_price_fields(item)
+            for key, item in value.items()
+            if str(key) not in PRICE_FIELD_NAMES
+        }
+    if isinstance(value, list):
+        return [_strip_price_fields(item) for item in value]
+    return value

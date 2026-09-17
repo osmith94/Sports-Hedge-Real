@@ -1,0 +1,541 @@
+"""Issue #260 forensic follow-up: live-shaped 1X2 mapping without loosening settlement.
+
+Deterministic fixtures shaped like owner-live Matchbook/Kalshi/Polymarket payloads.
+Not owner-live evidence.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Any
+
+import pytest
+
+from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
+from sports_hedge.application.lane_venues import participation_from_lists
+from sports_hedge.application.mapping_census import (
+    CENSUS_DATA_CLASS_FIXTURE,
+    census_from_report,
+)
+from sports_hedge.application.mapping_forensics import (
+    VENUE_SCOPE_ALL,
+    VENUE_SCOPE_UNIVERSE,
+    forensics_as_public_dict,
+    forensics_from_report,
+    parse_fixture_filter,
+    render_forensics,
+)
+from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.scan_lanes import ScanLane
+from sports_hedge.application.universe_mapping_census import (
+    OWNER_LIVE_CENSUS_ALL_VENUES_ENV,
+    resolve_census_venue_scope,
+)
+from sports_hedge.config import Settings
+from sports_hedge.domain.football import MarketFamily, SettlementScope
+from sports_hedge.domain.models import VenueName
+from sports_hedge.fees.kalshi import kalshi_cost_from_series
+from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
+from sports_hedge.market_intelligence.service import MarketIntelligenceService
+from sports_hedge.matching.markets import MarketMatcher
+from sports_hedge.normalization.venues import KalshiNormalizer, MatchbookNormalizer, PolymarketNormalizer
+from sports_hedge.paper.models import FxRateSnapshot
+from venue_cost_helpers import matchbook_polymarket_costs
+
+from test_issue260_mapping_census import _collect as _baseline_census_collect
+
+KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
+REGULATION = (
+    "Resolves based on 90 minutes of regulation time. Extra time and penalties do not count."
+)
+BETIS = "Real Betis"
+GETAFE = "Getafe"
+KALSHI_GAME_SERIES = {
+    "ticker": "KXEPLGAME",
+    "title": "Premier League",
+    "fee_type": "quadratic",
+    "fee_multiplier": 1,
+    "settlement_sources": [{"name": "Opta"}],
+}
+
+
+def _fx() -> list[FxRateSnapshot]:
+    return [FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="test")]
+
+
+def _costs() -> list:
+    captured = datetime.now(UTC)
+    return [
+        *matchbook_polymarket_costs("0.02", "0.02", captured_at=captured),
+        kalshi_cost_from_series(KALSHI_GAME_SERIES, captured_at=captured),
+    ]
+
+
+def _mb_match_odds() -> dict[str, Any]:
+    return {
+        "id": 9601,
+        "name": "Match Odds",
+        "runners": [
+            {
+                "id": 1,
+                "name": BETIS,
+                "prices": [{"side": "back", "odds": "2.10", "available-amount": "80"}],
+            },
+            {
+                "id": 2,
+                "name": "Draw",
+                "prices": [{"side": "back", "odds": "3.40", "available-amount": "80"}],
+            },
+            {
+                "id": 3,
+                "name": GETAFE,
+                "prices": [{"side": "back", "odds": "3.60", "available-amount": "80"}],
+            },
+        ],
+    }
+
+
+def _mb_to_qualify() -> dict[str, Any]:
+    return {
+        "id": 9607,
+        "name": "To Qualify",
+        "runners": [
+            {
+                "id": 51,
+                "name": BETIS,
+                "prices": [{"side": "back", "odds": "1.70", "available-amount": "80"}],
+            },
+            {
+                "id": 52,
+                "name": GETAFE,
+                "prices": [{"side": "back", "odds": "2.20", "available-amount": "80"}],
+            },
+        ],
+    }
+
+
+class BetisMatchbook:
+    def __init__(self, extra_markets: list[dict[str, Any]] | None = None) -> None:
+        self.extra_markets = list(extra_markets or [])
+
+    async def list_events(self, **filters: Any) -> dict[str, Any]:
+        del filters
+        return {
+            "events": [
+                {
+                    "id": 9600,
+                    "name": f"{BETIS} vs {GETAFE}",
+                    "start": KICKOFF.isoformat(),
+                    "competition-name": "Premier League",
+                }
+            ]
+        }
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+        del event_id, filters
+        return {"markets": [_mb_match_odds(), *self.extra_markets]}
+
+
+class EmptyPolymarket:
+    async def list_events(self, **filters: Any) -> list[dict[str, Any]]:
+        del filters
+        return []
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> list[dict[str, Any]]:
+        del event_id, filters
+        return []
+
+    async def get_order_book(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        return {"asset_id": "x", "bids": [], "asks": []}
+
+
+class BetisKalshi:
+    def __init__(self, *, rules_on_event: bool = False, rules_on_markets: bool = False) -> None:
+        self.rules_on_event = rules_on_event
+        self.rules_on_markets = rules_on_markets
+
+    def _markets(self) -> list[dict[str, Any]]:
+        ticker = "KXEPLGAME-26SEP20BETGET"
+        markets = []
+        for suffix, subtitle in (("BET", BETIS), ("DRAW", "Draw"), ("GET", GETAFE)):
+            item = {
+                "ticker": f"{ticker}-{suffix}",
+                "event_ticker": ticker,
+                "title": f"{BETIS} vs {GETAFE}",
+                "yes_sub_title": subtitle,
+            }
+            if self.rules_on_markets:
+                item["rules_primary"] = REGULATION
+            markets.append(item)
+        return markets
+
+    async def list_events(self, **filters: Any) -> dict[str, Any]:
+        del filters
+        event = {
+            "event_ticker": "KXEPLGAME-26SEP20BETGET",
+            "series_ticker": "KXEPLGAME",
+            "title": f"{BETIS} vs {GETAFE}",
+            "category": "Sports",
+            "strike_date": KICKOFF.isoformat(),
+            "product_metadata": {"competition": "EPL", "competition_scope": "Game"},
+            "markets": self._markets(),
+        }
+        if self.rules_on_event:
+            event["rules_primary"] = REGULATION
+        return {"events": [event]}
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+        del event_id, filters
+        return {"markets": []}
+
+    async def get_series(self, series_ticker: str) -> dict[str, Any]:
+        del series_ticker
+        return KALSHI_GAME_SERIES
+
+    async def get_order_book(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        return {
+            "orderbook_fp": {
+                "yes_dollars": [["0.33", "100.00"]],
+                "no_dollars": [["0.64", "200.00"]],
+            }
+        }
+
+
+class BetisPolymarketBinaries:
+    def __init__(self, *, with_regulation: bool = False, include_draw: bool = True) -> None:
+        self.with_regulation = with_regulation
+        self.include_draw = include_draw
+
+    async def list_events(self, **filters: Any) -> list[dict[str, Any]]:
+        del filters
+        return [
+            {
+                "id": "pm-bet-get",
+                "title": f"{BETIS} vs {GETAFE}",
+                "startTime": KICKOFF.isoformat(),
+                "competition": "Premier League",
+            }
+        ]
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> list[dict[str, Any]]:
+        del event_id, filters
+        description = REGULATION if self.with_regulation else ""
+        markets = [
+            {
+                "id": "pm-betis-win",
+                "question": f"Will {BETIS} win?",
+                "sportsMarketType": "moneyline",
+                "groupItemTitle": BETIS,
+                "outcomes": '["Yes", "No"]',
+                "clobTokenIds": '["by", "bn"]',
+                "description": description,
+                "feesEnabled": False,
+            },
+            {
+                "id": "pm-getafe-win",
+                "question": f"Will {GETAFE} win?",
+                "sportsMarketType": "moneyline",
+                "groupItemTitle": GETAFE,
+                "outcomes": '["Yes", "No"]',
+                "clobTokenIds": '["gy", "gn"]',
+                "description": description,
+                "feesEnabled": False,
+            },
+        ]
+        if self.include_draw:
+            markets.insert(
+                1,
+                {
+                    "id": "pm-draw",
+                    "question": "Will the match end in a draw?",
+                    "sportsMarketType": "moneyline",
+                    "groupItemTitle": "Draw",
+                    "outcomes": '["Yes", "No"]',
+                    "clobTokenIds": '["dy", "dn"]',
+                    "description": description,
+                    "feesEnabled": False,
+                },
+            )
+        return markets
+
+    async def get_order_book(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        outcome_id: int | str | None = None,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del event_id, market_id, filters
+        now_ms = int(datetime.now(UTC).timestamp() * 1000) - 150
+        return {
+            "asset_id": str(outcome_id),
+            "timestamp": now_ms,
+            "bids": [{"price": "0.30", "size": "200"}],
+            "asks": [{"price": "0.32", "size": "200"}],
+        }
+
+
+async def _scan(matchbook, polymarket, kalshi=None):
+    repository = SqliteMarketIntelligenceRepository()
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        paper_scan=PaperScanService(MarketIntelligenceService(repository)),
+    )
+    try:
+        report = await collector.collect_and_scan(
+            venue_costs=_costs(),
+            fx_snapshots=_fx(),
+            maximum_execution_risk=100,
+            scan_lane=ScanLane.UNIVERSE.value,
+        )
+        census = census_from_report(report, data_class=CENSUS_DATA_CLASS_FIXTURE)
+        forensics = forensics_from_report(
+            report,
+            data_class=CENSUS_DATA_CLASS_FIXTURE,
+            venue_scope=VENUE_SCOPE_UNIVERSE,
+            enabled_venues=[item.value for item in report.enabled_venues],
+            detail=True,
+            fixture_filter=parse_fixture_filter(f"{BETIS} / {GETAFE}"),
+        )
+        return report, census, forensics
+    finally:
+        repository.close()
+
+
+@pytest.mark.asyncio
+async def test_baseline_census_forensics_has_complete_3way_match_result() -> None:
+    report, _census = await _baseline_census_collect()
+    forensic = forensics_from_report(
+        report,
+        data_class=CENSUS_DATA_CLASS_FIXTURE,
+        venue_scope=VENUE_SCOPE_UNIVERSE,
+        enabled_venues=["matchbook", "polymarket", "kalshi"],
+        detail=True,
+        match_result_sample=8,
+    )
+    rendered = render_forensics(forensic)
+    assert "decimal_odds" not in rendered
+    assert "available-amount" not in rendered
+    assert "size_at_touch" not in rendered
+    assert forensic.match_result_by_venue["matchbook"].complete_3way_home_draw_away >= 1
+    assert forensic.candidate_rejection_histogram.get("matched") or any(
+        item.comparison_status == "matched_equivalent" for item in forensic.candidates
+    )
+
+
+def test_kalshi_event_level_rules_complete_settlement_without_name_inference() -> None:
+    normalizer = KalshiNormalizer()
+    event_payload = {
+        "event_ticker": "KXEPLGAME-26SEP20BETGET",
+        "title": f"{BETIS} vs {GETAFE}",
+        "strike_date": KICKOFF.isoformat(),
+        "rules_primary": REGULATION,
+    }
+    event = normalizer.normalize_event(event_payload, series=KALSHI_GAME_SERIES)
+    markets = [
+        {
+            "ticker": "KXEPLGAME-BET",
+            "title": f"{BETIS} vs {GETAFE}",
+            "yes_sub_title": BETIS,
+        },
+        {
+            "ticker": "KXEPLGAME-DRAW",
+            "title": f"{BETIS} vs {GETAFE}",
+            "yes_sub_title": "Draw",
+        },
+        {
+            "ticker": "KXEPLGAME-GET",
+            "title": f"{BETIS} vs {GETAFE}",
+            "yes_sub_title": GETAFE,
+        },
+    ]
+    without_event_rules = normalizer.assemble_canonical_markets(
+        event, markets, series=KALSHI_GAME_SERIES
+    )
+    with_event_rules = normalizer.assemble_canonical_markets(
+        event, markets, series=KALSHI_GAME_SERIES, event_payload=event_payload
+    )
+    assert len(without_event_rules) == 1
+    assert without_event_rules[0].family is MarketFamily.MATCH_RESULT
+    assert without_event_rules[0].settlement.scope is SettlementScope.UNKNOWN
+    assert without_event_rules[0].settlement.is_economically_complete() is False
+    assert with_event_rules[0].settlement.scope is SettlementScope.REGULATION_TIME
+    assert with_event_rules[0].settlement.is_economically_complete() is True
+    mb = MatchbookNormalizer().normalize_market(
+        MatchbookNormalizer().normalize_event(
+            {
+                "id": 9600,
+                "name": f"{BETIS} vs {GETAFE}",
+                "start": KICKOFF.isoformat(),
+                "competition-name": "Premier League",
+            }
+        ),
+        _mb_match_odds(),
+    )
+    matcher = MarketMatcher()
+    assert matcher.match(mb, without_event_rules[0]).matched is False
+    assert "incomplete_settlement" in matcher.match(mb, without_event_rules[0]).reasons
+    assert matcher.match(mb, with_event_rules[0]).matched is True
+    named_only_event = {
+        "event_ticker": "KXEPLGAME-26SEP20BETGET",
+        "title": f"{BETIS} vs {GETAFE} Game",
+        "strike_date": KICKOFF.isoformat(),
+        "product_metadata": {"competition": "EPL", "competition_scope": "Game"},
+    }
+    named_only = normalizer.assemble_canonical_markets(
+        event, markets, series=KALSHI_GAME_SERIES, event_payload=named_only_event
+    )
+    assert named_only[0].settlement.is_economically_complete() is False
+    assert matcher.match(mb, named_only[0]).matched is False
+
+
+@pytest.mark.asyncio
+async def test_live_shaped_kalshi_without_rules_is_not_equivalent() -> None:
+    report, census, forensics = await _scan(
+        BetisMatchbook(),
+        EmptyPolymarket(),
+        BetisKalshi(rules_on_event=False, rules_on_markets=False),
+    )
+    assert census.equivalent_market_pairs == 0
+    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    mb = forensics.match_result_by_venue["matchbook"]
+    kalshi = forensics.match_result_by_venue["kalshi"]
+    assert mb.complete_3way_home_draw_away == 1
+    assert kalshi.complete_3way_home_draw_away == 1
+    assert report.matched_event_pairs >= 1
+
+
+@pytest.mark.asyncio
+async def test_live_shaped_kalshi_event_rules_maps_ordinary_1x2() -> None:
+    _report, census, forensics = await _scan(
+        BetisMatchbook(),
+        EmptyPolymarket(),
+        BetisKalshi(rules_on_event=True, rules_on_markets=False),
+    )
+    assert census.equivalent_market_pairs == 1
+    assert census.market_family_breakdown.get("match_result") == 1
+    assert any(item.comparison_status == "matched_equivalent" for item in forensics.candidates)
+
+
+@pytest.mark.asyncio
+async def test_polymarket_binaries_without_draw_do_not_match_3way() -> None:
+    _report, census, forensics = await _scan(
+        BetisMatchbook(),
+        BetisPolymarketBinaries(with_regulation=True, include_draw=False),
+    )
+    assert census.equivalent_market_pairs == 0
+    pm = forensics.match_result_by_venue["polymarket"]
+    assert pm.incomplete_or_binary_yes_no >= 1 or pm.incomplete_other >= 1
+
+
+@pytest.mark.asyncio
+async def test_polymarket_complete_binaries_with_regulation_map_1x2() -> None:
+    _report, census, forensics = await _scan(
+        BetisMatchbook(),
+        BetisPolymarketBinaries(with_regulation=True, include_draw=True),
+    )
+    assert census.equivalent_market_pairs == 1
+    assert census.market_family_breakdown.get("match_result") == 1
+    assert forensics.match_result_by_venue["polymarket"].complete_3way_home_draw_away == 1
+
+
+@pytest.mark.asyncio
+async def test_to_qualify_remains_nonequivalent_to_regulation_1x2() -> None:
+    report, census, _forensics = await _scan(
+        BetisMatchbook(extra_markets=[_mb_to_qualify()]),
+        BetisPolymarketBinaries(with_regulation=True, include_draw=True),
+    )
+    rows = [row for items in report.fixture_markets.values() for row in items]
+    qualify = [row for row in rows if row.family == "to_qualify"]
+    assert qualify
+    assert all(row.comparison_status.value != "matched_equivalent" for row in qualify)
+    assert census.market_family_breakdown.get("match_result") == 1
+
+
+@pytest.mark.asyncio
+async def test_matchbook_to_qualify_not_equivalent_to_kalshi_regulation_1x2() -> None:
+    report, census, _forensics = await _scan(
+        BetisMatchbook(extra_markets=[_mb_to_qualify()]),
+        EmptyPolymarket(),
+        BetisKalshi(rules_on_event=True, rules_on_markets=False),
+    )
+    rows = [row for items in report.fixture_markets.values() for row in items]
+    qualify = [row for row in rows if row.family == "to_qualify"]
+    assert qualify
+    assert all(row.comparison_status.value != "matched_equivalent" for row in qualify)
+    assert census.equivalent_market_pairs == 1
+    assert census.market_family_breakdown.get("match_result") == 1
+
+
+def test_fixture_filter_and_venue_scope_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert parse_fixture_filter("Real Betis / Getafe") == ["Real Betis", "Getafe"]
+    participation = participation_from_lists(
+        ["matchbook", "kalshi"],
+        ["matchbook", "kalshi"],
+        source="operator",
+    )
+    monkeypatch.setattr(
+        "sports_hedge.application.universe_mapping_census.resolve_lane_venue_participation",
+        lambda *args, **kwargs: participation,
+    )
+    monkeypatch.setattr(
+        "sports_hedge.application.universe_mapping_census.get_lane_venue_settings_store",
+        lambda: object(),
+    )
+    scope, venues, source = resolve_census_venue_scope(settings=Settings(), environ={})
+    assert scope == VENUE_SCOPE_UNIVERSE
+    assert source == "operator"
+    assert VenueName.POLYMARKET not in venues
+    assert VenueName.MATCHBOOK in venues
+    all_scope, all_venues, all_source = resolve_census_venue_scope(
+        settings=Settings(),
+        environ={OWNER_LIVE_CENSUS_ALL_VENUES_ENV: "1"},
+    )
+    assert all_scope == VENUE_SCOPE_ALL
+    assert VenueName.POLYMARKET in all_venues
+    assert all_source == "explicit_all_venues"
+
+
+def test_polymarket_moneyline_yes_outcome_from_live_shaped_question() -> None:
+    event = PolymarketNormalizer().normalize_event(
+        {
+            "id": "pm-bet-get",
+            "title": f"{BETIS} vs {GETAFE}",
+            "startTime": KICKOFF.isoformat(),
+            "competition": "Premier League",
+        }
+    )
+    from sports_hedge.normalization.venues import polymarket_moneyline_yes_outcome
+
+    assert polymarket_moneyline_yes_outcome(
+        f"Will {BETIS} win?", home_team=event.home_team, away_team=event.away_team
+    ) is not None
+
+
+def test_forensics_public_dict_strips_prices_and_keeps_safe_metadata() -> None:
+    from sports_hedge.application.mapping_forensics import MappingForensics, MatchResultVenueCounts
+
+    payload = forensics_as_public_dict(
+        MappingForensics(
+            data_class=CENSUS_DATA_CLASS_FIXTURE,
+            venue_scope=VENUE_SCOPE_UNIVERSE,
+            enabled_venues=["matchbook", "kalshi"],
+            match_result_by_venue={
+                "matchbook": MatchResultVenueCounts(
+                    complete_3way_home_draw_away=1, total=1
+                )
+            },
+            candidate_rejection_histogram={"incomplete_settlement": 1},
+            notes=["PAPER MODE · EXECUTION DISABLED · mapping metadata only"],
+        )
+    )
+    dumped = str(payload)
+    assert "decimal_odds" not in dumped
+    assert "available-amount" not in dumped
+    assert payload["candidate_rejection_histogram"]["incomplete_settlement"] == 1
+    assert payload["match_result_by_venue"]["matchbook"]["complete_3way_home_draw_away"] == 1

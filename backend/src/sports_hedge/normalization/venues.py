@@ -366,10 +366,18 @@ class KalshiNormalizer:
         payloads: list[dict[str, Any]],
         *,
         series: dict[str, Any] | None = None,
+        event_payload: dict[str, Any] | None = None,
     ) -> list[CanonicalMarket]:
         classified: list[_KalshiContract] = []
         for payload in payloads:
-            classified.append(self._classify_contract(event, payload, series=series))
+            classified.append(
+                self._classify_contract(
+                    event,
+                    payload,
+                    series=series,
+                    event_payload=event_payload,
+                )
+            )
 
         grouped: dict[tuple[str, str, str], list[_KalshiContract]] = {}
         for item in classified:
@@ -387,6 +395,7 @@ class KalshiNormalizer:
         payload: dict[str, Any],
         *,
         series: dict[str, Any] | None,
+        event_payload: dict[str, Any] | None = None,
     ) -> _KalshiContract:
         ticker = str(_first(payload, "ticker", "market_ticker") or "").strip()
         if not ticker:
@@ -416,6 +425,7 @@ class KalshiNormalizer:
             family=family,
             period=period,
             line=line,
+            event_payload=event_payload,
         )
         return _KalshiContract(
             ticker=ticker,
@@ -1019,14 +1029,33 @@ def _kalshi_settlement(
     family: MarketFamily,
     period: FootballPeriod,
     line: Decimal | None,
+    event_payload: dict[str, Any] | None = None,
 ) -> SettlementFingerprint:
+    # Read settlement wording from the contract payload. Event-level rules are
+    # inherited only for ordinary Match Result when the nested market itself has
+    # no rule text. Do not infer regulation from GAME / Opta / series names.
     parts = [
         payload.get("rules_primary"),
         payload.get("rules_secondary"),
         payload.get("rules"),
         payload.get("description"),
+        payload.get("yes_description"),
+        payload.get("no_description"),
         payload.get("settlement_source"),
     ]
+    market_has_rule_text = any(str(value).strip() for value in parts if value is not None)
+    if (
+        not market_has_rule_text
+        and family is MarketFamily.MATCH_RESULT
+        and isinstance(event_payload, dict)
+    ):
+        parts.extend(
+            [
+                event_payload.get("rules_primary"),
+                event_payload.get("rules_secondary"),
+                event_payload.get("rules"),
+            ]
+        )
     if series:
         parts.extend(
             [

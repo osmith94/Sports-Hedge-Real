@@ -28,10 +28,15 @@ from sports_hedge.application.scan_cycle_audit import cycle_last_error
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.application.universe_mapping_census import (
     CensusSafetyError,
+    OWNER_LIVE_CENSUS_ALL_VENUES_ENV,
+    OWNER_LIVE_CENSUS_DETAIL_ENV,
+    OWNER_LIVE_CENSUS_FIXTURE_ENV,
+    OWNER_LIVE_CENSUS_SAMPLE_ENV,
     assert_paper_only_read_only,
     owner_live_census_enabled,
     run_owner_live_universe_census,
 )
+from sports_hedge.application.mapping_forensics import render_forensics
 from sports_hedge.config import Settings
 from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
@@ -504,6 +509,10 @@ def test_owner_live_census_is_opt_in_and_skipped_in_ci() -> None:
         assert token not in module_src
     assert "while True" not in module_src
     assert OWNER_LIVE_CENSUS_ENV in module_src
+    assert OWNER_LIVE_CENSUS_DETAIL_ENV in module_src
+    assert OWNER_LIVE_CENSUS_FIXTURE_ENV in module_src
+    assert OWNER_LIVE_CENSUS_SAMPLE_ENV in module_src
+    assert OWNER_LIVE_CENSUS_ALL_VENUES_ENV in module_src
     assert "CENSUS_DATA_CLASS_OWNER_LIVE" in module_src
     assert "MatchbookAuthFaultError" in module_src
     assert "MatchbookRateLimitedError" in module_src
@@ -534,11 +543,19 @@ async def test_owner_live_universe_census_opt_in_read_only() -> None:
             "UNIVERSE mapping census against venue market-data."
         )
     census = await run_owner_live_universe_census()
-    rendered = render_census(census)
+    rendered = render_census(census.census)
+    forensic_text = render_forensics(census.forensics)
     assert "OWNER-LIVE / READ-ONLY" in rendered
-    assert census.data_class == CENSUS_DATA_CLASS_OWNER_LIVE
-    assert census.execution_enabled is False
+    assert census.census.data_class == CENSUS_DATA_CLASS_OWNER_LIVE
+    assert census.census.execution_enabled is False
+    assert census.forensics.data_class == CENSUS_DATA_CLASS_OWNER_LIVE
+    assert census.census.venue_scope in {
+        "universe_lane_participation",
+        "all_operator_venues_forensic",
+    }
     assert "password" not in rendered.casefold()
     assert "session-token" not in rendered.casefold()
-    assert census.discovered_fixtures >= 0
-    assert census.equivalent_market_pairs >= 0
+    assert "password" not in forensic_text.casefold()
+    assert "decimal_odds" not in forensic_text
+    assert census.census.discovered_fixtures >= 0
+    assert census.census.equivalent_market_pairs >= 0

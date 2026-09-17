@@ -2472,6 +2472,7 @@ class ReadOnlyCrossVenueCollector:
                 event.canonical,
                 raw_markets,
                 series=series,
+                event_payload=event.raw if isinstance(event.raw, dict) else None,
             )
         except (VenueNormalizationError, ValueError) as exc:
             issues.append(

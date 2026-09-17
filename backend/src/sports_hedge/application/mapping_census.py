@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from sports_hedge.application.collector import CollectionReport, MarketEvaluationState
 from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
+from sports_hedge.application.mapping_forensics import VENUE_SCOPE_ALL, VENUE_SCOPE_UNIVERSE
 from sports_hedge.application.scan_cycle_audit import (
     issue_is_deadline_partial,
     issue_is_provider_failure,
@@ -48,6 +49,8 @@ class MappingCensus(BaseModel):
     qualifying_arbs: int = Field(ge=0)
     leftover_not_evaluated: int = Field(default=0, ge=0)
     venue_health: dict[str, str] = Field(default_factory=dict)
+    venue_scope: str | None = None
+    enabled_venues: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -56,6 +59,8 @@ def census_from_report(
     *,
     data_class: str,
     settings: Settings | None = None,
+    venue_scope: str | None = None,
+    enabled_venues: list[str] | None = None,
 ) -> MappingCensus:
     """Count mapping/equivalence from a completed collector report."""
 
@@ -112,6 +117,21 @@ def census_from_report(
     ]
     if data_class == CENSUS_DATA_CLASS_OWNER_LIVE:
         notes.append("One bounded UNIVERSE collect. No venue writes. No credential output.")
+        if venue_scope == VENUE_SCOPE_UNIVERSE:
+            notes.append(
+                "venue_scope=universe_lane_participation mirrors the UNIVERSE operator "
+                "lane. Polymarket is omitted when the operator disabled it. This "
+                "diagnostic does not write production venue toggles."
+            )
+        elif venue_scope == VENUE_SCOPE_ALL:
+            notes.append(
+                "venue_scope=all_operator_venues_forensic is an explicit all-venue "
+                "read-only diagnostic. It does not mirror a Polymarket-disabled "
+                "UNIVERSE lane and does not change production participation."
+            )
+        elif venue_scope:
+            notes.append(f"venue_scope={venue_scope}")
+    resolved_venues = [str(item) for item in (enabled_venues or [item.value for item in report.enabled_venues])]
     return MappingCensus(
         data_class=data_class,
         paper_mode=resolved.sports_hedge_mode,
@@ -135,6 +155,8 @@ def census_from_report(
         qualifying_arbs=int(report.qualifying_arbs),
         leftover_not_evaluated=leftover,
         venue_health=dict(report.venue_health or {}),
+        venue_scope=venue_scope,
+        enabled_venues=resolved_venues,
         notes=notes,
     )
 
@@ -164,6 +186,8 @@ def render_census(census: MappingCensus) -> str:
         f"qualifying_arbs={census.qualifying_arbs}",
         f"leftover_not_evaluated={census.leftover_not_evaluated}",
         f"venue_health={_fmt_counts(census.venue_health)}",
+        f"venue_scope={census.venue_scope or 'n/a'}",
+        f"enabled_venues={','.join(census.enabled_venues) or '{}'}",
     ]
     lines.extend(f"note: {note}" for note in census.notes)
     return "\n".join(lines) + "\n"
