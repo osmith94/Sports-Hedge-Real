@@ -264,12 +264,13 @@ class WatchlistService:
         snapshot. Semantic/cost/depth rejections stay fail-closed.
         """
 
-        return self.record_paper_fill(
-            opportunity_id,
-            stage=OpportunityStatus.PAPER_FILLING,
-            occurred_at=occurred_at,
-            detail=detail or "paper_fill_attempted_bound_snapshot",
-        )
+        with self.repository.transaction():
+            return self._record_paper_fill_locked(
+                opportunity_id,
+                stage=OpportunityStatus.PAPER_FILLING,
+                occurred_at=occurred_at,
+                detail=detail or "paper_fill_attempted_bound_snapshot",
+            )
 
     def allows_bound_snapshot_entry(self, current: NearOpportunity) -> bool:
         if current.status in {

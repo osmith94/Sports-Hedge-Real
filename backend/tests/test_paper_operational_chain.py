@@ -150,12 +150,17 @@ def test_stale_before_fill_is_rejected() -> None:
         opportunity_id = next(iter(ops._plans))
         plan = ops._plans[opportunity_id]
         plan.execution_modes = {venue: LegExecutionMode.INTERNAL for venue in plan.execution_modes}
-        later = OBSERVED + timedelta(seconds=30)
-        with pytest.raises(PaperOperationsError, match="stale_before_fill"):
+        stale_legs = [
+            leg.model_copy(update={"quote_age_ms": 50_000}) for leg in plan.legs
+        ]
+        ops._plans[opportunity_id] = plan.model_copy(
+            update={"legs": stale_legs, "quote_age_ms": 50_000, "quote_age_at_decision_ms": 50_000}
+        )
+        with pytest.raises(PaperOperationsError, match="snapshot_stale_at_decision"):
             ops.simulate_fill(
                 opportunity_id,
                 config=PaperFillConfig(assumed_latency_ms=0, max_quote_age_ms=10_000),
-                now=later,
+                now=OBSERVED,
             )
     finally:
         repository.close()

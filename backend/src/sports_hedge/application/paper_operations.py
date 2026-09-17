@@ -145,6 +145,7 @@ _AUTOFILL_GATE_REASONS = frozenset(
         "stale_quote",
         "snapshot_stale_at_decision",
         "snapshot_stale_at_simulated_arrival",
+        "unknown_quote_age",
         "market_revalidation_failed",
         "missing_paper_fill_plan",
         "no_positive_opening_legs",

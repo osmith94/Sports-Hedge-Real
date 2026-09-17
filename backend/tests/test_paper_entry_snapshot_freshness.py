@@ -369,10 +369,11 @@ def test_lifecycle_chronology_attempted_then_complete(tmp_path: Path) -> None:
         decision = _qualify(scan, age_ms=300)
         seeded = _observe(scan, watchlist, decision)
         ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER, autofill=True)
-        types = [
-            event.event_type
-            for event in watchlist.activity(opportunity_id=seeded.opportunity_id)
-        ]
+        events = sorted(
+            watchlist.activity(opportunity_id=seeded.opportunity_id),
+            key=lambda event: (event.occurred_at, event.event_id),
+        )
+        types = [event.event_type for event in events]
         assert LifecycleEventType.TRIGGER_CROSSED in types
         assert LifecycleEventType.PAPER_FILL_ATTEMPTED in types
         assert LifecycleEventType.PAPER_FILL_COMPLETE in types
