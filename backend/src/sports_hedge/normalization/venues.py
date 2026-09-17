@@ -1092,12 +1092,109 @@ KALSHI_GENERIC_RULE_PHRASES = (
     "see contract terms",
     "see contract",
 )
+KALSHI_SCOPE_CATALOG_PHRASES = (
+    "result scope",
+    "possible result",
+    "may be one of",
+    "one of the following",
+    "contract terms",
+    "series contract",
+    "for example",
+    "example:",
+    "examples:",
+)
+KALSHI_DOCUMENTED_SELECTOR_KEYS = (
+    "strike_type",
+    "custom_strike",
+    "market_type",
+    "settlement_source",
+)
 _NINETY_MINUTE_ABBREV_RE = re.compile(r"\b90\s*mins?\b")
 KALSHI_RULE_LAYER_NESTED = "nested_list"
 KALSHI_RULE_LAYER_EVENT = "event"
 KALSHI_RULE_LAYER_GET_MARKET = "get_market"
 KALSHI_RULE_LAYER_SERIES = "series"
 KALSHI_RULE_DIAGNOSTIC_CAP = 150
+
+
+def _classified_fingerprint_complete(
+    scope: SettlementScope, extra_time: bool | None, penalties: bool | None
+) -> bool:
+    return (
+        scope is not SettlementScope.UNKNOWN
+        and extra_time is not None
+        and penalties is not None
+    )
+
+
+def kalshi_secondary_is_scope_catalog(text: str) -> bool:
+    """True when secondary wording lists possible scopes/examples, not this market."""
+
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    if any(phrase in normalized for phrase in KALSHI_SCOPE_CATALOG_PHRASES):
+        return True
+    scope, extra_time, penalties = classify_settlement_wording(normalized)
+    if (
+        _classified_fingerprint_complete(scope, extra_time, penalties)
+        and scope in {SettlementScope.INCLUDING_EXTRA_TIME, SettlementScope.INCLUDING_PENALTIES}
+        and _has_regulation_marker(normalized)
+    ):
+        # Template listing regulation and ET/penalties scopes together, not one market clause.
+        return True
+    return False
+
+
+def resolve_kalshi_rule_field_precedence(
+    primary: str,
+    secondary: str,
+    rules: str = "",
+) -> tuple[SettlementScope, bool | None, bool | None]:
+    """Market-specific primary/rules establish settlement; catalog secondary does not.
+
+    A complete primary (or ``rules`` when primary is empty) may stand when
+    secondary is empty, incomplete, or generic multi-scope template text.
+    A complete secondary/rules clause with a different fingerprint still fails
+    closed unless it is catalog/example boilerplate. Unclassified primary is
+    not guessed from secondary.
+    """
+
+    unknown = (SettlementScope.UNKNOWN, None, None)
+    primary_text = str(primary or "").strip()
+    secondary_text = str(secondary or "").strip()
+    rules_text = str(rules or "").strip()
+    primary_fp = classify_settlement_wording(primary_text) if primary_text else unknown
+    secondary_fp = classify_settlement_wording(secondary_text) if secondary_text else unknown
+    rules_fp = classify_settlement_wording(rules_text) if rules_text else unknown
+
+    selected: tuple[SettlementScope, bool | None, bool | None] | None = None
+    if _classified_fingerprint_complete(*primary_fp):
+        selected = primary_fp
+    elif not primary_text and _classified_fingerprint_complete(*rules_fp):
+        selected = rules_fp
+    if selected is None:
+        if primary_text:
+            return primary_fp
+        if rules_text:
+            return rules_fp
+        return unknown
+
+    def _conflicts(
+        other_text: str,
+        other_fp: tuple[SettlementScope, bool | None, bool | None],
+    ) -> bool:
+        if not other_text or not _classified_fingerprint_complete(*other_fp):
+            return False
+        if other_fp == selected:
+            return False
+        return not kalshi_secondary_is_scope_catalog(other_text)
+
+    if _conflicts(secondary_text, secondary_fp):
+        return unknown
+    if selected == primary_fp and _conflicts(rules_text, rules_fp):
+        return unknown
+    return selected
 
 
 def kalshi_rule_field_presence(payload: dict[str, Any] | None) -> dict[str, bool]:
@@ -1133,12 +1230,52 @@ def _kalshi_rule_text(payload: dict[str, Any] | None) -> str:
 
 def _wording_completeness(text: str) -> tuple[str, bool]:
     scope, extra_time, penalties = classify_settlement_wording(text)
-    complete = (
-        scope is not SettlementScope.UNKNOWN
-        and extra_time is not None
-        and penalties is not None
-    )
+    complete = _classified_fingerprint_complete(scope, extra_time, penalties)
     return scope.value, complete
+
+
+def kalshi_documented_selector_presence(payload: dict[str, Any] | None) -> dict[str, bool]:
+    """SAFE presence of documented non-name fields. Values are never returned."""
+
+    if not isinstance(payload, dict):
+        return {key: False for key in KALSHI_DOCUMENTED_SELECTOR_KEYS}
+    present: dict[str, bool] = {}
+    for key in KALSHI_DOCUMENTED_SELECTOR_KEYS:
+        value = payload.get(key)
+        present[key] = value is not None and str(value).strip() not in {"", "None"}
+    return present
+
+
+def classify_kalshi_rule_field(field: str, text: str) -> dict[str, Any]:
+    """SAFE classification of one documented rule field. Never returns wording."""
+
+    stripped = str(text or "").strip()
+    normalized = normalize_text(stripped) if stripped else ""
+    if not stripped:
+        return {
+            "field": field,
+            "present_nonempty": False,
+            "classified_scope": None,
+            "economically_complete": False,
+            "wording_kind": "empty",
+            "has_regulation_tokens": False,
+            "has_extra_time_tokens": False,
+            "has_penalties_tokens": False,
+            "has_ninety_minute_abbrev": False,
+        }
+    scope, extra_time, penalties = classify_settlement_wording(stripped)
+    complete = _classified_fingerprint_complete(scope, extra_time, penalties)
+    return {
+        "field": field,
+        "present_nonempty": True,
+        "classified_scope": scope.value,
+        "economically_complete": complete,
+        "wording_kind": _kalshi_wording_kind(stripped, complete=complete),
+        "has_regulation_tokens": _has_regulation_marker(normalized),
+        "has_extra_time_tokens": _has_extra_time_token(normalized),
+        "has_penalties_tokens": _has_penalties_token(normalized),
+        "has_ninety_minute_abbrev": bool(_NINETY_MINUTE_ABBREV_RE.search(normalized)),
+    }
 
 
 def _kalshi_wording_kind(text: str, *, complete: bool) -> str:
@@ -1161,6 +1298,32 @@ def _kalshi_wording_kind(text: str, *, complete: bool) -> str:
     return "present_unclassified"
 
 
+def _kalshi_layer_field_diagnostics(payload: dict[str, Any] | None) -> dict[str, Any]:
+    raw = payload if isinstance(payload, dict) else {}
+    fields = [
+        classify_kalshi_rule_field(key, str(raw.get(key) or ""))
+        for key in KALSHI_CONTRACT_RULE_KEYS
+    ]
+    prec_scope, prec_et, prec_pen = resolve_kalshi_rule_field_precedence(
+        str(raw.get("rules_primary") or ""),
+        str(raw.get("rules_secondary") or ""),
+        str(raw.get("rules") or ""),
+    )
+    prec_complete = _classified_fingerprint_complete(prec_scope, prec_et, prec_pen)
+    return {
+        "fields": fields,
+        "precedence_classified_scope": prec_scope.value
+        if any(item["present_nonempty"] for item in fields)
+        else None,
+        "precedence_economically_complete": prec_complete
+        if any(item["present_nonempty"] for item in fields)
+        else False,
+        "documented_selector_presence": kalshi_documented_selector_presence(
+            payload if isinstance(payload, dict) else None
+        ),
+    }
+
+
 def classify_kalshi_contract_rule_layer(
     payload: dict[str, Any] | None,
     *,
@@ -1169,6 +1332,9 @@ def classify_kalshi_contract_rule_layer(
 ) -> dict[str, Any]:
     """Classify one documented rule layer without exposing contract text."""
 
+    field_diag = _kalshi_layer_field_diagnostics(
+        payload if isinstance(payload, dict) else None
+    )
     if payload is None and layer != KALSHI_RULE_LAYER_GET_MARKET:
         return {
             "layer": layer,
@@ -1184,6 +1350,7 @@ def classify_kalshi_contract_rule_layer(
             "has_penalties_tokens": False,
             "has_ninety_minute_abbrev": False,
             "fetch_status": fetch_status,
+            **field_diag,
         }
     presence = kalshi_rule_field_presence(payload if isinstance(payload, dict) else None)
     text = _kalshi_rule_text(payload if isinstance(payload, dict) else None)
@@ -1211,6 +1378,7 @@ def classify_kalshi_contract_rule_layer(
         "has_ninety_minute_abbrev": bool(normalized)
         and bool(_NINETY_MINUTE_ABBREV_RE.search(normalized)),
         "fetch_status": fetch_status,
+        **field_diag,
     }
 
 
@@ -1324,41 +1492,35 @@ def _kalshi_settlement(
     line: Decimal | None,
     event_payload: dict[str, Any] | None = None,
 ) -> SettlementFingerprint:
-    # Read settlement wording from the contract payload. Event-level rules are
-    # inherited only for ordinary Match Result when the nested market itself has
-    # no rule text. Do not infer regulation from GAME / Opta / series names.
-    parts = [
-        payload.get("rules_primary"),
-        payload.get("rules_secondary"),
-        payload.get("rules"),
-        payload.get("description"),
-        payload.get("yes_description"),
-        payload.get("no_description"),
-        payload.get("settlement_source"),
+    # Market-specific rule fields only. Do not infer regulation from GAME / Opta
+    # / series names, and do not concatenate series contract-terms catalogs into
+    # the market wording blob. Event-level rules are inherited only for ordinary
+    # Match Result when the nested market itself has no rule or description text.
+    # Series catalog URLs / settlement_sources are not market-selected scope.
+    _ = series
+    primary = str(payload.get("rules_primary") or "").strip()
+    secondary = str(payload.get("rules_secondary") or "").strip()
+    rules = str(payload.get("rules") or "").strip()
+    descriptions = [
+        str(payload.get(key) or "").strip()
+        for key in ("description", "yes_description", "no_description", "settlement_source")
+        if str(payload.get(key) or "").strip()
     ]
-    market_has_rule_text = any(str(value).strip() for value in parts if value is not None)
+    market_has_rule_text = bool(primary or secondary or rules or descriptions)
     if (
         not market_has_rule_text
         and family is MarketFamily.MATCH_RESULT
         and isinstance(event_payload, dict)
     ):
-        parts.extend(
-            [
-                event_payload.get("rules_primary"),
-                event_payload.get("rules_secondary"),
-                event_payload.get("rules"),
-            ]
+        primary = str(event_payload.get("rules_primary") or "").strip()
+        secondary = str(event_payload.get("rules_secondary") or "").strip()
+        rules = str(event_payload.get("rules") or "").strip()
+    if primary or secondary or rules:
+        scope, extra_time, penalties = resolve_kalshi_rule_field_precedence(
+            primary, secondary, rules
         )
-    if series:
-        parts.extend(
-            [
-                series.get("contract_terms_url"),
-                json.dumps(series.get("settlement_sources") or []),
-            ]
-        )
-    scope, extra_time, penalties = classify_settlement_wording(
-        " ".join(str(value) for value in parts if value)
-    )
+    else:
+        scope, extra_time, penalties = classify_settlement_wording(" ".join(descriptions))
     return SettlementFingerprint(
         scope=scope,
         period=period,

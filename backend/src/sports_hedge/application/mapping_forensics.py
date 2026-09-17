@@ -95,6 +95,20 @@ class MatchbookKalshiMatchResultAssessment(BaseModel):
     sample: list[SafeCandidateView] = Field(default_factory=list)
 
 
+class KalshiRuleFieldView(BaseModel):
+    """SAFE classification of one documented rule field. Never includes wording."""
+
+    field: str
+    present_nonempty: bool = False
+    classified_scope: str | None = None
+    economically_complete: bool | None = None
+    wording_kind: str | None = None
+    has_regulation_tokens: bool = False
+    has_extra_time_tokens: bool = False
+    has_penalties_tokens: bool = False
+    has_ninety_minute_abbrev: bool = False
+
+
 class KalshiRuleLayerView(BaseModel):
     """SAFE classification of one documented Kalshi rule source layer."""
 
@@ -113,6 +127,10 @@ class KalshiRuleLayerView(BaseModel):
     fetch_status: str | None = None
     contract_terms_url_present: bool | None = None
     settlement_sources_present: bool | None = None
+    fields: list[KalshiRuleFieldView] = Field(default_factory=list)
+    precedence_classified_scope: str | None = None
+    precedence_economically_complete: bool | None = None
+    documented_selector_presence: dict[str, bool] = Field(default_factory=dict)
 
 
 class KalshiMatchResultRuleTickerView(BaseModel):
@@ -300,7 +318,10 @@ def forensics_from_report(
     notes.append(
         "Kalshi Get Market / nested / event / series layers report field presence "
         "and classify_settlement_wording scope only. Contract text is not printed. "
-        "Series contract_terms_url is not fetched; presence is a boolean."
+        "Series contract_terms_url is not fetched; presence is a boolean. "
+        "Per-field rules_primary/rules_secondary/rules classification is reported "
+        "separately from combined concatenation. Precedence uses a complete "
+        "market-specific primary scope and ignores generic catalog secondary text."
     )
     return MappingForensics(
         data_class=data_class,
@@ -399,12 +420,29 @@ def render_forensics(forensics: MappingForensics) -> str:
                 "  "
                 f"layer={layer.layer} primary={layer.rules_primary_nonempty} "
                 f"secondary={layer.rules_secondary_nonempty} rules={layer.rules_nonempty} "
-                f"scope={layer.classified_scope} complete={layer.economically_complete} "
+                f"combined_scope={layer.classified_scope} combined_complete={layer.economically_complete} "
+                f"precedence_scope={layer.precedence_classified_scope} "
+                f"precedence_complete={layer.precedence_economically_complete} "
                 f"kind={layer.wording_kind} regulation_tokens={layer.has_regulation_tokens} "
                 f"et_tokens={layer.has_extra_time_tokens} pen_tokens={layer.has_penalties_tokens} "
                 f"ninety_min_abbrev={layer.has_ninety_minute_abbrev} "
                 f"fetch_status={layer.fetch_status}{extra}"
             )
+            for field in layer.fields:
+                lines.append(
+                    "    "
+                    f"field={field.field} present={field.present_nonempty} "
+                    f"scope={field.classified_scope} complete={field.economically_complete} "
+                    f"kind={field.wording_kind} regulation_tokens={field.has_regulation_tokens} "
+                    f"et_tokens={field.has_extra_time_tokens} pen_tokens={field.has_penalties_tokens} "
+                    f"ninety_min_abbrev={field.has_ninety_minute_abbrev}"
+                )
+            if layer.documented_selector_presence:
+                selectors = ",".join(
+                    f"{key}={value}"
+                    for key, value in sorted(layer.documented_selector_presence.items())
+                )
+                lines.append(f"    documented_selectors={{{selectors}}}")
     for note in forensics.notes:
         lines.append(f"note: {note}")
     for item in forensics.candidates:
@@ -436,6 +474,48 @@ def _fmt_hist(values: dict[str, int]) -> str:
     if not values:
         return "{}"
     return "{" + ", ".join(f"{key}={value}" for key, value in values.items()) + "}"
+
+
+def _parse_rule_field_views(raw: Any) -> list[KalshiRuleFieldView]:
+    if not isinstance(raw, list):
+        return []
+    views: list[KalshiRuleFieldView] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        views.append(
+            KalshiRuleFieldView(
+                field=str(item.get("field") or "unknown"),
+                present_nonempty=bool(item.get("present_nonempty")),
+                classified_scope=(
+                    str(item.get("classified_scope"))
+                    if item.get("classified_scope") is not None
+                    else None
+                ),
+                economically_complete=(
+                    bool(item.get("economically_complete"))
+                    if item.get("economically_complete") is not None
+                    else None
+                ),
+                wording_kind=(
+                    str(item.get("wording_kind")) if item.get("wording_kind") is not None else None
+                ),
+                has_regulation_tokens=bool(item.get("has_regulation_tokens")),
+                has_extra_time_tokens=bool(item.get("has_extra_time_tokens")),
+                has_penalties_tokens=bool(item.get("has_penalties_tokens")),
+                has_ninety_minute_abbrev=bool(item.get("has_ninety_minute_abbrev")),
+            )
+        )
+    return views
+
+
+def _parse_selector_presence(raw: Any) -> dict[str, bool]:
+    if not isinstance(raw, dict):
+        return {}
+    parsed: dict[str, bool] = {}
+    for key, value in raw.items():
+        parsed[str(key)] = bool(value)
+    return parsed
 
 
 def _kalshi_rule_layer_views(
@@ -525,6 +605,20 @@ def _kalshi_rule_layer_views(
                         bool(layer.get("settlement_sources_present"))
                         if "settlement_sources_present" in layer
                         else None
+                    ),
+                    fields=_parse_rule_field_views(layer.get("fields")),
+                    precedence_classified_scope=(
+                        str(layer.get("precedence_classified_scope"))
+                        if layer.get("precedence_classified_scope") is not None
+                        else None
+                    ),
+                    precedence_economically_complete=(
+                        bool(layer.get("precedence_economically_complete"))
+                        if layer.get("precedence_economically_complete") is not None
+                        else None
+                    ),
+                    documented_selector_presence=_parse_selector_presence(
+                        layer.get("documented_selector_presence")
                     ),
                 )
             )

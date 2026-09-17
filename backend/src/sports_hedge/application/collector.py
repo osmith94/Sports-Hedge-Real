@@ -109,6 +109,18 @@ from sports_hedge.paper.preparation import PreparablePaperOpportunity
 LOGGER = getLogger(__name__)
 
 
+def _new_kalshi_rule_enrichment() -> dict[str, int]:
+    return {
+        "attempted": 0,
+        "applied": 0,
+        "empty": 0,
+        "rules_empty": 0,
+        "unchanged_existing": 0,
+        "failed": 0,
+        "skipped_complete": 0,
+    }
+
+
 class MatchbookReadClient(Protocol):
     async def list_events(self, **filters: Any) -> dict[str, Any]: ...
 
@@ -485,13 +497,7 @@ class ReadOnlyCrossVenueCollector:
         self._provider_calls = 0
         self._inflight_orphaned = 0
         self._attribution = ScanAttribution()
-        self._kalshi_rule_enrichment = {
-            "attempted": 0,
-            "applied": 0,
-            "empty": 0,
-            "failed": 0,
-            "skipped_complete": 0,
-        }
+        self._kalshi_rule_enrichment = _new_kalshi_rule_enrichment()
         self._kalshi_rule_layer_diagnostics: list[dict[str, Any]] = []
 
     async def collect_and_scan(
@@ -568,13 +574,7 @@ class ReadOnlyCrossVenueCollector:
         self._provider_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
         self._provider_peak_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
         self._attribution = ScanAttribution()
-        self._kalshi_rule_enrichment = {
-            "attempted": 0,
-            "applied": 0,
-            "empty": 0,
-            "failed": 0,
-            "skipped_complete": 0,
-        }
+        self._kalshi_rule_enrichment = _new_kalshi_rule_enrichment()
         self._kalshi_rule_layer_diagnostics: list[dict[str, Any]] = []
         self._inflight = set()
         self._cluster_sema = asyncio.Semaphore(self._cluster_concurrency_limit)
@@ -2689,9 +2689,15 @@ class ReadOnlyCrossVenueCollector:
                 else:
                     get_payload = payload
                     get_status = "ok"
+                    nonempty_rules = any(
+                        str(payload.get(key) or "").strip() for key in KALSHI_CONTRACT_RULE_KEYS
+                    )
                     if target is not None and merge_kalshi_contract_rules(target, payload):
                         self._kalshi_rule_enrichment["applied"] += 1
+                    elif nonempty_rules:
+                        self._kalshi_rule_enrichment["unchanged_existing"] += 1
                     else:
+                        self._kalshi_rule_enrichment["rules_empty"] += 1
                         self._kalshi_rule_enrichment["empty"] += 1
             self._record_kalshi_rule_layers(
                 fixture_label=fixture_label,

@@ -53,7 +53,12 @@ from sports_hedge.normalization.venues import (
     MatchbookNormalizer,
     PolymarketNormalizer,
     classify_kalshi_contract_rule_layer,
+    classify_kalshi_rule_field,
+    classify_settlement_wording,
+    kalshi_documented_selector_presence,
+    kalshi_secondary_is_scope_catalog,
     merge_kalshi_contract_rules,
+    resolve_kalshi_rule_field_precedence,
 )
 from sports_hedge.paper.models import FxRateSnapshot
 
@@ -61,6 +66,17 @@ KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
 REGULATION = (
     "Resolves based on 90 minutes of regulation time. Extra time and penalties do not count."
 )
+# Abstracted live-shaped pattern. Not owner-live contract text.
+SCOPE_CATALOG_SECONDARY = (
+    "Series contract terms define result scope values that may be one of the following: "
+    "regulation time, extra time, or full match including extra time and penalties. "
+    "Example: a later penalty winner is not the regulation-time result. "
+    "The market-selected scope is stated in the primary rules."
+)
+CONTRADICTORY_SECONDARY = (
+    "This market resolves including extra time and penalties."
+)
+NINETY_MIN_ABBREV_PRIMARY = "Settles on 90 mins of play."
 BETIS = "Real Betis"
 GETAFE = "Getafe"
 KALSHI_GAME_SERIES = {
@@ -179,6 +195,7 @@ class BetisKalshi:
         rules_on_markets: bool = False,
         event_rules_text: str | None = None,
         market_rules_text: str | None = None,
+        market_secondary_text: str | None = None,
     ) -> None:
         self.event_rules_text = (
             REGULATION if rules_on_event and event_rules_text is None else event_rules_text
@@ -186,6 +203,7 @@ class BetisKalshi:
         self.market_rules_text = (
             REGULATION if rules_on_markets and market_rules_text is None else market_rules_text
         )
+        self.market_secondary_text = market_secondary_text
         self.list_events_calls = 0
 
     def _markets(self) -> list[dict[str, Any]]:
@@ -200,6 +218,8 @@ class BetisKalshi:
             }
             if self.market_rules_text:
                 item["rules_primary"] = self.market_rules_text
+            if self.market_secondary_text:
+                item["rules_secondary"] = self.market_secondary_text
             markets.append(item)
         return markets
 
@@ -589,8 +609,10 @@ class BetisKalshiGetMarket(BetisKalshi):
         self,
         *,
         rules_text: str = REGULATION,
+        secondary_text: str = "",
         event_rules_text: str | None = None,
         market_rules_text: str | None = None,
+        market_secondary_text: str | None = None,
         fail_tickers: tuple[str, ...] = (),
         rules_on_event: bool = False,
         rules_on_markets: bool = False,
@@ -600,8 +622,10 @@ class BetisKalshiGetMarket(BetisKalshi):
             rules_on_markets=rules_on_markets,
             event_rules_text=event_rules_text,
             market_rules_text=market_rules_text,
+            market_secondary_text=market_secondary_text,
         )
         self.rules_text = rules_text
+        self.secondary_text = secondary_text
         self.fail_tickers = {str(item) for item in fail_tickers}
         self.get_market_calls: list[str] = []
 
@@ -614,7 +638,7 @@ class BetisKalshiGetMarket(BetisKalshi):
             **nested,
             "ticker": ticker,
             "rules_primary": self.rules_text,
-            "rules_secondary": "",
+            "rules_secondary": self.secondary_text,
         }
 
 
@@ -654,6 +678,9 @@ async def test_get_market_empty_or_ambiguous_rules_stay_incomplete() -> None:
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), empty)
     assert census.equivalent_market_pairs == 0
     assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    assert census.kalshi_match_result_rule_enrichment["rules_empty"] == 3
+    assert census.kalshi_match_result_rule_enrichment["empty"] == 3
+    assert census.kalshi_match_result_rule_enrichment["unchanged_existing"] == 0
     ambiguous = BetisKalshiGetMarket(rules_text=AMBIGUOUS)
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), ambiguous)
     assert census.equivalent_market_pairs == 0
@@ -708,6 +735,75 @@ def test_safe_rule_layer_classification_does_not_expose_wording() -> None:
         fetch_status="transport_failed",
     )
     assert failed["wording_kind"] == "absent"
+
+
+def test_per_field_classification_separates_primary_from_catalog_secondary() -> None:
+    payload = {
+        "rules_primary": REGULATION,
+        "rules_secondary": SCOPE_CATALOG_SECONDARY,
+        "strike_type": "custom",
+        "title": f"{BETIS} vs {GETAFE}",
+    }
+    primary = classify_kalshi_rule_field("rules_primary", REGULATION)
+    secondary = classify_kalshi_rule_field("rules_secondary", SCOPE_CATALOG_SECONDARY)
+    combined_scope, combined_et, combined_pen = classify_settlement_wording(
+        f"{REGULATION} {SCOPE_CATALOG_SECONDARY}"
+    )
+    precedence = resolve_kalshi_rule_field_precedence(REGULATION, SCOPE_CATALOG_SECONDARY)
+    layer = classify_kalshi_contract_rule_layer(payload, layer="get_market", fetch_status="ok")
+    dumped = str(primary) + str(secondary) + str(layer)
+    assert REGULATION not in dumped
+    assert SCOPE_CATALOG_SECONDARY not in dumped
+    assert BETIS not in dumped
+    assert primary["economically_complete"] is True
+    assert primary["classified_scope"] == "regulation_time"
+    assert secondary["economically_complete"] is False or secondary["classified_scope"] != "regulation_time"
+    assert combined_scope is SettlementScope.UNKNOWN
+    assert combined_et is None and combined_pen is None
+    assert precedence == (SettlementScope.REGULATION_TIME, False, False)
+    assert layer["classified_scope"] == "unknown"
+    assert layer["precedence_classified_scope"] == "regulation_time"
+    assert layer["precedence_economically_complete"] is True
+    by_field = {item["field"]: item for item in layer["fields"]}
+    assert by_field["rules_primary"]["classified_scope"] == "regulation_time"
+    assert by_field["rules_primary"]["economically_complete"] is True
+    assert by_field["rules_secondary"]["present_nonempty"] is True
+    selectors = kalshi_documented_selector_presence(payload)
+    assert selectors["strike_type"] is True
+    assert selectors["custom_strike"] is False
+    assert "yes_sub_title" not in selectors
+    assert "ticker" not in selectors
+
+
+def test_unclassified_primary_is_not_guessed_from_catalog_secondary() -> None:
+    precedence = resolve_kalshi_rule_field_precedence(AMBIGUOUS, SCOPE_CATALOG_SECONDARY)
+    assert precedence[0] is SettlementScope.UNKNOWN
+    abbrev = classify_kalshi_rule_field("rules_primary", NINETY_MIN_ABBREV_PRIMARY)
+    assert abbrev["wording_kind"] == "present_unclassified_with_settlement_tokens"
+    assert abbrev["economically_complete"] is False
+    assert abbrev["has_ninety_minute_abbrev"] is True
+    assert NINETY_MIN_ABBREV_PRIMARY not in str(abbrev)
+    abbrev_prec = resolve_kalshi_rule_field_precedence(
+        NINETY_MIN_ABBREV_PRIMARY, SCOPE_CATALOG_SECONDARY
+    )
+    assert abbrev_prec[0] is SettlementScope.UNKNOWN
+
+
+def test_contradictory_complete_secondary_fails_closed() -> None:
+    precedence = resolve_kalshi_rule_field_precedence(REGULATION, CONTRADICTORY_SECONDARY)
+    assert precedence[0] is SettlementScope.UNKNOWN
+    assert precedence[1] is None and precedence[2] is None
+    listed_scopes = (
+        "Regulation time is one defined scope. Another defined scope is full match "
+        "including extra time and penalties."
+    )
+    assert kalshi_secondary_is_scope_catalog(listed_scopes) is True
+    assert resolve_kalshi_rule_field_precedence(REGULATION, listed_scopes) == (
+        SettlementScope.REGULATION_TIME,
+        False,
+        False,
+    )
+    assert kalshi_secondary_is_scope_catalog(CONTRADICTORY_SECONDARY) is False
 
 
 def test_match_result_tickers_fetch_only_when_settlement_incomplete() -> None:
@@ -807,8 +903,10 @@ async def test_ambiguous_current_and_get_market_rules_stay_incomplete() -> None:
     assert "incomplete_settlement" in forensics.candidate_rejection_histogram
     assert sorted(nested_ambiguous.get_market_calls) == sorted(_betis_kalshi_tickers())
     assert census.kalshi_match_result_rule_enrichment["attempted"] == 3
-    assert census.kalshi_match_result_rule_enrichment["empty"] == 3
+    assert census.kalshi_match_result_rule_enrichment["unchanged_existing"] == 3
     assert census.kalshi_match_result_rule_enrichment["applied"] == 0
+    assert census.kalshi_match_result_rule_enrichment["rules_empty"] == 0
+    assert census.kalshi_match_result_rule_enrichment["empty"] == 0
     assert forensics.get_market_wording_kind_histogram.get("generic_ambiguous") == 3
     rendered = render_forensics(forensics)
     assert AMBIGUOUS not in rendered
@@ -838,6 +936,126 @@ async def test_get_market_failure_for_one_ticker_fails_closed() -> None:
     assert census.kalshi_match_result_rule_enrichment["applied"] == 2
     assert forensics.get_market_status_histogram.get("transport_failed") == 1
     assert forensics.get_market_status_histogram.get("ok") == 2
+
+
+@pytest.mark.asyncio
+async def test_catalog_secondary_does_not_block_complete_primary_1x2() -> None:
+    kalshi = BetisKalshi(
+        rules_on_markets=True,
+        market_rules_text=REGULATION,
+        market_secondary_text=SCOPE_CATALOG_SECONDARY,
+    )
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 1
+    assert census.kalshi_match_result_rule_enrichment["skipped_complete"] == 3
+    assert census.kalshi_match_result_rule_enrichment["attempted"] == 0
+    rendered = render_forensics(forensics)
+    assert REGULATION not in rendered
+    assert SCOPE_CATALOG_SECONDARY not in rendered
+    assert "field=rules_primary" in rendered
+    assert "field=rules_secondary" in rendered
+    assert "precedence_scope=regulation_time" in rendered
+    assert "combined_scope=unknown" in rendered
+
+
+@pytest.mark.asyncio
+async def test_hot_and_universe_agree_on_catalog_secondary_precedence() -> None:
+    universe_kalshi = BetisKalshi(
+        rules_on_markets=True,
+        market_rules_text=REGULATION,
+        market_secondary_text=SCOPE_CATALOG_SECONDARY,
+    )
+    universe_report, universe_census, universe_forensics = await _scan(
+        BetisMatchbook(),
+        EmptyPolymarket(),
+        universe_kalshi,
+    )
+    hot_kalshi = BetisKalshi(
+        rules_on_markets=True,
+        market_rules_text=REGULATION,
+        market_secondary_text=SCOPE_CATALOG_SECONDARY,
+    )
+    hot_report, hot_census, hot_forensics = await _hot_from_same_payload(
+        universe_report, kalshi=hot_kalshi
+    )
+    assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics) == (
+        _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
+    )
+    assert universe_census.equivalent_market_pairs == 1
+
+
+@pytest.mark.asyncio
+async def test_contradictory_secondary_stays_nonequivalent() -> None:
+    kalshi = BetisKalshi(
+        rules_on_markets=True,
+        market_rules_text=REGULATION,
+        market_secondary_text=CONTRADICTORY_SECONDARY,
+    )
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
+    assert census.equivalent_market_pairs == 0
+    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+
+
+@pytest.mark.asyncio
+async def test_unclassified_primary_plus_catalog_secondary_stays_incomplete() -> None:
+    kalshi = BetisKalshi(
+        rules_on_markets=True,
+        market_rules_text=NINETY_MIN_ABBREV_PRIMARY,
+        market_secondary_text=SCOPE_CATALOG_SECONDARY,
+    )
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
+    assert census.equivalent_market_pairs == 0
+    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    get_layer = next(
+        layer
+        for item in forensics.kalshi_rule_layers
+        for layer in item.layers
+        if layer.layer == "nested_list"
+    )
+    primary = next(field for field in get_layer.fields if field.field == "rules_primary")
+    assert primary.wording_kind == "present_unclassified_with_settlement_tokens"
+    assert primary.economically_complete is False
+    assert get_layer.precedence_economically_complete is False
+    rendered = render_forensics(forensics)
+    assert NINETY_MIN_ABBREV_PRIMARY not in rendered
+    assert "90 mins" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_to_qualify_still_nonequivalent_with_catalog_secondary() -> None:
+    report, census, _forensics = await _scan(
+        BetisMatchbook(extra_markets=[_mb_to_qualify()]),
+        EmptyPolymarket(),
+        BetisKalshi(
+            rules_on_markets=True,
+            market_rules_text=REGULATION,
+            market_secondary_text=SCOPE_CATALOG_SECONDARY,
+        ),
+    )
+    rows = [row for items in report.fixture_markets.values() for row in items]
+    qualify = [row for row in rows if row.family == "to_qualify"]
+    assert qualify
+    assert all(row.comparison_status.value != "matched_equivalent" for row in qualify)
+    assert census.equivalent_market_pairs == 1
+    assert census.market_family_breakdown.get("match_result") == 1
+
+
+@pytest.mark.asyncio
+async def test_identical_get_market_rules_count_as_unchanged_existing() -> None:
+    kalshi = BetisKalshiGetMarket(
+        rules_text=AMBIGUOUS,
+        market_rules_text=AMBIGUOUS,
+        rules_on_markets=True,
+    )
+    _report, census, _forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
+    assert census.equivalent_market_pairs == 0
+    assert census.kalshi_match_result_rule_enrichment["attempted"] == 3
+    assert census.kalshi_match_result_rule_enrichment["unchanged_existing"] == 3
+    assert census.kalshi_match_result_rule_enrichment["applied"] == 0
+    assert census.kalshi_match_result_rule_enrichment["rules_empty"] == 0
+    assert census.kalshi_match_result_rule_enrichment["empty"] == 0
 
 
 @pytest.mark.asyncio
