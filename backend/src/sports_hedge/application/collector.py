@@ -194,6 +194,8 @@ DEFAULT_MAX_EVENT_PAIRS = 60
 # Keep ~4s of the 45s operator cycle for leftover assembly before coordinator grace.
 SCAN_FINALISATION_RESERVE_SECONDS = 4.0
 MIN_PROVIDER_WAIT_SECONDS = 0.05
+# Cancel/orphan drain only. Must not become the provider-call timeout when the
+# collector has no hard cycle deadline (unbounded UNIVERSE).
 PROVIDER_CANCEL_DRAIN_SECONDS = 0.05
 # list_events of one hung venue must not consume the entire soft budget before
 # clustering/evaluation of fixtures already returned by healthy venues.
@@ -953,10 +955,23 @@ class ReadOnlyCrossVenueCollector:
             return None
         return self._op_soft_deadline - monotonic()
 
-    def _remaining_assembly(self) -> float:
+    def _remaining_assembly(self) -> float | None:
+        """Seconds until the collector hard deadline, or None when unbounded.
+
+        Unbounded UNIVERSE has no hard cycle envelope. Individual provider
+        calls still use their configured finite venue/provider timeout.
+        ``PROVIDER_CANCEL_DRAIN_SECONDS`` is only a cancel-drain allowance.
+        """
+
         if self._op_deadline is None:
-            return PROVIDER_CANCEL_DRAIN_SECONDS
+            return None
         return max(0.0, self._op_deadline - monotonic())
+
+    def _cancel_drain_seconds(self) -> float:
+        remaining = self._remaining_assembly()
+        if remaining is None:
+            return PROVIDER_CANCEL_DRAIN_SECONDS
+        return min(PROVIDER_CANCEL_DRAIN_SECONDS, remaining)
 
     def _timeout_budget(self, requested: float) -> float:
         """Cap a provider wait to remaining soft budget and the hard collector deadline."""
@@ -967,7 +982,7 @@ class ReadOnlyCrossVenueCollector:
         elif remaining < MIN_PROVIDER_WAIT_SECONDS:
             return 0.0
         hard = self._remaining_assembly()
-        capped = min(requested, remaining, hard)
+        capped = min(requested, remaining) if hard is None else min(requested, remaining, hard)
         if capped < MIN_PROVIDER_WAIT_SECONDS:
             return 0.0
         return capped
@@ -978,19 +993,25 @@ class ReadOnlyCrossVenueCollector:
         Long cycles still use the configured venue timeout. Short Full Sweep
         chunks reserve ``MIN_POST_DISCOVERY_SOFT_SECONDS`` so a hung/degraded
         venue cannot leftover the whole discovered universe unevaluated.
+        Unbounded UNIVERSE has no assembly deadline, so the configured venue
+        timeout remains the finite per-call bound.
         """
 
         remaining_soft = self._remaining_soft()
         hard = self._remaining_assembly()
         if remaining_soft is None:
-            capped = requested if self._op_deadline is None else min(requested, hard)
+            capped = requested if hard is None else min(requested, hard)
             return 0.0 if capped < MIN_PROVIDER_WAIT_SECONDS else capped
         reserved = MIN_POST_DISCOVERY_SOFT_SECONDS
         if remaining_soft <= reserved + MIN_PROVIDER_WAIT_SECONDS:
             available = remaining_soft * 0.5
         else:
             available = remaining_soft - reserved
-        capped = min(requested, max(0.0, available), hard)
+        capped = (
+            min(requested, max(0.0, available))
+            if hard is None
+            else min(requested, max(0.0, available), hard)
+        )
         if capped < MIN_PROVIDER_WAIT_SECONDS:
             return 0.0
         return capped
@@ -1029,7 +1050,7 @@ class ReadOnlyCrossVenueCollector:
             else:
                 self._inflight.discard(task)
         if pending:
-            drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
+            drain = self._cancel_drain_seconds()
             if drain > 0:
                 await asyncio.wait(set(pending), timeout=drain)
         for task in pending:
@@ -1044,7 +1065,9 @@ class ReadOnlyCrossVenueCollector:
             if callable(close):
                 close()
             return None, True
-        timeout = min(timeout, self._remaining_assembly())
+        remaining_hard = self._remaining_assembly()
+        if remaining_hard is not None:
+            timeout = min(timeout, remaining_hard)
         if timeout <= 0:
             close = getattr(coro, "close", None)
             if callable(close):
@@ -1061,7 +1084,7 @@ class ReadOnlyCrossVenueCollector:
                 self._inflight.discard(task)
                 return task.result(), False
             self._request_cancel(task)
-            drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
+            drain = self._cancel_drain_seconds()
             if drain > 0:
                 await asyncio.wait({task}, timeout=drain)
             if task.done() and not task.cancelled():
@@ -1072,7 +1095,7 @@ class ReadOnlyCrossVenueCollector:
             return None, True
         except asyncio.CancelledError:
             self._request_cancel(task)
-            drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
+            drain = self._cancel_drain_seconds()
             if drain > 0 and not task.done():
                 await asyncio.wait({task}, timeout=drain)
             self._count_orphan_after_drain(task)
@@ -1103,14 +1126,14 @@ class ReadOnlyCrossVenueCollector:
             for task in still_pending:
                 task.cancel()
             if still_pending:
-                drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
+                drain = self._cancel_drain_seconds()
                 if drain > 0:
                     await asyncio.wait(set(still_pending), timeout=drain)
             raise
         for task in pending:
             task.cancel()
         if pending:
-            drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
+            drain = self._cancel_drain_seconds()
             if drain > 0:
                 await asyncio.wait(pending, timeout=drain)
         results: list[Any] = []
@@ -2048,7 +2071,7 @@ class ReadOnlyCrossVenueCollector:
             for task in pending.values():
                 if not task.done():
                     task.cancel()
-            drain = min(PROVIDER_CANCEL_DRAIN_SECONDS, self._remaining_assembly())
+            drain = self._cancel_drain_seconds()
             if drain > 0 and pending:
                 await asyncio.wait(set(pending.values()), timeout=drain)
 

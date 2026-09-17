@@ -237,6 +237,7 @@ classify_scan_lane(
     *,
     hot_horizon=60m,
     post_kickoff_unknown_horizon=3h,
+    post_kickoff_current_radar_ceiling=4h,
 ) -> HOT | UNIVERSE | DROP
 
 DROP when provider status is completed/settled/void/expired/finished/final/closed/graded
@@ -248,6 +249,7 @@ DROP when provider status is completed/settled/void/expired/finished/final/close
      `matchbook_matched` / cluster coverage is not Matchbook lifecycle authority.
 
 HOT  when in_running is True                         # only live label
+     and (now - effective_kickoff) <= 4h current-radar ceiling
      or 0 < (kickoff_utc - now) <= hot_horizon       # pre-kickoff
      or (
           in_running is not True
@@ -272,6 +274,13 @@ DROP also when kickoff-passed + unknown beyond the 3h window (#164)
      Leaves current radar / HOT identity / Discovery inventory.
      Does not write fixture_status=completed or in_running=true.
      Explicit postponed/delayed/rescheduled is not dropped by kickoff arithmetic.
+
+DROP also when a current/effective kickoff is available and the fixture is
+     more than 4h past it (#275), even if stale Matchbook in_running=true
+     or fixture_status=open persists. This is a hard football scheduling
+     safety ceiling for current-radar/HOT membership only. Elapsed time
+     must not fabricate completed/closed. Reason if surfaced:
+     clock_expired_current_radar. Before 4h, genuine in-running remains HOT.
 ```
 
 `in_running is True` is the only live label. After the 3h unknown window the fixture **leaves current radar** (not merely HOT scheduling). Elapsed time must not write `fixture_status=completed` or `in_running=true`. Explicit Matchbook/provider terminal status evicts immediately. A Matchbook-confirmed terminal tombstone must not be resurrected by a later Polymarket/Kalshi unknown or postponed/delayed/rescheduled observation. A later Matchbook `open` / `in-play` / `suspended` / `rescheduled` (or Matchbook `in_running=True` with a non-terminal status) may restore current radar.
@@ -478,6 +487,7 @@ generation budget remains a separate decision.
 | `paper_universe_hot_yield_safety_margin_seconds` | 2 | Chunk bound: `next_hot_due - now - margin`. |
 | `paper_hot_pre_kickoff_horizon_minutes` | 60 | |
 | `paper_hot_post_kickoff_unknown_horizon_hours` | **3** | Unknown in-play leaves HOT after this; no fabricated completed/live. |
+| `paper_hot_post_kickoff_current_radar_ceiling_hours` | **4** | Hard football current-radar/HOT ceiling after effective kickoff. Stale `in_running=true` / `open` cannot keep a fixture HOT forever. No fabricated completed/closed. |
 | `paper_hot_current_state_ttl_seconds` | **90** | Radar TTL |
 | `paper_universe_current_state_ttl_seconds` | **360** | Radar TTL |
 | venue/provider timeouts | 15 / 8 | Unchanged |
@@ -500,6 +510,7 @@ Windows launcher keeps `PAPER_LIVE_REFRESH_ENABLED=true`. No new execution flags
 | SQLite watchlist writers | Two lanes persist decisions | Same repository as today; serialize persist on the coordinator (append-only, short). Do not hold the provider gate during persist. |
 | `#157` cancel/uncooperative HTTP | Still required per chunk | Chunk yield uses the same leftover assembly; do not block on `aclose()`. |
 | Stale unresolved fixtures in HOT forever | Kickoff-passed + unknown in-play | **3h** bound; then UNIVERSE only; no fabricated completed/live. |
+| Stale Matchbook `in_running=true` / `open` remaining HOT forever | Provider flag never clears after kickoff | **4h** hard current-radar ceiling (#275); clock-expired drop; postponed/rescheduled still follow provider truth. |
 | Burst scheduler unused | Separate module | **v1 must not import it.** Simple key §5.5 only. |
 | Restart empty inventory | Process memory | Tracked empty until collect; **immediate UNIVERSE bootstrap**. |
 

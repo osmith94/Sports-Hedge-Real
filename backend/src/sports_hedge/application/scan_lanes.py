@@ -24,6 +24,10 @@ FRESHNESS_EXPIRED = "expired"
 
 DEFAULT_HOT_HORIZON = timedelta(minutes=60)
 DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON = timedelta(hours=3)
+# Hard football current-radar/HOT membership ceiling after effective kickoff.
+# Covers extra time, penalties and ordinary stoppage/delay. Scanner membership
+# only: elapsed time must not fabricate completed/closed/in_running.
+DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING = timedelta(hours=4)
 DEFAULT_HOT_TTL_SECONDS = 90
 DEFAULT_UNIVERSE_TTL_SECONDS = 360
 DEFAULT_HOT_INTERVAL_SECONDS = 30
@@ -80,6 +84,7 @@ MATCHBOOK_TRUSTED_CORRECTION_STATUSES = frozenset(
 MATCHBOOK_LIFECYCLE_SOURCE = "matchbook"
 EVICTION_TERMINAL_FROM_MATCHBOOK = "terminal_status_from_matchbook"
 EVICTION_TERMINAL = "terminal_status"
+EVICTION_CLOCK_EXPIRED_CURRENT_RADAR = "clock_expired_current_radar"
 
 
 def classify_scan_lane(
@@ -88,11 +93,13 @@ def classify_scan_lane(
     *,
     hot_horizon: timedelta = DEFAULT_HOT_HORIZON,
     post_kickoff_unknown_horizon: timedelta = DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON,
+    post_kickoff_current_radar_ceiling: timedelta = DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING,
 ) -> ScanLane:
     """Return HOT, UNIVERSE, or DROP. Never labels live/completed from time.
 
     This is the *lifecycle* classifier only: in-play, pre-kickoff horizon,
-    bounded post-kickoff unknown, schedule exception, and explicit terminal.
+    bounded post-kickoff unknown, hard post-kickoff current-radar ceiling,
+    schedule exception, and explicit terminal.
     Qualifying-opportunity promotion into HOT identity is applied separately
     by `FixtureCurrentStateStore` from merged current-state economics
     (Issue #200). Do not fold solver/UI labels into this function.
@@ -102,6 +109,10 @@ def classify_scan_lane(
     window; after that it leaves current radar without fabricating a status.
     Postponed/delayed/rescheduled follows explicit provider truth, not kickoff
     arithmetic. The 3h window is never applied to explicit terminal state.
+
+    Issue #275: a stale provider ``in_running=true`` / ``open`` flag cannot keep
+    a football fixture on current HOT/radar after the hard 4h post-kickoff
+    ceiling. That drop is clock-expired current-radar membership only.
     """
 
     evaluated = require_aware_instant(now, "now")
@@ -111,14 +122,18 @@ def classify_scan_lane(
     if status in SCHEDULE_EXCEPTION_STATUSES:
         return ScanLane.UNIVERSE
 
+    kickoff = getattr(fixture, "kickoff_utc", None)
+    kickoff_utc = require_aware_instant(kickoff, "kickoff_utc") if kickoff is not None else None
+    if kickoff_utc is not None and evaluated - kickoff_utc > post_kickoff_current_radar_ceiling:
+        # Hard current-radar ceiling. Do not rewrite fixture_status or in_running.
+        return ScanLane.DROP
+
     in_running = getattr(fixture, "in_running", None)
     if in_running is True:
         return ScanLane.HOT
 
-    kickoff = getattr(fixture, "kickoff_utc", None)
-    if kickoff is None:
+    if kickoff_utc is None:
         return ScanLane.UNIVERSE
-    kickoff_utc = require_aware_instant(kickoff, "kickoff_utc")
     until_kickoff = kickoff_utc - evaluated
     if timedelta(0) < until_kickoff <= hot_horizon:
         return ScanLane.HOT
@@ -130,6 +145,39 @@ def classify_scan_lane(
         # rewrite fixture_status or in_running from elapsed time.
         return ScanLane.DROP
     return ScanLane.UNIVERSE
+
+
+def current_radar_eviction_reason(
+    fixture: Any,
+    now: datetime,
+    *,
+    hot_horizon: timedelta = DEFAULT_HOT_HORIZON,
+    post_kickoff_unknown_horizon: timedelta = DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON,
+    post_kickoff_current_radar_ceiling: timedelta = DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING,
+) -> str | None:
+    """Return why the fixture leaves current radar, or None if it remains.
+
+    Elapsed-time expiry is ``clock_expired_current_radar``, never completed.
+    Explicit terminal still uses the provider-terminal eviction reason.
+    """
+
+    classify_kwargs = {
+        "hot_horizon": hot_horizon,
+        "post_kickoff_unknown_horizon": post_kickoff_unknown_horizon,
+        "post_kickoff_current_radar_ceiling": post_kickoff_current_radar_ceiling,
+    }
+    if classify_scan_lane(fixture, now, **classify_kwargs) is not ScanLane.DROP:
+        return None
+    if is_explicit_terminal(fixture):
+        return terminal_eviction_reason(fixture)
+    kickoff = getattr(fixture, "kickoff_utc", None)
+    if kickoff is None:
+        return None
+    evaluated = require_aware_instant(now, "now")
+    kickoff_utc = require_aware_instant(kickoff, "kickoff_utc")
+    if evaluated - kickoff_utc > post_kickoff_current_radar_ceiling:
+        return EVICTION_CLOCK_EXPIRED_CURRENT_RADAR
+    return None
 
 
 def kickoff_horizon_reason_label(hot_horizon: timedelta = DEFAULT_HOT_HORIZON) -> str:
