@@ -2,15 +2,23 @@
 
 Deterministic fixtures shaped like owner-live Matchbook/Kalshi/Polymarket payloads.
 Not owner-live evidence.
+
+HOT vs UNIVERSE: both lanes share `_load_kalshi_markets`. Historical/demo Kalshi
+1X2s complete because nested `rules_primary` carries explicit regulation wording
+(K1 / demo fixtures). GAME/Opta/title never complete settlement. Pre-strict
+matching of incomplete Kalshi GAME vs Matchbook regulation is not restored.
 """
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 import pytest
+from test_issue260_mapping_census import _collect as _baseline_census_collect
+from venue_cost_helpers import matchbook_polymarket_costs
 
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 from sports_hedge.application.lane_venues import participation_from_lists
@@ -48,9 +56,6 @@ from sports_hedge.normalization.venues import (
     merge_kalshi_contract_rules,
 )
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
-
-from test_issue260_mapping_census import _collect as _baseline_census_collect
 
 KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
 REGULATION = (
@@ -125,19 +130,20 @@ def _mb_to_qualify() -> dict[str, Any]:
 class BetisMatchbook:
     def __init__(self, extra_markets: list[dict[str, Any]] | None = None) -> None:
         self.extra_markets = list(extra_markets or [])
+        self.list_events_calls = 0
+
+    def event_payload(self) -> dict[str, Any]:
+        return {
+            "id": 9600,
+            "name": f"{BETIS} vs {GETAFE}",
+            "start": KICKOFF.isoformat(),
+            "competition-name": "Premier League",
+        }
 
     async def list_events(self, **filters: Any) -> dict[str, Any]:
         del filters
-        return {
-            "events": [
-                {
-                    "id": 9600,
-                    "name": f"{BETIS} vs {GETAFE}",
-                    "start": KICKOFF.isoformat(),
-                    "competition-name": "Premier League",
-                }
-            ]
-        }
+        self.list_events_calls += 1
+        return {"events": [self.event_payload()]}
 
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
         del event_id, filters
@@ -180,6 +186,7 @@ class BetisKalshi:
         self.market_rules_text = (
             REGULATION if rules_on_markets and market_rules_text is None else market_rules_text
         )
+        self.list_events_calls = 0
 
     def _markets(self) -> list[dict[str, Any]]:
         ticker = "KXEPLGAME-26SEP20BETGET"
@@ -196,8 +203,7 @@ class BetisKalshi:
             markets.append(item)
         return markets
 
-    async def list_events(self, **filters: Any) -> dict[str, Any]:
-        del filters
+    def event_payload(self) -> dict[str, Any]:
         event = {
             "event_ticker": "KXEPLGAME-26SEP20BETGET",
             "series_ticker": "KXEPLGAME",
@@ -209,7 +215,12 @@ class BetisKalshi:
         }
         if self.event_rules_text:
             event["rules_primary"] = self.event_rules_text
-        return {"events": [event]}
+        return event
+
+    async def list_events(self, **filters: Any) -> dict[str, Any]:
+        del filters
+        self.list_events_calls += 1
+        return {"events": [self.event_payload()]}
 
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
         del event_id, filters
@@ -303,7 +314,15 @@ class BetisPolymarketBinaries:
         }
 
 
-async def _scan(matchbook, polymarket, kalshi=None):
+async def _scan(
+    matchbook,
+    polymarket,
+    kalshi=None,
+    *,
+    scan_lane: str = ScanLane.UNIVERSE.value,
+    identity_scope: list[str] | None = None,
+    known_source_events: dict[str, list[dict[str, Any]]] | None = None,
+):
     repository = SqliteMarketIntelligenceRepository()
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
@@ -316,7 +335,9 @@ async def _scan(matchbook, polymarket, kalshi=None):
             venue_costs=_costs(),
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
-            scan_lane=ScanLane.UNIVERSE.value,
+            scan_lane=scan_lane,
+            identity_scope=identity_scope,
+            known_source_events=known_source_events,
         )
         census = census_from_report(report, data_class=CENSUS_DATA_CLASS_FIXTURE)
         forensics = forensics_from_report(
@@ -330,6 +351,115 @@ async def _scan(matchbook, polymarket, kalshi=None):
         return report, census, forensics
     finally:
         repository.close()
+
+
+def _known_source_events(
+    canonical_id: str,
+    *,
+    matchbook_event: dict[str, Any],
+    kalshi_event: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    return {
+        canonical_id: [
+            {
+                "venue": VenueName.MATCHBOOK.value,
+                "source_event_id": str(matchbook_event.get("id") or ""),
+                "raw": deepcopy(matchbook_event),
+            },
+            {
+                "venue": VenueName.KALSHI.value,
+                "source_event_id": str(kalshi_event.get("event_ticker") or ""),
+                "raw": deepcopy(kalshi_event),
+            },
+        ]
+    }
+
+
+def _cross_venue_fixture(report):
+    return next(
+        item
+        for item in report.discovered_fixtures
+        if item.matchbook_matched and item.kalshi_matched
+    )
+
+
+def _safe_identity(report) -> dict[str, Any]:
+    fixture = _cross_venue_fixture(report)
+    return {
+        "canonical_event_id": fixture.canonical_event_id,
+        "home_team": fixture.home_team,
+        "away_team": fixture.away_team,
+        "competition": fixture.competition,
+        "kickoff_utc": fixture.kickoff_utc.isoformat(),
+    }
+
+
+def _safe_lane_snapshot(report, census, forensics) -> dict[str, Any]:
+    mbk = forensics.matchbook_kalshi_match_result
+    candidates = []
+    for item in forensics.candidates:
+        if item.family != MarketFamily.MATCH_RESULT.value:
+            continue
+        venues = [
+            {
+                "venue": venue.venue,
+                "family": venue.family,
+                "period": venue.period,
+                "outcome_space": list(venue.outcome_space),
+                "settlement_scope": venue.settlement_scope,
+                "settlement_key": venue.settlement_key,
+                "settlement_complete": venue.settlement_complete,
+            }
+            for venue in sorted(item.venues, key=lambda row: row.venue)
+        ]
+        candidates.append(
+            {
+                "family": item.family,
+                "period": item.period,
+                "line": item.line,
+                "comparison_status": item.comparison_status,
+                "matcher_reasons": sorted(item.matcher_reasons),
+                "venues": venues,
+            }
+        )
+    candidates.sort(
+        key=lambda item: (
+            item["comparison_status"] or "",
+            item["period"] or "",
+            item["line"] or "",
+        )
+    )
+    return {
+        "identity": _safe_identity(report),
+        "equivalent_market_pairs": census.equivalent_market_pairs,
+        "matched_equivalent": mbk.matched_equivalent,
+        "both_complete_3way": mbk.both_complete_3way,
+        "both_settlement_complete": mbk.both_settlement_complete,
+        "rejection": dict(forensics.candidate_rejection_histogram),
+        "candidates": candidates,
+        "kalshi_match_result_rule_enrichment": dict(census.kalshi_match_result_rule_enrichment),
+    }
+
+
+async def _hot_from_same_payload(universe_report, *, kalshi):
+    matchbook = BetisMatchbook()
+    fixture = _cross_venue_fixture(universe_report)
+    known = _known_source_events(
+        fixture.canonical_event_id,
+        matchbook_event=matchbook.event_payload(),
+        kalshi_event=kalshi.event_payload(),
+    )
+    report, census, forensics = await _scan(
+        matchbook,
+        EmptyPolymarket(),
+        kalshi,
+        scan_lane=ScanLane.HOT.value,
+        identity_scope=[fixture.canonical_event_id],
+        known_source_events=known,
+    )
+    assert matchbook.list_events_calls == 0
+    assert kalshi.list_events_calls == 0
+    return report, census, forensics
 
 
 @pytest.mark.asyncio
@@ -708,6 +838,137 @@ async def test_get_market_failure_for_one_ticker_fails_closed() -> None:
     assert census.kalshi_match_result_rule_enrichment["applied"] == 2
     assert forensics.get_market_status_histogram.get("transport_failed") == 1
     assert forensics.get_market_status_histogram.get("ok") == 2
+
+
+@pytest.mark.asyncio
+async def test_hot_and_universe_agree_on_live_shaped_incomplete_kalshi() -> None:
+    """Same Betis/Getafe payload: HOT known-source-events vs UNIVERSE discovery.
+
+    Live-shaped nested GAME omits contract rules. Both lanes stay
+    incomplete_settlement. GAME/Opta/title do not complete settlement.
+    """
+
+    universe_kalshi = BetisKalshi(rules_on_event=False, rules_on_markets=False)
+    universe_report, universe_census, universe_forensics = await _scan(
+        BetisMatchbook(),
+        EmptyPolymarket(),
+        universe_kalshi,
+    )
+    assert universe_kalshi.list_events_calls == 1
+    hot_kalshi = BetisKalshi(rules_on_event=False, rules_on_markets=False)
+    hot_report, hot_census, hot_forensics = await _hot_from_same_payload(
+        universe_report, kalshi=hot_kalshi
+    )
+    universe_snap = _safe_lane_snapshot(universe_report, universe_census, universe_forensics)
+    hot_snap = _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
+    assert universe_snap == hot_snap
+    assert universe_snap["identity"]["home_team"] == BETIS
+    assert universe_snap["identity"]["away_team"] == GETAFE
+    assert universe_snap["matched_equivalent"] == 0
+    assert universe_snap["both_complete_3way"] == 1
+    assert universe_snap["both_settlement_complete"] == 0
+    assert "incomplete_settlement" in universe_snap["rejection"]
+    kalshi_venues = [
+        venue
+        for item in universe_snap["candidates"]
+        for venue in item["venues"]
+        if venue["venue"] == "kalshi"
+    ]
+    assert kalshi_venues
+    assert all(venue["settlement_complete"] is False for venue in kalshi_venues)
+    assert all(venue["settlement_scope"] == "unknown" for venue in kalshi_venues)
+    assert all(
+        set(venue["outcome_space"]) >= {"home", "draw", "away"} for venue in kalshi_venues
+    )
+    rendered = render_census(universe_census) + render_forensics(universe_forensics)
+    assert "kalshi_match_result_rule_enrichment=" in rendered
+    assert "attempted=0" in rendered
+    assert "applied=0" in rendered
+    assert "empty=" in rendered
+    assert "failed=" in rendered
+    assert universe_census.kalshi_match_result_rule_enrichment["attempted"] == 0
+    assert universe_census.kalshi_match_result_rule_enrichment["applied"] == 0
+    assert hot_census.kalshi_match_result_rule_enrichment["attempted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_hot_and_universe_agree_on_historical_nested_rules_primary() -> None:
+    """K1/demo historical path: nested rules_primary regulation wording.
+
+    That field — not GAME/Opta/title — is what made Kalshi 1X2 settlement
+    complete. Both lanes map the ordinary Match Result. Strict matcher is kept.
+    """
+
+    universe_kalshi = BetisKalshi(rules_on_markets=True)
+    universe_report, universe_census, universe_forensics = await _scan(
+        BetisMatchbook(),
+        EmptyPolymarket(),
+        universe_kalshi,
+    )
+    hot_kalshi = BetisKalshi(rules_on_markets=True)
+    hot_report, hot_census, hot_forensics = await _hot_from_same_payload(
+        universe_report, kalshi=hot_kalshi
+    )
+    universe_snap = _safe_lane_snapshot(universe_report, universe_census, universe_forensics)
+    hot_snap = _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
+    assert universe_snap == hot_snap
+    assert universe_snap["matched_equivalent"] == 1
+    assert universe_snap["both_settlement_complete"] == 1
+    assert universe_census.kalshi_match_result_rule_enrichment["skipped_complete"] == 3
+    assert universe_census.kalshi_match_result_rule_enrichment["attempted"] == 0
+    assert hot_census.kalshi_match_result_rule_enrichment["skipped_complete"] == 3
+    assert hot_census.kalshi_match_result_rule_enrichment["attempted"] == 0
+
+    names_only = BetisKalshi()._markets()
+    historical = [{**item, "rules_primary": REGULATION} for item in names_only]
+    normalizer = KalshiNormalizer()
+    event_payload = BetisKalshi().event_payload()
+    event = normalizer.normalize_event(event_payload, series=KALSHI_GAME_SERIES)
+    complete = normalizer.assemble_canonical_markets(
+        event, historical, series=KALSHI_GAME_SERIES, event_payload=event_payload
+    )
+    incomplete = normalizer.assemble_canonical_markets(
+        event, names_only, series=KALSHI_GAME_SERIES, event_payload=event_payload
+    )
+    assert complete[0].settlement.is_economically_complete() is True
+    assert complete[0].settlement.scope is SettlementScope.REGULATION_TIME
+    assert incomplete[0].settlement.is_economically_complete() is False
+    mb = MatchbookNormalizer().normalize_market(
+        MatchbookNormalizer().normalize_event(BetisMatchbook().event_payload()),
+        _mb_match_odds(),
+    )
+    matcher = MarketMatcher()
+    assert matcher.match(mb, complete[0]).matched is True
+    assert matcher.match(mb, incomplete[0]).matched is False
+    assert "incomplete_settlement" in matcher.match(mb, incomplete[0]).reasons
+
+
+@pytest.mark.asyncio
+async def test_hot_and_universe_agree_on_get_market_regulation() -> None:
+    universe_kalshi = BetisKalshiGetMarket(rules_text=REGULATION)
+    universe_report, universe_census, universe_forensics = await _scan(
+        BetisMatchbook(),
+        EmptyPolymarket(),
+        universe_kalshi,
+    )
+    assert sorted(universe_kalshi.get_market_calls) == sorted(_betis_kalshi_tickers())
+    hot_kalshi = BetisKalshiGetMarket(rules_text=REGULATION)
+    hot_report, hot_census, hot_forensics = await _hot_from_same_payload(
+        universe_report, kalshi=hot_kalshi
+    )
+    universe_snap = _safe_lane_snapshot(universe_report, universe_census, universe_forensics)
+    hot_snap = _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
+    assert universe_snap["identity"] == hot_snap["identity"]
+    assert universe_snap["candidates"] == hot_snap["candidates"]
+    assert universe_snap["matched_equivalent"] == hot_snap["matched_equivalent"] == 1
+    assert universe_snap["both_settlement_complete"] == 1
+    assert sorted(hot_kalshi.get_market_calls) == sorted(_betis_kalshi_tickers())
+    assert universe_census.kalshi_match_result_rule_enrichment["attempted"] == 3
+    assert universe_census.kalshi_match_result_rule_enrichment["applied"] == 3
+    assert hot_census.kalshi_match_result_rule_enrichment["attempted"] == 3
+    assert hot_census.kalshi_match_result_rule_enrichment["applied"] == 3
+    assert universe_census.kalshi_match_result_rule_enrichment["failed"] == 0
+    assert universe_census.kalshi_match_result_rule_enrichment["empty"] == 0
 
 
 @pytest.mark.asyncio

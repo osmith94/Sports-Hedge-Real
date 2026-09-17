@@ -620,6 +620,9 @@ class ReadOnlyCrossVenueCollector:
         clusters_before_resume = 0
         skipped_by_resume = 0
         stale_generation_state_ignored = False
+        # HOT skips list_events and reuses stored source-event payloads.
+        # Kalshi nested/list load, Get Market enrichment, and assemble still
+        # run through _load_kalshi_markets — the same path as UNIVERSE.
         skip_discovery = resolved_lane == ScanLane.HOT.value and identity_scope is not None
         try:
             with self._stage("event_discovery"):
