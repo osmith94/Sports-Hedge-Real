@@ -12,6 +12,7 @@ from sports_hedge.application.fixture_current_state import FixtureCurrentStateSt
 from sports_hedge.application.scan_lanes import (
     DEFAULT_HOT_HORIZON,
     HOT_REASON_ARB_PROMOTION,
+    HOT_REASON_SURVEILLANCE,
     HOT_REASON_IN_PLAY,
     HOT_REASON_POST_KICKOFF_STATUS_PENDING,
     ScanLane,
@@ -149,6 +150,7 @@ def test_inventory_stamps_arb_promotion_from_current_state_not_history() -> None
         scan_lane=ScanLane.UNIVERSE,
         now=NOW,
     )
-    not_promoted = _inventory_by_id(stale)[CANONICAL_ID]
-    assert not_promoted.scan_lane == ScanLane.UNIVERSE.value
-    assert not_promoted.hot_reasons == []
+    watched = _inventory_by_id(stale)[CANONICAL_ID]
+    assert watched.scan_lane == ScanLane.HOT.value
+    assert watched.hot_reasons == [HOT_REASON_SURVEILLANCE]
+    assert HOT_REASON_ARB_PROMOTION not in watched.hot_reasons
