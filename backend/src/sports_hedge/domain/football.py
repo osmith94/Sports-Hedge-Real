@@ -73,14 +73,15 @@ class SettlementFingerprint(BaseModel):
     abandonment_rule: str | None = None
     postponement_rule: str | None = None
     source_rule_version: str | None = None
+    unknown_reason: str | None = None
 
     def deterministic_key(self) -> str:
         """Return only economically relevant settlement semantics.
 
-        ``source_rule_version`` is retained on the model for provenance/audit but is
-        deliberately excluded here. A venue-specific rule document identifier is
-        not itself an economic difference and must not prevent two otherwise
-        equivalent markets from matching.
+        ``source_rule_version`` and ``unknown_reason`` are retained for
+        provenance/audit but are deliberately excluded here. A venue-specific
+        rule document identifier or GAMEWIN placeholder diagnostic is not
+        itself an economic difference.
         """
 
         values = (
@@ -99,7 +100,7 @@ class SettlementFingerprint(BaseModel):
         """Required settlement evidence must be known before markets can compare.
 
         Incomplete fingerprints are not equivalent merely because unknown fields
-        match. ``source_rule_version`` remains provenance-only.
+        match. ``source_rule_version`` and ``unknown_reason`` remain provenance-only.
         """
 
         if self.scope is SettlementScope.UNKNOWN:

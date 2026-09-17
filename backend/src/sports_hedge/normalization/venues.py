@@ -1925,6 +1925,27 @@ def _kalshi_settlement(
             scope, extra_time, penalties = SettlementScope.INCLUDING_EXTRA_TIME, True, False
         elif default_scope == "including_penalties":
             scope, extra_time, penalties = SettlementScope.INCLUDING_PENALTIES, True, True
+    unknown_reason = None
+    if (
+        family is MarketFamily.MATCH_RESULT
+        and scope is SettlementScope.UNKNOWN
+        and not _classified_fingerprint_complete(scope, extra_time, penalties)
+    ):
+        from sports_hedge.normalization.kalshi_contract_terms import (
+            GAMEWIN_SCOPE_UNAVAILABLE_REASON,
+            kalshi_gamewin_result_scope_unavailable,
+            lookup_kalshi_contract_family,
+        )
+
+        family_meta = series.get("contract_family") if isinstance(series, dict) else None
+        if not isinstance(family_meta, dict) and isinstance(series, dict):
+            family_meta = lookup_kalshi_contract_family(
+                url=str(series.get("contract_terms_url") or "")
+            )
+        if kalshi_gamewin_result_scope_unavailable(
+            family_meta if isinstance(family_meta, dict) else None
+        ):
+            unknown_reason = GAMEWIN_SCOPE_UNAVAILABLE_REASON
     return SettlementFingerprint(
         scope=scope,
         period=period,
@@ -1933,6 +1954,7 @@ def _kalshi_settlement(
         extra_time_included=extra_time,
         penalties_included=penalties,
         source_rule_version=str(_first(payload, "ticker", "market_ticker") or "") or None,
+        unknown_reason=unknown_reason,
     )
 
 

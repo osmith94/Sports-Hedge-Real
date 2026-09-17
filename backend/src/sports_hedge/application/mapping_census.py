@@ -20,6 +20,7 @@ from sports_hedge.application.scan_cycle_audit import (
     issue_is_unsupported_market_skip,
 )
 from sports_hedge.config import Settings
+from sports_hedge.matching.ordinary_1x2 import GAMEWIN_ORDINARY_1X2_AUDIT_REASON
 
 CENSUS_DATA_CLASS_FIXTURE = "deterministic_fixture"
 CENSUS_DATA_CLASS_OWNER_LIVE = "owner_live_read_only"
@@ -52,6 +53,7 @@ class MappingCensus(BaseModel):
     venue_scope: str | None = None
     enabled_venues: list[str] = Field(default_factory=list)
     kalshi_match_result_rule_enrichment: dict[str, int] = Field(default_factory=dict)
+    ordinary_1x2_structural_admissions: int = Field(default=0, ge=0)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -69,12 +71,15 @@ def census_from_report(
     diagnostics = dict(report.scan_diagnostics or {})
     family_counts: Counter[str] = Counter()
     status_counts: Counter[str] = Counter()
+    ordinary_admissions = 0
     for rows in (report.fixture_markets or {}).values():
         for row in rows:
             status = str(row.comparison_status.value if row.comparison_status else "unknown")
             status_counts[status] += 1
             if row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT:
                 family_counts[str(row.family or "unknown")] += 1
+                if GAMEWIN_ORDINARY_1X2_AUDIT_REASON in (row.match_reasons or []):
+                    ordinary_admissions += 1
 
     skip_reasons: Counter[str] = Counter()
     unsupported = 0
@@ -160,6 +165,7 @@ def census_from_report(
         venue_scope=venue_scope,
         enabled_venues=resolved_venues,
         kalshi_match_result_rule_enrichment=enrichment,
+        ordinary_1x2_structural_admissions=ordinary_admissions,
         notes=notes,
     )
 
@@ -194,6 +200,10 @@ def render_census(census: MappingCensus) -> str:
         (
             "kalshi_match_result_rule_enrichment="
             + _fmt_counts(census.kalshi_match_result_rule_enrichment)
+        ),
+        (
+            "ordinary_1x2_structural_admissions="
+            + str(census.ordinary_1x2_structural_admissions)
         ),
     ]
     lines.extend(f"note: {note}" for note in census.notes)

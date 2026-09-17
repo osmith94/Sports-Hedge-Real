@@ -43,6 +43,7 @@ _LISTED_SCOPE_LABELS = (
 
 # Live bytes observed 2026-09-17 from the public contract_terms_url for KXEPLGAME.
 SOCCERGAMEWIN_SHA256 = "3f1d6cc1765afa3eb44d809107f24b939dcc68f71718dc38ffe13d354c3f4ce2"
+GAMEWIN_SCOPE_UNAVAILABLE_REASON = "soccergamewin_result_scope_placeholder_unavailable"
 SOCCEREXACTSCORE_SHA256 = "1b630a064ad95f82de06ec46de7f4c3f24dd9b1724b826f47faf3989fea83e02"
 SOCCERANYGOAL_SHA256 = "f8109150c0aca60ce494af93e528190636fc4fbb7f30b476e9e57ce63e68ff8d"
 
@@ -216,6 +217,22 @@ def kalshi_apply_match_result_family_default(
     if family.get("verified") != "sha256":
         return None
     return kalshi_contract_family_match_result_default(family)
+
+
+def kalshi_gamewin_result_scope_unavailable(family: dict[str, Any] | None) -> bool:
+    """True when catalogued SOCCERGAMEWIN terms have no recoverable result scope."""
+
+    if not isinstance(family, dict):
+        return False
+    if family.get("family_id") != "soccergamewin":
+        return False
+    if family.get("defines_default_result_scope") is True:
+        return False
+    if family.get("default_applies_to_match_result") is True:
+        return False
+    if family.get("match_result_default_scope") not in {None, "none"}:
+        return False
+    return True
 
 
 def _safe_family_view(

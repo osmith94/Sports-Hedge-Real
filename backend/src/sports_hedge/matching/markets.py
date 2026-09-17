@@ -11,9 +11,8 @@ from sports_hedge.matching.learned_rules import (
     participant_identity_preserved,
 )
 from sports_hedge.matching.ordinary_1x2 import (
-    ORDINARY_1X2_REASON,
-    UNKNOWN_SETTLEMENT_ALLOWED_REASON,
     allow_unknown_settlement_for_ordinary_1x2,
+    ordinary_1x2_match_reasons,
 )
 
 
@@ -90,8 +89,7 @@ class MarketMatcher:
             not left.settlement.is_economically_complete()
             or not right.settlement.is_economically_complete()
         ):
-            match_reasons.append(ORDINARY_1X2_REASON)
-            match_reasons.append(UNKNOWN_SETTLEMENT_ALLOWED_REASON)
+            match_reasons.extend(ordinary_1x2_match_reasons())
         if (
             event_result.provenance.rule_type
             is MappingRuleType.VENUE_MARKET_LABEL_CONVENTION

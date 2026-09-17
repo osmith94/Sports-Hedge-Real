@@ -52,6 +52,7 @@ MATCHER_REASON_KEYS = (
     "outcome_space_mismatch",
     "ordinary_match_result_1x2",
     "settlement_unknown_not_contradictory",
+    "ordinary_3way_1x2_kalshi_gamewin_scope_unavailable",
 )
 SECRET_FRAGMENTS = ("password", "username", "token", "session", "mfa", "authorization", "secret")
 

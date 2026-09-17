@@ -1,12 +1,14 @@
 """Ordinary Matchbook↔Kalshi 1X2 equivalence.
 
 Owner time-box after Kalshi GAME/WIN contract terms failed to supply a default
-``<result scope>``. Unknown Kalshi settlement is not treated as a contradiction
-for an otherwise clean full-time HOME/DRAW/AWAY Match Result pair.
+``<result scope>``. Matchbook complete regulation-time 1X2 may match Kalshi
+ordinary full-time HOME/DRAW/AWAY when Kalshi scope is UNKNOWN solely because
+SOCCERGAMEWIN's listed result-scope placeholder cannot be recovered.
 
 This is an explicit, documented narrowing of Core Tenet 03 for this venue pair
 and family only. Polymarket, To Qualify, two-way books, non-full-time periods,
-and proven extra-time/penalties contradictions stay fail-closed.
+proven extra-time/penalties contradictions, and unknown Kalshi settlement
+without GAMEWIN placeholder evidence stay fail-closed.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from sports_hedge.domain.football import (
     SettlementScope,
 )
 from sports_hedge.domain.models import VenueName
+from sports_hedge.normalization.kalshi_contract_terms import GAMEWIN_SCOPE_UNAVAILABLE_REASON
 
 ORDINARY_1X2_OUTCOMES = frozenset(
     {CanonicalOutcome.HOME, CanonicalOutcome.DRAW, CanonicalOutcome.AWAY}
@@ -27,6 +30,12 @@ ORDINARY_1X2_OUTCOMES = frozenset(
 MATCHBOOK_KALSHI_VENUES = frozenset({VenueName.MATCHBOOK, VenueName.KALSHI})
 ORDINARY_1X2_REASON = "ordinary_match_result_1x2"
 UNKNOWN_SETTLEMENT_ALLOWED_REASON = "settlement_unknown_not_contradictory"
+GAMEWIN_ORDINARY_1X2_AUDIT_REASON = "ordinary_3way_1x2_kalshi_gamewin_scope_unavailable"
+ORDINARY_1X2_AUDIT_REASONS = (
+    ORDINARY_1X2_REASON,
+    UNKNOWN_SETTLEMENT_ALLOWED_REASON,
+    GAMEWIN_ORDINARY_1X2_AUDIT_REASON,
+)
 
 SETTLEMENT_STATUS_KNOWN = "known"
 SETTLEMENT_STATUS_UNKNOWN = "unknown"
@@ -46,6 +55,21 @@ def is_ordinary_full_time_1x2(market: CanonicalMarket) -> bool:
     if CanonicalOutcome.OTHER in outcomes:
         return False
     return outcomes == ORDINARY_1X2_OUTCOMES
+
+
+def is_complete_regulation_time_1x2(market: CanonicalMarket) -> bool:
+    if not is_ordinary_full_time_1x2(market):
+        return False
+    settlement = market.settlement
+    if not settlement.is_economically_complete():
+        return False
+    if settlement.scope is not SettlementScope.REGULATION_TIME:
+        return False
+    if settlement.extra_time_included is not False:
+        return False
+    if settlement.penalties_included is not False:
+        return False
+    return True
 
 
 def is_matchbook_kalshi_pair(left: CanonicalMarket, right: CanonicalMarket) -> bool:
@@ -79,11 +103,26 @@ def settlement_fingerprints_contradict(
     return False
 
 
+def kalshi_gamewin_scope_unavailable(market: CanonicalMarket) -> bool:
+    """Kalshi ordinary 1X2 whose listed GAMEWIN result scope cannot be recovered."""
+
+    if market.source_venue is not VenueName.KALSHI:
+        return False
+    if not is_ordinary_full_time_1x2(market):
+        return False
+    settlement = market.settlement
+    if settlement.scope is not SettlementScope.UNKNOWN:
+        return False
+    if settlement.is_economically_complete():
+        return False
+    return settlement.unknown_reason == GAMEWIN_SCOPE_UNAVAILABLE_REASON
+
+
 def allow_unknown_settlement_for_ordinary_1x2(
     left: CanonicalMarket,
     right: CanonicalMarket,
 ) -> bool:
-    """Matchbook↔Kalshi ordinary 1X2 may proceed when Kalshi scope is unknown."""
+    """Allow Matchbook regulation 1X2 vs Kalshi GAMEWIN-unknown, without contradiction."""
 
     if not is_matchbook_kalshi_pair(left, right):
         return False
@@ -91,7 +130,15 @@ def allow_unknown_settlement_for_ordinary_1x2(
         return False
     if settlement_fingerprints_contradict(left.settlement, right.settlement):
         return False
-    return True
+    matchbook = left if left.source_venue is VenueName.MATCHBOOK else right
+    kalshi = right if matchbook is left else left
+    if not is_complete_regulation_time_1x2(matchbook):
+        return False
+    return kalshi_gamewin_scope_unavailable(kalshi)
+
+
+def ordinary_1x2_match_reasons() -> list[str]:
+    return list(ORDINARY_1X2_AUDIT_REASONS)
 
 
 def pair_settlement_status(left: CanonicalMarket, right: CanonicalMarket) -> str:
