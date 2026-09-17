@@ -43,13 +43,14 @@ from sports_hedge.venues.matchbook import (
     reset_shared_matchbook_client,
     set_shared_matchbook_client,
 )
+from sports_hedge.application.provider_runtime import reset_shared_provider_runtime
 from test_matchbook_session_reliability import (
     PASSWORD,
     USERNAME,
-    _EmptyOtherVenue,
     _client_for,
     _events_ok,
     _football_ok,
+    _install_shared_runtime,
     _secret_free,
     _settings,
 )
@@ -105,7 +106,9 @@ def _lock_handler(
 @pytest.fixture
 async def isolated_shared_matchbook() -> Any:
     await reset_shared_matchbook_client()
+    await reset_shared_provider_runtime()
     yield
+    await reset_shared_provider_runtime()
     await reset_shared_matchbook_client()
 
 
@@ -141,20 +144,9 @@ async def test_latched_hot_universe_health_issue_zero_additional_login_posts(
     settings = _settings()
     venue, http = await _client_for(_lock_handler(session_posts, LOCKED_BODY), settings=settings)
     set_shared_matchbook_client(venue)
+    _install_shared_runtime(settings, venue)
     monkeypatch.setattr(paper_api, "get_settings", lambda: settings)
-    monkeypatch.setattr(paper_api, "PolymarketClient", lambda _s: _EmptyOtherVenue())
-    monkeypatch.setattr(paper_api, "KalshiClient", lambda _s: _EmptyOtherVenue())
     monkeypatch.setattr(main_api, "get_settings", lambda: settings)
-    monkeypatch.setattr(
-        main_api,
-        "PolymarketClient",
-        lambda _s: _EmptyOtherVenue(VenueName.POLYMARKET),
-    )
-    monkeypatch.setattr(
-        main_api,
-        "KalshiClient",
-        lambda _s: _EmptyOtherVenue(VenueName.KALSHI),
-    )
     service = _paper_service()
     async with http:
         with pytest.raises(MatchbookAuthFaultError):
