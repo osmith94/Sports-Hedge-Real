@@ -33,8 +33,12 @@ from sports_hedge.arbitrage.priority_alerts.models import (
     PriorityLeg,
 )
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
-from sports_hedge.arbitrage.watchlist.economics import gross_edge_from_quotes
-from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityStatus
+from sports_hedge.arbitrage.watchlist.economics import classification_for, gross_edge_from_quotes
+from sports_hedge.arbitrage.watchlist.models import (
+    ORPHANED_PAPER_FILLING_RECONCILED,
+    NearOpportunity,
+    OpportunityStatus,
+)
 from sports_hedge.arbitrage.watchlist.service import WatchlistService, _opportunity_id
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
@@ -160,6 +164,7 @@ _AUTOFILL_GATE_REASONS = frozenset(
         "remaining_hedge_revalidation_failed",
         "unknown_opportunity",
         "must_not_auto_capture",
+        "orphaned_paper_filling_reconciled",
     }
 )
 
@@ -223,14 +228,23 @@ class PaperOperationsService:
         if not decision.canonical_market_id:
             return None
         opportunity_id = _opportunity_id(decision.canonical_market_id)
+        dispatched = now or datetime.now(UTC)
+        reconciled_ids = set(self.reconcile_orphaned_paper_fills(now=dispatched))
+        if (
+            opportunity_id in reconciled_ids
+            and decision.eligible_for_paper_simulation
+        ):
+            self._promote_reconciled_orphan(opportunity_id, decision)
         opening_legs = [leg for leg in decision.fill_legs if leg.requested_stake > 0]
         current_watch = self.watchlist.repository.get(opportunity_id)
-        protected = current_watch is not None and current_watch.status in {
-            OpportunityStatus.PAPER_FILLING,
+        existing_trade = self._get_trade_by_opportunity(opportunity_id)
+        recoverable_inflight = current_watch is not None and current_watch.status in {
             OpportunityStatus.PARTIAL,
             OpportunityStatus.FILLED,
         }
-        if opening_legs and not protected:
+        if current_watch is not None and current_watch.status is OpportunityStatus.PAPER_FILLING:
+            recoverable_inflight = existing_trade is not None or opportunity_id in self._plans
+        if opening_legs and not recoverable_inflight:
             self._plans[opportunity_id] = self._plan_from_decision(
                 decision, opportunity_id, provenance
             )
@@ -245,13 +259,20 @@ class PaperOperationsService:
                 and opening_legs
                 and self._venues_refreshed_this_cycle(opening_legs, refreshed_venues)
             ):
-                dispatched = now or datetime.now(UTC)
-                bound_started = current_watch is not None and current_watch.status in {
-                    OpportunityStatus.PAPER_FILLING,
-                    OpportunityStatus.PARTIAL,
-                    OpportunityStatus.FILLED,
-                }
-                if current_watch is None or current_watch.status not in {
+                current_watch = self.watchlist.repository.get(opportunity_id)
+                bound_active = self.watchlist.has_active_bound_attempt(opportunity_id)
+                should_simulate = False
+                repairable = existing_trade is not None and current_watch is not None and (
+                    current_watch.status
+                    in {
+                        OpportunityStatus.PAPER_FILLING,
+                        OpportunityStatus.PARTIAL,
+                        OpportunityStatus.FILLED,
+                    }
+                )
+                if repairable or (bound_active and opportunity_id in self._plans):
+                    should_simulate = True
+                elif current_watch is None or current_watch.status not in {
                     OpportunityStatus.PAPER_FILLING,
                     OpportunityStatus.PARTIAL,
                     OpportunityStatus.FILLED,
@@ -262,11 +283,12 @@ class PaperOperationsService:
                             occurred_at=dispatched,
                             detail="paper_fill_attempted_bound_snapshot",
                             bind_snapshot=True,
+                            decision_at=decision.scanned_at,
                         )
-                        bound_started = True
+                        should_simulate = True
                     except ValueError:
-                        bound_started = False
-                if bound_started:
+                        should_simulate = False
+                if should_simulate:
                     try:
                         self.simulate_fill(
                             opportunity_id,
@@ -281,6 +303,47 @@ class PaperOperationsService:
                         else:
                             raise
         return candidate
+
+    def reconcile_orphaned_paper_fills(self, *, now: datetime | None = None) -> list[str]:
+        """Fail-close PAPER_FILLING rows that cannot be recovered after restart."""
+
+        occurred_at = now or datetime.now(UTC)
+        reconciled: list[str] = []
+        for item in self.watchlist.repository.list_opportunities():
+            if item.status is not OpportunityStatus.PAPER_FILLING:
+                continue
+            if item.opportunity_id in self._plans:
+                continue
+            if self._get_trade_by_opportunity(item.opportunity_id) is not None:
+                continue
+            self.watchlist.reconcile_orphaned_paper_filling(
+                item.opportunity_id,
+                occurred_at=occurred_at,
+            )
+            reconciled.append(item.opportunity_id)
+        return reconciled
+
+    def _promote_reconciled_orphan(self, opportunity_id: str, decision: PaperScanDecision) -> None:
+        """A fresh qualifying decision may start a new attempt after orphan close."""
+
+        current = self.watchlist.repository.get(opportunity_id)
+        if current is None or current.status is not OpportunityStatus.REJECTED:
+            return
+        reasons = [
+            reason
+            for reason in current.rejection_reasons
+            if reason != ORPHANED_PAPER_FILLING_RECONCILED
+        ]
+        promoted = current.model_copy(
+            update={
+                "status": OpportunityStatus.TRIGGERED,
+                "classification": classification_for(OpportunityStatus.TRIGGERED),
+                "is_arbitrage": True,
+                "rejection_reasons": reasons,
+                "last_seen_at": decision.scanned_at,
+            }
+        )
+        self.watchlist.repository.upsert_opportunity(promoted, force_status=True)
 
     def _should_autofill(
         self,

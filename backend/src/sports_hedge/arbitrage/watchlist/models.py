@@ -37,6 +37,37 @@ class OpportunityClassification(StrEnum):
     EXPIRED = "expired"
 
 
+ORPHANED_PAPER_FILLING_RECONCILED = "orphaned_paper_filling_reconciled"
+
+
+class PaperFillAttemptStatus(StrEnum):
+    STARTED = "started"
+    REJECTED = "rejected"
+    COMPLETE = "complete"
+
+
+class PaperFillAttempt(BaseModel):
+    """Durable paper-fill attempt identity. Bound snapshot is explicit, not inferred."""
+
+    attempt_id: str
+    opportunity_id: str
+    bound_snapshot: bool = False
+    status: PaperFillAttemptStatus = PaperFillAttemptStatus.STARTED
+    started_at: datetime
+    decision_at: datetime | None = None
+    finished_at: datetime | None = None
+    detail: str | None = None
+
+    @model_validator(mode="after")
+    def ensure_timezone(self) -> PaperFillAttempt:
+        self.started_at = require_aware_instant(self.started_at, "started_at")
+        if self.decision_at is not None:
+            self.decision_at = require_aware_instant(self.decision_at, "decision_at")
+        if self.finished_at is not None:
+            self.finished_at = require_aware_instant(self.finished_at, "finished_at")
+        return self
+
+
 class LifecycleEventType(StrEnum):
     CANDIDATE_FIRST_SEEN = "candidate_first_seen"
     MOVED_CLOSER_TO_TRIGGER = "moved_closer_to_trigger"
@@ -209,6 +240,18 @@ class OpportunityLifecycleEvent(BaseModel):
     def ensure_timezone(self) -> OpportunityLifecycleEvent:
         self.occurred_at = require_aware_instant(self.occurred_at, "occurred_at")
         return self
+
+
+def paper_fill_lifecycle_event_id(
+    opportunity_id: str,
+    event_type: LifecycleEventType,
+    attempt_id: str | None = None,
+) -> str:
+    """Stable lifecycle id. Attempt-scoped events stay idempotent inside one attempt."""
+
+    if attempt_id:
+        return f"{opportunity_id}:{event_type.value}:{attempt_id}"
+    return f"{opportunity_id}:{event_type.value}"
 
 
 class OpportunityObservationPoint(BaseModel):

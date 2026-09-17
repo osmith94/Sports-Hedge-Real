@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
+from uuid import uuid4
 
 from sports_hedge.application.quote_freshness import (
     effective_quote_age_ms,
@@ -19,11 +20,15 @@ from sports_hedge.arbitrage.watchlist.economics import (
     semantic_reasons,
 )
 from sports_hedge.arbitrage.watchlist.models import (
+    ORPHANED_PAPER_FILLING_RECONCILED,
     LifecycleEventType,
     NearOpportunity,
     OpportunityLifecycleEvent,
     OpportunityStatus,
+    PaperFillAttempt,
+    PaperFillAttemptStatus,
     WatchObservation,
+    paper_fill_lifecycle_event_id,
     strike_distance_narrative,
     OpportunityObservationPoint,
 )
@@ -201,6 +206,8 @@ class WatchlistService:
         stage: OpportunityStatus,
         occurred_at,
         detail: str | None = None,
+        bind_snapshot: bool = False,
+        decision_at=None,
     ) -> NearOpportunity:
         if stage not in {
             OpportunityStatus.PAPER_FILLING,
@@ -212,10 +219,18 @@ class WatchlistService:
         if current is None:
             raise ValueError(f"unknown opportunity: {opportunity_id}")
         if current.status is OpportunityStatus.FILLED and stage is OpportunityStatus.FILLED:
-            self.clear_bound_autofill_attempt(opportunity_id)
+            existing = self.repository.get_started_paper_fill_attempt(opportunity_id)
+            if existing is not None:
+                self._finish_paper_fill_attempt(
+                    existing,
+                    status=PaperFillAttemptStatus.COMPLETE,
+                    occurred_at=occurred_at,
+                    detail=detail,
+                )
+            self._active_bound_attempts.discard(opportunity_id)
             return current
         if current.status is OpportunityStatus.REJECTED and stage is OpportunityStatus.PAPER_FILLING:
-            if opportunity_id in self._active_bound_attempts:
+            if self.has_active_bound_attempt(opportunity_id):
                 current = self._revive_presentation_stale_for_bound_entry(current)
             if current.status is OpportunityStatus.REJECTED:
                 raise ValueError("paper fill can only be recorded for a triggered paper opportunity")
@@ -231,8 +246,20 @@ class WatchlistService:
             OpportunityStatus.PARTIAL: LifecycleEventType.PAPER_FILL_PARTIAL,
             OpportunityStatus.FILLED: LifecycleEventType.PAPER_FILL_COMPLETE,
         }[stage]
+        attempt = self._ensure_paper_fill_attempt(
+            opportunity_id,
+            occurred_at=occurred_at,
+            bound_snapshot=bind_snapshot,
+            decision_at=decision_at,
+            detail=detail,
+        )
         if stage is OpportunityStatus.FILLED:
-            self.clear_bound_autofill_attempt(opportunity_id)
+            self._finish_paper_fill_attempt(
+                attempt,
+                status=PaperFillAttemptStatus.COMPLETE,
+                occurred_at=occurred_at,
+                detail=detail,
+            )
         updated = current.model_copy(
             update={
                 "status": stage,
@@ -241,16 +268,21 @@ class WatchlistService:
             }
         )
         self.repository.upsert_opportunity(updated)
+        event_detail = detail or "paper_mode_only"
+        if attempt.attempt_id not in event_detail:
+            event_detail = f"attempt_id={attempt.attempt_id}; {event_detail}"
         self.repository.append_event(
             OpportunityLifecycleEvent(
-                event_id=f"{opportunity_id}:{event_type.value}",
+                event_id=paper_fill_lifecycle_event_id(
+                    opportunity_id, event_type, attempt.attempt_id
+                ),
                 opportunity_id=opportunity_id,
                 occurred_at=occurred_at,
                 event_type=event_type,
                 status=stage,
                 current_net_edge=updated.current_net_edge,
                 distance_to_trigger_pp=updated.distance_to_trigger_pp,
-                detail=detail or "paper_mode_only",
+                detail=event_detail,
             )
         )
         return updated
@@ -262,35 +294,40 @@ class WatchlistService:
         occurred_at,
         detail: str | None = None,
         bind_snapshot: bool = False,
+        decision_at=None,
     ) -> NearOpportunity:
         """Mark a fill attempt before freshness/fill evaluation.
 
-        `bind_snapshot=True` is autofill-only: the attempt must start from a
-        current TRIGGERED (or already PAPER_FILLING) row. Presentation-stale
-        REJECTED rows are not revived to start a new attempt.
+        `bind_snapshot=True` is autofill-only and requires an explicit durable
+        bound attempt. Generic PAPER_FILLING is not bound-autofill authority.
+        Presentation-stale REJECTED rows are not revived to start a new attempt.
         """
 
         with self.repository.transaction():
             current = self.repository.get(opportunity_id)
             if current is None:
                 raise ValueError(f"unknown opportunity: {opportunity_id}")
+            existing = self.repository.get_started_paper_fill_attempt(opportunity_id)
             if bind_snapshot:
-                if current.status not in {
-                    OpportunityStatus.TRIGGERED,
-                    OpportunityStatus.PAPER_FILLING,
-                }:
+                if existing is not None and existing.bound_snapshot:
+                    allowed = current.status in {
+                        OpportunityStatus.TRIGGERED,
+                        OpportunityStatus.PAPER_FILLING,
+                    }
+                else:
+                    allowed = current.status is OpportunityStatus.TRIGGERED
+                if not allowed:
                     raise ValueError(
                         "bound snapshot attempt requires a current TRIGGERED snapshot"
                     )
-            updated = self._record_paper_fill_locked(
+            return self._record_paper_fill_locked(
                 opportunity_id,
                 stage=OpportunityStatus.PAPER_FILLING,
                 occurred_at=occurred_at,
                 detail=detail or "paper_fill_attempted_bound_snapshot",
+                bind_snapshot=bind_snapshot,
+                decision_at=decision_at,
             )
-            if bind_snapshot:
-                self._active_bound_attempts.add(opportunity_id)
-            return updated
 
     def allows_bound_snapshot_entry(
         self, current: NearOpportunity, *, bound_autofill: bool = False
@@ -310,15 +347,123 @@ class WatchlistService:
         )
 
     def has_active_bound_attempt(self, opportunity_id: str) -> bool:
-        """True only while a paper-fill attempt is in flight, not after it ends."""
+        """True only for a durable STARTED attempt that is explicitly bound."""
 
-        if opportunity_id in self._active_bound_attempts:
-            return True
-        current = self.repository.get(opportunity_id)
-        return current is not None and current.status is OpportunityStatus.PAPER_FILLING
+        attempt = self.repository.get_started_paper_fill_attempt(opportunity_id)
+        return attempt is not None and attempt.bound_snapshot
+
+    def latest_paper_fill_attempt(self, opportunity_id: str) -> PaperFillAttempt | None:
+        attempts = self.repository.list_paper_fill_attempts(opportunity_id)
+        return attempts[0] if attempts else None
 
     def clear_bound_autofill_attempt(self, opportunity_id: str) -> None:
         self._active_bound_attempts.discard(opportunity_id)
+
+    def reconcile_orphaned_paper_filling(
+        self,
+        opportunity_id: str,
+        *,
+        occurred_at,
+        detail: str = ORPHANED_PAPER_FILLING_RECONCILED,
+    ) -> NearOpportunity | None:
+        """Fail-close PAPER_FILLING when the original attempt cannot continue."""
+
+        with self.repository.transaction():
+            current = self.repository.get(opportunity_id)
+            if current is None or current.status is not OpportunityStatus.PAPER_FILLING:
+                return current
+            attempt = self.repository.get_started_paper_fill_attempt(opportunity_id)
+            if attempt is not None:
+                self._finish_paper_fill_attempt(
+                    attempt,
+                    status=PaperFillAttemptStatus.REJECTED,
+                    occurred_at=occurred_at,
+                    detail=detail,
+                )
+            reasons = list(dict.fromkeys([*current.rejection_reasons, detail]))
+            updated = current.model_copy(
+                update={
+                    "status": OpportunityStatus.REJECTED,
+                    "classification": classification_for(OpportunityStatus.REJECTED),
+                    "is_arbitrage": False,
+                    "guaranteed_profit_gbp": None,
+                    "rejection_reasons": reasons,
+                    "last_seen_at": occurred_at,
+                }
+            )
+            self.repository.upsert_opportunity(updated, force_status=True)
+            event_id = paper_fill_lifecycle_event_id(
+                opportunity_id,
+                LifecycleEventType.PAPER_FILL_REJECTED,
+                None if attempt is None else attempt.attempt_id,
+            )
+            event_detail = detail
+            if attempt is not None and attempt.attempt_id not in event_detail:
+                event_detail = f"attempt_id={attempt.attempt_id}; {detail}"
+            self.repository.append_event(
+                OpportunityLifecycleEvent(
+                    event_id=event_id,
+                    opportunity_id=opportunity_id,
+                    occurred_at=occurred_at,
+                    event_type=LifecycleEventType.PAPER_FILL_REJECTED,
+                    status=updated.status,
+                    current_net_edge=updated.current_net_edge,
+                    distance_to_trigger_pp=updated.distance_to_trigger_pp,
+                    detail=event_detail,
+                )
+            )
+            self._active_bound_attempts.discard(opportunity_id)
+            return updated
+
+    def _ensure_paper_fill_attempt(
+        self,
+        opportunity_id: str,
+        *,
+        occurred_at,
+        bound_snapshot: bool,
+        decision_at=None,
+        detail: str | None,
+    ) -> PaperFillAttempt:
+        existing = self.repository.get_started_paper_fill_attempt(opportunity_id)
+        if existing is not None:
+            if bound_snapshot and not existing.bound_snapshot:
+                raise ValueError("bound snapshot attempt requires a current TRIGGERED snapshot")
+            if bound_snapshot:
+                self._active_bound_attempts.add(opportunity_id)
+            return existing
+        attempt = PaperFillAttempt(
+            attempt_id=str(uuid4()),
+            opportunity_id=opportunity_id,
+            bound_snapshot=bound_snapshot,
+            status=PaperFillAttemptStatus.STARTED,
+            started_at=occurred_at,
+            decision_at=decision_at,
+            detail=detail,
+        )
+        self.repository.upsert_paper_fill_attempt(attempt)
+        if bound_snapshot:
+            self._active_bound_attempts.add(opportunity_id)
+        return attempt
+
+    def _finish_paper_fill_attempt(
+        self,
+        attempt: PaperFillAttempt,
+        *,
+        status: PaperFillAttemptStatus,
+        occurred_at,
+        detail: str | None = None,
+    ) -> PaperFillAttempt:
+        finished = attempt.model_copy(
+            update={
+                "status": status,
+                "finished_at": occurred_at,
+                "detail": detail or attempt.detail,
+            }
+        )
+        self.repository.upsert_paper_fill_attempt(finished)
+        if finished.status is not PaperFillAttemptStatus.STARTED:
+            self._active_bound_attempts.discard(attempt.opportunity_id)
+        return finished
 
     def _revive_presentation_stale_for_bound_entry(
         self, current: NearOpportunity
@@ -351,6 +496,16 @@ class WatchlistService:
             current = self.repository.get(opportunity_id)
             if current is None:
                 return None
+            attempt = self.repository.get_started_paper_fill_attempt(opportunity_id)
+            if attempt is None:
+                attempt = self.latest_paper_fill_attempt(opportunity_id)
+            if attempt is not None and attempt.status is PaperFillAttemptStatus.STARTED:
+                self._finish_paper_fill_attempt(
+                    attempt,
+                    status=PaperFillAttemptStatus.REJECTED,
+                    occurred_at=occurred_at,
+                    detail=detail,
+                )
             status = current.status
             if current.status is OpportunityStatus.PAPER_FILLING:
                 reasons = list(dict.fromkeys([*current.rejection_reasons, detail]))
@@ -366,18 +521,27 @@ class WatchlistService:
                 )
                 self.repository.upsert_opportunity(current, force_status=True)
                 status = current.status
+            event_detail = detail
+            attempt_id = None if attempt is None else attempt.attempt_id
+            if attempt_id and attempt_id not in event_detail:
+                event_detail = f"attempt_id={attempt_id}; {detail}"
             self.repository.append_event(
                 OpportunityLifecycleEvent(
+                    event_id=paper_fill_lifecycle_event_id(
+                        opportunity_id,
+                        LifecycleEventType.PAPER_FILL_REJECTED,
+                        attempt_id,
+                    ),
                     opportunity_id=opportunity_id,
                     occurred_at=occurred_at,
                     event_type=LifecycleEventType.PAPER_FILL_REJECTED,
                     status=status,
                     current_net_edge=current.current_net_edge,
                     distance_to_trigger_pp=current.distance_to_trigger_pp,
-                    detail=detail,
+                    detail=event_detail,
                 )
             )
-            self.clear_bound_autofill_attempt(opportunity_id)
+            self._active_bound_attempts.discard(opportunity_id)
             return current
 
     def close(

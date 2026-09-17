@@ -102,16 +102,19 @@ def conservative_quote_age_at_decision_ms(
     quote_captured_at: datetime | None = None,
     legs: Sequence[PaperOpportunityLeg] = (),
 ) -> int | None:
-    """T1 quote age: known provider/source age plus capture → decision elapsed.
+    """T1 quote age from each required opening leg. Never cross-combine legs.
 
-    Conservatively uses the oldest required opening leg. A required leg with
-    neither provider age nor a capture/observation timestamp is unknown.
+    For every required leg: provider/source age at that leg's capture plus
+    elapsed capture → T1. The conservative result is the max of those real
+    legs. Plan-level `known_age_ms` / `quote_captured_at` are used only when
+    no per-leg timing exists. A required leg with neither age nor capture is
+    unknown.
     """
 
     decision = require_aware_instant(decision_at, "decision_at")
-    ages: list[int] = []
     required = [leg for leg in legs if leg.requested_stake > 0]
     if required:
+        ages: list[int] = []
         for leg in required:
             if leg.quote_age_ms is None and leg.quote_captured_at is None:
                 return None
@@ -121,19 +124,14 @@ def conservative_quote_age_at_decision_ms(
                 elapsed = _elapsed_ms(captured, decision)
             provider_age = 0 if leg.quote_age_ms is None else leg.quote_age_ms
             ages.append(provider_age + elapsed)
-    captured = None
+        return max(ages)
     if quote_captured_at is not None:
         captured = require_aware_instant(quote_captured_at, "quote_captured_at")
-        plan_elapsed = _elapsed_ms(captured, decision)
+        elapsed = _elapsed_ms(captured, decision)
         if known_age_ms is None:
-            ages.append(plan_elapsed)
-        else:
-            ages.append(known_age_ms + plan_elapsed)
-    elif known_age_ms is not None:
-        ages.append(known_age_ms)
-    if not ages:
-        return None
-    return max(ages)
+            return elapsed
+        return known_age_ms + elapsed
+    return known_age_ms
 
 
 def snapshot_freshness_rejection(

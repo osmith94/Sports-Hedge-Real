@@ -16,6 +16,8 @@ from sports_hedge.arbitrage.watchlist.models import (
     OpportunityLifecycleEvent,
     OpportunityObservationPoint,
     OpportunityStatus,
+    PaperFillAttempt,
+    PaperFillAttemptStatus,
     WatchLeg,
 )
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
@@ -158,6 +160,19 @@ class SqliteWatchlistRepository:
             );
             CREATE INDEX IF NOT EXISTS idx_watchlist_observation_history
                 ON watchlist_observation_history(opportunity_id, observed_at, id);
+
+            CREATE TABLE IF NOT EXISTS paper_fill_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                opportunity_id TEXT NOT NULL,
+                bound_snapshot INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                decision_at TEXT,
+                finished_at TEXT,
+                detail TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_paper_fill_attempts_opportunity
+                ON paper_fill_attempts(opportunity_id, started_at DESC, attempt_id DESC);
             """
         )
         columns = {
@@ -445,6 +460,69 @@ class SqliteWatchlistRepository:
             ).fetchall()
             return [_event_from_row(row) for row in rows]
 
+    def upsert_paper_fill_attempt(self, attempt: PaperFillAttempt) -> None:
+        with self.exclusive():
+            self._connection.execute(
+                """
+                INSERT INTO paper_fill_attempts (
+                    attempt_id, opportunity_id, bound_snapshot, status,
+                    started_at, decision_at, finished_at, detail
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(attempt_id) DO UPDATE SET
+                    opportunity_id = excluded.opportunity_id,
+                    bound_snapshot = excluded.bound_snapshot,
+                    status = excluded.status,
+                    started_at = excluded.started_at,
+                    decision_at = excluded.decision_at,
+                    finished_at = excluded.finished_at,
+                    detail = excluded.detail
+                """,
+                (
+                    attempt.attempt_id,
+                    attempt.opportunity_id,
+                    int(attempt.bound_snapshot),
+                    attempt.status.value,
+                    attempt.started_at.isoformat(),
+                    None if attempt.decision_at is None else attempt.decision_at.isoformat(),
+                    None if attempt.finished_at is None else attempt.finished_at.isoformat(),
+                    attempt.detail,
+                ),
+            )
+            self._commit()
+
+    def get_paper_fill_attempt(self, attempt_id: str) -> PaperFillAttempt | None:
+        with self.exclusive():
+            row = self._connection.execute(
+                "SELECT * FROM paper_fill_attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            return None if row is None else _paper_fill_attempt_from_row(row)
+
+    def list_paper_fill_attempts(self, opportunity_id: str) -> list[PaperFillAttempt]:
+        with self.exclusive():
+            rows = self._connection.execute(
+                """
+                SELECT * FROM paper_fill_attempts
+                WHERE opportunity_id = ?
+                ORDER BY started_at DESC, attempt_id DESC
+                """,
+                (opportunity_id,),
+            ).fetchall()
+            return [_paper_fill_attempt_from_row(row) for row in rows]
+
+    def get_started_paper_fill_attempt(self, opportunity_id: str) -> PaperFillAttempt | None:
+        with self.exclusive():
+            row = self._connection.execute(
+                """
+                SELECT * FROM paper_fill_attempts
+                WHERE opportunity_id = ? AND status = ?
+                ORDER BY started_at DESC, attempt_id DESC
+                LIMIT 1
+                """,
+                (opportunity_id, PaperFillAttemptStatus.STARTED.value),
+            ).fetchone()
+            return None if row is None else _paper_fill_attempt_from_row(row)
+
     def close(self) -> None:
         with self.exclusive():
             self._connection.close()
@@ -501,6 +579,23 @@ def _opportunity_from_row(row: sqlite3.Row) -> NearOpportunity:
         mapping_reasons=_json_list(_row_get(row, "mapping_reasons_json")),
         mapping_provenance=_mapping_provenance(_row_get(row, "mapping_provenance_json")),
         mapping_review_candidate=_mapping_candidate(_row_get(row, "mapping_review_candidate_json")),
+    )
+
+
+def _paper_fill_attempt_from_row(row: sqlite3.Row) -> PaperFillAttempt:
+    return PaperFillAttempt(
+        attempt_id=row["attempt_id"],
+        opportunity_id=row["opportunity_id"],
+        bound_snapshot=bool(row["bound_snapshot"]),
+        status=PaperFillAttemptStatus(row["status"]),
+        started_at=datetime.fromisoformat(row["started_at"]),
+        decision_at=None
+        if row["decision_at"] is None
+        else datetime.fromisoformat(row["decision_at"]),
+        finished_at=None
+        if row["finished_at"] is None
+        else datetime.fromisoformat(row["finished_at"]),
+        detail=row["detail"],
     )
 
 

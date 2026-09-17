@@ -558,6 +558,7 @@ class PaperScanService:
                 "eligible_for_paper_simulation": not rejections,
                 "rejection_reasons": _dedupe(rejections),
                 "mapping_review_candidate": mapping_review_candidate,
+                "scanned_at": datetime.now(UTC),
             }
         )
 

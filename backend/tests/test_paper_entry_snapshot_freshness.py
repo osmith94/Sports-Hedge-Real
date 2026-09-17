@@ -8,6 +8,7 @@ paper-only / read-only toward venues.
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -19,11 +20,17 @@ from sports_hedge.application.executable_liquidity import DEFAULT_OPENING_MAX_QU
 from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
-from sports_hedge.arbitrage.watchlist.models import LifecycleEventType, OpportunityStatus
+from sports_hedge.arbitrage.watchlist.models import (
+    ORPHANED_PAPER_FILLING_RECONCILED,
+    LifecycleEventType,
+    OpportunityStatus,
+    PaperFillAttemptStatus,
+)
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
+from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.entry_freshness import (
@@ -34,6 +41,7 @@ from sports_hedge.paper.entry_freshness import (
     conservative_quote_age_at_decision_ms,
     snapshot_freshness_rejection,
 )
+from sports_hedge.paper.fills import PaperOpportunityLeg
 from sports_hedge.paper.trades import PaperTradeState
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.venues import KalshiClient, MatchbookClient, PolymarketClient
@@ -56,6 +64,7 @@ def _freshness_bundle(
     latency_ms: int = 500,
     max_age_ms: int = 2000,
     watchlist_max_age_ms: int | None = None,
+    watchlist_db: Path | None = None,
 ):
     ledger = SqlitePaperLedger(
         tmp_path / "paper.sqlite",
@@ -73,7 +82,7 @@ def _freshness_bundle(
     )
     scan = PaperScanService(MarketIntelligenceService(repository), settings=settings)
     watchlist = WatchlistService(
-        SqliteWatchlistRepository(),
+        SqliteWatchlistRepository(watchlist_db or ":memory:"),
         max_quote_age_ms=watchlist_max_age_ms if watchlist_max_age_ms is not None else max_age_ms,
     )
     ops = PaperOperationsService(
@@ -587,3 +596,340 @@ def test_accepted_paper_fill_keeps_execution_disabled(tmp_path: Path) -> None:
     finally:
         repository.close()
         ledger.close()
+
+
+def _timing_leg(
+    *,
+    venue: VenueName,
+    outcome: str,
+    quote_age_ms: int | None,
+    quote_captured_at: datetime | None,
+    requested_stake: Decimal = Decimal("10"),
+) -> PaperOpportunityLeg:
+    return PaperOpportunityLeg(
+        outcome=outcome,
+        venue=venue,
+        source_market_id=f"{venue.value}-mkt",
+        source_runner_id=f"{venue.value}-runner",
+        requested_stake=requested_stake,
+        displayed_odds=Decimal("2.10"),
+        levels=[BookLevel(decimal_odds=Decimal("2.10"), available_stake=Decimal("100"))],
+        quote_age_ms=quote_age_ms,
+        quote_captured_at=quote_captured_at,
+    )
+
+
+def test_crossed_leg_quote_age_does_not_synthesize_impossible_quote() -> None:
+    age = conservative_quote_age_at_decision_ms(
+        decision_at=T1,
+        known_age_ms=900,
+        quote_captured_at=T1 - timedelta(milliseconds=1000),
+        legs=[
+            _timing_leg(
+                venue=VenueName.MATCHBOOK,
+                outcome="yes",
+                quote_age_ms=100,
+                quote_captured_at=T1 - timedelta(milliseconds=1000),
+            ),
+            _timing_leg(
+                venue=VenueName.POLYMARKET,
+                outcome="no",
+                quote_age_ms=900,
+                quote_captured_at=T1 - timedelta(milliseconds=100),
+            ),
+        ],
+    )
+    assert age == 1100
+
+
+def test_oldest_provider_age_and_capture_on_same_leg_stay_conservative() -> None:
+    age = conservative_quote_age_at_decision_ms(
+        decision_at=T1,
+        known_age_ms=50,
+        quote_captured_at=T1 - timedelta(milliseconds=10),
+        legs=[
+            _timing_leg(
+                venue=VenueName.MATCHBOOK,
+                outcome="yes",
+                quote_age_ms=400,
+                quote_captured_at=T1 - timedelta(milliseconds=800),
+            ),
+            _timing_leg(
+                venue=VenueName.POLYMARKET,
+                outcome="no",
+                quote_age_ms=100,
+                quote_captured_at=T1 - timedelta(milliseconds=50),
+            ),
+        ],
+    )
+    assert age == 1200
+
+
+def test_missing_timing_on_required_leg_is_unknown() -> None:
+    age = conservative_quote_age_at_decision_ms(
+        decision_at=T1,
+        known_age_ms=100,
+        quote_captured_at=T1 - timedelta(milliseconds=1000),
+        legs=[
+            _timing_leg(
+                venue=VenueName.MATCHBOOK,
+                outcome="yes",
+                quote_age_ms=100,
+                quote_captured_at=T1 - timedelta(milliseconds=200),
+            ),
+            _timing_leg(
+                venue=VenueName.POLYMARKET,
+                outcome="no",
+                quote_age_ms=None,
+                quote_captured_at=None,
+            ),
+        ],
+    )
+    assert age is None
+
+
+def test_scan_pair_final_qualification_includes_allocator_delay() -> None:
+    captured = datetime.now(UTC)
+    scan = PaperScanService(
+        MarketIntelligenceService(SqliteMarketIntelligenceRepository()),
+        settings=Settings(max_slippage_bps=0, fx_spread_bps=0, simulated_latency_ms=500),
+    )
+    left = _matchbook_btts().model_copy(update={"observed_at": captured, "quote_age_ms": 100})
+    right = _polymarket_btts().model_copy(update={"observed_at": captured, "quote_age_ms": 150})
+    real_allocate = scan._allocate_draft
+
+    def delayed_allocate(*args, **kwargs):
+        time.sleep(0.65)
+        return real_allocate(*args, **kwargs)
+
+    scan._allocate_draft = delayed_allocate
+    decision = scan.scan_pair(
+        left,
+        right,
+        venue_costs=matchbook_polymarket_costs(),
+        fx_snapshots=FX,
+        maximum_execution_risk=100,
+        liquidity_snapshot=_standing(),
+    )
+    assert decision.eligible_for_paper_simulation is True, decision.rejection_reasons
+    qualification_ms = int((decision.scanned_at - captured).total_seconds() * 1000)
+    assert qualification_ms >= 600
+    age = conservative_quote_age_at_decision_ms(
+        decision_at=decision.scanned_at,
+        known_age_ms=decision.quote_age_ms,
+        legs=decision.fill_legs,
+    )
+    assert age is not None
+    assert age >= 750
+    plan_age = PaperOperationsService(
+        watchlist=WatchlistService(SqliteWatchlistRepository()),
+        settings=Settings(),
+    )._plan_from_decision(decision, "opp-t1", DataProvenance.LIVE_PAPER).quote_age_at_decision_ms
+    assert plan_age is not None
+    assert plan_age >= 750
+
+
+def test_manual_paper_filling_does_not_inherit_bound_snapshot_authority(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=False)
+    try:
+        decision = _qualify(scan, age_ms=300)
+        seeded = _observe(scan, watchlist, decision)
+        ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER, autofill=False)
+        watchlist.begin_paper_fill_attempt(
+            seeded.opportunity_id,
+            occurred_at=T1,
+            bind_snapshot=False,
+        )
+        assert watchlist.has_active_bound_attempt(seeded.opportunity_id) is False
+        attempt = watchlist.latest_paper_fill_attempt(seeded.opportunity_id)
+        assert attempt is not None
+        assert attempt.bound_snapshot is False
+        dispatch_at = T1 + timedelta(milliseconds=1800)
+        with pytest.raises(PaperOperationsError, match=MARKET_REVALIDATION_FAILED):
+            ops.simulate_fill(
+                seeded.opportunity_id,
+                simulate_external=True,
+                provenance=DataProvenance.LIVE_PAPER,
+                now=dispatch_at,
+            )
+        assert ops.list_active_trades() == []
+        assert watchlist.has_active_bound_attempt(seeded.opportunity_id) is False
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_failed_attempt_then_fresh_retrigger_creates_second_attempt_events(
+    tmp_path: Path,
+) -> None:
+    scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=True)
+    try:
+        stale = _qualify(scan, age_ms=1700)
+        seeded = _observe(scan, watchlist, stale)
+        ops.persist_triggered_chain(stale, provenance=DataProvenance.LIVE_PAPER, autofill=True)
+        first_attempt = watchlist.latest_paper_fill_attempt(seeded.opportunity_id)
+        assert first_attempt is not None
+        assert first_attempt.status is PaperFillAttemptStatus.REJECTED
+        later = T1 + timedelta(seconds=2)
+        fresh = _qualify(scan, age_ms=300, scanned_at=later)
+        _observe(scan, watchlist, fresh)
+        ops.persist_triggered_chain(
+            fresh,
+            provenance=DataProvenance.LIVE_PAPER,
+            autofill=True,
+            now=later + timedelta(milliseconds=200),
+        )
+        attempts = watchlist.repository.list_paper_fill_attempts(seeded.opportunity_id)
+        assert len(attempts) == 2
+        assert attempts[0].attempt_id != attempts[1].attempt_id
+        attempted = [
+            event
+            for event in watchlist.activity(opportunity_id=seeded.opportunity_id)
+            if event.event_type is LifecycleEventType.PAPER_FILL_ATTEMPTED
+        ]
+        rejected = [
+            event
+            for event in watchlist.activity(opportunity_id=seeded.opportunity_id)
+            if event.event_type is LifecycleEventType.PAPER_FILL_REJECTED
+        ]
+        complete = [
+            event
+            for event in watchlist.activity(opportunity_id=seeded.opportunity_id)
+            if event.event_type is LifecycleEventType.PAPER_FILL_COMPLETE
+        ]
+        assert len(attempted) == 2
+        assert attempted[0].event_id != attempted[1].event_id
+        assert first_attempt.attempt_id in attempted[0].event_id or first_attempt.attempt_id in attempted[1].event_id
+        second = next(item for item in attempts if item.attempt_id != first_attempt.attempt_id)
+        assert any(second.attempt_id in event.event_id for event in attempted)
+        assert any(first_attempt.attempt_id in event.event_id for event in rejected)
+        assert any(second.attempt_id in event.event_id for event in complete)
+        assert len(ops.list_active_trades()) == 1
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_retry_inside_one_attempt_does_not_duplicate_attempted_event(tmp_path: Path) -> None:
+    scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=True)
+    try:
+        decision = _qualify(scan, age_ms=300)
+        seeded = _observe(scan, watchlist, decision)
+        ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER, autofill=True)
+        first_attempt = watchlist.latest_paper_fill_attempt(seeded.opportunity_id)
+        assert first_attempt is not None
+        for _ in range(2):
+            ops.simulate_fill(
+                seeded.opportunity_id,
+                simulate_external=True,
+                provenance=DataProvenance.LIVE_PAPER,
+                now=T1 + timedelta(milliseconds=200),
+            )
+        attempted = [
+            event
+            for event in watchlist.activity(opportunity_id=seeded.opportunity_id)
+            if event.event_type is LifecycleEventType.PAPER_FILL_ATTEMPTED
+        ]
+        complete = [
+            event
+            for event in watchlist.activity(opportunity_id=seeded.opportunity_id)
+            if event.event_type is LifecycleEventType.PAPER_FILL_COMPLETE
+        ]
+        assert len(attempted) == 1
+        assert first_attempt.attempt_id in attempted[0].event_id
+        assert len(complete) == 1
+        assert first_attempt.attempt_id in complete[0].event_id
+        assert len(watchlist.repository.list_paper_fill_attempts(seeded.opportunity_id)) == 1
+        assert len(ops.list_active_trades()) == 1
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_crash_after_paper_filling_reconciles_on_restart(tmp_path: Path) -> None:
+    watchlist_db = tmp_path / "watchlist.sqlite"
+    scan, watchlist, ops, repository, ledger, settings = _freshness_bundle(
+        tmp_path, autofill=False, watchlist_db=watchlist_db
+    )
+    try:
+        decision = _qualify(scan, age_ms=300)
+        seeded = _observe(scan, watchlist, decision)
+        ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER, autofill=False)
+        watchlist.begin_paper_fill_attempt(
+            seeded.opportunity_id,
+            occurred_at=T1,
+            bind_snapshot=True,
+            decision_at=decision.scanned_at,
+        )
+        row = watchlist.repository.get(seeded.opportunity_id)
+        assert row is not None
+        assert row.status is OpportunityStatus.PAPER_FILLING
+        first_attempt = watchlist.latest_paper_fill_attempt(seeded.opportunity_id)
+        assert first_attempt is not None
+        assert first_attempt.bound_snapshot is True
+        assert first_attempt.status is PaperFillAttemptStatus.STARTED
+        assert ops.list_active_trades() == []
+    finally:
+        watchlist.repository.close()
+        repository.close()
+        ledger.close()
+
+    scan2, watchlist2, ops2, repository2, ledger2, _settings2 = _freshness_bundle(
+        tmp_path, autofill=True, watchlist_db=watchlist_db
+    )
+    try:
+        assert ops2._plans == {}
+        orphan = watchlist2.repository.get(seeded.opportunity_id)
+        assert orphan is not None
+        assert orphan.status is OpportunityStatus.PAPER_FILLING
+        later = T1 + timedelta(seconds=2)
+        fresh = _qualify(scan2, age_ms=300, scanned_at=later)
+        retriggered = _observe(scan2, watchlist2, fresh)
+        assert retriggered.status is OpportunityStatus.PAPER_FILLING
+        ops2.persist_triggered_chain(
+            fresh,
+            provenance=DataProvenance.LIVE_PAPER,
+            autofill=True,
+            now=later + timedelta(milliseconds=200),
+        )
+        recovered = watchlist2.latest_paper_fill_attempt(seeded.opportunity_id)
+        first_after = watchlist2.repository.get_paper_fill_attempt(first_attempt.attempt_id)
+        assert first_after is not None
+        assert first_after.status is PaperFillAttemptStatus.REJECTED
+        assert first_after.detail is not None
+        assert ORPHANED_PAPER_FILLING_RECONCILED in first_after.detail
+        assert recovered is not None
+        assert recovered.attempt_id != first_attempt.attempt_id
+        assert recovered.status is PaperFillAttemptStatus.COMPLETE
+        trades = ops2.list_active_trades()
+        assert len(trades) == 1
+        assert trades[0].state is PaperTradeState.OPEN
+        fill_ids = [leg.fill_id for leg in trades[0].legs if leg.fill_id]
+        assert len(fill_ids) == len(set(fill_ids)) == 2
+        locks = _lock_rows(ledger2, trades[0].trade_id)
+        assert len(locks) == 2
+        row = watchlist2.repository.get(seeded.opportunity_id)
+        assert row is not None
+        assert row.status is OpportunityStatus.FILLED
+        assert watchlist2.has_active_bound_attempt(seeded.opportunity_id) is False
+        attempted = [
+            event
+            for event in watchlist2.activity(opportunity_id=seeded.opportunity_id)
+            if event.event_type is LifecycleEventType.PAPER_FILL_ATTEMPTED
+        ]
+        assert len(attempted) == 2
+        assert first_attempt.attempt_id in attempted[0].event_id or first_attempt.attempt_id in attempted[1].event_id
+        assert recovered.attempt_id in attempted[0].event_id or recovered.attempt_id in attempted[1].event_id
+        ops2.persist_triggered_chain(
+            fresh,
+            provenance=DataProvenance.LIVE_PAPER,
+            autofill=True,
+            now=later + timedelta(milliseconds=400),
+        )
+        assert len(ops2.list_active_trades()) == 1
+        assert _lock_rows(ledger2, trades[0].trade_id) == locks
+        assert settings.sports_hedge_execution_enabled is False
+    finally:
+        watchlist2.repository.close()
+        repository2.close()
+        ledger2.close()
