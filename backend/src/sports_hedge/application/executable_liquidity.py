@@ -17,6 +17,7 @@ PASSIVE_MAKER_NOT_EXECUTABLE = "passive_maker_not_executable"
 OPENING_LAY_NOT_SUPPORTED = "opening_lay_not_supported"
 STALE_PASSIVE_LIQUIDITY = "stale_passive_liquidity"
 DEFAULT_OPENING_MAX_QUOTE_AGE_MS = 2000
+"""Aligned with Settings.paper_entry_max_quote_age_ms default."""
 
 FAMILY_LABELS = {
     "match_result": "Match Result",

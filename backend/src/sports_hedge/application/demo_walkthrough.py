@@ -274,6 +274,13 @@ class DemoWalkthroughService:
             )
         if not decision.canonical_market_id:
             raise PaperOperationsError("fixture_replay_missing_market_id")
+        fixture_captured = [
+            observation.observed_at
+            for observation in (left, right)
+            if observation.observed_at is not None
+        ]
+        if fixture_captured:
+            decision = decision.model_copy(update={"scanned_at": max(fixture_captured)})
         history = self.scan.market_intelligence.market_history(
             canonical_market_id=decision.canonical_market_id
         )

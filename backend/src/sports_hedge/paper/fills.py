@@ -53,7 +53,7 @@ class PaperFillConfig(BaseModel):
 
     mode: FillMode = FillMode.REALISTIC
     assumed_latency_ms: int = Field(default=0, ge=0)
-    max_quote_age_ms: int | None = Field(default=1000, ge=0)
+    max_quote_age_ms: int | None = Field(default=2000, ge=0)
     slippage_bps: Decimal = Field(default=Decimal("0"), ge=0)
     price_impact_bps: Decimal = Field(default=Decimal("0"), ge=0)
     ms_per_skipped_level: int = Field(default=0, ge=0)

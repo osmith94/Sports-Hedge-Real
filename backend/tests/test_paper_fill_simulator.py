@@ -15,7 +15,8 @@ from sports_hedge.paper.simulator import (
     INSUFFICIENT_DEPTH,
     NO_VISIBLE_DEPTH,
     PaperFillSimulator,
-    STALE_QUOTE,
+    SNAPSHOT_STALE_AT_DECISION,
+    SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL,
     UNKNOWN_QUOTE_AGE,
 )
 
@@ -187,7 +188,7 @@ def test_stale_quote_is_rejected_after_latency() -> None:
     assert result.filled_stake == Decimal("0")
     assert result.remaining_stake == Decimal("40")
     assert result.weighted_odds is None
-    assert result.rejection_reason == STALE_QUOTE
+    assert result.rejection_reason == SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
     assert result.assumed_latency_ms == 500
     assert result.quote_age_ms == 800
     assert result.filled_at == datetime(2026, 9, 11, 12, 0, 0, 500000, tzinfo=UTC)
@@ -378,4 +379,4 @@ def test_quote_age_at_freshness_cap_is_stale() -> None:
     )
 
     assert result.filled_stake == Decimal("0")
-    assert result.rejection_reason == STALE_QUOTE
+    assert result.rejection_reason == SNAPSHOT_STALE_AT_DECISION

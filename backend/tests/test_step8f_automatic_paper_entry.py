@@ -672,7 +672,7 @@ def test_fixture_detail_and_trades_api_open_only_after_complete(tmp_path: Path) 
         ledger.close()
 
 
-def test_watchlist_stale_clock_rejects_autofill_without_open_trade(tmp_path: Path) -> None:
+def test_watchlist_stale_clock_ages_radar_without_open_trade(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=False)
     try:
         _observe_and_persist(
@@ -685,13 +685,12 @@ def test_watchlist_stale_clock_rejects_autofill_without_open_trade(tmp_path: Pat
         )
         opportunity_id = next(iter(ops._plans))
         before = ledger.treasury.snapshot()
-        with pytest.raises(PaperOperationsError, match="stale_before_fill"):
-            ops.simulate_fill(
-                opportunity_id,
-                simulate_external=True,
-                now=OBSERVED + timedelta(seconds=30),
-                provenance=DataProvenance.FIXTURE_DEMO,
-            )
+        aged = watchlist.triggered(as_of=OBSERVED + timedelta(seconds=30), limit=10)
+        assert aged == []
+        row = watchlist.repository.get(opportunity_id)
+        assert row is not None
+        assert row.status is OpportunityStatus.REJECTED
+        assert "stale_quote" in row.rejection_reasons
         assert ops.list_active_trades() == []
         after = ledger.treasury.snapshot()
         assert after.pool(VenueName.MATCHBOOK, "GBP").available_cash == before.pool(

@@ -198,7 +198,7 @@ def test_forced_open_locks_observe_overlap_does_not_regress_filled(tmp_path: Pat
         assert before_filled["trade_state"] == PaperTradeState.OPEN.value, before_filled
         assert before_filled["locks"] == 2, before_filled
         assert before_filled["fill_journals"] == 2, before_filled
-        assert before_filled["watch_status"] == OpportunityStatus.TRIGGERED.value, before_filled
+        assert before_filled["watch_status"] == OpportunityStatus.PAPER_FILLING.value, before_filled
 
         after = _state_report(
             ops=ops, ledger=ledger, watchlist=watchlist, opportunity_id=opportunity_id, audit=audit

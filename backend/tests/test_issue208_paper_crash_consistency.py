@@ -769,7 +769,7 @@ def test_crash_after_open_before_watchlist_filled_converges_on_retry(tmp_path: P
         )
         assert after_crash["open_trades"] == 1, after_crash
         assert after_crash["locks"] == 2, after_crash
-        assert after_crash["watch_status"] == OpportunityStatus.TRIGGERED.value, after_crash
+        assert after_crash["watch_status"] == OpportunityStatus.PAPER_FILLING.value, after_crash
         watchlist.record_paper_fill = real_fill  # type: ignore[method-assign]
         ops.persist_triggered_chain(decision, provenance=DataProvenance.LIVE_PAPER)
         after_retry = _state_report(

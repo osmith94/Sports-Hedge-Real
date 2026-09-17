@@ -317,12 +317,18 @@ def test_rejected_and_aborted_decisions_stay_out_of_the_gl(tmp_path: Path) -> No
     _scan, watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
     try:
         opportunity_id = next(iter(ops._plans))
+        plan = ops._plans[opportunity_id]
+        stale_legs = [leg.model_copy(update={"quote_age_ms": 50_000}) for leg in plan.legs]
+        ops._plans[opportunity_id] = plan.model_copy(
+            update={
+                "legs": stale_legs,
+                "quote_age_ms": 50_000,
+                "quote_age_at_decision_ms": 50_000,
+            }
+        )
         before = _journal_facts(ledger)
         assert ledger.reconcile().ok
-        with pytest.raises(
-            PaperOperationsError,
-            match="stale_before_fill|manual_external_confirmation_required",
-        ):
+        with pytest.raises(PaperOperationsError, match="snapshot_stale_at_decision"):
             ops.simulate_fill(opportunity_id, simulate_external=False, now=OBSERVED)
         assert ops.list_active_trades() == []
         assert opportunity_id in ops._entry_rejections
