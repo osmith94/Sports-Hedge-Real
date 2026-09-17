@@ -24,6 +24,7 @@ from sports_hedge.application.current_market_inventory import (
 from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
 from sports_hedge.application.hot_identity import hot_scheduling_key, scheduling_team_key
 from sports_hedge.application.live_refresh import DualCadencePlan, LiveRefreshCoordinator
+from sports_hedge.application.universe_checkpoint import SWEEP_RETRY_WAIT
 from sports_hedge.application.provider_access import (
     HEALTH_DEFERRED,
     HEALTH_DISCOVERY_TIMEOUT,
@@ -377,7 +378,10 @@ async def test_one_provider_failure_does_not_erase_successful_work() -> None:
         [],
     )
     assert "mb-ok" in coordinator._universe_evaluated_ids
-    assert "kalshi-fail" in coordinator._universe_failed_ids
+    failed = coordinator._universe_work["kalshi-fail"]
+    assert failed.state == SWEEP_RETRY_WAIT
+    assert "kalshi-fail" not in coordinator._universe_failed_ids
+    assert coordinator._universe_sweep_is_complete_unlocked() is False
     assert coordinator._universe_last_successful == "mb-ok"
 
 
@@ -458,6 +462,8 @@ def test_source_aliases_collapse_to_one_hot_scheduling_unit() -> None:
     unique, _lifecycle, _promoted = store.hot_membership_breakdown(NOW)
     assert len(scope) == 1
     assert unique == 1
+    assert {"betis-a", "betis-b"} <= set(store._rows)
+    assert len(store._rows) == 2
 
 
 def test_repeated_promotion_does_not_duplicate_hot() -> None:

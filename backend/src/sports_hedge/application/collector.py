@@ -405,6 +405,7 @@ class CollectionReport(BaseModel):
     fixture_source_events: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     issues: list[CollectorIssue] = Field(default_factory=list)
     scan_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    series_results: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     scan_lane: str | None = None
     resume_cursor: str | None = None
 
@@ -500,6 +501,8 @@ class ReadOnlyCrossVenueCollector:
         self._op_operation_health: dict[str, Any] = {}
         self._on_fixture_evaluated: Callable[..., Any] | None = None
         self._on_discovery_complete: Callable[..., Any] | None = None
+        self._on_canonical_work_set: Callable[..., Any] | None = None
+        self._op_series_results: dict[str, list[dict[str, Any]]] = {}
         self._peak_inflight = 0
         self._provider_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
         self._provider_peak_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
@@ -559,6 +562,8 @@ class ReadOnlyCrossVenueCollector:
         sweep_id: str | None = None,
         on_discovery_complete: Callable[..., Any] | None = None,
         on_fixture_evaluated: Callable[..., Any] | None = None,
+        on_canonical_work_set: Callable[..., Any] | None = None,
+        retry_series: dict[str, list[str]] | None = None,
     ) -> CollectionReport:
         if max_event_pairs <= 0 or max_market_pairs_per_event <= 0:
             raise ValueError("collector pair limits must be positive")
@@ -574,6 +579,8 @@ class ReadOnlyCrossVenueCollector:
         self._op_operation_health = {}
         self._on_discovery_complete = on_discovery_complete
         self._on_fixture_evaluated = on_fixture_evaluated
+        self._on_canonical_work_set = on_canonical_work_set
+        self._op_series_results = {}
         venue_health: dict[str, str] = {
             VenueName.MATCHBOOK.value: "unknown",
             VenueName.POLYMARKET.value: "unknown",
@@ -695,6 +702,20 @@ class ReadOnlyCrossVenueCollector:
                             venue_health[venue_name.value] = "ok"
                     if self.kalshi is None and VenueName.KALSHI in enabled:
                         venue_health[VenueName.KALSHI.value] = "unavailable"
+                    if retry_series:
+                        (
+                            raw_matchbook_events,
+                            raw_polymarket_events,
+                            raw_kalshi_events,
+                        ) = await self._merge_retry_series(
+                            raw_matchbook_events,
+                            raw_polymarket_events,
+                            raw_kalshi_events,
+                            retry_series=retry_series,
+                            enabled=enabled,
+                            issues=issues,
+                            venue_health=venue_health,
+                        )
                 else:
                     mb_task = self._discovery_task(
                         self.matchbook,
@@ -791,6 +812,8 @@ class ReadOnlyCrossVenueCollector:
                         CollectorIssue(stage="normalize_match", detail="scan_cycle_deadline_reached")
                     )
                 clusters_before_resume = len(clusters)
+                if resolved_lane != ScanLane.HOT.value:
+                    self._emit_canonical_work_set(clusters)
                 effective_skip = skip_ids
                 effective_cursor = resume_cursor
                 if (
@@ -1268,6 +1291,16 @@ class ReadOnlyCrossVenueCollector:
         issues: list[CollectorIssue],
         venue_health: dict[str, str],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        series_ids = _discovery_series_ids(venue, client, filters)
+        if series_ids:
+            return await self._list_raw_events_by_series(
+                client,
+                venue=venue,
+                filters=filters,
+                series_ids=series_ids,
+                issues=issues,
+                venue_health=venue_health,
+            )
         timeout = self._discovery_timeout_budget(self._op_venue_timeout)
         started = monotonic()
         if timeout <= 0:
@@ -1318,12 +1351,205 @@ class ReadOnlyCrossVenueCollector:
             if venue_health.get(venue.value) != VENUE_HEALTH_DISABLED:
                 venue_health[venue.value] = "unavailable"
             return [], {}
-        venue_health[venue.value] = "ok"
-        if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)], {}
-        if isinstance(payload, dict):
-            return _extract_matchbook_items(payload, "events"), payload
-        return [], {}
+        events, extra = _payload_events(payload, venue)
+        client_report = list(getattr(client, "last_series_report", None) or [])
+        if extra.get("series_results"):
+            client_report = list(extra.get("series_results") or [])
+        if client_report:
+            self._op_series_results[venue.value] = client_report
+            if extra.get("partial") or any(item.get("status") != "ok" for item in client_report):
+                venue_health[venue.value] = "degraded"
+            else:
+                venue_health[venue.value] = "ok"
+        else:
+            venue_health[venue.value] = "ok"
+        return events, extra if extra else ({"events": events} if events else {})
+
+    async def _list_raw_events_by_series(
+        self,
+        client: Any,
+        *,
+        venue: VenueName,
+        filters: dict[str, Any],
+        series_ids: list[str],
+        issues: list[CollectorIssue],
+        venue_health: dict[str, str],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        series_results: list[dict[str, Any]] = []
+        extra: dict[str, Any] = {}
+        for series_id in series_ids:
+            series_filters = dict(filters)
+            if venue is VenueName.KALSHI:
+                series_filters["series_ticker"] = series_id
+                series_filters.pop("series_tickers", None)
+            else:
+                series_filters["series_id"] = series_id
+            timeout = self._discovery_timeout_budget(self._op_venue_timeout)
+            started = monotonic()
+            if timeout <= 0:
+                series_results.append(
+                    {
+                        "series": series_id,
+                        "status": HEALTH_DISCOVERY_TIMEOUT,
+                        "retryable": True,
+                        "event_count": 0,
+                        "reason": "discovery_timeout",
+                    }
+                )
+                continue
+            try:
+                access = self._provider_access
+                sem = self._provider_semaphores.get(venue)
+
+                async def _call() -> tuple[Any, bool]:
+                    return await self._await_bounded(
+                        client.list_events(**series_filters), timeout
+                    )
+
+                if access is not None:
+                    async with access.acquire(
+                        venue, lane=self._op_request_lane, stage="list_events"
+                    ):
+                        payload, timed_out = await _call()
+                elif sem is None:
+                    payload, timed_out = await _call()
+                else:
+                    async with sem:
+                        payload, timed_out = await _call()
+                self._attribution.add(
+                    venue=venue.value,
+                    stage="list_events",
+                    elapsed_ms=max(0, int((monotonic() - started) * 1000)),
+                    timed_out=timed_out,
+                )
+                if timed_out:
+                    series_results.append(
+                        {
+                            "series": series_id,
+                            "status": HEALTH_DISCOVERY_TIMEOUT,
+                            "retryable": True,
+                            "event_count": 0,
+                            "reason": "discovery_timeout",
+                        }
+                    )
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                status, retryable = _collector_series_failure_kind(exc)
+                issues.append(
+                    CollectorIssue(
+                        stage="list_events",
+                        venue=venue,
+                        source_id=series_id,
+                        detail=str(exc),
+                    )
+                )
+                series_results.append(
+                    {
+                        "series": series_id,
+                        "status": status,
+                        "retryable": retryable,
+                        "event_count": 0,
+                        "reason": str(exc),
+                    }
+                )
+                continue
+            page_events, page_extra = _payload_events(payload, venue)
+            if page_extra:
+                extra.update(page_extra)
+            retained = 0
+            for item in page_events:
+                event_id = _discovery_event_id(item, venue)
+                if event_id and event_id in seen:
+                    continue
+                if event_id:
+                    seen.add(event_id)
+                events.append(item)
+                retained += 1
+            series_results.append(
+                {
+                    "series": series_id,
+                    "status": "ok",
+                    "retryable": False,
+                    "event_count": retained,
+                    "reason": None,
+                }
+            )
+        self._op_series_results[venue.value] = series_results
+        extra["series_results"] = series_results
+        extra["events"] = events
+        any_ok = any(item["status"] == "ok" for item in series_results)
+        any_fail = any(item["status"] != "ok" for item in series_results)
+        if any_ok and any_fail:
+            venue_health[venue.value] = "degraded"
+        elif any_ok:
+            venue_health[venue.value] = "ok"
+        elif any(item.get("status") == HEALTH_DISCOVERY_TIMEOUT for item in series_results):
+            venue_health[venue.value] = HEALTH_DISCOVERY_TIMEOUT
+        elif series_results:
+            venue_health[venue.value] = str(series_results[0].get("status") or "unavailable")
+        else:
+            venue_health[venue.value] = "unavailable"
+        return events, extra
+
+    async def _merge_retry_series(
+        self,
+        raw_matchbook_events: list[dict[str, Any]],
+        raw_polymarket_events: list[dict[str, Any]],
+        raw_kalshi_events: list[dict[str, Any]],
+        *,
+        retry_series: dict[str, list[str]],
+        enabled: frozenset[VenueName],
+        issues: list[CollectorIssue],
+        venue_health: dict[str, str],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        buckets = {
+            VenueName.MATCHBOOK: list(raw_matchbook_events),
+            VenueName.POLYMARKET: list(raw_polymarket_events),
+            VenueName.KALSHI: list(raw_kalshi_events),
+        }
+        clients = {
+            VenueName.MATCHBOOK: self.matchbook,
+            VenueName.POLYMARKET: self.polymarket,
+            VenueName.KALSHI: self.kalshi,
+        }
+        for venue in (VenueName.POLYMARKET, VenueName.KALSHI):
+            series_ids = [str(item).strip() for item in retry_series.get(venue.value, []) if str(item).strip()]
+            if venue not in enabled or not series_ids or clients[venue] is None:
+                continue
+            previous_series = list(self._op_series_results.get(venue.value) or [])
+            events, _extra = await self._list_raw_events_by_series(
+                clients[venue],
+                venue=venue,
+                filters={},
+                series_ids=series_ids,
+                issues=issues,
+                venue_health=venue_health,
+            )
+            incoming_series = list(self._op_series_results.get(venue.value) or [])
+            self._op_series_results[venue.value] = _merge_series_rows(
+                previous_series, incoming_series
+            )
+            seen = {
+                _discovery_event_id(item, venue)
+                for item in buckets[venue]
+                if _discovery_event_id(item, venue)
+            }
+            for item in events:
+                event_id = _discovery_event_id(item, venue)
+                if event_id and event_id in seen:
+                    continue
+                if event_id:
+                    seen.add(event_id)
+                buckets[venue].append(item)
+        return (
+            buckets[VenueName.MATCHBOOK],
+            buckets[VenueName.POLYMARKET],
+            buckets[VenueName.KALSHI],
+        )
 
     def _finish_report(
         self,
@@ -1539,6 +1765,13 @@ class ReadOnlyCrossVenueCollector:
                 item.canonical_event_id for item in discovered_fixtures
             ],
             "matching_coverage": matching_coverage,
+            "series_results": dict(self._op_series_results),
+            "canonical_work_total": clusters_before_resume or len(clusters),
+            "raw_events_by_venue": {
+                VenueName.MATCHBOOK.value: len(raw_matchbook_events),
+                VenueName.POLYMARKET.value: len(raw_polymarket_events),
+                VenueName.KALSHI.value: len(raw_kalshi_events),
+            },
         }
         LOGGER.info("scan_diagnostics %s", diagnostics)
         return CollectionReport(
@@ -1591,6 +1824,7 @@ class ReadOnlyCrossVenueCollector:
             fixture_source_events=_fixture_source_events(clusters, discovered_fixtures),
             issues=issues,
             scan_diagnostics=diagnostics,
+            series_results=dict(self._op_series_results),
             scan_lane=scan_lane,
             resume_cursor=resume_cursor,
         )
@@ -1656,15 +1890,31 @@ class ReadOnlyCrossVenueCollector:
         if callback is None:
             return
         try:
-            callback(
-                {
-                    VenueName.MATCHBOOK.value: list(raw_matchbook_events),
-                    VenueName.POLYMARKET.value: list(raw_polymarket_events),
-                    VenueName.KALSHI.value: list(raw_kalshi_events),
-                }
-            )
+            payload: dict[str, Any] = {
+                VenueName.MATCHBOOK.value: list(raw_matchbook_events),
+                VenueName.POLYMARKET.value: list(raw_polymarket_events),
+                VenueName.KALSHI.value: list(raw_kalshi_events),
+            }
+            if self._op_series_results:
+                payload["series_results"] = dict(self._op_series_results)
+            callback(payload)
         except Exception:
             LOGGER.warning("on_discovery_complete callback failed", exc_info=True)
+
+    def _emit_canonical_work_set(self, clusters: list[FixtureCluster]) -> None:
+        callback = self._on_canonical_work_set
+        if callback is None:
+            return
+        try:
+            callback(
+                [
+                    cluster_canonical_event_id(cluster)
+                    for cluster in clusters
+                    if cluster_canonical_event_id(cluster)
+                ]
+            )
+        except Exception:
+            LOGGER.warning("on_canonical_work_set callback failed", exc_info=True)
 
     def _emit_fixture_evaluated(
         self,
@@ -1720,41 +1970,66 @@ class ReadOnlyCrossVenueCollector:
             | None
         ] = [None] * len(clusters)
 
+        def accept(index: int, cluster: FixtureCluster, row: Any) -> None:
+            results[index] = row
+            if row is None:
+                return
+            fixture, cluster_decisions, inventory, _counts, _fetched, _pairs = row
+            self._emit_fixture_evaluated(
+                cluster, fixture, cluster_decisions, inventory
+            )
+
         async def run(index: int, cluster: FixtureCluster) -> None:
             try:
                 if self._deadline_reached() or self._hard_deadline_reached():
-                    results[index] = self._leftover_cluster_result(
+                    accept(
+                        index,
+                        cluster,
+                        self._leftover_cluster_result(
+                            cluster,
+                            seen_at=seen_at,
+                            polymarket_events=polymarket_events,
+                            queried_series_ids=queried_series_ids,
+                        ),
+                    )
+                    return
+                accept(
+                    index,
+                    cluster,
+                    await self._scan_cluster(
                         cluster,
                         seen_at=seen_at,
                         polymarket_events=polymarket_events,
                         queried_series_ids=queried_series_ids,
-                    )
-                    return
-                results[index] = await self._scan_cluster(
-                    cluster,
-                    seen_at=seen_at,
-                    polymarket_events=polymarket_events,
-                    queried_series_ids=queried_series_ids,
-                    matchbook_market_filters=matchbook_market_filters,
-                    polymarket_market_filters=polymarket_market_filters,
-                    max_market_pairs_per_event=max_market_pairs_per_event,
-                    scan_kwargs=scan_kwargs,
-                    issues=issues,
+                        matchbook_market_filters=matchbook_market_filters,
+                        polymarket_market_filters=polymarket_market_filters,
+                        max_market_pairs_per_event=max_market_pairs_per_event,
+                        scan_kwargs=scan_kwargs,
+                        issues=issues,
+                    ),
                 )
             except asyncio.CancelledError:
-                results[index] = self._leftover_cluster_result(
+                accept(
+                    index,
                     cluster,
-                    seen_at=seen_at,
-                    polymarket_events=polymarket_events,
-                    queried_series_ids=queried_series_ids,
+                    self._leftover_cluster_result(
+                        cluster,
+                        seen_at=seen_at,
+                        polymarket_events=polymarket_events,
+                        queried_series_ids=queried_series_ids,
+                    ),
                 )
             except Exception as exc:
-                results[index] = self._failed_cluster_result(
+                accept(
+                    index,
                     cluster,
-                    seen_at=seen_at,
-                    polymarket_events=polymarket_events,
-                    queried_series_ids=queried_series_ids,
-                    detail=str(exc),
+                    self._failed_cluster_result(
+                        cluster,
+                        seen_at=seen_at,
+                        polymarket_events=polymarket_events,
+                        queried_series_ids=queried_series_ids,
+                        detail=str(exc),
+                    ),
                 )
                 issues.append(
                     CollectorIssue(
@@ -1805,12 +2080,16 @@ class ReadOnlyCrossVenueCollector:
                         ):
                             exc = task.exception()
                             if results[index] is None:
-                                results[index] = self._failed_cluster_result(
+                                accept(
+                                    index,
                                     clusters[index],
-                                    seen_at=seen_at,
-                                    polymarket_events=polymarket_events,
-                                    queried_series_ids=queried_series_ids,
-                                    detail=str(exc),
+                                    self._failed_cluster_result(
+                                        clusters[index],
+                                        seen_at=seen_at,
+                                        polymarket_events=polymarket_events,
+                                        queried_series_ids=queried_series_ids,
+                                        detail=str(exc),
+                                    ),
                                 )
                                 issues.append(
                                     CollectorIssue(
@@ -1858,12 +2137,6 @@ class ReadOnlyCrossVenueCollector:
             books += fetched
             if inventory:
                 fixture_markets[fixture.canonical_event_id] = inventory
-            self._emit_fixture_evaluated(
-                clusters[index],
-                fixture,
-                cluster_decisions,
-                inventory,
-            )
         if leftover_needed:
             _append_deadline_leftovers(
                 leftover_needed,
@@ -3576,6 +3849,74 @@ def _extract_matchbook_items(payload: dict[str, Any], key: str) -> list[dict[str
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
+
+
+def _payload_events(payload: Any, venue: VenueName) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)], {}
+    if isinstance(payload, dict):
+        return _extract_matchbook_items(payload, "events"), dict(payload)
+    return [], {}
+
+
+def _discovery_event_id(item: dict[str, Any], venue: VenueName) -> str:
+    if venue is VenueName.KALSHI:
+        return str(item.get("event_ticker") or item.get("ticker") or item.get("id") or "").strip()
+    return str(item.get("id") or "").strip()
+
+
+def _discovery_series_ids(venue: VenueName, client: Any, filters: dict[str, Any]) -> list[str]:
+    if venue is VenueName.KALSHI:
+        if filters.get("cursor") or filters.get("series_ticker"):
+            return []
+        explicit = filters.get("series_tickers")
+        if explicit:
+            tickers = [str(item).strip() for item in explicit if str(item).strip()]
+        else:
+            settings = getattr(client, "settings", None)
+            tickers = [
+                str(item).strip()
+                for item in list(getattr(settings, "kalshi_series_tickers", []) or [])
+                if str(item).strip()
+            ]
+        return tickers if len(tickers) > 1 else []
+    if venue is VenueName.POLYMARKET:
+        if filters.get("series_id") is not None:
+            return []
+        settings = getattr(client, "settings", None)
+        resolver = getattr(settings, "resolved_polymarket_series_ids", None)
+        ids = [str(item).strip() for item in (resolver() if callable(resolver) else []) if str(item).strip()]
+        return ids if len(ids) > 1 else []
+    return []
+
+
+def _merge_series_rows(
+    existing: list[dict[str, Any]],
+    incoming: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_series: dict[str, dict[str, Any]] = {}
+    for item in existing:
+        series = str(item.get("series") or "").strip()
+        if series:
+            by_series[series] = item
+    for item in incoming:
+        series = str(item.get("series") or "").strip()
+        if series:
+            by_series[series] = item
+    return list(by_series.values()) if by_series else list(incoming)
+
+
+def _collector_series_failure_kind(exc: BaseException) -> tuple[str, bool]:
+    text = str(exc).casefold()
+    if "401" in text or "403" in text or "auth" in text:
+        return "auth_failure", False
+    if "unsupported" in text or "404" in text:
+        return "unsupported", False
+    if "429" in text or "rate-limited" in text:
+        return "rate_limited", True
+    if "timeout" in text or "timed out" in text:
+        return HEALTH_DISCOVERY_TIMEOUT, True
+    return "unavailable", True
 
 
 def _elapsed_ms(started: float) -> int:

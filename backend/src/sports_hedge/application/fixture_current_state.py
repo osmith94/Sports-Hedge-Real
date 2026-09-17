@@ -733,29 +733,30 @@ class FixtureCurrentStateStore:
         return lifecycle
 
     def _merge_scheduling_identity(self, target_id: str, fixture: Any) -> str:
-        """Collapse alias rows of one football fixture onto one scheduling unit."""
+        """Record a HOT scheduling key. Never absorbs canonical identity.
+
+        Trusted source/canonical overlap still merges via `_merge_target_identity`.
+        A team+kickoff collision without that evidence must not blend records.
+        """
 
         key = hot_scheduling_key(fixture)
         if key is None:
             return target_id
         existing = self._scheduling_index.get(key)
-        if existing is None or existing == target_id:
-            return target_id
-        if existing not in self._rows:
+        if existing is None or existing not in self._rows:
             self._scheduling_index[key] = target_id
-            return target_id
-        if target_id in self._rows and target_id != existing:
-            self._absorb_live_identity(target_id, existing)
-        return existing
+        return target_id
 
     def _bind_scheduling_key(self, fixture: Any, target_id: str) -> None:
         key = hot_scheduling_key(fixture)
         if key is None or target_id not in self._rows:
             return
         existing = self._scheduling_index.get(key)
-        if existing is not None and existing in self._rows and existing != target_id:
-            self._absorb_live_identity(target_id, existing)
-            self._scheduling_index[key] = existing
+        if existing is None or existing not in self._rows:
+            self._scheduling_index[key] = target_id
+            return
+        # Keep both canonical rows. Prefer the already-indexed unit for HOT.
+        if existing != target_id:
             return
         self._scheduling_index[key] = target_id
 

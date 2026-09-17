@@ -490,6 +490,12 @@ export type LaneRefreshStatus = {
   applies_next_cycle?: boolean;
   venue_health?: Record<string, string>;
   operation_health?: Record<string, unknown>;
+  raw_events_discovered_by_venue?: Record<string, number>;
+  canonical_work_total?: number;
+  canonical_evaluated?: number;
+  canonical_retryable?: number;
+  canonical_final_failed?: number;
+  canonical_remaining?: number;
 };
 
 export type LaneVenueFlags = {

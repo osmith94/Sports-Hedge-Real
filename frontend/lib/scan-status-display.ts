@@ -64,8 +64,9 @@ export function fullSweepCopy(
   const venues = lastScanVenueClause(status, "universe");
   const venueSuffix = venues ? ` · ${venues}` : "";
   const leftover = universe.not_evaluated_count ?? 0;
-  const evaluated = universe.evaluated_count ?? 0;
-  const discovered = universe.discovered_total ?? 0;
+  const evaluated = universe.canonical_evaluated ?? universe.evaluated_count ?? 0;
+  const discovered = universe.canonical_work_total ?? universe.discovered_total ?? 0;
+  const remaining = universe.canonical_remaining ?? universe.remaining ?? leftover;
   const persist =
     universe.persist_ok === false || universe.last_persist_error
       ? " · persist/auto-capture failed"
@@ -82,7 +83,7 @@ export function fullSweepCopy(
   const state = universe.worker_state && universe.worker_state !== "idle" ? ` · ${universe.worker_state}` : "";
   return {
     label: "Full sweep",
-    detail: `elapsed ${elapsed}${state} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${leftover} not evaluated${venueSuffix}${persist}`,
+    detail: `elapsed ${elapsed}${state} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${remaining} not evaluated${venueSuffix}${persist}`,
   };
 }
 

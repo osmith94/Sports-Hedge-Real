@@ -26,6 +26,11 @@ from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueHealth, VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
+from sports_hedge.application.provider_runtime import (
+    SharedProviderRuntime,
+    reset_shared_provider_runtime,
+    set_shared_provider_runtime,
+)
 from sports_hedge.venues.matchbook import (
     MATCHBOOK_SESSION_PATH,
     MatchbookClient,
@@ -100,10 +105,23 @@ def _events_ok() -> httpx.Response:
     return httpx.Response(200, json={"events": [], "total": 0, "per-page": 100})
 
 
+def _install_shared_runtime(settings: Settings, matchbook: MatchbookClient) -> SharedProviderRuntime:
+    runtime = SharedProviderRuntime(
+        settings,
+        matchbook=matchbook,
+        polymarket=_EmptyOtherVenue(VenueName.POLYMARKET),
+        kalshi=_EmptyOtherVenue(VenueName.KALSHI),
+    )
+    set_shared_provider_runtime(runtime)
+    return runtime
+
+
 @pytest.fixture
 async def isolated_shared_matchbook() -> Any:
     await reset_shared_matchbook_client()
+    await reset_shared_provider_runtime()
     yield
+    await reset_shared_provider_runtime()
     await reset_shared_matchbook_client()
 
 
@@ -180,9 +198,8 @@ async def test_hot_and_universe_collect_cycles_share_one_login(
 
     venue, http = await _client_for(handler, settings=settings)
     set_shared_matchbook_client(venue)
+    _install_shared_runtime(settings, venue)
     monkeypatch.setattr(paper_api, "get_settings", lambda: settings)
-    monkeypatch.setattr(paper_api, "PolymarketClient", lambda _s: _EmptyOtherVenue())
-    monkeypatch.setattr(paper_api, "KalshiClient", lambda _s: _EmptyOtherVenue())
     service = _paper_service()
     async with http:
         await paper_api._collect_report({}, service=service, scan_lane=ScanLane.HOT)
@@ -191,7 +208,7 @@ async def test_hot_and_universe_collect_cycles_share_one_login(
         assert not venue.closed
     assert session_posts == ["POST"]
     collect_src = inspect.getsource(paper_api._collect_report)
-    assert "get_shared_matchbook_client(settings)" in collect_src
+    assert "get_shared_provider_runtime" in collect_src
     assert "MatchbookClient(settings)" not in collect_src
     assert "_aclose_soon(matchbook" not in collect_src
 
@@ -216,9 +233,8 @@ async def test_two_sequential_scan_cycles_reuse_one_login(
 
     venue, http = await _client_for(handler, settings=settings)
     set_shared_matchbook_client(venue)
+    _install_shared_runtime(settings, venue)
     monkeypatch.setattr(paper_api, "get_settings", lambda: settings)
-    monkeypatch.setattr(paper_api, "PolymarketClient", lambda _s: _EmptyOtherVenue())
-    monkeypatch.setattr(paper_api, "KalshiClient", lambda _s: _EmptyOtherVenue())
     service = _paper_service()
     async with http:
         await paper_api._collect_report({}, service=service, scan_lane=ScanLane.HOT)
@@ -396,17 +412,8 @@ async def test_health_during_cooldown_does_not_login(
 
     venue, http = await _client_for(handler, settings=settings, monotonic_clock=mono)
     set_shared_matchbook_client(venue)
+    _install_shared_runtime(settings, venue)
     monkeypatch.setattr(main_api, "get_settings", lambda: settings)
-    monkeypatch.setattr(
-        main_api,
-        "PolymarketClient",
-        lambda _s: _EmptyOtherVenue(VenueName.POLYMARKET),
-    )
-    monkeypatch.setattr(
-        main_api,
-        "KalshiClient",
-        lambda _s: _EmptyOtherVenue(VenueName.KALSHI),
-    )
     async with http:
         first = await main_api.venue_health()
         second = await main_api.venue_health()
@@ -422,7 +429,7 @@ async def test_health_during_cooldown_does_not_login(
     assert third_client.ok is False
     assert session_posts == ["POST"]
     health_src = inspect.getsource(main_api.venue_health)
-    assert "get_shared_matchbook_client(settings)" in health_src
+    assert "get_shared_provider_runtime(settings)" in health_src
     assert "MatchbookClient(settings)" not in health_src
 
 
@@ -449,8 +456,9 @@ def test_lifespan_closes_shared_matchbook_and_collect_does_not() -> None:
     lifespan_src = inspect.getsource(main_api.lifespan)
     assert "aclose_shared_matchbook_client()" in lifespan_src
     collect_src = inspect.getsource(paper_api._collect_report)
-    assert "get_shared_matchbook_client(settings)" in collect_src
-    assert "_aclose_soon(polymarket, kalshi)" in collect_src
+    assert "get_shared_provider_runtime" in collect_src
+    assert "get_shared_provider_runtime" in collect_src
+    assert "_aclose_soon(polymarket, kalshi)" not in collect_src
 
 
 def test_no_execution_surface_on_matchbook_client() -> None:

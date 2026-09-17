@@ -19,11 +19,21 @@ from sports_hedge.application.collector import (
     FixtureDetailReadModel,
 )
 from sports_hedge.application.universe_checkpoint import (
+    SWEEP_EVALUATED,
+    SWEEP_FINAL_FAILED,
+    SWEEP_PENDING,
+    SWEEP_RETRY_WAIT,
+    SWEEP_SKIPPED_UNSUPPORTED,
+    SWEEP_TERMINAL_STATES,
+    SweepWorkUnit,
+    discovery_event_snapshot,
+    merge_series_reports,
     UniverseGenerationCheckpoint,
     checkpoint_from_payload,
     collection_report_from_snapshot,
     collection_report_snapshot,
     universe_provider_backoff_seconds,
+    universe_work_retry_backoff_seconds,
 )
 from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
 from sports_hedge.application.lane_venues import (
@@ -40,8 +50,10 @@ from sports_hedge.application.fixture_clusters import (
     cluster_member_events,
 )
 from sports_hedge.application.provider_access import (
+    HEALTH_AUTH_FAILURE,
     HEALTH_DISCOVERY_TIMEOUT,
     HEALTH_MARKET_TIMEOUT,
+    HEALTH_UNAVAILABLE,
     get_shared_provider_access,
 )
 from sports_hedge.application.quote_freshness import require_aware_instant
@@ -142,6 +154,12 @@ class LaneRefreshStatus(BaseModel):
     applies_next_cycle: bool = False
     venue_health: dict[str, str] = Field(default_factory=dict)
     operation_health: dict[str, Any] = Field(default_factory=dict)
+    raw_events_discovered_by_venue: dict[str, int] = Field(default_factory=dict)
+    canonical_work_total: int = 0
+    canonical_evaluated: int = 0
+    canonical_retryable: int = 0
+    canonical_final_failed: int = 0
+    canonical_remaining: int = 0
 
 
 class LiveRefreshStatus(BaseModel):
@@ -199,6 +217,7 @@ class DualCadencePlan(BaseModel):
     known_source_events: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     discovery_snapshot: dict[str, list[dict[str, Any]]] | None = None
     reuse_discovery: bool = False
+    retry_series: dict[str, list[str]] = Field(default_factory=dict)
     unbounded_cycle: bool = False
     sweep_id: str | None = None
     enabled_venues: list[VenueName] = Field(
@@ -261,6 +280,9 @@ class LiveRefreshCoordinator:
         self._universe_positive_count = 0
         self._universe_qualifying_count = 0
         self._universe_hot_promotions = 0
+        self._universe_work: dict[str, SweepWorkUnit] = {}
+        self._universe_raw_events: dict[str, int] = {}
+        self._universe_series_results: dict[str, list[dict[str, Any]]] = {}
         self._universe_checkpoint_store = universe_checkpoint_store
         self._universe_checkpoint_restored = False
         self._venue_store = venue_settings_store
@@ -472,6 +494,9 @@ class LiveRefreshCoordinator:
             self._universe_positive_count = 0
             self._universe_qualifying_count = 0
             self._universe_hot_promotions = 0
+            self._universe_work = {}
+            self._universe_raw_events = {}
+            self._universe_series_results = {}
             self._clear_universe_checkpoint_unlocked()
             self._universe_checkpoint_restored = False
             self._cycle_hot_venues = None
@@ -582,6 +607,18 @@ class LiveRefreshCoordinator:
             )
             sweep_id = self._universe_sweep_id
             universe_venues = list(self._pending_participation.venues_for(ScanLane.UNIVERSE))
+            retry_series = {
+                venue: [
+                    str(item.get("series"))
+                    for item in rows
+                    if item.get("retryable") and item.get("series")
+                ]
+                for venue, rows in self._universe_series_results.items()
+            }
+            retry_series = {key: value for key, value in retry_series.items() if value}
+        work_retry_at = self._earliest_retry_wait_unlocked(evaluated)
+        if work_retry_at is not None and evaluated < work_retry_at:
+            return DualCadencePlan(lane="idle", reason="universe_retry_wait")
         if universe_retry_at is not None and evaluated < universe_retry_at:
             return DualCadencePlan(lane="idle", reason="universe_provider_backoff")
         universe_due = universe_generation_started_at is not None or (
@@ -600,6 +637,7 @@ class LiveRefreshCoordinator:
             generation_resume=generation_resume,
             discovery_snapshot=snapshot,
             reuse_discovery=reuse,
+            retry_series=retry_series,
             unbounded_cycle=True,
             sweep_id=sweep_id,
             enabled_venues=universe_venues,
@@ -1139,15 +1177,49 @@ class LiveRefreshCoordinator:
         self._universe_provider_failures = 0
         self._universe_retry_at = None
         self._universe_last_report_snapshot = collection_report_snapshot(report)
+        if report.series_results:
+            self._universe_series_results = merge_series_reports(
+                self._universe_series_results, report.series_results
+            )
         if report.sweep_id:
             self._universe_sweep_id = report.sweep_id
         completeness = (report.scan_diagnostics or {}).get("completeness")
-        discovered = max(
-            self._universe_discovered_total,
-            int((report.scan_diagnostics or {}).get("clusters_before_resume") or 0),
-            len(report.discovered_fixtures) + leftover_n,
+        diagnostics = report.scan_diagnostics or {}
+        canonical_total = int(
+            diagnostics.get("canonical_work_total")
+            or diagnostics.get("clusters_before_resume")
+            or 0
         )
-        self._universe_discovered_total = discovered
+        if canonical_total > self._universe_discovered_total:
+            self._universe_discovered_total = canonical_total
+        raw_events = diagnostics.get("raw_events_by_venue")
+        if isinstance(raw_events, dict):
+            self._universe_raw_events = {
+                str(key): int(value or 0) for key, value in raw_events.items()
+            }
+        for item in report.discovered_fixtures:
+            canonical_id = item.canonical_event_id
+            if not canonical_id:
+                continue
+            unit = self._universe_work.get(canonical_id)
+            state = str(item.market_evaluation_state or "")
+            if unit is None or unit.state in {SWEEP_PENDING, SWEEP_RUNNING}:
+                self._apply_work_unit_result_unlocked(
+                    canonical_id,
+                    state=state,
+                    reason=str(getattr(item, "market_evaluation_reason", "") or ""),
+                    scanned=report.completed_at,
+                )
+            elif unit.state == SWEEP_RETRY_WAIT and state == "evaluated":
+                self._apply_work_unit_result_unlocked(
+                    canonical_id,
+                    state=state,
+                    reason="",
+                    scanned=report.completed_at,
+                )
+        counts = self._lane_progress_fields()
+        self._universe_discovered_total = counts["canonical_work_total"] or self._universe_discovered_total
+        degraded = degraded or counts["canonical_retryable"] > 0
         budget = self._charge_successful_universe_work(
             duration_s,
             report.completed_at,
@@ -1171,10 +1243,8 @@ class LiveRefreshCoordinator:
                         "last_duration_ms": duration_ms,
                         "chunk_last_duration_ms": duration_ms,
                         "generation_work_used_s": round(work_used, 3),
-                        "evaluated_count": evaluated_count,
+                        **counts,
                         "not_evaluated_count": leftover_n,
-                        "discovered_total": self._universe_discovered_total,
-                        "remaining": max(0, self._universe_discovered_total - evaluated_count),
                         "matched_fixtures": self._universe_matched_fixtures,
                         "equivalent_markets": self._universe_equivalent_markets,
                         "near_count": self._universe_near_count,
@@ -1190,7 +1260,10 @@ class LiveRefreshCoordinator:
                         "last_diagnostics": _lane_diagnostics(report),
                         "resume_cursor": resume_cursor,
                         "next_due_at": self._next_universe_due,
-                        "venue_health": _frozen_venue_health(report.venue_health),
+                        "venue_health": _honest_universe_venue_health(
+                            _frozen_venue_health(report.venue_health),
+                            retryable=counts["canonical_retryable"],
+                        ),
                         "operation_health": dict(report.operation_health or {}),
                         "operator_summary": _universe_operator_summary(
                             duration_ms,
@@ -1215,21 +1288,49 @@ class LiveRefreshCoordinator:
         with self._state_lock:
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(self.now())
-            self._universe_discovery_snapshot = {
-                key: list(value) for key, value in snapshot.items()
+            series = snapshot.get("series_results")
+            if isinstance(series, dict):
+                self._universe_series_results = merge_series_reports(
+                    self._universe_series_results, series
+                )
+            self._universe_discovery_snapshot = discovery_event_snapshot(snapshot)
+            self._universe_raw_events = {
+                key: len(value or [])
+                for key, value in self._universe_discovery_snapshot.items()
             }
-            discovered = 0
-            for rows in snapshot.values():
-                discovered += len(rows or [])
-            if discovered > self._universe_discovered_total:
-                self._universe_discovered_total = discovered
             self._persist_universe_checkpoint_unlocked()
             self.status = self.status.model_copy(
                 update={
                     "universe": self.status.universe.model_copy(
                         update={
                             "sweep_id": self._universe_sweep_id,
-                            "discovered_total": self._universe_discovered_total,
+                            "raw_events_discovered_by_venue": dict(self._universe_raw_events),
+                            "worker_state": WORKER_RUNNING
+                            if self._universe_in_progress
+                            else self.status.universe.worker_state,
+                        }
+                    )
+                }
+            )
+
+    def record_universe_work_set(self, canonical_ids: list[str]) -> None:
+        with self._state_lock:
+            if self._universe_generation_started_at is None:
+                self._ensure_universe_generation(self.now())
+            for raw_id in canonical_ids:
+                canonical_id = str(raw_id or "").strip()
+                if not canonical_id or canonical_id in self._universe_work:
+                    continue
+                self._universe_work[canonical_id] = SweepWorkUnit(canonical_id=canonical_id)
+            self._universe_discovered_total = len(self._universe_work)
+            self._persist_universe_checkpoint_unlocked()
+            counts = self._lane_progress_fields()
+            self.status = self.status.model_copy(
+                update={
+                    "universe": self.status.universe.model_copy(
+                        update={
+                            **counts,
+                            "sweep_id": self._universe_sweep_id,
                             "worker_state": WORKER_RUNNING
                             if self._universe_in_progress
                             else self.status.universe.worker_state,
@@ -1277,51 +1378,65 @@ class LiveRefreshCoordinator:
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(scanned)
             state = str(getattr(fixture, "market_evaluation_state", "") or "")
-            if state == "evaluated":
+            previous = self._universe_work.get(canonical_id)
+            already_evaluated = previous is not None and previous.state == SWEEP_EVALUATED
+            self._apply_work_unit_result_unlocked(
+                canonical_id,
+                state=state,
+                reason=str(getattr(fixture, "market_evaluation_reason", "") or ""),
+                scanned=scanned,
+            )
+            unit = self._universe_work.get(canonical_id)
+            if unit is not None and unit.state == SWEEP_EVALUATED:
                 self._universe_evaluated_ids.add(canonical_id)
                 self._universe_cursor = canonical_id
                 self._universe_last_successful = canonical_id
-            elif state == "market_fetch_unavailable":
-                self._universe_failed_ids[canonical_id] = str(
-                    getattr(fixture, "market_evaluation_reason", "") or "provider_failure"
-                )
-            else:
-                self._universe_skipped_ids[canonical_id] = state or "skipped"
+            elif unit is not None and unit.state == SWEEP_FINAL_FAILED:
+                self._universe_failed_ids[canonical_id] = unit.reason or "final_failed"
+            elif unit is not None and unit.state == SWEEP_SKIPPED_UNSUPPORTED:
+                self._universe_skipped_ids[canonical_id] = unit.reason or "skipped"
             self._universe_current_fixture = canonical_id
-            if int(getattr(fixture, "matched_equivalent_count", 0) or 0) > 0:
-                self._universe_matched_fixtures += 1
-                self._universe_equivalent_markets += int(
-                    getattr(fixture, "matched_equivalent_count", 0) or 0
-                )
-            opportunity = str(getattr(fixture, "opportunity_state", "") or "").casefold()
-            if opportunity in {"near", "near_executable", "approaching"}:
-                self._universe_near_count += 1
-            if (getattr(fixture, "current_net_edge", None) or 0) > 0:
-                self._universe_positive_count += 1
-            if bool(getattr(fixture, "solver_is_arbitrage", False)) or opportunity in {
-                "qualifying",
-                "triggered",
-                "arbitrage",
-            }:
-                self._universe_qualifying_count += 1
-            if promoted_now:
-                self._universe_hot_promotions += 1
-            if self._universe_discovered_total < len(self._universe_evaluated_ids):
-                self._universe_discovered_total = len(self._universe_evaluated_ids)
+            if not already_evaluated:
+                if int(getattr(fixture, "matched_equivalent_count", 0) or 0) > 0:
+                    self._universe_matched_fixtures += 1
+                    self._universe_equivalent_markets += int(
+                        getattr(fixture, "matched_equivalent_count", 0) or 0
+                    )
+                opportunity = str(getattr(fixture, "opportunity_state", "") or "").casefold()
+                if opportunity in {"near", "near_executable", "approaching"}:
+                    self._universe_near_count += 1
+                if (getattr(fixture, "current_net_edge", None) or 0) > 0:
+                    self._universe_positive_count += 1
+                if bool(getattr(fixture, "solver_is_arbitrage", False)) or opportunity in {
+                    "qualifying",
+                    "triggered",
+                    "arbitrage",
+                }:
+                    self._universe_qualifying_count += 1
+                if promoted_now:
+                    self._universe_hot_promotions += 1
+            counts = self._lane_progress_fields()
+            self._universe_discovered_total = counts["canonical_work_total"]
             self._persist_universe_checkpoint_unlocked()
-            evaluated_count = len(self._universe_evaluated_ids)
+            venue_health = _honest_universe_venue_health(
+                self.status.universe.venue_health,
+                retryable=counts["canonical_retryable"],
+            )
             self.status = self.status.model_copy(
                 update={
                     "discovered_fixtures": inventory_now,
+                    "venue_health": _merge_top_level_venue_health(
+                        self.status.hot.venue_health,
+                        venue_health,
+                    ),
                     "universe": self.status.universe.model_copy(
                         update={
+                            **counts,
+                            "degraded": self.status.universe.degraded
+                            or counts["canonical_retryable"] > 0,
+                            "venue_health": venue_health,
                             "worker_state": WORKER_RUNNING,
                             "sweep_id": self._universe_sweep_id,
-                            "evaluated_count": evaluated_count,
-                            "discovered_total": self._universe_discovered_total,
-                            "remaining": max(
-                                0, self._universe_discovered_total - evaluated_count
-                            ),
                             "matched_fixtures": self._universe_matched_fixtures,
                             "equivalent_markets": self._universe_equivalent_markets,
                             "near_count": self._universe_near_count,
@@ -1337,10 +1452,57 @@ class LiveRefreshCoordinator:
                 }
             )
 
-    def universe_collect_callbacks(self) -> tuple[Callable[..., None], Callable[..., None]]:
+    def _apply_work_unit_result_unlocked(
+        self,
+        canonical_id: str,
+        *,
+        state: str,
+        reason: str,
+        scanned: datetime,
+    ) -> None:
+        unit = self._universe_work.get(canonical_id) or SweepWorkUnit(canonical_id=canonical_id)
+        if unit.state == SWEEP_EVALUATED:
+            self._universe_work[canonical_id] = unit
+            return
+        settings = get_settings()
+        max_attempts = int(settings.paper_universe_work_max_attempts)
+        unit.last_attempted_at = scanned
+        if state == "evaluated":
+            unit.state = SWEEP_EVALUATED
+            unit.retryable = False
+            unit.reason = None
+            unit.next_retry_at = None
+        elif state == "market_fetch_unavailable":
+            unit.attempt_count += 1
+            unit.reason = reason or "provider_failure"
+            unit.provider = unit.provider
+            if unit.attempt_count >= max_attempts:
+                unit.state = SWEEP_FINAL_FAILED
+                unit.retryable = False
+                unit.next_retry_at = None
+            else:
+                unit.state = SWEEP_RETRY_WAIT
+                unit.retryable = True
+                unit.next_retry_at = scanned + timedelta(
+                    seconds=universe_work_retry_backoff_seconds(unit.attempt_count)
+                )
+        elif state in {"unsupported", "skipped_unsupported"}:
+            unit.state = SWEEP_SKIPPED_UNSUPPORTED
+            unit.retryable = False
+            unit.reason = reason or state
+            unit.next_retry_at = None
+        elif state:
+            unit.state = SWEEP_PENDING
+            unit.reason = state
+        self._universe_work[canonical_id] = unit
+
+    def universe_collect_callbacks(
+        self,
+    ) -> tuple[Callable[..., None], Callable[..., None], Callable[..., None]]:
         return (
             self.record_universe_discovery_snapshot,
             self.record_universe_fixture_progress,
+            self.record_universe_work_set,
         )
 
     def _universe_plan_resume_state_unlocked(
@@ -1354,12 +1516,73 @@ class LiveRefreshCoordinator:
         if progress_id is not None and progress_id != self._universe_generation_id:
             return (None, [], self._universe_generation_id + 1, False)
         plan_id = self._universe_generation_id if self._universe_generation_id > 0 else 1
+        skip = self._universe_skip_ids_unlocked()
         return (
             self._universe_cursor,
-            sorted(self._universe_evaluated_ids),
+            skip,
             plan_id,
             True,
         )
+
+    def _universe_skip_ids_unlocked(self) -> list[str]:
+        if self._universe_work:
+            skip: list[str] = []
+            now = self.now()
+            for canonical_id, unit in self._universe_work.items():
+                if unit.state in SWEEP_TERMINAL_STATES:
+                    skip.append(canonical_id)
+                elif (
+                    unit.state == SWEEP_RETRY_WAIT
+                    and unit.next_retry_at is not None
+                    and now < unit.next_retry_at
+                ):
+                    skip.append(canonical_id)
+            return sorted(skip)
+        return sorted(self._universe_evaluated_ids)
+
+    def _earliest_retry_wait_unlocked(self, now: datetime) -> datetime | None:
+        if any(unit.state == SWEEP_PENDING for unit in self._universe_work.values()):
+            return None
+        times = [
+            unit.next_retry_at
+            for unit in self._universe_work.values()
+            if unit.state == SWEEP_RETRY_WAIT and unit.next_retry_at is not None
+        ]
+        if not times:
+            return None
+        earliest = min(times)
+        return earliest if now < earliest else None
+
+    def _canonical_counts_unlocked(self) -> dict[str, int]:
+        work = self._universe_work
+        evaluated = sum(1 for unit in work.values() if unit.state == SWEEP_EVALUATED)
+        retryable = sum(1 for unit in work.values() if unit.state == SWEEP_RETRY_WAIT)
+        final_failed = sum(1 for unit in work.values() if unit.state == SWEEP_FINAL_FAILED)
+        skipped = sum(1 for unit in work.values() if unit.state == SWEEP_SKIPPED_UNSUPPORTED)
+        total = len(work) or self._universe_discovered_total
+        remaining = max(0, total - evaluated - final_failed - skipped)
+        return {
+            "canonical_work_total": total,
+            "canonical_evaluated": evaluated,
+            "canonical_retryable": retryable,
+            "canonical_final_failed": final_failed,
+            "canonical_remaining": remaining,
+            "discovered_total": total,
+            "evaluated_count": evaluated,
+            "remaining": remaining,
+        }
+
+    def _universe_sweep_is_complete_unlocked(self) -> bool:
+        if not self._universe_work:
+            return False
+        return all(unit.state in SWEEP_TERMINAL_STATES for unit in self._universe_work.values())
+
+    def _lane_progress_fields(self) -> dict[str, Any]:
+        counts = self._canonical_counts_unlocked()
+        return {
+            **counts,
+            "raw_events_discovered_by_venue": dict(self._universe_raw_events),
+        }
 
     def _status_universe_work_used(self) -> float:
         if self._universe_generation_started_at is not None:
@@ -1373,6 +1596,8 @@ class LiveRefreshCoordinator:
 
     def _status_universe_evaluated_count(self) -> int:
         if self._universe_generation_started_at is not None:
+            if self._universe_work:
+                return self._canonical_counts_unlocked()["canonical_evaluated"]
             return len(self._universe_evaluated_ids)
         return self._universe_closed_evaluated_count
 
@@ -1380,8 +1605,14 @@ class LiveRefreshCoordinator:
         self._universe_closed_generation_id = self._universe_generation_id
         self._universe_closed_work_used = self._universe_work_used
         self._universe_closed_cursor = self._universe_cursor
-        self._universe_closed_evaluated_count = len(self._universe_evaluated_ids)
+        if self._universe_work:
+            self._universe_closed_evaluated_count = self._canonical_counts_unlocked()[
+                "canonical_evaluated"
+            ]
+        else:
+            self._universe_closed_evaluated_count = len(self._universe_evaluated_ids)
         self._universe_evaluated_ids = set()
+        self._universe_work = {}
         self._universe_cursor = None
         self._universe_work_used = 0.0
         self._universe_progress_generation_id = None
@@ -1420,6 +1651,9 @@ class LiveRefreshCoordinator:
             positive_count=self._universe_positive_count,
             qualifying_count=self._universe_qualifying_count,
             hot_promotions=self._universe_hot_promotions,
+            raw_events_by_venue=dict(self._universe_raw_events),
+            work_units=dict(self._universe_work),
+            series_results=dict(self._universe_series_results),
         )
         try:
             store.save(
@@ -1497,22 +1731,30 @@ class LiveRefreshCoordinator:
             self._universe_positive_count = checkpoint.positive_count
             self._universe_qualifying_count = checkpoint.qualifying_count
             self._universe_hot_promotions = checkpoint.hot_promotions
+            self._universe_raw_events = dict(checkpoint.raw_events_by_venue)
+            self._universe_series_results = {
+                key: list(value)
+                for key, value in (checkpoint.series_results or {}).items()
+            }
+            self._universe_work = {
+                key: value if isinstance(value, SweepWorkUnit) else SweepWorkUnit.model_validate(value)
+                for key, value in (checkpoint.work_units or {}).items()
+            }
+            if not self._universe_work and checkpoint.evaluated_ids:
+                self._universe_work = {
+                    item: SweepWorkUnit(canonical_id=item, state=SWEEP_EVALUATED)
+                    for item in checkpoint.evaluated_ids
+                }
             status_update: dict[str, Any] = {
                 "discovered_fixtures": inventory,
                 "universe": self.status.universe.model_copy(
                     update={
                         "generation_work_used_s": round(self._universe_work_used, 3),
-                        "evaluated_count": len(self._universe_evaluated_ids),
+                        **self._lane_progress_fields(),
                         "resume_cursor": self._universe_cursor,
                         "fixture_count": universe_count,
                         "next_due_at": self._next_universe_due,
                         "sweep_id": self._universe_sweep_id,
-                        "discovered_total": self._universe_discovered_total,
-                        "remaining": max(
-                            0,
-                            self._universe_discovered_total
-                            - len(self._universe_evaluated_ids),
-                        ),
                         "matched_fixtures": self._universe_matched_fixtures,
                         "equivalent_markets": self._universe_equivalent_markets,
                         "hot_promotions": self._universe_hot_promotions,
@@ -1552,6 +1794,9 @@ class LiveRefreshCoordinator:
         self._universe_positive_count = 0
         self._universe_qualifying_count = 0
         self._universe_hot_promotions = 0
+        self._universe_work = {}
+        self._universe_raw_events = {}
+        self._universe_series_results = {}
         self._persist_universe_checkpoint_unlocked()
 
     def _charge_successful_universe_work(
@@ -1567,7 +1812,11 @@ class LiveRefreshCoordinator:
         if self._universe_generation_started_at is None:
             return budget
         self._universe_work_used += max(0.0, duration_s)
-        if leftover_n == 0 and completeness != UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE:
+        if self._universe_work:
+            complete = self._universe_sweep_is_complete_unlocked()
+        else:
+            complete = leftover_n == 0
+        if complete and completeness != UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE:
             self._close_universe_generation(finished)
         return budget
 
@@ -2156,32 +2405,75 @@ def _combined_operator_summary(
     return f"{fast} · {full}"
 
 
+def _honest_universe_venue_health(
+    venue_health: dict[str, str] | None,
+    *,
+    retryable: int,
+) -> dict[str, str]:
+    """Retryable leftover work is not a green sweep, even if one venue stayed ok."""
+
+    updated = dict(venue_health or {})
+    if retryable <= 0:
+        return updated
+    if any(value in _UNHEALTHY_VENUE_HEALTH for value in updated.values()):
+        return updated
+    painted = False
+    for key, value in list(updated.items()):
+        if value == "ok":
+            updated[key] = "retry_wait"
+            painted = True
+    if not painted:
+        updated["universe"] = "retry_wait"
+    return updated
+
+
+_UNHEALTHY_VENUE_HEALTH = frozenset(
+    {
+        "timeout",
+        HEALTH_DISCOVERY_TIMEOUT,
+        HEALTH_MARKET_TIMEOUT,
+        "degraded",
+        HEALTH_UNAVAILABLE,
+        HEALTH_AUTH_FAILURE,
+        "error",
+        "failed",
+        "retry_wait",
+        "partial",
+    }
+)
+_SCHEDULER_VENUE_HEALTH = frozenset({"waiting", "deferred", "rate_limited", "cancelled"})
+
+
 def _merge_top_level_venue_health(
     hot: dict[str, str] | None,
     universe: dict[str, str] | None,
 ) -> dict[str, str]:
+    """Top-level ok only when every relevant lane path is healthy.
+
+    One healthy lane must never paint the other lane's provider failure green.
+    Scheduler wait is not a provider outage.
+    """
+
     merged: dict[str, str] = {}
     keys = set(hot or {}) | set(universe or {})
     for venue in keys:
         left = (hot or {}).get(venue)
         right = (universe or {}).get(venue)
-        if left == "ok" and right == "ok":
-            merged[venue] = "ok"
-        elif left == "ok" and right in {
-            "timeout",
-            HEALTH_DISCOVERY_TIMEOUT,
-            HEALTH_MARKET_TIMEOUT,
-            "degraded",
-        }:
+        left_bad = left in _UNHEALTHY_VENUE_HEALTH
+        right_bad = right in _UNHEALTHY_VENUE_HEALTH
+        if left_bad and right_bad:
+            merged[venue] = left if left == right else "degraded"
+        elif left_bad and right == "ok":
             merged[venue] = "degraded"
-        elif right == "ok" and left in {
-            "timeout",
-            HEALTH_DISCOVERY_TIMEOUT,
-            HEALTH_MARKET_TIMEOUT,
-            "degraded",
-        }:
+        elif right_bad and left == "ok":
             merged[venue] = "degraded"
+        elif left_bad:
+            merged[venue] = left or "degraded"
+        elif right_bad:
+            merged[venue] = right or "degraded"
         elif left == "ok" or right == "ok":
+            merged[venue] = "ok"
+        elif left in _SCHEDULER_VENUE_HEALTH or right in _SCHEDULER_VENUE_HEALTH:
             merged[venue] = "ok"
         else:
             merged[venue] = right or left or "unknown"

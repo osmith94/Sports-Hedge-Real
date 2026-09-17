@@ -28,6 +28,11 @@ from sports_hedge.application.scan_lanes import (
     classify_scan_lane,
     hot_reason_labels,
 )
+from sports_hedge.application.provider_runtime import (
+    SharedProviderRuntime,
+    reset_shared_provider_runtime,
+    set_shared_provider_runtime,
+)
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
@@ -68,30 +73,17 @@ def _wire_shared_collect(
     settings: Settings,
 ) -> None:
     monkeypatch.setattr(paper_api, "get_settings", lambda: settings)
-    monkeypatch.setattr(
-        paper_api,
-        "PolymarketClient",
-        lambda _s: _EmptyOtherVenue(VenueName.POLYMARKET),
+    runtime = SharedProviderRuntime(
+        settings,
+        matchbook=get_shared_matchbook_client(settings),
+        polymarket=_EmptyOtherVenue(VenueName.POLYMARKET),
+        kalshi=_EmptyOtherVenue(VenueName.KALSHI),
     )
-    monkeypatch.setattr(
-        paper_api,
-        "KalshiClient",
-        lambda _s: _EmptyOtherVenue(VenueName.KALSHI),
-    )
+    set_shared_provider_runtime(runtime)
 
 
 def _wire_health(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> None:
     monkeypatch.setattr(main_api, "get_settings", lambda: settings)
-    monkeypatch.setattr(
-        main_api,
-        "PolymarketClient",
-        lambda _s: _EmptyOtherVenue(VenueName.POLYMARKET),
-    )
-    monkeypatch.setattr(
-        main_api,
-        "KalshiClient",
-        lambda _s: _EmptyOtherVenue(VenueName.KALSHI),
-    )
 
 
 def _persist(report, audit: SqlitePaperScanRepository, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,7 +100,9 @@ def _persist(report, audit: SqlitePaperScanRepository, monkeypatch: pytest.Monke
 @pytest.fixture
 async def isolated_shared_matchbook() -> Any:
     await reset_shared_matchbook_client()
+    await reset_shared_provider_runtime()
     yield
+    await reset_shared_provider_runtime()
     await reset_shared_matchbook_client()
 
 
@@ -155,7 +149,7 @@ async def test_zero_decision_hot_cycle_persists_one_row_with_shared_session(
         assert session_posts == ["POST"]
         collect_src = inspect.getsource(paper_api._collect_report)
         persist_src = inspect.getsource(paper_api._persist_collection_report)
-        assert "get_shared_matchbook_client(settings)" in collect_src
+        assert "get_shared_provider_runtime(settings)" in collect_src
         assert "_aclose_soon(matchbook" not in collect_src
         assert "audit.append_cycle(" in persist_src
     finally:
@@ -251,9 +245,10 @@ async def test_venues_health_reuses_session_and_does_not_write_scan_cycles(
         assert {row.scan_lane for row in rows} == {"hot", "universe"}
         assert session_posts == ["POST"]
         health_src = inspect.getsource(main_api.venue_health)
-        assert "get_shared_matchbook_client(settings)" in health_src
+        assert "get_shared_provider_runtime(settings)" in health_src
         assert "MatchbookClient(settings)" not in health_src
-        assert "for client in ephemeral:" in health_src
+        assert "get_shared_provider_runtime(settings)" in health_src
+        assert "runtime.matchbook" in health_src
     finally:
         audit.close()
 
@@ -358,7 +353,7 @@ def test_paper_only_execution_boundary_unchanged() -> None:
     assert "cancel_order" not in paper_src
     assert "place_order" not in main_src
     assert "aclose_shared_matchbook_client()" in lifespan_src
-    assert "get_shared_matchbook_client(settings)" in paper_src
+    assert "get_shared_provider_runtime(settings)" in paper_src
     persist_src = inspect.getsource(paper_api._persist_collection_report)
     status_src = inspect.getsource(paper_api.live_refresh_status)
     helper_src = inspect.getsource(paper_api._status_with_scan_cycles)

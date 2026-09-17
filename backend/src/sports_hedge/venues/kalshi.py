@@ -9,6 +9,7 @@ import httpx
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueCapabilities, VenueHealth, VenueName
 from sports_hedge.venues.base import ReadOnlyVenue, market_data_http_timeout
+from sports_hedge.venues.rate_limit import ProviderCooldown, ProviderRateLimitedError
 
 _FOOTBALL_SERIES_TOKENS = frozenset(
     {"soccer", "football", "association football", "epl", "premier league", "la liga", "championship"}
@@ -41,9 +42,12 @@ class KalshiClient(ReadOnlyVenue):
         *,
         client: httpx.AsyncClient | None = None,
         clock: Callable[[], datetime] | None = None,
+        cooldown: ProviderCooldown | None = None,
     ) -> None:
         self.settings = settings
         self._owns_client = client is None
+        self._cooldown = cooldown
+        self.last_series_report: list[dict[str, Any]] = []
         self._clock = clock or (lambda: datetime.now(UTC))
         self._base_url = settings.resolved_kalshi_base_url().rstrip("/")
         self._market_cache: dict[str, dict[str, Any]] = {}
@@ -58,8 +62,17 @@ class KalshiClient(ReadOnlyVenue):
         )
 
     async def _get(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._cooldown is not None:
+            self._cooldown.raise_if_active()
         url = path if str(path).startswith("http") else f"{self._base_url}{path}"
         response = await self._client.get(url, params=params)
+        if self._cooldown is not None and self._cooldown.observe_status(
+            response.status_code, response.headers
+        ):
+            raise ProviderRateLimitedError(
+                self._cooldown.remaining_seconds(),
+                provider="kalshi",
+            )
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -120,23 +133,41 @@ class KalshiClient(ReadOnlyVenue):
             milestones: list[dict[str, Any]] = []
             seen: set[str] = set()
             truncated = False
+            series_results: list[dict[str, Any]] = []
+            first_total_error: Exception | None = None
             for ticker in series_tickers:
-                page = await self._paginate(
-                    "/events",
-                    params={
-                        "status": filters.get("status", "open"),
-                        "limit": limit,
-                        "series_ticker": ticker,
-                        "with_nested_markets": nested,
-                        "with_milestones": with_milestones,
-                    },
-                    item_key="events",
-                    extra_keys=("milestones",),
-                    limit=limit,
-                    max_pages=self.settings.kalshi_event_max_pages,
-                )
+                try:
+                    page = await self._paginate(
+                        "/events",
+                        params={
+                            "status": filters.get("status", "open"),
+                            "limit": limit,
+                            "series_ticker": ticker,
+                            "with_nested_markets": nested,
+                            "with_milestones": with_milestones,
+                        },
+                        item_key="events",
+                        extra_keys=("milestones",),
+                        limit=limit,
+                        max_pages=self.settings.kalshi_event_max_pages,
+                    )
+                except Exception as exc:
+                    status, retryable = _series_failure_kind(exc)
+                    series_results.append(
+                        {
+                            "series": ticker,
+                            "status": status,
+                            "retryable": retryable,
+                            "event_count": 0,
+                            "reason": str(exc),
+                        }
+                    )
+                    if first_total_error is None:
+                        first_total_error = exc
+                    continue
                 truncated = truncated or bool(page.get("truncated"))
                 milestones.extend(page.get("milestones") or [])
+                retained = 0
                 for item in page.get("events", []):
                     event_id = str(item.get("event_ticker") or item.get("ticker") or "").strip()
                     if event_id and event_id in seen:
@@ -144,6 +175,20 @@ class KalshiClient(ReadOnlyVenue):
                     if event_id:
                         seen.add(event_id)
                     events.append(item)
+                    retained += 1
+                series_results.append(
+                    {
+                        "series": ticker,
+                        "status": "ok",
+                        "retryable": False,
+                        "event_count": retained,
+                        "reason": None,
+                    }
+                )
+            self.last_series_report = series_results
+            if not events and series_results and all(item["status"] != "ok" for item in series_results):
+                if first_total_error is not None:
+                    raise first_total_error
             milestones = _dedupe_by_id(milestones)
             milestones = await self._ensure_milestones(events, milestones)
             return {
@@ -151,6 +196,8 @@ class KalshiClient(ReadOnlyVenue):
                 "milestones": milestones,
                 "truncated": truncated,
                 "total": len(events),
+                "series_results": series_results,
+                "partial": any(item["status"] != "ok" for item in series_results) and bool(events),
             }
 
         page = await self._paginate(
@@ -419,6 +466,19 @@ def _requested_series(filters: dict[str, Any], configured: list[str]) -> list[st
     if ticker:
         return [str(ticker).strip()]
     return [item.strip() for item in configured if str(item).strip()]
+
+
+def _series_failure_kind(exc: BaseException) -> tuple[str, bool]:
+    text = str(exc).casefold()
+    if "401" in text or "403" in text or "auth" in text:
+        return "auth_failure", False
+    if "unsupported" in text or "404" in text:
+        return "unsupported", False
+    if "429" in text or "rate-limited" in text:
+        return "rate_limited", True
+    if "timeout" in text or "timed out" in text:
+        return "discovery_timeout", True
+    return "unavailable", True
 
 
 def _event_has_kickoff_clock(event: dict[str, Any]) -> bool:

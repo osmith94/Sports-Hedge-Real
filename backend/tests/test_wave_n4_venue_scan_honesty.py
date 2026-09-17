@@ -260,3 +260,15 @@ def test_universe_last_scan_truth_survives_later_hot_recovery() -> None:
     assert "MB unavailable" in universe_summary
     assert "last scan MB·PM·K" in hot_summary
     assert "MB unavailable" not in hot_summary
+
+
+def test_top_level_health_is_never_green_when_one_lane_failed() -> None:
+    from sports_hedge.application.live_refresh import _merge_top_level_venue_health
+
+    hot_ok = {"matchbook": "ok", "polymarket": "ok", "kalshi": "ok"}
+    assert _merge_top_level_venue_health(hot_ok, {"matchbook": "unavailable"})["matchbook"] == "degraded"
+    assert _merge_top_level_venue_health(hot_ok, {"matchbook": "auth_failure"})["matchbook"] == "degraded"
+    assert _merge_top_level_venue_health(hot_ok, {"matchbook": "discovery_timeout"})["matchbook"] == "degraded"
+    assert _merge_top_level_venue_health(hot_ok, {"matchbook": "retry_wait"})["matchbook"] == "degraded"
+    assert _merge_top_level_venue_health(hot_ok, {"matchbook": "waiting"})["matchbook"] == "ok"
+    assert _merge_top_level_venue_health(hot_ok, {"matchbook": "ok"})["matchbook"] == "ok"

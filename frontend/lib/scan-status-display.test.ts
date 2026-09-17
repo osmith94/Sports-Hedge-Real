@@ -193,6 +193,27 @@ describe("dual cadence operator copy", () => {
     assert.match(layout, /PAPER MODE · NO EXECUTION/);
   });
 
+  it("uses canonical work counts so three venue aliases stay 1/1 remaining 0", () => {
+    const now = Date.parse("2026-09-14T12:00:12Z");
+    const canonical = status({
+      universe: {
+        cadence_seconds: 180,
+        generation_budget_seconds: 150,
+        fixture_count: 1,
+        evaluated_count: 1,
+        discovered_total: 1,
+        not_evaluated_count: 2,
+        remaining: 0,
+        canonical_work_total: 1,
+        canonical_evaluated: 1,
+        canonical_remaining: 0,
+        worker_state: "complete",
+      },
+    });
+    assert.match(fullSweepCopy(canonical, now).detail, /1 evaluated \/ 0 not evaluated/);
+    assert.doesNotMatch(fullSweepCopy(canonical, now).detail, /2 not evaluated/);
+  });
+
   it("routes primary Run scan to HOT and labels full discovery as advanced", () => {
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
     const api = readFileSync(join(frontendRoot, "lib/api.ts"), "utf8");

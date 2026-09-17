@@ -48,7 +48,6 @@ from sports_hedge.application.market_observation import (
 )
 from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.provider_access import get_shared_provider_access
 from sports_hedge.application.scan_cycle_audit import build_paper_scan_cycle_record
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
@@ -100,13 +99,11 @@ from sports_hedge.treasury.models import (
     ValidatedUnwindResult,
 )
 from sports_hedge.treasury.service import PaperTreasuryError
-from sports_hedge.venues.kalshi import KalshiClient
+from sports_hedge.application.provider_runtime import get_shared_provider_runtime
 from sports_hedge.venues.matchbook import (
     MatchbookAuthError,
     MatchbookDiscoveryError,
-    get_shared_matchbook_client,
 )
-from sports_hedge.venues.polymarket import PolymarketClient
 
 router = APIRouter(prefix="/paper", tags=["paper"])
 LOGGER = getLogger(__name__)
@@ -971,11 +968,14 @@ async def _collect_report(
     sweep_id: str | None = None,
     on_discovery_complete=None,
     on_fixture_evaluated=None,
+    on_canonical_work_set=None,
+    retry_series: dict[str, list[str]] | None = None,
 ) -> CollectionReport:
     settings = get_settings()
-    matchbook = get_shared_matchbook_client(settings)
-    polymarket = PolymarketClient(settings)
-    kalshi = KalshiClient(settings)
+    runtime = get_shared_provider_runtime(settings)
+    matchbook = runtime.matchbook
+    polymarket = runtime.polymarket
+    kalshi = runtime.kalshi
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
         polymarket=polymarket,
@@ -991,7 +991,7 @@ async def _collect_report(
             VenueName.POLYMARKET: settings.paper_scan_polymarket_concurrency,
             VenueName.KALSHI: settings.paper_scan_kalshi_concurrency,
         },
-        provider_access=get_shared_provider_access(settings),
+        provider_access=runtime.access,
         cycle_timeout_seconds=(
             settings.paper_scan_cycle_timeout_seconds
             if cycle_timeout_seconds is None
@@ -1018,12 +1018,13 @@ async def _collect_report(
             sweep_id=sweep_id,
             on_discovery_complete=on_discovery_complete,
             on_fixture_evaluated=on_fixture_evaluated,
+            on_canonical_work_set=on_canonical_work_set,
+            retry_series=retry_series,
         )
     finally:
         acknowledge_task_cancellation()
-        # Reuse the process-local Matchbook session across HOT/UNIVERSE/manual
-        # collections. Close Polymarket/Kalshi HTTP clients only.
-        await _aclose_soon(polymarket, kalshi)
+        # SharedProviderRuntime owns Matchbook/Polymarket/Kalshi sessions across
+        # concurrent HOT and UNIVERSE workers. Do not close them per collect.
 
 
 def _run_paper_position_management(
@@ -1276,9 +1277,9 @@ async def server_owned_refresh_tick(plan=None) -> None:
 
     watchlist = get_watchlist_service(get_watchlist_repository())
     kwargs = scheduled_collection_kwargs()
-    on_discovery = on_fixture = None
+    on_discovery = on_fixture = on_work_set = None
     if resolved.lane == ScanLane.UNIVERSE.value:
-        on_discovery, on_fixture = coordinator.universe_collect_callbacks()
+        on_discovery, on_fixture, on_work_set = coordinator.universe_collect_callbacks()
 
     async def runner() -> CollectionReport:
         return await _collect_report(
@@ -1299,6 +1300,8 @@ async def server_owned_refresh_tick(plan=None) -> None:
             sweep_id=resolved.sweep_id,
             on_discovery_complete=on_discovery,
             on_fixture_evaluated=on_fixture,
+            on_canonical_work_set=on_work_set,
+            retry_series=resolved.retry_series,
         )
 
     try:
