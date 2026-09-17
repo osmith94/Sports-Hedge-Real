@@ -305,7 +305,8 @@ def test_naive_solver_would_overstate_profit_on_dnb_and_integer_lines() -> None:
     )
     assert PUSH_STATE_REASON not in dnb.rejection_reasons
     assert PUSH_STATE_REASON not in integer_totals.rejection_reasons
-    assert UNPROVEN_HANDICAP_REASON in integer_ah.rejection_reasons
+    assert "catalogue_unsupported" in integer_ah.rejection_reasons
+    assert solver_ineligibility_reason(mb_ah.market) == UNPROVEN_HANDICAP_REASON
 
 
 def test_line_push_possible_rejects_quarter_lines() -> None:
@@ -586,7 +587,8 @@ def test_text_only_signed_asian_handicap_does_not_enter_solver() -> None:
     )
     assert decision.depth_scan is None
     assert decision.eligible_for_paper_simulation is False
-    assert UNPROVEN_HANDICAP_REASON in decision.rejection_reasons
+    assert "catalogue_unsupported" in decision.rejection_reasons
+    assert solver_ineligibility_reason(mb) == UNPROVEN_HANDICAP_REASON
     rows = assemble_fixture_inventory(
         [_inventory(mb, name="Asian Handicap -0.5")],
         [_inventory(pm, name="Asian handicap -0.5")],
@@ -730,7 +732,8 @@ def test_integer_line_totals_and_ah_stay_out_of_solver_even_when_listed_odds_loo
     assert mb_ah.market.settlement.push_possible is True
     assert solver_eligible_market(mb_ah.market) is False
     assert decision_ah.depth_scan is None
-    assert UNPROVEN_HANDICAP_REASON in decision_ah.rejection_reasons
+    assert "catalogue_unsupported" in decision_ah.rejection_reasons
+    assert solver_ineligibility_reason(mb_ah.market) == UNPROVEN_HANDICAP_REASON
     rows = assemble_fixture_inventory(
         [_inventory(mb_ah.market, name="Asian Handicap -1.0")],
         [_inventory(pm_ah.market, name="AH -1")],
