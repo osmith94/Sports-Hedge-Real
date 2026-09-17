@@ -18,7 +18,7 @@ from sports_hedge.api.paper import router as paper_router, server_owned_refresh_
 from sports_hedge.api.priority_alerts import router as priority_alerts_router
 from sports_hedge.api.watchlist import router as watchlist_router
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
-from sports_hedge.config import get_settings
+from sports_hedge.config import emit_dotenv_operator_diagnostics, get_settings, inspect_dotenv_sources
 from sports_hedge.domain.models import VenueCapabilities, VenueName
 from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import (
@@ -30,6 +30,7 @@ from sports_hedge.venues.polymarket import PolymarketClient
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    emit_dotenv_operator_diagnostics(force=True)
     coordinator = get_live_refresh_coordinator()
     coordinator.configure_from_settings()
     schedule = get_accounting_schedule()
@@ -79,6 +80,7 @@ def health() -> dict[str, object]:
         "execution_enabled": settings.sports_hedge_execution_enabled,
         "paper_autofill_enabled": settings.paper_autofill_enabled,
         "paper_auto_unwind_enabled": settings.paper_auto_unwind_enabled,
+        "dotenv": inspect_dotenv_sources().as_public_dict(),
         "live_refresh": {
             "discovery_source": "matchbook",
             "discovery_mode": "venue_union",
