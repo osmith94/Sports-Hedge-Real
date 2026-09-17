@@ -1,14 +1,26 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 from json import JSONDecodeError, loads
 from logging import getLogger
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    NoDecode,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 LOGGER = getLogger(__name__)
+
+CANONICAL_DOTENV_NAME = ".env"
+_PACKAGE_FILE = Path(__file__).resolve()
+_DOTENV_DIAGNOSTICS_EMITTED = False
 
 EMPTY_LEGACY_POLYMARKET_SERIES_WARNING = (
     "scanner_configuration: POLYMARKET_GAMMA_SERIES_ID is empty, so Gamma series "
@@ -29,14 +41,146 @@ def legacy_extra_polymarket_series_warning(single: str, resolved: list[str]) -> 
     )
 
 
+def _is_repository_root(candidate: Path) -> bool:
+    return (candidate / ".env.example").is_file() and (candidate / "backend").is_dir()
+
+
+def resolve_repository_root() -> Path:
+    """Resolve the git/repository root from this package's location, not cwd.
+
+    ``sports_hedge.config`` lives at ``backend/src/sports_hedge/config.py``.
+    Walking upward from that file finds the committed layout that contains
+    ``.env.example`` and ``backend/``.
+    """
+
+    for candidate in (_PACKAGE_FILE.parent, *_PACKAGE_FILE.parents):
+        if _is_repository_root(candidate):
+            return candidate
+    try:
+        return _PACKAGE_FILE.parents[3]
+    except IndexError as exc:
+        raise RuntimeError(
+            "Unable to resolve Sports Hedge repository root from package location"
+        ) from exc
+
+
+def canonical_dotenv_path(*, repository_root: Path | None = None) -> Path:
+    """Absolute path of the single canonical local dotenv: repository-root ``.env``."""
+
+    root = repository_root if repository_root is not None else resolve_repository_root()
+    return (root / CANONICAL_DOTENV_NAME).resolve()
+
+
+def legacy_backend_dotenv_path(*, repository_root: Path | None = None) -> Path:
+    """Absolute path of the leftover ``backend/.env`` that must not be read."""
+
+    root = repository_root if repository_root is not None else resolve_repository_root()
+    return (root / "backend" / CANONICAL_DOTENV_NAME).resolve()
+
+
+def legacy_backend_dotenv_warning(*, canonical_path: Path, legacy_path: Path) -> str:
+    return (
+        "scanner_configuration: ignoring leftover dotenv at "
+        f"{legacy_path}; canonical local dotenv is {canonical_path}. "
+        "Remove or migrate backend/.env so it cannot be mistaken for active "
+        "configuration. This is configuration hygiene, not a provider outage."
+    )
+
+
+@dataclass(frozen=True)
+class DotenvDiagnostics:
+    """Path-level dotenv diagnostic. Never includes secret values."""
+
+    canonical_path: str
+    canonical_exists: bool
+    legacy_backend_path: str
+    legacy_backend_exists: bool
+    legacy_backend_ignored: bool
+    warning: str | None
+
+    def as_public_dict(self) -> dict[str, object]:
+        return {
+            "canonical_path": self.canonical_path,
+            "canonical_exists": self.canonical_exists,
+            "legacy_backend_path": self.legacy_backend_path,
+            "legacy_backend_exists": self.legacy_backend_exists,
+            "legacy_backend_ignored": self.legacy_backend_ignored,
+            "warning": self.warning,
+        }
+
+
+def inspect_dotenv_sources(*, repository_root: Path | None = None) -> DotenvDiagnostics:
+    """Report which dotenv path is configured without reading credential contents."""
+
+    canonical = canonical_dotenv_path(repository_root=repository_root)
+    legacy = legacy_backend_dotenv_path(repository_root=repository_root)
+    legacy_exists = legacy.is_file()
+    warning = (
+        legacy_backend_dotenv_warning(canonical_path=canonical, legacy_path=legacy)
+        if legacy_exists
+        else None
+    )
+    return DotenvDiagnostics(
+        canonical_path=str(canonical),
+        canonical_exists=canonical.is_file(),
+        legacy_backend_path=str(legacy),
+        legacy_backend_exists=legacy_exists,
+        legacy_backend_ignored=legacy_exists,
+        warning=warning,
+    )
+
+
+def emit_dotenv_operator_diagnostics(*, force: bool = False) -> DotenvDiagnostics:
+    """Log the canonical dotenv path and any leftover backend/.env warning once."""
+
+    global _DOTENV_DIAGNOSTICS_EMITTED
+    diagnostics = inspect_dotenv_sources()
+    if force or not _DOTENV_DIAGNOSTICS_EMITTED:
+        LOGGER.info(
+            "canonical local dotenv path=%s exists=%s",
+            diagnostics.canonical_path,
+            diagnostics.canonical_exists,
+        )
+        if diagnostics.warning:
+            LOGGER.warning("%s", diagnostics.warning)
+        _DOTENV_DIAGNOSTICS_EMITTED = True
+    return diagnostics
+
+
 class Settings(BaseSettings):
     """Runtime configuration for the Phase 1 paper-only service."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Load only the repository-root dotenv; process env still wins.
+
+        The default ``env_file=".env"`` source is cwd-relative and must not be
+        used. Discard it so a leftover ``backend/.env`` cannot override root.
+        """
+
+        _ = dotenv_settings
+        return (
+            init_settings,
+            env_settings,
+            DotEnvSettingsSource(
+                settings_cls,
+                env_file=canonical_dotenv_path(),
+                env_file_encoding="utf-8",
+            ),
+            file_secret_settings,
+        )
 
     sports_hedge_mode: Literal["paper"] = "paper"
     sports_hedge_execution_enabled: bool = False
@@ -351,4 +495,6 @@ def parse_series_ids(value: Any) -> list[str]:
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    emit_dotenv_operator_diagnostics()
+    return settings

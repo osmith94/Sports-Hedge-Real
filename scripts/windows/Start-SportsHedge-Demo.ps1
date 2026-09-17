@@ -6,6 +6,7 @@
 # latest published ECB USD close (weekend/holiday carry-forward) without waiting
 # for the 16:15 UK window. Does not enable live execution, wallet signing, or
 # trading credentials.
+# Canonical local dotenv is repository-root .env. backend\.env is ignored.
 
 $ErrorActionPreference = "Stop"
 
@@ -120,11 +121,19 @@ $env:PAPER_LIVE_REFRESH_ENABLED = "true"
 $env:ACCOUNTING_SCHEDULE_ENABLED = "true"
 $env:NEXT_PUBLIC_SPORTS_HEDGE_API_URL = "http://127.0.0.1:8000"
 
+$backendDir = Join-Path $Root "backend"
+$CanonicalDotEnv = Join-Path $Root ".env"
+$LegacyBackendDotEnv = Join-Path $backendDir ".env"
+Write-Host "Canonical local dotenv: $CanonicalDotEnv"
+Write-Host "backend\.env is ignored even though the backend process working directory is backend\."
+if (Test-Path $LegacyBackendDotEnv) {
+    Write-Host "WARNING: ignoring leftover $LegacyBackendDotEnv. Use $CanonicalDotEnv and remove the leftover file so it is not mistaken for active configuration." -ForegroundColor Yellow
+}
+
 $backendAlready = Test-HttpOk $BackendHealth
 $frontendAlready = Test-HttpOk $FrontendHealth
 
 if (-not $backendAlready) {
-    $backendDir = Join-Path $Root "backend"
     $backend = Start-Process -FilePath $Python -ArgumentList @(
         "-m", "uvicorn", "sports_hedge.api.main:app",
         "--host", "127.0.0.1", "--port", "8000"
@@ -161,5 +170,6 @@ try {
 Write-Host "Sports Hedge paper demo is running."
 Write-Host "Operator console: $DemoUrl"
 Write-Host "PAPER MODE. execution_enabled=false. PAPER_AUTOFILL_ENABLED=true (AUTO PAPER CAPTURE ON for qualifying LIVE_PAPER only; allocator-sized; no venue orders). PAPER_AUTO_UNWIND_ENABLED=true (AUTO PAPER POSITION MANAGEMENT ON; paper-only; two-scan fail-closed confirmation; no live execution; no automatic authoritative settlement). PAPER_LIVE_REFRESH_ENABLED=true and ACCOUNTING_SCHEDULE_ENABLED=true for this local demo only (ECB USD bootstrap + daily 16:15 UK refresh)."
+Write-Host "Canonical local dotenv remains $CanonicalDotEnv; backend\.env is not active configuration."
 Write-Host "Logs: $Logs"
 exit 0

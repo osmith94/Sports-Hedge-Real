@@ -32,7 +32,7 @@ cd ..\frontend
 npm install
 ```
 
-Copy `.env.example` to `.env` if you want local Matchbook credentials. Leave them blank for public PM/K-only discovery.
+Copy repository-root `.env.example` to repository-root `.env` if you want local Matchbook credentials. Leave them blank for public PM/K-only discovery. `backend/.env` is ignored and is not active configuration.
 
 ## Start / stop
 

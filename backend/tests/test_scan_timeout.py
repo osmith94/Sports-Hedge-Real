@@ -29,7 +29,7 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
 from test_read_only_collector import FakeMatchbook, FakePolymarket
-from test_issue_147_market_evaluation_state import KICKOFF, THREE_LEAGUE_FIXTURES
+from test_issue_147_market_evaluation_state import THREE_LEAGUE_FIXTURES
 from test_venue_union_discovery import KALSHI_SERIES, NewcastleKalshi, NewcastlePolymarket
 from venue_cost_helpers import matchbook_polymarket_costs, profit_commission_cost
 
@@ -211,11 +211,19 @@ async def test_slow_cluster_markets_still_return_discovered_fixtures() -> None:
         repository.close()
 
 
+# These synthetic fixtures exercise bounded partial collection, not lifecycle expiry.
+# Keep them safely pre-kickoff for the lifetime of a test process so calendar time
+# cannot change whether /paper/live-refresh is expected to retain them.
+_SIXTY_FIXTURE_KICKOFF = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(
+    days=1
+)
+
+
 def _sixty_fixtures() -> list[tuple[str, str, str, datetime]]:
     assert len(THREE_LEAGUE_FIXTURES) == 30
     fixtures: list[tuple[str, str, str, datetime]] = []
     for day in (0, 1):
-        kickoff = KICKOFF + timedelta(days=day)
+        kickoff = _SIXTY_FIXTURE_KICKOFF + timedelta(days=day)
         for competition, home, away in THREE_LEAGUE_FIXTURES:
             fixtures.append((competition, home, away, kickoff))
     assert len(fixtures) == DEFAULT_MAX_EVENT_PAIRS

@@ -24,9 +24,84 @@ _ASSOCIATION_FOOTBALL_SPORT_NAMES = frozenset(
 MATCHBOOK_SESSION_PATH = "/bpapi/rest/security/session"
 DEFAULT_LOGIN_COOLDOWN_SECONDS = 30.0
 MAX_LOGIN_COOLDOWN_SECONDS = 300.0
+LOGIN_ACCOUNT_LOCKED_CODE = "LOGIN_ACCOUNT_LOCKED_2"
+_MAX_SAFE_ERROR_ITEMS = 5
+_MAX_SAFE_MESSAGE_LEN = 200
 
 _shared_client_lock = threading.Lock()
 _shared_matchbook_client: MatchbookClient | None = None
+
+
+def parse_matchbook_login_error_metadata(
+    response: httpx.Response,
+    *,
+    secrets: tuple[str, ...] = (),
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Extract operator-safe login error codes/messages. Never request payloads."""
+
+    try:
+        body = response.json()
+    except Exception:
+        return (), ()
+    if not isinstance(body, dict):
+        return (), ()
+    errors = body.get("errors")
+    if not isinstance(errors, list):
+        return (), ()
+    codes: list[str] = []
+    messages: list[str] = []
+    seen_codes: set[str] = set()
+    seen_messages: set[str] = set()
+    for item in errors:
+        if not isinstance(item, dict):
+            continue
+        raw_codes = item.get("codes")
+        if isinstance(raw_codes, list):
+            for raw in raw_codes:
+                code = _safe_error_code(raw)
+                if code and code not in seen_codes and len(codes) < _MAX_SAFE_ERROR_ITEMS:
+                    seen_codes.add(code)
+                    codes.append(code)
+        raw_messages = item.get("messages")
+        if isinstance(raw_messages, list):
+            for raw in raw_messages:
+                message = _safe_error_message(raw, secrets)
+                if (
+                    message
+                    and message not in seen_messages
+                    and len(messages) < _MAX_SAFE_ERROR_ITEMS
+                ):
+                    seen_messages.add(message)
+                    messages.append(message)
+    return tuple(codes), tuple(messages)
+
+
+def _safe_error_code(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > 80:
+        return None
+    if not all(ch.isalnum() or ch in "._-" for ch in text):
+        return None
+    return text
+
+
+def _safe_error_message(value: Any, secrets: tuple[str, ...]) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    if not text:
+        return None
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    lowered = text.lower()
+    if "session-token" in lowered or "session_token" in lowered:
+        return None
+    if len(text) > _MAX_SAFE_MESSAGE_LEN:
+        text = text[:_MAX_SAFE_MESSAGE_LEN].rstrip() + "…"
+    return text
 
 
 class MatchbookAuthError(RuntimeError):
@@ -42,6 +117,45 @@ class MatchbookRateLimitedError(MatchbookAuthError):
         super().__init__(
             f"Matchbook authentication rate-limited (HTTP 429); retry after {wait_s}s"
         )
+
+
+class MatchbookAuthFaultError(MatchbookAuthError):
+    """Deterministic login rejection (HTTP 400). Fail fast until explicit reset."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int = 400,
+        codes: tuple[str, ...] = (),
+        messages: tuple[str, ...] = (),
+    ) -> None:
+        self.status_code = int(status_code)
+        self.codes = tuple(code for code in codes if code)
+        self.messages = tuple(message for message in messages if message)
+        super().__init__(self._operator_detail())
+
+    def _operator_detail(self) -> str:
+        parts = [f"Matchbook authentication rejected (HTTP {self.status_code})"]
+        if LOGIN_ACCOUNT_LOCKED_CODE in self.codes:
+            parts.append(f"account locked ({LOGIN_ACCOUNT_LOCKED_CODE})")
+        elif self.codes:
+            parts.append("codes " + ", ".join(self.codes))
+        if self.messages:
+            parts.append(self.messages[0])
+        parts.append(
+            "auth fault latched; correct credentials/MFA and restart the process to retry"
+        )
+        return "; ".join(parts)
+
+    @classmethod
+    def from_response(
+        cls,
+        response: httpx.Response,
+        *,
+        secrets: tuple[str, ...] = (),
+    ) -> MatchbookAuthFaultError:
+        codes, messages = parse_matchbook_login_error_metadata(response, secrets=secrets)
+        return cls(status_code=response.status_code, codes=codes, messages=messages)
 
 
 class MatchbookDiscoveryError(RuntimeError):
@@ -93,6 +207,7 @@ class MatchbookClient(ReadOnlyVenue):
             },
         )
         self._session_token: str | None = None
+        self._auth_fault: MatchbookAuthFaultError | None = None
         self._football_sport_id: int | None = None
         self._login_lock = asyncio.Lock()
         self._closed = False
@@ -104,10 +219,12 @@ class MatchbookClient(ReadOnlyVenue):
     async def login(self) -> str:
         """Authenticate once under a lock. Existing tokens are reused."""
 
+        self._raise_if_auth_fault()
         self._raise_if_cooling_down()
         async with self._login_lock:
             if self._session_token:
                 return self._session_token
+            self._raise_if_auth_fault()
             self._raise_if_cooling_down()
             return await self._authenticate()
 
@@ -137,6 +254,14 @@ class MatchbookClient(ReadOnlyVenue):
         if retry_after is not None:
             self._clear_session_token()
             raise MatchbookRateLimitedError(retry_after)
+        if response.status_code == 400:
+            self._clear_session_token()
+            fault = MatchbookAuthFaultError.from_response(
+                response,
+                secrets=self._login_secrets(),
+            )
+            self._auth_fault = fault
+            raise fault
         response.raise_for_status()
 
         body = response.json()
@@ -152,10 +277,31 @@ class MatchbookClient(ReadOnlyVenue):
         self._client.headers["session-token"] = self._session_token
         return self._session_token
 
+    def _login_secrets(self) -> tuple[str, ...]:
+        return tuple(
+            value
+            for value in (
+                self.settings.matchbook_username,
+                self.settings.matchbook_password,
+                self.settings.matchbook_mfa_code,
+                self._session_token,
+            )
+            if value
+        )
+
     def _raise_if_cooling_down(self) -> None:
         remaining = self._login_cooldown.remaining_seconds()
         if remaining > 0:
             raise MatchbookRateLimitedError(remaining)
+
+    def _raise_if_auth_fault(self) -> None:
+        if self._auth_fault is not None:
+            raise self._auth_fault
+
+    def clear_auth_fault(self) -> None:
+        """Clear the process-local 400 latch after credentials/MFA are corrected."""
+
+        self._auth_fault = None
 
     def _clear_session_token(self) -> None:
         self._session_token = None
@@ -170,6 +316,7 @@ class MatchbookClient(ReadOnlyVenue):
         async with self._login_lock:
             if self._session_token and self._session_token != rejected_token:
                 return
+            self._raise_if_auth_fault()
             self._clear_session_token()
             self._raise_if_cooling_down()
             await self._authenticate()
@@ -470,6 +617,9 @@ async def aclose_shared_matchbook_client() -> None:
 
 
 async def reset_shared_matchbook_client() -> None:
-    """Drop singleton state so later tests/process recreation start clean."""
+    """Drop singleton state so later tests/process recreation start clean.
+
+    A new shared client has no session token, no 429 cooldown, and no 400 latch.
+    """
 
     await aclose_shared_matchbook_client()
