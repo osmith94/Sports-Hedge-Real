@@ -15,7 +15,7 @@ SCAN_CYCLE_DEADLINE_DETAIL = "scan_cycle_deadline_reached"
 UNSUPPORTED_MARKET_STAGES = frozenset({"normalize_market"})
 PER_ITEM_SKIP_STAGES = frozenset({"normalize_market", "normalize_event"})
 PROVIDER_FAILURE_STAGES = frozenset(
-    {"list_events", "list_markets", "get_order_book", "get_series", "order_book"}
+    {"list_events", "list_markets", "get_order_book", "get_series", "get_contract_terms", "order_book"}
 )
 
 

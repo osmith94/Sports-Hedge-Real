@@ -133,6 +133,7 @@ class KalshiRuleLayerView(BaseModel):
     fetch_status: str | None = None
     contract_terms_url_present: bool | None = None
     settlement_sources_present: bool | None = None
+    contract_family: dict[str, Any] = Field(default_factory=dict)
     fields: list[KalshiRuleFieldView] = Field(default_factory=list)
     precedence_classified_scope: str | None = None
     precedence_economically_complete: bool | None = None
@@ -328,13 +329,14 @@ def forensics_from_report(
     notes.append(
         "Kalshi Get Market / nested / event / series layers report field presence "
         "and classify_settlement_wording scope only. Contract text is not printed. "
-        "Series contract_terms_url is not fetched; presence is a boolean. "
-        "Per-field rules_primary/rules_secondary/rules classification is reported "
+        "Series contract_terms_url is fetched once per series from an allowlisted "
+        "public Kalshi host; the PDF body is not printed. Family metadata is a "
+        "cached catalog keyed by URL filename and sha256. SOCCERGAMEWIN has no "
+        "default result scope. Per-field rules classification is reported "
         "separately from combined concatenation. Rule-field precedence is "
-        "diagnostic-only and is not used as the settlement fingerprint. "
-        "Official Get Market strike_type/custom_strike/market_type do not select "
-        "SOCCERGAME result scope; structured custom_strike values are entity "
-        "targets. Generic multi-scope template wording stays unknown."
+        "diagnostic-only. Official Get Market strike_type/custom_strike/market_type "
+        "do not select SOCCERGAME result scope. Generic multi-scope template "
+        "wording stays unknown."
     )
     return MappingForensics(
         data_class=data_class,
@@ -429,6 +431,8 @@ def render_forensics(forensics: MappingForensics) -> str:
                     f" contract_terms_url_present={layer.contract_terms_url_present} "
                     f"settlement_sources_present={layer.settlement_sources_present}"
                 )
+                if layer.contract_family:
+                    extra += " contract_family=" + _fmt_structured_fields(layer.contract_family)
             lines.append(
                 "  "
                 f"layer={layer.layer} primary={layer.rules_primary_nonempty} "
@@ -714,6 +718,7 @@ def _kalshi_rule_layer_views(
                         if "settlement_sources_present" in layer
                         else None
                     ),
+                    contract_family=_parse_structured_fields(layer.get("contract_family")),
                     fields=_parse_rule_field_views(layer.get("fields")),
                     precedence_classified_scope=(
                         str(layer.get("precedence_classified_scope"))

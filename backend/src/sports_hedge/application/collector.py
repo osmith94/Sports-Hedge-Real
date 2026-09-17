@@ -203,6 +203,7 @@ _PROVIDER_CALL_STAGE = {
     "list_events": "event_lookup",
     "list_markets": "market_discovery",
     "get_series": "market_discovery",
+    "get_contract_terms": "market_discovery",
     "get_order_book": "book_depth",
     "order_book": "book_depth",
 }
@@ -499,6 +500,7 @@ class ReadOnlyCrossVenueCollector:
         self._attribution = ScanAttribution()
         self._kalshi_rule_enrichment = _new_kalshi_rule_enrichment()
         self._kalshi_rule_layer_diagnostics: list[dict[str, Any]] = []
+        self._kalshi_contract_terms_cache: dict[str, dict[str, Any]] = {}
 
     async def collect_and_scan(
         self,
@@ -576,6 +578,7 @@ class ReadOnlyCrossVenueCollector:
         self._attribution = ScanAttribution()
         self._kalshi_rule_enrichment = _new_kalshi_rule_enrichment()
         self._kalshi_rule_layer_diagnostics: list[dict[str, Any]] = []
+        self._kalshi_contract_terms_cache: dict[str, dict[str, Any]] = {}
         self._inflight = set()
         self._cluster_sema = asyncio.Semaphore(self._cluster_concurrency_limit)
         self._provider_semaphores = {
@@ -2437,6 +2440,72 @@ class ReadOnlyCrossVenueCollector:
             return None
 
 
+    async def _attach_kalshi_contract_family(
+        self,
+        series: dict[str, Any],
+        *,
+        issues: list[CollectorIssue],
+    ) -> dict[str, Any]:
+        """Fetch allowlisted contract_terms_url once per series and attach SAFE family metadata.
+
+        Does not parse PDF text on the hot path. Hash/URL lookup against the
+        cached contract-family catalog. SOCCERGAMEWIN has no default result scope.
+        """
+
+        from sports_hedge.normalization.kalshi_contract_terms import (
+            kalshi_contract_terms_url_is_allowlisted,
+            lookup_kalshi_contract_family,
+        )
+
+        url = str(series.get("contract_terms_url") or "").strip()
+        fetch_status = "not_called"
+        sha256: str | None = None
+        if not url:
+            fetch_status = "absent"
+        elif not kalshi_contract_terms_url_is_allowlisted(url):
+            fetch_status = "host_not_allowlisted"
+        else:
+            cached = self._kalshi_contract_terms_cache.get(url)
+            getter = getattr(self.kalshi, "get_contract_terms_document", None)
+            if cached is not None:
+                sha256 = str(cached.get("sha256") or "") or None
+                fetch_status = str(cached.get("fetch_status") or "ok")
+            elif getter is None:
+                fetch_status = "not_called_no_client"
+            else:
+                try:
+                    document, failed = await self._wait_provider(
+                        getter(url),
+                        stage="get_contract_terms",
+                        venue=VenueName.KALSHI,
+                        source_id=str(series.get("ticker") or url),
+                        default=None,
+                    )
+                except Exception as exc:
+                    fetch_status = "transport_failed"
+                    issues.append(
+                        CollectorIssue(
+                            stage="get_contract_terms",
+                            venue=VenueName.KALSHI,
+                            source_id=str(series.get("ticker") or url),
+                            detail=str(exc),
+                        )
+                    )
+                    document, failed = None, True
+                if failed or not isinstance(document, dict):
+                    fetch_status = "transport_failed" if fetch_status != "transport_failed" else fetch_status
+                else:
+                    sha256 = str(document.get("sha256") or "") or None
+                    fetch_status = "ok"
+                self._kalshi_contract_terms_cache[url] = {
+                    "sha256": sha256,
+                    "fetch_status": fetch_status,
+                }
+        family = lookup_kalshi_contract_family(url=url, sha256=sha256)
+        attached = dict(series)
+        attached["contract_family"] = {**family, "fetch_status": fetch_status}
+        return attached
+
     async def _load_kalshi_markets(
         self,
         event: _NormalizedEvent,
@@ -2464,6 +2533,8 @@ class ReadOnlyCrossVenueCollector:
                         detail=str(exc),
                     )
                 )
+        if isinstance(series, dict):
+            series = await self._attach_kalshi_contract_family(series, issues=issues)
         nested = event.raw.get("markets")
         raw_markets: list[dict[str, Any]]
         if isinstance(nested, list) and nested:

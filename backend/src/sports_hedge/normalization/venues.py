@@ -1743,8 +1743,25 @@ def classify_kalshi_contract_rule_layer(
 
 
 def classify_kalshi_series_rule_layer(series: dict[str, Any] | None) -> dict[str, Any]:
-    """SAFE series-layer metadata. Does not fetch contract_terms_url."""
+    """SAFE series-layer metadata. Contract-terms PDF body is never returned."""
 
+    empty_family = {
+        "family_id": None,
+        "official_product_name_kind": None,
+        "defines_default_result_scope": False,
+        "default_result_scope": None,
+        "default_applies_to_match_result": False,
+        "match_result_default_scope": "none",
+        "placeholder_specified_by_exchange": False,
+        "listed_result_scopes": [],
+        "verified": None,
+        "fetch_status": None,
+        "catalog_version": None,
+        "filename": None,
+        "sha256_prefix": None,
+        "rulebook": None,
+        "url_allowlisted": False,
+    }
     if not isinstance(series, dict):
         return {
             "layer": KALSHI_RULE_LAYER_SERIES,
@@ -1762,38 +1779,37 @@ def classify_kalshi_series_rule_layer(series: dict[str, Any] | None) -> dict[str
             "fetch_status": None,
             "contract_terms_url_present": False,
             "settlement_sources_present": False,
+            "contract_family": empty_family,
         }
-    url = str(series.get("contract_terms_url") or series.get("contract_url") or "").strip()
+    url = str(series.get("contract_terms_url") or "").strip()
     sources = series.get("settlement_sources")
     sources_present = bool(sources)
-    text = " ".join(
-        part
-        for part in (url, json.dumps(sources) if sources_present else "")
-        if part
-    )
-    normalized = normalize_text(text) if text else ""
-    if text:
-        scope, complete = _wording_completeness(text)
-        kind = _kalshi_wording_kind(text, complete=complete)
-    else:
-        scope, complete, kind = None, False, "empty"
+    raw_family = series.get("contract_family")
+    if not isinstance(raw_family, dict):
+        from sports_hedge.normalization.kalshi_contract_terms import lookup_kalshi_contract_family
+
+        raw_family = lookup_kalshi_contract_family(url=url)
+    family = {**empty_family}
+    for key in empty_family:
+        if key in raw_family:
+            family[key] = raw_family[key]
     return {
         "layer": KALSHI_RULE_LAYER_SERIES,
         "rules_primary_nonempty": False,
         "rules_secondary_nonempty": False,
         "rules_nonempty": False,
-        "any_rule_field_nonempty": bool(text),
-        "classified_scope": scope,
-        "economically_complete": complete,
-        "wording_kind": kind,
-        "has_regulation_tokens": bool(normalized) and _has_regulation_marker(normalized),
-        "has_extra_time_tokens": bool(normalized) and _has_extra_time_token(normalized),
-        "has_penalties_tokens": bool(normalized) and _has_penalties_token(normalized),
-        "has_ninety_minute_abbrev": bool(normalized)
-        and bool(_NINETY_MINUTE_ABBREV_RE.search(normalized)),
-        "fetch_status": None,
+        "any_rule_field_nonempty": False,
+        "classified_scope": None,
+        "economically_complete": False,
+        "wording_kind": "catalog" if url else "absent",
+        "has_regulation_tokens": False,
+        "has_extra_time_tokens": False,
+        "has_penalties_tokens": False,
+        "has_ninety_minute_abbrev": False,
+        "fetch_status": family.get("fetch_status"),
         "contract_terms_url_present": bool(url),
         "settlement_sources_present": sources_present,
+        "contract_family": family,
     }
 
 
@@ -1858,8 +1874,9 @@ def _kalshi_settlement(
     # rules are inherited only for ordinary Match Result when the nested market
     # itself has no rule or description text. Primary-over-catalog precedence is
     # not a fingerprint source. Official Get Market structured fields do not
-    # select SOCCERGAME <result scope>.
-    _ = series
+    # select SOCCERGAME <result scope>. Series contract-family defaults apply
+    # only when the catalog records an unambiguous default for Match Result;
+    # SOCCERGAMEWIN does not.
     primary = str(payload.get("rules_primary") or "").strip()
     secondary = str(payload.get("rules_secondary") or "").strip()
     rules = str(payload.get("rules") or "").strip()
@@ -1886,6 +1903,28 @@ def _kalshi_settlement(
         )
     else:
         scope, extra_time, penalties = classify_settlement_wording(" ".join(descriptions))
+    if family is MarketFamily.MATCH_RESULT and not _classified_fingerprint_complete(
+        scope, extra_time, penalties
+    ):
+        from sports_hedge.normalization.kalshi_contract_terms import (
+            kalshi_apply_match_result_family_default,
+            lookup_kalshi_contract_family,
+        )
+
+        family_meta = series.get("contract_family") if isinstance(series, dict) else None
+        if not isinstance(family_meta, dict) and isinstance(series, dict):
+            family_meta = lookup_kalshi_contract_family(
+                url=str(series.get("contract_terms_url") or "")
+            )
+        default_scope = kalshi_apply_match_result_family_default(
+            family_meta if isinstance(family_meta, dict) else None
+        )
+        if default_scope == "regulation_time":
+            scope, extra_time, penalties = SettlementScope.REGULATION_TIME, False, False
+        elif default_scope == "including_extra_time":
+            scope, extra_time, penalties = SettlementScope.INCLUDING_EXTRA_TIME, True, False
+        elif default_scope == "including_penalties":
+            scope, extra_time, penalties = SettlementScope.INCLUDING_PENALTIES, True, True
     return SettlementFingerprint(
         scope=scope,
         period=period,

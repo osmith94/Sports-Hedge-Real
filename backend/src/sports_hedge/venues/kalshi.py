@@ -47,6 +47,7 @@ class KalshiClient(ReadOnlyVenue):
         self._clock = clock or (lambda: datetime.now(UTC))
         self._base_url = settings.resolved_kalshi_base_url().rstrip("/")
         self._market_cache: dict[str, dict[str, Any]] = {}
+        self._contract_terms_cache: dict[str, dict[str, Any]] = {}
         self._client = client or httpx.AsyncClient(
             timeout=market_data_http_timeout(),
             headers={
@@ -246,6 +247,56 @@ class KalshiClient(ReadOnlyVenue):
         if not isinstance(resolved, dict) or not resolved:
             raise KalshiDiscoveryError(f"Kalshi get_market {key} returned no market object")
         self._market_cache[key] = resolved
+        return resolved
+
+    async def get_contract_terms_document(self, url: str) -> dict[str, Any]:
+        """Bounded read-only GET of an allowlisted public contract_terms_url.
+
+        Uses a dedicated unauthenticated client: no venue credentials, no
+        redirects off the allowlisted URL, no PDF body returned. Cached once
+        per URL for the life of this client.
+        """
+
+        from sports_hedge.normalization.kalshi_contract_terms import (
+            KALSHI_CONTRACT_TERMS_MAX_BYTES,
+            kalshi_contract_terms_url_is_allowlisted,
+            sha256_hex,
+        )
+
+        key = str(url or "").strip()
+        if not kalshi_contract_terms_url_is_allowlisted(key):
+            raise KalshiDiscoveryError("Kalshi contract_terms_url host/path is not allowlisted")
+        cached = self._contract_terms_cache.get(key)
+        if cached is not None:
+            return cached
+        async with httpx.AsyncClient(
+            timeout=market_data_http_timeout(),
+            follow_redirects=False,
+            headers={
+                "Accept": "application/pdf,application/octet-stream,*/*",
+                "Accept-Encoding": "gzip",
+                "User-Agent": "sports-hedge/0.1 paper-research",
+            },
+        ) as public:
+            response = await public.get(key)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise KalshiDiscoveryError(
+                f"Kalshi contract_terms_url fetch failed with HTTP {response.status_code}"
+            ) from exc
+        payload = bytes(response.content or b"")
+        if not payload:
+            raise KalshiDiscoveryError("Kalshi contract_terms_url returned an empty document")
+        if len(payload) > KALSHI_CONTRACT_TERMS_MAX_BYTES:
+            raise KalshiDiscoveryError("Kalshi contract_terms_url exceeded bounded size")
+        resolved = {
+            "url": key,
+            "sha256": sha256_hex(payload),
+            "byte_length": len(payload),
+            "content_type": str(response.headers.get("content-type") or "")[:80],
+        }
+        self._contract_terms_cache[key] = resolved
         return resolved
 
     async def get_order_book(

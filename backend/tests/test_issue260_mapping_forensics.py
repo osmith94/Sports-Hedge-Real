@@ -48,6 +48,16 @@ from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
+from sports_hedge.normalization.kalshi_contract_terms import (
+    SOCCERANYGOAL_SHA256,
+    SOCCEREXACTSCORE_SHA256,
+    SOCCERGAMEWIN_SHA256,
+    classify_kalshi_contract_terms_text,
+    kalshi_apply_match_result_family_default,
+    kalshi_contract_family_match_result_default,
+    kalshi_contract_terms_url_is_allowlisted,
+    lookup_kalshi_contract_family,
+)
 from sports_hedge.normalization.venues import (
     KalshiNormalizer,
     MatchbookNormalizer,
@@ -98,6 +108,7 @@ KALSHI_GAME_SERIES = {
     "fee_type": "quadratic",
     "fee_multiplier": 1,
     "settlement_sources": [{"name": "Opta"}],
+    "contract_terms_url": "https://assets.kalshi.com/contract_terms/SOCCERGAMEWIN.pdf",
 }
 
 
@@ -209,6 +220,8 @@ class BetisKalshi:
         event_rules_text: str | None = None,
         market_rules_text: str | None = None,
         market_secondary_text: str | None = None,
+        contract_terms_url: str | None = None,
+        contract_terms_sha256: str | None = None,
     ) -> None:
         self.event_rules_text = (
             REGULATION if rules_on_event and event_rules_text is None else event_rules_text
@@ -217,7 +230,12 @@ class BetisKalshi:
             REGULATION if rules_on_markets and market_rules_text is None else market_rules_text
         )
         self.market_secondary_text = market_secondary_text
+        self.contract_terms_url = (
+            contract_terms_url or KALSHI_GAME_SERIES["contract_terms_url"]
+        )
+        self.contract_terms_sha256 = contract_terms_sha256 or SOCCERGAMEWIN_SHA256
         self.list_events_calls = 0
+        self.contract_terms_calls: list[str] = []
 
     def _markets(self) -> list[dict[str, Any]]:
         ticker = "KXEPLGAME-26SEP20BETGET"
@@ -261,7 +279,15 @@ class BetisKalshi:
 
     async def get_series(self, series_ticker: str) -> dict[str, Any]:
         del series_ticker
-        return KALSHI_GAME_SERIES
+        return {**KALSHI_GAME_SERIES, "contract_terms_url": self.contract_terms_url}
+
+    async def get_contract_terms_document(self, url: str) -> dict[str, Any]:
+        self.contract_terms_calls.append(str(url))
+        return {
+            "url": str(url),
+            "sha256": self.contract_terms_sha256,
+            "byte_length": 60221,
+        }
 
     async def get_order_book(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         del args, kwargs
@@ -630,6 +656,8 @@ class BetisKalshiGetMarket(BetisKalshi):
         rules_on_event: bool = False,
         rules_on_markets: bool = False,
         structured_fields: dict[str, Any] | None = None,
+        contract_terms_url: str | None = None,
+        contract_terms_sha256: str | None = None,
     ) -> None:
         super().__init__(
             rules_on_event=rules_on_event,
@@ -637,6 +665,8 @@ class BetisKalshiGetMarket(BetisKalshi):
             event_rules_text=event_rules_text,
             market_rules_text=market_rules_text,
             market_secondary_text=market_secondary_text,
+            contract_terms_url=contract_terms_url,
+            contract_terms_sha256=contract_terms_sha256,
         )
         self.rules_text = rules_text
         self.secondary_text = secondary_text
@@ -1575,3 +1605,266 @@ async def test_hot_and_universe_agree_on_structured_template_payload() -> None:
     )
     assert universe_census.equivalent_market_pairs == 0
     assert universe_forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
+
+
+GAMEWIN_TERMS_SHAPE = (
+    "Official product name kind will team win. "
+    "The result scope is specified by the Exchange. "
+    "Result scope values first half, regulation time, second half, extra time, or full match. "
+    "The Exchange may list iterations corresponding to each result scope."
+)
+EXACTSCORE_DEFAULT_SHAPE = (
+    "The time period where not specified otherwise shall be understood to refer to "
+    "regulation time only. Specified by the Exchange listed iterations may use extra time "
+    "or full match."
+)
+ANYGOAL_DEFAULT_SHAPE = (
+    "The time period where not specified otherwise shall be understood to refer to the "
+    "sum of regulation time and extra time. Specified by the Exchange."
+)
+UNKNOWN_DEFAULT_SHAPE = (
+    "The time period where not specified otherwise shall be understood to refer to the "
+    "applicable listed iteration."
+)
+GAMEWIN_URL = "https://assets.kalshi.com/contract_terms/SOCCERGAMEWIN.pdf"
+EXACTSCORE_URL = "https://assets.kalshi.com/contract_terms/SOCCEREXACTSCORE.pdf"
+ANYGOAL_URL = "https://assets.kalshi.com/contract_terms/SOCCERANYGOAL.pdf"
+
+
+def test_contract_terms_allowlist_rejects_arbitrary_hosts() -> None:
+    assert kalshi_contract_terms_url_is_allowlisted(GAMEWIN_URL) is True
+    assert kalshi_contract_terms_url_is_allowlisted(EXACTSCORE_URL) is True
+    assert kalshi_contract_terms_url_is_allowlisted(
+        "https://kalshi-public-docs.s3.amazonaws.com/contract_terms/SOCCERGAMEWIN.pdf"
+    )
+    assert kalshi_contract_terms_url_is_allowlisted(
+        "https://assets.kalshi.com/regulatory/product-certifications/SOCCERGAMEWIN.pdf"
+    ) is False
+    assert kalshi_contract_terms_url_is_allowlisted(
+        "https://evil.example/contract_terms/SOCCERGAMEWIN.pdf"
+    ) is False
+    assert kalshi_contract_terms_url_is_allowlisted(GAMEWIN_URL + "?x=1") is False
+    assert kalshi_contract_terms_url_is_allowlisted(
+        "http://assets.kalshi.com/contract_terms/SOCCERGAMEWIN.pdf"
+    ) is False
+
+
+def test_gamewin_terms_have_no_default_result_scope() -> None:
+    classified = classify_kalshi_contract_terms_text(GAMEWIN_TERMS_SHAPE)
+    assert classified["has_default_clause"] is False
+    assert classified["default_result_scope"] is None
+    assert classified["placeholder_specified_by_exchange"] is True
+    assert classified["looks_like_soccergamewin"] is True
+    family = lookup_kalshi_contract_family(url=GAMEWIN_URL, sha256=SOCCERGAMEWIN_SHA256)
+    assert family["family_id"] == "soccergamewin"
+    assert family["defines_default_result_scope"] is False
+    assert family["placeholder_specified_by_exchange"] is True
+    assert family["verified"] == "sha256"
+    assert family["match_result_default_scope"] == "none"
+    assert kalshi_contract_family_match_result_default(family) is None
+    assert kalshi_apply_match_result_family_default(family) is None
+
+
+def test_exactscore_default_is_regulation_but_not_match_result() -> None:
+    classified = classify_kalshi_contract_terms_text(EXACTSCORE_DEFAULT_SHAPE)
+    assert classified["has_default_clause"] is True
+    assert classified["default_result_scope"] == "regulation_time"
+    family = lookup_kalshi_contract_family(url=EXACTSCORE_URL, sha256=SOCCEREXACTSCORE_SHA256)
+    assert family["family_id"] == "soccerexactscore"
+    assert family["defines_default_result_scope"] is True
+    assert family["default_result_scope"] == "regulation_time"
+    assert family["default_applies_to_match_result"] is False
+    assert family["match_result_default_scope"] == "none"
+    assert kalshi_apply_match_result_family_default(family) is None
+
+
+def test_anygoal_default_is_extra_time_sum_not_match_result() -> None:
+    classified = classify_kalshi_contract_terms_text(ANYGOAL_DEFAULT_SHAPE)
+    assert classified["has_default_clause"] is True
+    assert classified["default_result_scope"] == "including_extra_time"
+    family = lookup_kalshi_contract_family(url=ANYGOAL_URL, sha256=SOCCERANYGOAL_SHA256)
+    assert family["family_id"] == "socceranygoal"
+    assert family["default_applies_to_match_result"] is False
+    assert kalshi_apply_match_result_family_default(family) is None
+
+
+def test_unknown_default_clause_and_hash_mismatch_fail_closed() -> None:
+    classified = classify_kalshi_contract_terms_text(UNKNOWN_DEFAULT_SHAPE)
+    assert classified["has_default_clause"] is True
+    assert classified["default_result_scope"] == "unknown"
+    mismatched = lookup_kalshi_contract_family(
+        url=GAMEWIN_URL,
+        sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    assert mismatched["family_id"] == "unknown"
+    assert mismatched["verified"] == "hash_mismatch"
+    assert kalshi_apply_match_result_family_default(mismatched) is None
+    filename_only = lookup_kalshi_contract_family(url=GAMEWIN_URL)
+    assert filename_only["family_id"] == "soccergamewin"
+    assert filename_only["verified"] == "url_filename"
+    assert kalshi_apply_match_result_family_default(filename_only) is None
+
+
+def test_synthetic_match_result_default_requires_sha256_and_does_not_override_et() -> None:
+    synthetic = {
+        "defines_default_result_scope": True,
+        "default_applies_to_match_result": True,
+        "default_result_scope": "regulation_time",
+        "verified": "sha256",
+    }
+    assert kalshi_apply_match_result_family_default(synthetic) == "regulation_time"
+    template = _kalshi_settlement(
+        {"rules_primary": GENERIC_SOCCERGAME_TEMPLATE, "ticker": "SYN-BET"},
+        series={"contract_family": synthetic},
+        family=MarketFamily.MATCH_RESULT,
+        period=FootballPeriod.FULL_TIME,
+        line=None,
+    )
+    assert template.scope is SettlementScope.REGULATION_TIME
+    assert template.is_economically_complete() is True
+    extra_time = _kalshi_settlement(
+        {
+            "rules_primary": "Resolves including extra time without penalties.",
+            "ticker": "SYN-ET",
+        },
+        series={"contract_family": synthetic},
+        family=MarketFamily.MATCH_RESULT,
+        period=FootballPeriod.FULL_TIME,
+        line=None,
+    )
+    assert extra_time.scope is SettlementScope.INCLUDING_EXTRA_TIME
+    unverified = _kalshi_settlement(
+        {"rules_primary": GENERIC_SOCCERGAME_TEMPLATE, "ticker": "SYN-UNVERIFIED"},
+        series={
+            "contract_family": {**synthetic, "verified": "url_filename"},
+        },
+        family=MarketFamily.MATCH_RESULT,
+        period=FootballPeriod.FULL_TIME,
+        line=None,
+    )
+    assert unverified.scope is SettlementScope.UNKNOWN
+    assert unverified.is_economically_complete() is False
+
+
+def test_gamewin_family_does_not_complete_template_settlement() -> None:
+    family = lookup_kalshi_contract_family(url=GAMEWIN_URL, sha256=SOCCERGAMEWIN_SHA256)
+    fingerprint = _kalshi_settlement(
+        {"rules_primary": GENERIC_SOCCERGAME_TEMPLATE, "ticker": "KXEPLGAME-BET"},
+        series={**KALSHI_GAME_SERIES, "contract_family": family},
+        family=MarketFamily.MATCH_RESULT,
+        period=FootballPeriod.FULL_TIME,
+        line=None,
+    )
+    assert fingerprint.scope is SettlementScope.UNKNOWN
+    assert fingerprint.is_economically_complete() is False
+    exactscore = lookup_kalshi_contract_family(
+        url=EXACTSCORE_URL, sha256=SOCCEREXACTSCORE_SHA256
+    )
+    leaked = _kalshi_settlement(
+        {"rules_primary": GENERIC_SOCCERGAME_TEMPLATE, "ticker": "KXEPLGAME-BET"},
+        series={"contract_terms_url": EXACTSCORE_URL, "contract_family": exactscore},
+        family=MarketFamily.MATCH_RESULT,
+        period=FootballPeriod.FULL_TIME,
+        line=None,
+    )
+    assert leaked.scope is SettlementScope.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_live_shaped_gamewin_contract_terms_stay_incomplete() -> None:
+    kalshi = BetisKalshiGetMarket(
+        rules_text=GENERIC_SOCCERGAME_TEMPLATE,
+        secondary_text=GENERIC_SOCCERGAME_TEMPLATE,
+        structured_fields=_live_shaped_get_market_structured(),
+    )
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
+    assert census.equivalent_market_pairs == 0
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
+    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
+    assert kalshi.contract_terms_calls == [GAMEWIN_URL]
+    rendered = render_forensics(forensics)
+    assert GENERIC_SOCCERGAME_TEMPLATE not in rendered
+    assert SOCCERGAMEWIN_SHA256 not in rendered
+    series_layer = next(
+        layer
+        for item in forensics.kalshi_rule_layers
+        for layer in item.layers
+        if layer.layer == "series"
+    )
+    assert series_layer.contract_terms_url_present is True
+    family = series_layer.contract_family
+    assert family["family_id"] == "soccergamewin"
+    assert family["defines_default_result_scope"] is False
+    assert family["match_result_default_scope"] == "none"
+    assert family["placeholder_specified_by_exchange"] is True
+    assert family["verified"] == "sha256"
+    assert family["fetch_status"] == "ok"
+    assert family["filename"] == "SOCCERGAMEWIN.pdf"
+    assert "SOCCERGAMEWIN.pdf" in rendered
+    assert "defines_default_result_scope=False" in rendered
+
+
+@pytest.mark.asyncio
+async def test_exactscore_family_default_does_not_complete_1x2() -> None:
+    kalshi = BetisKalshiGetMarket(
+        rules_text=GENERIC_SOCCERGAME_TEMPLATE,
+        secondary_text=GENERIC_SOCCERGAME_TEMPLATE,
+        contract_terms_url=EXACTSCORE_URL,
+        contract_terms_sha256=SOCCEREXACTSCORE_SHA256,
+    )
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
+    assert census.equivalent_market_pairs == 0
+    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
+    series_layer = next(
+        layer
+        for item in forensics.kalshi_rule_layers
+        for layer in item.layers
+        if layer.layer == "series"
+    )
+    assert series_layer.contract_family["family_id"] == "soccerexactscore"
+    assert series_layer.contract_family["default_result_scope"] == "regulation_time"
+    assert series_layer.contract_family["match_result_default_scope"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_hot_and_universe_agree_on_gamewin_contract_family() -> None:
+    universe_kalshi = BetisKalshiGetMarket(
+        rules_text=GENERIC_SOCCERGAME_TEMPLATE,
+        secondary_text=GENERIC_SOCCERGAME_TEMPLATE,
+        market_rules_text=GENERIC_SOCCERGAME_TEMPLATE,
+        market_secondary_text=GENERIC_SOCCERGAME_TEMPLATE,
+        rules_on_markets=True,
+    )
+    universe_report, universe_census, universe_forensics = await _scan(
+        BetisMatchbook(),
+        EmptyPolymarket(),
+        universe_kalshi,
+    )
+    hot_kalshi = BetisKalshiGetMarket(
+        rules_text=GENERIC_SOCCERGAME_TEMPLATE,
+        secondary_text=GENERIC_SOCCERGAME_TEMPLATE,
+        market_rules_text=GENERIC_SOCCERGAME_TEMPLATE,
+        market_secondary_text=GENERIC_SOCCERGAME_TEMPLATE,
+        rules_on_markets=True,
+    )
+    hot_report, hot_census, hot_forensics = await _hot_from_same_payload(
+        universe_report, kalshi=hot_kalshi
+    )
+    assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics) == (
+        _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
+    )
+    assert universe_census.equivalent_market_pairs == 0
+    assert universe_kalshi.contract_terms_calls == [GAMEWIN_URL]
+    assert hot_kalshi.contract_terms_calls == [GAMEWIN_URL]
+
+
+@pytest.mark.asyncio
+async def test_contract_terms_fetch_rejects_non_allowlisted_host() -> None:
+    from sports_hedge.config import Settings
+    from sports_hedge.venues.kalshi import KalshiClient, KalshiDiscoveryError
+
+    client = KalshiClient(Settings())
+    with pytest.raises(KalshiDiscoveryError, match="allowlisted"):
+        await client.get_contract_terms_document(
+            "https://evil.example/contract_terms/SOCCERGAMEWIN.pdf"
+        )
