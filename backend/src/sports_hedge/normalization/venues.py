@@ -1108,8 +1108,57 @@ KALSHI_DOCUMENTED_SELECTOR_KEYS = (
     "custom_strike",
     "market_type",
     "settlement_source",
+    "functional_strike",
+    "primary_participant_key",
 )
+KALSHI_STRIKE_TYPE_VALUES = (
+    "greater",
+    "greater_or_equal",
+    "less",
+    "less_or_equal",
+    "between",
+    "functional",
+    "custom",
+    "structured",
+)
+KALSHI_MARKET_TYPE_VALUES = ("binary", "scalar")
+KALSHI_DOCUMENTED_RESULT_SCOPES = (
+    "first_half",
+    "regulation_time",
+    "second_half",
+    "extra_time",
+    "full_match",
+)
+KALSHI_RESULT_SCOPE_PLACEHOLDER_PHRASES = (
+    "result scope",
+    "<result scope>",
+    "the applicable result scope",
+    "may take one of",
+    "one of the following",
+)
+KALSHI_PAYOUT_CRITERION_PHRASES = (
+    "payout criterion",
+    "this market resolves",
+    "this contract shall resolve",
+    "this contract pays",
+    "resolves based on",
+    "yes if and only if",
+)
+KALSHI_SCOPE_DEFINITION_LABELS = (
+    "first half",
+    "regulation time",
+    "second half",
+    "extra time",
+    "full match",
+)
+KALSHI_ENTITY_STRIKE_KEY_HINTS = ("team", "player", "participant", "club", "athlete")
 _NINETY_MINUTE_ABBREV_RE = re.compile(r"\b90\s*mins?\b")
+_SAFE_ENUM_TOKEN_RE = re.compile(r"^[a-z0-9_]{1,40}$")
+_SAFE_OBJECT_KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+_UUID_VALUE_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 KALSHI_RULE_LAYER_NESTED = "nested_list"
 KALSHI_RULE_LAYER_EVENT = "event"
 KALSHI_RULE_LAYER_GET_MARKET = "get_market"
@@ -1151,13 +1200,13 @@ def resolve_kalshi_rule_field_precedence(
     secondary: str,
     rules: str = "",
 ) -> tuple[SettlementScope, bool | None, bool | None]:
-    """Market-specific primary/rules establish settlement; catalog secondary does not.
+    """Diagnostic-only primary-vs-catalog comparison. Not a settlement fingerprint.
 
-    A complete primary (or ``rules`` when primary is empty) may stand when
-    secondary is empty, incomplete, or generic multi-scope template text.
-    A complete secondary/rules clause with a different fingerprint still fails
-    closed unless it is catalog/example boilerplate. Unclassified primary is
-    not guessed from secondary.
+    Owner-live disproved using a complete primary over catalog secondary: live
+    ``rules_primary`` is itself an unclassified multi-scope template. Settlement
+    uses ``resolve_kalshi_settlement_from_rule_fields`` instead. This helper
+    remains so forensics can show what the retired precedence path would have
+    claimed. Unclassified primary is not guessed from secondary.
     """
 
     unknown = (SettlementScope.UNKNOWN, None, None)
@@ -1246,11 +1295,310 @@ def kalshi_documented_selector_presence(payload: dict[str, Any] | None) -> dict[
     return present
 
 
+def _safe_short_enum(value: Any, allowed: tuple[str, ...]) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    lowered = text.casefold().replace(" ", "_").replace("-", "_")
+    if lowered in allowed:
+        return lowered
+    compact = text.strip().casefold()
+    if _SAFE_ENUM_TOKEN_RE.fullmatch(compact):
+        return compact
+    return "unrecognized"
+
+
+def _safe_json_value_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return "empty_string"
+        if _UUID_VALUE_RE.fullmatch(stripped):
+            return "uuid_string"
+        return "string"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list | tuple):
+        return "array"
+    return "other"
+
+
+def _safe_object_keys(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    keys: list[str] = []
+    for key in value:
+        token = str(key).strip()
+        if _SAFE_OBJECT_KEY_RE.fullmatch(token):
+            keys.append(token)
+    return sorted(keys)
+
+
+def _custom_strike_is_entity_target(keys: list[str]) -> bool:
+    for key in keys:
+        lowered = key.casefold()
+        if any(hint in lowered for hint in KALSHI_ENTITY_STRIKE_KEY_HINTS):
+            return True
+    return False
+
+
+def kalshi_title_scope_selector_flags(text: str) -> dict[str, bool]:
+    """SAFE semantic flags for subtitle/yes_sub_title. Never a fingerprint source."""
+
+    normalized = normalize_text(text)
+    return {
+        "contains_explicit_regulation_selector": (
+            "regulation time" in normalized or "90 minutes" in normalized
+        ),
+        "contains_explicit_extra_time_selector": "extra time" in normalized,
+        "contains_explicit_full_match_selector": "full match" in normalized,
+        "contains_explicit_first_half_selector": "first half" in normalized,
+        "contains_explicit_second_half_selector": "second half" in normalized,
+    }
+
+
+def _product_metadata_value_class(key: str, value: Any) -> str:
+    enum_value = _safe_short_enum(value, KALSHI_DOCUMENTED_RESULT_SCOPES) if isinstance(value, str) else None
+    if enum_value in KALSHI_DOCUMENTED_RESULT_SCOPES:
+        return f"documented_result_scope:{enum_value}"
+    lowered_key = key.casefold()
+    if lowered_key in {"competition", "league"}:
+        return "competition_code"
+    if "scope" in lowered_key or lowered_key in {"product", "family", "kind"}:
+        token = _safe_short_enum(value, ("game", "soccer_game", "match"))
+        if token in {"game", "soccer_game", "match"}:
+            return "series_or_product_family_not_result_scope"
+        return "non_result_scope_token"
+    return _safe_json_value_type(value)
+
+
+def classify_kalshi_rule_structure(text: str) -> dict[str, Any]:
+    """SAFE structural shape of one rule field. Never returns wording."""
+
+    stripped = str(text or "").strip()
+    if not stripped:
+        return {
+            "contains_result_scope_placeholder": False,
+            "contains_payout_criterion": False,
+            "contains_multiple_scope_definitions": False,
+            "looks_like_generic_contract_template": False,
+            "clause_token_pattern": "empty",
+        }
+    normalized = normalize_text(stripped)
+    placeholder = any(phrase in normalized for phrase in KALSHI_RESULT_SCOPE_PLACEHOLDER_PHRASES)
+    catalog = kalshi_secondary_is_scope_catalog(stripped)
+    payout = any(phrase in normalized for phrase in KALSHI_PAYOUT_CRITERION_PHRASES)
+    scope_labels = [label for label in KALSHI_SCOPE_DEFINITION_LABELS if label in normalized]
+    if placeholder or catalog:
+        multiple_scopes = len(scope_labels) >= 2
+    else:
+        multiple_scopes = len(scope_labels) >= 3
+    has_regulation = _has_regulation_marker(normalized)
+    has_et = _has_extra_time_token(normalized)
+    has_pen = _has_penalties_token(normalized)
+    if has_regulation and has_et and has_pen:
+        pattern = "mixed_regulation_et_penalties"
+    elif has_regulation and not has_et and not has_pen:
+        pattern = "regulation_only"
+    elif has_et or has_pen:
+        pattern = "extra_time_or_penalties"
+    elif has_regulation:
+        pattern = "regulation_with_contingency_tokens"
+    else:
+        pattern = "generic_no_scope_tokens"
+    scope, extra_time, penalties = classify_settlement_wording(stripped)
+    complete = _classified_fingerprint_complete(scope, extra_time, penalties)
+    template = bool(
+        catalog
+        or placeholder
+        or multiple_scopes
+        or (not complete and has_regulation and has_et and has_pen)
+    )
+    return {
+        "contains_result_scope_placeholder": placeholder,
+        "contains_payout_criterion": payout,
+        "contains_multiple_scope_definitions": multiple_scopes,
+        "looks_like_generic_contract_template": template,
+        "clause_token_pattern": pattern,
+    }
+
+
+def kalshi_rule_field_is_generic_scope_template(text: str) -> bool:
+    """True when wording is a multi-scope catalog/template, not a selected clause."""
+
+    return bool(
+        str(text or "").strip()
+        and classify_kalshi_rule_structure(text)["looks_like_generic_contract_template"]
+    )
+
+
+def kalshi_documented_structured_fields(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """SAFE Get Market / event structured shapes. No rule text, UUIDs, or titles."""
+
+    empty = {
+        "strike_type": None,
+        "market_type": None,
+        "custom_strike_present": False,
+        "custom_strike_keys": [],
+        "custom_strike_value_types": [],
+        "custom_strike_entity_target": False,
+        "custom_strike_selects_result_scope": False,
+        "functional_strike_present": False,
+        "functional_strike_value_type": "null",
+        "functional_strike_shape": "absent",
+        "primary_participant_key_present": False,
+        "subtitle_scope_selectors": kalshi_title_scope_selector_flags(""),
+        "yes_sub_title_scope_selectors": kalshi_title_scope_selector_flags(""),
+        "product_metadata_keys": [],
+        "product_metadata_value_classes": {},
+        "milestone_detail_keys": [],
+        "milestone_detail_value_types": {},
+        "documented_result_scope_selector": "none",
+    }
+    if not isinstance(payload, dict):
+        return empty
+    custom = payload.get("custom_strike")
+    custom_keys = _safe_object_keys(custom)
+    custom_types = (
+        sorted({_safe_json_value_type(custom[key]) for key in custom if str(key) in custom_keys})
+        if isinstance(custom, dict)
+        else []
+    )
+    functional = payload.get("functional_strike")
+    functional_present = functional is not None and str(functional).strip() not in {"", "None"}
+    functional_type = _safe_json_value_type(functional)
+    functional_shape = "absent"
+    if functional_present:
+        if isinstance(functional, dict):
+            functional_shape = "object"
+        elif isinstance(functional, list | tuple):
+            functional_shape = "array"
+        elif isinstance(functional, str):
+            stripped = functional.strip()
+            if stripped[:1] in {"{", "["}:
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    functional_shape = "string"
+                else:
+                    functional_shape = "json_object" if isinstance(parsed, dict) else (
+                        "json_array" if isinstance(parsed, list) else "json_other"
+                    )
+            else:
+                functional_shape = "string"
+        else:
+            functional_shape = functional_type
+    metadata = payload.get("product_metadata")
+    metadata_keys = _safe_object_keys(metadata)
+    metadata_classes = {
+        key: _product_metadata_value_class(key, metadata[key])
+        for key in metadata_keys
+        if isinstance(metadata, dict)
+    }
+    milestone = payload.get("milestone") if isinstance(payload.get("milestone"), dict) else {}
+    details = milestone.get("details") if isinstance(milestone, dict) else None
+    detail_keys = _safe_object_keys(details)
+    detail_types = {
+        key: _safe_json_value_type(details[key])
+        for key in detail_keys
+        if isinstance(details, dict)
+    }
+    return {
+        "strike_type": _safe_short_enum(payload.get("strike_type"), KALSHI_STRIKE_TYPE_VALUES),
+        "market_type": _safe_short_enum(payload.get("market_type"), KALSHI_MARKET_TYPE_VALUES),
+        "custom_strike_present": isinstance(custom, dict) and bool(custom),
+        "custom_strike_keys": custom_keys,
+        "custom_strike_value_types": custom_types,
+        "custom_strike_entity_target": _custom_strike_is_entity_target(custom_keys),
+        "custom_strike_selects_result_scope": False,
+        "functional_strike_present": functional_present,
+        "functional_strike_value_type": functional_type,
+        "functional_strike_shape": functional_shape,
+        "primary_participant_key_present": bool(str(payload.get("primary_participant_key") or "").strip()),
+        "subtitle_scope_selectors": kalshi_title_scope_selector_flags(
+            str(payload.get("subtitle") or "")
+        ),
+        "yes_sub_title_scope_selectors": kalshi_title_scope_selector_flags(
+            str(payload.get("yes_sub_title") or payload.get("yes_subtitle") or "")
+        ),
+        "product_metadata_keys": metadata_keys,
+        "product_metadata_value_classes": metadata_classes,
+        "milestone_detail_keys": detail_keys,
+        "milestone_detail_value_types": detail_types,
+        "documented_result_scope_selector": "none",
+    }
+
+
+def kalshi_documented_result_scope_fingerprint(
+    payload: dict[str, Any] | None,
+) -> tuple[SettlementScope, bool | None, bool | None] | None:
+    """Return a fingerprint only when a documented field selects SOCCERGAME scope.
+
+    Official Get Market schema: ``strike_type`` is strike evaluation
+    (greater/custom/structured/…), ``market_type`` is binary|scalar,
+    ``custom_strike`` with ``strike_type=structured`` holds structured-target
+    entity IDs, ``functional_strike`` maps expiration values to settlement
+    values, and ``primary_participant_key`` has no settlement description.
+    SOCCERGAMEWIN terms define ``<result scope>`` as first half / regulation
+    time / second half / extra time / full match, specified by the Exchange on
+    listed iterations — not as a Market API enum. Title/GAME/Opta/team
+    identity are never used. No documented selector currently maps.
+    """
+
+    _ = payload
+    return None
+
+
+def resolve_kalshi_settlement_from_rule_fields(
+    primary: str,
+    secondary: str,
+    rules: str = "",
+) -> tuple[SettlementScope, bool | None, bool | None]:
+    """Fail-closed fingerprint from market rule fields. No primary-over-catalog.
+
+    A single economically complete non-template field still maps (historical
+    nested ``rules_primary`` regulation). Generic multi-scope template text in
+    any nonempty field keeps UNKNOWN. Distinct complete fingerprints fail
+    closed. Combined mixed-token blobs stay UNKNOWN.
+    """
+
+    unknown = (SettlementScope.UNKNOWN, None, None)
+    fields = (
+        str(primary or "").strip(),
+        str(secondary or "").strip(),
+        str(rules or "").strip(),
+    )
+    nonempty = [text for text in fields if text]
+    if not nonempty:
+        return unknown
+    if any(kalshi_rule_field_is_generic_scope_template(text) for text in nonempty):
+        return unknown
+    complete: list[tuple[SettlementScope, bool | None, bool | None]] = []
+    for text in nonempty:
+        fingerprint = classify_settlement_wording(text)
+        if _classified_fingerprint_complete(*fingerprint):
+            complete.append(fingerprint)
+    unique = set(complete)
+    if len(unique) > 1:
+        return unknown
+    if len(unique) == 1:
+        return next(iter(unique))
+    return classify_settlement_wording(" ".join(nonempty))
+
+
 def classify_kalshi_rule_field(field: str, text: str) -> dict[str, Any]:
     """SAFE classification of one documented rule field. Never returns wording."""
 
     stripped = str(text or "").strip()
-    normalized = normalize_text(stripped) if stripped else ""
+    structure = classify_kalshi_rule_structure(stripped)
     if not stripped:
         return {
             "field": field,
@@ -1262,7 +1610,9 @@ def classify_kalshi_rule_field(field: str, text: str) -> dict[str, Any]:
             "has_extra_time_tokens": False,
             "has_penalties_tokens": False,
             "has_ninety_minute_abbrev": False,
+            **structure,
         }
+    normalized = normalize_text(stripped)
     scope, extra_time, penalties = classify_settlement_wording(stripped)
     complete = _classified_fingerprint_complete(scope, extra_time, penalties)
     return {
@@ -1275,6 +1625,7 @@ def classify_kalshi_rule_field(field: str, text: str) -> dict[str, Any]:
         "has_extra_time_tokens": _has_extra_time_token(normalized),
         "has_penalties_tokens": _has_penalties_token(normalized),
         "has_ninety_minute_abbrev": bool(_NINETY_MINUTE_ABBREV_RE.search(normalized)),
+        **structure,
     }
 
 
@@ -1310,15 +1661,24 @@ def _kalshi_layer_field_diagnostics(payload: dict[str, Any] | None) -> dict[str,
         str(raw.get("rules") or ""),
     )
     prec_complete = _classified_fingerprint_complete(prec_scope, prec_et, prec_pen)
+    fingerprint = resolve_kalshi_settlement_from_rule_fields(
+        str(raw.get("rules_primary") or ""),
+        str(raw.get("rules_secondary") or ""),
+        str(raw.get("rules") or ""),
+    )
+    fingerprint_complete = _classified_fingerprint_complete(*fingerprint)
+    nonempty = any(item["present_nonempty"] for item in fields)
     return {
         "fields": fields,
-        "precedence_classified_scope": prec_scope.value
-        if any(item["present_nonempty"] for item in fields)
-        else None,
-        "precedence_economically_complete": prec_complete
-        if any(item["present_nonempty"] for item in fields)
-        else False,
+        "precedence_classified_scope": prec_scope.value if nonempty else None,
+        "precedence_economically_complete": prec_complete if nonempty else False,
+        "fingerprint_classified_scope": fingerprint[0].value if nonempty else None,
+        "fingerprint_economically_complete": fingerprint_complete if nonempty else False,
+        "fingerprint_uses_rule_precedence": False,
         "documented_selector_presence": kalshi_documented_selector_presence(
+            payload if isinstance(payload, dict) else None
+        ),
+        "structured_fields": kalshi_documented_structured_fields(
             payload if isinstance(payload, dict) else None
         ),
     }
@@ -1493,10 +1853,12 @@ def _kalshi_settlement(
     event_payload: dict[str, Any] | None = None,
 ) -> SettlementFingerprint:
     # Market-specific rule fields only. Do not infer regulation from GAME / Opta
-    # / series names, and do not concatenate series contract-terms catalogs into
-    # the market wording blob. Event-level rules are inherited only for ordinary
-    # Match Result when the nested market itself has no rule or description text.
-    # Series catalog URLs / settlement_sources are not market-selected scope.
+    # / series names / custom_strike entity IDs / title. Do not concatenate
+    # series contract-terms catalogs into the market wording blob. Event-level
+    # rules are inherited only for ordinary Match Result when the nested market
+    # itself has no rule or description text. Primary-over-catalog precedence is
+    # not a fingerprint source. Official Get Market structured fields do not
+    # select SOCCERGAME <result scope>.
     _ = series
     primary = str(payload.get("rules_primary") or "").strip()
     secondary = str(payload.get("rules_secondary") or "").strip()
@@ -1515,8 +1877,11 @@ def _kalshi_settlement(
         primary = str(event_payload.get("rules_primary") or "").strip()
         secondary = str(event_payload.get("rules_secondary") or "").strip()
         rules = str(event_payload.get("rules") or "").strip()
-    if primary or secondary or rules:
-        scope, extra_time, penalties = resolve_kalshi_rule_field_precedence(
+    selector = kalshi_documented_result_scope_fingerprint(payload)
+    if selector is not None:
+        scope, extra_time, penalties = selector
+    elif primary or secondary or rules:
+        scope, extra_time, penalties = resolve_kalshi_settlement_from_rule_fields(
             primary, secondary, rules
         )
     else:

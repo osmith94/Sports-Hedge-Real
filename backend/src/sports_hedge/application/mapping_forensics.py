@@ -6,6 +6,7 @@ order-book prices/sizes, or write-path data.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from typing import Any
 
@@ -107,6 +108,11 @@ class KalshiRuleFieldView(BaseModel):
     has_extra_time_tokens: bool = False
     has_penalties_tokens: bool = False
     has_ninety_minute_abbrev: bool = False
+    contains_result_scope_placeholder: bool = False
+    contains_payout_criterion: bool = False
+    contains_multiple_scope_definitions: bool = False
+    looks_like_generic_contract_template: bool = False
+    clause_token_pattern: str | None = None
 
 
 class KalshiRuleLayerView(BaseModel):
@@ -130,7 +136,11 @@ class KalshiRuleLayerView(BaseModel):
     fields: list[KalshiRuleFieldView] = Field(default_factory=list)
     precedence_classified_scope: str | None = None
     precedence_economically_complete: bool | None = None
+    fingerprint_classified_scope: str | None = None
+    fingerprint_economically_complete: bool | None = None
+    fingerprint_uses_rule_precedence: bool = False
     documented_selector_presence: dict[str, bool] = Field(default_factory=dict)
+    structured_fields: dict[str, Any] = Field(default_factory=dict)
 
 
 class KalshiMatchResultRuleTickerView(BaseModel):
@@ -320,8 +330,11 @@ def forensics_from_report(
         "and classify_settlement_wording scope only. Contract text is not printed. "
         "Series contract_terms_url is not fetched; presence is a boolean. "
         "Per-field rules_primary/rules_secondary/rules classification is reported "
-        "separately from combined concatenation. Precedence uses a complete "
-        "market-specific primary scope and ignores generic catalog secondary text."
+        "separately from combined concatenation. Rule-field precedence is "
+        "diagnostic-only and is not used as the settlement fingerprint. "
+        "Official Get Market strike_type/custom_strike/market_type do not select "
+        "SOCCERGAME result scope; structured custom_strike values are entity "
+        "targets. Generic multi-scope template wording stays unknown."
     )
     return MappingForensics(
         data_class=data_class,
@@ -423,6 +436,9 @@ def render_forensics(forensics: MappingForensics) -> str:
                 f"combined_scope={layer.classified_scope} combined_complete={layer.economically_complete} "
                 f"precedence_scope={layer.precedence_classified_scope} "
                 f"precedence_complete={layer.precedence_economically_complete} "
+                f"fingerprint_scope={layer.fingerprint_classified_scope} "
+                f"fingerprint_complete={layer.fingerprint_economically_complete} "
+                f"fingerprint_uses_precedence={layer.fingerprint_uses_rule_precedence} "
                 f"kind={layer.wording_kind} regulation_tokens={layer.has_regulation_tokens} "
                 f"et_tokens={layer.has_extra_time_tokens} pen_tokens={layer.has_penalties_tokens} "
                 f"ninety_min_abbrev={layer.has_ninety_minute_abbrev} "
@@ -435,7 +451,12 @@ def render_forensics(forensics: MappingForensics) -> str:
                     f"scope={field.classified_scope} complete={field.economically_complete} "
                     f"kind={field.wording_kind} regulation_tokens={field.has_regulation_tokens} "
                     f"et_tokens={field.has_extra_time_tokens} pen_tokens={field.has_penalties_tokens} "
-                    f"ninety_min_abbrev={field.has_ninety_minute_abbrev}"
+                    f"ninety_min_abbrev={field.has_ninety_minute_abbrev} "
+                    f"placeholder={field.contains_result_scope_placeholder} "
+                    f"payout_criterion={field.contains_payout_criterion} "
+                    f"multi_scope_defs={field.contains_multiple_scope_definitions} "
+                    f"generic_template={field.looks_like_generic_contract_template} "
+                    f"clause_pattern={field.clause_token_pattern}"
                 )
             if layer.documented_selector_presence:
                 selectors = ",".join(
@@ -443,6 +464,10 @@ def render_forensics(forensics: MappingForensics) -> str:
                     for key, value in sorted(layer.documented_selector_presence.items())
                 )
                 lines.append(f"    documented_selectors={{{selectors}}}")
+            if layer.structured_fields:
+                lines.append(
+                    "    structured_fields=" + _fmt_structured_fields(layer.structured_fields)
+                )
     for note in forensics.notes:
         lines.append(f"note: {note}")
     for item in forensics.candidates:
@@ -504,6 +529,21 @@ def _parse_rule_field_views(raw: Any) -> list[KalshiRuleFieldView]:
                 has_extra_time_tokens=bool(item.get("has_extra_time_tokens")),
                 has_penalties_tokens=bool(item.get("has_penalties_tokens")),
                 has_ninety_minute_abbrev=bool(item.get("has_ninety_minute_abbrev")),
+                contains_result_scope_placeholder=bool(
+                    item.get("contains_result_scope_placeholder")
+                ),
+                contains_payout_criterion=bool(item.get("contains_payout_criterion")),
+                contains_multiple_scope_definitions=bool(
+                    item.get("contains_multiple_scope_definitions")
+                ),
+                looks_like_generic_contract_template=bool(
+                    item.get("looks_like_generic_contract_template")
+                ),
+                clause_token_pattern=(
+                    str(item.get("clause_token_pattern"))
+                    if item.get("clause_token_pattern") is not None
+                    else None
+                ),
             )
         )
     return views
@@ -516,6 +556,74 @@ def _parse_selector_presence(raw: Any) -> dict[str, bool]:
     for key, value in raw.items():
         parsed[str(key)] = bool(value)
     return parsed
+
+
+_SAFE_STRUCTURED_SCALAR_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_UNSAFE_STRUCTURED_KEYS = frozenset(
+    {"rules_primary", "rules_secondary", "rules", "title", "subtitle", "yes_sub_title"}
+)
+
+
+def _safe_structured_scalar(value: Any) -> Any:
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        token = value.strip()
+        if _SAFE_STRUCTURED_SCALAR_RE.fullmatch(token):
+            return token
+        return "redacted"
+    return None
+
+
+def _parse_structured_fields(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    parsed: dict[str, Any] = {}
+    for key, value in raw.items():
+        name = str(key)
+        if name in _UNSAFE_STRUCTURED_KEYS:
+            continue
+        if isinstance(value, dict):
+            nested: dict[str, Any] = {}
+            for nested_key, nested_value in value.items():
+                token = str(nested_key)
+                if not _SAFE_STRUCTURED_SCALAR_RE.fullmatch(token):
+                    continue
+                if isinstance(nested_value, bool | int) or nested_value is None:
+                    nested[token] = nested_value
+                elif isinstance(nested_value, str):
+                    scalar = _safe_structured_scalar(nested_value)
+                    if scalar is not None:
+                        nested[token] = scalar
+            parsed[name] = nested
+        elif isinstance(value, list):
+            items = []
+            for item in value:
+                scalar = _safe_structured_scalar(item)
+                if scalar is not None and scalar != "redacted":
+                    items.append(scalar)
+            parsed[name] = items
+        else:
+            scalar = _safe_structured_scalar(value)
+            if scalar is not None:
+                parsed[name] = scalar
+    return parsed
+
+
+def _fmt_structured_fields(values: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in sorted(values):
+        value = values[key]
+        if isinstance(value, dict):
+            inner = ",".join(f"{inner_key}={inner_value}" for inner_key, inner_value in sorted(value.items()))
+            parts.append(f"{key}={{{inner}}}")
+        elif isinstance(value, list):
+            parts.append(f"{key}=[{','.join(str(item) for item in value)}]")
+        else:
+            parts.append(f"{key}={value}")
+    return "{" + ", ".join(parts) + "}"
 
 
 def _kalshi_rule_layer_views(
@@ -620,6 +728,20 @@ def _kalshi_rule_layer_views(
                     documented_selector_presence=_parse_selector_presence(
                         layer.get("documented_selector_presence")
                     ),
+                    fingerprint_classified_scope=(
+                        str(layer.get("fingerprint_classified_scope"))
+                        if layer.get("fingerprint_classified_scope") is not None
+                        else None
+                    ),
+                    fingerprint_economically_complete=(
+                        bool(layer.get("fingerprint_economically_complete"))
+                        if layer.get("fingerprint_economically_complete") is not None
+                        else None
+                    ),
+                    fingerprint_uses_rule_precedence=bool(
+                        layer.get("fingerprint_uses_rule_precedence")
+                    ),
+                    structured_fields=_parse_structured_fields(layer.get("structured_fields")),
                 )
             )
         views.append(

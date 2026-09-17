@@ -42,7 +42,7 @@ from sports_hedge.application.universe_mapping_census import (
     resolve_census_venue_scope,
 )
 from sports_hedge.config import Settings
-from sports_hedge.domain.football import MarketFamily, SettlementScope
+from sports_hedge.domain.football import FootballPeriod, MarketFamily, SettlementScope
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
@@ -52,13 +52,18 @@ from sports_hedge.normalization.venues import (
     KalshiNormalizer,
     MatchbookNormalizer,
     PolymarketNormalizer,
+    _kalshi_settlement,
     classify_kalshi_contract_rule_layer,
     classify_kalshi_rule_field,
+    classify_kalshi_rule_structure,
     classify_settlement_wording,
+    kalshi_documented_result_scope_fingerprint,
     kalshi_documented_selector_presence,
+    kalshi_documented_structured_fields,
     kalshi_secondary_is_scope_catalog,
     merge_kalshi_contract_rules,
     resolve_kalshi_rule_field_precedence,
+    resolve_kalshi_settlement_from_rule_fields,
 )
 from sports_hedge.paper.models import FxRateSnapshot
 
@@ -77,6 +82,14 @@ CONTRADICTORY_SECONDARY = (
     "This market resolves including extra time and penalties."
 )
 NINETY_MIN_ABBREV_PRIMARY = "Settles on 90 mins of play."
+# Abstracted live-shaped SOCCERGAME template. Not owner-live contract text.
+GENERIC_SOCCERGAME_TEMPLATE = (
+    "Series contract terms define result scope that may take one of the following: "
+    "first half, regulation time, second half, extra time, or full match. "
+    "Payout criterion examples mention regulation time, extra time, and penalties. "
+    "The Exchange lists iterations corresponding to each result scope."
+)
+STRUCTURED_TARGET_ID = "2ef4d31c-0b46-4f43-a403-f44d62489034"
 BETIS = "Real Betis"
 GETAFE = "Getafe"
 KALSHI_GAME_SERIES = {
@@ -616,6 +629,7 @@ class BetisKalshiGetMarket(BetisKalshi):
         fail_tickers: tuple[str, ...] = (),
         rules_on_event: bool = False,
         rules_on_markets: bool = False,
+        structured_fields: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             rules_on_event=rules_on_event,
@@ -627,6 +641,7 @@ class BetisKalshiGetMarket(BetisKalshi):
         self.rules_text = rules_text
         self.secondary_text = secondary_text
         self.fail_tickers = {str(item) for item in fail_tickers}
+        self.structured_fields = dict(structured_fields or {})
         self.get_market_calls: list[str] = []
 
     async def get_market(self, ticker: str) -> dict[str, Any]:
@@ -639,6 +654,7 @@ class BetisKalshiGetMarket(BetisKalshi):
             "ticker": ticker,
             "rules_primary": self.rules_text,
             "rules_secondary": self.secondary_text,
+            **self.structured_fields,
         }
 
 
@@ -764,6 +780,9 @@ def test_per_field_classification_separates_primary_from_catalog_secondary() -> 
     assert layer["classified_scope"] == "unknown"
     assert layer["precedence_classified_scope"] == "regulation_time"
     assert layer["precedence_economically_complete"] is True
+    assert layer["fingerprint_classified_scope"] == "unknown"
+    assert layer["fingerprint_economically_complete"] is False
+    assert layer["fingerprint_uses_rule_precedence"] is False
     by_field = {item["field"]: item for item in layer["fields"]}
     assert by_field["rules_primary"]["classified_scope"] == "regulation_time"
     assert by_field["rules_primary"]["economically_complete"] is True
@@ -939,25 +958,34 @@ async def test_get_market_failure_for_one_ticker_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_catalog_secondary_does_not_block_complete_primary_1x2() -> None:
+async def test_catalog_secondary_does_not_complete_from_retired_precedence() -> None:
     kalshi = BetisKalshi(
         rules_on_markets=True,
         market_rules_text=REGULATION,
         market_secondary_text=SCOPE_CATALOG_SECONDARY,
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
-    assert census.equivalent_market_pairs == 1
-    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
-    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 1
-    assert census.kalshi_match_result_rule_enrichment["skipped_complete"] == 3
-    assert census.kalshi_match_result_rule_enrichment["attempted"] == 0
+    assert census.equivalent_market_pairs == 0
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
+    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
+    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
     rendered = render_forensics(forensics)
     assert REGULATION not in rendered
     assert SCOPE_CATALOG_SECONDARY not in rendered
     assert "field=rules_primary" in rendered
     assert "field=rules_secondary" in rendered
-    assert "precedence_scope=regulation_time" in rendered
+    assert "fingerprint_uses_precedence=False" in rendered
     assert "combined_scope=unknown" in rendered
+    nested = next(
+        layer
+        for item in forensics.kalshi_rule_layers
+        for layer in item.layers
+        if layer.layer == "nested_list"
+    )
+    assert nested.fingerprint_economically_complete is False
+    assert nested.fingerprint_uses_rule_precedence is False
+    secondary = next(field for field in nested.fields if field.field == "rules_secondary")
+    assert secondary.looks_like_generic_contract_template is True
 
 
 @pytest.mark.asyncio
@@ -983,7 +1011,7 @@ async def test_hot_and_universe_agree_on_catalog_secondary_precedence() -> None:
     assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics) == (
         _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
     )
-    assert universe_census.equivalent_market_pairs == 1
+    assert universe_census.equivalent_market_pairs == 0
 
 
 @pytest.mark.asyncio
@@ -1038,8 +1066,8 @@ async def test_to_qualify_still_nonequivalent_with_catalog_secondary() -> None:
     qualify = [row for row in rows if row.family == "to_qualify"]
     assert qualify
     assert all(row.comparison_status.value != "matched_equivalent" for row in qualify)
-    assert census.equivalent_market_pairs == 1
-    assert census.market_family_breakdown.get("match_result") == 1
+    assert census.equivalent_market_pairs == 0
+    assert census.market_family_breakdown.get("match_result") in {None, 0}
 
 
 @pytest.mark.asyncio
@@ -1306,3 +1334,244 @@ def test_forensics_public_dict_strips_prices_and_keeps_safe_metadata() -> None:
     assert "available-amount" not in dumped
     assert payload["candidate_rejection_histogram"]["incomplete_settlement"] == 1
     assert payload["match_result_by_venue"]["matchbook"]["complete_3way_home_draw_away"] == 1
+
+
+def _live_shaped_get_market_structured() -> dict[str, Any]:
+    return {
+        "strike_type": "structured",
+        "market_type": "binary",
+        "custom_strike": {"soccer_team": STRUCTURED_TARGET_ID},
+        "functional_strike": None,
+        "primary_participant_key": "soccer_team",
+        "subtitle": "",
+        "product_metadata": {"competition": "EPL", "competition_scope": "Game"},
+        "milestone": {
+            "type": "sports",
+            "details": {"home_team_id": STRUCTURED_TARGET_ID, "away_team_id": STRUCTURED_TARGET_ID},
+        },
+    }
+
+
+def test_generic_template_fields_are_structurally_unselected_scope() -> None:
+    primary = classify_kalshi_rule_field("rules_primary", GENERIC_SOCCERGAME_TEMPLATE)
+    secondary = classify_kalshi_rule_field("rules_secondary", GENERIC_SOCCERGAME_TEMPLATE)
+    structure = classify_kalshi_rule_structure(GENERIC_SOCCERGAME_TEMPLATE)
+    dumped = str(primary) + str(secondary) + str(structure)
+    assert GENERIC_SOCCERGAME_TEMPLATE not in dumped
+    assert primary["economically_complete"] is False
+    assert primary["classified_scope"] == "unknown"
+    assert primary["looks_like_generic_contract_template"] is True
+    assert primary["contains_result_scope_placeholder"] is True
+    assert primary["contains_multiple_scope_definitions"] is True
+    assert primary["clause_token_pattern"] == "mixed_regulation_et_penalties"
+    assert secondary["looks_like_generic_contract_template"] is True
+    assert resolve_kalshi_settlement_from_rule_fields(
+        GENERIC_SOCCERGAME_TEMPLATE, GENERIC_SOCCERGAME_TEMPLATE
+    ) == (SettlementScope.UNKNOWN, None, None)
+    fingerprint = _kalshi_settlement(
+        {
+            "rules_primary": GENERIC_SOCCERGAME_TEMPLATE,
+            "rules_secondary": GENERIC_SOCCERGAME_TEMPLATE,
+            "ticker": "KXEPLGAME-26SEP20BETGET-BET",
+            **_live_shaped_get_market_structured(),
+            "yes_sub_title": BETIS,
+        },
+        series=KALSHI_GAME_SERIES,
+        family=MarketFamily.MATCH_RESULT,
+        period=FootballPeriod.FULL_TIME,
+        line=None,
+    )
+    assert fingerprint.scope is SettlementScope.UNKNOWN
+    assert fingerprint.is_economically_complete() is False
+
+
+def test_get_market_structured_fields_are_safe_and_do_not_select_result_scope() -> None:
+    payload = {
+        "rules_primary": GENERIC_SOCCERGAME_TEMPLATE,
+        "rules_secondary": GENERIC_SOCCERGAME_TEMPLATE,
+        "yes_sub_title": BETIS,
+        "title": f"{BETIS} vs {GETAFE}",
+        **_live_shaped_get_market_structured(),
+    }
+    structured = kalshi_documented_structured_fields(payload)
+    layer = classify_kalshi_contract_rule_layer(payload, layer="get_market", fetch_status="ok")
+    dumped = str(structured) + str(layer)
+    assert STRUCTURED_TARGET_ID not in dumped
+    assert BETIS not in dumped
+    assert GETAFE not in dumped
+    assert GENERIC_SOCCERGAME_TEMPLATE not in dumped
+    assert structured["strike_type"] == "structured"
+    assert structured["market_type"] == "binary"
+    assert structured["custom_strike_present"] is True
+    assert structured["custom_strike_keys"] == ["soccer_team"]
+    assert structured["custom_strike_value_types"] == ["uuid_string"]
+    assert structured["custom_strike_entity_target"] is True
+    assert structured["custom_strike_selects_result_scope"] is False
+    assert structured["functional_strike_present"] is False
+    assert structured["functional_strike_shape"] == "absent"
+    assert structured["primary_participant_key_present"] is True
+    assert structured["yes_sub_title_scope_selectors"]["contains_explicit_regulation_selector"] is False
+    assert structured["yes_sub_title_scope_selectors"]["contains_explicit_extra_time_selector"] is False
+    assert structured["yes_sub_title_scope_selectors"]["contains_explicit_full_match_selector"] is False
+    assert structured["product_metadata_keys"] == ["competition", "competition_scope"]
+    assert structured["product_metadata_value_classes"]["competition"] == "competition_code"
+    assert (
+        structured["product_metadata_value_classes"]["competition_scope"]
+        == "series_or_product_family_not_result_scope"
+    )
+    assert "home_team_id" in structured["milestone_detail_keys"]
+    assert structured["milestone_detail_value_types"]["home_team_id"] == "uuid_string"
+    assert structured["documented_result_scope_selector"] == "none"
+    assert kalshi_documented_result_scope_fingerprint(payload) is None
+    presence = kalshi_documented_selector_presence(payload)
+    assert presence["strike_type"] is True
+    assert presence["custom_strike"] is True
+    assert presence["market_type"] is True
+    assert presence["functional_strike"] is False
+    assert presence["primary_participant_key"] is True
+    assert "yes_sub_title" not in presence
+    assert layer["fingerprint_economically_complete"] is False
+    assert layer["fingerprint_uses_rule_precedence"] is False
+    by_field = {item["field"]: item for item in layer["fields"]}
+    assert by_field["rules_primary"]["looks_like_generic_contract_template"] is True
+    assert by_field["rules_secondary"]["contains_payout_criterion"] is True
+
+
+def test_title_or_yes_sub_title_scope_words_do_not_complete_settlement() -> None:
+    payload = {
+        "rules_primary": GENERIC_SOCCERGAME_TEMPLATE,
+        "yes_sub_title": "Betis regulation time",
+        "subtitle": "full match including extra time",
+        "strike_type": "structured",
+        "custom_strike": {"soccer_team": STRUCTURED_TARGET_ID},
+        "market_type": "binary",
+    }
+    flags = kalshi_documented_structured_fields(payload)
+    assert flags["yes_sub_title_scope_selectors"]["contains_explicit_regulation_selector"] is True
+    assert flags["subtitle_scope_selectors"]["contains_explicit_full_match_selector"] is True
+    assert flags["subtitle_scope_selectors"]["contains_explicit_extra_time_selector"] is True
+    assert kalshi_documented_result_scope_fingerprint(payload) is None
+    fingerprint = _kalshi_settlement(
+        payload,
+        series=KALSHI_GAME_SERIES,
+        family=MarketFamily.MATCH_RESULT,
+        period=FootballPeriod.FULL_TIME,
+        line=None,
+    )
+    assert fingerprint.scope is SettlementScope.UNKNOWN
+    dumped = str(flags)
+    assert "Betis regulation time" not in dumped
+    assert STRUCTURED_TARGET_ID not in dumped
+
+
+def test_complete_primary_alone_still_maps_without_template_secondary() -> None:
+    fingerprint = _kalshi_settlement(
+        {"rules_primary": REGULATION, "ticker": "KXEPLGAME-BET"},
+        series=KALSHI_GAME_SERIES,
+        family=MarketFamily.MATCH_RESULT,
+        period=FootballPeriod.FULL_TIME,
+        line=None,
+    )
+    assert fingerprint.scope is SettlementScope.REGULATION_TIME
+    assert fingerprint.is_economically_complete() is True
+    catalog_blocked = resolve_kalshi_settlement_from_rule_fields(
+        REGULATION, SCOPE_CATALOG_SECONDARY
+    )
+    assert catalog_blocked == (SettlementScope.UNKNOWN, None, None)
+    contradictory = resolve_kalshi_settlement_from_rule_fields(
+        REGULATION, CONTRADICTORY_SECONDARY
+    )
+    assert contradictory == (SettlementScope.UNKNOWN, None, None)
+
+
+def test_extra_time_and_unknown_structured_selectors_stay_fail_closed() -> None:
+    extra_time = _kalshi_settlement(
+        {
+            "rules_primary": "Resolves including extra time without penalties.",
+            "strike_type": "structured",
+            "custom_strike": {"soccer_team": STRUCTURED_TARGET_ID},
+            "market_type": "binary",
+        },
+        series=KALSHI_GAME_SERIES,
+        family=MarketFamily.MATCH_RESULT,
+        period=FootballPeriod.FULL_TIME,
+        line=None,
+    )
+    assert extra_time.scope is SettlementScope.INCLUDING_EXTRA_TIME
+    unknown_selector = kalshi_documented_result_scope_fingerprint(
+        {
+            "strike_type": "custom",
+            "market_type": "scalar",
+            "custom_strike": {"result_scope": "regulation_time"},
+        }
+    )
+    assert unknown_selector is None
+
+
+@pytest.mark.asyncio
+async def test_live_shaped_template_plus_structured_get_market_stays_incomplete() -> None:
+    kalshi = BetisKalshiGetMarket(
+        rules_text=GENERIC_SOCCERGAME_TEMPLATE,
+        secondary_text=GENERIC_SOCCERGAME_TEMPLATE,
+        structured_fields=_live_shaped_get_market_structured(),
+    )
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
+    assert census.equivalent_market_pairs == 0
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
+    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
+    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    assert sorted(kalshi.get_market_calls) == sorted(_betis_kalshi_tickers())
+    rendered = render_forensics(forensics)
+    assert GENERIC_SOCCERGAME_TEMPLATE not in rendered
+    assert STRUCTURED_TARGET_ID not in rendered
+    get_layer = next(
+        layer
+        for item in forensics.kalshi_rule_layers
+        for layer in item.layers
+        if layer.layer == "get_market"
+    )
+    assert get_layer.structured_fields["strike_type"] == "structured"
+    assert get_layer.structured_fields["market_type"] == "binary"
+    assert get_layer.structured_fields["custom_strike_entity_target"] is True
+    assert get_layer.structured_fields["custom_strike_selects_result_scope"] is False
+    assert get_layer.structured_fields["documented_result_scope_selector"] == "none"
+    assert get_layer.fingerprint_economically_complete is False
+    primary = next(field for field in get_layer.fields if field.field == "rules_primary")
+    assert primary.looks_like_generic_contract_template is True
+    assert primary.contains_result_scope_placeholder is True
+    assert "generic_template=True" in rendered
+    assert "structured_fields=" in rendered
+
+
+@pytest.mark.asyncio
+async def test_hot_and_universe_agree_on_structured_template_payload() -> None:
+    structured = _live_shaped_get_market_structured()
+    universe_kalshi = BetisKalshiGetMarket(
+        rules_text=GENERIC_SOCCERGAME_TEMPLATE,
+        secondary_text=GENERIC_SOCCERGAME_TEMPLATE,
+        market_rules_text=GENERIC_SOCCERGAME_TEMPLATE,
+        market_secondary_text=GENERIC_SOCCERGAME_TEMPLATE,
+        rules_on_markets=True,
+        structured_fields=structured,
+    )
+    universe_report, universe_census, universe_forensics = await _scan(
+        BetisMatchbook(),
+        EmptyPolymarket(),
+        universe_kalshi,
+    )
+    hot_kalshi = BetisKalshiGetMarket(
+        rules_text=GENERIC_SOCCERGAME_TEMPLATE,
+        secondary_text=GENERIC_SOCCERGAME_TEMPLATE,
+        market_rules_text=GENERIC_SOCCERGAME_TEMPLATE,
+        market_secondary_text=GENERIC_SOCCERGAME_TEMPLATE,
+        rules_on_markets=True,
+        structured_fields=structured,
+    )
+    hot_report, hot_census, hot_forensics = await _hot_from_same_payload(
+        universe_report, kalshi=hot_kalshi
+    )
+    assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics) == (
+        _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
+    )
+    assert universe_census.equivalent_market_pairs == 0
+    assert universe_forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
