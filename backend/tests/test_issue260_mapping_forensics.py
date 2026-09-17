@@ -39,7 +39,12 @@ from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
-from sports_hedge.normalization.venues import KalshiNormalizer, MatchbookNormalizer, PolymarketNormalizer
+from sports_hedge.normalization.venues import (
+    KalshiNormalizer,
+    MatchbookNormalizer,
+    PolymarketNormalizer,
+    merge_kalshi_contract_rules,
+)
 from sports_hedge.paper.models import FxRateSnapshot
 from venue_cost_helpers import matchbook_polymarket_costs
 
@@ -151,10 +156,28 @@ class EmptyPolymarket:
         return {"asset_id": "x", "bids": [], "asks": []}
 
 
+AMBIGUOUS = "Winner of the match."
+
+
+def _betis_kalshi_tickers() -> list[str]:
+    return [str(item["ticker"]) for item in BetisKalshi()._markets()]
+
+
 class BetisKalshi:
-    def __init__(self, *, rules_on_event: bool = False, rules_on_markets: bool = False) -> None:
-        self.rules_on_event = rules_on_event
-        self.rules_on_markets = rules_on_markets
+    def __init__(
+        self,
+        *,
+        rules_on_event: bool = False,
+        rules_on_markets: bool = False,
+        event_rules_text: str | None = None,
+        market_rules_text: str | None = None,
+    ) -> None:
+        self.event_rules_text = (
+            REGULATION if rules_on_event and event_rules_text is None else event_rules_text
+        )
+        self.market_rules_text = (
+            REGULATION if rules_on_markets and market_rules_text is None else market_rules_text
+        )
 
     def _markets(self) -> list[dict[str, Any]]:
         ticker = "KXEPLGAME-26SEP20BETGET"
@@ -166,8 +189,8 @@ class BetisKalshi:
                 "title": f"{BETIS} vs {GETAFE}",
                 "yes_sub_title": subtitle,
             }
-            if self.rules_on_markets:
-                item["rules_primary"] = REGULATION
+            if self.market_rules_text:
+                item["rules_primary"] = self.market_rules_text
             markets.append(item)
         return markets
 
@@ -182,8 +205,8 @@ class BetisKalshi:
             "product_metadata": {"competition": "EPL", "competition_scope": "Game"},
             "markets": self._markets(),
         }
-        if self.rules_on_event:
-            event["rules_primary"] = REGULATION
+        if self.event_rules_text:
+            event["rules_primary"] = self.event_rules_text
         return {"events": [event]}
 
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
@@ -430,13 +453,30 @@ async def test_live_shaped_kalshi_event_rules_maps_ordinary_1x2() -> None:
 
 
 class BetisKalshiGetMarket(BetisKalshi):
-    def __init__(self, *, rules_text: str = REGULATION) -> None:
-        super().__init__(rules_on_event=False, rules_on_markets=False)
+    def __init__(
+        self,
+        *,
+        rules_text: str = REGULATION,
+        event_rules_text: str | None = None,
+        market_rules_text: str | None = None,
+        fail_tickers: tuple[str, ...] = (),
+        rules_on_event: bool = False,
+        rules_on_markets: bool = False,
+    ) -> None:
+        super().__init__(
+            rules_on_event=rules_on_event,
+            rules_on_markets=rules_on_markets,
+            event_rules_text=event_rules_text,
+            market_rules_text=market_rules_text,
+        )
         self.rules_text = rules_text
+        self.fail_tickers = {str(item) for item in fail_tickers}
         self.get_market_calls: list[str] = []
 
     async def get_market(self, ticker: str) -> dict[str, Any]:
         self.get_market_calls.append(str(ticker))
+        if str(ticker) in self.fail_tickers:
+            raise RuntimeError(f"Kalshi get_market failed for {ticker}")
         nested = next((item for item in self._markets() if item.get("ticker") == ticker), {})
         return {
             **nested,
@@ -464,10 +504,124 @@ async def test_get_market_empty_or_ambiguous_rules_stay_incomplete() -> None:
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), empty)
     assert census.equivalent_market_pairs == 0
     assert "incomplete_settlement" in forensics.candidate_rejection_histogram
-    ambiguous = BetisKalshiGetMarket(rules_text="Winner of the match.")
+    ambiguous = BetisKalshiGetMarket(rules_text=AMBIGUOUS)
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), ambiguous)
     assert census.equivalent_market_pairs == 0
     assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+
+
+def test_merge_prefers_get_market_rules_over_ambiguous_list_text() -> None:
+    target = {"rules_primary": AMBIGUOUS, "title": f"{BETIS} vs {GETAFE}"}
+    assert merge_kalshi_contract_rules(target, {"rules_primary": REGULATION, "title": "ignored"})
+    assert target["rules_primary"] == REGULATION
+    assert target["title"] == f"{BETIS} vs {GETAFE}"
+    assert merge_kalshi_contract_rules(target, {"rules_primary": ""}) is False
+    assert target["rules_primary"] == REGULATION
+
+
+def test_match_result_tickers_fetch_only_when_settlement_incomplete() -> None:
+    normalizer = KalshiNormalizer()
+    event_payload = {
+        "event_ticker": "KXEPLGAME-26SEP20BETGET",
+        "title": f"{BETIS} vs {GETAFE}",
+        "strike_date": KICKOFF.isoformat(),
+        "product_metadata": {"competition": "EPL", "competition_scope": "Game"},
+    }
+    event = normalizer.normalize_event(event_payload, series=KALSHI_GAME_SERIES)
+    nested = BetisKalshi()._markets()
+    missing = normalizer.match_result_tickers_missing_contract_rules(
+        event, nested, series=KALSHI_GAME_SERIES, event_payload=event_payload
+    )
+    assert missing == _betis_kalshi_tickers()
+
+    event_payload["rules_primary"] = AMBIGUOUS
+    ambiguous_event = normalizer.match_result_tickers_missing_contract_rules(
+        event, nested, series=KALSHI_GAME_SERIES, event_payload=event_payload
+    )
+    assert ambiguous_event == _betis_kalshi_tickers()
+
+    event_payload["rules_primary"] = REGULATION
+    complete_event = normalizer.match_result_tickers_missing_contract_rules(
+        event, nested, series=KALSHI_GAME_SERIES, event_payload=event_payload
+    )
+    assert complete_event == []
+
+    complete_nested = [{**item, "rules_primary": REGULATION} for item in nested]
+    complete_market = normalizer.match_result_tickers_missing_contract_rules(
+        event, complete_nested, series=KALSHI_GAME_SERIES, event_payload=event_payload
+    )
+    assert complete_market == []
+
+    ambiguous_nested = [{**item, "rules_primary": AMBIGUOUS} for item in nested]
+    incomplete_nested = normalizer.match_result_tickers_missing_contract_rules(
+        event, ambiguous_nested, series=KALSHI_GAME_SERIES, event_payload=event_payload
+    )
+    assert incomplete_nested == _betis_kalshi_tickers()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_event_rules_plus_get_market_regulation_maps_1x2() -> None:
+    kalshi = BetisKalshiGetMarket(rules_text=REGULATION, event_rules_text=AMBIGUOUS)
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
+    assert census.equivalent_market_pairs == 1
+    assert census.market_family_breakdown.get("match_result") == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 1
+    assert sorted(kalshi.get_market_calls) == sorted(_betis_kalshi_tickers())
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_nested_rules_plus_get_market_regulation_maps_1x2() -> None:
+    kalshi = BetisKalshiGetMarket(rules_text=REGULATION, market_rules_text=AMBIGUOUS)
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
+    assert census.equivalent_market_pairs == 1
+    assert census.market_family_breakdown.get("match_result") == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 1
+    assert sorted(kalshi.get_market_calls) == sorted(_betis_kalshi_tickers())
+
+
+@pytest.mark.asyncio
+async def test_complete_event_or_market_rules_skip_get_market() -> None:
+    event_complete = BetisKalshiGetMarket(rules_text="should-not-be-fetched", rules_on_event=True)
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), event_complete)
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert event_complete.get_market_calls == []
+
+    market_complete = BetisKalshiGetMarket(rules_text="should-not-be-fetched", rules_on_markets=True)
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), market_complete)
+    assert census.equivalent_market_pairs == 1
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
+    assert market_complete.get_market_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_current_and_get_market_rules_stay_incomplete() -> None:
+    event_ambiguous = BetisKalshiGetMarket(rules_text=AMBIGUOUS, event_rules_text=AMBIGUOUS)
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), event_ambiguous)
+    assert census.equivalent_market_pairs == 0
+    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    assert sorted(event_ambiguous.get_market_calls) == sorted(_betis_kalshi_tickers())
+
+    nested_ambiguous = BetisKalshiGetMarket(rules_text=AMBIGUOUS, market_rules_text=AMBIGUOUS)
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), nested_ambiguous)
+    assert census.equivalent_market_pairs == 0
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
+    assert "incomplete_settlement" in forensics.candidate_rejection_histogram
+    assert sorted(nested_ambiguous.get_market_calls) == sorted(_betis_kalshi_tickers())
+
+
+@pytest.mark.asyncio
+async def test_get_market_failure_for_one_ticker_fails_closed() -> None:
+    failed = _betis_kalshi_tickers()[0]
+    kalshi = BetisKalshiGetMarket(rules_text=REGULATION, fail_tickers=(failed,))
+    _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
+    assert census.equivalent_market_pairs == 0
+    assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
+    assert failed in kalshi.get_market_calls
+    assert sorted(kalshi.get_market_calls) == sorted(_betis_kalshi_tickers())
+    assert all(item.comparison_status != "matched_equivalent" for item in forensics.candidates)
 
 
 @pytest.mark.asyncio

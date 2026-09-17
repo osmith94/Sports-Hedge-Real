@@ -397,14 +397,14 @@ class KalshiNormalizer:
         series: dict[str, Any] | None = None,
         event_payload: dict[str, Any] | None = None,
     ) -> list[str]:
-        """Tickers classified as ordinary Match Result with no contract-rule text.
+        """Ordinary Match Result tickers whose current wording is not complete.
 
-        Event-level rules, when present, already complete MATCH_RESULT settlement
-        without a Get Market call. GAME / Opta / series names are not used.
+        Fetches documented Get Market when nested/event rule text is missing or
+        present-but-incomplete (e.g. ``Winner of the match.``). Does not fetch
+        when current market/event wording already classifies to an economically
+        complete settlement fingerprint. GAME / Opta / series names are not used.
         """
 
-        if kalshi_payload_has_rule_text(event_payload):
-            return []
         tickers: list[str] = []
         seen: set[str] = set()
         for payload in payloads:
@@ -419,7 +419,7 @@ class KalshiNormalizer:
                 continue
             if classified.family is not MarketFamily.MATCH_RESULT:
                 continue
-            if kalshi_payload_has_rule_text(payload):
+            if classified.settlement.is_economically_complete():
                 continue
             if classified.ticker in seen:
                 continue
@@ -1063,23 +1063,24 @@ def classify_settlement_wording(text: str) -> tuple[SettlementScope, bool | None
 KALSHI_CONTRACT_RULE_KEYS = ("rules_primary", "rules_secondary", "rules")
 
 
-def kalshi_payload_has_rule_text(payload: dict[str, Any] | None) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    return any(str(payload.get(key) or "").strip() for key in KALSHI_CONTRACT_RULE_KEYS)
-
-
 def merge_kalshi_contract_rules(target: dict[str, Any], source: dict[str, Any] | None) -> bool:
-    """Copy documented contract-rule fields only. Never copies titles or prices."""
+    """Prefer non-empty documented Get Market rule fields for the same ticker.
+
+    Enrichment is only invoked when current nested/event wording is missing or
+    incomplete. Non-empty Get Market ``rules_primary`` / ``rules_secondary`` /
+    ``rules`` replace generic list text such as ``Winner of the match.``.
+    Empty Get Market fields are not written. Titles and prices are never copied.
+    """
 
     if not isinstance(source, dict):
         return False
     applied = False
     for key in KALSHI_CONTRACT_RULE_KEYS:
-        if str(target.get(key) or "").strip():
-            continue
         value = str(source.get(key) or "").strip()
         if not value:
+            continue
+        current = str(target.get(key) or "").strip()
+        if current == value:
             continue
         target[key] = value
         applied = True

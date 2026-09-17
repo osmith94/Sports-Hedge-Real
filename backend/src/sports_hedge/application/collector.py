@@ -2584,9 +2584,12 @@ class ReadOnlyCrossVenueCollector:
     ) -> None:
         """Fetch documented Get Market rules for ordinary Match Result only.
 
-        Nested list payloads often omit `rules_primary`. Do not call this for
-        the full Kalshi book, and do not infer regulation from GAME/Opta names.
-        Missing or empty rules stay incomplete.
+        Nested list payloads often omit `rules_primary` or carry generic text
+        that does not complete settlement. Fetch only ordinary Match Result
+        tickers whose current wording is missing or incomplete. Prefer
+        documented Get Market rule fields for that ticker. Do not infer
+        regulation from GAME/Opta names. Missing or still-ambiguous rules stay
+        incomplete.
         """
 
         getter = getattr(self.kalshi, "get_market", None)
