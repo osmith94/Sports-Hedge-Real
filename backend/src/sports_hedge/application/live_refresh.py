@@ -22,6 +22,7 @@ from sports_hedge.application.universe_checkpoint import (
     SWEEP_EVALUATED,
     SWEEP_FINAL_FAILED,
     SWEEP_PENDING,
+    SWEEP_RUNNING,
     SWEEP_RETRY_WAIT,
     SWEEP_SKIPPED_UNSUPPORTED,
     SWEEP_TERMINAL_STATES,
@@ -599,7 +600,7 @@ class LiveRefreshCoordinator:
                 skip_event_ids,
                 universe_generation_id,
                 generation_resume,
-            ) = self._universe_plan_resume_state_unlocked()
+            ) = self._universe_plan_resume_state_unlocked(evaluated)
             snapshot = (
                 dict(self._universe_discovery_snapshot)
                 if self._universe_discovery_snapshot
@@ -1507,6 +1508,7 @@ class LiveRefreshCoordinator:
 
     def _universe_plan_resume_state_unlocked(
         self,
+        now: datetime | None = None,
     ) -> tuple[str | None, list[str], int, bool]:
         """Bind skip/cursor to the open generation. Closed gens plan empty resume."""
 
@@ -1516,7 +1518,7 @@ class LiveRefreshCoordinator:
         if progress_id is not None and progress_id != self._universe_generation_id:
             return (None, [], self._universe_generation_id + 1, False)
         plan_id = self._universe_generation_id if self._universe_generation_id > 0 else 1
-        skip = self._universe_skip_ids_unlocked()
+        skip = self._universe_skip_ids_unlocked(now)
         return (
             self._universe_cursor,
             skip,
@@ -1524,10 +1526,10 @@ class LiveRefreshCoordinator:
             True,
         )
 
-    def _universe_skip_ids_unlocked(self) -> list[str]:
+    def _universe_skip_ids_unlocked(self, now: datetime | None = None) -> list[str]:
         if self._universe_work:
             skip: list[str] = []
-            now = self.now()
+            now = now or self.now()
             for canonical_id, unit in self._universe_work.items():
                 if unit.state in SWEEP_TERMINAL_STATES:
                     skip.append(canonical_id)

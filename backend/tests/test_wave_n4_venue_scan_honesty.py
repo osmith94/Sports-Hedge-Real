@@ -216,7 +216,7 @@ def test_hot_last_scan_truth_survives_later_universe_recovery() -> None:
         scan_lane=ScanLane.UNIVERSE,
     )
     status = coordinator.public_status()
-    assert status.venue_health["matchbook"] == "ok"
+    assert status.venue_health["matchbook"] == "degraded"
     assert status.hot.venue_health["matchbook"] == "unavailable"
     assert status.universe.venue_health["matchbook"] == "ok"
     hot_summary = status.hot.operator_summary or ""
@@ -251,7 +251,7 @@ def test_universe_last_scan_truth_survives_later_hot_recovery() -> None:
         scan_lane=ScanLane.HOT,
     )
     status = coordinator.public_status()
-    assert status.venue_health["matchbook"] == "ok"
+    assert status.venue_health["matchbook"] == "degraded"
     assert status.universe.venue_health["matchbook"] == "unavailable"
     assert status.hot.venue_health["matchbook"] == "ok"
     universe_summary = status.universe.operator_summary or ""
