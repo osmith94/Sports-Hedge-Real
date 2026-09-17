@@ -1073,6 +1073,8 @@ class PaperOperationsService:
         if current.data_kind == "demo_fixture_replay":
             provenance = DataProvenance.FIXTURE_DEMO
         bound_autofill = self.watchlist.has_active_bound_attempt(opportunity_id)
+        demo_frozen_snapshot = current.data_kind == "demo_fixture_replay"
+        snapshot_bound = bound_autofill or demo_frozen_snapshot
         if not self.watchlist.allows_bound_snapshot_entry(
             current, bound_autofill=bound_autofill
         ):
@@ -1096,7 +1098,7 @@ class PaperOperationsService:
             paper_entry_max_quote_age_ms=max_age,
             quote_captured_at=plan.quote_captured_at,
             legs=plan.legs,
-            snapshot_bound=bound_autofill,
+            snapshot_bound=snapshot_bound,
         )
         plan = plan.model_copy(
             update={
@@ -1179,7 +1181,7 @@ class PaperOperationsService:
             fill_legs,
             fill_config,
             opportunity_id=opportunity_id,
-            now=plan.decision_at if bound_autofill else simulated_at,
+            now=plan.decision_at if snapshot_bound else simulated_at,
         )
         fills = _with_stable_fill_ids(fills, opportunity_id, modes, simulate_external=simulate_external)
         if require_complete and not _complete_opening_fills(fills, opening_legs):
