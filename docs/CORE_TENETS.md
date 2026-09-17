@@ -28,6 +28,7 @@ These files summarize the non-negotiable product principles agreed for Sports He
 16. [`core-tenets/16_EXTERNAL_MANUAL_LEGS.md`](core-tenets/16_EXTERNAL_MANUAL_LEGS.md) — opportunities with a required non-automated venue leg must hard-stop for explicit external/manual confirmation, keep capital separate, and revalidate the remaining hedge before proceeding.
 17. [`core-tenets/17_HISTORICAL_MARKET_MOVEMENT_CONTEXT.md`](core-tenets/17_HISTORICAL_MARKET_MOVEMENT_CONTEXT.md) — large or rapid market moves should be interpreted against comparable historical team/regime/league movements, with explicit sample size, uncertainty and the ability to report weak/no relationship or no historical precedent.
 18. [`core-tenets/18_EXECUTION_ATOMICITY_AND_FILL_RISK.md`](core-tenets/18_EXECUTION_ATOMICITY_AND_FILL_RISK.md) — one-leg-filled / remaining-leg-failed exposure is a principal production risk; executable opening liquidity is current taker depth we can consume now, not passive/maker quotes; real execution requires fresh revalidation after every fill, hard unhedged-exposure controls, shadow execution evidence and staged micro-live validation before treasury scale increases.
+19. [`core-tenets/19_CONCURRENT_HOT_AND_UNIVERSE_SCANNING.md`](core-tenets/19_CONCURRENT_HOT_AND_UNIVERSE_SCANNING.md) — HOT and UNIVERSE are independent concurrent scanner workers: HOT refreshes priority fixtures rapidly while UNIVERSE completes a durable full sweep in the background; HOT may receive provider-request priority but must never terminate, reset or restart UNIVERSE, and UNIVERSE must stream results and promotions incrementally.
 
 ## Source specifications
 
@@ -40,7 +41,7 @@ These tenets should be read alongside:
 - `SCENARIO_RESPONSE_PROFILES.md`
 - `MANAGER_ERA_AND_REGIME_CONTEXT.md`
 - `PRIORITY_ARB_ALERTS.md`
-- `DUAL_CADENCE_SCANNER.md` — HOT/UNIVERSE scan scheduler and Tracked current-state contract (Issue #158; architect direction accepted, design only until implementation)
+- `DUAL_CADENCE_SCANNER.md` — historical/implementation scanner specification. Core Tenet 19 is authoritative for HOT/UNIVERSE concurrency and supersedes any serialized or yield-to-HOT behaviour that prevents a continuous independent UNIVERSE sweep.
 - future accounting / FX / historical-data specifications
 
 ## Review rule
