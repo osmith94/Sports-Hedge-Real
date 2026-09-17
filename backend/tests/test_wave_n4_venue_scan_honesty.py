@@ -183,14 +183,15 @@ def test_scheduled_then_manual_scan_keeps_named_clocks() -> None:
         )
     )
     status = coordinator.public_status()
-    assert status.venue_health["matchbook"] == "timeout"
+    assert status.venue_health["matchbook"] == "degraded"
     assert "0s ago" not in (status.operator_summary or "")
     assert status.last_completed_at == later
     assert status.hot.last_completed_at == NOW
     hot_summary = status.hot.operator_summary or ""
     assert "completed at 2026-09-16T12:00:00Z" in hot_summary
     assert status.hot.venue_health["matchbook"] == "ok"
-    assert status.venue_health["matchbook"] == "timeout"
+    assert status.universe.venue_health["matchbook"] == "timeout"
+    assert status.venue_health["matchbook"] == "degraded"
 
 
 def test_hot_last_scan_truth_survives_later_universe_recovery() -> None:

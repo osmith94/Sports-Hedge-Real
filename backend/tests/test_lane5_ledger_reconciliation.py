@@ -707,7 +707,7 @@ def test_hanging_provider_does_not_post_phantom_cash(monkeypatch: pytest.MonkeyP
     client = TestClient(app)
     response = client.post("/paper/collect", json={"maximum_execution_risk": 100})
     assert response.status_code == 200
-    assert response.json()["venue_health"]["matchbook"] == "timeout"
+    assert response.json()["venue_health"]["matchbook"] == "discovery_timeout"
     assert _journal_facts(ledger) == before_journals
     after_pools = {
         f"{pool.venue.value}/{pool.native_currency}": (pool.available_cash, pool.locked_capital)

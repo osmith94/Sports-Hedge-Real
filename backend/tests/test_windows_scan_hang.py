@@ -262,7 +262,7 @@ def test_collect_api_returns_degraded_matchbook_and_pm_fixtures(monkeypatch: pyt
     assert elapsed < 3.0
     assert response.status_code == 200
     body = response.json()
-    assert body["venue_health"]["matchbook"] == "timeout"
+    assert body["venue_health"]["matchbook"] == "discovery_timeout"
     assert body["venue_health"]["polymarket"] == "ok"
     assert body["raw_matchbook_events"] == 0
     assert body["raw_polymarket_events"] >= 1
@@ -275,7 +275,7 @@ def test_collect_api_returns_degraded_matchbook_and_pm_fixtures(monkeypatch: pyt
     payload = status.json()
     assert payload["last_completed_at"]
     assert payload["cycle_in_progress"] is False
-    assert payload["venue_health"]["matchbook"] == "timeout"
+    assert payload["venue_health"]["matchbook"] == "discovery_timeout"
     assert payload["discovered_fixtures"]
     get_live_refresh_coordinator().reset()
 

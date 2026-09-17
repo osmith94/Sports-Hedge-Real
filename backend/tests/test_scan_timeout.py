@@ -82,7 +82,7 @@ async def test_hung_matchbook_does_not_block_healthy_polymarket_fixtures() -> No
         )
         elapsed = monotonic() - started
         assert elapsed < 2.5
-        assert report.venue_health["matchbook"] == "timeout"
+        assert report.venue_health["matchbook"] == "discovery_timeout"
         assert report.venue_health["polymarket"] == "ok"
         assert any(item.polymarket_matched for item in report.discovered_fixtures)
         assert any(issue.stage == "list_events" and "timeout" in issue.detail for issue in report.issues)
@@ -115,7 +115,7 @@ async def test_partial_kalshi_timeout_still_returns_polymarket_kalshi_capable_fi
         )
         elapsed = monotonic() - started
         assert elapsed < 2.5
-        assert report.venue_health["kalshi"] == "timeout"
+        assert report.venue_health["kalshi"] == "discovery_timeout"
         assert report.venue_health["polymarket"] == "ok"
         assert report.venue_health["matchbook"] == "ok"
         assert report.discovered_fixtures
@@ -144,7 +144,7 @@ async def test_hung_list_markets_marks_matchbook_degraded_and_keeps_other_venues
         )
         elapsed = monotonic() - started
         assert elapsed < 2.5
-        assert report.venue_health["matchbook"] in {"degraded", "timeout"}
+        assert report.venue_health["matchbook"] in {"degraded", "timeout", "market_timeout"}
         assert report.venue_health["polymarket"] == "ok"
         assert any(item.polymarket_matched for item in report.discovered_fixtures)
         assert any(issue.stage == "list_markets" and "timeout" in issue.detail for issue in report.issues)
@@ -201,7 +201,7 @@ async def test_slow_cluster_markets_still_return_discovered_fixtures() -> None:
         )
         elapsed = monotonic() - started
         assert elapsed < 2.5
-        assert report.venue_health["matchbook"] == "timeout"
+        assert report.venue_health["matchbook"] == "discovery_timeout"
         assert report.discovered_fixtures
         assert any(item.polymarket_matched for item in report.discovered_fixtures)
         assert any(
@@ -363,7 +363,13 @@ async def test_uncooperative_market_cancel_still_returns_partial_report() -> Non
         assert elapsed < 2.0
         assert report.discovered_fixtures
         assert report.venue_health["matchbook"] == "ok"
-        assert report.venue_health["polymarket"] in {"ok", "degraded", "timeout"}
+        assert report.venue_health["polymarket"] in {
+            "ok",
+            "degraded",
+            "timeout",
+            "discovery_timeout",
+            "market_timeout",
+        }
         assert report.scan_diagnostics["provider_cancels"] >= 1
     finally:
         repository.close()
@@ -394,9 +400,9 @@ async def test_sixty_slow_market_clusters_return_partial_before_hard_timeout() -
         elapsed = monotonic() - started
         assert elapsed < hard
         assert elapsed >= cycle - finalisation_reserve_seconds(cycle) - 0.5
-        assert report.venue_health["matchbook"] in {"ok", "degraded", "timeout"}
-        assert report.venue_health["polymarket"] in {"ok", "degraded", "timeout"}
-        assert report.venue_health["kalshi"] in {"ok", "degraded", "timeout"}
+        assert report.venue_health["matchbook"] in {"ok", "degraded", "timeout", "discovery_timeout", "market_timeout"}
+        assert report.venue_health["polymarket"] in {"ok", "degraded", "timeout", "discovery_timeout", "market_timeout"}
+        assert report.venue_health["kalshi"] in {"ok", "degraded", "timeout", "discovery_timeout", "market_timeout"}
         assert len(report.discovered_fixtures) == DEFAULT_MAX_EVENT_PAIRS
         leftovers = [
             item

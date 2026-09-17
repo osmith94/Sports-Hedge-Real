@@ -864,16 +864,46 @@ class LiveRefreshCoordinator:
         """Upsert current-state from a manual collect without moving scheduler dues."""
 
         self._last_report = report
-        self._fixture_state.upsert_from_report(report, scan_lane=ScanLane.UNIVERSE)
+        lane = _coerce_lane(report.scan_lane or ScanLane.UNIVERSE)
+        self._fixture_state.upsert_from_report(report, scan_lane=lane)
         duration_ms = max(
             0, int((report.completed_at - report.started_at).total_seconds() * 1000)
         )
         inventory = self._fixture_state.inventory(report.completed_at)
         _hot_count, universe_count = self._fixture_state.membership_counts(report.completed_at)
+        degraded = any(
+            is_provider_health_failure(value) for value in report.venue_health.values()
+        )
         with self._state_lock:
+            lane_update = {
+                "last_completed_at": report.completed_at,
+                "last_duration_ms": duration_ms,
+                "last_diagnostics": _lane_diagnostics(report),
+                "venue_health": _frozen_venue_health(report.venue_health),
+                "operation_health": dict(report.operation_health or {}),
+                "degraded": (
+                    degraded or self.status.universe.degraded
+                    if lane is ScanLane.UNIVERSE
+                    else degraded or self.status.hot.degraded
+                ),
+                "last_error": None,
+            }
+            if lane is ScanLane.HOT:
+                hot = self.status.hot.model_copy(update=lane_update)
+                universe = self.status.universe
+            else:
+                universe = self.status.universe.model_copy(update=lane_update)
+                hot = self.status.hot
+            any_running = (
+                self._hot_in_progress
+                or self._universe_in_progress
+                or self._manual_hot_in_progress
+            )
             self.status = self.status.model_copy(
                 update={
-                    "cycle_in_progress": False,
+                    "hot": hot,
+                    "universe": universe,
+                    "cycle_in_progress": any_running,
                     "last_completed_at": report.completed_at,
                     "last_duration_ms": duration_ms,
                     "discovery_mode": report.discovery_mode,
@@ -885,10 +915,13 @@ class LiveRefreshCoordinator:
                     "last_issue_count": len(report.issues),
                     "skipped_out_of_scope": report.skipped_out_of_scope,
                     "operator_summary": _combined_operator_summary(
-                        self.status.hot, self.status.universe, universe_count
+                        hot, universe, universe_count
                     ),
                     "config_warnings": report.config_warnings,
-                    "venue_health": report.venue_health,
+                    "venue_health": _merge_top_level_venue_health(
+                        hot.venue_health,
+                        universe.venue_health,
+                    ),
                     "discovered_fixtures": inventory,
                     "last_error": None,
                 }
@@ -1656,6 +1689,7 @@ class LiveRefreshCoordinator:
         """Expose manual HOT activity without claiming a scheduled due slot."""
 
         with self._state_lock:
+            self._manual_hot_in_progress = True
             self._cycle_hot_venues = self._pending_participation.venues_for(ScanLane.HOT)
             self._cycle_enabled_venues = self._cycle_hot_venues
             self.status = self.status.model_copy(
@@ -1805,8 +1839,14 @@ class LiveRefreshCoordinator:
                     "operator_summary": _combined_operator_summary(
                         self.status.hot, self.status.universe, universe_count
                     ),
+                    "venue_health": _merge_top_level_venue_health(
+                        self.status.hot.venue_health,
+                        self.status.universe.venue_health,
+                    ),
                     "provider_access": get_shared_provider_access().snapshot().as_dict(),
-                    "cycle_in_progress": self._hot_in_progress or self._universe_in_progress,
+                    "cycle_in_progress": self._hot_in_progress
+                    or self._universe_in_progress
+                    or self._manual_hot_in_progress,
                 }
             )
             return self.status
