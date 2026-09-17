@@ -63,6 +63,9 @@ describe("dual cadence operator copy", () => {
     assert.match(fastScanCopy(status(), now).detail, /partial \(2 not evaluated\)/);
     assert.doesNotMatch(fastScanCopy(status(), now).detail, /scan_cycle_timeout/);
     assert.match(fullSweepCopy(status(), now).detail, /104 universe/);
+    assert.doesNotMatch(fullSweepCopy(status(), now).detail, /chunk/i);
+    assert.doesNotMatch(fullSweepCopy(status(), now).detail, /HOT next due/);
+    assert.doesNotMatch(fullSweepCopy(status(), now).detail, /until HOT/i);
     const persistFailed = status({
       last_error: null,
       hot: {

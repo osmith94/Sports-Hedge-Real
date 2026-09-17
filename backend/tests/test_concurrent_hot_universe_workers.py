@@ -6,7 +6,7 @@ Deterministic fakes and coordinator barriers. Not owner-live evidence.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from time import monotonic
@@ -29,9 +29,7 @@ from sports_hedge.application.provider_access import (
     HEALTH_DISCOVERY_TIMEOUT,
     HEALTH_WAITING,
     ProviderAccessLayer,
-    get_shared_provider_access,
     reset_shared_provider_access,
-    set_shared_provider_access,
 )
 from sports_hedge.application.scan_lanes import (
     HOT_REASON_SURVEILLANCE,
