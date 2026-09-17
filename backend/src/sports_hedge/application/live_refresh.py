@@ -35,10 +35,23 @@ from sports_hedge.application.lane_venues import (
     last_scan_venue_clause,
     participation_from_lists,
 )
+from sports_hedge.application.fixture_clusters import (
+    cluster_identity_aliases,
+    cluster_member_events,
+)
+from sports_hedge.application.provider_access import (
+    HEALTH_DISCOVERY_TIMEOUT,
+    HEALTH_MARKET_TIMEOUT,
+    get_shared_provider_access,
+)
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
+    WORKER_COMPLETE,
+    WORKER_DEGRADED,
+    WORKER_IDLE,
+    WORKER_RUNNING,
+    WORKER_WAITING,
     ScanLane,
-    universe_chunk_wall_seconds,
 )
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
@@ -90,13 +103,27 @@ class LaneRefreshStatus(BaseModel):
     generation_work_used_s: float = 0
     chunk_last_duration_ms: int | None = Field(default=None, ge=0)
     cycle_in_progress: bool = False
+    worker_state: str = WORKER_IDLE
     last_started_at: datetime | None = None
     last_completed_at: datetime | None = None
     last_duration_ms: int | None = Field(default=None, ge=0)
     next_due_at: datetime | None = None
     fixture_count: int = 0
+    lifecycle_hot_count: int = 0
+    promoted_hot_count: int = 0
     evaluated_count: int = 0
     not_evaluated_count: int = 0
+    discovered_total: int = 0
+    remaining: int = 0
+    matched_fixtures: int = 0
+    equivalent_markets: int = 0
+    near_count: int = 0
+    positive_count: int = 0
+    qualifying_count: int = 0
+    hot_promotions: int = 0
+    last_successful_fixture: str | None = None
+    current_fixture: str | None = None
+    sweep_id: str | None = None
     last_error: str | None = None
     last_diagnostics: dict[str, Any] | None = None
     last_persist_error: str | None = None
@@ -114,6 +141,7 @@ class LaneRefreshStatus(BaseModel):
     venue_warning: str | None = None
     applies_next_cycle: bool = False
     venue_health: dict[str, str] = Field(default_factory=dict)
+    operation_health: dict[str, Any] = Field(default_factory=dict)
 
 
 class LiveRefreshStatus(BaseModel):
@@ -156,6 +184,7 @@ class LiveRefreshStatus(BaseModel):
     )
     venue_participation: LaneVenueParticipation | None = None
     recent_scan_cycles: list[PaperScanCycleRecord] = Field(default_factory=list)
+    provider_access: dict[str, Any] = Field(default_factory=dict)
 
 
 class DualCadencePlan(BaseModel):
@@ -168,6 +197,10 @@ class DualCadencePlan(BaseModel):
     universe_generation_id: int = 0
     generation_resume: bool = False
     known_source_events: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    discovery_snapshot: dict[str, list[dict[str, Any]]] | None = None
+    reuse_discovery: bool = False
+    unbounded_cycle: bool = False
+    sweep_id: str | None = None
     enabled_venues: list[VenueName] = Field(
         default_factory=lambda: list(default_operator_venues())
     )
@@ -175,7 +208,7 @@ class DualCadencePlan(BaseModel):
 
 
 class LiveRefreshCoordinator:
-    """One scheduler with HOT and UNIVERSE lanes. No stacked scanners."""
+    """Independent HOT and UNIVERSE workers with scoped locks (Tenet 19)."""
 
     def __init__(
         self,
@@ -184,8 +217,12 @@ class LiveRefreshCoordinator:
         universe_checkpoint_store: SqliteUniverseCheckpointStore | None = None,
     ) -> None:
         self._lock = asyncio.Lock()
+        self._hot_lock = asyncio.Lock()
+        self._universe_lock = asyncio.Lock()
         self._state_lock = threading.RLock()
         self._task: asyncio.Task[None] | None = None
+        self._hot_task: asyncio.Task[None] | None = None
+        self._universe_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._last_request: dict[str, Any] = {}
         self._last_report: CollectionReport | None = None
@@ -211,6 +248,19 @@ class LiveRefreshCoordinator:
         self._universe_retry_at: datetime | None = None
         self._universe_provider_failures = 0
         self._universe_last_report_snapshot: dict[str, Any] | None = None
+        self._universe_sweep_id: str | None = None
+        self._universe_discovery_snapshot: dict[str, list[dict[str, Any]]] | None = None
+        self._universe_discovered_total = 0
+        self._universe_failed_ids: dict[str, str] = {}
+        self._universe_skipped_ids: dict[str, str] = {}
+        self._universe_last_successful: str | None = None
+        self._universe_current_fixture: str | None = None
+        self._universe_matched_fixtures = 0
+        self._universe_equivalent_markets = 0
+        self._universe_near_count = 0
+        self._universe_positive_count = 0
+        self._universe_qualifying_count = 0
+        self._universe_hot_promotions = 0
         self._universe_checkpoint_store = universe_checkpoint_store
         self._universe_checkpoint_restored = False
         self._venue_store = venue_settings_store
@@ -409,6 +459,19 @@ class LiveRefreshCoordinator:
             self._universe_retry_at = None
             self._universe_provider_failures = 0
             self._universe_last_report_snapshot = None
+            self._universe_sweep_id = None
+            self._universe_discovery_snapshot = None
+            self._universe_discovered_total = 0
+            self._universe_failed_ids = {}
+            self._universe_skipped_ids = {}
+            self._universe_last_successful = None
+            self._universe_current_fixture = None
+            self._universe_matched_fixtures = 0
+            self._universe_equivalent_markets = 0
+            self._universe_near_count = 0
+            self._universe_positive_count = 0
+            self._universe_qualifying_count = 0
+            self._universe_hot_promotions = 0
             self._clear_universe_checkpoint_unlocked()
             self._universe_checkpoint_restored = False
             self._cycle_hot_venues = None
@@ -456,95 +519,92 @@ class LiveRefreshCoordinator:
         now: datetime | None = None,
         settings: Settings | None = None,
     ) -> DualCadencePlan:
+        """Compatibility planner: HOT if due, else UNIVERSE if due.
+
+        The other lane being active is not a reason to idle. Concurrent
+        workers call `plan_hot_tick` / `plan_universe_tick` directly.
+        """
+
+        resolved = settings or get_settings()
+        evaluated = require_aware_instant(now or self.now(), "now")
+        hot_plan = self.plan_hot_tick(now=evaluated, settings=resolved)
+        if hot_plan.lane == ScanLane.HOT.value:
+            return hot_plan
+        universe_plan = self.plan_universe_tick(now=evaluated, settings=resolved)
+        if universe_plan.lane == ScanLane.UNIVERSE.value:
+            return universe_plan
+        return universe_plan if universe_plan.reason else hot_plan
+
+    def plan_hot_tick(
+        self,
+        now: datetime | None = None,
+        settings: Settings | None = None,
+    ) -> DualCadencePlan:
         resolved = settings or get_settings()
         evaluated = require_aware_instant(now or self.now(), "now")
         with self._state_lock:
             self._ensure_due_times_unlocked(evaluated, resolved)
-            if (
-                self._hot_in_progress
-                or self._manual_hot_in_progress
-                or self.status.cycle_in_progress
-            ):
-                return DualCadencePlan(lane="idle", reason="cycle_in_progress")
+            if self._hot_in_progress or self._manual_hot_in_progress:
+                return DualCadencePlan(lane="idle", reason="hot_in_progress")
             next_hot_due = self._next_hot_due
+        hot_due = next_hot_due is not None and evaluated >= next_hot_due
+        hot_scope = self._hot_identity_scope(evaluated, resolved)
+        if hot_due and hot_scope:
+            return self._hot_plan(hot_scope, resolved, reason="hot_due")
+        if hot_due:
+            return DualCadencePlan(lane="idle", reason="hot_scope_empty")
+        return DualCadencePlan(lane="idle", reason="waiting")
+
+    def plan_universe_tick(
+        self,
+        now: datetime | None = None,
+        settings: Settings | None = None,
+    ) -> DualCadencePlan:
+        resolved = settings or get_settings()
+        evaluated = require_aware_instant(now or self.now(), "now")
+        with self._state_lock:
+            self._ensure_due_times_unlocked(evaluated, resolved)
+            if self._universe_in_progress:
+                return DualCadencePlan(lane="idle", reason="universe_in_progress")
             next_universe_due = self._next_universe_due
-            universe_work_used = self._universe_work_used
             universe_generation_started_at = self._universe_generation_started_at
             universe_retry_at = self._universe_retry_at
-            universe_budget_paused = self._universe_budget_paused
             (
                 universe_cursor,
                 skip_event_ids,
                 universe_generation_id,
                 generation_resume,
             ) = self._universe_plan_resume_state_unlocked()
+            snapshot = (
+                dict(self._universe_discovery_snapshot)
+                if self._universe_discovery_snapshot
+                else None
+            )
+            sweep_id = self._universe_sweep_id
             universe_venues = list(self._pending_participation.venues_for(ScanLane.UNIVERSE))
-        hot_due = next_hot_due is not None and evaluated >= next_hot_due
-        hot_scope = self._hot_identity_scope(evaluated, resolved)
-        if hot_due and hot_scope:
-            return self._hot_plan(hot_scope, resolved, reason="hot_due")
         if universe_retry_at is not None and evaluated < universe_retry_at:
             return DualCadencePlan(lane="idle", reason="universe_provider_backoff")
-        if universe_budget_paused:
-            if next_universe_due is None or evaluated < next_universe_due:
-                return DualCadencePlan(lane="idle", reason="universe_budget_paused")
-            with self._state_lock:
-                self._refresh_paused_universe_window_unlocked()
-                universe_work_used = self._universe_work_used
-                universe_generation_started_at = self._universe_generation_started_at
-                (
-                    universe_cursor,
-                    skip_event_ids,
-                    universe_generation_id,
-                    generation_resume,
-                ) = self._universe_plan_resume_state_unlocked()
-        if universe_generation_started_at is not None:
-            universe_due = universe_work_used < float(
-                resolved.paper_scan_universe_generation_budget_seconds
-            )
-        else:
-            universe_due = next_universe_due is not None and evaluated >= next_universe_due
-        if universe_due:
-            budget = float(resolved.paper_scan_universe_generation_budget_seconds)
-            remaining = (
-                budget - universe_work_used
-                if universe_generation_started_at is not None
-                else budget
-            )
-            if remaining <= 0:
-                return DualCadencePlan(lane="idle", reason="universe_budget_paused")
-            hot_cadence = timedelta(seconds=resolved.paper_live_refresh_hot_interval_seconds)
-            next_hot = next_hot_due or (evaluated + hot_cadence)
-            if not hot_scope and next_hot <= evaluated:
-                # Empty HOT must not starve generation-0 / empty-scope UNIVERSE.
-                next_hot = evaluated + hot_cadence
-            chunk_wall = universe_chunk_wall_seconds(
-                now=evaluated,
-                next_hot_due=next_hot,
-                remaining_generation_budget=remaining,
-                safety_margin_seconds=float(
-                    resolved.paper_universe_hot_yield_safety_margin_seconds
-                ),
-            )
-            if chunk_wall is None:
-                return DualCadencePlan(lane="idle", reason="yield_to_hot")
-            collector_timeout = chunk_wall - SCAN_CYCLE_RETURN_GRACE_SECONDS
-            if collector_timeout <= 0:
-                return DualCadencePlan(lane="idle", reason="chunk_below_grace")
-            return DualCadencePlan(
-                lane="universe",
-                collector_timeout_seconds=collector_timeout,
-                coordinator_timeout_seconds=chunk_wall,
-                resume_cursor=universe_cursor,
-                skip_event_ids=skip_event_ids,
-                universe_generation_id=universe_generation_id,
-                generation_resume=generation_resume,
-                enabled_venues=universe_venues,
-                reason="universe_chunk",
-            )
-        if hot_due:
-            return self._hot_plan(hot_scope, resolved, reason="hot_due")
-        return DualCadencePlan(lane="idle", reason="waiting")
+        universe_due = universe_generation_started_at is not None or (
+            next_universe_due is not None and evaluated >= next_universe_due
+        )
+        if not universe_due:
+            return DualCadencePlan(lane="idle", reason="waiting")
+        reuse = bool(snapshot) and generation_resume
+        return DualCadencePlan(
+            lane=ScanLane.UNIVERSE.value,
+            collector_timeout_seconds=None,
+            coordinator_timeout_seconds=None,
+            resume_cursor=universe_cursor,
+            skip_event_ids=skip_event_ids,
+            universe_generation_id=universe_generation_id,
+            generation_resume=generation_resume,
+            discovery_snapshot=snapshot,
+            reuse_discovery=reuse,
+            unbounded_cycle=True,
+            sweep_id=sweep_id,
+            enabled_venues=universe_venues,
+            reason="universe_sweep",
+        )
 
     def manual_hot_plan(
         self,
@@ -594,8 +654,9 @@ class LiveRefreshCoordinator:
         now: datetime | None = None,
         settings: Settings | None = None,
     ) -> float:
-        plan = self.plan_tick(now=now, settings=settings)
-        if plan.lane != "idle":
+        hot = self.plan_hot_tick(now=now, settings=settings)
+        universe = self.plan_universe_tick(now=now, settings=settings)
+        if hot.lane != "idle" or universe.lane != "idle":
             return 0.0
         evaluated = require_aware_instant(now or self.now(), "now")
         candidates: list[float] = []
@@ -603,10 +664,7 @@ class LiveRefreshCoordinator:
             candidates.append((self._next_hot_due - evaluated).total_seconds())
         if self._universe_retry_at is not None:
             candidates.append((self._universe_retry_at - evaluated).total_seconds())
-        include_universe_due = (
-            self._universe_generation_started_at is None or self._universe_budget_paused
-        )
-        if include_universe_due and self._next_universe_due is not None:
+        if self._universe_generation_started_at is None and self._next_universe_due is not None:
             candidates.append((self._next_universe_due - evaluated).total_seconds())
         if not candidates:
             return float(self.status.interval_seconds)
@@ -616,10 +674,13 @@ class LiveRefreshCoordinator:
         return self._next_universe_due is not None and self._universe_generation_id == 0
 
     def _universe_generation_open(self, now: datetime, settings: Settings) -> bool:
+        del settings
         if self._universe_generation_started_at is not None:
-            budget = float(settings.paper_scan_universe_generation_budget_seconds)
-            return self._universe_work_used < budget
+            return True
         return self._next_universe_due is not None and now >= self._next_universe_due
+
+    def _lane_lock(self, lane: ScanLane) -> asyncio.Lock:
+        return self._hot_lock if lane is ScanLane.HOT else self._universe_lock
 
     async def run_cycle(
         self,
@@ -630,12 +691,15 @@ class LiveRefreshCoordinator:
     ) -> CollectionReport:
         settings = get_settings()
         lane = _coerce_lane(scan_lane)
-        timeout = float(
-            settings.paper_scan_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
-            if timeout_seconds is None
-            else timeout_seconds
-        )
-        async with self._lock:
+        if timeout_seconds is None and lane is ScanLane.HOT:
+            timeout: float | None = float(
+                settings.paper_scan_hot_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
+            )
+        elif timeout_seconds is None:
+            timeout = None
+        else:
+            timeout = float(timeout_seconds)
+        async with self._lane_lock(lane):
             started = self.now()
             self._mark_lane_started(lane, started)
             try:
@@ -644,7 +708,11 @@ class LiveRefreshCoordinator:
                 return report
             except TimeoutError as exc:
                 finished = self.now()
-                message = f"scan_cycle_timeout after {timeout:g}s"
+                message = (
+                    f"scan_cycle_timeout after {timeout:g}s"
+                    if timeout is not None
+                    else "scan_cycle_timeout"
+                )
                 self._mark_lane_error(lane, started, finished, message)
                 raise ScanCycleTimeout(message) from exc
             except Exception as exc:
@@ -652,7 +720,12 @@ class LiveRefreshCoordinator:
                 self._mark_lane_error(lane, started, finished, str(exc))
                 raise
             finally:
-                if self.status.cycle_in_progress:
+                lane_busy = (
+                    self.status.hot.cycle_in_progress
+                    if lane is ScanLane.HOT
+                    else self.status.universe.cycle_in_progress
+                )
+                if lane_busy:
                     finished = self.now()
                     self._mark_lane_error(
                         lane,
@@ -661,14 +734,23 @@ class LiveRefreshCoordinator:
                         self.status.last_error or "scan_cycle_abandoned",
                     )
 
-    def scheduled_collection_active(self) -> bool:
+    def scheduled_hot_active(self) -> bool:
         return (
-            self._lock.locked()
-            or self.status.cycle_in_progress
+            self._hot_lock.locked()
             or self._hot_in_progress
-            or self._universe_in_progress
             or self._manual_hot_in_progress
+            or self.status.hot.cycle_in_progress
         )
+
+    def scheduled_universe_active(self) -> bool:
+        return (
+            self._universe_lock.locked()
+            or self._universe_in_progress
+            or self.status.universe.cycle_in_progress
+        )
+
+    def scheduled_collection_active(self) -> bool:
+        return self.scheduled_hot_active() or self.scheduled_universe_active()
 
     def explicit_collect_timeout_seconds(self, settings: Settings | None = None) -> float:
         """Coordinator envelope for manual diagnostic collect.
@@ -695,8 +777,8 @@ class LiveRefreshCoordinator:
 
         if self._manual_hot_in_progress:
             raise ExplicitCollectBusy("manual HOT refresh in progress")
-        if self.scheduled_collection_active():
-            raise ExplicitCollectBusy("scheduled scan in progress")
+        if self.scheduled_hot_active():
+            raise ExplicitCollectBusy("HOT scan in progress")
         settings = get_settings()
         timeout = float(
             settings.paper_scan_hot_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
@@ -707,9 +789,9 @@ class LiveRefreshCoordinator:
             self._manual_hot_in_progress = True
         started = self.now()
         try:
-            async with self._lock:
-                if self._hot_in_progress or self._universe_in_progress:
-                    raise ExplicitCollectBusy("scheduled scan in progress")
+            async with self._hot_lock:
+                if self._hot_in_progress:
+                    raise ExplicitCollectBusy("HOT scan in progress")
                 self._mark_manual_hot_started(started)
                 try:
                     report = await _await_collection_runner(runner, timeout)
@@ -739,7 +821,7 @@ class LiveRefreshCoordinator:
                     )
                     raise
                 finally:
-                    if self.status.cycle_in_progress:
+                    if self.status.hot.cycle_in_progress:
                         self._mark_lane_error(
                             ScanLane.HOT,
                             started,
@@ -756,12 +838,12 @@ class LiveRefreshCoordinator:
     async def run_explicit_collect(self, runner) -> CollectionReport:
         """Manual diagnostic collect. Does not own HOT/UNIVERSE generation progress."""
 
-        if self.scheduled_collection_active():
-            raise ExplicitCollectBusy("scheduled scan in progress")
+        if self.scheduled_universe_active():
+            raise ExplicitCollectBusy("UNIVERSE scan in progress")
         timeout = self.explicit_collect_timeout_seconds()
-        async with self._lock:
-            if self._hot_in_progress or self._universe_in_progress or self.status.cycle_in_progress:
-                raise ExplicitCollectBusy("scheduled scan in progress")
+        async with self._universe_lock:
+            if self._universe_in_progress or self.status.universe.cycle_in_progress:
+                raise ExplicitCollectBusy("UNIVERSE scan in progress")
             self._cycle_universe_venues = self._pending_participation.venues_for(
                 ScanLane.UNIVERSE
             )
@@ -839,8 +921,10 @@ class LiveRefreshCoordinator:
             is_provider_health_failure(value) for value in report.venue_health.values()
         )
         hot_count = 0
+        lifecycle_hot = 0
+        promoted_hot = 0
         if lane is ScanLane.HOT:
-            hot_count, _universe_count = self._fixture_state.membership_counts(
+            hot_count, lifecycle_hot, promoted_hot = self._fixture_state.hot_membership_breakdown(
                 report.completed_at,
                 hot_horizon=timedelta(minutes=get_settings().paper_hot_pre_kickoff_horizon_minutes),
                 post_kickoff_unknown_horizon=timedelta(
@@ -863,13 +947,17 @@ class LiveRefreshCoordinator:
                                 "evaluated_count": evaluated_n,
                                 "not_evaluated_count": leftover_n,
                                 "fixture_count": hot_count,
+                                "lifecycle_hot_count": lifecycle_hot,
+                                "promoted_hot_count": promoted_hot,
                                 "degraded": degraded,
+                                "worker_state": WORKER_DEGRADED if degraded else WORKER_IDLE,
                                 "last_error": None,
                                 "last_persist_error": None,
                                 "persist_ok": None,
                                 "last_diagnostics": _lane_diagnostics(report),
                                 "next_due_at": self._next_hot_due,
                                 "venue_health": _frozen_venue_health(report.venue_health),
+                                "operation_health": dict(report.operation_health or {}),
                                 "operator_summary": _hot_operator_summary(
                                     report.completed_at,
                                     duration_ms,
@@ -899,9 +987,16 @@ class LiveRefreshCoordinator:
             compat_duration = self.status.hot.last_duration_ms
             if compat_duration is None:
                 compat_duration = self.status.universe.last_duration_ms
+            if lane is ScanLane.HOT:
+                self._hot_in_progress = False
+                self._cycle_hot_venues = None
+            else:
+                self._universe_in_progress = False
+                self._cycle_universe_venues = None
+            any_running = self._hot_in_progress or self._universe_in_progress
             self.status = self.status.model_copy(
                 update={
-                    "cycle_in_progress": False,
+                    "cycle_in_progress": any_running,
                     "last_started_at": self.status.last_started_at
                     or self.status.hot.last_started_at
                     or self.status.universe.last_started_at,
@@ -919,14 +1014,16 @@ class LiveRefreshCoordinator:
                         self.status.hot, self.status.universe, universe_count
                     ),
                     "config_warnings": report.config_warnings,
-                    "venue_health": report.venue_health,
+                    "venue_health": _merge_top_level_venue_health(
+                        self.status.hot.venue_health,
+                        self.status.universe.venue_health,
+                    ),
                     "discovered_fixtures": inventory,
                     "last_error": None,
                     "interval_seconds": self.status.hot.cadence_seconds,
+                    "provider_access": get_shared_provider_access().snapshot().as_dict(),
                 }
             )
-            self._hot_in_progress = False
-            self._universe_in_progress = False
             self._cycle_enabled_venues = None
             self._sync_venue_status_unlocked()
 
@@ -1009,7 +1106,15 @@ class LiveRefreshCoordinator:
         self._universe_provider_failures = 0
         self._universe_retry_at = None
         self._universe_last_report_snapshot = collection_report_snapshot(report)
+        if report.sweep_id:
+            self._universe_sweep_id = report.sweep_id
         completeness = (report.scan_diagnostics or {}).get("completeness")
+        discovered = max(
+            self._universe_discovered_total,
+            int((report.scan_diagnostics or {}).get("clusters_before_resume") or 0),
+            len(report.discovered_fixtures) + leftover_n,
+        )
+        self._universe_discovered_total = discovered
         budget = self._charge_successful_universe_work(
             duration_s,
             report.completed_at,
@@ -1020,17 +1125,30 @@ class LiveRefreshCoordinator:
         work_used = self._status_universe_work_used()
         evaluated_count = self._status_universe_evaluated_count()
         resume_cursor = self._status_universe_cursor()
+        closed = self._universe_generation_started_at is None
+        worker_state = WORKER_COMPLETE if closed else (WORKER_DEGRADED if degraded else WORKER_IDLE)
         self.status = self.status.model_copy(
             update={
                 "universe": self.status.universe.model_copy(
                     update={
                         "cycle_in_progress": False,
+                        "worker_state": worker_state,
+                        "sweep_id": self._universe_sweep_id,
                         "last_completed_at": report.completed_at,
                         "last_duration_ms": duration_ms,
                         "chunk_last_duration_ms": duration_ms,
                         "generation_work_used_s": round(work_used, 3),
                         "evaluated_count": evaluated_count,
                         "not_evaluated_count": leftover_n,
+                        "discovered_total": self._universe_discovered_total,
+                        "remaining": max(0, self._universe_discovered_total - evaluated_count),
+                        "matched_fixtures": self._universe_matched_fixtures,
+                        "equivalent_markets": self._universe_equivalent_markets,
+                        "near_count": self._universe_near_count,
+                        "positive_count": self._universe_positive_count,
+                        "qualifying_count": self._universe_qualifying_count,
+                        "hot_promotions": self._universe_hot_promotions,
+                        "last_successful_fixture": self._universe_last_successful,
                         "fixture_count": universe_count,
                         "degraded": degraded,
                         "last_error": None,
@@ -1040,20 +1158,156 @@ class LiveRefreshCoordinator:
                         "resume_cursor": resume_cursor,
                         "next_due_at": self._next_universe_due,
                         "venue_health": _frozen_venue_health(report.venue_health),
+                        "operation_health": dict(report.operation_health or {}),
                         "operator_summary": _universe_operator_summary(
                             duration_ms,
                             work_used,
                             budget,
-                            self._next_hot_due,
                             universe_count,
                             evaluated_count,
                             leftover_n,
+                            discovered_total=self._universe_discovered_total,
+                            worker_state=worker_state,
                             venue_health=report.venue_health,
                             active_venues=self.status.universe.active_venues,
                         ),
                     }
                 )
             }
+        )
+
+    def record_universe_discovery_snapshot(
+        self, snapshot: dict[str, list[dict[str, Any]]]
+    ) -> None:
+        with self._state_lock:
+            if self._universe_generation_started_at is None:
+                self._ensure_universe_generation(self.now())
+            self._universe_discovery_snapshot = {
+                key: list(value) for key, value in snapshot.items()
+            }
+            discovered = 0
+            for rows in snapshot.values():
+                discovered += len(rows or [])
+            if discovered > self._universe_discovered_total:
+                self._universe_discovered_total = discovered
+            self._persist_universe_checkpoint_unlocked()
+            self.status = self.status.model_copy(
+                update={
+                    "universe": self.status.universe.model_copy(
+                        update={
+                            "sweep_id": self._universe_sweep_id,
+                            "discovered_total": self._universe_discovered_total,
+                            "worker_state": WORKER_RUNNING
+                            if self._universe_in_progress
+                            else self.status.universe.worker_state,
+                        }
+                    )
+                }
+            )
+
+    def record_universe_fixture_progress(
+        self,
+        cluster: Any,
+        fixture: Any,
+        decisions: list[Any],
+        inventory: list[Any],
+    ) -> None:
+        canonical_id = str(getattr(fixture, "canonical_event_id", "") or "")
+        if not canonical_id:
+            return
+        aliases = cluster_identity_aliases(cluster) if cluster is not None else {canonical_id: canonical_id}
+        source_events = []
+        if cluster is not None:
+            source_events = [
+                {
+                    "venue": item.venue.value,
+                    "source_event_id": item.source_event_id,
+                    "raw": item.raw,
+                }
+                for item in cluster_member_events(cluster)
+            ]
+        scanned = getattr(fixture, "last_scanned_at", None) or self.now()
+        before_hot, _before_universe = self._fixture_state.membership_counts(scanned)
+        self._fixture_state.upsert_evaluated_fixture(
+            fixture,
+            markets=inventory,
+            decisions=decisions,
+            aliases=aliases,
+            source_events=source_events,
+            scan_lane=ScanLane.UNIVERSE,
+            now=scanned,
+        )
+        after_hot, _after_universe = self._fixture_state.membership_counts(scanned)
+        promoted_now = after_hot > before_hot
+        inventory_now = self._fixture_state.inventory(scanned)
+        with self._state_lock:
+            if self._universe_generation_started_at is None:
+                self._ensure_universe_generation(scanned)
+            state = str(getattr(fixture, "market_evaluation_state", "") or "")
+            if state == "evaluated":
+                self._universe_evaluated_ids.add(canonical_id)
+                self._universe_cursor = canonical_id
+                self._universe_last_successful = canonical_id
+            elif state == "market_fetch_unavailable":
+                self._universe_failed_ids[canonical_id] = str(
+                    getattr(fixture, "market_evaluation_reason", "") or "provider_failure"
+                )
+            else:
+                self._universe_skipped_ids[canonical_id] = state or "skipped"
+            self._universe_current_fixture = canonical_id
+            if int(getattr(fixture, "matched_equivalent_count", 0) or 0) > 0:
+                self._universe_matched_fixtures += 1
+                self._universe_equivalent_markets += int(
+                    getattr(fixture, "matched_equivalent_count", 0) or 0
+                )
+            opportunity = str(getattr(fixture, "opportunity_state", "") or "").casefold()
+            if opportunity in {"near", "near_executable", "approaching"}:
+                self._universe_near_count += 1
+            if (getattr(fixture, "current_net_edge", None) or 0) > 0:
+                self._universe_positive_count += 1
+            if bool(getattr(fixture, "solver_is_arbitrage", False)) or opportunity in {
+                "qualifying",
+                "triggered",
+                "arbitrage",
+            }:
+                self._universe_qualifying_count += 1
+            if promoted_now:
+                self._universe_hot_promotions += 1
+            if self._universe_discovered_total < len(self._universe_evaluated_ids):
+                self._universe_discovered_total = len(self._universe_evaluated_ids)
+            self._persist_universe_checkpoint_unlocked()
+            evaluated_count = len(self._universe_evaluated_ids)
+            self.status = self.status.model_copy(
+                update={
+                    "discovered_fixtures": inventory_now,
+                    "universe": self.status.universe.model_copy(
+                        update={
+                            "worker_state": WORKER_RUNNING,
+                            "sweep_id": self._universe_sweep_id,
+                            "evaluated_count": evaluated_count,
+                            "discovered_total": self._universe_discovered_total,
+                            "remaining": max(
+                                0, self._universe_discovered_total - evaluated_count
+                            ),
+                            "matched_fixtures": self._universe_matched_fixtures,
+                            "equivalent_markets": self._universe_equivalent_markets,
+                            "near_count": self._universe_near_count,
+                            "positive_count": self._universe_positive_count,
+                            "qualifying_count": self._universe_qualifying_count,
+                            "hot_promotions": self._universe_hot_promotions,
+                            "last_successful_fixture": self._universe_last_successful,
+                            "current_fixture": self._universe_current_fixture,
+                            "resume_cursor": self._universe_cursor,
+                            "cycle_in_progress": True,
+                        }
+                    ),
+                }
+            )
+
+    def universe_collect_callbacks(self) -> tuple[Callable[..., None], Callable[..., None]]:
+        return (
+            self.record_universe_discovery_snapshot,
+            self.record_universe_fixture_progress,
         )
 
     def _universe_plan_resume_state_unlocked(
@@ -1118,9 +1372,21 @@ class LiveRefreshCoordinator:
             next_universe_due=self._next_universe_due,
             provider_failure_count=self._universe_provider_failures,
             retry_at=self._universe_retry_at,
-            budget_paused=self._universe_budget_paused,
+            budget_paused=False,
             report=self._universe_last_report_snapshot,
             updated_at=self.now(),
+            sweep_id=self._universe_sweep_id,
+            discovery_snapshot=self._universe_discovery_snapshot,
+            discovered_total=self._universe_discovered_total,
+            failed_ids=dict(self._universe_failed_ids),
+            skipped_ids=dict(self._universe_skipped_ids),
+            last_successful_fixture=self._universe_last_successful,
+            matched_fixtures=self._universe_matched_fixtures,
+            equivalent_markets=self._universe_equivalent_markets,
+            near_count=self._universe_near_count,
+            positive_count=self._universe_positive_count,
+            qualifying_count=self._universe_qualifying_count,
+            hot_promotions=self._universe_hot_promotions,
         )
         try:
             store.save(
@@ -1182,8 +1448,22 @@ class LiveRefreshCoordinator:
                 self._next_universe_due = checkpoint.next_universe_due
             self._universe_provider_failures = checkpoint.provider_failure_count
             self._universe_retry_at = checkpoint.retry_at
-            self._universe_budget_paused = checkpoint.budget_paused
+            self._universe_budget_paused = False
             self._universe_last_report_snapshot = checkpoint.report
+            self._universe_sweep_id = checkpoint.sweep_id or (
+                f"sweep-{checkpoint.generation_id}-{checkpoint.generation_started_at.isoformat()}"
+            )
+            self._universe_discovery_snapshot = checkpoint.discovery_snapshot
+            self._universe_discovered_total = checkpoint.discovered_total
+            self._universe_failed_ids = dict(checkpoint.failed_ids)
+            self._universe_skipped_ids = dict(checkpoint.skipped_ids)
+            self._universe_last_successful = checkpoint.last_successful_fixture
+            self._universe_matched_fixtures = checkpoint.matched_fixtures
+            self._universe_equivalent_markets = checkpoint.equivalent_markets
+            self._universe_near_count = checkpoint.near_count
+            self._universe_positive_count = checkpoint.positive_count
+            self._universe_qualifying_count = checkpoint.qualifying_count
+            self._universe_hot_promotions = checkpoint.hot_promotions
             status_update: dict[str, Any] = {
                 "discovered_fixtures": inventory,
                 "universe": self.status.universe.model_copy(
@@ -1193,8 +1473,21 @@ class LiveRefreshCoordinator:
                         "resume_cursor": self._universe_cursor,
                         "fixture_count": universe_count,
                         "next_due_at": self._next_universe_due,
-                        "degraded": self._universe_budget_paused
-                        or self._universe_provider_failures > 0,
+                        "sweep_id": self._universe_sweep_id,
+                        "discovered_total": self._universe_discovered_total,
+                        "remaining": max(
+                            0,
+                            self._universe_discovered_total
+                            - len(self._universe_evaluated_ids),
+                        ),
+                        "matched_fixtures": self._universe_matched_fixtures,
+                        "equivalent_markets": self._universe_equivalent_markets,
+                        "hot_promotions": self._universe_hot_promotions,
+                        "last_successful_fixture": self._universe_last_successful,
+                        "worker_state": WORKER_WAITING
+                        if self._universe_retry_at is not None
+                        else WORKER_IDLE,
+                        "degraded": self._universe_provider_failures > 0,
                     }
                 ),
             }
@@ -1213,6 +1506,19 @@ class LiveRefreshCoordinator:
         self._universe_evaluated_ids = set()
         self._universe_cursor = None
         self._universe_progress_generation_id = self._universe_generation_id
+        self._universe_sweep_id = f"sweep-{self._universe_generation_id}-{started.isoformat()}"
+        self._universe_discovery_snapshot = None
+        self._universe_discovered_total = 0
+        self._universe_failed_ids = {}
+        self._universe_skipped_ids = {}
+        self._universe_last_successful = None
+        self._universe_current_fixture = None
+        self._universe_matched_fixtures = 0
+        self._universe_equivalent_markets = 0
+        self._universe_near_count = 0
+        self._universe_positive_count = 0
+        self._universe_qualifying_count = 0
+        self._universe_hot_promotions = 0
         self._persist_universe_checkpoint_unlocked()
 
     def _charge_successful_universe_work(
@@ -1230,8 +1536,6 @@ class LiveRefreshCoordinator:
         self._universe_work_used += max(0.0, duration_s)
         if leftover_n == 0 and completeness != UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE:
             self._close_universe_generation(finished)
-        elif self._universe_work_used >= budget:
-            self._pause_universe_generation(finished)
         return budget
 
     def _pause_universe_generation(self, finished: datetime) -> None:
@@ -1279,19 +1583,24 @@ class LiveRefreshCoordinator:
         self._hot_due_started = None
 
     def _mark_lane_started(self, lane: ScanLane, started: datetime) -> None:
+        unique = lifecycle = promoted = 0
+        if lane is ScanLane.HOT:
+            unique, lifecycle, promoted = self._fixture_state.hot_membership_breakdown(
+                started, **self.radar_horizon_kwargs()
+            )
         with self._state_lock:
-            self._hot_in_progress = lane is ScanLane.HOT
-            self._universe_in_progress = lane is not ScanLane.HOT
             if lane is ScanLane.HOT:
+                self._hot_in_progress = True
                 self._cycle_hot_venues = self._pending_participation.venues_for(ScanLane.HOT)
                 self._cycle_enabled_venues = self._cycle_hot_venues
             else:
+                self._universe_in_progress = True
                 self._cycle_universe_venues = self._pending_participation.venues_for(
                     ScanLane.UNIVERSE
                 )
                 self._cycle_enabled_venues = self._cycle_universe_venues
             top = {
-                "cycle_in_progress": True,
+                "cycle_in_progress": self._hot_in_progress or self._universe_in_progress,
                 "last_started_at": started,
                 "last_error": None,
             }
@@ -1303,10 +1612,14 @@ class LiveRefreshCoordinator:
                         "hot": self.status.hot.model_copy(
                             update={
                                 "cycle_in_progress": True,
+                                "worker_state": WORKER_RUNNING,
                                 "last_started_at": started,
                                 "last_error": None,
                                 "last_persist_error": None,
                                 "persist_ok": None,
+                                "fixture_count": unique,
+                                "lifecycle_hot_count": lifecycle,
+                                "promoted_hot_count": promoted,
                             }
                         ),
                     }
@@ -1320,10 +1633,19 @@ class LiveRefreshCoordinator:
                     "universe": self.status.universe.model_copy(
                         update={
                             "cycle_in_progress": True,
+                            "worker_state": WORKER_RUNNING,
+                            "sweep_id": self._universe_sweep_id,
                             "last_started_at": started,
                             "last_error": None,
                             "last_persist_error": None,
                             "persist_ok": None,
+                            "discovered_total": self._universe_discovered_total,
+                            "evaluated_count": len(self._universe_evaluated_ids),
+                            "remaining": max(
+                                0,
+                                self._universe_discovered_total
+                                - len(self._universe_evaluated_ids),
+                            ),
                         }
                     ),
                 }
@@ -1344,6 +1666,7 @@ class LiveRefreshCoordinator:
                     "hot": self.status.hot.model_copy(
                         update={
                             "cycle_in_progress": True,
+                            "worker_state": WORKER_RUNNING,
                             "last_started_at": started,
                             "last_error": None,
                             "last_persist_error": None,
@@ -1368,8 +1691,14 @@ class LiveRefreshCoordinator:
             _, universe_count = self._fixture_state.membership_counts(finished)
         with self._state_lock:
             duration = max(0, int((finished - started).total_seconds() * 1000))
+            if lane is ScanLane.HOT:
+                self._hot_in_progress = False
+                self._cycle_hot_venues = None
+            else:
+                self._universe_in_progress = False
+                self._cycle_universe_venues = None
             update: dict[str, Any] = {
-                "cycle_in_progress": False,
+                "cycle_in_progress": self._hot_in_progress or self._universe_in_progress,
                 "last_error": message,
                 "last_completed_at": self.status.last_completed_at or finished,
                 "last_duration_ms": duration,
@@ -1380,6 +1709,7 @@ class LiveRefreshCoordinator:
                 update["hot"] = self.status.hot.model_copy(
                     update={
                         "cycle_in_progress": False,
+                        "worker_state": WORKER_DEGRADED,
                         "last_error": message,
                         "last_completed_at": finished,
                         "last_duration_ms": duration,
@@ -1399,6 +1729,7 @@ class LiveRefreshCoordinator:
                 update["universe"] = self.status.universe.model_copy(
                     update={
                         "cycle_in_progress": False,
+                        "worker_state": WORKER_WAITING,
                         "last_error": message,
                         "last_completed_at": finished,
                         "last_duration_ms": duration,
@@ -1407,16 +1738,18 @@ class LiveRefreshCoordinator:
                         "evaluated_count": evaluated_count,
                         "fixture_count": universe_count,
                         "degraded": True,
+                        "sweep_id": self._universe_sweep_id,
                         "resume_cursor": self._status_universe_cursor(),
                         "next_due_at": self._next_universe_due,
                         "operator_summary": _universe_operator_summary(
                             duration,
                             work_used,
                             budget,
-                            self._next_hot_due,
                             universe_count,
                             evaluated_count,
                             self.status.universe.not_evaluated_count,
+                            discovered_total=self._universe_discovered_total,
+                            worker_state=WORKER_WAITING,
                             venue_health=self.status.universe.venue_health,
                             active_venues=self.status.universe.active_venues,
                         ),
@@ -1425,8 +1758,6 @@ class LiveRefreshCoordinator:
                 if self.status.last_completed_at is None:
                     update["last_completed_at"] = finished
             self.status = self.status.model_copy(update=update)
-            self._hot_in_progress = False
-            self._universe_in_progress = False
             self._cycle_enabled_venues = None
             self._sync_venue_status_unlocked()
 
@@ -1454,17 +1785,28 @@ class LiveRefreshCoordinator:
             universe_ttl_seconds=horizon["universe_ttl_seconds"],
         )
         hot_count, universe_count = self._fixture_state.membership_counts(now, **classify)
+        unique, lifecycle, promoted = self._fixture_state.hot_membership_breakdown(
+            now, **classify
+        )
         with self._state_lock:
             self.status = self.status.model_copy(
                 update={
                     "discovered_fixtures": inventory,
-                    "hot": self.status.hot.model_copy(update={"fixture_count": hot_count}),
+                    "hot": self.status.hot.model_copy(
+                        update={
+                            "fixture_count": unique or hot_count,
+                            "lifecycle_hot_count": lifecycle,
+                            "promoted_hot_count": promoted,
+                        }
+                    ),
                     "universe": self.status.universe.model_copy(
                         update={"fixture_count": universe_count}
                     ),
                     "operator_summary": _combined_operator_summary(
                         self.status.hot, self.status.universe, universe_count
                     ),
+                    "provider_access": get_shared_provider_access().snapshot().as_dict(),
+                    "cycle_in_progress": self._hot_in_progress or self._universe_in_progress,
                 }
             )
             return self.status
@@ -1494,40 +1836,91 @@ class LiveRefreshCoordinator:
         self.configure_from_settings()
         if not self.status.server_loop_enabled:
             return
-        if self._task is not None and not self._task.done():
+        if self._hot_task is not None and not self._hot_task.done():
             return
         self._stop = asyncio.Event()
-        self._task = asyncio.create_task(self._loop(tick))
+        self._hot_task = asyncio.create_task(self._hot_loop(tick), name="hot-worker")
+        self._universe_task = asyncio.create_task(
+            self._universe_loop(tick), name="universe-worker"
+        )
+        self._task = self._hot_task
 
     async def stop_server_loop(self) -> None:
         self._stop.set()
-        if self._task is not None:
-            self._task.cancel()
+        for task in (self._hot_task, self._universe_task, self._task):
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await self._task
+                await task
             except (asyncio.CancelledError, Exception):
                 pass
-            self._task = None
+        self._hot_task = None
+        self._universe_task = None
+        self._task = None
 
-    async def _loop(self, tick) -> None:
+    async def _invoke_tick(self, tick, plan: DualCadencePlan | None = None) -> None:
+        try:
+            result = tick(plan) if plan is not None else tick()
+        except TypeError:
+            result = tick()
+        if asyncio.iscoroutine(result):
+            await result
+
+    async def _hot_loop(self, tick) -> None:
         while not self._stop.is_set():
-            if self.status.cycle_in_progress:
+            plan = self.plan_hot_tick()
+            if plan.lane == ScanLane.HOT.value:
                 try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=1.0)
-                except TimeoutError:
-                    continue
-                continue
-            try:
-                await tick()
-            except asyncio.CancelledError:
-                raise
-            except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, Exception):
-                pass
-            delay = min(self.seconds_until_next_work(), float(self.status.interval_seconds))
+                    await self._invoke_tick(tick, plan)
+                except asyncio.CancelledError:
+                    raise
+                except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, Exception):
+                    pass
+            delay = min(self._seconds_until_hot(), float(self.status.interval_seconds))
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, delay))
             except TimeoutError:
                 continue
+
+    async def _universe_loop(self, tick) -> None:
+        while not self._stop.is_set():
+            plan = self.plan_universe_tick()
+            if plan.lane == ScanLane.UNIVERSE.value:
+                try:
+                    await self._invoke_tick(tick, plan)
+                except asyncio.CancelledError:
+                    raise
+                except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, Exception):
+                    pass
+            delay = min(self._seconds_until_universe(), 5.0)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, delay))
+            except TimeoutError:
+                continue
+
+    def _seconds_until_hot(self) -> float:
+        now = self.now()
+        if self._hot_in_progress:
+            return 0.25
+        if self._next_hot_due is None:
+            return 0.05
+        return max(0.05, (self._next_hot_due - now).total_seconds())
+
+    def _seconds_until_universe(self) -> float:
+        now = self.now()
+        if self._universe_in_progress:
+            return 1.0
+        if self._universe_retry_at is not None and self._universe_retry_at > now:
+            return max(0.05, (self._universe_retry_at - now).total_seconds())
+        if self._universe_generation_started_at is not None:
+            return 0.05
+        if self._next_universe_due is None:
+            return 0.05
+        return max(0.05, (self._next_universe_due - now).total_seconds())
+
+    async def _loop(self, tick) -> None:
+        await self._hot_loop(tick)
 
 
 _COORDINATOR = LiveRefreshCoordinator()
@@ -1544,7 +1937,7 @@ def _collection_task_result(task: asyncio.Task[Any]) -> CollectionReport:
         raise TimeoutError from exc
 
 
-async def _await_collection_runner(runner, timeout: float) -> CollectionReport:
+async def _await_collection_runner(runner, timeout: float | None) -> CollectionReport:
     """Wait for collection/aclose on a child task; persist stays outside this wait.
 
     `asyncio.wait_for(coro)` is not used here: a timeout context would cancel
@@ -1554,6 +1947,8 @@ async def _await_collection_runner(runner, timeout: float) -> CollectionReport:
     `timeout` so the coordinator envelope stays ≤30s for HOT.
     """
 
+    if timeout is None:
+        return await runner()
     task = asyncio.create_task(runner())
     started = monotonic()
     harvest = min(SCAN_CYCLE_PARTIAL_HARVEST_SECONDS, max(0.05, float(timeout) / 2))
@@ -1684,20 +2079,24 @@ def _universe_operator_summary(
     duration_ms: int,
     work_used: float,
     budget: float,
-    next_hot: datetime | None,
     fixture_count: int,
     evaluated_n: int,
     leftover_n: int,
     *,
+    discovered_total: int = 0,
+    worker_state: str = WORKER_IDLE,
     venue_health: dict[str, str] | None = None,
     active_venues: list[VenueName] | None = None,
 ) -> str:
-    chunk_s = round(duration_ms / 1000, 1)
+    elapsed_s = round(max(work_used, duration_ms / 1000), 1)
     venue_clause = last_scan_venue_clause(venue_health, configured=active_venues)
+    discovered = discovered_total or fixture_count
+    remaining = max(0, discovered - evaluated_n)
+    state = worker_state or WORKER_IDLE
     return (
-        f"Full sweep · chunk ran {chunk_s}s · gen {int(work_used)}/{int(budget)}s · "
-        f"HOT next due {_iso_stamp(next_hot)} · {fixture_count} universe · "
-        f"{evaluated_n} evaluated / {leftover_n} not evaluated · {venue_clause}"
+        f"Full sweep · {state} · elapsed {elapsed_s}s · "
+        f"{evaluated_n}/{discovered} evaluated · {remaining} remaining · "
+        f"{fixture_count} universe · {leftover_n} leftover · {venue_clause}"
     )
 
 
@@ -1710,7 +2109,40 @@ def _combined_operator_summary(
         f"Fast scan · never · ran — · next due — · {hot.fixture_count} hot"
     )
     full = universe.operator_summary or (
-        f"Full sweep · chunk — · gen 0/{int(universe.generation_budget_seconds or 150)}s · "
+        f"Full sweep · {universe.worker_state or WORKER_IDLE} · "
+        f"{universe.evaluated_count}/{universe.discovered_total or universe_count} evaluated · "
         f"{universe_count} universe"
     )
     return f"{fast} · {full}"
+
+
+def _merge_top_level_venue_health(
+    hot: dict[str, str] | None,
+    universe: dict[str, str] | None,
+) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    keys = set(hot or {}) | set(universe or {})
+    for venue in keys:
+        left = (hot or {}).get(venue)
+        right = (universe or {}).get(venue)
+        if left == "ok" and right == "ok":
+            merged[venue] = "ok"
+        elif left == "ok" and right in {
+            "timeout",
+            HEALTH_DISCOVERY_TIMEOUT,
+            HEALTH_MARKET_TIMEOUT,
+            "degraded",
+        }:
+            merged[venue] = "degraded"
+        elif right == "ok" and left in {
+            "timeout",
+            HEALTH_DISCOVERY_TIMEOUT,
+            HEALTH_MARKET_TIMEOUT,
+            "degraded",
+        }:
+            merged[venue] = "degraded"
+        elif left == "ok" or right == "ok":
+            merged[venue] = "ok"
+        else:
+            merged[venue] = right or left or "unknown"
+    return merged

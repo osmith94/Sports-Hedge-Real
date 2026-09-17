@@ -580,6 +580,57 @@ def current_slots_prove_qualifying_opportunity(
     return False
 
 
+def stored_row_proves_surveillance_opportunity(row: FixtureMarketInventoryRow) -> bool:
+    """True when matcher economics show a positive cross-venue edge worth watching.
+
+    HOT surveillance is broader than paper eligibility: a positive edge below
+    the trade trigger may enter HOT. Settlement/mapping contradictions still
+    fail closed. Allocator, depth, fees, and 1s executable quote-age remain
+    paper gates and do not block surveillance.
+    """
+
+    if row.comparison_status is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
+        return False
+    if set(row.rejection_reasons) & _MAPPING_INCOMPATIBLE:
+        return False
+    if row.current_net_edge is None or row.current_net_edge <= 0:
+        return False
+    venues = [
+        facts
+        for facts in (row.matchbook, row.polymarket, row.kalshi)
+        if facts is not None
+    ]
+    return len(venues) >= 2
+
+
+def current_slots_prove_surveillance_opportunity(
+    slots: list[CurrentMarketSlot],
+    *,
+    now: datetime,
+    hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
+    universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+) -> bool:
+    """True when a radar-current slot has a positive equivalent edge below trade gates."""
+
+    evaluated = require_aware_instant(now, "now")
+    for slot in slots:
+        if slot.evaluated_absent:
+            continue
+        freshness = slot_freshness(
+            slot,
+            now=evaluated,
+            hot_ttl_seconds=hot_ttl_seconds,
+            universe_ttl_seconds=universe_ttl_seconds,
+            max_quote_age_ms=max_quote_age_ms,
+        )
+        if freshness == FRESHNESS_EXPIRED:
+            continue
+        if stored_row_proves_surveillance_opportunity(slot.row):
+            return True
+    return False
+
+
 def row_quote_age_ms(row: FixtureMarketInventoryRow) -> int | None:
     ages = [
         facts.quote_age_ms

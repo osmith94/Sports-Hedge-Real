@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -55,6 +55,13 @@ from sports_hedge.application.market_observation import (
     VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.provider_access import (
+    HEALTH_DISCOVERY_TIMEOUT,
+    HEALTH_MARKET_TIMEOUT,
+    ProviderAccessLayer,
+    merge_lane_operation_health,
+    operation_health_from_stage,
+)
 from sports_hedge.application.quote_freshness import (
     matchbook_market_quote_age,
     polymarket_books_quote_age,
@@ -387,6 +394,9 @@ class CollectionReport(BaseModel):
     config_warnings: list[str] = Field(default_factory=list)
     operator_summary: str = ""
     venue_health: dict[str, str] = Field(default_factory=dict)
+    operation_health: dict[str, Any] = Field(default_factory=dict)
+    discovery_reused: bool = False
+    sweep_id: str | None = None
     qualifying_arbs: int = Field(default=0, ge=0)
     paper_decisions: list[PaperScanDecision] = Field(default_factory=list)
     discovered_fixtures: list[DiscoveredFixture] = Field(default_factory=list)
@@ -460,6 +470,7 @@ class ReadOnlyCrossVenueCollector:
         cycle_timeout_seconds: float | None = 45.0,
         cluster_concurrency: int = DEFAULT_CLUSTER_CONCURRENCY,
         provider_concurrency: dict[VenueName, int] | None = None,
+        provider_access: ProviderAccessLayer | None = None,
     ) -> None:
         self.matchbook = matchbook
         self.polymarket = polymarket
@@ -482,8 +493,13 @@ class ReadOnlyCrossVenueCollector:
             venue: max(1, int(limits.get(venue, DEFAULT_PROVIDER_CONCURRENCY[venue])))
             for venue in DEFAULT_PROVIDER_CONCURRENCY
         }
+        self._provider_access = provider_access
         self._cluster_sema: asyncio.Semaphore | None = None
         self._provider_semaphores: dict[VenueName, asyncio.Semaphore] = {}
+        self._op_request_lane: str | None = None
+        self._op_operation_health: dict[str, Any] = {}
+        self._on_fixture_evaluated: Callable[..., Any] | None = None
+        self._on_discovery_complete: Callable[..., Any] | None = None
         self._peak_inflight = 0
         self._provider_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
         self._provider_peak_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
@@ -537,6 +553,12 @@ class ReadOnlyCrossVenueCollector:
         generation_resume: bool = False,
         known_source_events: dict[str, list[dict[str, Any]]] | None = None,
         enabled_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
+        reuse_discovery: bool = False,
+        discovery_snapshot: dict[str, list[dict[str, Any]]] | None = None,
+        unbounded_cycle: bool = False,
+        sweep_id: str | None = None,
+        on_discovery_complete: Callable[..., Any] | None = None,
+        on_fixture_evaluated: Callable[..., Any] | None = None,
     ) -> CollectionReport:
         if max_event_pairs <= 0 or max_market_pairs_per_event <= 0:
             raise ValueError("collector pair limits must be positive")
@@ -548,6 +570,10 @@ class ReadOnlyCrossVenueCollector:
             else default_operator_venues()
         )
         self._op_enabled_venues = enabled
+        self._op_request_lane = (scan_lane or "").strip().casefold() or None
+        self._op_operation_health = {}
+        self._on_discovery_complete = on_discovery_complete
+        self._on_fixture_evaluated = on_fixture_evaluated
         venue_health: dict[str, str] = {
             VenueName.MATCHBOOK.value: "unknown",
             VenueName.POLYMARKET.value: "unknown",
@@ -566,9 +592,12 @@ class ReadOnlyCrossVenueCollector:
             if provider_call_timeout_seconds is None
             else provider_call_timeout_seconds
         )
-        cycle_budget = (
-            self._cycle_timeout_seconds if cycle_timeout_seconds is None else cycle_timeout_seconds
-        )
+        if unbounded_cycle:
+            cycle_budget = None
+        else:
+            cycle_budget = (
+                self._cycle_timeout_seconds if cycle_timeout_seconds is None else cycle_timeout_seconds
+            )
         started_mono = monotonic()
         self._op_started_mono = started_mono
         self._stage_ms = {}
@@ -628,19 +657,33 @@ class ReadOnlyCrossVenueCollector:
         skipped_by_resume = 0
         stale_generation_state_ignored = False
         # HOT skips list_events and reuses stored source-event payloads.
+        # UNIVERSE reuses the sweep discovery snapshot after the first success.
         # Kalshi nested/list load, Get Market enrichment, and assemble still
         # run through _load_kalshi_markets — the same path as UNIVERSE.
-        skip_discovery = resolved_lane == ScanLane.HOT.value and identity_scope is not None
+        reuse_snapshot = bool(reuse_discovery and discovery_snapshot)
+        skip_discovery = (
+            (resolved_lane == ScanLane.HOT.value and identity_scope is not None)
+            or reuse_snapshot
+            or (reuse_discovery and bool(known_source_events))
+        )
+        discovery_reused = skip_discovery
         try:
             with self._stage("event_discovery"):
                 filtered_known = _filter_known_source_events(known_source_events or {}, enabled)
                 if skip_discovery:
-                    (
-                        raw_matchbook_events,
-                        raw_polymarket_events,
-                        raw_kalshi_events,
-                    ) = _raw_events_from_known_source_events(filtered_known)
                     matchbook_payload: dict[str, Any] = {}
+                    if reuse_snapshot:
+                        (
+                            raw_matchbook_events,
+                            raw_polymarket_events,
+                            raw_kalshi_events,
+                        ) = _raw_events_from_discovery_snapshot(discovery_snapshot or {})
+                    else:
+                        (
+                            raw_matchbook_events,
+                            raw_polymarket_events,
+                            raw_kalshi_events,
+                        ) = _raw_events_from_known_source_events(filtered_known)
                     for venue_name, has_events in (
                         (VenueName.MATCHBOOK, bool(raw_matchbook_events)),
                         (VenueName.POLYMARKET, bool(raw_polymarket_events)),
@@ -691,6 +734,11 @@ class ReadOnlyCrossVenueCollector:
                         raw_kalshi_events = []
                         venue_health[VenueName.KALSHI.value] = "unavailable"
                     issues.extend(_matchbook_discovery_issues(matchbook_payload))
+                self._emit_discovery_complete(
+                    raw_matchbook_events,
+                    raw_polymarket_events,
+                    raw_kalshi_events,
+                )
 
             with self._stage("normalize_match"):
                 mb_scope = filter_in_scope_events(
@@ -863,6 +911,8 @@ class ReadOnlyCrossVenueCollector:
             clusters_before_resume=clusters_before_resume,
             skipped_by_resume=skipped_by_resume,
             stale_generation_state_ignored=stale_generation_state_ignored,
+            discovery_reused=discovery_reused,
+            sweep_id=sweep_id,
         )
 
     def _deadline_reached(self) -> bool:
@@ -1071,12 +1121,19 @@ class ReadOnlyCrossVenueCollector:
                 detail=f"{stage}_timeout after {timeout:g}s",
             )
         )
+        status = operation_health_from_stage(stage, timed_out=True)
+        self._op_operation_health = merge_lane_operation_health(
+            self._op_operation_health,
+            venue=venue.value,
+            operation=stage,
+            status=status,
+        )
         if stage == "list_events":
-            health[venue.value] = "timeout"
+            health[venue.value] = HEALTH_DISCOVERY_TIMEOUT
         elif current == "ok":
             health[venue.value] = "degraded"
         elif current in {None, "unknown"}:
-            health[venue.value] = "timeout"
+            health[venue.value] = HEALTH_MARKET_TIMEOUT
 
     async def _wait_provider(
         self,
@@ -1087,6 +1144,20 @@ class ReadOnlyCrossVenueCollector:
         source_id: str | None = None,
         default: Any,
     ) -> tuple[Any, bool]:
+        access = self._provider_access
+        if access is not None:
+            try:
+                async with access.acquire(
+                    venue, lane=self._op_request_lane, stage=stage
+                ):
+                    return await self._wait_provider_unlocked(
+                        coro, stage=stage, venue=venue, source_id=source_id, default=default
+                    )
+            except asyncio.CancelledError:
+                close = getattr(coro, "close", None)
+                if callable(close):
+                    close()
+                raise
         sem = self._provider_semaphores.get(venue)
         if sem is None:
             return await self._wait_provider_unlocked(
@@ -1208,13 +1279,19 @@ class ReadOnlyCrossVenueCollector:
                 timed_out=True,
             )
             return [], {}
-        sem = self._provider_semaphores.get(venue)
 
         async def _call() -> tuple[Any, bool]:
             return await self._await_bounded(client.list_events(**filters), timeout)
 
         try:
-            if sem is None:
+            access = self._provider_access
+            sem = self._provider_semaphores.get(venue)
+            if access is not None:
+                async with access.acquire(
+                    venue, lane=self._op_request_lane, stage="list_events"
+                ):
+                    payload, timed_out = await _call()
+            elif sem is None:
                 payload, timed_out = await _call()
             else:
                 async with sem:
@@ -1285,6 +1362,8 @@ class ReadOnlyCrossVenueCollector:
         clusters_before_resume: int = 0,
         skipped_by_resume: int = 0,
         stale_generation_state_ignored: bool = False,
+        discovery_reused: bool = False,
+        sweep_id: str | None = None,
     ) -> CollectionReport:
         assembly_started = monotonic()
         completed_at = datetime.now(UTC)
@@ -1410,8 +1489,18 @@ class ReadOnlyCrossVenueCollector:
             "provider_unavailable": {
                 venue: health
                 for venue, health in venue_health.items()
-                if health in {"unavailable", "timeout", VENUE_HEALTH_DISABLED}
+                if health
+                in {
+                    "unavailable",
+                    "timeout",
+                    HEALTH_DISCOVERY_TIMEOUT,
+                    HEALTH_MARKET_TIMEOUT,
+                    VENUE_HEALTH_DISABLED,
+                }
             },
+            "operation_health": dict(self._op_operation_health),
+            "discovery_reused": discovery_reused,
+            "sweep_id": sweep_id,
             "scan_deadline_exhausted": leftover_n > 0 or self._deadline_reached() or cancelled,
             "timeout_count": timeout_count,
             "cancel_count": self._provider_cancels,
@@ -1480,6 +1569,9 @@ class ReadOnlyCrossVenueCollector:
             config_warnings=config_warnings,
             operator_summary=operator_summary,
             venue_health=venue_health,
+            operation_health=dict(self._op_operation_health),
+            discovery_reused=discovery_reused,
+            sweep_id=sweep_id,
             qualifying_arbs=qualifying,
             paper_decisions=decisions,
             discovered_fixtures=[
@@ -1526,6 +1618,73 @@ class ReadOnlyCrossVenueCollector:
             leftover=True,
         )
         return leftover, [], [], {}, 0, 0
+
+    def _failed_cluster_result(
+        self,
+        cluster: FixtureCluster,
+        *,
+        seen_at: datetime,
+        polymarket_events: list[_NormalizedEvent],
+        queried_series_ids: list[str] | None,
+        detail: str,
+    ) -> tuple[
+        DiscoveredFixture,
+        list[PaperScanDecision],
+        list[FixtureMarketInventoryRow],
+        dict[VenueName, int],
+        int,
+        int,
+    ]:
+        fixture = _fixture_from_cluster(
+            cluster,
+            seen_at=seen_at,
+            polymarket_events=polymarket_events,
+            queried_series_ids=queried_series_ids,
+        )
+        fixture.market_evaluation_state = MarketEvaluationState.MARKET_FETCH_UNAVAILABLE.value
+        fixture.market_evaluation_reason = detail or MARKET_FETCH_UNAVAILABLE_REASON
+        fixture.no_comparison_reason = fixture.no_comparison_reason or MARKET_FETCH_UNAVAILABLE_REASON
+        return fixture, [], [], {}, 0, 0
+
+    def _emit_discovery_complete(
+        self,
+        raw_matchbook_events: list[dict[str, Any]],
+        raw_polymarket_events: list[dict[str, Any]],
+        raw_kalshi_events: list[dict[str, Any]],
+    ) -> None:
+        callback = self._on_discovery_complete
+        if callback is None:
+            return
+        try:
+            callback(
+                {
+                    VenueName.MATCHBOOK.value: list(raw_matchbook_events),
+                    VenueName.POLYMARKET.value: list(raw_polymarket_events),
+                    VenueName.KALSHI.value: list(raw_kalshi_events),
+                }
+            )
+        except Exception:
+            LOGGER.warning("on_discovery_complete callback failed", exc_info=True)
+
+    def _emit_fixture_evaluated(
+        self,
+        cluster: FixtureCluster,
+        fixture: DiscoveredFixture,
+        decisions: list[PaperScanDecision],
+        inventory: list[FixtureMarketInventoryRow],
+    ) -> None:
+        callback = self._on_fixture_evaluated
+        if callback is None:
+            return
+        if fixture.market_evaluation_state not in {
+            MarketEvaluationState.EVALUATED.value,
+            MarketEvaluationState.MARKET_FETCH_UNAVAILABLE.value,
+        }:
+            return
+        try:
+            callback(cluster, fixture, decisions, inventory)
+        except Exception:
+            LOGGER.warning("on_fixture_evaluated callback failed", exc_info=True)
 
     async def _scan_clusters_bounded(
         self,
@@ -1589,6 +1748,21 @@ class ReadOnlyCrossVenueCollector:
                     polymarket_events=polymarket_events,
                     queried_series_ids=queried_series_ids,
                 )
+            except Exception as exc:
+                results[index] = self._failed_cluster_result(
+                    cluster,
+                    seen_at=seen_at,
+                    polymarket_events=polymarket_events,
+                    queried_series_ids=queried_series_ids,
+                    detail=str(exc),
+                )
+                issues.append(
+                    CollectorIssue(
+                        stage="cluster_scan",
+                        source_id=cluster_canonical_event_id(cluster),
+                        detail=str(exc),
+                    )
+                )
 
         pending: dict[int, asyncio.Task[None]] = {}
         next_index = 0
@@ -1629,7 +1803,24 @@ class ReadOnlyCrossVenueCollector:
                             and not task.cancelled()
                             and task.exception() is not None
                         ):
-                            raise task.exception()
+                            exc = task.exception()
+                            if results[index] is None:
+                                results[index] = self._failed_cluster_result(
+                                    clusters[index],
+                                    seen_at=seen_at,
+                                    polymarket_events=polymarket_events,
+                                    queried_series_ids=queried_series_ids,
+                                    detail=str(exc),
+                                )
+                                issues.append(
+                                    CollectorIssue(
+                                        stage="cluster_scan",
+                                        source_id=cluster_canonical_event_id(
+                                            clusters[index]
+                                        ),
+                                        detail=str(exc),
+                                    )
+                                )
                 if timeout is not None and not done_tasks:
                     break
                 if remaining is not None and remaining <= 0:
@@ -1667,6 +1858,12 @@ class ReadOnlyCrossVenueCollector:
             books += fetched
             if inventory:
                 fixture_markets[fixture.canonical_event_id] = inventory
+            self._emit_fixture_evaluated(
+                clusters[index],
+                fixture,
+                cluster_decisions,
+                inventory,
+            )
         if leftover_needed:
             _append_deadline_leftovers(
                 leftover_needed,
@@ -3532,6 +3729,20 @@ def _filter_known_source_events(
         if kept:
             filtered[canonical_id] = kept
     return filtered
+
+
+def _raw_events_from_discovery_snapshot(
+    snapshot: dict[str, list[dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    def _rows(key: str) -> list[dict[str, Any]]:
+        payload = snapshot.get(key) or []
+        return [item for item in payload if isinstance(item, dict)]
+
+    return (
+        _rows(VenueName.MATCHBOOK.value),
+        _rows(VenueName.POLYMARKET.value),
+        _rows(VenueName.KALSHI.value),
+    )
 
 
 def _raw_events_from_known_source_events(

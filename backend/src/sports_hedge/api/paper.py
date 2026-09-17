@@ -48,6 +48,7 @@ from sports_hedge.application.market_observation import (
 )
 from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.provider_access import get_shared_provider_access
 from sports_hedge.application.scan_cycle_audit import build_paper_scan_cycle_record
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
@@ -964,6 +965,12 @@ async def _collect_report(
     known_source_events: dict[str, list[dict[str, Any]]] | None = None,
     cycle_timeout_seconds: float | None = None,
     enabled_venues: list[VenueName] | None = None,
+    reuse_discovery: bool = False,
+    discovery_snapshot: dict[str, list[dict[str, Any]]] | None = None,
+    unbounded_cycle: bool = False,
+    sweep_id: str | None = None,
+    on_discovery_complete=None,
+    on_fixture_evaluated=None,
 ) -> CollectionReport:
     settings = get_settings()
     matchbook = get_shared_matchbook_client(settings)
@@ -984,6 +991,7 @@ async def _collect_report(
             VenueName.POLYMARKET: settings.paper_scan_polymarket_concurrency,
             VenueName.KALSHI: settings.paper_scan_kalshi_concurrency,
         },
+        provider_access=get_shared_provider_access(settings),
         cycle_timeout_seconds=(
             settings.paper_scan_cycle_timeout_seconds
             if cycle_timeout_seconds is None
@@ -1004,6 +1012,12 @@ async def _collect_report(
             known_source_events=known_source_events,
             cycle_timeout_seconds=cycle_timeout_seconds,
             enabled_venues=enabled_venues,
+            reuse_discovery=reuse_discovery,
+            discovery_snapshot=discovery_snapshot,
+            unbounded_cycle=unbounded_cycle,
+            sweep_id=sweep_id,
+            on_discovery_complete=on_discovery_complete,
+            on_fixture_evaluated=on_fixture_evaluated,
         )
     finally:
         acknowledge_task_cancellation()
@@ -1244,12 +1258,12 @@ def scheduled_collection_kwargs() -> dict[str, Any]:
     ).model_dump()
 
 
-async def server_owned_refresh_tick() -> None:
+async def server_owned_refresh_tick(plan=None) -> None:
     """Background tick used when PAPER_LIVE_REFRESH_ENABLED is true."""
 
     coordinator = get_live_refresh_coordinator()
-    plan = coordinator.plan_tick()
-    if plan.lane == "idle":
+    resolved = plan if plan is not None and getattr(plan, "lane", "idle") != "idle" else coordinator.plan_tick()
+    if resolved.lane == "idle":
         return
     service = get_paper_scan_service(
         get_market_intelligence_service(),
@@ -1262,27 +1276,36 @@ async def server_owned_refresh_tick() -> None:
 
     watchlist = get_watchlist_service(get_watchlist_repository())
     kwargs = scheduled_collection_kwargs()
+    on_discovery = on_fixture = None
+    if resolved.lane == ScanLane.UNIVERSE.value:
+        on_discovery, on_fixture = coordinator.universe_collect_callbacks()
 
     async def runner() -> CollectionReport:
         return await _collect_report(
             kwargs,
             service=service,
-            scan_lane=plan.lane,
-            identity_scope=plan.identity_scope,
-            resume_cursor=plan.resume_cursor,
-            skip_event_ids=plan.skip_event_ids,
-            universe_generation_id=plan.universe_generation_id,
-            generation_resume=plan.generation_resume,
-            known_source_events=plan.known_source_events,
-            cycle_timeout_seconds=plan.collector_timeout_seconds,
-            enabled_venues=list(coordinator.running_cycle_venues()),
+            scan_lane=resolved.lane,
+            identity_scope=resolved.identity_scope,
+            resume_cursor=resolved.resume_cursor,
+            skip_event_ids=resolved.skip_event_ids,
+            universe_generation_id=resolved.universe_generation_id,
+            generation_resume=resolved.generation_resume,
+            known_source_events=resolved.known_source_events,
+            cycle_timeout_seconds=resolved.collector_timeout_seconds,
+            enabled_venues=list(resolved.enabled_venues),
+            reuse_discovery=resolved.reuse_discovery,
+            discovery_snapshot=resolved.discovery_snapshot,
+            unbounded_cycle=resolved.unbounded_cycle,
+            sweep_id=resolved.sweep_id,
+            on_discovery_complete=on_discovery,
+            on_fixture_evaluated=on_fixture,
         )
 
     try:
         report = await coordinator.run_cycle(
             runner,
-            timeout_seconds=plan.coordinator_timeout_seconds,
-            scan_lane=ScanLane(plan.lane),
+            timeout_seconds=resolved.coordinator_timeout_seconds,
+            scan_lane=ScanLane(resolved.lane),
         )
     except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, httpx.HTTPError):
         return
@@ -1292,7 +1315,7 @@ async def server_owned_refresh_tick() -> None:
         service=service,
         audit=audit,
         watchlist=watchlist,
-        scan_lane=ScanLane(plan.lane),
+        scan_lane=ScanLane(resolved.lane),
     )
 
 

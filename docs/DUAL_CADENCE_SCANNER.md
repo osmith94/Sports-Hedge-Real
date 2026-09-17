@@ -1,8 +1,15 @@
 # Dual-cadence scanner — architecture and implementation plan
 
 **Issue:** #158
-**Status:** Implementation in progress as a draft child of #131. Do not merge to `main`. Stop for architect review.
+**Status:** Superseded for orchestration by Core Tenet 19.
 **Date:** 14 September 2026 (implementation on #131 `86afb600`)
+
+> **Tenet 19 override:** HOT and UNIVERSE are independent concurrent workers.
+> Do not yield UNIVERSE to the next HOT deadline. Do not keep a global scan
+> exclusion lock. Shared provider coordination and request priority remain.
+> This document still describes identity, leftover assembly, and radar TTL;
+> the chunk-until-HOT scheduler in §5 is no longer the live orchestration model.
+> See `docs/core-tenets/19_CONCURRENT_HOT_AND_UNIVERSE_SCANNING.md`.
 
 This is a scanner/scheduler/read-model change. It does not add venue write, place, cancel, or sign paths. Phase 1 remains `SPORTS_HEDGE_MODE=paper` / `SPORTS_HEDGE_EXECUTION_ENABLED=false`.
 
@@ -46,6 +53,7 @@ Read before implementation (this pass already did):
 | 11 UI / data honesty | Distinct Fast scan vs Full sweep. Stale rows must not look current. Empty stays empty. Unknown in-play is not labelled live. |
 | 12 Agent review | This document + PR template. |
 | 14 Event-driven dislocation | Fast lane is the Phase 1 realisation of “increase snapshot frequency for affected/urgent events within rate limits.” Burst scheduler stays a later overlay, not this PR. |
+| 19 Concurrent workers | HOT and UNIVERSE must overlap in wall-clock time. This document’s leftover-until-HOT chunking is no longer the orchestration contract. |
 | 15 Fees / FX | Both lanes run the same fail-closed economics. No invented costs. |
 
 Non-applicable for this slice: 05–08, 10, 13, 16–18 except that paper-entry quote-age fail-closed (18/04) must not be weakened so distant Tracked rows can look live.

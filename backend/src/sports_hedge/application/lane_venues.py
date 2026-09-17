@@ -29,7 +29,19 @@ INSUFFICIENT_VENUES_WARNING = (
 )
 INSUFFICIENT_VENUES_REASON = "insufficient_enabled_venues"
 VENUE_HEALTH_DISABLED = "disabled"
-PROVIDER_HEALTH_FAILURES = frozenset({"unavailable", "timeout", "degraded", "error", "failed"})
+PROVIDER_HEALTH_FAILURES = frozenset(
+    {
+        "unavailable",
+        "timeout",
+        "discovery_timeout",
+        "market_timeout",
+        "auth_failure",
+        "degraded",
+        "error",
+        "failed",
+    }
+)
+SCHEDULER_WAIT_HEALTH = frozenset({"waiting", "deferred", "rate_limited"})
 VENUE_SHORT_LABELS: dict[VenueName, str] = {
     VenueName.MATCHBOOK: "MB",
     VenueName.POLYMARKET: "PM",
@@ -95,6 +107,10 @@ def is_operator_disabled_health(status: str | None) -> bool:
 
 def is_provider_health_failure(status: str | None) -> bool:
     return status in PROVIDER_HEALTH_FAILURES
+
+
+def is_scheduler_wait_health(status: str | None) -> bool:
+    return status in SCHEDULER_WAIT_HEALTH
 
 
 def last_scan_venue_clause(

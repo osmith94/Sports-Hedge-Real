@@ -312,9 +312,11 @@ def test_distant_universe_qualifying_arb_enters_next_hot_identity_scope() -> Non
     assert plan.known_source_events[CANONICAL_ID]
 
 
-def test_distant_equivalent_nonqualifying_stays_universe_only() -> None:
-    coordinator = LiveRefreshCoordinator()
+def test_distant_equivalent_nonqualifying_promotes_surveillance_not_paper() -> None:
+    clock = FakeClock(NOW)
+    coordinator = LiveRefreshCoordinator(clock=clock)
     coordinator.reset()
+    coordinator._clock = clock
     near_edge = _market_row(edge=Decimal("0.004"), arb=False, trigger=Decimal("0.01"))
     fixture = _fixture(opportunity="near", arb=False, qualifying=0)
     coordinator.record_report(
@@ -325,14 +327,16 @@ def test_distant_equivalent_nonqualifying_stays_universe_only() -> None:
         scan_lane=ScanLane.UNIVERSE,
     )
     store = coordinator.fixture_current_state()
-    assert CANONICAL_ID not in store.hot_identity_scope(NOW)
+    assert CANONICAL_ID in store.hot_identity_scope(NOW)
     later = NOW + timedelta(seconds=30)
+    coordinator._next_hot_due = NOW
     plan = coordinator.plan_tick(now=later)
-    if plan.lane == "hot":
-        assert CANONICAL_ID not in plan.identity_scope
-    hot, universe = store.membership_counts(later)
-    assert hot == 0
-    assert universe == 1
+    assert plan.lane == "hot"
+    assert CANONICAL_ID in plan.identity_scope
+    inventory = store.inventory(later)
+    row = next(item for item in inventory if item.canonical_event_id == CANONICAL_ID)
+    assert "SURVEILLANCE" in (row.hot_reasons or [])
+    assert "ARB PROMOTION" not in (row.hot_reasons or [])
 
 
 def test_ui_label_without_current_state_markets_does_not_promote() -> None:
@@ -361,7 +365,7 @@ def test_unknown_settlement_cannot_cause_promotion() -> None:
     assert CANONICAL_ID not in store.hot_identity_scope(NOW + timedelta(seconds=30))
 
 
-def test_stale_quotes_cannot_cause_promotion() -> None:
+def test_stale_quotes_can_enter_surveillance_hot() -> None:
     store = FixtureCurrentStateStore()
     row = _market_row(quote_age_ms=50_000, arb=True, rejection_reasons=["stale_quote"])
     store.upsert_from_report(
@@ -369,10 +373,10 @@ def test_stale_quotes_cannot_cause_promotion() -> None:
         scan_lane=ScanLane.UNIVERSE,
         now=NOW,
     )
-    assert CANONICAL_ID not in store.hot_identity_scope(NOW + timedelta(seconds=30))
+    assert CANONICAL_ID in store.hot_identity_scope(NOW + timedelta(seconds=30))
 
 
-def test_non_executable_depth_fees_fx_risk_allocator_cannot_promote() -> None:
+def test_non_executable_depth_fees_fx_risk_allocator_can_enter_surveillance_hot() -> None:
     store = FixtureCurrentStateStore()
     cases = [
         ["missing_executable_outcome_depth"],
@@ -391,7 +395,7 @@ def test_non_executable_depth_fees_fx_risk_allocator_cannot_promote() -> None:
             scan_lane=ScanLane.UNIVERSE,
             now=NOW,
         )
-        assert CANONICAL_ID not in store.hot_identity_scope(NOW + timedelta(seconds=30)), reasons
+        assert CANONICAL_ID in store.hot_identity_scope(NOW + timedelta(seconds=30)), reasons
 
 
 def test_promoted_fixture_leaves_hot_when_no_longer_qualifying() -> None:
@@ -401,7 +405,7 @@ def test_promoted_fixture_leaves_hot_when_no_longer_qualifying() -> None:
     assert CANONICAL_ID in store.hot_identity_scope(later)
 
     cooled = _fixture(opportunity="matched", arb=False, qualifying=0, when=later)
-    cooled_row = _market_row(edge=Decimal("0.002"), arb=False)
+    cooled_row = _market_row(edge=Decimal("0"), arb=False)
     store.upsert_from_report(
         _report(
             [cooled],
@@ -443,7 +447,7 @@ def test_lifecycle_hot_survives_lost_opportunity_promotion() -> None:
             [_fixture("t45m", kickoff=NEAR_KICKOFF, opportunity="near", when=later)],
             when=later,
             scan_lane=ScanLane.HOT.value,
-            markets={"t45m": [_market_row(edge=Decimal("0.002"), arb=False)]},
+            markets={"t45m": [_market_row(edge=Decimal("0"), arb=False)]},
             decisions=[_decision("t45m", "mkt-t45m", when=later)],
         ),
         scan_lane=ScanLane.HOT,

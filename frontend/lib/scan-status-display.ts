@@ -58,26 +58,31 @@ export function fullSweepCopy(
   now: number | null = null,
 ): LaneScanCopy {
   const universe = status?.universe;
-  const hot = status?.hot;
   if (!universe) {
     return { label: "Full sweep", detail: "never" };
   }
   const venues = lastScanVenueClause(status, "universe");
   const venueSuffix = venues ? ` · ${venues}` : "";
-  if (universe.cycle_in_progress) {
-    return { label: "Full sweep", detail: `chunk in progress${venueSuffix}` };
-  }
-  const work = universe.generation_work_used_s ?? 0;
-  const budget = universe.generation_budget_seconds ?? 150;
   const leftover = universe.not_evaluated_count ?? 0;
   const evaluated = universe.evaluated_count ?? 0;
+  const discovered = universe.discovered_total ?? 0;
   const persist =
     universe.persist_ok === false || universe.last_persist_error
       ? " · persist/auto-capture failed"
       : "";
+  if (universe.cycle_in_progress || universe.worker_state === "running") {
+    const progress =
+      discovered > 0 ? `${evaluated}/${discovered} evaluated` : `${evaluated} evaluated`;
+    return {
+      label: "Full sweep",
+      detail: `in progress · ${progress}${venueSuffix}${persist}`,
+    };
+  }
+  const elapsed = durationLabel(universe.chunk_last_duration_ms ?? universe.last_duration_ms);
+  const state = universe.worker_state && universe.worker_state !== "idle" ? ` · ${universe.worker_state}` : "";
   return {
     label: "Full sweep",
-    detail: `chunk ran ${durationLabel(universe.chunk_last_duration_ms ?? universe.last_duration_ms)} · gen ${Math.round(work)}/${Math.round(budget)}s · HOT ${nextDueClock(hot?.next_due_at, now)} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${leftover} not evaluated${venueSuffix}${persist}`,
+    detail: `elapsed ${elapsed}${state} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${leftover} not evaluated${venueSuffix}${persist}`,
   };
 }
 

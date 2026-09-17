@@ -32,6 +32,18 @@ class UniverseGenerationCheckpoint(BaseModel):
     budget_paused: bool = False
     report: dict[str, Any] | None = None
     updated_at: datetime
+    sweep_id: str | None = None
+    discovery_snapshot: dict[str, list[dict[str, Any]]] | None = None
+    discovered_total: int = Field(default=0, ge=0)
+    failed_ids: dict[str, str] = Field(default_factory=dict)
+    skipped_ids: dict[str, str] = Field(default_factory=dict)
+    last_successful_fixture: str | None = None
+    matched_fixtures: int = Field(default=0, ge=0)
+    equivalent_markets: int = Field(default=0, ge=0)
+    near_count: int = Field(default=0, ge=0)
+    positive_count: int = Field(default=0, ge=0)
+    qualifying_count: int = Field(default=0, ge=0)
+    hot_promotions: int = Field(default=0, ge=0)
 
 
 def universe_provider_backoff_seconds(failure_count: int) -> float:

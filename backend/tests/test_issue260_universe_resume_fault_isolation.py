@@ -142,22 +142,16 @@ async def test_successful_work_budget_exhaustion_pauses_same_generation() -> Non
     )
     coordinator.record_report(heavy, scan_lane=ScanLane.UNIVERSE)
     assert coordinator._universe_generation_started_at is not None
-    assert coordinator._universe_budget_paused is True
+    assert coordinator._universe_budget_paused is False
     assert coordinator._universe_generation_id == generation
     assert set(first_ids) <= coordinator._universe_evaluated_ids
-    paused = coordinator.plan_tick(now=clock.now)
-    assert paused.lane == "idle"
-    assert paused.reason == "universe_budget_paused"
-    clock.now = coordinator._next_universe_due
-    coordinator._next_hot_due = clock.now + timedelta(seconds=1_000)
     continued = coordinator.plan_tick(now=clock.now)
     assert continued.lane == "universe"
+    assert continued.reason != "universe_budget_paused"
     assert continued.universe_generation_id == generation
     assert continued.generation_resume is True
     assert continued.resume_cursor == coordinator._universe_cursor
     assert set(first_ids) <= set(continued.skip_event_ids)
-    assert coordinator._universe_work_used == pytest.approx(0.0)
-    assert coordinator._universe_budget_paused is False
 
 
 def test_process_restart_restores_open_generation_from_sqlite(tmp_path: Path) -> None:

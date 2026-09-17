@@ -70,7 +70,7 @@ def test_hot_envelope_and_venue_participation_coexist() -> None:
     assert tick_src.index("persist_scheduled_collection_report") > tick_src.index(
         "run_cycle"
     )
-    assert "enabled_venues=list(coordinator.running_cycle_venues())" in tick_src
+    assert "enabled_venues=list(resolved.enabled_venues)" in tick_src
     assert "_persist_decision" not in collect_src
     assert "refreshed_venues=report.enabled_venues" in persist_src
     assert "enabled_venues=enabled_venues" in execute_src
