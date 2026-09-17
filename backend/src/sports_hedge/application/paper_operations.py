@@ -33,6 +33,7 @@ from sports_hedge.arbitrage.priority_alerts.models import (
     PriorityLeg,
 )
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
+from sports_hedge.arbitrage.watchlist.economics import gross_edge_from_quotes
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityStatus
 from sports_hedge.arbitrage.watchlist.service import WatchlistService, _opportunity_id
 from sports_hedge.config import Settings, get_settings
@@ -53,6 +54,10 @@ from sports_hedge.paper.chain import (
     PaperChainTrace,
     PaperFillPlan,
     SimulatePaperFillResult,
+)
+from sports_hedge.paper.entry_freshness import (
+    MARKET_REVALIDATION_FAILED,
+    assess_paper_entry_freshness,
 )
 from sports_hedge.paper.fills import (
     PaperFillConfig,
@@ -138,6 +143,9 @@ _AUTOFILL_GATE_REASONS = frozenset(
         "fill_plan_not_allocator_sized",
         "stale_before_fill",
         "stale_quote",
+        "snapshot_stale_at_decision",
+        "snapshot_stale_at_simulated_arrival",
+        "market_revalidation_failed",
         "missing_paper_fill_plan",
         "no_positive_opening_legs",
         "no_internal_paper_legs",
@@ -213,24 +221,15 @@ class PaperOperationsService:
             return None
         opportunity_id = _opportunity_id(decision.canonical_market_id)
         opening_legs = [leg for leg in decision.fill_legs if leg.requested_stake > 0]
-        if opening_legs:
-            self._plans[opportunity_id] = PaperFillPlan(
-                opportunity_id=opportunity_id,
-                canonical_event_id=decision.canonical_event_id,
-                canonical_market_id=decision.canonical_market_id,
-                scanned_at=decision.scanned_at,
-                quote_age_ms=decision.quote_age_ms,
-                eligible_for_paper_simulation=decision.eligible_for_paper_simulation,
-                settlement_equivalent=decision.market_match.matched,
-                legs=opening_legs,
-                execution_modes={
-                    venue: LegExecutionMode(mode)
-                    for venue, mode in decision.execution_modes.items()
-                },
-                venue_costs=list(decision.venue_costs),
-                fx_snapshots=list(decision.fx_snapshots),
-                decision=decision,
-                provenance=provenance,
+        current_watch = self.watchlist.repository.get(opportunity_id)
+        protected = current_watch is not None and current_watch.status in {
+            OpportunityStatus.PAPER_FILLING,
+            OpportunityStatus.PARTIAL,
+            OpportunityStatus.FILLED,
+        }
+        if opening_legs and not protected:
+            self._plans[opportunity_id] = self._plan_from_decision(
+                decision, opportunity_id, provenance
             )
         candidate = None
         solver_arb = _solver_is_arbitrage(decision)
@@ -238,27 +237,36 @@ class PaperOperationsService:
             if decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage:
                 candidate = _candidate_from_decision(decision, opportunity_id)
                 self.alerts.ingest(candidate)
-            if self._should_autofill(autofill=autofill, provenance=provenance) and self._venues_refreshed_this_cycle(
-                opening_legs, refreshed_venues
+            if (
+                self._should_autofill(autofill=autofill, provenance=provenance)
+                and opening_legs
+                and self._venues_refreshed_this_cycle(opening_legs, refreshed_venues)
             ):
-                try:
-                    self._require_allocator_sized_plan(opportunity_id)
-                except PaperOperationsError:
-                    # Allocator/plan gates are fail-closed non-captures, not persist crashes.
-                    pass
-                else:
+                if current_watch is None or current_watch.status not in {
+                    OpportunityStatus.PAPER_FILLING,
+                    OpportunityStatus.PARTIAL,
+                    OpportunityStatus.FILLED,
+                }:
                     try:
-                        self.simulate_fill(
+                        self.watchlist.begin_paper_fill_attempt(
                             opportunity_id,
-                            simulate_external=True,
-                            provenance=provenance,
-                            operator_note="PAPER-ONLY autofill; no venue order placed",
+                            occurred_at=datetime.now(UTC),
+                            detail="paper_fill_attempted_bound_snapshot",
                         )
-                    except PaperOperationsError as exc:
-                        if _is_expected_autofill_gate(exc):
-                            pass
-                        else:
-                            raise
+                    except ValueError:
+                        pass
+                try:
+                    self.simulate_fill(
+                        opportunity_id,
+                        simulate_external=True,
+                        provenance=provenance,
+                        operator_note="PAPER-ONLY autofill; no venue order placed",
+                    )
+                except PaperOperationsError as exc:
+                    if _is_expected_autofill_gate(exc):
+                        pass
+                    else:
+                        raise
         return candidate
 
     def _should_autofill(
@@ -1051,13 +1059,48 @@ class PaperOperationsService:
             raise PaperOperationsError("unknown_opportunity")
         if current.data_kind == "demo_fixture_replay":
             provenance = DataProvenance.FIXTURE_DEMO
-        presented = self.watchlist._present_freshness(current, simulated_at)
-        if presented.status not in {
-            OpportunityStatus.TRIGGERED,
-            OpportunityStatus.PAPER_FILLING,
-            OpportunityStatus.PARTIAL,
-        }:
-            self._fail_entry(opportunity_id, "stale_before_fill", simulated_at)
+        if not self.watchlist.allows_bound_snapshot_entry(current):
+            self._fail_entry(opportunity_id, MARKET_REVALIDATION_FAILED, simulated_at)
+
+        fill_config = config or PaperFillConfig(
+            assumed_latency_ms=self.settings.simulated_latency_ms,
+            max_quote_age_ms=self.settings.paper_entry_max_quote_age_ms,
+            slippage_bps=Decimal(self.settings.max_slippage_bps),
+        )
+        max_age = (
+            fill_config.max_quote_age_ms
+            if fill_config.max_quote_age_ms is not None
+            else self.settings.paper_entry_max_quote_age_ms
+        )
+        quote_age_at_decision = _bound_snapshot_quote_age_ms(plan)
+        freshness = assess_paper_entry_freshness(
+            decision_at=plan.decision_at,
+            dispatched_at=simulated_at,
+            quote_age_at_decision_ms=quote_age_at_decision,
+            simulated_latency_ms=fill_config.assumed_latency_ms,
+            paper_entry_max_quote_age_ms=max_age,
+            quote_captured_at=plan.quote_captured_at,
+        )
+        plan = plan.model_copy(
+            update={
+                "autofill_dispatched_at": simulated_at,
+                "simulated_latency_ms": fill_config.assumed_latency_ms,
+                "paper_entry_max_quote_age_ms": max_age,
+                "entry_freshness": freshness,
+            }
+        )
+        self._plans[opportunity_id] = plan
+        if require_complete:
+            try:
+                current = self.watchlist.begin_paper_fill_attempt(
+                    opportunity_id,
+                    occurred_at=simulated_at,
+                    detail=freshness.detail(),
+                )
+            except ValueError:
+                self._fail_entry(opportunity_id, MARKET_REVALIDATION_FAILED, simulated_at)
+        if freshness.rejection_reason:
+            self._fail_entry(opportunity_id, freshness.rejection_reason, simulated_at)
         bound_prepared_id: str | None = None
         if prepared_deployment_id is not None or requested_size_gbp is not None:
             plan, bound_prepared_id = self._bind_prepared_allocation(
@@ -1069,12 +1112,9 @@ class PaperOperationsService:
         opening_legs = [leg for leg in plan.legs if leg.requested_stake > 0]
         if not opening_legs:
             self._fail_entry(opportunity_id, "no_positive_opening_legs", simulated_at)
+        if require_complete:
+            self._require_allocator_sized_plan(opportunity_id)
 
-        fill_config = config or PaperFillConfig(
-            assumed_latency_ms=self.settings.simulated_latency_ms,
-            max_quote_age_ms=self.watchlist.max_quote_age_ms,
-            slippage_bps=Decimal(self.settings.max_slippage_bps),
-        )
         modes = plan.execution_modes
         external_venues = {
             venue for venue, mode in modes.items() if mode is LegExecutionMode.EXTERNAL_OPERATOR
@@ -1108,11 +1148,20 @@ class PaperOperationsService:
             except PaperOperationsError as exc:
                 self._fail_entry(opportunity_id, str(exc), simulated_at)
 
+        try:
+            current = self.watchlist.begin_paper_fill_attempt(
+                opportunity_id,
+                occurred_at=simulated_at,
+                detail=freshness.detail(),
+            )
+        except ValueError:
+            self._fail_entry(opportunity_id, MARKET_REVALIDATION_FAILED, simulated_at)
+
         fills = self.simulator.simulate(
             fill_legs,
             fill_config,
             opportunity_id=opportunity_id,
-            now=simulated_at,
+            now=plan.decision_at,
         )
         fills = _with_stable_fill_ids(fills, opportunity_id, modes, simulate_external=simulate_external)
         if require_complete and not _complete_opening_fills(fills, opening_legs):
@@ -1223,6 +1272,7 @@ class PaperOperationsService:
             entry_complete=trade is not None and trade.state is PaperTradeState.OPEN,
             allocated_requested_stakes=_allocated_stake_labels(opening_legs),
             prepared_deployment_id=bound_prepared_id,
+            entry_freshness=freshness,
         )
         result.trade_id = trade.trade_id if trade is not None else None
         return result
@@ -1642,6 +1692,50 @@ class PaperOperationsService:
             gbp_unavailable_reason=None if gbp_ok else "missing_fx_on_one_or_more_open_trades",
         )
 
+    def _plan_from_decision(
+        self,
+        decision: PaperScanDecision,
+        opportunity_id: str,
+        provenance: DataProvenance,
+    ) -> PaperFillPlan:
+        opening_legs = [leg for leg in decision.fill_legs if leg.requested_stake > 0]
+        captured_at = None
+        for leg in opening_legs:
+            if leg.quote_captured_at is None:
+                continue
+            if captured_at is None or leg.quote_captured_at < captured_at:
+                captured_at = leg.quote_captured_at
+        gross = None
+        if decision.depth_scan is not None:
+            gross = gross_edge_from_quotes(decision.depth_scan.selected_quotes)
+        risk_score = decision.execution_risk.score if decision.execution_risk is not None else None
+        return PaperFillPlan(
+            opportunity_id=opportunity_id,
+            canonical_event_id=decision.canonical_event_id,
+            canonical_market_id=decision.canonical_market_id,
+            scanned_at=decision.scanned_at,
+            quote_age_ms=decision.quote_age_ms,
+            quote_age_at_decision_ms=decision.quote_age_ms,
+            quote_captured_at=captured_at,
+            simulated_latency_ms=self.settings.simulated_latency_ms,
+            paper_entry_max_quote_age_ms=self.settings.paper_entry_max_quote_age_ms,
+            mapping_confidence=decision.market_match.confidence,
+            execution_risk_score=risk_score,
+            gross_edge=gross,
+            net_edge=decision_net_edge(decision),
+            eligible_for_paper_simulation=decision.eligible_for_paper_simulation,
+            settlement_equivalent=decision.market_match.matched,
+            legs=opening_legs,
+            execution_modes={
+                venue: LegExecutionMode(mode)
+                for venue, mode in decision.execution_modes.items()
+            },
+            venue_costs=list(decision.venue_costs),
+            fx_snapshots=list(decision.fx_snapshots),
+            decision=decision,
+            provenance=provenance,
+        )
+
     def _require_allocator_sized_plan(self, opportunity_id: str) -> None:
         plan = self._plans.get(opportunity_id)
         if plan is None:
@@ -1901,11 +1995,17 @@ class PaperOperationsService:
             trade.state = PaperTradeState.PENDING
             trade.guaranteed_profit_gbp_at_open = None
         if autofill:
+            freshness = plan.entry_freshness
+            detail = (
+                f"configurable paper autofill; simulated only; {freshness.detail()}"
+                if freshness is not None
+                else "configurable paper autofill; simulated only"
+            )
             self._append_trade_event_once(
                 trade,
                 event_type=PaperTradeAuditEventType.PAPER_AUTOFILL,
                 occurred_at=occurred_at,
-                detail="configurable paper autofill; simulated only",
+                detail=detail,
             )
         if simulate_external and any(
             leg.fill_kind is PaperLegFillKind.PAPER_SIMULATED_EXTERNAL for leg in legs
@@ -2215,6 +2315,25 @@ def _with_stable_fill_ids(
             )
         )
     return fills.model_copy(update={"fills": rewritten})
+
+
+def _bound_snapshot_quote_age_ms(plan: PaperFillPlan) -> int | None:
+    """Oldest frozen quote age on the bound snapshot. Unknown stays unknown."""
+
+    ages: list[int] = []
+    if plan.quote_age_at_decision_ms is not None:
+        ages.append(plan.quote_age_at_decision_ms)
+    elif plan.quote_age_ms is not None:
+        ages.append(plan.quote_age_ms)
+    for leg in plan.legs:
+        if leg.requested_stake <= 0:
+            continue
+        if leg.quote_age_ms is None:
+            return None
+        ages.append(leg.quote_age_ms)
+    if not ages:
+        return None
+    return max(ages)
 
 
 def _fill_stage(fills: PaperOpportunityFills) -> OpportunityStatus | None:

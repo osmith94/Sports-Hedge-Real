@@ -17,7 +17,6 @@ from sports_hedge.application.complete_set import (
 from sports_hedge.application.mapping_review import evidence_from_markets
 from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.executable_liquidity import (
-    DEFAULT_OPENING_MAX_QUOTE_AGE_MS,
     opening_liquidity_rejection_reasons,
 )
 from sports_hedge.application.quote_freshness import (
@@ -469,7 +468,7 @@ class PaperScanService:
         liquidity_rejections = opening_liquidity_rejection_reasons(
             list(scan_costs.values()),
             quote_age_ms=quote_age_ms,
-            max_quote_age_ms=DEFAULT_OPENING_MAX_QUOTE_AGE_MS,
+            max_quote_age_ms=int(self.settings.paper_entry_max_quote_age_ms),
         )
         rejections.extend(liquidity_rejections)
 

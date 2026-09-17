@@ -5,6 +5,12 @@ from decimal import Decimal
 from uuid import uuid4
 
 from sports_hedge.liquidity.book import BookLevel, OrderBookWalker
+from sports_hedge.paper.entry_freshness import (
+    SNAPSHOT_STALE_AT_DECISION,
+    SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL,
+    UNKNOWN_QUOTE_AGE,
+    snapshot_freshness_rejection,
+)
 from sports_hedge.paper.fills import (
     PaperFillConfig,
     PaperFillRecord,
@@ -14,8 +20,7 @@ from sports_hedge.paper.fills import (
     realised_slippage_bps,
 )
 
-STALE_QUOTE = "stale_quote"
-UNKNOWN_QUOTE_AGE = "unknown_quote_age"
+STALE_QUOTE = SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
 INSUFFICIENT_DEPTH = "insufficient_depth"
 NO_VISIBLE_DEPTH = "no_visible_depth"
 PRICE_UNAVAILABLE_AFTER_SLIPPAGE = "price_unavailable_after_slippage"
@@ -78,7 +83,12 @@ class PaperFillSimulator:
             )
 
         if config.max_quote_age_ms is not None:
-            if leg.quote_age_ms is None:
+            stale_reason = snapshot_freshness_rejection(
+                quote_age_at_decision_ms=leg.quote_age_ms,
+                simulated_latency_ms=config.assumed_latency_ms,
+                paper_entry_max_quote_age_ms=config.max_quote_age_ms,
+            )
+            if stale_reason is not None:
                 return _record(
                     leg,
                     config,
@@ -90,22 +100,7 @@ class PaperFillSimulator:
                     slippage=Decimal("0"),
                     levels_consumed=0,
                     fully_filled=False,
-                    rejection_reason=UNKNOWN_QUOTE_AGE,
-                )
-            # Match Near-Arb fail-closed freshness: age + latency at the cap is stale.
-            if leg.quote_age_ms + config.assumed_latency_ms >= config.max_quote_age_ms:
-                return _record(
-                    leg,
-                    config,
-                    filled_at=filled_at,
-                    filled_stake=Decimal("0"),
-                    remaining_stake=leg.requested_stake,
-                    weighted_odds=None,
-                    worst_odds=None,
-                    slippage=Decimal("0"),
-                    levels_consumed=0,
-                    fully_filled=False,
-                    rejection_reason=STALE_QUOTE,
+                    rejection_reason=stale_reason,
                 )
 
         visible_levels = _visible_levels(leg.levels, config)
@@ -241,6 +236,8 @@ __all__ = [
     "NO_VISIBLE_DEPTH",
     "PRICE_UNAVAILABLE_AFTER_SLIPPAGE",
     "PaperFillSimulator",
+    "SNAPSHOT_STALE_AT_DECISION",
+    "SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL",
     "STALE_QUOTE",
     "UNKNOWN_QUOTE_AGE",
 ]

@@ -45,7 +45,11 @@ from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.fills import FillMode, PaperFillConfig
-from sports_hedge.paper.simulator import INSUFFICIENT_DEPTH, STALE_QUOTE, PaperFillSimulator
+from sports_hedge.paper.simulator import (
+    INSUFFICIENT_DEPTH,
+    SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL,
+    PaperFillSimulator,
+)
 from sports_hedge.paper.trades import PaperLegFillKind, PaperTradeState
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.treasury.models import PaperTreasuryEventType
@@ -319,7 +323,7 @@ def test_lane3_realistic_fill_model_depth_slippage_latency_stale_partial() -> No
         now=now,
     )
     assert stale.filled_stake == 0
-    assert stale.rejection_reason == STALE_QUOTE
+    assert stale.rejection_reason == SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
 
     partial = simulator.simulate_leg(
         _leg(requested="150", displayed="2.20", levels=_two_level_book()),
@@ -433,7 +437,7 @@ def test_lane3_retries_idempotent_and_identity_survives_reload(tmp_path: Path) -
 
 
 def test_lane3_fixture_replay_with_production_fill_settings(tmp_path: Path) -> None:
-    """Operator-relevant settings: realistic 25 bps / 500 ms latency, 1000 ms watchlist cap."""
+    """Operator-relevant settings: realistic 25 bps / 500 ms latency, 2000 ms paper-entry cap."""
 
     ledger = SqlitePaperLedger(
         tmp_path / "paper.sqlite",
@@ -444,10 +448,11 @@ def test_lane3_fixture_replay_with_production_fill_settings(tmp_path: Path) -> N
     settings = Settings()
     assert settings.max_slippage_bps == 25
     assert settings.simulated_latency_ms == 500
+    assert settings.paper_entry_max_quote_age_ms == 2000
     assert settings.sports_hedge_execution_enabled is False
     repository = SqliteMarketIntelligenceRepository()
     scan = PaperScanService(MarketIntelligenceService(repository), settings=settings)
-    watchlist = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=1000)
+    watchlist = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=settings.paper_entry_max_quote_age_ms)
     ops = PaperOperationsService(
         watchlist=watchlist,
         alerts=PriorityAlertService(),
@@ -480,7 +485,7 @@ def test_lane3_fixture_replay_with_production_fill_settings(tmp_path: Path) -> N
         assert after.pool(VenueName.KALSHI, "USD").locked_capital == 0
         fills_cfg = PaperFillConfig(
             assumed_latency_ms=settings.simulated_latency_ms,
-            max_quote_age_ms=watchlist.max_quote_age_ms,
+            max_quote_age_ms=settings.paper_entry_max_quote_age_ms,
             slippage_bps=Decimal(settings.max_slippage_bps),
         )
         assert fills_cfg.mode is FillMode.REALISTIC

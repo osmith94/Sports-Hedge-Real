@@ -32,7 +32,10 @@ def get_watchlist_repository() -> SqliteWatchlistRepository:
 def get_watchlist_service(
     repository: SqliteWatchlistRepository = Depends(get_watchlist_repository),
 ) -> WatchlistService:
-    return WatchlistService(repository)
+    return WatchlistService(
+        repository,
+        max_quote_age_ms=get_settings().paper_entry_max_quote_age_ms,
+    )
 
 
 def get_bet_ticket_operations() -> PaperOperationsService:

@@ -16,6 +16,7 @@ from sports_hedge.arbitrage.watchlist.economics import (
     distance_to_trigger_pp,
     insufficiency_reasons,
     missing_cost_reasons,
+    semantic_reasons,
 )
 from sports_hedge.arbitrage.watchlist.models import (
     LifecycleEventType,
@@ -48,7 +49,7 @@ class WatchlistService:
         repository: SqliteWatchlistRepository | None = None,
         *,
         approaching_band_pp: Decimal = Decimal("0.50"),
-        max_quote_age_ms: int = 1000,
+        max_quote_age_ms: int = 2000,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if approaching_band_pp < 0:
@@ -211,6 +212,10 @@ class WatchlistService:
             raise ValueError(f"unknown opportunity: {opportunity_id}")
         if current.status is OpportunityStatus.FILLED and stage is OpportunityStatus.FILLED:
             return current
+        if current.status is OpportunityStatus.REJECTED and stage is OpportunityStatus.PAPER_FILLING:
+            current = self._revive_presentation_stale_for_bound_entry(current)
+            if current.status is OpportunityStatus.REJECTED:
+                raise ValueError("paper fill can only be recorded for a triggered paper opportunity")
         if current.status not in {
             OpportunityStatus.TRIGGERED,
             OpportunityStatus.PAPER_FILLING,
@@ -245,6 +250,56 @@ class WatchlistService:
         )
         return updated
 
+    def begin_paper_fill_attempt(
+        self,
+        opportunity_id: str,
+        *,
+        occurred_at,
+        detail: str | None = None,
+    ) -> NearOpportunity:
+        """Mark a bound snapshot attempt before freshness/fill evaluation.
+
+        Presentation-time stale REJECTED rows may be revived only when the
+        rejection is wall-clock aging of an already-qualified TRIGGERED
+        snapshot. Semantic/cost/depth rejections stay fail-closed.
+        """
+
+        return self.record_paper_fill(
+            opportunity_id,
+            stage=OpportunityStatus.PAPER_FILLING,
+            occurred_at=occurred_at,
+            detail=detail or "paper_fill_attempted_bound_snapshot",
+        )
+
+    def allows_bound_snapshot_entry(self, current: NearOpportunity) -> bool:
+        if current.status in {
+            OpportunityStatus.TRIGGERED,
+            OpportunityStatus.PAPER_FILLING,
+            OpportunityStatus.PARTIAL,
+        }:
+            return True
+        return current.status is OpportunityStatus.REJECTED and _presentation_stale_only(
+            current.rejection_reasons
+        )
+
+    def _revive_presentation_stale_for_bound_entry(
+        self, current: NearOpportunity
+    ) -> NearOpportunity:
+        if not _presentation_stale_only(current.rejection_reasons):
+            return current
+        revived = current.model_copy(
+            update={
+                "status": OpportunityStatus.TRIGGERED,
+                "classification": classification_for(OpportunityStatus.TRIGGERED),
+                "is_arbitrage": True,
+                "rejection_reasons": [
+                    reason for reason in current.rejection_reasons if reason != "stale_quote"
+                ],
+            }
+        )
+        self.repository.upsert_opportunity(revived)
+        return revived
+
     def record_paper_fill_rejection(
         self,
         opportunity_id: str,
@@ -258,12 +313,27 @@ class WatchlistService:
             current = self.repository.get(opportunity_id)
             if current is None:
                 return None
+            status = current.status
+            if current.status is OpportunityStatus.PAPER_FILLING:
+                reasons = list(dict.fromkeys([*current.rejection_reasons, detail]))
+                current = current.model_copy(
+                    update={
+                        "status": OpportunityStatus.REJECTED,
+                        "classification": classification_for(OpportunityStatus.REJECTED),
+                        "is_arbitrage": False,
+                        "guaranteed_profit_gbp": None,
+                        "rejection_reasons": reasons,
+                        "last_seen_at": occurred_at,
+                    }
+                )
+                self.repository.upsert_opportunity(current)
+                status = current.status
             self.repository.append_event(
                 OpportunityLifecycleEvent(
                     opportunity_id=opportunity_id,
                     occurred_at=occurred_at,
                     event_type=LifecycleEventType.PAPER_FILL_REJECTED,
-                    status=current.status,
+                    status=status,
                     current_net_edge=current.current_net_edge,
                     distance_to_trigger_pp=current.distance_to_trigger_pp,
                     detail=detail,
@@ -468,7 +538,9 @@ class WatchlistService:
                     persisted, LifecycleEventType.REJECTED_STALE_QUOTE, detail=reason
                 ).model_copy(update={"occurred_at": as_of})
             ]
-            if current.status == OpportunityStatus.TRIGGERED:
+            if current.status == OpportunityStatus.TRIGGERED and not self._fill_attempt_started(
+                current.opportunity_id
+            ):
                 events.append(
                     self._event(
                         persisted,
@@ -612,13 +684,14 @@ class WatchlistService:
                 OpportunityStatus.APPROACHING,
                 OpportunityStatus.REJECTED,
             }:
-                events.append(
-                    self._event(
-                        current,
-                        LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
-                        detail="trigger_lost_before_paper_fill",
+                if not self._fill_attempt_started(current.opportunity_id):
+                    events.append(
+                        self._event(
+                            current,
+                            LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
+                            detail="trigger_lost_before_paper_fill",
+                        )
                     )
-                )
 
         events.extend(self._rejection_events(previous, current, observation))
         for event in events:
@@ -740,6 +813,31 @@ class WatchlistService:
             distance_to_trigger_pp=opportunity.distance_to_trigger_pp,
             detail=detail,
         )
+
+    def _fill_attempt_started(self, opportunity_id: str) -> bool:
+        return any(
+            event.event_type is LifecycleEventType.PAPER_FILL_ATTEMPTED
+            for event in self.repository.list_events(opportunity_id=opportunity_id)
+        )
+
+
+def _presentation_stale_only(reasons: list[str]) -> bool:
+    """True when radar wall-clock aging is the only recorded rejection."""
+
+    if "stale_quote" not in reasons:
+        return False
+    if "unknown_quote_age" in reasons:
+        return False
+    if missing_cost_reasons(reasons) or semantic_reasons(reasons):
+        return False
+    blocking = {
+        "missing_executable_outcome_depth",
+        "incomplete_outcome_set",
+        "missing_net_edge",
+        "execution_risk_above_threshold",
+        "market_not_equivalent",
+    }
+    return not any(reason in blocking for reason in reasons)
 
 
 _opportunity_id = opportunity_id_for_canonical_market

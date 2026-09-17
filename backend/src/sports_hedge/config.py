@@ -340,6 +340,9 @@ class Settings(BaseSettings):
     max_execution_risk: int = Field(default=60, ge=0, le=100)
     min_mapping_confidence: float = Field(default=0.98, ge=0, le=1)
     simulated_latency_ms: int = Field(default=500, ge=0)
+    # Authoritative paper-entry freshness cap. Snapshot age at T1 plus simulated
+    # latency must stay strictly below this. Backend dispatch delay is telemetry.
+    paper_entry_max_quote_age_ms: int = Field(default=2000, ge=250, le=10000)
     simulate_partial_fills: bool = True
     fx_spread_bps: int = Field(default=10, ge=0)
 
