@@ -95,6 +95,37 @@ class MatchbookKalshiMatchResultAssessment(BaseModel):
     sample: list[SafeCandidateView] = Field(default_factory=list)
 
 
+class KalshiRuleLayerView(BaseModel):
+    """SAFE classification of one documented Kalshi rule source layer."""
+
+    layer: str
+    rules_primary_nonempty: bool = False
+    rules_secondary_nonempty: bool = False
+    rules_nonempty: bool = False
+    any_rule_field_nonempty: bool = False
+    classified_scope: str | None = None
+    economically_complete: bool | None = None
+    wording_kind: str | None = None
+    has_regulation_tokens: bool = False
+    has_extra_time_tokens: bool = False
+    has_penalties_tokens: bool = False
+    has_ninety_minute_abbrev: bool = False
+    fetch_status: str | None = None
+    contract_terms_url_present: bool | None = None
+    settlement_sources_present: bool | None = None
+
+
+class KalshiMatchResultRuleTickerView(BaseModel):
+    """SAFE per-ticker enrichment diagnostic. Never includes contract text."""
+
+    fixture_label: str
+    ticker: str
+    skipped_because_complete: bool = False
+    get_market_called: bool = False
+    get_market_status: str | None = None
+    layers: list[KalshiRuleLayerView] = Field(default_factory=list)
+
+
 class MappingForensics(BaseModel):
     """Owner-live/read-only mapping forensics. Fixture/demo when built from tests."""
 
@@ -113,6 +144,10 @@ class MappingForensics(BaseModel):
     matchbook_kalshi_match_result: MatchbookKalshiMatchResultAssessment = Field(
         default_factory=MatchbookKalshiMatchResultAssessment
     )
+    kalshi_match_result_rule_enrichment: dict[str, int] = Field(default_factory=dict)
+    get_market_status_histogram: dict[str, int] = Field(default_factory=dict)
+    get_market_wording_kind_histogram: dict[str, int] = Field(default_factory=dict)
+    kalshi_rule_layers: list[KalshiMatchResultRuleTickerView] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -258,6 +293,15 @@ def forensics_from_report(
     if tokens:
         notes.append("fixture_filter=" + " / ".join(tokens))
     mb_kalshi = _matchbook_kalshi_match_result_assessment(all_candidates)
+    enrichment, status_hist, kind_hist, layer_views = _kalshi_rule_layer_views(
+        report,
+        fixture_filter=tokens,
+    )
+    notes.append(
+        "Kalshi Get Market / nested / event / series layers report field presence "
+        "and classify_settlement_wording scope only. Contract text is not printed. "
+        "Series contract_terms_url is not fetched; presence is a boolean."
+    )
     return MappingForensics(
         data_class=data_class,
         venue_scope=venue_scope,
@@ -274,6 +318,10 @@ def forensics_from_report(
         reported_candidates=len(sampled),
         candidates=sampled,
         matchbook_kalshi_match_result=mb_kalshi,
+        kalshi_match_result_rule_enrichment=enrichment,
+        get_market_status_histogram=status_hist,
+        get_market_wording_kind_histogram=kind_hist,
+        kalshi_rule_layers=layer_views,
         notes=notes,
     )
 
@@ -323,6 +371,40 @@ def render_forensics(forensics: MappingForensics) -> str:
             f"  sample fixture={_safe_text(item.fixture_label)} status={item.comparison_status} "
             f"matcher_reasons={','.join(item.matcher_reasons) or 'none'}"
         )
+    lines.append(
+        "kalshi_match_result_rule_enrichment="
+        + _fmt_hist(forensics.kalshi_match_result_rule_enrichment)
+    )
+    lines.append(
+        "get_market_status_histogram=" + _fmt_hist(forensics.get_market_status_histogram)
+    )
+    lines.append(
+        "get_market_wording_kind_histogram="
+        + _fmt_hist(forensics.get_market_wording_kind_histogram)
+    )
+    for item in forensics.kalshi_rule_layers:
+        lines.append(
+            f"kalshi_rule_layer fixture={_safe_text(item.fixture_label)} "
+            f"ticker={_safe_text(item.ticker)} skipped_complete={item.skipped_because_complete} "
+            f"get_market_called={item.get_market_called} get_market_status={item.get_market_status}"
+        )
+        for layer in item.layers:
+            extra = ""
+            if layer.layer == "series":
+                extra = (
+                    f" contract_terms_url_present={layer.contract_terms_url_present} "
+                    f"settlement_sources_present={layer.settlement_sources_present}"
+                )
+            lines.append(
+                "  "
+                f"layer={layer.layer} primary={layer.rules_primary_nonempty} "
+                f"secondary={layer.rules_secondary_nonempty} rules={layer.rules_nonempty} "
+                f"scope={layer.classified_scope} complete={layer.economically_complete} "
+                f"kind={layer.wording_kind} regulation_tokens={layer.has_regulation_tokens} "
+                f"et_tokens={layer.has_extra_time_tokens} pen_tokens={layer.has_penalties_tokens} "
+                f"ninety_min_abbrev={layer.has_ninety_minute_abbrev} "
+                f"fetch_status={layer.fetch_status}{extra}"
+            )
     for note in forensics.notes:
         lines.append(f"note: {note}")
     for item in forensics.candidates:
@@ -348,6 +430,120 @@ def render_forensics(forensics: MappingForensics) -> str:
 def forensics_as_public_dict(forensics: MappingForensics) -> dict[str, Any]:
     payload = forensics.model_dump(mode="json")
     return _strip_price_fields(payload)
+
+
+def _fmt_hist(values: dict[str, int]) -> str:
+    if not values:
+        return "{}"
+    return "{" + ", ".join(f"{key}={value}" for key, value in values.items()) + "}"
+
+
+def _kalshi_rule_layer_views(
+    report: CollectionReport,
+    *,
+    fixture_filter: list[str],
+) -> tuple[dict[str, int], dict[str, int], dict[str, int], list[KalshiMatchResultRuleTickerView]]:
+    diagnostics = dict(report.scan_diagnostics or {})
+    raw_enrichment = diagnostics.get("kalshi_match_result_rule_enrichment") or {}
+    enrichment: dict[str, int] = {}
+    if isinstance(raw_enrichment, dict):
+        for key, value in raw_enrichment.items():
+            try:
+                enrichment[str(key)] = int(value)
+            except (TypeError, ValueError):
+                continue
+    records = diagnostics.get("kalshi_match_result_rule_layers") or []
+    status_hist: Counter[str] = Counter()
+    kind_hist: Counter[str] = Counter()
+    views: list[KalshiMatchResultRuleTickerView] = []
+    if not isinstance(records, list):
+        records = []
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("get_market_status") or "unknown")
+        status_hist[status] += 1
+        layers = item.get("layers") if isinstance(item.get("layers"), list) else []
+        get_market_layer = next(
+            (
+                layer
+                for layer in layers
+                if isinstance(layer, dict) and layer.get("layer") == "get_market"
+            ),
+            None,
+        )
+        kind = str((get_market_layer or {}).get("wording_kind") or "absent")
+        kind_hist[kind] += 1
+        label = str(item.get("fixture_label") or "")
+        if fixture_filter and not fixture_label_matches_filter(label, fixture_filter):
+            continue
+        if not fixture_filter:
+            continue
+        if len(views) >= 12:
+            continue
+        parsed_layers: list[KalshiRuleLayerView] = []
+        for layer in layers:
+            if not isinstance(layer, dict):
+                continue
+            parsed_layers.append(
+                KalshiRuleLayerView(
+                    layer=str(layer.get("layer") or "unknown"),
+                    rules_primary_nonempty=bool(layer.get("rules_primary_nonempty")),
+                    rules_secondary_nonempty=bool(layer.get("rules_secondary_nonempty")),
+                    rules_nonempty=bool(layer.get("rules_nonempty")),
+                    any_rule_field_nonempty=bool(layer.get("any_rule_field_nonempty")),
+                    classified_scope=(
+                        str(layer.get("classified_scope"))
+                        if layer.get("classified_scope") is not None
+                        else None
+                    ),
+                    economically_complete=(
+                        bool(layer.get("economically_complete"))
+                        if layer.get("economically_complete") is not None
+                        else None
+                    ),
+                    wording_kind=(
+                        str(layer.get("wording_kind"))
+                        if layer.get("wording_kind") is not None
+                        else None
+                    ),
+                    has_regulation_tokens=bool(layer.get("has_regulation_tokens")),
+                    has_extra_time_tokens=bool(layer.get("has_extra_time_tokens")),
+                    has_penalties_tokens=bool(layer.get("has_penalties_tokens")),
+                    has_ninety_minute_abbrev=bool(layer.get("has_ninety_minute_abbrev")),
+                    fetch_status=(
+                        str(layer.get("fetch_status"))
+                        if layer.get("fetch_status") is not None
+                        else None
+                    ),
+                    contract_terms_url_present=(
+                        bool(layer.get("contract_terms_url_present"))
+                        if "contract_terms_url_present" in layer
+                        else None
+                    ),
+                    settlement_sources_present=(
+                        bool(layer.get("settlement_sources_present"))
+                        if "settlement_sources_present" in layer
+                        else None
+                    ),
+                )
+            )
+        views.append(
+            KalshiMatchResultRuleTickerView(
+                fixture_label=label,
+                ticker=str(item.get("ticker") or ""),
+                skipped_because_complete=bool(item.get("skipped_because_complete")),
+                get_market_called=bool(item.get("get_market_called")),
+                get_market_status=str(item.get("get_market_status") or "") or None,
+                layers=parsed_layers,
+            )
+        )
+    return (
+        dict(sorted(enrichment.items())),
+        dict(sorted(status_hist.items())),
+        dict(sorted(kind_hist.items())),
+        views,
+    )
 
 
 def _candidates_sharing_family_period_line(

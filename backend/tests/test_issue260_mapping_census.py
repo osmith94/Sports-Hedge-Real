@@ -437,6 +437,9 @@ async def test_deterministic_mapping_census_exact_counts() -> None:
     )
     assert census.unsupported_market_skips == EXPECTED_FULL_CENSUS["unsupported_market_skips"]
     assert census.qualifying_arbs == EXPECTED_FULL_CENSUS["qualifying_arbs"]
+    assert census.kalshi_match_result_rule_enrichment["skipped_complete"] == 3
+    assert census.kalshi_match_result_rule_enrichment["attempted"] == 0
+    assert "kalshi_match_result_rule_enrichment=" in rendered
     assert census.skip_failure_reasons.get("unsupported_market:matchbook", 0) >= 2
     assert cycle_last_error(report) is None
     assert any("Unsupported Matchbook market: Total" in issue.detail for issue in report.issues)

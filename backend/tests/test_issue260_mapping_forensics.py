@@ -17,6 +17,7 @@ from sports_hedge.application.lane_venues import participation_from_lists
 from sports_hedge.application.mapping_census import (
     CENSUS_DATA_CLASS_FIXTURE,
     census_from_report,
+    render_census,
 )
 from sports_hedge.application.mapping_forensics import (
     VENUE_SCOPE_ALL,
@@ -43,6 +44,7 @@ from sports_hedge.normalization.venues import (
     KalshiNormalizer,
     MatchbookNormalizer,
     PolymarketNormalizer,
+    classify_kalshi_contract_rule_layer,
     merge_kalshi_contract_rules,
 )
 from sports_hedge.paper.models import FxRateSnapshot
@@ -496,6 +498,24 @@ async def test_get_market_rules_map_ordinary_1x2_without_name_inference() -> Non
     assert sorted(kalshi.get_market_calls) == sorted(
         item["ticker"] for item in BetisKalshi()._markets()
     )
+    assert census.kalshi_match_result_rule_enrichment["attempted"] == 3
+    assert census.kalshi_match_result_rule_enrichment["applied"] == 3
+    assert census.kalshi_match_result_rule_enrichment["skipped_complete"] == 0
+    assert forensics.get_market_status_histogram.get("ok") == 3
+    assert forensics.get_market_wording_kind_histogram.get("complete") == 3
+    rendered = render_forensics(forensics) + render_census(census)
+    assert REGULATION not in rendered
+    assert "kalshi_match_result_rule_enrichment=" in rendered
+    assert forensics.kalshi_rule_layers
+    for item in forensics.kalshi_rule_layers:
+        assert item.get_market_called is True
+        assert item.get_market_status == "ok"
+        get_layer = next(layer for layer in item.layers if layer.layer == "get_market")
+        assert get_layer.rules_primary_nonempty is True
+        assert get_layer.classified_scope == "regulation_time"
+        assert get_layer.wording_kind == "complete"
+        nested = next(layer for layer in item.layers if layer.layer == "nested_list")
+        assert nested.any_rule_field_nonempty is False
 
 
 @pytest.mark.asyncio
@@ -517,6 +537,47 @@ def test_merge_prefers_get_market_rules_over_ambiguous_list_text() -> None:
     assert target["title"] == f"{BETIS} vs {GETAFE}"
     assert merge_kalshi_contract_rules(target, {"rules_primary": ""}) is False
     assert target["rules_primary"] == REGULATION
+
+
+def test_safe_rule_layer_classification_does_not_expose_wording() -> None:
+    complete = classify_kalshi_contract_rule_layer(
+        {"rules_primary": REGULATION, "title": f"{BETIS} vs {GETAFE}"},
+        layer="nested_list",
+    )
+    dumped = str(complete)
+    assert REGULATION not in dumped
+    assert BETIS not in dumped
+    assert complete["wording_kind"] == "complete"
+    assert complete["classified_scope"] == "regulation_time"
+    assert complete["has_regulation_tokens"] is True
+    ambiguous = classify_kalshi_contract_rule_layer(
+        {"rules_primary": AMBIGUOUS},
+        layer="nested_list",
+    )
+    assert ambiguous["wording_kind"] == "generic_ambiguous"
+    assert ambiguous["classified_scope"] == "unknown"
+    assert AMBIGUOUS not in str(ambiguous)
+    gap = classify_kalshi_contract_rule_layer(
+        {"rules_primary": "Settles on 90 mins of play."},
+        layer="get_market",
+        fetch_status="ok",
+    )
+    assert gap["wording_kind"] == "present_unclassified_with_settlement_tokens"
+    assert gap["has_ninety_minute_abbrev"] is True
+    assert gap["economically_complete"] is False
+    assert "90 mins" not in str(gap)
+    skipped = classify_kalshi_contract_rule_layer(
+        None,
+        layer="get_market",
+        fetch_status="not_called_already_complete",
+    )
+    assert skipped["wording_kind"] == "not_called"
+    failed = classify_kalshi_contract_rule_layer(
+        None,
+        layer="get_market",
+        fetch_status="transport_failed",
+    )
+    assert failed["wording_kind"] == "absent"
 
 
 def test_match_result_tickers_fetch_only_when_settlement_incomplete() -> None:
@@ -588,12 +649,17 @@ async def test_complete_event_or_market_rules_skip_get_market() -> None:
     assert census.equivalent_market_pairs == 1
     assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
     assert event_complete.get_market_calls == []
+    assert census.kalshi_match_result_rule_enrichment["skipped_complete"] == 3
+    assert census.kalshi_match_result_rule_enrichment["attempted"] == 0
+    assert forensics.get_market_status_histogram.get("not_called_already_complete") == 3
 
     market_complete = BetisKalshiGetMarket(rules_text="should-not-be-fetched", rules_on_markets=True)
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), market_complete)
     assert census.equivalent_market_pairs == 1
     assert forensics.matchbook_kalshi_match_result.matched_equivalent == 1
     assert market_complete.get_market_calls == []
+    assert census.kalshi_match_result_rule_enrichment["skipped_complete"] == 3
+    assert census.kalshi_match_result_rule_enrichment["attempted"] == 0
 
 
 @pytest.mark.asyncio
@@ -610,6 +676,22 @@ async def test_ambiguous_current_and_get_market_rules_stay_incomplete() -> None:
     assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
     assert "incomplete_settlement" in forensics.candidate_rejection_histogram
     assert sorted(nested_ambiguous.get_market_calls) == sorted(_betis_kalshi_tickers())
+    assert census.kalshi_match_result_rule_enrichment["attempted"] == 3
+    assert census.kalshi_match_result_rule_enrichment["empty"] == 3
+    assert census.kalshi_match_result_rule_enrichment["applied"] == 0
+    assert forensics.get_market_wording_kind_histogram.get("generic_ambiguous") == 3
+    rendered = render_forensics(forensics)
+    assert AMBIGUOUS not in rendered
+    get_layer = next(
+        layer
+        for item in forensics.kalshi_rule_layers
+        for layer in item.layers
+        if layer.layer == "get_market"
+    )
+    assert get_layer.rules_primary_nonempty is True
+    assert get_layer.classified_scope == "unknown"
+    assert get_layer.wording_kind == "generic_ambiguous"
+    assert get_layer.has_regulation_tokens is False
 
 
 @pytest.mark.asyncio
@@ -622,6 +704,10 @@ async def test_get_market_failure_for_one_ticker_fails_closed() -> None:
     assert failed in kalshi.get_market_calls
     assert sorted(kalshi.get_market_calls) == sorted(_betis_kalshi_tickers())
     assert all(item.comparison_status != "matched_equivalent" for item in forensics.candidates)
+    assert census.kalshi_match_result_rule_enrichment["failed"] >= 1
+    assert census.kalshi_match_result_rule_enrichment["applied"] == 2
+    assert forensics.get_market_status_histogram.get("transport_failed") == 1
+    assert forensics.get_market_status_histogram.get("ok") == 2
 
 
 @pytest.mark.asyncio

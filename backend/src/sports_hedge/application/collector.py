@@ -93,12 +93,15 @@ from sports_hedge.fees.models import FeeSnapshot
 from sports_hedge.matching.events import EventMatcher
 from sports_hedge.matching.markets import MarketMatcher, MarketMatchResult
 from sports_hedge.normalization.venues import (
+    KALSHI_CONTRACT_RULE_KEYS,
+    KALSHI_RULE_DIAGNOSTIC_CAP,
     KalshiNormalizer,
     MatchbookNormalizer,
     PolymarketNormalizer,
     VenueNormalizationError,
     merge_kalshi_contract_rules,
     promote_polymarket_complete_match_result,
+    safe_kalshi_match_result_rule_layers,
 )
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.preparation import PreparablePaperOpportunity
@@ -487,7 +490,9 @@ class ReadOnlyCrossVenueCollector:
             "applied": 0,
             "empty": 0,
             "failed": 0,
+            "skipped_complete": 0,
         }
+        self._kalshi_rule_layer_diagnostics: list[dict[str, Any]] = []
 
     async def collect_and_scan(
         self,
@@ -568,7 +573,9 @@ class ReadOnlyCrossVenueCollector:
             "applied": 0,
             "empty": 0,
             "failed": 0,
+            "skipped_complete": 0,
         }
+        self._kalshi_rule_layer_diagnostics: list[dict[str, Any]] = []
         self._inflight = set()
         self._cluster_sema = asyncio.Semaphore(self._cluster_concurrency_limit)
         self._provider_semaphores = {
@@ -1428,6 +1435,7 @@ class ReadOnlyCrossVenueCollector:
             ),
             "enabled_venues": [item.value for item in self._op_enabled_venues],
             "kalshi_match_result_rule_enrichment": dict(self._kalshi_rule_enrichment),
+            "kalshi_match_result_rule_layers": list(self._kalshi_rule_layer_diagnostics),
             "identity_scope": [
                 item.canonical_event_id for item in discovered_fixtures
             ],
@@ -2589,26 +2597,57 @@ class ReadOnlyCrossVenueCollector:
         tickers whose current wording is missing or incomplete. Prefer
         documented Get Market rule fields for that ticker. Do not infer
         regulation from GAME/Opta names. Missing or still-ambiguous rules stay
-        incomplete.
+        incomplete. Records SAFE per-layer classification metadata only.
         """
 
-        getter = getattr(self.kalshi, "get_market", None)
-        if getter is None or not raw_markets:
+        if not raw_markets:
             return
-        tickers = self.kalshi_normalizer.match_result_tickers_missing_contract_rules(
+        event_payload = event.raw if isinstance(event.raw, dict) else None
+        incomplete, complete = self.kalshi_normalizer.match_result_rule_enrichment_tickers(
             event.canonical,
             raw_markets,
             series=series,
-            event_payload=event.raw if isinstance(event.raw, dict) else None,
+            event_payload=event_payload,
         )
-        if not tickers:
-            return
+        self._kalshi_rule_enrichment["skipped_complete"] += len(complete)
         by_ticker = {
             str(item.get("ticker") or "").strip(): item
             for item in raw_markets
             if str(item.get("ticker") or "").strip()
         }
-        self._kalshi_rule_enrichment["attempted"] += len(tickers)
+        nested_before_merge = {
+            ticker: {key: payload.get(key) for key in KALSHI_CONTRACT_RULE_KEYS}
+            for ticker, payload in by_ticker.items()
+        }
+        fixture_label = f"{event.canonical.home_team} vs {event.canonical.away_team}"
+        for ticker in complete:
+            self._record_kalshi_rule_layers(
+                fixture_label=fixture_label,
+                ticker=ticker,
+                nested=nested_before_merge.get(ticker),
+                event_payload=event_payload,
+                series=series,
+                get_market_payload=None,
+                get_market_status="not_called_already_complete",
+                skipped_because_complete=True,
+            )
+        getter = getattr(self.kalshi, "get_market", None)
+        if not incomplete:
+            return
+        if getter is None:
+            for ticker in incomplete:
+                self._record_kalshi_rule_layers(
+                    fixture_label=fixture_label,
+                    ticker=ticker,
+                    nested=nested_before_merge.get(ticker),
+                    event_payload=event_payload,
+                    series=series,
+                    get_market_payload=None,
+                    get_market_status="not_called_no_client",
+                    skipped_because_complete=False,
+                )
+            return
+        self._kalshi_rule_enrichment["attempted"] += len(incomplete)
         results = await asyncio.gather(
             *[
                 self._wait_provider(
@@ -2618,14 +2657,14 @@ class ReadOnlyCrossVenueCollector:
                     source_id=ticker,
                     default=None,
                 )
-                for ticker in tickers
+                for ticker in incomplete
             ],
             return_exceptions=True,
         )
-        for ticker, result in zip(tickers, results, strict=True):
+        for ticker, result in zip(incomplete, results, strict=True):
             target = by_ticker.get(ticker)
-            if target is None:
-                continue
+            get_payload: dict[str, Any] | None = None
+            get_status = "transport_failed"
             if isinstance(result, Exception):
                 self._kalshi_rule_enrichment["failed"] += 1
                 issues.append(
@@ -2636,15 +2675,63 @@ class ReadOnlyCrossVenueCollector:
                         detail=str(result),
                     )
                 )
-                continue
-            payload, failed = result if isinstance(result, tuple) else (None, True)
-            if failed or not isinstance(payload, dict):
-                self._kalshi_rule_enrichment["failed"] += 1
-                continue
-            if merge_kalshi_contract_rules(target, payload):
-                self._kalshi_rule_enrichment["applied"] += 1
             else:
-                self._kalshi_rule_enrichment["empty"] += 1
+                payload, failed = result if isinstance(result, tuple) else (None, True)
+                if failed:
+                    self._kalshi_rule_enrichment["failed"] += 1
+                    get_status = "transport_failed"
+                elif not isinstance(payload, dict):
+                    self._kalshi_rule_enrichment["failed"] += 1
+                    get_status = "empty_payload"
+                else:
+                    get_payload = payload
+                    get_status = "ok"
+                    if target is not None and merge_kalshi_contract_rules(target, payload):
+                        self._kalshi_rule_enrichment["applied"] += 1
+                    else:
+                        self._kalshi_rule_enrichment["empty"] += 1
+            self._record_kalshi_rule_layers(
+                fixture_label=fixture_label,
+                ticker=ticker,
+                nested=nested_before_merge.get(ticker),
+                event_payload=event_payload,
+                series=series,
+                get_market_payload=get_payload,
+                get_market_status=get_status,
+                skipped_because_complete=False,
+            )
+
+    def _record_kalshi_rule_layers(
+        self,
+        *,
+        fixture_label: str,
+        ticker: str,
+        nested: dict[str, Any] | None,
+        event_payload: dict[str, Any] | None,
+        series: dict[str, Any] | None,
+        get_market_payload: dict[str, Any] | None,
+        get_market_status: str | None,
+        skipped_because_complete: bool,
+    ) -> None:
+        if len(self._kalshi_rule_layer_diagnostics) >= KALSHI_RULE_DIAGNOSTIC_CAP:
+            return
+        called = get_market_status in {"ok", "transport_failed", "empty_payload"}
+        self._kalshi_rule_layer_diagnostics.append(
+            {
+                "fixture_label": fixture_label,
+                "ticker": ticker,
+                "skipped_because_complete": skipped_because_complete,
+                "get_market_called": called,
+                "get_market_status": get_market_status,
+                "layers": safe_kalshi_match_result_rule_layers(
+                    nested=nested,
+                    event_payload=event_payload,
+                    series=series,
+                    get_market_payload=get_market_payload,
+                    get_market_status=get_market_status,
+                ),
+            }
+        )
 
     async def _try_kalshi_observation(
         self,

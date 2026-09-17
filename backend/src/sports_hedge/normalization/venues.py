@@ -389,6 +389,45 @@ class KalshiNormalizer:
             assembled.append(self._assemble_group(event, items))
         return assembled
 
+    def match_result_rule_enrichment_tickers(
+        self,
+        event: CanonicalEvent,
+        payloads: list[dict[str, Any]],
+        *,
+        series: dict[str, Any] | None = None,
+        event_payload: dict[str, Any] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        """Ordinary Match Result tickers split by settlement completeness.
+
+        Returns ``(incomplete, already_complete)``. Incomplete tickers are
+        eligible for documented Get Market enrichment. Already-complete
+        wording is skipped. GAME / Opta / series names are not used.
+        """
+
+        incomplete: list[str] = []
+        complete: list[str] = []
+        seen: set[str] = set()
+        for payload in payloads:
+            try:
+                classified = self._classify_contract(
+                    event,
+                    payload,
+                    series=series,
+                    event_payload=event_payload,
+                )
+            except (VenueNormalizationError, ValueError):
+                continue
+            if classified.family is not MarketFamily.MATCH_RESULT:
+                continue
+            if classified.ticker in seen:
+                continue
+            seen.add(classified.ticker)
+            if classified.settlement.is_economically_complete():
+                complete.append(classified.ticker)
+            else:
+                incomplete.append(classified.ticker)
+        return incomplete, complete
+
     def match_result_tickers_missing_contract_rules(
         self,
         event: CanonicalEvent,
@@ -405,27 +444,13 @@ class KalshiNormalizer:
         complete settlement fingerprint. GAME / Opta / series names are not used.
         """
 
-        tickers: list[str] = []
-        seen: set[str] = set()
-        for payload in payloads:
-            try:
-                classified = self._classify_contract(
-                    event,
-                    payload,
-                    series=series,
-                    event_payload=event_payload,
-                )
-            except (VenueNormalizationError, ValueError):
-                continue
-            if classified.family is not MarketFamily.MATCH_RESULT:
-                continue
-            if classified.settlement.is_economically_complete():
-                continue
-            if classified.ticker in seen:
-                continue
-            seen.add(classified.ticker)
-            tickers.append(classified.ticker)
-        return tickers
+        incomplete, _complete = self.match_result_rule_enrichment_tickers(
+            event,
+            payloads,
+            series=series,
+            event_payload=event_payload,
+        )
+        return incomplete
 
     def _classify_contract(
         self,
@@ -1061,6 +1086,209 @@ def classify_settlement_wording(text: str) -> tuple[SettlementScope, bool | None
 
 
 KALSHI_CONTRACT_RULE_KEYS = ("rules_primary", "rules_secondary", "rules")
+KALSHI_GENERIC_RULE_PHRASES = (
+    "winner of the match",
+    "see contract url",
+    "see contract terms",
+    "see contract",
+)
+_NINETY_MINUTE_ABBREV_RE = re.compile(r"\b90\s*mins?\b")
+KALSHI_RULE_LAYER_NESTED = "nested_list"
+KALSHI_RULE_LAYER_EVENT = "event"
+KALSHI_RULE_LAYER_GET_MARKET = "get_market"
+KALSHI_RULE_LAYER_SERIES = "series"
+KALSHI_RULE_DIAGNOSTIC_CAP = 150
+
+
+def kalshi_rule_field_presence(payload: dict[str, Any] | None) -> dict[str, bool]:
+    """SAFE booleans for documented rule fields. Never returns the wording."""
+
+    if not isinstance(payload, dict):
+        return {
+            "rules_primary_nonempty": False,
+            "rules_secondary_nonempty": False,
+            "rules_nonempty": False,
+            "any_rule_field_nonempty": False,
+        }
+    present = {
+        key: bool(str(payload.get(key) or "").strip()) for key in KALSHI_CONTRACT_RULE_KEYS
+    }
+    return {
+        "rules_primary_nonempty": present["rules_primary"],
+        "rules_secondary_nonempty": present["rules_secondary"],
+        "rules_nonempty": present["rules"],
+        "any_rule_field_nonempty": any(present.values()),
+    }
+
+
+def _kalshi_rule_text(payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return " ".join(
+        str(payload.get(key) or "").strip()
+        for key in KALSHI_CONTRACT_RULE_KEYS
+        if str(payload.get(key) or "").strip()
+    )
+
+
+def _wording_completeness(text: str) -> tuple[str, bool]:
+    scope, extra_time, penalties = classify_settlement_wording(text)
+    complete = (
+        scope is not SettlementScope.UNKNOWN
+        and extra_time is not None
+        and penalties is not None
+    )
+    return scope.value, complete
+
+
+def _kalshi_wording_kind(text: str, *, complete: bool) -> str:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return "empty"
+    if complete:
+        return "complete"
+    normalized = normalize_text(stripped)
+    has_settlement_tokens = (
+        _has_regulation_marker(normalized)
+        or _has_extra_time_token(normalized)
+        or _has_penalties_token(normalized)
+        or bool(_NINETY_MINUTE_ABBREV_RE.search(normalized))
+    )
+    if has_settlement_tokens:
+        return "present_unclassified_with_settlement_tokens"
+    if any(phrase in normalized for phrase in KALSHI_GENERIC_RULE_PHRASES):
+        return "generic_ambiguous"
+    return "present_unclassified"
+
+
+def classify_kalshi_contract_rule_layer(
+    payload: dict[str, Any] | None,
+    *,
+    layer: str,
+    fetch_status: str | None = None,
+) -> dict[str, Any]:
+    """Classify one documented rule layer without exposing contract text."""
+
+    if payload is None and layer != KALSHI_RULE_LAYER_GET_MARKET:
+        return {
+            "layer": layer,
+            "rules_primary_nonempty": False,
+            "rules_secondary_nonempty": False,
+            "rules_nonempty": False,
+            "any_rule_field_nonempty": False,
+            "classified_scope": None,
+            "economically_complete": None,
+            "wording_kind": "absent",
+            "has_regulation_tokens": False,
+            "has_extra_time_tokens": False,
+            "has_penalties_tokens": False,
+            "has_ninety_minute_abbrev": False,
+            "fetch_status": fetch_status,
+        }
+    presence = kalshi_rule_field_presence(payload if isinstance(payload, dict) else None)
+    text = _kalshi_rule_text(payload if isinstance(payload, dict) else None)
+    normalized = normalize_text(text) if text else ""
+    if not text:
+        scope = None
+        complete = False
+        kind = "empty" if isinstance(payload, dict) else "absent"
+        if fetch_status and str(fetch_status).startswith("not_called"):
+            kind = "not_called"
+        elif fetch_status in {"transport_failed", "empty_payload"}:
+            kind = "absent"
+    else:
+        scope, complete = _wording_completeness(text)
+        kind = _kalshi_wording_kind(text, complete=complete)
+    return {
+        "layer": layer,
+        **presence,
+        "classified_scope": scope,
+        "economically_complete": complete if text else False,
+        "wording_kind": kind,
+        "has_regulation_tokens": bool(normalized) and _has_regulation_marker(normalized),
+        "has_extra_time_tokens": bool(normalized) and _has_extra_time_token(normalized),
+        "has_penalties_tokens": bool(normalized) and _has_penalties_token(normalized),
+        "has_ninety_minute_abbrev": bool(normalized)
+        and bool(_NINETY_MINUTE_ABBREV_RE.search(normalized)),
+        "fetch_status": fetch_status,
+    }
+
+
+def classify_kalshi_series_rule_layer(series: dict[str, Any] | None) -> dict[str, Any]:
+    """SAFE series-layer metadata. Does not fetch contract_terms_url."""
+
+    if not isinstance(series, dict):
+        return {
+            "layer": KALSHI_RULE_LAYER_SERIES,
+            "rules_primary_nonempty": False,
+            "rules_secondary_nonempty": False,
+            "rules_nonempty": False,
+            "any_rule_field_nonempty": False,
+            "classified_scope": None,
+            "economically_complete": False,
+            "wording_kind": "absent",
+            "has_regulation_tokens": False,
+            "has_extra_time_tokens": False,
+            "has_penalties_tokens": False,
+            "has_ninety_minute_abbrev": False,
+            "fetch_status": None,
+            "contract_terms_url_present": False,
+            "settlement_sources_present": False,
+        }
+    url = str(series.get("contract_terms_url") or series.get("contract_url") or "").strip()
+    sources = series.get("settlement_sources")
+    sources_present = bool(sources)
+    text = " ".join(
+        part
+        for part in (url, json.dumps(sources) if sources_present else "")
+        if part
+    )
+    normalized = normalize_text(text) if text else ""
+    if text:
+        scope, complete = _wording_completeness(text)
+        kind = _kalshi_wording_kind(text, complete=complete)
+    else:
+        scope, complete, kind = None, False, "empty"
+    return {
+        "layer": KALSHI_RULE_LAYER_SERIES,
+        "rules_primary_nonempty": False,
+        "rules_secondary_nonempty": False,
+        "rules_nonempty": False,
+        "any_rule_field_nonempty": bool(text),
+        "classified_scope": scope,
+        "economically_complete": complete,
+        "wording_kind": kind,
+        "has_regulation_tokens": bool(normalized) and _has_regulation_marker(normalized),
+        "has_extra_time_tokens": bool(normalized) and _has_extra_time_token(normalized),
+        "has_penalties_tokens": bool(normalized) and _has_penalties_token(normalized),
+        "has_ninety_minute_abbrev": bool(normalized)
+        and bool(_NINETY_MINUTE_ABBREV_RE.search(normalized)),
+        "fetch_status": None,
+        "contract_terms_url_present": bool(url),
+        "settlement_sources_present": sources_present,
+    }
+
+
+def safe_kalshi_match_result_rule_layers(
+    *,
+    nested: dict[str, Any] | None,
+    event_payload: dict[str, Any] | None,
+    series: dict[str, Any] | None,
+    get_market_payload: dict[str, Any] | None,
+    get_market_status: str | None,
+) -> list[dict[str, Any]]:
+    """Per-source-layer SAFE classification for one Match Result ticker."""
+
+    return [
+        classify_kalshi_contract_rule_layer(nested, layer=KALSHI_RULE_LAYER_NESTED),
+        classify_kalshi_contract_rule_layer(event_payload, layer=KALSHI_RULE_LAYER_EVENT),
+        classify_kalshi_contract_rule_layer(
+            get_market_payload,
+            layer=KALSHI_RULE_LAYER_GET_MARKET,
+            fetch_status=get_market_status,
+        ),
+        classify_kalshi_series_rule_layer(series),
+    ]
 
 
 def merge_kalshi_contract_rules(target: dict[str, Any], source: dict[str, Any] | None) -> bool:

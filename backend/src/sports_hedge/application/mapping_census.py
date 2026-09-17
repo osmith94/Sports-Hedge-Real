@@ -51,6 +51,7 @@ class MappingCensus(BaseModel):
     venue_health: dict[str, str] = Field(default_factory=dict)
     venue_scope: str | None = None
     enabled_venues: list[str] = Field(default_factory=list)
+    kalshi_match_result_rule_enrichment: dict[str, int] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -132,6 +133,7 @@ def census_from_report(
         elif venue_scope:
             notes.append(f"venue_scope={venue_scope}")
     resolved_venues = [str(item) for item in (enabled_venues or [item.value for item in report.enabled_venues])]
+    enrichment = _int_counts(diagnostics.get("kalshi_match_result_rule_enrichment"))
     return MappingCensus(
         data_class=data_class,
         paper_mode=resolved.sports_hedge_mode,
@@ -157,6 +159,7 @@ def census_from_report(
         venue_health=dict(report.venue_health or {}),
         venue_scope=venue_scope,
         enabled_venues=resolved_venues,
+        kalshi_match_result_rule_enrichment=enrichment,
         notes=notes,
     )
 
@@ -188,6 +191,10 @@ def render_census(census: MappingCensus) -> str:
         f"venue_health={_fmt_counts(census.venue_health)}",
         f"venue_scope={census.venue_scope or 'n/a'}",
         f"enabled_venues={','.join(census.enabled_venues) or '{}'}",
+        (
+            "kalshi_match_result_rule_enrichment="
+            + _fmt_counts(census.kalshi_match_result_rule_enrichment)
+        ),
     ]
     lines.extend(f"note: {note}" for note in census.notes)
     return "\n".join(lines) + "\n"
@@ -208,6 +215,18 @@ def _issue_reason_key(issue: object) -> str:
     if issue_is_provider_failure(issue):
         return f"provider_failure:{stage}:{venue}"
     return f"{stage}:{venue}"
+
+
+def _int_counts(value: object) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for key, item in value.items():
+        try:
+            counts[str(key)] = int(item)
+        except (TypeError, ValueError):
+            continue
+    return counts
 
 
 def _optional_int(value: object) -> int | None:
