@@ -76,10 +76,10 @@ def census_from_report(
         for row in rows:
             status = str(row.comparison_status.value if row.comparison_status else "unknown")
             status_counts[status] += 1
+            if GAMEWIN_ORDINARY_1X2_AUDIT_REASON in (row.match_reasons or []):
+                ordinary_admissions += 1
             if row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT:
                 family_counts[str(row.family or "unknown")] += 1
-                if GAMEWIN_ORDINARY_1X2_AUDIT_REASON in (row.match_reasons or []):
-                    ordinary_admissions += 1
 
     skip_reasons: Counter[str] = Counter()
     unsupported = 0
@@ -119,6 +119,11 @@ def census_from_report(
             "Deterministic fixture counts. Not owner-live evidence."
             if data_class == CENSUS_DATA_CLASS_FIXTURE
             else "Owner-live/read-only diagnostic. Distinct from deterministic fixture census."
+        ),
+        (
+            "Inventory MATCHED_EQUIVALENT and market_family_breakdown require "
+            "the shared catalogue APPROVED_EQUIVALENT gate. Matcher structural "
+            "hits, including GAMEWIN-unknown 1X2, remain on match_reasons."
         ),
     ]
     if data_class == CENSUS_DATA_CLASS_OWNER_LIVE:

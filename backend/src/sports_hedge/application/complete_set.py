@@ -224,7 +224,9 @@ def solver_model_for_pair(left: CanonicalMarket, right: CanonicalMarket) -> str 
 def scan_eligible_pair(left: CanonicalMarket, right: CanonicalMarket, match: MarketMatchResult) -> bool:
     if not match.matched:
         return False
-    return solver_model_for_pair(left, right) is not None
+    from sports_hedge.catalogue.admission import catalogue_allows_solver
+
+    return catalogue_allows_solver(left, right)
 
 
 def scan_ineligibility_reason(market: CanonicalMarket) -> str:

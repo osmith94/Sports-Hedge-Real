@@ -242,7 +242,7 @@ def test_missing_no_goal_is_incomplete_state_set() -> None:
     assert CanonicalOutcome.NO_GOAL not in {runner.outcome for runner in matchbook.market.runners}
     assert generalized_payoff_eligible_market(matchbook.market) is False
     assert scan_ineligibility_reason(matchbook.market) == INCOMPLETE_OUTCOME_REASON
-    assert INCOMPLETE_OUTCOME_REASON in decision.rejection_reasons
+    assert "catalogue_review_required" in decision.rejection_reasons
     assert decision.payoff_scan is None
     assert decision.eligible_for_paper_simulation is False
 

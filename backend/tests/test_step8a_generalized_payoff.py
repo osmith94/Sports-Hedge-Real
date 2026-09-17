@@ -441,7 +441,7 @@ def test_quarter_line_totals_remain_fail_closed() -> None:
     assert scan_ineligibility_reason(matchbook.market) == SPLIT_LINE_REASON
     assert decision.depth_scan is None
     assert decision.payoff_scan is None
-    assert SPLIT_LINE_REASON in decision.rejection_reasons
+    assert "catalogue_review_required" in decision.rejection_reasons
     assert decision.eligible_for_paper_simulation is False
 
 
