@@ -62,7 +62,7 @@ HOT characteristics:
 - targeted source-event and market refresh;
 - high request priority when provider capacity is constrained;
 - does not perform unnecessary broad event discovery when source identities are already known;
-- uses the same canonical market matcher and current-state store as UNIVERSE.
+- uses the same approved-market catalogue, venue recognition/equivalence rules and current-state store as UNIVERSE.
 
 HOT is a surveillance lane. HOT membership is not itself permission to trade.
 
@@ -79,7 +79,7 @@ UNIVERSE characteristics:
 - canonical fixture construction;
 - cross-venue mapping;
 - market normalization;
-- market-equivalence assessment;
+- approved-market recognition and strict equivalence assessment;
 - economics and solver evaluation where eligible;
 - immediate persistence of completed work;
 - immediate opportunity promotion into HOT;
@@ -207,7 +207,7 @@ Examples of incremental outputs:
 - canonical fixture discovered;
 - cross-venue fixture match found;
 - market equivalence found;
-- mapping confidence updated;
+- approved-market equivalence or review state updated;
 - near opportunity found;
 - positive edge found;
 - qualifying opportunity found;
@@ -312,17 +312,17 @@ They must share:
 - source aliases;
 - market normalization;
 - market-equivalence rules;
-- learned mappings;
+- operator-approved venue recognition/mapping rules;
 - fee/FX model;
 - solver semantics;
 - opportunity state.
 
 There must not be:
 
-- a HOT-only matcher;
-- a UNIVERSE-only matcher;
+- a HOT-only market catalogue/equivalence path;
+- a UNIVERSE-only market catalogue/equivalence path;
 - duplicate canonical fixture stores;
-- separate learned-rule systems.
+- separate exception-rule systems.
 
 Concurrent updates must be idempotent and keyed by canonical identity.
 
@@ -375,11 +375,11 @@ A fixture may deserve rapid monitoring because it has:
 - near-trigger edge;
 - significant divergence;
 - rapid movement;
-- newly credible cross-venue mapping.
+- newly approved-equivalent cross-venue market.
 
 Paper entry remains subject to stricter gates such as:
 
-- sufficient market equivalence/mapping confidence;
+- approved-catalogue market equivalence with exact required parameters/outcome semantics;
 - no hard contradiction;
 - fresh executable quotes;
 - exact applicable costs/FX;
@@ -594,7 +594,7 @@ The preferred architecture is:
                            v
                 Shared canonical state
                            │
-             mapping → economics → solver
+             approved-catalogue recognition → economics → solver
                            │
                   paper/execution gates
 ```
@@ -661,6 +661,7 @@ In particular:
 
 - **Tenet 2 — Paper Mode and Execution Boundaries:** concurrent scanning remains read-only toward venues in Phase 1.
 - **Tenet 3 — Canonical Market Equivalence:** concurrency does not permit incompatible markets to be compared as executable equivalents.
+- **Tenet 20 — Approved Market Catalogue and Exception Review:** both lanes use one pre-approved market catalogue; ambiguous probable-archetype markets go to review and unsupported novelty markets stay out of the solver.\n- **Tenet 20 — Approved Market Catalogue and Exception Review:** both lanes use the same bounded approved archetypes; REVIEW_REQUIRED and UNSUPPORTED markets do not enter the normal solver.
 - **Tenet 4 — Arbitrage Operations:** near opportunities and qualifying opportunities remain economically and risk aware.
 - **Tenet 11 — UI and Data Honesty:** lane/provider state must be labelled truthfully.
 - **Tenet 15 — Effective Venue Economics and Fees:** promotion does not bypass net economics.
@@ -685,7 +686,7 @@ Any PR changing HOT, UNIVERSE, provider scheduling or current-state orchestratio
 - [ ] Can UNIVERSE promote a fixture to HOT immediately?
 - [ ] Does promotion leave UNIVERSE running?
 - [ ] Is HOT canonical-deduplicated?
-- [ ] Do both workers share the same matcher and canonical state?
+- [ ] Do both workers share the same approved market catalogue, recognition rules, matcher and canonical state?
 - [ ] Can stale/older UNIVERSE data overwrite fresher HOT truth? It must not.
 - [ ] Can the operator see separate HOT and UNIVERSE progress/health?
 - [ ] Does restart/resume preserve successful sweep progress?

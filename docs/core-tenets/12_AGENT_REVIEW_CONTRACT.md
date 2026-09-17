@@ -47,7 +47,7 @@ Safety:
 - paper-only boundary checked
 
 Economic correctness:
-- settlement / fees / FX / liquidity checks reviewed where applicable
+- approved market catalogue / settlement / fees / FX / liquidity checks reviewed where applicable
 ```
 
 ## Required escalation
@@ -55,7 +55,7 @@ Economic correctness:
 A PR should be sent back when it:
 
 - introduces a second canonical identity system;
-- weakens settlement equivalence;
+- weakens settlement equivalence or bypasses the approved-market catalogue;
 - invents missing fees/FX/data;
 - mixes native currencies incorrectly;
 - presents Research as guaranteed arbitrage;
@@ -64,6 +64,17 @@ A PR should be sent back when it:
 - makes fixture/demo data look live;
 - introduces real execution into Phase 1;
 - materially violates another core tenet without explicit approval.
+
+For any change touching market recognition, equivalence, matcher rules, market-family coverage or solver eligibility, the handoff must additionally state:
+
+- which approved market archetypes are affected;
+- approved-good examples retained/lost/gained;
+- known-bad examples still rejected;
+- whether any ambiguous market can enter the solver without an explicit approved rule (it must not);
+- whether REVIEW_REQUIRED exceptions are kept out of paper/live execution;
+- whether HOT and UNIVERSE use the same catalogue and recognition rules.
+
+A generic confidence score must not be used as a substitute for approved market-contract equivalence.
 
 ## Product review use
 
