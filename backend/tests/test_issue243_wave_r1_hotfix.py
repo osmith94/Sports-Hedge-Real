@@ -730,13 +730,17 @@ async def test_hung_provider_does_not_leftover_healthy_overlap_as_budget_exhaust
             if item.polymarket_matched and item.kalshi_matched
         ]
         diagnostics = report.scan_diagnostics
-        assert report.venue_health["matchbook"] in {"timeout", "unavailable"}
+        assert report.venue_health["matchbook"] in {"timeout", "discovery_timeout", "unavailable"}
         assert report.venue_health["polymarket"] == "ok"
         assert report.venue_health["kalshi"] == "ok"
         assert two_venue, "healthy venues must still cluster overlapping fixtures"
         assert evaluated, diagnostics
         assert diagnostics["evaluated_count"] == len(evaluated)
-        assert diagnostics["provider_unavailable"].get("matchbook") in {"timeout", "unavailable"}
+        assert diagnostics["provider_unavailable"].get("matchbook") in {
+            "timeout",
+            "discovery_timeout",
+            "unavailable",
+        }
         budget_only = [
             item
             for item in leftovers

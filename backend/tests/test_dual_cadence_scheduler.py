@@ -263,8 +263,9 @@ async def test_universe_chunk_yields_and_cursor_advances_across_hot_cycles() -> 
 
     first = coordinator.plan_tick(now=clock.now)
     assert first.lane == "universe"
-    assert first.collector_timeout_seconds is not None
-    assert first.collector_timeout_seconds < 20
+    assert first.collector_timeout_seconds is None
+    assert first.unbounded_cycle is True
+    assert first.reason == "universe_sweep"
     await coordinator.run_cycle(
         runner,
         timeout_seconds=first.coordinator_timeout_seconds,
@@ -525,9 +526,9 @@ def test_startup_universe_due_immediately_and_tracked_empty() -> None:
     assert coordinator._next_hot_due == NOW
     plan = coordinator.plan_tick(now=NOW)
     assert plan.lane == "universe"
-    assert plan.reason == "universe_chunk"
-    assert plan.collector_timeout_seconds is not None
-    assert plan.collector_timeout_seconds < 30
+    assert plan.reason == "universe_sweep"
+    assert plan.collector_timeout_seconds is None
+    assert plan.unbounded_cycle is True
     assert coordinator._next_hot_due == NOW
 
 
@@ -773,12 +774,12 @@ async def test_explicit_collect_does_not_consume_universe_generation_progress() 
 async def test_explicit_collect_fails_fast_when_scheduled_lane_is_active() -> None:
     coordinator = LiveRefreshCoordinator()
     coordinator.status = coordinator.status.model_copy(update={"cycle_in_progress": True})
-    coordinator._hot_in_progress = True
+    coordinator._universe_in_progress = True
 
     async def runner() -> CollectionReport:
         raise AssertionError("explicit collect must not start")
 
-    with pytest.raises(ExplicitCollectBusy, match="scheduled scan in progress"):
+    with pytest.raises(ExplicitCollectBusy, match="UNIVERSE scan in progress"):
         await coordinator.run_explicit_collect(runner)
 
     client = TestClient(app)
@@ -789,7 +790,7 @@ async def test_explicit_collect_fails_fast_when_scheduled_lane_is_active() -> No
     try:
         response = client.post("/paper/collect", json={"maximum_execution_risk": 60})
         assert response.status_code == 409
-        assert "scheduled scan in progress" in response.json()["detail"]
+        assert "UNIVERSE scan in progress" in response.json()["detail"]
     finally:
         busy.reset()
 
@@ -884,11 +885,11 @@ def test_manual_hot_http_reuses_known_events_without_universe_discovery(monkeypa
 def test_manual_hot_http_returns_busy_when_scheduled_lane_owns_coordinator() -> None:
     coordinator = get_live_refresh_coordinator()
     coordinator.reset()
-    coordinator._universe_in_progress = True
+    coordinator._hot_in_progress = True
     try:
         response = TestClient(app).post("/paper/collect/hot", json={})
     finally:
         coordinator.reset()
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "scheduled scan in progress"
+    assert "HOT scan in progress" in response.json()["detail"]

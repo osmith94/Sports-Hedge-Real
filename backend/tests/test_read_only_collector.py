@@ -329,7 +329,7 @@ async def test_collector_returns_healthy_venue_fixtures_when_matchbook_hangs() -
         report = await collector.collect_and_scan(maximum_execution_risk=100)
         elapsed = time.monotonic() - started
         assert elapsed < 2.0
-        assert report.venue_health[VenueName.MATCHBOOK.value] == "timeout"
+        assert report.venue_health[VenueName.MATCHBOOK.value] == "discovery_timeout"
         assert report.venue_health[VenueName.POLYMARKET.value] == "ok"
         assert report.raw_matchbook_events == 0
         assert report.raw_polymarket_events == 2

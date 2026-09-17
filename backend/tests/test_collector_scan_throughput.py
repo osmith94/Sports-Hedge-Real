@@ -404,7 +404,7 @@ async def test_stalled_provider_degrades_truthfully_inside_cycle_budget() -> Non
         assert leftovers or unavailable or report.scan_diagnostics.get("soft_deadline_reached")
         assert fabricated == []
         assert all(item.current_net_edge is None or item.solver_is_arbitrage is False for item in leftovers)
-        assert report.venue_health["matchbook"] in {"timeout", "degraded"}
+        assert report.venue_health["matchbook"] in {"timeout", "discovery_timeout", "market_timeout", "degraded"}
         assert report.scan_diagnostics["stages"]["market_discovery"]["timeouts"] >= 1
     finally:
         repository.close()

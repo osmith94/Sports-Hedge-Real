@@ -310,6 +310,10 @@ class Settings(BaseSettings):
     paper_scan_matchbook_concurrency: int = Field(default=4, ge=1, le=16)
     paper_scan_polymarket_concurrency: int = Field(default=8, ge=1, le=32)
     paper_scan_kalshi_concurrency: int = Field(default=4, ge=1, le=16)
+    # After this many consecutive HOT provider grants while UNIVERSE waits,
+    # the next slot goes to UNIVERSE. HOT priority must not starve discovery.
+    paper_provider_hot_starvation_grants: int = Field(default=8, ge=1, le=64)
+    paper_universe_work_max_attempts: int = Field(default=3, ge=1, le=8)
     cors_allow_origins: Annotated[list[str], NoDecode] = Field(
         default=[
             "http://localhost:3000",

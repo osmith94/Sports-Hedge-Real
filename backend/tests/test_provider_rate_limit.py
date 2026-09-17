@@ -1,8 +1,7 @@
 """Reusable provider 429 cooldown primitive.
 
-Wave R3 wires this only to Matchbook login. These tests prove the primitive
-is usable for unauthenticated public GET adapters (Kalshi/Polymarket) in a
-later lane without importing or changing those clients.
+Wave R3 introduced the primitive on Matchbook login. Concurrent HOT/UNIVERSE
+workers now share the same cooldown truth on Kalshi and Polymarket public GETs.
 """
 
 from __future__ import annotations
@@ -100,11 +99,11 @@ def test_httpx_response_headers_work_for_retry_after() -> None:
     assert retry_after_seconds(response.headers, now=now, policy=policy) == 8
 
 
-def test_r3_does_not_wire_kalshi_or_polymarket_to_cooldown() -> None:
+def test_shared_runtime_wires_kalshi_and_polymarket_cooldown() -> None:
     import inspect
 
     assert "ProviderCooldown" in inspect.getsource(matchbook_mod)
-    assert "ProviderCooldown" not in inspect.getsource(kalshi_mod)
-    assert "ProviderCooldown" not in inspect.getsource(polymarket_mod)
-    assert "rate_limit" not in inspect.getsource(kalshi_mod)
-    assert "rate_limit" not in inspect.getsource(polymarket_mod)
+    assert "ProviderCooldown" in inspect.getsource(kalshi_mod)
+    assert "ProviderCooldown" in inspect.getsource(polymarket_mod)
+    assert "raise_if_active" in inspect.getsource(kalshi_mod)
+    assert "raise_if_active" in inspect.getsource(polymarket_mod)

@@ -183,14 +183,15 @@ def test_scheduled_then_manual_scan_keeps_named_clocks() -> None:
         )
     )
     status = coordinator.public_status()
-    assert status.venue_health["matchbook"] == "timeout"
+    assert status.venue_health["matchbook"] == "degraded"
     assert "0s ago" not in (status.operator_summary or "")
     assert status.last_completed_at == later
     assert status.hot.last_completed_at == NOW
     hot_summary = status.hot.operator_summary or ""
     assert "completed at 2026-09-16T12:00:00Z" in hot_summary
     assert status.hot.venue_health["matchbook"] == "ok"
-    assert status.venue_health["matchbook"] == "timeout"
+    assert status.universe.venue_health["matchbook"] == "timeout"
+    assert status.venue_health["matchbook"] == "degraded"
 
 
 def test_hot_last_scan_truth_survives_later_universe_recovery() -> None:
@@ -215,7 +216,7 @@ def test_hot_last_scan_truth_survives_later_universe_recovery() -> None:
         scan_lane=ScanLane.UNIVERSE,
     )
     status = coordinator.public_status()
-    assert status.venue_health["matchbook"] == "ok"
+    assert status.venue_health["matchbook"] == "degraded"
     assert status.hot.venue_health["matchbook"] == "unavailable"
     assert status.universe.venue_health["matchbook"] == "ok"
     hot_summary = status.hot.operator_summary or ""
@@ -250,7 +251,7 @@ def test_universe_last_scan_truth_survives_later_hot_recovery() -> None:
         scan_lane=ScanLane.HOT,
     )
     status = coordinator.public_status()
-    assert status.venue_health["matchbook"] == "ok"
+    assert status.venue_health["matchbook"] == "degraded"
     assert status.universe.venue_health["matchbook"] == "unavailable"
     assert status.hot.venue_health["matchbook"] == "ok"
     universe_summary = status.universe.operator_summary or ""
@@ -259,3 +260,15 @@ def test_universe_last_scan_truth_survives_later_hot_recovery() -> None:
     assert "MB unavailable" in universe_summary
     assert "last scan MB·PM·K" in hot_summary
     assert "MB unavailable" not in hot_summary
+
+
+def test_top_level_health_is_never_green_when_one_lane_failed() -> None:
+    from sports_hedge.application.live_refresh import _merge_top_level_venue_health
+
+    hot_ok = {"matchbook": "ok", "polymarket": "ok", "kalshi": "ok"}
+    assert _merge_top_level_venue_health(hot_ok, {"matchbook": "unavailable"})["matchbook"] == "degraded"
+    assert _merge_top_level_venue_health(hot_ok, {"matchbook": "auth_failure"})["matchbook"] == "degraded"
+    assert _merge_top_level_venue_health(hot_ok, {"matchbook": "discovery_timeout"})["matchbook"] == "degraded"
+    assert _merge_top_level_venue_health(hot_ok, {"matchbook": "retry_wait"})["matchbook"] == "degraded"
+    assert _merge_top_level_venue_health(hot_ok, {"matchbook": "waiting"})["matchbook"] == "ok"
+    assert _merge_top_level_venue_health(hot_ok, {"matchbook": "ok"})["matchbook"] == "ok"

@@ -63,6 +63,9 @@ describe("dual cadence operator copy", () => {
     assert.match(fastScanCopy(status(), now).detail, /partial \(2 not evaluated\)/);
     assert.doesNotMatch(fastScanCopy(status(), now).detail, /scan_cycle_timeout/);
     assert.match(fullSweepCopy(status(), now).detail, /104 universe/);
+    assert.doesNotMatch(fullSweepCopy(status(), now).detail, /chunk/i);
+    assert.doesNotMatch(fullSweepCopy(status(), now).detail, /HOT next due/);
+    assert.doesNotMatch(fullSweepCopy(status(), now).detail, /until HOT/i);
     const persistFailed = status({
       last_error: null,
       hot: {
@@ -188,6 +191,27 @@ describe("dual cadence operator copy", () => {
     assert.match(bar, /paper_autofill_enabled/);
     assert.match(scan, /AUTO PAPER CAPTURE ON/);
     assert.match(layout, /PAPER MODE · NO EXECUTION/);
+  });
+
+  it("uses canonical work counts so three venue aliases stay 1/1 remaining 0", () => {
+    const now = Date.parse("2026-09-14T12:00:12Z");
+    const canonical = status({
+      universe: {
+        cadence_seconds: 180,
+        generation_budget_seconds: 150,
+        fixture_count: 1,
+        evaluated_count: 1,
+        discovered_total: 1,
+        not_evaluated_count: 2,
+        remaining: 0,
+        canonical_work_total: 1,
+        canonical_evaluated: 1,
+        canonical_remaining: 0,
+        worker_state: "complete",
+      },
+    });
+    assert.match(fullSweepCopy(canonical, now).detail, /1 evaluated \/ 0 not evaluated/);
+    assert.doesNotMatch(fullSweepCopy(canonical, now).detail, /2 not evaluated/);
   });
 
   it("routes primary Run scan to HOT and labels full discovery as advanced", () => {

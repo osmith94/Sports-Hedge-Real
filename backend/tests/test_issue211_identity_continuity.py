@@ -472,6 +472,8 @@ def test_delayed_older_universe_snapshot_cannot_change_status_or_due_time() -> N
 
 
 def test_same_key_nonqualifying_hot_still_demotes() -> None:
+    """Zero-edge same-key refresh leaves HOT. A positive below-threshold edge stays."""
+
     store = FixtureCurrentStateStore()
     store.upsert_from_report(_qualifying_universe_report(), scan_lane=ScanLane.UNIVERSE, now=NOW)
     later = NOW + timedelta(seconds=30)
@@ -480,7 +482,7 @@ def test_same_key_nonqualifying_hot_still_demotes() -> None:
             [_fixture(opportunity="matched", arb=False, qualifying=0, when=later)],
             when=later,
             scan_lane=ScanLane.HOT.value,
-            markets={CANONICAL_ID: [_market_row(edge=Decimal("0.002"), arb=False)]},
+            markets={CANONICAL_ID: [_market_row(edge=Decimal("0"), arb=False)]},
         ),
         scan_lane=ScanLane.HOT,
         now=later,

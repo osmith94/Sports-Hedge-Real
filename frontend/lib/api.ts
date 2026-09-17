@@ -455,13 +455,27 @@ export type LaneRefreshStatus = {
   generation_work_used_s?: number;
   chunk_last_duration_ms?: number | null;
   cycle_in_progress?: boolean;
+  worker_state?: string | null;
   last_started_at?: string | null;
   last_completed_at?: string | null;
   last_duration_ms?: number | null;
   next_due_at?: string | null;
   fixture_count?: number;
+  lifecycle_hot_count?: number;
+  promoted_hot_count?: number;
   evaluated_count?: number;
   not_evaluated_count?: number;
+  discovered_total?: number;
+  remaining?: number;
+  matched_fixtures?: number;
+  equivalent_markets?: number;
+  near_count?: number;
+  positive_count?: number;
+  qualifying_count?: number;
+  hot_promotions?: number;
+  last_successful_fixture?: string | null;
+  current_fixture?: string | null;
+  sweep_id?: string | null;
   last_error?: string | null;
   last_diagnostics?: Record<string, unknown> | null;
   last_persist_error?: string | null;
@@ -475,6 +489,13 @@ export type LaneRefreshStatus = {
   venue_warning?: string | null;
   applies_next_cycle?: boolean;
   venue_health?: Record<string, string>;
+  operation_health?: Record<string, unknown>;
+  raw_events_discovered_by_venue?: Record<string, number>;
+  canonical_work_total?: number;
+  canonical_evaluated?: number;
+  canonical_retryable?: number;
+  canonical_final_failed?: number;
+  canonical_remaining?: number;
 };
 
 export type LaneVenueFlags = {
@@ -525,6 +546,7 @@ export type LiveRefreshStatus = {
   universe?: LaneRefreshStatus;
   venue_participation?: LaneVenueParticipation | null;
   recent_scan_cycles?: PaperScanCycleRecord[];
+  provider_access?: Record<string, unknown>;
 };
 
 export type VenueHealth = {

@@ -17,11 +17,13 @@ from sports_hedge.application.current_market_inventory import (
     apply_current_market_inventory,
     combined_radar_freshness,
     current_slots_prove_qualifying_opportunity,
+    current_slots_prove_surveillance_opportunity,
     merge_current_market_slots,
     prune_expired_market_slots,
     stamp_current_market_row,
     union_paper_market_ids,
 )
+from sports_hedge.application.hot_identity import hot_scheduling_key
 from sports_hedge.application.fixture_inventory import sort_fixture_inventory_rows
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
@@ -124,11 +126,13 @@ class FixtureCurrentStateStore:
 
     HOT identity is the union of lifecycle HOT membership (in-play / <=60m
     pre-kickoff / bounded post-kickoff unknown) and current fixtures whose
-    latest valid merged current-state proves a qualifying executable arb
-    (Issue #200). Opportunity promotion is not a second identity store and
+    latest valid merged current-state proves either a qualifying executable
+    arb (Issue #200) or a positive below-threshold surveillance edge
+    (Tenet 19). Opportunity promotion is not a second identity store and
     does not change `classify_scan_lane`. Promotion disappears when the
-    merged current-state ceases to qualify unless another lifecycle HOT
-    reason still applies.
+    merged current-state ceases to show a positive edge unless another
+    lifecycle HOT reason still applies. Aliases of one football fixture
+    collapse to one HOT scheduling unit.
 
     Terminal tombstones keep explicit finished/completed/settled truth from
     resurrecting via a later stale UNIVERSE or other-venue unknown snapshot.
@@ -147,6 +151,7 @@ class FixtureCurrentStateStore:
         self._aliases: dict[str, str] = {}
         self._tombstones: dict[str, CurrentStateTombstone] = {}
         self._tombstone_aliases: dict[str, str] = {}
+        self._scheduling_index: dict[str, str] = {}
         self._has_collection = False
 
     def clear(self, *, keep_tombstones: bool = False) -> None:
@@ -154,6 +159,7 @@ class FixtureCurrentStateStore:
             self._generation = 0
             self._rows = {}
             self._aliases = {}
+            self._scheduling_index = {}
             self._has_collection = False
             if not keep_tombstones:
                 self._tombstones = {}
@@ -181,6 +187,33 @@ class FixtureCurrentStateStore:
             self._upsert_from_report_unlocked(
                 report, scan_lane=scan_lane, now=now
             )
+
+    def upsert_evaluated_fixture(
+        self,
+        fixture: DiscoveredFixture,
+        *,
+        markets: list[Any] | None = None,
+        decisions: list[Any] | None = None,
+        aliases: dict[str, str] | None = None,
+        source_events: list[dict[str, Any]] | None = None,
+        scan_lane: ScanLane | str = ScanLane.UNIVERSE,
+        now: datetime | None = None,
+    ) -> None:
+        """Stream one evaluated fixture into current state immediately."""
+
+        scanned = now or fixture.last_scanned_at or fixture.last_seen_at
+        canonical_id = fixture.canonical_event_id
+        report = CollectionReport(
+            started_at=scanned,
+            completed_at=scanned,
+            discovered_fixtures=[fixture],
+            fixture_markets={canonical_id: list(markets or [])},
+            paper_decisions=list(decisions or []),
+            scan_lane=ScanLane(scan_lane).value if not isinstance(scan_lane, str) else scan_lane,
+            fixture_identity_aliases=dict(aliases or {canonical_id: canonical_id}),
+            fixture_source_events={canonical_id: list(source_events or [])},
+        )
+        self.upsert_from_report(report, scan_lane=scan_lane, now=scanned)
 
     def _upsert_from_report_unlocked(
         self,
@@ -213,6 +246,7 @@ class FixtureCurrentStateStore:
             ):
                 continue
             target_id = self._merge_target_identity(canonical_id, aliases)
+            target_id = self._merge_scheduling_identity(target_id, fixture)
             merge_map[canonical_id] = target_id
             membership = classify_scan_lane(fixture, scanned_at)
             if membership is ScanLane.DROP:
@@ -247,6 +281,7 @@ class FixtureCurrentStateStore:
             self._bind_aliases(aliases | {canonical_id, target_id}, target_id)
             for event in observation.source_events:
                 self._bind_alias(event.source_event_id, target_id)
+            self._bind_scheduling_key(stored_fixture, target_id)
         for alias, incoming_id in incoming_aliases.items():
             target = merge_map.get(incoming_id, incoming_id)
             if target in self._rows:
@@ -375,11 +410,20 @@ class FixtureCurrentStateStore:
                 lane, scanned = record.scheduler_lane_scan(membership, fixture)
                 lifecycle = classify_scan_lane(fixture, now, **classify_kwargs)
                 qualifying_promotion = False
+                surveillance_promotion = False
                 if membership is ScanLane.HOT and lifecycle is ScanLane.UNIVERSE:
                     qualifying_promotion = current_slots_prove_qualifying_opportunity(
                         record.live_market_slots(),
                         now=now,
                         **market_kwargs,
+                    )
+                    surveillance_promotion = (
+                        not qualifying_promotion
+                        and current_slots_prove_surveillance_opportunity(
+                            record.live_market_slots(),
+                            now=now,
+                            **market_kwargs,
+                        )
                     )
                 rows.append(
                     fixture.model_copy(
@@ -398,6 +442,7 @@ class FixtureCurrentStateStore:
                                 membership=membership,
                                 lifecycle=lifecycle,
                                 qualifying_promotion=qualifying_promotion,
+                                surveillance_promotion=surveillance_promotion,
                                 hot_horizon=hot_horizon,
                             ),
                         }
@@ -581,7 +626,7 @@ class FixtureCurrentStateStore:
                         fixture = fixture.model_copy(update={"solver_is_arbitrage": True})
                     fixtures.append(fixture)
             fixtures.sort(key=hot_sort_key)
-            return [item.canonical_event_id for item in fixtures]
+            return self._unique_hot_canonical_ids(fixtures)
 
     def known_source_events(self, canonical_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
         with self._lock:
@@ -608,9 +653,9 @@ class FixtureCurrentStateStore:
             classify_kwargs = _classify_kwargs(kwargs)
             market_kwargs = _market_ttl_kwargs(kwargs)
             self._evict_non_current(now, **classify_kwargs, **market_kwargs)
-            hot = 0
+            hot_keys: set[str] = set()
             universe = 0
-            for record in list(self._rows.values()):
+            for canonical_id, record in list(self._rows.items()):
                 record.prune_markets(now, **market_kwargs)
                 fixture = record.status_fixture(now, **market_kwargs)
                 if fixture is None:
@@ -623,10 +668,42 @@ class FixtureCurrentStateStore:
                     market_kwargs=market_kwargs,
                 )
                 if membership is ScanLane.HOT:
-                    hot += 1
+                    hot_keys.add(hot_scheduling_key(fixture) or canonical_id)
                 elif membership is ScanLane.UNIVERSE:
                     universe += 1
-            return hot, universe
+            return len(hot_keys), universe
+
+    def hot_membership_breakdown(self, now: datetime, **kwargs: Any) -> tuple[int, int, int]:
+        """Return (unique HOT units, lifecycle HOT, promoted HOT)."""
+
+        with self._lock:
+            classify_kwargs = _classify_kwargs(kwargs)
+            market_kwargs = _market_ttl_kwargs(kwargs)
+            self._evict_non_current(now, **classify_kwargs, **market_kwargs)
+            unique: set[str] = set()
+            lifecycle = 0
+            promoted = 0
+            for canonical_id, record in list(self._rows.items()):
+                record.prune_markets(now, **market_kwargs)
+                fixture = record.status_fixture(now, **market_kwargs)
+                if fixture is None:
+                    continue
+                membership = self._identity_membership(
+                    record,
+                    fixture,
+                    now,
+                    classify_kwargs=classify_kwargs,
+                    market_kwargs=market_kwargs,
+                )
+                if membership is not ScanLane.HOT:
+                    continue
+                unique.add(hot_scheduling_key(fixture) or canonical_id)
+                classified = classify_scan_lane(fixture, now, **classify_kwargs)
+                if classified is ScanLane.HOT:
+                    lifecycle += 1
+                else:
+                    promoted += 1
+            return len(unique), lifecycle, promoted
 
     def _identity_membership(
         self,
@@ -637,22 +714,62 @@ class FixtureCurrentStateStore:
         classify_kwargs: dict[str, Any],
         market_kwargs: dict[str, Any],
     ) -> ScanLane:
-        """HOT identity = lifecycle HOT or current qualifying-opportunity promotion.
+        """HOT identity = lifecycle HOT or current surveillance/qualifying promotion.
 
         `classify_scan_lane` remains the lifecycle classifier. Promotion reads
         merged current-state market truth, not UI labels or historical audit.
+        A positive below-threshold edge is enough to watch; paper entry stays
+        behind the existing executable/allocator gates.
         """
 
         lifecycle = classify_scan_lane(fixture, now, **classify_kwargs)
         if lifecycle is ScanLane.DROP or lifecycle is ScanLane.HOT:
             return lifecycle
-        if current_slots_prove_qualifying_opportunity(
-            record.live_market_slots(),
-            now=now,
-            **market_kwargs,
-        ):
+        slots = record.live_market_slots()
+        if current_slots_prove_qualifying_opportunity(slots, now=now, **market_kwargs):
+            return ScanLane.HOT
+        if current_slots_prove_surveillance_opportunity(slots, now=now, **market_kwargs):
             return ScanLane.HOT
         return lifecycle
+
+    def _merge_scheduling_identity(self, target_id: str, fixture: Any) -> str:
+        """Record a HOT scheduling key. Never absorbs canonical identity.
+
+        Trusted source/canonical overlap still merges via `_merge_target_identity`.
+        A team+kickoff collision without that evidence must not blend records.
+        """
+
+        key = hot_scheduling_key(fixture)
+        if key is None:
+            return target_id
+        existing = self._scheduling_index.get(key)
+        if existing is None or existing not in self._rows:
+            self._scheduling_index[key] = target_id
+        return target_id
+
+    def _bind_scheduling_key(self, fixture: Any, target_id: str) -> None:
+        key = hot_scheduling_key(fixture)
+        if key is None or target_id not in self._rows:
+            return
+        existing = self._scheduling_index.get(key)
+        if existing is None or existing not in self._rows:
+            self._scheduling_index[key] = target_id
+            return
+        # Keep both canonical rows. Prefer the already-indexed unit for HOT.
+        if existing != target_id:
+            return
+        self._scheduling_index[key] = target_id
+
+    def _unique_hot_canonical_ids(self, fixtures: list[DiscoveredFixture]) -> list[str]:
+        seen: set[str] = set()
+        unique: list[str] = []
+        for fixture in fixtures:
+            key = hot_scheduling_key(fixture) or fixture.canonical_event_id
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(fixture.canonical_event_id)
+        return unique
 
     def _merge_target_identity(self, canonical_id: str, aliases: set[str]) -> str:
         """Reuse the live row proved by trusted source/canonical aliases.
@@ -780,6 +897,9 @@ class FixtureCurrentStateStore:
                 self._aliases[alias] = target_id
         self._aliases[source_id] = target_id
         self._rows.pop(source_id, None)
+        for key, dest in list(self._scheduling_index.items()):
+            if dest == source_id:
+                self._scheduling_index[key] = target_id
 
     def _bind_alias(self, alias: str, target_id: str) -> None:
         key = alias.strip()
@@ -952,6 +1072,9 @@ class FixtureCurrentStateStore:
         for alias, target in list(self._aliases.items()):
             if target == canonical_id:
                 self._aliases.pop(alias, None)
+        for key, target in list(self._scheduling_index.items()):
+            if target == canonical_id:
+                self._scheduling_index.pop(key, None)
 
 
 @dataclass
