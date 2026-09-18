@@ -60,8 +60,11 @@ from sports_hedge.application.market_observation import (
 )
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.provider_access import (
+    HEALTH_AUTH_FAILURE,
     HEALTH_DISCOVERY_TIMEOUT,
     HEALTH_MARKET_TIMEOUT,
+    HEALTH_TIMEOUT,
+    HEALTH_UNAVAILABLE,
     ProviderAccessLayer,
     merge_lane_operation_health,
     operation_health_from_stage,
@@ -194,6 +197,41 @@ UNIVERSE_COMPLETENESS_COMPLETE = "complete"
 UNIVERSE_COMPLETENESS_DEADLINE_LEFTOVER = "deadline_leftover"
 UNIVERSE_COMPLETENESS_EMPTY_UNIVERSE = "empty_universe"
 UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE = "stale_generation_state"
+CANONICAL_WORK_SET_PARTIAL_REASONS = frozenset(
+    {
+        "clustering_truncated",
+        "deadline_truncation",
+        "retry_series_partial",
+        "provider_failure",
+        "auth_failure",
+        "incomplete_discovery",
+        "empty_cluster_set",
+    }
+)
+_NON_AUTHORITATIVE_VENUE_HEALTH = frozenset(
+    {
+        HEALTH_UNAVAILABLE,
+        HEALTH_TIMEOUT,
+        HEALTH_DISCOVERY_TIMEOUT,
+        HEALTH_MARKET_TIMEOUT,
+        HEALTH_AUTH_FAILURE,
+        "timeout",
+        "unavailable",
+        "auth_failure",
+    }
+)
+_RETRYABLE_SERIES_STATUSES = frozenset(
+    {
+        HEALTH_DISCOVERY_TIMEOUT,
+        HEALTH_MARKET_TIMEOUT,
+        HEALTH_UNAVAILABLE,
+        HEALTH_TIMEOUT,
+        "rate_limited",
+        "timeout",
+        "retry_wait",
+        "pending",
+    }
+)
 DEFAULT_MAX_EVENT_PAIRS = 60
 # Keep ~4s of the 45s operator cycle for leftover assembly before coordinator grace.
 SCAN_FINALISATION_RESERVE_SECONDS = 4.0
@@ -589,6 +627,8 @@ class ReadOnlyCrossVenueCollector:
         self._on_fixture_evaluated = on_fixture_evaluated
         self._on_canonical_work_set = on_canonical_work_set
         self._op_series_results = {}
+        self._op_canonical_work_set_authoritative = False
+        self._op_canonical_work_set_partial_reason: str | None = "incomplete_discovery"
         venue_health: dict[str, str] = {
             VenueName.MATCHBOOK.value: "unknown",
             VenueName.POLYMARKET.value: "unknown",
@@ -823,7 +863,28 @@ class ReadOnlyCrossVenueCollector:
                     )
                 clusters_before_resume = len(clusters)
                 if resolved_lane != ScanLane.HOT.value:
-                    self._emit_canonical_work_set(clusters)
+                    cluster_ids = [
+                        cluster_canonical_event_id(cluster)
+                        for cluster in clusters
+                        if cluster_canonical_event_id(cluster)
+                    ]
+                    authoritative, partial_reason = canonical_work_set_authority(
+                        cluster_ids=cluster_ids,
+                        clustering_truncated=clustering_truncated,
+                        retry_series=retry_series,
+                        venue_health=venue_health,
+                        enabled=enabled,
+                        issues=issues,
+                        series_results=self._op_series_results,
+                        provider_cancels=self._provider_cancels,
+                    )
+                    self._op_canonical_work_set_authoritative = authoritative
+                    self._op_canonical_work_set_partial_reason = partial_reason
+                    self._emit_canonical_work_set(
+                        cluster_ids,
+                        authoritative=authoritative,
+                        partial_reason=partial_reason,
+                    )
                 effective_skip = skip_ids
                 effective_cursor = resume_cursor
                 if (
@@ -1817,6 +1878,8 @@ class ReadOnlyCrossVenueCollector:
             "matching_coverage": matching_coverage,
             "series_results": dict(self._op_series_results),
             "canonical_work_total": clusters_before_resume or len(clusters),
+            "canonical_work_set_authoritative": self._op_canonical_work_set_authoritative,
+            "canonical_work_set_partial_reason": self._op_canonical_work_set_partial_reason,
             "raw_events_by_venue": {
                 VenueName.MATCHBOOK.value: len(raw_matchbook_events),
                 VenueName.POLYMARKET.value: len(raw_polymarket_events),
@@ -1951,18 +2014,25 @@ class ReadOnlyCrossVenueCollector:
         except Exception:
             LOGGER.warning("on_discovery_complete callback failed", exc_info=True)
 
-    def _emit_canonical_work_set(self, clusters: list[FixtureCluster]) -> None:
+    def _emit_canonical_work_set(
+        self,
+        canonical_ids: list[str],
+        *,
+        authoritative: bool,
+        partial_reason: str | None,
+    ) -> None:
         callback = self._on_canonical_work_set
         if callback is None:
             return
         try:
-            callback(
-                [
-                    cluster_canonical_event_id(cluster)
-                    for cluster in clusters
-                    if cluster_canonical_event_id(cluster)
-                ]
-            )
+            try:
+                callback(
+                    list(canonical_ids),
+                    authoritative=authoritative,
+                    partial_reason=partial_reason,
+                )
+            except TypeError:
+                callback(list(canonical_ids))
         except Exception:
             LOGGER.warning("on_canonical_work_set callback failed", exc_info=True)
 
@@ -4196,6 +4266,50 @@ def _matching_coverage(
             discovered_fixtures, fixture_markets
         ),
     }
+
+
+def canonical_work_set_authority(
+    *,
+    cluster_ids: list[str],
+    clustering_truncated: bool,
+    retry_series: dict[str, list[str]] | None,
+    venue_health: dict[str, str],
+    enabled: frozenset[VenueName] | set[VenueName],
+    issues: list[CollectorIssue],
+    series_results: dict[str, list[dict[str, Any]]] | None,
+    provider_cancels: int,
+) -> tuple[bool, str | None]:
+    """Whether the current cluster IDs are a complete work-set for reconciliation.
+
+    A missing PENDING id may be retired only when this returns True. Empty
+    cluster sets are never authoritative: they cannot distinguish a genuine
+    empty universe from failed/truncated discovery.
+    """
+
+    if clustering_truncated:
+        return False, "clustering_truncated"
+    if any(issue.detail == "scan_cycle_deadline_reached" for issue in issues):
+        return False, "deadline_truncation"
+    if retry_series and any(bool(value) for value in retry_series.values()):
+        return False, "retry_series_partial"
+    if provider_cancels > 0:
+        return False, "incomplete_discovery"
+    for venue in enabled:
+        health = str(venue_health.get(venue.value, "") or "")
+        if health in _NON_AUTHORITATIVE_VENUE_HEALTH:
+            if health in {HEALTH_AUTH_FAILURE, "auth_failure"}:
+                return False, "auth_failure"
+            return False, "provider_failure"
+    for rows in (series_results or {}).values():
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            status = str(row.get("status") or "").strip()
+            if bool(row.get("retryable")) or status in _RETRYABLE_SERIES_STATUSES:
+                return False, "retry_series_partial"
+    if not any(str(item or "").strip() for item in cluster_ids):
+        return False, "empty_cluster_set"
+    return True, None
 
 
 def universe_sweep_completeness(

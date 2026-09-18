@@ -20,6 +20,7 @@ from sports_hedge.application.collector import (
 )
 from sports_hedge.application.universe_checkpoint import (
     SERIES_TERMINAL_STATES,
+    STALE_ORPHAN_REASON,
     SWEEP_EVALUATED,
     SWEEP_FINAL_FAILED,
     SWEEP_OK,
@@ -27,7 +28,9 @@ from sports_hedge.application.universe_checkpoint import (
     SWEEP_RUNNING,
     SWEEP_RETRY_WAIT,
     SWEEP_SKIPPED_UNSUPPORTED,
+    SWEEP_STALE_ORPHAN,
     SWEEP_TERMINAL_STATES,
+    UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
     SeriesWorkUnit,
     SweepWorkUnit,
     discovery_event_snapshot,
@@ -164,6 +167,7 @@ class LaneRefreshStatus(BaseModel):
     canonical_evaluated: int = 0
     canonical_retryable: int = 0
     canonical_final_failed: int = 0
+    canonical_stale_orphan: int = 0
     canonical_remaining: int = 0
     series_work_total: int = 0
     series_ok: int = 0
@@ -1365,15 +1369,35 @@ class LiveRefreshCoordinator:
                 }
             )
 
-    def record_universe_work_set(self, canonical_ids: list[str]) -> None:
+    def record_universe_work_set(
+        self,
+        canonical_ids: list[str],
+        *,
+        authoritative: bool = False,
+        partial_reason: str | None = None,
+    ) -> None:
         with self._state_lock:
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(self.now())
+            current: list[str] = []
             for raw_id in canonical_ids:
                 canonical_id = str(raw_id or "").strip()
-                if not canonical_id or canonical_id in self._universe_work:
+                if not canonical_id:
                     continue
-                self._universe_work[canonical_id] = SweepWorkUnit(canonical_id=canonical_id)
+                current.append(canonical_id)
+                existing = self._universe_work.get(canonical_id)
+                if existing is None:
+                    self._universe_work[canonical_id] = SweepWorkUnit(canonical_id=canonical_id)
+                elif existing.state == SWEEP_STALE_ORPHAN:
+                    existing.state = SWEEP_PENDING
+                    existing.reason = None
+                    existing.retryable = False
+                    existing.next_retry_at = None
+            if authoritative:
+                self._reconcile_universe_work_set_unlocked(
+                    current,
+                    partial_reason=partial_reason,
+                )
             self._universe_discovered_total = len(self._universe_work)
             self._persist_universe_checkpoint_unlocked()
             counts = self._lane_progress_fields()
@@ -1390,6 +1414,50 @@ class LiveRefreshCoordinator:
                     )
                 }
             )
+
+    def _reconcile_universe_work_set_unlocked(
+        self,
+        current_ids: list[str],
+        *,
+        partial_reason: str | None,
+    ) -> None:
+        """Retire unreachable nonterminal work only against a full cluster set.
+
+        Partial discovery (provider failure, truncation, auth, retry-series)
+        must leave PENDING/RETRY_WAIT items untouched. Terminal evaluated
+        history is never reclassified.
+        """
+
+        del partial_reason
+        current = {item for item in current_ids if item}
+        if not current:
+            return
+        if not self._universe_work_set_may_retire_unlocked():
+            return
+        retired = 0
+        for canonical_id, unit in list(self._universe_work.items()):
+            if unit.state in SWEEP_TERMINAL_STATES:
+                continue
+            if canonical_id in current:
+                continue
+            unit.state = SWEEP_STALE_ORPHAN
+            unit.retryable = False
+            unit.reason = STALE_ORPHAN_REASON
+            unit.next_retry_at = None
+            self._universe_skipped_ids[canonical_id] = STALE_ORPHAN_REASON
+            retired += 1
+        if retired:
+            LOGGER.info(
+                "retired %s stale/orphan UNIVERSE work items absent from "
+                "authoritative cluster set of %s",
+                retired,
+                len(current),
+            )
+
+    def _universe_work_set_may_retire_unlocked(self) -> bool:
+        if self._universe_series_work and not self._universe_series_is_terminal_unlocked():
+            return False
+        return True
 
     def record_universe_fixture_progress(
         self,
@@ -1516,7 +1584,11 @@ class LiveRefreshCoordinator:
         if unit.state == SWEEP_EVALUATED:
             self._universe_work[canonical_id] = unit
             return
-        if unit.state in {SWEEP_FINAL_FAILED, SWEEP_SKIPPED_UNSUPPORTED} and state != "evaluated":
+        if unit.state in {
+            SWEEP_FINAL_FAILED,
+            SWEEP_SKIPPED_UNSUPPORTED,
+            SWEEP_STALE_ORPHAN,
+        } and state != "evaluated":
             self._universe_work[canonical_id] = unit
             return
         unit.last_attempted_at = scanned
@@ -1711,13 +1783,15 @@ class LiveRefreshCoordinator:
         retryable = sum(1 for unit in work.values() if unit.state == SWEEP_RETRY_WAIT)
         final_failed = sum(1 for unit in work.values() if unit.state == SWEEP_FINAL_FAILED)
         skipped = sum(1 for unit in work.values() if unit.state == SWEEP_SKIPPED_UNSUPPORTED)
+        stale_orphan = sum(1 for unit in work.values() if unit.state == SWEEP_STALE_ORPHAN)
         total = len(work) or self._universe_discovered_total
-        remaining = max(0, total - evaluated - final_failed - skipped)
+        remaining = max(0, total - evaluated - final_failed - skipped - stale_orphan)
         return {
             "canonical_work_total": total,
             "canonical_evaluated": evaluated,
             "canonical_retryable": retryable,
             "canonical_final_failed": final_failed,
+            "canonical_stale_orphan": stale_orphan,
             "canonical_remaining": remaining,
             "discovered_total": total,
             "evaluated_count": evaluated,
@@ -1789,6 +1863,7 @@ class LiveRefreshCoordinator:
         self._universe_cursor = None
         self._universe_work_used = 0.0
         self._universe_progress_generation_id = None
+        self._universe_discovery_snapshot = None
 
     def _persist_universe_checkpoint_unlocked(self) -> None:
         store = self._universe_checkpoint_store
@@ -1828,6 +1903,7 @@ class LiveRefreshCoordinator:
             work_units=dict(self._universe_work),
             series_results=dict(self._universe_series_results),
             series_work=dict(self._universe_series_work),
+            semantics_version=UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
         )
         try:
             store.save(
@@ -1871,6 +1947,21 @@ class LiveRefreshCoordinator:
                         "failed to invalidate unsafe universe checkpoint",
                         exc_info=True,
                     )
+            return
+        if checkpoint.semantics_version != UNIVERSE_CHECKPOINT_SEMANTICS_VERSION:
+            LOGGER.warning(
+                "universe checkpoint semantics_version=%s incompatible with runtime %s; "
+                "invalidating for a fresh generation",
+                checkpoint.semantics_version,
+                UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
+            )
+            try:
+                store.clear()
+            except Exception:
+                LOGGER.warning(
+                    "failed to invalidate incompatible universe checkpoint",
+                    exc_info=True,
+                )
             return
         report = collection_report_from_snapshot(checkpoint.report)
         if report is not None:
