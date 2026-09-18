@@ -15,6 +15,8 @@ Phase 1 remains PAPER / read-only. No venue writes. Polymarket is off.
 Live capture never fabricates a missing Matchbook side.
 When both venues are reachable, attempt-live computes genuine same-event
 overlap through production identity clustering rather than leaving overlap=False.
+Kalshi discovery uses the bounded configured catalogue-relevant football
+series set (GAME/BTTS/TOTAL/FTTS), not GAME-only.
 """
 
 from __future__ import annotations
@@ -47,7 +49,10 @@ from sports_hedge.application.fixture_clusters import (
 )
 from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.target_competitions import filter_in_scope_events
+from sports_hedge.application.target_competitions import (
+    filter_in_scope_events,
+    resolve_target_competition_from_kalshi_ticker,
+)
 from sports_hedge.catalogue.admission import catalogue_allows_solver
 from sports_hedge.catalogue.classify import PayloadSide, classify_payload_pair, normalize_payload_side
 from sports_hedge.catalogue.corpus import GAMEWIN_URL, KALSHI_GAMEWIN_SERIES
@@ -91,11 +96,21 @@ PROVENANCE_FIXTURE = "fixture_demo"
 PROVENANCE_CAPTURED_PUBLIC = "captured_public_payload_shape"
 PROVENANCE_UNAVAILABLE = "unavailable"
 
-HIGH_LIQUIDITY_GAME_SERIES = (
-    "KXEPLGAME",
-    "KXBUNDESLIGAGAME",
-    "KXSERIEAGAME",
-    "KXLALIGAGAME",
+_APPROVED_HINT_FAMILIES = frozenset(
+    {
+        MarketFamily.BOTH_TEAMS_TO_SCORE,
+        MarketFamily.TOTAL_GOALS,
+        MarketFamily.FIRST_TEAM_TO_SCORE,
+        MarketFamily.TEAM_TOTAL,
+        MarketFamily.DRAW_NO_BET,
+        MarketFamily.DOUBLE_CHANCE,
+    }
+)
+_CAPTURE_FAMILY_PRIORITY = (
+    MarketFamily.MATCH_RESULT.value,
+    MarketFamily.BOTH_TEAMS_TO_SCORE.value,
+    MarketFamily.TOTAL_GOALS.value,
+    MarketFamily.FIRST_TEAM_TO_SCORE.value,
 )
 
 _SECRET_KEY_FRAGMENTS = (
@@ -776,7 +791,6 @@ async def attempt_live_read_only_capture(
     cfg = settings or Settings(
         kalshi_event_page_limit=25,
         kalshi_event_max_pages=1,
-        kalshi_series_tickers=list(HIGH_LIQUIDITY_GAME_SERIES),
     )
     if cfg.sports_hedge_mode != "paper" or cfg.sports_hedge_execution_enabled:
         raise CaptureReplayError("live capture requires paper mode and execution disabled")
@@ -1007,7 +1021,7 @@ async def _attempt_kalshi(
             health = await health_fn()
             reachable = bool(getattr(health, "ok", True))
         payload = await handle.list_events(
-            series_tickers=list(HIGH_LIQUIDITY_GAME_SERIES),
+            series_tickers=catalogue_relevant_kalshi_series(settings),
             limit=min(25, settings.kalshi_event_page_limit),
             with_nested_markets="true",
             with_milestones="true",
@@ -1259,6 +1273,7 @@ async def _capture_genuine_overlap(
         notes=[
             f"Production identity clustering found {len(overlaps)} Matchbook↔Kalshi overlap(s).",
             f"Selected overlap {fixture_label} for approved-catalogue market/book fetch.",
+            "Kalshi discovery used the bounded catalogue-relevant football series set, not GAME-only.",
             "Collector/catalogue/inventory/solver ran on the selected pair only.",
             *(
                 [f"Sanitized ReplayBundle saved to {bundle_path}."]
@@ -1291,8 +1306,40 @@ def cluster_live_matchbook_kalshi_events(
     return clusters
 
 
+def catalogue_relevant_kalshi_series(settings: Settings | None = None) -> list[str]:
+    """Bounded configured football series for owner-live attempt-live discovery.
+
+    Uses Settings.kalshi_series_tickers (GAME/BTTS/TOTAL/FTTS for target
+    competitions), not GAME-only. Tickers outside the target-competition
+    prefixes are dropped so arbitrary Kalshi sports are not listed.
+    """
+
+    configured = [
+        str(item).strip()
+        for item in list((settings or Settings()).kalshi_series_tickers or [])
+        if str(item).strip()
+    ]
+    bounded = [
+        ticker
+        for ticker in configured
+        if resolve_target_competition_from_kalshi_ticker(ticker) is not None
+    ]
+    if bounded:
+        return bounded
+    return [
+        ticker
+        for ticker in Settings().kalshi_series_tickers
+        if resolve_target_competition_from_kalshi_ticker(str(ticker).strip()) is not None
+    ]
+
+
 def select_overlap_cluster(overlaps: list[FixtureCluster]) -> FixtureCluster:
-    """Prefer a 1X2-capable overlap, then other recognized approved families."""
+    """Prefer an overlap that exposes an approved catalogue family.
+
+    GAME-series 1X2 without regulation evidence ranks below BTTS/totals/FTTS
+    and below 1X2 that already carries 90-minute wording. Title equality is
+    not used.
+    """
 
     ranked = sorted(
         overlaps,
@@ -1313,15 +1360,27 @@ def build_live_overlap_bundle(
     report: CollectionReport,
     fx_snapshots: list[FxRateSnapshot] | None,
 ) -> ReplayBundle:
-    mb_event = sanitize_payload(cluster.matchbook.raw) if cluster.matchbook else None
-    kalshi_event = sanitize_payload(cluster.kalshi.raw) if cluster.kalshi else None
-    mb_event_id = str(cluster.matchbook.source_event_id) if cluster.matchbook else ""
-    kalshi_event_id = str(cluster.kalshi.source_event_id) if cluster.kalshi else ""
+    focus_rows = _preferred_equivalent_rows(report)
+    kalshi_item = _select_captured_kalshi_event(cluster, focus_rows)
+    matchbook_item = cluster.matchbook
+    mb_event = sanitize_payload(matchbook_item.raw) if matchbook_item else None
+    kalshi_event = sanitize_payload(kalshi_item.raw) if kalshi_item else None
+    mb_event_id = str(matchbook_item.source_event_id) if matchbook_item else ""
+    kalshi_event_id = str(kalshi_item.source_event_id) if kalshi_item else ""
     mb_markets = list(recording_matchbook.markets_by_event.get(mb_event_id) or [])
     if not mb_markets and isinstance(mb_event, dict):
         nested = mb_event.get("markets")
         if isinstance(nested, list):
             mb_markets = [sanitize_payload(item) for item in nested if isinstance(item, dict)]
+    mb_markets = _filter_markets_by_ids(
+        mb_markets,
+        {
+            str(row.matchbook.source_market_id)
+            for row in focus_rows
+            if row.matchbook is not None
+        },
+        id_fields=("id", "source_market_id"),
+    )
     kalshi_markets = list(recording_kalshi.markets_by_event.get(kalshi_event_id) or [])
     if not kalshi_markets and isinstance(kalshi_event, dict):
         nested = kalshi_event.get("markets")
@@ -1330,11 +1389,24 @@ def build_live_overlap_bundle(
     kalshi_markets = _merge_kalshi_get_market(
         kalshi_markets, recording_kalshi.get_market_payloads
     )
-    series = None
-    if recording_kalshi.series_by_ticker:
-        series = next(iter(recording_kalshi.series_by_ticker.values()))
-    elif isinstance(kalshi_event, dict) and kalshi_event.get("series_ticker"):
-        series = {"ticker": kalshi_event.get("series_ticker")}
+    kalshi_market_ids = {
+        str(row.kalshi.source_market_id)
+        for row in focus_rows
+        if row.kalshi is not None
+    }
+    kalshi_markets = _filter_markets_by_ids(
+        kalshi_markets,
+        kalshi_market_ids,
+        id_fields=("ticker", "id"),
+    )
+    series = _series_for_event(kalshi_event, recording_kalshi)
+    order_books = dict(recording_kalshi.order_books)
+    if kalshi_market_ids:
+        order_books = {
+            key: value
+            for key, value in order_books.items()
+            if str(key) in kalshi_market_ids
+        } or order_books
     fixture = _cluster_fixture_label(cluster)
     return ReplayBundle(
         bundle_id=f"issue293-live-overlap-{kalshi_event_id or mb_event_id or 'pair'}",
@@ -1360,7 +1432,7 @@ def build_live_overlap_bundle(
             event=kalshi_event if isinstance(kalshi_event, dict) else None,
             markets=kalshi_markets,
             series=series,
-            order_books=dict(recording_kalshi.order_books),
+            order_books=order_books,
             contract_terms=dict(recording_kalshi.contract_terms),
             identified_as="Live read-only Kalshi event/markets/books. Not a venue write.",
         ),
@@ -1395,29 +1467,134 @@ def _normalize_live_events(
 
 
 def _overlap_family_rank(cluster: FixtureCluster) -> int:
-    """0 = regulation 1X2 present, 1 = other recognized family, 2 = unknown."""
+    """Lower is better. Approved BTTS/totals/90m-1X2 beat GAME-only blocked 1X2."""
 
-    if cluster.kalshi is None:
-        return 2
-    raw = cluster.kalshi.raw if isinstance(cluster.kalshi.raw, dict) else {}
-    markets = [item for item in raw.get("markets") or [] if isinstance(item, dict)]
-    if not markets:
-        return 2
-    try:
-        normalizer = KalshiNormalizer()
-        event = normalizer.normalize_event(raw)
-        assembled = normalizer.assemble_canonical_markets(event, markets)
-    except (VenueNormalizationError, ValueError):
-        return 2
-    if any(
-        getattr(item, "family", None) is MarketFamily.MATCH_RESULT
-        or is_ordinary_full_time_1x2(item)
-        for item in assembled
-    ):
+    if not cluster.kalshi_events:
+        return 3
+    return min(_kalshi_source_rank(item) for item in cluster.kalshi_events)
+
+
+def _kalshi_source_rank(item: Any) -> int:
+    raw = item.raw if isinstance(getattr(item, "raw", None), dict) else {}
+    series_ticker = str(raw.get("series_ticker") or "")
+    hint = _series_family_hint(series_ticker)
+    if hint in {"btts", "total", "ftts"}:
         return 0
+    markets = [market for market in raw.get("markets") or [] if isinstance(market, dict)]
+    assembled: list[Any] = []
+    if markets:
+        try:
+            normalizer = KalshiNormalizer()
+            event = normalizer.normalize_event(raw)
+            assembled = normalizer.assemble_canonical_markets(
+                event, markets, event_payload=raw
+            )
+        except (VenueNormalizationError, ValueError):
+            assembled = []
+    families = {getattr(market, "family", None) for market in assembled}
+    if families & _APPROVED_HINT_FAMILIES:
+        return 0
+    has_1x2 = any(
+        getattr(market, "family", None) is MarketFamily.MATCH_RESULT
+        or is_ordinary_full_time_1x2(market)
+        for market in assembled
+    )
+    if has_1x2 or hint == "game":
+        if _markets_have_regulation_wording(markets):
+            return 0
+        return 2
     if assembled:
-        return 1
-    return 2
+        return 2
+    return 3
+
+
+def _series_family_hint(series_ticker: str) -> str:
+    ticker = str(series_ticker or "").strip().upper()
+    if "BTTS" in ticker:
+        return "btts"
+    if "FTTS" in ticker:
+        return "ftts"
+    if "TOTAL" in ticker:
+        return "total"
+    if ticker.endswith("GAME"):
+        return "game"
+    return "other"
+
+
+def _markets_have_regulation_wording(markets: list[dict[str, Any]]) -> bool:
+    text = " ".join(
+        str(item.get("rules_primary") or "") + " " + str(item.get("rules_secondary") or "")
+        for item in markets
+    ).casefold()
+    return "90 minute" in text or "90 min" in text
+
+
+def _preferred_equivalent_rows(report: CollectionReport) -> list[Any]:
+    rows: list[Any] = []
+    for group in report.fixture_markets.values():
+        rows.extend(group)
+    equivalent = [
+        row
+        for row in rows
+        if row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
+    ]
+    if not equivalent:
+        return []
+    for family in _CAPTURE_FAMILY_PRIORITY:
+        hit = [row for row in equivalent if row.family == family]
+        if hit:
+            return hit
+    return equivalent
+
+
+def _select_captured_kalshi_event(cluster: FixtureCluster, focus_rows: list[Any]) -> Any | None:
+    event_ids = {
+        str(row.kalshi.source_event_id)
+        for row in focus_rows
+        if row.kalshi is not None
+    }
+    if event_ids:
+        matches = [
+            item for item in cluster.kalshi_events if str(item.source_event_id) in event_ids
+        ]
+        if matches:
+            return sorted(matches, key=_kalshi_source_rank)[0]
+    if cluster.kalshi_events:
+        return sorted(cluster.kalshi_events, key=_kalshi_source_rank)[0]
+    return cluster.kalshi
+
+
+def _filter_markets_by_ids(
+    markets: list[dict[str, Any]],
+    wanted: set[str],
+    *,
+    id_fields: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    cleaned = {item.strip() for item in wanted if str(item).strip()}
+    if not cleaned or not markets:
+        return markets
+    filtered: list[dict[str, Any]] = []
+    for market in markets:
+        if any(str(market.get(field) or "").strip() in cleaned for field in id_fields):
+            filtered.append(market)
+    return filtered or markets
+
+
+def _series_for_event(
+    kalshi_event: dict[str, Any] | None,
+    recording_kalshi: RecordingKalshi,
+) -> dict[str, Any] | None:
+    ticker = ""
+    if isinstance(kalshi_event, dict):
+        ticker = str(kalshi_event.get("series_ticker") or "").strip()
+    recorded = recording_kalshi.series_by_ticker
+    if ticker and ticker in recorded:
+        return recorded[ticker]
+    if ticker:
+        return {"ticker": ticker}
+    if recorded:
+        return next(iter(recorded.values()))
+    return None
 
 
 def _cluster_fixture_label(cluster: FixtureCluster) -> str:
