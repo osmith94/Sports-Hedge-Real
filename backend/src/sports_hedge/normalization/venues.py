@@ -1032,7 +1032,10 @@ def _claim_regulation(
 def _claim_regulation_if_result_scope_proven(
     text: str, extra_time: bool | None, penalties: bool | None
 ) -> tuple[SettlementScope, bool | None, bool | None]:
-    """ET/penalty exclusion is not itself regulation/90-minute evidence."""
+    """Bare compound ET+penalties exclusion is not itself 90-minute evidence.
+
+    Single-subject extra-time exclusion still uses ``_claim_regulation``.
+    """
 
     if not _has_regulation_marker(text):
         return SettlementScope.UNKNOWN, None, None
@@ -1101,7 +1104,7 @@ def classify_settlement_wording(text: str) -> tuple[SettlementScope, bool | None
     if extra_time is False and penalties is True:
         return SettlementScope.UNKNOWN, None, None
     if extra_time is False:
-        return _claim_regulation_if_result_scope_proven(normalized, extra_time, penalties)
+        return _claim_regulation(normalized, extra_time, penalties)
     if penalties is True:
         # Positive penalties token cannot override contrary 90-minute / ET-exclusion.
         if extra_time is not True and _has_regulation_marker(normalized):

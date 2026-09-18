@@ -146,6 +146,19 @@ def test_exclusion_only_et_penalty_wording_stays_unknown(text: str) -> None:
     )
 
 
+def test_single_subject_extra_time_exclusion_remains_regulation() -> None:
+    assert classify_settlement_wording("Resolves not including extra time.") == (
+        SettlementScope.REGULATION_TIME,
+        False,
+        False,
+    )
+    assert classify_settlement_wording("Does not include extra time.") == (
+        SettlementScope.REGULATION_TIME,
+        False,
+        False,
+    )
+
+
 def test_explicit_90_minute_plus_exclusion_is_regulation() -> None:
     scope, extra_time, penalties = classify_settlement_wording(CURRENT_PRIMARY)
     assert scope is SettlementScope.REGULATION_TIME

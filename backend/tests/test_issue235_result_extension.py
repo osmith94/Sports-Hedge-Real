@@ -446,9 +446,9 @@ def test_positive_controls_remain_paper_eligible() -> None:
         True,
     )
     assert classify_settlement_wording("Resolves not including extra time.") == (
-        SettlementScope.UNKNOWN,
-        None,
-        None,
+        SettlementScope.REGULATION_TIME,
+        False,
+        False,
     )
     assert classify_settlement_wording(GAMMA_POSTPONE) == (
         SettlementScope.REGULATION_TIME,
