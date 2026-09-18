@@ -236,6 +236,27 @@ class DualCadencePlan(BaseModel):
     reason: str = ""
 
 
+def _schedule_capped_retry(
+    unit: SweepWorkUnit | SeriesWorkUnit,
+    *,
+    reason: str,
+    scanned: datetime,
+) -> None:
+    """Keep transient provider failures retryable. Attempt count is telemetry.
+
+    Backoff indexes into a capped table; it never becomes FINAL_FAILED solely
+    because the attempt count grew.
+    """
+
+    unit.attempt_count += 1
+    unit.reason = reason
+    unit.state = SWEEP_RETRY_WAIT
+    unit.retryable = True
+    unit.next_retry_at = scanned + timedelta(
+        seconds=universe_work_retry_backoff_seconds(unit.attempt_count)
+    )
+
+
 class LiveRefreshCoordinator:
     """Independent HOT and UNIVERSE workers with scoped locks (Tenet 19)."""
 
@@ -1495,8 +1516,9 @@ class LiveRefreshCoordinator:
         if unit.state == SWEEP_EVALUATED:
             self._universe_work[canonical_id] = unit
             return
-        settings = get_settings()
-        max_attempts = int(settings.paper_universe_work_max_attempts)
+        if unit.state in {SWEEP_FINAL_FAILED, SWEEP_SKIPPED_UNSUPPORTED} and state != "evaluated":
+            self._universe_work[canonical_id] = unit
+            return
         unit.last_attempted_at = scanned
         if state == "evaluated":
             unit.state = SWEEP_EVALUATED
@@ -1504,24 +1526,23 @@ class LiveRefreshCoordinator:
             unit.reason = None
             unit.next_retry_at = None
         elif state == "market_fetch_unavailable":
-            unit.attempt_count += 1
-            unit.reason = reason or "provider_failure"
-            unit.provider = unit.provider
-            if unit.attempt_count >= max_attempts:
-                unit.state = SWEEP_FINAL_FAILED
-                unit.retryable = False
-                unit.next_retry_at = None
-            else:
-                unit.state = SWEEP_RETRY_WAIT
-                unit.retryable = True
-                unit.next_retry_at = scanned + timedelta(
-                    seconds=universe_work_retry_backoff_seconds(unit.attempt_count)
-                )
+            _schedule_capped_retry(
+                unit,
+                reason=reason or "provider_failure",
+                scanned=scanned,
+            )
         elif state in {"unsupported", "skipped_unsupported"}:
             unit.state = SWEEP_SKIPPED_UNSUPPORTED
             unit.retryable = False
             unit.reason = reason or state
             unit.next_retry_at = None
+        elif state in {HEALTH_AUTH_FAILURE, "auth_failure"}:
+            unit.state = SWEEP_FINAL_FAILED
+            unit.retryable = False
+            unit.reason = reason or state
+            unit.next_retry_at = None
+            if unit.attempt_count == 0:
+                unit.attempt_count = 1
         elif state:
             unit.state = SWEEP_PENDING
             unit.reason = state
@@ -1572,8 +1593,6 @@ class LiveRefreshCoordinator:
         if unit.state in {SWEEP_FINAL_FAILED, SWEEP_SKIPPED_UNSUPPORTED} and status != "ok":
             self._universe_series_work[key] = unit
             return
-        settings = get_settings()
-        max_attempts = int(settings.paper_universe_work_max_attempts)
         unit.last_attempted_at = scanned
         unit.event_count = event_count
         if status == "ok":
@@ -1602,18 +1621,7 @@ class LiveRefreshCoordinator:
             "rate_limited",
             "timeout",
         }:
-            unit.attempt_count += 1
-            unit.reason = reason or status
-            if unit.attempt_count >= max_attempts:
-                unit.state = SWEEP_FINAL_FAILED
-                unit.retryable = False
-                unit.next_retry_at = None
-            else:
-                unit.state = SWEEP_RETRY_WAIT
-                unit.retryable = True
-                unit.next_retry_at = scanned + timedelta(
-                    seconds=universe_work_retry_backoff_seconds(unit.attempt_count)
-                )
+            _schedule_capped_retry(unit, reason=reason or status, scanned=scanned)
         elif status and not retryable_flag:
             unit.state = SWEEP_FINAL_FAILED
             unit.retryable = False

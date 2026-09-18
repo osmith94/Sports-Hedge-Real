@@ -33,7 +33,6 @@ from sports_hedge.application.provider_runtime import (
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.application.universe_checkpoint import (
     SWEEP_EVALUATED,
-    SWEEP_FINAL_FAILED,
     SWEEP_OK,
     SWEEP_RETRY_WAIT,
     series_work_key,
@@ -515,7 +514,9 @@ def test_retryable_failure_then_success_does_not_complete_early() -> None:
     assert coordinator._universe_generation_started_at is None
 
 
-def test_permanent_failure_becomes_final_failed_then_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_transient_unavailable_stays_retry_wait_beyond_max_attempts_then_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         "sports_hedge.application.live_refresh.get_settings",
         lambda: Settings(paper_universe_work_max_attempts=3),
@@ -524,7 +525,7 @@ def test_permanent_failure_becomes_final_failed_then_complete(monkeypatch: pytes
     coordinator = LiveRefreshCoordinator(clock=clock)
     coordinator._clock = clock
     coordinator.record_universe_work_set(["only"])
-    for _ in range(3):
+    for _ in range(5):
         coordinator.record_universe_fixture_progress(
             None,
             _universe_fixture("only", evaluation="market_fetch_unavailable"),
@@ -533,9 +534,13 @@ def test_permanent_failure_becomes_final_failed_then_complete(monkeypatch: pytes
         )
         clock.advance(20)
     unit = coordinator._universe_work["only"]
-    assert unit.state == SWEEP_FINAL_FAILED
-    assert unit.attempt_count == 3
-    assert coordinator._universe_failed_ids["only"]
+    assert unit.state == SWEEP_RETRY_WAIT
+    assert unit.attempt_count == 5
+    assert unit.retryable is True
+    assert coordinator._universe_failed_ids == {}
+    assert coordinator._universe_sweep_is_complete_unlocked() is False
+    coordinator.record_universe_fixture_progress(None, _universe_fixture("only"), [], [])
+    assert coordinator._universe_work["only"].state == SWEEP_EVALUATED
     assert coordinator._universe_sweep_is_complete_unlocked() is True
     coordinator._charge_successful_universe_work(0.0, clock.now, leftover_n=0, completeness=None)
     assert coordinator._universe_generation_started_at is None
@@ -1060,7 +1065,7 @@ async def test_all_series_fail_does_not_empty_universe_complete() -> None:
 
 
 @pytest.mark.asyncio
-async def test_series_permanent_failure_after_max_attempts_then_complete(
+async def test_series_transient_timeout_stays_retryable_beyond_max_attempts_then_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -1076,11 +1081,11 @@ async def test_series_permanent_failure_after_max_attempts_then_complete(
             "KXOK": [_k_event("ok-1", "Real Betis", "Getafe", series="KXOK")],
             "KXPERM": [],
         },
-        fail_always={"KXPERM"},
+        fail_times={"KXPERM": 4},
     )
     collector = _force_evaluated(_kalshi_collector(kalshi, matchbook=_betis_matchbook()))
     await _run_universe(coordinator, collector, enabled_venues=_MB_K)
-    for _ in range(2):
+    for _ in range(3):
         assert _series_unit(coordinator, "kalshi", "KXPERM").state == SWEEP_RETRY_WAIT
         assert coordinator._universe_sweep_is_complete_unlocked() is False
         clock.advance(20)
@@ -1097,10 +1102,28 @@ async def test_series_permanent_failure_after_max_attempts_then_complete(
         )
     diagnostics = coordinator.status.universe.last_diagnostics or {}
     perm = diagnostics["series_work"][series_work_key("kalshi", "KXPERM")]
-    assert perm["state"] == SWEEP_FINAL_FAILED
-    assert perm["attempt_count"] == 3
-    assert perm["retryable"] is False
-    assert coordinator.status.universe.series_final_failed == 1
+    assert perm["state"] == SWEEP_RETRY_WAIT
+    assert perm["attempt_count"] == 4
+    assert perm["retryable"] is True
+    assert coordinator.status.universe.series_final_failed == 0
+    assert coordinator._universe_generation_started_at is not None
+    clock.advance(20)
+    plan = coordinator.plan_universe_tick(now=clock.now)
+    await _run_universe(
+        coordinator,
+        collector,
+        enabled_venues=_MB_K,
+        reuse_discovery=True,
+        discovery_snapshot=plan.discovery_snapshot,
+        retry_series=plan.retry_series,
+        skip_event_ids=plan.skip_event_ids,
+        generation_resume=True,
+    )
+    recovered = (coordinator.status.universe.last_diagnostics or {})["series_work"][
+        series_work_key("kalshi", "KXPERM")
+    ]
+    assert recovered["state"] == SWEEP_OK
+    assert recovered["retryable"] is False
     assert coordinator._universe_generation_started_at is None
     assert coordinator.status.universe.worker_state == "complete"
 

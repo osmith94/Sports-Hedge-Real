@@ -471,8 +471,8 @@ def test_delayed_older_universe_snapshot_cannot_change_status_or_due_time() -> N
     assert status.last_scanned_at >= hot_at
 
 
-def test_same_key_nonqualifying_hot_still_demotes() -> None:
-    """Zero-edge same-key refresh leaves HOT. A positive below-threshold edge stays."""
+def test_same_key_zero_edge_stays_hot_until_relationship_breaks() -> None:
+    """Zero-edge approved equivalent stays HOT. Review/incompatible same key leaves."""
 
     store = FixtureCurrentStateStore()
     store.upsert_from_report(_qualifying_universe_report(), scan_lane=ScanLane.UNIVERSE, now=NOW)
@@ -487,7 +487,30 @@ def test_same_key_nonqualifying_hot_still_demotes() -> None:
         scan_lane=ScanLane.HOT,
         now=later,
     )
-    assert CANONICAL_ID not in store.hot_identity_scope(later)
+    assert CANONICAL_ID in store.hot_identity_scope(later)
+    broken_at = later + timedelta(seconds=1)
+    store.upsert_from_report(
+        _report(
+            [_fixture(opportunity="unmatched", arb=False, qualifying=0, when=broken_at)],
+            when=broken_at,
+            scan_lane=ScanLane.HOT.value,
+            markets={
+                CANONICAL_ID: [
+                    _market_row(
+                        status=InventoryComparisonStatus.SETTLEMENT_MISMATCH,
+                        edge=Decimal("0"),
+                        arb=False,
+                        reason="catalogue_review_required",
+                        rejection_reasons=["catalogue_review_required", "incomplete_settlement"],
+                        entered_solver=False,
+                    )
+                ]
+            },
+        ),
+        scan_lane=ScanLane.HOT,
+        now=broken_at,
+    )
+    assert CANONICAL_ID not in store.hot_identity_scope(broken_at)
 
 
 def test_opportunity_hot_crossing_t60m_stays_one_membership() -> None:

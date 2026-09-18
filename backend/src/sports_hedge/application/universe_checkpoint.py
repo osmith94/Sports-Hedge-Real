@@ -131,6 +131,8 @@ def merge_series_reports(
 
 
 def universe_work_retry_backoff_seconds(attempt_count: int) -> float:
+    """Capped isolated-work backoff. Attempt count may grow; delay does not."""
+
     if attempt_count <= 0:
         return UNIVERSE_WORK_RETRY_BACKOFF_SECONDS[0]
     index = min(attempt_count - 1, len(UNIVERSE_WORK_RETRY_BACKOFF_SECONDS) - 1)

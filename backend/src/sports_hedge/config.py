@@ -319,6 +319,9 @@ class Settings(BaseSettings):
     # After this many consecutive HOT provider grants while UNIVERSE waits,
     # the next slot goes to UNIVERSE. HOT priority must not starve discovery.
     paper_provider_hot_starvation_grants: int = Field(default=8, ge=1, le=64)
+    # Historical attempt counter bound. Transient UNIVERSE provider/network/
+    # rate-limit/timeout failures stay RETRY_WAIT with capped backoff; they are
+    # not converted to FINAL_FAILED solely because this count is reached.
     paper_universe_work_max_attempts: int = Field(default=3, ge=1, le=8)
     cors_allow_origins: Annotated[list[str], NoDecode] = Field(
         default=[

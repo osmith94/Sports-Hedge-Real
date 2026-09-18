@@ -16,6 +16,7 @@ from sports_hedge.application.current_market_inventory import (
     CurrentMarketSlot,
     apply_current_market_inventory,
     combined_radar_freshness,
+    current_slots_prove_approved_watch_relationship,
     current_slots_prove_qualifying_opportunity,
     current_slots_prove_surveillance_opportunity,
     merge_current_market_slots,
@@ -417,16 +418,27 @@ class FixtureCurrentStateStore:
                 lifecycle = classify_scan_lane(fixture, now, **classify_kwargs)
                 qualifying_promotion = False
                 surveillance_promotion = False
+                approved_watch_promotion = False
                 if membership is ScanLane.HOT and lifecycle is ScanLane.UNIVERSE:
+                    slots = record.live_market_slots()
                     qualifying_promotion = current_slots_prove_qualifying_opportunity(
-                        record.live_market_slots(),
+                        slots,
                         now=now,
                         **market_kwargs,
                     )
                     surveillance_promotion = (
                         not qualifying_promotion
                         and current_slots_prove_surveillance_opportunity(
-                            record.live_market_slots(),
+                            slots,
+                            now=now,
+                            **market_kwargs,
+                        )
+                    )
+                    approved_watch_promotion = (
+                        not qualifying_promotion
+                        and not surveillance_promotion
+                        and current_slots_prove_approved_watch_relationship(
+                            slots,
                             now=now,
                             **market_kwargs,
                         )
@@ -449,6 +461,7 @@ class FixtureCurrentStateStore:
                                 lifecycle=lifecycle,
                                 qualifying_promotion=qualifying_promotion,
                                 surveillance_promotion=surveillance_promotion,
+                                approved_watch_promotion=approved_watch_promotion,
                                 hot_horizon=hot_horizon,
                             ),
                         }
@@ -725,12 +738,13 @@ class FixtureCurrentStateStore:
         classify_kwargs: dict[str, Any],
         market_kwargs: dict[str, Any],
     ) -> ScanLane:
-        """HOT identity = lifecycle HOT or current surveillance/qualifying promotion.
+        """HOT identity = lifecycle HOT or current approved-watch/qualifying promotion.
 
         `classify_scan_lane` remains the lifecycle classifier. Promotion reads
         merged current-state market truth, not UI labels or historical audit.
-        A positive below-threshold edge is enough to watch; paper entry stays
-        behind the existing executable/allocator gates.
+        An approved MATCHED_EQUIVALENT cross-venue relationship is enough to
+        watch even at zero/negative edge; paper entry stays behind the existing
+        executable/allocator gates.
         """
 
         lifecycle = classify_scan_lane(fixture, now, **classify_kwargs)
@@ -738,6 +752,8 @@ class FixtureCurrentStateStore:
             return lifecycle
         slots = record.live_market_slots()
         if current_slots_prove_qualifying_opportunity(slots, now=now, **market_kwargs):
+            return ScanLane.HOT
+        if current_slots_prove_approved_watch_relationship(slots, now=now, **market_kwargs):
             return ScanLane.HOT
         if current_slots_prove_surveillance_opportunity(slots, now=now, **market_kwargs):
             return ScanLane.HOT

@@ -398,7 +398,7 @@ def test_non_executable_depth_fees_fx_risk_allocator_can_enter_surveillance_hot(
         assert CANONICAL_ID in store.hot_identity_scope(NOW + timedelta(seconds=30)), reasons
 
 
-def test_promoted_fixture_leaves_hot_when_no_longer_qualifying() -> None:
+def test_promoted_fixture_stays_hot_at_zero_edge_and_leaves_when_unapproved() -> None:
     store = FixtureCurrentStateStore()
     store.upsert_from_report(_qualifying_universe_report(), scan_lane=ScanLane.UNIVERSE, now=NOW)
     later = NOW + timedelta(seconds=30)
@@ -416,8 +416,29 @@ def test_promoted_fixture_leaves_hot_when_no_longer_qualifying() -> None:
         scan_lane=ScanLane.HOT,
         now=later,
     )
-    assert CANONICAL_ID not in store.hot_identity_scope(later)
-    hot, universe = store.membership_counts(later)
+    assert CANONICAL_ID in store.hot_identity_scope(later)
+
+    broken_at = later + timedelta(seconds=1)
+    broken = _market_row(
+        status=InventoryComparisonStatus.SETTLEMENT_MISMATCH,
+        edge=Decimal("0"),
+        arb=False,
+        reason="catalogue_review_required",
+        rejection_reasons=["catalogue_review_required", "incomplete_settlement"],
+        entered_solver=False,
+    )
+    store.upsert_from_report(
+        _report(
+            [cooled.model_copy(update={"last_seen_at": broken_at})],
+            when=broken_at,
+            scan_lane=ScanLane.HOT.value,
+            markets={CANONICAL_ID: [broken]},
+        ),
+        scan_lane=ScanLane.HOT,
+        now=broken_at,
+    )
+    assert CANONICAL_ID not in store.hot_identity_scope(broken_at)
+    hot, universe = store.membership_counts(broken_at)
     assert hot == 0
     assert universe == 1
 

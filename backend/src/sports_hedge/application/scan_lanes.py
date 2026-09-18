@@ -40,6 +40,7 @@ HOT_REASON_IN_PLAY = "IN PLAY"
 HOT_REASON_POST_KICKOFF_STATUS_PENDING = "POST-KICKOFF STATUS PENDING"
 HOT_REASON_ARB_PROMOTION = "ARB PROMOTION"
 HOT_REASON_SURVEILLANCE = "SURVEILLANCE"
+HOT_REASON_APPROVED_WATCH = "APPROVED WATCH"
 
 WORKER_IDLE = "idle"
 WORKER_RUNNING = "running"
@@ -193,6 +194,7 @@ def hot_reason_labels(
     lifecycle: ScanLane | str,
     qualifying_promotion: bool,
     surveillance_promotion: bool = False,
+    approved_watch_promotion: bool = False,
     hot_horizon: timedelta = DEFAULT_HOT_HORIZON,
 ) -> list[str]:
     """Return truthful current-state HOT reasons. Empty when membership is not HOT.
@@ -201,8 +203,9 @@ def hot_reason_labels(
     classification and whether current-state economics promoted a UNIVERSE
     fixture. ARB PROMOTION is only labelled when lifecycle would otherwise be
     UNIVERSE and the row still proves a qualifying executable arb.
-    SURVEILLANCE is a below-threshold positive edge. Elapsed time never
-    fabricates live or completed status.
+    SURVEILLANCE is a below-threshold positive edge. APPROVED WATCH is a
+    MATCHED_EQUIVALENT cross-venue relationship with no positive-edge
+    requirement. Elapsed time never fabricates live or completed status.
     """
 
     resolved_membership = ScanLane(membership) if not isinstance(membership, ScanLane) else membership
@@ -228,6 +231,8 @@ def hot_reason_labels(
             labels.append(HOT_REASON_ARB_PROMOTION)
         elif surveillance_promotion:
             labels.append(HOT_REASON_SURVEILLANCE)
+        elif approved_watch_promotion:
+            labels.append(HOT_REASON_APPROVED_WATCH)
     return labels
 
 
