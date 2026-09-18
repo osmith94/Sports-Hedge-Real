@@ -3216,6 +3216,18 @@ class ReadOnlyCrossVenueCollector:
             }
             normalized.append(_NormalizedMarket(wrapper, market))
             first_payload = grouped[market.source_market_id][0] if grouped[market.source_market_id] else {}
+            labels: list[str] = []
+            for payload in grouped[market.source_market_id]:
+                for label in raw_runner_labels(payload, VenueName.KALSHI):
+                    if label and label not in labels:
+                        labels.append(label)
+            if len(labels) < len(market.runners):
+                for runner in market.runners:
+                    if runner.label and runner.label not in labels:
+                        labels.append(runner.label)
+                    outcome = runner.outcome.value if runner.outcome is not None else ""
+                    if outcome and outcome not in labels:
+                        labels.append(outcome)
             inventory.append(
                 InventoryMarket(
                     venue=VenueName.KALSHI,
@@ -3223,8 +3235,7 @@ class ReadOnlyCrossVenueCollector:
                     source_market_id=market.source_market_id,
                     raw_name=raw_market_name(first_payload, VenueName.KALSHI) or market.family.value,
                     raw_market_type=raw_market_type(first_payload, VenueName.KALSHI),
-                    raw_runner_labels=raw_runner_labels(first_payload, VenueName.KALSHI)
-                    or [runner.label for runner in market.runners],
+                    raw_runner_labels=labels,
                     canonical=market,
                 )
             )

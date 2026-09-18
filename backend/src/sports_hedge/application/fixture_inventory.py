@@ -729,6 +729,13 @@ def _facts_from_inventory(
         labels = metadata.get("raw_runner_labels") if isinstance(metadata, dict) else None
         if isinstance(labels, list):
             runner_labels = [str(label) for label in labels if str(label).strip()]
+    if canonical is not None:
+        for runner in canonical.runners:
+            if runner.label and runner.label not in runner_labels:
+                runner_labels.append(runner.label)
+            outcome = runner.outcome.value if runner.outcome is not None else ""
+            if outcome and outcome not in runner_labels:
+                runner_labels.append(outcome)
     return VenueMarketFacts(
         venue=item.venue,
         source_event_id=item.source_event_id,
