@@ -46,16 +46,43 @@ def _event(
 
 
 def test_same_fixture_split_events_form_one_cluster() -> None:
+    """GAME/BTTS/TOTAL/FTTS siblings with realistic minute-offset kickoffs.
+
+    Live Kalshi sibling events often differ by 1–4 minutes. Exact curated
+    seniors in the same target competition must still form one cluster.
+    """
+
+    game_kickoff = KICKOFF
     polymarket = [
-        _event(VenueName.POLYMARKET, "pm-moneyline"),
-        _event(VenueName.POLYMARKET, "pm-btts"),
-        _event(VenueName.POLYMARKET, "pm-totals"),
+        _event(VenueName.POLYMARKET, "pm-moneyline", kickoff=game_kickoff),
+        _event(
+            VenueName.POLYMARKET,
+            "pm-btts",
+            kickoff=game_kickoff.replace(minute=game_kickoff.minute + 1),
+        ),
+        _event(
+            VenueName.POLYMARKET,
+            "pm-totals",
+            kickoff=game_kickoff.replace(minute=game_kickoff.minute + 3),
+        ),
     ]
     kalshi = [
-        _event(VenueName.KALSHI, "k-game"),
-        _event(VenueName.KALSHI, "k-btts"),
-        _event(VenueName.KALSHI, "k-totals"),
-        _event(VenueName.KALSHI, "k-ftts"),
+        _event(VenueName.KALSHI, "k-game", kickoff=game_kickoff),
+        _event(
+            VenueName.KALSHI,
+            "k-btts",
+            kickoff=game_kickoff.replace(minute=game_kickoff.minute + 1),
+        ),
+        _event(
+            VenueName.KALSHI,
+            "k-totals",
+            kickoff=game_kickoff.replace(minute=game_kickoff.minute + 3),
+        ),
+        _event(
+            VenueName.KALSHI,
+            "k-ftts",
+            kickoff=game_kickoff.replace(minute=game_kickoff.minute + 4),
+        ),
     ]
     clusters, counts = cluster_venue_events(
         matchbook=[],
@@ -148,6 +175,23 @@ def test_bulk_match_prefilter_never_rejects_a_matching_pair() -> None:
     ).canonical
     assert matcher.match(exact, unrelated).matched is False
     assert matcher.could_match(exact, unrelated) is False
+
+
+def test_exact_curated_siblings_match_inside_declared_kickoff_window() -> None:
+    matcher = EventMatcher()
+    assert matcher.threshold == 0.92
+    assert matcher.kickoff_tolerance.total_seconds() == 300
+    exact = _event(VenueName.MATCHBOOK, "mb-game").canonical
+    offset = _event(
+        VenueName.KALSHI,
+        "k-total",
+        kickoff=KICKOFF.replace(minute=KICKOFF.minute + 3),
+    ).canonical
+    result = matcher.match(exact, offset)
+    assert result.matched is True
+    assert result.confidence >= 0.92
+    assert "kickoff_offset" in result.reasons
+    assert matcher.could_match(exact, offset) is True
 
 
 def test_bulk_clustering_snapshots_enabled_rules_once() -> None:

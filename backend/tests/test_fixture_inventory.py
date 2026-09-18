@@ -254,6 +254,48 @@ def test_equivalent_kalshi_total_is_matched_without_scan_decision() -> None:
     assert row.entered_solver is False
 
 
+def test_matchbook_half_line_leftover_does_not_consume_exact_kalshi_total() -> None:
+    """Intersect exact totals before attachment. 0.5 must not steal 2.5."""
+
+    matchbook_half = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.TOTAL_GOALS,
+        source_id="mb-tg-05",
+        outcomes=[CanonicalOutcome.OVER, CanonicalOutcome.UNDER],
+        line=Decimal("0.5"),
+    )
+    matchbook_exact = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.TOTAL_GOALS,
+        source_id="mb-tg-25",
+        outcomes=[CanonicalOutcome.OVER, CanonicalOutcome.UNDER],
+        line=Decimal("2.5"),
+    )
+    kalshi_exact = _market(
+        VenueName.KALSHI,
+        family=MarketFamily.TOTAL_GOALS,
+        source_id="kalshi-tg-25",
+        outcomes=[CanonicalOutcome.OVER, CanonicalOutcome.UNDER],
+        line=Decimal("2.5"),
+    )
+    rows = assemble_fixture_inventory(
+        [
+            _inventory(matchbook_half, name="Over/Under 0.5 Goals"),
+            _inventory(matchbook_exact, name="Over/Under 2.5 Goals"),
+        ],
+        [],
+        kalshi_markets=[_inventory(kalshi_exact, name="Total Goals 2.5")],
+    )
+    by_line = {row.line: row for row in rows if row.family == MarketFamily.TOTAL_GOALS.value}
+    leftover = by_line[Decimal("0.5")]
+    matched = by_line[Decimal("2.5")]
+    assert leftover.kalshi is None
+    assert leftover.comparison_status is InventoryComparisonStatus.VENUE_ONLY
+    assert matched.kalshi is not None
+    assert matched.kalshi.source_market_id == "kalshi-tg-25"
+    assert matched.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
+
+
 def test_unnormalized_market_is_unsupported_family_not_hidden() -> None:
     rows = assemble_fixture_inventory(
         [

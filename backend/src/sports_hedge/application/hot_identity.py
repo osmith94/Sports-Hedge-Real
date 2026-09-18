@@ -1,8 +1,9 @@
 """HOT scheduling identity: one canonical football fixture, one HOT unit.
 
-Uses curated team aliases and kickoff-minute identity only. This does not
-change market-equivalence or settlement matching. Source aliases remain
-provenance; they must not become separate HOT jobs.
+Uses curated team aliases and the declared EventMatcher kickoff window. Sibling
+Kalshi GAME/BTTS/TOTAL/FTTS source timestamps that differ by a few minutes must
+not become separate HOT jobs. This does not change market-equivalence or
+settlement matching. Source aliases remain provenance.
 """
 
 from __future__ import annotations
@@ -27,10 +28,12 @@ def scheduling_team_key(name: str | None) -> str:
 
 
 def hot_scheduling_key(fixture: Any) -> str | None:
-    """Stable HOT roster key: curated teams + kickoff minute, order-independent.
+    """Stable HOT roster key: curated teams + 5-minute kickoff bucket.
 
     Generic or uncurated labels (for example test placeholders Home/Away) must
-    not collapse unrelated fixtures that happen to share a kickoff minute.
+    not collapse unrelated fixtures that happen to share a kickoff window.
+    The bucket matches EventMatcher.kickoff_tolerance so 20:00 and 20:03
+    siblings schedule as one unit without globally loosening fuzzy matching.
     """
 
     home = scheduling_team_key(getattr(fixture, "home_team", None))
@@ -42,8 +45,10 @@ def hot_scheduling_key(fixture: Any) -> str | None:
         return None
     aware = require_aware_instant(kickoff, "kickoff_utc")
     minute = aware.replace(second=0, microsecond=0)
+    bucket_minute = minute.minute - (minute.minute % 5)
+    bucket = minute.replace(minute=bucket_minute)
     pair = tuple(sorted((home, away)))
-    return f"{pair[0]}|{pair[1]}|{minute.isoformat()}"
+    return f"{pair[0]}|{pair[1]}|{bucket.isoformat()}"
 
 
 def prefer_hot_unit(left: Any, right: Any) -> Any:

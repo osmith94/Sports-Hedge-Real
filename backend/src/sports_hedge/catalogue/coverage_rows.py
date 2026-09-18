@@ -336,8 +336,16 @@ def _human_review_reason(reason: str) -> str:
 
 
 def _line_label(hits: list[Any]) -> str | None:
+    from sports_hedge.application.fixture_inventory import inventory_is_comparable_opportunity
+
+    fallback: str | None = None
     for row in hits:
         line = getattr(row, "line", None)
-        if line is not None and str(line) != "":
-            return str(line)
-    return None
+        if line is None or str(line) == "":
+            continue
+        token = str(line)
+        if inventory_is_comparable_opportunity(getattr(row, "comparison_status", None)):
+            return token
+        if fallback is None:
+            fallback = token
+    return fallback

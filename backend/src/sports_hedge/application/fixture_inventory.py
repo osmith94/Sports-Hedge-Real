@@ -1088,11 +1088,9 @@ def _kalshi_related_to_row(row: FixtureMarketInventoryRow, item: InventoryMarket
         return False
     if row.period and item.canonical.period.value != row.period:
         return False
-    if (
-        row.line is not None
-        and item.canonical.line != row.line
-        and item.canonical.family is not MarketFamily.TOTAL_GOALS
-    ):
+    if row.line is not None and item.canonical.line != row.line:
+        # Exact-line intersection for totals: 2.5↔2.5 only. A Matchbook 0.5
+        # leftover must not consume the Kalshi 2.5 sibling.
         return False
     if row.matchbook is None and row.polymarket is None:
         return False
