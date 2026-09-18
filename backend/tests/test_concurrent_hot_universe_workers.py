@@ -255,7 +255,8 @@ async def test_universe_reaches_final_fixture_under_healthy_fakes() -> None:
 
     plan = coordinator.plan_universe_tick(now=clock.now)
     assert plan.lane == "universe"
-    assert plan.collector_timeout_seconds is None
+    assert plan.collector_timeout_seconds is not None
+    assert plan.unbounded_cycle is False
     report = await coordinator.run_cycle(runner, timeout_seconds=None, scan_lane=ScanLane.UNIVERSE)
     assert {item.canonical_event_id for item in report.discovered_fixtures} == set(ids)
     assert coordinator._universe_generation_started_at is None
