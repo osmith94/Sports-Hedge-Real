@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -67,6 +67,7 @@ class LaneObservation:
     paper_market_ids: tuple[str, ...]
     source_events: tuple[StoredSourceEvent, ...] = ()
     evaluated: bool = True
+    universe_generation_id: int | None = None
 
 
 @dataclass
@@ -122,8 +123,14 @@ class FixtureCurrentStateStore:
     Expired or explicitly re-evaluated invalid rows leave/update truthfully.
 
     Fixture equivalent/qualifying/near counts and best/headline fields derive
-    from that merged current inventory. Radar TTL may keep rows visible;
-    paper eligibility / auto-capture still require executable quote freshness.
+    from that merged current inventory. Equivalent / ApprovedEquivalent
+    presence is generation-aware: a UNIVERSE evaluation remains discovery
+    current for the proving generation, then expires at that generation's
+    own close plus radar TTL. A later open generation does not revive or
+    suspend that expiry. A later authoritative re-evaluation may refresh
+    or remove the relationship sooner. Radar TTL may keep quote-stale rows
+    visible as relationship truth; paper eligibility / auto-capture / HOT
+    promotion still require executable or radar-current quote freshness.
 
     HOT identity is the union of lifecycle HOT membership (in-play / <=60m
     pre-kickoff / bounded post-kickoff unknown, subject to the 4h hard
@@ -156,8 +163,10 @@ class FixtureCurrentStateStore:
         self._tombstone_aliases: dict[str, str] = {}
         self._scheduling_index: dict[str, str] = {}
         self._has_collection = False
+        self._open_universe_generation_id: int | None = None
+        self._universe_generation_closed_at_by_id: dict[int, datetime] = {}
 
-    def clear(self, *, keep_tombstones: bool = False) -> None:
+    def clear(self, *, keep_tombstones: bool = False, keep_universe_generation: bool = False) -> None:
         with self._lock:
             self._generation = 0
             self._rows = {}
@@ -167,6 +176,9 @@ class FixtureCurrentStateStore:
             if not keep_tombstones:
                 self._tombstones = {}
                 self._tombstone_aliases = {}
+            if not keep_universe_generation:
+                self._open_universe_generation_id = None
+                self._universe_generation_closed_at_by_id = {}
 
     @property
     def generation(self) -> int:
@@ -176,8 +188,53 @@ class FixtureCurrentStateStore:
     def replace_from_report(self, report: CollectionReport) -> None:
         """Compatibility generation replace used by explicit diagnostic collects."""
 
-        self.clear(keep_tombstones=True)
+        self.clear(keep_tombstones=True, keep_universe_generation=True)
         self.upsert_from_report(report, scan_lane=ScanLane.UNIVERSE)
+
+    def open_universe_generation(self, generation_id: int, *, started_at: datetime | None = None) -> None:
+        with self._lock:
+            incoming = int(generation_id)
+            previous = self._open_universe_generation_id
+            if previous is not None and previous != incoming:
+                self._record_generation_close_unlocked(previous, started_at)
+            self._open_universe_generation_id = incoming
+
+    def close_universe_generation(self, generation_id: int, *, closed_at: datetime) -> None:
+        with self._lock:
+            proving = int(generation_id)
+            self._record_generation_close_unlocked(proving, closed_at)
+            if self._open_universe_generation_id == proving:
+                self._open_universe_generation_id = None
+
+    def _record_generation_close_unlocked(
+        self, generation_id: int, closed_at: datetime | None
+    ) -> None:
+        if closed_at is None:
+            return
+        instant = require_aware_instant(closed_at, "closed_at")
+        recorded = self._universe_generation_closed_at_by_id.get(generation_id)
+        if recorded is None:
+            self._universe_generation_closed_at_by_id[generation_id] = instant
+            recorded = instant
+        self._stamp_generation_close_unlocked(generation_id, recorded)
+
+    def _stamp_generation_close_unlocked(self, generation_id: int, closed_at: datetime) -> None:
+        for record in self._rows.values():
+            if not record.markets:
+                continue
+            updated: dict[str, CurrentMarketSlot] = {}
+            changed = False
+            for key, slot in record.markets.items():
+                if (
+                    slot.universe_generation_id == generation_id
+                    and slot.universe_generation_closed_at is None
+                ):
+                    updated[key] = replace(slot, universe_generation_closed_at=closed_at)
+                    changed = True
+                else:
+                    updated[key] = slot
+            if changed:
+                record.markets = updated
 
     def upsert_from_report(
         self,
@@ -185,10 +242,14 @@ class FixtureCurrentStateStore:
         *,
         scan_lane: ScanLane | str = ScanLane.UNIVERSE,
         now: datetime | None = None,
+        universe_generation_id: int | None = None,
     ) -> None:
         with self._lock:
             self._upsert_from_report_unlocked(
-                report, scan_lane=scan_lane, now=now
+                report,
+                scan_lane=scan_lane,
+                now=now,
+                universe_generation_id=universe_generation_id,
             )
 
     def upsert_evaluated_fixture(
@@ -201,6 +262,7 @@ class FixtureCurrentStateStore:
         source_events: list[dict[str, Any]] | None = None,
         scan_lane: ScanLane | str = ScanLane.UNIVERSE,
         now: datetime | None = None,
+        universe_generation_id: int | None = None,
     ) -> None:
         """Stream one evaluated fixture into current state immediately."""
 
@@ -216,7 +278,12 @@ class FixtureCurrentStateStore:
             fixture_identity_aliases=dict(aliases or {canonical_id: canonical_id}),
             fixture_source_events={canonical_id: list(source_events or [])},
         )
-        self.upsert_from_report(report, scan_lane=scan_lane, now=scanned)
+        self.upsert_from_report(
+            report,
+            scan_lane=scan_lane,
+            now=scanned,
+            universe_generation_id=universe_generation_id,
+        )
 
     def _upsert_from_report_unlocked(
         self,
@@ -224,11 +291,15 @@ class FixtureCurrentStateStore:
         *,
         scan_lane: ScanLane | str = ScanLane.UNIVERSE,
         now: datetime | None = None,
+        universe_generation_id: int | None = None,
     ) -> None:
         lane = ScanLane(scan_lane) if not isinstance(scan_lane, ScanLane) else scan_lane
         if lane is ScanLane.DROP:
             lane = ScanLane.UNIVERSE
         scanned_at = require_aware_instant(now or report.completed_at, "last_scanned_at")
+        stamped_generation_id = self._resolve_upsert_generation_id(
+            lane, universe_generation_id, report
+        )
         fixtures = {
             fixture.canonical_event_id: fixture for fixture in report.discovered_fixtures
         }
@@ -279,6 +350,7 @@ class FixtureCurrentStateStore:
                 paper_market_ids=paper_ids.get(canonical_id) or paper_ids.get(target_id, ()),
                 source_events=source_events.get(canonical_id) or source_events.get(target_id, ()),
                 evaluated=evaluated,
+                universe_generation_id=stamped_generation_id,
             )
             self._upsert_observation(target_id, observation)
             self._bind_aliases(aliases | {canonical_id, target_id}, target_id)
@@ -330,6 +402,7 @@ class FixtureCurrentStateStore:
         **kwargs: Any,
     ) -> FixtureDetailReadModel | None:
         with self._lock:
+            kwargs = self._store_market_kwargs(kwargs)
             if self._tombstone_for_unlocked(identity) is not None:
                 return None
             if now is not None:
@@ -367,6 +440,34 @@ class FixtureCurrentStateStore:
         with self._lock:
             return self._has_collection
 
+    def _store_market_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(kwargs)
+        if "open_universe_generation_id" not in merged:
+            merged["open_universe_generation_id"] = self._open_universe_generation_id
+        if "universe_generation_closed_at_by_id" not in merged:
+            merged["universe_generation_closed_at_by_id"] = dict(
+                self._universe_generation_closed_at_by_id
+            )
+        return merged
+
+    def _resolve_upsert_generation_id(
+        self,
+        lane: ScanLane,
+        explicit: int | None,
+        report: CollectionReport,
+    ) -> int | None:
+        if lane is not ScanLane.UNIVERSE:
+            return None
+        if explicit is not None:
+            return int(explicit)
+        if self._open_universe_generation_id is not None:
+            return self._open_universe_generation_id
+        diagnostics = getattr(report, "scan_diagnostics", None) or {}
+        raw = diagnostics.get("universe_generation_id")
+        if raw in (None, ""):
+            return None
+        return int(raw)
+
     def inventory(
         self,
         now: datetime,
@@ -381,11 +482,13 @@ class FixtureCurrentStateStore:
         max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     ) -> list[DiscoveredFixture]:
         with self._lock:
-            market_kwargs = {
-                "hot_ttl_seconds": hot_ttl_seconds,
-                "universe_ttl_seconds": universe_ttl_seconds,
-                "max_quote_age_ms": max_quote_age_ms,
-            }
+            market_kwargs = self._store_market_kwargs(
+                {
+                    "hot_ttl_seconds": hot_ttl_seconds,
+                    "universe_ttl_seconds": universe_ttl_seconds,
+                    "max_quote_age_ms": max_quote_age_ms,
+                }
+            )
             self._evict_non_current(
                 now,
                 hot_horizon=hot_horizon,
@@ -502,11 +605,13 @@ class FixtureCurrentStateStore:
         evaluated = require_aware_instant(now, "now")
         quote_ages = quote_age_ms_by_market or {}
         current: list[FixtureRadarRow] = []
-        market_kwargs = {
-            "hot_ttl_seconds": hot_ttl_seconds,
-            "universe_ttl_seconds": universe_ttl_seconds,
-            "max_quote_age_ms": max_quote_age_ms,
-        }
+        market_kwargs = self._store_market_kwargs(
+            {
+                "hot_ttl_seconds": hot_ttl_seconds,
+                "universe_ttl_seconds": universe_ttl_seconds,
+                "max_quote_age_ms": max_quote_age_ms,
+            }
+        )
         self._evict_non_current(
             evaluated,
             hot_horizon=hot_horizon,
@@ -612,6 +717,7 @@ class FixtureCurrentStateStore:
     def hot_identity_scope(self, now: datetime, **kwargs: Any) -> list[str]:
         with self._lock:
             evaluated = require_aware_instant(now, "now")
+            kwargs = self._store_market_kwargs(kwargs)
             classify_kwargs = _classify_kwargs(kwargs)
             market_kwargs = _market_ttl_kwargs(kwargs)
             self._evict_non_current(evaluated, **classify_kwargs, **market_kwargs)
@@ -661,6 +767,7 @@ class FixtureCurrentStateStore:
 
     def membership_counts(self, now: datetime, **kwargs: Any) -> tuple[int, int]:
         with self._lock:
+            kwargs = self._store_market_kwargs(kwargs)
             classify_kwargs = _classify_kwargs(kwargs)
             market_kwargs = _market_ttl_kwargs(kwargs)
             self._evict_non_current(now, **classify_kwargs, **market_kwargs)
@@ -688,6 +795,7 @@ class FixtureCurrentStateStore:
         """Return (unique HOT units, lifecycle HOT, promoted HOT)."""
 
         with self._lock:
+            kwargs = self._store_market_kwargs(kwargs)
             classify_kwargs = _classify_kwargs(kwargs)
             market_kwargs = _market_ttl_kwargs(kwargs)
             self._evict_non_current(now, **classify_kwargs, **market_kwargs)
@@ -945,6 +1053,7 @@ class FixtureCurrentStateStore:
             record.leftover_this_pass = False
 
     def _evict_non_current(self, now: datetime, **kwargs: Any) -> None:
+        kwargs = self._store_market_kwargs(kwargs)
         classify_kwargs = _classify_kwargs(kwargs)
         market_kwargs = _market_ttl_kwargs(kwargs)
         evaluated = require_aware_instant(now, "now")
@@ -1130,6 +1239,7 @@ class _FixtureRecord:
             scanned_at=observation.last_scanned_at,
             paper_market_ids=observation.paper_market_ids,
             evaluated=observation.evaluated,
+            universe_generation_id=observation.universe_generation_id,
         )
 
     def prune_markets(self, now: datetime | None, **kwargs: Any) -> None:
@@ -1161,6 +1271,7 @@ class _FixtureRecord:
                 paper_market_ids=observation.paper_market_ids,
                 source_events=observation.source_events,
                 evaluated=observation.evaluated,
+                universe_generation_id=observation.universe_generation_id,
             )
             self.set_lane(rewritten)
         if other.markets:
@@ -1470,4 +1581,10 @@ def _market_ttl_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         allowed["universe_ttl_seconds"] = kwargs["universe_ttl_seconds"]
     if "max_quote_age_ms" in kwargs:
         allowed["max_quote_age_ms"] = kwargs["max_quote_age_ms"]
+    if "open_universe_generation_id" in kwargs:
+        allowed["open_universe_generation_id"] = kwargs["open_universe_generation_id"]
+    if "universe_generation_closed_at_by_id" in kwargs:
+        allowed["universe_generation_closed_at_by_id"] = kwargs[
+            "universe_generation_closed_at_by_id"
+        ]
     return allowed

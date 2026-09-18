@@ -299,6 +299,9 @@ class Settings(BaseSettings):
     # Scanner membership only; elapsed time must not fabricate completed/closed.
     paper_hot_post_kickoff_current_radar_ceiling_hours: int = Field(default=4, ge=1, le=24)
     paper_hot_current_state_ttl_seconds: int = Field(default=90, ge=30, le=300)
+    # Quote / Tracked radar TTL and post-generation idle relationship TTL.
+    # Intra-generation ApprovedEquivalent presence is generation-scoped and
+    # is not extended by raising this value.
     paper_universe_current_state_ttl_seconds: int = Field(default=360, ge=60, le=900)
     # Lane-specific operator venue defaults. Empty/invalid values keep all three
     # first-class venues on. Persisted operator selections override these.

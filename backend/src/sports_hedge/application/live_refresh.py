@@ -947,7 +947,12 @@ class LiveRefreshCoordinator:
 
         self._last_report = report
         lane = _coerce_lane(report.scan_lane or ScanLane.UNIVERSE)
-        self._fixture_state.upsert_from_report(report, scan_lane=lane)
+        generation_id = (
+            self._universe_generation_id_for_upsert() if lane is ScanLane.UNIVERSE else None
+        )
+        self._fixture_state.upsert_from_report(
+            report, scan_lane=lane, universe_generation_id=generation_id
+        )
         duration_ms = max(
             0, int((report.completed_at - report.started_at).total_seconds() * 1000)
         )
@@ -1018,7 +1023,12 @@ class LiveRefreshCoordinator:
     ) -> None:
         lane = _coerce_lane(scan_lane or report.scan_lane)
         self._last_report = report
-        self._fixture_state.upsert_from_report(report, scan_lane=lane)
+        generation_id = (
+            self._universe_generation_id_for_upsert() if lane is ScanLane.UNIVERSE else None
+        )
+        self._fixture_state.upsert_from_report(
+            report, scan_lane=lane, universe_generation_id=generation_id
+        )
         duration_ms = max(
             0, int((report.completed_at - report.started_at).total_seconds() * 1000)
         )
@@ -1485,6 +1495,7 @@ class LiveRefreshCoordinator:
                 for item in cluster_member_events(cluster)
             ]
         scanned = getattr(fixture, "last_scanned_at", None) or self.now()
+        generation_id = self._ensure_store_universe_generation(scanned)
         before_hot, _before_universe = self._fixture_state.membership_counts(scanned)
         self._fixture_state.upsert_evaluated_fixture(
             fixture,
@@ -1494,6 +1505,7 @@ class LiveRefreshCoordinator:
             source_events=source_events,
             scan_lane=ScanLane.UNIVERSE,
             now=scanned,
+            universe_generation_id=generation_id,
         )
         after_hot, _after_universe = self._fixture_state.membership_counts(scanned)
         promoted_now = after_hot > before_hot
@@ -1968,9 +1980,16 @@ class LiveRefreshCoordinator:
                 )
             return
         report = collection_report_from_snapshot(checkpoint.report)
+        self._fixture_state.open_universe_generation(
+            checkpoint.generation_id, started_at=checkpoint.generation_started_at
+        )
         if report is not None:
             self._last_report = report
-            self._fixture_state.upsert_from_report(report, scan_lane=ScanLane.UNIVERSE)
+            self._fixture_state.upsert_from_report(
+                report,
+                scan_lane=ScanLane.UNIVERSE,
+                universe_generation_id=checkpoint.generation_id,
+            )
         inventory = self._fixture_state.inventory(self.now())
         _hot_count, universe_count = self._fixture_state.membership_counts(self.now())
         with self._state_lock:
@@ -2060,6 +2079,9 @@ class LiveRefreshCoordinator:
         self._universe_cursor = None
         self._universe_progress_generation_id = self._universe_generation_id
         self._universe_sweep_id = f"sweep-{self._universe_generation_id}-{started.isoformat()}"
+        self._fixture_state.open_universe_generation(
+            self._universe_generation_id, started_at=started
+        )
         self._universe_discovery_snapshot = None
         self._universe_discovered_total = 0
         self._universe_failed_ids = {}
@@ -2121,6 +2143,9 @@ class LiveRefreshCoordinator:
         settings = get_settings()
         cooldown = timedelta(seconds=settings.paper_universe_worker_cooldown_seconds)
         self._next_universe_due = finished + cooldown
+        self._fixture_state.close_universe_generation(
+            self._universe_generation_id, closed_at=finished
+        )
         self._clear_universe_generation_local_state()
         self._universe_generation_started_at = None
         self._universe_budget_paused = False
@@ -2326,6 +2351,22 @@ class LiveRefreshCoordinator:
 
     def fixture_current_state(self) -> FixtureCurrentStateStore:
         return self._fixture_state
+
+    def _universe_generation_id_for_upsert(self) -> int | None:
+        with self._state_lock:
+            if self._universe_generation_started_at is None:
+                return None
+            return self._universe_generation_id
+
+    def _ensure_store_universe_generation(self, scanned: datetime) -> int:
+        with self._state_lock:
+            if self._universe_generation_started_at is None:
+                self._ensure_universe_generation(scanned)
+            generation_id = self._universe_generation_id
+            started = self._universe_generation_started_at
+        if started is not None:
+            self._fixture_state.open_universe_generation(generation_id, started_at=started)
+        return generation_id
 
     def public_status(self) -> LiveRefreshStatus:
         """Current Discovery/Tracked inventory as of now, after lifecycle eviction."""
