@@ -350,8 +350,8 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
         CorpusEntry(
             entry_id="bad-1x2-mb-k-cancel-reschedule-fair-price",
             archetype=CatalogueArchetype.MATCH_RESULT_1X2,
-            expected_state=review,
-            known_kind="known_bad",
+            expected_state=paper_assumed,
+            known_kind="paper_assumed",
             left=_mb([_mb_1x2()]),
             right=_kalshi(
                 [
@@ -359,7 +359,11 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
                     for item in _kalshi_1x2(rules=NINETY_MINUTE_EXCLUSION)
                 ]
             ),
-            notes=["kalshi_unmodelled_cancellation_reschedule_fair_price"],
+            notes=[
+                "kalshi_unmodelled_cancellation_reschedule_fair_price",
+                "owner_paper_mode_assumption_issue_326",
+                "never_live_execution_eligible",
+            ],
         ),
         CorpusEntry(
             entry_id="bad-1x2-mb-pm-unknown-settlement",
@@ -412,10 +416,11 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
         CorpusEntry(
             entry_id="bad-btts-k-ambiguous-rules",
             archetype=CatalogueArchetype.BOTH_TEAMS_TO_SCORE,
-            expected_state=review,
-            known_kind="known_bad",
+            expected_state=paper_assumed,
+            known_kind="paper_assumed",
             left=_mb([_mb_btts()]),
             right=_kalshi([_kalshi_btts(rules="See contract URL.")]),
+            notes=["owner_paper_mode_assumption_issue_326", "never_live_execution_eligible"],
         ),
         CorpusEntry(
             entry_id="good-totals-25-mb-pm",
@@ -440,6 +445,15 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
             known_kind="known_good",
             left=_kalshi([_kalshi_totals("2.5")]),
             right=_pm([_pm_totals("2.5")]),
+        ),
+        CorpusEntry(
+            entry_id="bad-totals-k-ambiguous-rules",
+            archetype=CatalogueArchetype.TOTAL_GOALS_HALF_LINE,
+            expected_state=paper_assumed,
+            known_kind="paper_assumed",
+            left=_mb([_mb_totals("2.5")]),
+            right=_kalshi([_kalshi_totals("2.5", rules="See contract URL.")]),
+            notes=["owner_paper_mode_assumption_issue_326", "never_live_execution_eligible"],
         ),
         CorpusEntry(
             entry_id="bad-totals-line-mismatch",
@@ -516,10 +530,11 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
         CorpusEntry(
             entry_id="bad-ftts-k-unproven-regulation",
             archetype=CatalogueArchetype.FIRST_TEAM_TO_SCORE,
-            expected_state=review,
-            known_kind="known_bad",
+            expected_state=paper_assumed,
+            known_kind="paper_assumed",
             left=_mb([_mb_ftts()]),
             right=_kalshi(_kalshi_ftts(rules="Winner of the match.")),
+            notes=["owner_paper_mode_assumption_issue_326", "never_live_execution_eligible"],
         ),
         CorpusEntry(
             entry_id="bad-ftts-player-goalscorer",

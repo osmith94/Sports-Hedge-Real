@@ -139,10 +139,11 @@ def coverage_from_corpus(
                 "Before = matcher.matched and solver_model_for_pair capability. "
                 "After = Tenet 20 catalogue state. Production paper scan admits "
                 "APPROVED_EQUIVALENT and PAPER_ASSUMED_EQUIVALENT (Matchbook↔Kalshi "
-                "1X2 only, settlement_assumption=regulation_time). GAMEWIN-unknown "
-                "ordinary 1X2 is paper-assumed, not settlement-proven, and never "
-                "live-execution eligible. Fair-price / extra-time / penalties stay "
-                "fail-closed."
+                "locked four families, settlement_assumption=regulation_time). "
+                "GAMEWIN-unknown ordinary 1X2 and structurally matched BTTS/TOTAL/FTTS "
+                "without independent settlement proof are paper-assumed, never "
+                "live-execution eligible. Extra-time / penalties / to-qualify stay "
+                "fail-closed. Kalshi fair-price wording does not block PAPER admission."
             ),
         ],
     )

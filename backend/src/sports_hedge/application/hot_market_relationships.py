@@ -1,8 +1,8 @@
 """HOT quote-refresh identity over UNIVERSE-proved comparable rows.
 
 UNIVERSE discovers fixtures, normalizes markets, proves MATCHED_EQUIVALENT or
-PAPER_ASSUMED_EQUIVALENT (1X2 paper-mode only), and persists the exact venue
-market relationship. HOT reads that identity and refreshes only current
+PAPER_ASSUMED_EQUIVALENT (locked four-family paper-mode), and persists the exact
+venue market relationship. HOT reads that identity and refreshes only current
 quote/depth/status for those exact markets.
 
 Relationship identity is source/canonical contract identity, never stale prices.

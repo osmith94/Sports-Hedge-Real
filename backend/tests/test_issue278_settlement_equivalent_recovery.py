@@ -64,7 +64,6 @@ from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
-from sports_hedge.matching.ordinary_1x2 import GAMEWIN_ORDINARY_1X2_AUDIT_REASON
 from sports_hedge.normalization.venues import (
     KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
     KalshiNormalizer,
@@ -206,7 +205,7 @@ def test_home_draw_away_binaries_assemble_to_one_three_way() -> None:
     assert market.settlement.unknown_reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
 
 
-def test_production_path_mb_k_current_payload_is_review_required_for_fair_price() -> None:
+def test_production_path_mb_k_current_payload_is_paper_assumed_for_fair_price() -> None:
     captured = _captured()["payload"]
     left = PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[_mb_match_odds()])
     right = PayloadSide(
@@ -216,22 +215,23 @@ def test_production_path_mb_k_current_payload_is_review_required_for_fair_price(
         series=GAMEWIN_SERIES,
     )
     assessment = classify_payload_pair(left, right)
-    assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
-    assert assessment.reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
-    assert assessment.matcher_matched is False
-    assert assessment.matcher_admits_unknown_1x2 is False
+    assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
+    assert assessment.reason == "paper_assumed_equivalent"
+    assert assessment.matcher_matched is True
     assert assessment.settlement_complete is False
     assert assessment.execution_eligible is False
+    assert assessment.paper_mode_admitted is True
     assert assessment.catalogue_shared_by == ("hot", "universe")
     mb = normalize_payload_side(left)
     kalshi = normalize_payload_side(right)
     match = MarketMatcher().match(mb, kalshi)
-    assert match.matched is False
-    assert GAMEWIN_ORDINARY_1X2_AUDIT_REASON not in match.reasons
-    assert catalogue_allows_solver(mb, kalshi) is False
-    assert scan_eligible_pair(mb, kalshi, match) is False
+    assert match.matched is True
+    assert catalogue_allows_solver(mb, kalshi) is True
+    assert scan_eligible_pair(mb, kalshi, match) is True
     admission = assess_catalogue_admission(mb, kalshi)
-    assert admission.allowed is False
+    assert admission.allowed is True
+    assert admission.live_execution_eligible is False
     assert admission.catalogue_shared_by == ("hot", "universe")
 
 
@@ -484,11 +484,15 @@ def test_hot_and_universe_share_the_current_payload_gate() -> None:
     )
     hot = assess_catalogue_admission(left, right)
     universe = assess_catalogue_admission(left, right)
-    assert hot.allowed is False
-    assert universe.allowed is False
+    assert hot.allowed is True
+    assert universe.allowed is True
+    assert hot.live_execution_eligible is False
+    assert universe.live_execution_eligible is False
     assert hot.catalogue_shared_by == universe.catalogue_shared_by == ("hot", "universe")
-    assert hot.assessment.reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
-    assert universe.assessment.reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
+    assert hot.assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert universe.assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert hot.assessment.reason == "paper_assumed_equivalent"
+    assert universe.assessment.reason == "paper_assumed_equivalent"
 
 
 def test_zero_equivalent_diagnostics_state_the_actual_reason() -> None:

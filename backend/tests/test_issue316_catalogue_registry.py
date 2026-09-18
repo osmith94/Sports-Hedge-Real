@@ -1,11 +1,12 @@
-"""Issue #316: four-family Phase-1 registry + paper-assumed 1X2.
+"""Issue #316: four-family Phase-1 registry + paper-assumed locked families.
 
 Deterministic fixture/demo providers. Not owner-live quotes. PAPER / read-only.
 Execution disabled. Do not invent Kalshi availability or settlement semantics.
 
 Phase-1 owner-live operationalises MATCH_RESULT / BTTS / TOTAL (safe exact half-line)
-/ FTTS only. 1X2 may be PAPER_ASSUMED_EQUIVALENT. BTTS/TOTAL/FTTS stay proven
-APPROVED_EQUIVALENT. Non-target families must not trigger expensive work.
+/ FTTS. Issue #326 admits all four in PAPER mode once canonical identity matches.
+Independently proven siblings remain APPROVED_EQUIVALENT. Non-target families must
+not trigger expensive work.
 """
 
 from __future__ import annotations
@@ -104,8 +105,8 @@ def test_registry_covers_ten_archetypes_and_four_phase1_families() -> None:
     assert CatalogueArchetype.TEAM_TO_SCORE in archetypes
     assert CatalogueArchetype.TEAM_CLEAN_SHEET in archetypes
     assert REGISTRY_SHARED_BY == ("hot", "universe")
-    assert REGISTRY_PARENT_COMMIT == "46d20dd2e1f64a7445ca70bfcdcc184525e26485"
-    assert REGISTRY_VERSION == "v3"
+    assert REGISTRY_PARENT_COMMIT == "cf541aa857b19efb2d96cce54489c916bc1a38ba"
+    assert REGISTRY_VERSION == "v4"
     four = phase1_four_family_archetypes()
     assert four == (
         CatalogueArchetype.MATCH_RESULT_1X2,
@@ -208,7 +209,10 @@ def test_gamewin_is_paper_assumed_and_proven_90m_is_approved() -> None:
             series=_series("KXEPLGAME"),
         ),
     )
-    assert fair.state is CatalogueApprovalState.REVIEW_REQUIRED
+    assert fair.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert fair.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
+    assert fair.execution_eligible is False
+    assert fair.paper_mode_admitted is True
     incomplete = classify_payload_pair(
         PayloadSide(venue=VenueName.MATCHBOOK, event=mb_event, markets=[_mb_match_odds()]),
         PayloadSide(

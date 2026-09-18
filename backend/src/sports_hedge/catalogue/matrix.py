@@ -61,12 +61,12 @@ PAIRWISE_MATRIX: tuple[PairwiseCell, ...] = (
         solver_path="simple_complete_set",
         reason=(
             "Approved only when Kalshi Get Market or nested rules prove regulation "
-            "time. GAMEWIN-unknown 1X2 is REVIEW_REQUIRED in this catalogue even "
-            "though MarketMatcher currently admits that pair into the solver."
+            "time. GAMEWIN-unknown and fair-price 1X2 are PAPER_ASSUMED_EQUIVALENT "
+            "in paper mode (Issue #326) and never live-execution eligible."
         ),
         sibling_states=[
-            "REVIEW_REQUIRED: Kalshi GAMEWIN result-scope placeholder unavailable",
-            "REVIEW_REQUIRED: Kalshi cancellation/reschedule-to-fair-price unmodelled; no pairwise assumption",
+            "PAPER_ASSUMED_EQUIVALENT: Kalshi GAMEWIN result-scope placeholder unavailable",
+            "PAPER_ASSUMED_EQUIVALENT: Kalshi cancellation/reschedule-to-fair-price; owner-approved paper assumption",
             "KNOWN_CONTRADICTION: proven extra-time/penalties vs Matchbook regulation",
             "UNSUPPORTED: To Qualify / two-way books",
         ],
@@ -100,11 +100,15 @@ PAIRWISE_MATRIX: tuple[PairwiseCell, ...] = (
         state=CatalogueApprovalState.APPROVED_EQUIVALENT,
         solver_path="simple_complete_set",
         reason=(
-            "Approved when Kalshi market rules prove regulation. Generic "
-            "'See contract URL.' stays REVIEW_REQUIRED. Get Market enrichment is "
-            "Match Result only; BTTS does not inherit SOCCERANYGOAL extra-time default."
+            "Approved when Kalshi market rules prove regulation. Issue #326 admits "
+            "PAPER_ASSUMED_EQUIVALENT for structurally matched YES/NO without a "
+            "fresh settlement-proof gate. Get Market enrichment is Match Result "
+            "only; BTTS does not inherit SOCCERANYGOAL extra-time default."
         ),
-        sibling_states=["REVIEW_REQUIRED: Kalshi ambiguous/missing BTTS rules"],
+        sibling_states=[
+            "PAPER_ASSUMED_EQUIVALENT: structurally matched YES/NO without independent settlement proof",
+            "REVIEW_REQUIRED: incomplete YES/NO outcome set",
+        ],
     ),
     PairwiseCell(
         archetype=CatalogueArchetype.BOTH_TEAMS_TO_SCORE,
@@ -132,10 +136,13 @@ PAIRWISE_MATRIX: tuple[PairwiseCell, ...] = (
         solver_path="simple_complete_set",
         reason=(
             "Approved when Kalshi half-line Over/Under rules prove regulation. "
-            "Integer/quarter Kalshi totals are not this cell."
+            "Issue #326 admits PAPER_ASSUMED_EQUIVALENT when the exact safe line "
+            "matches without a fresh settlement-proof gate. Integer/quarter "
+            "Kalshi totals are not this cell."
         ),
         sibling_states=[
-            "REVIEW_REQUIRED: Kalshi totals wording incomplete",
+            "PAPER_ASSUMED_EQUIVALENT: exact half-line identity without independent settlement proof",
+            "APPROVED_PARAMETER_MISMATCH: exact line mismatch e.g. 2.5 vs 3.5",
             "UNSUPPORTED: Kalshi named-team totals are not inferred as match totals",
         ],
     ),
@@ -194,12 +201,14 @@ PAIRWISE_MATRIX: tuple[PairwiseCell, ...] = (
         state=CatalogueApprovalState.APPROVED_EQUIVALENT,
         solver_path="generalized_payoff",
         reason=(
-            "Kalshi assembles FTTS only with HOME/AWAY/NO_GOAL and proven "
-            "regulation-time rules. Incomplete Kalshi FTTS is REVIEW_REQUIRED, "
-            "not a 2-way CanonicalMarket."
+            "Kalshi assembles FTTS with HOME/AWAY/NO_GOAL. Independently proven "
+            "regulation-time rules remain APPROVED_EQUIVALENT. Issue #326 admits "
+            "PAPER_ASSUMED_EQUIVALENT when the complete three-state identity is "
+            "listed without a fresh settlement-proof gate. Missing NO_GOAL is "
+            "not a CanonicalMarket."
         ),
         sibling_states=[
-            "REVIEW_REQUIRED: Kalshi FTTS without proven regulation wording",
+            "PAPER_ASSUMED_EQUIVALENT: HOME/AWAY/NO_GOAL listed without independent settlement proof",
             "REVIEW_REQUIRED: Kalshi missing a NO_GOAL contract",
         ],
     ),

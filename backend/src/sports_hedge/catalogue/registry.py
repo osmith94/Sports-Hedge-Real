@@ -13,22 +13,28 @@ just because it is in the Tenet-20 product catalogue.
     SOLVER_SUPPORTED           Sports Hedge can model the settlement states
     OPERATIONAL_APPROVED       pairwise APPROVED_EQUIVALENT is possible when instance
                                evidence is independently complete
-    PAPER_ASSUMED_OPERATIONAL  Matchbook↔Kalshi 1X2 paper-mode assumption only
+    PAPER_ASSUMED_OPERATIONAL  Matchbook↔Kalshi locked four-family paper-mode assumption
 
 Phase-1 owner-live operationalises four families only:
 
     MATCH_RESULT / 1X2   PAPER_ASSUMED_EQUIVALENT when GAME HOME/DRAW/AWAY is
-                         complete and there is no contradictory wording
-    BTTS                 APPROVED_EQUIVALENT when proven
-    TOTAL_GOALS          exact safe half-line, APPROVED_EQUIVALENT when proven
-    FTTS                 APPROVED_EQUIVALENT when proven
+                         complete; Kalshi fair-price wording does not block PAPER
+    BTTS                 PAPER_ASSUMED_EQUIVALENT when YES/NO identity matches;
+                         APPROVED_EQUIVALENT when independently proven
+    TOTAL_GOALS          exact safe half-line; PAPER_ASSUMED when identity matches;
+                         APPROVED_EQUIVALENT when independently proven
+    FTTS                 PAPER_ASSUMED_EQUIVALENT when HOME/AWAY/NO_GOAL identity
+                         matches; APPROVED_EQUIVALENT when independently proven
 
 DNB / handicap / double chance / team total / team-to-score / clean sheet stay
 explicit in diagnostics as deferred / unsupported / venue-unavailable. They must
 not trigger settlement enrichment, depth, solver, or HOT promotion.
 
 PAPER_ASSUMED_EQUIVALENT is paper-mode only. It is never live-execution eligible
-and is never represented as independently proven settlement.
+and is never represented as independently proven settlement. Cross-venue
+equivalence for the four locked families is an owner-approved PAPER product
+assumption (Issue #326). The scanner must not re-litigate settlement text on
+every scan.
 
 Data class: deterministic registry + cited captured/public read-only metadata.
 Not owner-live quotes. Not modelled probabilities. PAPER / execution disabled.
@@ -43,9 +49,9 @@ from pydantic import BaseModel
 from sports_hedge.catalogue.states import CatalogueApprovalState, CatalogueArchetype
 from sports_hedge.domain.football import MarketFamily
 
-REGISTRY_VERSION = "v3"
-REGISTRY_ISSUE = 316
-REGISTRY_PARENT_COMMIT = "46d20dd2e1f64a7445ca70bfcdcc184525e26485"
+REGISTRY_VERSION = "v4"
+REGISTRY_ISSUE = 326
+REGISTRY_PARENT_COMMIT = "cf541aa857b19efb2d96cce54489c916bc1a38ba"
 REGISTRY_SHARED_BY = ("hot", "universe")
 DATA_CLASS = "deterministic_registry"
 SETTLEMENT_ASSUMPTION_REGULATION_TIME = "regulation_time"
@@ -258,8 +264,8 @@ ARCHETYPE_SPECS: tuple[CatalogueArchetypeSpec, ...] = (
                 "Kalshi GAME series exists. Independent settlement is proven only from "
                 "market-specific 90-minute wording (nested list or Get Market). GAMEWIN "
                 "template / soccergamewin placeholder is PAPER_ASSUMED_EQUIVALENT in "
-                "paper mode when HOME/DRAW/AWAY is complete and there is no contradictory "
-                "wording. Cancel/reschedule-to-fair-price is unmodelled REVIEW_REQUIRED. "
+                "paper mode when HOME/DRAW/AWAY is complete. Cancel/reschedule-to-"
+                "fair-price does not block PAPER admission (Issue #326). "
                 "Series ticker never approves. Paper-assumed is never live-execution eligible."
             ),
             evidence=(
@@ -293,17 +299,17 @@ ARCHETYPE_SPECS: tuple[CatalogueArchetypeSpec, ...] = (
                 reason=(
                     "Phase-1 Matchbook↔Kalshi 1X2 is PAPER_ASSUMED_EQUIVALENT when "
                     "Kalshi GAME contracts assemble HOME/DRAW/AWAY, fixture identity "
-                    "is exact, period/line are structurally consistent, and there is "
-                    "no contradictory wording. settlement_assumption=regulation_time. "
-                    "This is paper-mode only and is never live-execution eligible. "
-                    "Independently proven 90-minute wording remains APPROVED_EQUIVALENT. "
-                    "Extra time, penalties, to-qualify, and cancel/reschedule-to-fair-price "
-                    "fail closed. Series ticker never approves."
+                    "is exact, and period/line are structurally consistent. "
+                    "settlement_assumption=regulation_time. This is paper-mode only "
+                    "and is never live-execution eligible. Independently proven "
+                    "90-minute wording remains APPROVED_EQUIVALENT. Extra time, "
+                    "penalties, and to-qualify fail closed. Cancel/reschedule-to-"
+                    "fair-price does not block PAPER admission. Series ticker never approves."
                 ),
                 sibling_states=(
                     "APPROVED_EQUIVALENT: nested/Get Market 90-minute wording independently proves regulation",
                     "KNOWN_CONTRADICTION: extra-time/penalties/to-qualify vs Matchbook regulation",
-                    "REVIEW_REQUIRED: cancel/reschedule-to-fair-price unmodelled",
+                    "PAPER_ASSUMED_EQUIVALENT: cancel/reschedule-to-fair-price; owner-approved paper assumption",
                     "REVIEW_REQUIRED: incomplete HOME/DRAW/AWAY outcome set",
                 ),
             ),
@@ -358,8 +364,9 @@ ARCHETYPE_SPECS: tuple[CatalogueArchetypeSpec, ...] = (
             kalshi_series_suffix="BTTS",
             reason=(
                 "Kalshi BTTS series exists. Approved when market rules prove regulation. "
-                "'See contract URL.' stays REVIEW_REQUIRED. Get Market is Match Result only; "
-                "socceranygoal extra-time default is not applied."
+                "Issue #326 admits PAPER_ASSUMED_EQUIVALENT for structurally matched "
+                "YES/NO without a fresh settlement-proof gate. Get Market is Match Result "
+                "only; socceranygoal extra-time default is not applied."
             ),
             evidence=(_K_SERIES, "docs/APPROVED_MARKET_CATALOGUE_CENSUS_V1.md §3.2"),
         ),
@@ -379,11 +386,19 @@ ARCHETYPE_SPECS: tuple[CatalogueArchetypeSpec, ...] = (
                 settlement_proven=True,
                 solver_supported=True,
                 operational_approved=True,
+                paper_assumed_operational=True,
                 phase1_four_family=True,
                 diagnostic_state=CatalogueCoverageState.APPROVED_EQUIVALENT,
                 operational_state=CatalogueApprovalState.APPROVED_EQUIVALENT,
-                reason="Approved when Kalshi BTTS rules prove regulation YES/NO.",
-                sibling_states=("REVIEW_REQUIRED: Kalshi ambiguous/missing BTTS rules",),
+                reason=(
+                    "Approved when Kalshi BTTS rules prove regulation YES/NO. "
+                    "Issue #326 also admits PAPER_ASSUMED_EQUIVALENT when YES/NO "
+                    "full-time identity matches without a fresh settlement-proof gate."
+                ),
+                sibling_states=(
+                    "PAPER_ASSUMED_EQUIVALENT: structurally matched YES/NO without independent settlement proof",
+                    "REVIEW_REQUIRED: incomplete YES/NO outcome set",
+                ),
             ),
             _pair(
                 CatalogueArchetype.BOTH_TEAMS_TO_SCORE,
@@ -449,13 +464,19 @@ ARCHETYPE_SPECS: tuple[CatalogueArchetypeSpec, ...] = (
                 settlement_proven=True,
                 solver_supported=True,
                 operational_approved=True,
+                paper_assumed_operational=True,
                 phase1_four_family=True,
                 diagnostic_state=CatalogueCoverageState.APPROVED_EQUIVALENT,
                 operational_state=CatalogueApprovalState.APPROVED_EQUIVALENT,
-                reason="Approved when Kalshi half-line Over/Under rules prove regulation.",
+                reason=(
+                    "Approved when Kalshi half-line Over/Under rules prove regulation. "
+                    "Issue #326 also admits PAPER_ASSUMED_EQUIVALENT when the exact "
+                    "safe line matches without a fresh settlement-proof gate. "
+                    "2.5↔2.5 yes; 2.5↔3.5 is APPROVED_PARAMETER_MISMATCH."
+                ),
                 sibling_states=(
                     "APPROVED_PARAMETER_MISMATCH: exact line mismatch e.g. 2.5 vs 3.5",
-                    "REVIEW_REQUIRED: Kalshi totals wording incomplete",
+                    "PAPER_ASSUMED_EQUIVALENT: exact half-line identity without independent settlement proof",
                 ),
             ),
             _pair(
@@ -569,7 +590,9 @@ ARCHETYPE_SPECS: tuple[CatalogueArchetypeSpec, ...] = (
             reason=(
                 "Kalshi FTTS series exists for EPL/La Liga/cups/Bundesliga/Serie A. "
                 "Championship and international friendlies have no FTTS ticker in Settings. "
-                "Incomplete FTTS never becomes a CanonicalMarket. Get Market is not fetched."
+                "Missing NO_GOAL never becomes a CanonicalMarket. Incomplete settlement "
+                "still lists structurally complete HOME/AWAY/NO_GOAL for PAPER admission. "
+                "Get Market is not fetched."
             ),
             evidence=(
                 _K_SERIES,
@@ -592,15 +615,18 @@ ARCHETYPE_SPECS: tuple[CatalogueArchetypeSpec, ...] = (
                 settlement_proven=True,
                 solver_supported=True,
                 operational_approved=True,
+                paper_assumed_operational=True,
                 phase1_four_family=True,
                 diagnostic_state=CatalogueCoverageState.APPROVED_EQUIVALENT,
                 operational_state=CatalogueApprovalState.APPROVED_EQUIVALENT,
                 reason=(
-                    "Kalshi assembles FTTS only with HOME/AWAY/NO_GOAL and proven "
-                    "regulation-time rules."
+                    "Kalshi assembles FTTS with HOME/AWAY/NO_GOAL. Independently "
+                    "proven regulation-time rules remain APPROVED_EQUIVALENT. "
+                    "Issue #326 admits PAPER_ASSUMED_EQUIVALENT when the complete "
+                    "three-state identity is listed without a fresh settlement-proof gate."
                 ),
                 sibling_states=(
-                    "REVIEW_REQUIRED: Kalshi FTTS without proven regulation wording",
+                    "PAPER_ASSUMED_EQUIVALENT: HOME/AWAY/NO_GOAL listed without independent settlement proof",
                     "REVIEW_REQUIRED: Kalshi missing a NO_GOAL contract",
                     "VENUE_UNAVAILABLE: Championship / international friendlies have no FTTS series",
                 ),

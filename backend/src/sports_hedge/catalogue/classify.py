@@ -1,11 +1,14 @@
 """Deterministic Tenet 20 classification. Confidence is never executable permission.
 
-Independently proven settlement is APPROVED_EQUIVALENT. Matchbook↔Kalshi ordinary
-1X2 with complete HOME/DRAW/AWAY and no contradictory wording may be
-PAPER_ASSUMED_EQUIVALENT in paper mode only (settlement_assumption=regulation_time).
-That path is never live-execution eligible. Extra time, penalties, to-qualify,
-and cancel/reschedule-to-fair-price remain fail-closed REVIEW_REQUIRED /
-KNOWN_CONTRADICTION. HOT and UNIVERSE share this classifier.
+Independently proven settlement is APPROVED_EQUIVALENT. Matchbook↔Kalshi locked
+Phase-1 families (MATCH_RESULT / BTTS / exact-line TOTAL / FTTS) with complete
+canonical identity and no proven extra-time/penalties/to-qualify contradiction
+may be PAPER_ASSUMED_EQUIVALENT in paper mode only
+(settlement_assumption=regulation_time). That path is never live-execution
+eligible. Kalshi cancel/reschedule-to-fair-price wording does not block PAPER
+admission. Incomplete outcome space, line/period/family mismatch, and proven
+settlement contradictions remain fail-closed. HOT and UNIVERSE share this
+classifier.
 """
 
 from __future__ import annotations
@@ -35,8 +38,12 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.matching.ordinary_1x2 import (
     allow_unknown_settlement_for_ordinary_1x2,
-    paper_assumed_ordinary_1x2,
     settlement_fingerprints_contradict,
+)
+from sports_hedge.matching.paper_assumed import (
+    FAIR_PRICE_PAPER_ADMITTED_REASON,
+    OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
+    paper_assumed_locked_family,
 )
 from sports_hedge.normalization.venues import (
     KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
@@ -202,6 +209,8 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
         settlement_assumption = "regulation_time"
         notes.append("settlement_assumption=regulation_time")
         notes.append("paper_mode_only_not_live_execution_eligible")
+        if OWNER_APPROVED_PAPER_EQUIVALENCE_REASON not in notes:
+            notes.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
     return CataloguePairAssessment(
         state=state,
         reason=reason,
@@ -289,12 +298,22 @@ def _economic_state(
 
     cancel_reason = KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
     if left.settlement.unknown_reason == cancel_reason or right.settlement.unknown_reason == cancel_reason:
+        if paper_assumed_locked_family(left, right):
+            notes.append("paper_assumed_equivalent_not_settlement_proven")
+            notes.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
+            notes.append(FAIR_PRICE_PAPER_ADMITTED_REASON)
+            return (
+                CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT,
+                "paper_assumed_equivalent",
+                notes,
+            )
         notes.append("incomplete_settlement_is_review_required_not_confidence")
         notes.append("no_matchbook_kalshi_cancel_reschedule_fair_price_assumption")
         return CatalogueApprovalState.REVIEW_REQUIRED, cancel_reason, notes
     if not left.settlement.is_economically_complete() or not right.settlement.is_economically_complete():
-        if paper_assumed_ordinary_1x2(left, right):
+        if paper_assumed_locked_family(left, right):
             notes.append("paper_assumed_equivalent_not_settlement_proven")
+            notes.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
             return (
                 CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT,
                 "paper_assumed_equivalent",

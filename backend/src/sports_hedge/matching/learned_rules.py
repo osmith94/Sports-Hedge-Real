@@ -18,10 +18,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sports_hedge.application.target_competitions import resolve_target_competition
 from sports_hedge.domain.football import CanonicalEvent, CanonicalMarket
 from sports_hedge.domain.models import VenueName
-from sports_hedge.matching.ordinary_1x2 import (
-    allow_unknown_settlement_for_ordinary_1x2,
-    settlement_fingerprints_contradict,
-)
+from sports_hedge.matching.ordinary_1x2 import settlement_fingerprints_contradict
+from sports_hedge.matching.paper_assumed import allow_unknown_settlement_for_paper_assumed
 from sports_hedge.facts.aliases import resolve_team_name
 from sports_hedge.normalization.identity import kickoff_bucket
 from sports_hedge.normalization.text import normalize_text
@@ -787,7 +785,7 @@ def economic_mismatch_reasons(left: CanonicalMarket, right: CanonicalMarket) -> 
         left_complete = left.settlement.is_economically_complete()
         right_complete = right.settlement.is_economically_complete()
         if not left_complete or not right_complete:
-            if not allow_unknown_settlement_for_ordinary_1x2(left, right):
+            if not allow_unknown_settlement_for_paper_assumed(left, right):
                 reasons.append("incomplete_settlement")
                 for market in (left, right):
                     reason = market.settlement.unknown_reason

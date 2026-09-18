@@ -19,10 +19,6 @@ import pytest
 
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 from sports_hedge.application.complete_set import scan_eligible_pair
-from sports_hedge.application.equivalence_diagnostics import (
-    MARKET_SPECIFIC_RULES_MISSING,
-    zero_equivalent_reason_from_inventory,
-)
 from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.catalogue.admission import assess_catalogue_admission, catalogue_allows_solver
@@ -49,7 +45,6 @@ from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
-from sports_hedge.matching.ordinary_1x2 import GAMEWIN_ORDINARY_1X2_AUDIT_REASON
 from sports_hedge.normalization.venues import (
     KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
     KalshiNormalizer,
@@ -216,12 +211,13 @@ def test_captured_fair_price_payload_is_not_approved_equivalent() -> None:
         PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[_mb_match_odds()]),
         _captured_kalshi_side(),
     )
-    assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
+    assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
-    assert assessment.reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
+    assert assessment.reason == "paper_assumed_equivalent"
     assert assessment.settlement_complete is False
     assert assessment.execution_eligible is False
-    assert assessment.matcher_admits_unknown_1x2 is False
+    assert assessment.paper_mode_admitted is True
+    assert assessment.matcher_matched is True
     mb = normalize_payload_side(
         PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[_mb_match_odds()])
     )
@@ -233,13 +229,13 @@ def test_captured_fair_price_payload_is_not_approved_equivalent() -> None:
     assert mb.settlement.abandonment_rule is None
     assert mb.settlement.postponement_rule is None
     match = MarketMatcher().match(mb, kalshi)
-    assert match.matched is False
-    assert GAMEWIN_ORDINARY_1X2_AUDIT_REASON not in match.reasons
-    assert KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON in match.reasons
-    assert catalogue_allows_solver(mb, kalshi) is False
-    assert scan_eligible_pair(mb, kalshi, match) is False
+    assert match.matched is True
+    assert "paper_assumed_equivalent" in match.reasons
+    assert catalogue_allows_solver(mb, kalshi) is True
+    assert scan_eligible_pair(mb, kalshi, match) is True
     admission = assess_catalogue_admission(mb, kalshi)
-    assert admission.allowed is False
+    assert admission.allowed is True
+    assert admission.live_execution_eligible is False
     assert admission.catalogue_shared_by == ("hot", "universe")
 
 
@@ -388,18 +384,19 @@ async def test_collector_captured_fair_price_is_not_inventory_equivalent() -> No
         fixture = report.discovered_fixtures[0]
         assert fixture.matchbook_matched is True
         assert fixture.kalshi_matched is True
-        assert fixture.matched_equivalent_count == 0
+        assert fixture.matched_equivalent_count == 1
         rows = report.fixture_markets[fixture.canonical_event_id]
-        assert not any(
-            row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
-            and row.entered_solver
+        assert any(
+            row.comparison_status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
+            and row.family == "match_result"
             for row in rows
         )
-        reason = zero_equivalent_reason_from_inventory(rows)
-        assert reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
-        assert reason != MARKET_SPECIFIC_RULES_MISSING
+        assert not any(
+            row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
+            for row in rows
+        )
         coverage = report.scan_diagnostics["matching_coverage"]
-        assert coverage["equivalent_markets"] == 0
+        assert coverage["equivalent_markets"] == 1
         assert Settings().sports_hedge_execution_enabled is False
     finally:
         repository.close()

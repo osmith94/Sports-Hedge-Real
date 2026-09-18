@@ -391,7 +391,7 @@ def assemble_fixture_inventory(
 
 
 def inventory_is_comparable_opportunity(status: InventoryComparisonStatus | None) -> bool:
-    """True for paper-mode comparable opportunities (proven or 1X2 paper-assumed)."""
+    """True for paper-mode comparable opportunities (proven or paper-assumed)."""
 
     return status in {
         InventoryComparisonStatus.MATCHED_EQUIVALENT,

@@ -14,7 +14,12 @@ from sports_hedge.matching.ordinary_1x2 import (
     PAPER_ASSUMED_1X2_REASON,
     allow_unknown_settlement_for_ordinary_1x2,
     ordinary_1x2_match_reasons,
-    paper_assumed_ordinary_1x2,
+)
+from sports_hedge.matching.paper_assumed import (
+    OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
+    allow_unknown_settlement_for_paper_assumed,
+    paper_assumed_locked_family,
+    paper_assumed_match_reasons,
 )
 
 
@@ -30,8 +35,10 @@ class MarketMatcher:
 
     Event labels may be fuzzy for discovery, but paper-eligible identity is not.
     Family, period, line and outcome space must match. Proven settlement
-    contradictions fail closed. Matchbook↔Kalshi ordinary full-time HOME/DRAW/AWAY
-    1X2 may match when Kalshi settlement is unknown and not contradictory.
+    contradictions fail closed. Matchbook↔Kalshi locked Phase-1 families
+    (MATCH_RESULT / BTTS / exact-line TOTAL / FTTS) may match in PAPER mode
+    when canonical identity holds and Kalshi settlement is unknown or
+    fair-price-poisoned and not a proven extra-time/penalties contradiction.
     Learned naming rules may help aliases; they cannot override period, line,
     family, outcome-model mismatch, fixture participant identity, or a proven
     settlement contradiction.
@@ -77,8 +84,8 @@ class MarketMatcher:
             )
 
         reasons = economic_mismatch_reasons(left, right)
-        unknown_allowed = allow_unknown_settlement_for_ordinary_1x2(left, right)
-        paper_assumed = paper_assumed_ordinary_1x2(left, right)
+        unknown_allowed = allow_unknown_settlement_for_paper_assumed(left, right)
+        paper_assumed = paper_assumed_locked_family(left, right)
         if reasons:
             return MarketMatchResult(
                 matched=False,
@@ -92,10 +99,14 @@ class MarketMatcher:
             not left.settlement.is_economically_complete()
             or not right.settlement.is_economically_complete()
         ):
-            match_reasons.extend(ordinary_1x2_match_reasons())
+            if allow_unknown_settlement_for_ordinary_1x2(left, right):
+                match_reasons.extend(ordinary_1x2_match_reasons())
         if paper_assumed:
-            match_reasons.append(PAPER_ASSUMED_1X2_REASON)
-            match_reasons.append("settlement_assumption=regulation_time")
+            match_reasons.extend(paper_assumed_match_reasons())
+            if PAPER_ASSUMED_1X2_REASON not in match_reasons:
+                match_reasons.append(PAPER_ASSUMED_1X2_REASON)
+            if OWNER_APPROVED_PAPER_EQUIVALENCE_REASON not in match_reasons:
+                match_reasons.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
         if (
             event_result.provenance.rule_type
             is MappingRuleType.VENUE_MARKET_LABEL_CONVENTION

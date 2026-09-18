@@ -9,7 +9,7 @@ from sports_hedge.application.complete_set import (
     UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
     complete_set_outcomes,
     generalized_payoff_eligible_pair,
-    generalized_state_model,
+    generalized_state_model_for_pair,
     scan_ineligibility_reason,
     solver_eligible_market,
     solver_model_for_pair,
@@ -259,11 +259,11 @@ class PaperScanService:
             left.market.settlement.scope == SettlementScope.UNKNOWN
             or right.market.settlement.scope == SettlementScope.UNKNOWN
         ):
-            from sports_hedge.matching.ordinary_1x2 import (
-                allow_unknown_settlement_for_ordinary_1x2,
+            from sports_hedge.matching.paper_assumed import (
+                allow_unknown_settlement_for_paper_assumed,
             )
 
-            if not allow_unknown_settlement_for_ordinary_1x2(left.market, right.market):
+            if not allow_unknown_settlement_for_paper_assumed(left.market, right.market):
                 rejections.append("unknown_settlement_scope")
 
         from sports_hedge.catalogue.admission import assess_catalogue_admission
@@ -477,7 +477,7 @@ class PaperScanService:
             elif solution.roi < minimum_net_edge:
                 rejections.append("net_edge_below_threshold")
         else:
-            state_model = generalized_state_model(left.market)
+            state_model = generalized_state_model_for_pair(left.market, right.market)
             assert state_model is not None
             payoff_scan = self.payoff_scanner.scan(
                 sources,

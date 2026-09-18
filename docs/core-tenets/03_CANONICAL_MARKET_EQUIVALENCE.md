@@ -47,9 +47,11 @@ UNSUPPORTED
 
 Only `APPROVED_EQUIVALENT` may enter the **live-execution** path.
 
-`PAPER_ASSUMED_EQUIVALENT` is an owner-approved Phase-1 **paper-mode** exception for Matchbook↔Kalshi Match Result / 1X2 only. It may enter the paper solver when GAME HOME/DRAW/AWAY is complete, fixture identity is exact, period/line are structurally consistent, and there is no contradictory wording. It carries `settlement_assumption=regulation_time`. It is never represented as independently proven settlement and is never live-execution eligible. Extra time, penalties, to-qualify, fair-price cancellation/reschedule, and incomplete outcome sets remain fail-closed.
+`PAPER_ASSUMED_EQUIVALENT` is an owner-approved Phase-1 **paper-mode** exception for the four locked Matchbook↔Kalshi families: MATCH_RESULT / 1X2, BTTS, exact-line TOTAL_GOALS, and FIRST_TEAM_TO_SCORE. Once canonical fixture identity and canonical market identity/parameters match, the pair may enter the paper solver without re-litigating settlement wording on every scan. It carries `settlement_assumption=regulation_time` and an owner-approved paper-equivalence audit marker. It is never represented as independently proven settlement and is never live-execution eligible.
 
-If semantics are incomplete or ambiguous but the market plausibly belongs to an approved archetype, and the paper-assumed 1X2 exception does not apply, route it to `REVIEW_REQUIRED`.
+Kalshi cancel/reschedule-to-fair-price wording does **not** block PAPER admission for these four families. Extra time, penalties, to-qualify, wrong fixture/family/period, TOTAL line mismatch, and incomplete/incorrect outcome-space identity remain fail-closed. Genuinely absent venue markets stay NOT_LISTED / VENUE_UNAVAILABLE and must not be invented.
+
+If semantics are incomplete or ambiguous but the market plausibly belongs to an approved archetype, and the paper-assumed locked-family exception does not apply, route it to `REVIEW_REQUIRED`.
 
 Do not silently guess.
 

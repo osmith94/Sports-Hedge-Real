@@ -171,9 +171,16 @@ def test_kalshi_ftts_requires_three_states_and_regulation_rules() -> None:
     ]
     assembled = normalizer.assemble_canonical_markets(event, markets, series=KALSHI_SERIES)
     assert assembled[0].family is MarketFamily.FIRST_TEAM_TO_SCORE
-    with pytest.raises(VenueNormalizationError, match="regulation-time"):
-        ambiguous = [{**item, "rules_primary": "Winner of the match."} for item in markets]
-        normalizer.assemble_canonical_markets(event, ambiguous, series=KALSHI_SERIES)
+    ambiguous = [{**item, "rules_primary": "Winner of the match."} for item in markets]
+    incomplete = normalizer.assemble_canonical_markets(event, ambiguous, series=KALSHI_SERIES)
+    assert len(incomplete) == 1
+    assert incomplete[0].family is MarketFamily.FIRST_TEAM_TO_SCORE
+    assert incomplete[0].settlement.is_economically_complete() is False
+    assert {runner.outcome for runner in incomplete[0].runners} == {
+        CanonicalOutcome.HOME,
+        CanonicalOutcome.AWAY,
+        CanonicalOutcome.NO_GOAL,
+    }
 
 
 def test_ambiguous_settlement_is_visible_but_incomplete() -> None:

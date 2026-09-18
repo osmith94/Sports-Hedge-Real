@@ -2,9 +2,10 @@
 
 APPROVED_EQUIVALENT may enter the normal paper solver.
 
-PAPER_ASSUMED_EQUIVALENT is an owner-accepted Phase-1 paper-mode path for
-Matchbook↔Kalshi Match Result / 1X2 only. It is visibly labelled, carries
-settlement_assumption=regulation_time, and is never live-execution eligible.
+PAPER_ASSUMED_EQUIVALENT is an owner-accepted Phase-1 paper-mode path for the
+four locked Matchbook↔Kalshi families (MATCH_RESULT / BTTS / exact-line TOTAL /
+FTTS). It is visibly labelled, carries settlement_assumption=regulation_time,
+and is never live-execution eligible.
 
 REVIEW_REQUIRED, UNSUPPORTED, parameter mismatch and known contradiction
 cannot reach the solver. This module is scan-lane independent.

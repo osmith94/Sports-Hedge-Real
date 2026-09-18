@@ -167,18 +167,20 @@ Only this state is eligible for **live execution**.
 
 ### PAPER_ASSUMED_EQUIVALENT
 
-Owner-approved Phase-1 **paper-mode** exception for Matchbook↔Kalshi Match Result / 1X2 only.
+Owner-approved Phase-1 **paper-mode** exception for the four locked Matchbook↔Kalshi families:
 
-Kalshi GAME contracts may be assembled into HOME / DRAW / AWAY and compared with Matchbook Match Odds when:
+1. MATCH_RESULT / 1X2 — ordinary full-time HOME / DRAW / AWAY
+2. BTTS — full-time YES / NO
+3. TOTAL_GOALS — exact same safe half-line (2.5↔2.5 yes; 2.5↔3.5 is not the same market)
+4. FIRST_TEAM_TO_SCORE — complete HOME / AWAY / NO_GOAL outcome identity
 
-- fixture identity is exact;
-- all three outcomes are present;
-- period/line structure is otherwise consistent;
-- there is no known contradictory wording (extra time, penalties, to-qualify, fair-price cancellation/reschedule, or other material contradiction).
+Cross-venue equivalence for these four families is an owner-approved product assumption in PAPER / READ-ONLY mode. Once canonical fixture and canonical market identity/parameters match, the system must not re-litigate settlement text on every scan.
 
 This state is visibly labelled, carries `settlement_assumption=regulation_time`, may enter the **paper** solver, and is never live-execution eligible. It is not independently proven settlement.
 
-BTTS, safe exact-line totals, and FTTS remain `APPROVED_EQUIVALENT` only when their deterministic checks pass. DNB, handicap, double chance, team total, team-to-score, and clean sheet stay explicit in the versioned registry as deferred / unsupported / venue-unavailable and must not trigger Phase-1 settlement/depth/solver/HOT work.
+Kalshi cancel/reschedule-to-fair-price wording does not block PAPER admission. Extra time, penalties, to-qualify, incomplete outcome sets, wrong period, and TOTAL line mismatch remain fail-closed.
+
+Independently proven complete fingerprints remain `APPROVED_EQUIVALENT`. DNB, handicap, double chance, team total, team-to-score, and clean sheet stay explicit in the versioned registry as deferred / unsupported / venue-unavailable and must not trigger Phase-1 settlement/depth/solver/HOT work.
 
 ### APPROVED_PARAMETER_MISMATCH
 

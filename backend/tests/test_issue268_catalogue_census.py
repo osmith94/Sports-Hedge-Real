@@ -2,7 +2,8 @@
 
 Deterministic fixture/demo plus cited captured public payloads. Matcher
 recognition, HOT/UNIVERSE concurrency, paper autofill, and execution are
-unchanged. Solver/paper admission requires APPROVED_EQUIVALENT.
+unchanged. Solver/paper admission requires APPROVED_EQUIVALENT or the
+Issue #326 PAPER_ASSUMED_EQUIVALENT locked-family exception.
 """
 
 from __future__ import annotations
@@ -247,15 +248,23 @@ def test_high_confidence_does_not_approve_incomplete_settlement() -> None:
 def test_review_required_examples_are_explicit() -> None:
     ids = {
         "bad-1x2-mb-pm-unknown-settlement",
-        "bad-btts-k-ambiguous-rules",
         "bad-ftts-missing-no-goal-both",
-        "bad-ftts-k-unproven-regulation",
         "review-team-total-mb-pm",
     }
     by_id = {item.entry_id: item for item in census_corpus()}
     for entry_id in ids:
         assessment = classify_payload_pair(by_id[entry_id].left, by_id[entry_id].right)
         assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED, entry_id
+    paper_assumed_ids = {
+        "bad-btts-k-ambiguous-rules",
+        "bad-totals-k-ambiguous-rules",
+        "bad-ftts-k-unproven-regulation",
+        "bad-1x2-mb-k-cancel-reschedule-fair-price",
+    }
+    for entry_id in paper_assumed_ids:
+        assessment = classify_payload_pair(by_id[entry_id].left, by_id[entry_id].right)
+        assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT, entry_id
+        assert assessment.execution_eligible is False
 
 
 def test_unsupported_and_parameter_and_contradiction_examples() -> None:
@@ -331,12 +340,15 @@ def test_family_coverage_report_has_no_silent_regressions() -> None:
     assert report.unexpected_known_good_regressions == 0
     assert report.unexpected_known_bad_approvals == 0
     assert report.known_good_retained == 14
-    assert report.paper_assumed_count == 1
+    assert report.paper_assumed_count == 5
     assert report.matcher_catalogue_conflicts == 0
     assert report.conflict_entry_ids == []
     assert report.families["match_result_1x2"].after_approved == 3
-    assert report.families["match_result_1x2"].paper_assumed_equivalent == 1
-    assert report.families["match_result_1x2"].before_solver_admitted == 4
+    assert report.families["match_result_1x2"].paper_assumed_equivalent == 2
+    assert report.families["match_result_1x2"].before_solver_admitted == 5
+    assert report.families["both_teams_to_score"].paper_assumed_equivalent == 1
+    assert report.families["total_goals_half_line"].paper_assumed_equivalent == 1
+    assert report.families["first_team_to_score"].paper_assumed_equivalent == 1
     rendered = render_coverage_markdown(report)
     assert "PAPER_ASSUMED_EQUIVALENT" in " ".join(report.notes)
     assert "match_result_1x2" in rendered

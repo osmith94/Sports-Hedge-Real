@@ -2299,10 +2299,6 @@ def _assemble_first_team_to_score(
         raise VenueNormalizationError(
             "Kalshi First Team To Score requires HOME/AWAY/NO_GOAL contracts"
         )
-    if settlement.scope is not SettlementScope.REGULATION_TIME:
-        raise VenueNormalizationError(
-            "Kalshi First Team To Score requires proven regulation-time rules"
-        )
     runners = [
         CanonicalRunner(
             source_runner_id=f"{by_outcome[outcome].ticker}:YES",
@@ -2320,7 +2316,7 @@ def _assemble_first_team_to_score(
         line=None,
         settlement=settlement,
         runners=runners,
-        confidence=1.0,
+        confidence=1.0 if settlement.scope != SettlementScope.UNKNOWN else 0.75,
     )
 
 
