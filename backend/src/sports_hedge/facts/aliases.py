@@ -5,6 +5,69 @@ from sports_hedge.normalization.text import AliasRegistry
 # Conservative affixes only. Never drop United/City/Athletic-style identity terms.
 SAFE_TEAM_AFFIX_TOKENS = frozenset({"fc", "cf", "afc", "sc"})
 
+# Known senior clubs. Self-aliases enable the fail-closed FC/CF/AFC/SC remainder
+# strip in resolve_team_name. Unknown remainders stay unchanged (issue 309).
+_SENIOR_CLUB_SELF_ALIASES = (
+    # Premier League 2025/26
+    "Arsenal",
+    "Aston Villa",
+    "Bournemouth",
+    "Brentford",
+    "Brighton and Hove Albion",
+    "Burnley",
+    "Chelsea",
+    "Crystal Palace",
+    "Everton",
+    "Fulham",
+    "Leeds United",
+    "Liverpool",
+    "Manchester City",
+    "Manchester United",
+    "Newcastle United",
+    "Nottingham Forest",
+    "Sunderland",
+    "Tottenham Hotspur",
+    "West Ham United",
+    "Wolverhampton Wanderers",
+    # Championship / Football-Data England labels used by historical catalog
+    "Birmingham City",
+    "Blackburn Rovers",
+    "Bristol City",
+    "Charlton Athletic",
+    "Coventry City",
+    "Derby County",
+    "Hull City",
+    "Ipswich Town",
+    "Leicester City",
+    "Middlesbrough",
+    "Millwall",
+    "Norwich City",
+    "Oxford United",
+    "Plymouth Argyle",
+    "Portsmouth",
+    "Preston North End",
+    "Queens Park Rangers",
+    "Sheffield United",
+    "Sheffield Wednesday",
+    "Southampton",
+    "Stoke City",
+    "Swansea City",
+    "Watford",
+    "West Bromwich Albion",
+    "Wrexham",
+    "Barnsley",
+    "Blackpool",
+    "Cardiff City",
+    "Huddersfield Town",
+    "Luton Town",
+    "Peterborough United",
+    "Reading",
+    "Rotherham United",
+    "Wigan Athletic",
+    "Real Madrid",
+    "Barcelona",
+)
+
 
 def _registry() -> AliasRegistry:
     aliases = AliasRegistry()
@@ -110,6 +173,8 @@ def _registry() -> AliasRegistry:
     for alias, canonical in pairs.items():
         aliases.add(alias, canonical)
         aliases.add(canonical, canonical)
+    for club in _SENIOR_CLUB_SELF_ALIASES:
+        aliases.add(club, club)
     return aliases
 
 
