@@ -6,7 +6,7 @@ from hashlib import sha256
 
 from pydantic import BaseModel, model_validator
 
-from sports_hedge.facts.aliases import football_alias_registry
+from sports_hedge.facts.aliases import resolve_team_name
 from sports_hedge.facts.catalog import CompetitionCode, competition_from_label
 from sports_hedge.normalization.identity import kickoff_bucket
 from sports_hedge.normalization.text import normalize_text
@@ -53,7 +53,7 @@ def require_aware_kickoff(kickoff_utc: datetime) -> datetime:
 
 
 def canonical_team_id(name: str) -> str:
-    resolved = football_alias_registry.resolve(name)
+    resolved = resolve_team_name(name)
     digest = sha256(f"football|team|{resolved}".encode()).hexdigest()[:24]
     return f"team:{digest}"
 
@@ -74,8 +74,8 @@ def canonical_match_id(
             "football",
             normalize_text(competition_code),
             season.strip(),
-            football_alias_registry.resolve(home_team),
-            football_alias_registry.resolve(away_team),
+            resolve_team_name(home_team),
+            resolve_team_name(away_team),
             kickoff_bucket(kickoff_utc).isoformat(),
         ]
     )
@@ -104,8 +104,8 @@ def build_match_ref(
         spec = competition_from_label(competition)
     if spec is None:
         raise ValueError(f"unknown competition label: {competition!r}")
-    home = football_alias_registry.resolve(home_team)
-    away = football_alias_registry.resolve(away_team)
+    home = resolve_team_name(home_team)
+    away = resolve_team_name(away_team)
     return CanonicalMatchRef(
         canonical_match_id=canonical_match_id(
             competition_code=spec.code.value,

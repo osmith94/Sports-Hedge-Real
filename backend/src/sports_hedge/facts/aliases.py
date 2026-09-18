@@ -89,6 +89,23 @@ def _registry() -> AliasRegistry:
         "1. FC Union Berlin": "Union Berlin",
         "1 FC Union Berlin": "Union Berlin",
         "FC Union Berlin": "Union Berlin",
+        # Serie A / observed Matchbook vs Kalshi club-name variants (issue 277).
+        # AC/Calcio are club-specific aliases, not a global affix strip.
+        "Monza": "Monza",
+        "AC Monza": "Monza",
+        "Sassuolo": "Sassuolo",
+        "Sassuolo Calcio": "Sassuolo",
+        "US Sassuolo": "Sassuolo",
+        "US Sassuolo Calcio": "Sassuolo",
+        "AC Milan": "AC Milan",
+        "Milan": "AC Milan",
+        # La Liga / observed Kalshi geographic-suffix variants (issue 277).
+        # Barcelona remains a distinct senior club; never a global city strip.
+        "Espanyol Barcelona": "Espanyol",
+        "RCD Espanyol": "Espanyol",
+        "RCD Espanyol Barcelona": "Espanyol",
+        "RCD Espanyol de Barcelona": "Espanyol",
+        "FC Barcelona": "Barcelona",
     }
     for alias, canonical in pairs.items():
         aliases.add(alias, canonical)
