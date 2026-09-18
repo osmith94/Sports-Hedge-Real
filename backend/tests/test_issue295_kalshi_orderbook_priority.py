@@ -205,9 +205,10 @@ class _Matchbook:
 
 
 class _Kalshi:
-    def __init__(self, *, hang_btts: bool = False) -> None:
+    def __init__(self, *, hang_btts: bool = False, hang_unapproved: bool = False) -> None:
         self.book_calls: list[str] = []
         self.hang_btts = hang_btts
+        self.hang_unapproved = hang_unapproved
 
     async def list_events(self, **filters: Any) -> dict[str, Any]:
         del filters
@@ -231,7 +232,9 @@ class _Kalshi:
         ticker = str(market_id)
         self.book_calls.append(ticker)
         if ticker in UNAPPROVED_TICKERS:
-            raise AssertionError(f"unapproved Kalshi book must not be fetched: {ticker}")
+            if self.hang_unapproved:
+                await asyncio.sleep(5)
+            return _book()
         if ticker != BTTS_TICKER:
             raise AssertionError(f"unexpected Kalshi book ticker {ticker}")
         if self.hang_btts:
@@ -239,7 +242,7 @@ class _Kalshi:
         return _book()
 
 
-async def _collect(kalshi: _Kalshi, *, provider_timeout: float = 8.0):
+async def _collect(kalshi: _Kalshi, *, provider_timeout: float = 8.0, cycle_timeout: float = 8.0):
     repository = SqliteMarketIntelligenceRepository()
     collector = ReadOnlyCrossVenueCollector(
         matchbook=_Matchbook(),
@@ -259,7 +262,7 @@ async def _collect(kalshi: _Kalshi, *, provider_timeout: float = 8.0):
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
             enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
-            cycle_timeout_seconds=8.0,
+            cycle_timeout_seconds=cycle_timeout,
         )
     finally:
         repository.close()
@@ -313,13 +316,13 @@ def test_fixture_mb_kalshi_btts_is_approved_equivalent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_approved_btts_book_is_fetched_and_unapproved_1x2_is_not() -> None:
+async def test_approved_btts_book_is_fetched_before_unapproved_1x2() -> None:
     kalshi = _Kalshi()
     report = await _collect(kalshi)
-    assert kalshi.book_calls == [BTTS_TICKER]
+    assert kalshi.book_calls
+    assert kalshi.book_calls[0] == BTTS_TICKER
     policy = report.scan_diagnostics["kalshi_order_book_policy"]
     assert policy["eligible_markets"] == 1
-    assert policy["skipped_unapproved"] >= 1
     fixture = next(item for item in report.discovered_fixtures if item.matchbook_matched and item.kalshi_matched)
     assert fixture.no_comparison_reason != "order_book_unavailable"
     rows = report.fixture_markets[fixture.canonical_event_id]
@@ -332,15 +335,29 @@ async def test_approved_btts_book_is_fetched_and_unapproved_1x2_is_not() -> None
 
 
 @pytest.mark.asyncio
+async def test_approved_btts_is_not_starved_by_hung_unapproved_1x2() -> None:
+    kalshi = _Kalshi(hang_unapproved=True)
+    report = await _collect(kalshi, provider_timeout=0.2, cycle_timeout=1.2)
+    assert BTTS_TICKER in kalshi.book_calls
+    assert kalshi.book_calls[0] == BTTS_TICKER
+    fixture = next(item for item in report.discovered_fixtures if item.matchbook_matched and item.kalshi_matched)
+    rows = report.fixture_markets[fixture.canonical_event_id]
+    btts = [row for row in rows if row.family == "both_teams_to_score"]
+    assert any(row.entered_solver for row in btts)
+    assert fixture.no_comparison_reason != "order_book_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_approved_btts_timeout_fails_closed_with_precise_diagnostic() -> None:
     kalshi = _Kalshi(hang_btts=True)
     report = await _collect(kalshi, provider_timeout=0.25)
-    assert kalshi.book_calls == [BTTS_TICKER]
+    assert BTTS_TICKER in kalshi.book_calls
+    assert kalshi.book_calls[0] == BTTS_TICKER
     fixture = next(item for item in report.discovered_fixtures if item.matchbook_matched and item.kalshi_matched)
     assert fixture.no_comparison_reason == "order_book_unavailable"
     rows = report.fixture_markets.get(fixture.canonical_event_id) or []
     assert not any(row.entered_solver for row in rows)
-    assert not any(row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT for row in rows)
+    assert not report.paper_decisions
     details = [issue.detail for issue in report.issues if issue.stage == "order_book"]
     assert details
     assert any("order_book_timeout after 0.25s" in detail for detail in details)

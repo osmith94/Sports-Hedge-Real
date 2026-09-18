@@ -2377,25 +2377,38 @@ class ReadOnlyCrossVenueCollector:
         ]
         kalshi_depth_markets = _kalshi_markets_needing_depth(eligible_pairs)
         eligible_ids = {item.canonical.source_market_id for item in kalshi_depth_markets}
-        skipped_unapproved = sum(
-            1
-            for market in kalshi_markets
-            if market.canonical.source_market_id not in eligible_ids
-        )
         self._kalshi_books_eligible += len(kalshi_depth_markets)
-        self._kalshi_books_skipped_unapproved += skipped_unapproved
         if kalshi_depth_markets:
             await self._fetch_kalshi_depth_for_markets(
                 k_events,
                 kalshi_depth_markets,
                 side=kalshi_side,
                 issues=issues,
+                skip_if_budget_exhausted=False,
             )
-            order_books_fetched = (
-                matchbook_side.books + polymarket_side.books + kalshi_side.books
+        leftover_kalshi = [
+            market
+            for market in kalshi_markets
+            if market.canonical.source_market_id not in eligible_ids
+        ]
+        if leftover_kalshi and not self._provider_budget_exhausted():
+            await self._fetch_kalshi_depth_for_markets(
+                k_events,
+                leftover_kalshi,
+                side=kalshi_side,
+                issues=issues,
+                skip_if_budget_exhausted=True,
             )
-            for source_id, observation in kalshi_side.observations.items():
-                observations_by_market_id[(VenueName.KALSHI, source_id)] = observation
+        self._kalshi_books_skipped_unapproved += sum(
+            1
+            for market in leftover_kalshi
+            if market.canonical.source_market_id not in kalshi_side.observations
+        )
+        order_books_fetched = (
+            matchbook_side.books + polymarket_side.books + kalshi_side.books
+        )
+        for source_id, observation in kalshi_side.observations.items():
+            observations_by_market_id[(VenueName.KALSHI, source_id)] = observation
         decisions: list[PaperScanDecision] = []
         decisions_by_source_ids: dict[tuple[str, str], PaperScanDecision] = {}
         decisions_by_pair: dict[tuple[str, str, str, str], PaperScanDecision] = {}
@@ -2720,11 +2733,14 @@ class ReadOnlyCrossVenueCollector:
         *,
         side: _VenueSideFetch,
         issues: list[CollectorIssue],
+        skip_if_budget_exhausted: bool,
     ) -> None:
-        """Fetch Kalshi order books only for catalogue-eligible markets.
+        """Fetch Kalshi order books, optionally skipping when the cycle budget is gone.
 
-        Queue wait is not a live quote. Missing or timed-out books stay
-        fail-closed; cached/stale prices are never substituted.
+        Approved catalogue pairs call this first with skip_if_budget_exhausted=False
+        so a genuine miss still records a precise timeout. Unapproved leftover
+        work may skip rather than starve the next cluster. Queue wait is not a
+        live quote. Missing books stay fail-closed; cached prices are never used.
         """
 
         if self.kalshi is None or not markets:
@@ -2732,6 +2748,8 @@ class ReadOnlyCrossVenueCollector:
         prioritized = _prioritize_catalogue_depth_markets(markets)
 
         async def _one(market: _NormalizedMarket) -> None:
+            if skip_if_budget_exhausted and self._provider_budget_exhausted():
+                return
             book_event = _event_for_source(
                 k_events, market.canonical.event.source_event_id
             )
@@ -2743,6 +2761,7 @@ class ReadOnlyCrossVenueCollector:
                 market,
                 series=series if isinstance(series, dict) else None,
                 issues=issues,
+                skip_if_budget_exhausted=skip_if_budget_exhausted,
             )
             side.books += book_fetched
             if observation is None:
@@ -3403,6 +3422,7 @@ class ReadOnlyCrossVenueCollector:
         *,
         series: dict[str, Any] | None,
         issues: list[CollectorIssue],
+        skip_if_budget_exhausted: bool = False,
     ) -> tuple[VenueMarketObservation | None, int]:
         assert self.kalshi is not None
         payloads = market.raw.get("grouped_payloads")
@@ -3424,6 +3444,9 @@ class ReadOnlyCrossVenueCollector:
             if failed or not ticker:
                 if ticker:
                     failed = True
+                return
+            if skip_if_budget_exhausted and self._provider_budget_exhausted():
+                failed = True
                 return
             try:
                 started = perf_counter()
