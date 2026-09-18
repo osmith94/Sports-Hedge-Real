@@ -26,7 +26,10 @@ from sports_hedge.domain.football import (
     SettlementScope,
 )
 from sports_hedge.domain.models import VenueName
-from sports_hedge.normalization.kalshi_contract_terms import GAMEWIN_SCOPE_UNAVAILABLE_REASON
+from sports_hedge.normalization.kalshi_contract_terms import (
+    GAMEWIN_SCOPE_UNAVAILABLE_REASON,
+    KALSHI_CONTRACT_FAMILY_NOT_MATCH_RESULT_REASON,
+)
 
 ORDINARY_1X2_OUTCOMES = frozenset(
     {CanonicalOutcome.HOME, CanonicalOutcome.DRAW, CanonicalOutcome.AWAY}
@@ -189,6 +192,8 @@ def paper_assumed_ordinary_1x2(left: CanonicalMarket, right: CanonicalMarket) ->
     }:
         return False
     unknown = str(kalshi.settlement.unknown_reason or "").casefold()
+    if kalshi.settlement.unknown_reason == KALSHI_CONTRACT_FAMILY_NOT_MATCH_RESULT_REASON:
+        return False
     if any(token in unknown for token in _CONTRADICTION_TOKENS):
         return False
     if kalshi.settlement.is_economically_complete() and is_complete_regulation_time_1x2(kalshi):

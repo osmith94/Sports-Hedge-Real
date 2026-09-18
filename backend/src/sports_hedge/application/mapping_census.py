@@ -14,7 +14,6 @@ from pydantic import BaseModel, Field
 from sports_hedge.application.collector import CollectionReport, MarketEvaluationState
 from sports_hedge.application.equivalence_diagnostics import zero_equivalent_reason_counts
 from sports_hedge.application.fixture_inventory import (
-    InventoryComparisonStatus,
     inventory_is_comparable_opportunity,
 )
 from sports_hedge.application.mapping_forensics import VENUE_SCOPE_ALL, VENUE_SCOPE_UNIVERSE

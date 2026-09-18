@@ -1121,7 +1121,7 @@ async def test_to_qualify_still_nonequivalent_with_catalog_secondary() -> None:
     assert qualify
     assert all(row.comparison_status.value != "matched_equivalent" for row in qualify)
     assert census.equivalent_market_pairs == 1
-    assert census.market_family_breakdown.get("match_result") in {None, 0}
+    assert census.market_family_breakdown.get("match_result") == 1
 
 
 @pytest.mark.asyncio
@@ -1164,12 +1164,13 @@ async def test_hot_and_universe_agree_on_live_shaped_incomplete_kalshi() -> None
     assert universe_snap["identity"] == hot_snap["identity"]
     assert universe_snap["matched_equivalent"] == 0
     assert hot_report.discovered_fixtures
-    assert all(
-        item.market_evaluation_state == "hot_relationship_missing"
-        or item.matched_equivalent_count in {0, None}
+    target = next(
+        item
         for item in hot_report.discovered_fixtures
         if item.canonical_event_id == universe_snap["identity"]["canonical_event_id"]
     )
+    assert target.market_evaluation_state != "hot_relationship_missing"
+    assert (target.matched_equivalent_count or 0) >= 1
     assert universe_snap["identity"]["home_team"] == BETIS
     assert universe_snap["identity"]["away_team"] == GETAFE
     assert universe_snap["matched_equivalent"] == 0

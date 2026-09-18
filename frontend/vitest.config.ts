@@ -19,6 +19,7 @@ export default defineConfig({
       "lib/live-refresh-poll-guard.test.ts",
       "lib/hot-fixture-roster-display.test.ts",
       "lib/scan-cycle-history-display.test.ts",
+      "lib/catalogue-coverage-display.test.ts",
     ],
   },
 });

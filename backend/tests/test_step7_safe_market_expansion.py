@@ -1281,9 +1281,9 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
             "match_result",
             "both_teams_to_score",
             "total_goals",
-            "draw_no_bet",
             "first_team_to_score",
         }
+        assert "draw_no_bet" not in scanned_families
         assert "asian_handicap" not in scanned_families
         assert "to_qualify" not in scanned_families
         assert "next_goal" not in scanned_families
@@ -1299,10 +1299,7 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
         assert all(row.solver_model == "generalized_payoff" for row in integer_totals)
         assert all(row.solver_is_arbitrage is False for row in integer_totals)
         dnb = next(row for row in rows if row.family == "draw_no_bet")
-        assert dnb.entered_solver is True
-        assert dnb.solver_model == "generalized_payoff"
-        assert dnb.solver_is_arbitrage is False
-        assert dnb.reason
+        assert dnb.entered_solver is False
         ah_rows = [row for row in rows if row.family == "asian_handicap"]
         assert ah_rows
         assert all(not row.entered_solver for row in ah_rows)
@@ -1358,12 +1355,7 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
         }
         assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "match_result")
         assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "both_teams_to_score")
-        assert all(row["entered_solver"] for row in body["markets"] if row["family"] == "draw_no_bet")
-        assert all(
-            row.get("solver_model") == "generalized_payoff"
-            for row in body["markets"]
-            if row["family"] == "draw_no_bet"
-        )
+        assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "draw_no_bet")
         assert all(not row["solver_is_arbitrage"] for row in body["markets"] if row["family"] == "draw_no_bet")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "asian_handicap")
         assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "to_qualify")

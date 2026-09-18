@@ -79,8 +79,8 @@ EXPECTED_FULL_CENSUS = {
     "discovered_fixtures": 5,
     "cross_venue_matched_events": 5,
     "normalized_markets_by_venue": {
-        "matchbook": 7,
-        "polymarket": 4,
+        "matchbook": 5,
+        "polymarket": 3,
         "kalshi": 2,
     },
     "equivalent_market_pairs": 5,

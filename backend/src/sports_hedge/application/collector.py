@@ -33,7 +33,6 @@ from sports_hedge.application.equivalence_diagnostics import (
 )
 from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
-    InventoryComparisonStatus,
     InventoryMarket,
     assemble_fixture_inventory,
     inventory_is_comparable_opportunity,
@@ -674,6 +673,7 @@ class ReadOnlyCrossVenueCollector:
         ] = {}
         self._kalshi_books_eligible = 0
         self._kalshi_books_skipped_unapproved = 0
+        self._kalshi_get_market_failed_tickers: set[str] = set()
 
     async def collect_and_scan(
         self,
@@ -775,6 +775,7 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_series_inflight = {}
         self._kalshi_books_eligible = 0
         self._kalshi_books_skipped_unapproved = 0
+        self._kalshi_get_market_failed_tickers = set()
         self._inflight = set()
         self._cluster_sema = asyncio.Semaphore(self._cluster_concurrency_limit)
         self._provider_semaphores = {
@@ -2693,7 +2694,13 @@ class ReadOnlyCrossVenueCollector:
             for item in selected_pairs
             if scan_eligible_pair(item[2].canonical, item[3].canonical, item[4])
         ]
-        kalshi_depth_markets = _kalshi_markets_needing_depth(eligible_pairs)
+        kalshi_depth_markets = [
+            market
+            for market in _kalshi_markets_needing_depth(eligible_pairs)
+            if not _kalshi_market_has_failed_ticker(
+                market, self._kalshi_get_market_failed_tickers
+            )
+        ]
         eligible_ids = {item.canonical.source_market_id for item in kalshi_depth_markets}
         self._kalshi_books_eligible += len(kalshi_depth_markets)
         leftover_kalshi = [
@@ -4524,6 +4531,7 @@ class ReadOnlyCrossVenueCollector:
             get_status = "transport_failed"
             if isinstance(result, Exception):
                 self._kalshi_rule_enrichment["failed"] += 1
+                self._kalshi_get_market_failed_tickers.add(ticker)
                 issues.append(
                     CollectorIssue(
                         stage="get_market",
@@ -4536,6 +4544,7 @@ class ReadOnlyCrossVenueCollector:
                 payload, failed = result if isinstance(result, tuple) else (None, True)
                 if failed:
                     self._kalshi_rule_enrichment["failed"] += 1
+                    self._kalshi_get_market_failed_tickers.add(ticker)
                     get_status = "transport_failed"
                 elif not isinstance(payload, dict):
                     self._kalshi_rule_enrichment["failed"] += 1
@@ -5205,6 +5214,19 @@ def _kalshi_markets_needing_depth(
         if right_venue is VenueName.KALSHI:
             needed.setdefault(right_market.canonical.source_market_id, right_market)
     return list(needed.values())
+
+
+def _kalshi_market_has_failed_ticker(market: _NormalizedMarket, failed: set[str]) -> bool:
+    """Skip depth when Get Market timed out/failed for a constituent ticker."""
+
+    if not failed:
+        return False
+    for payload in _kalshi_grouped_payloads([market]):
+        ticker = str(payload.get("ticker") or "").strip()
+        if ticker and ticker in failed:
+            return True
+    source_id = str(market.canonical.source_market_id or "").strip()
+    return source_id in failed
 
 
 def _is_baseline_match_result_pair(
