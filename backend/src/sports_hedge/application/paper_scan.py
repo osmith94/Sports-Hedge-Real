@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from time import monotonic
@@ -87,6 +88,7 @@ class PaperScanService:
         open_trades: list[PaperTrade] | None = None,
         mapping_rule_store: object | None = None,
         reverse_catalog: LatestObservationCatalog | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.market_intelligence = market_intelligence
         if market_matcher is None:
@@ -106,6 +108,7 @@ class PaperScanService:
         self.liquidity = liquidity
         self.open_trades = open_trades or []
         self.reverse_catalog = reverse_catalog
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.last_scan_phase_ms: dict[str, int] = {
             "mapping_equivalence": 0,
             "fees_fx_risk": 0,
@@ -183,7 +186,7 @@ class PaperScanService:
         fees = list(fee_snapshots or [])
         rejections: list[str] = []
         assumption_labels: list[str] = []
-        evaluated_at = datetime.now(UTC)
+        evaluated_at = self._clock()
         costs, cost_resolve_reasons = self._resolve_costs(
             left,
             right,

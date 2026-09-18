@@ -351,6 +351,7 @@ def test_sunday_bootstrap_unblocks_usd_matched_paper_scan() -> None:
         intelligence,
         fx_service=service,
         cost_resolver=VenueCostResolver(),
+        clock=lambda: sunday.astimezone(UTC),
     )
     mb_event, mb_market = matchbook_payloads()
     pm_event, pm_market, pm_books = polymarket_payloads()

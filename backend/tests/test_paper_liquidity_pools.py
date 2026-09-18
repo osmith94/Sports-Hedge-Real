@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -18,7 +17,6 @@ from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.resolver import VenueCostResolver
-from sports_hedge.fx.models import PublishedFxClose
 from sports_hedge.fx.repository import SqliteFxRateRepository
 from sports_hedge.fx.service import FxRateService
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
@@ -26,6 +24,7 @@ from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
+from fx_test_helpers import fresh_usd_ecb_close
 from test_paper_scan_pipeline import OBSERVED, matchbook_payloads, polymarket_payloads
 from venue_cost_helpers import matchbook_polymarket_costs
 
@@ -159,18 +158,7 @@ def test_matchbook_and_polymarket_pools_cap_paper_scan() -> None:
 
 def test_polymarket_pool_uses_backend_fx_not_client_assumption() -> None:
     fx = FxRateService(SqliteFxRateRepository())
-    fx.persist_ecb_closes(
-        [
-            PublishedFxClose(
-                currency="USD",
-                gbp_per_unit=Decimal("0.50000000"),
-                source_date=date(2026, 9, 11),
-                retrieved_at=datetime(2026, 9, 11, 16, tzinfo=UTC),
-                source="ecb_eurofxref",
-                source_id="ecb:2026-09-11:USD",
-            )
-        ]
-    )
+    fx.persist_ecb_closes([fresh_usd_ecb_close(Decimal("0.50000000"))])
     intelligence = MarketIntelligenceService(SqliteMarketIntelligenceRepository())
     liquidity = SqlitePaperLiquidityRepository()
     liquidity.update_available(

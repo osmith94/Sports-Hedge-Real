@@ -20,7 +20,6 @@ from sports_hedge.fees.resolver import (
     MATCHBOOK_STANDARD_FOOTBALL_COMMISSION,
     VenueCostResolver,
 )
-from sports_hedge.fx.models import PublishedFxClose
 from sports_hedge.fx.repository import SqliteFxRateRepository
 from sports_hedge.fx.service import FxRateService
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
@@ -28,7 +27,7 @@ from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.persistence.matchbook_account_fee import SqliteMatchbookAccountFeeStore
 from test_fixture_inventory import _inventory, _market
 from test_paper_scan_pipeline import OBSERVED, matchbook_payloads, polymarket_payloads
-from datetime import date
+from fx_test_helpers import fresh_usd_ecb_close
 
 
 AS_OF = datetime(2026, 9, 13, 17, tzinfo=UTC)
@@ -91,18 +90,7 @@ def test_paper_scan_snapshots_applied_matchbook_override() -> None:
     store = SqliteMatchbookAccountFeeStore()
     store.set_override(Decimal("0.03"))
     fx = FxRateService(SqliteFxRateRepository())
-    fx.persist_ecb_closes(
-        [
-            PublishedFxClose(
-                currency="USD",
-                gbp_per_unit=Decimal("0.75"),
-                source_date=date(2026, 9, 11),
-                retrieved_at=datetime(2026, 9, 11, 16, tzinfo=UTC),
-                source="ecb_eurofxref",
-                source_id="ecb:2026-09-11:USD",
-            )
-        ]
-    )
+    fx.persist_ecb_closes([fresh_usd_ecb_close(Decimal("0.75"))])
     repository = SqliteMarketIntelligenceRepository()
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(
