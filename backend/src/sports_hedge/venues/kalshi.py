@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -51,6 +52,9 @@ class KalshiClient(ReadOnlyVenue):
         self._clock = clock or (lambda: datetime.now(UTC))
         self._base_url = settings.resolved_kalshi_base_url().rstrip("/")
         self._market_cache: dict[str, dict[str, Any]] = {}
+        self._market_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._series_cache: dict[str, dict[str, Any]] = {}
+        self._series_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
         self._contract_terms_cache: dict[str, dict[str, Any]] = {}
         self._client = client or httpx.AsyncClient(
             timeout=market_data_http_timeout(),
@@ -97,11 +101,26 @@ class KalshiClient(ReadOnlyVenue):
         )
 
     async def get_series(self, series_ticker: str) -> dict[str, Any]:
-        payload = await self._get(f"/series/{series_ticker}")
-        series = payload.get("series")
-        if isinstance(series, dict):
-            return series
-        return payload
+        """Read-only Get Series with a successful per-client cache and single-flight.
+
+        Concurrent callers for the same ticker share one HTTP call. Transient
+        failures are not stored as successful metadata; a later retry may fetch
+        again. Series names are not settlement proof.
+        """
+
+        key = str(series_ticker or "").strip()
+        if not key:
+            raise KalshiDiscoveryError("Kalshi get_series requires a series ticker")
+
+        async def _fetch() -> dict[str, Any]:
+            payload = await self._get(f"/series/{key}")
+            series = payload.get("series")
+            resolved = series if isinstance(series, dict) else payload
+            if not isinstance(resolved, dict) or not resolved:
+                raise KalshiDiscoveryError(f"Kalshi get_series {key} returned no series object")
+            return resolved
+
+        return await _single_flight_cached(self._series_cache, self._series_inflight, key, _fetch)
 
     async def list_events(self, **filters: Any) -> dict[str, Any]:
         """List open Kalshi events, optionally restricted to configured series."""
@@ -285,16 +304,16 @@ class KalshiClient(ReadOnlyVenue):
         key = str(ticker or "").strip()
         if not key:
             raise KalshiDiscoveryError("Kalshi get_market requires a ticker")
-        cached = self._market_cache.get(key)
-        if cached is not None:
-            return cached
-        payload = await self._get(f"/markets/{key}")
-        market = payload.get("market")
-        resolved = market if isinstance(market, dict) else payload
-        if not isinstance(resolved, dict) or not resolved:
-            raise KalshiDiscoveryError(f"Kalshi get_market {key} returned no market object")
-        self._market_cache[key] = resolved
-        return resolved
+
+        async def _fetch() -> dict[str, Any]:
+            payload = await self._get(f"/markets/{key}")
+            market = payload.get("market")
+            resolved = market if isinstance(market, dict) else payload
+            if not isinstance(resolved, dict) or not resolved:
+                raise KalshiDiscoveryError(f"Kalshi get_market {key} returned no market object")
+            return resolved
+
+        return await _single_flight_cached(self._market_cache, self._market_inflight, key, _fetch)
 
     async def get_contract_terms_document(self, url: str) -> dict[str, Any]:
         """Bounded read-only GET of an allowlisted public contract_terms_url.
@@ -434,6 +453,34 @@ class KalshiClient(ReadOnlyVenue):
             "truncated": truncated,
             "total": len(items),
         }
+
+
+async def _single_flight_cached(
+    cache: dict[str, dict[str, Any]],
+    inflight: dict[str, asyncio.Task[dict[str, Any]]],
+    key: str,
+    fetch: Callable[[], Awaitable[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Share one in-flight fetch per key. Cache successful payloads only."""
+
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    existing = inflight.get(key)
+    if existing is not None:
+        return await asyncio.shield(existing)
+
+    async def _run() -> dict[str, Any]:
+        try:
+            resolved = await fetch()
+            cache[key] = resolved
+            return resolved
+        finally:
+            inflight.pop(key, None)
+
+    task = asyncio.create_task(_run())
+    inflight[key] = task
+    return await asyncio.shield(task)
 
 
 def football_series_ticker(series: dict[str, Any]) -> bool:

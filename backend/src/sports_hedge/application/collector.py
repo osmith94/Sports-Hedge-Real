@@ -76,6 +76,8 @@ from sports_hedge.application.quote_freshness import (
     retrieval_quote_age,
 )
 from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key, should_skip_market_work
+from sports_hedge.catalogue.classify import classify_pair
+from sports_hedge.catalogue.states import CatalogueApprovalState
 from sports_hedge.application.target_competitions import (
     EVENT_IDENTITY_MISMATCH,
     SERIES_NOT_QUERIED,
@@ -114,6 +116,7 @@ from sports_hedge.matching.ordinary_1x2 import (
 from sports_hedge.normalization.venues import (
     KALSHI_CONTRACT_RULE_KEYS,
     KALSHI_RULE_DIAGNOSTIC_CAP,
+    KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
     KalshiNormalizer,
     MatchbookNormalizer,
     PolymarketNormalizer,
@@ -126,6 +129,17 @@ from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.preparation import PreparablePaperOpportunity
 
 LOGGER = getLogger(__name__)
+
+
+def _consume_orphaned_provider_task(task: asyncio.Task[Any]) -> None:
+    """Retrieve a detached provider task result so exceptions are not left unconsumed."""
+
+    if not task.done():
+        return
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        return
 
 
 def _new_kalshi_rule_enrichment() -> dict[str, int]:
@@ -256,6 +270,7 @@ _PROVIDER_CALL_STAGE = {
     "list_events": "event_lookup",
     "list_markets": "market_discovery",
     "get_series": "market_discovery",
+    "get_market": "market_discovery",
     "get_contract_terms": "market_discovery",
     "get_order_book": "book_depth",
     "order_book": "book_depth",
@@ -566,6 +581,8 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_rule_enrichment = _new_kalshi_rule_enrichment()
         self._kalshi_rule_layer_diagnostics: list[dict[str, Any]] = []
         self._kalshi_contract_terms_cache: dict[str, dict[str, Any]] = {}
+        self._kalshi_series_ok: dict[tuple[str, bool], dict[str, Any]] = {}
+        self._kalshi_series_inflight: dict[tuple[str, bool], asyncio.Task[dict[str, Any] | None]] = {}
         self._kalshi_books_eligible = 0
         self._kalshi_books_skipped_unapproved = 0
 
@@ -665,6 +682,7 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_rule_enrichment = _new_kalshi_rule_enrichment()
         self._kalshi_rule_layer_diagnostics: list[dict[str, Any]] = []
         self._kalshi_contract_terms_cache: dict[str, dict[str, Any]] = {}
+        self._kalshi_series_inflight = {}
         self._kalshi_books_eligible = 0
         self._kalshi_books_skipped_unapproved = 0
         self._inflight = set()
@@ -713,8 +731,9 @@ class ReadOnlyCrossVenueCollector:
         stale_generation_state_ignored = False
         # HOT skips list_events and reuses stored source-event payloads.
         # UNIVERSE reuses the sweep discovery snapshot after the first success.
-        # Kalshi nested/list load, Get Market enrichment, and assemble still
-        # run through _load_kalshi_markets — the same path as UNIVERSE.
+        # Cheap Kalshi nested/list inventory still runs through _load_kalshi_markets.
+        # Get Series / Get Market settlement enrichment is later, and only for
+        # Approved Catalogue candidates. Live books stay approved-pair-only.
         reuse_snapshot = bool(reuse_discovery and discovery_snapshot)
         skip_discovery = (
             (resolved_lane == ScanLane.HOT.value and identity_scope is not None)
@@ -1111,6 +1130,22 @@ class ReadOnlyCrossVenueCollector:
         if not task.done():
             self._inflight_orphaned += 1
 
+    def _detach_provider_task(self, task: asyncio.Task[Any], *, count_orphan: bool) -> None:
+        """Drop a provider task from inflight and consume a later result/exception.
+
+        Bounded cancel must not wait forever. If the coroutine ignores cancel
+        and later raises, retrieve that exception so the event loop does not
+        emit ``Task exception was never retrieved``.
+        """
+
+        if count_orphan:
+            self._count_orphan_after_drain(task)
+        self._inflight.discard(task)
+        if task.done():
+            _consume_orphaned_provider_task(task)
+            return
+        task.add_done_callback(_consume_orphaned_provider_task)
+
     async def _cancel_inflight(self) -> None:
         pending: list[asyncio.Task[Any]] = []
         for task in list(self._inflight):
@@ -1119,13 +1154,13 @@ class ReadOnlyCrossVenueCollector:
                 pending.append(task)
             else:
                 self._inflight.discard(task)
+                _consume_orphaned_provider_task(task)
         if pending:
             drain = self._cancel_drain_seconds()
             if drain > 0:
                 await asyncio.wait(set(pending), timeout=drain)
         for task in pending:
-            self._count_orphan_after_drain(task)
-            self._inflight.discard(task)
+            self._detach_provider_task(task, count_orphan=True)
 
     async def _await_bounded(self, coro: Any, timeout: float) -> tuple[Any, bool]:
         """Wait up to timeout, then cancel without blocking on uncooperative providers."""
@@ -1160,16 +1195,14 @@ class ReadOnlyCrossVenueCollector:
             if task.done() and not task.cancelled():
                 self._inflight.discard(task)
                 return task.result(), False
-            self._count_orphan_after_drain(task)
-            self._inflight.discard(task)
+            self._detach_provider_task(task, count_orphan=True)
             return None, True
         except asyncio.CancelledError:
             self._request_cancel(task)
             drain = self._cancel_drain_seconds()
             if drain > 0 and not task.done():
                 await asyncio.wait({task}, timeout=drain)
-            self._count_orphan_after_drain(task)
-            self._inflight.discard(task)
+            self._detach_provider_task(task, count_orphan=True)
             raise
         finally:
             if task.done():
@@ -1199,6 +1232,11 @@ class ReadOnlyCrossVenueCollector:
                 drain = self._cancel_drain_seconds()
                 if drain > 0:
                     await asyncio.wait(set(still_pending), timeout=drain)
+            for task in tasks:
+                if not task.done():
+                    task.add_done_callback(_consume_orphaned_provider_task)
+                else:
+                    _consume_orphaned_provider_task(task)
             raise
         for task in pending:
             task.cancel()
@@ -1206,6 +1244,11 @@ class ReadOnlyCrossVenueCollector:
             drain = self._cancel_drain_seconds()
             if drain > 0:
                 await asyncio.wait(pending, timeout=drain)
+        for task in pending:
+            if not task.done():
+                task.add_done_callback(_consume_orphaned_provider_task)
+            else:
+                _consume_orphaned_provider_task(task)
         results: list[Any] = []
         defaults = default if isinstance(default, tuple) and len(default) == len(tasks) else None
         for index, task in enumerate(tasks):
@@ -2421,6 +2464,15 @@ class ReadOnlyCrossVenueCollector:
             pair_specs = tuple(
                 pair for pair in pair_specs if pair[0] in enabled and pair[1] in enabled
             )
+        await self._enrich_kalshi_catalogue_candidate_settlement(
+            k_events,
+            venue_markets=venue_markets,
+            kalshi_side=kalshi_side,
+            pair_specs=pair_specs,
+            issues=issues,
+        )
+        kalshi_markets = kalshi_side.markets
+        venue_markets[VenueName.KALSHI] = kalshi_markets
         selected_pairs: list[
             tuple[VenueName, VenueName, _NormalizedMarket, _NormalizedMarket, MarketMatchResult]
         ] = []
@@ -2786,9 +2838,10 @@ class ReadOnlyCrossVenueCollector:
             side.inventory.extend(inventory)
         # Live get_order_book is later, and only for Kalshi legs that
         # participate in scan-eligible / Approved Market Catalogue pairs.
-        # Metadata, series/fee wrappers, Get Market rule enrichment, and
-        # inventory listing stay here. Fetching nested unapproved books
-        # starves approved BTTS under the 4-slot Kalshi limiter.
+        # Cheap nested/list inventory stays here. Series metadata, Get Market
+        # rule enrichment, and contract-terms fetches wait for catalogue
+        # candidates. Fetching nested unapproved books starves approved BTTS
+        # under the 4-slot Kalshi limiter.
 
     async def _fetch_kalshi_depth_for_markets(
         self,
@@ -2817,6 +2870,14 @@ class ReadOnlyCrossVenueCollector:
             if book_event is None:
                 return
             series = market.raw.get("series") if isinstance(market.raw, dict) else None
+            if not isinstance(series, dict):
+                series = await self._fetch_kalshi_series_metadata(
+                    book_event,
+                    issues=issues,
+                    attach_contract_family=False,
+                )
+                if isinstance(series, dict) and isinstance(market.raw, dict):
+                    market.raw["series"] = series
             observation, book_fetched = await self._try_kalshi_observation(
                 book_event,
                 market,
@@ -3175,28 +3236,10 @@ class ReadOnlyCrossVenueCollector:
         issues: list[CollectorIssue],
     ) -> tuple[list[_NormalizedMarket], list[InventoryMarket], dict[str, Any] | None, int, bool]:
         assert self.kalshi is not None
+        # Cheap archetype inventory from nested/list payloads only. Series
+        # metadata is not required to recognise family/period/line/outcomes.
+        # Get Series and Get Market wait for Approved Catalogue candidates.
         series: dict[str, Any] | None = None
-        series_ticker = str(event.raw.get("series_ticker") or "").strip()
-        if series_ticker:
-            try:
-                series, _series_failed = await self._wait_provider(
-                    self.kalshi.get_series(series_ticker),
-                    stage="get_series",
-                    venue=VenueName.KALSHI,
-                    source_id=series_ticker,
-                    default=None,
-                )
-            except Exception as exc:
-                issues.append(
-                    CollectorIssue(
-                        stage="get_series",
-                        venue=VenueName.KALSHI,
-                        source_id=series_ticker,
-                        detail=str(exc),
-                    )
-                )
-        if isinstance(series, dict):
-            series = await self._attach_kalshi_contract_family(series, issues=issues)
         nested = event.raw.get("markets")
         raw_markets: list[dict[str, Any]]
         if isinstance(nested, list) and nested:
@@ -3223,12 +3266,10 @@ class ReadOnlyCrossVenueCollector:
                     )
                 )
                 return [], [], series, 0, True
-        await self._enrich_kalshi_match_result_rules(
-            event,
-            raw_markets,
-            series=series,
-            issues=issues,
-        )
+        # Settlement enrichment is deferred until a cross-venue catalogue
+        # candidate exists. Nested wording that is already complete still
+        # classifies here; incomplete Match Result stays fail-closed until
+        # candidate Get Market / series fallback runs.
         inventory: list[InventoryMarket] = []
         normalized: list[_NormalizedMarket] = []
         try:
@@ -3327,6 +3368,181 @@ class ReadOnlyCrossVenueCollector:
                 )
             )
         return normalized, inventory, series, 0, False
+
+    async def _enrich_kalshi_catalogue_candidate_settlement(
+        self,
+        k_events: list[_NormalizedEvent],
+        *,
+        venue_markets: dict[VenueName, list[_NormalizedMarket]],
+        kalshi_side: _VenueSideFetch,
+        pair_specs: tuple[tuple[VenueName, VenueName], ...],
+        issues: list[CollectorIssue],
+    ) -> None:
+        """Get Market / series settlement work only for Approved Catalogue candidates.
+
+        Cheap inventory already recognised family/period/line/outcomes from
+        nested payloads. Enrich ordinary Match Result rules only when another
+        venue offers the same catalogue archetype and settlement is not already
+        fail-closed (cancel/fair-price). After enrichment, reassemble and fail
+        closed if settlement is still unproven. Depth stays behind
+        ``scan_eligible_pair``.
+        """
+
+        if self.kalshi is None or not kalshi_side.markets or not pair_specs:
+            return
+        candidates: dict[str, _NormalizedMarket] = {}
+        for left_venue, right_venue in pair_specs:
+            if VenueName.KALSHI not in {left_venue, right_venue}:
+                continue
+            left_markets = venue_markets.get(left_venue) or []
+            right_markets = venue_markets.get(right_venue) or []
+            if not left_markets or not right_markets:
+                continue
+            for left_market in left_markets:
+                for right_market in right_markets:
+                    if not _kalshi_match_result_catalogue_candidate(
+                        left_market.canonical, right_market.canonical
+                    ):
+                        continue
+                    kalshi_market = (
+                        left_market if left_venue is VenueName.KALSHI else right_market
+                    )
+                    candidates.setdefault(
+                        kalshi_market.canonical.source_market_id, kalshi_market
+                    )
+        if not candidates:
+            return
+        by_event: dict[str, list[_NormalizedMarket]] = {}
+        for market in candidates.values():
+            event_id = market.canonical.event.source_event_id
+            by_event.setdefault(event_id, []).append(market)
+        for event_id, markets in by_event.items():
+            event = _event_for_source(k_events, event_id)
+            if event is None:
+                continue
+            raw_markets = _kalshi_grouped_payloads(markets)
+            series: dict[str, Any] | None = None
+            if _kalshi_markets_still_need_series_fallback(event, raw_markets):
+                series = await self._fetch_kalshi_series_metadata(
+                    event,
+                    issues=issues,
+                    attach_contract_family=True,
+                )
+            await self._enrich_kalshi_match_result_rules(
+                event,
+                raw_markets,
+                series=series,
+                issues=issues,
+            )
+            self._rebuild_kalshi_candidate_markets(
+                event,
+                markets,
+                kalshi_side=kalshi_side,
+                raw_markets=raw_markets,
+                series=series,
+                issues=issues,
+            )
+
+    async def _fetch_kalshi_series_metadata(
+        self,
+        event: _NormalizedEvent,
+        *,
+        issues: list[CollectorIssue],
+        attach_contract_family: bool,
+    ) -> dict[str, Any] | None:
+        """Coalesced Get Series for candidate settlement fallback or approved fees.
+
+        Successful metadata is cached on this collector and on the Kalshi
+        client. Transient failures are not stored as success.
+        """
+
+        if self.kalshi is None:
+            return None
+        ticker = str(event.raw.get("series_ticker") or "").strip()
+        if not ticker:
+            return None
+        cache_key = (ticker, attach_contract_family)
+        cached = self._kalshi_series_ok.get(cache_key)
+        if cached is not None:
+            return cached
+        existing = self._kalshi_series_inflight.get(cache_key)
+        if existing is not None:
+            return await asyncio.shield(existing)
+
+        async def _load() -> dict[str, Any] | None:
+            client = self.kalshi
+            if client is None:
+                return None
+            try:
+                try:
+                    series, failed = await self._wait_provider(
+                        client.get_series(ticker),
+                        stage="get_series",
+                        venue=VenueName.KALSHI,
+                        source_id=ticker,
+                        default=None,
+                    )
+                except Exception as exc:
+                    issues.append(
+                        CollectorIssue(
+                            stage="get_series",
+                            venue=VenueName.KALSHI,
+                            source_id=ticker,
+                            detail=str(exc),
+                        )
+                    )
+                    return None
+                if failed or not isinstance(series, dict):
+                    return None
+                if attach_contract_family:
+                    series = await self._attach_kalshi_contract_family(series, issues=issues)
+                self._kalshi_series_ok[cache_key] = series
+                return series
+            finally:
+                self._kalshi_series_inflight.pop(cache_key, None)
+
+        task = asyncio.create_task(_load())
+        self._kalshi_series_inflight[cache_key] = task
+        return await asyncio.shield(task)
+
+    def _rebuild_kalshi_candidate_markets(
+        self,
+        event: _NormalizedEvent,
+        markets: list[_NormalizedMarket],
+        *,
+        kalshi_side: _VenueSideFetch,
+        raw_markets: list[dict[str, Any]],
+        series: dict[str, Any] | None,
+        issues: list[CollectorIssue],
+    ) -> None:
+        try:
+            canonicals = self.kalshi_normalizer.assemble_canonical_markets(
+                event.canonical,
+                raw_markets,
+                series=series,
+                event_payload=event.raw if isinstance(event.raw, dict) else None,
+            )
+        except (VenueNormalizationError, ValueError) as exc:
+            issues.append(
+                CollectorIssue(
+                    stage="normalize_market",
+                    venue=VenueName.KALSHI,
+                    source_id=event.canonical.source_event_id,
+                    detail=str(exc),
+                )
+            )
+            return
+        by_id = {item.source_market_id: item for item in canonicals}
+        for market in markets:
+            rebuilt = by_id.get(market.canonical.source_market_id)
+            if rebuilt is None:
+                continue
+            market.canonical = rebuilt
+            if isinstance(series, dict):
+                market.raw["series"] = series
+            for item in kalshi_side.inventory:
+                if item.source_market_id == rebuilt.source_market_id:
+                    item.canonical = rebuilt
 
     async def _enrich_kalshi_match_result_rules(
         self,
@@ -4003,6 +4219,69 @@ def _prioritize_catalogue_depth_markets(
             item.canonical.source_market_id,
         ),
     )
+
+
+def _kalshi_match_result_catalogue_candidate(
+    left: CanonicalMarket, right: CanonicalMarket
+) -> bool:
+    """True when a Kalshi Match Result could become ApprovedEquivalent after enrichment.
+
+    Series metadata is not required for this cheap archetype check. Nested
+    cancel/fair-price wording already fail-closes and must not trigger Get Market.
+    """
+
+    if VenueName.KALSHI not in {left.source_venue, right.source_venue}:
+        return False
+    kalshi = left if left.source_venue is VenueName.KALSHI else right
+    if kalshi.family is not MarketFamily.MATCH_RESULT:
+        return False
+    if kalshi.settlement.unknown_reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON:
+        return False
+    assessment = classify_pair(left, right)
+    if assessment.archetype is None:
+        return False
+    if assessment.reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON:
+        return False
+    if assessment.state in {
+        CatalogueApprovalState.KNOWN_CONTRADICTION,
+        CatalogueApprovalState.UNSUPPORTED,
+        CatalogueApprovalState.APPROVED_PARAMETER_MISMATCH,
+    }:
+        return False
+    return True
+
+
+def _kalshi_grouped_payloads(markets: list[_NormalizedMarket]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for market in markets:
+        grouped = market.raw.get("grouped_payloads") if isinstance(market.raw, dict) else None
+        items = grouped if isinstance(grouped, list) else [market.raw]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ticker = str(item.get("ticker") or "").strip()
+            if ticker and ticker in seen:
+                continue
+            if ticker:
+                seen.add(ticker)
+            payloads.append(item)
+    return payloads
+
+
+def _kalshi_markets_still_need_series_fallback(
+    event: _NormalizedEvent,
+    raw_markets: list[dict[str, Any]],
+) -> bool:
+    """True when Get Market did not complete ordinary Match Result settlement."""
+
+    incomplete, _complete = KalshiNormalizer().match_result_rule_enrichment_tickers(
+        event.canonical,
+        raw_markets,
+        series=None,
+        event_payload=event.raw if isinstance(event.raw, dict) else None,
+    )
+    return bool(incomplete)
 
 
 def _kalshi_markets_needing_depth(

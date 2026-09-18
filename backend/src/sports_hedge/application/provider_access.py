@@ -296,7 +296,7 @@ def operation_health_from_stage(stage: str, *, timed_out: bool) -> str:
         return HEALTH_OK
     if stage == "list_events":
         return HEALTH_DISCOVERY_TIMEOUT
-    if stage in {"list_markets", "get_series", "get_contract_terms", "get_order_book", "order_book"}:
+    if stage in {"list_markets", "get_series", "get_market", "get_contract_terms", "get_order_book", "order_book"}:
         return HEALTH_MARKET_TIMEOUT
     return HEALTH_TIMEOUT
 
