@@ -20,10 +20,11 @@ LOGGER = logging.getLogger(__name__)
 UNIVERSE_PROVIDER_BACKOFF_SECONDS = (2.0, 5.0, 10.0, 20.0, 30.0)
 UNIVERSE_WORK_RETRY_BACKOFF_SECONDS = (2.0, 5.0, 10.0)
 
-# Identity/normalization/work-set contract. Bump when resume skip IDs or
-# canonical clustering would mis-handle an older checkpoint. Missing payloads
-# default to this version so healthy same-version RETRY_WAIT state still
-# restores; unequal versions fail closed into a fresh generation.
+# Identity/normalization/work-set contract. Bump UNIVERSE_CHECKPOINT_SEMANTICS_VERSION
+# when resume skip IDs or canonical clustering would mis-handle an older checkpoint.
+# Unversioned (#304) payloads must always parse as the legacy constant, not the
+# current runtime version, so a future 1→2 bump invalidates them.
+LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION = 1
 UNIVERSE_CHECKPOINT_SEMANTICS_VERSION = 1
 
 SWEEP_PENDING = "pending"
@@ -104,7 +105,7 @@ class UniverseGenerationCheckpoint(BaseModel):
     work_units: dict[str, SweepWorkUnit] = Field(default_factory=dict)
     series_results: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     series_work: dict[str, SeriesWorkUnit] = Field(default_factory=dict)
-    semantics_version: int = Field(default=UNIVERSE_CHECKPOINT_SEMANTICS_VERSION)
+    semantics_version: int = Field(default=LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION)
 
 
 _VENUE_SNAPSHOT_KEYS = frozenset({"matchbook", "polymarket", "kalshi"})

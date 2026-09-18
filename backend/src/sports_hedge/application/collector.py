@@ -63,6 +63,7 @@ from sports_hedge.application.provider_access import (
     HEALTH_AUTH_FAILURE,
     HEALTH_DISCOVERY_TIMEOUT,
     HEALTH_MARKET_TIMEOUT,
+    HEALTH_OK,
     HEALTH_TIMEOUT,
     HEALTH_UNAVAILABLE,
     ProviderAccessLayer,
@@ -205,19 +206,16 @@ CANONICAL_WORK_SET_PARTIAL_REASONS = frozenset(
         "provider_failure",
         "auth_failure",
         "incomplete_discovery",
-        "empty_cluster_set",
     }
 )
-_NON_AUTHORITATIVE_VENUE_HEALTH = frozenset(
+_PROVIDER_FAILURE_VENUE_HEALTH = frozenset(
     {
         HEALTH_UNAVAILABLE,
         HEALTH_TIMEOUT,
         HEALTH_DISCOVERY_TIMEOUT,
         HEALTH_MARKET_TIMEOUT,
-        HEALTH_AUTH_FAILURE,
         "timeout",
         "unavailable",
-        "auth_failure",
     }
 )
 _RETRYABLE_SERIES_STATUSES = frozenset(
@@ -748,8 +746,11 @@ class ReadOnlyCrossVenueCollector:
                     ):
                         if venue_name not in enabled:
                             venue_health[venue_name.value] = VENUE_HEALTH_DISABLED
-                        elif has_events:
-                            venue_health[venue_name.value] = "ok"
+                        elif reuse_snapshot or has_events:
+                            # A reused complete snapshot is healthy even when that
+                            # venue's event list is empty; unknown must not leak
+                            # into reconciliation authority.
+                            venue_health[venue_name.value] = HEALTH_OK
                     if self.kalshi is None and VenueName.KALSHI in enabled:
                         venue_health[VenueName.KALSHI.value] = "unavailable"
                     if retry_series:
@@ -4281,11 +4282,12 @@ def canonical_work_set_authority(
 ) -> tuple[bool, str | None]:
     """Whether the current cluster IDs are a complete work-set for reconciliation.
 
-    A missing PENDING id may be retired only when this returns True. Empty
-    cluster sets are never authoritative: they cannot distinguish a genuine
-    empty universe from failed/truncated discovery.
+    Missing PENDING ids may be retired only when this returns True. Every
+    enabled venue must be explicitly healthy (`ok`). A genuinely healthy empty
+    cluster set is authoritative; unknown/degraded/blank/failure is not.
     """
 
+    _ = cluster_ids
     if clustering_truncated:
         return False, "clustering_truncated"
     if any(issue.detail == "scan_cycle_deadline_reached" for issue in issues):
@@ -4295,11 +4297,14 @@ def canonical_work_set_authority(
     if provider_cancels > 0:
         return False, "incomplete_discovery"
     for venue in enabled:
-        health = str(venue_health.get(venue.value, "") or "")
-        if health in _NON_AUTHORITATIVE_VENUE_HEALTH:
-            if health in {HEALTH_AUTH_FAILURE, "auth_failure"}:
-                return False, "auth_failure"
+        health = str(venue_health.get(venue.value, "") or "").strip()
+        if health == HEALTH_OK:
+            continue
+        if health in {HEALTH_AUTH_FAILURE, "auth_failure"}:
+            return False, "auth_failure"
+        if health in _PROVIDER_FAILURE_VENUE_HEALTH:
             return False, "provider_failure"
+        return False, "incomplete_discovery"
     for rows in (series_results or {}).values():
         for row in rows or []:
             if not isinstance(row, dict):
@@ -4307,8 +4312,6 @@ def canonical_work_set_authority(
             status = str(row.get("status") or "").strip()
             if bool(row.get("retryable")) or status in _RETRYABLE_SERIES_STATUSES:
                 return False, "retry_series_partial"
-    if not any(str(item or "").strip() for item in cluster_ids):
-        return False, "empty_cluster_set"
     return True, None
 
 

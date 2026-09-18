@@ -28,6 +28,7 @@ from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.provider_access import HEALTH_AUTH_FAILURE, HEALTH_DISCOVERY_TIMEOUT
 from sports_hedge.application.scan_lanes import WORKER_COMPLETE, ScanLane
 from sports_hedge.application.universe_checkpoint import (
+    LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION,
     STALE_ORPHAN_REASON,
     SWEEP_EVALUATED,
     SWEEP_OK,
@@ -37,6 +38,7 @@ from sports_hedge.application.universe_checkpoint import (
     UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
     SeriesWorkUnit,
     SweepWorkUnit,
+    checkpoint_from_payload,
     series_work_key,
     universe_work_retry_backoff_seconds,
 )
@@ -235,7 +237,22 @@ def test_partial_discovery_does_not_retire_absent_pending_ids(tmp_path: Path) ->
             "auth_failure",
         ),
         ({"provider_cancels": 1}, "incomplete_discovery"),
-        ({"cluster_ids": []}, "empty_cluster_set"),
+        (
+            {"venue_health": {"matchbook": "ok", "polymarket": "ok", "kalshi": "degraded"}},
+            "incomplete_discovery",
+        ),
+        (
+            {"venue_health": {"matchbook": "ok", "polymarket": "ok", "kalshi": "unknown"}},
+            "incomplete_discovery",
+        ),
+        (
+            {"venue_health": {"matchbook": "ok", "polymarket": "ok", "kalshi": ""}},
+            "incomplete_discovery",
+        ),
+        (
+            {"venue_health": {"matchbook": "ok", "polymarket": "ok"}},
+            "incomplete_discovery",
+        ),
         (
             {
                 "series_results": {
@@ -282,6 +299,146 @@ def test_canonical_work_set_authority_accepts_complete_reused_snapshot() -> None
     )
     assert authoritative is True
     assert partial_reason is None
+
+
+def test_canonical_work_set_authority_accepts_healthy_empty_cluster_set() -> None:
+    authoritative, partial_reason = canonical_work_set_authority(
+        cluster_ids=[],
+        clustering_truncated=False,
+        retry_series={},
+        venue_health={"matchbook": "ok", "polymarket": "ok", "kalshi": "ok"},
+        enabled={VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI},
+        issues=[],
+        series_results={},
+        provider_cancels=0,
+    )
+    assert authoritative is True
+    assert partial_reason is None
+
+
+def test_degraded_enabled_venue_does_not_retire_pending_orphans(tmp_path: Path) -> None:
+    store = SqliteUniverseCheckpointStore(tmp_path / "issue305-degraded.sqlite")
+    _seed_owner_live_generation_26(store)
+    _clock, coordinator = _restore_owner_live(store)
+    authoritative, reason = canonical_work_set_authority(
+        cluster_ids=list(CURRENT_CLUSTER_IDS),
+        clustering_truncated=False,
+        retry_series=None,
+        venue_health={"matchbook": "ok", "polymarket": "ok", "kalshi": "degraded"},
+        enabled={VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI},
+        issues=[],
+        series_results={},
+        provider_cancels=0,
+    )
+    assert authoritative is False
+    assert reason == "incomplete_discovery"
+    coordinator.record_universe_work_set(
+        CURRENT_CLUSTER_IDS,
+        authoritative=authoritative,
+        partial_reason=reason,
+    )
+    assert {coordinator._universe_work[item].state for item in ORPHAN_IDS} == {SWEEP_PENDING}
+    assert coordinator._canonical_counts_unlocked()["canonical_remaining"] == 2
+    assert coordinator._universe_generation_started_at is not None
+
+
+def test_unknown_enabled_venue_does_not_retire_pending_orphans(tmp_path: Path) -> None:
+    store = SqliteUniverseCheckpointStore(tmp_path / "issue305-unknown.sqlite")
+    _seed_owner_live_generation_26(store)
+    _clock, coordinator = _restore_owner_live(store)
+    authoritative, reason = canonical_work_set_authority(
+        cluster_ids=list(CURRENT_CLUSTER_IDS),
+        clustering_truncated=False,
+        retry_series=None,
+        venue_health={"matchbook": "ok", "polymarket": "ok", "kalshi": "unknown"},
+        enabled={VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI},
+        issues=[],
+        series_results={},
+        provider_cancels=0,
+    )
+    assert authoritative is False
+    assert reason == "incomplete_discovery"
+    coordinator.record_universe_work_set(
+        CURRENT_CLUSTER_IDS,
+        authoritative=authoritative,
+        partial_reason=reason,
+    )
+    assert {coordinator._universe_work[item].state for item in ORPHAN_IDS} == {SWEEP_PENDING}
+    assert coordinator._universe_sweep_is_complete_unlocked() is False
+
+
+def test_healthy_empty_authoritative_set_retires_pending_and_closes_generation(
+    tmp_path: Path,
+) -> None:
+    store = SqliteUniverseCheckpointStore(tmp_path / "issue305-healthy-empty.sqlite")
+    _seed_owner_live_generation_26(store)
+    clock, coordinator = _restore_owner_live(store)
+    authoritative, reason = canonical_work_set_authority(
+        cluster_ids=[],
+        clustering_truncated=False,
+        retry_series=None,
+        venue_health={"matchbook": "ok", "polymarket": "ok", "kalshi": "ok"},
+        enabled={VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI},
+        issues=[],
+        series_results={},
+        provider_cancels=0,
+    )
+    assert authoritative is True
+    assert reason is None
+    coordinator.record_universe_work_set([], authoritative=True)
+    for orphan in ORPHAN_IDS:
+        unit = coordinator._universe_work[orphan]
+        assert unit.state == SWEEP_STALE_ORPHAN
+        assert unit.state != SWEEP_EVALUATED
+        assert unit.reason == STALE_ORPHAN_REASON
+    assert coordinator._canonical_counts_unlocked()["canonical_evaluated"] == 75
+    assert coordinator._canonical_counts_unlocked()["canonical_remaining"] == 0
+    assert coordinator._universe_sweep_is_complete_unlocked() is True
+    coordinator.record_report(
+        _zero_work_complete_report(when=clock.now).model_copy(
+            update={
+                "scan_diagnostics": {
+                    "completeness": UNIVERSE_COMPLETENESS_COMPLETE,
+                    "evaluated_count": 0,
+                    "not_evaluated_count": 0,
+                    "generation_resume": True,
+                    "universe_generation_id": 26,
+                    "clusters_before_resume": 0,
+                    "skipped_by_resume_count": 0,
+                    "canonical_work_total": 0,
+                    "canonical_work_set_authoritative": True,
+                    "canonical_work_set_partial_reason": None,
+                }
+            }
+        ),
+        scan_lane=ScanLane.UNIVERSE,
+    )
+    assert coordinator._universe_generation_started_at is None
+    assert coordinator.status.universe.worker_state == WORKER_COMPLETE
+    idle = coordinator.plan_universe_tick(now=clock.now)
+    assert idle.reason == "universe_cooldown"
+
+
+def test_unhealthy_empty_cluster_set_does_not_retire_pending(tmp_path: Path) -> None:
+    store = SqliteUniverseCheckpointStore(tmp_path / "issue305-unhealthy-empty.sqlite")
+    _seed_owner_live_generation_26(store)
+    _clock, coordinator = _restore_owner_live(store)
+    authoritative, reason = canonical_work_set_authority(
+        cluster_ids=[],
+        clustering_truncated=False,
+        retry_series=None,
+        venue_health={"matchbook": "ok", "polymarket": "ok", "kalshi": "degraded"},
+        enabled={VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI},
+        issues=[],
+        series_results={},
+        provider_cancels=0,
+    )
+    assert authoritative is False
+    assert reason == "incomplete_discovery"
+    coordinator.record_universe_work_set([], authoritative=False, partial_reason=reason)
+    assert {coordinator._universe_work[item].state for item in ORPHAN_IDS} == {SWEEP_PENDING}
+    assert coordinator._canonical_counts_unlocked()["canonical_remaining"] == 2
+    assert coordinator._universe_generation_started_at is not None
 
 
 def test_fresh_generation_repopulates_fixture_radar_and_equivalents(tmp_path: Path) -> None:
@@ -392,6 +549,42 @@ def test_compatible_retry_wait_checkpoint_still_restores(tmp_path: Path) -> None
     assert restored.retryable is True
     assert restarted._universe_generation_started_at is not None
     assert restarted._universe_sweep_is_complete_unlocked() is False
+
+
+def test_unversioned_legacy_checkpoint_invalidates_when_runtime_semantics_bumped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SqliteUniverseCheckpointStore(tmp_path / "issue305-legacy-bump.sqlite")
+    first = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
+    first.configure_from_settings()
+    first.record_universe_work_set(["retry-b"])
+    first.record_universe_fixture_progress(
+        None,
+        _universe_fixture("retry-b", evaluation="market_fetch_unavailable"),
+        [],
+        [],
+    )
+    payload = store.load()
+    assert payload is not None
+    payload.pop("semantics_version", None)
+    store.save(payload, updated_at=NOW.isoformat())
+    parsed = checkpoint_from_payload(store.load())
+    assert parsed is not None
+    assert parsed.semantics_version == LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION
+    monkeypatch.setattr(
+        "sports_hedge.application.live_refresh.UNIVERSE_CHECKPOINT_SEMANTICS_VERSION",
+        LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION + 1,
+    )
+    monkeypatch.setattr(
+        "sports_hedge.application.universe_checkpoint.UNIVERSE_CHECKPOINT_SEMANTICS_VERSION",
+        LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION + 1,
+    )
+    restarted = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
+    restarted.configure_from_settings()
+    assert restarted._universe_generation_started_at is None
+    assert restarted._universe_work == {}
+    assert store.load() is None
 
 
 @pytest.mark.asyncio

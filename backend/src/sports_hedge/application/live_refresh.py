@@ -1423,15 +1423,15 @@ class LiveRefreshCoordinator:
     ) -> None:
         """Retire unreachable nonterminal work only against a full cluster set.
 
-        Partial discovery (provider failure, truncation, auth, retry-series)
-        must leave PENDING/RETRY_WAIT items untouched. Terminal evaluated
-        history is never reclassified.
+        A genuinely healthy empty set is authoritative: every persisted
+        nonterminal id is absent and must be retired. Partial discovery
+        (provider failure, truncation, auth, retry-series, unknown/degraded
+        health) must leave PENDING/RETRY_WAIT items untouched. Terminal
+        evaluated history is never reclassified.
         """
 
         del partial_reason
         current = {item for item in current_ids if item}
-        if not current:
-            return
         if not self._universe_work_set_may_retire_unlocked():
             return
         retired = 0
