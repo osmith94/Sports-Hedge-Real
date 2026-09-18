@@ -215,10 +215,12 @@ async def test_hot_uncooperative_books_return_partial_before_envelope() -> None:
             == MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE.value
         ]
         assert leftovers or report.scan_diagnostics.get("soft_deadline_reached")
-        assert report.scan_diagnostics["inflight_live"] == 0
+        # Uncooperative books stay in inflight until the underlying call
+        # finishes. aclose() below is what actually terminates them.
         assert report.scan_diagnostics["provider_cancels"] >= 1
         assert report.scan_diagnostics["cancel_count"] >= 1
         assert report.scan_diagnostics["inflight_orphaned"] >= 1
+        assert report.scan_diagnostics["inflight_live"] == report.scan_diagnostics["inflight_orphaned"]
         assert report.scan_diagnostics["cancel_count"] >= report.scan_diagnostics["inflight_orphaned"]
         assert "partial" in (coordinator.status.hot.operator_summary or report.operator_summary)
         await asyncio.sleep(0.08)
@@ -266,9 +268,12 @@ async def test_repeated_slow_hot_cycles_do_not_accumulate_tasks() -> None:
                 scan_lane=ScanLane.HOT,
             )
             assert coordinator.status.hot.last_error is None
-            assert report.scan_diagnostics["inflight_live"] == 0
             assert report.scan_diagnostics["cancel_count"] >= 1
             assert report.scan_diagnostics["inflight_orphaned"] >= 1
+            assert (
+                report.scan_diagnostics["inflight_live"]
+                == report.scan_diagnostics["inflight_orphaned"]
+            )
             await asyncio.sleep(0.08)
             assert polymarket.live_calls == 0
         leftover = [
@@ -280,7 +285,7 @@ async def test_repeated_slow_hot_cycles_do_not_accumulate_tasks() -> None:
         assert coordinator.status.hot.next_due_at is not None
         assert coordinator.status.hot.cycle_in_progress is False
         assert coordinator.status.hot.last_diagnostics is not None
-        assert coordinator.status.hot.last_diagnostics.get("inflight_live") == 0
+        assert coordinator.status.hot.last_diagnostics.get("inflight_orphaned", 0) >= 1
     finally:
         repository.close()
 
