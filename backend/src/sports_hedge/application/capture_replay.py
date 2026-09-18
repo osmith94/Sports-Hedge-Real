@@ -1,4 +1,4 @@
-"""Issue #291 read-only capture + offline replay harness.
+"""Issue #291/#293 read-only capture + offline replay harness.
 
 Feeds a sanitized Matchbook↔Kalshi bundle through the real production path:
 
@@ -13,6 +13,8 @@ Feeds a sanitized Matchbook↔Kalshi bundle through the real production path:
 
 Phase 1 remains PAPER / read-only. No venue writes. Polymarket is off.
 Live capture never fabricates a missing Matchbook side.
+When both venues are reachable, attempt-live computes genuine same-event
+overlap through production identity clustering rather than leaving overlap=False.
 """
 
 from __future__ import annotations
@@ -29,21 +31,40 @@ from pydantic import BaseModel, Field
 
 from sports_hedge.application.collector import (
     CollectionReport,
+    DEFAULT_MAX_EVENT_PAIRS,
     ReadOnlyCrossVenueCollector,
+    _NormalizedEvent,
 )
 from sports_hedge.application.equivalence_diagnostics import (
     zero_equivalent_reason_from_inventory,
 )
+from sports_hedge.application.fixture_clusters import (
+    FixtureCluster,
+    cluster_canonical_event_id,
+    cluster_member_events,
+    cluster_venue_events,
+    to_venue_event,
+)
 from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.target_competitions import filter_in_scope_events
 from sports_hedge.catalogue.admission import catalogue_allows_solver
 from sports_hedge.catalogue.classify import PayloadSide, classify_payload_pair, normalize_payload_side
 from sports_hedge.catalogue.corpus import GAMEWIN_URL, KALSHI_GAMEWIN_SERIES
 from sports_hedge.config import Settings
+from sports_hedge.domain.football import MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.kalshi import kalshi_cost_from_series
+from sports_hedge.fees.resolver import VenueCostResolver
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
+from sports_hedge.matching.events import EventMatcher
+from sports_hedge.matching.ordinary_1x2 import is_ordinary_full_time_1x2
+from sports_hedge.normalization.venues import (
+    KalshiNormalizer,
+    MatchbookNormalizer,
+    VenueNormalizationError,
+)
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookClient
@@ -140,6 +161,7 @@ class ReplayVenueSide(BaseModel):
     markets: list[dict[str, Any]] = Field(default_factory=list)
     series: dict[str, Any] | None = None
     order_books: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    contract_terms: dict[str, dict[str, Any]] = Field(default_factory=dict)
     identified_as: str | None = None
 
 
@@ -256,13 +278,17 @@ class CaptureAttemptReport(BaseModel):
     matchbook: VenueAttempt
     kalshi: VenueAttempt
     same_event_overlap_found: bool = False
+    overlap_count: int = 0
     overlap_fixture: str | None = None
     overlap_competition: str | None = None
     approved_family_on_both: bool | None = None
+    catalogue_state: str | None = None
+    canonical_market_key: str | None = None
     matched_equivalent: bool | None = None
     comparison_economics_computed: bool | None = None
     arb: bool | None = None
     block_reason: str | None = None
+    replay_bundle_path: str | None = None
     notes: list[str] = Field(default_factory=list)
 
 
@@ -270,6 +296,8 @@ class ReplayKalshi:
     def __init__(self, side: ReplayVenueSide) -> None:
         self.side = side
         self.get_market_calls: list[str] = []
+        if side.contract_terms:
+            self.get_contract_terms_document = self._get_contract_terms_document
 
     async def list_events(self, **filters: Any) -> dict[str, Any]:
         del filters
@@ -305,6 +333,12 @@ class ReplayKalshi:
         series = dict(self.side.series or {})
         series.setdefault("ticker", series_ticker)
         return series
+
+    async def _get_contract_terms_document(self, url: str) -> dict[str, Any]:
+        document = (self.side.contract_terms or {}).get(str(url))
+        if document is None:
+            raise LookupError(f"replay bundle has no captured Kalshi contract terms for {url}")
+        return dict(document)
 
 
 class ReplayMatchbook:
@@ -725,8 +759,18 @@ def rewrite_captured_kalshi(
 async def attempt_live_read_only_capture(
     *,
     settings: Settings | None = None,
+    matchbook_client: Any | None = None,
+    kalshi_client: Any | None = None,
+    venue_costs: list[Any] | None = None,
+    fx_snapshots: list[FxRateSnapshot] | None = None,
+    bundle_out: Path | None = None,
 ) -> CaptureAttemptReport:
-    """Bounded football-only Matchbook+Kalshi discovery. Never fabricates overlap."""
+    """Bounded football-only Matchbook+Kalshi discovery. Never fabricates overlap.
+
+    When both venues are reachable, events are clustered through the production
+    EventMatcher / canonical-identity path. Markets, books and the
+    collector/catalogue/solver gate run only for a selected genuine overlap.
+    """
 
     captured_at = datetime.now(UTC)
     cfg = settings or Settings(
@@ -737,46 +781,108 @@ async def attempt_live_read_only_capture(
     if cfg.sports_hedge_mode != "paper" or cfg.sports_hedge_execution_enabled:
         raise CaptureReplayError("live capture requires paper mode and execution disabled")
     assert_no_write_methods()
-    matchbook = await _attempt_matchbook(cfg)
-    kalshi = await _attempt_kalshi(cfg)
-    overlap = False
+    owns_matchbook = matchbook_client is None
+    owns_kalshi = kalshi_client is None
+    matchbook_raw: list[dict[str, Any]] = []
+    kalshi_raw: list[dict[str, Any]] = []
+    matchbook_handle: Any | None = matchbook_client
+    kalshi_handle: Any | None = kalshi_client
+    overlap_result: _LiveOverlapResult | None = None
+    try:
+        matchbook, matchbook_raw, matchbook_handle = await _attempt_matchbook(
+            cfg, client=matchbook_handle
+        )
+        kalshi, kalshi_raw, kalshi_handle = await _attempt_kalshi(
+            cfg, client=kalshi_handle
+        )
+        both_reachable = bool(
+            matchbook.reachable
+            and kalshi.reachable
+            and matchbook.events_listed
+            and kalshi.events_listed
+            and matchbook_handle is not None
+            and kalshi_handle is not None
+        )
+        if both_reachable:
+            overlap_result = await _capture_genuine_overlap(
+                matchbook_client=matchbook_handle,
+                kalshi_client=kalshi_handle,
+                matchbook_events=matchbook_raw,
+                kalshi_events=kalshi_raw,
+                captured_at=captured_at,
+                settings=cfg,
+                venue_costs=venue_costs,
+                fx_snapshots=fx_snapshots,
+                bundle_out=bundle_out,
+            )
+    finally:
+        if owns_matchbook:
+            await _aclose_client(matchbook_handle)
+        if owns_kalshi:
+            await _aclose_client(kalshi_handle)
+
     notes = [
         "Phase A: no genuine same-event Matchbook+Kalshi capture exists in repo fixtures.",
         "Existing Kalshi Bayern/Union Berlin and Matchbook Chelsea/Hull are different events.",
         "Polymarket was not queried.",
         "No venue write/order methods were invoked.",
+        "Overlap uses production event identity/clustering, not title equality.",
     ]
-    if not matchbook.credentials_present:
+    if not matchbook.credentials_present and matchbook_client is None:
         notes.append(
             "Matchbook credentials are absent in this environment; the Matchbook "
             "side was not fabricated."
         )
-    if matchbook.credentials_present and kalshi.events_listed and not overlap:
+    overlap_found = bool(overlap_result and overlap_result.same_event_overlap_found)
+    if overlap_result is not None:
+        notes.extend(overlap_result.notes)
+    elif matchbook.credentials_present and kalshi.events_listed:
         notes.append("Both venues listed events but no production-identity overlap was selected.")
+
+    if overlap_result is not None:
+        block_reason = overlap_result.block_reason
+        approved = overlap_result.approved_family_on_both
+        matched = overlap_result.matched_equivalent
+        economics = overlap_result.comparison_economics_computed
+        arb = overlap_result.arb
+    elif not matchbook.credentials_present and matchbook_client is None:
+        block_reason = matchbook.unavailable_reason
+        approved = None
+        matched = None
+        economics = None
+        arb = None
+    else:
+        block_reason = matchbook.unavailable_reason or kalshi.unavailable_reason or "no_same_event_overlap"
+        approved = None
+        matched = None
+        economics = None
+        arb = None
+
     return CaptureAttemptReport(
         captured_at=captured_at,
         identified_as=(
-            "LIVE read-only capture attempt for Issue #291. Public identifiers only. "
+            "LIVE read-only capture attempt for Issue #293. Public identifiers only. "
             "Not a paper fill. Not an executable opportunity. A missing Matchbook "
-            "side is not replaced with synthetic events."
+            "side is not replaced with synthetic events. Same-event overlap is "
+            "computed through the production identity/catalogue path."
         ),
         paper_mode="paper",
         execution_enabled=False,
         existing_same_event_capture_found=False,
         matchbook=matchbook,
         kalshi=kalshi,
-        same_event_overlap_found=overlap,
-        overlap_fixture=None,
-        overlap_competition=None,
-        approved_family_on_both=None if not overlap else False,
-        matched_equivalent=None if not overlap else False,
-        comparison_economics_computed=None if not overlap else False,
-        arb=None if not overlap else False,
-        block_reason=(
-            matchbook.unavailable_reason
-            if not matchbook.credentials_present
-            else "no_same_event_overlap"
-        ),
+        same_event_overlap_found=overlap_found,
+        overlap_count=0 if overlap_result is None else overlap_result.overlap_count,
+        overlap_fixture=None if overlap_result is None else overlap_result.overlap_fixture,
+        overlap_competition=None if overlap_result is None else overlap_result.overlap_competition,
+        approved_family_on_both=approved,
+        catalogue_state=None if overlap_result is None else overlap_result.catalogue_state,
+        canonical_market_key=None if overlap_result is None else overlap_result.canonical_market_key,
+        matched_equivalent=matched,
+        comparison_economics_computed=economics,
+        arb=arb,
+        block_reason=block_reason,
+        replay_bundle_path=None if overlap_result is None else overlap_result.replay_bundle_path,
         notes=notes,
     )
 
@@ -809,104 +915,571 @@ def existing_repo_same_event_capture() -> dict[str, Any]:
     }
 
 
-async def _attempt_matchbook(settings: Settings) -> VenueAttempt:
-    username_present = bool(str(settings.matchbook_username or "").strip())
-    password_present = bool(str(settings.matchbook_password or "").strip())
-    if not username_present or not password_present:
-        return VenueAttempt(
-            venue=VenueName.MATCHBOOK.value,
-            credentials_present=False,
-            reachable=None,
-            events_listed=0,
-            unavailable_reason=(
-                "MATCHBOOK_USERNAME and MATCHBOOK_PASSWORD are not set in this "
-                "agent environment. MatchbookClient.list_events requires a session "
-                "and was not called. The Matchbook side was not fabricated."
-            ),
-            provenance=PROVENANCE_UNAVAILABLE,
-            data_class=DATA_CLASS_UNAVAILABLE,
-        )
-    client = MatchbookClient(settings)
+async def _attempt_matchbook(
+    settings: Settings,
+    *,
+    client: Any | None = None,
+) -> tuple[VenueAttempt, list[dict[str, Any]], Any | None]:
+    handle = client
+    if handle is None:
+        username_present = bool(str(settings.matchbook_username or "").strip())
+        password_present = bool(str(settings.matchbook_password or "").strip())
+        if not username_present or not password_present:
+            return (
+                VenueAttempt(
+                    venue=VenueName.MATCHBOOK.value,
+                    credentials_present=False,
+                    reachable=None,
+                    events_listed=0,
+                    unavailable_reason=(
+                        "MATCHBOOK_USERNAME and MATCHBOOK_PASSWORD are not set in this "
+                        "agent environment. MatchbookClient.list_events requires a session "
+                        "and was not called. The Matchbook side was not fabricated."
+                    ),
+                    provenance=PROVENANCE_UNAVAILABLE,
+                    data_class=DATA_CLASS_UNAVAILABLE,
+                ),
+                [],
+                None,
+            )
+        handle = MatchbookClient(settings)
     try:
-        payload = await client.list_events()
+        payload = await handle.list_events()
         events = [
-            _public_matchbook_summary(item)
-            for item in payload.get("events") or []
+            item
+            for item in (payload.get("events") if isinstance(payload, dict) else []) or []
             if isinstance(item, dict)
         ]
-        return VenueAttempt(
-            venue=VenueName.MATCHBOOK.value,
-            credentials_present=True,
-            reachable=True,
-            events_listed=len(events),
-            provenance=PROVENANCE_LIVE,
-            data_class=DATA_CLASS_LIVE_CAPTURE,
-            public_event_summaries=events,
+        summaries = [_public_matchbook_summary(item) for item in events]
+        return (
+            VenueAttempt(
+                venue=VenueName.MATCHBOOK.value,
+                credentials_present=True,
+                reachable=True,
+                events_listed=len(events),
+                provenance=PROVENANCE_LIVE,
+                data_class=DATA_CLASS_LIVE_CAPTURE,
+                public_event_summaries=summaries,
+            ),
+            events,
+            handle,
         )
     except MatchbookAuthError as exc:
-        return VenueAttempt(
-            venue=VenueName.MATCHBOOK.value,
-            credentials_present=True,
-            reachable=False,
-            events_listed=0,
-            unavailable_reason=_safe_exception(exc),
-            provenance=PROVENANCE_UNAVAILABLE,
-            data_class=DATA_CLASS_UNAVAILABLE,
+        return (
+            VenueAttempt(
+                venue=VenueName.MATCHBOOK.value,
+                credentials_present=True,
+                reachable=False,
+                events_listed=0,
+                unavailable_reason=_safe_exception(exc),
+                provenance=PROVENANCE_UNAVAILABLE,
+                data_class=DATA_CLASS_UNAVAILABLE,
+            ),
+            [],
+            handle,
         )
     except Exception as exc:
-        return VenueAttempt(
-            venue=VenueName.MATCHBOOK.value,
-            credentials_present=True,
-            reachable=False,
-            events_listed=0,
-            unavailable_reason=_safe_exception(exc),
-            provenance=PROVENANCE_UNAVAILABLE,
-            data_class=DATA_CLASS_UNAVAILABLE,
+        return (
+            VenueAttempt(
+                venue=VenueName.MATCHBOOK.value,
+                credentials_present=True,
+                reachable=False,
+                events_listed=0,
+                unavailable_reason=_safe_exception(exc),
+                provenance=PROVENANCE_UNAVAILABLE,
+                data_class=DATA_CLASS_UNAVAILABLE,
+            ),
+            [],
+            handle,
         )
-    finally:
-        closer = getattr(client, "aclose", None)
-        if closer is not None:
-            await closer()
 
 
-async def _attempt_kalshi(settings: Settings) -> VenueAttempt:
-    client = KalshiClient(settings)
+async def _attempt_kalshi(
+    settings: Settings,
+    *,
+    client: Any | None = None,
+) -> tuple[VenueAttempt, list[dict[str, Any]], Any | None]:
+    handle = client if client is not None else KalshiClient(settings)
     try:
-        health = await client.health()
-        payload = await client.list_events(
+        reachable = True
+        health_fn = getattr(handle, "health", None)
+        if callable(health_fn):
+            health = await health_fn()
+            reachable = bool(getattr(health, "ok", True))
+        payload = await handle.list_events(
             series_tickers=list(HIGH_LIQUIDITY_GAME_SERIES),
             limit=min(25, settings.kalshi_event_page_limit),
             with_nested_markets="true",
             with_milestones="true",
         )
         events = [
-            _public_kalshi_summary(item)
-            for item in payload.get("events") or []
+            item
+            for item in (payload.get("events") if isinstance(payload, dict) else []) or []
             if isinstance(item, dict)
         ]
-        return VenueAttempt(
-            venue=VenueName.KALSHI.value,
-            credentials_present=False,
-            reachable=bool(health.ok),
-            events_listed=len(events),
-            provenance=PROVENANCE_LIVE,
-            data_class=DATA_CLASS_LIVE_CAPTURE,
-            public_event_summaries=events,
+        summaries = [_public_kalshi_summary(item) for item in events]
+        return (
+            VenueAttempt(
+                venue=VenueName.KALSHI.value,
+                credentials_present=False,
+                reachable=reachable,
+                events_listed=len(events),
+                provenance=PROVENANCE_LIVE,
+                data_class=DATA_CLASS_LIVE_CAPTURE,
+                public_event_summaries=summaries,
+            ),
+            events,
+            handle,
         )
     except Exception as exc:
-        return VenueAttempt(
-            venue=VenueName.KALSHI.value,
-            credentials_present=False,
-            reachable=False,
-            events_listed=0,
-            unavailable_reason=_safe_exception(exc),
-            provenance=PROVENANCE_UNAVAILABLE,
-            data_class=DATA_CLASS_UNAVAILABLE,
+        return (
+            VenueAttempt(
+                venue=VenueName.KALSHI.value,
+                credentials_present=False,
+                reachable=False,
+                events_listed=0,
+                unavailable_reason=_safe_exception(exc),
+                provenance=PROVENANCE_UNAVAILABLE,
+                data_class=DATA_CLASS_UNAVAILABLE,
+            ),
+            [],
+            handle,
+        )
+
+
+class _LiveOverlapResult:
+    def __init__(
+        self,
+        *,
+        same_event_overlap_found: bool,
+        overlap_count: int = 0,
+        overlap_fixture: str | None = None,
+        overlap_competition: str | None = None,
+        approved_family_on_both: bool | None = None,
+        catalogue_state: str | None = None,
+        canonical_market_key: str | None = None,
+        matched_equivalent: bool | None = None,
+        comparison_economics_computed: bool | None = None,
+        arb: bool | None = None,
+        block_reason: str | None = None,
+        replay_bundle_path: str | None = None,
+        notes: list[str] | None = None,
+    ) -> None:
+        self.same_event_overlap_found = same_event_overlap_found
+        self.overlap_count = overlap_count
+        self.overlap_fixture = overlap_fixture
+        self.overlap_competition = overlap_competition
+        self.approved_family_on_both = approved_family_on_both
+        self.catalogue_state = catalogue_state
+        self.canonical_market_key = canonical_market_key
+        self.matched_equivalent = matched_equivalent
+        self.comparison_economics_computed = comparison_economics_computed
+        self.arb = arb
+        self.block_reason = block_reason
+        self.replay_bundle_path = replay_bundle_path
+        self.notes = list(notes or [])
+
+
+class RecordingMatchbook:
+    """Read-only Matchbook proxy that records list_markets payloads for replay."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.markets_by_event: dict[str, list[dict[str, Any]]] = {}
+
+    async def list_events(self, **filters: Any) -> dict[str, Any]:
+        return await self.inner.list_events(**filters)
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+        payload = await self.inner.list_markets(event_id, **filters)
+        markets: list[dict[str, Any]] = []
+        if isinstance(payload, dict):
+            markets = [item for item in payload.get("markets") or [] if isinstance(item, dict)]
+        self.markets_by_event[str(event_id)] = [sanitize_payload(item) for item in markets]
+        return payload
+
+
+class RecordingKalshi:
+    """Read-only Kalshi proxy that records series, markets, books and terms."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.series_by_ticker: dict[str, dict[str, Any]] = {}
+        self.markets_by_event: dict[str, list[dict[str, Any]]] = {}
+        self.order_books: dict[str, dict[str, Any]] = {}
+        self.contract_terms: dict[str, dict[str, Any]] = {}
+        self.get_market_payloads: dict[str, dict[str, Any]] = {}
+        if getattr(inner, "get_contract_terms_document", None) is None:
+            self.get_contract_terms_document = None
+
+    async def list_events(self, **filters: Any) -> dict[str, Any]:
+        return await self.inner.list_events(**filters)
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+        payload = await self.inner.list_markets(event_id, **filters)
+        markets: list[dict[str, Any]] = []
+        if isinstance(payload, dict):
+            markets = [item for item in payload.get("markets") or [] if isinstance(item, dict)]
+        self.markets_by_event[str(event_id)] = [sanitize_payload(item) for item in markets]
+        return payload
+
+    async def get_market(self, ticker: str) -> dict[str, Any]:
+        payload = await self.inner.get_market(ticker)
+        if isinstance(payload, dict):
+            self.get_market_payloads[str(ticker)] = sanitize_payload(payload)
+        return payload
+
+    async def get_order_book(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        outcome_id: int | str | None = None,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        payload = await self.inner.get_order_book(
+            event_id, market_id, outcome_id, **filters
+        )
+        if isinstance(payload, dict):
+            self.order_books[str(market_id)] = sanitize_payload(payload)
+        return payload
+
+    async def get_series(self, series_ticker: str) -> dict[str, Any]:
+        payload = await self.inner.get_series(series_ticker)
+        if isinstance(payload, dict):
+            self.series_by_ticker[str(series_ticker)] = sanitize_payload(payload)
+        return payload
+
+    async def get_contract_terms_document(self, url: str) -> dict[str, Any]:
+        getter = getattr(self.inner, "get_contract_terms_document", None)
+        if getter is None:
+            raise LookupError("inner Kalshi client has no get_contract_terms_document")
+        payload = await getter(url)
+        if isinstance(payload, dict):
+            self.contract_terms[str(url)] = sanitize_payload(payload)
+        return payload
+
+
+async def _capture_genuine_overlap(
+    *,
+    matchbook_client: Any,
+    kalshi_client: Any,
+    matchbook_events: list[dict[str, Any]],
+    kalshi_events: list[dict[str, Any]],
+    captured_at: datetime,
+    settings: Settings,
+    venue_costs: list[Any] | None,
+    fx_snapshots: list[FxRateSnapshot] | None,
+    bundle_out: Path | None,
+) -> _LiveOverlapResult:
+    clusters = cluster_live_matchbook_kalshi_events(matchbook_events, kalshi_events)
+    overlaps = [
+        cluster
+        for cluster in clusters
+        if cluster.matchbook is not None and cluster.kalshi is not None
+    ]
+    if not overlaps:
+        return _LiveOverlapResult(
+            same_event_overlap_found=False,
+            overlap_count=0,
+            block_reason="no_same_event_overlap",
+            notes=[
+                "Both venues listed football events, but production EventMatcher "
+                "clustering found no Matchbook↔Kalshi same-event pair. No overlap "
+                "was fabricated from titles."
+            ],
+        )
+    selected = select_overlap_cluster(overlaps)
+    canonical_id = cluster_canonical_event_id(selected)
+    recording_matchbook = RecordingMatchbook(matchbook_client)
+    recording_kalshi = RecordingKalshi(kalshi_client)
+    known = {
+        canonical_id: [
+            {
+                "venue": item.venue.value,
+                "source_event_id": item.source_event_id,
+                "raw": item.raw,
+            }
+            for item in cluster_member_events(selected)
+            if item.venue in {VenueName.MATCHBOOK, VenueName.KALSHI}
+        ]
+    }
+    repository = SqliteMarketIntelligenceRepository()
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=recording_matchbook,
+        polymarket=DisabledPolymarket(),
+        kalshi=recording_kalshi,
+        paper_scan=PaperScanService(
+            MarketIntelligenceService(repository),
+            settings=settings,
+            fx_service=None if fx_snapshots is not None else _try_fx_service(settings),
+            cost_resolver=VenueCostResolver(),
+        ),
+    )
+    try:
+        report = await collector.collect_and_scan(
+            venue_costs=venue_costs,
+            fx_snapshots=fx_snapshots,
+            maximum_execution_risk=100,
+            enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
+            unbounded_cycle=True,
+            reuse_discovery=True,
+            known_source_events=known,
+            identity_scope=[canonical_id],
         )
     finally:
-        closer = getattr(client, "aclose", None)
-        if closer is not None:
-            await closer()
+        repository.close()
+
+    bundle = build_live_overlap_bundle(
+        cluster=selected,
+        captured_at=captured_at,
+        recording_matchbook=recording_matchbook,
+        recording_kalshi=recording_kalshi,
+        report=report,
+        fx_snapshots=fx_snapshots,
+    )
+    replay_summary = summarize_replay(bundle, report)
+    bundle_path: str | None = None
+    if bundle_out is not None:
+        dump_json(bundle_out, bundle.model_dump(mode="json"))
+        bundle_path = str(bundle_out)
+    fixture_label = replay_summary.fixture or _cluster_fixture_label(selected)
+    return _LiveOverlapResult(
+        same_event_overlap_found=True,
+        overlap_count=len(overlaps),
+        overlap_fixture=fixture_label,
+        overlap_competition=replay_summary.competition or _cluster_competition(selected),
+        approved_family_on_both=replay_summary.catalogue_admission_allowed,
+        catalogue_state=replay_summary.catalogue_state,
+        canonical_market_key=replay_summary.canonical_market_key,
+        matched_equivalent=replay_summary.matched_equivalent,
+        comparison_economics_computed=replay_summary.comparison_economics_computed,
+        arb=replay_summary.arb,
+        block_reason=replay_summary.block_reason,
+        replay_bundle_path=bundle_path,
+        notes=[
+            f"Production identity clustering found {len(overlaps)} Matchbook↔Kalshi overlap(s).",
+            f"Selected overlap {fixture_label} for approved-catalogue market/book fetch.",
+            "Collector/catalogue/inventory/solver ran on the selected pair only.",
+            *(
+                [f"Sanitized ReplayBundle saved to {bundle_path}."]
+                if bundle_path
+                else []
+            ),
+        ],
+    )
+
+
+def cluster_live_matchbook_kalshi_events(
+    matchbook_events: list[dict[str, Any]],
+    kalshi_events: list[dict[str, Any]],
+    *,
+    matcher: EventMatcher | None = None,
+) -> list[FixtureCluster]:
+    """Cluster live venue events using the production identity path."""
+
+    mb_scope = filter_in_scope_events(matchbook_events, venue=VenueName.MATCHBOOK)
+    kalshi_scope = filter_in_scope_events(kalshi_events, venue=VenueName.KALSHI)
+    matchbook_items = _normalize_live_events(mb_scope.allowed, venue=VenueName.MATCHBOOK)
+    kalshi_items = _normalize_live_events(kalshi_scope.allowed, venue=VenueName.KALSHI)
+    clusters, _counts = cluster_venue_events(
+        matchbook=matchbook_items,
+        polymarket=[],
+        kalshi=kalshi_items,
+        matcher=matcher or EventMatcher(),
+        max_event_pairs=DEFAULT_MAX_EVENT_PAIRS,
+    )
+    return clusters
+
+
+def select_overlap_cluster(overlaps: list[FixtureCluster]) -> FixtureCluster:
+    """Prefer a 1X2-capable overlap, then other recognized approved families."""
+
+    ranked = sorted(
+        overlaps,
+        key=lambda cluster: (
+            _overlap_family_rank(cluster),
+            cluster_canonical_event_id(cluster),
+        ),
+    )
+    return ranked[0]
+
+
+def build_live_overlap_bundle(
+    *,
+    cluster: FixtureCluster,
+    captured_at: datetime,
+    recording_matchbook: RecordingMatchbook,
+    recording_kalshi: RecordingKalshi,
+    report: CollectionReport,
+    fx_snapshots: list[FxRateSnapshot] | None,
+) -> ReplayBundle:
+    mb_event = sanitize_payload(cluster.matchbook.raw) if cluster.matchbook else None
+    kalshi_event = sanitize_payload(cluster.kalshi.raw) if cluster.kalshi else None
+    mb_event_id = str(cluster.matchbook.source_event_id) if cluster.matchbook else ""
+    kalshi_event_id = str(cluster.kalshi.source_event_id) if cluster.kalshi else ""
+    mb_markets = list(recording_matchbook.markets_by_event.get(mb_event_id) or [])
+    if not mb_markets and isinstance(mb_event, dict):
+        nested = mb_event.get("markets")
+        if isinstance(nested, list):
+            mb_markets = [sanitize_payload(item) for item in nested if isinstance(item, dict)]
+    kalshi_markets = list(recording_kalshi.markets_by_event.get(kalshi_event_id) or [])
+    if not kalshi_markets and isinstance(kalshi_event, dict):
+        nested = kalshi_event.get("markets")
+        if isinstance(nested, list):
+            kalshi_markets = [sanitize_payload(item) for item in nested if isinstance(item, dict)]
+    kalshi_markets = _merge_kalshi_get_market(
+        kalshi_markets, recording_kalshi.get_market_payloads
+    )
+    series = None
+    if recording_kalshi.series_by_ticker:
+        series = next(iter(recording_kalshi.series_by_ticker.values()))
+    elif isinstance(kalshi_event, dict) and kalshi_event.get("series_ticker"):
+        series = {"ticker": kalshi_event.get("series_ticker")}
+    fixture = _cluster_fixture_label(cluster)
+    return ReplayBundle(
+        bundle_id=f"issue293-live-overlap-{kalshi_event_id or mb_event_id or 'pair'}",
+        captured_at=captured_at,
+        data_class=DATA_CLASS_LIVE_CAPTURE,
+        identified_as=(
+            "LIVE read-only same-event Matchbook↔Kalshi capture. "
+            f"Fixture {fixture}. Not a paper fill. Not an executable live order. "
+            "Replay uses these sanitized captured payloads with network unused."
+        ),
+        matchbook=ReplayVenueSide(
+            present=mb_event is not None,
+            provenance=PROVENANCE_LIVE,
+            data_class=DATA_CLASS_LIVE_CAPTURE,
+            event=mb_event if isinstance(mb_event, dict) else None,
+            markets=mb_markets,
+            identified_as="Live read-only Matchbook event/markets. Not a venue write.",
+        ),
+        kalshi=ReplayVenueSide(
+            present=kalshi_event is not None,
+            provenance=PROVENANCE_LIVE,
+            data_class=DATA_CLASS_LIVE_CAPTURE,
+            event=kalshi_event if isinstance(kalshi_event, dict) else None,
+            markets=kalshi_markets,
+            series=series,
+            order_books=dict(recording_kalshi.order_books),
+            contract_terms=dict(recording_kalshi.contract_terms),
+            identified_as="Live read-only Kalshi event/markets/books. Not a venue write.",
+        ),
+        fx_snapshots=_fx_payloads_from_report(report, fx_snapshots),
+        notes=[
+            "Captured through production identity clustering and the collector gate.",
+            "Do not treat a MATCHED_EQUIVALENT row as a live executable fill.",
+        ],
+    )
+
+
+def default_replay_bundle_path(attempt_out: Path) -> Path:
+    return attempt_out.with_name(f"{attempt_out.stem}.replay-bundle.json")
+
+
+def _normalize_live_events(
+    payloads: list[dict[str, Any]],
+    *,
+    venue: VenueName,
+) -> list[Any]:
+    normalizer: MatchbookNormalizer | KalshiNormalizer = (
+        MatchbookNormalizer() if venue is VenueName.MATCHBOOK else KalshiNormalizer()
+    )
+    items: list[Any] = []
+    for payload in payloads:
+        try:
+            canonical = normalizer.normalize_event(payload)
+        except (VenueNormalizationError, ValueError):
+            continue
+        items.append(to_venue_event(_NormalizedEvent(payload, canonical), venue))
+    return items
+
+
+def _overlap_family_rank(cluster: FixtureCluster) -> int:
+    """0 = regulation 1X2 present, 1 = other recognized family, 2 = unknown."""
+
+    if cluster.kalshi is None:
+        return 2
+    raw = cluster.kalshi.raw if isinstance(cluster.kalshi.raw, dict) else {}
+    markets = [item for item in raw.get("markets") or [] if isinstance(item, dict)]
+    if not markets:
+        return 2
+    try:
+        normalizer = KalshiNormalizer()
+        event = normalizer.normalize_event(raw)
+        assembled = normalizer.assemble_canonical_markets(event, markets)
+    except (VenueNormalizationError, ValueError):
+        return 2
+    if any(
+        getattr(item, "family", None) is MarketFamily.MATCH_RESULT
+        or is_ordinary_full_time_1x2(item)
+        for item in assembled
+    ):
+        return 0
+    if assembled:
+        return 1
+    return 2
+
+
+def _cluster_fixture_label(cluster: FixtureCluster) -> str:
+    anchor = cluster.anchor.canonical
+    return f"{anchor.home_team} vs {anchor.away_team}"
+
+
+def _cluster_competition(cluster: FixtureCluster) -> str | None:
+    competition = str(getattr(cluster.anchor.canonical, "competition", "") or "").strip()
+    return competition or None
+
+
+def _merge_kalshi_get_market(
+    markets: list[dict[str, Any]],
+    get_market_payloads: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not get_market_payloads:
+        return markets
+    merged: list[dict[str, Any]] = []
+    for market in markets:
+        ticker = str(market.get("ticker") or "")
+        extra = get_market_payloads.get(ticker)
+        if extra:
+            merged.append({**market, **extra})
+        else:
+            merged.append(market)
+    return merged
+
+
+def _fx_payloads_from_report(
+    report: CollectionReport,
+    provided: list[FxRateSnapshot] | None,
+) -> list[dict[str, Any]]:
+    for decision in report.paper_decisions:
+        snapshots = getattr(decision, "fx_snapshots", None) or []
+        if snapshots:
+            return [item.model_dump(mode="json") for item in snapshots]
+    if provided:
+        return [item.model_dump(mode="json") for item in provided]
+    return []
+
+
+def _try_fx_service(settings: Settings) -> Any | None:
+    try:
+        from sports_hedge.fx.repository import SqliteFxRateRepository
+        from sports_hedge.fx.service import FxRateService
+
+        return FxRateService(
+            SqliteFxRateRepository(settings.fx_db_path),
+            check_tolerance_bps=Decimal(str(settings.fx_check_tolerance_bps)),
+            stale_after_days=settings.fx_stale_after_days,
+        )
+    except Exception:
+        return None
+
+
+async def _aclose_client(client: Any | None) -> None:
+    if client is None:
+        return
+    closer = getattr(client, "aclose", None)
+    if closer is not None:
+        await closer()
 
 
 def _public_kalshi_summary(event: dict[str, Any]) -> dict[str, Any]:
@@ -1154,11 +1727,25 @@ def main(argv: list[str] | None = None) -> int:
         help="Bounded live read-only Matchbook+Kalshi discovery; does not fabricate overlap",
     )
     attempt_parser.add_argument("--out", type=Path, required=True)
+    attempt_parser.add_argument(
+        "--bundle-out",
+        type=Path,
+        help="Optional ReplayBundle JSON path. Defaults to <out-stem>.replay-bundle.json",
+    )
     args = parser.parse_args(argv)
     if args.command == "attempt-live":
-        report = asyncio.run(attempt_live_read_only_capture())
+        bundle_out = args.bundle_out or default_replay_bundle_path(args.out)
+        report = asyncio.run(attempt_live_read_only_capture(bundle_out=bundle_out))
         dump_json(args.out, report.model_dump(mode="json"))
         print(render_attempt(report))
+        if report.replay_bundle_path:
+            print(
+                "\nReplay bundle saved:\n"
+                f"  {report.replay_bundle_path}\n"
+                "Offline replay (network unused):\n"
+                "  python -m sports_hedge.application.capture_replay "
+                f"replay --bundle {report.replay_bundle_path}"
+            )
         return 0
     if args.scenario == "2":
         bundle = scenario2_bayern_fair_price_bundle()
