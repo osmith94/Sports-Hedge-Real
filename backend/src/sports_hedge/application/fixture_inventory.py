@@ -368,7 +368,11 @@ def assemble_fixture_inventory(
             rows[rows.index(row)] = replacement
             break
     for index, item in enumerate(leftover_kalshi):
-        if index not in used_kalshi and index not in attached:
+        # leftover_kalshi is already the unattached unmatched_kalshi slice.
+        # `attached` holds unmatched_kalshi indexes, not leftover indexes;
+        # mixing them dropped unapproved GAME rows when BTTS was attached
+        # at unmatched index 0.
+        if index not in used_kalshi:
             rows.append(
                 _venue_only_row(
                     item,
