@@ -368,7 +368,11 @@ def assemble_fixture_inventory(
             rows[rows.index(row)] = replacement
             break
     for index, item in enumerate(leftover_kalshi):
-        if index not in used_kalshi and index not in attached:
+        # leftover_kalshi is already the unattached unmatched_kalshi slice.
+        # `attached` holds unmatched_kalshi indexes, not leftover indexes;
+        # mixing them dropped unapproved GAME rows when BTTS was attached
+        # at unmatched index 0.
+        if index not in used_kalshi:
             rows.append(
                 _venue_only_row(
                     item,
@@ -725,6 +729,13 @@ def _facts_from_inventory(
         labels = metadata.get("raw_runner_labels") if isinstance(metadata, dict) else None
         if isinstance(labels, list):
             runner_labels = [str(label) for label in labels if str(label).strip()]
+    if canonical is not None and observation is None and item.venue is VenueName.KALSHI:
+        for runner in canonical.runners:
+            if runner.label and runner.label not in runner_labels:
+                runner_labels.append(runner.label)
+            outcome = runner.outcome.value
+            if outcome and outcome not in runner_labels:
+                runner_labels.append(outcome)
     return VenueMarketFacts(
         venue=item.venue,
         source_event_id=item.source_event_id,

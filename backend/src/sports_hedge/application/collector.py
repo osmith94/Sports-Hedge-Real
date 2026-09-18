@@ -530,6 +530,8 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_rule_enrichment = _new_kalshi_rule_enrichment()
         self._kalshi_rule_layer_diagnostics: list[dict[str, Any]] = []
         self._kalshi_contract_terms_cache: dict[str, dict[str, Any]] = {}
+        self._kalshi_books_eligible = 0
+        self._kalshi_books_skipped_unapproved = 0
 
     async def collect_and_scan(
         self,
@@ -625,6 +627,8 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_rule_enrichment = _new_kalshi_rule_enrichment()
         self._kalshi_rule_layer_diagnostics: list[dict[str, Any]] = []
         self._kalshi_contract_terms_cache: dict[str, dict[str, Any]] = {}
+        self._kalshi_books_eligible = 0
+        self._kalshi_books_skipped_unapproved = 0
         self._inflight = set()
         self._cluster_sema = asyncio.Semaphore(self._cluster_concurrency_limit)
         self._provider_semaphores = {
@@ -1154,21 +1158,35 @@ class ReadOnlyCrossVenueCollector:
         stage: str,
         venue: VenueName,
         source_id: str | None = None,
+        *,
+        waited_seconds: float | None = None,
     ) -> None:
         health = self._op_venue_health
         current = health.get(venue.value)
         if current == VENUE_HEALTH_DISABLED:
             return
-        timeout = (
+        configured = (
             self._op_venue_timeout if stage == "list_events" else self._op_provider_timeout
         )
+        waited = configured if waited_seconds is None else max(0.0, float(waited_seconds))
         self._timeouts_by_stage[stage] = self._timeouts_by_stage.get(stage, 0) + 1
+        if waited_seconds is None or abs(waited - configured) < 1e-9:
+            detail = f"{stage}_timeout after {configured:g}s"
+        else:
+            remaining = self._remaining_soft()
+            extra = ""
+            if remaining is not None:
+                extra = f", remaining_soft={max(0.0, remaining):.3f}s"
+            detail = (
+                f"{stage}_timeout after {waited:g}s "
+                f"(configured_timeout={configured:g}s{extra})"
+            )
         self._op_issues.append(
             CollectorIssue(
                 stage=stage,
                 venue=venue,
                 source_id=source_id,
-                detail=f"{stage}_timeout after {timeout:g}s",
+                detail=detail,
             )
         )
         status = operation_health_from_stage(stage, timed_out=True)
@@ -1239,7 +1257,7 @@ class ReadOnlyCrossVenueCollector:
             close = getattr(coro, "close", None)
             if callable(close):
                 close()
-            self._record_timeout(stage, venue, source_id)
+            self._record_timeout(stage, venue, source_id, waited_seconds=0.0)
             self._attribution.add(
                 venue=venue.value,
                 stage=stage,
@@ -1261,7 +1279,7 @@ class ReadOnlyCrossVenueCollector:
                 timed_out=timed_out,
             )
             if timed_out:
-                self._record_timeout(stage, venue, source_id)
+                self._record_timeout(stage, venue, source_id, waited_seconds=timeout)
                 return default, True
             return payload, False
         except asyncio.CancelledError:
@@ -1789,6 +1807,10 @@ class ReadOnlyCrossVenueCollector:
             "enabled_venues": [item.value for item in self._op_enabled_venues],
             "kalshi_match_result_rule_enrichment": dict(self._kalshi_rule_enrichment),
             "kalshi_match_result_rule_layers": list(self._kalshi_rule_layer_diagnostics),
+            "kalshi_order_book_policy": {
+                "eligible_markets": self._kalshi_books_eligible,
+                "skipped_unapproved": self._kalshi_books_skipped_unapproved,
+            },
             "identity_scope": [
                 item.canonical_event_id for item in discovered_fixtures
             ],
@@ -2328,11 +2350,10 @@ class ReadOnlyCrossVenueCollector:
             pair_specs = tuple(
                 pair for pair in pair_specs if pair[0] in enabled and pair[1] in enabled
             )
-        decisions: list[PaperScanDecision] = []
-        decisions_by_source_ids: dict[tuple[str, str], PaperScanDecision] = {}
-        decisions_by_pair: dict[tuple[str, str, str, str], PaperScanDecision] = {}
+        selected_pairs: list[
+            tuple[VenueName, VenueName, _NormalizedMarket, _NormalizedMarket, MarketMatchResult]
+        ] = []
         matched_market_pairs = 0
-        headline_applies: list[tuple] = []
         for left_venue, right_venue in pair_specs:
             left_markets = venue_markets[left_venue]
             right_markets = venue_markets[right_venue]
@@ -2345,70 +2366,106 @@ class ReadOnlyCrossVenueCollector:
                 max_market_pairs_per_event,
             )
             matched_market_pairs += len(market_pairs)
-            for left_market, right_market, match in market_pairs:
-                if not scan_eligible_pair(left_market.canonical, right_market.canonical, match):
-                    continue
-                left_obs = observations_by_market_id.get(
-                    (left_venue, left_market.canonical.source_market_id)
+            selected_pairs.extend(
+                (left_venue, right_venue, left_market, right_market, match)
+                for left_market, right_market, match in market_pairs
+            )
+        eligible_pairs = [
+            item
+            for item in selected_pairs
+            if scan_eligible_pair(item[2].canonical, item[3].canonical, item[4])
+        ]
+        kalshi_depth_markets = _kalshi_markets_needing_depth(eligible_pairs)
+        eligible_ids = {item.canonical.source_market_id for item in kalshi_depth_markets}
+        self._kalshi_books_eligible += len(kalshi_depth_markets)
+        leftover_kalshi = [
+            market
+            for market in kalshi_markets
+            if market.canonical.source_market_id not in eligible_ids
+        ]
+        # Count every listed Kalshi market that is not a scan-eligible /
+        # Approved Market Catalogue pair leg. Do not infer this from missing
+        # observations after a leftover depth attempt — leftover books are
+        # never fetched.
+        self._kalshi_books_skipped_unapproved += len(leftover_kalshi)
+        if kalshi_depth_markets:
+            await self._fetch_kalshi_depth_for_markets(
+                k_events,
+                kalshi_depth_markets,
+                side=kalshi_side,
+                issues=issues,
+            )
+        order_books_fetched = (
+            matchbook_side.books + polymarket_side.books + kalshi_side.books
+        )
+        for source_id, observation in kalshi_side.observations.items():
+            observations_by_market_id[(VenueName.KALSHI, source_id)] = observation
+        decisions: list[PaperScanDecision] = []
+        decisions_by_source_ids: dict[tuple[str, str], PaperScanDecision] = {}
+        decisions_by_pair: dict[tuple[str, str, str, str], PaperScanDecision] = {}
+        headline_applies: list[tuple] = []
+        for left_venue, right_venue, left_market, right_market, _match in eligible_pairs:
+            left_obs = observations_by_market_id.get(
+                (left_venue, left_market.canonical.source_market_id)
+            )
+            right_obs = observations_by_market_id.get(
+                (right_venue, right_market.canonical.source_market_id)
+            )
+            if left_obs is None or right_obs is None:
+                if fixture.current_net_edge is None:
+                    fixture.no_comparison_reason = "order_book_unavailable"
+                continue
+            stored = self.paper_scan.scan_pair(
+                left_obs,
+                right_obs,
+                fixture_canonical_event_id=fixture.canonical_event_id,
+                **scan_kwargs,
+            )
+            phases = getattr(self.paper_scan, "last_scan_phase_ms", None) or {}
+            self._attribution.add(
+                stage="mapping_equivalence",
+                elapsed_ms=int(phases.get("mapping_equivalence", 0)),
+                calls=1,
+            )
+            self._attribution.add(
+                stage="fees_fx_risk",
+                elapsed_ms=int(phases.get("fees_fx_risk", 0)),
+                calls=1,
+            )
+            self._attribution.add(
+                stage="solver_allocation",
+                elapsed_ms=int(phases.get("solver_allocation", 0)),
+                calls=1,
+            )
+            if mb_event is not None:
+                state = matchbook_fixture_state(mb_event.raw)
+                stored = stored.model_copy(
+                    update={
+                        "fixture_discovery_source": cluster.anchor.venue,
+                        "fixture_status": state.venue_status,
+                        "in_running": state.in_running,
+                        "live_score_supported": state.live_score_supported,
+                        "home_score": state.home_score,
+                        "away_score": state.away_score,
+                    }
                 )
-                right_obs = observations_by_market_id.get(
-                    (right_venue, right_market.canonical.source_market_id)
+            else:
+                stored = stored.model_copy(
+                    update={"fixture_discovery_source": cluster.anchor.venue}
                 )
-                if left_obs is None or right_obs is None:
-                    if fixture.current_net_edge is None:
-                        fixture.no_comparison_reason = "order_book_unavailable"
-                    continue
-                stored = self.paper_scan.scan_pair(
-                    left_obs,
-                    right_obs,
-                    fixture_canonical_event_id=fixture.canonical_event_id,
-                    **scan_kwargs,
+            decisions.append(stored)
+            decisions_by_source_ids[
+                (left_market.canonical.source_market_id, right_market.canonical.source_market_id)
+            ] = stored
+            decisions_by_pair[
+                (
+                    left_obs.venue.value,
+                    left_market.canonical.source_market_id,
+                    right_obs.venue.value,
+                    right_market.canonical.source_market_id,
                 )
-                phases = getattr(self.paper_scan, "last_scan_phase_ms", None) or {}
-                self._attribution.add(
-                    stage="mapping_equivalence",
-                    elapsed_ms=int(phases.get("mapping_equivalence", 0)),
-                    calls=1,
-                )
-                self._attribution.add(
-                    stage="fees_fx_risk",
-                    elapsed_ms=int(phases.get("fees_fx_risk", 0)),
-                    calls=1,
-                )
-                self._attribution.add(
-                    stage="solver_allocation",
-                    elapsed_ms=int(phases.get("solver_allocation", 0)),
-                    calls=1,
-                )
-                if mb_event is not None:
-                    state = matchbook_fixture_state(mb_event.raw)
-                    stored = stored.model_copy(
-                        update={
-                            "fixture_discovery_source": cluster.anchor.venue,
-                            "fixture_status": state.venue_status,
-                            "in_running": state.in_running,
-                            "live_score_supported": state.live_score_supported,
-                            "home_score": state.home_score,
-                            "away_score": state.away_score,
-                        }
-                    )
-                else:
-                    stored = stored.model_copy(
-                        update={"fixture_discovery_source": cluster.anchor.venue}
-                    )
-                decisions.append(stored)
-                decisions_by_source_ids[
-                    (left_market.canonical.source_market_id, right_market.canonical.source_market_id)
-                ] = stored
-                decisions_by_pair[
-                    (
-                        left_obs.venue.value,
-                        left_market.canonical.source_market_id,
-                        right_obs.venue.value,
-                        right_market.canonical.source_market_id,
-                    )
-                ] = stored
-                headline_applies.append((left_market, left_obs, right_obs, stored))
+            ] = stored
+            headline_applies.append((left_market, left_obs, right_obs, stored))
 
         inventory_rows = assemble_fixture_inventory(
             matchbook_inventory,
@@ -2644,7 +2701,7 @@ class ReadOnlyCrossVenueCollector:
         for k_event in k_events:
             if self._provider_budget_exhausted():
                 break
-            markets, inventory, series, fetched, kalshi_failed = await self._load_kalshi_markets(
+            markets, inventory, _series, fetched, kalshi_failed = await self._load_kalshi_markets(
                 k_event, issues=issues
             )
             if kalshi_failed:
@@ -2656,24 +2713,54 @@ class ReadOnlyCrossVenueCollector:
             side.books += fetched
             side.markets.extend(markets)
             side.inventory.extend(inventory)
+        # Live get_order_book is later, and only for Kalshi legs that
+        # participate in scan-eligible / Approved Market Catalogue pairs.
+        # Metadata, series/fee wrappers, Get Market rule enrichment, and
+        # inventory listing stay here. Fetching nested unapproved books
+        # starves approved BTTS under the 4-slot Kalshi limiter.
 
-            async def _one_kalshi(kalshi_market: _NormalizedMarket) -> None:
-                if self._provider_budget_exhausted():
-                    return
-                observation, book_fetched = await self._try_kalshi_observation(
-                    k_event, kalshi_market, series=series, issues=issues
-                )
-                side.books += book_fetched
-                if observation is None:
-                    return
-                side.observations[kalshi_market.canonical.source_market_id] = observation
-                for item in side.inventory:
-                    if item.source_market_id == kalshi_market.canonical.source_market_id:
-                        item.observation = observation
+    async def _fetch_kalshi_depth_for_markets(
+        self,
+        k_events: list[_NormalizedEvent],
+        markets: list[_NormalizedMarket],
+        *,
+        side: _VenueSideFetch,
+        issues: list[CollectorIssue],
+    ) -> None:
+        """Fetch live Kalshi order books for approved catalogue pair legs only.
 
-            prioritized = _prioritize_baseline_markets(markets)
-            if prioritized:
-                await asyncio.gather(*[_one_kalshi(market) for market in prioritized])
+        Callers must pass scan-eligible / APPROVED_EQUIVALENT Kalshi legs.
+        Unapproved leftover markets stay metadata/inventory only. Queue wait
+        is not a live quote. Missing books stay fail-closed; cached prices
+        are never used. A genuine miss still records a precise timeout.
+        """
+
+        if self.kalshi is None or not markets:
+            return
+        prioritized = _prioritize_catalogue_depth_markets(markets)
+
+        async def _one(market: _NormalizedMarket) -> None:
+            book_event = _event_for_source(
+                k_events, market.canonical.event.source_event_id
+            )
+            if book_event is None:
+                return
+            series = market.raw.get("series") if isinstance(market.raw, dict) else None
+            observation, book_fetched = await self._try_kalshi_observation(
+                book_event,
+                market,
+                series=series if isinstance(series, dict) else None,
+                issues=issues,
+            )
+            side.books += book_fetched
+            if observation is None:
+                return
+            side.observations[market.canonical.source_market_id] = observation
+            for item in side.inventory:
+                if item.source_market_id == market.canonical.source_market_id:
+                    item.observation = observation
+
+        await asyncio.gather(*[_one(market) for market in prioritized])
 
     async def _cluster_venue_events_cooperative(
         self,
@@ -3129,6 +3216,17 @@ class ReadOnlyCrossVenueCollector:
             }
             normalized.append(_NormalizedMarket(wrapper, market))
             first_payload = grouped[market.source_market_id][0] if grouped[market.source_market_id] else {}
+            labels: list[str] = []
+            for payload in grouped[market.source_market_id]:
+                for label in raw_runner_labels(payload, VenueName.KALSHI):
+                    if label and label not in labels:
+                        labels.append(label)
+            for runner in market.runners:
+                if runner.label and runner.label not in labels:
+                    labels.append(runner.label)
+                outcome = runner.outcome.value
+                if outcome and outcome not in labels:
+                    labels.append(outcome)
             inventory.append(
                 InventoryMarket(
                     venue=VenueName.KALSHI,
@@ -3136,8 +3234,7 @@ class ReadOnlyCrossVenueCollector:
                     source_market_id=market.source_market_id,
                     raw_name=raw_market_name(first_payload, VenueName.KALSHI) or market.family.value,
                     raw_market_type=raw_market_type(first_payload, VenueName.KALSHI),
-                    raw_runner_labels=raw_runner_labels(first_payload, VenueName.KALSHI)
-                    or [runner.label for runner in market.runners],
+                    raw_runner_labels=labels,
                     canonical=market,
                 )
             )
@@ -3342,7 +3439,7 @@ class ReadOnlyCrossVenueCollector:
 
         async def _one(ticker: str) -> None:
             nonlocal fetched, latency_ms, failed
-            if failed or not ticker or self._provider_budget_exhausted():
+            if failed or not ticker:
                 if ticker:
                     failed = True
                 return
@@ -3810,6 +3907,47 @@ def _prioritize_baseline_markets(markets: list[_NormalizedMarket]) -> list[_Norm
             else 2
         ),
     )
+
+
+_CATALOGUE_DEPTH_FAMILIES = frozenset(
+    {
+        MarketFamily.MATCH_RESULT,
+        MarketFamily.BOTH_TEAMS_TO_SCORE,
+        MarketFamily.TOTAL_GOALS,
+        MarketFamily.FIRST_TEAM_TO_SCORE,
+        MarketFamily.DRAW_NO_BET,
+    }
+)
+
+
+def _prioritize_catalogue_depth_markets(
+    markets: list[_NormalizedMarket],
+) -> list[_NormalizedMarket]:
+    """Approved catalogue families share depth priority; BTTS is not behind 1X2."""
+
+    return sorted(
+        markets,
+        key=lambda item: (
+            0 if item.canonical.family in _CATALOGUE_DEPTH_FAMILIES else 1,
+            item.canonical.source_market_id,
+        ),
+    )
+
+
+def _kalshi_markets_needing_depth(
+    eligible_pairs: list[
+        tuple[VenueName, VenueName, _NormalizedMarket, _NormalizedMarket, MarketMatchResult]
+    ],
+) -> list[_NormalizedMarket]:
+    """Deduped Kalshi legs from catalogue-eligible pairs only."""
+
+    needed: dict[str, _NormalizedMarket] = {}
+    for left_venue, right_venue, left_market, right_market, _match in eligible_pairs:
+        if left_venue is VenueName.KALSHI:
+            needed.setdefault(left_market.canonical.source_market_id, left_market)
+        if right_venue is VenueName.KALSHI:
+            needed.setdefault(right_market.canonical.source_market_id, right_market)
+    return list(needed.values())
 
 
 def _is_baseline_match_result_pair(
