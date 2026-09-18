@@ -42,6 +42,7 @@ from sports_hedge.normalization.kalshi_contract_terms import (
 )
 from sports_hedge.normalization.venues import (
     KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
+    KALSHI_UNMODELLED_EXTRA_TIME_OR_PENALTIES_REASON,
 )
 
 LOCKED_PAPER_FAMILIES: frozenset[MarketFamily] = frozenset(
@@ -188,6 +189,8 @@ def kalshi_has_proven_settlement_contradiction(market: CanonicalMarket) -> bool:
         return True
     if settlement.unknown_reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON:
         return False
+    if settlement.unknown_reason == KALSHI_UNMODELLED_EXTRA_TIME_OR_PENALTIES_REASON:
+        return True
     unknown = str(settlement.unknown_reason or "").casefold()
     return any(token in unknown for token in _PROVEN_CONTRADICTION_TOKENS)
 

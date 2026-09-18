@@ -1,8 +1,10 @@
 """Issue #278: recover market-specific Kalshi result-scope evidence.
 
 Captured public Kalshi Trade API nested-list wording from 2026-09-18. Does not
-infer regulation from GAMEWIN / series / title / REG TIME labels. Catalogue
-admission still requires complete matching fingerprints. PAPER / execution off.
+infer regulation from GAMEWIN / series / title / REG TIME labels. Independently
+proven fingerprints remain APPROVED_EQUIVALENT. Issue #326 paper-assumes the
+four locked families when identity matches; extra-time wording stays fail-closed.
+PAPER / execution off.
 """
 
 from __future__ import annotations
@@ -441,11 +443,9 @@ def test_parameter_mismatch_and_contradiction_remain_blocked() -> None:
             ],
         ),
     )
-    assert ftts.state in {
-        CatalogueApprovalState.REVIEW_REQUIRED,
-        CatalogueApprovalState.KNOWN_CONTRADICTION,
-    }
+    assert ftts.state is CatalogueApprovalState.KNOWN_CONTRADICTION
     assert ftts.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
+    assert ftts.state is not CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     corpus_ftts = classify_payload_pair(_mb([_mb_ftts()]), _kalshi([
         {
             "ticker": "KX-FTTS-H",
@@ -709,7 +709,7 @@ class _BayernKalshi:
 
 
 @pytest.mark.asyncio
-async def test_collector_nested_current_payload_is_not_inventory_equivalent() -> None:
+async def test_collector_nested_current_payload_is_paper_assumed_not_approved() -> None:
     repository = SqliteMarketIntelligenceRepository()
     kalshi = _BayernKalshi()
     collector = ReadOnlyCrossVenueCollector(
@@ -735,15 +735,18 @@ async def test_collector_nested_current_payload_is_not_inventory_equivalent() ->
         fixture = report.discovered_fixtures[0]
         assert fixture.matchbook_matched is True
         assert fixture.kalshi_matched is True
-        assert fixture.matched_equivalent_count == 0
+        assert fixture.matched_equivalent_count == 1
         rows = report.fixture_markets[fixture.canonical_event_id]
+        assert any(
+            row.comparison_status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
+            for row in rows
+        )
         assert not any(
             row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
-            and row.entered_solver
             for row in rows
         )
         coverage = report.scan_diagnostics["matching_coverage"]
-        assert coverage["equivalent_markets"] == 0
+        assert coverage["equivalent_markets"] == 1
         assert Settings().sports_hedge_execution_enabled is False
     finally:
         repository.close()

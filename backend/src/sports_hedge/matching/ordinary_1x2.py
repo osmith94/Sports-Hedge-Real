@@ -194,10 +194,13 @@ def paper_assumed_ordinary_1x2(left: CanonicalMarket, right: CanonicalMarket) ->
         return False
     from sports_hedge.normalization.venues import (
         KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
+        KALSHI_UNMODELLED_EXTRA_TIME_OR_PENALTIES_REASON,
     )
 
     if kalshi.settlement.unknown_reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON:
         return True
+    if kalshi.settlement.unknown_reason == KALSHI_UNMODELLED_EXTRA_TIME_OR_PENALTIES_REASON:
+        return False
     if any(token in unknown for token in _CONTRADICTION_TOKENS):
         return False
     if kalshi.settlement.is_economically_complete() and is_complete_regulation_time_1x2(kalshi):

@@ -47,6 +47,7 @@ from sports_hedge.matching.paper_assumed import (
 )
 from sports_hedge.normalization.venues import (
     KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
+    KALSHI_UNMODELLED_EXTRA_TIME_OR_PENALTIES_REASON,
     KalshiNormalizer,
     MatchbookNormalizer,
     PolymarketNormalizer,
@@ -269,6 +270,12 @@ def _economic_state(
     if left.line != right.line:
         return CatalogueApprovalState.APPROVED_PARAMETER_MISMATCH, "line_mismatch", notes
     if settlement_fingerprints_contradict(left.settlement, right.settlement):
+        return CatalogueApprovalState.KNOWN_CONTRADICTION, "settlement_mismatch", notes
+    if (
+        left.settlement.unknown_reason == KALSHI_UNMODELLED_EXTRA_TIME_OR_PENALTIES_REASON
+        or right.settlement.unknown_reason == KALSHI_UNMODELLED_EXTRA_TIME_OR_PENALTIES_REASON
+    ):
+        notes.append("extra_time_or_penalties_wording_is_not_paper_assumed")
         return CatalogueApprovalState.KNOWN_CONTRADICTION, "settlement_mismatch", notes
 
     left_outcomes = runner_outcomes(left)
