@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from sports_hedge.application.hot_market_relationships import HotMarketRelationship
 from sports_hedge.application.collector import (
     DIAGNOSTIC_PROVIDERS,
     DIAGNOSTIC_STAGES,
@@ -233,6 +234,9 @@ class DualCadencePlan(BaseModel):
     universe_generation_id: int = 0
     generation_resume: bool = False
     known_source_events: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    hot_market_relationships: dict[str, list[HotMarketRelationship]] = Field(
+        default_factory=dict
+    )
     discovery_snapshot: dict[str, list[dict[str, Any]]] | None = None
     reuse_discovery: bool = False
     retry_series: dict[str, list[str]] = Field(default_factory=dict)
@@ -724,6 +728,9 @@ class LiveRefreshCoordinator:
             coordinator_timeout_seconds=timeout + SCAN_CYCLE_RETURN_GRACE_SECONDS,
             identity_scope=list(hot_scope),
             known_source_events=self._fixture_state.known_source_events(hot_scope),
+            hot_market_relationships=self._fixture_state.hot_market_relationships(
+                hot_scope, now=self.now()
+            ),
             enabled_venues=list(self.pending_venues_for(ScanLane.HOT)),
             reason=reason,
         )
@@ -2351,6 +2358,13 @@ class LiveRefreshCoordinator:
 
     def fixture_current_state(self) -> FixtureCurrentStateStore:
         return self._fixture_state
+
+    def hot_market_relationships(
+        self, canonical_ids: list[str]
+    ) -> dict[str, list[HotMarketRelationship]]:
+        """Coordinator facade over current-state ApprovedEquivalent HOT identities."""
+
+        return self._fixture_state.hot_market_relationships(canonical_ids, now=self.now())
 
     def _universe_generation_id_for_upsert(self) -> int | None:
         with self._state_lock:

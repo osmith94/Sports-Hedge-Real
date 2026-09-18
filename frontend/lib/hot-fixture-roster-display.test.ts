@@ -265,8 +265,22 @@ describe("HOT Zone evaluation state and Fast Scan summary", () => {
       "Not evaluated — scan budget exhausted · scan_budget_exhausted",
     );
     assert.equal(
-      hotEvaluationLabel(fixture({ solver_is_arbitrage: true, market_evaluation_state: "evaluated" })),
-      "qualifying",
+      hotEvaluationLabel(
+        fixture({
+          market_evaluation_state: "hot_relationship_missing",
+          market_evaluation_reason: "hot_relationship_missing",
+        }),
+      ),
+      "Not evaluated — HOT relationship missing · hot_relationship_missing",
+    );
+    assert.equal(
+      hotEvaluationLabel(
+        fixture({
+          market_evaluation_state: "evaluated",
+          market_evaluation_reason: "hot_revalidation_needed",
+        }),
+      ),
+      "HOT revalidation needed",
     );
   });
 

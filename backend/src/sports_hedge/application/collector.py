@@ -33,6 +33,7 @@ from sports_hedge.application.equivalence_diagnostics import (
 )
 from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
+    InventoryComparisonStatus,
     InventoryMarket,
     assemble_fixture_inventory,
     inventory_summary,
@@ -41,6 +42,20 @@ from sports_hedge.application.fixture_inventory import (
     raw_market_type,
     raw_runner_labels,
     scan_eligible_pair,
+)
+from sports_hedge.application.hot_market_relationships import (
+    HOT_RELATIONSHIP_MISSING_REASON,
+    HOT_REVALIDATION_NEEDED_REASON,
+    HOT_RELATIONSHIP_UNAVAILABLE_REASON,
+    HotMarketRelationship,
+    HotVenueLeg,
+    canonical_market_from_leg,
+    extract_matchbook_market_payload,
+    fail_closed_inventory_row,
+    hot_identity_matches_market,
+    index_hot_relationships,
+    kalshi_tickers_for_leg,
+    matchbook_payload_is_terminal,
 )
 from sports_hedge.application.fixture_state import matchbook_fixture_state
 from sports_hedge.application.lane_venues import (
@@ -77,6 +92,7 @@ from sports_hedge.application.quote_freshness import (
     retrieval_quote_age,
 )
 from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key, should_skip_market_work
+from sports_hedge.venues.matchbook import MatchbookMarketGoneError
 from sports_hedge.catalogue.classify import classify_pair
 from sports_hedge.catalogue.states import CatalogueApprovalState
 from sports_hedge.application.target_competitions import (
@@ -99,7 +115,6 @@ from sports_hedge.domain.football import (
     CanonicalEvent,
     CanonicalMarket,
     CanonicalOutcome,
-    CanonicalRunner,
     FootballPeriod,
     MarketFamily,
     SettlementScope,
@@ -198,6 +213,13 @@ class MatchbookReadClient(Protocol):
 
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]: ...
 
+    async def get_market(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        **filters: Any,
+    ) -> dict[str, Any]: ...
+
 
 class KalshiReadClient(Protocol):
     async def list_events(self, **filters: Any) -> dict[str, Any]: ...
@@ -242,6 +264,7 @@ class MarketEvaluationState(StrEnum):
     EVALUATED = "evaluated"
     NOT_EVALUATED_SCAN_DEADLINE = "not_evaluated_scan_deadline"
     MARKET_FETCH_UNAVAILABLE = "market_fetch_unavailable"
+    HOT_RELATIONSHIP_MISSING = "hot_relationship_missing"
 
 
 NOT_EVALUATED_SCAN_DEADLINE_REASON = "not_evaluated_scan_deadline"
@@ -537,6 +560,18 @@ class _VenueSideFetch:
         self.primary_event: _NormalizedEvent | None = None
 
 
+class _HotLegRefresh:
+    """One persisted HOT venue leg after a targeted quote/depth read."""
+
+    def __init__(self) -> None:
+        self.inventory: InventoryMarket | None = None
+        self.observation: VenueMarketObservation | None = None
+        self.gone = False
+        self.identity_changed = False
+        self.unavailable = False
+        self.books = 0
+
+
 class ReadOnlyCrossVenueCollector:
     """Discover, match and paper-scan first-class venue markets.
 
@@ -666,6 +701,7 @@ class ReadOnlyCrossVenueCollector:
         on_fixture_evaluated: Callable[..., Any] | None = None,
         on_canonical_work_set: Callable[..., Any] | None = None,
         retry_series: dict[str, list[str]] | None = None,
+        hot_market_relationships: dict[str, list[HotMarketRelationship]] | None = None,
     ) -> CollectionReport:
         if max_event_pairs <= 0 or max_market_pairs_per_event <= 0:
             raise ValueError("collector pair limits must be positive")
@@ -770,11 +806,22 @@ class ReadOnlyCrossVenueCollector:
         clusters_before_resume = 0
         skipped_by_resume = 0
         stale_generation_state_ignored = False
+        (
+            self._op_hot_relationships,
+            self._op_hot_relationships_by_source,
+        ) = index_hot_relationships(hot_market_relationships)
+        self._op_hot_stats = {
+            "targeted": resolved_lane == ScanLane.HOT.value,
+            "refreshed": 0,
+            "missing": 0,
+            "revalidation": 0,
+            "matchbook_get_market": 0,
+            "kalshi_order_books": 0,
+        }
         # HOT skips list_events and reuses stored source-event payloads.
         # UNIVERSE reuses the sweep discovery snapshot after the first success.
-        # Cheap Kalshi nested/list inventory still runs through _load_kalshi_markets.
-        # Get Series / Get Market settlement enrichment is later, and only for
-        # Approved Catalogue candidates. Live books stay approved-pair-only.
+        # HOT market work is a quote/depth refresh of persisted ApprovedEquivalent
+        # relationships. It must not re-run list_markets / get_series rediscovery.
         reuse_snapshot = bool(reuse_discovery and discovery_snapshot)
         skip_discovery = (
             (resolved_lane == ScanLane.HOT.value and identity_scope is not None)
@@ -1537,6 +1584,8 @@ class ReadOnlyCrossVenueCollector:
                 cancelled=True,
             )
             raise
+        except MatchbookMarketGoneError:
+            raise
         except Exception as exc:
             self._op_issues.append(
                 CollectorIssue(stage=stage, venue=venue, source_id=source_id, detail=str(exc))
@@ -2037,6 +2086,7 @@ class ReadOnlyCrossVenueCollector:
                 "eligible_markets": self._kalshi_books_eligible,
                 "skipped_unapproved": self._kalshi_books_skipped_unapproved,
             },
+            "hot_targeted_refresh": dict(getattr(self, "_op_hot_stats", {})),
             "identity_scope": [
                 item.canonical_event_id for item in discovered_fixtures
             ],
@@ -2479,6 +2529,17 @@ class ReadOnlyCrossVenueCollector:
         )
         if should_skip_market_work(fixture, seen_at):
             return fixture, [], [], {}, 0, 0
+        if self._op_request_lane == ScanLane.HOT.value:
+            return await self._refresh_hot_cluster(
+                cluster,
+                fixture=fixture,
+                seen_at=seen_at,
+                polymarket_events=polymarket_events,
+                queried_series_ids=queried_series_ids,
+                max_market_pairs_per_event=max_market_pairs_per_event,
+                scan_kwargs=scan_kwargs,
+                issues=issues,
+            )
         mb_events = [_as_normalized(item) for item in cluster.events_for(VenueName.MATCHBOOK)]
         pm_events = [_as_normalized(item) for item in cluster.events_for(VenueName.POLYMARKET)]
         k_events = [_as_normalized(item) for item in cluster.events_for(VenueName.KALSHI)]
@@ -2763,6 +2824,627 @@ class ReadOnlyCrossVenueCollector:
             order_books_fetched,
             matched_market_pairs,
         )
+
+    async def _refresh_hot_cluster(
+        self,
+        cluster: FixtureCluster,
+        *,
+        fixture: DiscoveredFixture,
+        seen_at: datetime,
+        polymarket_events: list[_NormalizedEvent],
+        queried_series_ids: list[str] | None,
+        max_market_pairs_per_event: int,
+        scan_kwargs: dict[str, Any],
+        issues: list[CollectorIssue],
+    ) -> tuple[
+        DiscoveredFixture,
+        list[PaperScanDecision],
+        list[FixtureMarketInventoryRow],
+        dict[VenueName, int],
+        int,
+        int,
+    ]:
+        del max_market_pairs_per_event
+        relationships = self._hot_relationships_for_cluster(cluster, fixture)
+        if not relationships:
+            self._bump_hot_stat("missing")
+            issues.append(
+                CollectorIssue(
+                    stage="hot_refresh",
+                    source_id=fixture.canonical_event_id,
+                    detail=HOT_RELATIONSHIP_MISSING_REASON,
+                )
+            )
+            fixture.market_evaluation_state = MarketEvaluationState.HOT_RELATIONSHIP_MISSING.value
+            fixture.market_evaluation_reason = HOT_RELATIONSHIP_MISSING_REASON
+            fixture.no_comparison_reason = HOT_RELATIONSHIP_MISSING_REASON
+            fixture.matched_equivalent_count = None
+            fixture.opportunity_state = _opportunity_state(fixture)
+            return fixture, [], [], {}, 0, 0
+
+        mb_events = [_as_normalized(item) for item in cluster.events_for(VenueName.MATCHBOOK)]
+        pm_events = [_as_normalized(item) for item in cluster.events_for(VenueName.POLYMARKET)]
+        k_events = [_as_normalized(item) for item in cluster.events_for(VenueName.KALSHI)]
+        enabled = self._op_enabled_venues
+        if VenueName.MATCHBOOK not in enabled:
+            mb_events = []
+        if VenueName.POLYMARKET not in enabled:
+            pm_events = []
+        if VenueName.KALSHI not in enabled:
+            k_events = []
+        mb_events = [item for item in mb_events if item is not None]
+        pm_events = [item for item in pm_events if item is not None]
+        k_events = [item for item in k_events if item is not None]
+        mb_event = mb_events[0] if mb_events else None
+
+        inventory_rows: list[FixtureMarketInventoryRow] = []
+        decisions: list[PaperScanDecision] = []
+        headline_applies: list[tuple] = []
+        market_counts: dict[VenueName, int] = {}
+        order_books_fetched = 0
+        matched_market_pairs = 0
+        revalidation = 0
+        timeouts = 0
+        refreshed = 0
+
+        for relationship in relationships:
+            if self._provider_budget_exhausted():
+                break
+            row, pair_decisions, pair_headlines, books, pair_matched, outcome = (
+                await self._refresh_hot_relationship(
+                    relationship,
+                    fixture=fixture,
+                    mb_events=mb_events,
+                    pm_events=pm_events,
+                    k_events=k_events,
+                    scan_kwargs=scan_kwargs,
+                    issues=issues,
+                )
+            )
+            order_books_fetched += books
+            if pair_matched:
+                matched_market_pairs += pair_matched
+            if outcome == "refreshed":
+                refreshed += 1
+            elif outcome == "revalidation":
+                revalidation += 1
+            elif outcome == "unavailable":
+                timeouts += 1
+            if row is not None:
+                inventory_rows.append(row)
+                for venue in (VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI):
+                    facts = getattr(row, venue.value)
+                    if facts is None:
+                        continue
+                    market_counts[venue] = market_counts.get(venue, 0) + 1
+            for stored in pair_decisions:
+                if mb_event is not None:
+                    state = matchbook_fixture_state(mb_event.raw)
+                    stored = stored.model_copy(
+                        update={
+                            "fixture_discovery_source": cluster.anchor.venue,
+                            "fixture_status": state.venue_status,
+                            "in_running": state.in_running,
+                            "live_score_supported": state.live_score_supported,
+                            "home_score": state.home_score,
+                            "away_score": state.away_score,
+                        }
+                    )
+                else:
+                    stored = stored.model_copy(
+                        update={"fixture_discovery_source": cluster.anchor.venue}
+                    )
+                decisions.append(stored)
+            headline_applies.extend(pair_headlines)
+
+        self._bump_hot_stat("refreshed", refreshed)
+        self._bump_hot_stat("revalidation", revalidation)
+        discovered_count, equivalent_count, _observed_edge = inventory_summary(inventory_rows)
+        fixture.discovered_market_count = discovered_count
+        fixture.matched_market_count = matched_market_pairs
+        if not inventory_rows and timeouts and not refreshed and not revalidation:
+            fixture.market_evaluation_state = MarketEvaluationState.MARKET_FETCH_UNAVAILABLE.value
+            fixture.market_evaluation_reason = HOT_RELATIONSHIP_UNAVAILABLE_REASON
+            fixture.matched_equivalent_count = None
+            fixture.no_comparison_reason = HOT_RELATIONSHIP_UNAVAILABLE_REASON
+        else:
+            fixture.market_evaluation_state = MarketEvaluationState.EVALUATED.value
+            fixture.market_evaluation_reason = (
+                HOT_REVALIDATION_NEEDED_REASON if revalidation and not refreshed else None
+            )
+            fixture.matched_equivalent_count = equivalent_count
+            _apply_fixture_headline(fixture, headline_applies)
+            if cluster.venue_count >= 2 and equivalent_count == 0:
+                fixture.no_comparison_reason = zero_equivalent_reason_from_inventory(
+                    inventory_rows,
+                    existing_reason=fixture.no_comparison_reason,
+                )
+        fixture.opportunity_state = _opportunity_state(fixture)
+        return (
+            fixture,
+            decisions,
+            inventory_rows,
+            market_counts,
+            order_books_fetched,
+            matched_market_pairs,
+        )
+
+    def _hot_relationships_for_cluster(
+        self,
+        cluster: FixtureCluster,
+        fixture: DiscoveredFixture,
+    ) -> list[HotMarketRelationship]:
+        by_canonical = getattr(self, "_op_hot_relationships", {}) or {}
+        by_source = getattr(self, "_op_hot_relationships_by_source", {}) or {}
+        found: list[HotMarketRelationship] = []
+        seen: set[str] = set()
+        identities = [
+            fixture.canonical_event_id,
+            cluster_canonical_event_id(cluster),
+            *cluster_identity_aliases(cluster).keys(),
+        ]
+        for ident in identities:
+            for relationship in by_canonical.get(str(ident), []):
+                if relationship.market_key in seen:
+                    continue
+                seen.add(relationship.market_key)
+                found.append(relationship)
+        for event in cluster_member_events(cluster):
+            key = f"{event.venue.value}:{event.source_event_id}"
+            for relationship in by_source.get(key, []):
+                if relationship.market_key in seen:
+                    continue
+                seen.add(relationship.market_key)
+                found.append(relationship)
+        return found
+
+    def _bump_hot_stat(self, key: str, amount: int = 1) -> None:
+        stats = getattr(self, "_op_hot_stats", None)
+        if not isinstance(stats, dict) or amount == 0:
+            return
+        stats[key] = int(stats.get(key) or 0) + int(amount)
+
+    async def _refresh_hot_relationship(
+        self,
+        relationship: HotMarketRelationship,
+        *,
+        fixture: DiscoveredFixture,
+        mb_events: list[_NormalizedEvent],
+        pm_events: list[_NormalizedEvent],
+        k_events: list[_NormalizedEvent],
+        scan_kwargs: dict[str, Any],
+        issues: list[CollectorIssue],
+    ) -> tuple[
+        FixtureMarketInventoryRow | None,
+        list[PaperScanDecision],
+        list[tuple],
+        int,
+        int,
+        str,
+    ]:
+        legs: list[tuple[VenueName, HotVenueLeg, list[_NormalizedEvent]]] = []
+        if relationship.matchbook is not None:
+            legs.append((VenueName.MATCHBOOK, relationship.matchbook, mb_events))
+        if relationship.polymarket is not None:
+            legs.append((VenueName.POLYMARKET, relationship.polymarket, pm_events))
+        if relationship.kalshi is not None:
+            legs.append((VenueName.KALSHI, relationship.kalshi, k_events))
+        refreshed: dict[VenueName, _HotLegRefresh] = {}
+        books = 0
+        for venue, leg, events in legs:
+            result = await self._refresh_hot_venue_leg(
+                venue,
+                leg,
+                relationship=relationship,
+                events=events,
+                issues=issues,
+            )
+            refreshed[venue] = result
+            books += result.books
+            if result.gone or result.identity_changed:
+                self._note_hot_revalidation(issues, relationship, venue, result)
+                return (
+                    fail_closed_inventory_row(
+                        relationship, reason=HOT_REVALIDATION_NEEDED_REASON
+                    ),
+                    [],
+                    [],
+                    books,
+                    0,
+                    "revalidation",
+                )
+        if any(item.unavailable or item.inventory is None for item in refreshed.values()):
+            return None, [], [], books, 0, "unavailable"
+        inventories = [item.inventory for item in refreshed.values() if item.inventory is not None]
+        observations = {
+            venue: item.observation
+            for venue, item in refreshed.items()
+            if item.observation is not None
+        }
+        pair_venues = [
+            (left, right)
+            for left, right in (
+                (VenueName.MATCHBOOK, VenueName.POLYMARKET),
+                (VenueName.MATCHBOOK, VenueName.KALSHI),
+                (VenueName.POLYMARKET, VenueName.KALSHI),
+            )
+            if left in refreshed and right in refreshed
+        ]
+        if not pair_venues:
+            return None, [], [], books, 0, "unavailable"
+        decisions: list[PaperScanDecision] = []
+        headlines: list[tuple] = []
+        decisions_by_source_ids: dict[tuple[str, str], PaperScanDecision] = {}
+        decisions_by_pair: dict[tuple[str, str, str, str], PaperScanDecision] = {}
+        matched_pairs = 0
+        for left_venue, right_venue in pair_venues:
+            left_inv = refreshed[left_venue].inventory
+            right_inv = refreshed[right_venue].inventory
+            left_obs = observations.get(left_venue)
+            right_obs = observations.get(right_venue)
+            if (
+                left_inv is None
+                or right_inv is None
+                or left_inv.canonical is None
+                or right_inv.canonical is None
+                or left_obs is None
+                or right_obs is None
+            ):
+                continue
+            match = self.market_matcher.match(left_inv.canonical, right_inv.canonical)
+            if not scan_eligible_pair(left_inv.canonical, right_inv.canonical, match):
+                issues.append(
+                    CollectorIssue(
+                        stage="hot_refresh",
+                        source_id=relationship.market_key,
+                        detail=HOT_REVALIDATION_NEEDED_REASON,
+                    )
+                )
+                return (
+                    fail_closed_inventory_row(
+                        relationship, reason=HOT_REVALIDATION_NEEDED_REASON
+                    ),
+                    [],
+                    [],
+                    books,
+                    0,
+                    "revalidation",
+                )
+            stored = self.paper_scan.scan_pair(
+                left_obs,
+                right_obs,
+                fixture_canonical_event_id=fixture.canonical_event_id,
+                **scan_kwargs,
+            )
+            phases = getattr(self.paper_scan, "last_scan_phase_ms", None) or {}
+            self._attribution.add(
+                stage="mapping_equivalence",
+                elapsed_ms=int(phases.get("mapping_equivalence", 0)),
+                calls=1,
+            )
+            self._attribution.add(
+                stage="fees_fx_risk",
+                elapsed_ms=int(phases.get("fees_fx_risk", 0)),
+                calls=1,
+            )
+            self._attribution.add(
+                stage="solver_allocation",
+                elapsed_ms=int(phases.get("solver_allocation", 0)),
+                calls=1,
+            )
+            decisions.append(stored)
+            decisions_by_source_ids[
+                (left_inv.canonical.source_market_id, right_inv.canonical.source_market_id)
+            ] = stored
+            decisions_by_pair[
+                (
+                    left_obs.venue.value,
+                    left_inv.canonical.source_market_id,
+                    right_obs.venue.value,
+                    right_inv.canonical.source_market_id,
+                )
+            ] = stored
+            headlines.append(
+                (
+                    _NormalizedMarket(left_inv.canonical.model_dump(mode="json"), left_inv.canonical),
+                    left_obs,
+                    right_obs,
+                    stored,
+                )
+            )
+            matched_pairs += 1
+        if not matched_pairs:
+            return None, [], [], books, 0, "unavailable"
+        matchbook_inv = [item for item in inventories if item.venue is VenueName.MATCHBOOK]
+        polymarket_inv = [item for item in inventories if item.venue is VenueName.POLYMARKET]
+        kalshi_inv = [item for item in inventories if item.venue is VenueName.KALSHI]
+        rows = assemble_fixture_inventory(
+            matchbook_inv,
+            polymarket_inv,
+            kalshi_markets=kalshi_inv,
+            matcher=self.market_matcher,
+            decisions_by_source_ids=decisions_by_source_ids,
+            decisions_by_pair=decisions_by_pair,
+            venue_costs=scan_kwargs.get("venue_costs"),
+            fx_snapshots=scan_kwargs.get("fx_snapshots"),
+            cost_resolver=self.paper_scan.cost_resolver,
+        )
+        matched = [
+            row
+            for row in rows
+            if row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
+        ]
+        chosen = matched[0] if matched else (rows[0] if rows else None)
+        if chosen is None:
+            return None, [], [], books, 0, "unavailable"
+        return chosen, decisions, headlines, books, matched_pairs, "refreshed"
+
+    def _note_hot_revalidation(
+        self,
+        issues: list[CollectorIssue],
+        relationship: HotMarketRelationship,
+        venue: VenueName,
+        result: _HotLegRefresh,
+    ) -> None:
+        detail = HOT_REVALIDATION_NEEDED_REASON
+        if result.gone:
+            detail = f"{HOT_REVALIDATION_NEEDED_REASON}:gone"
+        elif result.identity_changed:
+            detail = f"{HOT_REVALIDATION_NEEDED_REASON}:identity"
+        issues.append(
+            CollectorIssue(
+                stage="hot_refresh",
+                venue=venue,
+                source_id=relationship.market_key,
+                detail=detail,
+            )
+        )
+
+    async def _refresh_hot_venue_leg(
+        self,
+        venue: VenueName,
+        leg: HotVenueLeg,
+        *,
+        relationship: HotMarketRelationship,
+        events: list[_NormalizedEvent],
+        issues: list[CollectorIssue],
+    ) -> _HotLegRefresh:
+        if venue is VenueName.MATCHBOOK:
+            return await self._refresh_hot_matchbook_leg(
+                leg, relationship=relationship, events=events, issues=issues
+            )
+        if venue is VenueName.KALSHI:
+            return await self._refresh_hot_kalshi_leg(
+                leg, relationship=relationship, events=events, issues=issues
+            )
+        return await self._refresh_hot_polymarket_leg(
+            leg, relationship=relationship, events=events, issues=issues
+        )
+
+    async def _refresh_hot_matchbook_leg(
+        self,
+        leg: HotVenueLeg,
+        *,
+        relationship: HotMarketRelationship,
+        events: list[_NormalizedEvent],
+        issues: list[CollectorIssue],
+    ) -> _HotLegRefresh:
+        result = _HotLegRefresh()
+        getter = getattr(self.matchbook, "get_market", None)
+        event = _event_for_source(events, leg.source_event_id)
+        if not callable(getter) or event is None:
+            result.unavailable = True
+            return result
+        try:
+            started = perf_counter()
+            payload, failed = await self._wait_provider(
+                getter(leg.source_event_id, leg.source_market_id),
+                stage="get_market",
+                venue=VenueName.MATCHBOOK,
+                source_id=leg.source_market_id,
+                default=None,
+            )
+        except MatchbookMarketGoneError:
+            result.gone = True
+            self._bump_hot_stat("matchbook_get_market")
+            return result
+        self._bump_hot_stat("matchbook_get_market")
+        if failed or payload is None:
+            result.unavailable = True
+            return result
+        market_payload = extract_matchbook_market_payload(payload)
+        if market_payload is None:
+            result.gone = True
+            return result
+        if matchbook_payload_is_terminal(market_payload):
+            result.gone = True
+            return result
+        markets, inventory = self._inventory_markets(
+            event, [market_payload], venue=VenueName.MATCHBOOK, issues=issues
+        )
+        if not markets:
+            result.gone = True
+            return result
+        market = markets[0]
+        if not hot_identity_matches_market(
+            family=market.canonical.family.value if market.canonical.family else None,
+            period=market.canonical.period.value if market.canonical.period else None,
+            line=market.canonical.line,
+            settlement_key=(
+                market.canonical.settlement.deterministic_key()
+                if market.canonical.settlement
+                else None
+            ),
+            source_market_id=market.canonical.source_market_id,
+            expected=leg,
+        ):
+            result.identity_changed = True
+            return result
+        observation = self._try_matchbook_observation(
+            event,
+            market,
+            retrieved_at=datetime.now(UTC),
+            latency_ms=_elapsed_ms(started),
+            issues=issues,
+        )
+        if observation is None:
+            result.unavailable = True
+            return result
+        item = inventory[0] if inventory else _inventory_from_observation(observation)
+        item.observation = observation
+        result.inventory = item
+        result.observation = observation
+        result.books = 1
+        return result
+
+    async def _refresh_hot_kalshi_leg(
+        self,
+        leg: HotVenueLeg,
+        *,
+        relationship: HotMarketRelationship,
+        events: list[_NormalizedEvent],
+        issues: list[CollectorIssue],
+    ) -> _HotLegRefresh:
+        del relationship
+        result = _HotLegRefresh()
+        if self.kalshi is None:
+            result.unavailable = True
+            return result
+        event = _event_for_source(events, leg.source_event_id)
+        canonical = canonical_market_from_leg(leg)
+        tickers = kalshi_tickers_for_leg(leg)
+        client = self.kalshi
+        if event is None or canonical is None or not tickers or client is None:
+            result.unavailable = True
+            return result
+        books_by_ticker: dict[str, dict[str, Any]] = {}
+        fetched = 0
+        latency_ms = 0
+        failed = False
+
+        async def _one(ticker: str) -> None:
+            nonlocal fetched, latency_ms, failed
+            if failed or not ticker:
+                return
+            try:
+                started = perf_counter()
+                raw_book, book_failed = await self._wait_provider(
+                    client.get_order_book(
+                        event.canonical.source_event_id,
+                        ticker,
+                    ),
+                    stage="order_book",
+                    venue=VenueName.KALSHI,
+                    source_id=ticker,
+                    default=None,
+                )
+                if book_failed or raw_book is None:
+                    failed = True
+                    return
+                latency_ms += _elapsed_ms(started)
+                books_by_ticker[ticker] = raw_book
+                fetched += 1
+            except Exception as exc:
+                issues.append(
+                    CollectorIssue(
+                        stage="order_book",
+                        venue=VenueName.KALSHI,
+                        source_id=ticker,
+                        detail=str(exc),
+                    )
+                )
+                failed = True
+
+        await asyncio.gather(*[_one(ticker) for ticker in tickers])
+        self._bump_hot_stat("kalshi_order_books", fetched)
+        result.books = fetched
+        if failed:
+            result.unavailable = True
+            return result
+        evaluated_at = datetime.now(UTC)
+        age = retrieval_quote_age(retrieved_at=evaluated_at, evaluated_at=evaluated_at)
+        fee_snapshot = leg.fee_snapshot
+        if not fee_snapshot:
+            # Persisted UNIVERSE event payload may already carry fee overrides.
+            # This is not Get Series / Get Market contract proof.
+            fee_snapshot = resolve_kalshi_fee_metadata(
+                event=event.raw if isinstance(event.raw, dict) else None,
+                series=event.raw.get("series") if isinstance(event.raw, dict) else None,
+            )
+        try:
+            observation = self.kalshi_builder.build_from_canonical(
+                canonical,
+                books_by_ticker,
+                observed_at=evaluated_at,
+                source_latency_ms=latency_ms,
+                quote_age_ms=age.quote_age_ms,
+                quote_age_basis=age.basis,
+                quote_age_reason=age.reason,
+                fee_snapshot=fee_snapshot,
+            )
+        except (VenueNormalizationError, ValueError) as exc:
+            issues.append(
+                CollectorIssue(
+                    stage="build_observation",
+                    venue=VenueName.KALSHI,
+                    source_id=leg.source_market_id,
+                    detail=str(exc),
+                )
+            )
+            result.unavailable = True
+            return result
+        result.observation = observation
+        result.inventory = _inventory_from_observation(observation)
+        return result
+
+    async def _refresh_hot_polymarket_leg(
+        self,
+        leg: HotVenueLeg,
+        *,
+        relationship: HotMarketRelationship,
+        events: list[_NormalizedEvent],
+        issues: list[CollectorIssue],
+    ) -> _HotLegRefresh:
+        del relationship
+        result = _HotLegRefresh()
+        event = _event_for_source(events, leg.source_event_id)
+        tokens = [item for item in leg.source_runner_ids if str(item).strip()]
+        if event is None or not tokens:
+            result.unavailable = True
+            return result
+        books_by_token, latency_ms, fetched, failed = await self._fetch_polymarket_token_books(
+            event,
+            tokens,
+            market_id=leg.source_market_id,
+            issues=issues,
+        )
+        result.books = fetched
+        if failed:
+            result.unavailable = True
+            return result
+        canonical = canonical_market_from_leg(leg)
+        if canonical is None:
+            result.unavailable = True
+            return result
+        market = _NormalizedMarket(
+            {"id": leg.source_market_id, "question": canonical.family.value},
+            canonical,
+        )
+        observation = self._try_polymarket_observation(
+            event,
+            market,
+            books_by_token,
+            latency_ms=latency_ms,
+            issues=issues,
+        )
+        if observation is None:
+            result.unavailable = True
+            return result
+        if isinstance(leg.fee_snapshot, dict) and leg.fee_snapshot:
+            observation.metadata["polymarket_fee"] = dict(leg.fee_snapshot)
+        result.observation = observation
+        result.inventory = _inventory_from_observation(observation)
+        return result
 
     async def _fetch_matchbook_cluster_side(
         self,
@@ -3190,15 +3872,30 @@ class ReadOnlyCrossVenueCollector:
         *,
         issues: list[CollectorIssue],
     ) -> tuple[dict[str, dict[str, Any]], int, int, bool]:
+        tokens = [runner.source_runner_id for runner in market.canonical.runners]
+        return await self._fetch_polymarket_token_books(
+            event,
+            tokens,
+            market_id=market.canonical.source_market_id,
+            issues=issues,
+        )
+
+    async def _fetch_polymarket_token_books(
+        self,
+        event: _NormalizedEvent,
+        tokens: list[str],
+        *,
+        market_id: str,
+        issues: list[CollectorIssue],
+    ) -> tuple[dict[str, dict[str, Any]], int, int, bool]:
         books_by_token: dict[str, dict[str, Any]] = {}
         latency_ms = 0
         fetched = 0
         failed = False
-        runners = list(market.canonical.runners)
 
-        async def _one(runner: CanonicalRunner) -> None:
+        async def _one(token: str) -> None:
             nonlocal latency_ms, fetched, failed
-            if failed or self._provider_budget_exhausted():
+            if failed or self._provider_budget_exhausted() or not token:
                 failed = True
                 return
             try:
@@ -3206,33 +3903,33 @@ class ReadOnlyCrossVenueCollector:
                 raw_book, book_timed_out = await self._wait_provider(
                     self.polymarket.get_order_book(
                         event.canonical.source_event_id,
-                        market.canonical.source_market_id,
-                        runner.source_runner_id,
+                        market_id,
+                        token,
                     ),
                     stage="order_book",
                     venue=VenueName.POLYMARKET,
-                    source_id=runner.source_runner_id,
+                    source_id=token,
                     default=None,
                 )
                 if book_timed_out or raw_book is None:
                     failed = True
                     return
                 latency_ms += _elapsed_ms(started)
-                books_by_token[runner.source_runner_id] = raw_book
+                books_by_token[token] = raw_book
                 fetched += 1
             except Exception as exc:
                 issues.append(
                     CollectorIssue(
                         stage="order_book",
                         venue=VenueName.POLYMARKET,
-                        source_id=runner.source_runner_id,
+                        source_id=token,
                         detail=str(exc),
                     )
                 )
                 failed = True
 
-        if runners:
-            await asyncio.gather(*[_one(runner) for runner in runners])
+        if tokens:
+            await asyncio.gather(*[_one(token) for token in tokens])
         return books_by_token, latency_ms, fetched, failed
 
     def _try_polymarket_observation(
@@ -4579,6 +5276,25 @@ def _collector_series_failure_kind(exc: BaseException) -> tuple[str, bool]:
 
 def _elapsed_ms(started: float) -> int:
     return max(0, round((perf_counter() - started) * 1000))
+
+
+def _inventory_from_observation(observation: VenueMarketObservation) -> InventoryMarket:
+    market = observation.market
+    metadata = observation.metadata if isinstance(observation.metadata, dict) else {}
+    labels = metadata.get("raw_runner_labels")
+    runner_labels = (
+        [str(item) for item in labels if str(item).strip()] if isinstance(labels, list) else []
+    )
+    return InventoryMarket(
+        venue=observation.venue,
+        source_event_id=market.event.source_event_id,
+        source_market_id=market.source_market_id,
+        raw_name=str(metadata.get("raw_market_name") or market.family.value),
+        raw_market_type=str(metadata.get("raw_market_type") or "") or None,
+        raw_runner_labels=runner_labels,
+        canonical=market,
+        observation=observation,
+    )
 
 
 def finalisation_reserve_seconds(cycle_budget: float) -> float:

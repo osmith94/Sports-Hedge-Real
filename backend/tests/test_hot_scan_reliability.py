@@ -24,6 +24,11 @@ from sports_hedge.application.live_refresh import (
     SCAN_CYCLE_RETURN_GRACE_SECONDS,
     ScanCycleTimeout,
 )
+from sports_hedge.application.hot_market_relationships import (
+    HotMarketRelationship,
+    HotVenueLeg,
+    relationships_from_fixture_markets,
+)
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.config import Settings
@@ -46,6 +51,31 @@ from test_step8f_automatic_paper_entry import (
 from venue_cost_helpers import matchbook_polymarket_costs
 
 
+def _hung_hot_relationships() -> dict[str, list[HotMarketRelationship]]:
+    relationship = HotMarketRelationship(
+        canonical_event_id="hung-newcastle-chelsea",
+        market_key="both_teams_to_score|full_time|",
+        family="both_teams_to_score",
+        period="full_time",
+        matchbook=HotVenueLeg(
+            venue=VenueName.MATCHBOOK,
+            source_event_id="1001",
+            source_market_id="2001",
+            family="both_teams_to_score",
+            period="full_time",
+        ),
+        polymarket=HotVenueLeg(
+            venue=VenueName.POLYMARKET,
+            source_event_id="pm-event-1",
+            source_market_id="pm-market-1",
+            source_runner_ids=["yes-token", "no-token"],
+            family="both_teams_to_score",
+            period="full_time",
+        ),
+    )
+    return {relationship.canonical_event_id: [relationship]}
+
+
 class SlowCancellableMarketsMatchbook(FakeMatchbook):
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
         del event_id, filters
@@ -58,6 +88,11 @@ class SlowCancellableMarketsPolymarket(FakePolymarket):
         del event_id, filters
         await asyncio.sleep(30)
         return []
+
+    async def get_order_book(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        await asyncio.sleep(30)
+        return {"asset_id": "x", "bids": [], "asks": []}
 
 
 class CloseTerminatedPolymarket(FakePolymarket):
@@ -83,6 +118,21 @@ class CloseTerminatedPolymarket(FakePolymarket):
                 except asyncio.CancelledError:
                     continue
             return []
+        finally:
+            self.live_calls -= 1
+
+    async def get_order_book(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        self.live_calls += 1
+        try:
+            while not self._closed.is_set():
+                try:
+                    await asyncio.wait_for(self._closed.wait(), timeout=0.05)
+                except TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    continue
+            return {"asset_id": "x", "bids": [], "asks": []}
         finally:
             self.live_calls -= 1
 
@@ -193,6 +243,7 @@ async def test_hot_uncooperative_books_return_partial_before_envelope() -> None:
                     maximum_execution_risk=100,
                     cycle_timeout_seconds=cycle,
                     scan_lane=ScanLane.HOT.value,
+                    hot_market_relationships=_hung_hot_relationships(),
                 )
             finally:
                 await collector.polymarket.aclose()
@@ -256,6 +307,7 @@ async def test_repeated_slow_hot_cycles_do_not_accumulate_tasks() -> None:
                 maximum_execution_risk=100,
                 cycle_timeout_seconds=cycle,
                 scan_lane=ScanLane.HOT.value,
+                hot_market_relationships=_hung_hot_relationships(),
             )
         finally:
             await polymarket.aclose()
@@ -311,6 +363,7 @@ async def test_collect_cancel_uncancels_so_aclose_can_run() -> None:
                 maximum_execution_risk=100,
                 cycle_timeout_seconds=8.0,
                 scan_lane=ScanLane.HOT.value,
+                hot_market_relationships=_hung_hot_relationships(),
             )
         )
         await asyncio.sleep(0.05)
@@ -473,11 +526,19 @@ async def test_hot_diagnostics_include_provider_and_stage_attribution() -> None:
         cycle_timeout_seconds=8.0,
     )
     try:
+        universe = await collector.collect_and_scan(
+            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+            fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
+            maximum_execution_risk=100,
+        )
         report = await collector.collect_and_scan(
             venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
             maximum_execution_risk=100,
             scan_lane=ScanLane.HOT.value,
+            identity_scope=[item.canonical_event_id for item in universe.discovered_fixtures],
+            known_source_events=universe.fixture_source_events,
+            hot_market_relationships=relationships_from_fixture_markets(universe.fixture_markets),
         )
         diagnostics = report.scan_diagnostics
         for venue in DIAGNOSTIC_PROVIDERS:
@@ -525,6 +586,7 @@ async def test_cooperative_cancel_is_not_counted_as_orphan() -> None:
             maximum_execution_risk=100,
             cycle_timeout_seconds=0.5,
             scan_lane=ScanLane.HOT.value,
+            hot_market_relationships=_hung_hot_relationships(),
         )
         assert report.scan_diagnostics["cancel_count"] >= 1
         assert report.scan_diagnostics["inflight_orphaned"] == 0

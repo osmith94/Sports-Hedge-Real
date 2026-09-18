@@ -25,6 +25,8 @@ export const EQUIVALENT_MARKETS_HELP =
 
 export const NOT_EVALUATED_SCAN_BUDGET_LABEL = "Not evaluated — scan budget exhausted";
 export const NOT_EVALUATED_MARKET_FETCH_LABEL = "Not evaluated — market fetch unavailable";
+export const HOT_RELATIONSHIP_MISSING_LABEL = "Not evaluated — HOT relationship missing";
+export const HOT_REVALIDATION_NEEDED_LABEL = "HOT revalidation needed";
 export const FIXTURE_FOUND_LABEL = "fixture found";
 
 export const BEST_ARB_MARKET_HELP =
@@ -133,6 +135,7 @@ export function marketEvaluationUnevaluated(item: DiscoveredFixture): boolean {
   if (
     state === "not_evaluated_scan_deadline" ||
     state === "market_fetch_unavailable" ||
+    state === "hot_relationship_missing" ||
     item.opportunity_state === "not_evaluated"
   ) {
     return true;
@@ -146,6 +149,12 @@ export function marketEvaluationLabel(item: DiscoveredFixture): string {
   }
   if (item.market_evaluation_state === "market_fetch_unavailable") {
     return NOT_EVALUATED_MARKET_FETCH_LABEL;
+  }
+  if (item.market_evaluation_state === "hot_relationship_missing") {
+    return HOT_RELATIONSHIP_MISSING_LABEL;
+  }
+  if (item.market_evaluation_reason === "hot_revalidation_needed") {
+    return HOT_REVALIDATION_NEEDED_LABEL;
   }
   if (marketEvaluationUnevaluated(item)) return "Not evaluated";
   return EQUIVALENT_MARKETS_HELP;

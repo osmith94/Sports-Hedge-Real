@@ -32,6 +32,7 @@ from sports_hedge.application.collector import (
     MarketEvaluationState,
     ReadOnlyCrossVenueCollector,
 )
+from sports_hedge.application.hot_market_relationships import relationships_from_fixture_markets
 from sports_hedge.application.mapping_review import MappingReviewService
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
@@ -193,6 +194,9 @@ class SyntheticMatchbook:
             ]
         }
 
+    def _markets(self, event_id: int | str) -> list[dict[str, Any]]:
+        return [_btts_matchbook_market(20_000 + int(event_id))]
+
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
         del filters
         self._universe.list_markets_calls["matchbook"] += 1
@@ -200,7 +204,23 @@ class SyntheticMatchbook:
         if self._universe.stall_after_calls is not None:
             stall = stall and self._universe.list_markets_calls["matchbook"] > self._universe.stall_after_calls
         await self._universe._pace(stall=stall)
-        return {"markets": [_btts_matchbook_market(20_000 + int(event_id))]}
+        return {"markets": self._markets(event_id)}
+
+    async def get_market(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del filters
+        stall = self._universe.stall_matchbook_markets
+        await self._universe._pace(stall=stall)
+        for market in self._markets(event_id):
+            if str(market.get("id")) == str(market_id):
+                return market
+        from sports_hedge.venues.matchbook import MatchbookMarketGoneError
+
+        raise MatchbookMarketGoneError(event_id, market_id, 404)
 
 
 class SyntheticPolymarket:
@@ -431,6 +451,7 @@ async def test_repeated_hot_cycles_do_not_rediscover_or_slow_down() -> None:
                 scan_lane=ScanLane.HOT.value,
                 identity_scope=scope,
                 known_source_events=known,
+                hot_market_relationships=relationships_from_fixture_markets(first.fixture_markets),
             )
             durations.append(monotonic() - started)
             orphaned.append(hot.scan_diagnostics["inflight_orphaned"])
@@ -466,6 +487,7 @@ async def test_cancelled_concurrent_hot_scan_drains_cluster_and_provider_tasks()
                 scan_lane=ScanLane.HOT.value,
                 identity_scope=[item.canonical_event_id for item in seed.discovered_fixtures],
                 known_source_events=seed.fixture_source_events,
+                hot_market_relationships=relationships_from_fixture_markets(seed.fixture_markets),
             )
         )
         await asyncio.sleep(0.1)
