@@ -3221,13 +3221,12 @@ class ReadOnlyCrossVenueCollector:
                 for label in raw_runner_labels(payload, VenueName.KALSHI):
                     if label and label not in labels:
                         labels.append(label)
-            if len(labels) < len(market.runners):
-                for runner in market.runners:
-                    if runner.label and runner.label not in labels:
-                        labels.append(runner.label)
-                    outcome = runner.outcome.value if runner.outcome is not None else ""
-                    if outcome and outcome not in labels:
-                        labels.append(outcome)
+            for runner in market.runners:
+                if runner.label and runner.label not in labels:
+                    labels.append(runner.label)
+                outcome = runner.outcome.value
+                if outcome and outcome not in labels:
+                    labels.append(outcome)
             inventory.append(
                 InventoryMarket(
                     venue=VenueName.KALSHI,
