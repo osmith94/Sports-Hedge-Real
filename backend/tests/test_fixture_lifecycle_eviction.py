@@ -15,6 +15,7 @@ from sports_hedge.application.collector import (
     ReadOnlyCrossVenueCollector,
 )
 from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
+from sports_hedge.application.hot_market_relationships import relationships_from_fixture_markets
 from sports_hedge.application.live_refresh import LiveRefreshCoordinator
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import (
@@ -543,6 +544,7 @@ class LifecycleMatchbook:
         self.in_running = in_running
         self.list_events_calls = 0
         self.list_markets_calls: list[str] = []
+        self.get_market_calls: list[tuple[str, str]] = []
 
     async def list_events(self, **filters: Any) -> dict[str, Any]:
         del filters
@@ -560,34 +562,50 @@ class LifecycleMatchbook:
             ]
         }
 
+    def _markets(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": 26401,
+                "name": "Match Odds",
+                "runners": [
+                    {
+                        "id": 1,
+                        "name": "Norwich City",
+                        "prices": [{"side": "back", "odds": "2.10", "available-amount": "80"}],
+                    },
+                    {
+                        "id": 2,
+                        "name": "Draw",
+                        "prices": [{"side": "back", "odds": "3.40", "available-amount": "80"}],
+                    },
+                    {
+                        "id": 3,
+                        "name": "West Bromwich Albion",
+                        "prices": [{"side": "back", "odds": "3.60", "available-amount": "80"}],
+                    },
+                ],
+            }
+        ]
+
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
         del filters
         self.list_markets_calls.append(str(event_id))
-        return {
-            "markets": [
-                {
-                    "id": 26401,
-                    "name": "Match Odds",
-                    "runners": [
-                        {
-                            "id": 1,
-                            "name": "Norwich City",
-                            "prices": [{"side": "back", "odds": "2.10", "available-amount": "80"}],
-                        },
-                        {
-                            "id": 2,
-                            "name": "Draw",
-                            "prices": [{"side": "back", "odds": "3.40", "available-amount": "80"}],
-                        },
-                        {
-                            "id": 3,
-                            "name": "West Bromwich Albion",
-                            "prices": [{"side": "back", "odds": "3.60", "available-amount": "80"}],
-                        },
-                    ],
-                }
-            ]
-        }
+        return {"markets": self._markets()}
+
+    async def get_market(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del filters
+        self.get_market_calls.append((str(event_id), str(market_id)))
+        for market in self._markets():
+            if str(market.get("id")) == str(market_id):
+                return market
+        from sports_hedge.venues.matchbook import MatchbookMarketGoneError
+
+        raise MatchbookMarketGoneError(event_id, market_id, 404)
 
 
 class LifecyclePolymarket:
@@ -669,34 +687,52 @@ async def test_matchbook_finished_stops_hot_market_book_and_economics_calls() ->
     coordinator.reset()
     coordinator._clock = lambda: clock["now"]
     try:
-        live_report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
-            fx_snapshots=[
-                FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75")),
-                FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal("1")),
-            ],
+        costs = matchbook_polymarket_costs()
+        fx = [
+            FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75")),
+            FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal("1")),
+        ]
+        universe = await collector.collect_and_scan(
+            venue_costs=costs,
+            fx_snapshots=fx,
             maximum_execution_risk=100,
-            scan_lane=ScanLane.HOT.value,
+            scan_lane=ScanLane.UNIVERSE.value,
         )
-        coordinator.record_report(live_report, scan_lane=ScanLane.HOT)
+        coordinator.record_report(universe, scan_lane=ScanLane.UNIVERSE)
         assert matchbook.list_markets_calls
         assert polymarket.list_markets_calls
+        assert polymarket.book_calls
+        assert paper_scan.scan_pair_calls > 0
+        universe_markets = list(matchbook.list_markets_calls)
+        universe_pm_markets = list(polymarket.list_markets_calls)
+        fixture = next(item for item in universe.discovered_fixtures if item.matchbook_matched)
+        live_report = await collector.collect_and_scan(
+            venue_costs=costs,
+            fx_snapshots=fx,
+            maximum_execution_risk=100,
+            scan_lane=ScanLane.HOT.value,
+            identity_scope=[fixture.canonical_event_id],
+            known_source_events=universe.fixture_source_events,
+            hot_market_relationships=relationships_from_fixture_markets(universe.fixture_markets),
+        )
+        coordinator.record_report(live_report, scan_lane=ScanLane.HOT)
+        assert matchbook.list_markets_calls == universe_markets
+        assert polymarket.list_markets_calls == universe_pm_markets
+        assert matchbook.get_market_calls
         assert polymarket.book_calls
         assert paper_scan.scan_pair_calls > 0
         live_markets = list(matchbook.list_markets_calls)
         live_pm_markets = list(polymarket.list_markets_calls)
         live_books = list(polymarket.book_calls)
         live_scans = paper_scan.scan_pair_calls
+        live_get_market = list(matchbook.get_market_calls)
         assert coordinator.fixture_current_state().hot_identity_scope(clock["now"])
 
         matchbook.status = "finished"
         matchbook.in_running = False
         finished_report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
-            fx_snapshots=[
-                FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75")),
-                FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal("1")),
-            ],
+            venue_costs=costs,
+            fx_snapshots=fx,
             maximum_execution_risk=100,
             scan_lane=ScanLane.UNIVERSE.value,
         )
@@ -705,6 +741,7 @@ async def test_matchbook_finished_stops_hot_market_book_and_economics_calls() ->
         assert polymarket.list_markets_calls == live_pm_markets
         assert polymarket.book_calls == live_books
         assert paper_scan.scan_pair_calls == live_scans
+        assert matchbook.get_market_calls == live_get_market
         store = coordinator.fixture_current_state()
         assert store.hot_identity_scope(clock["now"]) == []
         assert store.inventory(clock["now"]) == []
@@ -717,21 +754,23 @@ async def test_matchbook_finished_stops_hot_market_book_and_economics_calls() ->
         clock["now"] = clock["now"] + timedelta(seconds=30)
         plan = coordinator.plan_tick(now=clock["now"])
         hot_report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
-            fx_snapshots=[
-                FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75")),
-                FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal("1")),
-            ],
+            venue_costs=costs,
+            fx_snapshots=fx,
             maximum_execution_risk=100,
             scan_lane=ScanLane.HOT.value,
             identity_scope=plan.identity_scope or store.hot_identity_scope(clock["now"]),
             known_source_events=store.known_source_events(store.hot_identity_scope(clock["now"])),
+            hot_market_relationships=store.hot_market_relationships(
+                store.hot_identity_scope(clock["now"]),
+                now=clock["now"],
+            ),
         )
         coordinator.record_report(hot_report, scan_lane=ScanLane.HOT)
         assert matchbook.list_markets_calls == live_markets
         assert polymarket.list_markets_calls == live_pm_markets
         assert polymarket.book_calls == live_books
         assert paper_scan.scan_pair_calls == live_scans
+        assert matchbook.get_market_calls == live_get_market
         assert coordinator.public_status().discovered_fixtures == []
         assert live_report.discovered_fixtures
         assert live_report.paper_decisions

@@ -12,8 +12,15 @@ from typing import Any
 
 import pytest
 
-from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
+from sports_hedge.application.collector import (
+    MarketEvaluationState,
+    ReadOnlyCrossVenueCollector,
+)
 from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
+from sports_hedge.application.hot_market_relationships import (
+    HOT_RELATIONSHIP_MISSING_REASON,
+    relationships_from_fixture_markets,
+)
 from sports_hedge.application.mapping_census import CENSUS_DATA_CLASS_FIXTURE, census_from_report
 from sports_hedge.application.mapping_forensics import (
     VENUE_SCOPE_UNIVERSE,
@@ -667,6 +674,9 @@ async def test_hot_and_universe_agree_on_unknown_1x2() -> None:
             scan_lane=ScanLane.HOT.value,
             identity_scope=[fixture.canonical_event_id],
             known_source_events=known,
+            hot_market_relationships=relationships_from_fixture_markets(
+                universe.fixture_markets
+            ),
         )
         universe_row = next(
             row
@@ -674,31 +684,33 @@ async def test_hot_and_universe_agree_on_unknown_1x2() -> None:
             if row.family == "match_result"
             and GAMEWIN_ORDINARY_1X2_AUDIT_REASON in (row.match_reasons or [])
         )
-        hot_row = next(
+        hot_gamewin = [
             row
             for rows in hot.fixture_markets.values()
             for row in rows
-            if row.family == "match_result"
-            and GAMEWIN_ORDINARY_1X2_AUDIT_REASON in (row.match_reasons or [])
+            if GAMEWIN_ORDINARY_1X2_AUDIT_REASON in (row.match_reasons or [])
+        ]
+        target = next(
+            item
+            for item in hot.discovered_fixtures
+            if item.canonical_event_id == fixture.canonical_event_id
         )
         assert hot_matchbook.list_events_calls == 0
         assert hot_kalshi.list_events_calls == 0
         assert universe.matched_market_pairs == 12
-        assert hot.matched_market_pairs == 1
-        assert hot_row.comparison_status is InventoryComparisonStatus.OTHER
+        assert hot_gamewin == []
+        assert target.market_evaluation_state == MarketEvaluationState.HOT_RELATIONSHIP_MISSING.value
+        assert target.market_evaluation_reason == HOT_RELATIONSHIP_MISSING_REASON
         assert universe_row.comparison_status is InventoryComparisonStatus.OTHER
-        assert hot_row.reason == "catalogue_review_required"
         assert universe_row.reason == "catalogue_review_required"
-        assert hot_row.entered_solver is False
         assert universe_row.entered_solver is False
-        assert set(hot_row.match_reasons) >= {
+        assert set(universe_row.match_reasons) >= {
             UNKNOWN_SETTLEMENT_ALLOWED_REASON,
             GAMEWIN_ORDINARY_1X2_AUDIT_REASON,
         }
-        assert set(universe_row.match_reasons) == set(hot_row.match_reasons)
         assert not any(
             item.solver_model is not None or item.depth_scan is not None
-            for item in (*universe.paper_decisions, *hot.paper_decisions)
+            for item in universe.paper_decisions
         )
     finally:
         hot_repo.close()
