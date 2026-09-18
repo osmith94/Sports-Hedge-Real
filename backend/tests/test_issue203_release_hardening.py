@@ -105,9 +105,9 @@ from venue_cost_helpers import matchbook_polymarket_costs
         ),
         (
             "Not including extra time and penalties.",
-            SettlementScope.REGULATION_TIME,
-            False,
-            False,
+            SettlementScope.UNKNOWN,
+            None,
+            None,
         ),
         (
             "Winner including extra time and penalties. Extra time and penalties do not count.",

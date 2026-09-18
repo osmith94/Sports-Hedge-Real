@@ -25,6 +25,13 @@ GAMEWIN_TEMPLATE = (
     "full match."
 )
 GAMEWIN_URL = "https://assets.kalshi.com/contract_terms/SOCCERGAMEWIN.pdf"
+NINETY_MINUTE_EXCLUSION = (
+    "Resolves after 90 minutes plus stoppage time (does not include extra time or penalties)."
+)
+CANCEL_RESCHEDULE_FAIR_PRICE = (
+    "If the game is cancelled or rescheduled to over 48 hours away, "
+    "the market will resolve to a fair price in accordance with the rules."
+)
 
 MB_EVENT: dict[str, Any] = {
     "id": 26801,
@@ -334,6 +341,20 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
             left=_mb([_mb_1x2()]),
             right=_kalshi(_kalshi_1x2(rules=GAMEWIN_TEMPLATE), series=KALSHI_GAMEWIN_SERIES),
             notes=["matcher_currently_admits_gamewin_unknown_1x2"],
+        ),
+        CorpusEntry(
+            entry_id="bad-1x2-mb-k-cancel-reschedule-fair-price",
+            archetype=CatalogueArchetype.MATCH_RESULT_1X2,
+            expected_state=review,
+            known_kind="known_bad",
+            left=_mb([_mb_1x2()]),
+            right=_kalshi(
+                [
+                    {**item, "rules_secondary": CANCEL_RESCHEDULE_FAIR_PRICE}
+                    for item in _kalshi_1x2(rules=NINETY_MINUTE_EXCLUSION)
+                ]
+            ),
+            notes=["kalshi_unmodelled_cancellation_reschedule_fair_price"],
         ),
         CorpusEntry(
             entry_id="bad-1x2-mb-pm-unknown-settlement",

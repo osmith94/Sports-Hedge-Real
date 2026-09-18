@@ -465,7 +465,7 @@ async def test_evaluated_zero_equivalents_is_not_the_unevaluated_state() -> None
         assert fixture.market_evaluation_state == MarketEvaluationState.EVALUATED
         assert fixture.matched_equivalent_count == 0
         assert fixture.opportunity_state == "unmatched"
-        assert fixture.no_comparison_reason == "no_settlement_equivalent_market_pair"
+        assert fixture.no_comparison_reason == "no_normalized_market_family_overlap"
         assert fixture.market_evaluation_reason is None
     finally:
         repository.close()

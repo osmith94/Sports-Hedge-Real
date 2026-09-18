@@ -14,6 +14,19 @@ from sports_hedge.catalogue.states import CatalogueApprovalState, CatalogueArche
 CENSUS_MATRIX_VERSION = "v1"
 CENSUS_PARENT_COMMIT = "620d1807473a5bfaa08a5023d2a28f4da756efe3"
 
+# No versioned Matchbook↔Kalshi assumption currently proves that Kalshi
+# cancellation/reschedule-to-fair-price is economically compatible with
+# Matchbook regulation 1X2. Matchbook payloads have no resolution-rule text;
+# `_standard_football_settlement` does not model this rule. Absence of
+# Matchbook wording is not compatibility (Core Tenets 03 and 20).
+MATCHBOOK_KALSHI_CANCEL_RESCHEDULE_FAIR_PRICE_ASSUMPTION_ID = None
+MATCHBOOK_KALSHI_CANCEL_RESCHEDULE_FAIR_PRICE_COMPATIBLE = False
+MATCHBOOK_KALSHI_CANCEL_RESCHEDULE_FAIR_PRICE_REASON = (
+    "No versioned Matchbook↔Kalshi assumption proves cancellation/"
+    "reschedule-to-fair-price economically compatible. Do not invent "
+    "Matchbook void/postponement from absent rule text."
+)
+
 
 class PairwiseCell(BaseModel):
     archetype: CatalogueArchetype
@@ -53,6 +66,7 @@ PAIRWISE_MATRIX: tuple[PairwiseCell, ...] = (
         ),
         sibling_states=[
             "REVIEW_REQUIRED: Kalshi GAMEWIN result-scope placeholder unavailable",
+            "REVIEW_REQUIRED: Kalshi cancellation/reschedule-to-fair-price unmodelled; no pairwise assumption",
             "KNOWN_CONTRADICTION: proven extra-time/penalties vs Matchbook regulation",
             "UNSUPPORTED: To Qualify / two-way books",
         ],

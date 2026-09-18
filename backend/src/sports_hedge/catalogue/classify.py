@@ -35,6 +35,7 @@ from sports_hedge.matching.ordinary_1x2 import (
     settlement_fingerprints_contradict,
 )
 from sports_hedge.normalization.venues import (
+    KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
     KalshiNormalizer,
     MatchbookNormalizer,
     PolymarketNormalizer,
@@ -264,6 +265,11 @@ def _economic_state(
     if left_outcomes != required:
         return CatalogueApprovalState.REVIEW_REQUIRED, "incomplete_outcome_set", notes
 
+    cancel_reason = KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
+    if left.settlement.unknown_reason == cancel_reason or right.settlement.unknown_reason == cancel_reason:
+        notes.append("incomplete_settlement_is_review_required_not_confidence")
+        notes.append("no_matchbook_kalshi_cancel_reschedule_fair_price_assumption")
+        return CatalogueApprovalState.REVIEW_REQUIRED, cancel_reason, notes
     if not left.settlement.is_economically_complete() or not right.settlement.is_economically_complete():
         notes.append("incomplete_settlement_is_review_required_not_confidence")
         return CatalogueApprovalState.REVIEW_REQUIRED, "incomplete_settlement", notes

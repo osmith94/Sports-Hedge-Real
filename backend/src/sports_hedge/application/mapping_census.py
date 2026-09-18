@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from sports_hedge.application.collector import CollectionReport, MarketEvaluationState
+from sports_hedge.application.equivalence_diagnostics import zero_equivalent_reason_counts
 from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
 from sports_hedge.application.mapping_forensics import VENUE_SCOPE_ALL, VENUE_SCOPE_UNIVERSE
 from sports_hedge.application.scan_cycle_audit import (
@@ -45,6 +46,7 @@ class MappingCensus(BaseModel):
     market_family_breakdown: dict[str, int] = Field(default_factory=dict)
     comparison_status_breakdown: dict[str, int] = Field(default_factory=dict)
     evaluated_zero_equivalent_fixtures: int = Field(ge=0)
+    zero_equivalent_reason_counts: dict[str, int] = Field(default_factory=dict)
     unsupported_market_skips: int = Field(ge=0)
     skip_failure_reasons: dict[str, int] = Field(default_factory=dict)
     qualifying_arbs: int = Field(ge=0)
@@ -162,6 +164,10 @@ def census_from_report(
         market_family_breakdown=dict(sorted(family_counts.items())),
         comparison_status_breakdown=dict(sorted(status_counts.items())),
         evaluated_zero_equivalent_fixtures=evaluated_zero,
+        zero_equivalent_reason_counts=zero_equivalent_reason_counts(
+            list(report.discovered_fixtures),
+            report.fixture_markets,
+        ),
         unsupported_market_skips=unsupported,
         skip_failure_reasons=dict(sorted(skip_reasons.items())),
         qualifying_arbs=int(report.qualifying_arbs),
@@ -195,6 +201,7 @@ def render_census(census: MappingCensus) -> str:
         f"market_family_breakdown={_fmt_counts(census.market_family_breakdown)}",
         f"comparison_status_breakdown={_fmt_counts(census.comparison_status_breakdown)}",
         f"evaluated_zero_equivalent_fixtures={census.evaluated_zero_equivalent_fixtures}",
+        f"zero_equivalent_reason_counts={_fmt_counts(census.zero_equivalent_reason_counts)}",
         f"unsupported_market_skips={census.unsupported_market_skips}",
         f"skip_failure_reasons={_fmt_counts(census.skip_failure_reasons)}",
         f"qualifying_arbs={census.qualifying_arbs}",
