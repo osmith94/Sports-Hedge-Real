@@ -133,6 +133,27 @@ def _mb_event_at(kickoff: datetime) -> dict[str, Any]:
     return event
 
 
+class HotOverlapMatchbook(OverlapMatchbook):
+    """UNIVERSE uses list_markets; HOT targeted refresh uses get_market by ID."""
+
+    def __init__(self, events: list[dict[str, Any]], markets_by_id: dict[str, list[dict[str, Any]]]) -> None:
+        super().__init__(events, markets_by_id)
+        self.get_market_calls: list[tuple[str, str]] = []
+
+    async def get_market(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del filters
+        self.get_market_calls.append((str(event_id), str(market_id)))
+        for market in self.markets_by_id.get(str(event_id), []):
+            if str(market.get("id")) == str(market_id):
+                return deepcopy(market)
+        raise LookupError(f"{event_id}/{market_id}")
+
+
 def test_paper_boundary_holds() -> None:
     settings = Settings()
     assert settings.sports_hedge_mode == "paper"
@@ -424,7 +445,7 @@ def test_gamewin_1x2_is_paper_assumed_across_three_minute_offset() -> None:
 
 @pytest.mark.asyncio
 async def test_offset_siblings_admit_four_families_and_hot_exact_ids() -> None:
-    matchbook = OverlapMatchbook(
+    matchbook = HotOverlapMatchbook(
         [_mb_event_at(GAME_KICKOFF)],
         {str(MB_EVENT_ID): [_mb_match_odds(), _mb_btts(), _mb_totals("0.5"), _mb_totals("2.5"), _mb_ftts()]},
     )
@@ -538,6 +559,7 @@ async def test_offset_siblings_admit_four_families_and_hot_exact_ids() -> None:
     try:
         matchbook.list_events_calls = 0
         matchbook.list_markets_calls.clear()
+        matchbook.get_market_calls.clear()
         kalshi.list_events_calls = 0
         kalshi.list_markets_calls.clear()
         kalshi.book_calls.clear()
@@ -557,6 +579,13 @@ async def test_offset_siblings_admit_four_families_and_hot_exact_ids() -> None:
     assert kalshi.list_events_calls == 0
     assert matchbook.list_markets_calls == []
     assert kalshi.list_markets_calls == []
+    persisted_mb_ids = {
+        str(item.matchbook.source_market_id)
+        for item in persisted
+        if item.matchbook is not None
+    }
+    assert persisted_mb_ids
+    assert {call[1] for call in matchbook.get_market_calls} <= persisted_mb_ids
     persisted_kalshi_ids = {
         str(contract)
         for item in persisted
