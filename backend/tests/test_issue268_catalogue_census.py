@@ -24,6 +24,7 @@ from sports_hedge.application.market_observation import (
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.catalogue.admission import (
     assess_catalogue_admission,
+    catalogue_allows_live_execution,
     catalogue_allows_solver,
 )
 from sports_hedge.catalogue.classify import (
@@ -150,26 +151,39 @@ def test_corpus_classifications_match_expected_states() -> None:
             assert assessment.state is CatalogueApprovalState.APPROVED_EQUIVALENT
             assert assessment.solver_model is not None
             assert assessment.settlement_complete is True
+            assert assessment.paper_mode_admitted is True
+            assert assessment.execution_eligible is False
+        elif entry.known_kind == "paper_assumed":
+            assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+            assert assessment.settlement_complete is False
+            assert assessment.paper_mode_admitted is True
+            assert assessment.execution_eligible is False
+            assert assessment.settlement_assumption == "regulation_time"
         else:
             assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
+            assert assessment.state is not CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
 
 
-def test_gamewin_unknown_1x2_is_review_required_despite_matcher_admission() -> None:
+def test_gamewin_unknown_1x2_is_paper_assumed_not_settlement_proven() -> None:
     entry = next(
         item for item in census_corpus() if item.entry_id == "bad-1x2-mb-k-gamewin-unknown"
     )
     assessment = classify_payload_pair(entry.left, entry.right)
-    assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
-    assert assessment.reason == "incomplete_settlement"
+    assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert assessment.reason == "paper_assumed_equivalent"
     assert assessment.matcher_matched is True
     assert assessment.matcher_admits_unknown_1x2 is True
     assert assessment.solver_model == "simple_complete_set"
-    assert assessment.known_conflict_with_current_matcher is True
+    assert assessment.known_conflict_with_current_matcher is False
+    assert assessment.paper_mode_admitted is True
+    assert assessment.execution_eligible is False
+    assert assessment.settlement_assumption == "regulation_time"
     matchbook = normalize_payload_side(entry.left)
     kalshi = normalize_payload_side(entry.right)
     assert allow_unknown_settlement_for_ordinary_1x2(matchbook, kalshi) is True
     assert kalshi.settlement.is_economically_complete() is False
-    assert catalogue_allows_solver(matchbook, kalshi) is False
+    assert catalogue_allows_solver(matchbook, kalshi) is True
+    assert catalogue_allows_live_execution(matchbook, kalshi) is False
 
 
 def test_high_confidence_does_not_approve_incomplete_settlement() -> None:
@@ -232,7 +246,6 @@ def test_high_confidence_does_not_approve_incomplete_settlement() -> None:
 
 def test_review_required_examples_are_explicit() -> None:
     ids = {
-        "bad-1x2-mb-k-gamewin-unknown",
         "bad-1x2-mb-pm-unknown-settlement",
         "bad-btts-k-ambiguous-rules",
         "bad-ftts-missing-no-goal-both",
@@ -318,12 +331,14 @@ def test_family_coverage_report_has_no_silent_regressions() -> None:
     assert report.unexpected_known_good_regressions == 0
     assert report.unexpected_known_bad_approvals == 0
     assert report.known_good_retained == 14
-    assert report.matcher_catalogue_conflicts == 1
-    assert report.conflict_entry_ids == ["bad-1x2-mb-k-gamewin-unknown"]
+    assert report.paper_assumed_count == 1
+    assert report.matcher_catalogue_conflicts == 0
+    assert report.conflict_entry_ids == []
     assert report.families["match_result_1x2"].after_approved == 3
+    assert report.families["match_result_1x2"].paper_assumed_equivalent == 1
     assert report.families["match_result_1x2"].before_solver_admitted == 4
     rendered = render_coverage_markdown(report)
-    assert "GAMEWIN-unknown" in " ".join(report.notes)
+    assert "PAPER_ASSUMED_EQUIVALENT" in " ".join(report.notes)
     assert "match_result_1x2" in rendered
 
 
@@ -344,7 +359,7 @@ def test_gamewin_payload_helpers_remain_available_for_review() -> None:
         _kalshi(_kalshi_1x2(rules=GAMEWIN_TEMPLATE), series=KALSHI_GAMEWIN_SERIES),
     )
     assert isinstance(assessment, CataloguePairAssessment)
-    assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
+    assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert classify_payload_pair(_mb([_mb_1x2()]), _pm([_pm_1x2()])).state is (
         CatalogueApprovalState.APPROVED_EQUIVALENT
     )
@@ -430,7 +445,7 @@ def test_approved_catalogue_pair_reaches_solver_eligibility() -> None:
         repository.close()
 
 
-def test_review_required_gamewin_is_blocked_even_if_legacy_matcher_matches() -> None:
+def test_paper_assumed_gamewin_is_paper_admitted_never_live_execution() -> None:
     entry = next(
         item for item in census_corpus() if item.entry_id == "bad-1x2-mb-k-gamewin-unknown"
     )
@@ -440,11 +455,14 @@ def test_review_required_gamewin_is_blocked_even_if_legacy_matcher_matches() -> 
     assert match.matched is True
     assert allow_unknown_settlement_for_ordinary_1x2(left, right) is True
     admission = assess_catalogue_admission(left, right)
-    assert admission.allowed is False
-    assert admission.assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
-    assert admission.rejection_reason == "catalogue_review_required"
-    assert scan_eligible_pair(left, right, match) is False
-    assert catalogue_allows_solver(left, right) is False
+    assert admission.allowed is True
+    assert admission.paper_mode_admitted is True
+    assert admission.live_execution_eligible is False
+    assert admission.assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert admission.settlement_assumption == "regulation_time"
+    assert scan_eligible_pair(left, right, match) is True
+    assert catalogue_allows_solver(left, right) is True
+    assert catalogue_allows_live_execution(left, right) is False
 
     service, repository = _scan_service()
     try:
@@ -472,10 +490,9 @@ def test_review_required_gamewin_is_blocked_even_if_legacy_matcher_matches() -> 
             maximum_execution_risk=100,
         )
         assert decision.market_match.matched is True
-        assert "catalogue_review_required" in decision.rejection_reasons
-        assert decision.solver_model is None
-        assert decision.depth_scan is None
-        assert decision.eligible_for_paper_simulation is False
+        assert "catalogue_review_required" not in decision.rejection_reasons
+        assert not any(reason.startswith("catalogue_") for reason in decision.rejection_reasons)
+        assert Settings().sports_hedge_execution_enabled is False
     finally:
         repository.close()
 
@@ -513,9 +530,10 @@ def test_hot_and_universe_use_the_same_catalogue_gate() -> None:
     right = normalize_payload_side(entry.right)
     hot = assess_catalogue_admission(left, right)
     universe = assess_catalogue_admission(left, right)
-    assert hot.allowed is False
-    assert universe.allowed is False
+    assert hot.allowed is True
+    assert universe.allowed is True
     assert hot.assessment.state is universe.assessment.state
+    assert hot.assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert hot.rejection_reason == universe.rejection_reason
     assert hot.catalogue_shared_by == ("hot", "universe")
     assert universe.catalogue_shared_by == ("hot", "universe")

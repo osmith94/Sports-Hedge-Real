@@ -22,6 +22,7 @@ class FamilyCoverage(BaseModel):
     known_good: int = 0
     known_bad: int = 0
     approved_equivalent: int = 0
+    paper_assumed_equivalent: int = 0
     review_required: int = 0
     parameter_mismatch: int = 0
     known_contradiction: int = 0
@@ -43,6 +44,7 @@ class CatalogueCoverageReport(BaseModel):
     unexpected_known_good_regressions: int = 0
     unexpected_known_bad_approvals: int = 0
     review_required_count: int = 0
+    paper_assumed_count: int = 0
     unsupported_count: int = 0
     matcher_catalogue_conflicts: int = 0
     families: dict[str, FamilyCoverage] = Field(default_factory=dict)
@@ -62,6 +64,7 @@ def coverage_from_corpus(
     good_regressions = 0
     bad_approvals = 0
     review = 0
+    paper_assumed = 0
     unsupported = 0
     conflicts = 0
     conflict_ids: list[str] = []
@@ -70,11 +73,16 @@ def coverage_from_corpus(
         row = family_rows[entry.archetype]
         if entry.known_kind == "known_good":
             row.known_good += 1
+        elif entry.known_kind == "paper_assumed":
+            pass
         else:
             row.known_bad += 1
         state = assessment.state
         if state is CatalogueApprovalState.APPROVED_EQUIVALENT:
             row.approved_equivalent += 1
+        elif state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT:
+            row.paper_assumed_equivalent += 1
+            paper_assumed += 1
         elif state is CatalogueApprovalState.REVIEW_REQUIRED:
             row.review_required += 1
             review += 1
@@ -99,6 +107,11 @@ def coverage_from_corpus(
                 known_good_ok += 1
             else:
                 good_regressions += 1
+        elif entry.known_kind == "paper_assumed":
+            if state is not entry.expected_state:
+                good_regressions += 1
+            elif state is CatalogueApprovalState.APPROVED_EQUIVALENT:
+                bad_approvals += 1
         else:
             if state is entry.expected_state and state is not CatalogueApprovalState.APPROVED_EQUIVALENT:
                 known_bad_ok += 1
@@ -113,6 +126,7 @@ def coverage_from_corpus(
         unexpected_known_good_regressions=good_regressions,
         unexpected_known_bad_approvals=bad_approvals,
         review_required_count=review,
+        paper_assumed_count=paper_assumed,
         unsupported_count=unsupported,
         matcher_catalogue_conflicts=conflicts,
         families={item.value: family_rows[item] for item in CatalogueArchetype},
@@ -123,10 +137,12 @@ def coverage_from_corpus(
             "HOT and UNIVERSE share this catalogue; classifier has no scan_lane.",
             (
                 "Before = matcher.matched and solver_model_for_pair capability. "
-                "After = Tenet 20 catalogue state. Production scan_eligible_pair "
-                "and paper_scan require APPROVED_EQUIVALENT. GAMEWIN-unknown 1X2 "
-                "is the documented matcher/catalogue conflict and is blocked from "
-                "solver/paper admission."
+                "After = Tenet 20 catalogue state. Production paper scan admits "
+                "APPROVED_EQUIVALENT and PAPER_ASSUMED_EQUIVALENT (Matchbook↔Kalshi "
+                "1X2 only, settlement_assumption=regulation_time). GAMEWIN-unknown "
+                "ordinary 1X2 is paper-assumed, not settlement-proven, and never "
+                "live-execution eligible. Fair-price / extra-time / penalties stay "
+                "fail-closed."
             ),
         ],
     )
@@ -141,6 +157,7 @@ def render_coverage_markdown(report: CatalogueCoverageReport | None = None) -> s
         f"Unexpected known-good regressions: {coverage.unexpected_known_good_regressions}",
         f"Unexpected known-bad approvals: {coverage.unexpected_known_bad_approvals}",
         f"REVIEW_REQUIRED: {coverage.review_required_count}",
+        f"PAPER_ASSUMED_EQUIVALENT: {coverage.paper_assumed_count}",
         f"UNSUPPORTED: {coverage.unsupported_count}",
         f"Matcher vs catalogue conflicts: {coverage.matcher_catalogue_conflicts}",
         "",
@@ -173,6 +190,7 @@ def family_count_histogram(report: CatalogueCoverageReport) -> dict[str, int]:
     counts: Counter[str] = Counter()
     for row in report.families.values():
         counts["approved_equivalent"] += row.approved_equivalent
+        counts["paper_assumed_equivalent"] += row.paper_assumed_equivalent
         counts["review_required"] += row.review_required
         counts["parameter_mismatch"] += row.parameter_mismatch
         counts["known_contradiction"] += row.known_contradiction

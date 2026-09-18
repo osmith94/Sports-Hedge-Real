@@ -2034,6 +2034,23 @@ def _kalshi_settlement(
             family_meta if isinstance(family_meta, dict) else None
         ):
             unknown_reason = GAMEWIN_SCOPE_UNAVAILABLE_REASON
+        elif isinstance(family_meta, dict):
+            family_id = str(family_meta.get("family_id") or "").strip()
+            if (
+                family_id in {"soccerexactscore", "socceranygoal"}
+                or (
+                    family_id
+                    and family_id != "soccergamewin"
+                    and family_meta.get("default_applies_to_match_result") is False
+                    and family_meta.get("official_product_name_kind")
+                    in {"exact_score", "any_goal"}
+                )
+            ):
+                from sports_hedge.normalization.kalshi_contract_terms import (
+                    KALSHI_CONTRACT_FAMILY_NOT_MATCH_RESULT_REASON,
+                )
+
+                unknown_reason = KALSHI_CONTRACT_FAMILY_NOT_MATCH_RESULT_REASON
     return SettlementFingerprint(
         scope=scope,
         period=period,

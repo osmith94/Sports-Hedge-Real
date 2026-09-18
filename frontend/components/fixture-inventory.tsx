@@ -18,6 +18,7 @@ import {
   toneClass,
 } from "../lib/fixture-inventory-operator";
 import { PaperDeploymentPreview } from "./paper-deployment-preview";
+import { coverageRowLabel, fixtureCoverageRows } from "../lib/catalogue-coverage-display";
 
 type KalshiFixtureDetailReadModel = Omit<FixtureDetailReadModel, "fixture" | "markets"> & {
   fixture: FixtureDetailReadModel["fixture"] & { kalshi_matched?: boolean };
@@ -73,6 +74,13 @@ export function FixtureInventoryWorkspace({
           : ""}
         .
       </p>
+      {fixtureCoverageRows(fixture).length ? (
+        <ul className="catalogue-coverage-list">
+          {fixtureCoverageRows(fixture).map((row) => (
+            <li key={row.archetype}>{coverageRowLabel(row)}</li>
+          ))}
+        </ul>
+      ) : null}
       {detail.paper_entries?.length ? (
         <p className="section-copy">
           Paper entries:{" "}

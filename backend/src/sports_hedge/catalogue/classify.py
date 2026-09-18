@@ -1,8 +1,11 @@
 """Deterministic Tenet 20 classification. Confidence is never executable permission.
 
-Incomplete settlement is REVIEW_REQUIRED even when MarketMatcher currently matches
-Matchbook↔Kalshi GAMEWIN-unknown ordinary 1X2. Production solver/paper admission
-requires APPROVED_EQUIVALENT via the shared HOT/UNIVERSE catalogue gate.
+Independently proven settlement is APPROVED_EQUIVALENT. Matchbook↔Kalshi ordinary
+1X2 with complete HOME/DRAW/AWAY and no contradictory wording may be
+PAPER_ASSUMED_EQUIVALENT in paper mode only (settlement_assumption=regulation_time).
+That path is never live-execution eligible. Extra time, penalties, to-qualify,
+and cancel/reschedule-to-fair-price remain fail-closed REVIEW_REQUIRED /
+KNOWN_CONTRADICTION. HOT and UNIVERSE share this classifier.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.matching.ordinary_1x2 import (
     allow_unknown_settlement_for_ordinary_1x2,
+    paper_assumed_ordinary_1x2,
     settlement_fingerprints_contradict,
 )
 from sports_hedge.normalization.venues import (
@@ -62,6 +66,8 @@ class CataloguePairAssessment(BaseModel):
     data_class: str = DATA_CLASS_FIXTURE
     catalogue_shared_by: tuple[str, ...] = CATALOGUE_SHARED_BY
     execution_eligible: bool = False
+    paper_mode_admitted: bool = False
+    settlement_assumption: str | None = None
 
 
 class PayloadSide(BaseModel):
@@ -176,8 +182,14 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
     )
     archetype = _archetype_from_markets(left, right)
     state, reason, notes = _economic_state(left, right)
+    paper_assumed = state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    paper_admitted = state in {
+        CatalogueApprovalState.APPROVED_EQUIVALENT,
+        CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT,
+    }
     conflict = (
         state is not CatalogueApprovalState.APPROVED_EQUIVALENT
+        and not paper_assumed
         and matcher.matched
         and solver_model is not None
     )
@@ -185,6 +197,11 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
         notes.append(
             "legacy_matcher_may_still_match; catalogue_blocks_solver_admission"
         )
+    settlement_assumption = None
+    if paper_assumed:
+        settlement_assumption = "regulation_time"
+        notes.append("settlement_assumption=regulation_time")
+        notes.append("paper_mode_only_not_live_execution_eligible")
     return CataloguePairAssessment(
         state=state,
         reason=reason,
@@ -197,6 +214,8 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
         known_conflict_with_current_matcher=conflict,
         notes=notes,
         execution_eligible=False,
+        paper_mode_admitted=paper_admitted,
+        settlement_assumption=settlement_assumption,
     )
 
 
@@ -221,8 +240,11 @@ def _economic_state(
     left: CanonicalMarket, right: CanonicalMarket
 ) -> tuple[CatalogueApprovalState, str, list[str]]:
     notes: list[str] = []
-    left_in = left.family in CENSUS_V1_FAMILIES
-    right_in = right.family in CENSUS_V1_FAMILIES
+    from sports_hedge.catalogue.registry import target_market_families
+
+    catalogue_families = target_market_families() | CENSUS_V1_FAMILIES
+    left_in = left.family in catalogue_families
+    right_in = right.family in catalogue_families
     if not left_in and not right_in:
         return CatalogueApprovalState.UNSUPPORTED, "both_outside_census_v1_catalogue", notes
     if not left_in or not right_in:
@@ -271,6 +293,13 @@ def _economic_state(
         notes.append("no_matchbook_kalshi_cancel_reschedule_fair_price_assumption")
         return CatalogueApprovalState.REVIEW_REQUIRED, cancel_reason, notes
     if not left.settlement.is_economically_complete() or not right.settlement.is_economically_complete():
+        if paper_assumed_ordinary_1x2(left, right):
+            notes.append("paper_assumed_equivalent_not_settlement_proven")
+            return (
+                CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT,
+                "paper_assumed_equivalent",
+                notes,
+            )
         notes.append("incomplete_settlement_is_review_required_not_confidence")
         return CatalogueApprovalState.REVIEW_REQUIRED, "incomplete_settlement", notes
     if left.settlement.deterministic_key() != right.settlement.deterministic_key():

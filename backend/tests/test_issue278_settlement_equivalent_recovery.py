@@ -235,20 +235,22 @@ def test_production_path_mb_k_current_payload_is_review_required_for_fair_price(
     assert admission.catalogue_shared_by == ("hot", "universe")
 
 
-def test_generic_gamewin_without_scope_remains_review_required() -> None:
+def test_generic_gamewin_without_scope_is_paper_assumed_not_approved() -> None:
     assessment = classify_payload_pair(
         _mb([_mb_1x2()]),
         _kalshi(_kalshi_1x2(rules=GAMEWIN_TEMPLATE), series=KALSHI_GAMEWIN_SERIES),
     )
-    assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
-    assert assessment.reason == "incomplete_settlement"
+    assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert assessment.reason == "paper_assumed_equivalent"
     assert assessment.matcher_admits_unknown_1x2 is True
+    assert assessment.settlement_assumption == "regulation_time"
+    assert assessment.execution_eligible is False
     left = normalize_payload_side(_mb([_mb_1x2()]))
     right = normalize_payload_side(
         _kalshi(_kalshi_1x2(rules=GAMEWIN_TEMPLATE), series=KALSHI_GAMEWIN_SERIES)
     )
-    assert catalogue_allows_solver(left, right) is False
-    assert scan_eligible_pair(left, right, MarketMatcher().match(left, right)) is False
+    assert catalogue_allows_solver(left, right) is True
+    assert scan_eligible_pair(left, right, MarketMatcher().match(left, right)) is True
 
 
 def test_title_reg_time_does_not_approve_gamewin_unknown() -> None:
@@ -260,7 +262,8 @@ def test_title_reg_time_does_not_approve_gamewin_unknown() -> None:
         _mb([_mb_1x2()]),
         _kalshi(markets, series=KALSHI_GAMEWIN_SERIES),
     )
-    assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
+    assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
+    assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert assessment.settlement_complete is False
 
 
@@ -525,8 +528,10 @@ def test_zero_equivalent_diagnostics_state_the_actual_reason() -> None:
             )
         ],
     )
-    reason = zero_equivalent_reason_from_inventory(rows)
-    assert reason == MARKET_SPECIFIC_RULES_MISSING
+    assert any(
+        row.comparison_status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
+        for row in rows
+    )
     family_rows = [
         FixtureMarketInventoryRow(
             display_name="Match Odds",

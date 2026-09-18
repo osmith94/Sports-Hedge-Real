@@ -1,185 +1,22 @@
 from __future__ import annotations
 
-from sports_hedge.normalization.text import AliasRegistry
+from sports_hedge.facts.team_registry import alias_pairs, canonical_team_names
+from sports_hedge.normalization.text import AliasRegistry, normalize_text
 
 # Conservative affixes only. Never drop United/City/Athletic-style identity terms.
 SAFE_TEAM_AFFIX_TOKENS = frozenset({"fc", "cf", "afc", "sc"})
 
-# Known senior clubs. Self-aliases enable the fail-closed FC/CF/AFC/SC remainder
-# strip in resolve_team_name. Unknown remainders stay unchanged (issue 309).
-_SENIOR_CLUB_SELF_ALIASES = (
-    # Premier League 2025/26
-    "Arsenal",
-    "Aston Villa",
-    "Bournemouth",
-    "Brentford",
-    "Brighton and Hove Albion",
-    "Burnley",
-    "Chelsea",
-    "Crystal Palace",
-    "Everton",
-    "Fulham",
-    "Leeds United",
-    "Liverpool",
-    "Manchester City",
-    "Manchester United",
-    "Newcastle United",
-    "Nottingham Forest",
-    "Sunderland",
-    "Tottenham Hotspur",
-    "West Ham United",
-    "Wolverhampton Wanderers",
-    # Championship / Football-Data England labels used by historical catalog
-    "Birmingham City",
-    "Blackburn Rovers",
-    "Bristol City",
-    "Charlton Athletic",
-    "Coventry City",
-    "Derby County",
-    "Hull City",
-    "Ipswich Town",
-    "Leicester City",
-    "Middlesbrough",
-    "Millwall",
-    "Norwich City",
-    "Oxford United",
-    "Plymouth Argyle",
-    "Portsmouth",
-    "Preston North End",
-    "Queens Park Rangers",
-    "Sheffield United",
-    "Sheffield Wednesday",
-    "Southampton",
-    "Stoke City",
-    "Swansea City",
-    "Watford",
-    "West Bromwich Albion",
-    "Wrexham",
-    "Barnsley",
-    "Blackpool",
-    "Cardiff City",
-    "Huddersfield Town",
-    "Luton Town",
-    "Peterborough United",
-    "Reading",
-    "Rotherham United",
-    "Wigan Athletic",
-    "Real Madrid",
-    "Barcelona",
-)
-
 
 def _registry() -> AliasRegistry:
     aliases = AliasRegistry()
-    pairs = {
-        # Premier League / football-data.co.uk
-        "Man United": "Manchester United",
-        "Man Utd": "Manchester United",
-        "Man City": "Manchester City",
-        "Newcastle": "Newcastle United",
-        "Nott'm Forest": "Nottingham Forest",
-        "Nottm Forest": "Nottingham Forest",
-        "Wolves": "Wolverhampton Wanderers",
-        "Spurs": "Tottenham Hotspur",
-        "Tottenham": "Tottenham Hotspur",
-        "West Ham": "West Ham United",
-        "Brighton": "Brighton and Hove Albion",
-        "Brighton & Hove Albion": "Brighton and Hove Albion",
-        "Brighton and Hove Albion": "Brighton and Hove Albion",
-        "Leicester": "Leicester City",
-        "Leeds": "Leeds United",
-        "Ipswich": "Ipswich Town",
-        "Sheffield Utd": "Sheffield United",
-        "Sheffield Weds": "Sheffield Wednesday",
-        "West Brom": "West Bromwich Albion",
-        "QPR": "Queens Park Rangers",
-        "Birmingham": "Birmingham City",
-        "Blackburn": "Blackburn Rovers",
-        "Charlton": "Charlton Athletic",
-        "Derby": "Derby County",
-        "Hull": "Hull City",
-        "Norwich": "Norwich City",
-        "Oxford": "Oxford United",
-        "Plymouth": "Plymouth Argyle",
-        "Stoke": "Stoke City",
-        "Swansea": "Swansea City",
-        "Cardiff": "Cardiff City",
-        "Middlesbrough": "Middlesbrough",
-        "Coventry": "Coventry City",
-        "Bristol City": "Bristol City",
-        "Preston": "Preston North End",
-        "Huddersfield": "Huddersfield Town",
-        # La Liga / football-data.co.uk
-        "Ath Madrid": "Atletico Madrid",
-        "Ath Bilbao": "Athletic Club",
-        "Athletic Bilbao": "Athletic Club",
-        "Athletic Club": "Athletic Club",
-        "Barcelona": "Barcelona",
-        "Espanol": "Espanyol",
-        "Sociedad": "Real Sociedad",
-        "Betis": "Real Betis",
-        "Celta": "Celta Vigo",
-        "Vallecano": "Rayo Vallecano",
-        "Alaves": "Deportivo Alaves",
-        "Mallorca": "Mallorca",
-        "Villarreal": "Villarreal",
-        "Villarreal CF": "Villarreal",
-        "Sevilla": "Sevilla",
-        "Valencia": "Valencia",
-        "Osasuna": "Osasuna",
-        "Getafe": "Getafe",
-        "Girona": "Girona",
-        "Leganes": "Leganes",
-        "Las Palmas": "Las Palmas",
-        "Valladolid": "Real Valladolid",
-        "Oviedo": "Real Oviedo",
-        "Elche": "Elche",
-        "Elche CF": "Elche",
-        "Levante": "Levante",
-        "Malaga": "Malaga",
-        "Malaga CF": "Malaga",
-        "Málaga": "Malaga",
-        "Málaga CF": "Malaga",
-        # Bundesliga / observed Matchbook vs Kalshi provider variants
-        "Bayern Munich": "Bayern Munich",
-        "FC Bayern München": "Bayern Munich",
-        "FC Bayern Munchen": "Bayern Munich",
-        "Bayern München": "Bayern Munich",
-        "Bayern Munchen": "Bayern Munich",
-        "FC Bayern Munich": "Bayern Munich",
-        "FC Bayern": "Bayern Munich",
-        "Union Berlin": "Union Berlin",
-        "1. FC Union Berlin": "Union Berlin",
-        "1 FC Union Berlin": "Union Berlin",
-        "FC Union Berlin": "Union Berlin",
-        # Serie A / observed Matchbook vs Kalshi club-name variants (issue 277).
-        # AC/Calcio are club-specific aliases, not a global affix strip.
-        "Monza": "Monza",
-        "AC Monza": "Monza",
-        "Sassuolo": "Sassuolo",
-        "Sassuolo Calcio": "Sassuolo",
-        "US Sassuolo": "Sassuolo",
-        "US Sassuolo Calcio": "Sassuolo",
-        "AC Milan": "AC Milan",
-        "Milan": "AC Milan",
-        # La Liga / observed Kalshi geographic-suffix variants (issue 277).
-        # Barcelona remains a distinct senior club; never a global city strip.
-        "Espanyol Barcelona": "Espanyol",
-        "RCD Espanyol": "Espanyol",
-        "RCD Espanyol Barcelona": "Espanyol",
-        "RCD Espanyol de Barcelona": "Espanyol",
-        "FC Barcelona": "Barcelona",
-    }
-    for alias, canonical in pairs.items():
+    for alias, canonical in alias_pairs():
         aliases.add(alias, canonical)
         aliases.add(canonical, canonical)
-    for club in _SENIOR_CLUB_SELF_ALIASES:
-        aliases.add(club, club)
     return aliases
 
 
 football_alias_registry = _registry()
-_CANONICAL_TEAM_NAMES = frozenset(football_alias_registry.aliases.values())
+_CANONICAL_TEAM_NAMES = canonical_team_names() | frozenset(football_alias_registry.aliases.values())
 
 
 def _canonical_remainder_after_safe_affixes(normalized: str) -> str | None:
@@ -221,3 +58,7 @@ def resolve_team_name(value: str) -> str:
         return resolved
     stripped = _canonical_remainder_after_safe_affixes(resolved)
     return stripped if stripped is not None else resolved
+
+
+def is_curated_canonical_team(name: str) -> bool:
+    return normalize_text(name) in _CANONICAL_TEAM_NAMES

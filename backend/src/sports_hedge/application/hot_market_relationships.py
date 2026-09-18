@@ -1,8 +1,9 @@
-"""HOT quote-refresh identity over UNIVERSE-proved ApprovedEquivalent rows.
+"""HOT quote-refresh identity over UNIVERSE-proved comparable rows.
 
-UNIVERSE discovers fixtures, normalizes markets, proves MATCHED_EQUIVALENT, and
-persists the exact venue market relationship. HOT reads that identity and
-refreshes only current quote/depth/status for those exact markets.
+UNIVERSE discovers fixtures, normalizes markets, proves MATCHED_EQUIVALENT or
+PAPER_ASSUMED_EQUIVALENT (1X2 paper-mode only), and persists the exact venue
+market relationship. HOT reads that identity and refreshes only current
+quote/depth/status for those exact markets.
 
 Relationship identity is source/canonical contract identity, never stale prices.
 Kalshi fee snapshots cached here are fee metadata (type/multiplier/provenance),
@@ -27,6 +28,7 @@ from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
     InventoryComparisonStatus,
     VenueMarketFacts,
+    inventory_is_hot_refreshable,
 )
 from sports_hedge.application.scan_lanes import TERMINAL_STATUSES
 from sports_hedge.domain.football import CanonicalMarket
@@ -113,7 +115,7 @@ def relationship_from_inventory_row(
     canonical_event_id: str,
     row: FixtureMarketInventoryRow,
 ) -> HotMarketRelationship | None:
-    if row.comparison_status is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
+    if not inventory_is_hot_refreshable(row.comparison_status):
         return None
     matchbook = _leg_from_facts(row.matchbook)
     kalshi = _leg_from_facts(row.kalshi)
@@ -133,7 +135,7 @@ def relationship_from_inventory_row(
         period=row.period,
         line=row.line,
         settlement_key=settlement,
-        proof_status=PROOF_MATCHED_EQUIVALENT,
+        proof_status=row.comparison_status.value,
         venue_pair=pairs,
         matchbook=matchbook,
         kalshi=kalshi,

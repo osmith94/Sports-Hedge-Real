@@ -204,21 +204,30 @@ export function classifyPairs(row: KalshiFixtureMarketInventoryRow): {
 
   if (!pairs.length && present.length >= 2) {
     const mappingFailed = collectReasonCodes(row).some((reason) => MAPPING_INCOMPATIBLE.has(reason));
-    if (row.comparison_status === "matched_equivalent" && !mappingFailed) {
+    if (
+      (row.comparison_status === "matched_equivalent" ||
+        row.comparison_status === "paper_assumed_equivalent") &&
+      !mappingFailed
+    ) {
+      const assumed = row.comparison_status === "paper_assumed_equivalent";
       return {
         comparable: [],
         incompatible: [],
         leftoverVenues: [],
         comparableKind,
-        comparableHeadline: `Comparable: ${present.map(venueTitle).join(" ↔ ")}`,
+        comparableHeadline: assumed
+          ? `Paper-assumed comparable: ${present.map(venueTitle).join(" ↔ ")}`
+          : `Comparable: ${present.map(venueTitle).join(" ↔ ")}`,
         badges: [
           {
-            text: `${present.map(venueShortLabel).join(" ↔ ")} · equivalent`,
+            text: `${present.map(venueShortLabel).join(" ↔ ")} · ${assumed ? "paper assumed" : "equivalent"}`,
             tone: "eligible",
             comparable: true,
           },
         ],
-        discoveredNotes: [],
+        discoveredNotes: assumed
+          ? ["1X2 paper-mode assumption; not independently settlement-proven; never live-execution eligible."]
+          : [],
       };
     }
   }

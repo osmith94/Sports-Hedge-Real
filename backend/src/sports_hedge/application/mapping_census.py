@@ -13,12 +13,18 @@ from pydantic import BaseModel, Field
 
 from sports_hedge.application.collector import CollectionReport, MarketEvaluationState
 from sports_hedge.application.equivalence_diagnostics import zero_equivalent_reason_counts
-from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
+from sports_hedge.application.fixture_inventory import (
+    inventory_is_comparable_opportunity,
+)
 from sports_hedge.application.mapping_forensics import VENUE_SCOPE_ALL, VENUE_SCOPE_UNIVERSE
 from sports_hedge.application.scan_cycle_audit import (
     issue_is_deadline_partial,
     issue_is_provider_failure,
     issue_is_unsupported_market_skip,
+)
+from sports_hedge.catalogue.coverage_rows import (
+    aggregate_coverage_by_archetype,
+    fixture_catalogue_coverage,
 )
 from sports_hedge.config import Settings
 from sports_hedge.matching.ordinary_1x2 import GAMEWIN_ORDINARY_1X2_AUDIT_REASON
@@ -56,6 +62,7 @@ class MappingCensus(BaseModel):
     enabled_venues: list[str] = Field(default_factory=list)
     kalshi_match_result_rule_enrichment: dict[str, int] = Field(default_factory=dict)
     ordinary_1x2_structural_admissions: int = Field(default=0, ge=0)
+    catalogue_by_archetype: dict[str, dict[str, int]] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -80,7 +87,7 @@ def census_from_report(
             status_counts[status] += 1
             if GAMEWIN_ORDINARY_1X2_AUDIT_REASON in (row.match_reasons or []):
                 ordinary_admissions += 1
-            if row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT:
+            if inventory_is_comparable_opportunity(row.comparison_status):
                 family_counts[str(row.family or "unknown")] += 1
 
     skip_reasons: Counter[str] = Counter()
@@ -123,9 +130,15 @@ def census_from_report(
             else "Owner-live/read-only diagnostic. Distinct from deterministic fixture census."
         ),
         (
-            "Inventory MATCHED_EQUIVALENT and market_family_breakdown require "
-            "the shared catalogue APPROVED_EQUIVALENT gate. Matcher structural "
-            "hits, including GAMEWIN-unknown 1X2, remain on match_reasons."
+            "Inventory MATCHED_EQUIVALENT / PAPER_ASSUMED_EQUIVALENT and "
+            "market_family_breakdown require the shared catalogue gate. "
+            "PAPER_ASSUMED_EQUIVALENT is 1X2 paper-mode only and is never "
+            "live-execution eligible. Matcher structural hits remain on match_reasons."
+        ),
+        (
+            "catalogue_by_archetype counts Tenet-20 coverage states per target "
+            "archetype. VENUE_UNAVAILABLE means the venue does not offer the "
+            "contract; PAPER_ASSUMED_EQUIVALENT is the 1X2 paper-mode assumption."
         ),
     ]
     if data_class == CENSUS_DATA_CLASS_OWNER_LIVE:
@@ -177,6 +190,7 @@ def census_from_report(
         enabled_venues=resolved_venues,
         kalshi_match_result_rule_enrichment=enrichment,
         ordinary_1x2_structural_admissions=ordinary_admissions,
+        catalogue_by_archetype=_catalogue_by_archetype(report),
         notes=notes,
     )
 
@@ -217,6 +231,7 @@ def render_census(census: MappingCensus) -> str:
             "ordinary_1x2_structural_admissions="
             + str(census.ordinary_1x2_structural_admissions)
         ),
+        f"catalogue_by_archetype={_fmt_nested_counts(census.catalogue_by_archetype)}",
     ]
     lines.extend(f"note: {note}" for note in census.notes)
     return "\n".join(lines) + "\n"
@@ -265,3 +280,33 @@ def _fmt_counts(values: dict[str, Any]) -> str:
         return "{}"
     parts = [f"{key}={values[key]}" for key in values]
     return "{" + ", ".join(parts) + "}"
+
+
+def _fmt_nested_counts(values: dict[str, dict[str, int]]) -> str:
+    if not values:
+        return "{}"
+    parts = [f"{key}:{_fmt_counts(inner)}" for key, inner in values.items()]
+    return "{" + "; ".join(parts) + "}"
+
+
+def _catalogue_by_archetype(report: CollectionReport) -> dict[str, dict[str, int]]:
+    summaries = [
+        item.catalogue_coverage
+        for item in report.discovered_fixtures
+        if getattr(item, "catalogue_coverage", None) is not None
+    ]
+    if summaries:
+        return aggregate_coverage_by_archetype(summaries)
+    rebuilt = []
+    for fixture in report.discovered_fixtures:
+        rows = (report.fixture_markets or {}).get(fixture.canonical_event_id, [])
+        rebuilt.append(
+            fixture_catalogue_coverage(
+                rows,
+                matchbook_matched=bool(fixture.matchbook_matched),
+                kalshi_matched=bool(fixture.kalshi_matched),
+                polymarket_matched=bool(fixture.polymarket_matched),
+                target_competition_code=fixture.target_competition_code,
+            )
+        )
+    return aggregate_coverage_by_archetype(rebuilt)

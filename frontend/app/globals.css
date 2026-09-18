@@ -189,6 +189,8 @@ td.wrap, .wrap { white-space: normal; }
 .venue-mark-on { color: var(--accent); border-color: rgba(124, 242, 176, .28); background: var(--accent-soft); }
 .discovery-detail-row td { padding-top: 0; border-bottom: 1px solid rgba(34, 51, 47, .6); }
 .discovery-detail-row summary { cursor: pointer; color: var(--muted-2); font-size: 9px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+.catalogue-coverage-list { margin: 8px 0 0; padding-left: 18px; color: var(--muted-2); font-size: 11px; line-height: 1.45; }
+.catalogue-coverage-summary { font-size: 12px; }
 th { text-align: left; color: var(--muted-2); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; font-weight: 750; padding: 10px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 th.sortable { padding: 0; }
 button.sort-header {

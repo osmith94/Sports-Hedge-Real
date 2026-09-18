@@ -168,6 +168,7 @@ export type PaperCollectionReport = {
       equivalent_markets?: number;
       qualifying_arbs?: number;
       matching_state?: string;
+      catalogue_by_archetype?: Record<string, Record<string, number>>;
     };
     [key: string]: unknown;
   };
@@ -221,10 +222,36 @@ export type DiscoveredFixture = {
   last_scanned_at?: string | null;
   next_due_at?: string | null;
   hot_reasons?: string[] | null;
+  catalogue_coverage?: FixtureCatalogueCoverage | null;
+};
+
+export type FixtureArchetypeCoverage = {
+  archetype: string;
+  display_label: string;
+  state: string;
+  reason: string;
+  operational_approved?: boolean;
+  line?: string | null;
+  matchbook_present?: boolean;
+  kalshi_present?: boolean;
+  polymarket_present?: boolean;
+};
+
+export type FixtureCatalogueCoverage = {
+  venue_pair?: string | null;
+  rows: FixtureArchetypeCoverage[];
+  approved_equivalent?: number;
+  paper_assumed_equivalent?: number;
+  review_required?: number;
+  unsupported?: number;
+  venue_unavailable?: number;
+  not_listed?: number;
+  registry_version?: string;
 };
 
 export type InventoryComparisonStatus =
   | "matched_equivalent"
+  | "paper_assumed_equivalent"
   | "venue_only"
   | "settlement_mismatch"
   | "unsupported_outcome_model"

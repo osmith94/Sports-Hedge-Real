@@ -283,20 +283,21 @@ def test_explicit_90_minute_without_fair_price_sibling_remains_approved() -> Non
     assert assessment.execution_eligible is False
 
 
-def test_generic_gamewin_remains_review_required() -> None:
+def test_generic_gamewin_is_paper_assumed_not_approved() -> None:
     assessment = classify_payload_pair(
         _mb([_mb_1x2()]),
         _kalshi(_kalshi_1x2(rules=GAMEWIN_TEMPLATE), series=KALSHI_GAMEWIN_SERIES),
     )
-    assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
-    assert assessment.reason == "incomplete_settlement"
+    assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert assessment.reason == "paper_assumed_equivalent"
     assert assessment.matcher_admits_unknown_1x2 is True
+    assert assessment.execution_eligible is False
     left = normalize_payload_side(_mb([_mb_1x2()]))
     right = normalize_payload_side(
         _kalshi(_kalshi_1x2(rules=GAMEWIN_TEMPLATE), series=KALSHI_GAMEWIN_SERIES)
     )
-    assert catalogue_allows_solver(left, right) is False
-    assert scan_eligible_pair(left, right, MarketMatcher().match(left, right)) is False
+    assert catalogue_allows_solver(left, right) is True
+    assert scan_eligible_pair(left, right, MarketMatcher().match(left, right)) is True
 
 
 def test_execution_remains_disabled() -> None:
