@@ -11,7 +11,6 @@ auto-capture still require executable quote freshness independently.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -61,18 +60,6 @@ _MAPPING_INCOMPATIBLE = frozenset(
         "unproven_handicap_semantics",
         "generalized_split_line_not_modelled",
         "unknown_draw_void_semantics",
-    }
-)
-# Catalogue review / unapproved pairs must not enter HOT as an approved watch.
-_APPROVED_WATCH_FAIL_CLOSED = frozenset(
-    {
-        *_MAPPING_INCOMPATIBLE,
-        "catalogue_review_required",
-        "catalogue_unsupported",
-        "catalogue_parameter_mismatch",
-        "catalogue_contradiction",
-        "plausible_archetype_incomplete_evidence",
-        "insufficient_venue_equivalence",
     }
 )
 # Fail-closed reasons that must never fabricate HOT opportunity promotion.
@@ -593,27 +580,6 @@ def current_slots_prove_qualifying_opportunity(
     return False
 
 
-def stored_row_proves_approved_watch_relationship(row: FixtureMarketInventoryRow) -> bool:
-    """True when current state shows a valid approved cross-venue watch pair.
-
-    HOT membership for an approved MATCHED_EQUIVALENT relationship does not
-    require a positive edge, solver arb, trigger threshold, or paper
-    eligibility. Settlement/mapping contradictions and REVIEW_REQUIRED /
-    unapproved catalogue states fail closed. Paper entry gates stay separate.
-    """
-
-    if row.comparison_status is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
-        return False
-    if set(row.rejection_reasons) & _APPROVED_WATCH_FAIL_CLOSED:
-        return False
-    venues = [
-        facts
-        for facts in (row.matchbook, row.polymarket, row.kalshi)
-        if facts is not None
-    ]
-    return len(venues) >= 2
-
-
 def stored_row_proves_surveillance_opportunity(row: FixtureMarketInventoryRow) -> bool:
     """True when matcher economics show a positive cross-venue edge worth watching.
 
@@ -623,11 +589,18 @@ def stored_row_proves_surveillance_opportunity(row: FixtureMarketInventoryRow) -
     paper gates and do not block surveillance.
     """
 
-    if not stored_row_proves_approved_watch_relationship(row):
+    if row.comparison_status is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
+        return False
+    if set(row.rejection_reasons) & _MAPPING_INCOMPATIBLE:
         return False
     if row.current_net_edge is None or row.current_net_edge <= 0:
         return False
-    return True
+    venues = [
+        facts
+        for facts in (row.matchbook, row.polymarket, row.kalshi)
+        if facts is not None
+    ]
+    return len(venues) >= 2
 
 
 def current_slots_prove_surveillance_opportunity(
@@ -640,45 +613,6 @@ def current_slots_prove_surveillance_opportunity(
 ) -> bool:
     """True when a radar-current slot has a positive equivalent edge below trade gates."""
 
-    return _current_slots_prove(
-        slots,
-        now=now,
-        predicate=stored_row_proves_surveillance_opportunity,
-        hot_ttl_seconds=hot_ttl_seconds,
-        universe_ttl_seconds=universe_ttl_seconds,
-        max_quote_age_ms=max_quote_age_ms,
-    )
-
-
-def current_slots_prove_approved_watch_relationship(
-    slots: list[CurrentMarketSlot],
-    *,
-    now: datetime,
-    hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
-    universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
-    max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
-) -> bool:
-    """True when a radar-current slot is a valid approved watch relationship."""
-
-    return _current_slots_prove(
-        slots,
-        now=now,
-        predicate=stored_row_proves_approved_watch_relationship,
-        hot_ttl_seconds=hot_ttl_seconds,
-        universe_ttl_seconds=universe_ttl_seconds,
-        max_quote_age_ms=max_quote_age_ms,
-    )
-
-
-def _current_slots_prove(
-    slots: list[CurrentMarketSlot],
-    *,
-    now: datetime,
-    predicate: Callable[[FixtureMarketInventoryRow], bool],
-    hot_ttl_seconds: int,
-    universe_ttl_seconds: int,
-    max_quote_age_ms: int,
-) -> bool:
     evaluated = require_aware_instant(now, "now")
     for slot in slots:
         if slot.evaluated_absent:
@@ -692,7 +626,7 @@ def _current_slots_prove(
         )
         if freshness == FRESHNESS_EXPIRED:
             continue
-        if predicate(slot.row):
+        if stored_row_proves_surveillance_opportunity(slot.row):
             return True
     return False
 

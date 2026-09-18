@@ -19,7 +19,6 @@ from sports_hedge.application.collector import (
     ReadOnlyCrossVenueCollector,
 )
 from sports_hedge.application.current_market_inventory import (
-    stored_row_proves_approved_watch_relationship,
     stored_row_proves_qualifying_executable,
     stored_row_proves_surveillance_opportunity,
 )
@@ -30,12 +29,7 @@ from sports_hedge.application.fixture_inventory import (
 )
 from sports_hedge.application.live_refresh import LiveRefreshCoordinator
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.scan_lanes import (
-    HOT_REASON_APPROVED_WATCH,
-    HOT_REASON_ARB_PROMOTION,
-    WORKER_COMPLETE,
-    ScanLane,
-)
+from sports_hedge.application.scan_lanes import WORKER_COMPLETE, ScanLane
 from sports_hedge.application.universe_checkpoint import (
     SWEEP_FINAL_FAILED,
     SWEEP_OK,
@@ -56,7 +50,6 @@ from test_concurrent_hot_universe_workers import _universe_fixture
 from test_dual_cadence_scheduler import NOW, FakeClock, _fixture, _report
 from test_issue200_universe_hot_promotion import (
     _facts,
-    _market_row,
     _qualifying_universe_report,
 )
 from test_read_only_collector import FakeMatchbook, FakePolymarket
@@ -92,18 +85,6 @@ def _approved_mb_kalshi_btts_row(*, edge: Decimal) -> FixtureMarketInventoryRow:
                 solver_is_arbitrage=False,
             )
         ],
-    )
-
-
-def _review_required_btts_row() -> FixtureMarketInventoryRow:
-    return _market_row(
-        status=InventoryComparisonStatus.SETTLEMENT_MISMATCH,
-        edge=NEGATIVE_EDGE,
-        arb=False,
-        reason="catalogue_review_required",
-        rejection_reasons=["catalogue_review_required", "incomplete_settlement"],
-        entered_solver=False,
-        settlement_complete=None,
     )
 
 
@@ -342,13 +323,11 @@ def test_approved_pair_promotes_before_generation_completes() -> None:
     assert OWNER_PENDING not in nxt.skip_event_ids
 
 
-def test_approved_negative_edge_btts_promotes_hot_before_generation_completes() -> None:
+def test_negative_edge_approved_pair_stays_universe_until_lifecycle_or_positive_edge() -> None:
     row = _approved_mb_kalshi_btts_row(edge=NEGATIVE_EDGE)
-    assert stored_row_proves_approved_watch_relationship(row) is True
     assert stored_row_proves_surveillance_opportunity(row) is False
     assert stored_row_proves_qualifying_executable(row) is False
     zero = _approved_mb_kalshi_btts_row(edge=Decimal("0"))
-    assert stored_row_proves_approved_watch_relationship(zero) is True
     assert stored_row_proves_surveillance_opportunity(zero) is False
 
     clock = FakeClock(NOW)
@@ -359,12 +338,7 @@ def test_approved_negative_edge_btts_promotes_hot_before_generation_completes() 
     coordinator.record_universe_work_set([fixture.canonical_event_id, OWNER_PENDING])
     coordinator.record_universe_fixture_progress(None, fixture, [], [row])
     store = coordinator.fixture_current_state()
-    assert fixture.canonical_event_id in store.hot_identity_scope(NOW)
-    shown = next(
-        item for item in store.inventory(NOW) if item.canonical_event_id == fixture.canonical_event_id
-    )
-    assert HOT_REASON_APPROVED_WATCH in (shown.hot_reasons or [])
-    assert HOT_REASON_ARB_PROMOTION not in (shown.hot_reasons or [])
+    assert fixture.canonical_event_id not in store.hot_identity_scope(NOW)
     assert coordinator._universe_generation_started_at is not None
     assert coordinator._universe_sweep_is_complete_unlocked() is False
     coordinator._universe_in_progress = False
@@ -372,37 +346,6 @@ def test_approved_negative_edge_btts_promotes_hot_before_generation_completes() 
     assert nxt.lane == ScanLane.UNIVERSE.value
     assert nxt.generation_resume is True
     assert OWNER_PENDING not in nxt.skip_event_ids
-
-
-def test_review_required_and_unapproved_pairs_do_not_promote() -> None:
-    clock = FakeClock(NOW)
-    coordinator = LiveRefreshCoordinator(clock=clock)
-    coordinator._clock = clock
-    review = _review_required_btts_row()
-    unapproved = _market_row(
-        status=InventoryComparisonStatus.UNSUPPORTED_FAMILY,
-        edge=Decimal("0.02"),
-        arb=False,
-        reason="unsupported_family",
-        rejection_reasons=["unsupported_family"],
-        entered_solver=False,
-    )
-    assert stored_row_proves_approved_watch_relationship(review) is False
-    assert stored_row_proves_approved_watch_relationship(unapproved) is False
-    sneaky = _approved_mb_kalshi_btts_row(edge=NEGATIVE_EDGE).model_copy(
-        update={"rejection_reasons": ["catalogue_review_required"]}
-    )
-    assert stored_row_proves_approved_watch_relationship(sneaky) is False
-    review_fixture = _universe_fixture("review-btts")
-    unapproved_fixture = _universe_fixture("unapproved-btts")
-    coordinator.record_universe_work_set(
-        [review_fixture.canonical_event_id, unapproved_fixture.canonical_event_id]
-    )
-    coordinator.record_universe_fixture_progress(None, review_fixture, [], [review])
-    coordinator.record_universe_fixture_progress(None, unapproved_fixture, [], [unapproved])
-    store = coordinator.fixture_current_state()
-    assert review_fixture.canonical_event_id not in store.hot_identity_scope(NOW)
-    assert unapproved_fixture.canonical_event_id not in store.hot_identity_scope(NOW)
 
 
 def test_transient_unavailable_stays_retry_wait_beyond_three_attempts_then_recovers() -> None:
