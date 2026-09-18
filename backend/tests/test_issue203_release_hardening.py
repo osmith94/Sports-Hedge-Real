@@ -69,15 +69,15 @@ from venue_cost_helpers import matchbook_polymarket_costs
         ),
         (
             "Resolves not including extra time.",
-            SettlementScope.REGULATION_TIME,
-            False,
-            False,
+            SettlementScope.UNKNOWN,
+            None,
+            None,
         ),
         (
             "Does not include extra time.",
-            SettlementScope.REGULATION_TIME,
-            False,
-            False,
+            SettlementScope.UNKNOWN,
+            None,
+            None,
         ),
         (
             "Winner including extra time and penalties.",
@@ -105,9 +105,9 @@ from venue_cost_helpers import matchbook_polymarket_costs
         ),
         (
             "Not including extra time and penalties.",
-            SettlementScope.REGULATION_TIME,
-            False,
-            False,
+            SettlementScope.UNKNOWN,
+            None,
+            None,
         ),
         (
             "Winner including extra time and penalties. Extra time and penalties do not count.",
@@ -151,8 +151,8 @@ def test_polymarket_and_kalshi_parsers_use_fail_closed_wording() -> None:
             "description": "Resolves not including extra time.",
         },
     )
-    assert negated.settlement.scope is SettlementScope.REGULATION_TIME
-    assert negated.settlement.extra_time_included is False
+    assert negated.settlement.scope is SettlementScope.UNKNOWN
+    assert negated.settlement.extra_time_included is None
 
     compound = pm.normalize_market(
         event,
@@ -176,8 +176,8 @@ def test_polymarket_and_kalshi_parsers_use_fail_closed_wording() -> None:
         period=FootballPeriod.FULL_TIME,
         line=None,
     )
-    assert kalshi.scope is SettlementScope.REGULATION_TIME
-    assert kalshi.extra_time_included is False
+    assert kalshi.scope is SettlementScope.UNKNOWN
+    assert kalshi.extra_time_included is None
     compound_k = _kalshi_settlement(
         {
             "rules_primary": "Winner including extra time and penalties.",
