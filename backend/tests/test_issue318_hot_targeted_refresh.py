@@ -265,6 +265,19 @@ def _collector(matchbook, kalshi) -> tuple[ReadOnlyCrossVenueCollector, SqliteMa
     return collector, repository
 
 
+def _clear_provider_call_logs(matchbook: SixMatchbook, kalshi: SixKalshi) -> None:
+    """Drop UNIVERSE discovery counts so later asserts measure HOT-only work."""
+
+    matchbook.list_events_calls = 0
+    matchbook.list_markets_calls.clear()
+    matchbook.get_market_calls.clear()
+    kalshi.list_events_calls = 0
+    kalshi.list_markets_calls.clear()
+    kalshi.get_series_calls.clear()
+    kalshi.get_market_calls.clear()
+    kalshi.book_calls.clear()
+
+
 async def _universe_then_hot(
     matchbook: SixMatchbook,
     kalshi: SixKalshi,
@@ -284,6 +297,7 @@ async def _universe_then_hot(
             if item.matchbook_matched and item.kalshi_matched
         ]
         relationships = relationships_from_fixture_markets(universe.fixture_markets)
+        _clear_provider_call_logs(matchbook, kalshi)
         hot = await collector.collect_and_scan(
             venue_costs=_costs(),
             fx_snapshots=_fx(),
@@ -306,15 +320,10 @@ async def test_hot_six_approved_equivalents_use_direct_reads_not_discovery() -> 
 
     assert len(clustered) == 6
     assert sum(len(rows) for rows in relationships.values()) == 6
-    mb_markets_after_universe = list(matchbook.list_markets_calls)
-    k_markets_after_universe = list(kalshi.list_markets_calls)
-    k_series_after_universe = list(kalshi.get_series_calls)
-    k_get_market_after_universe = list(kalshi.get_market_calls)
-
-    assert matchbook.list_markets_calls == mb_markets_after_universe
-    assert kalshi.list_markets_calls == k_markets_after_universe
-    assert kalshi.get_series_calls == k_series_after_universe
-    assert kalshi.get_market_calls == k_get_market_after_universe
+    assert matchbook.list_markets_calls == []
+    assert kalshi.list_markets_calls == []
+    assert kalshi.get_series_calls == []
+    assert kalshi.get_market_calls == []
     assert len(matchbook.get_market_calls) == 6
     assert len(kalshi.book_calls) == 6
     assert all(
@@ -363,6 +372,7 @@ async def test_hot_refresh_updates_quotes_without_deleting_other_universe_rows()
             for row in universe.fixture_markets[fixture.canonical_event_id]
             if row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
         )
+        _clear_provider_call_logs(matchbook, kalshi)
         stamped = universe.model_copy(
             update={
                 "fixture_markets": {
@@ -408,10 +418,7 @@ async def test_lifecycle_hot_without_approved_relationship_does_not_discover_mar
             scan_lane=ScanLane.UNIVERSE.value,
         )
         fixture = next(item for item in universe.discovered_fixtures if item.matchbook_matched)
-        mb_markets = list(matchbook.list_markets_calls)
-        k_markets = list(kalshi.list_markets_calls)
-        k_series = list(kalshi.get_series_calls)
-        k_get = list(kalshi.get_market_calls)
+        _clear_provider_call_logs(matchbook, kalshi)
         hot = await collector.collect_and_scan(
             venue_costs=_costs(),
             fx_snapshots=_fx(),
@@ -420,10 +427,10 @@ async def test_lifecycle_hot_without_approved_relationship_does_not_discover_mar
             known_source_events=universe.fixture_source_events,
             hot_market_relationships={},
         )
-        assert matchbook.list_markets_calls == mb_markets
-        assert kalshi.list_markets_calls == k_markets
-        assert kalshi.get_series_calls == k_series
-        assert kalshi.get_market_calls == k_get
+        assert matchbook.list_markets_calls == []
+        assert kalshi.list_markets_calls == []
+        assert kalshi.get_series_calls == []
+        assert kalshi.get_market_calls == []
         assert matchbook.get_market_calls == []
         assert kalshi.book_calls == []
         target = next(
@@ -456,7 +463,7 @@ async def test_known_market_404_fails_closed_and_requests_universe_revalidation(
             {fixture.canonical_event_id: universe.fixture_markets[fixture.canonical_event_id]}
         )
         matchbook.gone_ids.add(str(fixture.source_event_id))
-        mb_markets = list(matchbook.list_markets_calls)
+        _clear_provider_call_logs(matchbook, kalshi)
         hot = await collector.collect_and_scan(
             venue_costs=_costs(),
             fx_snapshots=_fx(),
@@ -465,7 +472,7 @@ async def test_known_market_404_fails_closed_and_requests_universe_revalidation(
             known_source_events=universe.fixture_source_events,
             hot_market_relationships=relationships,
         )
-        assert matchbook.list_markets_calls == mb_markets
+        assert matchbook.list_markets_calls == []
         assert kalshi.list_markets_calls == []
         target = next(
             item for item in hot.discovered_fixtures if item.canonical_event_id == fixture.canonical_event_id
@@ -502,6 +509,7 @@ async def test_hot_direct_refresh_completes_while_universe_is_running() -> None:
             if item.matchbook_matched and item.kalshi_matched
         ]
         relationships = relationships_from_fixture_markets(universe.fixture_markets)
+        _clear_provider_call_logs(matchbook, kalshi)
         slow = SlowUniverseMatchbook()
         universe_collector, universe_repo = _collector(slow, SixKalshi())
         universe_collector._provider_access = access
@@ -554,8 +562,7 @@ async def test_direct_quote_timeout_stays_on_that_relationship_without_discovery
         ]
         timed_out = clustered[0]
         matchbook.timeout_ids.add(str(timed_out.source_event_id))
-        mb_markets = list(matchbook.list_markets_calls)
-        k_markets = list(kalshi.list_markets_calls)
+        _clear_provider_call_logs(matchbook, kalshi)
         hot = await collector.collect_and_scan(
             venue_costs=_costs(),
             fx_snapshots=_fx(),
@@ -566,8 +573,8 @@ async def test_direct_quote_timeout_stays_on_that_relationship_without_discovery
             provider_call_timeout_seconds=0.2,
             cycle_timeout_seconds=8.0,
         )
-        assert matchbook.list_markets_calls == mb_markets
-        assert kalshi.list_markets_calls == k_markets
+        assert matchbook.list_markets_calls == []
+        assert kalshi.list_markets_calls == []
         evaluated = [
             item
             for item in hot.discovered_fixtures
