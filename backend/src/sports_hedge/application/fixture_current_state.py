@@ -23,7 +23,10 @@ from sports_hedge.application.current_market_inventory import (
     stamp_current_market_row,
     union_paper_market_ids,
 )
-from sports_hedge.application.hot_identity import hot_scheduling_key
+from sports_hedge.application.hot_identity import (
+    hot_scheduling_key,
+    unique_hot_scheduling_ids,
+)
 from sports_hedge.application.hot_market_relationships import (
     HotMarketRelationship,
     relationships_from_current_slots,
@@ -807,9 +810,9 @@ class FixtureCurrentStateStore:
             classify_kwargs = _classify_kwargs(kwargs)
             market_kwargs = _market_ttl_kwargs(kwargs)
             self._evict_non_current(now, **classify_kwargs, **market_kwargs)
-            hot_keys: set[str] = set()
+            hot_fixtures: list[DiscoveredFixture] = []
             universe = 0
-            for canonical_id, record in list(self._rows.items()):
+            for record in list(self._rows.values()):
                 record.prune_markets(now, **market_kwargs)
                 fixture = record.status_fixture(now, **market_kwargs)
                 if fixture is None:
@@ -822,10 +825,10 @@ class FixtureCurrentStateStore:
                     market_kwargs=market_kwargs,
                 )
                 if membership is ScanLane.HOT:
-                    hot_keys.add(hot_scheduling_key(fixture) or canonical_id)
+                    hot_fixtures.append(fixture)
                 elif membership is ScanLane.UNIVERSE:
                     universe += 1
-            return len(hot_keys), universe
+            return len(unique_hot_scheduling_ids(hot_fixtures)), universe
 
     def hot_membership_breakdown(self, now: datetime, **kwargs: Any) -> tuple[int, int, int]:
         """Return (unique HOT units, lifecycle HOT, promoted HOT)."""
@@ -835,10 +838,10 @@ class FixtureCurrentStateStore:
             classify_kwargs = _classify_kwargs(kwargs)
             market_kwargs = _market_ttl_kwargs(kwargs)
             self._evict_non_current(now, **classify_kwargs, **market_kwargs)
-            unique: set[str] = set()
+            hot_fixtures: list[DiscoveredFixture] = []
             lifecycle = 0
             promoted = 0
-            for canonical_id, record in list(self._rows.items()):
+            for record in list(self._rows.values()):
                 record.prune_markets(now, **market_kwargs)
                 fixture = record.status_fixture(now, **market_kwargs)
                 if fixture is None:
@@ -852,13 +855,13 @@ class FixtureCurrentStateStore:
                 )
                 if membership is not ScanLane.HOT:
                     continue
-                unique.add(hot_scheduling_key(fixture) or canonical_id)
+                hot_fixtures.append(fixture)
                 classified = classify_scan_lane(fixture, now, **classify_kwargs)
                 if classified is ScanLane.HOT:
                     lifecycle += 1
                 else:
                     promoted += 1
-            return len(unique), lifecycle, promoted
+            return len(unique_hot_scheduling_ids(hot_fixtures)), lifecycle, promoted
 
     def _identity_membership(
         self,
@@ -888,10 +891,12 @@ class FixtureCurrentStateStore:
         return lifecycle
 
     def _merge_scheduling_identity(self, target_id: str, fixture: Any) -> str:
-        """Record a HOT scheduling key. Never absorbs canonical identity.
+        """Record a diagnostic HOT scheduling token. Never absorbs canonical identity.
 
-        Trusted source/canonical overlap still merges via `_merge_target_identity`.
-        A team+kickoff collision without that evidence must not blend records.
+        Unique HOT units use the inclusive 5-minute relation in
+        ``unique_hot_scheduling_ids``, not this index. Trusted source/canonical
+        overlap still merges via `_merge_target_identity`. A team+kickoff
+        collision without that evidence must not blend records.
         """
 
         key = hot_scheduling_key(fixture)
@@ -916,15 +921,9 @@ class FixtureCurrentStateStore:
         self._scheduling_index[key] = target_id
 
     def _unique_hot_canonical_ids(self, fixtures: list[DiscoveredFixture]) -> list[str]:
-        seen: set[str] = set()
-        unique: list[str] = []
-        for fixture in fixtures:
-            key = hot_scheduling_key(fixture) or fixture.canonical_event_id
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(fixture.canonical_event_id)
-        return unique
+        """One representative canonical id per inclusive 5-minute HOT unit."""
+
+        return unique_hot_scheduling_ids(fixtures)
 
     def _merge_target_identity(self, canonical_id: str, aliases: set[str]) -> str:
         """Reuse the live row proved by trusted source/canonical aliases.

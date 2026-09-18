@@ -7,7 +7,11 @@ from functools import lru_cache
 from pydantic import BaseModel, Field
 
 from sports_hedge.domain.football import CanonicalEvent, CanonicalMarket
-from sports_hedge.facts.aliases import curated_team_names_conflict, resolve_team_name
+from sports_hedge.facts.aliases import (
+    curated_team_names_conflict,
+    is_curated_canonical_team,
+    resolve_team_name,
+)
 from sports_hedge.matching.learned_rules import (
     AppliedLearnedRule,
     LearnedMappingApplicator,
@@ -97,6 +101,18 @@ class EventMatcher:
             left_away, right_away
         ):
             return False
+        if self._exact_curated_senior_identity(
+            left_home=left_home,
+            right_home=right_home,
+            left_away=left_away,
+            right_away=right_away,
+            left_competition=left.competition,
+            right_competition=right.competition,
+        ):
+            # Exact curated identity inside the declared kickoff window must not
+            # be excluded by the weighted kickoff penalty. Fuzzy pairs still use
+            # the conservative upper-bound formula below.
+            return True
         home_upper = SequenceMatcher(a=left_home, b=right_home).quick_ratio()
         away_upper = SequenceMatcher(a=left_away, b=right_away).quick_ratio()
         tolerance_seconds = self.kickoff_tolerance.total_seconds()
@@ -164,7 +180,23 @@ class EventMatcher:
         home_score = self._similarity(left_home, right_home)
         away_score = self._similarity(left_away, right_away)
         competition_score = self._competition_score(left.competition, right.competition)
-        kickoff_score = 1.0 - (kickoff_delta.total_seconds() / self.kickoff_tolerance.total_seconds())
+        exact_identity = self._exact_curated_senior_identity(
+            left_home=left_home,
+            right_home=right_home,
+            left_away=left_away,
+            right_away=right_away,
+            left_competition=left.competition,
+            right_competition=right.competition,
+        )
+        if exact_identity:
+            # Provider sibling events (GAME/BTTS/TOTAL/FTTS) often differ by a
+            # few minutes. The 5-minute window is already a hard veto; do not
+            # also scale confidence by that offset for exact curated seniors.
+            kickoff_score = 1.0
+        else:
+            kickoff_score = 1.0 - (
+                kickoff_delta.total_seconds() / self.kickoff_tolerance.total_seconds()
+            )
 
         confidence = (
             0.35 * home_score
@@ -212,6 +244,40 @@ class EventMatcher:
             counterpart,
             market=market,
             counterpart_market=counterpart_market,
+        )
+
+    @staticmethod
+    def _exact_curated_senior_identity(
+        *,
+        left_home: str,
+        right_home: str,
+        left_away: str,
+        right_away: str,
+        left_competition: str,
+        right_competition: str,
+    ) -> bool:
+        """True only for exact curated seniors in the same target competition.
+
+        Unknown, youth, women, and reserve labels stay fail-closed. Fuzzy club
+        strings keep the weighted kickoff penalty and the 0.92 threshold.
+        """
+
+        if left_home != right_home or left_away != right_away:
+            return False
+        if not is_curated_canonical_team(left_home) or not is_curated_canonical_team(left_away):
+            return False
+        return EventMatcher._same_target_competition(left_competition, right_competition)
+
+    @staticmethod
+    def _same_target_competition(left: str, right: str) -> bool:
+        from sports_hedge.application.target_competitions import resolve_target_competition
+
+        left_target = resolve_target_competition(left)
+        right_target = resolve_target_competition(right)
+        return (
+            left_target is not None
+            and right_target is not None
+            and left_target.code == right_target.code
         )
 
     @staticmethod
