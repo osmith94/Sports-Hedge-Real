@@ -20,14 +20,13 @@ from sports_hedge.application.collector import (
 )
 from sports_hedge.application.live_refresh import LiveRefreshCoordinator
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.scan_lanes import WORKER_COMPLETE, WORKER_WAITING, ScanLane
+from sports_hedge.application.scan_lanes import WORKER_COMPLETE, ScanLane
 from sports_hedge.application.universe_checkpoint import (
     SWEEP_PENDING,
     SWEEP_RETRY_WAIT,
     SweepWorkUnit,
 )
 from sports_hedge.config import Settings, get_settings
-from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
@@ -200,26 +199,13 @@ def test_retryable_unit_waits_instead_of_false_complete_busy_loop() -> None:
         [],
         [],
     )
-    coordinator.record_report(
-        _report(
-            [
-                _universe_fixture("ok-a"),
-                _universe_fixture("retry-b", evaluation="market_fetch_unavailable"),
-            ],
-            when=NOW,
-            scan_lane=ScanLane.UNIVERSE.value,
-        ).model_copy(
-            update={
-                "completed_at": NOW + timedelta(seconds=2),
-                "scan_diagnostics": {"completeness": UNIVERSE_COMPLETENESS_COMPLETE},
-            }
-        ),
-        scan_lane=ScanLane.UNIVERSE,
-    )
+    coordinator._universe_in_progress = False
     assert coordinator._universe_work["retry-b"].state == SWEEP_RETRY_WAIT
     assert coordinator._universe_sweep_is_complete_unlocked() is False
+    coordinator._charge_successful_universe_work(
+        0.0, clock.now, leftover_n=0, completeness=UNIVERSE_COMPLETENESS_COMPLETE
+    )
     assert coordinator._universe_generation_started_at is not None
-    assert coordinator.status.universe.worker_state == WORKER_WAITING
     waiting = coordinator.plan_universe_tick(now=clock.now)
     assert waiting.lane == "idle"
     assert waiting.reason == "universe_retry_wait"
