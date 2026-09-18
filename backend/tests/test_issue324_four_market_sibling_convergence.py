@@ -22,11 +22,20 @@ from typing import Any
 
 import pytest
 
-from sports_hedge.application.collector import MarketEvaluationState, ReadOnlyCrossVenueCollector
+from sports_hedge.application.collector import (
+    CollectionReport,
+    DiscoveredFixture,
+    MarketEvaluationState,
+    ReadOnlyCrossVenueCollector,
+)
 from sports_hedge.application.fixture_clusters import VenueEvent, cluster_venue_events
 from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
 from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
-from sports_hedge.application.hot_identity import hot_scheduling_key
+from sports_hedge.application.hot_identity import (
+    hot_scheduling_key,
+    same_hot_scheduling_unit,
+    unique_hot_scheduling_ids,
+)
 from sports_hedge.application.hot_market_relationships import relationships_from_fixture_markets
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
@@ -69,6 +78,8 @@ GAME_KICKOFF = datetime(2026, 9, 18, 20, 0, tzinfo=UTC)
 BTTS_KICKOFF = GAME_KICKOFF + timedelta(minutes=1)
 TOTAL_KICKOFF = GAME_KICKOFF + timedelta(minutes=3)
 FTTS_KICKOFF = GAME_KICKOFF + timedelta(minutes=4)
+BOUNDARY_LEFT_KICKOFF = GAME_KICKOFF + timedelta(minutes=4)
+BOUNDARY_RIGHT_KICKOFF = GAME_KICKOFF + timedelta(minutes=5)
 OUTSIDE_KICKOFF = GAME_KICKOFF + timedelta(minutes=6)
 
 
@@ -261,25 +272,180 @@ def test_exact_curated_20_00_siblings_converge_inside_five_minute_window() -> No
     assert counts["matchbook_kalshi"] == 1
 
 
+def _discovered(
+    canonical_id: str,
+    *,
+    home: str,
+    away: str,
+    kickoff: datetime,
+    last_seen: datetime | None = None,
+) -> DiscoveredFixture:
+    seen = last_seen or kickoff - timedelta(minutes=30)
+    return DiscoveredFixture(
+        source=VenueName.MATCHBOOK,
+        source_event_id=canonical_id,
+        canonical_event_id=canonical_id,
+        home_team=home,
+        away_team=away,
+        competition="La Liga",
+        kickoff_utc=kickoff,
+        last_seen_at=seen,
+        market_evaluation_state=MarketEvaluationState.EVALUATED.value,
+        opportunity_state="matched",
+    )
+
+
+def _hot_report(fixtures: list[DiscoveredFixture], *, when: datetime) -> CollectionReport:
+    return CollectionReport(
+        started_at=when,
+        completed_at=when,
+        paper_decisions=[],
+        discovered_fixtures=fixtures,
+        scan_lane=ScanLane.UNIVERSE.value,
+        venue_health={"matchbook": "ok", "polymarket": "ok", "kalshi": "ok"},
+        operator_summary="issue324-hot-unit",
+        fixture_identity_aliases={
+            item.canonical_event_id: item.canonical_event_id for item in fixtures
+        },
+        fixture_source_events={
+            item.canonical_event_id: [
+                {
+                    "venue": "matchbook",
+                    "source_event_id": item.source_event_id,
+                    "raw": {"id": item.source_event_id},
+                }
+            ]
+            for item in fixtures
+        },
+    )
+
+
 def test_hot_scheduling_collapses_minute_offset_siblings() -> None:
     left = SimpleNamespace(
         home_team="Espanyol",
         away_team="Elche CF",
         kickoff_utc=GAME_KICKOFF,
+        canonical_event_id="espanyol-elche-game",
     )
     right = SimpleNamespace(
         home_team="Espanyol Barcelona",
         away_team="Elche",
         kickoff_utc=TOTAL_KICKOFF,
+        canonical_event_id="espanyol-elche-total",
     )
     later = SimpleNamespace(
         home_team="Espanyol",
         away_team="Elche",
         kickoff_utc=OUTSIDE_KICKOFF,
+        canonical_event_id="espanyol-elche-later",
     )
     assert hot_scheduling_key(left) is not None
-    assert hot_scheduling_key(left) == hot_scheduling_key(right)
-    assert hot_scheduling_key(left) != hot_scheduling_key(later)
+    assert hot_scheduling_key(left) != hot_scheduling_key(right)
+    assert same_hot_scheduling_unit(left, right) is True
+    assert same_hot_scheduling_unit(left, later) is False
+    assert unique_hot_scheduling_ids([left, right, later]) == [
+        "espanyol-elche-game",
+        "espanyol-elche-later",
+    ]
+
+
+def test_hot_scheduling_collapses_inclusive_five_minute_boundary() -> None:
+    left = SimpleNamespace(
+        home_team="Espanyol",
+        away_team="Elche",
+        kickoff_utc=BOUNDARY_LEFT_KICKOFF,
+        canonical_event_id="espanyol-elche-20-04",
+    )
+    right = SimpleNamespace(
+        home_team="Espanyol Barcelona",
+        away_team="Elche CF",
+        kickoff_utc=BOUNDARY_RIGHT_KICKOFF,
+        canonical_event_id="espanyol-elche-20-05",
+    )
+    game = SimpleNamespace(
+        home_team="Espanyol",
+        away_team="Elche",
+        kickoff_utc=GAME_KICKOFF,
+        canonical_event_id="espanyol-elche-20-00",
+    )
+    later = SimpleNamespace(
+        home_team="Espanyol",
+        away_team="Elche",
+        kickoff_utc=OUTSIDE_KICKOFF,
+        canonical_event_id="espanyol-elche-20-06",
+    )
+    assert hot_scheduling_key(left) != hot_scheduling_key(right)
+    assert same_hot_scheduling_unit(left, right) is True
+    assert same_hot_scheduling_unit(game, later) is False
+    assert unique_hot_scheduling_ids([left, right]) == ["espanyol-elche-20-04"]
+    assert unique_hot_scheduling_ids([game, later]) == [
+        "espanyol-elche-20-00",
+        "espanyol-elche-20-06",
+    ]
+
+
+def test_hot_unit_dedupe_honors_inclusive_window_without_absorbing_identity() -> None:
+    scanned = GAME_KICKOFF - timedelta(minutes=30)
+    boundary_left = _discovered(
+        "espanyol-elche-20-04",
+        home="Espanyol",
+        away="Elche",
+        kickoff=BOUNDARY_LEFT_KICKOFF,
+        last_seen=scanned,
+    )
+    boundary_right = _discovered(
+        "espanyol-elche-20-05",
+        home="Espanyol Barcelona",
+        away="Elche CF",
+        kickoff=BOUNDARY_RIGHT_KICKOFF,
+        last_seen=scanned,
+    )
+    store = FixtureCurrentStateStore()
+    store.upsert_from_report(
+        _hot_report([boundary_left, boundary_right], when=scanned),
+        scan_lane=ScanLane.UNIVERSE,
+        now=scanned,
+    )
+    unique, _lifecycle, _promoted = store.hot_membership_breakdown(scanned)
+    hot_count, _universe = store.membership_counts(scanned)
+    scope = store.hot_identity_scope(scanned)
+    assert set(store._rows) == {"espanyol-elche-20-04", "espanyol-elche-20-05"}
+    assert store._aliases.get("espanyol-elche-20-04") != "espanyol-elche-20-05"
+    assert store._aliases.get("espanyol-elche-20-05") != "espanyol-elche-20-04"
+    assert unique == 1
+    assert hot_count == 1
+    assert len(scope) == 1
+    assert scope[0] in {"espanyol-elche-20-04", "espanyol-elche-20-05"}
+
+    outside_left = _discovered(
+        "espanyol-elche-20-00",
+        home="Espanyol",
+        away="Elche",
+        kickoff=GAME_KICKOFF,
+        last_seen=scanned,
+    )
+    outside_right = _discovered(
+        "espanyol-elche-20-06",
+        home="Espanyol",
+        away="Elche",
+        kickoff=OUTSIDE_KICKOFF,
+        last_seen=scanned,
+    )
+    store.clear()
+    store.upsert_from_report(
+        _hot_report([outside_left, outside_right], when=scanned),
+        scan_lane=ScanLane.UNIVERSE,
+        now=scanned,
+    )
+    unique, _lifecycle, _promoted = store.hot_membership_breakdown(scanned)
+    hot_count, _universe = store.membership_counts(scanned)
+    assert set(store._rows) == {"espanyol-elche-20-00", "espanyol-elche-20-06"}
+    assert unique == 2
+    assert hot_count == 2
+    assert set(store.hot_identity_scope(scanned)) == {
+        "espanyol-elche-20-00",
+        "espanyol-elche-20-06",
+    }
 
 
 def test_fail_closed_different_teams_competition_or_outside_tolerance() -> None:
