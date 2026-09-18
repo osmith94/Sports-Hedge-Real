@@ -66,6 +66,7 @@ from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.matching.ordinary_1x2 import GAMEWIN_ORDINARY_1X2_AUDIT_REASON
 from sports_hedge.normalization.venues import (
+    KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
     KalshiNormalizer,
     MatchbookNormalizer,
     classify_kalshi_rule_structure,
@@ -163,8 +164,10 @@ def test_current_kalshi_90_minute_clause_classifies_as_regulation() -> None:
     structure = classify_kalshi_rule_structure(CURRENT_PRIMARY)
     assert structure["looks_like_generic_contract_template"] is False
     assert structure["contains_result_scope_placeholder"] is False
-    fingerprint = resolve_kalshi_settlement_from_rule_fields(CURRENT_PRIMARY, CURRENT_SECONDARY)
+    fingerprint = resolve_kalshi_settlement_from_rule_fields(CURRENT_PRIMARY, "")
     assert fingerprint == (SettlementScope.REGULATION_TIME, False, False)
+    sibling = resolve_kalshi_settlement_from_rule_fields(CURRENT_PRIMARY, CURRENT_SECONDARY)
+    assert sibling == (SettlementScope.UNKNOWN, None, None)
     assert kalshi_documented_result_scope_fingerprint(
         {"rules_primary": CURRENT_PRIMARY, "yes_sub_title": "Bayern Munich", "subtitle": "REG TIME"}
     ) is None
@@ -199,12 +202,11 @@ def test_home_draw_away_binaries_assemble_to_one_three_way() -> None:
         CanonicalOutcome.DRAW,
         CanonicalOutcome.AWAY,
     }
-    assert market.settlement.scope is SettlementScope.REGULATION_TIME
-    assert market.settlement.is_economically_complete() is True
-    assert market.settlement.unknown_reason is None
+    assert market.settlement.is_economically_complete() is False
+    assert market.settlement.unknown_reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
 
 
-def test_production_path_mb_k_current_payload_is_approved_equivalent() -> None:
+def test_production_path_mb_k_current_payload_is_review_required_for_fair_price() -> None:
     captured = _captured()["payload"]
     left = PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[_mb_match_odds()])
     right = PayloadSide(
@@ -214,22 +216,22 @@ def test_production_path_mb_k_current_payload_is_approved_equivalent() -> None:
         series=GAMEWIN_SERIES,
     )
     assessment = classify_payload_pair(left, right)
-    assert assessment.state is CatalogueApprovalState.APPROVED_EQUIVALENT
-    assert assessment.reason == "approved_equivalent"
-    assert assessment.matcher_matched is True
+    assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
+    assert assessment.reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
+    assert assessment.matcher_matched is False
     assert assessment.matcher_admits_unknown_1x2 is False
-    assert assessment.settlement_complete is True
+    assert assessment.settlement_complete is False
     assert assessment.execution_eligible is False
     assert assessment.catalogue_shared_by == ("hot", "universe")
     mb = normalize_payload_side(left)
     kalshi = normalize_payload_side(right)
     match = MarketMatcher().match(mb, kalshi)
-    assert match.matched is True
+    assert match.matched is False
     assert GAMEWIN_ORDINARY_1X2_AUDIT_REASON not in match.reasons
-    assert catalogue_allows_solver(mb, kalshi) is True
-    assert scan_eligible_pair(mb, kalshi, match) is True
+    assert catalogue_allows_solver(mb, kalshi) is False
+    assert scan_eligible_pair(mb, kalshi, match) is False
     admission = assess_catalogue_admission(mb, kalshi)
-    assert admission.allowed is True
+    assert admission.allowed is False
     assert admission.catalogue_shared_by == ("hot", "universe")
 
 
@@ -479,9 +481,11 @@ def test_hot_and_universe_share_the_current_payload_gate() -> None:
     )
     hot = assess_catalogue_admission(left, right)
     universe = assess_catalogue_admission(left, right)
-    assert hot.allowed is True
-    assert universe.allowed is True
+    assert hot.allowed is False
+    assert universe.allowed is False
     assert hot.catalogue_shared_by == universe.catalogue_shared_by == ("hot", "universe")
+    assert hot.assessment.reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
+    assert universe.assessment.reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
 
 
 def test_zero_equivalent_diagnostics_state_the_actual_reason() -> None:
@@ -696,7 +700,7 @@ class _BayernKalshi:
 
 
 @pytest.mark.asyncio
-async def test_collector_nested_current_payload_is_inventory_equivalent() -> None:
+async def test_collector_nested_current_payload_is_not_inventory_equivalent() -> None:
     repository = SqliteMarketIntelligenceRepository()
     kalshi = _BayernKalshi()
     collector = ReadOnlyCrossVenueCollector(
@@ -722,19 +726,15 @@ async def test_collector_nested_current_payload_is_inventory_equivalent() -> Non
         fixture = report.discovered_fixtures[0]
         assert fixture.matchbook_matched is True
         assert fixture.kalshi_matched is True
-        assert fixture.matched_equivalent_count == 1
-        assert fixture.no_comparison_reason is None or fixture.no_comparison_reason != MARKET_SPECIFIC_RULES_MISSING
+        assert fixture.matched_equivalent_count == 0
         rows = report.fixture_markets[fixture.canonical_event_id]
-        assert any(
+        assert not any(
             row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
-            and row.family == "match_result"
             and row.entered_solver
             for row in rows
         )
         coverage = report.scan_diagnostics["matching_coverage"]
-        assert coverage["equivalent_markets"] == 1
-        assert coverage["matching_state"] == "cross_venue_equivalent_present"
-        assert coverage["zero_equivalent_reason_counts"] == {}
+        assert coverage["equivalent_markets"] == 0
         assert Settings().sports_hedge_execution_enabled is False
     finally:
         repository.close()

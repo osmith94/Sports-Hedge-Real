@@ -119,6 +119,14 @@ _CALLED_OFF_RE = re.compile(r"\b(?:called off|call off)\b")
 _REFUND_RE = re.compile(
     r"\b(?:refund(?:s|ed)?|stakes? returned|bets? (?:are )?(?:refunded|returned))\b"
 )
+# Material Kalshi cancel/reschedule-to-fair-price settlement wording.
+KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON = (
+    "kalshi_unmodelled_cancellation_reschedule_fair_price"
+)
+_KALSHI_CANCEL_RESCHEDULE_FAIR_PRICE_RE = re.compile(
+    r"(?:cancel+ed|reschedul\w*).{0,200}fair price"
+    r"|fair price.{0,200}(?:cancel+ed|reschedul\w*)"
+)
 _NEGATED_EXCLUSION_RE = re.compile(
     r"\b(?:not|never)\s+(?:excluding|exclude|without)\b"
     r"|\bdoes not exclude\b"
@@ -424,6 +432,14 @@ class KalshiNormalizer:
                 continue
             seen.add(classified.ticker)
             if classified.settlement.is_economically_complete():
+                complete.append(classified.ticker)
+            elif (
+                classified.settlement.unknown_reason
+                == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
+            ):
+                # Nested wording already carries the material cancel/reschedule
+                # fair-price rule. Get Market cannot invent a Matchbook-compatible
+                # catalogue assumption.
                 complete.append(classified.ticker)
             else:
                 incomplete.append(classified.ticker)
@@ -1013,6 +1029,16 @@ def _claim_regulation(
     return SettlementScope.REGULATION_TIME, False, False
 
 
+def _claim_regulation_if_result_scope_proven(
+    text: str, extra_time: bool | None, penalties: bool | None
+) -> tuple[SettlementScope, bool | None, bool | None]:
+    """ET/penalty exclusion is not itself regulation/90-minute evidence."""
+
+    if not _has_regulation_marker(text):
+        return SettlementScope.UNKNOWN, None, None
+    return _claim_regulation(text, extra_time, penalties)
+
+
 def _first_defined_polarity(text: str, phrases: tuple[str, ...]) -> bool | None:
     for phrase in phrases:
         polarity = _phrase_polarity(text, phrase)
@@ -1049,7 +1075,7 @@ def classify_settlement_wording(text: str) -> tuple[SettlementScope, bool | None
     if include_affirmed and include_negated:
         return SettlementScope.UNKNOWN, None, None
     if include_negated:
-        return _claim_regulation(normalized, False, False)
+        return _claim_regulation_if_result_scope_proven(normalized, False, False)
     if include_affirmed:
         if _inclusion_exclusion_conflict(normalized, True, True):
             return SettlementScope.UNKNOWN, None, None
@@ -1075,7 +1101,7 @@ def classify_settlement_wording(text: str) -> tuple[SettlementScope, bool | None
     if extra_time is False and penalties is True:
         return SettlementScope.UNKNOWN, None, None
     if extra_time is False:
-        return _claim_regulation(normalized, extra_time, penalties)
+        return _claim_regulation_if_result_scope_proven(normalized, extra_time, penalties)
     if penalties is True:
         # Positive penalties token cannot override contrary 90-minute / ET-exclusion.
         if extra_time is not True and _has_regulation_marker(normalized):
@@ -1558,6 +1584,34 @@ def kalshi_documented_result_scope_fingerprint(
     return None
 
 
+def kalshi_text_has_cancel_reschedule_fair_price(text: str) -> bool:
+    """True when wording carries cancel/reschedule-to-fair-price settlement."""
+
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    return bool(_KALSHI_CANCEL_RESCHEDULE_FAIR_PRICE_RE.search(normalized))
+
+
+def kalshi_fields_have_cancel_reschedule_fair_price(fields: list[str] | tuple[str, ...]) -> bool:
+    return any(kalshi_text_has_cancel_reschedule_fair_price(text) for text in fields if text)
+
+
+def matchbook_kalshi_cancel_reschedule_fair_price_compatible() -> bool:
+    """Trace the versioned Matchbook↔Kalshi catalogue assumption, if any.
+
+    Matchbook ``_standard_football_settlement`` does not model cancellation,
+    reschedule, or fair-price. Absence of Matchbook rule text is not proof of
+    compatibility. There is currently no approved pairwise assumption.
+    """
+
+    from sports_hedge.catalogue.matrix import (
+        MATCHBOOK_KALSHI_CANCEL_RESCHEDULE_FAIR_PRICE_COMPATIBLE,
+    )
+
+    return MATCHBOOK_KALSHI_CANCEL_RESCHEDULE_FAIR_PRICE_COMPATIBLE is True
+
+
 def resolve_kalshi_settlement_from_rule_fields(
     primary: str,
     secondary: str,
@@ -1569,9 +1623,10 @@ def resolve_kalshi_settlement_from_rule_fields(
     current nested/Get Market payout clauses such as ``after 90 minutes plus
     stoppage time (does not include extra time or penalties)``. Generic
     multi-scope catalog/placeholder text in any nonempty field keeps UNKNOWN.
-    Distinct complete fingerprints fail closed. Incomplete sibling fields that
-    are not catalogs (cancel/reschedule void language, affiliation boilerplate)
-    do not poison a complete selected clause.
+    Distinct complete fingerprints fail closed. Affiliation boilerplate that
+    is not a catalog does not poison a complete selected clause. Material
+    cancellation/reschedule-to-fair-price language does poison unless a
+    versioned Matchbook↔Kalshi catalogue assumption proves compatibility.
     """
 
     unknown = (SettlementScope.UNKNOWN, None, None)
@@ -1593,6 +1648,9 @@ def resolve_kalshi_settlement_from_rule_fields(
     unique = set(complete)
     if len(unique) > 1:
         return unknown
+    if kalshi_fields_have_cancel_reschedule_fair_price(nonempty):
+        if not matchbook_kalshi_cancel_reschedule_fair_price_compatible():
+            return unknown
     if len(unique) == 1:
         return next(iter(unique))
     return classify_settlement_wording(" ".join(nonempty))
@@ -1910,7 +1968,12 @@ def _kalshi_settlement(
         )
     else:
         scope, extra_time, penalties = classify_settlement_wording(" ".join(descriptions))
-    if family is MarketFamily.MATCH_RESULT and not _classified_fingerprint_complete(
+    cancel_fair_price = kalshi_fields_have_cancel_reschedule_fair_price(
+        (primary, secondary, rules, *descriptions)
+    ) and not matchbook_kalshi_cancel_reschedule_fair_price_compatible()
+    if cancel_fair_price:
+        scope, extra_time, penalties = SettlementScope.UNKNOWN, None, None
+    elif family is MarketFamily.MATCH_RESULT and not _classified_fingerprint_complete(
         scope, extra_time, penalties
     ):
         from sports_hedge.normalization.kalshi_contract_terms import (
@@ -1933,7 +1996,9 @@ def _kalshi_settlement(
         elif default_scope == "including_penalties":
             scope, extra_time, penalties = SettlementScope.INCLUDING_PENALTIES, True, True
     unknown_reason = None
-    if (
+    if cancel_fair_price:
+        unknown_reason = KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
+    elif (
         family is MarketFamily.MATCH_RESULT
         and scope is SettlementScope.UNKNOWN
         and not _classified_fingerprint_complete(scope, extra_time, penalties)

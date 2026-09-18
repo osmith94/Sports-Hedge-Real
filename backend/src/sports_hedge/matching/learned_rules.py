@@ -789,6 +789,10 @@ def economic_mismatch_reasons(left: CanonicalMarket, right: CanonicalMarket) -> 
         if not left_complete or not right_complete:
             if not allow_unknown_settlement_for_ordinary_1x2(left, right):
                 reasons.append("incomplete_settlement")
+                for market in (left, right):
+                    reason = market.settlement.unknown_reason
+                    if reason and reason not in reasons:
+                        reasons.append(reason)
         elif left.settlement.deterministic_key() != right.settlement.deterministic_key():
             reasons.append("settlement_mismatch")
     left_outcomes = {runner.outcome for runner in left.runners}

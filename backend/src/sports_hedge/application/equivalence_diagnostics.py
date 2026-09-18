@@ -16,6 +16,9 @@ from sports_hedge.application.fixture_inventory import (
 from sports_hedge.catalogue.states import CatalogueApprovalState
 from sports_hedge.matching.ordinary_1x2 import GAMEWIN_ORDINARY_1X2_AUDIT_REASON
 from sports_hedge.normalization.kalshi_contract_terms import GAMEWIN_SCOPE_UNAVAILABLE_REASON
+from sports_hedge.normalization.venues import (
+    KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
+)
 
 NO_FAMILY_OVERLAP = "no_normalized_market_family_overlap"
 MATCHER_MISMATCH = "market_matcher_mismatch"
@@ -62,6 +65,7 @@ _REVIEW_TOKENS = frozenset(
         "plausible_archetype_incomplete_evidence",
         "incomplete_outcome_set",
         "match_result_outcome_space_incomplete_or_mismatched",
+        KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
     }
 )
 
@@ -101,6 +105,8 @@ def zero_equivalent_reason_from_inventory(
 
     if MARKET_SPECIFIC_RULES_MISSING in tokens or GAMEWIN_SCOPE_UNAVAILABLE_REASON in tokens:
         return MARKET_SPECIFIC_RULES_MISSING
+    if KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON in tokens:
+        return KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
     if GAMEWIN_ORDINARY_1X2_AUDIT_REASON in tokens and any(
         token in tokens for token in _REVIEW_TOKENS
     ):
