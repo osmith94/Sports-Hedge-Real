@@ -166,22 +166,22 @@ function Invoke-DemoOwnedService {
     }
     $action = Get-DemoStartAction -HealthOk $healthOk -Identity $identity -Live $live -CurrentGitHead $Git.sha -CurrentRepoRoot $Root
     if ($action -eq "reuse") {
-        Write-Host "$Label: reused existing Sports Hedge process for SHA $($Git.sha)"
+        Write-Host "${Label}: reused existing Sports Hedge process for SHA $($Git.sha)"
         return
     }
     if ($action -eq "conflict") {
         Show-StartupError "$Label is healthy at $HealthUrl but is not a Sports Hedge launcher process for this checkout (SHA $($Git.sha)). Refusing to reuse or kill the unrelated process occupying the port."
     }
     if ($action -eq "restart") {
-        Write-Host "$Label: restart required; recorded SHA $($identity.git_head) != current $($Git.sha)"
+        Write-Host "${Label}: restart required; recorded SHA $($identity.git_head) != current $($Git.sha)"
         Stop-DemoPid -PidFile $PidFile -Label $Label
         Wait-HttpGone -Url $HealthUrl -Label $Label
     }
     & $Starter
     if ($action -eq "restart") {
-        Write-Host "$Label: restarted owned process because recorded SHA $($identity.git_head) != current $($Git.sha)"
+        Write-Host "${Label}: restarted owned process because recorded SHA $($identity.git_head) != current $($Git.sha)"
     } else {
-        Write-Host "$Label: started for SHA $($Git.sha)"
+        Write-Host "${Label}: started for SHA $($Git.sha)"
     }
 }
 
