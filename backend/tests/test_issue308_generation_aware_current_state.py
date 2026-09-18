@@ -232,21 +232,94 @@ def test_next_generation_removes_relationship_when_market_gone() -> None:
     assert row.opportunity_state == "unmatched"
 
 
-def test_open_next_generation_keeps_unreevaluated_relationship() -> None:
+def test_omitted_later_generation_does_not_extend_proving_close_ttl() -> None:
+    """gen8 opens 8s later but never sees A: A still expires at gen7_close + 360s."""
+
     store = FixtureCurrentStateStore()
     store.open_universe_generation(GENERATION_ID, started_at=NOW)
     _upsert_universe(store, FIXTURE_A, when=NOW, markets=[_row()])
-    closed_at = NOW + timedelta(seconds=TWENTY_MINUTES)
-    store.close_universe_generation(GENERATION_ID, closed_at=closed_at)
+    gen7_close = NOW + timedelta(seconds=TWENTY_MINUTES)
+    store.close_universe_generation(GENERATION_ID, closed_at=gen7_close)
 
-    next_generation = GENERATION_ID + 1
-    started = closed_at + timedelta(seconds=8)
-    store.open_universe_generation(next_generation, started_at=started)
-    still_sweeping = started + timedelta(seconds=SEVENTEEN_MINUTES)
-    row = _inventory_row(store, FIXTURE_A, still_sweeping)
+    gen8 = GENERATION_ID + 1
+    gen8_start = gen7_close + timedelta(seconds=8)
+    store.open_universe_generation(gen8, started_at=gen8_start)
+    _upsert_universe(store, FIXTURE_B, when=gen8_start, markets=[_row()], generation_id=gen8)
+
+    still_current = gen7_close + timedelta(seconds=DEFAULT_UNIVERSE_TTL_SECONDS - 1)
+    row = _inventory_row(store, FIXTURE_A, still_current)
     assert row is not None
     assert row.matched_equivalent_count >= 1
     assert row.opportunity_state == "matched"
+    assert row.solver_is_arbitrage is False
+    assert row.current_net_edge is None
+    assert FIXTURE_A not in store.hot_identity_scope(still_current)
+
+    expired = gen7_close + timedelta(seconds=DEFAULT_UNIVERSE_TTL_SECONDS + 1)
+    assert expired > gen8_start
+    gone = _inventory_row(store, FIXTURE_A, expired)
+    if gone is not None:
+        assert gone.matched_equivalent_count == 0
+        assert gone.opportunity_state == "unmatched"
+
+
+def test_repeated_omitted_generations_cannot_keep_relationship_forever() -> None:
+    store = FixtureCurrentStateStore()
+    store.open_universe_generation(GENERATION_ID, started_at=NOW)
+    _upsert_universe(store, FIXTURE_A, when=NOW, markets=[_row()])
+    gen7_close = NOW + timedelta(seconds=TWENTY_MINUTES)
+    store.close_universe_generation(GENERATION_ID, closed_at=gen7_close)
+
+    gen8_start = gen7_close + timedelta(seconds=8)
+    store.open_universe_generation(GENERATION_ID + 1, started_at=gen8_start)
+    gen8_close = gen8_start + timedelta(seconds=TWENTY_MINUTES)
+    store.close_universe_generation(GENERATION_ID + 1, closed_at=gen8_close)
+    gen9_start = gen8_close + timedelta(seconds=8)
+    store.open_universe_generation(GENERATION_ID + 2, started_at=gen9_start)
+
+    during_gen8 = gen7_close + timedelta(seconds=DEFAULT_UNIVERSE_TTL_SECONDS + 1)
+    gone_during_gen8 = _inventory_row(store, FIXTURE_A, during_gen8)
+    if gone_during_gen8 is not None:
+        assert gone_during_gen8.matched_equivalent_count == 0
+
+    after_later_closes = gen9_start + timedelta(seconds=30)
+    gone = _inventory_row(store, FIXTURE_A, after_later_closes)
+    if gone is not None:
+        assert gone.matched_equivalent_count == 0
+        assert gone.opportunity_state == "unmatched"
+
+
+def test_later_generation_reproof_starts_new_lifecycle() -> None:
+    store = FixtureCurrentStateStore()
+    store.open_universe_generation(GENERATION_ID, started_at=NOW)
+    _upsert_universe(store, FIXTURE_A, when=NOW, markets=[_row()])
+    gen7_close = NOW + timedelta(seconds=TWENTY_MINUTES)
+    store.close_universe_generation(GENERATION_ID, closed_at=gen7_close)
+
+    gen8 = GENERATION_ID + 1
+    gen8_start = gen7_close + timedelta(seconds=8)
+    store.open_universe_generation(gen8, started_at=gen8_start)
+    _upsert_universe(store, FIXTURE_A, when=gen8_start, markets=[_row()], generation_id=gen8)
+
+    past_gen7_ttl = gen7_close + timedelta(seconds=DEFAULT_UNIVERSE_TTL_SECONDS + 1)
+    still_gen8 = _inventory_row(store, FIXTURE_A, past_gen7_ttl)
+    assert still_gen8 is not None
+    assert still_gen8.matched_equivalent_count >= 1
+
+    gen8_complete = gen8_start + timedelta(seconds=TWENTY_MINUTES)
+    during_gen8 = _inventory_row(store, FIXTURE_A, gen8_complete)
+    assert during_gen8 is not None
+    assert during_gen8.matched_equivalent_count >= 1
+    store.close_universe_generation(gen8, closed_at=gen8_complete)
+    after_close = _inventory_row(store, FIXTURE_A, gen8_complete)
+    assert after_close is not None
+    assert after_close.matched_equivalent_count >= 1
+
+    expired = gen8_complete + timedelta(seconds=DEFAULT_UNIVERSE_TTL_SECONDS + 1)
+    gone = _inventory_row(store, FIXTURE_A, expired)
+    if gone is not None:
+        assert gone.matched_equivalent_count == 0
+        assert gone.opportunity_state == "unmatched"
 
 
 def test_post_generation_idle_ttl_expires_relationship() -> None:

@@ -6,11 +6,12 @@ fuzzy labels — and merged so a partial HOT refresh cannot collapse still-curre
 equivalents from the other lane.
 
 Issue #308: ApprovedEquivalent / market-relationship presence is
-generation-aware. A long UNIVERSE sweep must not erase an early fixture's
-proven relationship merely because quotes aged past lane TTL. Quote
-freshness, paper eligibility, auto-capture and HOT promotion stay on the
-short-lived executable / radar clocks and are independent of relationship
-retention.
+generation-aware. A UNIVERSE evaluation remains discovery-current for the
+generation that proved it. After that proving generation closes, expiry is
+anchored to that generation's own close time plus radar TTL. A later open
+generation does not revive or suspend that expiry. Quote freshness, paper
+eligibility, auto-capture and HOT promotion stay on the short-lived
+executable / radar clocks and are independent of relationship retention.
 """
 
 from __future__ import annotations
@@ -93,6 +94,7 @@ class CurrentMarketSlot:
     paper_market_ids: tuple[str, ...]
     evaluated_absent: bool = False
     universe_generation_id: int | None = None
+    universe_generation_closed_at: datetime | None = None
 
 
 def canonical_current_market_key(row: FixtureMarketInventoryRow) -> str:
@@ -228,6 +230,11 @@ def merge_current_market_slots(
                 incoming_generation_id=universe_generation_id,
                 previous=previous,
             ),
+            universe_generation_closed_at=_slot_generation_closed_at(
+                lane,
+                incoming_generation_id=universe_generation_id,
+                previous=previous,
+            ),
         )
     if not incoming_rows:
         merged = mark_evaluated_absence(
@@ -263,6 +270,11 @@ def mark_evaluated_absence(
                 incoming_generation_id=None,
                 previous=slot,
             ),
+            universe_generation_closed_at=_slot_generation_closed_at(
+                scan_lane,
+                incoming_generation_id=None,
+                previous=slot,
+            ),
         )
     return updated
 
@@ -275,7 +287,7 @@ def prune_expired_market_slots(
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     open_universe_generation_id: int | None = None,
-    universe_generation_closed_at: datetime | None = None,
+    universe_generation_closed_at_by_id: dict[int, datetime] | None = None,
 ) -> dict[str, CurrentMarketSlot]:
     evaluated = require_aware_instant(now, "now")
     live: dict[str, CurrentMarketSlot] = {}
@@ -287,7 +299,7 @@ def prune_expired_market_slots(
             universe_ttl_seconds=universe_ttl_seconds,
             max_quote_age_ms=max_quote_age_ms,
             open_universe_generation_id=open_universe_generation_id,
-            universe_generation_closed_at=universe_generation_closed_at,
+            universe_generation_closed_at_by_id=universe_generation_closed_at_by_id,
         ):
             continue
         live[key] = slot
@@ -302,24 +314,38 @@ def slot_relationship_current(
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     open_universe_generation_id: int | None = None,
-    universe_generation_closed_at: datetime | None = None,
+    universe_generation_closed_at_by_id: dict[int, datetime] | None = None,
 ) -> bool:
     """True when ApprovedEquivalent / market presence is still discovery-current.
 
     Quote freshness is a separate clock. A UNIVERSE-stamped relationship stays
-    visible while that generation is open, even after radar TTL. After the
-    generation closes, the existing universe TTL is the post-generation idle
-    policy, anchored at close time rather than the early-fixture eval instant.
+    visible while its proving generation is open. After that generation closes,
+    expiry is anchored to that proving generation's own close time plus radar
+    TTL. A later open generation does not revive or suspend that expiry.
     Unstamped / HOT-only slots keep the historical last_scanned_at lane TTL.
     """
 
     if slot.evaluated_absent:
         return False
     if slot.universe_generation_id is not None:
-        if open_universe_generation_id is not None:
+        proving = slot.universe_generation_id
+        if open_universe_generation_id == proving:
             return True
-        anchor = universe_generation_closed_at or slot.last_scanned_at
-        expires = require_aware_instant(anchor, "universe_generation_closed_at") + timedelta(
+        closed_at = slot.universe_generation_closed_at
+        if closed_at is None and universe_generation_closed_at_by_id:
+            closed_at = universe_generation_closed_at_by_id.get(proving)
+        if closed_at is None:
+            return (
+                slot_freshness(
+                    slot,
+                    now=now,
+                    hot_ttl_seconds=hot_ttl_seconds,
+                    universe_ttl_seconds=universe_ttl_seconds,
+                    max_quote_age_ms=max_quote_age_ms,
+                )
+                != FRESHNESS_EXPIRED
+            )
+        expires = require_aware_instant(closed_at, "universe_generation_closed_at") + timedelta(
             seconds=universe_ttl_seconds
         )
         return now < expires
@@ -477,7 +503,7 @@ def apply_current_market_inventory(
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     open_universe_generation_id: int | None = None,
-    universe_generation_closed_at: datetime | None = None,
+    universe_generation_closed_at_by_id: dict[int, datetime] | None = None,
 ):
     """Project merged current markets onto fixture headline fields.
 
@@ -487,7 +513,7 @@ def apply_current_market_inventory(
     only quote-fresh slots.
     """
 
-    del open_universe_generation_id, universe_generation_closed_at
+    del open_universe_generation_id, universe_generation_closed_at_by_id
     ttl = {
         "hot_ttl_seconds": hot_ttl_seconds,
         "universe_ttl_seconds": universe_ttl_seconds,
@@ -726,6 +752,22 @@ def _slot_generation_id(
         return incoming_generation_id
     if previous is not None:
         return previous.universe_generation_id
+    return None
+
+
+def _slot_generation_closed_at(
+    scan_lane: ScanLane,
+    *,
+    incoming_generation_id: int | None,
+    previous: CurrentMarketSlot | None,
+) -> datetime | None:
+    """A UNIVERSE re-evaluation starts a new proving lifecycle; HOT keeps the old close."""
+
+    del incoming_generation_id
+    if scan_lane is ScanLane.UNIVERSE:
+        return None
+    if previous is not None:
+        return previous.universe_generation_closed_at
     return None
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -125,11 +125,12 @@ class FixtureCurrentStateStore:
     Fixture equivalent/qualifying/near counts and best/headline fields derive
     from that merged current inventory. Equivalent / ApprovedEquivalent
     presence is generation-aware: a UNIVERSE evaluation remains discovery
-    current until a later generation re-evaluates it, explicit absence
-    invalidates it, or the post-generation radar TTL expires after the
-    sweep closes. Radar TTL may keep quote-stale rows visible as
-    relationship truth; paper eligibility / auto-capture / HOT promotion
-    still require executable or radar-current quote freshness.
+    current for the proving generation, then expires at that generation's
+    own close plus radar TTL. A later open generation does not revive or
+    suspend that expiry. A later authoritative re-evaluation may refresh
+    or remove the relationship sooner. Radar TTL may keep quote-stale rows
+    visible as relationship truth; paper eligibility / auto-capture / HOT
+    promotion still require executable or radar-current quote freshness.
 
     HOT identity is the union of lifecycle HOT membership (in-play / <=60m
     pre-kickoff / bounded post-kickoff unknown, subject to the 4h hard
@@ -163,7 +164,7 @@ class FixtureCurrentStateStore:
         self._scheduling_index: dict[str, str] = {}
         self._has_collection = False
         self._open_universe_generation_id: int | None = None
-        self._universe_generation_closed_at: datetime | None = None
+        self._universe_generation_closed_at_by_id: dict[int, datetime] = {}
 
     def clear(self, *, keep_tombstones: bool = False, keep_universe_generation: bool = False) -> None:
         with self._lock:
@@ -177,7 +178,7 @@ class FixtureCurrentStateStore:
                 self._tombstone_aliases = {}
             if not keep_universe_generation:
                 self._open_universe_generation_id = None
-                self._universe_generation_closed_at = None
+                self._universe_generation_closed_at_by_id = {}
 
     @property
     def generation(self) -> int:
@@ -191,18 +192,49 @@ class FixtureCurrentStateStore:
         self.upsert_from_report(report, scan_lane=ScanLane.UNIVERSE)
 
     def open_universe_generation(self, generation_id: int, *, started_at: datetime | None = None) -> None:
-        del started_at
         with self._lock:
-            self._open_universe_generation_id = int(generation_id)
+            incoming = int(generation_id)
+            previous = self._open_universe_generation_id
+            if previous is not None and previous != incoming:
+                self._record_generation_close_unlocked(previous, started_at)
+            self._open_universe_generation_id = incoming
 
     def close_universe_generation(self, generation_id: int, *, closed_at: datetime) -> None:
         with self._lock:
-            if self._open_universe_generation_id is None:
-                return
-            if int(generation_id) != self._open_universe_generation_id:
-                return
-            self._open_universe_generation_id = None
-            self._universe_generation_closed_at = require_aware_instant(closed_at, "closed_at")
+            proving = int(generation_id)
+            self._record_generation_close_unlocked(proving, closed_at)
+            if self._open_universe_generation_id == proving:
+                self._open_universe_generation_id = None
+
+    def _record_generation_close_unlocked(
+        self, generation_id: int, closed_at: datetime | None
+    ) -> None:
+        if closed_at is None:
+            return
+        instant = require_aware_instant(closed_at, "closed_at")
+        recorded = self._universe_generation_closed_at_by_id.get(generation_id)
+        if recorded is None:
+            self._universe_generation_closed_at_by_id[generation_id] = instant
+            recorded = instant
+        self._stamp_generation_close_unlocked(generation_id, recorded)
+
+    def _stamp_generation_close_unlocked(self, generation_id: int, closed_at: datetime) -> None:
+        for record in self._rows.values():
+            if not record.markets:
+                continue
+            updated: dict[str, CurrentMarketSlot] = {}
+            changed = False
+            for key, slot in record.markets.items():
+                if (
+                    slot.universe_generation_id == generation_id
+                    and slot.universe_generation_closed_at is None
+                ):
+                    updated[key] = replace(slot, universe_generation_closed_at=closed_at)
+                    changed = True
+                else:
+                    updated[key] = slot
+            if changed:
+                record.markets = updated
 
     def upsert_from_report(
         self,
@@ -412,8 +444,10 @@ class FixtureCurrentStateStore:
         merged = dict(kwargs)
         if "open_universe_generation_id" not in merged:
             merged["open_universe_generation_id"] = self._open_universe_generation_id
-        if "universe_generation_closed_at" not in merged:
-            merged["universe_generation_closed_at"] = self._universe_generation_closed_at
+        if "universe_generation_closed_at_by_id" not in merged:
+            merged["universe_generation_closed_at_by_id"] = dict(
+                self._universe_generation_closed_at_by_id
+            )
         return merged
 
     def _resolve_upsert_generation_id(
@@ -1549,6 +1583,8 @@ def _market_ttl_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         allowed["max_quote_age_ms"] = kwargs["max_quote_age_ms"]
     if "open_universe_generation_id" in kwargs:
         allowed["open_universe_generation_id"] = kwargs["open_universe_generation_id"]
-    if "universe_generation_closed_at" in kwargs:
-        allowed["universe_generation_closed_at"] = kwargs["universe_generation_closed_at"]
+    if "universe_generation_closed_at_by_id" in kwargs:
+        allowed["universe_generation_closed_at_by_id"] = kwargs[
+            "universe_generation_closed_at_by_id"
+        ]
     return allowed
