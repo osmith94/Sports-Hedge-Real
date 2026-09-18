@@ -183,9 +183,11 @@ def test_native_hundred_percent_does_not_need_learned_rule() -> None:
 
 
 def test_below_hundred_fuzzy_fc_suffix_is_not_native_perfect() -> None:
+    # Curated senior clubs may now resolve FC suffixes natively (issue 309).
+    # Unknown remainders must stay fail-closed and not look native-perfect.
     result = MarketMatcher().match(
-        _market(_event(VenueName.MATCHBOOK, "Leeds United", "Chelsea")),
-        _market(_event(VenueName.POLYMARKET, "Leeds United FC", "Chelsea FC")),
+        _market(_event(VenueName.MATCHBOOK, "Unknownville", "Otherville")),
+        _market(_event(VenueName.POLYMARKET, "Unknownville FC", "Otherville FC")),
     )
     assert result.confidence < 1.0
     assert result.provenance.mapping_source is MappingProvenanceSource.NATIVE_DETERMINISTIC
@@ -691,8 +693,8 @@ def test_disable_and_revoke_stop_applying_without_rewriting_audit(tmp_path) -> N
     MappingReviewService(store).disable(proposal.proposed_rule.rule_id, operator="oliver", revoke=True)
     matcher = _matcher_with_store(store)
     result = matcher.match(
-        _market(_event(VenueName.MATCHBOOK, "Leeds United", "Chelsea")),
-        _market(_event(VenueName.POLYMARKET, "Leeds United FC", "Chelsea FC")),
+        _market(_event(VenueName.MATCHBOOK, "Unknownville", "Otherville")),
+        _market(_event(VenueName.POLYMARKET, "Unknownville FC", "Otherville FC")),
     )
     assert result.confidence < 1.0
     assert result.provenance.mapping_source is MappingProvenanceSource.NATIVE_DETERMINISTIC
