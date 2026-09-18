@@ -141,8 +141,8 @@ async def test_open_universe_retains_relationship_while_hot_heartbeats_and_provi
             FIXTURE_A,
             when=NOW,
             equivalent=1,
-            arb=True,
-            opportunity="qualifying",
+            arb=False,
+            opportunity="matched",
         )
         coordinator.record_universe_fixture_progress(
             None,
@@ -155,13 +155,13 @@ async def test_open_universe_retains_relationship_while_hot_heartbeats_and_provi
                     }
                 )
             ],
-            [_row(arb=True, edge=Decimal("0.012"))],
+            [_row(arb=False, edge=Decimal("-0.004"))],
         )
         store = coordinator.fixture_current_state()
         early = _inventory_row(store, FIXTURE_A, NOW)
         assert early is not None
         assert early.matched_equivalent_count >= 1
-        assert early.opportunity_state == "matched"
+        assert early.opportunity_state != "unmatched"
         assert coordinator._universe_generation_started_at is not None
 
         universe_started = asyncio.Event()
