@@ -5,14 +5,18 @@ market rows are keyed by canonical family/period/line/settlement — never by
 fuzzy labels — and merged so a partial HOT refresh cannot collapse still-current
 equivalents from the other lane.
 
-Radar TTL governs whether a market row remains current. Paper eligibility and
-auto-capture still require executable quote freshness independently.
+Issue #308: ApprovedEquivalent / market-relationship presence is
+generation-aware. A long UNIVERSE sweep must not erase an early fixture's
+proven relationship merely because quotes aged past lane TTL. Quote
+freshness, paper eligibility, auto-capture and HOT promotion stay on the
+short-lived executable / radar clocks and are independent of relationship
+retention.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sports_hedge.application.executable_liquidity import (
@@ -88,6 +92,7 @@ class CurrentMarketSlot:
     last_scanned_at: datetime
     paper_market_ids: tuple[str, ...]
     evaluated_absent: bool = False
+    universe_generation_id: int | None = None
 
 
 def canonical_current_market_key(row: FixtureMarketInventoryRow) -> str:
@@ -190,6 +195,7 @@ def merge_current_market_slots(
     scanned_at: datetime,
     paper_market_ids: tuple[str, ...],
     evaluated: bool,
+    universe_generation_id: int | None = None,
 ) -> dict[str, CurrentMarketSlot]:
     """Upsert evaluated canonical markets. Partial/not_evaluated work is a no-op.
 
@@ -217,6 +223,11 @@ def merge_current_market_slots(
             last_scanned_at=scanned,
             paper_market_ids=paper_market_ids,
             evaluated_absent=False,
+            universe_generation_id=_slot_generation_id(
+                lane,
+                incoming_generation_id=universe_generation_id,
+                previous=previous,
+            ),
         )
     if not incoming_rows:
         merged = mark_evaluated_absence(
@@ -247,6 +258,11 @@ def mark_evaluated_absence(
             last_scanned_at=scanned_at,
             paper_market_ids=(),
             evaluated_absent=True,
+            universe_generation_id=_slot_generation_id(
+                scan_lane,
+                incoming_generation_id=None,
+                previous=slot,
+            ),
         )
     return updated
 
@@ -258,21 +274,65 @@ def prune_expired_market_slots(
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    open_universe_generation_id: int | None = None,
+    universe_generation_closed_at: datetime | None = None,
 ) -> dict[str, CurrentMarketSlot]:
     evaluated = require_aware_instant(now, "now")
     live: dict[str, CurrentMarketSlot] = {}
     for key, slot in slots.items():
-        freshness = slot_freshness(
+        if not slot_relationship_current(
             slot,
             now=evaluated,
             hot_ttl_seconds=hot_ttl_seconds,
             universe_ttl_seconds=universe_ttl_seconds,
             max_quote_age_ms=max_quote_age_ms,
-        )
-        if freshness == FRESHNESS_EXPIRED:
+            open_universe_generation_id=open_universe_generation_id,
+            universe_generation_closed_at=universe_generation_closed_at,
+        ):
             continue
         live[key] = slot
     return live
+
+
+def slot_relationship_current(
+    slot: CurrentMarketSlot,
+    *,
+    now: datetime,
+    hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
+    universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    open_universe_generation_id: int | None = None,
+    universe_generation_closed_at: datetime | None = None,
+) -> bool:
+    """True when ApprovedEquivalent / market presence is still discovery-current.
+
+    Quote freshness is a separate clock. A UNIVERSE-stamped relationship stays
+    visible while that generation is open, even after radar TTL. After the
+    generation closes, the existing universe TTL is the post-generation idle
+    policy, anchored at close time rather than the early-fixture eval instant.
+    Unstamped / HOT-only slots keep the historical last_scanned_at lane TTL.
+    """
+
+    if slot.evaluated_absent:
+        return False
+    if slot.universe_generation_id is not None:
+        if open_universe_generation_id is not None:
+            return True
+        anchor = universe_generation_closed_at or slot.last_scanned_at
+        expires = require_aware_instant(anchor, "universe_generation_closed_at") + timedelta(
+            seconds=universe_ttl_seconds
+        )
+        return now < expires
+    return (
+        slot_freshness(
+            slot,
+            now=now,
+            hot_ttl_seconds=hot_ttl_seconds,
+            universe_ttl_seconds=universe_ttl_seconds,
+            max_quote_age_ms=max_quote_age_ms,
+        )
+        != FRESHNESS_EXPIRED
+    )
 
 
 def slot_freshness(
@@ -282,6 +342,7 @@ def slot_freshness(
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    **_: object,
 ) -> str:
     quote_age = effective_quote_age_ms(row_quote_age_ms(slot.row), slot.last_scanned_at, now)
     return freshness_class(
@@ -302,6 +363,7 @@ def stamp_current_market_row(
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    **_: object,
 ) -> FixtureMarketInventoryRow:
     if now is None:
         freshness = FRESHNESS_RADAR_CURRENT
@@ -375,6 +437,7 @@ def candidate_from_current_slot(
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    **_: object,
 ) -> FixtureHeadlineCandidate:
     row = slot.row
     if now is None:
@@ -413,39 +476,46 @@ def apply_current_market_inventory(
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    open_universe_generation_id: int | None = None,
+    universe_generation_closed_at: datetime | None = None,
 ):
-    """Project merged current markets onto fixture headline fields."""
+    """Project merged current markets onto fixture headline fields.
 
+    Relationship counts (discovered / matched / equivalent) include
+    generation-current ApprovedEquivalent rows even when quotes are stale.
+    Headline edge, qualifying/near bands, solver and paper eligibility use
+    only quote-fresh slots.
+    """
+
+    del open_universe_generation_id, universe_generation_closed_at
     ttl = {
         "hot_ttl_seconds": hot_ttl_seconds,
         "universe_ttl_seconds": universe_ttl_seconds,
         "max_quote_age_ms": max_quote_age_ms,
     }
-    stamped = [
-        stamp_current_market_row(slot, now=now, **ttl)
-        for slot in slots
-        if not slot.evaluated_absent
-        and (
-            now is None
-            or slot_freshness(slot, now=now, **ttl) != FRESHNESS_EXPIRED
-        )
-    ]
-    stamped = sort_fixture_inventory_rows(stamped)
-    if not stamped:
+    relationship = [slot for slot in slots if not slot.evaluated_absent]
+    if not relationship:
         return fixture, []
-    discovered, matched_rows, _best = inventory_summary(stamped)
-    equivalent = equivalent_comparison_count(stamped)
-    live_slots = [
+    relationship_rows = sort_fixture_inventory_rows(
+        [stamp_current_market_row(slot, now=now, **ttl) for slot in relationship]
+    )
+    quote_slots = [
         slot
-        for slot in slots
-        if not slot.evaluated_absent
-        and (now is None or slot_freshness(slot, now=now, **ttl) != FRESHNESS_EXPIRED)
+        for slot in relationship
+        if now is None or slot_freshness(slot, now=now, **ttl) != FRESHNESS_EXPIRED
     ]
-    candidates = [candidate_from_current_slot(slot, now=now, **ttl) for slot in live_slots]
+    discovered, matched_rows, _best = inventory_summary(relationship_rows)
+    equivalent = equivalent_comparison_count(relationship_rows)
+    candidates = [candidate_from_current_slot(slot, now=now, **ttl) for slot in quote_slots]
     qualifying = sum(1 for item in candidates if headline_band_for(item) is HeadlineBand.QUALIFYING)
     near = sum(1 for item in candidates if headline_band_for(item) is HeadlineBand.NEAR_EXECUTABLE)
     headline = select_fixture_headline(candidates)
-    winner_row = _headline_row(stamped, headline.candidate)
+    quote_rows = [
+        row
+        for row in relationship_rows
+        if now is None or row.radar_freshness != FRESHNESS_EXPIRED
+    ]
+    winner_row = _headline_row(quote_rows, headline.candidate)
     updates: dict[str, object] = {
         "discovered_market_count": discovered,
         "matched_market_count": matched_rows,
@@ -498,7 +568,7 @@ def apply_current_market_inventory(
             updates["best_kalshi_price"] = _best_back_price(winner_row.kalshi)
     projected = fixture.model_copy(update=updates)
     projected.opportunity_state = _opportunity_state(projected)
-    return projected, stamped
+    return projected, relationship_rows
 
 
 def union_paper_market_ids(slots: list[CurrentMarketSlot]) -> tuple[str, ...]:
@@ -559,6 +629,7 @@ def current_slots_prove_qualifying_opportunity(
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    **_: object,
 ) -> bool:
     """True when a radar-current merged slot still proves a qualifying executable arb."""
 
@@ -610,6 +681,7 @@ def current_slots_prove_surveillance_opportunity(
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    **_: object,
 ) -> bool:
     """True when a radar-current slot has a positive equivalent edge below trade gates."""
 
@@ -640,6 +712,21 @@ def row_quote_age_ms(row: FixtureMarketInventoryRow) -> int | None:
     if not ages:
         return None
     return max(ages)
+
+
+def _slot_generation_id(
+    scan_lane: ScanLane,
+    *,
+    incoming_generation_id: int | None,
+    previous: CurrentMarketSlot | None,
+) -> int | None:
+    """UNIVERSE evaluations stamp the generation; HOT refreshes keep the last UNIVERSE id."""
+
+    if scan_lane is ScanLane.UNIVERSE:
+        return incoming_generation_id
+    if previous is not None:
+        return previous.universe_generation_id
+    return None
 
 
 def _incoming_supersedes(
