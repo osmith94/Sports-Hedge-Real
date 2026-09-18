@@ -2378,32 +2378,23 @@ class ReadOnlyCrossVenueCollector:
         kalshi_depth_markets = _kalshi_markets_needing_depth(eligible_pairs)
         eligible_ids = {item.canonical.source_market_id for item in kalshi_depth_markets}
         self._kalshi_books_eligible += len(kalshi_depth_markets)
+        leftover_kalshi = [
+            market
+            for market in kalshi_markets
+            if market.canonical.source_market_id not in eligible_ids
+        ]
+        # Count every listed Kalshi market that is not a scan-eligible /
+        # Approved Market Catalogue pair leg. Do not infer this from missing
+        # observations after a leftover depth attempt — leftover books are
+        # never fetched.
+        self._kalshi_books_skipped_unapproved += len(leftover_kalshi)
         if kalshi_depth_markets:
             await self._fetch_kalshi_depth_for_markets(
                 k_events,
                 kalshi_depth_markets,
                 side=kalshi_side,
                 issues=issues,
-                skip_if_budget_exhausted=False,
             )
-        leftover_kalshi = [
-            market
-            for market in kalshi_markets
-            if market.canonical.source_market_id not in eligible_ids
-        ]
-        if leftover_kalshi and not self._provider_budget_exhausted():
-            await self._fetch_kalshi_depth_for_markets(
-                k_events,
-                leftover_kalshi,
-                side=kalshi_side,
-                issues=issues,
-                skip_if_budget_exhausted=True,
-            )
-        self._kalshi_books_skipped_unapproved += sum(
-            1
-            for market in leftover_kalshi
-            if market.canonical.source_market_id not in kalshi_side.observations
-        )
         order_books_fetched = (
             matchbook_side.books + polymarket_side.books + kalshi_side.books
         )
@@ -2722,9 +2713,11 @@ class ReadOnlyCrossVenueCollector:
             side.books += fetched
             side.markets.extend(markets)
             side.inventory.extend(inventory)
-        # Depth is fetched later, and only for Approved Market Catalogue pairs.
-        # Fetching every nested Kalshi book here starves approved BTTS behind
-        # unapproved work under the 4-slot Kalshi limiter.
+        # Live get_order_book is later, and only for Kalshi legs that
+        # participate in scan-eligible / Approved Market Catalogue pairs.
+        # Metadata, series/fee wrappers, Get Market rule enrichment, and
+        # inventory listing stay here. Fetching nested unapproved books
+        # starves approved BTTS under the 4-slot Kalshi limiter.
 
     async def _fetch_kalshi_depth_for_markets(
         self,
@@ -2733,14 +2726,13 @@ class ReadOnlyCrossVenueCollector:
         *,
         side: _VenueSideFetch,
         issues: list[CollectorIssue],
-        skip_if_budget_exhausted: bool,
     ) -> None:
-        """Fetch Kalshi order books, optionally skipping when the cycle budget is gone.
+        """Fetch live Kalshi order books for approved catalogue pair legs only.
 
-        Approved catalogue pairs call this first with skip_if_budget_exhausted=False
-        so a genuine miss still records a precise timeout. Unapproved leftover
-        work may skip rather than starve the next cluster. Queue wait is not a
-        live quote. Missing books stay fail-closed; cached prices are never used.
+        Callers must pass scan-eligible / APPROVED_EQUIVALENT Kalshi legs.
+        Unapproved leftover markets stay metadata/inventory only. Queue wait
+        is not a live quote. Missing books stay fail-closed; cached prices
+        are never used. A genuine miss still records a precise timeout.
         """
 
         if self.kalshi is None or not markets:
@@ -2748,8 +2740,6 @@ class ReadOnlyCrossVenueCollector:
         prioritized = _prioritize_catalogue_depth_markets(markets)
 
         async def _one(market: _NormalizedMarket) -> None:
-            if skip_if_budget_exhausted and self._provider_budget_exhausted():
-                return
             book_event = _event_for_source(
                 k_events, market.canonical.event.source_event_id
             )
@@ -2761,7 +2751,6 @@ class ReadOnlyCrossVenueCollector:
                 market,
                 series=series if isinstance(series, dict) else None,
                 issues=issues,
-                skip_if_budget_exhausted=skip_if_budget_exhausted,
             )
             side.books += book_fetched
             if observation is None:
@@ -3422,7 +3411,6 @@ class ReadOnlyCrossVenueCollector:
         *,
         series: dict[str, Any] | None,
         issues: list[CollectorIssue],
-        skip_if_budget_exhausted: bool = False,
     ) -> tuple[VenueMarketObservation | None, int]:
         assert self.kalshi is not None
         payloads = market.raw.get("grouped_payloads")
@@ -3444,9 +3432,6 @@ class ReadOnlyCrossVenueCollector:
             if failed or not ticker:
                 if ticker:
                     failed = True
-                return
-            if skip_if_budget_exhausted and self._provider_budget_exhausted():
-                failed = True
                 return
             try:
                 started = perf_counter()

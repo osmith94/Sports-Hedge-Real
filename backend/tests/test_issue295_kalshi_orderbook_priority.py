@@ -7,6 +7,10 @@ latency. Root cause: the collector fetched every nested Kalshi book before
 catalogue admission, so approved BTTS waited behind unapproved 1X2/noise
 under the 4-slot Kalshi limiter and the 20s manual-diagnostic envelope.
 
+Architect follow-up on PR #297: leftover/unapproved Kalshi depth is not
+fetched at all. Metadata/inventory remain visible. Live get_order_book
+runs only for scan-eligible / Approved Market Catalogue pair legs.
+
 These tests are fixture/demo. They are not live books and not a historical
 backtest. PAPER / read-only. Polymarket off. Execution disabled.
 """
@@ -234,7 +238,7 @@ class _Kalshi:
         if ticker in UNAPPROVED_TICKERS:
             if self.hang_unapproved:
                 await asyncio.sleep(5)
-            return _book()
+            raise AssertionError(f"unapproved Kalshi book ticker {ticker} must not be fetched")
         if ticker != BTTS_TICKER:
             raise AssertionError(f"unexpected Kalshi book ticker {ticker}")
         if self.hang_btts:
@@ -316,13 +320,14 @@ def test_fixture_mb_kalshi_btts_is_approved_equivalent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_approved_btts_book_is_fetched_before_unapproved_1x2() -> None:
+async def test_approved_btts_book_is_fetched_and_unapproved_game_is_not() -> None:
     kalshi = _Kalshi()
     report = await _collect(kalshi)
-    assert kalshi.book_calls
-    assert kalshi.book_calls[0] == BTTS_TICKER
+    assert kalshi.book_calls == [BTTS_TICKER]
+    assert all(ticker not in kalshi.book_calls for ticker in UNAPPROVED_TICKERS)
     policy = report.scan_diagnostics["kalshi_order_book_policy"]
     assert policy["eligible_markets"] == 1
+    assert policy["skipped_unapproved"] >= 1
     fixture = next(item for item in report.discovered_fixtures if item.matchbook_matched and item.kalshi_matched)
     assert fixture.no_comparison_reason != "order_book_unavailable"
     rows = report.fixture_markets[fixture.canonical_event_id]
@@ -330,21 +335,54 @@ async def test_approved_btts_book_is_fetched_before_unapproved_1x2() -> None:
     assert btts
     assert any(row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT for row in btts)
     assert any(row.entered_solver for row in btts)
+    game_inventory = [
+        row
+        for row in rows
+        if row.kalshi is not None
+        and (
+            "GAME" in row.kalshi.source_event_id
+            or any(ticker in row.kalshi.source_market_id for ticker in UNAPPROVED_TICKERS)
+        )
+    ]
+    assert game_inventory
+    assert all(not row.entered_solver for row in game_inventory)
+    assert all(row.kalshi is None or not row.kalshi.best_backs for row in game_inventory)
+    btts_kalshi = next(row.kalshi for row in btts if row.kalshi is not None)
+    assert btts_kalshi.fee_status
+    assert btts_kalshi.fee_source
     assert report.paper_decisions
     assert Settings().sports_hedge_execution_enabled is False
 
 
 @pytest.mark.asyncio
-async def test_approved_btts_is_not_starved_by_hung_unapproved_1x2() -> None:
+async def test_hanging_unapproved_game_tickers_are_never_called() -> None:
     kalshi = _Kalshi(hang_unapproved=True)
+    started = monotonic()
     report = await _collect(kalshi, provider_timeout=0.2, cycle_timeout=1.2)
-    assert BTTS_TICKER in kalshi.book_calls
-    assert kalshi.book_calls[0] == BTTS_TICKER
+    elapsed = monotonic() - started
+    assert kalshi.book_calls == [BTTS_TICKER]
+    assert all(ticker not in kalshi.book_calls for ticker in UNAPPROVED_TICKERS)
+    policy = report.scan_diagnostics["kalshi_order_book_policy"]
+    assert policy["eligible_markets"] == 1
+    assert policy["skipped_unapproved"] >= 1
     fixture = next(item for item in report.discovered_fixtures if item.matchbook_matched and item.kalshi_matched)
     rows = report.fixture_markets[fixture.canonical_event_id]
     btts = [row for row in rows if row.family == "both_teams_to_score"]
     assert any(row.entered_solver for row in btts)
     assert fixture.no_comparison_reason != "order_book_unavailable"
+    game_inventory = [
+        row
+        for row in rows
+        if row.kalshi is not None
+        and (
+            "GAME" in row.kalshi.source_event_id
+            or any(ticker in row.kalshi.source_market_id for ticker in UNAPPROVED_TICKERS)
+        )
+    ]
+    assert game_inventory
+    assert all(not row.entered_solver for row in game_inventory)
+    # Three hung GAME books at 5s each would exceed the 1.2s cycle if fetched.
+    assert elapsed < 2.0
 
 
 @pytest.mark.asyncio
