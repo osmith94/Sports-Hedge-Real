@@ -23,6 +23,7 @@ export type KalshiFixtureMarketInventoryRow = FixtureMarketInventoryRow & {
 
 const COMPARISON_LABELS: Record<string, string> = {
   matched_equivalent: "Matched equivalent",
+  paper_assumed_equivalent: "Paper-assumed equivalent",
   venue_only: "Venue only",
   settlement_mismatch: "Settlement mismatch",
   unsupported_outcome_model: "Unsupported outcome model",

@@ -36,6 +36,7 @@ from sports_hedge.application.fixture_inventory import (
     InventoryComparisonStatus,
     InventoryMarket,
     assemble_fixture_inventory,
+    inventory_is_comparable_opportunity,
     inventory_summary,
     raw_market_id,
     raw_market_name,
@@ -94,6 +95,15 @@ from sports_hedge.application.quote_freshness import (
 from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key, should_skip_market_work
 from sports_hedge.venues.matchbook import MatchbookMarketGoneError
 from sports_hedge.catalogue.classify import classify_pair
+from sports_hedge.catalogue.coverage_rows import (
+    FixtureCatalogueCoverage,
+    aggregate_coverage_by_archetype,
+    fixture_catalogue_coverage,
+)
+from sports_hedge.catalogue.registry import (
+    family_is_phase1_expensive_work,
+    operational_kalshi_families,
+)
 from sports_hedge.catalogue.states import CatalogueApprovalState
 from sports_hedge.application.target_competitions import (
     EVENT_IDENTITY_MISMATCH,
@@ -133,10 +143,12 @@ from sports_hedge.normalization.venues import (
     KALSHI_CONTRACT_RULE_KEYS,
     KALSHI_RULE_DIAGNOSTIC_CAP,
     KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
+    MATCHBOOK_NON_UNIQUE_CANONICAL_REASON,
     KalshiNormalizer,
     MatchbookNormalizer,
     PolymarketNormalizer,
     VenueNormalizationError,
+    matchbook_unsupported_market_detail,
     merge_kalshi_contract_rules,
     promote_polymarket_complete_match_result,
     safe_kalshi_match_result_rule_layers,
@@ -459,6 +471,7 @@ class DiscoveredFixture(BaseModel):
     last_scanned_at: datetime | None = None
     next_due_at: datetime | None = None
     hot_reasons: list[str] = Field(default_factory=list)
+    catalogue_coverage: FixtureCatalogueCoverage | None = None
 
 
 class FixturePaperEntry(BaseModel):
@@ -2796,6 +2809,13 @@ class ReadOnlyCrossVenueCollector:
                 leftover=True,
             )
             leftover.discovered_market_count = discovered_count
+            leftover.catalogue_coverage = fixture_catalogue_coverage(
+                inventory_rows,
+                matchbook_matched=bool(leftover.matchbook_matched),
+                kalshi_matched=bool(leftover.kalshi_matched),
+                polymarket_matched=bool(leftover.polymarket_matched),
+                target_competition_code=leftover.target_competition_code,
+            )
             return leftover, decisions, inventory_rows, market_counts, order_books_fetched, 0
         if fetch_unavailable and not compared_enough_venues:
             fixture.market_evaluation_state = MarketEvaluationState.MARKET_FETCH_UNAVAILABLE.value
@@ -2816,6 +2836,13 @@ class ReadOnlyCrossVenueCollector:
                         existing_reason=fixture.no_comparison_reason,
                     )
         fixture.opportunity_state = _opportunity_state(fixture)
+        fixture.catalogue_coverage = fixture_catalogue_coverage(
+            inventory_rows,
+            matchbook_matched=bool(fixture.matchbook_matched),
+            kalshi_matched=bool(fixture.kalshi_matched),
+            polymarket_matched=bool(fixture.polymarket_matched),
+            target_competition_code=fixture.target_competition_code,
+        )
         return (
             fixture,
             decisions,
@@ -2960,6 +2987,13 @@ class ReadOnlyCrossVenueCollector:
                     existing_reason=fixture.no_comparison_reason,
                 )
         fixture.opportunity_state = _opportunity_state(fixture)
+        fixture.catalogue_coverage = fixture_catalogue_coverage(
+            inventory_rows,
+            matchbook_matched=bool(fixture.matchbook_matched),
+            kalshi_matched=bool(fixture.kalshi_matched),
+            polymarket_matched=bool(fixture.polymarket_matched),
+            target_competition_code=fixture.target_competition_code,
+        )
         return (
             fixture,
             decisions,
@@ -3172,7 +3206,7 @@ class ReadOnlyCrossVenueCollector:
         matched = [
             row
             for row in rows
-            if row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
+            if inventory_is_comparable_opportunity(row.comparison_status)
         ]
         chosen = matched[0] if matched else (rows[0] if rows else None)
         if chosen is None:
@@ -3803,6 +3837,30 @@ class ReadOnlyCrossVenueCollector:
                         raw_market_type=raw_market_type(payload, venue),
                         raw_runner_labels=raw_runner_labels(payload, venue),
                         normalize_error=str(exc),
+                    )
+                )
+                continue
+            if not family_is_phase1_expensive_work(market.canonical.family):
+                uniqueness = _cheap_non_unique_canonical_detail(venue, market, name, payload)
+                if uniqueness is not None:
+                    issues.append(
+                        CollectorIssue(
+                            stage="normalize_market",
+                            venue=venue,
+                            source_id=source_id,
+                            detail=uniqueness,
+                        )
+                    )
+                inventory.append(
+                    InventoryMarket(
+                        venue=venue,
+                        source_event_id=event.canonical.source_event_id,
+                        source_market_id=market.canonical.source_market_id,
+                        raw_name=name,
+                        raw_market_type=raw_market_type(payload, venue),
+                        raw_runner_labels=raw_runner_labels(payload, venue),
+                        canonical=market.canonical,
+                        normalize_error=uniqueness or "phase1_non_target_family_discarded",
                     )
                 )
                 continue
@@ -5033,15 +5091,27 @@ def _prioritize_baseline_markets(markets: list[_NormalizedMarket]) -> list[_Norm
     )
 
 
-_CATALOGUE_DEPTH_FAMILIES = frozenset(
-    {
-        MarketFamily.MATCH_RESULT,
-        MarketFamily.BOTH_TEAMS_TO_SCORE,
-        MarketFamily.TOTAL_GOALS,
-        MarketFamily.FIRST_TEAM_TO_SCORE,
-        MarketFamily.DRAW_NO_BET,
-    }
-)
+_CATALOGUE_DEPTH_FAMILIES = operational_kalshi_families()
+
+
+def _cheap_non_unique_canonical_detail(
+    venue: VenueName,
+    market: _NormalizedMarket,
+    name: str,
+    payload: dict[str, Any],
+) -> str | None:
+    """Fail-closed uniqueness from already-parsed inventory. No extra depth fetch."""
+
+    if venue is not VenueName.MATCHBOOK:
+        return None
+    outcomes = [runner.outcome for runner in market.canonical.runners]
+    if len(outcomes) == len(set(outcomes)):
+        return None
+    return matchbook_unsupported_market_detail(
+        name or market.canonical.source_market_id,
+        MATCHBOOK_NON_UNIQUE_CANONICAL_REASON,
+        market_type=raw_market_type(payload, venue),
+    )
 
 
 def _prioritize_catalogue_depth_markets(
@@ -5389,6 +5459,11 @@ def _matching_coverage(
         meaning = "multi_venue_identity_without_settlement_equivalent"
     else:
         meaning = "cross_venue_equivalent_present"
+    catalogue_summaries = [
+        item.catalogue_coverage
+        for item in discovered_fixtures
+        if item.catalogue_coverage is not None
+    ]
     return {
         "fixtures": len(discovered_fixtures),
         "single_venue_clusters": single_venue,
@@ -5401,6 +5476,7 @@ def _matching_coverage(
         "zero_equivalent_reason_counts": zero_equivalent_reason_counts(
             discovered_fixtures, fixture_markets
         ),
+        "catalogue_by_archetype": aggregate_coverage_by_archetype(catalogue_summaries),
     }
 
 

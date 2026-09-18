@@ -9,6 +9,7 @@ from sports_hedge.domain.football import CanonicalOutcome, MarketFamily
 
 class CatalogueApprovalState(StrEnum):
     APPROVED_EQUIVALENT = "approved_equivalent"
+    PAPER_ASSUMED_EQUIVALENT = "paper_assumed_equivalent"
     APPROVED_PARAMETER_MISMATCH = "approved_parameter_mismatch"
     KNOWN_CONTRADICTION = "known_contradiction"
     REVIEW_REQUIRED = "review_required"

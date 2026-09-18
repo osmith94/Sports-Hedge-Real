@@ -9,6 +9,10 @@ This is an explicit, documented narrowing of Core Tenet 03 for this venue pair
 and family only. Polymarket, To Qualify, two-way books, non-full-time periods,
 proven extra-time/penalties contradictions, and unknown Kalshi settlement
 without GAMEWIN placeholder evidence stay fail-closed.
+
+Issue #316 additionally admits a bounded PAPER-MODE assumption for ordinary
+Matchbook↔Kalshi 1X2 when GAME HOME/DRAW/AWAY is complete and there is no
+contradictory wording. That assumption is never live-execution eligible.
 """
 
 from __future__ import annotations
@@ -31,6 +35,8 @@ MATCHBOOK_KALSHI_VENUES = frozenset({VenueName.MATCHBOOK, VenueName.KALSHI})
 ORDINARY_1X2_REASON = "ordinary_match_result_1x2"
 UNKNOWN_SETTLEMENT_ALLOWED_REASON = "settlement_unknown_not_contradictory"
 GAMEWIN_ORDINARY_1X2_AUDIT_REASON = "ordinary_3way_1x2_kalshi_gamewin_scope_unavailable"
+PAPER_ASSUMED_1X2_REASON = "paper_assumed_equivalent"
+SETTLEMENT_ASSUMPTION_REGULATION_TIME = "regulation_time"
 ORDINARY_1X2_AUDIT_REASONS = (
     ORDINARY_1X2_REASON,
     UNKNOWN_SETTLEMENT_ALLOWED_REASON,
@@ -134,7 +140,60 @@ def allow_unknown_settlement_for_ordinary_1x2(
     kalshi = right if matchbook is left else left
     if not is_complete_regulation_time_1x2(matchbook):
         return False
-    return kalshi_gamewin_scope_unavailable(kalshi)
+    if kalshi_gamewin_scope_unavailable(kalshi):
+        return True
+    return paper_assumed_ordinary_1x2(left, right)
+
+
+_CONTRADICTION_TOKENS = (
+    "extra time",
+    "extra-time",
+    "penalties",
+    "to qualify",
+    "to-qualify",
+    "fair price",
+    "fair-price",
+    "reschedule",
+    "cancelled",
+    "canceled",
+)
+
+
+def paper_assumed_ordinary_1x2(left: CanonicalMarket, right: CanonicalMarket) -> bool:
+    """Owner-accepted paper-mode 1X2 assumption. Never live-execution eligible.
+
+    Requires exact ordinary HOME/DRAW/AWAY, Matchbook regulation convention,
+    structurally consistent period, and no known contradictory Kalshi wording.
+    Independent settlement proof is not required.
+    """
+
+    if not is_matchbook_kalshi_pair(left, right):
+        return False
+    if left.family is not MarketFamily.MATCH_RESULT or right.family is not MarketFamily.MATCH_RESULT:
+        return False
+    if not is_ordinary_full_time_1x2(left) or not is_ordinary_full_time_1x2(right):
+        return False
+    if left.period != right.period or left.line != right.line:
+        return False
+    if settlement_fingerprints_contradict(left.settlement, right.settlement):
+        return False
+    matchbook = left if left.source_venue is VenueName.MATCHBOOK else right
+    kalshi = right if matchbook is left else left
+    if not is_complete_regulation_time_1x2(matchbook):
+        return False
+    if kalshi.settlement.extra_time_included is True or kalshi.settlement.penalties_included is True:
+        return False
+    if kalshi.settlement.scope in {
+        SettlementScope.INCLUDING_EXTRA_TIME,
+        SettlementScope.INCLUDING_PENALTIES,
+    }:
+        return False
+    unknown = str(kalshi.settlement.unknown_reason or "").casefold()
+    if any(token in unknown for token in _CONTRADICTION_TOKENS):
+        return False
+    if kalshi.settlement.is_economically_complete() and is_complete_regulation_time_1x2(kalshi):
+        return False
+    return True
 
 
 def ordinary_1x2_match_reasons() -> list[str]:

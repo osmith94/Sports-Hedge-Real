@@ -401,19 +401,21 @@ def test_single_subject_extra_time_exclusion_remains_regulation() -> None:
         assert extra_time is False
 
 
-def test_generic_gamewin_and_title_only_reg_time_fail_closed() -> None:
+def test_generic_gamewin_and_title_only_reg_time_are_paper_assumed_not_approved() -> None:
     assessment = classify_payload_pair(
         _mb([_mb_1x2()]),
         _kalshi(_kalshi_1x2(rules=GAMEWIN_TEMPLATE), series=KALSHI_GAMEWIN_SERIES),
     )
-    assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
-    assert assessment.reason == "incomplete_settlement"
+    assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert assessment.reason == "paper_assumed_equivalent"
+    assert assessment.settlement_assumption == "regulation_time"
     markets = _kalshi_1x2(rules=GAMEWIN_TEMPLATE)
     for item in markets:
         item["subtitle"] = "REG TIME"
         item["title"] = f"{item['title']} REG TIME"
     titled = classify_payload_pair(_mb([_mb_1x2()]), _kalshi(markets, series=KALSHI_GAMEWIN_SERIES))
-    assert titled.state is CatalogueApprovalState.REVIEW_REQUIRED
+    assert titled.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
+    assert titled.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert titled.settlement_complete is False
 
 

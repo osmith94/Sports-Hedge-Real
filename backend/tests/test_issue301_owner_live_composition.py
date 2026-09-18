@@ -284,38 +284,20 @@ class _DisabledPolymarket:
         return []
 
 
-class _RefusingGameKalshi(OverlapKalshi):
-    """Kalshi double that records books and refuses unapproved GAME tickers."""
+def _kalshi() -> OverlapKalshi:
+    from sports_hedge.application.capture_replay import DEFAULT_KALSHI_BOOK
 
-    async def get_order_book(
-        self,
-        event_id: int | str,
-        market_id: int | str,
-        outcome_id: int | str | None = None,
-        **filters: Any,
-    ) -> dict[str, Any]:
-        del event_id, outcome_id, filters
-        ticker = str(market_id)
-        self.book_calls.append(ticker)
-        if ticker in UNAPPROVED_GAME_TICKERS or "GAME" in ticker:
-            raise AssertionError(f"unapproved Kalshi GAME ticker {ticker} must not be fetched")
-        if ticker != BTTS_TICKER:
-            raise AssertionError(f"unexpected Kalshi book ticker {ticker}")
-        book = self.books.get(ticker)
-        if book is None:
-            raise LookupError(ticker)
-        return deepcopy(book)
-
-
-def _kalshi() -> _RefusingGameKalshi:
-    return _RefusingGameKalshi(
+    books = {BTTS_TICKER: _btts_book()}
+    for ticker in UNAPPROVED_GAME_TICKERS:
+        books[ticker] = deepcopy(DEFAULT_KALSHI_BOOK)
+    return OverlapKalshi(
         [_kalshi_game_event(), _kalshi_btts_event()],
         series=BTTS_SERIES,
         series_by_ticker={
             "KXEPLBTTS": dict(BTTS_SERIES),
             "KXEPLGAME": dict(GAME_SERIES),
         },
-        books={BTTS_TICKER: _btts_book()},
+        books=books,
     )
 
 
@@ -323,7 +305,7 @@ def _matchbook() -> OverlapMatchbook:
     return OverlapMatchbook([_mb_event()], {str(MB_EVENT_ID): _mb_markets()})
 
 
-async def _collect(matchbook: OverlapMatchbook, kalshi: _RefusingGameKalshi):
+async def _collect(matchbook: OverlapMatchbook, kalshi: OverlapKalshi):
     repository = SqliteMarketIntelligenceRepository()
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
@@ -410,7 +392,9 @@ def test_approved_btts_is_catalogue_equivalent_and_game_is_not() -> None:
             series=GAME_SERIES,
         ),
     )
+    assert game_assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert game_assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
+    assert game_assessment.settlement_assumption == "regulation_time"
 
 
 @pytest.mark.asyncio
@@ -452,12 +436,11 @@ async def test_combined_owner_live_seams_on_one_fixture(
     assert HOME in (fixture.home_team or "")
     assert AWAY in (fixture.away_team or "")
 
-    # 3/4. Kalshi depth only for approved BTTS; GAME tickers never called.
-    assert kalshi.book_calls == [BTTS_TICKER]
-    assert all(ticker not in kalshi.book_calls for ticker in UNAPPROVED_GAME_TICKERS)
+    # 3/4. Kalshi depth for Phase-1 comparable families: paper-assumed 1X2 and proven BTTS.
+    assert BTTS_TICKER in kalshi.book_calls
+    assert any(ticker in kalshi.book_calls for ticker in UNAPPROVED_GAME_TICKERS)
     policy = report.scan_diagnostics["kalshi_order_book_policy"]
-    assert policy["eligible_markets"] == 1
-    assert policy["skipped_unapproved"] >= 1
+    assert policy["eligible_markets"] >= 2
 
     rows = report.fixture_markets[fixture.canonical_event_id]
 
@@ -487,8 +470,14 @@ async def test_combined_owner_live_seams_on_one_fixture(
         )
     ]
     assert game_inventory
-    assert all(not row.entered_solver for row in game_inventory)
-    assert all(row.kalshi is None or not row.kalshi.best_backs for row in game_inventory)
+    assert any(
+        row.comparison_status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
+        for row in game_inventory
+    )
+    assert all(
+        row.comparison_status is not InventoryComparisonStatus.MATCHED_EQUIVALENT
+        for row in game_inventory
+    )
 
     # 5. Matchbook exotics fail closed without uniqueness validation errors.
     details = [str(issue.detail) for issue in report.issues]
@@ -551,8 +540,8 @@ async def test_combined_owner_live_seams_on_one_fixture(
     assert "both_teams_to_score" in capture.canonical_market_key
     assert capture.comparison_economics_computed is True
     assert capture.replay_bundle_path == str(bundle_path)
-    assert capture_kalshi.book_calls == [BTTS_TICKER]
-    assert all(ticker not in capture_kalshi.book_calls for ticker in UNAPPROVED_GAME_TICKERS)
+    assert BTTS_TICKER in capture_kalshi.book_calls
+    assert any(ticker in capture_kalshi.book_calls for ticker in UNAPPROVED_GAME_TICKERS)
     saved = ReplayBundle.model_validate_json(bundle_path.read_text(encoding="utf-8"))
     assert saved.data_class == DATA_CLASS_LIVE_CAPTURE
     assert saved.paper_mode == "paper"
@@ -561,7 +550,6 @@ async def test_combined_owner_live_seams_on_one_fixture(
     assert saved.kalshi.event.get("series_ticker") == "KXEPLBTTS"
     assert any("BTTS" in str(market.get("ticker") or "") for market in saved.kalshi.markets)
     assert BTTS_TICKER in saved.kalshi.order_books
-    assert all(ticker not in saved.kalshi.order_books for ticker in UNAPPROVED_GAME_TICKERS)
     dumped = bundle_path.read_text(encoding="utf-8").casefold()
     assert "password" not in dumped
     assert "authorization" not in dumped

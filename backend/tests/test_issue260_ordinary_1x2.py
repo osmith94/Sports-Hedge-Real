@@ -51,8 +51,10 @@ from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.matching.ordinary_1x2 import (
     GAMEWIN_ORDINARY_1X2_AUDIT_REASON,
+    PAPER_ASSUMED_1X2_REASON,
     UNKNOWN_SETTLEMENT_ALLOWED_REASON,
     allow_unknown_settlement_for_ordinary_1x2,
+    paper_assumed_ordinary_1x2,
 )
 from sports_hedge.normalization.kalshi_contract_terms import (
     GAMEWIN_SCOPE_UNAVAILABLE_REASON,
@@ -200,13 +202,14 @@ def test_both_complete_regulation_still_uses_strict_comparison() -> None:
     assert allow_unknown_settlement_for_ordinary_1x2(mb, kalshi) is False
 
 
-def test_kalshi_unknown_without_gamewin_placeholder_fails_closed() -> None:
+def test_kalshi_unknown_without_gamewin_placeholder_is_paper_assumed() -> None:
     mb = _market(VenueName.MATCHBOOK)
     kalshi = _unknown_kalshi(gamewin=False)
     result = MarketMatcher().match(mb, kalshi)
-    assert result.matched is False
-    assert "incomplete_settlement" in result.reasons
-    assert allow_unknown_settlement_for_ordinary_1x2(mb, kalshi) is False
+    assert result.matched is True
+    assert PAPER_ASSUMED_1X2_REASON in result.reasons
+    assert allow_unknown_settlement_for_ordinary_1x2(mb, kalshi) is True
+    assert paper_assumed_ordinary_1x2(mb, kalshi) is True
 
 
 def test_matchbook_extra_time_does_not_use_gamewin_unknown_tolerance() -> None:
@@ -554,7 +557,7 @@ async def test_evening_census_matches_ordinary_gamewin_unknown_1x2s() -> None:
     assert census.discovered_fixtures == 17
     assert census.cross_venue_matched_events == 15
     assert census.equivalent_market_pairs == 12
-    assert census.market_family_breakdown.get("match_result") in {None, 0}
+    assert census.market_family_breakdown.get("match_result") == 12
     assert census.ordinary_1x2_structural_admissions == 12
     assert census.qualifying_arbs == 0
     assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
@@ -571,9 +574,8 @@ async def test_evening_census_matches_ordinary_gamewin_unknown_1x2s() -> None:
     ]
     assert len(ordinary_rows) == 12
     assert all(
-        row.comparison_status is InventoryComparisonStatus.OTHER
-        and row.reason == "catalogue_review_required"
-        and row.entered_solver is False
+        row.comparison_status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
+        and row.reason == "paper_assumed_equivalent"
         for row in ordinary_rows
     )
 
@@ -588,7 +590,7 @@ async def test_evening_census_matches_ordinary_gamewin_unknown_1x2s() -> None:
     assert by_home[CONTROL_MB_ONLY[1]].matched_equivalent_count == 0
     assert by_home[CONTROL_KALSHI_ONLY[0]].matched_equivalent_count == 0
     for _event_id, home, _away, _suffix in ORDINARY_FIXTURES:
-        assert by_home[home].matched_equivalent_count == 0
+        assert by_home[home].matched_equivalent_count == 1
 
     rendered = render_forensics(forensics)
     assert "settlement_unknown_not_contradictory" in rendered
@@ -598,13 +600,7 @@ async def test_evening_census_matches_ordinary_gamewin_unknown_1x2s() -> None:
     assert "ordinary_1x2_structural_admissions=12" in (
         f"ordinary_1x2_structural_admissions={census.ordinary_1x2_structural_admissions}"
     )
-
-    solver_decisions = [
-        decision
-        for decision in report.paper_decisions
-        if decision.solver_model is not None or decision.depth_scan is not None
-    ]
-    assert solver_decisions == []
+    assert Settings().sports_hedge_execution_enabled is False
 
 
 @pytest.mark.asyncio
@@ -627,7 +623,7 @@ async def test_resumed_universe_still_reaches_ordinary_1x2_matches() -> None:
     assert ORDINARY_FIXTURES[1][1] not in remaining_homes
     assert census.equivalent_market_pairs == 10
     assert census.ordinary_1x2_structural_admissions == 10
-    assert census.market_family_breakdown.get("match_result") in {None, 0}
+    assert census.market_family_breakdown.get("match_result") == 10
 
 
 @pytest.mark.asyncio
@@ -684,12 +680,6 @@ async def test_hot_and_universe_agree_on_unknown_1x2() -> None:
             if row.family == "match_result"
             and GAMEWIN_ORDINARY_1X2_AUDIT_REASON in (row.match_reasons or [])
         )
-        hot_gamewin = [
-            row
-            for rows in hot.fixture_markets.values()
-            for row in rows
-            if GAMEWIN_ORDINARY_1X2_AUDIT_REASON in (row.match_reasons or [])
-        ]
         target = next(
             item
             for item in hot.discovered_fixtures
@@ -698,20 +688,14 @@ async def test_hot_and_universe_agree_on_unknown_1x2() -> None:
         assert hot_matchbook.list_events_calls == 0
         assert hot_kalshi.list_events_calls == 0
         assert universe.matched_market_pairs == 12
-        assert hot_gamewin == []
-        assert target.market_evaluation_state == MarketEvaluationState.HOT_RELATIONSHIP_MISSING.value
-        assert target.market_evaluation_reason == HOT_RELATIONSHIP_MISSING_REASON
-        assert universe_row.comparison_status is InventoryComparisonStatus.OTHER
-        assert universe_row.reason == "catalogue_review_required"
-        assert universe_row.entered_solver is False
+        assert universe_row.comparison_status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
+        assert universe_row.reason == "paper_assumed_equivalent"
         assert set(universe_row.match_reasons) >= {
             UNKNOWN_SETTLEMENT_ALLOWED_REASON,
             GAMEWIN_ORDINARY_1X2_AUDIT_REASON,
         }
-        assert not any(
-            item.solver_model is not None or item.depth_scan is not None
-            for item in universe.paper_decisions
-        )
+        assert target.market_evaluation_state != MarketEvaluationState.HOT_RELATIONSHIP_MISSING.value
+        assert target.market_evaluation_reason != HOT_RELATIONSHIP_MISSING_REASON
     finally:
         hot_repo.close()
 

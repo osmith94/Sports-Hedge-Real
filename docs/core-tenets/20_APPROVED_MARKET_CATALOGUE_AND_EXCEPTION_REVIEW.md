@@ -152,6 +152,7 @@ At minimum:
 
 ```text
 APPROVED_EQUIVALENT
+PAPER_ASSUMED_EQUIVALENT
 APPROVED_PARAMETER_MISMATCH
 KNOWN_CONTRADICTION
 REVIEW_REQUIRED
@@ -162,7 +163,22 @@ UNSUPPORTED
 
 Both venue markets normalize to the same approved archetype and all required parameters/outcome semantics agree.
 
-Only this state is eligible for the normal arbitrage solver.
+Only this state is eligible for **live execution**.
+
+### PAPER_ASSUMED_EQUIVALENT
+
+Owner-approved Phase-1 **paper-mode** exception for Matchbook↔Kalshi Match Result / 1X2 only.
+
+Kalshi GAME contracts may be assembled into HOME / DRAW / AWAY and compared with Matchbook Match Odds when:
+
+- fixture identity is exact;
+- all three outcomes are present;
+- period/line structure is otherwise consistent;
+- there is no known contradictory wording (extra time, penalties, to-qualify, fair-price cancellation/reschedule, or other material contradiction).
+
+This state is visibly labelled, carries `settlement_assumption=regulation_time`, may enter the **paper** solver, and is never live-execution eligible. It is not independently proven settlement.
+
+BTTS, safe exact-line totals, and FTTS remain `APPROVED_EQUIVALENT` only when their deterministic checks pass. DNB, handicap, double chance, team total, team-to-score, and clean sheet stay explicit in the versioned registry as deferred / unsupported / venue-unavailable and must not trigger Phase-1 settlement/depth/solver/HOT work.
 
 ### APPROVED_PARAMETER_MISMATCH
 

@@ -11,8 +11,10 @@ from sports_hedge.matching.learned_rules import (
     participant_identity_preserved,
 )
 from sports_hedge.matching.ordinary_1x2 import (
+    PAPER_ASSUMED_1X2_REASON,
     allow_unknown_settlement_for_ordinary_1x2,
     ordinary_1x2_match_reasons,
+    paper_assumed_ordinary_1x2,
 )
 
 
@@ -76,6 +78,7 @@ class MarketMatcher:
 
         reasons = economic_mismatch_reasons(left, right)
         unknown_allowed = allow_unknown_settlement_for_ordinary_1x2(left, right)
+        paper_assumed = paper_assumed_ordinary_1x2(left, right)
         if reasons:
             return MarketMatchResult(
                 matched=False,
@@ -90,6 +93,9 @@ class MarketMatcher:
             or not right.settlement.is_economically_complete()
         ):
             match_reasons.extend(ordinary_1x2_match_reasons())
+        if paper_assumed:
+            match_reasons.append(PAPER_ASSUMED_1X2_REASON)
+            match_reasons.append("settlement_assumption=regulation_time")
         if (
             event_result.provenance.rule_type
             is MappingRuleType.VENUE_MARKET_LABEL_CONVENTION

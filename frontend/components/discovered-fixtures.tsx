@@ -24,6 +24,11 @@ import {
   venuePresent,
   venuePriceLabel,
 } from "../lib/discovered-fixture-display";
+import {
+  coverageRowLabel,
+  fixtureCoverageRows,
+  universeArchetypeSummaryLines,
+} from "../lib/catalogue-coverage-display";
 import { kickoffLocalLabel } from "../lib/format";
 import { dualScanStatusLines } from "../lib/scan-status-display";
 import { useHydratedNowMs } from "./hydrated-relative-time";
@@ -143,6 +148,13 @@ function FixtureRow({ item, nowMs }: { item: DiscoveredFixture; nowMs: number | 
           <details>
             <summary>Advanced · mapping, quotes, and all market comparisons</summary>
             <div className="muted wrap">{details.join(" · ")}</div>
+            {fixtureCoverageRows(item).length ? (
+              <ul className="catalogue-coverage-list">
+                {fixtureCoverageRows(item).map((row) => (
+                  <li key={row.archetype}>{coverageRowLabel(row)}</li>
+                ))}
+              </ul>
+            ) : null}
             <div className="muted">
               Expand this fixture for every equivalent market. The headline is the best
               executable opportunity only.
@@ -175,6 +187,7 @@ export function DiscoveredFixturesPanel({
   const snapshot = status.operator_summary
     ? `Stamped scan snapshot (not live age) · ${status.operator_summary}`
     : `Target football competitions only. ${dualScanStatusLines(status, nowMs).join(" · ")}`;
+  const archetypeLines = universeArchetypeSummaryLines(status);
 
   return (
     <>
@@ -182,6 +195,11 @@ export function DiscoveredFixturesPanel({
         {snapshot}
         {status.last_error ? ` Last error: ${status.last_error}` : ""}
       </p>
+      {archetypeLines.length ? (
+        <p className="section-copy catalogue-coverage-summary">
+          Coverage by archetype: {archetypeLines.join(" · ")}
+        </p>
+      ) : null}
       {warnings.length ? (
         <div className={CONFIG_WARNING_BANNER_CLASS} role="status">
           {warnings.join(" ")}

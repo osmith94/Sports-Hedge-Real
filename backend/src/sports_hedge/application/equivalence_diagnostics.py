@@ -12,6 +12,7 @@ from typing import Any
 from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
     InventoryComparisonStatus,
+    inventory_is_comparable_opportunity,
 )
 from sports_hedge.catalogue.states import CatalogueApprovalState
 from sports_hedge.matching.ordinary_1x2 import GAMEWIN_ORDINARY_1X2_AUDIT_REASON
@@ -85,7 +86,7 @@ def zero_equivalent_reason_from_inventory(
     tokens: list[str] = []
     paired = 0
     for row in rows:
-        if row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT:
+        if inventory_is_comparable_opportunity(row.comparison_status):
             continue
         venue_facts = (
             ("matchbook", row.matchbook),

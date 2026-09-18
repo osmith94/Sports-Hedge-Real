@@ -247,7 +247,9 @@ def _assert_stable_report(
     assert diagnostics["stages"]["book_depth"]["calls"] == fixture_count * 2
     assert diagnostics["stages"]["mapping_equivalence"]["calls"] >= fixture_count
     assert diagnostics["stages"]["fees_fx_risk"]["calls"] == fixture_count
-    assert diagnostics["matching_coverage"] == {
+    observed = dict(diagnostics["matching_coverage"])
+    observed.pop("catalogue_by_archetype", None)
+    assert observed == {
         "fixtures": fixture_count,
         "single_venue_clusters": 0,
         "cross_venue_clusters": fixture_count,

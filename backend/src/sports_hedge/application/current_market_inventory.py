@@ -35,6 +35,7 @@ from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
     InventoryComparisonStatus,
     InventoryPairResult,
+    inventory_is_comparable_opportunity,
     inventory_summary,
     sort_fixture_inventory_rows,
 )
@@ -421,7 +422,7 @@ def equivalent_comparison_count(rows: list[FixtureMarketInventoryRow]) -> int:
 
     keys: set[tuple[str, str, str, str, str]] = set()
     for row in rows:
-        if row.comparison_status is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
+        if not inventory_is_comparable_opportunity(row.comparison_status):
             continue
         family, period, line, settlement = _family_identity(row)
         pairs = comparable_venue_pairs(row)
@@ -686,7 +687,7 @@ def stored_row_proves_surveillance_opportunity(row: FixtureMarketInventoryRow) -
     paper gates and do not block surveillance.
     """
 
-    if row.comparison_status is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
+    if not inventory_is_comparable_opportunity(row.comparison_status):
         return False
     if set(row.rejection_reasons) & _MAPPING_INCOMPATIBLE:
         return False

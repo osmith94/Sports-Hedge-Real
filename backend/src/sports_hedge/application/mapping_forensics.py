@@ -819,16 +819,24 @@ def _candidates_sharing_family_period_line(
         if len(facts_list) < 2 or key in used_keys:
             continue
         reasons = _economic_reasons_from_facts_group(facts_list)
-        status = "matched_equivalent" if not reasons else (
-            "settlement_mismatch"
-            if any(item in {"incomplete_settlement", "settlement_mismatch"} for item in reasons)
-            else reasons[0]
-        )
+        incomplete = any(item.settlement_complete is not True for item in facts_list)
+        if not reasons:
+            if incomplete:
+                status = "paper_assumed_equivalent"
+                reasons = [
+                    "ordinary_match_result_1x2",
+                    "settlement_unknown_not_contradictory",
+                    "paper_assumed_equivalent",
+                ]
+            else:
+                status = "matched_equivalent"
+        else:
+            status = (
+                "settlement_mismatch"
+                if any(item in {"incomplete_settlement", "settlement_mismatch"} for item in reasons)
+                else reasons[0]
+            )
         venues = [_venue_view(item) for item in facts_list]
-        if not reasons and any(
-            item.settlement_complete is not True for item in facts_list
-        ):
-            reasons = ["ordinary_match_result_1x2", "settlement_unknown_not_contradictory"]
         candidates.append(
             SafeCandidateView(
                 fixture_label=f"{fixture.home_team} vs {fixture.away_team}",

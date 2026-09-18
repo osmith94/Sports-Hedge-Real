@@ -41,6 +41,7 @@ from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 
 class InventoryComparisonStatus(StrEnum):
     MATCHED_EQUIVALENT = "matched_equivalent"
+    PAPER_ASSUMED_EQUIVALENT = "paper_assumed_equivalent"
     VENUE_ONLY = "venue_only"
     SETTLEMENT_MISMATCH = "settlement_mismatch"
     UNSUPPORTED_OUTCOME_MODEL = "unsupported_outcome_model"
@@ -389,10 +390,25 @@ def assemble_fixture_inventory(
     return _sort_rows(rows)
 
 
+def inventory_is_comparable_opportunity(status: InventoryComparisonStatus | None) -> bool:
+    """True for paper-mode comparable opportunities (proven or 1X2 paper-assumed)."""
+
+    return status in {
+        InventoryComparisonStatus.MATCHED_EQUIVALENT,
+        InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT,
+    }
+
+
+def inventory_is_hot_refreshable(status: InventoryComparisonStatus | None) -> bool:
+    """HOT may quote-refresh proven and paper-assumed persisted relationships."""
+
+    return inventory_is_comparable_opportunity(status)
+
+
 def inventory_summary(rows: list[FixtureMarketInventoryRow]) -> tuple[int, int, Decimal | None]:
     discovered = len(rows)
     equivalent = sum(
-        1 for row in rows if row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
+        1 for row in rows if inventory_is_comparable_opportunity(row.comparison_status)
     )
     edges = [row.current_net_edge for row in rows if row.current_net_edge is not None]
     best = max(edges) if edges else None
@@ -629,11 +645,13 @@ def _classify_pair(
             not admission.allowed
             and admission.assessment.state is not CatalogueApprovalState.UNSUPPORTED
         ):
-            reason = admission.rejection_reason or "catalogue_review_required"
+            catalogue_reason = admission.rejection_reason or "catalogue_review_required"
+            specific = admission.assessment.reason
+            reason = specific or catalogue_reason
             return (
                 InventoryComparisonStatus.OTHER,
                 reason,
-                [reason, admission.assessment.reason, *match.reasons],
+                [catalogue_reason, specific, *match.reasons],
                 False,
             )
         ineligible = (
@@ -650,8 +668,14 @@ def _classify_pair(
 
     entered = decision is not None and scan_eligible_pair(left_market, right_market, match)
     rejections = list(decision.rejection_reasons) if decision is not None else []
+    from sports_hedge.catalogue.admission import assess_catalogue_admission
+    from sports_hedge.catalogue.states import CatalogueApprovalState
+
+    admission = assess_catalogue_admission(left_market, right_market)
     status = InventoryComparisonStatus.MATCHED_EQUIVALENT
-    reason: str | None = None
+    if admission.assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT:
+        status = InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
+    reason: str | None = admission.assessment.reason if status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT else None
     if rejections:
         mapped = _status_from_rejections(rejections)
         if mapped is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
@@ -674,6 +698,7 @@ def _status_from_rejections(rejections: list[str]) -> InventoryComparisonStatus:
         InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL,
         InventoryComparisonStatus.UNSUPPORTED_FAMILY,
         InventoryComparisonStatus.SETTLEMENT_MISMATCH,
+        InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT,
     ):
         if status in mapped:
             return status
@@ -683,6 +708,8 @@ def _status_from_rejections(rejections: list[str]) -> InventoryComparisonStatus:
 def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
     if reason.startswith("catalogue_"):
         return InventoryComparisonStatus.OTHER
+    if reason in {"paper_assumed_equivalent", "paper_assumed_not_live_execution_eligible"}:
+        return InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
     if reason.startswith("missing_venue_cost") or reason in {
         "missing_costs",
         "legacy_fee_snapshot_not_cost_truth",
@@ -1061,7 +1088,11 @@ def _kalshi_related_to_row(row: FixtureMarketInventoryRow, item: InventoryMarket
         return False
     if row.period and item.canonical.period.value != row.period:
         return False
-    if row.line is not None and item.canonical.line != row.line:
+    if (
+        row.line is not None
+        and item.canonical.line != row.line
+        and item.canonical.family is not MarketFamily.TOTAL_GOALS
+    ):
         return False
     if row.matchbook is None and row.polymarket is None:
         return False
@@ -1072,7 +1103,12 @@ def _kalshi_related_to_row(row: FixtureMarketInventoryRow, item: InventoryMarket
     }
     kalshi_key = item.canonical.settlement.deterministic_key()
     if settlement_keys and kalshi_key not in settlement_keys:
-        if item.canonical.family is MarketFamily.MATCH_RESULT:
+        if item.canonical.family in {
+            MarketFamily.MATCH_RESULT,
+            MarketFamily.TOTAL_GOALS,
+            MarketFamily.BOTH_TEAMS_TO_SCORE,
+            MarketFamily.FIRST_TEAM_TO_SCORE,
+        }:
             return True
         return False
     return True
@@ -1124,7 +1160,7 @@ def _matching_kalshi_index(
             polymarket_markets=polymarket_markets,
         )
         equivalent = any(match.matched for match in matches)
-        if not equivalent and row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT:
+        if not equivalent and inventory_is_comparable_opportunity(row.comparison_status):
             continue
         related.append((equivalent, index))
     if not related:
@@ -1248,14 +1284,14 @@ def _attach_kalshi(
         polymarket_markets=polymarket_markets,
     )
     if catalogue is not None and not catalogue.allowed:
-        reason = catalogue.rejection_reason or "catalogue_review_required"
+        catalogue_reason = catalogue.rejection_reason or "catalogue_review_required"
+        reason = catalogue.assessment.reason or catalogue_reason
         row.comparison_status = InventoryComparisonStatus.OTHER
         row.reason = reason
+        if catalogue_reason not in row.rejection_reasons:
+            row.rejection_reasons.append(catalogue_reason)
         if reason not in row.rejection_reasons:
             row.rejection_reasons.append(reason)
-        detail = catalogue.assessment.reason
-        if detail and detail not in row.rejection_reasons:
-            row.rejection_reasons.append(detail)
         row.entered_solver = False
         row.solver_model = None
         row.current_net_edge = None
@@ -1272,13 +1308,35 @@ def _attach_kalshi(
             row.current_net_edge = best.current_net_edge
             row.solver_is_arbitrage = best.solver_is_arbitrage
         if best.entered_solver or not best.rejection_reasons:
-            row.comparison_status = InventoryComparisonStatus.MATCHED_EQUIVALENT
-            if row.reason == "venue_only":
-                row.reason = None
+            row.comparison_status = _comparable_status_from_catalogue(catalogue)
+            row.reason = _comparable_reason(row.comparison_status, row.reason)
         return
-    row.comparison_status = InventoryComparisonStatus.MATCHED_EQUIVALENT
-    if row.reason == "venue_only":
-        row.reason = None
+    row.comparison_status = _comparable_status_from_catalogue(catalogue)
+    row.reason = _comparable_reason(row.comparison_status, row.reason)
+
+
+def _comparable_status_from_catalogue(catalogue: Any) -> InventoryComparisonStatus:
+    from sports_hedge.catalogue.states import CatalogueApprovalState
+
+    if (
+        catalogue is not None
+        and catalogue.assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    ):
+        return InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
+    return InventoryComparisonStatus.MATCHED_EQUIVALENT
+
+
+def _comparable_reason(
+    status: InventoryComparisonStatus,
+    current: str | None,
+) -> str | None:
+    if status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT:
+        if current in {None, "venue_only"}:
+            return "paper_assumed_equivalent"
+        return current
+    if current == "venue_only":
+        return None
+    return current
 
 
 def _inventory_from_facts(

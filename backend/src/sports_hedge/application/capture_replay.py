@@ -47,14 +47,16 @@ from sports_hedge.application.fixture_clusters import (
     cluster_venue_events,
     to_venue_event,
 )
-from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
+from sports_hedge.application.fixture_inventory import (
+    InventoryComparisonStatus,
+    inventory_is_comparable_opportunity,
+)
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.target_competitions import (
     filter_in_scope_events,
     resolve_target_competition_from_kalshi_ticker,
 )
-from sports_hedge.catalogue.admission import catalogue_allows_solver
-from sports_hedge.catalogue.classify import PayloadSide, classify_payload_pair, normalize_payload_side
+from sports_hedge.catalogue.classify import PayloadSide, classify_payload_pair
 from sports_hedge.catalogue.corpus import GAMEWIN_URL, KALSHI_GAMEWIN_SERIES
 from sports_hedge.config import Settings
 from sports_hedge.domain.football import MarketFamily
@@ -75,7 +77,7 @@ from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookClient
 from sports_hedge.venues.polymarket import PolymarketClient
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 FORBIDDEN_WRITE_METHODS = (
     "place_order",
     "cancel_order",
@@ -173,8 +175,11 @@ class ReplayVenueSide(BaseModel):
     data_class: str = DATA_CLASS_UNAVAILABLE
     unavailable_reason: str | None = None
     event: dict[str, Any] | None = None
+    events: list[dict[str, Any]] = Field(default_factory=list)
     markets: list[dict[str, Any]] = Field(default_factory=list)
+    markets_by_event: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     series: dict[str, Any] | None = None
+    series_by_ticker: dict[str, dict[str, Any]] = Field(default_factory=dict)
     order_books: dict[str, dict[str, Any]] = Field(default_factory=dict)
     contract_terms: dict[str, dict[str, Any]] = Field(default_factory=dict)
     identified_as: str | None = None
@@ -315,13 +320,29 @@ class ReplayKalshi:
             self.get_contract_terms_document = self._get_contract_terms_document
 
     async def list_events(self, **filters: Any) -> dict[str, Any]:
-        del filters
-        if not self.side.present or not self.side.event:
-            return {"events": []}
-        return {"events": [sanitize_payload(self.side.event)]}
+        events = _replay_kalshi_events(self.side)
+        series_tickers = filters.get("series_tickers")
+        ticker = filters.get("series_ticker")
+        wanted: set[str] = set()
+        if isinstance(series_tickers, str):
+            wanted = {part.strip() for part in series_tickers.split(",") if part.strip()}
+        elif series_tickers:
+            wanted = {str(item).strip() for item in series_tickers if str(item).strip()}
+        elif ticker:
+            wanted = {str(ticker).strip()}
+        if wanted:
+            events = [
+                item
+                for item in events
+                if str(item.get("series_ticker") or "").strip() in wanted
+            ]
+        return {"events": [sanitize_payload(item) for item in events]}
 
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
-        del event_id, filters
+        del filters
+        by_event = self.side.markets_by_event.get(str(event_id))
+        if by_event:
+            return {"markets": list(by_event)}
         return {"markets": list(self.side.markets or [])}
 
     async def get_market(self, ticker: str) -> dict[str, Any]:
@@ -345,6 +366,9 @@ class ReplayKalshi:
         return dict(book)
 
     async def get_series(self, series_ticker: str) -> dict[str, Any]:
+        mapped = (self.side.series_by_ticker or {}).get(str(series_ticker))
+        if mapped:
+            return dict(mapped)
         series = dict(self.side.series or {})
         series.setdefault("ticker", series_ticker)
         return series
@@ -511,10 +535,15 @@ def summarize_replay(bundle: ReplayBundle, report: CollectionReport) -> ReplaySu
     equivalent = [
         row
         for row in rows
+        if inventory_is_comparable_opportunity(row.comparison_status)
+    ]
+    proven = [
+        row
+        for row in equivalent
         if row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
     ]
-    focus = equivalent[0] if equivalent else (rows[0] if rows else None)
-    catalogue_state, catalogue_allowed, settlement_status = _catalogue_fields(bundle)
+    focus = proven[0] if proven else (equivalent[0] if equivalent else (rows[0] if rows else None))
+    catalogue_state, catalogue_allowed, settlement_status = _catalogue_fields(bundle, focus)
     block_reason = None
     if fixture is not None and not equivalent:
         block_reason = zero_equivalent_reason_from_inventory(rows) or fixture.no_comparison_reason
@@ -1360,62 +1389,81 @@ def build_live_overlap_bundle(
     report: CollectionReport,
     fx_snapshots: list[FxRateSnapshot] | None,
 ) -> ReplayBundle:
-    focus_rows = _preferred_equivalent_rows(report)
-    kalshi_item = _select_captured_kalshi_event(cluster, focus_rows)
+    focus_rows = _catalogue_fixture_rows(report)
+    kalshi_items = _select_captured_kalshi_events(cluster, focus_rows)
     matchbook_item = cluster.matchbook
     mb_event = sanitize_payload(matchbook_item.raw) if matchbook_item else None
-    kalshi_event = sanitize_payload(kalshi_item.raw) if kalshi_item else None
+    kalshi_events = [
+        sanitize_payload(item.raw)
+        for item in kalshi_items
+        if isinstance(getattr(item, "raw", None), dict)
+    ]
+    kalshi_event = kalshi_events[0] if kalshi_events else None
     mb_event_id = str(matchbook_item.source_event_id) if matchbook_item else ""
-    kalshi_event_id = str(kalshi_item.source_event_id) if kalshi_item else ""
     mb_markets = list(recording_matchbook.markets_by_event.get(mb_event_id) or [])
     if not mb_markets and isinstance(mb_event, dict):
         nested = mb_event.get("markets")
         if isinstance(nested, list):
             mb_markets = [sanitize_payload(item) for item in nested if isinstance(item, dict)]
-    mb_markets = _filter_markets_by_ids(
-        mb_markets,
-        {
-            str(row.matchbook.source_market_id)
-            for row in focus_rows
-            if row.matchbook is not None
-        },
-        id_fields=("id", "source_market_id"),
+    mb_wanted = {
+        str(row.matchbook.source_market_id)
+        for row in focus_rows
+        if getattr(row, "matchbook", None) is not None
+    }
+    mb_markets = (
+        _filter_markets_by_ids(mb_markets, mb_wanted, id_fields=("id", "source_market_id"))
+        if mb_wanted
+        else mb_markets
     )
-    kalshi_markets = list(recording_kalshi.markets_by_event.get(kalshi_event_id) or [])
-    if not kalshi_markets and isinstance(kalshi_event, dict):
-        nested = kalshi_event.get("markets")
-        if isinstance(nested, list):
-            kalshi_markets = [sanitize_payload(item) for item in nested if isinstance(item, dict)]
-    kalshi_markets = _merge_kalshi_get_market(
-        kalshi_markets, recording_kalshi.get_market_payloads
-    )
-    kalshi_market_ids = {
+    markets_by_event: dict[str, list[dict[str, Any]]] = {}
+    all_kalshi_markets: list[dict[str, Any]] = []
+    kalshi_wanted = {
         str(row.kalshi.source_market_id)
         for row in focus_rows
-        if row.kalshi is not None
+        if getattr(row, "kalshi", None) is not None
     }
-    kalshi_markets = _filter_markets_by_ids(
-        kalshi_markets,
-        kalshi_market_ids,
-        id_fields=("ticker", "id"),
-    )
+    equivalent_kalshi_ids = {
+        str(row.kalshi.source_market_id)
+        for row in focus_rows
+        if getattr(row, "kalshi", None) is not None
+        and inventory_is_comparable_opportunity(getattr(row, "comparison_status", None))
+    }
+    for item in kalshi_items:
+        event_id = str(item.source_event_id)
+        markets = list(recording_kalshi.markets_by_event.get(event_id) or [])
+        raw = item.raw if isinstance(getattr(item, "raw", None), dict) else {}
+        if not markets:
+            nested = raw.get("markets")
+            if isinstance(nested, list):
+                markets = [sanitize_payload(market) for market in nested if isinstance(market, dict)]
+        markets = _merge_kalshi_get_market(markets, recording_kalshi.get_market_payloads)
+        if kalshi_wanted:
+            markets = _filter_markets_by_ids(markets, kalshi_wanted, id_fields=("ticker", "id"))
+        markets_by_event[event_id] = markets
+        all_kalshi_markets.extend(markets)
+    series_by_ticker = {
+        str(ticker): sanitize_payload(payload)
+        for ticker, payload in dict(recording_kalshi.series_by_ticker).items()
+    }
     series = _series_for_event(kalshi_event, recording_kalshi)
     order_books = dict(recording_kalshi.order_books)
-    if kalshi_market_ids:
-        order_books = {
-            key: value
-            for key, value in order_books.items()
-            if str(key) in kalshi_market_ids
-        } or order_books
+    book_ids = equivalent_kalshi_ids or kalshi_wanted
+    if book_ids:
+        filtered_books = {
+            key: value for key, value in order_books.items() if str(key) in book_ids
+        }
+        if filtered_books:
+            order_books = filtered_books
     fixture = _cluster_fixture_label(cluster)
     return ReplayBundle(
-        bundle_id=f"issue293-live-overlap-{kalshi_event_id or mb_event_id or 'pair'}",
+        bundle_id=f"issue293-live-overlap-{_kalshi_cluster_id(kalshi_items) or mb_event_id or 'pair'}",
         captured_at=captured_at,
         data_class=DATA_CLASS_LIVE_CAPTURE,
         identified_as=(
             "LIVE read-only same-event Matchbook↔Kalshi capture. "
             f"Fixture {fixture}. Not a paper fill. Not an executable live order. "
-            "Replay uses these sanitized captured payloads with network unused."
+            "Replay uses these sanitized captured payloads with network unused. "
+            "Sibling GAME/BTTS/TOTAL/FTTS containers are preserved on one fixture."
         ),
         matchbook=ReplayVenueSide(
             present=mb_event is not None,
@@ -1426,20 +1474,23 @@ def build_live_overlap_bundle(
             identified_as="Live read-only Matchbook event/markets. Not a venue write.",
         ),
         kalshi=ReplayVenueSide(
-            present=kalshi_event is not None,
+            present=bool(kalshi_events),
             provenance=PROVENANCE_LIVE,
             data_class=DATA_CLASS_LIVE_CAPTURE,
             event=kalshi_event if isinstance(kalshi_event, dict) else None,
-            markets=kalshi_markets,
+            events=kalshi_events,
+            markets=all_kalshi_markets,
+            markets_by_event=markets_by_event,
             series=series,
+            series_by_ticker=series_by_ticker,
             order_books=order_books,
             contract_terms=dict(recording_kalshi.contract_terms),
-            identified_as="Live read-only Kalshi event/markets/books. Not a venue write.",
+            identified_as="Live read-only Kalshi sibling events/markets/books. Not a venue write.",
         ),
         fx_snapshots=_fx_payloads_from_report(report, fx_snapshots),
         notes=[
             "Captured through production identity clustering and the collector gate.",
-            "Do not treat a MATCHED_EQUIVALENT row as a live executable fill.",
+            "Do not treat a MATCHED_EQUIVALENT or PAPER_ASSUMED_EQUIVALENT row as a live executable fill.",
         ],
     )
 
@@ -1529,39 +1580,72 @@ def _markets_have_regulation_wording(markets: list[dict[str, Any]]) -> bool:
     return "90 minute" in text or "90 min" in text
 
 
-def _preferred_equivalent_rows(report: CollectionReport) -> list[Any]:
+def _catalogue_fixture_rows(report: CollectionReport) -> list[Any]:
+    """Keep every Phase-1 family inventory row on the clustered fixture.
+
+    Capture must preserve GAME/BTTS/TOTAL/FTTS siblings, including
+    PAPER_ASSUMED 1X2, not only the first APPROVED_EQUIVALENT family.
+    """
+
+    from sports_hedge.catalogue.registry import family_to_registry_archetype, phase1_expensive_work_families
+
     rows: list[Any] = []
     for group in report.fixture_markets.values():
         rows.extend(group)
-    equivalent = [
+    families = phase1_expensive_work_families()
+    kept: list[Any] = []
+    for row in rows:
+        family = getattr(row, "family", None)
+        if family is None:
+            continue
+        try:
+            market_family = family if isinstance(family, MarketFamily) else MarketFamily(str(family))
+        except ValueError:
+            continue
+        if market_family not in families:
+            continue
+        if family_to_registry_archetype(market_family) is None:
+            continue
+        kept.append(row)
+    if kept:
+        return kept
+    return [
         row
         for row in rows
-        if row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
+        if inventory_is_comparable_opportunity(getattr(row, "comparison_status", None))
     ]
-    if not equivalent:
-        return []
-    for family in _CAPTURE_FAMILY_PRIORITY:
-        hit = [row for row in equivalent if row.family == family]
-        if hit:
-            return hit
-    return equivalent
 
 
-def _select_captured_kalshi_event(cluster: FixtureCluster, focus_rows: list[Any]) -> Any | None:
+def _select_captured_kalshi_events(cluster: FixtureCluster, focus_rows: list[Any]) -> list[Any]:
     event_ids = {
         str(row.kalshi.source_event_id)
         for row in focus_rows
-        if row.kalshi is not None
+        if getattr(row, "kalshi", None) is not None
     }
     if event_ids:
         matches = [
             item for item in cluster.kalshi_events if str(item.source_event_id) in event_ids
         ]
         if matches:
-            return sorted(matches, key=_kalshi_source_rank)[0]
+            return sorted(matches, key=_kalshi_source_rank)
     if cluster.kalshi_events:
-        return sorted(cluster.kalshi_events, key=_kalshi_source_rank)[0]
-    return cluster.kalshi
+        return sorted(cluster.kalshi_events, key=_kalshi_source_rank)
+    if cluster.kalshi is not None:
+        return [cluster.kalshi]
+    return []
+
+
+def _kalshi_cluster_id(items: list[Any]) -> str:
+    return "|".join(sorted(str(item.source_event_id) for item in items if item is not None))
+
+
+def _preferred_equivalent_rows(report: CollectionReport) -> list[Any]:
+    return _catalogue_fixture_rows(report)
+
+
+def _select_captured_kalshi_event(cluster: FixtureCluster, focus_rows: list[Any]) -> Any | None:
+    items = _select_captured_kalshi_events(cluster, focus_rows)
+    return items[0] if items else None
 
 
 def _filter_markets_by_ids(
@@ -1688,14 +1772,37 @@ def _public_matchbook_summary(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _replay_kalshi_events(side: ReplayVenueSide) -> list[dict[str, Any]]:
+    events = [item for item in (side.events or []) if isinstance(item, dict)]
+    if events:
+        return events
+    if side.present and isinstance(side.event, dict):
+        return [side.event]
+    return []
+
+
 def _kalshi_markets(side: ReplayVenueSide) -> list[dict[str, Any]]:
+    collected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in (side.markets_by_event or {}).values():
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            ticker = str(item.get("ticker") or item.get("id") or "")
+            if ticker and ticker in seen:
+                continue
+            if ticker:
+                seen.add(ticker)
+            collected.append(item)
+    if collected:
+        return collected
     if side.markets:
         return list(side.markets)
-    if isinstance(side.event, dict):
-        nested = side.event.get("markets")
+    for event in _replay_kalshi_events(side):
+        nested = event.get("markets")
         if isinstance(nested, list):
-            return [item for item in nested if isinstance(item, dict)]
-    return []
+            collected.extend(item for item in nested if isinstance(item, dict))
+    return collected
 
 
 def _kalshi_books_for_event(event: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1709,7 +1816,13 @@ def _kalshi_books_for_event(event: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return books
 
 
-def _catalogue_fields(bundle: ReplayBundle) -> tuple[str | None, bool | None, str | None]:
+def _catalogue_fields(
+    bundle: ReplayBundle, focus: Any | None = None
+) -> tuple[str | None, bool | None, str | None]:
+    if focus is not None and getattr(focus, "comparison_status", None) is not None:
+        allowed = inventory_is_comparable_opportunity(focus.comparison_status)
+        settlement = getattr(focus, "reason", None)
+        return str(focus.comparison_status.value), allowed, settlement
     if not bundle.matchbook.present or not bundle.kalshi.present:
         return None, None, None
     mb_markets = bundle.matchbook.markets or (
@@ -1721,24 +1834,19 @@ def _catalogue_fields(bundle: ReplayBundle) -> tuple[str | None, bool | None, st
     left = PayloadSide(
         venue=VenueName.MATCHBOOK,
         event=bundle.matchbook.event,
-        markets=mb_markets,
+        markets=mb_markets[:1],
     )
     right = PayloadSide(
         venue=VenueName.KALSHI,
         event=bundle.kalshi.event,
-        markets=kalshi_markets,
+        markets=kalshi_markets[:1] if len(kalshi_markets) == 1 else kalshi_markets[:3],
         series=bundle.kalshi.series,
     )
-    assessment = classify_payload_pair(left, right)
-    mb = normalize_payload_side(left)
-    kalshi = normalize_payload_side(right)
-    allowed = catalogue_allows_solver(mb, kalshi)
-    settlement = None
-    if kalshi.settlement.unknown_reason:
-        settlement = kalshi.settlement.unknown_reason
-    elif kalshi.settlement.scope:
-        settlement = kalshi.settlement.scope.value
-    return assessment.state.value, allowed, settlement
+    try:
+        assessment = classify_payload_pair(left, right)
+    except Exception:
+        return None, None, None
+    return assessment.state.value, assessment.paper_mode_admitted, assessment.reason
 
 
 def _row_summary(
@@ -1769,7 +1877,7 @@ def _row_summary(
         net_edge=row.current_net_edge,
         arb=bool(row.solver_is_arbitrage),
         block_reason=None
-        if row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
+        if inventory_is_comparable_opportunity(row.comparison_status)
         else row.reason,
         rejection_reasons=list(row.rejection_reasons or []),
     )

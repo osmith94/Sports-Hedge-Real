@@ -38,19 +38,22 @@ The normal operational states should distinguish:
 
 ```text
 APPROVED_EQUIVALENT
+PAPER_ASSUMED_EQUIVALENT
 APPROVED_PARAMETER_MISMATCH
 KNOWN_CONTRADICTION
 REVIEW_REQUIRED
 UNSUPPORTED
 ```
 
-Only `APPROVED_EQUIVALENT` may enter the normal arbitrage solver.
+Only `APPROVED_EQUIVALENT` may enter the **live-execution** path.
 
-If semantics are incomplete or ambiguous but the market plausibly belongs to an approved archetype, route it to `REVIEW_REQUIRED`.
+`PAPER_ASSUMED_EQUIVALENT` is an owner-approved Phase-1 **paper-mode** exception for Matchbook↔Kalshi Match Result / 1X2 only. It may enter the paper solver when GAME HOME/DRAW/AWAY is complete, fixture identity is exact, period/line are structurally consistent, and there is no contradictory wording. It carries `settlement_assumption=regulation_time`. It is never represented as independently proven settlement and is never live-execution eligible. Extra time, penalties, to-qualify, fair-price cancellation/reschedule, and incomplete outcome sets remain fail-closed.
+
+If semantics are incomplete or ambiguous but the market plausibly belongs to an approved archetype, and the paper-assumed 1X2 exception does not apply, route it to `REVIEW_REQUIRED`.
 
 Do not silently guess.
 
-Do not admit it to paper/live execution.
+Do not admit incomplete settlement to live execution.
 
 Markets outside the approved catalogue are `UNSUPPORTED` for the normal arbitrage path.
 

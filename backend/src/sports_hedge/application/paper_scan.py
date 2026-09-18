@@ -530,6 +530,13 @@ class PaperScanService:
             payoff_scan=payoff_scan,
             effective_fx=effective_fx,
         )
+        from sports_hedge.catalogue.states import CatalogueApprovalState
+
+        if (
+            catalogue_admission.assessment.state
+            is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+        ):
+            rejections.append("paper_assumed_equivalent")
 
         draft = PaperScanDecision(
             market_match=match,

@@ -304,6 +304,7 @@ def _kalshi_ftts(*, rules: str = REGULATION, include_no_goal: bool = True) -> li
 
 def census_corpus() -> tuple[CorpusEntry, ...]:
     good = CatalogueApprovalState.APPROVED_EQUIVALENT
+    paper_assumed = CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     review = CatalogueApprovalState.REVIEW_REQUIRED
     mismatch = CatalogueApprovalState.APPROVED_PARAMETER_MISMATCH
     contradiction = CatalogueApprovalState.KNOWN_CONTRADICTION
@@ -336,11 +337,15 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
         CorpusEntry(
             entry_id="bad-1x2-mb-k-gamewin-unknown",
             archetype=CatalogueArchetype.MATCH_RESULT_1X2,
-            expected_state=review,
-            known_kind="known_bad",
+            expected_state=paper_assumed,
+            known_kind="paper_assumed",
             left=_mb([_mb_1x2()]),
             right=_kalshi(_kalshi_1x2(rules=GAMEWIN_TEMPLATE), series=KALSHI_GAMEWIN_SERIES),
-            notes=["matcher_currently_admits_gamewin_unknown_1x2"],
+            notes=[
+                "owner_paper_mode_assumption_for_complete_game_home_draw_away",
+                "not_settlement_proven",
+                "never_live_execution_eligible",
+            ],
         ),
         CorpusEntry(
             entry_id="bad-1x2-mb-k-cancel-reschedule-fair-price",

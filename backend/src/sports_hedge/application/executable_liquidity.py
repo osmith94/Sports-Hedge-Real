@@ -64,6 +64,8 @@ HARD_NON_EXECUTABLE_REASONS = frozenset(
         "fill_confidence_below_threshold",
         "insufficient_depth",
         "missing_risk_evidence",
+        "paper_assumed_equivalent",
+        "paper_assumed_not_live_execution_eligible",
     }
 )
 
