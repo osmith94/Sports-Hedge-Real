@@ -4317,23 +4317,11 @@ def _select_lane_clusters(
         decorated.sort(key=lambda item: item[0])
         return [cluster for _key, cluster in decorated]
     selected.sort(key=cluster_canonical_event_id)
-    if skip_event_ids:
-        return selected
-    cursor = (resume_cursor or "").strip()
-    if not cursor:
-        return selected
-    # skip_event_ids already dropped evaluated work; keep a stable order after
-    # the cursor as a belt-and-braces resume if ids were not recorded.
-    after: list[FixtureCluster] = []
-    seen_cursor = False
-    for cluster in selected:
-        canonical_id = cluster_canonical_event_id(cluster)
-        if not seen_cursor:
-            if canonical_id == cursor:
-                seen_cursor = True
-            continue
-        after.append(cluster)
-    return after if seen_cursor else selected
+    # Skip IDs are the source of truth for already-finished work. An empty skip
+    # means remaining clusters are still work — do not treat resume_cursor as
+    # "already evaluated" or a complete leftover-0 cycle will skip the universe.
+    _ = resume_cursor
+    return selected
 
 
 def _fixture_source_events(

@@ -282,6 +282,9 @@ class Settings(BaseSettings):
     paper_live_refresh_interval_seconds: int = Field(default=30, ge=15, le=300)
     paper_live_refresh_hot_interval_seconds: int = Field(default=30, ge=15, le=60)
     paper_live_refresh_universe_interval_seconds: int = Field(default=180, ge=60, le=300)
+    # Persistent UNIVERSE worker pause after a terminal generation. Not a
+    # cron-style 180s dead period; the next generation id starts after this.
+    paper_universe_worker_cooldown_seconds: int = Field(default=8, ge=5, le=15)
     # Bounded live-scan budgets. A hung provider must not freeze the operator console.
     paper_scan_cycle_timeout_seconds: int = Field(default=45, ge=10, le=180)
     paper_scan_hot_cycle_timeout_seconds: int = Field(default=25, ge=10, le=45)

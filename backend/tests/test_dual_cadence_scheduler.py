@@ -418,7 +418,7 @@ def test_live_refresh_exposes_distinct_hot_and_universe_status() -> None:
         payload = client.get("/paper/live-refresh").json()
         assert payload["hot"]["cadence_seconds"] == 30
         assert payload["hot"]["cycle_timeout_seconds"] == 25
-        assert payload["universe"]["cadence_seconds"] == 180
+        assert payload["universe"]["cadence_seconds"] == 8
         assert payload["universe"]["generation_budget_seconds"] == 150
         assert payload["interval_seconds"] == payload["hot"]["cadence_seconds"]
         assert "Fast scan" in (payload["operator_summary"] or "")

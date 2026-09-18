@@ -206,7 +206,7 @@ class LiveRefreshStatus(BaseModel):
     )
     universe: LaneRefreshStatus = Field(
         default_factory=lambda: LaneRefreshStatus(
-            cadence_seconds=180,
+            cadence_seconds=8,
             generation_budget_seconds=150,
         )
     )
@@ -340,7 +340,7 @@ class LiveRefreshCoordinator:
                     ),
                     "universe": self.status.universe.model_copy(
                         update={
-                            "cadence_seconds": resolved.paper_live_refresh_universe_interval_seconds,
+                            "cadence_seconds": resolved.paper_universe_worker_cooldown_seconds,
                             "generation_budget_seconds": float(
                                 resolved.paper_scan_universe_generation_budget_seconds
                             ),
@@ -546,6 +546,7 @@ class LiveRefreshCoordinator:
                 "universe": self.status.universe.model_copy(
                     update={
                         "next_due_at": self._next_universe_due,
+                        "cadence_seconds": resolved.paper_universe_worker_cooldown_seconds,
                         "resume_cursor": self._status_universe_cursor(),
                         "generation_work_used_s": round(self._status_universe_work_used(), 3),
                     }
@@ -631,6 +632,8 @@ class LiveRefreshCoordinator:
             next_universe_due is not None and evaluated >= next_universe_due
         )
         if not universe_due:
+            if universe_generation_started_at is None and next_universe_due is not None:
+                return DualCadencePlan(lane="idle", reason="universe_cooldown")
             return DualCadencePlan(lane="idle", reason="waiting")
         reuse = bool(snapshot) and generation_resume
         return DualCadencePlan(
@@ -711,6 +714,9 @@ class LiveRefreshCoordinator:
             candidates.append((self._next_hot_due - evaluated).total_seconds())
         if self._universe_retry_at is not None:
             candidates.append((self._universe_retry_at - evaluated).total_seconds())
+        work_retry = self._earliest_retry_wait_unlocked(evaluated)
+        if work_retry is not None:
+            candidates.append((work_retry - evaluated).total_seconds())
         if self._universe_generation_started_at is None and self._next_universe_due is not None:
             candidates.append((self._next_universe_due - evaluated).total_seconds())
         if not candidates:
@@ -1184,8 +1190,6 @@ class LiveRefreshCoordinator:
         self._universe_evaluated_ids.update(newly_evaluated)
         if newly_evaluated:
             self._universe_cursor = newly_evaluated[-1]
-        elif report.resume_cursor:
-            self._universe_cursor = report.resume_cursor
         self._universe_provider_failures = 0
         self._universe_retry_at = None
         self._universe_last_report_snapshot = collection_report_snapshot(report)
@@ -1247,7 +1251,15 @@ class LiveRefreshCoordinator:
         evaluated_count = self._status_universe_evaluated_count()
         resume_cursor = self._status_universe_cursor()
         closed = self._universe_generation_started_at is None
-        worker_state = WORKER_COMPLETE if closed else (WORKER_DEGRADED if degraded else WORKER_IDLE)
+        retry_wait = None if closed else self._earliest_retry_wait_unlocked(report.completed_at)
+        if closed:
+            worker_state = WORKER_COMPLETE
+        elif retry_wait is not None:
+            worker_state = WORKER_WAITING
+        elif degraded:
+            worker_state = WORKER_DEGRADED
+        else:
+            worker_state = WORKER_IDLE
         self.status = self.status.model_copy(
             update={
                 "universe": self.status.universe.model_copy(
@@ -1989,7 +2001,7 @@ class LiveRefreshCoordinator:
         if self._universe_generation_started_at is None:
             return
         settings = get_settings()
-        interval = timedelta(seconds=settings.paper_live_refresh_universe_interval_seconds)
+        interval = timedelta(seconds=settings.paper_universe_worker_cooldown_seconds)
         self._next_universe_due = finished + interval
         self._universe_budget_paused = True
 
@@ -2004,12 +2016,8 @@ class LiveRefreshCoordinator:
         if self._universe_generation_started_at is None:
             return
         settings = get_settings()
-        started = self._universe_generation_started_at
-        next_due = started + timedelta(
-            seconds=settings.paper_live_refresh_universe_interval_seconds
-        )
-        next_due = max(finished, next_due)
-        self._next_universe_due = next_due
+        cooldown = timedelta(seconds=settings.paper_universe_worker_cooldown_seconds)
+        self._next_universe_due = finished + cooldown
         self._clear_universe_generation_local_state()
         self._universe_generation_started_at = None
         self._universe_budget_paused = False
@@ -2352,7 +2360,7 @@ class LiveRefreshCoordinator:
                     raise
                 except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, Exception):
                     pass
-            delay = min(self._seconds_until_universe(), 5.0)
+            delay = min(self._seconds_until_universe(), 30.0)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, delay))
             except TimeoutError:
@@ -2372,6 +2380,9 @@ class LiveRefreshCoordinator:
             return 1.0
         if self._universe_retry_at is not None and self._universe_retry_at > now:
             return max(0.05, (self._universe_retry_at - now).total_seconds())
+        work_retry = self._earliest_retry_wait_unlocked(now)
+        if work_retry is not None:
+            return max(0.05, (work_retry - now).total_seconds())
         if self._universe_generation_started_at is not None:
             return 0.05
         if self._next_universe_due is None:
