@@ -851,6 +851,7 @@ async def refresh_hot_read_only_market_data(
             known_source_events=plan.known_source_events,
             cycle_timeout_seconds=plan.collector_timeout_seconds,
             enabled_venues=plan.enabled_venues,
+            hot_market_relationships=plan.hot_market_relationships,
         )
 
     try:
@@ -970,6 +971,7 @@ async def _collect_report(
     on_fixture_evaluated=None,
     on_canonical_work_set=None,
     retry_series: dict[str, list[str]] | None = None,
+    hot_market_relationships=None,
 ) -> CollectionReport:
     settings = get_settings()
     runtime = get_shared_provider_runtime(settings)
@@ -1020,6 +1022,7 @@ async def _collect_report(
             on_fixture_evaluated=on_fixture_evaluated,
             on_canonical_work_set=on_canonical_work_set,
             retry_series=retry_series,
+            hot_market_relationships=hot_market_relationships,
         )
     finally:
         acknowledge_task_cancellation()
@@ -1302,6 +1305,7 @@ async def server_owned_refresh_tick(plan=None) -> None:
             on_fixture_evaluated=on_fixture,
             on_canonical_work_set=on_work_set,
             retry_series=resolved.retry_series,
+            hot_market_relationships=getattr(resolved, "hot_market_relationships", None),
         )
 
     try:

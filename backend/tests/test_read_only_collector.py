@@ -23,6 +23,7 @@ class FakeMatchbook:
     def __init__(self, *, duplicate_event: bool = False) -> None:
         self.duplicate_event = duplicate_event
         self.list_markets_calls: list[str] = []
+        self.get_market_calls: list[tuple[str, str]] = []
 
     async def list_events(self, **filters: Any) -> dict[str, Any]:
         del filters
@@ -52,40 +53,57 @@ class FakeMatchbook:
             )
         return {"events": events}
 
+    def _markets(self, event_id: int | str) -> list[dict[str, Any]]:
+        del event_id
+        return [
+            {
+                "id": 2001,
+                "name": "Both Teams To Score",
+                "runners": [
+                    {
+                        "id": 301,
+                        "name": "Yes",
+                        "prices": [
+                            {"side": "back", "odds": "2.20", "available-amount": "100"},
+                            {"side": "lay", "odds": "2.22", "available-amount": "100"},
+                        ],
+                    },
+                    {
+                        "id": 302,
+                        "name": "No",
+                        "prices": [
+                            {"side": "back", "odds": "1.80", "available-amount": "100"},
+                            {"side": "lay", "odds": "1.82", "available-amount": "100"},
+                        ],
+                    },
+                ],
+            },
+            {
+                "id": 2999,
+                "name": "Novelty unsupported market",
+                "runners": [{"id": 3999, "name": "Yes", "prices": []}],
+            },
+        ]
+
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
         del filters
         self.list_markets_calls.append(str(event_id))
-        return {
-            "markets": [
-                {
-                    "id": 2001,
-                    "name": "Both Teams To Score",
-                    "runners": [
-                        {
-                            "id": 301,
-                            "name": "Yes",
-                            "prices": [
-                                {"side": "back", "odds": "2.20", "available-amount": "100"},
-                                {"side": "lay", "odds": "2.22", "available-amount": "100"},
-                            ],
-                        },
-                        {
-                            "id": 302,
-                            "name": "No",
-                            "prices": [
-                                {"side": "back", "odds": "1.80", "available-amount": "100"},
-                                {"side": "lay", "odds": "1.82", "available-amount": "100"},
-                            ],
-                        },
-                    ],
-                },
-                {
-                    "id": 2999,
-                    "name": "Novelty unsupported market",
-                    "runners": [{"id": 3999, "name": "Yes", "prices": []}],
-                },
-            ]
-        }
+        return {"markets": self._markets(event_id)}
+
+    async def get_market(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del filters
+        self.get_market_calls.append((str(event_id), str(market_id)))
+        for market in self._markets(event_id):
+            if str(market.get("id")) == str(market_id):
+                return market
+        from sports_hedge.venues.matchbook import MatchbookMarketGoneError
+
+        raise MatchbookMarketGoneError(event_id, market_id, 404)
 
 
 class FakePolymarket:

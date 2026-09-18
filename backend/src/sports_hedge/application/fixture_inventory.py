@@ -83,6 +83,10 @@ class VenueMarketFacts(BaseModel):
     raw_market_name: str | None = None
     raw_market_type: str | None = None
     raw_runner_labels: list[str] = Field(default_factory=list)
+    source_runner_ids: list[str] = Field(default_factory=list)
+    constituent_contract_ids: list[str] = Field(default_factory=list)
+    canonical_identity: dict[str, Any] | None = None
+    fee_snapshot: dict[str, Any] | None = None
 
 
 class FixtureMarketInventoryRow(BaseModel):
@@ -736,6 +740,29 @@ def _facts_from_inventory(
             outcome = runner.outcome.value
             if outcome and outcome not in runner_labels:
                 runner_labels.append(outcome)
+    source_runner_ids: list[str] = []
+    constituent_contract_ids: list[str] = []
+    canonical_identity: dict[str, Any] | None = None
+    fee_snapshot: dict[str, Any] | None = None
+    if canonical is not None:
+        canonical_identity = canonical.model_dump(mode="json")
+        for runner in canonical.runners:
+            runner_id = str(runner.source_runner_id or "").strip()
+            if not runner_id:
+                continue
+            source_runner_ids.append(runner_id)
+            if item.venue is VenueName.KALSHI:
+                ticker = runner_id.rsplit(":", 1)[0].strip()
+                if ticker and ticker not in constituent_contract_ids:
+                    constituent_contract_ids.append(ticker)
+    if observation is not None and isinstance(observation.metadata, dict):
+        fee_key = "kalshi_fee" if item.venue is VenueName.KALSHI else (
+            "polymarket_fee" if item.venue is VenueName.POLYMARKET else None
+        )
+        if fee_key:
+            snap = observation.metadata.get(fee_key)
+            if isinstance(snap, dict):
+                fee_snapshot = snap
     return VenueMarketFacts(
         venue=item.venue,
         source_event_id=item.source_event_id,
@@ -761,6 +788,10 @@ def _facts_from_inventory(
         raw_market_name=raw_name or None,
         raw_market_type=raw_type,
         raw_runner_labels=runner_labels,
+        source_runner_ids=source_runner_ids,
+        constituent_contract_ids=constituent_contract_ids,
+        canonical_identity=canonical_identity,
+        fee_snapshot=fee_snapshot,
         **fee,
     )
 

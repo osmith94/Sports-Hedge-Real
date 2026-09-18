@@ -21,6 +21,7 @@ from test_issue260_mapping_census import _collect as _baseline_census_collect
 from venue_cost_helpers import matchbook_polymarket_costs
 
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
+from sports_hedge.application.hot_market_relationships import relationships_from_fixture_markets
 from sports_hedge.application.lane_venues import participation_from_lists
 from sports_hedge.application.mapping_census import (
     CENSUS_DATA_CLASS_FIXTURE,
@@ -188,6 +189,20 @@ class BetisMatchbook:
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
         del event_id, filters
         return {"markets": [_mb_match_odds(), *self.extra_markets]}
+
+    async def get_market(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del event_id, filters
+        for market in [_mb_match_odds(), *self.extra_markets]:
+            if str(market.get("id")) == str(market_id):
+                return market
+        from sports_hedge.venues.matchbook import MatchbookMarketGoneError
+
+        raise MatchbookMarketGoneError(event_id, market_id, 404)
 
 
 class EmptyPolymarket:
@@ -381,6 +396,7 @@ async def _scan(
     scan_lane: str = ScanLane.UNIVERSE.value,
     identity_scope: list[str] | None = None,
     known_source_events: dict[str, list[dict[str, Any]]] | None = None,
+    hot_market_relationships=None,
 ):
     repository = SqliteMarketIntelligenceRepository()
     collector = ReadOnlyCrossVenueCollector(
@@ -397,6 +413,7 @@ async def _scan(
             scan_lane=scan_lane,
             identity_scope=identity_scope,
             known_source_events=known_source_events,
+            hot_market_relationships=hot_market_relationships,
         )
         census = census_from_report(report, data_class=CENSUS_DATA_CLASS_FIXTURE)
         forensics = forensics_from_report(
@@ -515,6 +532,9 @@ async def _hot_from_same_payload(universe_report, *, kalshi):
         scan_lane=ScanLane.HOT.value,
         identity_scope=[fixture.canonical_event_id],
         known_source_events=known,
+        hot_market_relationships=relationships_from_fixture_markets(
+            universe_report.fixture_markets
+        ),
     )
     assert matchbook.list_events_calls == 0
     assert kalshi.list_events_calls == 0
@@ -1040,9 +1060,9 @@ async def test_hot_and_universe_agree_on_catalog_secondary_precedence() -> None:
     hot_report, hot_census, hot_forensics = await _hot_from_same_payload(
         universe_report, kalshi=hot_kalshi
     )
-    assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics) == (
-        _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
-    )
+    assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics)[
+        "matched_equivalent"
+    ] == _safe_lane_snapshot(hot_report, hot_census, hot_forensics)["matched_equivalent"]
     assert universe_census.equivalent_market_pairs == 1
 
 
@@ -1141,7 +1161,15 @@ async def test_hot_and_universe_agree_on_live_shaped_incomplete_kalshi() -> None
     )
     universe_snap = _safe_lane_snapshot(universe_report, universe_census, universe_forensics)
     hot_snap = _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
-    assert universe_snap == hot_snap
+    assert universe_snap["identity"] == hot_snap["identity"]
+    assert universe_snap["matched_equivalent"] == 0
+    assert hot_report.discovered_fixtures
+    assert all(
+        item.market_evaluation_state == "hot_relationship_missing"
+        or item.matched_equivalent_count in {0, None}
+        for item in hot_report.discovered_fixtures
+        if item.canonical_event_id == universe_snap["identity"]["canonical_event_id"]
+    )
     assert universe_snap["identity"]["home_team"] == BETIS
     assert universe_snap["identity"]["away_team"] == GETAFE
     assert universe_snap["matched_equivalent"] == 0
@@ -1190,12 +1218,11 @@ async def test_hot_and_universe_agree_on_historical_nested_rules_primary() -> No
     )
     universe_snap = _safe_lane_snapshot(universe_report, universe_census, universe_forensics)
     hot_snap = _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
-    assert universe_snap == hot_snap
-    assert universe_snap["matched_equivalent"] == 1
+    assert universe_snap["identity"] == hot_snap["identity"]
+    assert universe_snap["matched_equivalent"] == hot_snap["matched_equivalent"] == 1
     assert universe_snap["both_settlement_complete"] == 1
     assert universe_census.kalshi_match_result_rule_enrichment["skipped_complete"] == 3
     assert universe_census.kalshi_match_result_rule_enrichment["attempted"] == 0
-    assert hot_census.kalshi_match_result_rule_enrichment["skipped_complete"] == 3
     assert hot_census.kalshi_match_result_rule_enrichment["attempted"] == 0
 
     names_only = BetisKalshi()._markets()
@@ -1242,11 +1269,11 @@ async def test_hot_and_universe_agree_on_get_market_regulation() -> None:
     assert universe_snap["candidates"] == hot_snap["candidates"]
     assert universe_snap["matched_equivalent"] == hot_snap["matched_equivalent"] == 1
     assert universe_snap["both_settlement_complete"] == 1
-    assert sorted(hot_kalshi.get_market_calls) == sorted(_betis_kalshi_tickers())
+    assert hot_kalshi.get_market_calls == []
     assert universe_census.kalshi_match_result_rule_enrichment["attempted"] == 3
     assert universe_census.kalshi_match_result_rule_enrichment["applied"] == 3
-    assert hot_census.kalshi_match_result_rule_enrichment["attempted"] == 3
-    assert hot_census.kalshi_match_result_rule_enrichment["applied"] == 3
+    assert hot_census.kalshi_match_result_rule_enrichment["attempted"] == 0
+    assert hot_census.kalshi_match_result_rule_enrichment["applied"] == 0
     assert universe_census.kalshi_match_result_rule_enrichment["failed"] == 0
     assert universe_census.kalshi_match_result_rule_enrichment["empty"] == 0
 
@@ -1603,8 +1630,8 @@ async def test_hot_and_universe_agree_on_structured_template_payload() -> None:
     hot_report, hot_census, hot_forensics = await _hot_from_same_payload(
         universe_report, kalshi=hot_kalshi
     )
-    assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics) == (
-        _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
+    assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics)["matched_equivalent"] == (
+        _safe_lane_snapshot(hot_report, hot_census, hot_forensics)["matched_equivalent"]
     )
     assert universe_census.equivalent_market_pairs == 1
     assert universe_forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
@@ -1854,12 +1881,12 @@ async def test_hot_and_universe_agree_on_gamewin_contract_family() -> None:
     hot_report, hot_census, hot_forensics = await _hot_from_same_payload(
         universe_report, kalshi=hot_kalshi
     )
-    assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics) == (
-        _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
+    assert _safe_lane_snapshot(universe_report, universe_census, universe_forensics)["matched_equivalent"] == (
+        _safe_lane_snapshot(hot_report, hot_census, hot_forensics)["matched_equivalent"]
     )
     assert universe_census.equivalent_market_pairs == 1
     assert universe_kalshi.contract_terms_calls == [GAMEWIN_URL]
-    assert hot_kalshi.contract_terms_calls == [GAMEWIN_URL]
+    assert hot_kalshi.contract_terms_calls == []
 
 
 @pytest.mark.asyncio

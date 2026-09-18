@@ -2,6 +2,8 @@ import { DiscoveredFixture, LiveRefreshStatus } from "./api";
 import {
   NOT_EVALUATED_MARKET_FETCH_LABEL,
   NOT_EVALUATED_SCAN_BUDGET_LABEL,
+  HOT_RELATIONSHIP_MISSING_LABEL,
+  HOT_REVALIDATION_NEEDED_LABEL,
   fixtureHref,
   kickoffContextLines,
   lastRefreshLabel,
@@ -151,7 +153,15 @@ export function hotEvaluationLabel(item: DiscoveredFixture): string {
       ? `${NOT_EVALUATED_MARKET_FETCH_LABEL} · ${item.market_evaluation_reason}`
       : NOT_EVALUATED_MARKET_FETCH_LABEL;
   }
+  if (item.market_evaluation_state === "hot_relationship_missing") {
+    return item.market_evaluation_reason
+      ? `${HOT_RELATIONSHIP_MISSING_LABEL} · ${item.market_evaluation_reason}`
+      : HOT_RELATIONSHIP_MISSING_LABEL;
+  }
   const reason = item.market_evaluation_reason || item.no_comparison_reason;
+  if (reason === "hot_revalidation_needed") {
+    return HOT_REVALIDATION_NEEDED_LABEL;
+  }
   if (item.market_evaluation_state === "evaluated") {
     return reason ? `evaluated · ${reason}` : "evaluated · no qualifying opportunity";
   }

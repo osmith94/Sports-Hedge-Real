@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sports_hedge.application.collector import (
@@ -24,6 +24,10 @@ from sports_hedge.application.current_market_inventory import (
     union_paper_market_ids,
 )
 from sports_hedge.application.hot_identity import hot_scheduling_key
+from sports_hedge.application.hot_market_relationships import (
+    HotMarketRelationship,
+    relationships_from_current_slots,
+)
 from sports_hedge.application.fixture_inventory import sort_fixture_inventory_rows
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
@@ -763,6 +767,38 @@ class FixtureCurrentStateStore:
                     }
                     for item in events
                 ]
+            return payload
+
+    def hot_market_relationships(
+        self,
+        canonical_ids: list[str],
+        now: datetime | None = None,
+        **kwargs: Any,
+    ) -> dict[str, list[HotMarketRelationship]]:
+        """Current non-absent MATCHED_EQUIVALENT identities HOT may quote-refresh.
+
+        Prices on inventory rows are not relationship identity. Generation-aware
+        ApprovedEquivalent presence still gates which rows are current.
+        """
+
+        with self._lock:
+            kwargs = self._store_market_kwargs(kwargs)
+            market_kwargs = _market_ttl_kwargs(kwargs)
+            evaluated = require_aware_instant(now or datetime.now(UTC), "now")
+            payload: dict[str, list[HotMarketRelationship]] = {}
+            for canonical_id in canonical_ids:
+                record = self._rows.get(canonical_id)
+                if record is None:
+                    continue
+                record.prune_markets(evaluated, **market_kwargs)
+                items = relationships_from_current_slots(
+                    canonical_id,
+                    record.live_market_slots(),
+                    now=evaluated,
+                    **market_kwargs,
+                )
+                if items:
+                    payload[canonical_id] = items
             return payload
 
     def membership_counts(self, now: datetime, **kwargs: Any) -> tuple[int, int]:

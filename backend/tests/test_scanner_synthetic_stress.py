@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from sports_hedge.application.collector import CollectionReport, ReadOnlyCrossVenueCollector
+from sports_hedge.application.hot_market_relationships import relationships_from_fixture_markets
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.domain.models import VenueName
@@ -97,6 +98,47 @@ class SyntheticMatchbook:
                 }
             ]
         }
+
+    async def get_market(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del filters
+        await asyncio.sleep(SYNTHETIC_PROVIDER_LATENCY_SECONDS)
+        payload = {
+            "markets": [
+                {
+                    "id": f"mb-market-{event_id}",
+                    "name": "Both Teams To Score",
+                    "runners": [
+                        {
+                            "id": f"mb-yes-{event_id}",
+                            "name": "Yes",
+                            "prices": [
+                                {"side": "back", "odds": "1.90", "available-amount": "100"},
+                                {"side": "lay", "odds": "1.92", "available-amount": "100"},
+                            ],
+                        },
+                        {
+                            "id": f"mb-no-{event_id}",
+                            "name": "No",
+                            "prices": [
+                                {"side": "back", "odds": "1.90", "available-amount": "100"},
+                                {"side": "lay", "odds": "1.92", "available-amount": "100"},
+                            ],
+                        },
+                    ],
+                }
+            ]
+        }
+        for market in payload["markets"]:
+            if str(market.get("id")) == str(market_id):
+                return market
+        from sports_hedge.venues.matchbook import MatchbookMarketGoneError
+
+        raise MatchbookMarketGoneError(event_id, market_id, 404)
 
 
 class SyntheticPolymarket:
@@ -187,7 +229,9 @@ def _collector(
     return collector, repository, matchbook, polymarket
 
 
-def _assert_stable_report(report: CollectionReport, fixture_count: int) -> None:
+def _assert_stable_report(
+    report: CollectionReport, fixture_count: int, *, hot: bool = False
+) -> None:
     diagnostics = report.scan_diagnostics
     assert len(report.discovered_fixtures) == fixture_count
     assert report.matched_event_pairs == fixture_count
@@ -198,7 +242,8 @@ def _assert_stable_report(report: CollectionReport, fixture_count: int) -> None:
     assert diagnostics["inflight_orphaned"] == 0
     assert diagnostics["inflight_live"] == 0
     assert diagnostics["timeout_count"] == 0
-    assert diagnostics["stages"]["market_discovery"]["calls"] == fixture_count * 2
+    market_discovery = fixture_count if hot else fixture_count * 2
+    assert diagnostics["stages"]["market_discovery"]["calls"] == market_discovery
     assert diagnostics["stages"]["book_depth"]["calls"] == fixture_count * 2
     assert diagnostics["stages"]["mapping_equivalence"]["calls"] >= fixture_count
     assert diagnostics["stages"]["fees_fx_risk"]["calls"] == fixture_count
@@ -239,6 +284,7 @@ async def _run_hot(
         scan_lane=ScanLane.HOT.value,
         identity_scope=identity_scope,
         known_source_events=seed.fixture_source_events,
+        hot_market_relationships=relationships_from_fixture_markets(seed.fixture_markets),
         enabled_venues=[VenueName.MATCHBOOK, VenueName.POLYMARKET],
         cycle_timeout_seconds=SYNTHETIC_CYCLE_BUDGET_SECONDS,
         venue_costs=matchbook_polymarket_costs("0", "0"),
@@ -383,7 +429,7 @@ async def test_synthetic_hot_stress_skips_discovery_and_has_no_orphans(
         seed, _ = await _run_universe(collector)
         matchbook.list_events_calls = polymarket.list_events_calls = 0
         report, wall_seconds = await _run_hot(collector, seed)
-        _assert_stable_report(report, fixture_count)
+        _assert_stable_report(report, fixture_count, hot=True)
         assert wall_seconds < SYNTHETIC_CYCLE_BUDGET_SECONDS * 0.8
         assert matchbook.list_events_calls == polymarket.list_events_calls == 0
         assert polymarket.book_calls == fixture_count * 4
@@ -419,7 +465,7 @@ async def test_repeated_hot_cycles_do_not_accumulate_tasks_or_latency() -> None:
         )
         for _ in range(SYNTHETIC_SOAK_CYCLES):
             report, wall_seconds = await _run_hot(collector, seed)
-            _assert_stable_report(report, fixture_count)
+            _assert_stable_report(report, fixture_count, hot=True)
             wall_samples.append(wall_seconds)
             assert collector._inflight == set()
         live_tasks_after = len(

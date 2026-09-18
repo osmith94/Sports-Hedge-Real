@@ -31,7 +31,7 @@ from sports_hedge.application.collector import (
     ReadOnlyCrossVenueCollector,
     SCAN_BUDGET_EXHAUSTED_REASON,
 )
-from sports_hedge.application.fixture_clusters import VenueEvent, cluster_venue_events
+from sports_hedge.application.hot_market_relationships import relationships_from_fixture_markets
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane, UNIVERSE_MIN_CHUNK_SECONDS
 from sports_hedge.application.target_competitions import (
@@ -337,6 +337,7 @@ class NamedMatchbook:
         self.event_name = event_name
         self.list_events_calls = 0
         self.list_markets_calls: list[str] = []
+        self.get_market_calls: list[tuple[str, str]] = []
 
     async def list_events(self, **filters: Any) -> dict[str, Any]:
         del filters
@@ -358,6 +359,21 @@ class NamedMatchbook:
         del filters
         self.list_markets_calls.append(str(event_id))
         return {"markets": [_btts_matchbook(int(event_id))]}
+
+    async def get_market(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del filters
+        self.get_market_calls.append((str(event_id), str(market_id)))
+        market = _btts_matchbook(int(event_id) if str(event_id).isdigit() else int(market_id))
+        if str(market["id"]) != str(market_id):
+            from sports_hedge.venues.matchbook import MatchbookMarketGoneError
+
+            raise MatchbookMarketGoneError(event_id, market_id, 404)
+        return market
 
 
 class NamedPolymarket:
@@ -411,6 +427,8 @@ class NamedKalshi:
         self.event_title = event_title
         self.list_events_calls = 0
         self.list_markets_calls: list[str] = []
+        self.get_series_calls: list[str] = []
+        self.get_market_calls: list[str] = []
 
     async def list_events(self, **filters: Any) -> dict[str, Any]:
         del filters
@@ -445,9 +463,14 @@ class NamedKalshi:
         }
 
     async def get_series(self, series_ticker: str) -> dict[str, Any]:
+        self.get_series_calls.append(str(series_ticker))
         series = _kalshi_series_for_competition(self.competition)
         series["ticker"] = series_ticker or series["ticker"]
         return series
+
+    async def get_market(self, ticker: str) -> dict[str, Any]:
+        self.get_market_calls.append(str(ticker))
+        return {"ticker": ticker, "title": "Both Teams To Score", "rules_primary": REGULATION}
 
 
 def _scan_costs():
@@ -876,15 +899,23 @@ async def test_hot_known_source_refresh_evaluates_without_universe_rediscovery()
         mb_events_before = matchbook.list_events_calls
         k_events_before = kalshi.list_events_calls
         mb_markets_before = list(matchbook.list_markets_calls)
+        k_markets_before = list(kalshi.list_markets_calls)
+        k_series_before = list(kalshi.get_series_calls)
+        k_get_market_before = list(kalshi.get_market_calls)
         hot = await collector.collect_and_scan(
             venue_costs=_scan_costs(),
             scan_lane=ScanLane.HOT.value,
             identity_scope=[fixture.canonical_event_id],
             known_source_events=known,
+            hot_market_relationships=relationships_from_fixture_markets(universe.fixture_markets),
         )
         assert matchbook.list_events_calls == mb_events_before
         assert kalshi.list_events_calls == k_events_before
-        assert matchbook.list_markets_calls != mb_markets_before
+        assert matchbook.list_markets_calls == mb_markets_before
+        assert kalshi.list_markets_calls == k_markets_before
+        assert kalshi.get_series_calls == k_series_before
+        assert kalshi.get_market_calls == k_get_market_before
+        assert matchbook.get_market_calls
         assert all(
             item.market_evaluation_state == MarketEvaluationState.EVALUATED.value
             for item in hot.discovered_fixtures

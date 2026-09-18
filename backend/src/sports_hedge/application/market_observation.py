@@ -335,7 +335,35 @@ class KalshiObservationBuilder:
         )
         if len(assembled) != 1:
             raise ValueError("Kalshi observation builder requires one canonical market group")
-        market = assembled[0]
+        return self.build_from_canonical(
+            assembled[0],
+            books_by_ticker,
+            observed_at=observed_at,
+            source_latency_ms=source_latency_ms,
+            quote_age_ms=quote_age_ms,
+            quote_age_basis=quote_age_basis,
+            quote_age_reason=quote_age_reason,
+            fee_snapshot=fee_snapshot,
+        )
+
+    def build_from_canonical(
+        self,
+        market: CanonicalMarket,
+        books_by_ticker: Mapping[str, dict[str, Any]],
+        *,
+        observed_at: datetime | None = None,
+        source_latency_ms: int = 0,
+        quote_age_ms: int | None = None,
+        quote_age_basis: str | None = None,
+        quote_age_reason: str | None = None,
+        fee_snapshot: dict[str, Any] | None = None,
+    ) -> VenueMarketObservation:
+        """Build a live quote observation from a persisted canonical market.
+
+        HOT reuses UNIVERSE-proved settlement identity. This does not call
+        assemble_canonical_markets or Get Series.
+        """
+
         books: list[OutcomeOrderBook] = []
         for runner in market.runners:
             ticker, side = _kalshi_runner_ticker_side(runner.source_runner_id)
@@ -350,7 +378,7 @@ class KalshiObservationBuilder:
                     raw_book={
                         **raw_book,
                         "market_ticker": ticker,
-                        "event_ticker": event.source_event_id,
+                        "event_ticker": market.event.source_event_id,
                         "contract_side": side,
                         "complement": (
                             "yes_ask = 1 - no_bid" if side == "YES" else "no_ask = 1 - yes_bid"

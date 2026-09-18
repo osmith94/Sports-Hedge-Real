@@ -162,6 +162,19 @@ class MatchbookDiscoveryError(RuntimeError):
     """Raised when football discovery cannot proceed without guessing."""
 
 
+class MatchbookMarketGoneError(MatchbookDiscoveryError):
+    """Known-market refresh returned HTTP 404/410. HOT must fail closed."""
+
+    def __init__(self, event_id: int | str, market_id: int | str, status_code: int) -> None:
+        self.event_id = str(event_id)
+        self.market_id = str(market_id)
+        self.status_code = int(status_code)
+        super().__init__(
+            f"Matchbook market {self.market_id} for event {self.event_id} "
+            f"unavailable (HTTP {self.status_code})"
+        )
+
+
 class MatchbookClient(ReadOnlyVenue):
     """Read-only Matchbook market-data client for Sports Hedge Phase 1."""
 
@@ -492,6 +505,34 @@ class MatchbookClient(ReadOnlyVenue):
             **filters,
         }
         return await self._get(f"/edge/rest/events/{event_id}/markets", params=params)
+
+    async def get_market(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        """Read-only GET of one known Matchbook market with prices.
+
+        Official path: ``GET /edge/rest/events/{event_id}/markets/{market_id}``.
+        HOT uses this for persisted ApprovedEquivalent markets instead of
+        ``list_markets(event_id)``. Phase 1 remains market-data only.
+        """
+
+        params = {
+            **self._market_data_params(),
+            "include-prices": "true",
+            "price-depth": self.settings.matchbook_price_depth,
+            **filters,
+        }
+        path = f"/edge/rest/events/{event_id}/markets/{market_id}"
+        try:
+            return await self._get(path, params=params)
+        except httpx.HTTPStatusError as exc:
+            status_code = int(exc.response.status_code)
+            if status_code in {404, 410}:
+                raise MatchbookMarketGoneError(event_id, market_id, status_code) from exc
+            raise
 
     async def get_order_book(
         self,
