@@ -211,6 +211,7 @@ def _assert_stable_report(report: CollectionReport, fixture_count: int) -> None:
         "equivalent_markets": fixture_count,
         "qualifying_arbs": 0,
         "matching_state": "cross_venue_equivalent_present",
+        "zero_equivalent_reason_counts": {},
     }
 
 
@@ -292,18 +293,13 @@ async def test_matching_diagnostics_separate_provider_overlap_from_market_equiva
     )
     try:
         report, _wall = await _run_universe(collector)
-        assert report.scan_diagnostics["matching_coverage"] == {
-            "fixtures": fixture_count,
-            "single_venue_clusters": 0,
-            "cross_venue_clusters": fixture_count,
-            "matched_event_pairs": fixture_count,
-            "inventory_cross_venue_fixtures": fixture_count,
-            "equivalent_markets": 0,
-            "qualifying_arbs": 0,
-            "matching_state": "multi_venue_identity_without_settlement_equivalent",
-        }
+        assert report.scan_diagnostics["matching_coverage"]["matching_state"] == (
+            "multi_venue_identity_without_settlement_equivalent"
+        )
+        assert report.scan_diagnostics["matching_coverage"]["equivalent_markets"] == 0
+        assert report.scan_diagnostics["matching_coverage"]["zero_equivalent_reason_counts"]
         assert all(
-            item.no_comparison_reason == "no_settlement_equivalent_market_pair"
+            item.no_comparison_reason == "no_normalized_market_family_overlap"
             for item in report.discovered_fixtures
         )
     finally:

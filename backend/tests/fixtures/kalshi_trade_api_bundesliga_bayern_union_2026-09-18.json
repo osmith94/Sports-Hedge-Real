@@ -1,0 +1,70 @@
+{
+  "fixture_id": "kalshi-trade-api-bundesliga-bayern-union-2026-09-18",
+  "identified_as": "CAPTURED public Kalshi Trade API v2 nested-list event shape for KXBUNDESLIGAGAME-26SEP18BMUUNI. Market-specific rules_primary/rules_secondary only. Not live quotes, not a paper fill, not owner-live books.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events?series_ticker=KXBUNDESLIGAGAME&status=open&with_nested_markets=true",
+  "retrieved_at": "2026-09-18T08:15:00Z",
+  "data_class": "captured_public_payload_shape",
+  "notes": [
+    "Nested list_events already carries market-specific 90-minute payout clauses.",
+    "Get Market for KXBUNDESLIGAGAME-26SEP18BMUUNI-BMU returned the same rules_primary/rules_secondary.",
+    "strike_date is a test-stable kickoff for pairing. Live occurrence_datetime equals expected_expiration_time and is an expiration clock, not kickoff.",
+    "Prices/volume omitted. Contract wording retained because it is the settlement evidence under test."
+  ],
+  "payload": {
+    "event_ticker": "KXBUNDESLIGAGAME-26SEP18BMUUNI",
+    "series_ticker": "KXBUNDESLIGAGAME",
+    "title": "Bayern Munich vs Union Berlin",
+    "sub_title": "BMU vs UNI (Sep 18)",
+    "category": "Sports",
+    "mutually_exclusive": true,
+    "product_metadata": {
+      "competition": "Bundesliga",
+      "competition_scope": "Game"
+    },
+    "strike_date": "2026-09-18T18:30:00Z",
+    "markets": [
+      {
+        "ticker": "KXBUNDESLIGAGAME-26SEP18BMUUNI-BMU",
+        "event_ticker": "KXBUNDESLIGAGAME-26SEP18BMUUNI",
+        "title": "Bayern Munich wins",
+        "yes_sub_title": "Bayern Munich",
+        "no_sub_title": "Bayern Munich",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "soccer_team": "d443a482-af73-41ca-8d4b-f49502861dc4"
+        },
+        "rules_primary": "If Bayern Munich wins the Bayern Munich vs Union Berlin professional Bundesliga soccer game originally scheduled for Sep 18, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves to Yes.",
+        "rules_secondary": "The following market refers to the Bayern Munich vs Union Berlin professional Bundesliga soccer game originally scheduled for Sep 18, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties). If the game ends in a tie, the market called \"Tie\" resolves to Yes. If the game is cancelled or rescheduled to over 48 hours away, the market will resolve to a fair price in accordance with the rules."
+      },
+      {
+        "ticker": "KXBUNDESLIGAGAME-26SEP18BMUUNI-UNI",
+        "event_ticker": "KXBUNDESLIGAGAME-26SEP18BMUUNI",
+        "title": "Union Berlin wins",
+        "yes_sub_title": "Union Berlin",
+        "no_sub_title": "Union Berlin",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "soccer_team": "a971c973-65e6-418f-8f4e-79fbbeb0967a"
+        },
+        "rules_primary": "If Union Berlin wins the Bayern Munich vs Union Berlin professional Bundesliga soccer game originally scheduled for Sep 18, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves to Yes.",
+        "rules_secondary": "The following market refers to the Bayern Munich vs Union Berlin professional Bundesliga soccer game originally scheduled for Sep 18, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties). If the game ends in a tie, the market called \"Tie\" resolves to Yes. If the game is cancelled or rescheduled to over 48 hours away, the market will resolve to a fair price in accordance with the rules."
+      },
+      {
+        "ticker": "KXBUNDESLIGAGAME-26SEP18BMUUNI-TIE",
+        "event_ticker": "KXBUNDESLIGAGAME-26SEP18BMUUNI",
+        "title": "Tie is the result",
+        "yes_sub_title": "Tie",
+        "no_sub_title": "Tie",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "soccer_team": "111193d4-9b1f-4bd8-ab7c-9de252737f05"
+        },
+        "rules_primary": "If Tie is the result of the Bayern Munich vs Union Berlin professional Bundesliga soccer game originally scheduled for Sep 18, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves to Yes.",
+        "rules_secondary": "The following market refers to the Bayern Munich vs Union Berlin professional Bundesliga soccer game originally scheduled for Sep 18, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties). If the game ends in a tie, the market called \"Tie\" resolves to Yes. If the game is cancelled or rescheduled to over 48 hours away, the market will resolve to a fair price in accordance with the rules."
+      }
+    ]
+  }
+}

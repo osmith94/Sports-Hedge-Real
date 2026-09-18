@@ -48,7 +48,8 @@ _COMPOUND_INCLUDE_ET_PENALTIES = re.compile(
     r"including extra time(?: and| plus) penalties"
 )
 _COMPOUND_EXCLUDE_ET_PENALTIES = re.compile(
-    r"(?:not including|excluding|without) extra time(?: and| plus) penalties"
+    r"(?:not including|excluding|without) extra time(?: and| or| plus) penalties"
+    r"|(?:does not|do not|doesn t|don t) include extra time(?: and| or| plus) penalties"
     r"|extra time and penalties do not count"
     r"|extra time and penalties don t count"
     r"|extra time plus penalties do not count"
@@ -859,6 +860,10 @@ def _exclusion_phrases(subject: str) -> tuple[str, ...]:
         f"{subject} is not included",
         f"{subject} are not included",
         f"not including {subject}",
+        f"does not include {subject}",
+        f"do not include {subject}",
+        f"doesn t include {subject}",
+        f"don t include {subject}",
         f"excluding {subject}",
         f"without {subject}",
         f"exclude {subject}",
@@ -1414,14 +1419,10 @@ def classify_kalshi_rule_structure(text: str) -> dict[str, Any]:
         pattern = "regulation_with_contingency_tokens"
     else:
         pattern = "generic_no_scope_tokens"
-    scope, extra_time, penalties = classify_settlement_wording(stripped)
-    complete = _classified_fingerprint_complete(scope, extra_time, penalties)
-    template = bool(
-        catalog
-        or placeholder
-        or multiple_scopes
-        or (not complete and has_regulation and has_et and has_pen)
-    )
+    # A selected 90-minute clause that excludes extra time/penalties mentions all
+    # three token families. That is not a multi-scope catalog. Poison only true
+    # SOCCERGAMEWIN placeholder / listed-scope templates.
+    template = bool(catalog or placeholder or multiple_scopes)
     return {
         "contains_result_scope_placeholder": placeholder,
         "contains_payout_criterion": payout,
@@ -1564,10 +1565,13 @@ def resolve_kalshi_settlement_from_rule_fields(
 ) -> tuple[SettlementScope, bool | None, bool | None]:
     """Fail-closed fingerprint from market rule fields. No primary-over-catalog.
 
-    A single economically complete non-template field still maps (historical
-    nested ``rules_primary`` regulation). Generic multi-scope template text in
-    any nonempty field keeps UNKNOWN. Distinct complete fingerprints fail
-    closed. Combined mixed-token blobs stay UNKNOWN.
+    A single economically complete non-template field still maps, including
+    current nested/Get Market payout clauses such as ``after 90 minutes plus
+    stoppage time (does not include extra time or penalties)``. Generic
+    multi-scope catalog/placeholder text in any nonempty field keeps UNKNOWN.
+    Distinct complete fingerprints fail closed. Incomplete sibling fields that
+    are not catalogs (cancel/reschedule void language, affiliation boilerplate)
+    do not poison a complete selected clause.
     """
 
     unknown = (SettlementScope.UNKNOWN, None, None)
@@ -1868,15 +1872,18 @@ def _kalshi_settlement(
     line: Decimal | None,
     event_payload: dict[str, Any] | None = None,
 ) -> SettlementFingerprint:
-    # Market-specific rule fields only. Do not infer regulation from GAME / Opta
-    # / series names / custom_strike entity IDs / title. Do not concatenate
-    # series contract-terms catalogs into the market wording blob. Event-level
-    # rules are inherited only for ordinary Match Result when the nested market
-    # itself has no rule or description text. Primary-over-catalog precedence is
-    # not a fingerprint source. Official Get Market structured fields do not
-    # select SOCCERGAME <result scope>. Series contract-family defaults apply
-    # only when the catalog records an unambiguous default for Match Result;
-    # SOCCERGAMEWIN does not.
+    # Market-specific documented rule fields only. Do not infer regulation from
+    # GAME / Opta / series names / custom_strike entity IDs / title / REG TIME
+    # labels. Do not concatenate series contract-terms catalogs into the market
+    # wording blob. Event-level rules are inherited only for ordinary Match
+    # Result when the nested market itself has no rule or description text.
+    # Primary-over-catalog precedence is not a fingerprint source. Official Get
+    # Market structured fields do not select SOCCERGAME <result scope>. Nested
+    # list and Get Market ``rules_primary`` / ``rules_secondary`` / ``rules``
+    # may carry a selected 90-minute payout clause; that market-specific
+    # wording is the fingerprint source when economically complete. Series
+    # contract-family defaults apply only when the catalog records an
+    # unambiguous default for Match Result; SOCCERGAMEWIN does not.
     primary = str(payload.get("rules_primary") or "").strip()
     secondary = str(payload.get("rules_secondary") or "").strip()
     rules = str(payload.get("rules") or "").strip()

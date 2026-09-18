@@ -27,6 +27,10 @@ from sports_hedge.application.fixture_clusters import (
     cluster_member_events,
     to_venue_event,
 )
+from sports_hedge.application.equivalence_diagnostics import (
+    zero_equivalent_reason_counts,
+    zero_equivalent_reason_from_inventory,
+)
 from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
     InventoryMarket,
@@ -1657,6 +1661,7 @@ class ReadOnlyCrossVenueCollector:
             pair_counts=pair_counts,
             equivalent=equivalent,
             qualifying=qualifying,
+            fixture_markets=fixture_markets,
         )
         coverage = _target_coverage(clusters)
         deadline_hit = leftover_n > 0 or cancelled or any(
@@ -2440,12 +2445,14 @@ class ReadOnlyCrossVenueCollector:
             fixture.market_evaluation_reason = None
             fixture.matched_equivalent_count = equivalent_count
             _apply_fixture_headline(fixture, headline_applies)
-            if cluster.venue_count >= 2 and matched_market_pairs == 0:
-                fixture.no_comparison_reason = fixture.no_comparison_reason or (
-                    MARKET_FETCH_UNAVAILABLE_REASON
-                    if fetch_unavailable
-                    else "no_settlement_equivalent_market_pair"
-                )
+            if cluster.venue_count >= 2 and equivalent_count == 0:
+                if fetch_unavailable and fixture.no_comparison_reason is None:
+                    fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
+                else:
+                    fixture.no_comparison_reason = zero_equivalent_reason_from_inventory(
+                        inventory_rows,
+                        existing_reason=fixture.no_comparison_reason,
+                    )
         fixture.opportunity_state = _opportunity_state(fixture)
         return (
             fixture,
@@ -4013,6 +4020,7 @@ def _matching_coverage(
     pair_counts: dict[str, int],
     equivalent: int,
     qualifying: int,
+    fixture_markets: dict[str, list[FixtureMarketInventoryRow]] | None = None,
 ) -> dict[str, Any]:
     """Honest current-cycle matching counts. Zero is a valid empty result."""
 
@@ -4046,6 +4054,9 @@ def _matching_coverage(
         "equivalent_markets": equivalent,
         "qualifying_arbs": qualifying,
         "matching_state": meaning,
+        "zero_equivalent_reason_counts": zero_equivalent_reason_counts(
+            discovered_fixtures, fixture_markets
+        ),
     }
 
 
