@@ -115,7 +115,6 @@ from sports_hedge.domain.football import (
     CanonicalEvent,
     CanonicalMarket,
     CanonicalOutcome,
-    CanonicalRunner,
     FootballPeriod,
     MarketFamily,
     SettlementScope,
@@ -3409,21 +3408,28 @@ class ReadOnlyCrossVenueCollector:
         del relationship
         result = _HotLegRefresh()
         event = _event_for_source(events, leg.source_event_id)
+        tokens = [item for item in leg.source_runner_ids if str(item).strip()]
+        if event is None or not tokens:
+            result.unavailable = True
+            return result
+        books_by_token, latency_ms, fetched, failed = await self._fetch_polymarket_token_books(
+            event,
+            tokens,
+            market_id=leg.source_market_id,
+            issues=issues,
+        )
+        result.books = fetched
+        if failed:
+            result.unavailable = True
+            return result
         canonical = canonical_market_from_leg(leg)
-        if event is None or canonical is None:
+        if canonical is None:
             result.unavailable = True
             return result
         market = _NormalizedMarket(
             {"id": leg.source_market_id, "question": canonical.family.value},
             canonical,
         )
-        books_by_token, latency_ms, fetched, failed = await self._fetch_polymarket_books(
-            event, market, issues=issues
-        )
-        result.books = fetched
-        if failed:
-            result.unavailable = True
-            return result
         observation = self._try_polymarket_observation(
             event,
             market,
@@ -3866,15 +3872,30 @@ class ReadOnlyCrossVenueCollector:
         *,
         issues: list[CollectorIssue],
     ) -> tuple[dict[str, dict[str, Any]], int, int, bool]:
+        tokens = [runner.source_runner_id for runner in market.canonical.runners]
+        return await self._fetch_polymarket_token_books(
+            event,
+            tokens,
+            market_id=market.canonical.source_market_id,
+            issues=issues,
+        )
+
+    async def _fetch_polymarket_token_books(
+        self,
+        event: _NormalizedEvent,
+        tokens: list[str],
+        *,
+        market_id: str,
+        issues: list[CollectorIssue],
+    ) -> tuple[dict[str, dict[str, Any]], int, int, bool]:
         books_by_token: dict[str, dict[str, Any]] = {}
         latency_ms = 0
         fetched = 0
         failed = False
-        runners = list(market.canonical.runners)
 
-        async def _one(runner: CanonicalRunner) -> None:
+        async def _one(token: str) -> None:
             nonlocal latency_ms, fetched, failed
-            if failed or self._provider_budget_exhausted():
+            if failed or self._provider_budget_exhausted() or not token:
                 failed = True
                 return
             try:
@@ -3882,33 +3903,33 @@ class ReadOnlyCrossVenueCollector:
                 raw_book, book_timed_out = await self._wait_provider(
                     self.polymarket.get_order_book(
                         event.canonical.source_event_id,
-                        market.canonical.source_market_id,
-                        runner.source_runner_id,
+                        market_id,
+                        token,
                     ),
                     stage="order_book",
                     venue=VenueName.POLYMARKET,
-                    source_id=runner.source_runner_id,
+                    source_id=token,
                     default=None,
                 )
                 if book_timed_out or raw_book is None:
                     failed = True
                     return
                 latency_ms += _elapsed_ms(started)
-                books_by_token[runner.source_runner_id] = raw_book
+                books_by_token[token] = raw_book
                 fetched += 1
             except Exception as exc:
                 issues.append(
                     CollectorIssue(
                         stage="order_book",
                         venue=VenueName.POLYMARKET,
-                        source_id=runner.source_runner_id,
+                        source_id=token,
                         detail=str(exc),
                     )
                 )
                 failed = True
 
-        if runners:
-            await asyncio.gather(*[_one(runner) for runner in runners])
+        if tokens:
+            await asyncio.gather(*[_one(token) for token in tokens])
         return books_by_token, latency_ms, fetched, failed
 
     def _try_polymarket_observation(

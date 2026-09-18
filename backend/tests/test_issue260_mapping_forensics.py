@@ -196,7 +196,7 @@ class BetisMatchbook:
         market_id: int | str,
         **filters: Any,
     ) -> dict[str, Any]:
-        del event_id, filters
+        del filters
         for market in [_mb_match_odds(), *self.extra_markets]:
             if str(market.get("id")) == str(market_id):
                 return market

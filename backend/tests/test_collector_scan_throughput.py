@@ -33,6 +33,7 @@ from sports_hedge.application.collector import (
     ReadOnlyCrossVenueCollector,
 )
 from sports_hedge.application.hot_market_relationships import relationships_from_fixture_markets
+from sports_hedge.application.mapping_review import MappingReviewService
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository

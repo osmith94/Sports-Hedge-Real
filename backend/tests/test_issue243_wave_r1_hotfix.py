@@ -31,6 +31,7 @@ from sports_hedge.application.collector import (
     ReadOnlyCrossVenueCollector,
     SCAN_BUDGET_EXHAUSTED_REASON,
 )
+from sports_hedge.application.fixture_clusters import VenueEvent, cluster_venue_events
 from sports_hedge.application.hot_market_relationships import relationships_from_fixture_markets
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane, UNIVERSE_MIN_CHUNK_SECONDS

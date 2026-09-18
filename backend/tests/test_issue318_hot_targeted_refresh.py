@@ -24,8 +24,6 @@ from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
 from sports_hedge.application.hot_market_relationships import (
     HOT_RELATIONSHIP_MISSING_REASON,
     HOT_REVALIDATION_NEEDED_REASON,
-    HotMarketRelationship,
-    HotVenueLeg,
     relationships_from_fixture_markets,
 )
 from sports_hedge.application.live_refresh import DualCadencePlan, LiveRefreshCoordinator

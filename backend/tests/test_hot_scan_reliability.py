@@ -29,6 +29,7 @@ from sports_hedge.application.hot_market_relationships import (
     HotVenueLeg,
     relationships_from_fixture_markets,
 )
+from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
@@ -81,22 +82,17 @@ class SlowCancellableMarketsMatchbook(FakeMatchbook):
         await asyncio.sleep(30)
         return {"markets": []}
 
-    async def get_market(
-        self,
-        event_id: int | str,
-        market_id: int | str,
-        **filters: Any,
-    ) -> dict[str, Any]:
-        del event_id, market_id, filters
-        await asyncio.sleep(30)
-        return {"markets": []}
-
 
 class SlowCancellableMarketsPolymarket(FakePolymarket):
     async def list_markets(self, event_id: int | str, **filters: Any) -> list[dict[str, Any]]:
         del event_id, filters
         await asyncio.sleep(30)
         return []
+
+    async def get_order_book(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        await asyncio.sleep(30)
+        return {"asset_id": "x", "bids": [], "asks": []}
 
 
 class CloseTerminatedPolymarket(FakePolymarket):
@@ -122,6 +118,21 @@ class CloseTerminatedPolymarket(FakePolymarket):
                 except asyncio.CancelledError:
                     continue
             return []
+        finally:
+            self.live_calls -= 1
+
+    async def get_order_book(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        self.live_calls += 1
+        try:
+            while not self._closed.is_set():
+                try:
+                    await asyncio.wait_for(self._closed.wait(), timeout=0.05)
+                except TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    continue
+            return {"asset_id": "x", "bids": [], "asks": []}
         finally:
             self.live_calls -= 1
 
