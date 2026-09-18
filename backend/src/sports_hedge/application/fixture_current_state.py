@@ -31,6 +31,7 @@ from sports_hedge.application.scan_lanes import (
     DEFAULT_HOT_HORIZON,
     DEFAULT_HOT_INTERVAL_SECONDS,
     DEFAULT_HOT_TTL_SECONDS,
+    DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING,
     DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON,
     DEFAULT_UNIVERSE_INTERVAL_SECONDS,
     DEFAULT_UNIVERSE_TTL_SECONDS,
@@ -125,14 +126,16 @@ class FixtureCurrentStateStore:
     paper eligibility / auto-capture still require executable quote freshness.
 
     HOT identity is the union of lifecycle HOT membership (in-play / <=60m
-    pre-kickoff / bounded post-kickoff unknown) and current fixtures whose
+    pre-kickoff / bounded post-kickoff unknown, subject to the 4h hard
+    post-kickoff current-radar ceiling) and current fixtures whose
     latest valid merged current-state proves either a qualifying executable
     arb (Issue #200) or a positive below-threshold surveillance edge
     (Tenet 19). Opportunity promotion is not a second identity store and
     does not change `classify_scan_lane`. Promotion disappears when the
     merged current-state ceases to show a positive edge unless another
-    lifecycle HOT reason still applies. Aliases of one football fixture
-    collapse to one HOT scheduling unit.
+    lifecycle HOT reason still applies. A stale in-running/open flag cannot
+    keep a fixture HOT after the current-radar ceiling. Aliases of one
+    football fixture collapse to one HOT scheduling unit.
 
     Terminal tombstones keep explicit finished/completed/settled truth from
     resurrecting via a later stale UNIVERSE or other-venue unknown snapshot.
@@ -370,6 +373,7 @@ class FixtureCurrentStateStore:
         *,
         hot_horizon=DEFAULT_HOT_HORIZON,
         post_kickoff_unknown_horizon=DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON,
+        post_kickoff_current_radar_ceiling=DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING,
         hot_interval_seconds: int = DEFAULT_HOT_INTERVAL_SECONDS,
         universe_interval_seconds: int = DEFAULT_UNIVERSE_INTERVAL_SECONDS,
         hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
@@ -386,6 +390,7 @@ class FixtureCurrentStateStore:
                 now,
                 hot_horizon=hot_horizon,
                 post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+                post_kickoff_current_radar_ceiling=post_kickoff_current_radar_ceiling,
                 **market_kwargs,
             )
             rows: list[DiscoveredFixture] = []
@@ -397,6 +402,7 @@ class FixtureCurrentStateStore:
                 classify_kwargs = {
                     "hot_horizon": hot_horizon,
                     "post_kickoff_unknown_horizon": post_kickoff_unknown_horizon,
+                    "post_kickoff_current_radar_ceiling": post_kickoff_current_radar_ceiling,
                 }
                 membership = self._identity_membership(
                     record,
@@ -457,6 +463,7 @@ class FixtureCurrentStateStore:
         *,
         hot_horizon=DEFAULT_HOT_HORIZON,
         post_kickoff_unknown_horizon=DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON,
+        post_kickoff_current_radar_ceiling=DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING,
         hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
         universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
         hot_interval_seconds: int = DEFAULT_HOT_INTERVAL_SECONDS,
@@ -469,6 +476,7 @@ class FixtureCurrentStateStore:
                 now,
                 hot_horizon=hot_horizon,
                 post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+                post_kickoff_current_radar_ceiling=post_kickoff_current_radar_ceiling,
                 hot_ttl_seconds=hot_ttl_seconds,
                 universe_ttl_seconds=universe_ttl_seconds,
                 hot_interval_seconds=hot_interval_seconds,
@@ -483,6 +491,7 @@ class FixtureCurrentStateStore:
         *,
         hot_horizon=DEFAULT_HOT_HORIZON,
         post_kickoff_unknown_horizon=DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON,
+        post_kickoff_current_radar_ceiling=DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING,
         hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
         universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
         hot_interval_seconds: int = DEFAULT_HOT_INTERVAL_SECONDS,
@@ -502,6 +511,7 @@ class FixtureCurrentStateStore:
             evaluated,
             hot_horizon=hot_horizon,
             post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+            post_kickoff_current_radar_ceiling=post_kickoff_current_radar_ceiling,
             **market_kwargs,
         )
         for canonical_id, record in self._rows.items():
@@ -516,6 +526,7 @@ class FixtureCurrentStateStore:
                 classify_kwargs={
                     "hot_horizon": hot_horizon,
                     "post_kickoff_unknown_horizon": post_kickoff_unknown_horizon,
+                    "post_kickoff_current_radar_ceiling": post_kickoff_current_radar_ceiling,
                 },
                 market_kwargs=market_kwargs,
             )
@@ -1446,6 +1457,8 @@ def _classify_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         allowed["hot_horizon"] = kwargs["hot_horizon"]
     if "post_kickoff_unknown_horizon" in kwargs:
         allowed["post_kickoff_unknown_horizon"] = kwargs["post_kickoff_unknown_horizon"]
+    if "post_kickoff_current_radar_ceiling" in kwargs:
+        allowed["post_kickoff_current_radar_ceiling"] = kwargs["post_kickoff_current_radar_ceiling"]
     return allowed
 
 

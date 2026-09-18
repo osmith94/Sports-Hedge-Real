@@ -292,6 +292,9 @@ class Settings(BaseSettings):
     paper_universe_hot_yield_safety_margin_seconds: float = Field(default=2.0, ge=0.5, le=10)
     paper_hot_pre_kickoff_horizon_minutes: int = Field(default=60, ge=5, le=180)
     paper_hot_post_kickoff_unknown_horizon_hours: int = Field(default=3, ge=1, le=12)
+    # Hard football current-radar/HOT membership ceiling after effective kickoff.
+    # Scanner membership only; elapsed time must not fabricate completed/closed.
+    paper_hot_post_kickoff_current_radar_ceiling_hours: int = Field(default=4, ge=1, le=24)
     paper_hot_current_state_ttl_seconds: int = Field(default=90, ge=30, le=300)
     paper_universe_current_state_ttl_seconds: int = Field(default=360, ge=60, le=900)
     # Lane-specific operator venue defaults. Empty/invalid values keep all three

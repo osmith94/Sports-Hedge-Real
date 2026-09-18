@@ -673,6 +673,9 @@ class LiveRefreshCoordinator:
             post_kickoff_unknown_horizon=timedelta(
                 hours=settings.paper_hot_post_kickoff_unknown_horizon_hours
             ),
+            post_kickoff_current_radar_ceiling=timedelta(
+                hours=settings.paper_hot_post_kickoff_current_radar_ceiling_hours
+            ),
         )
 
     def _hot_plan(
@@ -1006,6 +1009,9 @@ class LiveRefreshCoordinator:
                 hot_horizon=timedelta(minutes=get_settings().paper_hot_pre_kickoff_horizon_minutes),
                 post_kickoff_unknown_horizon=timedelta(
                     hours=get_settings().paper_hot_post_kickoff_unknown_horizon_hours
+                ),
+                post_kickoff_current_radar_ceiling=timedelta(
+                    hours=get_settings().paper_hot_post_kickoff_current_radar_ceiling_hours
                 ),
             )
         inventory = self._fixture_state.inventory(report.completed_at)
@@ -2218,6 +2224,7 @@ class LiveRefreshCoordinator:
         classify = {
             "hot_horizon": horizon["hot_horizon"],
             "post_kickoff_unknown_horizon": horizon["post_kickoff_unknown_horizon"],
+            "post_kickoff_current_radar_ceiling": horizon["post_kickoff_current_radar_ceiling"],
         }
         inventory = self._fixture_state.inventory(
             now,
@@ -2274,6 +2281,9 @@ class LiveRefreshCoordinator:
             "hot_horizon": timedelta(minutes=resolved.paper_hot_pre_kickoff_horizon_minutes),
             "post_kickoff_unknown_horizon": timedelta(
                 hours=resolved.paper_hot_post_kickoff_unknown_horizon_hours
+            ),
+            "post_kickoff_current_radar_ceiling": timedelta(
+                hours=resolved.paper_hot_post_kickoff_current_radar_ceiling_hours
             ),
             "hot_ttl_seconds": resolved.paper_hot_current_state_ttl_seconds,
             "universe_ttl_seconds": resolved.paper_universe_current_state_ttl_seconds,
