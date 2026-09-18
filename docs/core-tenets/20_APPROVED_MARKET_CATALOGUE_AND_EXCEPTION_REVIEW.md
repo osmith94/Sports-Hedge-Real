@@ -11,21 +11,20 @@ The normal path is:
 ```text
 raw venue market
     ↓
-approved-market recogniser
+venue-native archetype recogniser
     ↓
-approved archetype + exact parameters
+Approved Match Register canonical key + exact parameters
     ↓
-strict cross-venue equivalence
-    ↓
-economics / solver
+paper / solver (PAPER mode) or live-execution gate (APPROVED_EQUIVALENT only)
 ```
 
 Anything outside that contract is either:
 
-- `REVIEW_REQUIRED` when it plausibly resembles an approved archetype but evidence is incomplete; or
-- `UNSUPPORTED` when it is outside the approved catalogue.
+- rejected when parameters/structure mismatch; or
+- `NOT_LISTED` / `VENUE_UNAVAILABLE` when a genuine venue market is absent; or
+- ignored/`UNSUPPORTED` when it is outside the approved catalogue/register.
 
-It must not enter the normal arbitrage solver merely because labels look similar or a probabilistic confidence score is high.
+It must not enter the normal arbitrage solver merely because labels look similar or a probabilistic confidence score is high. Runtime scanning does not open `REVIEW_REQUIRED` for a registered Matchbook↔Kalshi row.
 
 The guiding product rule is:
 
@@ -167,16 +166,18 @@ Only this state is eligible for **live execution**.
 
 ### PAPER_ASSUMED_EQUIVALENT
 
-Owner-approved Phase-1 **paper-mode** exception for the four locked Matchbook↔Kalshi families:
+Owner-approved Phase-1 **paper-mode** path for Matchbook↔Kalshi rows in the Approved Match Register:
 
-1. MATCH_RESULT / 1X2 — ordinary full-time HOME / DRAW / AWAY
-2. BTTS — full-time YES / NO
-3. TOTAL_GOALS — exact same safe half-line (2.5↔2.5 yes; 2.5↔3.5 is not the same market)
-4. FIRST_TEAM_TO_SCORE — complete HOME / AWAY / NO_GOAL outcome identity
+| Canonical key | Matchbook | Kalshi | Structural requirements |
+| --- | --- | --- | --- |
+| MATCH_RESULT_FT | Match Odds / Final Result | GAME | FULL_TIME + HOME/DRAW/AWAY |
+| BTTS_FT | Both Teams To Score | BTTS | FULL_TIME + YES/NO |
+| TOTAL_GOALS_FT:{line} | Total Goals | TOTAL | FULL_TIME + exact safe half-line + OVER/UNDER |
+| FTTS_FT | First Team To Score | FTTS | FULL_TIME + HOME/AWAY/NO_GOAL |
 
-Cross-venue equivalence for these four families is an owner-approved product assumption in PAPER / READ-ONLY mode. Once canonical fixture and canonical market identity/parameters match, the system must not re-litigate settlement text on every scan.
+The register itself is the PAPER cross-venue equivalence decision. Once canonical fixture and canonical market identity/parameters match, the system must not re-litigate settlement text, mapping confidence, or learned labels on every scan.
 
-This state is visibly labelled, carries `settlement_assumption=regulation_time`, may enter the **paper** solver, and is never live-execution eligible. It is not independently proven settlement.
+This state is visibly labelled, carries `settlement_assumption=regulation_time`, may enter the **paper** solver and Priority Alerts path, and is never live-execution eligible. It is not independently proven settlement.
 
 Kalshi cancel/reschedule-to-fair-price wording does not block PAPER admission. Extra time, penalties, to-qualify, incomplete outcome sets, wrong period, and TOTAL line mismatch remain fail-closed.
 
@@ -227,23 +228,23 @@ The market is not part of the approved catalogue or is a novelty proposition Spo
 
 It should be ignored by the normal arbitrage path while remaining countable in diagnostics.
 
-## 6. Exception review replaces general confidence-based admission
+## 6. Onboarding review replaces runtime confidence-based admission
 
 Sports Hedge should not use a high confidence percentage as permission to compare ambiguous betting contracts economically.
 
-When evidence is incomplete:
+When a **new** venue-native archetype is being onboarded:
 
 ```text
 probable approved archetype
     ↓
-REVIEW_REQUIRED
-    ↓
-exception payload
+onboarding review payload
     ↓
 GPT / operator review
     ↓
-approve venue recognition rule OR reject
+add versioned Approved Match Register entry OR reject
 ```
+
+Runtime scanning then consumes the register. It does not consult `minimum_mapping_confidence`, learned market-label rules, or the dynamic mapping-review/ChatGPT store to decide whether a registered row is equivalent.
 
 The review payload should retain enough source evidence to make the decision auditable, including:
 
@@ -288,8 +289,8 @@ UNIVERSE may still perform broad **event discovery**, because it must find the f
 
 At the market level, however, Sports Hedge should prioritize and deeply process only markets that are:
 
-- directly recognized as approved catalogue archetypes; or
-- plausible approved-archetype exceptions that need review.
+- registered venue-native archetypes with matching canonical keys; or
+- unregistered candidates reserved for **onboarding** review, not runtime scanner admission.
 
 Unsupported novelty markets should not consume normal solver/matching effort.
 
@@ -324,7 +325,7 @@ These are not automatically economically equivalent.
 
 The approved archetype must specify the required no-goal/void contract, and each venue recogniser must prove compatibility before the pair can become `APPROVED_EQUIVALENT`.
 
-If that evidence is absent, the state is `REVIEW_REQUIRED`, not a probabilistic executable match.
+If that evidence is absent for an **unregistered** FTTS contract, the pair is not admitted. A registered complete HOME/AWAY/NO_GOAL FTTS row is paper-admitted from the register without a runtime settlement-proof gate.
 
 ## 10. Fixture identity may still use confidence
 
@@ -420,9 +421,9 @@ Any matching/catalogue PR should answer:
 - [ ] Are all required archetype parameters extracted?
 - [ ] Can parameter mismatch accidentally enter the solver?
 - [ ] Can incomplete settlement evidence accidentally become executable?
-- [ ] Are ambiguous probable-archetype markets routed to REVIEW_REQUIRED?
-- [ ] Are unsupported markets filtered before expensive solver work where practical?
-- [ ] Are operator-approved exception rules reusable by both HOT and UNIVERSE?
+- [ ] Are unregistered/unsupported markets filtered before expensive solver work where practical?
+- [ ] Does runtime scanning consume the Approved Match Register rather than mapping confidence?
+- [ ] Are operator-approved register entries reusable by both HOT and UNIVERSE?
 - [ ] Are approved-good and known-bad regression counts reported?
 - [ ] Does execution remain limited to APPROVED_EQUIVALENT markets?
 

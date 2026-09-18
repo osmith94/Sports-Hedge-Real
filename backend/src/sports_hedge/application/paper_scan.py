@@ -15,7 +15,10 @@ from sports_hedge.application.complete_set import (
     solver_eligible_market,
     solver_model_for_pair,
 )
-from sports_hedge.application.mapping_review import evidence_from_markets
+from sports_hedge.application.ftts_alert_bridge import (
+    is_complete_ftts_pair,
+    project_ftts_payoff_to_ordinary_depth,
+)
 from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.executable_liquidity import (
     opening_liquidity_rejection_reasons,
@@ -46,6 +49,8 @@ from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.events import EventMatcher
 from sports_hedge.matching.learned_rules import LearnedMappingApplicator
 from sports_hedge.matching.markets import MarketMatcher
+from sports_hedge.matching.approved_register import registered_structural_match
+from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
 from sports_hedge.normalization.identity import (
     canonical_matched_event_id,
     canonical_matched_market_id,
@@ -165,11 +170,18 @@ class PaperScanService:
         map_started = monotonic()
         match = self.market_matcher.match(left.market, right.market)
         mapping_ms = max(0, int((monotonic() - map_started) * 1000))
+        register_admitted = match.matched and registered_structural_match(
+            left.market, right.market
+        )
 
         def mapping_review_evidence():
-            """Package operator evidence only after executable work for this branch."""
+            """Deprecated scan-path audit. Never an admission gate for register rows."""
 
+            if register_admitted:
+                return None
             nonlocal mapping_ms
+            from sports_hedge.application.mapping_review import evidence_from_markets
+
             review_started = monotonic()
             candidate = evidence_from_markets(
                 left.market,
@@ -256,7 +268,7 @@ class PaperScanService:
 
         if left.venue == right.venue:
             rejections.append("same_venue_pair")
-        if match.confidence < minimum_mapping_confidence:
+        if (not register_admitted) and match.confidence < minimum_mapping_confidence:
             rejections.append("mapping_confidence_below_threshold")
         if (
             left.market.settlement.scope == SettlementScope.UNKNOWN
@@ -495,6 +507,18 @@ class PaperScanService:
                 rejections.append(payoff.rejection_reason or "no_arbitrage")
             elif payoff.roi < minimum_net_edge:
                 rejections.append("net_edge_below_threshold")
+            if (
+                is_complete_ftts_pair(left.market.family, right.market.family)
+                and payoff_scan is not None
+                and payoff_scan.solution.is_arbitrage
+            ):
+                projected = project_ftts_payoff_to_ordinary_depth(
+                    payoff_scan,
+                    capital_limit=capital_limit_gbp,
+                    venue_capital_limits=venue_capital_limits,
+                )
+                if projected is not None:
+                    depth_scan = projected
 
         liquidity_rejections = opening_liquidity_rejection_reasons(
             list(scan_costs.values()),
@@ -551,7 +575,7 @@ class PaperScanService:
             payoff_scan=payoff_scan,
             execution_risk=risk,
             execution_risk_inputs=risk_inputs,
-            eligible_for_paper_simulation=not rejections,
+            eligible_for_paper_simulation=not _paper_blocking_reasons(rejections),
             rejection_reasons=_dedupe(rejections),
             fee_snapshots=fees,
             venue_costs=list(scan_costs.values()),
@@ -593,7 +617,7 @@ class PaperScanService:
         )
         return draft.model_copy(
             update={
-                "eligible_for_paper_simulation": not rejections,
+                "eligible_for_paper_simulation": not _paper_blocking_reasons(rejections),
                 "rejection_reasons": _dedupe(rejections),
                 "mapping_review_candidate": mapping_review_candidate,
                 "scanned_at": datetime.now(UTC),
@@ -864,6 +888,12 @@ def _with_gbp_rate(rates: list[FxRateSnapshot], *, as_of: datetime | None = None
 
 def _dedupe(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+def _paper_blocking_reasons(reasons: list[str]) -> list[str]:
+    """Audit labels such as paper_assumed_equivalent do not block PAPER admission."""
+
+    return [reason for reason in reasons if reason not in PAPER_NONBLOCKING_REJECTION_REASONS]
 
 
 def _default_execution_mode(venue: VenueName) -> LegExecutionMode:

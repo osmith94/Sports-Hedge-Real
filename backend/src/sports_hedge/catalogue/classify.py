@@ -1,14 +1,14 @@
-"""Deterministic Tenet 20 classification. Confidence is never executable permission.
+"""Deterministic Tenet 20 classification via the Approved Match Register.
 
-Independently proven settlement is APPROVED_EQUIVALENT. Matchbook↔Kalshi locked
-Phase-1 families (MATCH_RESULT / BTTS / exact-line TOTAL / FTTS) with complete
-canonical identity and no proven extra-time/penalties/to-qualify contradiction
-may be PAPER_ASSUMED_EQUIVALENT in paper mode only
-(settlement_assumption=regulation_time). That path is never live-execution
-eligible. Kalshi cancel/reschedule-to-fair-price wording does not block PAPER
-admission. Incomplete outcome space, line/period/family mismatch, and proven
-settlement contradictions remain fail-closed. HOT and UNIVERSE share this
-classifier.
+Independently proven settlement is APPROVED_EQUIVALENT. Matchbook↔Kalshi rows
+that resolve to a register canonical key (MATCH_RESULT_FT / BTTS_FT /
+TOTAL_GOALS_FT:{line} / FTTS_FT) with no proven extra-time/penalties/
+to-qualify contradiction may be PAPER_ASSUMED_EQUIVALENT in paper mode only
+(settlement_assumption=regulation_time). Numeric mapping confidence and
+learned labels are not admission. That path is never live-execution eligible.
+Kalshi cancel/reschedule-to-fair-price wording does not block PAPER admission.
+Incomplete outcome space, line/period/family mismatch, and proven settlement
+contradictions remain fail-closed. HOT and UNIVERSE share this classifier.
 """
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ from sports_hedge.matching.paper_assumed import (
     OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
     paper_assumed_locked_family,
 )
+from sports_hedge.matching.approved_register import REGISTER_ADMITTED_REASON
 from sports_hedge.normalization.venues import (
     KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
     KALSHI_UNMODELLED_EXTRA_TIME_OR_PENALTIES_REASON,
@@ -212,6 +213,8 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
         notes.append("paper_mode_only_not_live_execution_eligible")
         if OWNER_APPROVED_PAPER_EQUIVALENCE_REASON not in notes:
             notes.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
+        if REGISTER_ADMITTED_REASON not in notes:
+            notes.append(REGISTER_ADMITTED_REASON)
     return CataloguePairAssessment(
         state=state,
         reason=reason,

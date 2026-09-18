@@ -32,10 +32,13 @@ from sports_hedge.matching.ordinary_1x2 import (
     SETTLEMENT_ASSUMPTION_REGULATION_TIME,
     allow_unknown_settlement_for_ordinary_1x2,
     is_complete_regulation_time_1x2,
-    is_matchbook_kalshi_pair,
     is_ordinary_full_time_1x2,
     paper_assumed_ordinary_1x2,
     settlement_fingerprints_contradict,
+)
+from sports_hedge.matching.approved_register import (
+    REGISTER_ADMITTED_REASON,
+    registered_structural_match,
 )
 from sports_hedge.normalization.kalshi_contract_terms import (
     KALSHI_CONTRACT_FAMILY_NOT_MATCH_RESULT_REASON,
@@ -65,6 +68,13 @@ PAPER_ASSUMED_AUDIT_REASONS = (
     PAPER_ASSUMED_REASON,
     f"settlement_assumption={SETTLEMENT_ASSUMPTION_REGULATION_TIME}",
     OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
+    REGISTER_ADMITTED_REASON,
+)
+PAPER_NONBLOCKING_REJECTION_REASONS = frozenset(
+    {
+        PAPER_ASSUMED_REASON,
+        "paper_assumed_not_live_execution_eligible",
+    }
 )
 
 _PROVEN_CONTRADICTION_TOKENS = (
@@ -207,21 +217,17 @@ def both_independently_proven_regulation(left: CanonicalMarket, right: Canonical
 def paper_assumed_locked_family(left: CanonicalMarket, right: CanonicalMarket) -> bool:
     """Owner-accepted paper-mode assumption for the four locked families.
 
-    Requires Matchbook↔Kalshi, exact fixture already matched by EventMatcher,
-    canonical family/period/line/outcome identity, Matchbook regulation
-    convention, and no proven extra-time/penalties/to-qualify contradiction.
-    Independent Kalshi settlement proof is not required. Fair-price wording
-    does not block this path. Never live-execution eligible.
+    Requires the Approved Match Register structural identity (Issue #331),
+    Matchbook regulation convention, and no proven extra-time/penalties/
+    to-qualify contradiction. Independent Kalshi settlement proof is not
+    required. Fair-price wording does not block this path. Never live-execution
+    eligible.
     """
 
-    if not is_matchbook_kalshi_pair(left, right):
+    if not registered_structural_match(left, right):
         return False
     if left.family is MarketFamily.MATCH_RESULT or right.family is MarketFamily.MATCH_RESULT:
         return paper_assumed_ordinary_1x2(left, right)
-    if left.family not in LOCKED_PAPER_FAMILIES or right.family not in LOCKED_PAPER_FAMILIES:
-        return False
-    if not pair_structural_identity_matches(left, right):
-        return False
     if settlement_fingerprints_contradict(left.settlement, right.settlement):
         return False
     matchbook = left if left.source_venue is VenueName.MATCHBOOK else right

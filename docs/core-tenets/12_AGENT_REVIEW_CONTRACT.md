@@ -67,14 +67,14 @@ A PR should be sent back when it:
 
 For any change touching market recognition, equivalence, matcher rules, market-family coverage or solver eligibility, the handoff must additionally state:
 
-- which approved market archetypes are affected;
+- which approved market archetypes / register keys are affected;
 - approved-good examples retained/lost/gained;
 - known-bad examples still rejected;
-- whether any ambiguous market can enter the solver without an explicit approved rule (it must not);
-- whether REVIEW_REQUIRED exceptions are kept out of paper/live execution;
-- whether HOT and UNIVERSE use the same catalogue and recognition rules.
+- whether any ambiguous market can enter the solver without an explicit register entry (it must not);
+- whether unregistered REVIEW_REQUIRED exceptions are kept out of paper/live execution;
+- whether HOT and UNIVERSE consume the same register.
 
-A generic confidence score must not be used as a substitute for approved market-contract equivalence.
+A generic confidence score must not be used as a substitute for Approved Match Register equivalence.
 
 ## Product review use
 

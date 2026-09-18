@@ -21,6 +21,10 @@ from sports_hedge.matching.paper_assumed import (
     paper_assumed_locked_family,
     paper_assumed_match_reasons,
 )
+from sports_hedge.matching.approved_register import (
+    REGISTER_ADMITTED_REASON,
+    registered_structural_match,
+)
 
 
 class MarketMatchResult(BaseModel):
@@ -36,12 +40,13 @@ class MarketMatcher:
     Event labels may be fuzzy for discovery, but paper-eligible identity is not.
     Family, period, line and outcome space must match. Proven settlement
     contradictions fail closed. Matchbook↔Kalshi locked Phase-1 families
-    (MATCH_RESULT / BTTS / exact-line TOTAL / FTTS) may match in PAPER mode
-    when canonical identity holds and Kalshi settlement is unknown or
-    fair-price-poisoned and not a proven extra-time/penalties contradiction.
-    Learned naming rules may help aliases; they cannot override period, line,
-    family, outcome-model mismatch, fixture participant identity, or a proven
-    settlement contradiction.
+    (MATCH_RESULT / BTTS / exact-line TOTAL / FTTS) match in PAPER mode from
+    the Approved Match Register (Issue #331) when canonical identity holds.
+    Numeric mapping confidence and learned market-label rules are not
+    equivalence permission. Fair-price wording does not block PAPER admission.
+    Learned naming rules may help fixture aliases; they cannot override period,
+    line, family, outcome-model mismatch, fixture participant identity, or a
+    proven extra-time/penalties contradiction.
     """
 
     def __init__(self, event_matcher: EventMatcher | None = None) -> None:
@@ -107,6 +112,8 @@ class MarketMatcher:
                 match_reasons.append(PAPER_ASSUMED_1X2_REASON)
             if OWNER_APPROVED_PAPER_EQUIVALENCE_REASON not in match_reasons:
                 match_reasons.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
+        if registered_structural_match(left, right) and REGISTER_ADMITTED_REASON not in match_reasons:
+            match_reasons.append(REGISTER_ADMITTED_REASON)
         if (
             event_result.provenance.rule_type
             is MappingRuleType.VENUE_MARKET_LABEL_CONVENTION

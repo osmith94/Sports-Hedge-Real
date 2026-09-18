@@ -4,15 +4,16 @@
 
 Sports Hedge may use tolerant/fuzzy label handling to **recognize a possible supported market**, but it must never fuzzy-match economic settlement semantics.
 
-The operational arbitrage path is deliberately bounded by the **Approved Market Catalogue** in Core Tenet 20.
+The operational arbitrage path is deliberately bounded by the **Approved Market Catalogue** in Core Tenet 20 and the **Approved Match Register** (Issue #331).
 
-Two venue markets may be treated as executable equivalents only when:
+Runtime scanning must not score, review, learn, or re-litigate whether an owner-approved venue market pair is equivalent. Equivalence is decided during venue onboarding and stored in the register. The scanner consumes that truth deterministically.
+
+Two venue markets may be treated as paper-mode equivalents when:
 
 1. they refer to the same canonical event;
-2. both are recognized as the same approved market archetype;
-3. all required archetype parameters match;
-4. the required outcome state space is economically compatible; and
-5. no explicit settlement contradiction exists.
+2. each side maps through a venue-native archetype to the same canonical key;
+3. all required archetype parameters match (period, line, outcome space);
+4. no proven extra-time / penalties / to-qualify contradiction exists.
 
 A generic confidence percentage is not permission to treat ambiguous contracts as economically equivalent.
 
@@ -47,17 +48,17 @@ UNSUPPORTED
 
 Only `APPROVED_EQUIVALENT` may enter the **live-execution** path.
 
-`PAPER_ASSUMED_EQUIVALENT` is an owner-approved Phase-1 **paper-mode** exception for the four locked Matchbook↔Kalshi families: MATCH_RESULT / 1X2, BTTS, exact-line TOTAL_GOALS, and FIRST_TEAM_TO_SCORE. Once canonical fixture identity and canonical market identity/parameters match, the pair may enter the paper solver without re-litigating settlement wording on every scan. It carries `settlement_assumption=regulation_time` and an owner-approved paper-equivalence audit marker. It is never represented as independently proven settlement and is never live-execution eligible.
+`PAPER_ASSUMED_EQUIVALENT` is an owner-approved Phase-1 **paper-mode** path for Matchbook↔Kalshi rows in the Approved Match Register: MATCH_RESULT / 1X2, BTTS, exact-line TOTAL_GOALS, and FIRST_TEAM_TO_SCORE. The register itself is the PAPER cross-venue equivalence decision. Once canonical fixture identity and canonical market identity/parameters match, the scanner must not re-litigate settlement wording, mapping confidence, or learned labels on every scan. It carries `settlement_assumption=regulation_time` and an owner-approved paper-equivalence / register audit marker. It is never represented as independently proven settlement and is never live-execution eligible.
 
 Kalshi cancel/reschedule-to-fair-price wording does **not** block PAPER admission for these four families. Extra time, penalties, to-qualify, wrong fixture/family/period, TOTAL line mismatch, and incomplete/incorrect outcome-space identity remain fail-closed. Genuinely absent venue markets stay NOT_LISTED / VENUE_UNAVAILABLE and must not be invented.
 
-If semantics are incomplete or ambiguous but the market plausibly belongs to an approved archetype, and the paper-assumed locked-family exception does not apply, route it to `REVIEW_REQUIRED`.
+If semantics are incomplete or ambiguous but the market is **not** a registered structural match, do not admit it. Unregistered/unsupported markets are ignored by the scanner. Parameter/structural mismatch is rejected. Genuinely absent markets stay NOT_LISTED / VENUE_UNAVAILABLE.
 
 Do not silently guess.
 
 Do not admit incomplete settlement to live execution.
 
-Markets outside the approved catalogue are `UNSUPPORTED` for the normal arbitrage path.
+Markets outside the approved catalogue/register are `UNSUPPORTED` for the normal arbitrage path.
 
 ## Canonical event identity
 
@@ -89,15 +90,13 @@ This tenet defines the safety rule inside that catalogue:
 
 A venue title or ticker may be recognized through an operator-approved venue rule, but the resulting canonical contract must still pass this equivalence test.
 
-## Exception review
+## Exception review (onboarding, not runtime scanning)
 
-Ambiguous probable-archetype markets should be preserved as review evidence rather than disappearing.
+Ambiguous probable-archetype markets may be preserved as onboarding evidence rather than disappearing.
 
-A review payload may be assessed by GPT/operator workflow.
+A review payload may be assessed by GPT/operator workflow **during venue onboarding**. An approved exception becomes a versioned Approved Match Register entry.
 
-An approved exception may become a versioned, auditable venue recognition/mapping rule.
-
-Until such approval exists, the market remains non-executable.
+Until such approval exists, the market remains unregistered and is not admitted by the scanner. Runtime scanning does not consult mapping confidence, learned market-label rules, or the dynamic mapping-review store to decide equivalence for registered rows.
 
 ## Violation examples
 
@@ -107,8 +106,9 @@ Until such approval exists, the market remains non-executable.
 - Treating 90-minute Match Result as `to qualify`.
 - Treating First Team To Score contracts with materially different no-goal settlement as equivalent.
 - Forcing a Polymarket proposition into a football market comparison because the labels look similar.
-- Allowing an 88% or 95% generic confidence score to override missing required settlement evidence.
+- Allowing an 88% or 95% generic confidence score to override missing required settlement evidence or to grant register admission.
 - Sending an unsupported novelty contract to the arbitrage solver.
+- Re-litigating a registered Matchbook↔Kalshi row on every scan because Kalshi fair-price wording differs.
 
 ## Review checks
 
@@ -117,7 +117,7 @@ Until such approval exists, the market remains non-executable.
 - Do both venues normalize to the same approved archetype?
 - Are required period/line/team/outcome parameters identical?
 - Are explicit settlement contradictions hard-blocked?
-- Are ambiguous probable-archetype mappings routed to REVIEW_REQUIRED rather than guessed?
-- Is a deterministic settlement/equivalence key available before cross-venue comparison?
-- Do HOT and UNIVERSE use the same catalogue and equivalence rules?
+- Are ambiguous unregistered markets kept out of the solver rather than guessed?
+- Is a deterministic register canonical key available before paper comparison?
+- Do HOT and UNIVERSE consume the same Approved Match Register?
 - Do Research and Arbitrage apply the same proposition-equivalence discipline where they share market contracts?
