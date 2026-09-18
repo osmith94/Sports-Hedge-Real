@@ -363,8 +363,8 @@ async def test_four_families_emit_independent_priority_alerts() -> None:
     assert set(by_family) == LOCKED_FAMILIES
     assert by_family["first_team_to_score"].payoff_scan is not None
     assert by_family["first_team_to_score"].payoff_scan.solution.is_arbitrage
-    assert by_family["first_team_to_score"].depth_scan is not None
-    assert by_family["first_team_to_score"].depth_scan.solution.is_arbitrage
+    assert by_family["first_team_to_score"].solver_model == "generalized_payoff"
+    assert by_family["first_team_to_score"].depth_scan is None
 
     ids = {decision.canonical_market_id for decision in by_family.values()}
     assert len(ids) == 4
@@ -390,6 +390,10 @@ async def test_four_families_emit_independent_priority_alerts() -> None:
     alert_ids = {alert.canonical_market_id for alert in current}
     assert ids <= alert_ids
     assert len(alert_ids) >= 4
+    assert by_family["first_team_to_score"].canonical_market_id in alert_ids
+    assert by_family["match_result"].canonical_market_id in alert_ids
+    assert by_family["both_teams_to_score"].canonical_market_id in alert_ids
+    assert by_family["total_goals"].canonical_market_id in alert_ids
 
     repository = SqliteMarketIntelligenceRepository()
     collector = ReadOnlyCrossVenueCollector(

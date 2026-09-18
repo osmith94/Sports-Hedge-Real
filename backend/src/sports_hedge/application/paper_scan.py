@@ -15,10 +15,6 @@ from sports_hedge.application.complete_set import (
     solver_eligible_market,
     solver_model_for_pair,
 )
-from sports_hedge.application.ftts_alert_bridge import (
-    is_complete_ftts_pair,
-    project_ftts_payoff_to_ordinary_depth,
-)
 from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.executable_liquidity import (
     opening_liquidity_rejection_reasons,
@@ -507,18 +503,6 @@ class PaperScanService:
                 rejections.append(payoff.rejection_reason or "no_arbitrage")
             elif payoff.roi < minimum_net_edge:
                 rejections.append("net_edge_below_threshold")
-            if (
-                is_complete_ftts_pair(left.market.family, right.market.family)
-                and payoff_scan is not None
-                and payoff_scan.solution.is_arbitrage
-            ):
-                projected = project_ftts_payoff_to_ordinary_depth(
-                    payoff_scan,
-                    capital_limit=capital_limit_gbp,
-                    venue_capital_limits=venue_capital_limits,
-                )
-                if projected is not None:
-                    depth_scan = projected
 
         liquidity_rejections = opening_liquidity_rejection_reasons(
             list(scan_costs.values()),
