@@ -1074,7 +1074,7 @@ async def test_contradictory_secondary_stays_nonequivalent() -> None:
         market_secondary_text=CONTRADICTORY_SECONDARY,
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
-    assert census.equivalent_market_pairs == 1
+    assert census.equivalent_market_pairs == 0
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
     assert forensics.matchbook_kalshi_match_result.matched_equivalent == 0
 

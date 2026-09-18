@@ -40,7 +40,7 @@ from sports_hedge.catalogue.corpus import (
     REGULATION,
     _mb,
     _mb_1x2,
-    _mb_btts,
+    _mb_btts as _census_mb_btts,
     _pm,
     _pm_1x2,
     _pm_btts,
@@ -54,7 +54,6 @@ from sports_hedge.catalogue.registry import (
 )
 from sports_hedge.catalogue.states import CatalogueApprovalState, CatalogueArchetype
 from sports_hedge.config import Settings
-from sports_hedge.domain.football import MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
@@ -271,7 +270,7 @@ def test_polymarket_incomplete_settlement_stays_review_required() -> None:
     assert one_x_two.state is CatalogueApprovalState.REVIEW_REQUIRED
     assert one_x_two.paper_mode_admitted is False
     btts = classify_payload_pair(
-        _mb([_mb_btts()]),
+        _mb([_census_mb_btts()]),
         _pm([_pm_btts(description="See market rules.")]),
     )
     assert btts.state is CatalogueApprovalState.REVIEW_REQUIRED

@@ -24,7 +24,7 @@ from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
-from sports_hedge.normalization.venues import KalshiNormalizer, VenueNormalizationError
+from sports_hedge.normalization.venues import KalshiNormalizer
 from sports_hedge.paper.liquidity import default_pools
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.venues.kalshi import KalshiClient
