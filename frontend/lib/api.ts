@@ -480,6 +480,8 @@ export type LaneRefreshStatus = {
   last_diagnostics?: Record<string, unknown> | null;
   last_persist_error?: string | null;
   persist_ok?: boolean | null;
+  last_heartbeat_at?: string | null;
+  last_plan_reason?: string | null;
   degraded?: boolean;
   resume_cursor?: string | null;
   operator_summary?: string | null;

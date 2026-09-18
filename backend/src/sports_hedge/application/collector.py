@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -67,6 +67,7 @@ from sports_hedge.application.provider_access import (
     HEALTH_TIMEOUT,
     HEALTH_UNAVAILABLE,
     ProviderAccessLayer,
+    ProviderLease,
     merge_lane_operation_health,
     operation_health_from_stage,
 )
@@ -140,6 +141,44 @@ def _consume_orphaned_provider_task(task: asyncio.Task[Any]) -> None:
         task.exception()
     except asyncio.CancelledError:
         return
+
+
+class _NullCapacityLease:
+    def hold_until_task(self, task: asyncio.Task[Any]) -> bool:
+        del task
+        return False
+
+    async def release(self) -> None:
+        return None
+
+
+class _SemaphoreCapacityLease:
+    """Hold a collector semaphore until the live provider task finishes."""
+
+    def __init__(self, semaphore: asyncio.Semaphore) -> None:
+        self._semaphore = semaphore
+        self._owned = True
+
+    def hold_until_task(self, task: asyncio.Task[Any]) -> bool:
+        if not self._owned or task.done():
+            return False
+        self._owned = False
+
+        def _done(done: asyncio.Task[Any]) -> None:
+            _consume_orphaned_provider_task(done)
+            try:
+                self._semaphore.release()
+            except ValueError:
+                return
+
+        task.add_done_callback(_done)
+        return True
+
+    async def release(self) -> None:
+        if not self._owned:
+            return
+        self._owned = False
+        self._semaphore.release()
 
 
 def _new_kalshi_rule_enrichment() -> dict[str, int]:
@@ -582,7 +621,9 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_rule_layer_diagnostics: list[dict[str, Any]] = []
         self._kalshi_contract_terms_cache: dict[str, dict[str, Any]] = {}
         self._kalshi_series_ok: dict[tuple[str, bool], dict[str, Any]] = {}
-        self._kalshi_series_inflight: dict[tuple[str, bool], asyncio.Task[dict[str, Any] | None]] = {}
+        self._kalshi_series_inflight: dict[
+            tuple[str, bool], asyncio.Future[dict[str, Any] | None]
+        ] = {}
         self._kalshi_books_eligible = 0
         self._kalshi_books_skipped_unapproved = 0
 
@@ -1135,7 +1176,9 @@ class ReadOnlyCrossVenueCollector:
 
         Bounded cancel must not wait forever. If the coroutine ignores cancel
         and later raises, retrieve that exception so the event loop does not
-        emit ``Task exception was never retrieved``.
+        emit ``Task exception was never retrieved``. Prefer
+        ``_bind_live_capacity`` when a permit must stay occupied until the
+        underlying call actually finishes.
         """
 
         if count_orphan:
@@ -1145,6 +1188,90 @@ class ReadOnlyCrossVenueCollector:
             _consume_orphaned_provider_task(task)
             return
         task.add_done_callback(_consume_orphaned_provider_task)
+
+    def _bind_live_capacity(
+        self,
+        lease: ProviderLease | _SemaphoreCapacityLease | _NullCapacityLease,
+        task: asyncio.Task[Any],
+        venue: VenueName,
+        *,
+        count_logical_inflight: bool,
+    ) -> bool:
+        """Keep collector and provider capacity occupied until ``task`` finishes."""
+
+        self._count_orphan_after_drain(task)
+        if not lease.hold_until_task(task):
+            if task.done():
+                _consume_orphaned_provider_task(task)
+            return False
+
+        def _done(done: asyncio.Task[Any]) -> None:
+            self._inflight.discard(done)
+            if count_logical_inflight:
+                self._provider_inflight[venue] = max(0, self._provider_inflight[venue] - 1)
+            _consume_orphaned_provider_task(done)
+
+        task.add_done_callback(_done)
+        return True
+
+    @asynccontextmanager
+    async def _provider_capacity(
+        self,
+        venue: VenueName,
+        *,
+        stage: str,
+    ) -> AsyncIterator[ProviderLease | _SemaphoreCapacityLease | _NullCapacityLease]:
+        access = self._provider_access
+        if access is not None:
+            async with access.acquire(
+                venue, lane=self._op_request_lane, stage=stage
+            ) as lease:
+                yield lease
+            return
+        sem = self._provider_semaphores.get(venue)
+        if sem is None:
+            yield _NullCapacityLease()
+            return
+        await sem.acquire()
+        lease = _SemaphoreCapacityLease(sem)
+        try:
+            yield lease
+        finally:
+            await lease.release()
+
+    async def _await_bounded_with_capacity(
+        self,
+        coro: Any,
+        timeout: float,
+        *,
+        venue: VenueName,
+        lease: ProviderLease | _SemaphoreCapacityLease | _NullCapacityLease,
+        count_logical_inflight: bool = False,
+    ) -> tuple[Any, bool]:
+        held = False
+
+        def _on_still_running(task: asyncio.Task[Any]) -> None:
+            nonlocal held
+            held = self._bind_live_capacity(
+                lease,
+                task,
+                venue,
+                count_logical_inflight=count_logical_inflight,
+            )
+
+        if count_logical_inflight:
+            self._provider_inflight[venue] += 1
+            self._provider_peak_inflight[venue] = max(
+                self._provider_peak_inflight[venue],
+                self._provider_inflight[venue],
+            )
+        try:
+            return await self._await_bounded(
+                coro, timeout, on_still_running=_on_still_running
+            )
+        finally:
+            if count_logical_inflight and not held:
+                self._provider_inflight[venue] -= 1
 
     async def _cancel_inflight(self) -> None:
         pending: list[asyncio.Task[Any]] = []
@@ -1162,8 +1289,19 @@ class ReadOnlyCrossVenueCollector:
         for task in pending:
             self._detach_provider_task(task, count_orphan=True)
 
-    async def _await_bounded(self, coro: Any, timeout: float) -> tuple[Any, bool]:
-        """Wait up to timeout, then cancel without blocking on uncooperative providers."""
+    async def _await_bounded(
+        self,
+        coro: Any,
+        timeout: float,
+        *,
+        on_still_running: Callable[[asyncio.Task[Any]], None] | None = None,
+    ) -> tuple[Any, bool]:
+        """Wait up to timeout, then cancel without blocking on uncooperative providers.
+
+        When ``on_still_running`` is provided and the task is still alive after
+        the drain, capacity accounting is transferred to that callback instead
+        of dropping the permit.
+        """
 
         if timeout <= 0:
             close = getattr(coro, "close", None)
@@ -1187,22 +1325,34 @@ class ReadOnlyCrossVenueCollector:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
             if task in done:
                 self._inflight.discard(task)
-                return task.result(), False
+                try:
+                    return task.result(), False
+                except asyncio.CancelledError:
+                    return None, True
             self._request_cancel(task)
             drain = self._cancel_drain_seconds()
             if drain > 0:
                 await asyncio.wait({task}, timeout=drain)
             if task.done() and not task.cancelled():
                 self._inflight.discard(task)
-                return task.result(), False
-            self._detach_provider_task(task, count_orphan=True)
+                try:
+                    return task.result(), False
+                except asyncio.CancelledError:
+                    return None, True
+            if not task.done() and on_still_running is not None:
+                on_still_running(task)
+            else:
+                self._detach_provider_task(task, count_orphan=True)
             return None, True
         except asyncio.CancelledError:
             self._request_cancel(task)
             drain = self._cancel_drain_seconds()
             if drain > 0 and not task.done():
                 await asyncio.wait({task}, timeout=drain)
-            self._detach_provider_task(task, count_orphan=True)
+            if not task.done() and on_still_running is not None:
+                on_still_running(task)
+            else:
+                self._detach_provider_task(task, count_orphan=True)
             raise
         finally:
             if task.done():
@@ -1317,34 +1467,23 @@ class ReadOnlyCrossVenueCollector:
         source_id: str | None = None,
         default: Any,
     ) -> tuple[Any, bool]:
-        access = self._provider_access
-        if access is not None:
-            try:
-                async with access.acquire(
-                    venue, lane=self._op_request_lane, stage=stage
-                ):
-                    return await self._wait_provider_unlocked(
-                        coro, stage=stage, venue=venue, source_id=source_id, default=default
-                    )
-            except asyncio.CancelledError:
-                close = getattr(coro, "close", None)
-                if callable(close):
-                    close()
-                raise
-        sem = self._provider_semaphores.get(venue)
-        if sem is None:
-            return await self._wait_provider_unlocked(
-                coro, stage=stage, venue=venue, source_id=source_id, default=default
-            )
         try:
-            async with sem:
+            async with self._provider_capacity(venue, stage=stage) as lease:
                 return await self._wait_provider_unlocked(
-                    coro, stage=stage, venue=venue, source_id=source_id, default=default
+                    coro,
+                    stage=stage,
+                    venue=venue,
+                    source_id=source_id,
+                    default=default,
+                    lease=lease,
                 )
         except asyncio.CancelledError:
             close = getattr(coro, "close", None)
             if callable(close):
-                close()
+                try:
+                    close()
+                except (RuntimeError, ValueError):
+                    pass
             raise
 
     async def _wait_provider_unlocked(
@@ -1355,6 +1494,7 @@ class ReadOnlyCrossVenueCollector:
         venue: VenueName,
         source_id: str | None = None,
         default: Any,
+        lease: ProviderLease | _SemaphoreCapacityLease | _NullCapacityLease | None = None,
     ) -> tuple[Any, bool]:
         timeout = self._timeout_budget(self._op_provider_timeout)
         started = monotonic()
@@ -1370,13 +1510,15 @@ class ReadOnlyCrossVenueCollector:
                 timed_out=True,
             )
             return default, True
-        self._provider_inflight[venue] += 1
-        self._provider_peak_inflight[venue] = max(
-            self._provider_peak_inflight[venue],
-            self._provider_inflight[venue],
-        )
+        capacity = lease if lease is not None else _NullCapacityLease()
         try:
-            payload, timed_out = await self._await_bounded(coro, timeout)
+            payload, timed_out = await self._await_bounded_with_capacity(
+                coro,
+                timeout,
+                venue=venue,
+                lease=capacity,
+                count_logical_inflight=True,
+            )
             self._attribution.add(
                 venue=venue.value,
                 stage=stage,
@@ -1405,8 +1547,6 @@ class ReadOnlyCrossVenueCollector:
             if current == "ok":
                 self._op_venue_health[venue.value] = "degraded"
             return default, True
-        finally:
-            self._provider_inflight[venue] -= 1
 
     async def _discovery_task(
         self,
@@ -1463,22 +1603,14 @@ class ReadOnlyCrossVenueCollector:
             )
             return [], {}
 
-        async def _call() -> tuple[Any, bool]:
-            return await self._await_bounded(client.list_events(**filters), timeout)
-
         try:
-            access = self._provider_access
-            sem = self._provider_semaphores.get(venue)
-            if access is not None:
-                async with access.acquire(
-                    venue, lane=self._op_request_lane, stage="list_events"
-                ):
-                    payload, timed_out = await _call()
-            elif sem is None:
-                payload, timed_out = await _call()
-            else:
-                async with sem:
-                    payload, timed_out = await _call()
+            async with self._provider_capacity(venue, stage="list_events") as lease:
+                payload, timed_out = await self._await_bounded_with_capacity(
+                    client.list_events(**filters),
+                    timeout,
+                    venue=venue,
+                    lease=lease,
+                )
             self._attribution.add(
                 venue=venue.value,
                 stage="list_events",
@@ -1550,24 +1682,13 @@ class ReadOnlyCrossVenueCollector:
                 )
                 continue
             try:
-                access = self._provider_access
-                sem = self._provider_semaphores.get(venue)
-
-                async def _call() -> tuple[Any, bool]:
-                    return await self._await_bounded(
-                        client.list_events(**series_filters), timeout
+                async with self._provider_capacity(venue, stage="list_events") as lease:
+                    payload, timed_out = await self._await_bounded_with_capacity(
+                        client.list_events(**series_filters),
+                        timeout,
+                        venue=venue,
+                        lease=lease,
                     )
-
-                if access is not None:
-                    async with access.acquire(
-                        venue, lane=self._op_request_lane, stage="list_events"
-                    ):
-                        payload, timed_out = await _call()
-                elif sem is None:
-                    payload, timed_out = await _call()
-                else:
-                    async with sem:
-                        payload, timed_out = await _call()
                 self._attribution.add(
                     venue=venue.value,
                     stage="list_events",
@@ -3453,7 +3574,8 @@ class ReadOnlyCrossVenueCollector:
         """Coalesced Get Series for candidate settlement fallback or approved fees.
 
         Successful metadata is cached on this collector and on the Kalshi
-        client. Transient failures are not stored as success.
+        client. Transient failures are not stored as success. The leader runs
+        on the caller's task so provider capacity stays attached to live HTTP.
         """
 
         if self.kalshi is None:
@@ -3467,13 +3589,19 @@ class ReadOnlyCrossVenueCollector:
             return cached
         existing = self._kalshi_series_inflight.get(cache_key)
         if existing is not None:
-            return await asyncio.shield(existing)
+            return await existing
 
-        async def _load() -> dict[str, Any] | None:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any] | None] = loop.create_future()
+        leader = self._kalshi_series_inflight.setdefault(cache_key, future)
+        if leader is not future:
+            return await leader
+
+        try:
             client = self.kalshi
             if client is None:
-                return None
-            try:
+                resolved: dict[str, Any] | None = None
+            else:
                 try:
                     series, failed = await self._wait_provider(
                         client.get_series(ticker),
@@ -3491,19 +3619,31 @@ class ReadOnlyCrossVenueCollector:
                             detail=str(exc),
                         )
                     )
-                    return None
-                if failed or not isinstance(series, dict):
-                    return None
-                if attach_contract_family:
-                    series = await self._attach_kalshi_contract_family(series, issues=issues)
-                self._kalshi_series_ok[cache_key] = series
-                return series
-            finally:
+                    resolved = None
+                else:
+                    if failed or not isinstance(series, dict):
+                        resolved = None
+                    else:
+                        if attach_contract_family:
+                            series = await self._attach_kalshi_contract_family(
+                                series, issues=issues
+                            )
+                        self._kalshi_series_ok[cache_key] = series
+                        resolved = series
+            if not future.done():
+                future.set_result(resolved)
+            return resolved
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not future.done():
+                future.set_exception(exc)
+            raise
+        finally:
+            if self._kalshi_series_inflight.get(cache_key) is future:
                 self._kalshi_series_inflight.pop(cache_key, None)
-
-        task = asyncio.create_task(_load())
-        self._kalshi_series_inflight[cache_key] = task
-        return await asyncio.shield(task)
+            if not future.done():
+                future.cancel()
 
     def _rebuild_kalshi_candidate_markets(
         self,

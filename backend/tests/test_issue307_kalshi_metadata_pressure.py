@@ -9,7 +9,7 @@ probabilities. PAPER / read-only. Execution disabled.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import monotonic
 from typing import Any
@@ -20,11 +20,13 @@ import pytest
 from sports_hedge.application.collector import (
     DEFAULT_PROVIDER_CONCURRENCY,
     ReadOnlyCrossVenueCollector,
+    ScanAttribution,
 )
 from sports_hedge.application.complete_set import scan_eligible_pair
-from sports_hedge.application.live_refresh import _merge_top_level_venue_health
+from sports_hedge.application.live_refresh import LiveRefreshCoordinator, _merge_top_level_venue_health
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.scan_lanes import DEFAULT_HOT_TTL_SECONDS, ScanLane
+from sports_hedge.application.provider_access import ProviderAccessLayer
+from sports_hedge.application.scan_lanes import DEFAULT_HOT_TTL_SECONDS, ScanLane, WORKER_IDLE, WORKER_WAITING
 from sports_hedge.catalogue.admission import catalogue_allows_solver
 from sports_hedge.catalogue.classify import PayloadSide, classify_payload_pair, normalize_payload_side
 from sports_hedge.catalogue.states import CatalogueApprovalState
@@ -39,6 +41,7 @@ from sports_hedge.venues.kalshi import KalshiClient, KalshiDiscoveryError
 from sports_hedge.venues.matchbook import MatchbookClient
 from sports_hedge.venues.polymarket import PolymarketClient
 from venue_cost_helpers import matchbook_polymarket_costs
+from test_dual_cadence_scheduler import NOW as SCHED_NOW, FakeClock, _fixture, _report
 
 KICKOFF = datetime(2026, 9, 18, 19, 0, tzinfo=UTC)
 NOW = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
@@ -653,3 +656,367 @@ def test_merge_does_not_copy_kalshi_failure_onto_matchbook() -> None:
     assert merged["matchbook"] == "ok"
     assert merged["kalshi"] == "degraded"
     assert merged["polymarket"] == "ok"
+
+
+async def _ignore_cancel_until(event: asyncio.Event) -> None:
+    """Stay alive after asyncio cancel, like a stuck HTTP connect."""
+
+    while not event.is_set():
+        task = asyncio.current_task()
+        if task is not None:
+            while task.cancelling():
+                task.uncancel()
+        try:
+            await asyncio.wait_for(event.wait(), timeout=0.02)
+        except TimeoutError:
+            continue
+        except asyncio.CancelledError:
+            continue
+
+
+def _prep_capacity_collector(
+    collector: ReadOnlyCrossVenueCollector,
+    access: ProviderAccessLayer,
+    *,
+    timeout: float = 0.05,
+) -> None:
+    collector._provider_access = access
+    collector._op_request_lane = ScanLane.UNIVERSE.value
+    collector._op_provider_timeout = timeout
+    collector._op_venue_timeout = timeout
+    collector._op_deadline = None
+    collector._op_soft_deadline = None
+    collector._op_issues = []
+    collector._op_venue_health = {
+        VenueName.MATCHBOOK.value: "ok",
+        VenueName.POLYMARKET.value: "ok",
+        VenueName.KALSHI.value: "ok",
+    }
+    collector._op_operation_health = {}
+    collector._attribution = ScanAttribution()
+    collector._inflight = set()
+    collector._provider_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
+    collector._provider_peak_inflight = {venue: 0 for venue in DEFAULT_PROVIDER_CONCURRENCY}
+    collector._provider_calls = 0
+    collector._provider_cancels = 0
+    collector._inflight_orphaned = 0
+    collector._peak_inflight = 0
+    collector._timeouts_by_stage = {}
+
+
+@pytest.mark.asyncio
+async def test_provider_lease_stays_occupied_until_cancel_resistant_task_finishes() -> None:
+    layer = ProviderAccessLayer(
+        {
+            VenueName.MATCHBOOK: 1,
+            VenueName.POLYMARKET: 8,
+            VenueName.KALSHI: 4,
+        }
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stubborn() -> str:
+        started.set()
+        await _ignore_cancel_until(release)
+        return "ok"
+
+    async def first() -> str:
+        async with layer.acquire(VenueName.MATCHBOOK, lane="universe") as lease:
+            task = asyncio.create_task(stubborn())
+            done, _pending = await asyncio.wait({task}, timeout=0.05)
+            if task not in done:
+                task.cancel()
+                assert lease.hold_until_task(task) is True
+            return "timed_out"
+
+    assert await first() == "timed_out"
+    await started.wait()
+    assert layer.snapshot().inflight["matchbook"] == 1
+
+    second_started = asyncio.Event()
+
+    async def second() -> None:
+        async with layer.acquire(VenueName.MATCHBOOK, lane="universe"):
+            second_started.set()
+
+    waiter = asyncio.create_task(second())
+    await asyncio.sleep(0.08)
+    assert not second_started.is_set()
+    assert layer.snapshot().inflight["matchbook"] == 1
+    release.set()
+    await asyncio.wait_for(waiter, timeout=1.0)
+    assert second_started.is_set()
+    assert layer.snapshot().inflight["matchbook"] == 0
+
+
+@pytest.mark.asyncio
+async def test_matchbook_list_markets_peak_live_stays_within_concurrency() -> None:
+    access = ProviderAccessLayer(
+        {
+            VenueName.MATCHBOOK: 4,
+            VenueName.POLYMARKET: 8,
+            VenueName.KALSHI: 4,
+        }
+    )
+    live = {"n": 0, "peak": 0}
+    lock = asyncio.Lock()
+    release = asyncio.Event()
+
+    class StubbornMatchbook:
+        async def list_events(self, **filters: Any) -> dict[str, Any]:
+            del filters
+            return {"events": []}
+
+        async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+            del filters
+            async with lock:
+                live["n"] += 1
+                live["peak"] = max(live["peak"], live["n"])
+            try:
+                await _ignore_cancel_until(release)
+                return {"markets": [], "id": event_id}
+            finally:
+                async with lock:
+                    live["n"] -= 1
+
+    repository = SqliteMarketIntelligenceRepository()
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=StubbornMatchbook(),
+        polymarket=_DisabledPolymarket(),
+        kalshi=_Kalshi([_kalshi_btts_event()]),
+        paper_scan=PaperScanService(MarketIntelligenceService(repository)),
+        provider_call_timeout_seconds=0.05,
+        provider_access=access,
+        provider_concurrency={
+            VenueName.MATCHBOOK: 4,
+            VenueName.POLYMARKET: 8,
+            VenueName.KALSHI: 4,
+        },
+    )
+    _prep_capacity_collector(collector, access, timeout=0.05)
+    try:
+        first_wave = [
+            asyncio.create_task(
+                collector._wait_provider(
+                    collector.matchbook.list_markets(index),
+                    stage="list_markets",
+                    venue=VenueName.MATCHBOOK,
+                    source_id=str(index),
+                    default=None,
+                )
+            )
+            for index in range(4)
+        ]
+        await asyncio.sleep(0.08)
+        assert live["n"] == 4
+        assert access.snapshot().inflight["matchbook"] == 4
+        results = await asyncio.gather(*first_wave)
+        assert all(timed_out for _payload, timed_out in results)
+        assert live["n"] == 4
+        assert access.snapshot().inflight["matchbook"] == 4
+
+        retry_started = asyncio.Event()
+
+        async def retry_wave() -> list[tuple[Any, bool]]:
+            retry_started.set()
+            return list(
+                await asyncio.gather(
+                    *[
+                        collector._wait_provider(
+                            collector.matchbook.list_markets(100 + index),
+                            stage="list_markets",
+                            venue=VenueName.MATCHBOOK,
+                            source_id=str(100 + index),
+                            default=None,
+                        )
+                        for index in range(4)
+                    ]
+                )
+            )
+
+        retry_task = asyncio.create_task(retry_wave())
+        await retry_started.wait()
+        await asyncio.sleep(0.12)
+        assert live["n"] == 4
+        assert live["peak"] == 4
+        assert access.snapshot().inflight["matchbook"] == 4
+        assert not retry_task.done()
+        release.set()
+        await asyncio.wait_for(retry_task, timeout=1.0)
+        assert live["peak"] == 4
+        assert live["n"] == 0
+        assert access.snapshot().inflight["matchbook"] == 0
+        assert collector._provider_peak_inflight[VenueName.MATCHBOOK] <= 4
+    finally:
+        repository.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_resistant_get_series_single_flight_does_not_accumulate_http() -> None:
+    live = {"n": 0, "peak": 0}
+    calls = {"n": 0}
+    release = asyncio.Event()
+    lock = asyncio.Lock()
+
+    async def hang_get(path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        del params
+        calls["n"] += 1
+        async with lock:
+            live["n"] += 1
+            live["peak"] = max(live["peak"], live["n"])
+        try:
+            await _ignore_cancel_until(release)
+            return {
+                "series": {
+                    "ticker": "KXEPLGAME",
+                    "title": "Premier League",
+                    "fee_type": "quadratic",
+                    "fee_multiplier": 1,
+                }
+            }
+        finally:
+            async with lock:
+                live["n"] -= 1
+
+    settings = Settings()
+    venue = KalshiClient(settings, client=httpx.AsyncClient())
+    venue._get = hang_get  # type: ignore[method-assign]
+    access = ProviderAccessLayer(
+        {
+            VenueName.MATCHBOOK: 4,
+            VenueName.POLYMARKET: 8,
+            VenueName.KALSHI: 4,
+        }
+    )
+    repository = SqliteMarketIntelligenceRepository()
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=_Matchbook(),
+        polymarket=_DisabledPolymarket(),
+        kalshi=venue,
+        paper_scan=PaperScanService(MarketIntelligenceService(repository)),
+        provider_call_timeout_seconds=0.05,
+        provider_access=access,
+    )
+    _prep_capacity_collector(collector, access, timeout=0.05)
+    try:
+        first = [
+            asyncio.create_task(
+                collector._wait_provider(
+                    venue.get_series("KXEPLGAME"),
+                    stage="get_series",
+                    venue=VenueName.KALSHI,
+                    source_id="KXEPLGAME",
+                    default=None,
+                )
+            )
+            for _ in range(4)
+        ]
+        await asyncio.sleep(0.08)
+        assert live["n"] == 1
+        assert calls["n"] == 1
+        await asyncio.gather(*first)
+        assert live["n"] == 1
+        retry = [
+            asyncio.create_task(
+                collector._wait_provider(
+                    venue.get_series("KXEPLGAME"),
+                    stage="get_series",
+                    venue=VenueName.KALSHI,
+                    source_id="KXEPLGAME",
+                    default=None,
+                )
+            )
+            for _ in range(4)
+        ]
+        await asyncio.sleep(0.08)
+        assert live["n"] == 1
+        assert live["peak"] == 1
+        assert calls["n"] == 1
+        release.set()
+        await asyncio.gather(*retry)
+        assert live["peak"] == 1
+        assert calls["n"] == 1
+    finally:
+        repository.close()
+        await venue._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_hot_empty_scope_heartbeat_while_universe_runs_then_starts_independently() -> None:
+    clock = FakeClock(SCHED_NOW)
+    coordinator = LiveRefreshCoordinator(clock=clock)
+    coordinator._clock = clock
+    coordinator._next_hot_due = SCHED_NOW
+    coordinator._next_universe_due = SCHED_NOW
+    coordinator._stop = asyncio.Event()
+    universe_started = asyncio.Event()
+    universe_hold = asyncio.Event()
+    hot_ticks: list[str] = []
+
+    async def universe_runner() -> Any:
+        universe_started.set()
+        await universe_hold.wait()
+        return _report([], when=clock.now, scan_lane=ScanLane.UNIVERSE.value)
+
+    async def tick(plan=None) -> Any:
+        if plan is None:
+            return None
+        if plan.lane == ScanLane.HOT.value:
+            hot_ticks.append(plan.reason)
+            return _report(
+                [
+                    _fixture(
+                        "live",
+                        kickoff=SCHED_NOW - timedelta(minutes=1),
+                        in_running=True,
+                    )
+                ],
+                when=clock.now,
+                scan_lane=ScanLane.HOT.value,
+            )
+        return None
+
+    never = coordinator.status.hot
+    assert never.last_heartbeat_at is None
+    assert never.last_plan_reason is None
+    assert never.worker_state == WORKER_IDLE
+
+    universe_task = asyncio.create_task(
+        coordinator.run_cycle(
+            universe_runner, timeout_seconds=None, scan_lane=ScanLane.UNIVERSE
+        )
+    )
+    await universe_started.wait()
+    assert coordinator._universe_in_progress is True
+
+    hot_task = asyncio.create_task(coordinator._hot_loop(tick))
+    await asyncio.sleep(0.15)
+    hot = coordinator.status.hot
+    assert hot.last_heartbeat_at is not None
+    assert hot.last_plan_reason == "hot_scope_empty"
+    assert hot.worker_state == WORKER_WAITING
+    assert "scope empty" in (hot.operator_summary or "").casefold()
+    assert "worker alive" in (hot.operator_summary or "").casefold()
+    assert hot_ticks == []
+    assert coordinator._universe_in_progress is True
+
+    live = _fixture("live", kickoff=SCHED_NOW - timedelta(minutes=1), in_running=True)
+    coordinator.record_report(
+        _report([live], when=SCHED_NOW, scan_lane=ScanLane.HOT.value),
+        scan_lane=ScanLane.HOT,
+        advance_hot_due=False,
+    )
+    await asyncio.sleep(0.2)
+    assert hot_ticks
+    assert coordinator._universe_in_progress is True
+
+    coordinator._stop.set()
+    universe_hold.set()
+    hot_task.cancel()
+    try:
+        await hot_task
+    except asyncio.CancelledError:
+        pass
+    await universe_task
+    assert Settings().sports_hedge_execution_enabled is False

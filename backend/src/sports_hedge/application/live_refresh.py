@@ -148,6 +148,8 @@ class LaneRefreshStatus(BaseModel):
     last_diagnostics: dict[str, Any] | None = None
     last_persist_error: str | None = None
     persist_ok: bool | None = None
+    last_heartbeat_at: datetime | None = None
+    last_plan_reason: str | None = None
     degraded: bool = False
     resume_cursor: str | None = None
     operator_summary: str | None = None
@@ -211,6 +213,8 @@ class LiveRefreshStatus(BaseModel):
     universe: LaneRefreshStatus = Field(
         default_factory=lambda: LaneRefreshStatus(
             cadence_seconds=8,
+            # Telemetry of accumulated successful UNIVERSE work. Not a cycle deadline;
+            # UNIVERSE generations remain unbounded (Tenet 19).
             generation_budget_seconds=150,
         )
     )
@@ -835,8 +839,8 @@ class LiveRefreshCoordinator:
 
         Scheduled Fast/Full keep their own HOT 25s / UNIVERSE-chunk budgets.
         Advanced full diagnostic is a bounded one-shot and must return before
-        the frontend's 60s PAPER_COLLECTION_TIMEOUT_MS rather than competing
-        with the 150s Full Sweep generation.
+        the frontend's 60s PAPER_COLLECTION_TIMEOUT_MS. Scheduled UNIVERSE
+        generations are unbounded; this envelope is not a generation deadline.
         """
 
         resolved = settings or get_settings()
@@ -2436,6 +2440,7 @@ class LiveRefreshCoordinator:
     async def _hot_loop(self, tick) -> None:
         while not self._stop.is_set():
             plan = self.plan_hot_tick()
+            self._record_hot_heartbeat(plan)
             if plan.lane == ScanLane.HOT.value:
                 try:
                     await self._invoke_tick(tick, plan)
@@ -2448,6 +2453,35 @@ class LiveRefreshCoordinator:
                 await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, delay))
             except TimeoutError:
                 continue
+
+    def _record_hot_heartbeat(self, plan: DualCadencePlan) -> None:
+        """Mark the HOT worker alive, including intentional empty-scope idle.
+
+        Empty scope must not look like a dead/never-scheduled worker and must
+        not trigger a dummy provider call.
+        """
+
+        now = self.now()
+        with self._state_lock:
+            hot_update: dict[str, Any] = {
+                "last_heartbeat_at": now,
+                "last_plan_reason": plan.reason,
+            }
+            if plan.lane != ScanLane.HOT.value and not self._hot_in_progress:
+                if plan.reason == "hot_scope_empty":
+                    hot_update["worker_state"] = WORKER_WAITING
+                    hot_update["cycle_in_progress"] = False
+                    hot_update["operator_summary"] = (
+                        "Fast scan · worker alive · scope empty · polling · no provider call"
+                    )
+                elif plan.reason == "waiting" and self.status.hot.last_started_at is None:
+                    hot_update["worker_state"] = WORKER_WAITING
+                    hot_update["operator_summary"] = (
+                        "Fast scan · worker alive · waiting · no provider call"
+                    )
+            self.status = self.status.model_copy(
+                update={"hot": self.status.hot.model_copy(update=hot_update)}
+            )
 
     async def _universe_loop(self, tick) -> None:
         while not self._stop.is_set():

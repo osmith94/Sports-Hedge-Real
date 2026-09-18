@@ -68,6 +68,72 @@ class _Waiter:
     reason: str = HEALTH_WAITING
 
 
+def _consume_task_result(task: asyncio.Task[Any]) -> None:
+    """Retrieve a finished task result so exceptions are not left unconsumed."""
+
+    if not task.done():
+        return
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        return
+
+
+@dataclass(slots=True)
+class ProviderLease:
+    """Capacity unit that stays occupied until the underlying call finishes.
+
+    ``async with acquire()`` must not make the slot reusable while the HTTP
+    work it protected is still alive after timeout/cancel. Transfer ownership
+    to that live task with ``hold_until_task``.
+    """
+
+    _layer: ProviderAccessLayer | None
+    _venue: VenueName | None
+    _waiter: _Waiter | None
+    _loop: asyncio.AbstractEventLoop | None
+    _owned: bool = True
+
+    @classmethod
+    def unbound(cls) -> ProviderLease:
+        return cls(_layer=None, _venue=None, _waiter=None, _loop=None, _owned=False)
+
+    def hold_until_task(self, task: asyncio.Task[Any]) -> bool:
+        if not self._owned or self._layer is None or self._venue is None or self._waiter is None:
+            return False
+        if task.done():
+            return False
+        self._owned = False
+        loop = self._loop
+        layer = self._layer
+        venue = self._venue
+        waiter = self._waiter
+
+        def _done(done: asyncio.Task[Any]) -> None:
+            _consume_task_result(done)
+            if loop is None:
+                return
+            try:
+                release_task = loop.create_task(
+                    layer._release(venue, waiter),
+                    name="provider-lease-release",
+                )
+            except RuntimeError:
+                return
+            release_task.add_done_callback(_consume_task_result)
+
+        task.add_done_callback(_done)
+        return True
+
+    async def release(self) -> None:
+        if not self._owned:
+            return
+        self._owned = False
+        if self._layer is None or self._venue is None or self._waiter is None:
+            return
+        await self._layer._release(self._venue, self._waiter)
+
+
 @dataclass(slots=True)
 class ProviderAccessSnapshot:
     inflight: dict[str, int]
@@ -165,18 +231,24 @@ class ProviderAccessLayer:
         *,
         lane: ScanLane | str | None = None,
         stage: str = "provider",
-    ) -> AsyncIterator[None]:
+    ) -> AsyncIterator[ProviderLease]:
         if venue not in self._limits:
-            yield
+            yield ProviderLease.unbound()
             return
         waiter = await self._enqueue(venue, lane=lane, stage=stage)
+        lease = ProviderLease(
+            _layer=self,
+            _venue=venue,
+            _waiter=waiter,
+            _loop=asyncio.get_running_loop(),
+        )
         try:
             await waiter.event.wait()
             if waiter.cancelled:
                 raise asyncio.CancelledError
-            yield
+            yield lease
         finally:
-            await self._release(venue, waiter)
+            await lease.release()
 
     async def _enqueue(
         self,

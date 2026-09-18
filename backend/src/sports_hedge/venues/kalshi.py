@@ -52,9 +52,9 @@ class KalshiClient(ReadOnlyVenue):
         self._clock = clock or (lambda: datetime.now(UTC))
         self._base_url = settings.resolved_kalshi_base_url().rstrip("/")
         self._market_cache: dict[str, dict[str, Any]] = {}
-        self._market_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._market_inflight: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._series_cache: dict[str, dict[str, Any]] = {}
-        self._series_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._series_inflight: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._contract_terms_cache: dict[str, dict[str, Any]] = {}
         self._client = client or httpx.AsyncClient(
             timeout=market_data_http_timeout(),
@@ -457,30 +457,48 @@ class KalshiClient(ReadOnlyVenue):
 
 async def _single_flight_cached(
     cache: dict[str, dict[str, Any]],
-    inflight: dict[str, asyncio.Task[dict[str, Any]]],
+    inflight: dict[str, asyncio.Future[dict[str, Any]]],
     key: str,
     fetch: Callable[[], Awaitable[dict[str, Any]]],
 ) -> dict[str, Any]:
-    """Share one in-flight fetch per key. Cache successful payloads only."""
+    """Share one in-flight fetch per key. Cache successful payloads only.
+
+    The leader runs ``fetch`` on the caller's task so provider capacity stays
+    attached to the live HTTP work. Joiners wait on a Future: cancelling a
+    joiner does not cancel the leader, and there is no shielded child task
+    that can outlive the permit.
+    """
 
     cached = cache.get(key)
     if cached is not None:
         return cached
     existing = inflight.get(key)
     if existing is not None:
-        return await asyncio.shield(existing)
+        return await existing
 
-    async def _run() -> dict[str, Any]:
-        try:
-            resolved = await fetch()
-            cache[key] = resolved
-            return resolved
-        finally:
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[dict[str, Any]] = loop.create_future()
+    leader = inflight.setdefault(key, future)
+    if leader is not future:
+        return await leader
+
+    try:
+        resolved = await fetch()
+        cache[key] = resolved
+        if not future.done():
+            future.set_result(resolved)
+        return resolved
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if not future.done():
+            future.set_exception(exc)
+        raise
+    finally:
+        if inflight.get(key) is future:
             inflight.pop(key, None)
-
-    task = asyncio.create_task(_run())
-    inflight[key] = task
-    return await asyncio.shield(task)
+        if not future.done():
+            future.cancel()
 
 
 def football_series_ticker(series: dict[str, Any]) -> bool:
