@@ -13,9 +13,12 @@ from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.models import MarketSnapshot
 from sports_hedge.normalization.venues import (
     KalshiNormalizer,
+    MATCHBOOK_NON_UNIQUE_CANONICAL_REASON,
     MatchbookNormalizer,
     PolymarketNormalizer,
+    VenueNormalizationError,
     matchbook_raw_market_type,
+    matchbook_unsupported_market_detail,
 )
 
 
@@ -225,6 +228,15 @@ class MatchbookObservationBuilder:
         ]
         if runner_labels:
             metadata["raw_runner_labels"] = runner_labels
+        outcomes = [book.outcome for book in books]
+        if len(outcomes) != len(set(outcomes)):
+            raise VenueNormalizationError(
+                matchbook_unsupported_market_detail(
+                    raw_name or str(market_payload.get("id") or market.source_market_id),
+                    MATCHBOOK_NON_UNIQUE_CANONICAL_REASON,
+                    market_type=raw_type,
+                )
+            )
         return VenueMarketObservation(
             market=market,
             observed_at=observed_at or datetime.now(UTC),
