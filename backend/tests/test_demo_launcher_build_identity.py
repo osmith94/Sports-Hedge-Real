@@ -120,7 +120,7 @@ def test_current_sha_shown_to_operator() -> None:
         encoding="utf-8"
     )
     assert "Current branch:" in start_ps1
-    assert "Current SHA:" in start_ps1
+    # PowerShell parses "$Label:" as an invalid scoped/drive-style variable reference.\n    # Braced interpolation is required anywhere a variable is immediately followed by a colon.\n    assert '$Label:' not in start_ps1\n    assert '${Label}:' in start_ps1\n    assert "Current SHA:" in start_ps1
     assert "reused existing Sports Hedge process for SHA" in start_ps1
     assert "restarted owned process because recorded SHA" in start_ps1
     assert "Refusing to reuse or kill" in start_ps1
