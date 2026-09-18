@@ -194,6 +194,19 @@ class MatchbookNormalizer:
             home_team=event.home_team,
             away_team=event.away_team,
         )
+        exotic_reason = _matchbook_compound_exotic_runner_reason(
+            payload,
+            home_team=event.home_team,
+            away_team=event.away_team,
+        )
+        if exotic_reason and family in _MATCHBOOK_STRICT_UNIQUE_FAMILIES:
+            raise VenueNormalizationError(
+                matchbook_unsupported_market_detail(
+                    name,
+                    exotic_reason,
+                    market_type=matchbook_raw_market_type(payload),
+                )
+            )
         period = _period_from_text(name)
         settlement = _standard_football_settlement(family=family, period=period, line=line)
         runners = [
@@ -2379,6 +2392,40 @@ def _polymarket_competition(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def matchbook_unsupported_market_detail(
+    name: str,
+    reason: str,
+    *,
+    market_type: str | None = None,
+) -> str:
+    """Fail-closed unsupported detail that scan-cycle audit treats as a skip."""
+
+    detail = f"Unsupported Matchbook market: {name} ({reason})"
+    if market_type:
+        return f"{detail} [market_type={market_type}]"
+    return detail
+
+
+MATCHBOOK_NON_UNIQUE_CANONICAL_REASON = "non_unique_canonical_outcomes"
+MATCHBOOK_COMPOUND_FAMILY_REASON = "compound_exotic_family"
+MATCHBOOK_COMPOUND_RUNNER_REASON = "compound_exotic_runners"
+MATCHBOOK_CORRECT_SCORE_BUCKET_REASON = "correct_score_bucket_runner"
+MATCHBOOK_SLASH_COMPOUND_REASON = "slash_separated_compound_runner"
+MATCHBOOK_SCORELINE_RUNNER_REASON = "correct_score_scoreline_runner"
+
+# Phase-1 live equivalents whose catalogue contract requires a unique canonical
+# state space. Compound/exotic runners must not be admitted as these families.
+_MATCHBOOK_STRICT_UNIQUE_FAMILIES = frozenset(
+    {
+        MarketFamily.MATCH_RESULT,
+        MarketFamily.BOTH_TEAMS_TO_SCORE,
+        MarketFamily.TOTAL_GOALS,
+        MarketFamily.FIRST_TEAM_TO_SCORE,
+        MarketFamily.DRAW_NO_BET,
+    }
+)
+
+
 def _matchbook_market_family(
     name: str,
     payload: dict[str, Any],
@@ -2387,6 +2434,15 @@ def _matchbook_market_family(
     away_team: str,
 ) -> tuple[MarketFamily, Decimal | None]:
     text = normalize_text(name)
+    compound_markers = _matchbook_family_markers(text)
+    if len(compound_markers) >= 2:
+        raise VenueNormalizationError(
+            matchbook_unsupported_market_detail(
+                name,
+                MATCHBOOK_COMPOUND_FAMILY_REASON,
+                market_type=matchbook_raw_market_type(payload),
+            )
+        )
     line = _line_from_payload_or_text(payload, name)
     if text in {"match odds", "match result", "moneyline", "full time result"}:
         return MarketFamily.MATCH_RESULT, None
@@ -2613,6 +2669,128 @@ def matchbook_raw_market_type(payload: dict[str, Any]) -> str | None:
     if value is None or str(value).strip() == "":
         return None
     return str(value).strip()
+
+
+_SCORELINE_RUNNER_RE = re.compile(r"^\d+\s+\d+$")
+_SIMPLE_REMAINDER_LABELS = frozenset(
+    {
+        "draw",
+        "tie",
+        "yes",
+        "no",
+        "home",
+        "away",
+        "home team",
+        "away team",
+        "home or draw",
+        "home or away",
+        "draw or away",
+        "1x",
+        "12",
+        "x2",
+    }
+)
+
+
+def _matchbook_family_markers(text: str) -> set[str]:
+    """Distinct catalogue-family phrases present in a Matchbook market name.
+
+    Period prefixes such as first-half BTTS are a single family, not a compound.
+    """
+
+    markers: set[str] = set()
+    if (
+        text in {"match odds", "match result", "moneyline", "full time result"}
+        or "match odds" in text
+        or "match result" in text
+        or "moneyline" in text
+        or "full time result" in text
+    ):
+        markers.add("match_result")
+    elif re.search(r"\bresult\b", text) and "correct" not in text:
+        markers.add("match_result")
+    if "both teams to score" in text or text == "btts" or re.search(r"\bbtts\b", text):
+        markers.add("btts")
+    if "total goal" in text or ("over under" in text and "goal" in text):
+        markers.add("total_goals")
+    if "draw no bet" in text:
+        markers.add("draw_no_bet")
+    if "double chance" in text:
+        markers.add("double_chance")
+    if "correct score" in text:
+        markers.add("correct_score")
+    if "half time" in text and "full time" in text:
+        markers.add("half_time_full_time")
+    if _explicit_first_team_to_score(text):
+        markers.add("first_team_to_score")
+    return markers
+
+
+def _strip_named_teams(text: str, *, home_team: str, away_team: str) -> str:
+    remainder = text
+    for team in sorted((normalize_text(home_team), normalize_text(away_team)), key=len, reverse=True):
+        if not team:
+            continue
+        remainder = re.sub(rf"\b{re.escape(team)}\b", " ", remainder)
+    return " ".join(remainder.split())
+
+
+def _matchbook_one_runner_compound_reason(
+    raw_label: str,
+    *,
+    home_team: str,
+    away_team: str,
+) -> str | None:
+    raw = raw_label.strip()
+    if not raw:
+        return None
+    text = normalize_text(raw)
+    if text.startswith("any other"):
+        return MATCHBOOK_CORRECT_SCORE_BUCKET_REASON
+    if "/" in raw or "\\" in raw:
+        return MATCHBOOK_SLASH_COMPOUND_REASON
+    if _SCORELINE_RUNNER_RE.fullmatch(text):
+        return MATCHBOOK_SCORELINE_RUNNER_REASON
+    remainder = _strip_named_teams(text, home_team=home_team, away_team=away_team)
+    if not remainder:
+        return None
+    if remainder in _SIMPLE_REMAINDER_LABELS:
+        return None
+    if remainder.startswith("over") or remainder.startswith("under"):
+        return None
+    if _is_no_goal_runner(remainder):
+        return None
+    if _remainder_has_second_proposition(remainder):
+        return MATCHBOOK_COMPOUND_RUNNER_REASON
+    return None
+
+
+def _remainder_has_second_proposition(remainder: str) -> bool:
+    """True when leftover tokens are a second betting proposition, not club-name 'and'."""
+
+    tokens = remainder.split()
+    if not tokens:
+        return False
+    if "or" in tokens:
+        return True
+    return any(token in {"yes", "no", "over", "under", "draw", "tie"} for token in tokens)
+
+
+def _matchbook_compound_exotic_runner_reason(
+    payload: dict[str, Any],
+    *,
+    home_team: str,
+    away_team: str,
+) -> str | None:
+    for label in _payload_runner_labels(payload):
+        reason = _matchbook_one_runner_compound_reason(
+            label,
+            home_team=home_team,
+            away_team=away_team,
+        )
+        if reason:
+            return reason
+    return None
 
 
 def _matchbook_looks_like_match_total(text: str) -> bool:
