@@ -193,6 +193,39 @@ describe("dual cadence operator copy", () => {
     assert.match(layout, /PAPER MODE · NO EXECUTION/);
   });
 
+  it("distinguishes HOT worker alive with empty scope from never scheduled", () => {
+    const never = status({
+      hot: {
+        cadence_seconds: 30,
+        cycle_timeout_seconds: 25,
+        last_completed_at: null,
+        last_started_at: null,
+        last_heartbeat_at: null,
+        last_plan_reason: null,
+        fixture_count: 0,
+        not_evaluated_count: 0,
+      },
+    });
+    assert.equal(fastScanCopy(never).detail, "never");
+
+    const idleAlive = status({
+      hot: {
+        cadence_seconds: 30,
+        cycle_timeout_seconds: 25,
+        last_completed_at: null,
+        last_started_at: null,
+        last_heartbeat_at: "2026-09-18T12:00:00Z",
+        last_plan_reason: "hot_scope_empty",
+        worker_state: "waiting",
+        fixture_count: 0,
+        not_evaluated_count: 0,
+      },
+    });
+    assert.match(fastScanCopy(idleAlive).detail, /worker alive/);
+    assert.match(fastScanCopy(idleAlive).detail, /scope empty/);
+    assert.doesNotMatch(fastScanCopy(idleAlive).detail, /never/);
+  });
+
   it("uses canonical work counts so three venue aliases stay 1/1 remaining 0", () => {
     const now = Date.parse("2026-09-14T12:00:12Z");
     const canonical = status({

@@ -47,6 +47,15 @@ export function fastScanCopy(
     hot.persist_ok === false || hot.last_persist_error
       ? " · persist/auto-capture failed"
       : "";
+  if (hot.last_plan_reason === "hot_scope_empty" && hot.last_heartbeat_at) {
+    return {
+      label: "Fast scan",
+      detail: `worker alive · scope empty · polling · no provider call${venueSuffix}${persist}`,
+    };
+  }
+  if (!hot.last_completed_at && !hot.last_started_at && !hot.last_heartbeat_at) {
+    return { label: "Fast scan", detail: "never" };
+  }
   return {
     label: "Fast scan",
     detail: `${completedClock(hot.last_completed_at, now)} · ran ${durationLabel(hot.last_duration_ms)} · ${nextDueClock(hot.next_due_at, now)} · ${hot.fixture_count} hot${venueSuffix}${leftover}${persist}`,
