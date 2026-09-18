@@ -38,7 +38,7 @@ Copy repository-root `.env.example` to repository-root `.env` if you want local 
 
 Double-click:
 
-- `scripts\windows\Start-SportsHedge-Demo.bat` — starts FastAPI `:8000` and Next `:3000`, waits for health, opens **`/`** (not `/demo`).
+- `scripts\windows\Start-SportsHedge-Demo.bat` — starts FastAPI `:8000` and Next `:3000`, waits for health, opens **`/`** (not `/demo`). Prints current branch/SHA and whether backend/frontend were reused or restarted. Reuses a healthy process only when launcher PID identity, command, repo root, and Git HEAD match this checkout.
 - `scripts\windows\Stop-SportsHedge-Demo.bat` — stops only launcher-owned PIDs.
 
 Or from PowerShell:
@@ -62,7 +62,7 @@ Logs: `logs\demo-backend.*.log` and `logs\demo-frontend.*.log`.
 ### 1. Live / read-only discovery (`/`)
 
 1. Confirm the console shows **PAPER MODE · NO EXECUTION** and, for the Windows paper demo, **AUTO PAPER CAPTURE ON**.
-2. Open `/health` in a tab if needed: `mode=paper`, `execution_enabled=false`, `paper_autofill_enabled=true` on the launcher process.
+2. Open `/health` or `/build-info` in a tab if needed: `mode=paper`, `execution_enabled=false`, `paper_autofill_enabled=true` on the launcher process, plus the serving Git SHA (`build.git_sha`) so the running process matches the checkout you launched.
 3. Fast scan / Full sweep are server-owned. The browser polls `GET /paper/live-refresh`; do not expect auto-refresh to POST `/paper/collect`.
 4. Primary **Run scan** posts `/paper/collect/hot`: the same current HOT identity/venue scope and bounded timing as Fast Scan, with no full discovery. If a scheduled lane is active, HTTP 409 / BUSY is truthful. Advanced **Run full diagnostic** retains broad, bounded `/paper/collect` discovery and may return partial coverage.
 5. Inspect venue health: Matchbook `unavailable` without credentials is truthful. Polymarket/Kalshi public data may still populate fixtures.

@@ -7,8 +7,14 @@
 # for the 16:15 UK window. Does not enable live execution, wallet signing, or
 # trading credentials.
 # Canonical local dotenv is repository-root .env. backend\.env is ignored.
+# Reuses a healthy backend/frontend only when the launcher-owned PID identity,
+# command, repo root, and Git HEAD match this checkout. A different HEAD
+# restarts that owned process. An unrelated occupant of 8000/3000 is refused
+# rather than killed.
 
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "Demo-LauncherIdentity.ps1")
 
 function Get-RepoRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -56,6 +62,21 @@ function Wait-HttpOk {
     Show-StartupError "$Label did not become healthy at $Url within $Seconds seconds. Inspect logs under logs\."
 }
 
+function Wait-HttpGone {
+    param(
+        [string]$Url,
+        [int]$Seconds = 15,
+        [string]$Label
+    )
+    for ($i = 0; $i -lt $Seconds; $i++) {
+        if (-not (Test-HttpOk $Url)) {
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+    Show-StartupError "$Label is still healthy at $Url after stopping the launcher-owned process. Refusing to kill an unexpected occupant of the port."
+}
+
 $Root = Get-RepoRoot
 $Logs = Join-Path $Root "logs"
 if (-not (Test-Path $Logs)) {
@@ -71,6 +92,15 @@ $FrontendErr = Join-Path $Logs "demo-frontend.err.log"
 $BackendHealth = "http://127.0.0.1:8000/health"
 $FrontendHealth = "http://127.0.0.1:3000"
 $DemoUrl = "http://127.0.0.1:3000/"
+
+try {
+    $Git = Get-RepoGitIdentity -RepoRoot $Root
+} catch {
+    Show-StartupError "Could not read Git HEAD from $Root. The demo launcher requires git to record the serving checkout. $_"
+}
+
+Write-Host "Current branch: $($Git.branch)"
+Write-Host "Current SHA: $($Git.sha)"
 
 $Python = Join-Path $Root "backend\.venv\Scripts\python.exe"
 if (-not (Test-Path $Python)) {
@@ -98,21 +128,6 @@ if (-not (Test-Path $NodeModules)) {
 }
 
 # Paper-only demo environment. Do not inject trading, wallet, or execution secrets.
-function Write-DemoPidIdentity {
-    param(
-        [string]$PidFile,
-        [System.Diagnostics.Process]$Process,
-        [string[]]$CommandTokens
-    )
-    $payload = @{
-        pid = $Process.Id
-        path = $Process.Path
-        name = $Process.ProcessName
-        command_tokens = @($CommandTokens)
-    }
-    ($payload | ConvertTo-Json -Compress) | Set-Content -Path $PidFile -Encoding utf8
-}
-
 $env:SPORTS_HEDGE_MODE = "paper"
 $env:SPORTS_HEDGE_EXECUTION_ENABLED = "false"
 $env:PAPER_AUTOFILL_ENABLED = "true"
@@ -120,6 +135,9 @@ $env:PAPER_AUTO_UNWIND_ENABLED = "true"
 $env:PAPER_LIVE_REFRESH_ENABLED = "true"
 $env:ACCOUNTING_SCHEDULE_ENABLED = "true"
 $env:NEXT_PUBLIC_SPORTS_HEDGE_API_URL = "http://127.0.0.1:8000"
+$env:SPORTS_HEDGE_GIT_SHA = $Git.sha
+$env:SPORTS_HEDGE_GIT_BRANCH = $Git.branch
+$env:SPORTS_HEDGE_REPO_ROOT = $Root
 
 $backendDir = Join-Path $Root "backend"
 $CanonicalDotEnv = Join-Path $Root ".env"
@@ -130,10 +148,44 @@ if (Test-Path $LegacyBackendDotEnv) {
     Write-Host "WARNING: ignoring leftover $LegacyBackendDotEnv. Use $CanonicalDotEnv and remove the leftover file so it is not mistaken for active configuration." -ForegroundColor Yellow
 }
 
-$backendAlready = Test-HttpOk $BackendHealth
-$frontendAlready = Test-HttpOk $FrontendHealth
+function Invoke-DemoOwnedService {
+    param(
+        [string]$Label,
+        [string]$HealthUrl,
+        [string]$PidFile,
+        [scriptblock]$Starter
+    )
+    $healthOk = Test-HttpOk $HealthUrl
+    $identity = $null
+    if (Test-Path $PidFile) {
+        $identity = ConvertTo-DemoIdentity -Raw (Get-Content $PidFile -Raw -ErrorAction SilentlyContinue)
+    }
+    $live = $null
+    if ($null -ne $identity -and $null -ne $identity.pid) {
+        $live = Get-DemoLiveProcess -ProcId $identity.pid
+    }
+    $action = Get-DemoStartAction -HealthOk $healthOk -Identity $identity -Live $live -CurrentGitHead $Git.sha -CurrentRepoRoot $Root
+    if ($action -eq "reuse") {
+        Write-Host "$Label: reused existing Sports Hedge process for SHA $($Git.sha)"
+        return
+    }
+    if ($action -eq "conflict") {
+        Show-StartupError "$Label is healthy at $HealthUrl but is not a Sports Hedge launcher process for this checkout (SHA $($Git.sha)). Refusing to reuse or kill the unrelated process occupying the port."
+    }
+    if ($action -eq "restart") {
+        Write-Host "$Label: restart required; recorded SHA $($identity.git_head) != current $($Git.sha)"
+        Stop-DemoPid -PidFile $PidFile -Label $Label
+        Wait-HttpGone -Url $HealthUrl -Label $Label
+    }
+    & $Starter
+    if ($action -eq "restart") {
+        Write-Host "$Label: restarted owned process because recorded SHA $($identity.git_head) != current $($Git.sha)"
+    } else {
+        Write-Host "$Label: started for SHA $($Git.sha)"
+    }
+}
 
-if (-not $backendAlready) {
+Invoke-DemoOwnedService -Label "backend" -HealthUrl $BackendHealth -PidFile $BackendPidFile -Starter {
     $backend = Start-Process -FilePath $Python -ArgumentList @(
         "-m", "uvicorn", "sports_hedge.api.main:app",
         "--host", "127.0.0.1", "--port", "8000"
@@ -141,10 +193,10 @@ if (-not $backendAlready) {
     Write-DemoPidIdentity -PidFile $BackendPidFile -Process $backend -CommandTokens @(
         "uvicorn",
         "sports_hedge.api.main:app"
-    )
+    ) -GitHead $Git.sha -RepoRoot $Root
 }
 
-if (-not $frontendAlready) {
+Invoke-DemoOwnedService -Label "frontend" -HealthUrl $FrontendHealth -PidFile $FrontendPidFile -Starter {
     $npmCmd = Get-Command npm.cmd -ErrorAction SilentlyContinue
     if ($null -eq $npmCmd) {
         Show-StartupError "npm.cmd was not found on PATH. Install Node.js, then retry."
@@ -155,7 +207,7 @@ if (-not $frontendAlready) {
         "dev",
         "127.0.0.1",
         "3000"
-    )
+    ) -GitHead $Git.sha -RepoRoot $Root
 }
 
 Wait-HttpOk -Url $BackendHealth -Label "Sports Hedge backend" | Out-Null
@@ -169,6 +221,8 @@ try {
 
 Write-Host "Sports Hedge paper demo is running."
 Write-Host "Operator console: $DemoUrl"
+Write-Host "Serving Git SHA: $($Git.sha) ($($Git.branch))"
+Write-Host "Build identity: GET http://127.0.0.1:8000/build-info"
 Write-Host "PAPER MODE. execution_enabled=false. PAPER_AUTOFILL_ENABLED=true (AUTO PAPER CAPTURE ON for qualifying LIVE_PAPER only; allocator-sized; no venue orders). PAPER_AUTO_UNWIND_ENABLED=true (AUTO PAPER POSITION MANAGEMENT ON; paper-only; two-scan fail-closed confirmation; no live execution; no automatic authoritative settlement). PAPER_LIVE_REFRESH_ENABLED=true and ACCOUNTING_SCHEDULE_ENABLED=true for this local demo only (ECB USD bootstrap + daily 16:15 UK refresh)."
 Write-Host "Canonical local dotenv remains $CanonicalDotEnv; backend\.env is not active configuration."
 Write-Host "Logs: $Logs"

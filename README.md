@@ -62,14 +62,15 @@ uvicorn sports_hedge.api.main:app --reload
 
 Then inspect:
 
-- `GET /health` — confirms paper mode, execution-disabled state, and which dotenv path is configured (path only; no secrets).
+- `GET /health` — confirms paper mode, execution-disabled state, which dotenv path is configured (path only; no secrets), and the serving Git SHA under `build`.
+- `GET /build-info` — cheap runtime serving identity (`git_sha`, `git_branch`, `source`) so soak/UI can prove which checkout is actually running.
 - `GET /venues` — shows current venue capability flags.
 
 ## One-click local demo (Windows)
 
 Double-click `scripts/windows/Start-SportsHedge-Demo.bat`. It starts the Python backend and Next.js operator console hidden, waits until they are healthy, and opens `/` (Operations Console). Fixture replay remains a labelled advanced/test path at `/demo` and is not the normal operator surface. Fast/Full auto-refresh is server-owned; the browser polls status. Primary **Run scan** posts a bounded current-identity HOT refresh to `/paper/collect/hot`, while broad `/paper/collect` discovery is explicitly labelled **Run full diagnostic** under Advanced and may return partial coverage. A companion `Stop-SportsHedge-Demo.bat` stops only the launcher-started processes after verifying PID command/path identity; a reused PID is not killed. Logs are written under `logs/`. The launcher forces paper mode (`execution_enabled=false`), enables local paper autofill and the read-only live-refresh loop for that process only, and does not add venue write, wallet, or trading-auth capability. It is not a Vercel/cloud deploy.
 
-Requires a local `backend/.venv` with the package installed and Node.js `npm` on PATH. If the backend or frontend is already healthy on ports 8000/3000, the launcher reuses them instead of starting duplicates. Matchbook credentials belong in the repository-root `.env` (same file as `.env.example`). The launcher starts FastAPI with working directory `backend\` but does not read `backend/.env`.
+Requires a local `backend/.venv` with the package installed and Node.js `npm` on PATH. If the backend or frontend is already healthy on ports 8000/3000, the launcher reuses them only when the PID identity belongs to this Sports Hedge launcher, the process command matches, and the recorded repo root plus Git HEAD match the current checkout. A launcher-owned process from a different HEAD is stopped and restarted. An unrelated occupant of those ports is refused rather than killed. The launcher prints the current branch, SHA, and whether each process was reused or restarted. `GET /build-info` (also nested on `GET /health`) reports the serving Git SHA. Matchbook credentials belong in the repository-root `.env` (same file as `.env.example`). The launcher starts FastAPI with working directory `backend\` but does not read `backend/.env`.
 
 ## Operator console (two processes)
 
