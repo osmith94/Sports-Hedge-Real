@@ -698,16 +698,25 @@ def test_windows_launcher_scripts_encode_paper_only_contract() -> None:
         "Wait-HttpOk -Url $FrontendHealth -Label \"Sports Hedge operator console\" | Out-Null"
         in start_ps1
     )
-    assert "command_tokens" in start_ps1
-    assert "ConvertTo-Json" in start_ps1
+    identity_ps1 = (REPO_ROOT / "scripts/windows/Demo-LauncherIdentity.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "command_tokens" in identity_ps1
+    assert "ConvertTo-Json" in identity_ps1
+    assert "git_head" in identity_ps1
+    assert "repo_root" in identity_ps1
+    assert "Get-DemoStartAction" in identity_ps1
+    assert "Demo-LauncherIdentity.ps1" in start_ps1
+    assert "Demo-LauncherIdentity.ps1" in stop_ps1
     assert "vercel" not in start_ps1.lower()
     assert "place_order" not in start_ps1
     assert "MATCHBOOK_PASSWORD" not in start_ps1
-    assert "Stop-Process" in stop_ps1
-    assert "Get-CimInstance" in stop_ps1
-    assert "CommandLine" in stop_ps1
-    assert "Test-DemoPidOwned" in stop_ps1
-    assert "unrelated process was not killed" in stop_ps1
+    assert "Stop-DemoPid" in stop_ps1
+    assert "Stop-Process" in identity_ps1
+    assert "Get-CimInstance" in identity_ps1
+    assert "CommandLine" in identity_ps1
+    assert "Test-DemoPidOwned" in identity_ps1
+    assert "unrelated process was not killed" in identity_ps1
     assert "logs" in stop_ps1
     docs = (REPO_ROOT / "docs/DEMO_READINESS.md").read_text(encoding="utf-8")
     assert "PAPER_SIMULATED_EXTERNAL" in docs
@@ -762,10 +771,12 @@ def test_stale_demo_pid_is_not_killed() -> None:
         )
         == "stale"
     )
-    stop_ps1 = (REPO_ROOT / "scripts/windows/Stop-SportsHedge-Demo.ps1").read_text(encoding="utf-8")
-    stop_index = stop_ps1.index("Stop-Process -Id")
-    assert stop_ps1.index("Test-DemoPidOwned") < stop_index
-    assert stop_ps1.index('$action -ne "stop"') < stop_index
+    identity_ps1 = (REPO_ROOT / "scripts/windows/Demo-LauncherIdentity.ps1").read_text(
+        encoding="utf-8"
+    )
+    stop_index = identity_ps1.index("Stop-Process -Id")
+    assert identity_ps1.index("Test-DemoPidOwned") < stop_index
+    assert identity_ps1.index('$action -ne "stop"') < stop_index
 
 
 def test_demo_operator_surface_wires_live_discovery_and_solver_guard() -> None:

@@ -18,6 +18,7 @@ from sports_hedge.api.paper import router as paper_router, server_owned_refresh_
 from sports_hedge.api.priority_alerts import router as priority_alerts_router
 from sports_hedge.api.watchlist import router as watchlist_router
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
+from sports_hedge.application.serving_build import get_serving_build_info
 from sports_hedge.config import emit_dotenv_operator_diagnostics, get_settings, inspect_dotenv_sources
 from sports_hedge.persistence.universe_checkpoint import get_universe_checkpoint_store
 from sports_hedge.domain.models import VenueCapabilities, VenueName
@@ -31,6 +32,7 @@ from sports_hedge.venues.matchbook import aclose_shared_matchbook_client
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     emit_dotenv_operator_diagnostics(force=True)
+    get_serving_build_info()
     coordinator = get_live_refresh_coordinator()
     coordinator.bind_universe_checkpoint_store(get_universe_checkpoint_store())
     coordinator.configure_from_settings()
@@ -71,6 +73,13 @@ app.include_router(watchlist_router)
 app.include_router(priority_alerts_router)
 
 
+@app.get("/build-info")
+def build_info() -> dict[str, object]:
+    """Cheap serving identity so soak/UI can prove which Git SHA is running."""
+
+    return get_serving_build_info().as_public_dict()
+
+
 @app.get("/health")
 def health() -> dict[str, object]:
     settings = get_settings()
@@ -83,6 +92,7 @@ def health() -> dict[str, object]:
         "paper_autofill_enabled": settings.paper_autofill_enabled,
         "paper_auto_unwind_enabled": settings.paper_auto_unwind_enabled,
         "dotenv": inspect_dotenv_sources().as_public_dict(),
+        "build": get_serving_build_info().as_public_dict(),
         "live_refresh": {
             "discovery_source": "matchbook",
             "discovery_mode": "venue_union",
