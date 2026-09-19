@@ -100,6 +100,16 @@ export function dualScanStatusLines(
   status: LiveRefreshStatus | null,
   now: number | null = null,
 ): string[] {
+  if (status?.scanner_stopped) {
+    const lines = [
+      "Fast scan · stopped by operator · no provider call",
+      "Full sweep · stopped by operator · no provider call",
+    ];
+    if (status.background || status.price_engine?.background) {
+      lines.push("Background price engine · stopped by operator · no provider call");
+    }
+    return lines;
+  }
   const fast = fastScanCopy(status, now);
   const full = fullSweepCopy(status, now);
   const lines = [`${fast.label} · ${fast.detail}`, `${full.label} · ${full.detail}`];

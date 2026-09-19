@@ -99,6 +99,9 @@ from sports_hedge.application.scan_lanes import (
     classify_scan_lane,
 )
 from sports_hedge.config import Settings, get_settings
+from sports_hedge.persistence.operator_scanner_settings import (
+    effective_operator_scanner_settings,
+)
 from sports_hedge.domain.football import (
     CanonicalEvent,
     CanonicalMarket,
@@ -677,8 +680,9 @@ class CataloguePriceEngine:
             }
             settings = getattr(self.paper_scan, "settings", None)
             if settings is not None:
-                scan_kwargs["minimum_net_edge"] = Decimal(str(settings.min_net_edge))
-                scan_kwargs["maximum_execution_risk"] = int(settings.max_execution_risk)
+                operator = effective_operator_scanner_settings(settings)
+                scan_kwargs["minimum_net_edge"] = operator.min_net_edge
+                scan_kwargs["maximum_execution_risk"] = operator.max_execution_risk
                 scan_kwargs["assumed_latency_ms"] = int(settings.simulated_latency_ms)
             decision = self.paper_scan.scan_pair(matchbook_obs, kalshi_obs, **scan_kwargs)
             result.decisions.append(decision)

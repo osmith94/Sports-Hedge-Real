@@ -286,6 +286,19 @@ describe("dual cadence operator copy", () => {
     assert.match(fullSweepCopy(waiting).detail, /72 evaluated/);
   });
 
+  it("makes operator-stopped status explicit for Fast/Full/Background", () => {
+    const lines = dualScanStatusLines(
+      status({
+        scanner_stopped: true,
+        background: { cadence_seconds: 180, cycle_timeout_seconds: null },
+      }),
+    );
+    assert.equal(lines.length, 3);
+    assert.match(lines[0], /stopped by operator/);
+    assert.match(lines[1], /stopped by operator/);
+    assert.match(lines[2], /stopped by operator/);
+  });
+
   it("routes primary Run scan to HOT and labels full discovery as advanced", () => {
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
     const api = readFileSync(join(frontendRoot, "lib/api.ts"), "utf8");
@@ -295,6 +308,14 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /Run full diagnostic/);
     assert.match(scan, /collect\("diagnostic"\)/);
     assert.match(scan, /does not\s+rediscover the full universe/);
+    assert.match(scan, /HOT cadence s/);
+    assert.match(scan, /Update/);
+    assert.match(scan, /Stop scanner/);
+    assert.match(scan, /Resume scanner/);
+    assert.match(scan, /saveOperatorScannerSettings/);
+    assert.match(scan, /stopPaperScanner/);
+    assert.match(scan, /resumePaperScanner/);
+    assert.doesNotMatch(scan, /Refresh interval/);
     assert.match(api, /\/paper\/collect\/hot/);
     assert.match(api, /PAPER_HOT_REFRESH_TIMEOUT_MS = 35_000/);
     assert.match(api, /\/paper\/collect`/);

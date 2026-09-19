@@ -261,7 +261,8 @@ def test_live_console_hides_demo_pools_and_compacts_empty_states() -> None:
     assert "econ-strip" in scan
     assert "USD → GBP" not in scan
     assert "Matchbook fee %" not in scan
-    assert "Refresh interval" in scan
+    assert "HOT cadence" in scan
+    assert "Refresh interval" not in scan
     assert "Auto 30s" not in scan
     assert "DEMO_LIQUIDITY_POOLS" not in treasury
     assert "PAPER CAPITAL" in pools

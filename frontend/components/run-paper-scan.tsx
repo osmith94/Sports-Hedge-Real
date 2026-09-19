@@ -12,11 +12,13 @@ import {
   getEconomicsStatus,
   getLiveRefreshStatus,
   resetMatchbookFee,
+  resumePaperScanner,
   runPaperCollection,
   runPaperHotRefresh,
   saveMatchbookFee,
+  saveOperatorScannerSettings,
+  stopPaperScanner,
 } from "../lib/api";
-import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
 import { dualScanStatusLines } from "../lib/scan-status-display";
 import { CONFIG_WARNING_BANNER_CLASS } from "../lib/config-warning-display";
 import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-refresh-poll-guard";
@@ -66,9 +68,16 @@ function reportSummary(report: PaperCollectionReport): string {
   return `${report.matched_event_pairs} event pair${report.matched_event_pairs === 1 ? "" : "s"} · ${report.matched_market_pairs} market pair${report.matched_market_pairs === 1 ? "" : "s"} · ${eligible} paper-eligible · ${report.issues.length} genuine issue${report.issues.length === 1 ? "" : "s"}`;
 }
 
-function clampIntervalSeconds(value: number): number {
+function clampHotCadenceSeconds(value: number): number {
   if (!Number.isFinite(value)) return 30;
-  return Math.min(300, Math.max(15, Math.round(value)));
+  return Math.min(60, Math.max(15, Math.round(value)));
+}
+
+function minNetPercentFromRate(value: string | number | null | undefined): string {
+  if (value == null || value === "") return "";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "";
+  return (parsed * 100).toFixed(2);
 }
 
 function sourceLabel(source: string): string {
@@ -195,22 +204,23 @@ function economicsChips(status: EconomicsStatus | null): StripChip[] {
 export function RunPaperScan() {
   const router = useRouter();
   const [capitalLimit, setCapitalLimit] = useState("");
-  const [minNetArbPercent, setMinNetArbPercent] = useState(
-    String(DEFAULT_SCANNER_ASSUMPTIONS.minimumNetArb * 100),
-  );
-  const [maxRisk, setMaxRisk] = useState(String(DEFAULT_SCANNER_ASSUMPTIONS.maximumExecutionRisk));
+  const [minNetArbPercent, setMinNetArbPercent] = useState("");
+  const [maxRisk, setMaxRisk] = useState("");
   const [loadingMode, setLoadingMode] = useState<ScanMode | null>(null);
   const [state, setState] = useState<ScanState>({ kind: "idle" });
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [intervalSeconds, setIntervalSeconds] = useState(30);
-  const [intervalDraft, setIntervalDraft] = useState("30");
+  const [intervalDraft, setIntervalDraft] = useState("");
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [scannerControlBusy, setScannerControlBusy] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [lastCompletedAt, setLastCompletedAt] = useState<string | null>(null);
   const [lastDurationMs, setLastDurationMs] = useState<number | null>(null);
   const [liveRefresh, setLiveRefresh] = useState<LiveRefreshStatus | null>(null);
   const [venueHealth, setVenueHealth] = useState<Record<string, string> | null>(null);
   const [completeFlash, setCompleteFlash] = useState(false);
   const [nowMs, setNowMs] = useState<number | null>(null);
-  const [autoAnchorMs, setAutoAnchorMs] = useState<number | null>(null);
   const [economics, setEconomics] = useState<EconomicsStatus | null>(null);
   const [matchbookCommissionPercent, setMatchbookCommissionPercent] = useState("2.00");
   const [feeSaving, setFeeSaving] = useState(false);
@@ -252,11 +262,18 @@ export function RunPaperScan() {
   }, []);
 
   const applyLiveRefresh = useCallback(
-    (status: LiveRefreshStatus) => {
-      if (status.interval_seconds) {
-        const clamped = clampIntervalSeconds(status.interval_seconds);
+    (status: LiveRefreshStatus, options?: { forceSettings?: boolean }) => {
+      const saved = status.operator_settings;
+      const cadence = saved?.hot_cadence_seconds ?? status.interval_seconds;
+      if (cadence && (!settingsDirty || options?.forceSettings)) {
+        const clamped = clampHotCadenceSeconds(cadence);
         setIntervalSeconds(clamped);
         setIntervalDraft(String(clamped));
+      }
+      if (saved && (!settingsDirty || options?.forceSettings)) {
+        setMinNetArbPercent(minNetPercentFromRate(saved.min_net_edge));
+        setMaxRisk(String(saved.max_execution_risk));
+        if (options?.forceSettings) setSettingsDirty(false);
       }
       const completed =
         status.hot?.last_completed_at ??
@@ -278,7 +295,7 @@ export function RunPaperScan() {
         if (stamp !== "|") router.refresh();
       }
     },
-    [router],
+    [router, settingsDirty],
   );
 
   const collect = useCallback(async (mode: ScanMode) => {
@@ -384,18 +401,14 @@ export function RunPaperScan() {
 
   useEffect(() => {
     if (!autoRefresh) {
-      setAutoAnchorMs(null);
       return undefined;
     }
-    const serverOwned = Boolean(liveRefresh?.server_loop_enabled);
-    const cadenceMs = serverOwned ? 2000 : clampIntervalSeconds(intervalSeconds) * 1000;
-    setAutoAnchorMs(Date.now());
     void pollLiveStatus();
     const timer = window.setInterval(() => {
       void pollLiveStatus();
-    }, cadenceMs);
+    }, 2000);
     return () => window.clearInterval(timer);
-  }, [autoRefresh, intervalSeconds, liveRefresh?.server_loop_enabled, pollLiveStatus]);
+  }, [autoRefresh, liveRefresh?.server_loop_enabled, pollLiveStatus]);
 
   useEffect(() => {
     if (!autoRefresh || loadingMode !== null) return undefined;
@@ -403,6 +416,51 @@ export function RunPaperScan() {
     const timer = window.setInterval(() => setNowMs(Date.now()), 250);
     return () => window.clearInterval(timer);
   }, [autoRefresh, loadingMode]);
+
+  async function saveOperatorSettings() {
+    setSettingsSaving(true);
+    setSettingsMessage(null);
+    try {
+      const minNet = optionalPercentRate(minNetArbPercent, "Minimum net arb");
+      if (!minNet) {
+        throw new Error("Minimum net arb is required.");
+      }
+      const risk = Number(maxRisk);
+      if (!Number.isInteger(risk) || risk < 0 || risk > 100) {
+        throw new Error("Maximum execution risk must be a whole number from 0 to 100.");
+      }
+      const cadence = clampHotCadenceSeconds(Number(intervalDraft));
+      const status = await saveOperatorScannerSettings({
+        min_net_edge: minNet,
+        max_execution_risk: risk,
+        hot_cadence_seconds: cadence,
+      });
+      applyLiveRefresh(status, { forceSettings: true });
+      setSettingsDirty(false);
+      setSettingsMessage("Saved scanner settings. Subsequent server-owned work will use them.");
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : "Could not save scanner settings.");
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
+
+  async function toggleScannerStopped() {
+    setScannerControlBusy(true);
+    setSettingsMessage(null);
+    try {
+      const status = liveRefresh?.scanner_stopped
+        ? await resumePaperScanner()
+        : await stopPaperScanner();
+      applyLiveRefresh(status, { forceSettings: true });
+    } catch (error) {
+      setSettingsMessage(
+        error instanceof Error ? error.message : "Could not change scanner run state.",
+      );
+    } finally {
+      setScannerControlBusy(false);
+    }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -444,29 +502,29 @@ export function RunPaperScan() {
 
   const chips = economicsChips(economics);
   const loading = loadingMode !== null;
-  const cadenceMs = clampIntervalSeconds(intervalSeconds) * 1000;
   const serverOwned = Boolean(liveRefresh?.server_loop_enabled);
+  const scannerStopped = Boolean(liveRefresh?.scanner_stopped);
   const nextHotMs = liveRefresh?.hot?.next_due_at
     ? Date.parse(liveRefresh.hot.next_due_at)
     : Number.NaN;
-  const nextRefreshSeconds = !autoRefresh || nowMs == null
+  const nextRefreshSeconds = !autoRefresh || nowMs == null || scannerStopped
     ? null
     : Number.isFinite(nextHotMs)
       ? Math.max(0, Math.ceil((nextHotMs - nowMs) / 1000))
-      : autoAnchorMs != null
-        ? Math.max(0, Math.ceil((autoAnchorMs + cadenceMs - nowMs) / 1000))
-        : null;
+      : null;
   const pulsePhase: LiveScanPulsePhase = loading
     ? "scanning"
     : state.kind === "error"
       ? "error"
-      : venueHealthIsDegraded(venueHealth ?? undefined)
-        ? "degraded"
-        : completeFlash
-          ? "complete"
-          : !autoRefresh
-            ? "paused"
-            : "idle";
+      : scannerStopped
+        ? "stopped"
+        : venueHealthIsDegraded(venueHealth ?? undefined)
+          ? "degraded"
+          : completeFlash
+            ? "complete"
+            : !autoRefresh
+              ? "paused"
+              : "idle";
 
   return (
     <section className="panel scan-control">
@@ -492,7 +550,10 @@ export function RunPaperScan() {
             <input
               inputMode="decimal"
               value={minNetArbPercent}
-              onChange={(event) => setMinNetArbPercent(event.target.value)}
+              onChange={(event) => {
+                setMinNetArbPercent(event.target.value);
+                setSettingsDirty(true);
+              }}
               placeholder="0.50"
               aria-label="Minimum net arbitrage trigger percent"
             />
@@ -502,23 +563,29 @@ export function RunPaperScan() {
             <input
               inputMode="numeric"
               value={maxRisk}
-              onChange={(event) => setMaxRisk(event.target.value)}
+              onChange={(event) => {
+                setMaxRisk(event.target.value);
+                setSettingsDirty(true);
+              }}
               aria-label="Maximum execution risk score"
             />
           </label>
           <label className="scan-field scan-field-compact">
-            <span>Refresh interval s</span>
+            <span>HOT cadence s</span>
             <input
               inputMode="numeric"
               value={intervalDraft}
-              onChange={(event) => setIntervalDraft(event.target.value)}
+              onChange={(event) => {
+                setIntervalDraft(event.target.value);
+                setSettingsDirty(true);
+              }}
               onBlur={() => {
-                const clamped = clampIntervalSeconds(Number(intervalDraft));
+                const clamped = clampHotCadenceSeconds(Number(intervalDraft));
                 setIntervalSeconds(clamped);
                 setIntervalDraft(String(clamped));
               }}
-              aria-label="Refresh interval seconds"
-              title="Safe range 15–300 seconds"
+              aria-label="HOT cadence seconds"
+              title="Server-owned HOT pricing cadence. Safe range 15–60 seconds. Not the view refresh."
             />
           </label>
           <label className="scan-refresh">
@@ -526,13 +593,9 @@ export function RunPaperScan() {
               type="checkbox"
               checked={autoRefresh}
               onChange={(event) => setAutoRefresh(event.target.checked)}
-              aria-label={
-                serverOwned
-                  ? "Auto refresh Fast scan and Full sweep status"
-                  : "Auto refresh"
-              }
+              aria-label="Auto refresh scanner status view"
             />
-            {serverOwned ? "Auto refresh view" : "Auto refresh"}
+            Auto refresh view
           </label>
           <LiveScanPulse
             phase={pulsePhase}
@@ -546,10 +609,47 @@ export function RunPaperScan() {
             </button>
           </div>
         </div>
+        <div className="scan-ops-actions">
+          <button
+            className="scan-button-secondary"
+            type="button"
+            disabled={settingsSaving || loading}
+            onClick={() => void saveOperatorSettings()}
+          >
+            {settingsSaving ? "Saving…" : "Update"}
+          </button>
+          <button
+            className={scannerStopped ? "scan-button" : "scan-button-danger"}
+            type="button"
+            disabled={scannerControlBusy || loading}
+            onClick={() => void toggleScannerStopped()}
+            aria-label={scannerStopped ? "Resume scanner" : "Stop scanner"}
+          >
+            {scannerControlBusy
+              ? scannerStopped
+                ? "Resuming…"
+                : "Stopping…"
+              : scannerStopped
+                ? "Resume scanner"
+                : "Stop scanner"}
+          </button>
+          {scannerStopped ? (
+            <span className="status-badge" role="status">
+              SCANNER STOPPED · HOT/UNIVERSE/BACKGROUND paused
+            </span>
+          ) : null}
+        </div>
+        {settingsMessage ? (
+          <div className="scan-note" role="status">
+            {settingsMessage}
+          </div>
+        ) : null}
         <div className="scan-note">
           Run scan performs a manual HOT refresh of current known fixtures.
           It does not rediscover the full universe or advance the scheduled Fast Scan / Full Sweep
-          lanes.
+          lanes. Update saves Min Net Arb, Max Risk and HOT cadence for subsequent server-owned work
+          and does not trigger a scan. HOT cadence is how often HOT pricing is due; Auto refresh view
+          only polls status.
         </div>
         <div className="scan-note" aria-label="Fast scan and Full sweep status">
           {dualScanStatusLines(liveRefresh, nowMs).map((line) => (
@@ -557,9 +657,11 @@ export function RunPaperScan() {
           ))}
           {autoRefresh
             ? serverOwned
-              ? " · auto on · view refresh · server owns Fast/Full scans"
-              : " · auto on"
-            : " · auto off"}
+              ? scannerStopped
+                ? " · view refresh on · scanner stopped by operator"
+                : " · auto on · view refresh · server owns Fast/Full scans"
+              : " · auto on · view refresh"
+            : " · view refresh off"}
         </div>
         <VenueLaneControls
           status={liveRefresh}

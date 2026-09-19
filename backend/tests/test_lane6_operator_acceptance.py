@@ -178,15 +178,24 @@ def test_operator_console_hierarchy_is_treasury_then_scan_then_discovery() -> No
 def test_live_scan_pulse_states_are_real_and_last_scan_is_not_invented() -> None:
     pulse = (FRONTEND / "components" / "live-scan-pulse.tsx").read_text(encoding="utf-8")
     scan = (FRONTEND / "components" / "run-paper-scan.tsx").read_text(encoding="utf-8")
-    for phase in ('"idle"', '"scanning"', '"complete"', '"error"', '"degraded"', '"paused"'):
+    for phase in ('"idle"', '"scanning"', '"complete"', '"error"', '"degraded"', '"paused"', '"stopped"'):
         assert phase in pulse
     assert "Scanning live venues" in pulse
     assert "Scan failed" in pulse
     assert "Partial venue failure" in pulse
     assert "Auto refresh off" in pulse
+    assert "Scanner stopped" in pulse
     assert "Waiting for first scan" in pulse
     assert "Fast scan" in scan
     assert "Full sweep" in scan
+    assert "Refresh interval" not in scan
+    assert "HOT cadence s" in scan
+    assert "Update" in scan
+    assert "Stop scanner" in scan
+    assert "Resume scanner" in scan
+    assert "Auto refresh view" in scan
+    assert "saveOperatorScannerSettings" in scan
+    assert "2000" in scan
     assert "dualScanStatusLines" in scan
     assert "pollLiveStatus" in scan
     assert "void collectRef.current()" not in scan

@@ -575,6 +575,22 @@ export type LaneVenueParticipationUpdate = {
   universe: LaneVenueFlags;
 };
 
+export type OperatorScannerSettings = {
+  min_net_edge: string;
+  max_execution_risk: number;
+  hot_cadence_seconds: number;
+  scanner_stopped: boolean;
+  source?: "operator" | "env_default";
+  updated_at?: string | null;
+  restart_semantics?: string;
+};
+
+export type OperatorScannerSettingsUpdate = {
+  min_net_edge: string;
+  max_execution_risk: number;
+  hot_cadence_seconds: number;
+};
+
 export type LiveRefreshStatus = {
   discovery_source: Venue;
   discovery_mode?: string;
@@ -582,6 +598,8 @@ export type LiveRefreshStatus = {
   matching_venues?: Venue[];
   server_loop_enabled: boolean;
   paper_autofill_enabled?: boolean;
+  scanner_stopped?: boolean;
+  operator_settings?: OperatorScannerSettings | null;
   interval_seconds: number;
   cycle_in_progress: boolean;
   last_started_at?: string | null;
@@ -1139,6 +1157,47 @@ export async function saveVenueParticipation(
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(update),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function saveOperatorScannerSettings(
+  update: OperatorScannerSettingsUpdate,
+): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/operator-scanner-settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function stopPaperScanner(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function resumePaperScanner(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
     cache: "no-store",
   });
   if (!response.ok) {
