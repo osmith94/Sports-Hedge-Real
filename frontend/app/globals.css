@@ -51,6 +51,19 @@ button, input, select { font: inherit; }
 .status-dot.down { background: var(--red); }
 .status-dot.off { background: var(--muted-2); }
 .status-dot.unknown { background: var(--muted-2); }
+.status-why {
+  appearance: none;
+  background: transparent;
+  border: 1px solid rgba(241, 191, 105, .35);
+  color: var(--amber);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  cursor: pointer;
+}
+.status-why:hover { border-color: var(--amber); color: var(--text); }
 .clock { font-variant-numeric: tabular-nums; color: var(--muted-2); }
 
 .main { padding: 26px; max-width: 1600px; margin: 0 auto; }

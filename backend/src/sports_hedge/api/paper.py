@@ -796,8 +796,14 @@ def _cycles_from(repository: Any, limit: int = 100) -> list[PaperScanCycleRecord
 def _status_with_scan_cycles(
     status: LiveRefreshStatus,
     repository: Any,
+    coordinator: Any | None = None,
 ) -> LiveRefreshStatus:
-    return status.model_copy(update={"recent_scan_cycles": _cycles_from(repository)})
+    """Attach recent cycle rows and bounded Why? incidents. Never starts scan work."""
+
+    resolved = coordinator or get_live_refresh_coordinator()
+    with_cycles = status.model_copy(update={"recent_scan_cycles": _cycles_from(repository)})
+    incidents = resolved.observe_degradation_incidents(with_cycles)
+    return with_cycles.model_copy(update={"venue_degradation_incidents": incidents})
 
 
 @router.get("/live-refresh", response_model=LiveRefreshStatus)
@@ -807,7 +813,7 @@ def live_refresh_status(
     """Pure read model. Never starts collector, discovery, or checkpoint I/O."""
 
     coordinator = get_live_refresh_coordinator()
-    return _status_with_scan_cycles(coordinator.public_status(), repository)
+    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
 
 
 @router.get("/scanner-validation", response_model=ScannerValidationSnapshot)
@@ -855,7 +861,7 @@ def put_venue_participation(
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_venue_participation(update.hot.as_venues(), update.universe.as_venues())
-    return _status_with_scan_cycles(coordinator.public_status(), repository)
+    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
 
 
 @router.post(

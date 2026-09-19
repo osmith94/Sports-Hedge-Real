@@ -525,6 +525,11 @@ export type LaneRefreshStatus = {
   canonical_retryable?: number;
   canonical_final_failed?: number;
   canonical_remaining?: number;
+  series_work_total?: number;
+  series_ok?: number;
+  series_retryable?: number;
+  series_final_failed?: number;
+  series_skipped?: number;
 };
 
 export type PriceEngineTierStatus = {
@@ -575,6 +580,33 @@ export type LaneVenueParticipationUpdate = {
   universe: LaneVenueFlags;
 };
 
+export type VenueDegradationIncident = {
+  schema?: string;
+  data_kind?: string;
+  captured_at: string;
+  build?: {
+    git_sha?: string | null;
+    git_branch?: string | null;
+    source?: string | null;
+  };
+  affected_venue: string;
+  transition?: {
+    previous_health?: string | null;
+    new_health?: string | null;
+    reason?: string;
+  };
+  venue_health?: Record<string, string>;
+  hot?: Record<string, unknown>;
+  background?: Record<string, unknown>;
+  universe?: Record<string, unknown>;
+  price_engine?: Record<string, unknown>;
+  provider_access?: Record<string, unknown>;
+  recent_scan_cycles?: Array<Record<string, unknown>>;
+  active_catalogue_count?: number | null;
+  classification?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
 export type LiveRefreshStatus = {
   discovery_source: Venue;
   discovery_mode?: string;
@@ -605,6 +637,7 @@ export type LiveRefreshStatus = {
   venue_participation?: LaneVenueParticipation | null;
   recent_scan_cycles?: PaperScanCycleRecord[];
   provider_access?: Record<string, unknown>;
+  venue_degradation_incidents?: Record<string, VenueDegradationIncident>;
 };
 
 export type VenueHealth = {

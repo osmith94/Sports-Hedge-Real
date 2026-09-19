@@ -20,6 +20,7 @@ export default defineConfig({
       "lib/hot-fixture-roster-display.test.ts",
       "lib/scan-cycle-history-display.test.ts",
       "lib/catalogue-coverage-display.test.ts",
+      "lib/venue-degradation-incident.test.ts",
     ],
   },
 });

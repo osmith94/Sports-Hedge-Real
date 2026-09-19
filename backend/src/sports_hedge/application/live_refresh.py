@@ -75,6 +75,7 @@ from sports_hedge.application.scanner_observability import (
     ScannerObservabilitySink,
     empty_price_engine_status,
 )
+from sports_hedge.application.venue_degradation_incident import VenueDegradationIncidentStore
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
     UNIVERSE_MIN_CHUNK_SECONDS,
@@ -253,6 +254,7 @@ class LiveRefreshStatus(BaseModel):
     venue_participation: LaneVenueParticipation | None = None
     recent_scan_cycles: list[PaperScanCycleRecord] = Field(default_factory=list)
     provider_access: dict[str, Any] = Field(default_factory=dict)
+    venue_degradation_incidents: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class DualCadencePlan(BaseModel):
@@ -441,6 +443,7 @@ class LiveRefreshCoordinator:
         self._cycle_hot_venues: tuple[VenueName, ...] | None = None
         self._cycle_universe_venues: tuple[VenueName, ...] | None = None
         self._cycle_enabled_venues: tuple[VenueName, ...] | None = None
+        self._degradation_incidents = VenueDegradationIncidentStore()
         self.status = LiveRefreshStatus(
             server_loop_enabled=False,
             interval_seconds=30,
@@ -680,6 +683,7 @@ class LiveRefreshCoordinator:
                 server_loop_enabled=False,
                 interval_seconds=30,
             )
+            self._degradation_incidents.reset()
         self.flush_universe_checkpoint()
         self.configure_from_settings()
         self._drain_orphaned_collection_tasks(orphans)
@@ -3296,6 +3300,11 @@ class LiveRefreshCoordinator:
                 }
             )
             return self.status
+
+    def observe_degradation_incidents(self, status: LiveRefreshStatus) -> dict[str, dict[str, Any]]:
+        """Bounded OK→degraded snapshots from an already-built live-refresh read model."""
+
+        return self._degradation_incidents.observe(status, captured_at=self.now())
 
     def fixture_detail(self, canonical_event_id: str) -> FixtureDetailReadModel | None:
         return self._fixture_state.detail(
