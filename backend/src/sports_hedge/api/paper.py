@@ -822,7 +822,7 @@ def venue_degradation_incident(
     venue: str,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
 ) -> dict[str, Any]:
-    """Cheap in-memory Why? snapshot. Never calls venues, /venues/health, or scan workers."""
+    """Cheap in-memory Why? snapshot. Never calls venues, venue health, or scan workers."""
 
     key = str(venue or "").strip().casefold()
     if key not in FIRST_CLASS_VENUES:
