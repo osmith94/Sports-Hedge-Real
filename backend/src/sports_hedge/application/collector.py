@@ -94,7 +94,7 @@ from sports_hedge.application.quote_freshness import (
 from sports_hedge.application.approved_market_catalogue import FEE_SOURCE_GET_SERIES
 from sports_hedge.application.catalogue_maintenance import (
     pair_identity_from_markets,
-    persist_universe_catalogue_pass,
+    persist_universe_catalogue_pass_offloop,
 )
 from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key, should_skip_market_work
 from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
@@ -646,6 +646,7 @@ class ReadOnlyCrossVenueCollector:
         }
         self._provider_access = provider_access
         self.catalogue_store = catalogue_store
+        self._catalogue_persist_sema = asyncio.Semaphore(1)
         self._op_universe_generation_id: int | None = None
         self._cluster_sema: asyncio.Semaphore | None = None
         self._provider_semaphores: dict[VenueName, asyncio.Semaphore] = {}
@@ -2552,7 +2553,7 @@ class ReadOnlyCrossVenueCollector:
             queried_series_ids=queried_series_ids,
         )
         if should_skip_market_work(fixture, seen_at):
-            self._mark_universe_catalogue_terminal(fixture)
+            await self._mark_universe_catalogue_terminal(fixture)
             return fixture, [], [], {}, 0, 0
         if self._op_request_lane == ScanLane.HOT.value:
             return await self._refresh_hot_cluster(
@@ -2879,24 +2880,25 @@ class ReadOnlyCrossVenueCollector:
             matched_market_pairs,
         )
 
-    def _mark_universe_catalogue_terminal(self, fixture: DiscoveredFixture) -> None:
+    async def _mark_universe_catalogue_terminal(self, fixture: DiscoveredFixture) -> None:
         store = self.catalogue_store
         if store is None or self._op_request_lane == ScanLane.HOT.value:
             return
         generation = self._op_universe_generation_id
-        persist_universe_catalogue_pass(
-            store,
-            canonical_event_id=fixture.canonical_event_id,
-            competition=fixture.target_competition_code or fixture.competition,
-            home_canonical=fixture.home_team,
-            away_canonical=fixture.away_team,
-            kickoff_utc=fixture.kickoff_utc,
-            pairs=[],
-            now=datetime.now(UTC),
-            generation_id=None if generation is None else str(generation),
-            listed_ok=False,
-            terminal=True,
-        )
+        async with self._catalogue_persist_sema:
+            await persist_universe_catalogue_pass_offloop(
+                store,
+                canonical_event_id=fixture.canonical_event_id,
+                competition=fixture.target_competition_code or fixture.competition,
+                home_canonical=fixture.home_team,
+                away_canonical=fixture.away_team,
+                kickoff_utc=fixture.kickoff_utc,
+                pairs=[],
+                now=datetime.now(UTC),
+                generation_id=None if generation is None else str(generation),
+                listed_ok=False,
+                terminal=True,
+            )
 
     async def _persist_universe_catalogue_from_pairs(
         self,
@@ -2948,19 +2950,20 @@ class ReadOnlyCrossVenueCollector:
             if identity is not None:
                 identities.append(identity)
         generation = self._op_universe_generation_id
-        persist_universe_catalogue_pass(
-            store,
-            canonical_event_id=fixture.canonical_event_id,
-            competition=fixture.target_competition_code or fixture.competition,
-            home_canonical=fixture.home_team,
-            away_canonical=fixture.away_team,
-            kickoff_utc=fixture.kickoff_utc,
-            pairs=identities,
-            now=datetime.now(UTC),
-            generation_id=None if generation is None else str(generation),
-            listed_ok=listed_ok,
-            terminal=False,
-        )
+        async with self._catalogue_persist_sema:
+            await persist_universe_catalogue_pass_offloop(
+                store,
+                canonical_event_id=fixture.canonical_event_id,
+                competition=fixture.target_competition_code or fixture.competition,
+                home_canonical=fixture.home_team,
+                away_canonical=fixture.away_team,
+                kickoff_utc=fixture.kickoff_utc,
+                pairs=identities,
+                now=datetime.now(UTC),
+                generation_id=None if generation is None else str(generation),
+                listed_ok=listed_ok,
+                terminal=False,
+            )
 
     async def _refresh_hot_cluster(
         self,

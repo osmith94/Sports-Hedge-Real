@@ -6,7 +6,12 @@ probabilities. PAPER / read-only. No Phase 3 price-engine queue.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import json
+import threading
+import time
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,15 +25,21 @@ from sports_hedge.application.approved_market_catalogue import (
     FEE_STATUS_KNOWN,
     FEE_STATUS_PARTIAL,
     FEE_STATUS_UNKNOWN,
+    HISTORY_FORBIDDEN_COLUMNS,
     CatalogueRowState,
     KalshiFeeSnapshotRecord,
     catalogue_row_supports_paper_eligibility,
     derived_price_engine_working_set,
     kalshi_fee_snapshot_from_payloads,
+    semantic_kalshi_fee_snapshot_id,
 )
 from sports_hedge.application.capture_replay import FORBIDDEN_WRITE_METHODS
-from sports_hedge.application.catalogue_maintenance import persist_universe_catalogue_pass
+from sports_hedge.application.catalogue_maintenance import (
+    persist_universe_catalogue_pass,
+    persist_universe_catalogue_pass_offloop,
+)
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
+from sports_hedge.application.live_refresh import LiveRefreshCoordinator
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.universe_checkpoint import (
     FAT_CHECKPOINT_PAYLOAD_KEYS,
@@ -204,11 +215,21 @@ def test_catalogue_and_fee_schema_forbid_policy_and_quote_columns() -> None:
     try:
         catalogue_cols = {name.casefold() for name in store.table_columns("approved_market_catalogue")}
         fee_cols = {name.casefold() for name in store.table_columns("kalshi_fee_snapshot")}
+        history_cols = {
+            name.casefold() for name in store.table_columns("approved_market_catalogue_history")
+        }
         assert not (catalogue_cols & {item.casefold() for item in CATALOGUE_FORBIDDEN_COLUMNS})
         assert not (fee_cols & {item.casefold() for item in FEE_SNAPSHOT_FORBIDDEN_COLUMNS})
+        assert not (history_cols & {item.casefold() for item in HISTORY_FORBIDDEN_COLUMNS})
         assert "paper_admission" not in catalogue_cols
         assert "settlement_assumption" not in catalogue_cols
         assert "live_execution_eligible" not in catalogue_cols
+        assert "prior_row_state" in history_cols
+        assert "new_row_state" in history_cols
+        assert "prior_content_version" in history_cols
+        assert "new_content_version" in history_cols
+        assert "generation_id" in history_cols
+        assert "recorded_at" in history_cols
         assert CATALOGUE_SCHEMA_VERSION == 1
     finally:
         store.close()
@@ -671,8 +692,273 @@ def test_no_phase3_durable_price_engine_queue() -> None:
             }
         assert "approved_market_catalogue" in names
         assert "kalshi_fee_snapshot" in names
+        assert "approved_market_catalogue_history" in names
         assert "hot_work_item_v1" not in names
         assert "price_engine_queue" not in names
+        persist_src = inspect.getsource(persist_universe_catalogue_pass_offloop)
+        assert "asyncio.to_thread" in persist_src
+        collector_persist = inspect.getsource(
+            ReadOnlyCrossVenueCollector._persist_universe_catalogue_from_pairs
+        )
+        collector_terminal = inspect.getsource(
+            ReadOnlyCrossVenueCollector._mark_universe_catalogue_terminal
+        )
+        assert "persist_universe_catalogue_pass_offloop" in collector_persist
+        assert "persist_universe_catalogue_pass_offloop" in collector_terminal
         assert persist_universe_catalogue_pass.__doc__
+    finally:
+        store.close()
+
+
+class _SlowCatalogueStore(SqliteApprovedMarketCatalogueStore):
+    """Deliberately blocking store for event-loop dispatch regressions."""
+
+    def __init__(self, database: str | Path = ":memory:", delay: float = 0.5) -> None:
+        super().__init__(database)
+        self.delay = delay
+        self.started = threading.Event()
+        self.threads: list[int] = []
+
+    def run_in_transaction(self, mutator: Any) -> Any:
+        self.threads.append(threading.get_ident())
+        self.started.set()
+        time.sleep(self.delay)
+        return super().run_in_transaction(mutator)
+
+
+@pytest.mark.asyncio
+async def test_blocking_catalogue_persist_keeps_hot_heartbeat_dispatchable() -> None:
+    store = _SlowCatalogueStore(":memory:", delay=0.5)
+    coordinator = LiveRefreshCoordinator(clock=lambda: datetime.now(UTC))
+    loop_thread = threading.get_ident()
+    heartbeats = 0
+
+    async def idle_tick(plan=None):
+        del plan
+        return None
+
+    persist_task = asyncio.create_task(
+        persist_universe_catalogue_pass_offloop(
+            store,
+            canonical_event_id="evt-block",
+            competition="EPL",
+            home_canonical="brentford",
+            away_canonical="chelsea",
+            kickoff_utc=NOW,
+            pairs=[],
+            now=NOW,
+            generation_id="1",
+            listed_ok=False,
+            terminal=False,
+        )
+    )
+    for _ in range(50):
+        if store.started.is_set():
+            break
+        await asyncio.sleep(0.02)
+    assert store.started.is_set()
+    assert not persist_task.done()
+
+    hot_task = asyncio.create_task(coordinator._hot_loop(idle_tick))
+    try:
+        deadline = time.monotonic() + 0.35
+        while time.monotonic() < deadline:
+            if coordinator.status.hot.last_heartbeat_at is not None:
+                heartbeats += 1
+                break
+            await asyncio.sleep(0.02)
+        assert not persist_task.done()
+        assert coordinator.status.hot.last_heartbeat_at is not None
+        assert heartbeats >= 1
+        await persist_task
+    finally:
+        coordinator._stop.set()
+        hot_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await hot_task
+        store.close()
+    assert store.threads
+    assert store.threads[0] != loop_thread
+
+
+@pytest.mark.asyncio
+async def test_catalogue_history_records_disappeared_restored_terminal_and_native_id() -> None:
+    store = SqliteApprovedMarketCatalogueStore(":memory:")
+    matchbook = OverlapMatchbook([_mb_event()], {str(MB_EVENT_ID): _mb_markets()})
+    kalshi = OverlapKalshi(_kalshi_events(), series_by_ticker=_series_map(), books=_all_books())
+    try:
+        first = await _collect_catalogue(matchbook, kalshi, store, universe_generation_id=7)
+        fixture_id = next(
+            item.canonical_event_id for item in first.discovered_fixtures if item.matchbook_matched
+        )
+        btts = next(
+            row for row in store.list_active() if row.register_canonical_key == CANONICAL_BTTS_FT
+        )
+        match_result = next(
+            row
+            for row in store.list_active()
+            if row.register_canonical_key == CANONICAL_MATCH_RESULT_FT
+        )
+        insert_history = store.list_history(btts.catalogue_row_id)
+        assert insert_history
+        assert insert_history[0].prior_row_state is None
+        assert insert_history[0].new_row_state == CatalogueRowState.ACTIVE.value
+        assert insert_history[0].new_content_version == 1
+        assert insert_history[0].generation_id == "7"
+
+        kalshi.events = [
+            _kalshi_game_event(rules=REGULATION),
+            _kalshi_total_event("2.5"),
+            _kalshi_ftts_event(),
+        ]
+        await _collect_catalogue(matchbook, kalshi, store, universe_generation_id=8)
+        disappeared = store.get_row(btts.catalogue_row_id)
+        assert disappeared is not None
+        assert disappeared.row_state is CatalogueRowState.DISAPPEARED
+        disappeared_history = store.list_history(btts.catalogue_row_id)
+        assert [item.new_row_state for item in disappeared_history] == [
+            CatalogueRowState.ACTIVE.value,
+            CatalogueRowState.DISAPPEARED.value,
+        ]
+        assert disappeared_history[0].prior_row_state is None
+        assert disappeared_history[1].prior_row_state == CatalogueRowState.ACTIVE.value
+        assert disappeared_history[1].generation_id == "8"
+
+        kalshi.events = _kalshi_events()
+        await _collect_catalogue(matchbook, kalshi, store, universe_generation_id=9)
+        restored = store.get_row(btts.catalogue_row_id)
+        assert restored is not None
+        assert restored.row_state is CatalogueRowState.ACTIVE
+        restored_history = store.list_history(btts.catalogue_row_id)
+        assert [item.new_row_state for item in restored_history] == [
+            CatalogueRowState.ACTIVE.value,
+            CatalogueRowState.DISAPPEARED.value,
+            CatalogueRowState.ACTIVE.value,
+        ]
+        assert restored_history[1].new_row_state == CatalogueRowState.DISAPPEARED.value
+        assert restored_history[2].generation_id == "9"
+
+        original_match = store.get_row(match_result.catalogue_row_id)
+        assert original_match is not None
+        changed = _mb_match_odds()
+        changed["id"] = 316099
+        matchbook.markets_by_id = {
+            str(MB_EVENT_ID): [changed, _mb_btts(), _mb_totals("2.5"), _mb_ftts()]
+        }
+        await _collect_catalogue(matchbook, kalshi, store, universe_generation_id=10)
+        updated_match = store.get_row(match_result.catalogue_row_id)
+        assert updated_match is not None
+        assert updated_match.content_version == original_match.content_version + 1
+        native_history = store.list_history(match_result.catalogue_row_id)
+        assert native_history[0].new_content_version == 1
+        assert native_history[-1].prior_content_version == original_match.content_version
+        assert native_history[-1].new_content_version == updated_match.content_version
+        prior_identity = json.loads(native_history[-1].prior_native_identity_json or "{}")
+        new_identity = json.loads(native_history[-1].new_native_identity_json)
+        assert prior_identity["matchbook_market_id"] == "316010"
+        assert new_identity["matchbook_market_id"] == "316099"
+
+        closed = _mb_event()
+        closed["status"] = "closed"
+        matchbook.events = [closed]
+        await _collect_catalogue(matchbook, kalshi, store, universe_generation_id=11)
+        terminal_row = store.get_row(match_result.catalogue_row_id)
+        assert terminal_row is not None
+        assert terminal_row.row_state is CatalogueRowState.TERMINAL
+        terminal_history = store.list_history(match_result.catalogue_row_id)
+        assert terminal_history[0].new_row_state == CatalogueRowState.ACTIVE.value
+        assert terminal_history[-1].new_row_state == CatalogueRowState.TERMINAL.value
+        assert terminal_history[-1].prior_row_state == CatalogueRowState.ACTIVE.value
+        assert terminal_history[-1].generation_id == "11"
+        btts_terminal = store.list_history(btts.catalogue_row_id)
+        assert btts_terminal[0].new_row_state == CatalogueRowState.ACTIVE.value
+        assert btts_terminal[-1].new_row_state == CatalogueRowState.TERMINAL.value
+        assert fixture_id == match_result.canonical_event_id
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_fee_snapshots_are_immutable_and_versioned_on_input_change() -> None:
+    store = SqliteApprovedMarketCatalogueStore(":memory:")
+    matchbook = OverlapMatchbook([_mb_event()], {str(MB_EVENT_ID): [_mb_match_odds()]})
+    series_a = _series("KXEPLGAME")
+    kalshi = OverlapKalshi(
+        [_kalshi_game_event(rules=REGULATION)],
+        series_by_ticker={"KXEPLGAME": series_a},
+        books=_all_books(),
+    )
+    try:
+        await _collect_catalogue(matchbook, kalshi, store)
+        row = store.list_active()[0]
+        first_id = row.kalshi_fee_snapshot_id
+        assert first_id
+        first_snap = store.get_fee_snapshot(first_id)
+        assert first_snap is not None
+        assert first_snap.fee_resolution_status == FEE_STATUS_KNOWN
+        assert first_snap.fee_multiplier == "1"
+        assert first_snap.series_fee_multiplier in {1, "1"}
+        expected_id = semantic_kalshi_fee_snapshot_id(first_snap)
+        assert first_id == expected_id
+        mutated = first_snap.model_copy(update={"fee_multiplier": "99"})
+        store.upsert_fee_snapshot(mutated)
+        unchanged = store.get_fee_snapshot(first_id)
+        assert unchanged is not None
+        assert unchanged.fee_multiplier == "1"
+
+        series_b = dict(series_a)
+        series_b["fee_multiplier"] = 2
+        kalshi.series_by_ticker = {"KXEPLGAME": series_b}
+        await _collect_catalogue(matchbook, kalshi, store)
+        updated = store.list_active()[0]
+        second_id = updated.kalshi_fee_snapshot_id
+        assert second_id
+        assert second_id != first_id
+        assert updated.content_version == row.content_version + 1
+        old_snap = store.get_fee_snapshot(first_id)
+        new_snap = store.get_fee_snapshot(second_id)
+        assert old_snap is not None and new_snap is not None
+        assert old_snap.fee_multiplier == "1"
+        assert new_snap.fee_multiplier == "2"
+        assert new_snap.fee_resolution_status == FEE_STATUS_KNOWN
+        assert catalogue_row_supports_paper_eligibility(updated, new_snap) is True
+        fee_history = store.list_history(updated.catalogue_row_id)
+        assert fee_history[-1].prior_kalshi_fee_snapshot_id == first_id
+        assert fee_history[-1].new_kalshi_fee_snapshot_id == second_id
+        assert fee_history[-1].new_content_version == updated.content_version
+
+        game_partial_a = _kalshi_game_event(rules=REGULATION)
+        game_partial_a["fee_type_override"] = "quadratic"
+        kalshi.events = [game_partial_a]
+        kalshi.series_by_ticker = {"KXEPLGAME": series_a}
+        await _collect_catalogue(matchbook, kalshi, store)
+        partial_a_row = store.list_active()[0]
+        partial_a_id = partial_a_row.kalshi_fee_snapshot_id
+        partial_a = store.get_fee_snapshot(partial_a_id or "")
+        assert partial_a is not None
+        assert partial_a.fee_resolution_status == FEE_STATUS_PARTIAL
+        assert catalogue_row_supports_paper_eligibility(partial_a_row, partial_a) is False
+
+        game_partial_b = _kalshi_game_event(rules=REGULATION)
+        game_partial_b["fee_multiplier_override"] = 2
+        kalshi.events = [game_partial_b]
+        await _collect_catalogue(matchbook, kalshi, store)
+        partial_b_row = store.list_active()[0]
+        partial_b_id = partial_b_row.kalshi_fee_snapshot_id
+        partial_b = store.get_fee_snapshot(partial_b_id or "")
+        assert partial_b is not None
+        assert partial_a_id != partial_b_id
+        assert store.get_fee_snapshot(partial_a_id or "") is not None
+        assert partial_b.fee_resolution_status == FEE_STATUS_PARTIAL
+        assert partial_b.fee_multiplier is None
+        assert catalogue_row_supports_paper_eligibility(partial_b_row, partial_b) is False
+        assert semantic_kalshi_fee_snapshot_id(partial_a) == partial_a_id
+        assert semantic_kalshi_fee_snapshot_id(partial_b) == partial_b_id
+        snapshots = store.list_fee_snapshots()
+        snapshot_ids = {item.snapshot_id for item in snapshots}
+        assert first_id in snapshot_ids
+        assert second_id in snapshot_ids
+        assert partial_a_id in snapshot_ids
+        assert partial_b_id in snapshot_ids
     finally:
         store.close()

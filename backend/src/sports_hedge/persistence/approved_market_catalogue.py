@@ -4,6 +4,10 @@ Tables live beside the existing paper-settings database. This is not the
 UNIVERSE generation checkpoint, not a durable price-engine work queue, and
 not a second equivalence authority.
 
+Current-row table is scheduler truth. Lifecycle/version history is append-only
+and written in the same transaction as the current-row mutation. Kalshi fee
+snapshots are semantically immutable once inserted.
+
 PAPER / read-only. No venue writes.
 """
 
@@ -12,7 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from functools import lru_cache
@@ -23,7 +27,9 @@ from sports_hedge.application.approved_market_catalogue import (
     CATALOGUE_FORBIDDEN_COLUMNS,
     CATALOGUE_SCHEMA_VERSION,
     FEE_SNAPSHOT_FORBIDDEN_COLUMNS,
+    HISTORY_FORBIDDEN_COLUMNS,
     ApprovedMarketCatalogueRow,
+    CatalogueHistoryRecord,
     CatalogueRowState,
     KalshiFeeSnapshotRecord,
     OutcomeNativeId,
@@ -82,6 +88,22 @@ CREATE TABLE IF NOT EXISTS approved_market_catalogue (
     FOREIGN KEY (kalshi_fee_snapshot_id) REFERENCES kalshi_fee_snapshot(snapshot_id)
 );
 
+CREATE TABLE IF NOT EXISTS approved_market_catalogue_history (
+    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalogue_row_id TEXT NOT NULL,
+    prior_row_state TEXT,
+    new_row_state TEXT NOT NULL,
+    prior_content_version INTEGER,
+    new_content_version INTEGER NOT NULL,
+    prior_native_identity_json TEXT,
+    new_native_identity_json TEXT NOT NULL,
+    prior_kalshi_fee_snapshot_id TEXT,
+    new_kalshi_fee_snapshot_id TEXT,
+    invalidation_reason TEXT,
+    generation_id TEXT,
+    recorded_at TEXT NOT NULL
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_approved_catalogue_active_identity
 ON approved_market_catalogue (canonical_event_id, register_canonical_key)
 WHERE row_state = 'ACTIVE';
@@ -91,7 +113,73 @@ ON approved_market_catalogue (canonical_event_id);
 
 CREATE INDEX IF NOT EXISTS idx_approved_catalogue_state
 ON approved_market_catalogue (row_state);
+
+CREATE INDEX IF NOT EXISTS idx_approved_catalogue_history_row
+ON approved_market_catalogue_history (catalogue_row_id, history_id);
 """
+
+
+class ApprovedMarketCatalogueTransaction:
+    """Connection-bound helpers for one complete catalogue mutation."""
+
+    def __init__(
+        self,
+        store: SqliteApprovedMarketCatalogueStore,
+        connection: sqlite3.Connection,
+    ) -> None:
+        self._store = store
+        self._connection = connection
+
+    def get_row(self, catalogue_row_id: str) -> ApprovedMarketCatalogueRow | None:
+        return self._store._get_row_on(self._connection, catalogue_row_id)
+
+    def get_row_for_identity(
+        self, canonical_event_id: str, register_canonical_key: str
+    ) -> ApprovedMarketCatalogueRow | None:
+        return self._store._get_row_for_identity_on(
+            self._connection, canonical_event_id, register_canonical_key
+        )
+
+    def list_rows_for_event(self, canonical_event_id: str) -> list[ApprovedMarketCatalogueRow]:
+        return self._store._list_rows_for_event_on(self._connection, canonical_event_id)
+
+    def insert_fee_snapshot(self, snapshot: KalshiFeeSnapshotRecord) -> str:
+        return self._store._insert_fee_snapshot_on(self._connection, snapshot)
+
+    def upsert_catalogue_row(self, row: ApprovedMarketCatalogueRow) -> ApprovedMarketCatalogueRow:
+        return self._store._upsert_catalogue_row_on(self._connection, row)
+
+    def mark_disappeared(
+        self,
+        catalogue_row_id: str,
+        *,
+        reason: str,
+        now: datetime,
+        generation_id: str | None,
+    ) -> ApprovedMarketCatalogueRow | None:
+        return self._store._mark_disappeared_on(
+            self._connection,
+            catalogue_row_id,
+            reason=reason,
+            now=now,
+            generation_id=generation_id,
+        )
+
+    def mark_fixture_terminal(
+        self,
+        canonical_event_id: str,
+        *,
+        reason: str,
+        now: datetime,
+        generation_id: str | None,
+    ) -> list[ApprovedMarketCatalogueRow]:
+        return self._store._mark_fixture_terminal_on(
+            self._connection,
+            canonical_event_id,
+            reason=reason,
+            now=now,
+            generation_id=generation_id,
+        )
 
 
 class SqliteApprovedMarketCatalogueStore:
@@ -145,6 +233,14 @@ class SqliteApprovedMarketCatalogueStore:
             finally:
                 connection.close()
 
+    def run_in_transaction(
+        self, mutator: Callable[[ApprovedMarketCatalogueTransaction], Any]
+    ) -> Any:
+        """Run a complete catalogue read/modify/write as one SQLite transaction."""
+
+        with self._connect() as connection:
+            return mutator(ApprovedMarketCatalogueTransaction(self, connection))
+
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         connection.executescript(_CREATE_SCHEMA_SQL)
         self._assert_no_forbidden_columns(connection)
@@ -158,12 +254,18 @@ class SqliteApprovedMarketCatalogueStore:
             str(row["name"]).casefold()
             for row in connection.execute("PRAGMA table_info(kalshi_fee_snapshot)")
         }
+        history_cols = {
+            str(row["name"]).casefold()
+            for row in connection.execute("PRAGMA table_info(approved_market_catalogue_history)")
+        }
         forbidden_catalogue = catalogue_cols & {item.casefold() for item in CATALOGUE_FORBIDDEN_COLUMNS}
         forbidden_fees = fee_cols & {item.casefold() for item in FEE_SNAPSHOT_FORBIDDEN_COLUMNS}
-        if forbidden_catalogue or forbidden_fees:
+        forbidden_history = history_cols & {item.casefold() for item in HISTORY_FORBIDDEN_COLUMNS}
+        if forbidden_catalogue or forbidden_fees or forbidden_history:
             raise RuntimeError(
                 "approved-market catalogue schema contains forbidden policy/quote columns: "
-                f"catalogue={sorted(forbidden_catalogue)} fees={sorted(forbidden_fees)}"
+                f"catalogue={sorted(forbidden_catalogue)} fees={sorted(forbidden_fees)} "
+                f"history={sorted(forbidden_history)}"
             )
 
     def table_columns(self, table: str) -> list[str]:
@@ -174,6 +276,12 @@ class SqliteApprovedMarketCatalogueStore:
             ]
 
     def upsert_fee_snapshot(self, snapshot: KalshiFeeSnapshotRecord) -> str:
+        with self._connect() as connection:
+            return self._insert_fee_snapshot_on(connection, snapshot)
+
+    def _insert_fee_snapshot_on(
+        self, connection: sqlite3.Connection, snapshot: KalshiFeeSnapshotRecord
+    ) -> str:
         payload = (
             snapshot.snapshot_id,
             snapshot.series_ticker,
@@ -192,45 +300,42 @@ class SqliteApprovedMarketCatalogueStore:
             None if snapshot.confirmed_at is None else snapshot.confirmed_at.isoformat(),
             snapshot.source,
         )
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO kalshi_fee_snapshot (
-                    snapshot_id, series_ticker, event_ticker, market_ticker,
-                    fee_type, fee_multiplier, fee_type_override, fee_multiplier_override,
-                    series_fee_type, series_fee_multiplier, fee_provenance,
-                    fee_resolution_status, fee_resolution_error, captured_at,
-                    confirmed_at, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(snapshot_id) DO UPDATE SET
-                    series_ticker = excluded.series_ticker,
-                    event_ticker = excluded.event_ticker,
-                    market_ticker = excluded.market_ticker,
-                    fee_type = excluded.fee_type,
-                    fee_multiplier = excluded.fee_multiplier,
-                    fee_type_override = excluded.fee_type_override,
-                    fee_multiplier_override = excluded.fee_multiplier_override,
-                    series_fee_type = excluded.series_fee_type,
-                    series_fee_multiplier = excluded.series_fee_multiplier,
-                    fee_provenance = excluded.fee_provenance,
-                    fee_resolution_status = excluded.fee_resolution_status,
-                    fee_resolution_error = excluded.fee_resolution_error,
-                    confirmed_at = excluded.confirmed_at,
-                    source = excluded.source
-                """,
-                payload,
-            )
+        connection.execute(
+            """
+            INSERT INTO kalshi_fee_snapshot (
+                snapshot_id, series_ticker, event_ticker, market_ticker,
+                fee_type, fee_multiplier, fee_type_override, fee_multiplier_override,
+                series_fee_type, series_fee_multiplier, fee_provenance,
+                fee_resolution_status, fee_resolution_error, captured_at,
+                confirmed_at, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_id) DO NOTHING
+            """,
+            payload,
+        )
         return snapshot.snapshot_id
 
     def get_fee_snapshot(self, snapshot_id: str) -> KalshiFeeSnapshotRecord | None:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM kalshi_fee_snapshot WHERE snapshot_id = ?",
-                (snapshot_id,),
-            ).fetchone()
+            return self._get_fee_snapshot_on(connection, snapshot_id)
+
+    def _get_fee_snapshot_on(
+        self, connection: sqlite3.Connection, snapshot_id: str
+    ) -> KalshiFeeSnapshotRecord | None:
+        row = connection.execute(
+            "SELECT * FROM kalshi_fee_snapshot WHERE snapshot_id = ?",
+            (snapshot_id,),
+        ).fetchone()
         if row is None:
             return None
         return _fee_from_row(row)
+
+    def list_fee_snapshots(self) -> list[KalshiFeeSnapshotRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM kalshi_fee_snapshot ORDER BY captured_at, snapshot_id"
+            ).fetchall()
+        return [_fee_from_row(row) for row in rows]
 
     def get_active(
         self, canonical_event_id: str, register_canonical_key: str
@@ -251,10 +356,15 @@ class SqliteApprovedMarketCatalogueStore:
 
     def get_row(self, catalogue_row_id: str) -> ApprovedMarketCatalogueRow | None:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM approved_market_catalogue WHERE catalogue_row_id = ?",
-                (catalogue_row_id,),
-            ).fetchone()
+            return self._get_row_on(connection, catalogue_row_id)
+
+    def _get_row_on(
+        self, connection: sqlite3.Connection, catalogue_row_id: str
+    ) -> ApprovedMarketCatalogueRow | None:
+        row = connection.execute(
+            "SELECT * FROM approved_market_catalogue WHERE catalogue_row_id = ?",
+            (catalogue_row_id,),
+        ).fetchone()
         if row is None:
             return None
         return _catalogue_from_row(row)
@@ -263,13 +373,23 @@ class SqliteApprovedMarketCatalogueStore:
         self, canonical_event_id: str, register_canonical_key: str
     ) -> ApprovedMarketCatalogueRow | None:
         with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM approved_market_catalogue
-                WHERE canonical_event_id = ? AND register_canonical_key = ?
-                """,
-                (canonical_event_id, register_canonical_key),
-            ).fetchone()
+            return self._get_row_for_identity_on(
+                connection, canonical_event_id, register_canonical_key
+            )
+
+    def _get_row_for_identity_on(
+        self,
+        connection: sqlite3.Connection,
+        canonical_event_id: str,
+        register_canonical_key: str,
+    ) -> ApprovedMarketCatalogueRow | None:
+        row = connection.execute(
+            """
+            SELECT * FROM approved_market_catalogue
+            WHERE canonical_event_id = ? AND register_canonical_key = ?
+            """,
+            (canonical_event_id, register_canonical_key),
+        ).fetchone()
         if row is None:
             return None
         return _catalogue_from_row(row)
@@ -287,66 +407,130 @@ class SqliteApprovedMarketCatalogueStore:
 
     def list_rows_for_event(self, canonical_event_id: str) -> list[ApprovedMarketCatalogueRow]:
         with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM approved_market_catalogue
-                WHERE canonical_event_id = ?
-                ORDER BY register_canonical_key
-                """,
-                (canonical_event_id,),
-            ).fetchall()
+            return self._list_rows_for_event_on(connection, canonical_event_id)
+
+    def _list_rows_for_event_on(
+        self, connection: sqlite3.Connection, canonical_event_id: str
+    ) -> list[ApprovedMarketCatalogueRow]:
+        rows = connection.execute(
+            """
+            SELECT * FROM approved_market_catalogue
+            WHERE canonical_event_id = ?
+            ORDER BY register_canonical_key
+            """,
+            (canonical_event_id,),
+        ).fetchall()
         return [_catalogue_from_row(row) for row in rows]
 
-    def upsert_catalogue_row(self, row: ApprovedMarketCatalogueRow) -> ApprovedMarketCatalogueRow:
-        payload = _catalogue_to_sql(row)
+    def list_history(self, catalogue_row_id: str) -> list[CatalogueHistoryRecord]:
         with self._connect() as connection:
-            connection.execute(
+            rows = connection.execute(
                 """
-                INSERT INTO approved_market_catalogue (
-                    catalogue_row_id, schema_version, register_version, register_canonical_key,
-                    canonical_event_id, competition, home_canonical, away_canonical, kickoff_utc,
-                    matchbook_event_id, matchbook_market_id, matchbook_runner_ids_json,
-                    kalshi_event_ticker, kalshi_market_tickers_json, kalshi_outcome_ids_json,
-                    kalshi_series_ticker, family, period, line, required_outcomes_json,
-                    kalshi_fee_snapshot_id, row_state, invalidation_reason,
-                    first_catalogued_at, last_confirmed_at, last_seen_generation_id,
-                    content_version
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?
-                )
-                ON CONFLICT(catalogue_row_id) DO UPDATE SET
-                    schema_version = excluded.schema_version,
-                    register_version = excluded.register_version,
-                    register_canonical_key = excluded.register_canonical_key,
-                    canonical_event_id = excluded.canonical_event_id,
-                    competition = excluded.competition,
-                    home_canonical = excluded.home_canonical,
-                    away_canonical = excluded.away_canonical,
-                    kickoff_utc = excluded.kickoff_utc,
-                    matchbook_event_id = excluded.matchbook_event_id,
-                    matchbook_market_id = excluded.matchbook_market_id,
-                    matchbook_runner_ids_json = excluded.matchbook_runner_ids_json,
-                    kalshi_event_ticker = excluded.kalshi_event_ticker,
-                    kalshi_market_tickers_json = excluded.kalshi_market_tickers_json,
-                    kalshi_outcome_ids_json = excluded.kalshi_outcome_ids_json,
-                    kalshi_series_ticker = excluded.kalshi_series_ticker,
-                    family = excluded.family,
-                    period = excluded.period,
-                    line = excluded.line,
-                    required_outcomes_json = excluded.required_outcomes_json,
-                    kalshi_fee_snapshot_id = excluded.kalshi_fee_snapshot_id,
-                    row_state = excluded.row_state,
-                    invalidation_reason = excluded.invalidation_reason,
-                    last_confirmed_at = excluded.last_confirmed_at,
-                    last_seen_generation_id = excluded.last_seen_generation_id,
-                    content_version = excluded.content_version
+                SELECT * FROM approved_market_catalogue_history
+                WHERE catalogue_row_id = ?
+                ORDER BY history_id ASC
                 """,
-                payload,
+                (catalogue_row_id,),
+            ).fetchall()
+        return [_history_from_row(row) for row in rows]
+
+    def upsert_catalogue_row(self, row: ApprovedMarketCatalogueRow) -> ApprovedMarketCatalogueRow:
+        with self._connect() as connection:
+            return self._upsert_catalogue_row_on(connection, row)
+
+    def _upsert_catalogue_row_on(
+        self, connection: sqlite3.Connection, row: ApprovedMarketCatalogueRow
+    ) -> ApprovedMarketCatalogueRow:
+        existing = self._get_row_on(connection, row.catalogue_row_id)
+        if existing is None:
+            existing = self._get_row_for_identity_on(
+                connection, row.canonical_event_id, row.register_canonical_key
             )
-        loaded = self.get_row(row.catalogue_row_id)
+        self._insert_history_if_changed(connection, prior=existing, new=row)
+        payload = _catalogue_to_sql(row)
+        connection.execute(
+            """
+            INSERT INTO approved_market_catalogue (
+                catalogue_row_id, schema_version, register_version, register_canonical_key,
+                canonical_event_id, competition, home_canonical, away_canonical, kickoff_utc,
+                matchbook_event_id, matchbook_market_id, matchbook_runner_ids_json,
+                kalshi_event_ticker, kalshi_market_tickers_json, kalshi_outcome_ids_json,
+                kalshi_series_ticker, family, period, line, required_outcomes_json,
+                kalshi_fee_snapshot_id, row_state, invalidation_reason,
+                first_catalogued_at, last_confirmed_at, last_seen_generation_id,
+                content_version
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?
+            )
+            ON CONFLICT(catalogue_row_id) DO UPDATE SET
+                schema_version = excluded.schema_version,
+                register_version = excluded.register_version,
+                register_canonical_key = excluded.register_canonical_key,
+                canonical_event_id = excluded.canonical_event_id,
+                competition = excluded.competition,
+                home_canonical = excluded.home_canonical,
+                away_canonical = excluded.away_canonical,
+                kickoff_utc = excluded.kickoff_utc,
+                matchbook_event_id = excluded.matchbook_event_id,
+                matchbook_market_id = excluded.matchbook_market_id,
+                matchbook_runner_ids_json = excluded.matchbook_runner_ids_json,
+                kalshi_event_ticker = excluded.kalshi_event_ticker,
+                kalshi_market_tickers_json = excluded.kalshi_market_tickers_json,
+                kalshi_outcome_ids_json = excluded.kalshi_outcome_ids_json,
+                kalshi_series_ticker = excluded.kalshi_series_ticker,
+                family = excluded.family,
+                period = excluded.period,
+                line = excluded.line,
+                required_outcomes_json = excluded.required_outcomes_json,
+                kalshi_fee_snapshot_id = excluded.kalshi_fee_snapshot_id,
+                row_state = excluded.row_state,
+                invalidation_reason = excluded.invalidation_reason,
+                last_confirmed_at = excluded.last_confirmed_at,
+                last_seen_generation_id = excluded.last_seen_generation_id,
+                content_version = excluded.content_version
+            """,
+            payload,
+        )
+        loaded = self._get_row_on(connection, row.catalogue_row_id)
         assert loaded is not None
         return loaded
+
+    def _insert_history_if_changed(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        prior: ApprovedMarketCatalogueRow | None,
+        new: ApprovedMarketCatalogueRow,
+    ) -> None:
+        if not _history_worthy(prior, new):
+            return
+        recorded_at = new.last_confirmed_at or new.first_catalogued_at
+        connection.execute(
+            """
+            INSERT INTO approved_market_catalogue_history (
+                catalogue_row_id, prior_row_state, new_row_state,
+                prior_content_version, new_content_version,
+                prior_native_identity_json, new_native_identity_json,
+                prior_kalshi_fee_snapshot_id, new_kalshi_fee_snapshot_id,
+                invalidation_reason, generation_id, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new.catalogue_row_id,
+                None if prior is None else prior.row_state.value,
+                new.row_state.value,
+                None if prior is None else int(prior.content_version),
+                int(new.content_version),
+                None if prior is None else prior.native_identity_json(),
+                new.native_identity_json(),
+                None if prior is None else prior.kalshi_fee_snapshot_id,
+                new.kalshi_fee_snapshot_id,
+                new.invalidation_reason,
+                new.last_seen_generation_id,
+                recorded_at.isoformat(),
+            ),
+        )
 
     def mark_disappeared(
         self,
@@ -356,7 +540,25 @@ class SqliteApprovedMarketCatalogueStore:
         now: datetime,
         generation_id: str | None,
     ) -> ApprovedMarketCatalogueRow | None:
-        existing = self.get_row(catalogue_row_id)
+        with self._connect() as connection:
+            return self._mark_disappeared_on(
+                connection,
+                catalogue_row_id,
+                reason=reason,
+                now=now,
+                generation_id=generation_id,
+            )
+
+    def _mark_disappeared_on(
+        self,
+        connection: sqlite3.Connection,
+        catalogue_row_id: str,
+        *,
+        reason: str,
+        now: datetime,
+        generation_id: str | None,
+    ) -> ApprovedMarketCatalogueRow | None:
+        existing = self._get_row_on(connection, catalogue_row_id)
         if existing is None:
             return None
         updated = existing.model_copy(
@@ -367,7 +569,7 @@ class SqliteApprovedMarketCatalogueStore:
                 "last_seen_generation_id": generation_id,
             }
         )
-        return self.upsert_catalogue_row(updated)
+        return self._upsert_catalogue_row_on(connection, updated)
 
     def mark_fixture_terminal(
         self,
@@ -377,8 +579,26 @@ class SqliteApprovedMarketCatalogueStore:
         now: datetime,
         generation_id: str | None,
     ) -> list[ApprovedMarketCatalogueRow]:
+        with self._connect() as connection:
+            return self._mark_fixture_terminal_on(
+                connection,
+                canonical_event_id,
+                reason=reason,
+                now=now,
+                generation_id=generation_id,
+            )
+
+    def _mark_fixture_terminal_on(
+        self,
+        connection: sqlite3.Connection,
+        canonical_event_id: str,
+        *,
+        reason: str,
+        now: datetime,
+        generation_id: str | None,
+    ) -> list[ApprovedMarketCatalogueRow]:
         updated: list[ApprovedMarketCatalogueRow] = []
-        for row in self.list_rows_for_event(canonical_event_id):
+        for row in self._list_rows_for_event_on(connection, canonical_event_id):
             if row.row_state is CatalogueRowState.TERMINAL:
                 updated.append(row)
                 continue
@@ -390,7 +610,7 @@ class SqliteApprovedMarketCatalogueStore:
                     "last_seen_generation_id": generation_id,
                 }
             )
-            updated.append(self.upsert_catalogue_row(changed))
+            updated.append(self._upsert_catalogue_row_on(connection, changed))
         return updated
 
     def active_price_engine_working_set(self) -> list[Any]:
@@ -411,6 +631,20 @@ def get_approved_market_catalogue_store() -> SqliteApprovedMarketCatalogueStore:
         path = Path(database)
         path.parent.mkdir(parents=True, exist_ok=True)
     return SqliteApprovedMarketCatalogueStore(database)
+
+
+def _history_worthy(
+    prior: ApprovedMarketCatalogueRow | None, new: ApprovedMarketCatalogueRow
+) -> bool:
+    if prior is None:
+        return True
+    return (
+        prior.row_state != new.row_state
+        or prior.content_version != new.content_version
+        or prior.native_identity_tuple() != new.native_identity_tuple()
+        or prior.kalshi_fee_snapshot_id != new.kalshi_fee_snapshot_id
+        or prior.invalidation_reason != new.invalidation_reason
+    )
 
 
 def _json_or_text(value: Any) -> str | None:
@@ -519,6 +753,26 @@ def _catalogue_from_row(row: sqlite3.Row) -> ApprovedMarketCatalogueRow:
         ),
         last_seen_generation_id=row["last_seen_generation_id"],
         content_version=int(row["content_version"]),
+    )
+
+
+def _history_from_row(row: sqlite3.Row) -> CatalogueHistoryRecord:
+    return CatalogueHistoryRecord(
+        history_id=int(row["history_id"]),
+        catalogue_row_id=row["catalogue_row_id"],
+        prior_row_state=row["prior_row_state"],
+        new_row_state=row["new_row_state"],
+        prior_content_version=(
+            None if row["prior_content_version"] is None else int(row["prior_content_version"])
+        ),
+        new_content_version=int(row["new_content_version"]),
+        prior_native_identity_json=row["prior_native_identity_json"],
+        new_native_identity_json=row["new_native_identity_json"],
+        prior_kalshi_fee_snapshot_id=row["prior_kalshi_fee_snapshot_id"],
+        new_kalshi_fee_snapshot_id=row["new_kalshi_fee_snapshot_id"],
+        invalidation_reason=row["invalidation_reason"],
+        generation_id=row["generation_id"],
+        recorded_at=datetime.fromisoformat(row["recorded_at"]),
     )
 
 

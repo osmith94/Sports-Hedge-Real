@@ -16,9 +16,11 @@ PAPER / read-only.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from hashlib import sha256
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -74,6 +76,7 @@ FEE_SNAPSHOT_FORBIDDEN_COLUMNS = frozenset(
         "size_at_touch",
     }
 )
+HISTORY_FORBIDDEN_COLUMNS = CATALOGUE_FORBIDDEN_COLUMNS | FEE_SNAPSHOT_FORBIDDEN_COLUMNS
 
 SUPPORTED_KALSHI_FEE_TYPES = frozenset({"quadratic", "quadratic_with_maker_fees"})
 
@@ -119,6 +122,47 @@ class KalshiFeeSnapshotRecord(BaseModel):
     def is_known(self) -> bool:
         return self.fee_resolution_status == FEE_STATUS_KNOWN and self.fee_type is not None
 
+    def semantic_identity_parts(self) -> tuple[str, ...]:
+        """Inputs that uniquely identify an immutable fee snapshot.
+
+        Series fee type/multiplier, event override type/multiplier, resolution
+        status/error, provenance, and series/event/market keys. Timestamps and
+        quotes are excluded so the same semantics reuse the same snapshot ID.
+        """
+
+        return (
+            (self.series_ticker or "").strip(),
+            (self.event_ticker or "").strip(),
+            (self.market_ticker or "").strip(),
+            _canonical_fee_token(self.series_fee_type),
+            _canonical_fee_token(self.series_fee_multiplier),
+            _canonical_fee_token(self.fee_type_override),
+            _canonical_fee_token(self.fee_multiplier_override),
+            (self.fee_resolution_status or "").strip(),
+            (self.fee_resolution_error or "").strip(),
+            (self.fee_provenance or "").strip(),
+        )
+
+
+class CatalogueHistoryRecord(BaseModel):
+    """Append-only lifecycle/version history. Not scheduler truth."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    history_id: int | None = None
+    catalogue_row_id: str
+    prior_row_state: str | None = None
+    new_row_state: str
+    prior_content_version: int | None = None
+    new_content_version: int
+    prior_native_identity_json: str | None = None
+    new_native_identity_json: str
+    prior_kalshi_fee_snapshot_id: str | None = None
+    new_kalshi_fee_snapshot_id: str | None = None
+    invalidation_reason: str | None = None
+    generation_id: str | None = None
+    recorded_at: datetime
+
 
 class ApprovedMarketCatalogueRow(BaseModel):
     """One durable approved-family identity row."""
@@ -162,6 +206,26 @@ class ApprovedMarketCatalogueRow(BaseModel):
             tuple(self.kalshi_market_tickers),
             tuple((item.outcome, item.native_id) for item in self.kalshi_outcome_ids),
             self.kalshi_series_ticker,
+        )
+
+    def native_identity_payload(self) -> dict[str, Any]:
+        return {
+            "matchbook_event_id": self.matchbook_event_id,
+            "matchbook_market_id": self.matchbook_market_id,
+            "matchbook_runner_ids": [item.model_dump() for item in self.matchbook_runner_ids],
+            "kalshi_event_ticker": self.kalshi_event_ticker,
+            "kalshi_market_tickers": list(self.kalshi_market_tickers),
+            "kalshi_outcome_ids": [item.model_dump() for item in self.kalshi_outcome_ids],
+            "kalshi_series_ticker": self.kalshi_series_ticker,
+        }
+
+    def native_identity_json(self) -> str:
+        return json.dumps(self.native_identity_payload(), separators=(",", ":"), sort_keys=True)
+
+    def content_identity_changed(self, other: ApprovedMarketCatalogueRow) -> bool:
+        return (
+            self.native_identity_tuple() != other.native_identity_tuple()
+            or self.kalshi_fee_snapshot_id != other.kalshi_fee_snapshot_id
         )
 
 
@@ -215,6 +279,12 @@ def classify_kalshi_fee_resolution(metadata: dict[str, Any]) -> tuple[str, str |
     return FEE_STATUS_KNOWN, None
 
 
+def semantic_kalshi_fee_snapshot_id(record: KalshiFeeSnapshotRecord) -> str:
+    payload = "|".join(record.semantic_identity_parts())
+    digest = sha256(payload.encode()).hexdigest()[:24]
+    return f"kfee:{digest}"
+
+
 def kalshi_fee_snapshot_from_payloads(
     *,
     series: dict[str, Any] | None,
@@ -222,7 +292,7 @@ def kalshi_fee_snapshot_from_payloads(
     market_ticker: str | None,
     captured_at: datetime,
     source: str,
-    snapshot_id: str,
+    snapshot_id: str | None = None,
     confirmed_at: datetime | None = None,
 ) -> KalshiFeeSnapshotRecord:
     metadata = resolve_kalshi_fee_metadata(event=event, series=series)
@@ -239,8 +309,8 @@ def kalshi_fee_snapshot_from_payloads(
         stored_type = str(fee_type_raw)
     event_payload = event or {}
     series_payload = series or {}
-    return KalshiFeeSnapshotRecord(
-        snapshot_id=snapshot_id,
+    record = KalshiFeeSnapshotRecord(
+        snapshot_id=snapshot_id or "provisional",
         series_ticker=str(
             series_payload.get("ticker")
             or event_payload.get("series_ticker")
@@ -263,6 +333,9 @@ def kalshi_fee_snapshot_from_payloads(
         confirmed_at=confirmed_at,
         source=source,
     )
+    if not snapshot_id:
+        record = record.model_copy(update={"snapshot_id": semantic_kalshi_fee_snapshot_id(record)})
+    return record
 
 
 def catalogue_row_supports_paper_eligibility(
@@ -363,3 +436,14 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _canonical_fee_token(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    try:
+        return format(Decimal(str(value)), "f")
+    except (InvalidOperation, ValueError, TypeError):
+        return str(value).strip()

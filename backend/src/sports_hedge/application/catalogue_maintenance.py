@@ -3,10 +3,14 @@
 Uses the Approved Match Register as the only runtime equivalence function.
 Persists exact native IDs and compact Kalshi fee snapshots. Does not fetch
 order books, run the solver, or create a durable price-engine queue.
+
+Synchronous SQLite mutation is intended to run off the scanner event loop
+via `persist_universe_catalogue_pass_offloop`.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from hashlib import sha256
 from typing import Any
@@ -21,10 +25,14 @@ from sports_hedge.application.approved_market_catalogue import (
     family_period_line_from_key,
     kalshi_fee_snapshot_from_payloads,
     required_outcomes_for_key,
+    semantic_kalshi_fee_snapshot_id,
 )
 from sports_hedge.domain.football import CanonicalMarket
 from sports_hedge.matching.approved_register import REGISTER_VERSION, registered_canonical_key
-from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
+from sports_hedge.persistence.approved_market_catalogue import (
+    ApprovedMarketCatalogueTransaction,
+    SqliteApprovedMarketCatalogueStore,
+)
 
 DISAPPEARED_FAMILY_REASON = "family_not_listed_this_generation"
 TERMINAL_FIXTURE_REASON = "fixture_terminal"
@@ -54,31 +62,6 @@ class CataloguePairIdentity:
 def catalogue_row_id_for(canonical_event_id: str, register_canonical_key: str) -> str:
     digest = sha256(f"{canonical_event_id}|{register_canonical_key}".encode()).hexdigest()[:24]
     return f"amc:{digest}"
-
-
-def fee_snapshot_id_for(
-    *,
-    series_ticker: str,
-    event_ticker: str | None,
-    market_ticker: str | None,
-    status: str,
-    fee_type: str | None,
-    fee_multiplier: str | None,
-    provenance: str | None,
-) -> str:
-    payload = "|".join(
-        [
-            series_ticker,
-            event_ticker or "",
-            market_ticker or "",
-            status,
-            fee_type or "",
-            fee_multiplier or "",
-            provenance or "",
-        ]
-    )
-    digest = sha256(payload.encode()).hexdigest()[:24]
-    return f"kfee:{digest}"
 
 
 def ordered_native_ids(market: CanonicalMarket, register_canonical_key: str) -> list[OutcomeNativeId]:
@@ -120,10 +103,74 @@ def persist_universe_catalogue_pass(
     """Upsert ACTIVE rows for registered pairs and invalidate missing families.
 
     Catalogue completion does not require executable books or solver output.
+    The complete read/modify/write runs in one SQLite transaction.
     """
 
+    return store.run_in_transaction(
+        lambda tx: _persist_universe_catalogue_pass_tx(
+            tx,
+            canonical_event_id=canonical_event_id,
+            competition=competition,
+            home_canonical=home_canonical,
+            away_canonical=away_canonical,
+            kickoff_utc=kickoff_utc,
+            pairs=pairs,
+            now=now,
+            generation_id=generation_id,
+            listed_ok=listed_ok,
+            terminal=terminal,
+        )
+    )
+
+
+async def persist_universe_catalogue_pass_offloop(
+    store: SqliteApprovedMarketCatalogueStore,
+    *,
+    canonical_event_id: str,
+    competition: str | None,
+    home_canonical: str | None,
+    away_canonical: str | None,
+    kickoff_utc: datetime | None,
+    pairs: list[CataloguePairIdentity],
+    now: datetime,
+    generation_id: str | None,
+    listed_ok: bool,
+    terminal: bool,
+) -> list[ApprovedMarketCatalogueRow]:
+    """Bounded off-loop wrapper so SQLite catalogue I/O cannot stall HOT."""
+
+    return await asyncio.to_thread(
+        persist_universe_catalogue_pass,
+        store,
+        canonical_event_id=canonical_event_id,
+        competition=competition,
+        home_canonical=home_canonical,
+        away_canonical=away_canonical,
+        kickoff_utc=kickoff_utc,
+        pairs=pairs,
+        now=now,
+        generation_id=generation_id,
+        listed_ok=listed_ok,
+        terminal=terminal,
+    )
+
+
+def _persist_universe_catalogue_pass_tx(
+    tx: ApprovedMarketCatalogueTransaction,
+    *,
+    canonical_event_id: str,
+    competition: str | None,
+    home_canonical: str | None,
+    away_canonical: str | None,
+    kickoff_utc: datetime | None,
+    pairs: list[CataloguePairIdentity],
+    now: datetime,
+    generation_id: str | None,
+    listed_ok: bool,
+    terminal: bool,
+) -> list[ApprovedMarketCatalogueRow]:
     if terminal:
-        return store.mark_fixture_terminal(
+        return tx.mark_fixture_terminal(
             canonical_event_id,
             reason=TERMINAL_FIXTURE_REASON,
             now=now,
@@ -139,7 +186,7 @@ def persist_universe_catalogue_pass(
         found_keys.add(key)
         rows.append(
             _upsert_active_pair(
-                store,
+                tx,
                 canonical_event_id=canonical_event_id,
                 competition=competition,
                 home_canonical=home_canonical,
@@ -153,11 +200,11 @@ def persist_universe_catalogue_pass(
         )
 
     if listed_ok:
-        for existing in store.list_rows_for_event(canonical_event_id):
+        for existing in tx.list_rows_for_event(canonical_event_id):
             if existing.register_canonical_key in found_keys:
                 continue
             if existing.row_state is CatalogueRowState.ACTIVE:
-                disappeared = store.mark_disappeared(
+                disappeared = tx.mark_disappeared(
                     existing.catalogue_row_id,
                     reason=DISAPPEARED_FAMILY_REASON,
                     now=now,
@@ -168,7 +215,7 @@ def persist_universe_catalogue_pass(
 
 
 def _upsert_active_pair(
-    store: SqliteApprovedMarketCatalogueStore,
+    tx: ApprovedMarketCatalogueTransaction,
     *,
     canonical_event_id: str,
     competition: str | None,
@@ -193,32 +240,22 @@ def _upsert_active_pair(
         pair.kalshi_event_payload.get("event_ticker") or pair.kalshi.event.source_event_id or ""
     ).strip() or None
     market_ticker = tickers[0] if tickers else None
-    provisional = kalshi_fee_snapshot_from_payloads(
+    snapshot = kalshi_fee_snapshot_from_payloads(
         series=pair.kalshi_series_payload,
         event=pair.kalshi_event_payload,
         market_ticker=market_ticker,
         captured_at=now,
         source=pair.fee_source or FEE_SOURCE_EVENT_PAYLOAD,
-        snapshot_id="provisional",
         confirmed_at=now,
     )
-    snapshot = provisional.model_copy(
-        update={
-            "snapshot_id": fee_snapshot_id_for(
-                series_ticker=series_ticker or provisional.series_ticker,
-                event_ticker=event_ticker,
-                market_ticker=market_ticker,
-                status=provisional.fee_resolution_status,
-                fee_type=provisional.fee_type,
-                fee_multiplier=provisional.fee_multiplier,
-                provenance=provisional.fee_provenance,
-            ),
-            "series_ticker": series_ticker or provisional.series_ticker,
-        }
-    )
-    store.upsert_fee_snapshot(snapshot)
+    if series_ticker and snapshot.series_ticker != series_ticker:
+        snapshot = snapshot.model_copy(update={"series_ticker": series_ticker})
+        snapshot = snapshot.model_copy(
+            update={"snapshot_id": semantic_kalshi_fee_snapshot_id(snapshot)}
+        )
+    tx.insert_fee_snapshot(snapshot)
     row_id = catalogue_row_id_for(canonical_event_id, register_canonical_key)
-    existing = store.get_row(row_id) or store.get_row_for_identity(
+    existing = tx.get_row(row_id) or tx.get_row_for_identity(
         canonical_event_id, register_canonical_key
     )
     incoming = ApprovedMarketCatalogueRow(
@@ -250,9 +287,9 @@ def _upsert_active_pair(
         last_seen_generation_id=generation_id,
         content_version=1 if existing is None else existing.content_version,
     )
-    if existing is not None and existing.native_identity_tuple() != incoming.native_identity_tuple():
+    if existing is not None and existing.content_identity_changed(incoming):
         incoming = incoming.model_copy(update={"content_version": existing.content_version + 1})
-    return store.upsert_catalogue_row(incoming)
+    return tx.upsert_catalogue_row(incoming)
 
 
 def pair_identity_from_markets(
