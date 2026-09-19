@@ -7,6 +7,7 @@ import { useHydratedNowMs } from "./hydrated-relative-time";
 import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-refresh-poll-guard";
 import { dualScanStatusLines } from "../lib/scan-status-display";
 import { scanHealthTone, venueHealthCaption } from "../lib/venue-health-display";
+import { SystemLoadSummaryCard } from "./system-load-summary";
 
 const FIRST_CLASS: Array<{ venue: VenueHealth["venue"]; label: string }> = [
   { venue: "matchbook", label: "Matchbook" },
@@ -60,6 +61,7 @@ export function VenueHealthBar() {
 
   return (
     <div className="status-cluster" aria-label="First-class venue data health">
+      <SystemLoadSummaryCard status={refresh} />
       {FIRST_CLASS.map((item) => {
         const row = byVenue.get(item.venue);
         const scan = scanHealth[item.venue];

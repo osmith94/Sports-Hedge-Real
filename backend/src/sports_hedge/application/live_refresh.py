@@ -75,6 +75,7 @@ from sports_hedge.application.scanner_observability import (
     ScannerObservabilitySink,
     empty_price_engine_status,
 )
+from sports_hedge.application.system_load import SystemLoadSummary, system_load_from_status
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
     UNIVERSE_MIN_CHUNK_SECONDS,
@@ -253,6 +254,7 @@ class LiveRefreshStatus(BaseModel):
     venue_participation: LaneVenueParticipation | None = None
     recent_scan_cycles: list[PaperScanCycleRecord] = Field(default_factory=list)
     provider_access: dict[str, Any] = Field(default_factory=dict)
+    system_load: SystemLoadSummary = Field(default_factory=SystemLoadSummary)
 
 
 class DualCadencePlan(BaseModel):
@@ -3293,6 +3295,10 @@ class LiveRefreshCoordinator:
                     or self._universe_in_progress
                     or self._background_in_progress
                     or self._manual_hot_in_progress,
+                    "system_load": system_load_from_status(
+                        self.status,
+                        universe_work_used_s=self._status_universe_work_used(),
+                    ),
                 }
             )
             return self.status
