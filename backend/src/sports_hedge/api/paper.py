@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import lru_cache
@@ -41,7 +42,7 @@ from sports_hedge.application.live_refresh import (
     ScanCycleTimeout,
     get_live_refresh_coordinator,
 )
-from sports_hedge.application.price_engine import PriceEnginePriority
+from sports_hedge.application.price_engine import CataloguePriceEngine, PriceEnginePriority
 from sports_hedge.application.market_observation import (
     KalshiObservationBuilder,
     MatchbookObservationBuilder,
@@ -110,6 +111,8 @@ from sports_hedge.venues.matchbook import (
 
 router = APIRouter(prefix="/paper", tags=["paper"])
 LOGGER = getLogger(__name__)
+_PRICE_ENGINE_ITEM_PERSIST_LOCK = threading.Lock()
+PRICE_ENGINE_ITEM_COMPLETION_CAPTURE = "item_completion_capture"
 
 
 class RawVenueObservationRequest(BaseModel):
@@ -1089,15 +1092,19 @@ def _persist_collection_report(
         build_paper_scan_cycle_record(report, scan_lane=scan_lane or report.scan_lane)
     )
     operations = get_paper_operations_service(watchlist, get_priority_alert_service())
-    for decision in report.paper_decisions:
-        _persist_decision(
-            decision,
-            service=service,
-            audit=audit,
-            watchlist=watchlist,
-            operations=operations,
-            refreshed_venues=report.enabled_venues,
-        )
+    already_captured = bool(
+        (report.scan_diagnostics or {}).get(PRICE_ENGINE_ITEM_COMPLETION_CAPTURE)
+    )
+    if not already_captured:
+        for decision in report.paper_decisions:
+            _persist_decision(
+                decision,
+                service=service,
+                audit=audit,
+                watchlist=watchlist,
+                operations=operations,
+                refreshed_venues=report.enabled_venues,
+            )
     _run_paper_position_management(report, operations=operations)
 
 
@@ -1291,6 +1298,16 @@ async def server_owned_refresh_tick(plan=None) -> None:
     service = scheduled_paper_scan_service()
     settings = get_settings()
     runtime = get_shared_provider_runtime(settings)
+    audit = get_paper_audit_repository()
+    from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
+
+    watchlist = get_watchlist_service(get_watchlist_repository())
+    bind_price_engine_item_persist(
+        coordinator.price_engine(),
+        service=service,
+        audit=audit,
+        watchlist=watchlist,
+    )
     if resolved.lane == "background":
         await coordinator.run_price_engine_slice(
             PriceEnginePriority.BACKGROUND,
@@ -1298,6 +1315,7 @@ async def server_owned_refresh_tick(plan=None) -> None:
             kalshi=runtime.kalshi,
             paper_scan=service,
         )
+        await coordinator.price_engine().drain_item_captures()
         return
     if resolved.lane == ScanLane.HOT.value or getattr(resolved, "reason", "") == "hot_scope_empty":
         hot_wall = float(settings.paper_scan_hot_cycle_timeout_seconds)
@@ -1328,6 +1346,8 @@ async def server_owned_refresh_tick(plan=None) -> None:
                     "deferred": list(result.deferred),
                     "not_started": list(result.not_started),
                     "legacy_hot_collector": False,
+                    PRICE_ENGINE_ITEM_COMPLETION_CAPTURE: True,
+                    "persist_failures": list(result.persist_failures),
                 },
             )
 
@@ -1339,13 +1359,11 @@ async def server_owned_refresh_tick(plan=None) -> None:
             )
         except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, httpx.HTTPError):
             return
-        # Existing #336/#338 batch-end capture: persist off-loop after the
-        # price-engine slice. Do not call persist_triggered_chain here (Phase 4)
-        # and do not re-enter the legacy HOT collector.
-        audit = get_paper_audit_repository()
-        from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
-
-        watchlist = get_watchlist_service(get_watchlist_repository())
+        # Item captures started during the slice. Drain them outside run_cycle
+        # so slow SQLite/treasury work cannot become scan_cycle_timeout.
+        await coordinator.price_engine().drain_item_captures()
+        # Cycle history / position management only. Capture already ran at
+        # item completion. Do not recapture the same decision here.
         await persist_scheduled_collection_report(
             coordinator,
             report,
@@ -1355,10 +1373,6 @@ async def server_owned_refresh_tick(plan=None) -> None:
             scan_lane=ScanLane.HOT,
         )
         return
-    audit = get_paper_audit_repository()
-    from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
-
-    watchlist = get_watchlist_service(get_watchlist_repository())
     kwargs = scheduled_collection_kwargs()
 
     async def runner() -> CollectionReport:
@@ -1621,6 +1635,64 @@ async def _aclose_soon(*clients: Any, timeout: float = 0.5) -> None:
             task.result()
         except Exception as exc:
             LOGGER.warning("venue_client_close_failed error=%s", exc)
+
+
+def persist_price_engine_item_decision(
+    decision: PaperScanDecision,
+    *,
+    service: PaperScanService,
+    audit: SqlitePaperScanRepository,
+    watchlist: WatchlistService,
+    refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
+) -> None:
+    """Watchlist-publish and capture one completed price-engine item.
+
+    Reuses ``_persist_decision`` / ``persist_triggered_chain``. Does not invent
+    a second capture service. SQLite work is serialized across in-memory capture
+    tasks; pricing workers do not wait for this lock.
+    """
+
+    with _PRICE_ENGINE_ITEM_PERSIST_LOCK:
+        operations = get_paper_operations_service(watchlist, get_priority_alert_service())
+        _persist_decision(
+            decision,
+            service=service,
+            audit=audit,
+            watchlist=watchlist,
+            operations=operations,
+            quote_age_ms=decision.quote_age_ms,
+            refreshed_venues=(
+                refreshed_venues
+                if refreshed_venues is not None
+                else (VenueName.MATCHBOOK, VenueName.KALSHI)
+            ),
+        )
+
+
+def bind_price_engine_item_persist(
+    engine: CataloguePriceEngine,
+    *,
+    service: PaperScanService,
+    audit: SqlitePaperScanRepository,
+    watchlist: WatchlistService,
+) -> None:
+    """Wire item-completion capture without putting it inside the price engine.
+
+    The engine starts this callback immediately, then drains the in-memory
+    capture tasks outside the HOT ``run_cycle`` envelope.
+    """
+
+    async def _handoff(decision: PaperScanDecision, runtime: Any) -> None:
+        del runtime
+        await asyncio.to_thread(
+            persist_price_engine_item_decision,
+            decision,
+            service=service,
+            audit=audit,
+            watchlist=watchlist,
+        )
+
+    engine.on_item_decision = _handoff
 
 
 def _persist_decision(

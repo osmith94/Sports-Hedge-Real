@@ -330,6 +330,7 @@ def _engine(
     timeout: float = 0.2,
     hot_interval: int = 0,
     background_interval: int = 0,
+    on_item_decision: Any = None,
 ) -> tuple[CataloguePriceEngine, FakeMatchbook, FakeKalshi, ProviderAccessLayer]:
     mb = matchbook or FakeMatchbook()
     ks = kalshi or FakeKalshi()
@@ -356,6 +357,7 @@ def _engine(
         provider_timeout_seconds=timeout,
         hot_interval_seconds=hot_interval,
         background_interval_seconds=background_interval,
+        on_item_decision=on_item_decision,
     )
     engine.reconstruct()
     return engine, mb, ks, layer
@@ -970,6 +972,7 @@ def _scheduled_hot_tick_env(monkeypatch):
     monkeypatch.setattr(paper_api, "get_paper_audit_repository", lambda: object())
     monkeypatch.setattr(watchlist_api, "get_watchlist_repository", lambda: object())
     monkeypatch.setattr(watchlist_api, "get_watchlist_service", lambda repo: object())
+    monkeypatch.setattr(paper_api, "persist_price_engine_item_decision", lambda *a, **k: None)
 
     async def forbidden_collect(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("legacy HOT collector must not run on scheduled HOT")
@@ -1015,10 +1018,12 @@ async def test_scheduled_hot_tick_uses_price_engine_not_legacy_collector(monkeyp
         assert report.paper_decisions == [paper.decision]
         assert report.scan_diagnostics["price_engine"] is True
         assert report.scan_diagnostics["legacy_hot_collector"] is False
+        assert report.scan_diagnostics["item_completion_capture"] is True
         tick_src = inspect.getsource(paper_api.server_owned_refresh_tick)
         assert tick_src.index("PriceEnginePriority.HOT") < tick_src.index("_collect_report(")
         assert tick_src.index("run_cycle") < tick_src.index("persist_scheduled_collection_report")
         assert "legacy_hot_collector" in tick_src
+        assert "bind_price_engine_item_persist" in tick_src
         engine_src = inspect.getsource(CataloguePriceEngine)
         assert "persist_triggered_chain" not in engine_src
         assert "persist_scheduled_collection_report" not in engine_src
