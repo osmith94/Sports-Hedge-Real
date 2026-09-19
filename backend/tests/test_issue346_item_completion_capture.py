@@ -166,6 +166,7 @@ def _bind(engine, *, scan, watchlist, ops, audit, monkeypatch) -> list:
 async def _slice_and_drain(engine, priority, **kwargs):
     result = await engine.run_slice(priority, **kwargs)
     await engine.drain_item_captures()
+    await engine.drain_observability()
     return result
 
 
