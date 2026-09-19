@@ -4,12 +4,24 @@
 **Status:** Superseded for orchestration by Core Tenet 19.
 **Date:** 14 September 2026 (implementation on #131 `86afb600`)
 
-> **Tenet 19 override:** HOT and UNIVERSE are independent concurrent workers.
-> Do not yield UNIVERSE to the next HOT deadline. Do not keep a global scan
-> exclusion lock. Shared provider coordination and request priority remain.
-> This document still describes identity, leftover assembly, and radar TTL;
-> the chunk-until-HOT scheduler in §5 is no longer the live orchestration model.
-> See `docs/core-tenets/19_CONCURRENT_HOT_AND_UNIVERSE_SCANNING.md`.
+> **HISTORICAL SPEC — Core Tenet 19 is authoritative.**
+>
+> The current scanner operating model is:
+>
+> `UNIVERSE discovery → durable approved-market catalogue → one price engine → HOT/BACKGROUND priority`.
+>
+> HOT is not a second broad-discovery scanner. Once exact approved native IDs are
+> catalogued, routine HOT/BACKGROUND pricing must not rediscover the fixture,
+> rematch the market, or re-prove registered equivalence. UNIVERSE and the price
+> engine are independently scheduled and may overlap, using one bounded shared
+> provider-access layer.
+>
+> Any text below that implies chunk-until-HOT scheduling, a global scan exclusion
+> lock, HOT-wide rediscovery, exclusive HOT-only pricing, or fixture-wide
+> completeness for unrelated market families is superseded by
+> `docs/core-tenets/19_CONCURRENT_HOT_AND_UNIVERSE_SCANNING.md` and Core Tenet 20.
+> The remaining historical material may still be useful for identity, radar TTL,
+> and implementation provenance; it is not the orchestration contract.
 
 This is a scanner/scheduler/read-model change. It does not add venue write, place, cancel, or sign paths. Phase 1 remains `SPORTS_HEDGE_MODE=paper` / `SPORTS_HEDGE_EXECUTION_ENABLED=false`.
 
