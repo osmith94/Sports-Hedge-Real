@@ -69,6 +69,28 @@ SOAK_HTTP_GET_ONLY = ("GET",)
 FORBIDDEN_SOAK_HTTP = ("POST", "PUT", "PATCH", "DELETE")
 DEFAULT_SOAK_DURATION_SECONDS = 720
 DEFAULT_SOAK_INTERVAL_SECONDS = 15
+CORE_OBSERVER_PATHS = (
+    "/health",
+    "/build-info",
+    "/paper/live-refresh",
+    "/paper/scanner-validation",
+)
+CAPTURE_OBSERVER_PATHS = (
+    "/paper/trades/active",
+    "/paper/watchlist/activity",
+)
+PROGRESSED_TRADE_STATES = frozenset(
+    {"OPEN", "PARTIAL", "CLOSED", "AWAITING_MANUAL_EXTERNAL"}
+)
+CAPTURE_ATTEMPT_EVENTS = frozenset({"paper_fill_attempted"})
+CAPTURE_REJECT_EVENTS = frozenset({"paper_fill_rejected", "paper_entry_rejected"})
+CAPTURE_PROGRESS_EVENTS = frozenset({"paper_fill_complete", "paper_fill_partial"})
+TIMEOUT_ERROR_TOKENS = (
+    "timeout",
+    "timed out",
+    "market_timeout",
+    "provider_timeout",
+)
 CONFIDENCE_REVIEW_TOKENS = (
     "min_mapping_confidence",
     "mapping_confidence",
@@ -155,6 +177,7 @@ class VenueWriteEvidence(BaseModel):
 
 class SoakRowState(BaseModel):
     catalogue_row_id: str
+    content_version: int = 1
     register_canonical_key: str
     canonical_event_id: str
     row_state: str
@@ -167,6 +190,9 @@ class SoakRowState(BaseModel):
     last_error_detail: str | None = None
     revalidation_reason: str | None = None
 
+    def coverage_identity(self) -> str:
+        return f"{self.catalogue_row_id}:{self.content_version}"
+
 
 class SoakEndpointSample(BaseModel):
     path: str
@@ -176,14 +202,51 @@ class SoakEndpointSample(BaseModel):
     error: str | None = None
 
 
+class SoakCaptureOpportunity(BaseModel):
+    """Durable capture outcome for one opportunity/attempt identity."""
+
+    opportunity_id: str
+    attempted: bool = False
+    open: bool = False
+    rejected: bool = False
+    progressed: bool = False
+    duplicate_open: bool = False
+    silent: bool = False
+    trade_ids: list[str] = Field(default_factory=list)
+    attempt_event_ids: list[str] = Field(default_factory=list)
+    reject_event_ids: list[str] = Field(default_factory=list)
+
+
 class SoakCaptureSummary(BaseModel):
     paper_autofill_enabled: bool = False
+    evidence_usable: bool = True
     open_trades: int = 0
     paper_fill_rejected: int = 0
     paper_fill_attempted: int = 0
     duplicate_open_ids: list[str] = Field(default_factory=list)
     eligible_without_open_or_reject: int = 0
+    silent_opportunity_ids: list[str] = Field(default_factory=list)
     persist_failures: int = 0
+    opportunities: list[SoakCaptureOpportunity] = Field(default_factory=list)
+
+
+class SoakLaneProgress(BaseModel):
+    """Read-only lane timestamps/counters. Not scheduler authority."""
+
+    hot_last_started_at: datetime | None = None
+    hot_last_completed_at: datetime | None = None
+    hot_next_due_at: datetime | None = None
+    universe_last_started_at: datetime | None = None
+    universe_last_completed_at: datetime | None = None
+    universe_next_due_at: datetime | None = None
+    universe_discovered_total: int = 0
+    universe_remaining: int = 0
+    universe_generation_work_used_s: float = 0
+    universe_resume_cursor: str | None = None
+    background_last_started_at: datetime | None = None
+    background_last_completed_at: datetime | None = None
+    background_next_due_at: datetime | None = None
+    background_working_set: int = 0
 
 
 class SoakHardFail(BaseModel):
@@ -200,6 +263,10 @@ class ScannerValidationSnapshot(BaseModel):
     observer_only: bool = True
     triggered_discovery: bool = False
     triggered_pricing: bool = False
+    usable: bool = True
+    evidence_errors: list[str] = Field(default_factory=list)
+    coordinator_catalogue_bound: bool | None = None
+    coordinator_price_engine_bound: bool | None = None
     mode: str = "paper"
     execution_enabled: bool = False
     paper_autofill_enabled: bool = False
@@ -213,6 +280,9 @@ class ScannerValidationSnapshot(BaseModel):
     universe_in_progress: bool = False
     promoted_hot_count: int = 0
     hot_promotions: int = 0
+    promoted_hot_ids: list[str] = Field(default_factory=list)
+    promoted_hot_row_ids: list[str] = Field(default_factory=list)
+    lane_progress: SoakLaneProgress = Field(default_factory=SoakLaneProgress)
     revalidation_requests: list[dict[str, str]] = Field(default_factory=list)
     capture: SoakCaptureSummary = Field(default_factory=SoakCaptureSummary)
     venue_write: VenueWriteEvidence = Field(default_factory=VenueWriteEvidence)
@@ -223,7 +293,7 @@ class ScannerValidationSnapshot(BaseModel):
 class SoakReport(BaseModel):
     """Bounded observer report. Never scheduler authority."""
 
-    schema_version: int = 1
+    schema_version: int = 2
     issue: int = PHASE6_ISSUE
     data_kind: str = DATA_CLASS_FIXTURE_DEMO
     paper_only: bool = True
@@ -232,11 +302,18 @@ class SoakReport(BaseModel):
     ended_at: datetime | None = None
     duration_seconds: float = 0
     sample_count: int = 0
+    usable_sample_count: int = 0
     observed_build_sha: str | None = None
     observed_build_branch: str | None = None
+    observed_build_shas: list[str] = Field(default_factory=list)
+    build_sha_changed: bool = False
+    coordinator_catalogue_bound: bool | None = None
+    coordinator_price_engine_bound: bool | None = None
     active_catalogue_row_count: int = 0
+    catalogue_count_mismatches: int = 0
     rows_evaluated_at_least_once: int = 0
     coverage_ratio: float | None = None
+    evaluated_identities: list[str] = Field(default_factory=list)
     unevaluated_rows: list[SoakRowState] = Field(default_factory=list)
     latest_rows: list[SoakRowState] = Field(default_factory=list)
     hot_evaluated: int = 0
@@ -252,11 +329,19 @@ class SoakReport(BaseModel):
     provider_health: dict[str, Any] = Field(default_factory=dict)
     scan_budget_exhausted_price_engine: int = 0
     hot_universe_overlap_samples: int = 0
+    hot_work_samples: int = 0
+    background_work_samples: int = 0
+    universe_progress_samples: int = 0
     background_hot_promotions: int = 0
+    promoted_hot_ids_baseline: list[str] = Field(default_factory=list)
+    promoted_hot_ids_observed: list[str] = Field(default_factory=list)
+    lane_progress_first: SoakLaneProgress | None = None
+    lane_progress_last: SoakLaneProgress | None = None
     capture: SoakCaptureSummary = Field(default_factory=SoakCaptureSummary)
     endpoint_samples: list[SoakEndpointSample] = Field(default_factory=list)
     venue_write: VenueWriteEvidence = Field(default_factory=VenueWriteEvidence)
     durable_queue: bool = False
+    evidence_errors: list[str] = Field(default_factory=list)
     hard_fails: list[SoakHardFail] = Field(default_factory=list)
     accepted: bool | None = None
     notes: list[str] = Field(default_factory=list)
@@ -506,82 +591,291 @@ def soak_row_from_catalogue(
     now: datetime,
     previously_evaluated: bool = False,
 ) -> SoakRowState:
-    status = _runtime_status(runtime, now=now)
+    version_matches = (
+        runtime is not None and runtime.identity.content_version == row.content_version
+    )
+    matched = runtime if version_matches else None
+    status = _runtime_status(matched, now=now)
     evaluated = previously_evaluated or (
-        runtime is not None
-        and (runtime.last_priced_at is not None or runtime.status is PriceEngineItemStatus.EVALUATED)
+        matched is not None
+        and (matched.last_priced_at is not None or matched.status is PriceEngineItemStatus.EVALUATED)
     )
     revalidation = None
-    if runtime is not None and runtime.status is PriceEngineItemStatus.REVALIDATION_NEEDED:
-        revalidation = runtime.last_error_detail or runtime.last_error_stage
+    if matched is not None and matched.status is PriceEngineItemStatus.REVALIDATION_NEEDED:
+        revalidation = matched.last_error_detail or matched.last_error_stage
     return SoakRowState(
         catalogue_row_id=row.catalogue_row_id,
+        content_version=row.content_version,
         register_canonical_key=row.register_canonical_key,
         canonical_event_id=row.canonical_event_id,
         row_state=row.row_state.value,
-        priority=None if runtime is None else runtime.priority.value,
+        priority=None if matched is None else matched.priority.value,
         status=status,
-        reason=_row_reason(runtime, status=status),
+        reason=_row_reason(matched, status=status),
         evaluated_at_least_once=evaluated,
-        last_priced_at=None if runtime is None else runtime.last_priced_at,
-        last_error_stage=None if runtime is None else runtime.last_error_stage,
-        last_error_detail=None if runtime is None else runtime.last_error_detail,
+        last_priced_at=None if matched is None else matched.last_priced_at,
+        last_error_stage=None if matched is None else matched.last_error_stage,
+        last_error_detail=None if matched is None else matched.last_error_detail,
         revalidation_reason=revalidation,
+    )
+
+
+def _field(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def _normalize_trades(trades: list[Any] | dict[str, Any] | None) -> list[Any]:
+    if trades is None:
+        return []
+    if isinstance(trades, dict):
+        for key in ("items", "trades", "results"):
+            value = trades.get(key)
+            if isinstance(value, list):
+                return value
+        return []
+    return list(trades)
+
+
+def _normalize_activity(activity: list[Any] | dict[str, Any] | None) -> list[Any]:
+    if activity is None:
+        return []
+    if isinstance(activity, dict):
+        for key in ("items", "events", "activity", "results"):
+            value = activity.get(key)
+            if isinstance(value, list):
+                return value
+        return []
+    return list(activity)
+
+
+def _opportunity_bucket(
+    buckets: dict[str, SoakCaptureOpportunity], opportunity_id: str
+) -> SoakCaptureOpportunity:
+    existing = buckets.get(opportunity_id)
+    if existing is None:
+        existing = SoakCaptureOpportunity(opportunity_id=opportunity_id)
+        buckets[opportunity_id] = existing
+    return existing
+
+
+def _finalize_capture_buckets(
+    buckets: dict[str, SoakCaptureOpportunity],
+    *,
+    paper_autofill_enabled: bool,
+    persist_failures: int,
+    evidence_usable: bool,
+) -> SoakCaptureSummary:
+    silent_ids: list[str] = []
+    duplicates: list[str] = []
+    open_count = 0
+    rejected = 0
+    attempted = 0
+    opportunities: list[SoakCaptureOpportunity] = []
+    for opportunity_id, item in sorted(buckets.items()):
+        unique_trades = list(dict.fromkeys(item.trade_ids))
+        item.trade_ids = unique_trades
+        item.attempt_event_ids = list(dict.fromkeys(item.attempt_event_ids))
+        item.reject_event_ids = list(dict.fromkeys(item.reject_event_ids))
+        item.duplicate_open = item.open and len(unique_trades) > 1
+        item.progressed = item.progressed or item.open
+        item.silent = bool(
+            paper_autofill_enabled and item.attempted and not (item.open or item.progressed or item.rejected)
+        )
+        if item.silent:
+            silent_ids.append(opportunity_id)
+        if item.duplicate_open:
+            duplicates.append(opportunity_id)
+        if item.open:
+            open_count += 1
+        if item.rejected:
+            rejected += 1
+        if item.attempted:
+            attempted += 1
+        opportunities.append(item)
+    return SoakCaptureSummary(
+        paper_autofill_enabled=paper_autofill_enabled,
+        evidence_usable=evidence_usable,
+        open_trades=open_count,
+        paper_fill_rejected=rejected,
+        paper_fill_attempted=attempted,
+        duplicate_open_ids=duplicates,
+        eligible_without_open_or_reject=len(silent_ids),
+        silent_opportunity_ids=silent_ids,
+        persist_failures=persist_failures,
+        opportunities=opportunities,
     )
 
 
 def capture_summary_from_reads(
     *,
     paper_autofill_enabled: bool,
-    trades: list[Any] | None = None,
-    activity: list[Any] | None = None,
+    trades: list[Any] | dict[str, Any] | None = None,
+    activity: list[Any] | dict[str, Any] | None = None,
     persist_failures: int = 0,
+    evidence_usable: bool = True,
 ) -> SoakCaptureSummary:
-    open_ids: list[str] = []
-    for trade in trades or []:
-        payload = trade if isinstance(trade, dict) else None
-        state = trade.get("state") if payload is not None else getattr(trade, "state", None)
-        state_value = getattr(state, "value", state)
-        if str(state_value).upper() == "OPEN":
-            opportunity = str(
-                (payload or {}).get("opportunity_id")
-                if payload is not None
-                else getattr(trade, "opportunity_id", "") or ""
-            )
-            trade_id = str(
-                (payload or {}).get("trade_id")
-                if payload is not None
-                else getattr(trade, "trade_id", "") or ""
-            )
-            open_ids.append(opportunity or trade_id)
-    counts: dict[str, int] = {}
-    for item in open_ids:
-        counts[item] = counts.get(item, 0) + 1
-    duplicates = sorted(key for key, count in counts.items() if count > 1 and key)
-    rejected = 0
-    attempted = 0
-    for event in activity or []:
-        payload = event if isinstance(event, dict) else None
-        event_type = (
-            event.get("event_type") if payload is not None else getattr(event, "event_type", None)
-        )
+    buckets: dict[str, SoakCaptureOpportunity] = {}
+    for trade in _normalize_trades(trades):
+        opportunity = str(_field(trade, "opportunity_id") or _field(trade, "canonical_market_id") or "")
+        trade_id = str(_field(trade, "trade_id") or "")
+        state = _field(trade, "state")
+        state_value = str(getattr(state, "value", state) or "").upper()
+        identity = opportunity or trade_id
+        if not identity:
+            continue
+        bucket = _opportunity_bucket(buckets, identity)
+        if state_value == "OPEN":
+            bucket.open = True
+            if trade_id and trade_id not in bucket.trade_ids:
+                bucket.trade_ids.append(trade_id)
+        if state_value in PROGRESSED_TRADE_STATES:
+            bucket.progressed = True
+    for event in _normalize_activity(activity):
+        opportunity = str(_field(event, "opportunity_id") or "")
+        event_id = str(_field(event, "event_id") or "")
+        event_type = _field(event, "event_type")
         value = str(getattr(event_type, "value", event_type) or "").casefold()
-        if value == "paper_fill_rejected":
-            rejected += 1
-        if value == "paper_fill_attempted":
-            attempted += 1
-    eligible_gap = 0
-    if paper_autofill_enabled and attempted and not (open_ids or rejected):
-        eligible_gap = attempted
-    return SoakCaptureSummary(
+        if not opportunity:
+            continue
+        bucket = _opportunity_bucket(buckets, opportunity)
+        if value in CAPTURE_ATTEMPT_EVENTS:
+            bucket.attempted = True
+            if event_id:
+                bucket.attempt_event_ids.append(event_id)
+        if value in CAPTURE_REJECT_EVENTS:
+            bucket.rejected = True
+            if event_id:
+                bucket.reject_event_ids.append(event_id)
+        if value in CAPTURE_PROGRESS_EVENTS:
+            bucket.progressed = True
+    return _finalize_capture_buckets(
+        buckets,
         paper_autofill_enabled=paper_autofill_enabled,
-        open_trades=len(open_ids),
-        paper_fill_rejected=rejected,
-        paper_fill_attempted=attempted,
-        duplicate_open_ids=duplicates,
-        eligible_without_open_or_reject=eligible_gap,
         persist_failures=persist_failures,
+        evidence_usable=evidence_usable,
     )
+
+
+def merge_capture_summaries(*summaries: SoakCaptureSummary) -> SoakCaptureSummary:
+    buckets: dict[str, SoakCaptureOpportunity] = {}
+    paper_autofill = False
+    persist_failures = 0
+    evidence_usable = True
+    for summary in summaries:
+        paper_autofill = paper_autofill or summary.paper_autofill_enabled
+        persist_failures = max(persist_failures, summary.persist_failures)
+        evidence_usable = evidence_usable and summary.evidence_usable
+        for item in summary.opportunities:
+            bucket = _opportunity_bucket(buckets, item.opportunity_id)
+            bucket.attempted = bucket.attempted or item.attempted
+            bucket.open = bucket.open or item.open
+            bucket.rejected = bucket.rejected or item.rejected
+            bucket.progressed = bucket.progressed or item.progressed
+            for trade_id in item.trade_ids:
+                if trade_id not in bucket.trade_ids:
+                    bucket.trade_ids.append(trade_id)
+            for event_id in item.attempt_event_ids:
+                if event_id not in bucket.attempt_event_ids:
+                    bucket.attempt_event_ids.append(event_id)
+            for event_id in item.reject_event_ids:
+                if event_id not in bucket.reject_event_ids:
+                    bucket.reject_event_ids.append(event_id)
+    return _finalize_capture_buckets(
+        buckets,
+        paper_autofill_enabled=paper_autofill,
+        persist_failures=persist_failures,
+        evidence_usable=evidence_usable,
+    )
+
+
+def _lane_datetime(value: Any) -> datetime | None:
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed
+    return None
+
+
+def lane_progress_from_coordinator(coordinator: Any) -> SoakLaneProgress:
+    """Read already-published lane timestamps. Does not call public_status()."""
+
+    status = getattr(coordinator, "status", None)
+    hot = getattr(status, "hot", None)
+    universe = getattr(status, "universe", None)
+    background = getattr(status, "background", None)
+    return SoakLaneProgress(
+        hot_last_started_at=_lane_datetime(getattr(hot, "last_started_at", None)),
+        hot_last_completed_at=_lane_datetime(getattr(hot, "last_completed_at", None)),
+        hot_next_due_at=_lane_datetime(
+            getattr(coordinator, "_next_hot_due", None) or getattr(hot, "next_due_at", None)
+        ),
+        universe_last_started_at=_lane_datetime(getattr(universe, "last_started_at", None)),
+        universe_last_completed_at=_lane_datetime(getattr(universe, "last_completed_at", None)),
+        universe_next_due_at=_lane_datetime(
+            getattr(coordinator, "_next_universe_due", None) or getattr(universe, "next_due_at", None)
+        ),
+        universe_discovered_total=int(
+            getattr(coordinator, "_universe_discovered_total", None)
+            or getattr(universe, "discovered_total", 0)
+            or 0
+        ),
+        universe_remaining=int(getattr(universe, "remaining", 0) or 0),
+        universe_generation_work_used_s=float(
+            getattr(coordinator, "_universe_work_used", None)
+            or getattr(universe, "generation_work_used_s", 0)
+            or 0
+        ),
+        universe_resume_cursor=(
+            getattr(coordinator, "_universe_cursor", None)
+            or getattr(universe, "resume_cursor", None)
+        ),
+        background_last_started_at=_lane_datetime(getattr(background, "last_started_at", None)),
+        background_last_completed_at=_lane_datetime(getattr(background, "last_completed_at", None)),
+        background_next_due_at=_lane_datetime(
+            getattr(coordinator, "_next_background_due", None)
+            or getattr(background, "next_due_at", None)
+        ),
+        background_working_set=int(getattr(background, "evaluated_count", 0) or 0),
+    )
+
+
+def lane_progress_from_live(live: dict[str, Any] | None) -> SoakLaneProgress:
+    payload = live or {}
+    hot = payload.get("hot") or {}
+    universe = payload.get("universe") or {}
+    background = payload.get("background") or {}
+    return SoakLaneProgress(
+        hot_last_started_at=_lane_datetime(hot.get("last_started_at")),
+        hot_last_completed_at=_lane_datetime(hot.get("last_completed_at")),
+        hot_next_due_at=_lane_datetime(hot.get("next_due_at")),
+        universe_last_started_at=_lane_datetime(universe.get("last_started_at")),
+        universe_last_completed_at=_lane_datetime(universe.get("last_completed_at")),
+        universe_next_due_at=_lane_datetime(universe.get("next_due_at")),
+        universe_discovered_total=int(universe.get("discovered_total") or 0),
+        universe_remaining=int(universe.get("remaining") or 0),
+        universe_generation_work_used_s=float(universe.get("generation_work_used_s") or 0),
+        universe_resume_cursor=universe.get("resume_cursor"),
+        background_last_started_at=_lane_datetime(background.get("last_started_at")),
+        background_last_completed_at=_lane_datetime(background.get("last_completed_at")),
+        background_next_due_at=_lane_datetime(background.get("next_due_at")),
+        background_working_set=int((payload.get("price_engine") or {}).get("background", {}).get("working_set") or 0),
+    )
+
+
+def _promoted_identities(engine: CataloguePriceEngine | None) -> tuple[list[str], list[str]]:
+    if engine is None:
+        return [], []
+    fixture_ids = sorted(str(item) for item in getattr(engine, "_promoted_hot_ids", set()) or [])
+    row_ids = sorted(str(item) for item in getattr(engine, "_promoted_hot_rows", {}) or [])
+    return fixture_ids, row_ids
 
 
 def observer_snapshot(
@@ -596,12 +890,16 @@ def observer_snapshot(
     data_kind: str = DATA_CLASS_FIXTURE_DEMO,
     endpoint_samples: list[SoakEndpointSample] | None = None,
     soak_http_methods: list[str] | None = None,
+    coordinator_catalogue_bound: bool | None = None,
 ) -> ScannerValidationSnapshot:
-    """Read catalogue + in-memory engine items. Never prices or discovers."""
+    """Read catalogue + in-memory engine items. Never prices, discovers, or binds."""
 
     resolved = settings or get_settings()
     observed_at = now or datetime.now(UTC)
     engine: CataloguePriceEngine | None = getattr(coordinator, "_price_engine", None)
+    bound_store = getattr(coordinator, "_catalogue_store", None)
+    catalogue_bound = bound_store is not None if coordinator_catalogue_bound is None else coordinator_catalogue_bound
+    engine_bound = engine is not None
     rows = list(catalogue_store.list_active()) if catalogue_store is not None else []
     runtime_by_id: dict[str, PriceEngineRuntimeItem] = {}
     if engine is not None:
@@ -623,6 +921,7 @@ def observer_snapshot(
     status = getattr(coordinator, "status", None)
     promoted = int(getattr(getattr(status, "hot", None), "promoted_hot_count", 0) or 0)
     promotions = int(getattr(getattr(status, "hot", None), "hot_promotions", 0) or 0)
+    promoted_ids, promoted_rows = _promoted_identities(engine)
     build_payload: dict[str, Any]
     if isinstance(build, ServingBuildInfo):
         build_payload = build.as_public_dict()
@@ -631,6 +930,17 @@ def observer_snapshot(
     else:
         build_payload = get_serving_build_info().as_public_dict()
     revalidation = list(getattr(engine, "revalidation_requests", []) or []) if engine is not None else []
+    evidence_errors: list[str] = []
+    if len(soak_rows) != len(rows):
+        evidence_errors.append("catalogue_count_mismatch")
+    if not catalogue_bound:
+        evidence_errors.append("coordinator_catalogue_unbound")
+    if not engine_bound:
+        evidence_errors.append("coordinator_price_engine_unbound")
+    lane = lane_progress_from_coordinator(coordinator)
+    if engine is not None:
+        lane = lane.model_copy(update={"background_working_set": price_status.background.working_set})
+    usable = "catalogue_count_mismatch" not in evidence_errors
     return ScannerValidationSnapshot(
         observed_at=observed_at,
         data_kind=data_kind,
@@ -638,6 +948,10 @@ def observer_snapshot(
         execution_enabled=bool(resolved.sports_hedge_execution_enabled),
         paper_autofill_enabled=bool(resolved.paper_autofill_enabled),
         build=build_payload,
+        usable=usable,
+        evidence_errors=evidence_errors,
+        coordinator_catalogue_bound=catalogue_bound,
+        coordinator_price_engine_bound=engine_bound,
         active_catalogue_row_count=len(rows),
         rows=soak_rows,
         price_engine=price_status,
@@ -647,6 +961,9 @@ def observer_snapshot(
         universe_in_progress=bool(live.get("universe_in_progress")),
         promoted_hot_count=promoted,
         hot_promotions=promotions,
+        promoted_hot_ids=promoted_ids,
+        promoted_hot_row_ids=promoted_rows,
+        lane_progress=lane,
         revalidation_requests=revalidation,
         capture=capture_summary_from_reads(
             paper_autofill_enabled=bool(resolved.paper_autofill_enabled),
@@ -666,8 +983,126 @@ def _json_contains_budget_exhausted(payload: Any) -> int:
     return json.dumps(payload, default=str).count(SCAN_BUDGET_EXHAUSTED_REASON)
 
 
+def _endpoint_path(sample: SoakEndpointSample) -> str:
+    raw = sample.path or ""
+    if "://" in raw:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(raw)
+        raw = parsed.path or raw
+    path = raw.split("?", 1)[0]
+    if not path.startswith("/"):
+        path = "/" + path
+    return path
+
+
+def _endpoint_attempted(samples: list[SoakEndpointSample], suffix: str) -> bool:
+    return any(_endpoint_path(item).endswith(suffix) for item in samples)
+
+
+def _endpoint_available(samples: list[SoakEndpointSample], suffix: str) -> bool:
+    return any(
+        item.available and _endpoint_path(item).endswith(suffix) for item in samples
+    )
+
+
+def _has_timeout_token(text: str | None) -> bool:
+    blob = (text or "").casefold()
+    return any(token in blob for token in TIMEOUT_ERROR_TOKENS)
+
+
+def _universe_due(progress: SoakLaneProgress, observed_at: datetime) -> bool:
+    due = progress.universe_next_due_at
+    if due is None:
+        return True
+    return due <= observed_at
+
+
+def _universe_progressed(previous: SoakLaneProgress, current: SoakLaneProgress) -> bool:
+    if current.universe_last_completed_at != previous.universe_last_completed_at and current.universe_last_completed_at:
+        return True
+    if current.universe_generation_work_used_s > previous.universe_generation_work_used_s:
+        return True
+    if current.universe_discovered_total > previous.universe_discovered_total:
+        return True
+    if current.universe_resume_cursor and current.universe_resume_cursor != previous.universe_resume_cursor:
+        return True
+    if current.universe_remaining and previous.universe_remaining and current.universe_remaining < previous.universe_remaining:
+        return True
+    return False
+
+
+def _build_sha(sample: ScannerValidationSnapshot) -> str | None:
+    sha = str(sample.build.get("git_sha") or sample.build.get("sha") or "").strip()
+    return sha or None
+
+
 def evaluate_soak_acceptance(report: SoakReport) -> list[SoakHardFail]:
     fails: list[SoakHardFail] = []
+    if report.usable_sample_count <= 0 or report.sample_count <= 0:
+        fails.append(
+            SoakHardFail(
+                code="no_usable_samples",
+                detail="no usable observer samples; soak cannot pass closed",
+            )
+        )
+    missing_core = [
+        path
+        for path in CORE_OBSERVER_PATHS
+        if _endpoint_attempted(report.endpoint_samples, path)
+        and not _endpoint_available(report.endpoint_samples, path)
+    ]
+    if report.data_kind == DATA_CLASS_OWNER_LIVE_OBSERVATION:
+        missing_core = [
+            path
+            for path in CORE_OBSERVER_PATHS
+            if not _endpoint_available(report.endpoint_samples, path)
+        ]
+    if missing_core:
+        fails.append(
+            SoakHardFail(
+                code="core_endpoints_unavailable",
+                detail="core observer endpoints unavailable: " + ",".join(missing_core),
+            )
+        )
+    if _endpoint_attempted(report.endpoint_samples, "/paper/scanner-validation") and not _endpoint_available(
+        report.endpoint_samples, "/paper/scanner-validation"
+    ):
+        fails.append(
+            SoakHardFail(
+                code="scanner_validation_unavailable",
+                detail="scanner-validation missing; empty catalogue was not assumed",
+            )
+        )
+    if report.catalogue_count_mismatches:
+        fails.append(
+            SoakHardFail(
+                code="catalogue_count_mismatch",
+                detail="stated ACTIVE count disagrees with row payload",
+            )
+        )
+    if report.build_sha_changed:
+        fails.append(
+            SoakHardFail(
+                code="build_sha_changed",
+                detail="serving build SHA changed mid-soak: "
+                + ",".join(report.observed_build_shas),
+            )
+        )
+    if report.usable_sample_count > 0 and report.active_catalogue_row_count <= 0:
+        fails.append(
+            SoakHardFail(
+                code="no_active_catalogue_rows",
+                detail="no ACTIVE catalogue row observed; insufficient rollout evidence",
+            )
+        )
+    if report.coordinator_catalogue_bound is False or report.coordinator_price_engine_bound is False:
+        fails.append(
+            SoakHardFail(
+                code="coordinator_unbound",
+                detail="GET observed unbound coordinator catalogue/engine wiring",
+            )
+        )
     if report.scan_budget_exhausted_price_engine:
         fails.append(
             SoakHardFail(
@@ -695,12 +1130,34 @@ def evaluate_soak_acceptance(report: SoakReport) -> list[SoakHardFail]:
                 detail="soak harness used a mutating HTTP method",
             )
         )
+    if report.capture.paper_autofill_enabled and not report.capture.evidence_usable:
+        fails.append(
+            SoakHardFail(
+                code="capture_evidence_unavailable",
+                detail="autofill ON but capture reads were unusable",
+            )
+        )
+    missing_capture = [
+        path
+        for path in CAPTURE_OBSERVER_PATHS
+        if report.capture.paper_autofill_enabled
+        and _endpoint_attempted(report.endpoint_samples, path)
+        and not _endpoint_available(report.endpoint_samples, path)
+    ]
+    if missing_capture and "capture_evidence_unavailable" not in {item.code for item in fails}:
+        fails.append(
+            SoakHardFail(
+                code="capture_evidence_unavailable",
+                detail="autofill ON but capture observer endpoints unavailable: "
+                + ",".join(missing_capture),
+            )
+        )
     for row in report.unevaluated_rows:
         if row.reason == SCAN_BUDGET_EXHAUSTED_REASON:
             fails.append(
                 SoakHardFail(
                     code="scan_budget_exhausted_row",
-                    detail=f"{row.catalogue_row_id} leftover as scan_budget_exhausted",
+                    detail=f"{row.coverage_identity()} leftover as scan_budget_exhausted",
                 )
             )
             continue
@@ -710,7 +1167,7 @@ def evaluate_soak_acceptance(report: SoakReport) -> list[SoakHardFail]:
             fails.append(
                 SoakHardFail(
                     code="silent_active_row",
-                    detail=f"{row.catalogue_row_id} has no truthful unevaluated reason",
+                    detail=f"{row.coverage_identity()} has no truthful unevaluated reason",
                 )
             )
             continue
@@ -720,7 +1177,7 @@ def evaluate_soak_acceptance(report: SoakReport) -> list[SoakHardFail]:
                     SoakHardFail(
                         code="silent_active_row",
                         detail=(
-                            f"{row.catalogue_row_id} status={row.status} reason={row.reason}"
+                            f"{row.coverage_identity()} status={row.status} reason={row.reason}"
                         ),
                     )
                 )
@@ -732,45 +1189,83 @@ def evaluate_soak_acceptance(report: SoakReport) -> list[SoakHardFail]:
                 + ",".join(report.capture.duplicate_open_ids),
             )
         )
-    if report.capture.eligible_without_open_or_reject:
+    if report.capture.eligible_without_open_or_reject or report.capture.silent_opportunity_ids:
+        silent = ",".join(report.capture.silent_opportunity_ids) or "per-opportunity gap"
         fails.append(
             SoakHardFail(
                 code="silent_eligible_capture",
-                detail="eligible+autofill ON without OPEN or PAPER_FILL_REJECTED",
+                detail="eligible+autofill ON without OPEN or PAPER_FILL_REJECTED: " + silent,
             )
         )
-    if report.notes and "hot_blocked_universe" in report.notes:
-        fails.append(
-            SoakHardFail(
-                code="hot_blocked_universe",
-                detail="HOT prevented UNIVERSE progress during soak",
-            )
-        )
-    if report.notes and "background_starvation" in report.notes:
+    had_background = any(
+        (row.priority or "").casefold() == "background" for row in report.latest_rows
+    )
+    if report.lane_progress_last is not None and report.lane_progress_last.background_working_set:
+        had_background = True
+    background_due = False
+    if (
+        report.lane_progress_last is not None
+        and report.ended_at is not None
+        and report.lane_progress_last.background_next_due_at is not None
+    ):
+        background_due = report.lane_progress_last.background_next_due_at <= report.ended_at
+    starve = had_background and report.background_work_samples <= 0 and report.background_evaluated <= 0
+    if starve and (background_due or report.data_kind == DATA_CLASS_OWNER_LIVE_OBSERVATION):
         fails.append(
             SoakHardFail(
                 code="background_starvation",
-                detail="BACKGROUND received no work while ACTIVE rows existed",
+                detail="BACKGROUND ACTIVE rows existed but BACKGROUND received no work",
             )
         )
-    if report.notes and "unrelated_timeout_leftover" in report.notes:
+    universe_due = False
+    if report.lane_progress_last is not None and report.ended_at is not None:
+        universe_due = _universe_due(report.lane_progress_last, report.ended_at)
+    if (
+        report.hot_work_samples
+        and universe_due
+        and report.universe_progress_samples <= 0
+        and report.hot_universe_overlap_samples <= 0
+    ):
+        fails.append(
+            SoakHardFail(
+                code="hot_blocked_universe",
+                detail="HOT worked while UNIVERSE was due and made no observed progress",
+            )
+        )
+    timeout_rows = [
+        row
+        for row in report.latest_rows
+        if _has_timeout_token(row.last_error_detail)
+        or _has_timeout_token(row.reason)
+        or _has_timeout_token(row.last_error_stage)
+    ]
+    leftover_unrelated = [
+        row
+        for row in report.latest_rows
+        if row.coverage_identity() not in {item.coverage_identity() for item in timeout_rows}
+        and (
+            row.reason == SCAN_BUDGET_EXHAUSTED_REASON
+            or (
+                row.status in {"failed", "unknown"}
+                and not row.last_error_detail
+                and not row.evaluated_at_least_once
+            )
+        )
+    ]
+    if timeout_rows and leftover_unrelated:
         fails.append(
             SoakHardFail(
                 code="unrelated_timeout_leftover",
-                detail="one provider timeout leftover-marked unrelated items",
+                detail="provider timeout leftover-marked unrelated items",
             )
         )
-    if report.notes and "dual_matcher" in report.notes:
-        fails.append(
-            SoakHardFail(code="dual_matcher", detail="second matcher/equivalence authority")
-        )
-    if report.notes and "stale_projection_resurrection" in report.notes:
-        fails.append(
-            SoakHardFail(
-                code="stale_projection",
-                detail="stale pre-reset projection resurrection observed",
-            )
-        )
+    for extra in report.evidence_errors:
+        if extra in {
+            "dual_matcher",
+            "stale_projection_resurrection",
+            "status_triggered_work",
+        }:
+            fails.append(SoakHardFail(code=extra, detail=extra))
     return fails
 
 
@@ -781,45 +1276,126 @@ def accumulate_soak_report(
     notes: list[str] | None = None,
 ) -> SoakReport:
     if not samples:
-        report = SoakReport(data_kind=data_kind, notes=list(notes or []))
+        report = SoakReport(
+            data_kind=data_kind,
+            notes=list(notes or []),
+            sample_count=0,
+            usable_sample_count=0,
+            evidence_errors=["no_usable_samples"],
+        )
         report.hard_fails = evaluate_soak_acceptance(report)
-        report.accepted = not report.hard_fails
+        report.accepted = False
         return report
-    first = samples[0]
-    last = samples[-1]
-    evaluated_ids: set[str] = set()
-    latest_by_id: dict[str, SoakRowState] = {}
+    usable = [sample for sample in samples if sample.usable]
+    endpoint_samples: list[SoakEndpointSample] = []
+    evidence_errors: list[str] = []
     exhausted = 0
     overlap = 0
-    promotions = 0
-    endpoint_samples: list[SoakEndpointSample] = []
-    reasons: list[str] = []
+    hot_work = 0
+    background_work = 0
+    universe_progress = 0
+    mismatches = 0
+    evaluated_ids: set[str] = set()
+    capture = SoakCaptureSummary()
     for sample in samples:
+        endpoint_samples.extend(sample.endpoint_samples)
+        evidence_errors.extend(sample.evidence_errors)
         exhausted += sample.scan_budget_exhausted_price_engine
         exhausted += _json_contains_budget_exhausted(sample.price_engine.model_dump())
+        if sample.active_catalogue_row_count != len(sample.rows):
+            mismatches += 1
+            evidence_errors.append("catalogue_count_mismatch")
+        capture = merge_capture_summaries(capture, sample.capture)
+        if sample.hot_in_progress:
+            hot_work += 1
+        if sample.background_in_progress or sample.price_engine.background.evaluated:
+            background_work += 1
+        if sample.universe_in_progress:
+            universe_progress += 1
         if sample.hot_in_progress and sample.universe_in_progress:
             overlap += 1
-        promotions = max(promotions, sample.promoted_hot_count, sample.hot_promotions)
-        endpoint_samples.extend(sample.endpoint_samples)
         for row in sample.rows:
-            latest_by_id[row.catalogue_row_id] = row
             if row.evaluated_at_least_once or row.status == PriceEngineItemStatus.EVALUATED.value:
-                evaluated_ids.add(row.catalogue_row_id)
+                evaluated_ids.add(row.coverage_identity())
+            if (row.priority or "").casefold() == "background" and (
+                row.evaluated_at_least_once
+                or row.last_priced_at is not None
+                or row.status
+                in {
+                    PriceEngineItemStatus.EVALUATED.value,
+                    PriceEngineItemStatus.RETRY_WAIT.value,
+                    PriceEngineItemStatus.DEFERRED.value,
+                    PriceEngineItemStatus.IN_FLIGHT.value,
+                }
+            ):
+                background_work += 1
+    if not usable:
+        last = samples[-1]
+        report = SoakReport(
+            data_kind=data_kind,
+            paper_only=last.paper_only and not last.execution_enabled,
+            execution_enabled=last.execution_enabled,
+            started_at=samples[0].observed_at,
+            ended_at=last.observed_at,
+            duration_seconds=max(0.0, (last.observed_at - samples[0].observed_at).total_seconds()),
+            sample_count=len(samples),
+            usable_sample_count=0,
+            observed_build_sha=_build_sha(last),
+            observed_build_branch=str(last.build.get("git_branch") or "") or None,
+            observed_build_shas=list(dict.fromkeys(sha for sha in (_build_sha(item) for item in samples) if sha)),
+            catalogue_count_mismatches=mismatches,
+            endpoint_samples=endpoint_samples,
+            venue_write=last.venue_write,
+            capture=capture,
+            evidence_errors=list(dict.fromkeys(evidence_errors or ["no_usable_samples"])),
+            notes=list(notes or []),
+        )
+        report.hard_fails = evaluate_soak_acceptance(report)
+        report.accepted = False
+        return report
+    first = usable[0]
+    last = usable[-1]
+    current_rows = {row.coverage_identity(): row for row in last.rows}
+    unevaluated = [
+        row for key, row in sorted(current_rows.items()) if key not in evaluated_ids
+    ]
+    coverage = None
+    if current_rows:
+        covered = sum(1 for key in current_rows if key in evaluated_ids)
+        coverage = round(covered / len(current_rows), 4)
+    shas = list(dict.fromkeys(sha for sha in (_build_sha(item) for item in usable) if sha))
+    sha_changed = len(shas) > 1
+    reasons: list[str] = []
+    for sample in usable:
+        for row in sample.rows:
             if row.revalidation_reason:
                 reasons.append(row.revalidation_reason)
         for item in sample.revalidation_requests:
             text = str(item.get("reason") or item.get("detail") or "").strip()
             if text:
                 reasons.append(text)
-    active_ids = set(latest_by_id)
-    unevaluated = [
-        latest_by_id[row_id]
-        for row_id in sorted(active_ids - evaluated_ids)
-    ]
-    coverage = None
-    if latest_by_id:
-        coverage = round(len(evaluated_ids) / len(latest_by_id), 4)
+    baseline_ids = list(first.promoted_hot_ids)
+    observed_new: list[str] = []
+    seen_new: set[str] = set()
+    for sample in usable[1:]:
+        for ident in sample.promoted_hot_ids:
+            if ident not in first.promoted_hot_ids and ident not in seen_new:
+                seen_new.add(ident)
+                observed_new.append(ident)
+    first_lane = first.lane_progress
+    last_lane = last.lane_progress
+    for previous, current in zip(usable, usable[1:]):
+        if _universe_progressed(previous.lane_progress, current.lane_progress):
+            universe_progress += 1
+        if current.price_engine.hot.evaluated > previous.price_engine.hot.evaluated:
+            hot_work += 1
+        if current.price_engine.background.evaluated > previous.price_engine.background.evaluated:
+            background_work += 1
     pe = last.price_engine
+    if pe.background.evaluated or pe.background.retry_wait or pe.background.deferred:
+        background_work = max(background_work, 1)
+    if pe.hot.evaluated:
+        hot_work = max(hot_work, 1)
     report = SoakReport(
         data_kind=data_kind,
         paper_only=last.paper_only and not last.execution_enabled,
@@ -828,13 +1404,20 @@ def accumulate_soak_report(
         ended_at=last.observed_at,
         duration_seconds=max(0.0, (last.observed_at - first.observed_at).total_seconds()),
         sample_count=len(samples),
-        observed_build_sha=str(last.build.get("git_sha") or "") or None,
+        usable_sample_count=len(usable),
+        observed_build_sha=_build_sha(last),
         observed_build_branch=str(last.build.get("git_branch") or "") or None,
-        active_catalogue_row_count=len(latest_by_id),
-        rows_evaluated_at_least_once=len(evaluated_ids),
+        observed_build_shas=shas,
+        build_sha_changed=sha_changed,
+        coordinator_catalogue_bound=last.coordinator_catalogue_bound,
+        coordinator_price_engine_bound=last.coordinator_price_engine_bound,
+        active_catalogue_row_count=last.active_catalogue_row_count,
+        catalogue_count_mismatches=mismatches,
+        rows_evaluated_at_least_once=sum(1 for key in current_rows if key in evaluated_ids),
         coverage_ratio=coverage,
+        evaluated_identities=sorted(evaluated_ids),
         unevaluated_rows=unevaluated,
-        latest_rows=list(latest_by_id.values()),
+        latest_rows=list(current_rows.values()),
         hot_evaluated=pe.hot.evaluated,
         hot_retry=pe.hot.retry_wait,
         hot_deferred=pe.hot.deferred,
@@ -857,11 +1440,19 @@ def accumulate_soak_report(
         },
         scan_budget_exhausted_price_engine=exhausted,
         hot_universe_overlap_samples=overlap,
-        background_hot_promotions=promotions,
-        capture=last.capture,
+        hot_work_samples=hot_work,
+        background_work_samples=background_work,
+        universe_progress_samples=universe_progress,
+        background_hot_promotions=len(observed_new),
+        promoted_hot_ids_baseline=baseline_ids,
+        promoted_hot_ids_observed=observed_new,
+        lane_progress_first=first_lane,
+        lane_progress_last=last_lane,
+        capture=capture,
         endpoint_samples=endpoint_samples,
         venue_write=last.venue_write,
         durable_queue=any(sample.durable_queue for sample in samples),
+        evidence_errors=list(dict.fromkeys(evidence_errors)),
         notes=list(notes or []),
     )
     report.hard_fails = evaluate_soak_acceptance(report)
@@ -919,34 +1510,67 @@ def snapshot_from_http_payloads(
     build: dict[str, Any] | None,
     live: dict[str, Any] | None,
     validation: dict[str, Any] | None,
-    trades: list[Any] | None,
-    activity: list[Any] | None,
+    trades: list[Any] | dict[str, Any] | None,
+    activity: list[Any] | dict[str, Any] | None,
     endpoint_samples: list[SoakEndpointSample],
     data_kind: str,
+    trades_available: bool | None = None,
+    activity_available: bool | None = None,
 ) -> ScannerValidationSnapshot:
+    capture_available = True
+    if trades_available is False or activity_available is False:
+        capture_available = False
+    extra_capture = capture_summary_from_reads(
+        paper_autofill_enabled=bool((health or {}).get("paper_autofill_enabled")),
+        trades=trades,
+        activity=activity,
+        evidence_usable=capture_available,
+    )
     if validation:
         snapshot = ScannerValidationSnapshot.model_validate(validation)
         snapshot.observed_at = observed_at
         snapshot.data_kind = data_kind
         snapshot.endpoint_samples = endpoint_samples
         snapshot.venue_write.soak_http_methods = list(SOAK_HTTP_GET_ONLY)
+        errors = list(snapshot.evidence_errors)
+        if snapshot.active_catalogue_row_count != len(snapshot.rows):
+            errors.append("catalogue_count_mismatch")
+        if build:
+            build_sha = str(build.get("git_sha") or "").strip()
+            snap_sha = str(snapshot.build.get("git_sha") or "").strip()
+            if build_sha and snap_sha and build_sha != snap_sha:
+                errors.append("build_sha_inconsistent")
+            if not snapshot.build:
+                snapshot.build = dict(build)
+        snapshot.capture = merge_capture_summaries(snapshot.capture, extra_capture)
+        if snapshot.paper_autofill_enabled and not capture_available:
+            errors.append("capture_evidence_unavailable")
+            snapshot.capture.evidence_usable = False
+        snapshot.evidence_errors = list(dict.fromkeys(errors))
+        blocking = {
+            "catalogue_count_mismatch",
+            "build_sha_inconsistent",
+            "scanner_validation_unavailable",
+        }
+        snapshot.usable = snapshot.usable and not any(item in blocking for item in snapshot.evidence_errors)
         return snapshot
-    live = live or {}
-    price = live.get("price_engine") or {}
+    errors = ["scanner_validation_unavailable"]
     health = health or {}
-    rows = []
+    live = live or {}
+    build_payload = dict(build or health.get("build") or {})
     return ScannerValidationSnapshot(
         observed_at=observed_at,
         data_kind=data_kind,
+        usable=False,
+        evidence_errors=errors,
         mode=str(health.get("mode") or "paper"),
         execution_enabled=bool(health.get("execution_enabled")),
         paper_autofill_enabled=bool(health.get("paper_autofill_enabled")),
-        build=dict(build or health.get("build") or {}),
-        active_catalogue_row_count=int((price.get("hot") or {}).get("working_set") or 0)
-        + int((price.get("background") or {}).get("working_set") or 0),
-        rows=rows,
-        price_engine=PriceEnginePublicStatus.model_validate(price) if price else PriceEnginePublicStatus(),
-        durable_queue=bool(price.get("durable_queue", False)),
+        build=build_payload,
+        active_catalogue_row_count=0,
+        rows=[],
+        price_engine=PriceEnginePublicStatus(),
+        durable_queue=False,
         hot_in_progress=bool((health.get("live_refresh") or {}).get("hot_in_progress") or live.get("hot", {}).get("cycle_in_progress")),
         background_in_progress=bool(
             (health.get("live_refresh") or {}).get("background_in_progress")
@@ -956,15 +1580,10 @@ def snapshot_from_http_payloads(
             (health.get("live_refresh") or {}).get("universe_in_progress")
             or live.get("universe", {}).get("cycle_in_progress")
         ),
-        promoted_hot_count=int((live.get("hot") or {}).get("promoted_hot_count") or 0),
-        hot_promotions=int((live.get("hot") or {}).get("hot_promotions") or 0),
-        capture=capture_summary_from_reads(
-            paper_autofill_enabled=bool(health.get("paper_autofill_enabled")),
-            trades=trades,
-            activity=activity,
-        ),
+        lane_progress=lane_progress_from_live(live),
+        capture=extra_capture,
         venue_write=venue_write_boundary_evidence(soak_http_methods=list(SOAK_HTTP_GET_ONLY)),
-        scan_budget_exhausted_price_engine=_json_contains_budget_exhausted(price),
+        scan_budget_exhausted_price_engine=0,
         endpoint_samples=endpoint_samples,
     )
 
@@ -1003,8 +1622,10 @@ def run_http_soak(
                     build=build if isinstance(build, dict) else None,
                     live=live if isinstance(live, dict) else None,
                     validation=validation if isinstance(validation, dict) else None,
-                    trades=trades if isinstance(trades, list) else None,
-                    activity=activity if isinstance(activity, list) else None,
+                    trades=trades if isinstance(trades, (list, dict)) else None,
+                    activity=activity if isinstance(activity, (list, dict)) else None,
+                    trades_available=trades_sample.available,
+                    activity_available=activity_sample.available,
                     endpoint_samples=[
                         health_sample,
                         build_sample,

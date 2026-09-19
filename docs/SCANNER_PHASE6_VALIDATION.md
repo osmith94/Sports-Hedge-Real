@@ -67,8 +67,10 @@ The report always exposes:
 
 - start/end timestamps and observed build SHA;
 - ACTIVE catalogue row count;
-- coverage ratio = rows evaluated at least once / ACTIVE rows observed;
-- every ACTIVE row not evaluated, with a truthful reason/status
+- coverage ratio = current ACTIVE `(catalogue_row_id, content_version)`
+  identities evaluated at least once / current ACTIVE identities;
+  a new content version must earn its own evaluation;
+- every current ACTIVE identity not evaluated, with a truthful reason/status
   (`retry_wait`, `deferred` / `provider_capacity_saturated`,
   `not_started_this_cadence`, `revalidation_needed`, `in_flight`, `failed`);
 - HOT and BACKGROUND evaluated / retry / deferred / not-started counts;
@@ -89,21 +91,69 @@ but degraded-provider truth must remain visible.
 
 Hard-fail (exit code 2) when any of these are present:
 
-- silent ACTIVE rows with no evaluated result and no truthful
+- no usable observer samples, or core GET evidence missing/inconsistent
+  (`/health`, `/build-info`, `/paper/live-refresh`,
+  `/paper/scanner-validation`);
+- `/paper/scanner-validation` unavailable (never treated as a valid empty
+  catalogue);
+- stated ACTIVE catalogue count disagrees with the row payload;
+- serving build SHA changes mid-soak;
+- no ACTIVE catalogue row observed for the whole bounded soak;
+- coordinator catalogue/engine wiring unbound on the observer GET;
+- silent ACTIVE identities with no evaluated result and no truthful
   retry/deferred/revalidation/not-started reason;
 - any price-engine `scan_budget_exhausted`;
-- HOT preventing UNIVERSE progress;
-- BACKGROUND starvation;
+- HOT worked while UNIVERSE was due and made no observed progress;
+- BACKGROUND ACTIVE rows existed, BACKGROUND was due, and BACKGROUND
+  received no work;
 - one provider timeout leftover-marking unrelated items;
-- eligible + autofill ON without OPEN or explicit `PAPER_FILL_REJECTED`;
-- duplicate OPEN / treasury lock from repeated observation;
+- eligible + autofill ON without a **per-opportunity** durable OPEN
+  (or valid progression) or explicit `PAPER_FILL_REJECTED`;
+- duplicate OPEN / treasury lock for the same opportunity/attempt;
 - venue write / place / cancel / sign;
-- a status/read endpoint triggering discovery or pricing work;
-- stale pre-reset projection resurrection;
-- dual matcher / second equivalence authority.
+- a status/read endpoint triggering discovery or pricing work.
 
-CI proves the deterministic contracts above with fixture/demo data. Owner-live
-soak evidence is a separate gate.
+`GET /paper/scanner-validation` is strictly observer-only: it must not bind
+coordinator catalogue/engine state, change due times, or start
+reconstruction/discovery/pricing. If the runtime is unbound, the snapshot
+records that truth instead of repairing it.
+
+Magic `notes` strings are not soak hard-fail switches. Dual-matcher and
+reset-quarantine facts stay deterministic CI/architecture tests; a read-only
+soak cannot cause them.
+
+Fixture/demo example (CI; **not** owner-live):
+
+```json
+{
+  "schema_version": 2,
+  "issue": 350,
+  "data_kind": "fixture_demo",
+  "paper_only": true,
+  "execution_enabled": false,
+  "usable_sample_count": 2,
+  "active_catalogue_row_count": 2,
+  "rows_evaluated_at_least_once": 1,
+  "coverage_ratio": 0.5,
+  "evaluated_identities": ["amc-a:1"],
+  "unevaluated_rows": [
+    {
+      "catalogue_row_id": "amc-b",
+      "content_version": 1,
+      "status": "not_started_this_cadence",
+      "reason": "not_started_this_cadence",
+      "evaluated_at_least_once": false
+    }
+  ],
+  "hot_universe_overlap_samples": 2,
+  "scan_budget_exhausted_price_engine": 0,
+  "durable_queue": false,
+  "accepted": true
+}
+```
+
+This example is **fixture/demo** only. CI proves the deterministic contracts
+above with fixture/demo data. Owner-live soak evidence is a separate gate.
 
 ## Safe restart
 

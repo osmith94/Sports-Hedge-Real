@@ -32,17 +32,22 @@ from sports_hedge.application.provider_access import HEALTH_CAPACITY_SATURATED
 from sports_hedge.application.scanner_observability import PriceEnginePublicStatus, PriceEngineTierStatus
 from sports_hedge.application.scanner_phase6 import (
     DATA_CLASS_FIXTURE_DEMO,
+    DATA_CLASS_OWNER_LIVE_OBSERVATION,
     DEFAULT_SOAK_DURATION_SECONDS,
     ScannerValidationSnapshot,
+    SoakCaptureSummary,
     SoakEndpointSample,
+    SoakLaneProgress,
     SoakRowState,
     accumulate_soak_report,
+    capture_summary_from_reads,
     catalogue_register_identities,
     compare_register_parity,
     evaluate_soak_acceptance,
     legacy_register_identities_from_payloads,
     observer_snapshot,
     pair_identity_uses_register_only,
+    snapshot_from_http_payloads,
     soak_harness_is_observer_only,
     venue_write_boundary_evidence,
 )
@@ -513,6 +518,10 @@ async def test_health_build_info_live_refresh_and_validation_are_observer_only(
     assert "collect_and_scan" not in source
     assert "_collect_report" not in source
     assert "list_events" not in source
+    assert "bind_catalogue_store" not in source
+    assert "reconstruct(" not in source
+    assert "run_price_engine_slice" not in source
+    assert "run_slice" not in source
     live_src = inspect.getsource(paper_api.live_refresh_status)
     assert "collect_and_scan" not in live_src
     transport = httpx.ASGITransport(app=main_api.app)
@@ -532,6 +541,46 @@ async def test_health_build_info_live_refresh_and_validation_are_observer_only(
         assert payload["execution_enabled"] is False
         assert payload["scan_budget_exhausted_price_engine"] == 0
         assert SCAN_BUDGET_EXHAUSTED_REASON not in repr(payload.get("price_engine") or {})
+        assert payload["coordinator_catalogue_bound"] is False
+        assert payload["coordinator_price_engine_bound"] is False
+        assert coordinator._catalogue_store is None
+        assert coordinator._price_engine is None
+        assert coordinator._next_hot_due is None
+        assert coordinator._next_universe_due is None
+        assert coordinator._next_background_due is None
+        assert coordinator._hot_in_progress is False
+
+        store = SqliteApprovedMarketCatalogueStore(":memory:")
+        try:
+            row = _row(
+                suffix="getbind",
+                kickoff=NEAR_KICKOFF,
+                matchbook_market_id="316701",
+                kalshi_event="KXEPLBTTS-GETBIND",
+            )
+            store.upsert_catalogue_row(row)
+            engine, _mb, _ks, _layer = _engine([row], store=store)
+            coordinator.bind_catalogue_store(store)
+            coordinator.bind_price_engine(engine)
+            coordinator._next_hot_due = NOW
+            coordinator._next_universe_due = NOW
+            coordinator._next_background_due = NOW
+            coordinator._hot_in_progress = True
+            bound = await client.get("/paper/scanner-validation")
+            assert bound.status_code == 200
+            bound_payload = bound.json()
+            assert bound_payload["coordinator_catalogue_bound"] is True
+            assert bound_payload["coordinator_price_engine_bound"] is True
+            assert coordinator._catalogue_store is store
+            assert coordinator._price_engine is engine
+            assert coordinator._next_hot_due == NOW
+            assert coordinator._next_universe_due == NOW
+            assert coordinator._next_background_due == NOW
+            assert coordinator._hot_in_progress is True
+            assert coordinator._universe_in_progress is False
+            assert coordinator._background_in_progress is False
+        finally:
+            store.close()
 
 
 def test_soak_harness_read_only_boundary_and_timeouts_unchanged() -> None:
@@ -611,6 +660,7 @@ def test_soak_example_report_is_fixture_demo_only() -> None:
         rows=[
             SoakRowState(
                 catalogue_row_id="amc-a",
+                content_version=1,
                 register_canonical_key=CANONICAL_BTTS_FT,
                 canonical_event_id="evt-a",
                 row_state="ACTIVE",
@@ -622,6 +672,7 @@ def test_soak_example_report_is_fixture_demo_only() -> None:
             ),
             SoakRowState(
                 catalogue_row_id="amc-b",
+                content_version=1,
                 register_canonical_key=CANONICAL_MATCH_RESULT_FT,
                 canonical_event_id="evt-b",
                 row_state="ACTIVE",
@@ -649,3 +700,440 @@ def test_soak_example_report_is_fixture_demo_only() -> None:
     assert report.hot_universe_overlap_samples == 2
     assert report.accepted is True
     assert "owner_live" not in report.data_kind
+
+
+def _core_endpoints(
+    *,
+    health: bool = True,
+    build: bool = True,
+    live: bool = True,
+    validation: bool = True,
+    trades: bool = True,
+    activity: bool = True,
+) -> list[SoakEndpointSample]:
+    def _sample(path: str, available: bool) -> SoakEndpointSample:
+        return SoakEndpointSample(
+            path=path,
+            status_code=200 if available else None,
+            available=available,
+            elapsed_ms=1.5,
+            error=None if available else "unavailable",
+        )
+
+    return [
+        _sample("/health", health),
+        _sample("/build-info", build),
+        _sample("/paper/live-refresh", live),
+        _sample("/paper/scanner-validation", validation),
+        _sample("/paper/trades/active", trades),
+        _sample("/paper/watchlist/activity", activity),
+    ]
+
+
+def _row_state(
+    row_id: str,
+    *,
+    version: int = 1,
+    evaluated: bool = False,
+    status: str = "not_started_this_cadence",
+    reason: str = "not_started_this_cadence",
+    priority: str = "hot",
+    error: str | None = None,
+) -> SoakRowState:
+    return SoakRowState(
+        catalogue_row_id=row_id,
+        content_version=version,
+        register_canonical_key=CANONICAL_BTTS_FT,
+        canonical_event_id=f"evt-{row_id}",
+        row_state="ACTIVE",
+        priority=priority,
+        status=status,
+        reason=reason,
+        evaluated_at_least_once=evaluated,
+        last_priced_at=NOW if evaluated else None,
+        last_error_detail=error,
+    )
+
+
+def _usable_snapshot(
+    rows: list[SoakRowState],
+    *,
+    sha: str = "fixture",
+    endpoints: list[SoakEndpointSample] | None = None,
+    capture: SoakCaptureSummary | None = None,
+    promoted_ids: list[str] | None = None,
+    hot: bool = True,
+    universe: bool = True,
+    background: bool = False,
+    lane: SoakLaneProgress | None = None,
+    bound: bool = True,
+    count: int | None = None,
+) -> ScannerValidationSnapshot:
+    return ScannerValidationSnapshot(
+        observed_at=NOW,
+        data_kind=DATA_CLASS_FIXTURE_DEMO,
+        usable=True,
+        coordinator_catalogue_bound=bound,
+        coordinator_price_engine_bound=bound,
+        build={"git_sha": sha, "git_branch": "test"},
+        active_catalogue_row_count=len(rows) if count is None else count,
+        rows=rows,
+        price_engine=PriceEnginePublicStatus(
+            hot=PriceEngineTierStatus(working_set=1, evaluated=1 if any(r.evaluated_at_least_once for r in rows) else 0),
+            background=PriceEngineTierStatus(
+                working_set=int(any((r.priority or "") == "background" for r in rows)),
+                evaluated=int(
+                    any(
+                        (r.priority or "") == "background" and r.evaluated_at_least_once
+                        for r in rows
+                    )
+                ),
+            ),
+        ),
+        hot_in_progress=hot,
+        universe_in_progress=universe,
+        background_in_progress=background,
+        promoted_hot_ids=list(promoted_ids or []),
+        lane_progress=lane or SoakLaneProgress(),
+        capture=capture or SoakCaptureSummary(),
+        endpoint_samples=endpoints
+        or [SoakEndpointSample(path="/health", status_code=200, available=True, elapsed_ms=1.0)],
+    )
+
+
+def test_zero_samples_are_rejected() -> None:
+    report = accumulate_soak_report([], data_kind=DATA_CLASS_FIXTURE_DEMO)
+    assert report.accepted is False
+    assert {item.code for item in report.hard_fails} >= {"no_usable_samples"}
+
+
+def test_all_core_gets_unavailable_are_rejected() -> None:
+    snapshot = snapshot_from_http_payloads(
+        observed_at=NOW,
+        health=None,
+        build=None,
+        live=None,
+        validation=None,
+        trades=None,
+        activity=None,
+        endpoint_samples=_core_endpoints(
+            health=False, build=False, live=False, validation=False, trades=False, activity=False
+        ),
+        data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION,
+        trades_available=False,
+        activity_available=False,
+    )
+    assert snapshot.usable is False
+    assert snapshot.rows == []
+    assert snapshot.active_catalogue_row_count == 0
+    report = accumulate_soak_report([snapshot], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION)
+    codes = {item.code for item in report.hard_fails}
+    assert report.accepted is False
+    assert "no_usable_samples" in codes
+    assert "core_endpoints_unavailable" in codes
+    assert report.endpoint_samples
+
+
+def test_missing_scanner_validation_does_not_pass_as_empty_catalogue() -> None:
+    snapshot = snapshot_from_http_payloads(
+        observed_at=NOW,
+        health={"mode": "paper", "execution_enabled": False, "live_refresh": {"hot_in_progress": False}},
+        build={"git_sha": "abc"},
+        live={"price_engine": {"hot": {"working_set": 9}, "background": {"working_set": 4}}},
+        validation=None,
+        trades=[],
+        activity=[],
+        endpoint_samples=_core_endpoints(validation=False),
+        data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION,
+        trades_available=True,
+        activity_available=True,
+    )
+    assert snapshot.usable is False
+    assert snapshot.active_catalogue_row_count == 0
+    assert snapshot.rows == []
+    report = accumulate_soak_report([snapshot], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION)
+    codes = {item.code for item in report.hard_fails}
+    assert report.accepted is False
+    assert "scanner_validation_unavailable" in codes
+    assert report.active_catalogue_row_count == 0
+    assert report.coverage_ratio is None
+
+
+def test_stated_active_count_mismatch_is_rejected() -> None:
+    snapshot = _usable_snapshot(
+        [_row_state("amc-a", evaluated=True, status="evaluated", reason="evaluated")],
+        count=2,
+        endpoints=_core_endpoints(),
+    )
+    via_http = snapshot_from_http_payloads(
+        observed_at=NOW,
+        health={"mode": "paper"},
+        build={"git_sha": "fixture"},
+        live={},
+        validation=snapshot.model_dump(mode="json"),
+        trades=[],
+        activity=[],
+        endpoint_samples=_core_endpoints(),
+        data_kind=DATA_CLASS_FIXTURE_DEMO,
+        trades_available=True,
+        activity_available=True,
+    )
+    assert via_http.usable is False
+    report = accumulate_soak_report([via_http], data_kind=DATA_CLASS_FIXTURE_DEMO)
+    assert report.accepted is False
+    assert "catalogue_count_mismatch" in {item.code for item in report.hard_fails}
+
+
+def test_build_sha_change_mid_soak_is_rejected() -> None:
+    first = _usable_snapshot(
+        [_row_state("amc-a", evaluated=True, status="evaluated", reason="evaluated")],
+        sha="sha-one",
+        hot=True,
+        universe=True,
+    )
+    second = first.model_copy(
+        update={
+            "observed_at": NOW + timedelta(minutes=12),
+            "build": {"git_sha": "sha-two", "git_branch": "test"},
+        }
+    )
+    report = accumulate_soak_report([first, second], data_kind=DATA_CLASS_FIXTURE_DEMO)
+    assert report.accepted is False
+    assert report.build_sha_changed is True
+    assert "build_sha_changed" in {item.code for item in report.hard_fails}
+
+
+def test_coverage_is_content_version_identity() -> None:
+    v1 = _usable_snapshot(
+        [_row_state("amc-x", version=1, evaluated=True, status="evaluated", reason="evaluated")],
+        hot=True,
+        universe=True,
+    )
+    v2 = v1.model_copy(
+        update={
+            "observed_at": NOW + timedelta(minutes=1),
+            "rows": [
+                _row_state(
+                    "amc-x",
+                    version=2,
+                    evaluated=False,
+                    status="not_started_this_cadence",
+                    reason="not_started_this_cadence",
+                )
+            ],
+            "active_catalogue_row_count": 1,
+        }
+    )
+    report = accumulate_soak_report([v1, v2], data_kind=DATA_CLASS_FIXTURE_DEMO)
+    assert report.active_catalogue_row_count == 1
+    assert report.rows_evaluated_at_least_once == 0
+    assert report.coverage_ratio == 0.0
+    assert report.unevaluated_rows[0].catalogue_row_id == "amc-x"
+    assert report.unevaluated_rows[0].content_version == 2
+    assert "amc-x:1" in report.evaluated_identities
+    assert "amc-x:2" not in report.evaluated_identities
+    assert report.accepted is True
+
+
+def test_capture_outcomes_are_correlated_per_opportunity() -> None:
+    open_a = capture_summary_from_reads(
+        paper_autofill_enabled=True,
+        trades=[{"opportunity_id": "opp-a", "trade_id": "tr-a", "state": "OPEN"}],
+        activity=[
+            {"opportunity_id": "opp-a", "event_id": "e-a1", "event_type": "paper_fill_attempted"},
+            {"opportunity_id": "opp-b", "event_id": "e-b1", "event_type": "paper_fill_attempted"},
+        ],
+    )
+    assert open_a.silent_opportunity_ids == ["opp-b"]
+    first = _usable_snapshot(
+        [_row_state("amc-a", evaluated=True, status="evaluated", reason="evaluated")],
+        capture=open_a,
+        hot=True,
+        universe=True,
+    )
+    later_activity = capture_summary_from_reads(
+        paper_autofill_enabled=True,
+        trades=[{"opportunity_id": "opp-a", "trade_id": "tr-a", "state": "OPEN"}],
+        activity=[
+            {"opportunity_id": "opp-a", "event_id": "e-a1", "event_type": "paper_fill_attempted"},
+        ],
+    )
+    second = first.model_copy(
+        update={"observed_at": NOW + timedelta(minutes=1), "capture": later_activity}
+    )
+    report = accumulate_soak_report([first, second], data_kind=DATA_CLASS_FIXTURE_DEMO)
+    assert report.accepted is False
+    assert "silent_eligible_capture" in {item.code for item in report.hard_fails}
+    assert report.capture.silent_opportunity_ids == ["opp-b"]
+
+    rejected_b = capture_summary_from_reads(
+        paper_autofill_enabled=True,
+        trades=[{"opportunity_id": "opp-a", "trade_id": "tr-a", "state": "OPEN"}],
+        activity=[
+            {"opportunity_id": "opp-b", "event_id": "e-b1", "event_type": "paper_fill_attempted"},
+            {"opportunity_id": "opp-b", "event_id": "e-b2", "event_type": "paper_fill_rejected"},
+        ],
+    )
+    recovered = first.model_copy(update={"capture": rejected_b, "observed_at": NOW + timedelta(minutes=2)})
+    ok = accumulate_soak_report([first, recovered], data_kind=DATA_CLASS_FIXTURE_DEMO)
+    assert ok.capture.silent_opportunity_ids == []
+    assert ok.accepted is True
+
+    duplicate = capture_summary_from_reads(
+        paper_autofill_enabled=True,
+        trades=[
+            {"opportunity_id": "opp-a", "trade_id": "tr-a", "state": "OPEN"},
+            {"opportunity_id": "opp-a", "trade_id": "tr-a2", "state": "OPEN"},
+        ],
+        activity=[{"opportunity_id": "opp-a", "event_id": "e-a1", "event_type": "paper_fill_attempted"}],
+    )
+    dup_report = accumulate_soak_report(
+        [first.model_copy(update={"capture": duplicate})],
+        data_kind=DATA_CLASS_FIXTURE_DEMO,
+    )
+    assert "duplicate_open" in {item.code for item in dup_report.hard_fails}
+
+    idempotent = capture_summary_from_reads(
+        paper_autofill_enabled=True,
+        trades=[
+            {"opportunity_id": "opp-a", "trade_id": "tr-a", "state": "OPEN"},
+            {"opportunity_id": "opp-a", "trade_id": "tr-a", "state": "OPEN"},
+        ],
+        activity=[
+            {"opportunity_id": "opp-a", "event_id": "e-a1", "event_type": "paper_fill_attempted"},
+            {"opportunity_id": "opp-a", "event_id": "e-a1", "event_type": "paper_fill_attempted"},
+        ],
+    )
+    idem_report = accumulate_soak_report(
+        [first.model_copy(update={"capture": idempotent})],
+        data_kind=DATA_CLASS_FIXTURE_DEMO,
+    )
+    assert idem_report.capture.duplicate_open_ids == []
+    assert idem_report.accepted is True
+
+
+def test_runtime_invariants_are_derived_not_notes() -> None:
+    healthy = _usable_snapshot(
+        [
+            _row_state("amc-a", evaluated=True, status="evaluated", reason="evaluated"),
+            _row_state(
+                "amc-b",
+                evaluated=False,
+                status="not_started_this_cadence",
+                reason="not_started_this_cadence",
+                priority="background",
+            ),
+        ],
+        hot=True,
+        universe=True,
+    )
+    notes_report = accumulate_soak_report(
+        [healthy],
+        data_kind=DATA_CLASS_FIXTURE_DEMO,
+        notes=[
+            "hot_blocked_universe",
+            "background_starvation",
+            "unrelated_timeout_leftover",
+            "dual_matcher",
+            "stale_projection_resurrection",
+        ],
+    )
+    codes = {item.code for item in notes_report.hard_fails}
+    assert "hot_blocked_universe" not in codes
+    assert "background_starvation" not in codes
+    assert "unrelated_timeout_leftover" not in codes
+    assert "dual_matcher" not in codes
+    assert notes_report.accepted is True
+
+    blocked = healthy.model_copy(
+        update={
+            "data_kind": DATA_CLASS_OWNER_LIVE_OBSERVATION,
+            "universe_in_progress": False,
+            "lane_progress": SoakLaneProgress(
+                universe_next_due_at=NOW,
+                hot_last_completed_at=NOW,
+            ),
+        }
+    )
+    blocked_report = accumulate_soak_report(
+        [blocked, blocked.model_copy(update={"observed_at": NOW + timedelta(minutes=12)})],
+        data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION,
+    )
+    assert "hot_blocked_universe" in {item.code for item in blocked_report.hard_fails}
+
+    starved = healthy.model_copy(
+        update={
+            "data_kind": DATA_CLASS_OWNER_LIVE_OBSERVATION,
+            "hot_in_progress": False,
+            "universe_in_progress": False,
+            "lane_progress": SoakLaneProgress(background_next_due_at=NOW, background_working_set=1),
+        }
+    )
+    starved_report = accumulate_soak_report(
+        [starved, starved.model_copy(update={"observed_at": NOW + timedelta(minutes=12)})],
+        data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION,
+    )
+    assert "background_starvation" in {item.code for item in starved_report.hard_fails}
+
+    timeout = _usable_snapshot(
+        [
+            _row_state(
+                "amc-slow",
+                evaluated=False,
+                status="retry_wait",
+                reason="retry_wait",
+                error="kalshi order_book timeout",
+            ),
+            _row_state(
+                "amc-other",
+                evaluated=False,
+                status="failed",
+                reason="scan_budget_exhausted",
+            ),
+        ],
+        hot=True,
+        universe=True,
+    )
+    timeout_report = accumulate_soak_report([timeout], data_kind=DATA_CLASS_FIXTURE_DEMO)
+    codes = {item.code for item in timeout_report.hard_fails}
+    assert "unrelated_timeout_leftover" in codes
+    assert "scan_budget_exhausted_row" in codes
+
+    first_promo = _usable_snapshot(
+        [_row_state("amc-a", evaluated=True, status="evaluated", reason="evaluated")],
+        promoted_ids=["evt-old"],
+        hot=True,
+        universe=True,
+        background=True,
+    )
+    second_promo = first_promo.model_copy(
+        update={
+            "observed_at": NOW + timedelta(seconds=30),
+            "promoted_hot_ids": ["evt-old", "evt-new"],
+        }
+    )
+    promo_report = accumulate_soak_report([first_promo, second_promo], data_kind=DATA_CLASS_FIXTURE_DEMO)
+    assert promo_report.promoted_hot_ids_baseline == ["evt-old"]
+    assert promo_report.promoted_hot_ids_observed == ["evt-new"]
+    assert promo_report.background_hot_promotions == 1
+
+
+def test_architecture_only_dual_matcher_and_reset_quarantine_remain_code_facts() -> None:
+    from sports_hedge.application.catalogue_maintenance import pair_identity_from_markets
+    from sports_hedge.application.live_refresh import LiveRefreshCoordinator
+    from sports_hedge.application.price_engine import CataloguePriceEngine
+
+    assert pair_identity_uses_register_only() is True
+    pair_src = inspect.getsource(pair_identity_from_markets)
+    assert "MarketMatcher(" not in pair_src
+    engine_src = inspect.getsource(CataloguePriceEngine)
+    assert "reset_generation" in engine_src
+    live_src = inspect.getsource(LiveRefreshCoordinator)
+    assert "quarantine" in live_src.casefold() or "reset_generation" in live_src
+
+
+def test_no_active_catalogue_rows_fail_closed() -> None:
+    empty = _usable_snapshot([], hot=True, universe=True)
+    report = accumulate_soak_report([empty], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION)
+    assert report.accepted is False
+    assert "no_active_catalogue_rows" in {item.code for item in report.hard_fails}

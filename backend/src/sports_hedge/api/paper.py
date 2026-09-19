@@ -815,14 +815,16 @@ def scanner_validation_snapshot(
     operations: PaperOperationsService = Depends(get_paper_operations_service),
     watchlist: WatchlistService = Depends(get_watchlist_service),
 ) -> ScannerValidationSnapshot:
-    """Observer-only Phase 6 soak snapshot. Never discovers, prices, or writes venues."""
+    """Observer-only Phase 6 soak snapshot. Never discovers, prices, binds, or writes venues."""
 
     coordinator = get_live_refresh_coordinator()
-    if coordinator._catalogue_store is None:
-        coordinator.bind_catalogue_store(get_approved_market_catalogue_store())
+    bound_store = coordinator._catalogue_store
+    catalogue_bound = bound_store is not None
+    catalogue_store = bound_store if catalogue_bound else get_approved_market_catalogue_store()
     return observer_snapshot(
         coordinator=coordinator,
-        catalogue_store=coordinator._catalogue_store,
+        catalogue_store=catalogue_store,
+        coordinator_catalogue_bound=catalogue_bound,
         settings=get_settings(),
         build=get_serving_build_info(),
         trades=operations.list_active_trades(),
