@@ -678,6 +678,7 @@ class LiveRefreshCoordinator:
         self.flush_universe_checkpoint()
         self.configure_from_settings()
         self._drain_orphaned_collection_tasks(orphans)
+        self._observability.reset()
         if self._price_engine is not None:
             self._price_engine.restart()
 

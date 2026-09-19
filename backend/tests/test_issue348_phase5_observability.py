@@ -12,6 +12,7 @@ import inspect
 import threading
 import time
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -36,14 +37,20 @@ from sports_hedge.application.provider_access import (
     ProviderAccessLayer,
 )
 from sports_hedge.application.scanner_observability import ScannerObservabilitySink
+from sports_hedge.arbitrage.models import PayoffSolution
+from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
 from sports_hedge.domain.models import VenueName
+from sports_hedge.matching.markets import MarketMatchResult
+from sports_hedge.paper.models import PaperScanDecision
 from sports_hedge.paper.trades import PaperTradeState
+from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.universe_checkpoint import SqliteUniverseCheckpointStore
 from test_dual_cadence_scheduler import NOW
 from test_issue344_price_engine import (
     DISTANT_KICKOFF,
     FakeKalshi,
     NEAR_KICKOFF,
+    StubPaperScan,
     _engine,
     _hold_slot,
     _qualifying_decision,
@@ -62,6 +69,42 @@ from test_step8f_automatic_paper_entry import _ops_bundle
 
 def _json_walk(value: Any) -> str:
     return repr(value)
+
+
+def _positive_near_decision(*, scanned_at=NOW) -> PaperScanDecision:
+    return PaperScanDecision(
+        scanned_at=scanned_at,
+        market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=["register"]),
+        payoff_scan=PayoffScanResult(
+            solution=PayoffSolution(
+                is_arbitrage=False,
+                roi=Decimal("0.004"),
+                minimum_state_pnl=Decimal("0"),
+                numerically_validated=True,
+            )
+        ),
+        minimum_net_edge=Decimal("0.01"),
+        solver_model="strict_complete_set",
+        eligible_for_paper_simulation=False,
+    )
+
+
+def _flat_decision(*, scanned_at=NOW) -> PaperScanDecision:
+    return PaperScanDecision(
+        scanned_at=scanned_at,
+        market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=["register"]),
+        payoff_scan=PayoffScanResult(
+            solution=PayoffSolution(
+                is_arbitrage=False,
+                roi=Decimal("0"),
+                minimum_state_pnl=Decimal("0"),
+                numerically_validated=True,
+            )
+        ),
+        minimum_net_edge=Decimal("0.01"),
+        solver_model="strict_complete_set",
+        eligible_for_paper_simulation=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -463,13 +506,209 @@ async def test_delayed_audit_cannot_recapture_phase4_open(
 
 def test_phase5_does_not_create_durable_queue_or_weaken_paper_boundary() -> None:
     sink_src = inspect.getsource(ScannerObservabilitySink)
+    emit_src = inspect.getsource(ScannerObservabilitySink.emit)
     engine_src = inspect.getsource(CataloguePriceEngine)
     paper_src = inspect.getsource(paper_api.live_refresh_status)
     assert "CREATE TABLE" not in sink_src
     assert "CREATE TABLE" not in engine_src
+    assert "cancel" not in emit_src
     assert "durable_queue" in inspect.getsource(CataloguePriceEngine.public_status)
     assert "collect_and_scan" not in paper_src
     for token in FORBIDDEN_WRITE_METHODS:
         assert token not in engine_src
         assert token not in sink_src
     assert VenueName.MATCHBOOK in MB_K
+
+
+@pytest.mark.asyncio
+async def test_saturated_sink_does_not_orphan_running_to_thread(
+    tmp_path: Path,
+) -> None:
+    repo = SqlitePaperScanRepository(tmp_path / "obs-sink.sqlite")
+    sink = ScannerObservabilitySink(maxsize=2)
+    release = threading.Event()
+    started_event = threading.Event()
+    started: list[int] = []
+    finished: list[int] = []
+
+    def callback(index: int) -> None:
+        started.append(index)
+        started_event.set()
+        assert release.wait(timeout=2.0)
+        repo.list_scans(limit=1)
+        finished.append(index)
+
+    try:
+        for index in range(5):
+            sink.emit(lambda item=index: callback(item))
+        for _ in range(100):
+            if started_event.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert started_event.is_set()
+        assert sink.dropped >= 1
+        assert sink.lag >= 1
+        assert started
+        assert not finished
+        drain_task = asyncio.create_task(sink.drain())
+        await asyncio.sleep(0.05)
+        assert not drain_task.done()
+        assert len(finished) == 0
+        release.set()
+        await drain_task
+        assert len(finished) == len(started)
+        assert len(started) + sink.dropped == 5
+        assert sink.lag == 0
+        repo.list_scans(limit=1)
+    finally:
+        release.set()
+        await sink.shutdown()
+        repo.close()
+
+
+@pytest.mark.asyncio
+async def test_positive_near_background_promotes_before_projection_drains() -> None:
+    fixture_state = FixtureCurrentStateStore()
+    paper = StubPaperScan(_positive_near_decision())
+    row = _row(
+        suffix="nearhot",
+        kickoff=DISTANT_KICKOFF,
+        matchbook_market_id="316580",
+        kalshi_event="KXEPLBTTS-NEARHOT",
+    )
+    engine, _mb, _ks, _layer = _engine([row], paper_scan=paper, fixture_state=fixture_state)
+    gate = threading.Event()
+    original = fixture_state.upsert_from_report
+
+    def slow_upsert(*args: Any, **kwargs: Any) -> None:
+        gate.wait(timeout=2.0)
+        original(*args, **kwargs)
+
+    fixture_state.upsert_from_report = slow_upsert  # type: ignore[method-assign]
+    runtime = engine.item("amc-nearhot")
+    assert runtime is not None
+    assert runtime.priority is PriceEnginePriority.BACKGROUND
+    result = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
+    assert "amc-nearhot" in result.evaluated
+    assert row.canonical_event_id in result.promotions
+    assert row.canonical_event_id in engine._promoted_hot_ids
+    assert engine.classify_priority(runtime.identity) is PriceEnginePriority.HOT
+    assert row.canonical_event_id not in fixture_state.hot_identity_scope(NOW)
+    gate.set()
+    await engine.drain_observability()
+    assert row.canonical_event_id in fixture_state.hot_identity_scope(NOW)
+
+
+@pytest.mark.asyncio
+async def test_non_interesting_evaluation_demotes_unless_lifecycle_hot() -> None:
+    fixture_state = FixtureCurrentStateStore()
+    paper = StubPaperScan(_positive_near_decision())
+    distant = _row(
+        suffix="demote",
+        kickoff=DISTANT_KICKOFF,
+        matchbook_market_id="316581",
+        kalshi_event="KXEPLBTTS-DEMOTE",
+    )
+    near = _row(
+        suffix="keep",
+        kickoff=NEAR_KICKOFF,
+        matchbook_market_id="316582",
+        kalshi_event="KXEPLBTTS-KEEP",
+    )
+    engine, _mb, _ks, _layer = _engine(
+        [distant, near], paper_scan=paper, fixture_state=fixture_state
+    )
+    distant_runtime = engine.item("amc-demote")
+    near_runtime = engine.item("amc-keep")
+    assert distant_runtime is not None and near_runtime is not None
+    first = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
+    assert distant.canonical_event_id in first.promotions
+    assert engine.classify_priority(distant_runtime.identity) is PriceEnginePriority.HOT
+    assert engine.classify_priority(near_runtime.identity) is PriceEnginePriority.HOT
+    paper.decision = _flat_decision()
+    cooled = await engine.run_slice(PriceEnginePriority.HOT, now=NOW)
+    assert "amc-demote" in cooled.evaluated
+    assert "amc-keep" in cooled.evaluated
+    assert distant.canonical_event_id not in engine._promoted_hot_ids
+    assert engine.classify_priority(distant_runtime.identity) is PriceEnginePriority.BACKGROUND
+    assert engine.classify_priority(near_runtime.identity) is PriceEnginePriority.HOT
+    await engine.drain_observability()
+    assert distant.canonical_event_id not in fixture_state.hot_identity_scope(NOW)
+    assert near.canonical_event_id in fixture_state.hot_identity_scope(NOW)
+
+
+@pytest.mark.asyncio
+async def test_lagged_ui_projection_cannot_change_scheduler_promotion() -> None:
+    fixture_state = FixtureCurrentStateStore()
+    paper = StubPaperScan(_positive_near_decision())
+    row = _row(
+        suffix="ignoreui",
+        kickoff=DISTANT_KICKOFF,
+        matchbook_market_id="316583",
+        kalshi_event="KXEPLBTTS-IGNOREUI",
+    )
+    engine, _mb, _ks, _layer = _engine([row], paper_scan=paper, fixture_state=fixture_state)
+    runtime = engine.item("amc-ignoreui")
+    assert runtime is not None
+    await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
+    fixture_state.hot_identity_scope = lambda now, **kwargs: []  # type: ignore[method-assign]
+    assert engine.classify_priority(runtime.identity) is PriceEnginePriority.HOT
+    paper.decision = _flat_decision()
+    await engine.run_slice(PriceEnginePriority.HOT, now=NOW)
+    fixture_state.hot_identity_scope = (  # type: ignore[method-assign]
+        lambda now, **kwargs: [row.canonical_event_id]
+    )
+    assert engine.classify_priority(runtime.identity) is PriceEnginePriority.BACKGROUND
+    assert row.canonical_event_id not in engine._promoted_hot_ids
+    await engine.drain_observability()
+
+
+@pytest.mark.asyncio
+async def test_delayed_projection_keeps_emitted_event_lane_and_identity() -> None:
+    fixture_state = FixtureCurrentStateStore()
+    paper = StubPaperScan(_qualifying_decision(scanned_at=NOW))
+    row = _row(
+        suffix="snap",
+        kickoff=DISTANT_KICKOFF,
+        matchbook_market_id="316584",
+        kalshi_event="KXEPLBTTS-SNAP",
+    )
+    engine, _mb, _ks, _layer = _engine([row], paper_scan=paper, fixture_state=fixture_state)
+    gate = threading.Event()
+    seen: list[dict[str, Any]] = []
+    original = fixture_state.upsert_from_report
+
+    def capturing_upsert(report: Any, **kwargs: Any) -> None:
+        gate.wait(timeout=2.0)
+        seen.append(
+            {
+                "scan_lane": kwargs.get("scan_lane"),
+                "priority": (report.scan_diagnostics or {}).get("priority"),
+                "canonical_event_id": report.discovered_fixtures[0].canonical_event_id
+                if report.discovered_fixtures
+                else None,
+                "catalogue_row_id": (report.scan_diagnostics or {}).get("catalogue_row_id"),
+            }
+        )
+        original(report, **kwargs)
+
+    fixture_state.upsert_from_report = capturing_upsert  # type: ignore[method-assign]
+    runtime = engine.item("amc-snap")
+    assert runtime is not None
+    result = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
+    assert "amc-snap" in result.evaluated
+    emitted_priority = runtime.priority
+    assert emitted_priority is PriceEnginePriority.HOT
+    runtime.priority = PriceEnginePriority.BACKGROUND
+    runtime.identity = runtime.identity.model_copy(
+        update={"canonical_event_id": "evt-mutated-after-emit"}
+    )
+    gate.set()
+    await engine.drain_observability()
+    assert seen
+    assert seen[0]["priority"] == PriceEnginePriority.HOT.value
+    assert seen[0]["scan_lane"] is ScanLane.HOT
+    assert seen[0]["canonical_event_id"] == row.canonical_event_id
+    assert seen[0]["catalogue_row_id"] == "amc-snap"
+    assert runtime.priority is PriceEnginePriority.BACKGROUND
+    assert runtime.identity.canonical_event_id == "evt-mutated-after-emit"

@@ -173,6 +173,21 @@ class PriceEngineRuntimeItem:
         return f"{self.identity.catalogue_row_id}:{self.identity.content_version}"
 
 
+@dataclass(frozen=True)
+class PriceEngineProjectionEvent:
+    """Immutable item-event inputs for lagged UI/current-state projection.
+
+    Projection may lag, but must not reread later ``PriceEngineRuntimeItem``
+    mutation for catalogue identity, lane/priority, observations, or decision.
+    """
+
+    identity: DerivedPriceEngineItem
+    priority: PriceEnginePriority
+    matchbook_obs: VenueMarketObservation
+    kalshi_obs: VenueMarketObservation
+    decision: PaperScanDecision | None
+
+
 @dataclass
 class PriceEngineSliceResult:
     evaluated: list[str] = field(default_factory=list)
@@ -335,18 +350,24 @@ class CataloguePriceEngine:
             PriceEnginePriority.HOT.value: {},
             PriceEnginePriority.BACKGROUND.value: {},
         }
+        self.observability.reset()
         return self.reconstruct()
 
     def classify_priority(self, identity: DerivedPriceEngineItem) -> PriceEnginePriority:
-        if identity.canonical_event_id in self._promoted_hot_ids:
-            return PriceEnginePriority.HOT
+        """Scheduler HOT vs BACKGROUND from lifecycle + engine-local promotion.
+
+        UI/current-state projection is not scheduler authority. A lagged
+        ``FixtureCurrentStateStore`` upsert cannot grant or revoke priority.
+        """
+
         fixture = _fixture_like(identity)
         lifecycle = classify_scan_lane(fixture, self.now())
         if lifecycle is ScanLane.HOT:
             return PriceEnginePriority.HOT
-        if self.fixture_state is not None:
-            if identity.canonical_event_id in self.fixture_state.hot_identity_scope(self.now()):
-                return PriceEnginePriority.HOT
+        if lifecycle is ScanLane.DROP:
+            return PriceEnginePriority.BACKGROUND
+        if identity.canonical_event_id in self._promoted_hot_ids:
+            return PriceEnginePriority.HOT
         return PriceEnginePriority.BACKGROUND
 
     def due_items(
@@ -676,15 +697,22 @@ class CataloguePriceEngine:
         decision: PaperScanDecision | None,
         result: PriceEngineSliceResult,
     ) -> None:
-        """HOT promotion is scheduler truth in process memory, not a UI projection."""
+        """HOT promotion/demotion is scheduler truth in process memory.
 
-        if decision is None or not decision_is_solver_arbitrage(decision):
-            return
+        Positive/near or solver-qualifying BACKGROUND work promotes immediately.
+        A later non-interesting evaluation revokes opportunity promotion unless
+        lifecycle independently classifies HOT. Lagged UI projection cannot
+        grant or revoke this set.
+        """
+
         canonical_id = runtime.identity.canonical_event_id
-        if canonical_id not in self._promoted_hot_ids:
-            self._promoted_hot_ids.add(canonical_id)
-            result.promotions.append(canonical_id)
-        runtime.priority = PriceEnginePriority.HOT
+        if _decision_is_interesting(decision):
+            if canonical_id not in self._promoted_hot_ids:
+                self._promoted_hot_ids.add(canonical_id)
+                result.promotions.append(canonical_id)
+        else:
+            self._promoted_hot_ids.discard(canonical_id)
+        runtime.priority = self.classify_priority(runtime.identity)
 
     def _schedule_projection(
         self,
@@ -696,26 +724,22 @@ class CataloguePriceEngine:
     ) -> None:
         """UI/current-state projection is a consumer. It must not delay the next item."""
 
-        self.observability.emit(
-            lambda: self._project_item_state(
-                runtime,
-                matchbook_obs=matchbook_obs,
-                kalshi_obs=kalshi_obs,
-                decision=decision,
-            )
+        event = PriceEngineProjectionEvent(
+            identity=runtime.identity.model_copy(deep=True),
+            priority=runtime.priority,
+            matchbook_obs=matchbook_obs.model_copy(deep=True),
+            kalshi_obs=kalshi_obs.model_copy(deep=True),
+            decision=None if decision is None else decision.model_copy(deep=True),
         )
+        self.observability.emit(lambda snapshot=event: self._project_item_state(snapshot))
 
-    def _project_item_state(
-        self,
-        runtime: PriceEngineRuntimeItem,
-        *,
-        matchbook_obs: VenueMarketObservation,
-        kalshi_obs: VenueMarketObservation,
-        decision: PaperScanDecision | None,
-    ) -> None:
+    def _project_item_state(self, event: PriceEngineProjectionEvent) -> None:
         if self.fixture_state is None:
             return
-        identity = runtime.identity
+        identity = event.identity
+        matchbook_obs = event.matchbook_obs
+        kalshi_obs = event.kalshi_obs
+        decision = event.decision
         observed_at = matchbook_obs.observed_at
         fixture = DiscoveredFixture(
             source=VenueName.MATCHBOOK,
@@ -733,7 +757,7 @@ class CataloguePriceEngine:
             opportunity_state="matched",
             scan_lane=(
                 ScanLane.HOT.value
-                if runtime.priority is PriceEnginePriority.HOT
+                if event.priority is PriceEnginePriority.HOT
                 else ScanLane.UNIVERSE.value
             ),
             current_net_edge=None if decision is None else decision_net_edge(decision),
@@ -779,7 +803,7 @@ class CataloguePriceEngine:
         )
         rows = _overlay_decision_inventory(
             rows,
-            runtime=runtime,
+            identity=identity,
             matchbook_obs=matchbook_obs,
             kalshi_obs=kalshi_obs,
             decision=decision,
@@ -799,14 +823,14 @@ class CataloguePriceEngine:
             scan_lane=fixture.scan_lane,
             scan_diagnostics={
                 "price_engine": True,
-                "priority": runtime.priority.value,
+                "priority": event.priority.value,
                 "catalogue_row_id": identity.catalogue_row_id,
             },
         )
         self.fixture_state.upsert_from_report(
             report,
             scan_lane=ScanLane.UNIVERSE
-            if runtime.priority is PriceEnginePriority.BACKGROUND
+            if event.priority is PriceEnginePriority.BACKGROUND
             else ScanLane.HOT,
             now=observed_at,
         )
@@ -1307,10 +1331,21 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
     return None
 
 
+def _decision_is_interesting(decision: PaperScanDecision | None) -> bool:
+    """Positive/near surveillance or solver-qualifying. Broader than paper entry."""
+
+    if decision is None:
+        return False
+    if decision_is_solver_arbitrage(decision):
+        return True
+    edge = decision_net_edge(decision)
+    return edge is not None and edge > 0
+
+
 def _overlay_decision_inventory(
     rows: list[FixtureMarketInventoryRow],
     *,
-    runtime: PriceEngineRuntimeItem,
+    identity: DerivedPriceEngineItem,
     matchbook_obs: VenueMarketObservation,
     kalshi_obs: VenueMarketObservation,
     decision: PaperScanDecision | None,
@@ -1343,18 +1378,17 @@ def _overlay_decision_inventory(
             if row.kalshi is not None and row.kalshi.quote_age_ms is None:
                 row.kalshi.quote_age_ms = kalshi_obs.quote_age_ms or 0
         return rows
-    return [*rows, _decision_inventory_row(runtime, matchbook_obs, kalshi_obs, decision, edge, is_arb)]
+    return [*rows, _decision_inventory_row(identity, matchbook_obs, kalshi_obs, decision, edge, is_arb)]
 
 
 def _decision_inventory_row(
-    runtime: PriceEngineRuntimeItem,
+    identity: DerivedPriceEngineItem,
     matchbook_obs: VenueMarketObservation,
     kalshi_obs: VenueMarketObservation,
     decision: PaperScanDecision,
     edge: Decimal,
     is_arb: bool,
 ) -> FixtureMarketInventoryRow:
-    identity = runtime.identity
     family = identity.family or matchbook_obs.market.family.value
     period = identity.period or matchbook_obs.market.period.value
 
