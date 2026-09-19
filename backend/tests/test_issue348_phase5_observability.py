@@ -84,7 +84,7 @@ def _positive_near_decision(*, scanned_at=NOW) -> PaperScanDecision:
         payoff_scan=PayoffScanResult(
             solution=PayoffSolution(
                 is_arbitrage=False,
-                roi=Decimal("0.004"),
+                roi=Decimal("0.008"),
                 minimum_state_pnl=Decimal("0"),
                 numerically_validated=True,
             )

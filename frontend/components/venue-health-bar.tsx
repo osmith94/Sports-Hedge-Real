@@ -2,11 +2,19 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { LiveRefreshStatus, VenueHealth, getLiveRefreshStatus, getVenueHealth } from "../lib/api";
+import {
+  LiveRefreshStatus,
+  VenueHealth,
+  getLiveRefreshStatus,
+  getVenueDegradationIncident,
+  getVenueHealth,
+} from "../lib/api";
 import { useHydratedNowMs } from "./hydrated-relative-time";
 import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-refresh-poll-guard";
 import { dualScanStatusLines } from "../lib/scan-status-display";
-import { scanHealthTone, venueHealthCaption } from "../lib/venue-health-display";
+import { downloadVenueWhyIncident } from "../lib/venue-degradation-incident";
+import { scanHealthTone, venueHealthCaption, venueHealthNeedsWhy } from "../lib/venue-health-display";
+import { SystemLoadSummaryCard } from "./system-load-summary";
 
 const FIRST_CLASS: Array<{ venue: VenueHealth["venue"]; label: string }> = [
   { venue: "matchbook", label: "Matchbook" },
@@ -60,6 +68,7 @@ export function VenueHealthBar() {
 
   return (
     <div className="status-cluster" aria-label="First-class venue data health">
+      <SystemLoadSummaryCard status={refresh} />
       {FIRST_CLASS.map((item) => {
         const row = byVenue.get(item.venue);
         const scan = scanHealth[item.venue];
@@ -68,6 +77,20 @@ export function VenueHealthBar() {
           <span className="status-item" key={item.venue} title={row?.detail ?? venueHealthCaption(item.label, scan, row)}>
             <span className={`status-dot ${kind}`} />
             {venueHealthCaption(item.label, scan, row)}
+            {venueHealthNeedsWhy(scan) ? (
+              <button
+                type="button"
+                className="status-why"
+                aria-label={`Why is ${item.label} degraded?`}
+                onClick={() => {
+                  void getVenueDegradationIncident(item.venue)
+                    .then((incident) => downloadVenueWhyIncident(incident))
+                    .catch(() => undefined);
+                }}
+              >
+                Why?
+              </button>
+            ) : null}
           </span>
         );
       })}

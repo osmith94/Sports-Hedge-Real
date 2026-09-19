@@ -98,7 +98,14 @@ from sports_hedge.application.scan_lanes import (
     ScanLane,
     classify_scan_lane,
 )
+from sports_hedge.arbitrage.watchlist.economics import (
+    is_net_proximity_hot,
+    qualifies_min_net_arb,
+)
 from sports_hedge.config import Settings, get_settings
+from sports_hedge.persistence.operator_scanner_settings import (
+    effective_operator_scanner_settings,
+)
 from sports_hedge.domain.football import (
     CanonicalEvent,
     CanonicalMarket,
@@ -677,8 +684,9 @@ class CataloguePriceEngine:
             }
             settings = getattr(self.paper_scan, "settings", None)
             if settings is not None:
-                scan_kwargs["minimum_net_edge"] = Decimal(str(settings.min_net_edge))
-                scan_kwargs["maximum_execution_risk"] = int(settings.max_execution_risk)
+                operator = effective_operator_scanner_settings(settings)
+                scan_kwargs["minimum_net_edge"] = operator.min_net_edge
+                scan_kwargs["maximum_execution_risk"] = operator.max_execution_risk
                 scan_kwargs["assumed_latency_ms"] = int(settings.simulated_latency_ms)
             decision = self.paper_scan.scan_pair(matchbook_obs, kalshi_obs, **scan_kwargs)
             result.decisions.append(decision)
@@ -1382,14 +1390,21 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
 
 
 def _decision_is_interesting(decision: PaperScanDecision | None) -> bool:
-    """Positive/near surveillance or solver-qualifying. Broader than paper entry."""
+    """Triggered Min Net Arb or 0.50pp net proximity. Broader than paper entry.
+
+    Uses `current_net_edge` (`decision_net_edge`) versus `trigger_net_edge`
+    (`decision.minimum_net_edge`). Does not hard-code zero or gross edge.
+    """
 
     if decision is None:
         return False
-    if decision_is_solver_arbitrage(decision):
-        return True
     edge = decision_net_edge(decision)
-    return edge is not None and edge > 0
+    trigger = decision.minimum_net_edge
+    if edge is None:
+        return False
+    if qualifies_min_net_arb(edge, trigger):
+        return True
+    return is_net_proximity_hot(edge, trigger)
 
 
 def _overlay_decision_inventory(

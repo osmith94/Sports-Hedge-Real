@@ -1305,6 +1305,13 @@ def _attach_kalshi(
             row.solver_model = best.solver_model
             row.current_net_edge = best.current_net_edge
             row.solver_is_arbitrage = best.solver_is_arbitrage
+        if best.entered_solver and best_decision is not None and row.trigger_net_edge is None:
+            # Keep current_net_edge and trigger_net_edge paired. Kalshi attach
+            # can fill economics after a venue-only row; Wave 1A HOT proximity
+            # must not see a net ROI with a missing operator Min Net Arb.
+            row.trigger_net_edge = best_decision.minimum_net_edge
+            if row.current_net_edge is None:
+                row.current_net_edge = best.current_net_edge
         if best.entered_solver or not best.rejection_reasons:
             row.comparison_status = _comparable_status_from_catalogue(catalogue)
             row.reason = _comparable_reason(row.comparison_status, row.reason)

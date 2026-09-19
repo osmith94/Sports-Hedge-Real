@@ -2,7 +2,14 @@
 
 import { isOperatorDisabledHealth, pulseVenueTone } from "../lib/venue-health-display";
 
-export type LiveScanPulsePhase = "idle" | "scanning" | "complete" | "error" | "degraded" | "paused";
+export type LiveScanPulsePhase =
+  | "idle"
+  | "scanning"
+  | "complete"
+  | "error"
+  | "degraded"
+  | "paused"
+  | "stopped";
 
 const VENUES: Array<{ key: string; label: string }> = [
   { key: "matchbook", label: "Matchbook" },
@@ -38,6 +45,9 @@ function statusCopy(
   }
   if (phase === "paused") {
     return { title: "Auto refresh off", detail: "Run scan or resume status refresh" };
+  }
+  if (phase === "stopped") {
+    return { title: "Scanner stopped", detail: "HOT / UNIVERSE / BACKGROUND paused" };
   }
   return {
     title: "Live scan",

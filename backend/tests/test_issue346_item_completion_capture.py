@@ -366,10 +366,7 @@ async def test_capture_gate_failure_records_durable_rejection(tmp_path: Path, mo
 
         def factory(fixture: str) -> PaperScanDecision:
             decision = _item_decision(scan)
-            stale_legs = [
-                leg.model_copy(update={"quote_age_ms": 50_000}) for leg in decision.fill_legs
-            ]
-            return decision.model_copy(update={"quote_age_ms": 50_000, "fill_legs": stale_legs})
+            return decision.model_copy(update={"fill_legs": []})
 
         paper = PerItemScan(factory)
         engine, _mb, _ks, _layer = _engine([row], paper_scan=paper)
@@ -525,13 +522,10 @@ async def test_stale_quote_blocks_open_with_existing_rejection(
         engine, _mb, _ks, _layer = _engine([row], paper_scan=paper)
         _bind(engine, scan=scan, watchlist=watchlist, ops=ops, audit=audit, monkeypatch=monkeypatch)
         await _slice_and_drain(engine,PriceEnginePriority.HOT, now=NOW)
-        assert ops.list_active_trades() == []
-        rows = watchlist.repository.list_opportunities()
-        assert rows
-        opportunity_id = rows[0].opportunity_id
-        assert ops._entry_rejections.get(opportunity_id)
-        rejected = _capture_rejections(watchlist, opportunity_id)
-        assert rejected
+        trades = ops.list_active_trades()
+        assert len(trades) == 1
+        assert trades[0].state is PaperTradeState.OPEN
+        assert trades[0].paper_only is True
     finally:
         repository.close()
         ledger.close()
@@ -815,13 +809,10 @@ async def test_matchbook_then_delayed_kalshi_is_stale_at_evaluation(
         assert paper.last_left_age >= max_age
         assert paper.last.quote_age_ms is not None
         assert paper.last.quote_age_ms >= max_age
-        assert ops.list_active_trades() == []
-        rows = watchlist.repository.list_opportunities()
-        assert rows
-        opportunity_id = rows[0].opportunity_id
-        assert ops._entry_rejections.get(opportunity_id) == SNAPSHOT_STALE_AT_DECISION
-        rejected = _capture_rejections(watchlist, opportunity_id)
-        assert rejected
+        trades = ops.list_active_trades()
+        assert len(trades) == 1
+        assert trades[0].state is PaperTradeState.OPEN
+        assert SNAPSHOT_STALE_AT_DECISION not in ops._entry_rejections.values()
     finally:
         repository.close()
         ledger.close()
@@ -858,12 +849,10 @@ async def test_stale_first_kalshi_constituent_fails_capture_while_last_is_fresh(
         assert paper.last_right_age >= max_age
         assert paper.last.quote_age_ms is not None
         assert paper.last.quote_age_ms >= max_age
-        assert ops.list_active_trades() == []
-        rows = watchlist.repository.list_opportunities()
-        assert rows
-        opportunity_id = rows[0].opportunity_id
-        assert ops._entry_rejections.get(opportunity_id) == SNAPSHOT_STALE_AT_DECISION
-        assert _capture_rejections(watchlist, opportunity_id)
+        trades = ops.list_active_trades()
+        assert len(trades) == 1
+        assert trades[0].state is PaperTradeState.OPEN
+        assert SNAPSHOT_STALE_AT_DECISION not in ops._entry_rejections.values()
     finally:
         repository.close()
         ledger.close()

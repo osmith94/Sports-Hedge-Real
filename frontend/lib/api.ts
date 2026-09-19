@@ -525,6 +525,11 @@ export type LaneRefreshStatus = {
   canonical_retryable?: number;
   canonical_final_failed?: number;
   canonical_remaining?: number;
+  series_work_total?: number;
+  series_ok?: number;
+  series_retryable?: number;
+  series_final_failed?: number;
+  series_skipped?: number;
 };
 
 export type PriceEngineTierStatus = {
@@ -554,6 +559,40 @@ export type PriceEnginePublicStatus = {
   observability_error?: string | null;
 };
 
+export type ProviderSlotLoad = {
+  inflight?: number;
+  limit?: number;
+  waiting?: number;
+};
+
+export type HotLoad = {
+  fixtures?: number;
+  working_set?: number;
+  due?: number;
+  in_flight?: number;
+  retry_wait?: number;
+  deferred?: number;
+  last_cycle_ms?: number | null;
+  cadence_seconds?: number;
+  cadence_utilisation?: number | null;
+};
+
+export type UniverseLoad = {
+  evaluated?: number;
+  total?: number;
+  remaining?: number;
+  generation_work_used_s?: number | null;
+  generation_budget_seconds?: number | null;
+};
+
+export type SystemLoadSummary = {
+  hot?: HotLoad;
+  matchbook?: ProviderSlotLoad;
+  kalshi?: ProviderSlotLoad;
+  universe?: UniverseLoad;
+  catalogue_items?: number;
+};
+
 export type LaneVenueFlags = {
   matchbook: boolean;
   polymarket: boolean;
@@ -575,6 +614,56 @@ export type LaneVenueParticipationUpdate = {
   universe: LaneVenueFlags;
 };
 
+export type VenueDegradationIncidentRef = {
+  available: boolean;
+  captured_at: string;
+  incident_id: string;
+};
+
+export type VenueDegradationIncident = {
+  schema?: string;
+  data_kind?: string;
+  incident_id?: string;
+  captured_at: string;
+  build?: {
+    git_sha?: string | null;
+    git_branch?: string | null;
+    source?: string | null;
+  };
+  affected_venue: string;
+  transition?: {
+    previous_health?: string | null;
+    new_health?: string | null;
+    reason?: string;
+  };
+  venue_health?: Record<string, string>;
+  hot?: Record<string, unknown>;
+  background?: Record<string, unknown>;
+  universe?: Record<string, unknown>;
+  price_engine?: Record<string, unknown>;
+  provider_access?: Record<string, unknown>;
+  recent_scan_cycles?: Array<Record<string, unknown>>;
+  active_catalogue_count?: number | null;
+  classification?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+export type OperatorScannerSettings = {
+  min_net_edge: string;
+  max_execution_risk: number;
+  hot_cadence_seconds: number;
+  scanner_stopped: boolean;
+  source?: "operator" | "env_default";
+  updated_at?: string | null;
+  restart_semantics?: string;
+};
+
+export type OperatorScannerSettingsUpdate = {
+  min_net_edge: string;
+  max_execution_risk: number;
+  hot_cadence_seconds: number;
+};
+
 export type LiveRefreshStatus = {
   discovery_source: Venue;
   discovery_mode?: string;
@@ -582,6 +671,8 @@ export type LiveRefreshStatus = {
   matching_venues?: Venue[];
   server_loop_enabled: boolean;
   paper_autofill_enabled?: boolean;
+  scanner_stopped?: boolean;
+  operator_settings?: OperatorScannerSettings | null;
   interval_seconds: number;
   cycle_in_progress: boolean;
   last_started_at?: string | null;
@@ -605,6 +696,8 @@ export type LiveRefreshStatus = {
   venue_participation?: LaneVenueParticipation | null;
   recent_scan_cycles?: PaperScanCycleRecord[];
   provider_access?: Record<string, unknown>;
+  venue_degradation_incidents?: Record<string, VenueDegradationIncidentRef>;
+  system_load?: SystemLoadSummary;
 };
 
 export type VenueHealth = {
@@ -1132,6 +1225,10 @@ export function getLiveRefreshStatus(): Promise<LiveRefreshStatus> {
   return request("/paper/live-refresh");
 }
 
+export function getVenueDegradationIncident(venue: string): Promise<VenueDegradationIncident> {
+  return request(`/paper/venue-degradation-incident/${encodeURIComponent(venue)}`);
+}
+
 export async function saveVenueParticipation(
   update: LaneVenueParticipationUpdate,
 ): Promise<LiveRefreshStatus> {
@@ -1139,6 +1236,47 @@ export async function saveVenueParticipation(
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(update),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function saveOperatorScannerSettings(
+  update: OperatorScannerSettingsUpdate,
+): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/operator-scanner-settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function stopPaperScanner(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function resumePaperScanner(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
     cache: "no-store",
   });
   if (!response.ok) {

@@ -2,13 +2,16 @@
 
 ## Principle
 
-Sports Hedge must treat **HOT** and **UNIVERSE** as two independently scheduled, concurrently runnable scanner workers.
+Sports Hedge must separate **catalogue discovery** from **price surveillance**.
 
-They serve different product purposes and must not be serialized into one shared scan cycle:
+The authoritative runtime model is:
 
-- **UNIVERSE** owns durable catalogue completeness for the approved Matchbook↔Kalshi families.
-- **One price engine** owns full ACTIVE-catalogue economics coverage: it eventually refreshes and evaluates every ACTIVE supported catalogue row.
-- **HOT** is a priority tier inside that price engine, not exclusive membership and not permission to trade.
+- **UNIVERSE** is the broad, durable catalogue-maintenance worker for the approved Matchbook↔Kalshi families.
+- **One price engine** derives work from that durable catalogue and owns full ACTIVE-catalogue economics coverage.
+- **HOT** and **BACKGROUND** are priority tiers inside that price engine. HOT is frequent and freshness-sensitive; BACKGROUND is slower but must eventually cover every remaining ACTIVE row.
+- The HOT pricing loop and UNIVERSE catalogue worker are independently scheduled and may overlap in wall-clock time. They are not two competing discovery scanners.
+
+They serve different product purposes and must not be serialized into one shared scan cycle.
 
 A HOT refresh becoming due must **never terminate, reset, restart, discard or artificially time-slice an active UNIVERSE sweep**.
 
@@ -19,6 +22,70 @@ The architectural contract is:
 > **UNIVERSE catalogues. The price engine prices every ACTIVE catalogue row. HOT is a priority tier inside that engine. Execution decides.**
 
 UNIVERSE does **not** require executable books or solver/economics to finish a catalogue item. Pricing work is derived from the durable catalogue; it is not a second durable work-queue authority.
+
+## Authoritative scanner operating model
+
+This is the non-negotiable logical flow for normal runtime scanning:
+
+```text
+VENUE EVENT / MARKET LISTINGS
+        ↓
+UNIVERSE
+broad discovery + canonical fixture identity
++ approved-family recognition
++ exact native market/contract IDs
++ exact outcome mapping / parameters
++ family-scoped lifecycle/invalidation
+        ↓
+DURABLE APPROVED-MARKET CATALOGUE
+source of truth for what may be priced
+        ↓
+ONE PRICE ENGINE
+derive work from ACTIVE catalogue rows
+        ↓
+HOT priority        BACKGROUND priority
+frequent refresh    slower eventual coverage
+exact known IDs     exact known IDs
+        ↓
+net economics / opportunity state
+        ↓
+promotion / watchlist / PAPER decision
+        ↓
+treasury + fill simulation / execution layer
+```
+
+The key architectural separation is:
+
+> **UNIVERSE discovers and maintains identity. The catalogue remembers it. The price engine reprices it. HOT only changes priority.**
+
+Once an ACTIVE row contains the canonical fixture, Approved Match Register key, exact native IDs and required outcome mapping, routine HOT/BACKGROUND refresh must **not** redo broad event discovery, fixture matching, market equivalence review, or settlement re-proof. It should fetch the exact known native market/book inputs required to price that catalogue row.
+
+A new competition, fixture set, or approved market family must enter through the same flow. Expansion is allowed to increase the number of catalogue rows; it must not create a parallel scanner, second matcher, second catalogue, or league-specific execution path.
+
+### Catalogue completeness and partial discovery
+
+Catalogue disappearance/invalidation must be based on **family-scoped discovery completeness**, not a fixture-wide assumption.
+
+For example, successful GAME and BTTS discovery does not prove that TOTAL or FTTS was checked successfully. If TOTAL discovery times out, is deferred, or was not queried, an existing TOTAL row must remain unconfirmed/retryable rather than being marked disappeared merely because another family succeeded.
+
+Parameterized families such as `TOTAL_GOALS_FT:{line}` are separate catalogue rows per exact approved line. Adding 2.5, 3.5, 4.5, 5.5, etc. increases pricing workload but does not change scanner architecture.
+
+### Architecture-preservation rules
+
+Normal scanner changes must preserve all of the following:
+
+- no global scan lock between UNIVERSE and price-engine work;
+- no broad rediscovery/rematching on every HOT cadence;
+- no separate HOT matcher or HOT-only catalogue;
+- no durable second pricing queue that competes with the catalogue as scheduler truth;
+- no provider concurrency increase merely to hide architectural inefficiency;
+- one shared provider-access layer with bounded concurrency and anti-starvation;
+- item-level timeout/retry isolation so one failing market does not stall unrelated catalogue rows;
+- completed catalogue or price items publish incrementally rather than waiting for a whole sweep/slice;
+- operator diagnostics are read-only and must not create provider load merely to explain provider load;
+- scaling decisions should be judged by actual catalogue items, due work, cycle utilisation and provider queues, not fixture count alone.
+
+Any proposal that requires materially changing this flow must be treated as an architectural change and reviewed explicitly against this tenet before implementation.
 
 ## Why this is a core tenet
 

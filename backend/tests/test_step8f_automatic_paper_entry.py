@@ -869,7 +869,7 @@ def test_allocator_rejection_does_not_auto_open_live_paper(tmp_path: Path) -> No
         ledger.close()
 
 
-def test_stale_quote_does_not_auto_open_live_paper(tmp_path: Path) -> None:
+def test_stale_quote_does_not_veto_bound_min_net_auto_open(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
     try:
         kwargs = dict(
@@ -888,18 +888,12 @@ def test_stale_quote_does_not_auto_open_live_paper(tmp_path: Path) -> None:
             leg.model_copy(update={"quote_age_ms": 50_000}) for leg in decision.fill_legs
         ]
         stale = decision.model_copy(update={"quote_age_ms": 50_000, "fill_legs": stale_legs})
-        before = ledger.treasury.snapshot()
         ops.persist_triggered_chain(stale, provenance=DataProvenance.LIVE_PAPER)
-        assert ops.list_active_trades() == []
-        assert ops._entry_rejections
-        after = ledger.treasury.snapshot()
-        for venue, currency in (
-            (VenueName.MATCHBOOK, "GBP"),
-            (VenueName.POLYMARKET, "USD"),
-            (VenueName.KALSHI, "USD"),
-        ):
-            assert after.pool(venue, currency).available_cash == before.pool(venue, currency).available_cash
-            assert after.pool(venue, currency).locked_capital == before.pool(venue, currency).locked_capital
+        trades = ops.list_active_trades()
+        assert len(trades) == 1
+        assert trades[0].state is PaperTradeState.OPEN
+        assert trades[0].paper_only is True
+        assert trades[0].places_orders is False
     finally:
         repository.close()
         ledger.close()

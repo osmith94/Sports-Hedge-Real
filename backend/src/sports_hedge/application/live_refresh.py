@@ -6,6 +6,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from time import monotonic
 from typing import Any, Literal
 
@@ -70,11 +71,6 @@ from sports_hedge.application.provider_access import (
     HEALTH_UNAVAILABLE,
     get_shared_provider_access,
 )
-from sports_hedge.application.scanner_observability import (
-    PriceEnginePublicStatus,
-    ScannerObservabilitySink,
-    empty_price_engine_status,
-)
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
     UNIVERSE_MIN_CHUNK_SECONDS,
@@ -86,6 +82,16 @@ from sports_hedge.application.scan_lanes import (
     ScanLane,
     universe_chunk_wall_seconds,
 )
+from sports_hedge.application.scanner_observability import (
+    PriceEnginePublicStatus,
+    ScannerObservabilitySink,
+    empty_price_engine_status,
+)
+from sports_hedge.application.system_load import SystemLoadSummary, system_load_from_status
+from sports_hedge.application.venue_degradation_incident import (
+    VenueDegradationIncidentStore,
+    fallback_venue_degradation_incident,
+)
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.audit import PaperScanCycleRecord
@@ -93,6 +99,15 @@ from sports_hedge.persistence.lane_venue_settings import (
     SqliteLaneVenueSettingsStore,
     get_lane_venue_settings_store,
     resolve_lane_venue_participation,
+)
+from sports_hedge.persistence.operator_scanner_settings import (
+    SCANNER_STOPPED_BY_OPERATOR,
+    OperatorScannerSettings,
+    SqliteOperatorScannerSettingsStore,
+    bind_runtime_operator_scanner_settings_store,
+    env_operator_scanner_settings,
+    get_operator_scanner_settings_store,
+    resolve_operator_scanner_settings,
 )
 from sports_hedge.persistence.universe_checkpoint import SqliteUniverseCheckpointStore
 from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookDiscoveryError
@@ -202,6 +217,14 @@ class LaneRefreshStatus(BaseModel):
     series_skipped: int = 0
 
 
+class VenueDegradationIncidentRef(BaseModel):
+    """Compact Why? pointer on the high-frequency live-refresh poll."""
+
+    available: bool = True
+    captured_at: str
+    incident_id: str
+
+
 class LiveRefreshStatus(BaseModel):
     discovery_source: VenueName = VenueName.MATCHBOOK
     discovery_mode: str = "venue_union"
@@ -212,6 +235,8 @@ class LiveRefreshStatus(BaseModel):
     server_loop_enabled: bool
     paper_autofill_enabled: bool = False
     paper_auto_unwind_enabled: bool = False
+    scanner_stopped: bool = False
+    operator_settings: OperatorScannerSettings | None = None
     interval_seconds: int = Field(ge=15, le=300)
     cycle_in_progress: bool = False
     last_started_at: datetime | None = None
@@ -253,6 +278,10 @@ class LiveRefreshStatus(BaseModel):
     venue_participation: LaneVenueParticipation | None = None
     recent_scan_cycles: list[PaperScanCycleRecord] = Field(default_factory=list)
     provider_access: dict[str, Any] = Field(default_factory=dict)
+    venue_degradation_incidents: dict[str, VenueDegradationIncidentRef] = Field(
+        default_factory=dict
+    )
+    system_load: SystemLoadSummary = Field(default_factory=SystemLoadSummary)
 
 
 class DualCadencePlan(BaseModel):
@@ -355,6 +384,7 @@ class LiveRefreshCoordinator:
         self,
         clock: Callable[[], datetime] | None = None,
         venue_settings_store: SqliteLaneVenueSettingsStore | None = None,
+        operator_settings_store: SqliteOperatorScannerSettingsStore | None = None,
         universe_checkpoint_store: SqliteUniverseCheckpointStore | None = None,
         catalogue_store: Any | None = None,
         price_engine: CataloguePriceEngine | None = None,
@@ -370,6 +400,8 @@ class LiveRefreshCoordinator:
         self._universe_task: asyncio.Task[None] | None = None
         self._background_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
+        self._control = asyncio.Event()
+        self._operator_scanner_stopped = False
         self._last_request: dict[str, Any] = {}
         self._last_report: CollectionReport | None = None
         self._fixture_state = FixtureCurrentStateStore()
@@ -432,6 +464,9 @@ class LiveRefreshCoordinator:
         self._universe_checkpoint_write_seq = 0
         self._universe_checkpoint_persist_task: asyncio.Task[None] | None = None
         self._venue_store = venue_settings_store
+        self._operator_store = operator_settings_store
+        if operator_settings_store is not None:
+            bind_runtime_operator_scanner_settings_store(operator_settings_store)
         self._pending_participation = participation_from_lists(
             default_operator_venues(),
             default_operator_venues(),
@@ -441,6 +476,7 @@ class LiveRefreshCoordinator:
         self._cycle_hot_venues: tuple[VenueName, ...] | None = None
         self._cycle_universe_venues: tuple[VenueName, ...] | None = None
         self._cycle_enabled_venues: tuple[VenueName, ...] | None = None
+        self._degradation_incidents = VenueDegradationIncidentStore()
         self.status = LiveRefreshStatus(
             server_loop_enabled=False,
             interval_seconds=30,
@@ -451,24 +487,42 @@ class LiveRefreshCoordinator:
 
     def configure_from_settings(self, settings: Settings | None = None) -> None:
         resolved = settings or get_settings()
-        hot_cadence = resolved.paper_live_refresh_hot_interval_seconds
+        operator = resolve_operator_scanner_settings(
+            self._resolved_operator_store(resolved),
+            resolved,
+        )
+        hot_cadence = operator.hot_cadence_seconds
         pending = resolve_lane_venue_participation(
             self._resolved_store(resolved),
             resolved,
         )
         with self._state_lock:
             self._pending_participation = pending
+            self._operator_scanner_stopped = operator.scanner_stopped
             self.status = self.status.model_copy(
                 update={
                     "server_loop_enabled": resolved.paper_live_refresh_enabled,
                     "paper_autofill_enabled": resolved.paper_autofill_enabled,
                     "paper_auto_unwind_enabled": resolved.paper_auto_unwind_enabled,
+                    "scanner_stopped": operator.scanner_stopped,
+                    "operator_settings": operator,
                     "interval_seconds": hot_cadence,
                     "hot": self.status.hot.model_copy(
                         update={
                             "cadence_seconds": hot_cadence,
                             "cycle_timeout_seconds": float(
                                 resolved.paper_scan_hot_cycle_timeout_seconds
+                            ),
+                            **(
+                                {
+                                    "last_plan_reason": "operator_stopped",
+                                    "worker_state": WORKER_WAITING,
+                                    "operator_summary": (
+                                        "Fast scan · stopped by operator · no provider call"
+                                    ),
+                                }
+                                if operator.scanner_stopped
+                                else {}
                             ),
                         }
                     ),
@@ -498,6 +552,123 @@ class LiveRefreshCoordinator:
         if self._venue_store is None:
             self._venue_store = get_lane_venue_settings_store()
         return self._venue_store
+
+    def _resolved_operator_store(
+        self, settings: Settings | None = None
+    ) -> SqliteOperatorScannerSettingsStore:
+        del settings
+        if self._operator_store is None:
+            self._operator_store = get_operator_scanner_settings_store()
+            bind_runtime_operator_scanner_settings_store(self._operator_store)
+        return self._operator_store
+
+    def bind_operator_settings_store(self, store: SqliteOperatorScannerSettingsStore) -> None:
+        bind_runtime_operator_scanner_settings_store(store)
+        operator = resolve_operator_scanner_settings(store)
+        with self._state_lock:
+            self._operator_store = store
+            self._apply_operator_settings_unlocked(operator, cadence_changed=False)
+
+    def apply_operator_scan_settings(
+        self,
+        *,
+        min_net_edge: Decimal,
+        max_execution_risk: int,
+        hot_cadence_seconds: int,
+    ) -> OperatorScannerSettings:
+        store = self._resolved_operator_store()
+        saved = store.save_settings(
+            min_net_edge=min_net_edge,
+            max_execution_risk=max_execution_risk,
+            hot_cadence_seconds=hot_cadence_seconds,
+        )
+        with self._state_lock:
+            previous = (
+                self.status.operator_settings.hot_cadence_seconds
+                if self.status.operator_settings is not None
+                else self.status.interval_seconds
+            )
+            self._apply_operator_settings_unlocked(
+                saved,
+                cadence_changed=previous != saved.hot_cadence_seconds,
+            )
+        self._pulse_control()
+        return saved
+
+    def apply_operator_scanner_stopped(self, stopped: bool) -> OperatorScannerSettings:
+        store = self._resolved_operator_store()
+        saved = store.save_stopped(stopped)
+        with self._state_lock:
+            self._apply_operator_settings_unlocked(saved, cadence_changed=False)
+        self._pulse_control()
+        return saved
+
+    def effective_scanner_settings(
+        self, settings: Settings | None = None
+    ) -> OperatorScannerSettings:
+        if self.status.operator_settings is not None:
+            return self.status.operator_settings
+        return resolve_operator_scanner_settings(self._resolved_operator_store(), settings)
+
+    @property
+    def operator_scanner_stopped(self) -> bool:
+        return self._operator_scanner_stopped
+
+    def _apply_operator_settings_unlocked(
+        self,
+        operator: OperatorScannerSettings,
+        *,
+        cadence_changed: bool,
+    ) -> None:
+        self._operator_scanner_stopped = operator.scanner_stopped
+        hot_update: dict[str, Any] = {"cadence_seconds": operator.hot_cadence_seconds}
+        if cadence_changed and not self._hot_in_progress:
+            # Shift the next HOT due to the new cadence. Do not make HOT due
+            # immediately: Update must not itself trigger a scan.
+            self._next_hot_due = self.now() + timedelta(seconds=operator.hot_cadence_seconds)
+            hot_update["next_due_at"] = self._next_hot_due
+        if operator.scanner_stopped:
+            hot_update["last_plan_reason"] = "operator_stopped"
+            hot_update["worker_state"] = WORKER_WAITING
+            hot_update["operator_summary"] = (
+                "Fast scan · stopped by operator · no provider call"
+            )
+        self.status = self.status.model_copy(
+            update={
+                "scanner_stopped": operator.scanner_stopped,
+                "operator_settings": operator,
+                "interval_seconds": operator.hot_cadence_seconds,
+                "hot": self.status.hot.model_copy(update=hot_update),
+            }
+        )
+
+    def _pulse_control(self) -> None:
+        """Wake parked HOT/UNIVERSE/BACKGROUND loops after Update/Stop/Resume."""
+
+        def _set() -> None:
+            self._control.set()
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+            for task in (self._hot_task, self._universe_task, self._background_task):
+                if task is not None:
+                    loop = task.get_loop()
+                    break
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(_set)
+        else:
+            _set()
+
+    async def _sleep_interruptible(self, timeout: float) -> None:
+        if self._stop.is_set():
+            return
+        try:
+            await asyncio.wait_for(self._control.wait(), timeout=max(0.05, timeout))
+            self._control.clear()
+        except TimeoutError:
+            return
 
     def bind_universe_checkpoint_store(self, store: SqliteUniverseCheckpointStore) -> None:
         with self._state_lock:
@@ -680,6 +851,7 @@ class LiveRefreshCoordinator:
                 server_loop_enabled=False,
                 interval_seconds=30,
             )
+            self._degradation_incidents.reset()
         self.flush_universe_checkpoint()
         self.configure_from_settings()
         self._drain_orphaned_collection_tasks(orphans)
@@ -706,7 +878,7 @@ class LiveRefreshCoordinator:
                 "hot": self.status.hot.model_copy(
                     update={
                         "next_due_at": self._next_hot_due,
-                        "cadence_seconds": resolved.paper_live_refresh_hot_interval_seconds,
+                        "cadence_seconds": int(self.status.interval_seconds),
                     }
                 ),
                 "universe": self.status.universe.model_copy(
@@ -733,6 +905,8 @@ class LiveRefreshCoordinator:
 
         resolved = settings or get_settings()
         evaluated = require_aware_instant(now or self.now(), "now")
+        if self._operator_scanner_stopped:
+            return DualCadencePlan(lane="idle", reason="operator_stopped")
         hot_plan = self.plan_hot_tick(now=evaluated, settings=resolved)
         if hot_plan.lane == ScanLane.HOT.value:
             return hot_plan
@@ -748,6 +922,8 @@ class LiveRefreshCoordinator:
     ) -> DualCadencePlan:
         resolved = settings or get_settings()
         evaluated = require_aware_instant(now or self.now(), "now")
+        if self._operator_scanner_stopped:
+            return DualCadencePlan(lane="idle", reason="operator_stopped")
         with self._state_lock:
             self._ensure_due_times_unlocked(evaluated, resolved)
             if self._hot_in_progress or self._manual_hot_in_progress:
@@ -768,6 +944,8 @@ class LiveRefreshCoordinator:
     ) -> DualCadencePlan:
         resolved = settings or get_settings()
         evaluated = require_aware_instant(now or self.now(), "now")
+        if self._operator_scanner_stopped:
+            return DualCadencePlan(lane="idle", reason="operator_stopped")
         with self._state_lock:
             self._ensure_due_times_unlocked(evaluated, resolved)
             if self._background_in_progress:
@@ -922,6 +1100,8 @@ class LiveRefreshCoordinator:
     ) -> DualCadencePlan:
         resolved = settings or get_settings()
         evaluated = require_aware_instant(now or self.now(), "now")
+        if self._operator_scanner_stopped:
+            return DualCadencePlan(lane="idle", reason="operator_stopped")
         with self._state_lock:
             self._ensure_due_times_unlocked(evaluated, resolved)
             if self._universe_in_progress:
@@ -1199,6 +1379,8 @@ class LiveRefreshCoordinator:
     ) -> CollectionReport:
         """Run a manual HOT refresh without moving scheduled lane due-times."""
 
+        if self._operator_scanner_stopped:
+            raise ExplicitCollectBusy(SCANNER_STOPPED_BY_OPERATOR)
         if self._manual_hot_in_progress:
             raise ExplicitCollectBusy("manual HOT refresh in progress")
         if self.scheduled_hot_active():
@@ -1264,6 +1446,8 @@ class LiveRefreshCoordinator:
     async def run_explicit_collect(self, runner) -> CollectionReport:
         """Manual diagnostic collect. Does not own HOT/UNIVERSE generation progress."""
 
+        if self._operator_scanner_stopped:
+            raise ExplicitCollectBusy(SCANNER_STOPPED_BY_OPERATOR)
         if self.scheduled_universe_active():
             raise ExplicitCollectBusy("UNIVERSE scan in progress")
         timeout = self.explicit_collect_timeout_seconds()
@@ -2635,6 +2819,7 @@ class LiveRefreshCoordinator:
             "matching_venues": ["polymarket", "kalshi"],
             "server_loop_enabled": status.server_loop_enabled,
             "paper_autofill_enabled": status.paper_autofill_enabled,
+            "scanner_stopped": status.scanner_stopped,
             "interval_seconds": status.interval_seconds,
             "hot_in_progress": self._hot_in_progress,
             "background_in_progress": self._background_in_progress,
@@ -2861,8 +3046,8 @@ class LiveRefreshCoordinator:
         self._mark_universe_checkpoint_dirty_unlocked()
 
     def _advance_hot_due(self, now: datetime) -> None:
-        settings = get_settings()
-        interval = timedelta(seconds=settings.paper_live_refresh_hot_interval_seconds)
+        cadence = int(self.status.interval_seconds) or 30
+        interval = timedelta(seconds=cadence)
         due = self._hot_due_started or self._next_hot_due or now
         nxt = due + interval
         evaluated = require_aware_instant(now, "now")
@@ -3281,6 +3466,10 @@ class LiveRefreshCoordinator:
                     or self._universe_in_progress
                     or self._background_in_progress
                     or self._manual_hot_in_progress,
+                    "scanner_stopped": self._operator_scanner_stopped,
+                    "operator_settings": self.status.operator_settings
+                    or env_operator_scanner_settings(),
+                    "interval_seconds": int(self.status.interval_seconds),
                 }
             )
             self._apply_universe_honesty_unlocked()
@@ -3293,9 +3482,33 @@ class LiveRefreshCoordinator:
                     or self._universe_in_progress
                     or self._background_in_progress
                     or self._manual_hot_in_progress,
+                    "system_load": system_load_from_status(
+                        self.status,
+                        universe_work_used_s=self._status_universe_work_used(),
+                    ),
                 }
             )
             return self.status
+
+    def observe_degradation_incidents(
+        self, status: LiveRefreshStatus
+    ) -> dict[str, VenueDegradationIncidentRef]:
+        """Bounded OK→degraded capture. Returns compact refs for the poll payload."""
+
+        refs = self._degradation_incidents.observe(status, captured_at=self.now())
+        return {
+            venue: VenueDegradationIncidentRef.model_validate(ref) for venue, ref in refs.items()
+        }
+
+    def degradation_incident(self, venue: str) -> dict[str, Any] | None:
+        """Already-captured in-memory snapshot. Never probes venues or starts scans."""
+
+        return self._degradation_incidents.get(venue)
+
+    def fallback_degradation_incident(self, status: LiveRefreshStatus, venue: str) -> dict[str, Any]:
+        """Package the current coordinator read model when no transition snapshot exists."""
+
+        return fallback_venue_degradation_incident(status, venue, captured_at=self.now())
 
     def fixture_detail(self, canonical_event_id: str) -> FixtureDetailReadModel | None:
         return self._fixture_state.detail(
@@ -3317,7 +3530,7 @@ class LiveRefreshCoordinator:
             ),
             "hot_ttl_seconds": resolved.paper_hot_current_state_ttl_seconds,
             "universe_ttl_seconds": resolved.paper_universe_current_state_ttl_seconds,
-            "hot_interval_seconds": resolved.paper_live_refresh_hot_interval_seconds,
+            "hot_interval_seconds": int(self.status.interval_seconds),
             "universe_interval_seconds": resolved.paper_live_refresh_universe_interval_seconds,
         }
 
@@ -3328,6 +3541,7 @@ class LiveRefreshCoordinator:
         if self._hot_task is not None and not self._hot_task.done():
             return
         self._stop = asyncio.Event()
+        self._control = asyncio.Event()
         self._hot_task = asyncio.create_task(self._hot_loop(tick), name="hot-worker")
         self._universe_task = asyncio.create_task(
             self._universe_loop(tick), name="universe-worker"
@@ -3339,6 +3553,7 @@ class LiveRefreshCoordinator:
 
     async def stop_server_loop(self) -> None:
         self._stop.set()
+        self._pulse_control()
         await self._await_universe_checkpoint_persist()
         persist_task = self._universe_checkpoint_persist_task
         if persist_task is not None and not persist_task.done():
@@ -3370,6 +3585,10 @@ class LiveRefreshCoordinator:
 
     async def _hot_loop(self, tick) -> None:
         while not self._stop.is_set():
+            if self._operator_scanner_stopped:
+                self._record_hot_heartbeat(DualCadencePlan(lane="idle", reason="operator_stopped"))
+                await self._sleep_interruptible(2.0)
+                continue
             plan = self.plan_hot_tick()
             self._record_hot_heartbeat(plan)
             if plan.lane == ScanLane.HOT.value or plan.reason == "hot_scope_empty":
@@ -3380,10 +3599,7 @@ class LiveRefreshCoordinator:
                 except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, Exception):
                     pass
             delay = min(self._seconds_until_hot(), float(self.status.interval_seconds))
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, delay))
-            except TimeoutError:
-                continue
+            await self._sleep_interruptible(delay)
 
     def _record_hot_heartbeat(self, plan: DualCadencePlan) -> None:
         """Mark the HOT worker alive, including intentional empty-scope idle.
@@ -3399,7 +3615,13 @@ class LiveRefreshCoordinator:
                 "last_plan_reason": plan.reason,
             }
             if plan.lane != ScanLane.HOT.value and not self._hot_in_progress:
-                if plan.reason == "hot_scope_empty":
+                if plan.reason == "operator_stopped":
+                    hot_update["worker_state"] = WORKER_WAITING
+                    hot_update["cycle_in_progress"] = False
+                    hot_update["operator_summary"] = (
+                        "Fast scan · stopped by operator · no provider call"
+                    )
+                elif plan.reason == "hot_scope_empty":
                     hot_update["worker_state"] = WORKER_WAITING
                     hot_update["cycle_in_progress"] = False
                     hot_update["operator_summary"] = (
@@ -3416,6 +3638,12 @@ class LiveRefreshCoordinator:
 
     async def _universe_loop(self, tick) -> None:
         while not self._stop.is_set():
+            if self._operator_scanner_stopped:
+                self._record_universe_heartbeat(
+                    DualCadencePlan(lane="idle", reason="operator_stopped")
+                )
+                await self._sleep_interruptible(2.0)
+                continue
             plan = self.plan_universe_tick()
             self._record_universe_heartbeat(plan)
             if plan.lane == ScanLane.UNIVERSE.value:
@@ -3426,10 +3654,7 @@ class LiveRefreshCoordinator:
                 except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, Exception):
                     pass
             delay = min(self._seconds_until_universe(), 30.0)
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, delay))
-            except TimeoutError:
-                continue
+            await self._sleep_interruptible(delay)
 
     def _record_universe_heartbeat(self, plan: DualCadencePlan) -> None:
         """Mark the UNIVERSE worker alive, including retry/backoff idle.
@@ -3445,6 +3670,11 @@ class LiveRefreshCoordinator:
             }
             if plan.lane != ScanLane.UNIVERSE.value and not self._universe_in_progress:
                 universe_update["cycle_in_progress"] = False
+                if plan.reason == "operator_stopped":
+                    universe_update["worker_state"] = WORKER_WAITING
+                    universe_update["operator_summary"] = (
+                        "Full sweep · stopped by operator · no provider call"
+                    )
             self.status = self.status.model_copy(
                 update={"universe": self.status.universe.model_copy(update=universe_update)}
             )
@@ -3452,6 +3682,25 @@ class LiveRefreshCoordinator:
 
     async def _background_loop(self, tick) -> None:
         while not self._stop.is_set():
+            if self._operator_scanner_stopped:
+                with self._state_lock:
+                    self.status = self.status.model_copy(
+                        update={
+                            "background": self.status.background.model_copy(
+                                update={
+                                    "last_heartbeat_at": self.now(),
+                                    "last_plan_reason": "operator_stopped",
+                                    "worker_state": WORKER_WAITING,
+                                    "cycle_in_progress": False,
+                                    "operator_summary": (
+                                        "Background · stopped by operator · no provider call"
+                                    ),
+                                }
+                            )
+                        }
+                    )
+                await self._sleep_interruptible(2.0)
+                continue
             plan = self.plan_background_tick()
             if plan.lane == "background":
                 with self._state_lock:
@@ -3470,10 +3719,7 @@ class LiveRefreshCoordinator:
                     with self._state_lock:
                         self._background_in_progress = False
             delay = min(self._seconds_until_background(), 30.0)
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, delay))
-            except TimeoutError:
-                continue
+            await self._sleep_interruptible(delay)
 
     def _seconds_until_background(self) -> float:
         now = self.now()
@@ -3736,6 +3982,8 @@ def _combined_operator_summary(
         f"{universe.evaluated_count}/{universe.discovered_total or universe_count} evaluated · "
         f"{universe_count} universe"
     )
+    if hot.last_plan_reason == "operator_stopped" or universe.last_plan_reason == "operator_stopped":
+        return f"Scanner stopped by operator · {fast} · {full}"
     return f"{fast} · {full}"
 
 

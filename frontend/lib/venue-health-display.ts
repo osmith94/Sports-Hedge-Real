@@ -8,6 +8,14 @@ export const PROVIDER_HEALTH_FAILURES = new Set([
   "failed",
 ]);
 
+const WHY_ELIGIBLE_EXTRA = new Set([
+  "discovery_timeout",
+  "market_timeout",
+  "auth_failure",
+  "retry_wait",
+  "partial",
+]);
+
 export type VenueHealthTone = "ok" | "warn" | "down" | "unknown" | "off";
 
 export function isOperatorDisabledHealth(value: string | undefined): boolean {
@@ -16,6 +24,11 @@ export function isOperatorDisabledHealth(value: string | undefined): boolean {
 
 export function isProviderHealthFailure(value: string | undefined): boolean {
   return Boolean(value && PROVIDER_HEALTH_FAILURES.has(value));
+}
+
+export function venueHealthNeedsWhy(value: string | undefined): boolean {
+  if (!value || isOperatorDisabledHealth(value)) return false;
+  return isProviderHealthFailure(value) || WHY_ELIGIBLE_EXTRA.has(value);
 }
 
 export function venueHealthIsDegraded(health: Record<string, string> | undefined): boolean {
@@ -28,8 +41,19 @@ export function venueHealthIsDegraded(health: Record<string, string> | undefined
 export function scanHealthTone(value: string | undefined): VenueHealthTone | null {
   if (!value) return null;
   if (value === "ok") return "ok";
-  if (value === "degraded" || value === "timeout") return "warn";
-  if (value === "unavailable" || value === "error" || value === "failed") return "down";
+  if (
+    value === "degraded" ||
+    value === "timeout" ||
+    value === "discovery_timeout" ||
+    value === "market_timeout" ||
+    value === "retry_wait" ||
+    value === "partial"
+  ) {
+    return "warn";
+  }
+  if (value === "unavailable" || value === "error" || value === "failed" || value === "auth_failure") {
+    return "down";
+  }
   if (value === VENUE_HEALTH_DISABLED) return "off";
   return "unknown";
 }
@@ -48,9 +72,12 @@ export function venueHealthCaption(
   row?: { ok?: boolean; authenticated?: boolean } | null,
 ): string {
   if (isOperatorDisabledHealth(scan)) return `${label} off (operator)`;
-  if (scan === "degraded") return `${label} degraded`;
+  if (scan === "degraded" || scan === "partial") return `${label} degraded`;
   if (scan === "timeout") return `${label} timeout`;
-  if (scan === "unavailable" || scan === "error" || scan === "failed") {
+  if (scan === "discovery_timeout") return `${label} discovery timeout`;
+  if (scan === "market_timeout") return `${label} market timeout`;
+  if (scan === "retry_wait") return `${label} retry wait`;
+  if (scan === "unavailable" || scan === "error" || scan === "failed" || scan === "auth_failure") {
     return `${label} unavailable`;
   }
   if (scan === "ok") return healthyFeedCaption(label);

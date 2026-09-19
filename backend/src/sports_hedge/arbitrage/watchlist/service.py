@@ -12,6 +12,7 @@ from sports_hedge.application.quote_freshness import (
 from sports_hedge.arbitrage.watchlist.adapter import observation_from_paper_decision
 from sports_hedge.arbitrage.watchlist.economics import (
     LIFECYCLE_STATUSES_PROTECTED_FROM_OBSERVATION,
+    NET_PROXIMITY_BAND_PP,
     classification_for,
     classify_status,
     distance_to_trigger_pp,
@@ -53,7 +54,7 @@ class WatchlistService:
         self,
         repository: SqliteWatchlistRepository | None = None,
         *,
-        approaching_band_pp: Decimal = Decimal("0.50"),
+        approaching_band_pp: Decimal = NET_PROXIMITY_BAND_PP,
         max_quote_age_ms: int = 2000,
         clock: Callable[[], datetime] | None = None,
     ) -> None:

@@ -11,6 +11,7 @@ import {
   scanHealthTone,
   venueHealthCaption,
   venueHealthIsDegraded,
+  venueHealthNeedsWhy,
 } from "./venue-health-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -30,10 +31,16 @@ describe("operator-disabled venue health vs provider failure", () => {
     assert.equal(isProviderHealthFailure("unavailable"), true);
     assert.equal(isProviderHealthFailure("timeout"), true);
     assert.equal(isProviderHealthFailure("degraded"), true);
+    assert.equal(isProviderHealthFailure("discovery_timeout"), false);
+    assert.equal(isProviderHealthFailure("market_timeout"), false);
     assert.equal(scanHealthTone("unavailable"), "down");
     assert.equal(scanHealthTone("timeout"), "warn");
+    assert.equal(scanHealthTone("discovery_timeout"), "warn");
+    assert.equal(scanHealthTone("market_timeout"), "warn");
     assert.equal(venueHealthCaption("Kalshi", "unavailable"), "Kalshi unavailable");
     assert.equal(venueHealthCaption("Matchbook", "timeout"), "Matchbook timeout");
+    assert.equal(venueHealthCaption("Matchbook", "discovery_timeout"), "Matchbook discovery timeout");
+    assert.equal(venueHealthCaption("Kalshi", "market_timeout"), "Kalshi market timeout");
     assert.equal(
       venueHealthIsDegraded({ matchbook: "ok", polymarket: "disabled", kalshi: "timeout" }),
       true,
@@ -66,6 +73,12 @@ describe("operator-disabled venue health vs provider failure", () => {
       }),
       false,
     );
+    assert.equal(venueHealthNeedsWhy("disabled"), false);
+    assert.equal(venueHealthNeedsWhy("ok"), false);
+    assert.equal(venueHealthNeedsWhy("waiting"), false);
+    assert.equal(venueHealthNeedsWhy("degraded"), true);
+    assert.equal(venueHealthNeedsWhy("discovery_timeout"), true);
+    assert.equal(venueHealthNeedsWhy("retry_wait"), true);
   });
 
   it("health bar and pulse render disabled as off, not a fake provider failure", () => {
@@ -81,5 +94,13 @@ describe("operator-disabled venue health vs provider failure", () => {
     assert.match(pulse, /Partial venue failure/);
     assert.match(pulse, /Provider unhealthy/);
     assert.doesNotMatch(pulse, /phase === "degraded"[\s\S]*Scan failed/);
+    assert.match(bar, /Why\?/);
+    assert.match(bar, /downloadVenueWhyIncident/);
+    assert.match(bar, /getVenueDegradationIncident/);
+    assert.match(bar, /venueHealthNeedsWhy/);
+    const whyBlock = bar.slice(bar.indexOf("status-why"));
+    assert.doesNotMatch(whyBlock, /getVenueHealth/);
+    assert.doesNotMatch(whyBlock, /getLiveRefreshStatus/);
+    assert.doesNotMatch(whyBlock, /\/venues\/health/);
   });
 });

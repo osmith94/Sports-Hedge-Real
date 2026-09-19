@@ -4,6 +4,9 @@ Uses the Approved Match Register as the only runtime equivalence function.
 Persists exact native IDs and compact Kalshi fee snapshots. Does not fetch
 order books, run the solver, or create a durable price-engine queue.
 
+Catalogue disappearance is family-scoped. Fixture-wide listed_ok is not an
+authority: GAME/BTTS discovery success must not imply TOTAL/FTTS completeness.
+
 Synchronous SQLite mutation is intended to run off the scanner event loop
 via `persist_universe_catalogue_pass_offloop`.
 """
@@ -11,6 +14,7 @@ via `persist_universe_catalogue_pass_offloop`.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from typing import Any
@@ -27,8 +31,18 @@ from sports_hedge.application.approved_market_catalogue import (
     required_outcomes_for_key,
     semantic_kalshi_fee_snapshot_id,
 )
+from sports_hedge.application.target_competitions import (
+    resolve_target_competition_from_kalshi_ticker,
+)
 from sports_hedge.domain.football import CanonicalMarket
-from sports_hedge.matching.approved_register import REGISTER_VERSION, registered_canonical_key
+from sports_hedge.matching.approved_register import (
+    CANONICAL_BTTS_FT,
+    CANONICAL_FTTS_FT,
+    CANONICAL_MATCH_RESULT_FT,
+    CANONICAL_TOTAL_GOALS_FT,
+    REGISTER_VERSION,
+    registered_canonical_key,
+)
 from sports_hedge.persistence.approved_market_catalogue import (
     ApprovedMarketCatalogueTransaction,
     SqliteApprovedMarketCatalogueStore,
@@ -36,6 +50,83 @@ from sports_hedge.persistence.approved_market_catalogue import (
 
 DISAPPEARED_FAMILY_REASON = "family_not_listed_this_generation"
 TERMINAL_FIXTURE_REASON = "fixture_terminal"
+KALSHI_SERIES_STATUS_OK = "ok"
+
+# Longest suffix first so BTTS/FTTS/TOTAL cannot be confused with GAME.
+_KALSHI_SERIES_FAMILY_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("BTTS", CANONICAL_BTTS_FT),
+    ("FTTS", CANONICAL_FTTS_FT),
+    ("TOTAL", CANONICAL_TOTAL_GOALS_FT),
+    ("GAME", CANONICAL_MATCH_RESULT_FT),
+)
+
+
+@dataclass(frozen=True)
+class FamilyDiscoveryCompleteness:
+    """Explicit UNIVERSE family-discovery truth for one fixture/generation.
+
+    This is the only catalogue-completeness authority. A family may be marked
+    disappeared only when every required Matchbook source-event listing for the
+    fixture finished successfully and the required Kalshi series discovery for
+    that family completed successfully. Timeout / deferred / not-queried /
+    budget-truncated families stay ACTIVE/unconfirmed.
+    """
+
+    matchbook_listing_complete: bool = False
+    kalshi_series_results: tuple[dict[str, Any], ...] = ()
+    kalshi_incomplete_family_keys: frozenset[str] = frozenset()
+    target_competition_code: str | None = None
+
+
+def catalogue_family_key(register_canonical_key: str) -> str:
+    """Family identity used for completeness. TOTAL lines share one family."""
+
+    key = str(register_canonical_key or "").strip()
+    if key.startswith(f"{CANONICAL_TOTAL_GOALS_FT}:"):
+        return CANONICAL_TOTAL_GOALS_FT
+    return key
+
+
+def family_key_from_kalshi_series(series_ticker: str | None) -> str | None:
+    """Map a Kalshi series or event ticker onto a register family key."""
+
+    ticker = str(series_ticker or "").strip().upper()
+    if not ticker:
+        return None
+    head = ticker.split("-", 1)[0]
+    for suffix, key in _KALSHI_SERIES_FAMILY_SUFFIXES:
+        if head.endswith(suffix) or ticker.endswith(suffix):
+            return key
+    return None
+
+
+def complete_family_keys(evidence: FamilyDiscoveryCompleteness) -> frozenset[str]:
+    """Families whose upstream discovery completed for this fixture/generation.
+
+    GAME/BTTS success does not imply TOTAL/FTTS completeness. A missing series
+    row is not-queried. Any status other than ok is timeout/deferred/failed.
+    """
+
+    if not evidence.matchbook_listing_complete:
+        return frozenset()
+    wanted_code = str(evidence.target_competition_code or "").strip()
+    if not wanted_code:
+        return frozenset()
+    complete: set[str] = set()
+    for row in evidence.kalshi_series_results:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "").strip() != KALSHI_SERIES_STATUS_OK:
+            continue
+        series = str(row.get("series") or "").strip()
+        family = family_key_from_kalshi_series(series)
+        if family is None:
+            continue
+        competition = resolve_target_competition_from_kalshi_ticker(series)
+        if competition is None or competition.code.value != wanted_code:
+            continue
+        complete.add(family)
+    return frozenset(complete - set(evidence.kalshi_incomplete_family_keys))
 
 
 class CataloguePairIdentity:
@@ -97,15 +188,19 @@ def persist_universe_catalogue_pass(
     pairs: list[CataloguePairIdentity],
     now: datetime,
     generation_id: str | None,
-    listed_ok: bool,
+    family_discovery: FamilyDiscoveryCompleteness | None,
     terminal: bool,
 ) -> list[ApprovedMarketCatalogueRow]:
     """Upsert ACTIVE rows for registered pairs and invalidate missing families.
 
+    A row may disappear only when that family's UNIVERSE discovery completed
+    successfully and the exact register key was genuinely absent. Incomplete
+    TOTAL/FTTS discovery leaves existing rows ACTIVE/unconfirmed/retryable.
     Catalogue completion does not require executable books or solver output.
     The complete read/modify/write runs in one SQLite transaction.
     """
 
+    evidence = family_discovery or FamilyDiscoveryCompleteness()
     return store.run_in_transaction(
         lambda tx: _persist_universe_catalogue_pass_tx(
             tx,
@@ -117,7 +212,7 @@ def persist_universe_catalogue_pass(
             pairs=pairs,
             now=now,
             generation_id=generation_id,
-            listed_ok=listed_ok,
+            family_discovery=evidence,
             terminal=terminal,
         )
     )
@@ -134,7 +229,7 @@ async def persist_universe_catalogue_pass_offloop(
     pairs: list[CataloguePairIdentity],
     now: datetime,
     generation_id: str | None,
-    listed_ok: bool,
+    family_discovery: FamilyDiscoveryCompleteness | None,
     terminal: bool,
 ) -> list[ApprovedMarketCatalogueRow]:
     """Bounded off-loop wrapper so SQLite catalogue I/O cannot stall HOT."""
@@ -150,7 +245,7 @@ async def persist_universe_catalogue_pass_offloop(
         pairs=pairs,
         now=now,
         generation_id=generation_id,
-        listed_ok=listed_ok,
+        family_discovery=family_discovery,
         terminal=terminal,
     )
 
@@ -166,7 +261,7 @@ def _persist_universe_catalogue_pass_tx(
     pairs: list[CataloguePairIdentity],
     now: datetime,
     generation_id: str | None,
-    listed_ok: bool,
+    family_discovery: FamilyDiscoveryCompleteness,
     terminal: bool,
 ) -> list[ApprovedMarketCatalogueRow]:
     if terminal:
@@ -199,18 +294,21 @@ def _persist_universe_catalogue_pass_tx(
             )
         )
 
-    if listed_ok:
-        for existing in tx.list_rows_for_event(canonical_event_id):
-            if existing.register_canonical_key in found_keys:
-                continue
-            if existing.row_state is CatalogueRowState.ACTIVE:
-                disappeared = tx.mark_disappeared(
-                    existing.catalogue_row_id,
-                    reason=DISAPPEARED_FAMILY_REASON,
-                    now=now,
-                    generation_id=generation_id,
-                )
-                rows.append(disappeared or existing)
+    complete = complete_family_keys(family_discovery)
+    for existing in tx.list_rows_for_event(canonical_event_id):
+        if existing.register_canonical_key in found_keys:
+            continue
+        if existing.row_state is not CatalogueRowState.ACTIVE:
+            continue
+        if catalogue_family_key(existing.register_canonical_key) not in complete:
+            continue
+        disappeared = tx.mark_disappeared(
+            existing.catalogue_row_id,
+            reason=DISAPPEARED_FAMILY_REASON,
+            now=now,
+            generation_id=generation_id,
+        )
+        rows.append(disappeared or existing)
     return rows
 
 
