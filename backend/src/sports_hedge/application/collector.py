@@ -93,6 +93,8 @@ from sports_hedge.application.quote_freshness import (
 )
 from sports_hedge.application.approved_market_catalogue import FEE_SOURCE_GET_SERIES
 from sports_hedge.application.catalogue_maintenance import (
+    FamilyDiscoveryCompleteness,
+    family_key_from_kalshi_series,
     pair_identity_from_markets,
     persist_universe_catalogue_pass_offloop,
 )
@@ -576,6 +578,7 @@ class _VenueSideFetch:
         self.latency_ms = 0
         self.retrieved_at: datetime | None = None
         self.primary_event: _NormalizedEvent | None = None
+        self.kalshi_incomplete_family_keys: set[str] = set()
 
 
 class _HotLegRefresh:
@@ -2729,8 +2732,17 @@ class ReadOnlyCrossVenueCollector:
             fixture=fixture,
             eligible_pairs=eligible_pairs,
             k_events=k_events,
-            listed_ok=(
-                VenueName.MATCHBOOK in listed_venues and VenueName.KALSHI in listed_venues
+            family_discovery=FamilyDiscoveryCompleteness(
+                matchbook_listing_complete=(
+                    matchbook_side.listed and not matchbook_side.failed
+                ),
+                kalshi_series_results=tuple(
+                    self._op_series_results.get(VenueName.KALSHI.value) or ()
+                ),
+                kalshi_incomplete_family_keys=frozenset(
+                    kalshi_side.kalshi_incomplete_family_keys
+                ),
+                target_competition_code=fixture.target_competition_code,
             ),
             issues=issues,
         )
@@ -2896,7 +2908,7 @@ class ReadOnlyCrossVenueCollector:
                 pairs=[],
                 now=datetime.now(UTC),
                 generation_id=None if generation is None else str(generation),
-                listed_ok=False,
+                family_discovery=FamilyDiscoveryCompleteness(),
                 terminal=True,
             )
 
@@ -2908,7 +2920,7 @@ class ReadOnlyCrossVenueCollector:
             tuple[VenueName, VenueName, _NormalizedMarket, _NormalizedMarket, MarketMatchResult]
         ],
         k_events: list[_NormalizedEvent],
-        listed_ok: bool,
+        family_discovery: FamilyDiscoveryCompleteness,
         issues: list[CollectorIssue],
     ) -> None:
         """Persist approved-family identity before depth/solver (Tenet 19 / #341)."""
@@ -2961,7 +2973,7 @@ class ReadOnlyCrossVenueCollector:
                 pairs=identities,
                 now=datetime.now(UTC),
                 generation_id=None if generation is None else str(generation),
-                listed_ok=listed_ok,
+                family_discovery=family_discovery,
                 terminal=False,
             )
 
@@ -3772,13 +3784,26 @@ class ReadOnlyCrossVenueCollector:
         if self.kalshi is None or not k_events:
             return
         for k_event in k_events:
+            family_key = family_key_from_kalshi_series(
+                k_event.raw.get("series_ticker")
+                if isinstance(k_event.raw, dict)
+                else None
+            ) or family_key_from_kalshi_series(
+                k_event.raw.get("event_ticker")
+                if isinstance(k_event.raw, dict)
+                else None
+            )
             if self._provider_budget_exhausted():
+                if family_key:
+                    side.kalshi_incomplete_family_keys.add(family_key)
                 break
             markets, inventory, _series, fetched, kalshi_failed = await self._load_kalshi_markets(
                 k_event, issues=issues
             )
             if kalshi_failed:
                 side.failed = True
+                if family_key:
+                    side.kalshi_incomplete_family_keys.add(family_key)
                 if fixture.no_comparison_reason is None:
                     fixture.no_comparison_reason = MARKET_FETCH_UNAVAILABLE_REASON
             else:
