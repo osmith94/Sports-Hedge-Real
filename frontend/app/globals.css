@@ -103,6 +103,14 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 .scan-form { padding: 15px 17px 16px; }
 .scan-control-grid { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)) auto; gap: 10px; align-items: end; }
 .scan-ops-row { display: grid; grid-template-columns: minmax(140px, 1.4fr) minmax(88px, .7fr) minmax(110px, .8fr) auto minmax(168px, auto) auto; gap: 10px; align-items: end; }
+.scan-ops-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.scan-button-secondary { border: 1px solid var(--line-strong); background: transparent; color: var(--muted); border-radius: 8px; padding: 9px 13px; min-height: 35px; font-size: 10px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; cursor: pointer; }
+.scan-button-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.scan-button-danger { border: 1px solid rgba(240, 130, 130, .45); background: rgba(240, 130, 130, .08); color: var(--red); border-radius: 8px; padding: 9px 13px; min-height: 35px; font-size: 10px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; cursor: pointer; }
+.scan-button-danger:hover:not(:disabled) { background: rgba(240, 130, 130, .16); }
+.scan-button-secondary:disabled, .scan-button-danger:disabled { opacity: .55; cursor: wait; }
+.live-scan-pulse-stopped .live-scan-pulse-core { background: var(--amber); }
+.live-scan-pulse-stopped .live-scan-pulse-ring { border-color: rgba(241, 191, 105, .55); }
 .live-scan-pulse { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; align-items: center; min-width: 168px; min-height: 35px; padding: 4px 2px; }
 .live-scan-pulse-mark { position: relative; width: 16px; height: 16px; display: block; overflow: hidden; }
 .live-scan-pulse-ring, .live-scan-pulse-core { position: absolute; inset: 0; border-radius: 50%; }

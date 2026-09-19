@@ -103,6 +103,12 @@ from sports_hedge.persistence.matchbook_account_fee import (
     SqliteMatchbookAccountFeeStore,
 )
 from sports_hedge.persistence.mapping_rules import get_mapping_rule_store
+from sports_hedge.persistence.operator_scanner_settings import (
+    SCANNER_STOPPED_BY_OPERATOR,
+    OperatorScannerSettings,
+    OperatorScannerSettingsUpdate,
+    effective_operator_scanner_settings,
+)
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.treasury.models import (
@@ -884,6 +890,52 @@ def put_venue_participation(
     return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
 
 
+@router.get("/operator-scanner-settings", response_model=OperatorScannerSettings)
+def get_operator_scanner_settings() -> OperatorScannerSettings:
+    """Read backend-authoritative scanner operator settings. No scan or provider I/O."""
+
+    coordinator = get_live_refresh_coordinator()
+    return coordinator.effective_scanner_settings()
+
+
+@router.put("/operator-scanner-settings", response_model=LiveRefreshStatus)
+def put_operator_scanner_settings(
+    update: OperatorScannerSettingsUpdate,
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Persist Min Net Arb, Max Risk and HOT cadence. Does not scan or call providers."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_operator_scan_settings(
+        min_net_edge=update.min_net_edge,
+        max_execution_risk=update.max_execution_risk,
+        hot_cadence_seconds=update.hot_cadence_seconds,
+    )
+    return _status_with_scan_cycles(coordinator.public_status(), repository)
+
+
+@router.post("/scanner/stop", response_model=LiveRefreshStatus)
+def stop_paper_scanner(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Pause server-owned HOT, UNIVERSE and BACKGROUND work without clearing state."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_operator_scanner_stopped(True)
+    return _status_with_scan_cycles(coordinator.public_status(), repository)
+
+
+@router.post("/scanner/resume", response_model=LiveRefreshStatus)
+def resume_paper_scanner(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Resume server-owned scanner workers from preserved state. No process restart."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_operator_scanner_stopped(False)
+    return _status_with_scan_cycles(coordinator.public_status(), repository)
+
+
 @router.post(
     "/collect/hot",
     response_model=CollectionReport,
@@ -904,8 +956,10 @@ async def refresh_hot_read_only_market_data(
     and retains all normal paper qualification gates.
     """
 
-    kwargs = request.model_dump()
     coordinator = get_live_refresh_coordinator()
+    if coordinator.operator_scanner_stopped:
+        raise HTTPException(status_code=409, detail=SCANNER_STOPPED_BY_OPERATOR)
+    kwargs = request.model_dump()
     coordinator.remember_request(kwargs)
     plan = coordinator.manual_hot_plan()
 
@@ -975,8 +1029,10 @@ async def collect_read_only_market_data(
     drill-down reads current-state inventory instead of this diagnostic payload.
     """
 
-    kwargs = request.model_dump()
     coordinator = get_live_refresh_coordinator()
+    if coordinator.operator_scanner_stopped:
+        raise HTTPException(status_code=409, detail=SCANNER_STOPPED_BY_OPERATOR)
+    kwargs = request.model_dump()
     coordinator.remember_request(kwargs)
     settings = get_settings()
     diagnostic_timeout = float(settings.paper_scan_manual_diagnostic_timeout_seconds)
@@ -1326,9 +1382,10 @@ def scheduled_collection_kwargs() -> dict[str, Any]:
     """Stable server-owned collect settings. Manual request kwargs never apply."""
 
     settings = get_settings()
+    operator = effective_operator_scanner_settings(settings)
     return PaperCollectionRequest(
-        minimum_net_edge=Decimal(str(settings.min_net_edge)),
-        maximum_execution_risk=int(settings.max_execution_risk),
+        minimum_net_edge=operator.min_net_edge,
+        maximum_execution_risk=operator.max_execution_risk,
         minimum_mapping_confidence=float(settings.min_mapping_confidence),
         assumed_latency_ms=int(settings.simulated_latency_ms),
     ).model_dump()
@@ -1349,6 +1406,8 @@ async def server_owned_refresh_tick(plan=None) -> None:
     """Background tick used when PAPER_LIVE_REFRESH_ENABLED is true."""
 
     coordinator = get_live_refresh_coordinator()
+    if coordinator.operator_scanner_stopped:
+        return
     if coordinator._catalogue_store is None:
         coordinator.bind_catalogue_store(get_approved_market_catalogue_store())
     resolved = plan if plan is not None else coordinator.plan_tick()

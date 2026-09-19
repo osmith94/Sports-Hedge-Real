@@ -114,6 +114,7 @@ def test_explicit_collect_persists_after_bounded_scan_envelope(monkeypatch) -> N
             self.inside_scan_envelope = False
             self.persist_seen = False
             self.persist_outcome_seen = False
+            self.operator_scanner_stopped = False
 
         def remember_request(self, payload) -> None:
             del payload
