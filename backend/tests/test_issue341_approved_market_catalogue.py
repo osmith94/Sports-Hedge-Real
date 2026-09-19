@@ -748,7 +748,7 @@ async def test_blocking_catalogue_persist_keeps_hot_heartbeat_dispatchable() -> 
             pairs=[],
             now=NOW,
             generation_id="1",
-            listed_ok=False,
+            family_discovery=None,
             terminal=False,
         )
     )
