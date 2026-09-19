@@ -6,10 +6,12 @@ Clock is injected. Do not import the dislocation burst scheduler.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
 from sports_hedge.application.quote_freshness import require_aware_instant
+from sports_hedge.arbitrage.watchlist.economics import net_proximity_reason_label
 
 
 class ScanLane(StrEnum):
@@ -40,6 +42,7 @@ HOT_REASON_IN_PLAY = "IN PLAY"
 HOT_REASON_POST_KICKOFF_STATUS_PENDING = "POST-KICKOFF STATUS PENDING"
 HOT_REASON_ARB_PROMOTION = "ARB PROMOTION"
 HOT_REASON_SURVEILLANCE = "SURVEILLANCE"
+HOT_REASON_NET_PROXIMITY_PREFIX = "NET PROXIMITY"
 
 WORKER_IDLE = "idle"
 WORKER_RUNNING = "running"
@@ -193,6 +196,8 @@ def hot_reason_labels(
     lifecycle: ScanLane | str,
     qualifying_promotion: bool,
     surveillance_promotion: bool = False,
+    net_proximity_promotion: bool = False,
+    net_proximity_distance_pp: Decimal | None = None,
     hot_horizon: timedelta = DEFAULT_HOT_HORIZON,
 ) -> list[str]:
     """Return truthful current-state HOT reasons. Empty when membership is not HOT.
@@ -201,8 +206,9 @@ def hot_reason_labels(
     classification and whether current-state economics promoted a UNIVERSE
     fixture. ARB PROMOTION is only labelled when lifecycle would otherwise be
     UNIVERSE and the row still proves a qualifying executable arb.
-    SURVEILLANCE is a below-threshold positive edge. Elapsed time never
-    fabricates live or completed status.
+    NET PROXIMITY is below Min Net Arb but within 0.50pp of the operator
+    trigger. SURVEILLANCE remains already-triggered economics that are not
+    executable-fresh. Elapsed time never fabricates live or completed status.
     """
 
     resolved_membership = ScanLane(membership) if not isinstance(membership, ScanLane) else membership
@@ -226,6 +232,8 @@ def hot_reason_labels(
     if resolved_lifecycle is ScanLane.UNIVERSE:
         if qualifying_promotion:
             labels.append(HOT_REASON_ARB_PROMOTION)
+        elif net_proximity_promotion and net_proximity_distance_pp is not None:
+            labels.append(net_proximity_reason_label(net_proximity_distance_pp))
         elif surveillance_promotion:
             labels.append(HOT_REASON_SURVEILLANCE)
     return labels

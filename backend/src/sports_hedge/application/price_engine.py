@@ -98,6 +98,10 @@ from sports_hedge.application.scan_lanes import (
     ScanLane,
     classify_scan_lane,
 )
+from sports_hedge.arbitrage.watchlist.economics import (
+    is_net_proximity_hot,
+    qualifies_min_net_arb,
+)
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.football import (
     CanonicalEvent,
@@ -1382,14 +1386,21 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
 
 
 def _decision_is_interesting(decision: PaperScanDecision | None) -> bool:
-    """Positive/near surveillance or solver-qualifying. Broader than paper entry."""
+    """Triggered Min Net Arb or 0.50pp net proximity. Broader than paper entry.
+
+    Uses `current_net_edge` (`decision_net_edge`) versus `trigger_net_edge`
+    (`decision.minimum_net_edge`). Does not hard-code zero or gross edge.
+    """
 
     if decision is None:
         return False
-    if decision_is_solver_arbitrage(decision):
-        return True
     edge = decision_net_edge(decision)
-    return edge is not None and edge > 0
+    trigger = decision.minimum_net_edge
+    if edge is None:
+        return False
+    if qualifies_min_net_arb(edge, trigger):
+        return True
+    return is_net_proximity_hot(edge, trigger)
 
 
 def _overlay_decision_inventory(

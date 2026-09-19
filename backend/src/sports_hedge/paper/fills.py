@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field, model_validator
 from sports_hedge.domain.models import VenueName
 from sports_hedge.liquidity.book import BookLevel
 
-
 BPS_SCALE = Decimal("10000")
 
 
@@ -57,6 +56,9 @@ class PaperFillConfig(BaseModel):
     slippage_bps: Decimal = Field(default=Decimal("0"), ge=0)
     price_impact_bps: Decimal = Field(default=Decimal("0"), ge=0)
     ms_per_skipped_level: int = Field(default=0, ge=0)
+    # Explicit modeled arrival net ROI for post-trigger Min Net Arb tolerance.
+    # Not a second qualification refresh and not gross edge.
+    modeled_arrival_net_edge: Decimal | None = None
 
     @property
     def is_ideal(self) -> bool:

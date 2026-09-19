@@ -15,6 +15,10 @@ from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REAS
 EDGE_QUANT = Decimal("0.00000001")
 PP_QUANT = Decimal("0.0001")
 PERCENTAGE_POINTS = Decimal("100")
+# Operator-facing HOT proximity band. Not a second threshold setting: this is
+# the same 0.50pp near-arb distance already used by watchlist APPROACHING.
+NET_PROXIMITY_BAND_PP = Decimal("0.50")
+MOVED_BELOW_MIN_NET_ARB = "moved_below_min_net_arb"
 
 SEMANTIC_REASONS = (
     "market_not_equivalent",
@@ -89,9 +93,78 @@ def distance_to_trigger_pp(current_net_edge: Decimal, trigger_net_edge: Decimal)
     """Return how many percentage points the edge sits below (or above) the trigger.
 
     Example: trigger 1.00% (0.01) and current 0.80% (0.008) → 0.20pp.
+    `current_net_edge` is post-cost net ROI. `trigger_net_edge` is operator Min Net Arb.
     """
 
     return quantized_pp((trigger_net_edge - current_net_edge) * PERCENTAGE_POINTS)
+
+
+def qualifies_min_net_arb(current_net_edge: Decimal, trigger_net_edge: Decimal) -> bool:
+    """True when post-cost net ROI meets the configured Min Net Arb trigger."""
+
+    return current_net_edge >= trigger_net_edge
+
+
+def is_net_proximity_hot(current_net_edge: Decimal, trigger_net_edge: Decimal) -> bool:
+    """Economically HOT, not yet a fill: below trigger but within 0.50pp.
+
+    Uses existing `distance_to_trigger_pp`. Never treats gross edge or a hard-coded
+    zero as the trigger.
+    """
+
+    if qualifies_min_net_arb(current_net_edge, trigger_net_edge):
+        return False
+    distance = distance_to_trigger_pp(current_net_edge, trigger_net_edge)
+    return Decimal("0") < distance <= NET_PROXIMITY_BAND_PP
+
+
+def net_proximity_reason_label(distance_pp: Decimal) -> str:
+    """Operator-facing HOT reason, e.g. `NET PROXIMITY · 0.05pp TO TRIGGER`."""
+
+    quantized = quantized_pp(distance_pp)
+    formatted = format(quantized, "f").rstrip("0").rstrip(".")
+    if "." not in formatted:
+        formatted = f"{formatted}.00"
+    elif len(formatted.split(".", 1)[1]) == 1:
+        formatted = f"{formatted}0"
+    return f"NET PROXIMITY · {formatted}pp TO TRIGGER"
+
+
+def evaluate_post_trigger_min_net_arb(
+    *,
+    bound_net_edge: Decimal,
+    arrival_net_edge: Decimal,
+    trigger_net_edge: Decimal,
+) -> str | None:
+    """Once a bound decision already meets Min Net Arb, only arrival below it blocks.
+
+    Favourable movement, or movement that remains >= the same configured trigger,
+    is allowed. Returns `moved_below_min_net_arb` when simulated arrival net
+    economics fall below that trigger. Does not inspect quote age or execution risk.
+    """
+
+    if not qualifies_min_net_arb(bound_net_edge, trigger_net_edge):
+        raise ValueError(
+            "post-trigger min-net tolerance requires a bound decision at or above Min Net Arb"
+        )
+    if qualifies_min_net_arb(arrival_net_edge, trigger_net_edge):
+        return None
+    return MOVED_BELOW_MIN_NET_ARB
+
+
+def arrival_net_edge_from_decimal_odds(odds: Sequence[Decimal]) -> Decimal | None:
+    """Complete-set net ROI from simulated arrival odds. Missing/invalid odds fail closed."""
+
+    if not odds:
+        return None
+    implied = Decimal("0")
+    for value in odds:
+        if value <= 0:
+            return None
+        implied += Decimal("1") / value
+    if implied <= 0:
+        return None
+    return net_edge_from_implied_sum(implied)
 
 
 def missing_cost_reasons(reasons: list[str]) -> list[str]:

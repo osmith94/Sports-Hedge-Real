@@ -317,7 +317,7 @@ def test_distant_equivalent_nonqualifying_promotes_surveillance_not_paper() -> N
     coordinator = LiveRefreshCoordinator(clock=clock)
     coordinator.reset()
     coordinator._clock = clock
-    near_edge = _market_row(edge=Decimal("0.004"), arb=False, trigger=Decimal("0.01"))
+    near_edge = _market_row(edge=Decimal("0.008"), arb=False, trigger=Decimal("0.01"))
     fixture = _fixture(opportunity="near", arb=False, qualifying=0)
     coordinator.record_report(
         _report(
@@ -335,8 +335,9 @@ def test_distant_equivalent_nonqualifying_promotes_surveillance_not_paper() -> N
     assert CANONICAL_ID in plan.identity_scope
     inventory = store.inventory(later)
     row = next(item for item in inventory if item.canonical_event_id == CANONICAL_ID)
-    assert "SURVEILLANCE" in (row.hot_reasons or [])
+    assert any(str(reason).startswith("NET PROXIMITY") for reason in (row.hot_reasons or []))
     assert "ARB PROMOTION" not in (row.hot_reasons or [])
+    assert "SURVEILLANCE" not in (row.hot_reasons or [])
 
 
 def test_ui_label_without_current_state_markets_does_not_promote() -> None:
