@@ -14,6 +14,7 @@ PAPER / read-only. Exact persisted Matchbook/Kalshi IDs only — never
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -231,6 +232,7 @@ class CataloguePriceEngine:
             VenueName.MATCHBOOK.value: 0,
             VenueName.KALSHI.value: 0,
         }
+        self._slice_remaining: Callable[[], float | None] | None = None
 
     def now(self) -> datetime:
         return self._clock()
@@ -316,6 +318,40 @@ class CataloguePriceEngine:
             due.append(runtime)
         return due
 
+    def _slice_worker_limit(self) -> int:
+        """Bound in-slice item workers to provider caps without raising them.
+
+        One worker prices one item sequentially (Matchbook then Kalshi), so a
+        pool of Matchbook+Kalshi caps can keep both venues busy. It does not
+        reserve a hostage set of slots for one item.
+        """
+
+        access = self.provider_access
+        if access is None:
+            return 4
+        matchbook = int(access.limits.get(VenueName.MATCHBOOK, 4))
+        kalshi = int(access.limits.get(VenueName.KALSHI, 4))
+        return max(1, matchbook + kalshi)
+
+    def _remaining_slice_seconds(self) -> float | None:
+        if self._slice_remaining is None:
+            return None
+        return self._slice_remaining()
+
+    def _slot_wait_seconds(self) -> float:
+        """How long an unstarted item may wait for a freed provider slot.
+
+        Fast in-slice work must be allowed to queue locally. The wait is still
+        capped by the remaining slice and the 8s provider timeout so hung
+        held leases cannot block the cadence forever.
+        """
+
+        cap = float(self._provider_timeout)
+        remaining = self._remaining_slice_seconds()
+        if remaining is None:
+            return cap
+        return max(0.0, min(cap, remaining))
+
     async def run_slice(
         self,
         priority: PriceEnginePriority,
@@ -328,21 +364,55 @@ class CataloguePriceEngine:
         due = self.due_items(priority, now=evaluated)
         result = PriceEngineSliceResult()
         started_mono = monotonic()
-        pending: list[asyncio.Task[None]] = []
+        deadline = (
+            None
+            if slice_wall_seconds is None
+            else started_mono + float(slice_wall_seconds)
+        )
 
-        async def _run(runtime: PriceEngineRuntimeItem) -> None:
-            outcome = await self._price_item(runtime, result)
-            self._record_outcome(runtime, outcome, result)
+        def remaining() -> float | None:
+            if deadline is None:
+                return None
+            return deadline - monotonic()
 
-        for runtime in due:
-            if slice_wall_seconds is not None and (monotonic() - started_mono) >= float(slice_wall_seconds):
+        if remaining() is not None and float(remaining() or 0) <= 0:
+            for runtime in due:
                 runtime.status = PriceEngineItemStatus.NOT_STARTED
                 result.not_started.append(runtime.identity.catalogue_row_id)
-                continue
-            pending.append(asyncio.create_task(_run(runtime)))
-            await asyncio.sleep(0)
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            return result
+
+        pending = deque(due)
+        self._slice_remaining = remaining
+        try:
+            async def _worker() -> None:
+                while True:
+                    rem = remaining()
+                    if rem is not None and rem <= 0:
+                        return
+                    try:
+                        runtime = pending.popleft()
+                    except IndexError:
+                        return
+                    rem = remaining()
+                    if rem is not None and rem <= 0:
+                        runtime.status = PriceEngineItemStatus.NOT_STARTED
+                        self._record_outcome(runtime, PriceEngineItemStatus.NOT_STARTED, result)
+                        continue
+                    outcome = await self._price_item(runtime, result)
+                    self._record_outcome(runtime, outcome, result)
+
+            worker_n = min(self._slice_worker_limit(), len(due))
+            if worker_n > 0:
+                await asyncio.gather(
+                    *(asyncio.create_task(_worker()) for _ in range(worker_n)),
+                    return_exceptions=True,
+                )
+            while pending:
+                runtime = pending.popleft()
+                runtime.status = PriceEngineItemStatus.NOT_STARTED
+                result.not_started.append(runtime.identity.catalogue_row_id)
+        finally:
+            self._slice_remaining = None
         return result
 
     async def _price_item(
@@ -652,13 +722,20 @@ class CataloguePriceEngine:
                 except (RuntimeError, ValueError):
                     pass
 
-        if access.venue_saturated(venue):
+        slot_wait = self._slot_wait_seconds()
+        if slot_wait <= 0:
             await _close_unused()
-            return None, PriceEngineItemStatus.DEFERRED
-        async with access.try_acquire(venue, lane=lane, stage=stage) as lease:
+            if access.venue_saturated(venue):
+                return None, PriceEngineItemStatus.DEFERRED
+            return None, PriceEngineItemStatus.NOT_STARTED
+        async with access.acquire_wait(
+            venue, lane=lane, stage=stage, timeout=slot_wait
+        ) as lease:
             if lease is None:
                 await _close_unused()
-                return None, PriceEngineItemStatus.DEFERRED
+                if access.venue_saturated(venue):
+                    return None, PriceEngineItemStatus.DEFERRED
+                return None, PriceEngineItemStatus.NOT_STARTED
             inflight = access.snapshot().inflight.get(venue.value, 0)
             self._peak_held_slots[venue.value] = max(
                 self._peak_held_slots[venue.value], inflight
@@ -731,6 +808,10 @@ class CataloguePriceEngine:
                     detail=runtime.last_error_detail or PRICE_ENGINE_ITEM_TIMEOUT_REASON,
                 )
             )
+            return
+        if outcome is PriceEngineItemStatus.NOT_STARTED:
+            runtime.status = PriceEngineItemStatus.NOT_STARTED
+            result.not_started.append(row_id)
             return
         if outcome is PriceEngineItemStatus.DEFERRED:
             runtime.status = PriceEngineItemStatus.DEFERRED

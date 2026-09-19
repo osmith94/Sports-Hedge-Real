@@ -3229,22 +3229,13 @@ class LiveRefreshCoordinator:
         while not self._stop.is_set():
             plan = self.plan_hot_tick()
             self._record_hot_heartbeat(plan)
-            if plan.lane == ScanLane.HOT.value:
+            if plan.lane == ScanLane.HOT.value or plan.reason == "hot_scope_empty":
                 try:
                     await self._invoke_tick(tick, plan)
                 except asyncio.CancelledError:
                     raise
                 except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, Exception):
                     pass
-            elif plan.reason == "hot_scope_empty":
-                engine = self._price_engine
-                if engine is not None and engine.matchbook is not None:
-                    try:
-                        await self.run_price_engine_slice(PriceEnginePriority.HOT)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        pass
             delay = min(self._seconds_until_hot(), float(self.status.interval_seconds))
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, delay))

@@ -301,6 +301,51 @@ class ProviderAccessLayer:
         )
 
     @asynccontextmanager
+    async def acquire_wait(
+        self,
+        venue: VenueName,
+        *,
+        lane: ScanLane | str | None = None,
+        stage: str = "provider",
+        timeout: float | None = None,
+    ) -> AsyncIterator[ProviderLease | None]:
+        """Wait locally for a free slot, or return None when the wait expires.
+
+        Ordinary in-slice work should flow through capacity as soon as a slot
+        is released. A wait that expires while every slot is still occupied is
+        ``provider_capacity_saturated`` / deferred, not a scan-budget failure
+        and not a venue outage. This does not raise the 4/4 caps.
+        """
+
+        if venue not in self._limits:
+            yield ProviderLease.unbound()
+            return
+        if timeout is not None and timeout <= 0:
+            yield None
+            return
+        waiter = await self._enqueue(venue, lane=lane, stage=stage)
+        lease = ProviderLease(
+            _layer=self,
+            _venue=venue,
+            _waiter=waiter,
+            _loop=asyncio.get_running_loop(),
+        )
+        try:
+            try:
+                if timeout is None:
+                    await waiter.event.wait()
+                else:
+                    await asyncio.wait_for(waiter.event.wait(), timeout=timeout)
+            except TimeoutError:
+                yield None
+                return
+            if waiter.cancelled:
+                raise asyncio.CancelledError
+            yield lease
+        finally:
+            await lease.release()
+
+    @asynccontextmanager
     async def try_acquire(
         self,
         venue: VenueName,
@@ -310,9 +355,9 @@ class ProviderAccessLayer:
     ) -> AsyncIterator[ProviderLease | None]:
         """Grant a free slot immediately, or return None without queueing.
 
-        Price-engine items must not block the slice when every slot is already
-        occupied. That state is ``provider_capacity_saturated`` / deferred, not
-        a scan-budget failure and not a venue outage.
+        Immediate non-blocking admission for callers that cannot wait. The
+        price engine uses ``acquire_wait`` so a busy-but-completing roster can
+        flow through freed slots in the same slice.
         """
 
         if venue not in self._limits:
