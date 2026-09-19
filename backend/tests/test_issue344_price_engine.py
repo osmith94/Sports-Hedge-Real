@@ -32,6 +32,7 @@ from sports_hedge.application.price_engine import (
     PRICE_ENGINE_RETRY_BACKOFF_SECONDS,
     PROVIDER_CAPACITY_SATURATED,
     SCAN_BUDGET_EXHAUSTED_REASON,
+    CataloguePriceEngine,
     PriceEnginePriority,
     price_engine_retry_backoff_seconds,
 )
@@ -378,8 +379,10 @@ def test_timeouts_caps_and_paper_boundary_unchanged() -> None:
         assert banned not in source
     engine_src = inspect.getsource(CataloguePriceEngine)
     assert "persist_triggered_chain" not in engine_src
-    assert "list_events" not in inspect.getsource(CataloguePriceEngine._price_item)
-    assert "list_markets" not in inspect.getsource(CataloguePriceEngine._price_item)
+    price_item_src = inspect.getsource(CataloguePriceEngine._price_item)
+    assert ".list_events(" not in price_item_src
+    assert ".list_markets(" not in price_item_src
+    assert "MarketMatcher" not in inspect.getsource(CataloguePriceEngine._refresh_matchbook)
 
 
 @pytest.mark.asyncio

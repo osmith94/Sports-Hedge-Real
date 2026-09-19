@@ -24,9 +24,7 @@ from typing import Any
 
 from sports_hedge.application.approved_market_catalogue import (
     ApprovedMarketCatalogueRow,
-    CatalogueRowState,
     DerivedPriceEngineItem,
-    OutcomeNativeId,
     derived_price_engine_working_set,
     required_outcomes_for_key,
 )
