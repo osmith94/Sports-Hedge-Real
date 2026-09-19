@@ -374,6 +374,8 @@ def get_paper_operations_service(
     holder = get_paper_journal_holder()
     holder.watchlist = watchlist
     holder.alerts = alerts
+    # Process-cached holder must not disagree with /health and live-refresh.
+    holder.settings = get_settings()
     return holder
 
 

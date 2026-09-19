@@ -507,7 +507,10 @@ class WatchlistService:
                     detail=detail,
                 )
             status = current.status
-            if current.status is OpportunityStatus.PAPER_FILLING:
+            if current.status in {
+                OpportunityStatus.PAPER_FILLING,
+                OpportunityStatus.TRIGGERED,
+            }:
                 reasons = list(dict.fromkeys([*current.rejection_reasons, detail]))
                 current = current.model_copy(
                     update={

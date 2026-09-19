@@ -901,6 +901,7 @@ export type WatchlistLifecycleEventType =
   | "paper_fill_attempted"
   | "paper_fill_partial"
   | "paper_fill_complete"
+  | "paper_fill_rejected"
   | "rejected_stale_quote"
   | "rejected_insufficient_depth"
   | "rejected_semantics"
