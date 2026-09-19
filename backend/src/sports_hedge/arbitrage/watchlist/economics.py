@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from decimal import ROUND_HALF_EVEN, Decimal
 
 from sports_hedge.application.complete_set import SOLVER_MODEL_GENERALIZED
@@ -10,6 +11,9 @@ from sports_hedge.arbitrage.watchlist.models import (
     WatchLeg,
     WatchObservation,
 )
+from sports_hedge.domain.models import VenueName
+from sports_hedge.fees.cost import VenueCostSnapshot
+from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
 
 EDGE_QUANT = Decimal("0.00000001")
@@ -152,8 +156,8 @@ def evaluate_post_trigger_min_net_arb(
     return MOVED_BELOW_MIN_NET_ARB
 
 
-def arrival_net_edge_from_decimal_odds(odds: Sequence[Decimal]) -> Decimal | None:
-    """Complete-set net ROI from simulated arrival odds. Missing/invalid odds fail closed."""
+def complete_set_roi_from_decimal_odds(odds: Sequence[Decimal]) -> Decimal | None:
+    """Complete-set ROI from decimal odds. This is not post-cost net."""
 
     if not odds:
         return None
@@ -165,6 +169,58 @@ def arrival_net_edge_from_decimal_odds(odds: Sequence[Decimal]) -> Decimal | Non
     if implied <= 0:
         return None
     return net_edge_from_implied_sum(implied)
+
+
+def arrival_net_edge_after_venue_costs(
+    *,
+    arrival_legs: Sequence[tuple[VenueName, str | None, Decimal]],
+    venue_costs: Sequence[VenueCostSnapshot],
+    as_of: datetime | None = None,
+) -> Decimal | None:
+    """Post-cost complete-set net ROI from arrival gross odds.
+
+    Applies the same per-quote `apply_venue_costs` model as paper scan / depth.
+    Missing or inapplicable costs fail closed (None). Never returns odds-only ROI.
+    """
+
+    if not arrival_legs:
+        return None
+    net_odds: list[Decimal] = []
+    for venue, source_market_id, gross_odds in arrival_legs:
+        if gross_odds <= 1:
+            return None
+        cost = _cost_snapshot_for_arrival(venue_costs, venue, source_market_id)
+        if cost is None:
+            return None
+        try:
+            economics = apply_venue_costs(
+                cost,
+                gross_decimal_odds=gross_odds,
+                require_gbp=False,
+                as_of=as_of,
+            )
+        except CostRuleError:
+            return None
+        net_odds.append(economics.net_decimal_equivalent)
+    return complete_set_roi_from_decimal_odds(net_odds)
+
+
+def _cost_snapshot_for_arrival(
+    venue_costs: Sequence[VenueCostSnapshot],
+    venue: VenueName,
+    source_market_id: str | None,
+) -> VenueCostSnapshot | None:
+    matches = [item for item in venue_costs if item.venue is venue]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    if source_market_id is None:
+        return None
+    by_market = [item for item in matches if item.source_market_id == source_market_id]
+    if len(by_market) == 1:
+        return by_market[0]
+    return None
 
 
 def missing_cost_reasons(reasons: list[str]) -> list[str]:

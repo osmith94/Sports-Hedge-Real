@@ -31,6 +31,7 @@ from test_step8f_automatic_paper_entry import (
     _ops_bundle,
     _standing,
 )
+from venue_cost_helpers import profit_commission_cost
 
 from sports_hedge.accounting.paper_journal import DataProvenance
 from sports_hedge.application.current_market_inventory import (
@@ -48,7 +49,9 @@ from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
 from sports_hedge.arbitrage.watchlist.economics import (
     MOVED_BELOW_MIN_NET_ARB,
     NET_PROXIMITY_BAND_PP,
+    arrival_net_edge_after_venue_costs,
     classify_status,
+    complete_set_roi_from_decimal_odds,
     distance_to_trigger_pp,
     evaluate_post_trigger_min_net_arb,
     is_net_proximity_hot,
@@ -56,6 +59,8 @@ from sports_hedge.arbitrage.watchlist.economics import (
     qualifies_min_net_arb,
 )
 from sports_hedge.arbitrage.watchlist.models import OpportunityStatus, PaperFillAttemptStatus
+from sports_hedge.domain.models import VenueName
+from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.matching.markets import MarketMatchResult
 from sports_hedge.paper.entry_freshness import (
     SNAPSHOT_STALE_AT_DECISION,
@@ -72,6 +77,9 @@ EDGE_140 = Decimal("0.014")
 EDGE_099 = Decimal("0.0099")
 EDGE_080 = Decimal("0.008")
 EDGE_049 = Decimal("0.0049")
+ARRIVAL_GROSS_ODDS = Decimal("2.04")
+HIGH_COMMISSION = Decimal("0.05")
+LOW_COMMISSION = Decimal("0.01")
 
 
 def _near_decision(*, roi: Decimal, trigger: Decimal = TRIGGER) -> PaperScanDecision:
@@ -455,3 +463,118 @@ def test_qualifying_executable_still_uses_existing_architecture() -> None:
     assert not any(
         str(reason).startswith("NET PROXIMITY") for reason in (promoted.hot_reasons or [])
     )
+
+
+def _commission_costs(rate: Decimal) -> list:
+    return [
+        profit_commission_cost(VenueName.MATCHBOOK, rate, captured_at=T1),
+        profit_commission_cost(VenueName.KALSHI, rate, captured_at=T1),
+    ]
+
+
+def _arrival_legs(odds: Decimal = ARRIVAL_GROSS_ODDS):
+    return (
+        (VenueName.MATCHBOOK, "mb-yes", odds),
+        (VenueName.KALSHI, "ks-no", odds),
+    )
+
+
+def test_odds_only_roi_is_not_post_cost_arrival_net() -> None:
+    gross = complete_set_roi_from_decimal_odds(
+        [ARRIVAL_GROSS_ODDS, ARRIVAL_GROSS_ODDS]
+    )
+    assert gross is not None
+    assert gross > TRIGGER
+    high_net = arrival_net_edge_after_venue_costs(
+        arrival_legs=_arrival_legs(),
+        venue_costs=_commission_costs(HIGH_COMMISSION),
+        as_of=T1,
+    )
+    low_net = arrival_net_edge_after_venue_costs(
+        arrival_legs=_arrival_legs(),
+        venue_costs=_commission_costs(LOW_COMMISSION),
+        as_of=T1,
+    )
+    assert high_net is not None and high_net < TRIGGER
+    assert low_net is not None and low_net >= TRIGGER
+    assert arrival_net_edge_after_venue_costs(
+        arrival_legs=_arrival_legs(),
+        venue_costs=[],
+        as_of=T1,
+    ) is None
+
+
+def _bind_with_arrival_commission(tmp_path: Path, *, commission: Decimal):
+    _scan, watchlist, ops, repository, ledger, seeded, plan = _bind_qualified(tmp_path)
+    costs = _commission_costs(commission)
+    legs = [
+        leg.model_copy(
+            update={
+                "displayed_odds": ARRIVAL_GROSS_ODDS,
+                "levels": [
+                    BookLevel(
+                        decimal_odds=ARRIVAL_GROSS_ODDS,
+                        available_stake=Decimal("1000"),
+                    )
+                ],
+            }
+        )
+        for leg in plan.legs
+    ]
+    ops._plans[seeded.opportunity_id] = plan.model_copy(
+        update={"legs": legs, "venue_costs": costs}
+    )
+    return watchlist, ops, repository, ledger, seeded
+
+
+def test_arrival_gross_above_trigger_but_fees_push_net_below_blocks(
+    tmp_path: Path,
+) -> None:
+    gross = complete_set_roi_from_decimal_odds(
+        [ARRIVAL_GROSS_ODDS, ARRIVAL_GROSS_ODDS]
+    )
+    assert gross is not None and gross > TRIGGER
+    watchlist, ops, repository, ledger, seeded = _bind_with_arrival_commission(
+        tmp_path, commission=HIGH_COMMISSION
+    )
+    try:
+        with pytest.raises(PaperOperationsError, match=MOVED_BELOW_MIN_NET_ARB):
+            ops.simulate_fill(
+                seeded.opportunity_id,
+                simulate_external=True,
+                provenance=DataProvenance.LIVE_PAPER,
+                now=T1,
+                config=PaperFillConfig(assumed_latency_ms=0, slippage_bps=Decimal("0")),
+            )
+        assert ops.list_active_trades() == []
+        assert ops._entry_rejections[seeded.opportunity_id] == MOVED_BELOW_MIN_NET_ARB
+        row = watchlist.repository.get(seeded.opportunity_id)
+        assert row is not None
+        assert MOVED_BELOW_MIN_NET_ARB in row.rejection_reasons
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_arrival_gross_above_trigger_and_post_cost_net_still_fills(
+    tmp_path: Path,
+) -> None:
+    watchlist, ops, repository, ledger, seeded = _bind_with_arrival_commission(
+        tmp_path, commission=LOW_COMMISSION
+    )
+    try:
+        ops.simulate_fill(
+            seeded.opportunity_id,
+            simulate_external=True,
+            provenance=DataProvenance.LIVE_PAPER,
+            now=T1,
+            config=PaperFillConfig(assumed_latency_ms=0, slippage_bps=Decimal("0")),
+        )
+        assert ops.list_active_trades()[0].state is PaperTradeState.OPEN
+        assert seeded.opportunity_id not in ops._entry_rejections
+        filled = watchlist.repository.get(seeded.opportunity_id)
+        assert filled is not None
+        assert filled.status is OpportunityStatus.FILLED
+    finally:
+        repository.close()
+        ledger.close()

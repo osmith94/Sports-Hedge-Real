@@ -36,7 +36,7 @@ from sports_hedge.arbitrage.priority_alerts.models import (
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
 from sports_hedge.arbitrage.watchlist.economics import (
     MOVED_BELOW_MIN_NET_ARB,
-    arrival_net_edge_from_decimal_odds,
+    arrival_net_edge_after_venue_costs,
     classification_for,
     evaluate_post_trigger_min_net_arb,
     gross_edge_from_quotes,
@@ -2705,18 +2705,36 @@ def _post_trigger_min_net_rejection(
         return None
     arrival = config.modeled_arrival_net_edge
     if arrival is None:
-        odds = [
-            fill.weighted_odds
-            for fill in fills.fills
-            if fill.weighted_odds is not None and fill.filled_stake > 0
-        ]
-        arrival = arrival_net_edge_from_decimal_odds(odds) if odds else None
+        arrival = _arrival_net_edge_from_fills(plan, fills)
     if arrival is None:
         return None
     return evaluate_post_trigger_min_net_arb(
         bound_net_edge=bound,
         arrival_net_edge=arrival,
         trigger_net_edge=plan.decision.minimum_net_edge,
+    )
+
+
+def _arrival_net_edge_from_fills(
+    plan: PaperFillPlan,
+    fills: PaperOpportunityFills,
+) -> Decimal | None:
+    """Post-cost arrival net from simulated fill odds + bound venue costs.
+
+    Does not treat fill decimal odds as net ROI.
+    """
+
+    arrival_legs: list[tuple[VenueName, str | None, Decimal]] = []
+    for fill in fills.fills:
+        if fill.weighted_odds is None or fill.filled_stake <= 0:
+            continue
+        arrival_legs.append((fill.venue, fill.source_market_id, fill.weighted_odds))
+    if not arrival_legs:
+        return None
+    return arrival_net_edge_after_venue_costs(
+        arrival_legs=arrival_legs,
+        venue_costs=plan.venue_costs,
+        as_of=plan.scanned_at,
     )
 
 

@@ -56,8 +56,9 @@ class PaperFillConfig(BaseModel):
     slippage_bps: Decimal = Field(default=Decimal("0"), ge=0)
     price_impact_bps: Decimal = Field(default=Decimal("0"), ge=0)
     ms_per_skipped_level: int = Field(default=0, ge=0)
-    # Explicit modeled arrival net ROI for post-trigger Min Net Arb tolerance.
-    # Not a second qualification refresh and not gross edge.
+    # Authoritative post-cost arrival net ROI. When omitted, arrival net is
+    # computed by applying the bound decision's venue costs to simulated fill
+    # odds. Never treat fill decimal odds as net.
     modeled_arrival_net_edge: Decimal | None = None
 
     @property
