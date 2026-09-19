@@ -123,6 +123,7 @@ describe("system load display", () => {
     assert.doesNotMatch(display, /resolveSystemLoad/);
     assert.doesNotMatch(display, /cadenceUtilisation/);
     assert.doesNotMatch(display, /DEFAULT_PROVIDER/);
+    assert.doesNotMatch(display, /LiveRefreshStatus/);
     assert.doesNotMatch(display, /price_engine/);
     assert.doesNotMatch(display, /provider_access/);
     assert.doesNotMatch(display, /canonical_evaluated/);
