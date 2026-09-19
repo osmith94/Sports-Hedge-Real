@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,13 @@ import pytest
 
 from sports_hedge.api import main as main_api
 from sports_hedge.application.collector import CollectionReport
+from sports_hedge.application.fixture_inventory import (
+    FixtureMarketInventoryRow,
+    InventoryComparisonStatus,
+    InventoryPairResult,
+    VenueMarketFacts,
+    VenueQuoteFact,
+)
 from sports_hedge.application.live_refresh import (
     UNIVERSE_CHECKPOINT_FLUSH_FIXTURE_THRESHOLD,
     LiveRefreshCoordinator,
@@ -31,11 +39,13 @@ from sports_hedge.application.universe_checkpoint import (
     UNIVERSE_CHECKPOINT_MAX_ENCODED_BYTES,
     UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
     SweepWorkUnit,
+    UniverseCheckpointTooLarge,
     encode_durable_universe_checkpoint,
 )
+from sports_hedge.domain.models import VenueName
 from sports_hedge.persistence.universe_checkpoint import SqliteUniverseCheckpointStore
 from test_concurrent_hot_universe_workers import _universe_fixture
-from test_dual_cadence_scheduler import NOW, FakeClock, _report
+from test_dual_cadence_scheduler import NOW, FakeClock, _decision, _fixture, _report
 
 
 class _SlowCheckpointStore(SqliteUniverseCheckpointStore):
@@ -57,6 +67,115 @@ class _SlowCheckpointStore(SqliteUniverseCheckpointStore):
         self.save_started.set()
         time.sleep(self.delay)
         super().save(payload, updated_at=updated_at)
+
+
+class _FailingCheckpointStore(SqliteUniverseCheckpointStore):
+    def __init__(
+        self,
+        database: str | Path,
+        *,
+        fail_saves: int = 0,
+        fail_clears: int = 0,
+        oversize: bool = False,
+    ) -> None:
+        super().__init__(database)
+        self.fail_saves = fail_saves
+        self.fail_clears = fail_clears
+        self.oversize = oversize
+        self.save_calls = 0
+        self.clear_calls = 0
+
+    def save(self, payload: dict[str, Any], *, updated_at: str) -> None:
+        self.save_calls += 1
+        if self.oversize:
+            raise UniverseCheckpointTooLarge(
+                "universe checkpoint encoded size exceeds compact cap"
+            )
+        if self.fail_saves > 0:
+            self.fail_saves -= 1
+            raise sqlite3.OperationalError("database is locked")
+        super().save(payload, updated_at=updated_at)
+
+    def clear(self) -> None:
+        self.clear_calls += 1
+        if self.fail_clears > 0:
+            self.fail_clears -= 1
+            raise sqlite3.OperationalError("database is locked")
+        super().clear()
+
+
+def _hot_equivalent_row(canonical_id: str) -> FixtureMarketInventoryRow:
+    def facts(venue: VenueName, market_id: str) -> VenueMarketFacts:
+        return VenueMarketFacts(
+            venue=venue,
+            source_event_id=f"{venue.value}-{canonical_id}",
+            source_market_id=market_id,
+            family="both_teams_to_score",
+            period="full_time",
+            settlement_key="regulation_time|full_time",
+            settlement_complete=True,
+            best_backs=[
+                VenueQuoteFact(
+                    outcome="yes", decimal_odds=Decimal("2.10"), size_at_touch=Decimal(100)
+                ),
+                VenueQuoteFact(
+                    outcome="no", decimal_odds=Decimal("1.80"), size_at_touch=Decimal(100)
+                ),
+            ],
+            quote_age_ms=80,
+            quote_age_basis="source",
+            native_currency="GBP" if venue is VenueName.MATCHBOOK else "USD",
+        )
+
+    return FixtureMarketInventoryRow(
+        display_name="BTTS",
+        family="both_teams_to_score",
+        period="full_time",
+        comparison_status=InventoryComparisonStatus.MATCHED_EQUIVALENT,
+        entered_solver=True,
+        solver_model="strict_complete_set",
+        current_net_edge=Decimal("0.015"),
+        trigger_net_edge=Decimal("0.01"),
+        solver_is_arbitrage=True,
+        matchbook=facts(VenueName.MATCHBOOK, "mb-btts"),
+        polymarket=facts(VenueName.POLYMARKET, "pm-btts"),
+        pair_results=[
+            InventoryPairResult(
+                left_venue=VenueName.MATCHBOOK,
+                right_venue=VenueName.POLYMARKET,
+                entered_solver=True,
+                solver_model="strict_complete_set",
+                current_net_edge=Decimal("0.015"),
+                solver_is_arbitrage=True,
+            )
+        ],
+    )
+
+
+def _lifecycle_hot_fixture(canonical_id: str) -> Any:
+    fixture = _fixture(
+        canonical_id,
+        kickoff=NOW - timedelta(minutes=1),
+        in_running=True,
+        evaluation="evaluated",
+    )
+    return fixture.model_copy(
+        update={
+            "matched_equivalent_count": 1,
+            "last_scanned_at": NOW,
+            "opportunity_state": "matched",
+        }
+    )
+
+
+def _assert_compact_checkpoint(payload: dict[str, Any] | None) -> None:
+    assert payload is not None
+    assert payload["semantics_version"] == UNIVERSE_CHECKPOINT_SEMANTICS_VERSION
+    assert "report" not in payload
+    assert "discovery_snapshot" not in payload
+    assert "series_results" not in payload
+    encoded = encode_durable_universe_checkpoint(payload)
+    assert len(encoded.encode("utf-8")) <= UNIVERSE_CHECKPOINT_MAX_ENCODED_BYTES
 
 
 def _partial_report(*ids: str, leftover: str | None = None, when=NOW) -> CollectionReport:
@@ -337,9 +456,157 @@ def test_restart_restores_compact_resume_state(tmp_path: Path) -> None:
     plan = restarted.plan_universe_tick(now=NOW + timedelta(seconds=3))
     assert plan.generation_resume is True
     assert plan.universe_generation_id == generation
-    assert "done-a" in plan.skip_event_ids
+    assert "done-a" in restarted._universe_needs_rehydration
+    assert "done-a" not in plan.skip_event_ids
     assert "pending-c" not in plan.skip_event_ids
     assert restarted._universe_discovery_snapshot is None
+
+
+def test_restart_rehydrates_hot_identity_without_double_counting(tmp_path: Path) -> None:
+    store = SqliteUniverseCheckpointStore(tmp_path / "hot-restart.sqlite")
+    first = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
+    first.configure_from_settings()
+    fixture = _lifecycle_hot_fixture("hot-a")
+    inventory = [_hot_equivalent_row("hot-a")]
+    decisions = [_decision("hot-a", "mkt-hot-a")]
+    first.record_universe_work_set(["hot-a", "pending-b"], authoritative=True)
+    first.record_universe_fixture_progress(None, fixture, decisions, inventory)
+    assert "hot-a" in first.fixture_current_state().hot_identity_scope(NOW)
+    assert first.hot_market_relationships(["hot-a"]).get("hot-a")
+    matched = first._universe_matched_fixtures
+    equivalent = first._universe_equivalent_markets
+    evaluated = first.status.universe.canonical_evaluated
+    promotions = first._universe_hot_promotions
+    _assert_compact_checkpoint(store.load())
+
+    restarted = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
+    restarted.configure_from_settings()
+    assert restarted._universe_work["hot-a"].state == "evaluated"
+    assert "hot-a" in restarted._universe_needs_rehydration
+    assert restarted.fixture_current_state().hot_identity_scope(NOW) == []
+    assert restarted.hot_market_relationships(["hot-a"]) == {}
+    first_plan = restarted.plan_universe_tick(now=NOW)
+    assert first_plan.generation_resume is True
+    assert "hot-a" not in first_plan.skip_event_ids
+    assert "pending-b" not in first_plan.skip_event_ids
+    assert restarted._universe_sweep_is_complete_unlocked() is False
+
+    restarted.record_universe_work_set(["hot-a", "pending-b"], authoritative=True)
+    restarted.record_universe_fixture_progress(None, fixture, decisions, inventory)
+    assert "hot-a" not in restarted._universe_needs_rehydration
+    assert "hot-a" in restarted.fixture_current_state().hot_identity_scope(NOW)
+    relationships = restarted.hot_market_relationships(["hot-a"])
+    assert "hot-a" in relationships
+    assert relationships["hot-a"][0].proof_status == InventoryComparisonStatus.MATCHED_EQUIVALENT.value
+    assert restarted._universe_matched_fixtures == matched
+    assert restarted._universe_equivalent_markets == equivalent
+    assert restarted.status.universe.canonical_evaluated == evaluated
+    assert restarted._universe_hot_promotions == promotions
+    later = restarted.plan_universe_tick(now=NOW)
+    assert "hot-a" in later.skip_event_ids
+    assert "pending-b" not in later.skip_event_ids
+    _assert_compact_checkpoint(store.load())
+
+
+def test_restart_mixed_set_rehydrates_only_missing_evaluated_current_state(
+    tmp_path: Path,
+) -> None:
+    store = SqliteUniverseCheckpointStore(tmp_path / "mixed-restart.sqlite")
+    first = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
+    first.configure_from_settings()
+    first.record_universe_work_set(["done-a", "retry-b", "pending-c"], authoritative=True)
+    first.record_universe_fixture_progress(None, _universe_fixture("done-a"), [], [])
+    first.record_universe_fixture_progress(
+        None,
+        _universe_fixture("retry-b", evaluation="market_fetch_unavailable"),
+        [],
+        [],
+    )
+    evaluated = first.status.universe.canonical_evaluated
+
+    restarted = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
+    restarted.configure_from_settings()
+    assert restarted._universe_work["done-a"].state == "evaluated"
+    assert restarted._universe_work["retry-b"].state == "retry_wait"
+    assert restarted._universe_work["pending-c"].state == "pending"
+    waiting = restarted.plan_universe_tick(now=NOW)
+    assert "done-a" in restarted._universe_needs_rehydration
+    assert "retry-b" not in restarted._universe_needs_rehydration
+    assert "pending-c" not in restarted._universe_needs_rehydration
+    assert "done-a" not in waiting.skip_event_ids
+    assert "retry-b" in waiting.skip_event_ids
+    assert "pending-c" not in waiting.skip_event_ids
+
+    restarted.record_universe_work_set(
+        ["done-a", "retry-b", "pending-c"], authoritative=True
+    )
+    restarted.record_universe_fixture_progress(None, _universe_fixture("done-a"), [], [])
+    assert "done-a" not in restarted._universe_needs_rehydration
+    assert restarted.status.universe.canonical_evaluated == evaluated
+    after = restarted.plan_universe_tick(now=NOW)
+    assert "done-a" in after.skip_event_ids
+    assert "retry-b" in after.skip_event_ids
+    assert "pending-c" not in after.skip_event_ids
+    due = restarted.plan_universe_tick(now=NOW + timedelta(seconds=3))
+    assert "done-a" in due.skip_event_ids
+    assert "retry-b" not in due.skip_event_ids
+    assert "pending-c" not in due.skip_event_ids
+    _assert_compact_checkpoint(store.load())
+
+
+def test_transient_checkpoint_save_failure_remains_retryable(tmp_path: Path) -> None:
+    store = _FailingCheckpointStore(tmp_path / "retry.sqlite", fail_saves=1)
+    coordinator = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
+    coordinator.configure_from_settings()
+    coordinator.record_universe_work_set(["a"])
+    assert store.save_calls == 1
+    assert coordinator._universe_checkpoint_dirty is True
+    assert coordinator.status.universe.persist_ok is False
+    assert store.load() is None
+    coordinator.flush_universe_checkpoint()
+    assert store.save_calls == 2
+    assert coordinator._universe_checkpoint_dirty is False
+    assert coordinator.status.universe.persist_ok is True
+    assert store.load() is not None
+
+
+def test_oversize_checkpoint_is_surfaced_and_does_not_tight_loop(tmp_path: Path) -> None:
+    store = _FailingCheckpointStore(tmp_path / "oversize.sqlite", oversize=True)
+    coordinator = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
+    coordinator.configure_from_settings()
+    coordinator.record_universe_work_set(["a"])
+    assert store.save_calls == 1
+    assert coordinator._universe_checkpoint_dirty is False
+    assert coordinator.status.universe.persist_ok is False
+    assert "exceeds compact cap" in (coordinator.status.universe.last_persist_error or "")
+    coordinator.flush_universe_checkpoint()
+    assert store.save_calls == 1
+    store.oversize = False
+    coordinator.record_universe_work_set(["a", "b"], authoritative=True)
+    assert store.save_calls == 2
+    assert coordinator._universe_checkpoint_dirty is False
+    assert coordinator.status.universe.persist_ok is True
+    _assert_compact_checkpoint(store.load())
+
+
+def test_failed_generation_close_clear_remains_retryable(tmp_path: Path) -> None:
+    store = _FailingCheckpointStore(tmp_path / "clear.sqlite")
+    coordinator = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
+    coordinator.configure_from_settings()
+    coordinator.record_universe_work_set(["a"], authoritative=True)
+    assert store.load() is not None
+    coordinator._universe_generation_started_at = None
+    coordinator._universe_checkpoint_dirty = True
+    store.fail_clears = 1
+    coordinator.flush_universe_checkpoint()
+    assert store.clear_calls == 1
+    assert coordinator._universe_checkpoint_dirty is True
+    assert coordinator.status.universe.persist_ok is False
+    assert store.load() is not None
+    coordinator.flush_universe_checkpoint()
+    assert store.clear_calls == 2
+    assert coordinator._universe_checkpoint_dirty is False
+    assert store.load() is None
 
 
 def test_compact_work_units_stay_under_cap_for_synthetic_counts() -> None:

@@ -959,7 +959,8 @@ def test_restart_preserves_retryable_and_completed_work(tmp_path: Path) -> None:
     waiting = restarted.plan_universe_tick(now=NOW)
     assert waiting.generation_resume is True
     assert waiting.reuse_discovery is False
-    assert "done-a" in waiting.skip_event_ids
+    assert "done-a" in restarted._universe_needs_rehydration
+    assert "done-a" not in waiting.skip_event_ids
     assert "retry-b" in waiting.skip_event_ids
     assert "KXBAD" not in waiting.retry_series.get("kalshi", [])
     plan = restarted.plan_universe_tick(now=NOW + timedelta(seconds=3))

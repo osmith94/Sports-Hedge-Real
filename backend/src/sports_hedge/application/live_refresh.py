@@ -365,6 +365,7 @@ class LiveRefreshCoordinator:
         self._universe_work_used = 0.0
         self._universe_cursor: str | None = None
         self._universe_evaluated_ids: set[str] = set()
+        self._universe_needs_rehydration: set[str] = set()
         self._universe_progress_generation_id: int | None = None
         self._universe_closed_generation_id = 0
         self._universe_closed_work_used = 0.0
@@ -594,6 +595,7 @@ class LiveRefreshCoordinator:
             self._universe_work_used = 0.0
             self._universe_cursor = None
             self._universe_evaluated_ids = set()
+            self._universe_needs_rehydration = set()
             self._universe_progress_generation_id = None
             self._universe_closed_generation_id = 0
             self._universe_closed_work_used = 0.0
@@ -1585,6 +1587,7 @@ class LiveRefreshCoordinator:
                     current,
                     partial_reason=partial_reason,
                 )
+                self._prune_universe_rehydration_unlocked(current)
             self._universe_discovered_total = len(self._universe_work)
             self._mark_universe_checkpoint_dirty_unlocked()
             counts = self._lane_progress_fields()
@@ -1647,6 +1650,22 @@ class LiveRefreshCoordinator:
             return False
         return True
 
+    def _prune_universe_rehydration_unlocked(self, current_ids: list[str]) -> None:
+        """Drop vanished evaluated IDs so they cannot pin an open generation.
+
+        Authoritative rediscovery is allowed to omit fixtures that no longer
+        exist. Those IDs stay EVALUATED for accounting but must not block
+        sweep completion waiting for current-state that will never return.
+        Partial/non-authoritative cluster sets must not prune.
+        """
+
+        if not self._universe_needs_rehydration:
+            return
+        if not self._universe_work_set_may_retire_unlocked():
+            return
+        current = {item for item in current_ids if item}
+        self._universe_needs_rehydration.intersection_update(current)
+
     def record_universe_fixture_progress(
         self,
         cluster: Any,
@@ -1686,6 +1705,7 @@ class LiveRefreshCoordinator:
                 now=scanned,
                 universe_generation_id=generation_id,
             )
+            self._universe_needs_rehydration.discard(canonical_id)
             after_hot, _after_universe = self._fixture_state.membership_counts(scanned)
             promoted_now = after_hot > before_hot
             inventory_now = self._fixture_state.inventory(scanned)
@@ -2046,10 +2066,13 @@ class LiveRefreshCoordinator:
         )
 
     def _universe_skip_ids_unlocked(self, now: datetime | None = None) -> list[str]:
+        pending_rehydration = self._universe_needs_rehydration
         if self._universe_work:
             skip: list[str] = []
             now = now or self.now()
             for canonical_id, unit in self._universe_work.items():
+                if canonical_id in pending_rehydration:
+                    continue
                 if unit.state in SWEEP_TERMINAL_STATES:
                     skip.append(canonical_id)
                 elif (
@@ -2059,7 +2082,11 @@ class LiveRefreshCoordinator:
                 ):
                     skip.append(canonical_id)
             return sorted(skip)
-        return sorted(self._universe_evaluated_ids)
+        return sorted(
+            canonical_id
+            for canonical_id in self._universe_evaluated_ids
+            if canonical_id not in pending_rehydration
+        )
 
     def _earliest_retry_wait_unlocked(self, now: datetime) -> datetime | None:
         if any(
@@ -2103,6 +2130,8 @@ class LiveRefreshCoordinator:
         )
 
     def _universe_sweep_is_complete_unlocked(self) -> bool:
+        if self._universe_needs_rehydration:
+            return False
         series_terminal = self._universe_series_is_terminal_unlocked()
         if self._universe_series_work and not series_terminal:
             return False
@@ -2155,6 +2184,7 @@ class LiveRefreshCoordinator:
         else:
             self._universe_closed_evaluated_count = len(self._universe_evaluated_ids)
         self._universe_evaluated_ids = set()
+        self._universe_needs_rehydration = set()
         self._universe_work = {}
         self._universe_series_work = {}
         self._universe_series_results = {}
@@ -2217,31 +2247,76 @@ class LiveRefreshCoordinator:
             updated_at=checkpoint.updated_at.isoformat(),
         )
 
-    def _commit_universe_checkpoint_write(self, write: _UniverseCheckpointWrite) -> None:
+    def _commit_universe_checkpoint_write(self, write: _UniverseCheckpointWrite) -> bool:
         if self._state_lock.held_by_current_thread:
             raise RuntimeError("universe checkpoint I/O while _state_lock is held")
         store = self._universe_checkpoint_store
         if store is None:
-            return
+            self._apply_universe_checkpoint_write_outcome(write, ok=True, retryable=False, error=None)
+            return True
         try:
             if write.action == "clear":
                 store.clear()
-                return
-            if write.payload is None or write.updated_at is None:
-                return
-            store.save(write.payload, updated_at=write.updated_at)
-        except UniverseCheckpointTooLarge:
+            elif write.payload is None or write.updated_at is None:
+                self._apply_universe_checkpoint_write_outcome(
+                    write, ok=True, retryable=False, error=None
+                )
+                return True
+            else:
+                store.save(write.payload, updated_at=write.updated_at)
+        except UniverseCheckpointTooLarge as exc:
             LOGGER.warning("refusing oversized universe checkpoint payload", exc_info=True)
-        except Exception:
+            self._apply_universe_checkpoint_write_outcome(
+                write,
+                ok=False,
+                retryable=False,
+                error=str(exc) or "universe_checkpoint_too_large",
+            )
+            return False
+        except Exception as exc:
             LOGGER.warning("failed to persist universe generation checkpoint", exc_info=True)
+            self._apply_universe_checkpoint_write_outcome(
+                write,
+                ok=False,
+                retryable=True,
+                error=str(exc) or "universe_checkpoint_persist_failed",
+            )
+            return False
+        self._apply_universe_checkpoint_write_outcome(write, ok=True, retryable=False, error=None)
+        return True
 
-    def _run_universe_checkpoint_persist_once(self) -> None:
+    def _apply_universe_checkpoint_write_outcome(
+        self,
+        write: _UniverseCheckpointWrite,
+        *,
+        ok: bool,
+        retryable: bool,
+        error: str | None,
+    ) -> None:
+        """Keep transient I/O failures retryable; never tight-loop oversize."""
+
+        with self._state_lock:
+            superseded = self._universe_checkpoint_write_seq != write.token
+            if not ok and retryable and not superseded:
+                self._universe_checkpoint_dirty = True
+            self.status = self.status.model_copy(
+                update={
+                    "universe": self.status.universe.model_copy(
+                        update={
+                            "last_persist_error": None if ok else error,
+                            "persist_ok": ok,
+                        }
+                    )
+                }
+            )
+
+    def _run_universe_checkpoint_persist_once(self) -> bool:
         with self._universe_checkpoint_io_lock:
             with self._state_lock:
                 write = self._snapshot_universe_checkpoint_write_unlocked()
             if write is None:
-                return
-            self._commit_universe_checkpoint_write(write)
+                return True
+            return self._commit_universe_checkpoint_write(write)
 
     def flush_universe_checkpoint(self) -> None:
         """Persist coalesced compact resume state without holding `_state_lock`."""
@@ -2254,7 +2329,8 @@ class LiveRefreshCoordinator:
                     self._universe_checkpoint_dirty = False
                     self._universe_checkpoint_unpersisted_fixtures = 0
                     return
-            self._run_universe_checkpoint_persist_once()
+            if not self._run_universe_checkpoint_persist_once():
+                return
 
     def _request_universe_checkpoint_persist(self, *, force: bool) -> None:
         with self._state_lock:
@@ -2291,7 +2367,9 @@ class LiveRefreshCoordinator:
                     dirty = self._universe_checkpoint_dirty
                 if not dirty:
                     return
-                await asyncio.to_thread(self._run_universe_checkpoint_persist_once)
+                ok = await asyncio.to_thread(self._run_universe_checkpoint_persist_once)
+                if not ok:
+                    return
         finally:
             self._universe_checkpoint_persist_task = None
 
@@ -2391,6 +2469,7 @@ class LiveRefreshCoordinator:
                     item: SweepWorkUnit(canonical_id=item, state=SWEEP_EVALUATED)
                     for item in checkpoint.evaluated_ids
                 }
+            self._seed_universe_rehydration_unlocked()
             self.status = self.status.model_copy(
                 update={
                     "discovered_fixtures": inventory,
@@ -2415,6 +2494,23 @@ class LiveRefreshCoordinator:
                 }
             )
 
+    def _seed_universe_rehydration_unlocked(self) -> None:
+        """Mark restored EVALUATED IDs as missing process-memory current-state.
+
+        Compact checkpoints do not persist FixtureCurrentStateStore rows or
+        ApprovedEquivalent HOT relationships. A fresh process must rediscover
+        and re-upsert those fixtures before skip_event_ids may omit them.
+        The set is process-memory only and is never written to SQLite.
+        """
+
+        pending = {
+            canonical_id
+            for canonical_id, unit in self._universe_work.items()
+            if unit.state == SWEEP_EVALUATED
+        }
+        pending.update(self._universe_evaluated_ids)
+        self._universe_needs_rehydration = pending
+
     def _ensure_universe_generation(self, started: datetime) -> None:
         if self._universe_generation_started_at is not None:
             return
@@ -2422,6 +2518,7 @@ class LiveRefreshCoordinator:
         self._universe_generation_started_at = started
         self._universe_work_used = 0.0
         self._universe_evaluated_ids = set()
+        self._universe_needs_rehydration = set()
         self._universe_cursor = None
         self._universe_progress_generation_id = self._universe_generation_id
         self._universe_sweep_id = f"sweep-{self._universe_generation_id}-{started.isoformat()}"

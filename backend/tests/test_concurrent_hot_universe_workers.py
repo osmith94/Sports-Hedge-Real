@@ -527,7 +527,8 @@ def test_restart_resume_preserves_completed_universe_progress(tmp_path: Path) ->
     plan = restarted.plan_universe_tick(now=NOW)
     assert plan.generation_resume is True
     assert plan.reuse_discovery is False
-    assert set(plan.skip_event_ids) == evaluated
+    assert evaluated <= restarted._universe_needs_rehydration
+    assert not (evaluated & set(plan.skip_event_ids))
 
 
 def test_lane_specific_health_can_be_hot_ok_and_universe_discovery_degraded() -> None:

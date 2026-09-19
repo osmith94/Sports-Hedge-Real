@@ -121,9 +121,17 @@ def _assert_owner_live_restored(coordinator: LiveRefreshCoordinator) -> None:
     assert len(coordinator._universe_series_work) == 30
     assert all(unit.state == SWEEP_OK for unit in coordinator._universe_series_work.values())
     skip = set(coordinator._universe_skip_ids_unlocked(NOW))
-    assert skip == set(EVALUATED_IDS)
+    assert skip == set()
+    assert set(EVALUATED_IDS) <= coordinator._universe_needs_rehydration
     assert set(ORPHAN_IDS).isdisjoint(skip)
-    assert set(CURRENT_CLUSTER_IDS) <= skip
+    assert set(ORPHAN_IDS).isdisjoint(coordinator._universe_needs_rehydration)
+
+
+def _rehydrate_restored_evaluated(coordinator: LiveRefreshCoordinator) -> None:
+    for canonical_id in list(coordinator._universe_needs_rehydration):
+        coordinator.record_universe_fixture_progress(
+            None, _universe_fixture(canonical_id), [], []
+        )
 
 
 def _zero_work_complete_report(*, when) -> object:
@@ -168,6 +176,12 @@ def test_owner_live_orphan_shape_is_reconciled_without_false_evaluated(tmp_path:
     assert counts["canonical_evaluated"] == 75
     assert counts["canonical_stale_orphan"] == 2
     assert counts["canonical_remaining"] == 0
+    vanished = set(EVALUATED_IDS) - set(CURRENT_CLUSTER_IDS)
+    assert vanished <= set(EVALUATED_IDS)
+    assert coordinator._universe_needs_rehydration == set(CURRENT_CLUSTER_IDS)
+    assert coordinator._universe_sweep_is_complete_unlocked() is False
+    _rehydrate_restored_evaluated(coordinator)
+    assert coordinator._universe_needs_rehydration == set()
     assert coordinator._universe_sweep_is_complete_unlocked() is True
 
     coordinator.record_report(_zero_work_complete_report(when=clock.now), scan_lane=ScanLane.UNIVERSE)
@@ -444,9 +458,11 @@ def test_fresh_generation_repopulates_fixture_radar_and_equivalents(tmp_path: Pa
     store = SqliteUniverseCheckpointStore(tmp_path / "issue305-radar.sqlite")
     _seed_owner_live_generation_26(store)
     clock, coordinator = _restore_owner_live(store)
-    coordinator.record_universe_work_set(CURRENT_CLUSTER_IDS, authoritative=True)
-    coordinator.record_report(_zero_work_complete_report(when=clock.now), scan_lane=ScanLane.UNIVERSE)
     assert coordinator.fixture_current_state().inventory(clock.now) == []
+    assert coordinator.fixture_current_state().hot_identity_scope(clock.now) == []
+    coordinator.record_universe_work_set(CURRENT_CLUSTER_IDS, authoritative=True)
+    _rehydrate_restored_evaluated(coordinator)
+    coordinator.record_report(_zero_work_complete_report(when=clock.now), scan_lane=ScanLane.UNIVERSE)
 
     clock.now = coordinator._next_universe_due
     plan = coordinator.plan_universe_tick(now=clock.now)
@@ -625,6 +641,7 @@ def test_retry_backoff_caps_remain_2_5_10_and_hot_stays_independent(tmp_path: Pa
     hot = coordinator.plan_hot_tick(now=clock.now)
     assert hot.lane in {ScanLane.HOT.value, "idle"}
     coordinator.record_universe_work_set(CURRENT_CLUSTER_IDS, authoritative=True)
+    _rehydrate_restored_evaluated(coordinator)
     coordinator.record_report(_zero_work_complete_report(when=clock.now), scan_lane=ScanLane.UNIVERSE)
     coordinator._next_hot_due = clock.now
     hot_during_cooldown = coordinator.plan_hot_tick(now=clock.now)

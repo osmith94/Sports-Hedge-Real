@@ -188,7 +188,8 @@ def test_process_restart_restores_open_generation_from_sqlite(tmp_path: Path) ->
     assert resumed.lane == "universe"
     assert resumed.universe_generation_id == generation
     assert resumed.generation_resume is True
-    assert set(evaluated) <= set(resumed.skip_event_ids)
+    assert set(evaluated) <= restarted._universe_needs_rehydration
+    assert not set(evaluated) & set(resumed.skip_event_ids)
 
 
 def test_explicit_reset_clears_universe_checkpoint(tmp_path: Path) -> None:
