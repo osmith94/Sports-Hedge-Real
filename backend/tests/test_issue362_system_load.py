@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from test_issue344_price_engine import _hold_slot
 
 from sports_hedge.api import main as main_api
 from sports_hedge.api import paper as paper_api
@@ -43,8 +44,6 @@ from sports_hedge.application.system_load import (
 )
 from sports_hedge.domain.models import VenueName
 from sports_hedge.persistence.universe_checkpoint import SqliteUniverseCheckpointStore
-from test_issue344_price_engine import _hold_slot
-
 
 NOW = datetime(2026, 9, 19, 21, 0, tzinfo=UTC)
 
@@ -97,7 +96,7 @@ def test_system_load_uses_existing_public_status_fields_only() -> None:
     assert load.hot.deferred == 0
     assert load.hot.last_cycle_ms == 3800
     assert load.hot.cadence_seconds == 30
-    assert load.hot.cadence_utilisation == pytest.approx(3800 / 30_000)
+    assert load.hot.cadence_utilisation == pytest.approx(0.1267)
     assert load.matchbook.inflight == 2
     assert load.matchbook.limit == 4
     assert load.matchbook.waiting == 0

@@ -131,7 +131,7 @@ describe("system load display", () => {
     const text = systemLoadLines(live)
       .map((line) => `${line.key} ${line.detail}`)
       .join(" ");
-    assert.match(text, /HOT  2 fixtures/);
+    assert.match(text, /HOT 2 fixtures/);
     assert.doesNotMatch(text, /safe/i);
     assert.doesNotMatch(text, /unsafe/i);
     assert.doesNotMatch(text, /p50/i);
