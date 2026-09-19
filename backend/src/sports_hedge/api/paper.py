@@ -43,6 +43,13 @@ from sports_hedge.application.live_refresh import (
     get_live_refresh_coordinator,
 )
 from sports_hedge.application.price_engine import CataloguePriceEngine, PriceEnginePriority
+from sports_hedge.application.scanner_phase6 import (
+    DATA_CLASS_OWNER_LIVE_OBSERVATION,
+    ScannerValidationSnapshot,
+    SOAK_HTTP_GET_ONLY,
+    observer_snapshot,
+)
+from sports_hedge.application.serving_build import get_serving_build_info
 from sports_hedge.application.market_observation import (
     KalshiObservationBuilder,
     MatchbookObservationBuilder,
@@ -801,6 +808,30 @@ def live_refresh_status(
 
     coordinator = get_live_refresh_coordinator()
     return _status_with_scan_cycles(coordinator.public_status(), repository)
+
+
+@router.get("/scanner-validation", response_model=ScannerValidationSnapshot)
+def scanner_validation_snapshot(
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+    watchlist: WatchlistService = Depends(get_watchlist_service),
+) -> ScannerValidationSnapshot:
+    """Observer-only Phase 6 soak snapshot. Never discovers, prices, binds, or writes venues."""
+
+    coordinator = get_live_refresh_coordinator()
+    bound_store = coordinator._catalogue_store
+    catalogue_bound = bound_store is not None
+    catalogue_store = bound_store if catalogue_bound else get_approved_market_catalogue_store()
+    return observer_snapshot(
+        coordinator=coordinator,
+        catalogue_store=catalogue_store,
+        coordinator_catalogue_bound=catalogue_bound,
+        settings=get_settings(),
+        build=get_serving_build_info(),
+        trades=operations.list_active_trades(),
+        activity=watchlist.activity(limit=100),
+        data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION,
+        soak_http_methods=list(SOAK_HTTP_GET_ONLY),
+    )
 
 
 @router.get("/venue-participation", response_model=LaneVenueParticipation)
