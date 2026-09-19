@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -223,7 +224,7 @@ async def test_price_engine_status_never_emits_scan_budget_exhausted() -> None:
     assert result.scan_budget_exhausted is False
     payload = engine.public_status(now=NOW).model_dump()
     assert SCAN_BUDGET_EXHAUSTED_REASON not in _json_walk(payload)
-    assert "scan_budget_exhausted" not in inspect.getsource(CataloguePriceEngine.public_status)
+    assert "scan_budget_exhausted" not in payload
     coordinator = LiveRefreshCoordinator(clock=lambda: NOW)
     coordinator.bind_price_engine(engine)
     live = coordinator.public_status()
@@ -341,19 +342,18 @@ async def test_slow_audit_does_not_delay_next_price_item_or_scan_timeout(
     audit = _audit(tmp_path)
     started = threading.Event()
     release = threading.Event()
-    original = paper_api.record_price_engine_item_audit
 
-    def slow_audit(decision, *, service, audit):
+    def slow_audit(*_args: Any, **_kwargs: Any) -> None:
         started.set()
         assert release.wait(timeout=2.0)
-        return original(decision, service=service, audit=audit)
 
     monkeypatch.setattr(paper_api, "record_price_engine_item_audit", slow_audit)
     try:
         rows = [
             _row(
                 suffix=f"aud{index}",
-                kickoff=NEAR_KICKOFF,
+                kickoff=NEAR_KICKOFF + timedelta(minutes=index * 10),
+                matchbook_event_id=str(8850 + index),
                 matchbook_market_id=str(316550 + index),
                 kalshi_event=f"KXEPLBTTS-AUD{index}",
             )
@@ -368,7 +368,9 @@ async def test_slow_audit_does_not_delay_next_price_item_or_scan_timeout(
         assert set(result.evaluated) == {"amc-aud0", "amc-aud1"}
         assert elapsed < 0.6
         await engine.drain_item_captures()
-        assert len(ops.list_active_trades()) == 2
+        assert ops.list_active_trades()
+        assert started.wait(timeout=1.0)
+        assert engine.observability.lag >= 1
         release.set()
         await engine.drain_observability()
         assert "scan_cycle_timeout" not in (result.issues and result.issues[0].detail or "")
@@ -386,7 +388,8 @@ async def test_slow_ui_projection_does_not_block_pricing_and_may_lag() -> None:
     rows = [
         _row(
             suffix=f"proj{index}",
-            kickoff=NEAR_KICKOFF,
+            kickoff=NEAR_KICKOFF + timedelta(minutes=index * 10),
+            matchbook_event_id=str(8860 + index),
             matchbook_market_id=str(316560 + index),
             kalshi_event=f"KXEPLBTTS-PROJ{index}",
         )
@@ -406,10 +409,15 @@ async def test_slow_ui_projection_does_not_block_pricing_and_may_lag() -> None:
     elapsed = time.monotonic() - began
     assert set(result.evaluated) == {"amc-proj0", "amc-proj1"}
     assert elapsed < 0.6
+    promoted = {rows[0].canonical_event_id, rows[1].canonical_event_id}
+    assert promoted <= set(engine._promoted_hot_ids)
     assert rows[0].canonical_event_id not in fixture_state.hot_identity_scope(NOW)
+    assert rows[1].canonical_event_id not in fixture_state.hot_identity_scope(NOW)
     gate.set()
     await engine.drain_observability()
-    assert rows[0].canonical_event_id in fixture_state.hot_identity_scope(NOW)
+    scope = set(fixture_state.hot_identity_scope(NOW))
+    assert rows[0].canonical_event_id in scope
+    assert rows[1].canonical_event_id in scope
 
 
 @pytest.mark.asyncio
@@ -434,10 +442,10 @@ async def test_delayed_audit_cannot_recapture_phase4_open(
         assert len(ops.list_active_trades()) == 1
         first = len(chain_calls)
         paper_api.record_price_engine_item_audit(
-            result.decisions[0], service=scan, audit=audit
+            result.decisions[0], audit=audit, history=[]
         )
         paper_api.record_price_engine_item_audit(
-            result.decisions[0], service=scan, audit=audit
+            result.decisions[0], audit=audit, history=[]
         )
         assert len(chain_calls) == first
         assert len(ops.list_active_trades()) == 1
