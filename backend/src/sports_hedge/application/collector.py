@@ -576,6 +576,7 @@ class _VenueSideFetch:
         self.observations: dict[str, VenueMarketObservation] = {}
         self.listed = False
         self.failed = False
+        self.listing_complete = False
         self.books = 0
         self.latency_ms = 0
         self.retrieved_at: datetime | None = None
@@ -2737,9 +2738,7 @@ class ReadOnlyCrossVenueCollector:
             eligible_pairs=eligible_pairs,
             k_events=k_events,
             family_discovery=FamilyDiscoveryCompleteness(
-                matchbook_listing_complete=(
-                    matchbook_side.listed and not matchbook_side.failed
-                ),
+                matchbook_listing_complete=matchbook_side.listing_complete,
                 kalshi_series_results=tuple(
                     self._op_series_results.get(VenueName.KALSHI.value) or ()
                 ),
@@ -3619,10 +3618,14 @@ class ReadOnlyCrossVenueCollector:
         fixture: DiscoveredFixture,
     ) -> None:
         if not mb_events:
+            side.listing_complete = False
             return
         side.primary_event = mb_events[0]
+        processed = 0
+        truncated = False
         for mb_event in mb_events:
             if self._provider_budget_exhausted():
+                truncated = True
                 break
             mb_listed = True
             try:
@@ -3660,6 +3663,7 @@ class ReadOnlyCrossVenueCollector:
                 mb_market_payload = {"markets": []}
             if mb_listed:
                 side.listed = True
+                processed += 1
             raw_matchbook = _extract_matchbook_items(mb_market_payload, "markets")
             markets, inventory = self._inventory_markets(
                 mb_event, raw_matchbook, venue=VenueName.MATCHBOOK, issues=issues
@@ -3681,6 +3685,11 @@ class ReadOnlyCrossVenueCollector:
                 for item in side.inventory:
                     if item.source_market_id == left_market.canonical.source_market_id:
                         item.observation = observation
+        # "At least one listed" is not fixture listing complete. A budget
+        # break before later source events must leave the fixture incomplete.
+        side.listing_complete = (
+            not truncated and not side.failed and processed == len(mb_events)
+        )
 
     async def _fetch_polymarket_cluster_side(
         self,
@@ -3787,20 +3796,14 @@ class ReadOnlyCrossVenueCollector:
     ) -> None:
         if self.kalshi is None or not k_events:
             return
-        for k_event in k_events:
-            family_key = family_key_from_kalshi_series(
-                k_event.raw.get("series_ticker")
-                if isinstance(k_event.raw, dict)
-                else None
-            ) or family_key_from_kalshi_series(
-                k_event.raw.get("event_ticker")
-                if isinstance(k_event.raw, dict)
-                else None
-            )
+        remaining = list(k_events)
+        while remaining:
+            k_event = remaining[0]
+            family_key = _kalshi_family_key_from_event(k_event)
             if self._provider_budget_exhausted():
-                if family_key:
-                    side.kalshi_incomplete_family_keys.add(family_key)
+                _mark_unprocessed_kalshi_families_incomplete(side, remaining)
                 break
+            remaining = remaining[1:]
             markets, inventory, _series, fetched, kalshi_failed = await self._load_kalshi_markets(
                 k_event, issues=issues
             )
@@ -5439,6 +5442,24 @@ def _payload_events(payload: Any, venue: VenueName) -> tuple[list[dict[str, Any]
     if isinstance(payload, dict):
         return _extract_matchbook_items(payload, "events"), dict(payload)
     return [], {}
+
+
+def _kalshi_family_key_from_event(event: _NormalizedEvent) -> str | None:
+    raw = event.raw if isinstance(event.raw, dict) else {}
+    return family_key_from_kalshi_series(raw.get("series_ticker")) or family_key_from_kalshi_series(
+        raw.get("event_ticker")
+    )
+
+
+def _mark_unprocessed_kalshi_families_incomplete(
+    side: _VenueSideFetch, remaining_events: list[_NormalizedEvent]
+) -> None:
+    """Budget/not-queried remainder is incomplete even when series discovery was ok."""
+
+    for event in remaining_events:
+        family_key = _kalshi_family_key_from_event(event)
+        if family_key:
+            side.kalshi_incomplete_family_keys.add(family_key)
 
 
 def _combined_kalshi_series_ok_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:

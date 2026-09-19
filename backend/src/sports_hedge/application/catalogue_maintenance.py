@@ -66,9 +66,10 @@ class FamilyDiscoveryCompleteness:
     """Explicit UNIVERSE family-discovery truth for one fixture/generation.
 
     This is the only catalogue-completeness authority. A family may be marked
-    disappeared only when Matchbook listing for the fixture succeeded and the
-    required Kalshi series discovery for that family completed successfully.
-    Timeout / not-queried / deferred families stay ACTIVE/unconfirmed.
+    disappeared only when every required Matchbook source-event listing for the
+    fixture finished successfully and the required Kalshi series discovery for
+    that family completed successfully. Timeout / deferred / not-queried /
+    budget-truncated families stay ACTIVE/unconfirmed.
     """
 
     matchbook_listing_complete: bool = False

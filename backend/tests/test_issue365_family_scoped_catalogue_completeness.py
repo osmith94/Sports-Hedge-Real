@@ -29,22 +29,38 @@ from sports_hedge.application.catalogue_maintenance import (
     persist_universe_catalogue_pass,
     persist_universe_catalogue_pass_offloop,
 )
-from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
+from sports_hedge.application.collector import (
+    DiscoveredFixture,
+    ReadOnlyCrossVenueCollector,
+    _NormalizedEvent,
+    _VenueSideFetch,
+    _kalshi_family_key_from_event,
+    _mark_unprocessed_kalshi_families_incomplete,
+)
+from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.catalogue.corpus import REGULATION
 from sports_hedge.config import Settings
+from sports_hedge.domain.models import VenueName
+from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
+from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.approved_register import (
     CANONICAL_BTTS_FT,
     CANONICAL_FTTS_FT,
     CANONICAL_MATCH_RESULT_FT,
     CANONICAL_TOTAL_GOALS_FT,
 )
+from sports_hedge.normalization.venues import MatchbookNormalizer
 from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
 from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import MatchbookClient
 from sports_hedge.venues.polymarket import PolymarketClient
 from test_issue293_owner_live_overlap import OverlapKalshi, OverlapMatchbook
 from test_issue316_catalogue_registry import (
+    KICKOFF,
     MB_EVENT_ID,
+    _DisabledPolymarket,
+    _costs,
+    _fx,
     _kalshi_btts_event,
     _kalshi_event,
     _kalshi_ftts_event,
@@ -148,6 +164,92 @@ class _SeriesFilteredKalshi(OverlapKalshi):
         return {**payload, "events": events}
 
 
+_FAMILY_FETCH_ORDER = {
+    CANONICAL_MATCH_RESULT_FT: 0,
+    CANONICAL_BTTS_FT: 1,
+    CANONICAL_TOTAL_GOALS_FT: 2,
+    CANONICAL_FTTS_FT: 3,
+}
+
+
+class _PartialFamilyBudgetCollector(ReadOnlyCrossVenueCollector):
+    """Fixture/demo only: exhaust budget mid-fixture without starving the other venue."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.exhaust_kalshi_after: int | None = None
+        self.exhaust_matchbook_after: int | None = None
+        self.kalshi_loads = 0
+        self._in_kalshi_fetch = False
+        self._in_matchbook_fetch = False
+
+    def _provider_budget_exhausted(self) -> bool:
+        if self._in_kalshi_fetch and self.exhaust_kalshi_after is not None:
+            return self.kalshi_loads >= self.exhaust_kalshi_after
+        if self._in_matchbook_fetch and self.exhaust_matchbook_after is not None:
+            listed = getattr(self.matchbook, "list_markets_calls", [])
+            return len(listed) >= self.exhaust_matchbook_after
+        return super()._provider_budget_exhausted()
+
+    async def _fetch_matchbook_cluster_side(self, mb_events, **kwargs):  # type: ignore[no-untyped-def]
+        self._in_matchbook_fetch = True
+        try:
+            return await super()._fetch_matchbook_cluster_side(mb_events, **kwargs)
+        finally:
+            self._in_matchbook_fetch = False
+
+    async def _fetch_kalshi_cluster_side(self, k_events, **kwargs):  # type: ignore[no-untyped-def]
+        ordered = sorted(
+            k_events,
+            key=lambda event: _FAMILY_FETCH_ORDER.get(
+                _kalshi_family_key_from_event(event) or "", 99
+            ),
+        )
+        self._in_kalshi_fetch = True
+        self.kalshi_loads = 0
+        try:
+            return await super()._fetch_kalshi_cluster_side(ordered, **kwargs)
+        finally:
+            self._in_kalshi_fetch = False
+
+    async def _load_kalshi_markets(self, k_event, *, issues):  # type: ignore[no-untyped-def]
+        result = await super()._load_kalshi_markets(k_event, issues=issues)
+        if self._in_kalshi_fetch:
+            self.kalshi_loads += 1
+        return result
+
+
+async def _collect_with(
+    matchbook: OverlapMatchbook,
+    kalshi: OverlapKalshi,
+    store: SqliteApprovedMarketCatalogueStore,
+    *,
+    collector_cls: type[ReadOnlyCrossVenueCollector] = ReadOnlyCrossVenueCollector,
+    configure: Any | None = None,
+) -> tuple[Any, ReadOnlyCrossVenueCollector]:
+    repository = SqliteMarketIntelligenceRepository()
+    collector = collector_cls(
+        matchbook=matchbook,
+        polymarket=_DisabledPolymarket(),
+        kalshi=kalshi,
+        paper_scan=PaperScanService(MarketIntelligenceService(repository)),
+        catalogue_store=store,
+    )
+    if configure is not None:
+        configure(collector)
+    try:
+        report = await collector.collect_and_scan(
+            venue_costs=_costs(),
+            fx_snapshots=_fx(),
+            maximum_execution_risk=100,
+            enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
+            unbounded_cycle=True,
+        )
+        return report, collector
+    finally:
+        repository.close()
+
+
 def _rows_by_key(store: SqliteApprovedMarketCatalogueStore, fixture_id: str) -> dict[str, Any]:
     return {row.register_canonical_key: row for row in store.list_rows_for_event(fixture_id)}
 
@@ -223,6 +325,39 @@ def test_game_btts_success_does_not_complete_total_or_ftts() -> None:
         target_competition_code="premier_league",
     )
     assert complete_family_keys(matchbook_failed) == frozenset()
+
+    budget_remainder = FamilyDiscoveryCompleteness(
+        matchbook_listing_complete=True,
+        kalshi_series_results=(
+            {"series": "KXEPLGAME", "status": "ok"},
+            {"series": "KXEPLBTTS", "status": "ok"},
+            {"series": "KXEPLTOTAL", "status": "ok"},
+            {"series": "KXEPLFTTS", "status": "ok"},
+        ),
+        kalshi_incomplete_family_keys=frozenset({CANONICAL_TOTAL_GOALS_FT, CANONICAL_FTTS_FT}),
+        target_competition_code="premier_league",
+    )
+    budget_complete = complete_family_keys(budget_remainder)
+    assert CANONICAL_MATCH_RESULT_FT in budget_complete
+    assert CANONICAL_BTTS_FT in budget_complete
+    assert CANONICAL_TOTAL_GOALS_FT not in budget_complete
+    assert CANONICAL_FTTS_FT not in budget_complete
+
+
+def test_budget_break_marks_current_and_remaining_kalshi_families_incomplete() -> None:
+    side = _VenueSideFetch()
+    remaining = [
+        _NormalizedEvent({"series_ticker": "KXEPLBTTS", "event_ticker": "KXEPLBTTS-1"}, object()),
+        _NormalizedEvent({"series_ticker": "KXEPLTOTAL", "event_ticker": "KXEPLTOTAL-1"}, object()),
+        _NormalizedEvent({"series_ticker": "KXEPLFTTS", "event_ticker": "KXEPLFTTS-1"}, object()),
+    ]
+    _mark_unprocessed_kalshi_families_incomplete(side, remaining)
+    assert side.kalshi_incomplete_family_keys == {
+        CANONICAL_BTTS_FT,
+        CANONICAL_TOTAL_GOALS_FT,
+        CANONICAL_FTTS_FT,
+    }
+    assert _kalshi_family_key_from_event(remaining[1]) == CANONICAL_TOTAL_GOALS_FT
 
 
 @pytest.mark.asyncio
@@ -446,6 +581,158 @@ async def test_persist_timeout_evidence_does_not_use_fixture_wide_listed_ok() ->
         store.close()
 
 
+@pytest.mark.asyncio
+async def test_kalshi_budget_before_total_ftts_preserves_rows_even_if_series_ok() -> None:
+    """GAME/BTTS inventory plus series-ok TOTAL/FTTS must not invent TOTAL/FTTS completeness."""
+
+    store = SqliteApprovedMarketCatalogueStore(":memory:")
+    matchbook = OverlapMatchbook([_mb_event()], {str(MB_EVENT_ID): _mb_markets_with_totals()})
+    events = _kalshi_family_events()
+    kalshi = _SeriesFilteredKalshi(
+        events, series_by_ticker=_series_map(), books=_books_for(events)
+    )
+    try:
+        first, _collector = await _collect_with(matchbook, kalshi, store)
+        fixture_id = next(
+            item.canonical_event_id for item in first.discovered_fixtures if item.matchbook_matched
+        )
+        before = _rows_by_key(store, fixture_id)
+        assert TOTAL_KEYS <= set(before)
+        confirmed_at = {
+            key: before[key].last_confirmed_at
+            for key in (*TOTAL_KEYS, CANONICAL_FTTS_FT, CANONICAL_MATCH_RESULT_FT, CANONICAL_BTTS_FT)
+        }
+
+        def _exhaust_after_game_btts(collector: ReadOnlyCrossVenueCollector) -> None:
+            assert isinstance(collector, _PartialFamilyBudgetCollector)
+            collector.exhaust_kalshi_after = 2
+
+        second, budget_collector = await _collect_with(
+            matchbook,
+            kalshi,
+            store,
+            collector_cls=_PartialFamilyBudgetCollector,
+            configure=_exhaust_after_game_btts,
+        )
+        del second
+        assert isinstance(budget_collector, _PartialFamilyBudgetCollector)
+        assert budget_collector.kalshi_loads == 2
+        after = _rows_by_key(store, fixture_id)
+        for key in TOTAL_KEYS:
+            row = after[key]
+            assert row.row_state is CatalogueRowState.ACTIVE
+            assert row.invalidation_reason is None
+            assert row.last_confirmed_at == confirmed_at[key]
+        assert after[CANONICAL_FTTS_FT].row_state is CatalogueRowState.ACTIVE
+        assert after[CANONICAL_FTTS_FT].invalidation_reason is None
+        assert after[CANONICAL_FTTS_FT].last_confirmed_at == confirmed_at[CANONICAL_FTTS_FT]
+        assert after[CANONICAL_MATCH_RESULT_FT].row_state is CatalogueRowState.ACTIVE
+        assert after[CANONICAL_BTTS_FT].row_state is CatalogueRowState.ACTIVE
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_matchbook_budget_break_before_later_source_cannot_disappear() -> None:
+    """One successful Matchbook listing is not fixture listing complete."""
+
+    store = SqliteApprovedMarketCatalogueStore(":memory:")
+    matchbook = OverlapMatchbook([_mb_event()], {str(MB_EVENT_ID): _mb_markets_with_totals()})
+    events = _kalshi_family_events()
+    kalshi = _SeriesFilteredKalshi(
+        events, series_by_ticker=_series_map(), books=_books_for(events)
+    )
+    try:
+        first, _collector = await _collect_with(matchbook, kalshi, store)
+        fixture_id = next(
+            item.canonical_event_id for item in first.discovered_fixtures if item.matchbook_matched
+        )
+        before = _rows_by_key(store, fixture_id)
+        tracked = (*TOTAL_KEYS, CANONICAL_MATCH_RESULT_FT, CANONICAL_BTTS_FT, CANONICAL_FTTS_FT)
+        confirmed_at = {key: before[key].last_confirmed_at for key in tracked}
+
+        second_id = MB_EVENT_ID + 1
+        first_raw = _mb_event()
+        second_raw = dict(_mb_event())
+        second_raw["id"] = second_id
+        isolated_matchbook = OverlapMatchbook(
+            [first_raw, second_raw],
+            {
+                str(MB_EVENT_ID): [_mb_match_odds()],
+                str(second_id): [_mb_btts(), *[_mb_total_line(line) for line in TOTAL_LINES], _mb_ftts()],
+            },
+        )
+        repository = SqliteMarketIntelligenceRepository()
+        collector = _PartialFamilyBudgetCollector(
+            matchbook=isolated_matchbook,
+            polymarket=_DisabledPolymarket(),
+            kalshi=kalshi,
+            paper_scan=PaperScanService(MarketIntelligenceService(repository)),
+            catalogue_store=store,
+        )
+        collector.exhaust_matchbook_after = 1
+        try:
+            normalizer = MatchbookNormalizer()
+            mb_events = [
+                _NormalizedEvent(first_raw, normalizer.normalize_event(first_raw)),
+                _NormalizedEvent(second_raw, normalizer.normalize_event(second_raw)),
+            ]
+            side = _VenueSideFetch()
+            fixture = DiscoveredFixture(
+                source_event_id=str(MB_EVENT_ID),
+                canonical_event_id=fixture_id,
+                home_team=HOME,
+                away_team=AWAY,
+                competition="Premier League",
+                kickoff_utc=KICKOFF,
+                last_seen_at=NOW,
+            )
+            await collector._fetch_matchbook_cluster_side(
+                mb_events,
+                side=side,
+                matchbook_market_filters={},
+                issues=[],
+                fixture=fixture,
+            )
+            assert isolated_matchbook.list_markets_calls == [str(MB_EVENT_ID)]
+            assert side.listed is True
+            assert side.failed is False
+            assert side.listing_complete is False
+        finally:
+            repository.close()
+
+        persist_universe_catalogue_pass(
+            store,
+            canonical_event_id=fixture_id,
+            competition="premier_league",
+            home_canonical="brentford",
+            away_canonical="chelsea",
+            kickoff_utc=NOW,
+            pairs=[],
+            now=datetime(2026, 9, 19, 12, 0, tzinfo=UTC),
+            generation_id="mb-partial-listing",
+            family_discovery=FamilyDiscoveryCompleteness(
+                matchbook_listing_complete=False,
+                kalshi_series_results=(
+                    {"series": "KXEPLGAME", "status": "ok"},
+                    {"series": "KXEPLBTTS", "status": "ok"},
+                    {"series": "KXEPLTOTAL", "status": "ok"},
+                    {"series": "KXEPLFTTS", "status": "ok"},
+                ),
+                target_competition_code="premier_league",
+            ),
+            terminal=False,
+        )
+        after = _rows_by_key(store, fixture_id)
+        for key in tracked:
+            row = after[key]
+            assert row.row_state is CatalogueRowState.ACTIVE
+            assert row.invalidation_reason is None
+            assert row.last_confirmed_at == confirmed_at[key]
+    finally:
+        store.close()
+
+
 def test_wave2_does_not_change_scanner_architecture() -> None:
     settings = Settings()
     assert settings.sports_hedge_mode == "paper"
@@ -475,6 +762,11 @@ def test_wave2_does_not_change_scanner_architecture() -> None:
     collector_terminal = inspect.getsource(
         ReadOnlyCrossVenueCollector._mark_universe_catalogue_terminal
     )
+    collector_kalshi = inspect.getsource(ReadOnlyCrossVenueCollector._fetch_kalshi_cluster_side)
+    collector_matchbook = inspect.getsource(
+        ReadOnlyCrossVenueCollector._fetch_matchbook_cluster_side
+    )
+    remainder_src = inspect.getsource(_mark_unprocessed_kalshi_families_incomplete)
     assert "listed_ok" not in persist_src
     assert "FamilyDiscoveryCompleteness" in persist_src
     assert "complete_family_keys" in maintenance_src
@@ -483,6 +775,12 @@ def test_wave2_does_not_change_scanner_architecture() -> None:
     assert "persist_universe_catalogue_pass_offloop" in collector_terminal
     assert "FamilyDiscoveryCompleteness" in collector_persist
     assert "listed_ok" not in collector_persist
+    assert "matchbook_side.listing_complete" in collector_persist
+    assert "matchbook_listing_complete=matchbook_side.listed" not in collector_persist
+    assert "_mark_unprocessed_kalshi_families_incomplete" in collector_kalshi
+    assert "truncated" in collector_matchbook
+    assert "listing_complete" in collector_matchbook
+    assert "remaining_events" in remainder_src
     assert "FamilyDiscoveryCompleteness" not in inspect.getsource(price_engine_module)
     assert "FamilyDiscoveryCompleteness" not in inspect.getsource(live_refresh_module)
     assert "FamilyDiscoveryCompleteness" not in inspect.getsource(scan_lanes_module)
