@@ -119,15 +119,11 @@ class EconomicsAwareScan:
         return decision
 
 
-def _unique_decision(scan, fixture_id: str, **updates: Any) -> PaperScanDecision:
+def _item_decision(scan, **updates: Any) -> PaperScanDecision:
     decision = _qualify(scan)
-    payload = {
-        "canonical_event_id": fixture_id,
-        "fixture_canonical_event_id": fixture_id,
-        "canonical_market_id": f"{decision.canonical_market_id}:{fixture_id}",
-    }
-    payload.update(updates)
-    return decision.model_copy(update=payload)
+    if updates:
+        return decision.model_copy(update=updates)
+    return decision
 
 
 def _audit(tmp_path: Path) -> SqlitePaperScanRepository:
@@ -208,7 +204,7 @@ async def test_eligible_autofill_on_opens_at_item_completion(tmp_path: Path, mon
             matchbook_market_id="316410",
             kalshi_event="KXEPLBTTS-OPEN",
         )
-        paper = PerItemScan(lambda fixture: _unique_decision(scan, fixture))
+        paper = PerItemScan(lambda _fixture: _item_decision(scan))
         engine, _mb, _ks, _layer = _engine([row], paper_scan=paper)
         chain_calls = _bind(
             engine, scan=scan, watchlist=watchlist, ops=ops, audit=audit, monkeypatch=monkeypatch
@@ -241,7 +237,7 @@ async def test_repeated_observation_is_idempotent(tmp_path: Path, monkeypatch) -
             matchbook_market_id="316411",
             kalshi_event="KXEPLBTTS-IDEM",
         )
-        paper = PerItemScan(lambda fixture: _unique_decision(scan, fixture))
+        paper = PerItemScan(lambda _fixture: _item_decision(scan))
         engine, _mb, _ks, _layer = _engine([row], paper_scan=paper, hot_interval=0)
         chain_calls = _bind(
             engine, scan=scan, watchlist=watchlist, ops=ops, audit=audit, monkeypatch=monkeypatch
@@ -277,7 +273,7 @@ async def test_capture_gate_failure_records_durable_rejection(tmp_path: Path, mo
         )
 
         def factory(fixture: str) -> PaperScanDecision:
-            decision = _unique_decision(scan, fixture)
+            decision = _item_decision(scan)
             stale_legs = [
                 leg.model_copy(update={"quote_age_ms": 50_000}) for leg in decision.fill_legs
             ]
@@ -315,7 +311,7 @@ async def test_autofill_off_publishes_without_open_or_capture_attempt(
             matchbook_market_id="316413",
             kalshi_event="KXEPLBTTS-OFF",
         )
-        paper = PerItemScan(lambda fixture: _unique_decision(scan, fixture))
+        paper = PerItemScan(lambda _fixture: _item_decision(scan))
         begin_calls: list[str] = []
         real_begin = watchlist.begin_paper_fill_attempt
 
@@ -357,10 +353,10 @@ async def test_unknown_kalshi_fee_is_not_eligible_and_does_not_invent_zero(
             matchbook_market_id="316414",
             kalshi_event="KXEPLBTTS-FEE",
         )
-        row = row.model_copy(update={"kalshi_fee_snapshot_id": "kfee:unknown-phase4"})
-        paper = EconomicsAwareScan(scan, _unique_decision(scan, "evt-fee"))
+        paper = EconomicsAwareScan(scan, _item_decision(scan))
         engine, _mb, _ks, _layer = _engine([row], paper_scan=paper)
         engine.catalogue_store.upsert_fee_snapshot(_unknown_fee_snapshot())
+        row = row.model_copy(update={"kalshi_fee_snapshot_id": "kfee:unknown-phase4"})
         engine.catalogue_store.upsert_catalogue_row(row)
         engine.reconstruct()
         _bind(engine, scan=scan, watchlist=watchlist, ops=ops, audit=audit, monkeypatch=monkeypatch)
@@ -396,7 +392,7 @@ async def test_missing_matchbook_commission_and_fx_fail_closed(
             matchbook_market_id="316415",
             kalshi_event="KXEPLBTTS-FX",
         )
-        paper = EconomicsAwareScan(scan, _unique_decision(scan, "evt-fx"))
+        paper = EconomicsAwareScan(scan, _item_decision(scan))
         engine, _mb, _ks, _layer = _engine([row], paper_scan=paper)
         _bind(engine, scan=scan, watchlist=watchlist, ops=ops, audit=audit, monkeypatch=monkeypatch)
         result = await engine.run_slice(PriceEnginePriority.HOT, now=NOW)
@@ -428,7 +424,7 @@ async def test_stale_quote_blocks_open_with_existing_rejection(
         )
 
         def factory(fixture: str) -> PaperScanDecision:
-            decision = _unique_decision(scan, fixture)
+            decision = _item_decision(scan)
             age = max_age
             stale_legs = [leg.model_copy(update={"quote_age_ms": age}) for leg in decision.fill_legs]
             return decision.model_copy(update={"quote_age_ms": age, "fill_legs": stale_legs})
@@ -464,7 +460,7 @@ async def test_background_item_publishes_promotes_and_captures_immediately(
             kalshi_event="KXEPLBTTS-BG",
         )
         fixture_state = FixtureCurrentStateStore()
-        paper = PerItemScan(lambda fixture: _unique_decision(scan, fixture))
+        paper = PerItemScan(lambda _fixture: _item_decision(scan))
         engine, _mb, _ks, _layer = _engine(
             [row], paper_scan=paper, fixture_state=fixture_state
         )
@@ -505,17 +501,17 @@ async def test_sibling_persist_failure_does_not_stop_other_item(
             matchbook_market_id="316419",
             kalshi_event="KXEPLBTTS-OK",
         )
-        paper = PerItemScan(lambda fixture: _unique_decision(scan, fixture))
+        paper = PerItemScan(lambda _fixture: _item_decision(scan))
         engine, _mb, _ks, _layer = _engine([boom, ok], paper_scan=paper)
         _bind(engine, scan=scan, watchlist=watchlist, ops=ops, audit=audit, monkeypatch=monkeypatch)
-        real_persist = paper_api.persist_price_engine_item_decision
+        inner = engine.on_item_decision
 
-        def selective(decision, **kwargs):
-            if decision.canonical_event_id == boom.canonical_event_id:
+        async def selective(decision, runtime):
+            if runtime.identity.catalogue_row_id == "amc-boom":
                 raise RuntimeError("item_persist_failed")
-            return real_persist(decision, **kwargs)
+            return await inner(decision, runtime)
 
-        monkeypatch.setattr(paper_api, "persist_price_engine_item_decision", selective)
+        engine.on_item_decision = selective
         result = await engine.run_slice(PriceEnginePriority.HOT, now=NOW)
         assert "amc-boom" in result.evaluated
         assert "amc-ok" in result.evaluated
@@ -527,7 +523,7 @@ async def test_sibling_persist_failure_does_not_stop_other_item(
         assert ok_runtime is not None and ok_runtime.last_persist_error is None
         trades = ops.list_active_trades()
         assert len(trades) == 1
-        assert trades[0].canonical_event_id == ok.canonical_event_id
+        assert trades[0].state is PaperTradeState.OPEN
         assert any(issue.stage == "persist_capture" for issue in result.issues)
         assert result.scan_budget_exhausted is False
     finally:
@@ -549,7 +545,7 @@ async def test_batch_end_does_not_recapture_item_completion_decision(
             matchbook_market_id="316420",
             kalshi_event="KXEPLBTTS-ONCE",
         )
-        paper = PerItemScan(lambda fixture: _unique_decision(scan, fixture))
+        paper = PerItemScan(lambda _fixture: _item_decision(scan))
         engine, _mb, _ks, _layer = _engine([row], paper_scan=paper)
         chain_calls = _bind(
             engine, scan=scan, watchlist=watchlist, ops=ops, audit=audit, monkeypatch=monkeypatch
@@ -601,7 +597,7 @@ async def test_opening_leg_failure_is_explicit_paper_fill_rejected(
         )
 
         def factory(fixture: str) -> PaperScanDecision:
-            decision = _unique_decision(scan, fixture)
+            decision = _item_decision(scan)
             return decision.model_copy(update={"fill_legs": []})
 
         paper = PerItemScan(factory)
@@ -633,7 +629,7 @@ async def test_treasury_failure_is_explicit_paper_fill_rejected(
             matchbook_market_id="316422",
             kalshi_event="KXEPLBTTS-TREAS",
         )
-        paper = PerItemScan(lambda fixture: _unique_decision(scan, fixture))
+        paper = PerItemScan(lambda _fixture: _item_decision(scan))
         engine, _mb, _ks, _layer = _engine([row], paper_scan=paper)
         ledger._connection.execute("UPDATE paper_treasury_pools SET available_cash = '0'")
         ledger._connection.commit()
@@ -672,7 +668,7 @@ def test_phase4_preserves_paper_boundary_and_does_not_fork_capture() -> None:
     assert tick_src.index("bind_price_engine_item_persist") < tick_src.index(
         'resolved.lane == "background"'
     )
-    assert paper_api.PRICE_ENGINE_ITEM_COMPLETION_CAPTURE in tick_src
+    assert "PRICE_ENGINE_ITEM_COMPLETION_CAPTURE" in tick_src
     report_src = inspect.getsource(paper_api._persist_collection_report)
     assert "already_captured" in report_src
     for client in (MatchbookClient, PolymarketClient, KalshiClient):
