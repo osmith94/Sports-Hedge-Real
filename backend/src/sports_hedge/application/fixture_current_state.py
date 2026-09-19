@@ -16,6 +16,7 @@ from sports_hedge.application.current_market_inventory import (
     CurrentMarketSlot,
     apply_current_market_inventory,
     combined_radar_freshness,
+    current_slots_net_proximity_distance_pp,
     current_slots_prove_qualifying_opportunity,
     current_slots_prove_surveillance_opportunity,
     merge_current_market_slots,
@@ -23,6 +24,7 @@ from sports_hedge.application.current_market_inventory import (
     stamp_current_market_row,
     union_paper_market_ids,
 )
+from sports_hedge.application.fixture_inventory import sort_fixture_inventory_rows
 from sports_hedge.application.hot_identity import (
     hot_scheduling_key,
     unique_hot_scheduling_ids,
@@ -31,7 +33,6 @@ from sports_hedge.application.hot_market_relationships import (
     HotMarketRelationship,
     relationships_from_current_slots,
 )
-from sports_hedge.application.fixture_inventory import sort_fixture_inventory_rows
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
     DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
@@ -142,14 +143,16 @@ class FixtureCurrentStateStore:
     HOT identity is the union of lifecycle HOT membership (in-play / <=60m
     pre-kickoff / bounded post-kickoff unknown, subject to the 4h hard
     post-kickoff current-radar ceiling) and current fixtures whose
-    latest valid merged current-state proves either a qualifying executable
-    arb (Issue #200) or a positive below-threshold surveillance edge
-    (Tenet 19). Opportunity promotion is not a second identity store and
-    does not change `classify_scan_lane`. Promotion disappears when the
-    merged current-state ceases to show a positive edge unless another
-    lifecycle HOT reason still applies. A stale in-running/open flag cannot
-    keep a fixture HOT after the current-radar ceiling. Aliases of one
-    football fixture collapse to one HOT scheduling unit.
+    latest valid merged current-state proves a qualifying executable
+    arb (Issue #200), net-proximity within 0.50pp of the operator Min Net
+    Arb trigger, or already-triggered economics that are not yet
+    executable-fresh (Tenet 19 / Issue #357). Opportunity promotion is not
+    a second identity store and does not change `classify_scan_lane`.
+    Promotion disappears when the merged current-state ceases to show
+    triggered or in-band net economics unless another lifecycle HOT reason
+    still applies. A stale in-running/open flag cannot keep a fixture HOT
+    after the current-radar ceiling. Aliases of one football fixture
+    collapse to one HOT scheduling unit.
 
     Terminal tombstones keep explicit finished/completed/settled truth from
     resurrecting via a later stale UNIVERSE or other-venue unknown snapshot.
@@ -542,14 +545,25 @@ class FixtureCurrentStateStore:
                 lifecycle = classify_scan_lane(fixture, now, **classify_kwargs)
                 qualifying_promotion = False
                 surveillance_promotion = False
+                net_proximity_promotion = False
+                net_proximity_distance_pp = None
                 if membership is ScanLane.HOT and lifecycle is ScanLane.UNIVERSE:
                     qualifying_promotion = current_slots_prove_qualifying_opportunity(
                         record.live_market_slots(),
                         now=now,
                         **market_kwargs,
                     )
+                    net_proximity_distance_pp = current_slots_net_proximity_distance_pp(
+                        record.live_market_slots(),
+                        now=now,
+                        **market_kwargs,
+                    )
+                    net_proximity_promotion = (
+                        not qualifying_promotion and net_proximity_distance_pp is not None
+                    )
                     surveillance_promotion = (
                         not qualifying_promotion
+                        and not net_proximity_promotion
                         and current_slots_prove_surveillance_opportunity(
                             record.live_market_slots(),
                             now=now,
@@ -574,6 +588,8 @@ class FixtureCurrentStateStore:
                                 lifecycle=lifecycle,
                                 qualifying_promotion=qualifying_promotion,
                                 surveillance_promotion=surveillance_promotion,
+                                net_proximity_promotion=net_proximity_promotion,
+                                net_proximity_distance_pp=net_proximity_distance_pp,
                                 hot_horizon=hot_horizon,
                             ),
                         }
@@ -891,8 +907,9 @@ class FixtureCurrentStateStore:
 
         `classify_scan_lane` remains the lifecycle classifier. Promotion reads
         merged current-state market truth, not UI labels or historical audit.
-        A positive below-threshold edge is enough to watch; paper entry stays
-        behind the existing executable/allocator gates.
+        Already-triggered net ROI or 0.50pp net proximity is enough to watch;
+        paper entry stays behind the existing executable/allocator gates and
+        the post-trigger Min Net Arb arrival check.
         """
 
         lifecycle = classify_scan_lane(fixture, now, **classify_kwargs)

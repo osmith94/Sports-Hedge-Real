@@ -309,7 +309,7 @@ def _enrich_surveillance(row: Any) -> Any:
     fixture = fixture.model_copy(
         update={
             "market_evaluation_state": "evaluated",
-            "current_net_edge": Decimal("0.004"),
+            "current_net_edge": Decimal("0.008"),
             "matched_equivalent_count": 1,
             "opportunity_state": "near",
             "solver_is_arbitrage": False,
@@ -319,7 +319,7 @@ def _enrich_surveillance(row: Any) -> Any:
     return (
         fixture,
         decisions,
-        [_market_row(edge=Decimal("0.004"), arb=False, trigger=Decimal("0.01"))],
+        [_market_row(edge=Decimal("0.008"), arb=False, trigger=Decimal("0.01"))],
         counts,
         fetched,
         pairs,

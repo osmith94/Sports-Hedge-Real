@@ -162,6 +162,15 @@ describe("HOT reason presentation", () => {
     assert.equal(promoted?.hasQualifyingOpportunity, true);
   });
 
+  it("passes through backend NET PROXIMITY reasons without inventing them", () => {
+    const reason = "NET PROXIMITY · 0.20pp TO TRIGGER";
+    assert.deepEqual(
+      hotReasonLabels(fixture({ hot_reasons: [reason] })),
+      [reason],
+    );
+    assert.ok(reason.startsWith("NET PROXIMITY"));
+  });
+
   it("does not invent kickoff or arb-promotion reasons when the read-model field is absent", () => {
     assert.deepEqual(
       hotReasonLabels(

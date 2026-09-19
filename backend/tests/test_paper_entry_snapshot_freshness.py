@@ -41,7 +41,7 @@ from sports_hedge.paper.entry_freshness import (
     conservative_quote_age_at_decision_ms,
     snapshot_freshness_rejection,
 )
-from sports_hedge.paper.fills import PaperOpportunityLeg
+from sports_hedge.paper.fills import PaperFillConfig, PaperOpportunityLeg
 from sports_hedge.paper.trades import PaperTradeState
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.venues import KalshiClient, MatchbookClient, PolymarketClient
@@ -309,7 +309,9 @@ def test_manual_fill_does_not_revive_aged_rejected_snapshot(tmp_path: Path) -> N
         ledger.close()
 
 
-def test_genuine_stale_at_simulated_arrival_fails(tmp_path: Path) -> None:
+def test_genuine_stale_at_simulated_arrival_is_diagnostic_not_post_trigger_veto(
+    tmp_path: Path,
+) -> None:
     scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=True)
     try:
         decision = _qualify(scan, age_ms=1700)
@@ -327,11 +329,11 @@ def test_genuine_stale_at_simulated_arrival_fails(tmp_path: Path) -> None:
         assert plan.entry_freshness.simulated_arrival_quote_age_ms == 2200
         assert plan.entry_freshness.decision_to_autofill_dispatch_ms == 1500
         assert plan.entry_freshness.rejection_reason == SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
-        assert ops._entry_rejections[seeded.opportunity_id] == SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
-        assert ops.list_active_trades() == []
-        snap = ledger.treasury.snapshot()
-        assert snap.pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
-        assert snap.pool(VenueName.POLYMARKET, "USD").locked_capital == 0
+        trades = ops.list_active_trades()
+        assert len(trades) == 1
+        assert trades[0].state is PaperTradeState.OPEN
+        assert trades[0].paper_only is True
+        assert SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL not in ops._entry_rejections.values()
     finally:
         repository.close()
         ledger.close()
@@ -387,7 +389,9 @@ def test_processing_delay_between_capture_and_t1_counts_toward_arrival_age(
         ledger.close()
 
 
-def test_processing_delay_can_make_simulated_arrival_stale(tmp_path: Path) -> None:
+def test_processing_delay_stale_arrival_does_not_veto_bound_min_net(
+    tmp_path: Path,
+) -> None:
     scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=True)
     try:
         decision = _qualify(scan, age_ms=300, processing_delay_ms=1300)
@@ -404,23 +408,30 @@ def test_processing_delay_can_make_simulated_arrival_stale(tmp_path: Path) -> No
         assert freshness.quote_age_at_decision_ms == 1600
         assert freshness.simulated_arrival_quote_age_ms == 2100
         assert freshness.rejection_reason == SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
-        assert ops.list_active_trades() == []
+        assert ops.list_active_trades()[0].state is PaperTradeState.OPEN
     finally:
         repository.close()
         ledger.close()
 
 
 def test_rejected_attempt_does_not_suppress_later_trigger_lost(tmp_path: Path) -> None:
-    scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=True)
+    scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=False)
     try:
         stale = _qualify(scan, age_ms=1700)
         seeded = _observe(scan, watchlist, stale)
         ops.persist_triggered_chain(
             stale,
             provenance=DataProvenance.LIVE_PAPER,
-            autofill=True,
+            autofill=False,
             now=T1,
         )
+        with pytest.raises(PaperOperationsError, match=SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL):
+            ops.simulate_fill(
+                seeded.opportunity_id,
+                simulate_external=True,
+                provenance=DataProvenance.LIVE_PAPER,
+                now=T1,
+            )
         assert ops.list_active_trades() == []
         assert ops._entry_rejections[seeded.opportunity_id] == SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
         assert watchlist.has_active_bound_attempt(seeded.opportunity_id) is False
@@ -762,11 +773,37 @@ def test_manual_paper_filling_does_not_inherit_bound_snapshot_authority(tmp_path
 def test_failed_attempt_then_fresh_retrigger_creates_second_attempt_events(
     tmp_path: Path,
 ) -> None:
-    scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=True)
+    scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=False)
     try:
-        stale = _qualify(scan, age_ms=1700)
-        seeded = _observe(scan, watchlist, stale)
-        ops.persist_triggered_chain(stale, provenance=DataProvenance.LIVE_PAPER, autofill=True)
+        first_decision = _qualify(scan, age_ms=300)
+        seeded = _observe(scan, watchlist, first_decision)
+        ops.persist_triggered_chain(
+            first_decision, provenance=DataProvenance.LIVE_PAPER, autofill=False
+        )
+        watchlist.begin_paper_fill_attempt(
+            seeded.opportunity_id,
+            occurred_at=T1,
+            bind_snapshot=True,
+            decision_at=first_decision.scanned_at,
+        )
+        plan = ops._plans[seeded.opportunity_id]
+        ops._plans[seeded.opportunity_id] = plan.model_copy(
+            update={
+                "net_edge": Decimal("0.012"),
+                "decision": plan.decision.model_copy(update={"minimum_net_edge": Decimal("0.01")}),
+            }
+        )
+        with pytest.raises(PaperOperationsError, match="moved_below_min_net_arb"):
+            ops.simulate_fill(
+                seeded.opportunity_id,
+                simulate_external=True,
+                provenance=DataProvenance.LIVE_PAPER,
+                now=T1,
+                config=PaperFillConfig(
+                    assumed_latency_ms=0,
+                    modeled_arrival_net_edge=Decimal("0.0099"),
+                ),
+            )
         first_attempt = watchlist.latest_paper_fill_attempt(seeded.opportunity_id)
         assert first_attempt is not None
         assert first_attempt.status is PaperFillAttemptStatus.REJECTED

@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field, model_validator
 from sports_hedge.domain.models import VenueName
 from sports_hedge.liquidity.book import BookLevel
 
-
 BPS_SCALE = Decimal("10000")
 
 
@@ -57,6 +56,10 @@ class PaperFillConfig(BaseModel):
     slippage_bps: Decimal = Field(default=Decimal("0"), ge=0)
     price_impact_bps: Decimal = Field(default=Decimal("0"), ge=0)
     ms_per_skipped_level: int = Field(default=0, ge=0)
+    # Authoritative post-cost arrival net ROI. When omitted, arrival net is
+    # computed by applying the bound decision's venue costs to simulated fill
+    # odds. Never treat fill decimal odds as net.
+    modeled_arrival_net_edge: Decimal | None = None
 
     @property
     def is_ideal(self) -> bool:

@@ -157,28 +157,24 @@ def test_paper_assumed_eligible_autofill_opens_once_and_locks(tmp_path: Path) ->
         ledger.close()
 
 
-def test_eligible_freshness_fail_records_durable_capture_rejection(tmp_path: Path) -> None:
+def test_eligible_stale_snapshot_still_captures_when_min_net_holds(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
     try:
         decision = _qualify(scan)
         _observe(scan, watchlist, decision)
         stale_legs = [leg.model_copy(update={"quote_age_ms": 50_000}) for leg in decision.fill_legs]
         stale = decision.model_copy(update={"quote_age_ms": 50_000, "fill_legs": stale_legs})
-        before = ledger.treasury.snapshot()
         ops.persist_triggered_chain(
             stale, provenance=DataProvenance.LIVE_PAPER, refreshed_venues=MB_K
         )
-        assert ops.list_active_trades() == []
+        trades = ops.list_active_trades()
+        assert len(trades) == 1
+        assert trades[0].state is PaperTradeState.OPEN
         opportunity_id = _opportunity_id(decision)
-        assert ops._entry_rejections.get(opportunity_id)
-        assert _capture_rejections(watchlist, opportunity_id)
         watched = watchlist.repository.get(opportunity_id)
         assert watched is not None
-        assert watched.status is OpportunityStatus.REJECTED
-        after = ledger.treasury.snapshot()
-        assert after.pool(VenueName.MATCHBOOK, "GBP").locked_capital == before.pool(
-            VenueName.MATCHBOOK, "GBP"
-        ).locked_capital
+        assert watched.status is OpportunityStatus.FILLED
+        assert ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital > 0
     finally:
         repository.close()
         ledger.close()

@@ -34,13 +34,24 @@ from sports_hedge.arbitrage.priority_alerts.models import (
     PriorityLeg,
 )
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
-from sports_hedge.arbitrage.watchlist.economics import classification_for, gross_edge_from_quotes
+from sports_hedge.arbitrage.watchlist.economics import (
+    MOVED_BELOW_MIN_NET_ARB,
+    arrival_net_edge_after_venue_costs,
+    classification_for,
+    evaluate_post_trigger_min_net_arb,
+    gross_edge_from_quotes,
+    qualifies_min_net_arb,
+)
 from sports_hedge.arbitrage.watchlist.models import (
     ORPHANED_PAPER_FILLING_RECONCILED,
     NearOpportunity,
     OpportunityStatus,
 )
-from sports_hedge.arbitrage.watchlist.service import WatchlistService, _opportunity_id
+from sports_hedge.arbitrage.watchlist.service import (
+    WatchlistService,
+    _opportunity_id,
+    _presentation_stale_only,
+)
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import MarketAction
@@ -169,6 +180,7 @@ _AUTOFILL_GATE_REASONS = frozenset(
         "orphaned_paper_filling_reconciled",
         "watchlist_not_triggered",
         "venues_not_refreshed_this_cycle",
+        MOVED_BELOW_MIN_NET_ARB,
     }
 )
 
@@ -1209,10 +1221,16 @@ class PaperOperationsService:
         bound_autofill = self.watchlist.has_active_bound_attempt(opportunity_id)
         demo_frozen_snapshot = current.data_kind == "demo_fixture_replay"
         snapshot_bound = bound_autofill or demo_frozen_snapshot
+        bound_min_net = snapshot_bound and _plan_satisfies_min_net_arb(plan)
         if not self.watchlist.allows_bound_snapshot_entry(
             current, bound_autofill=bound_autofill
         ):
-            self._fail_entry(opportunity_id, MARKET_REVALIDATION_FAILED, simulated_at)
+            if not (
+                bound_min_net
+                and current.status is OpportunityStatus.REJECTED
+                and _presentation_stale_only(current.rejection_reasons)
+            ):
+                self._fail_entry(opportunity_id, MARKET_REVALIDATION_FAILED, simulated_at)
 
         fill_config = config or PaperFillConfig(
             assumed_latency_ms=self.settings.simulated_latency_ms,
@@ -1253,8 +1271,12 @@ class PaperOperationsService:
                 )
             except ValueError:
                 self._fail_entry(opportunity_id, MARKET_REVALIDATION_FAILED, simulated_at)
-        if freshness.rejection_reason:
+        if freshness.rejection_reason and not bound_min_net:
             self._fail_entry(opportunity_id, freshness.rejection_reason, simulated_at)
+        if bound_min_net:
+            # Post-trigger: model movement for fill outcome/tolerance only.
+            # Do not requalify via a second exact-odds refresh or quote-age veto.
+            fill_config = fill_config.model_copy(update={"max_quote_age_ms": None})
         bound_prepared_id: str | None = None
         if prepared_deployment_id is not None or requested_size_gbp is not None:
             plan, bound_prepared_id = self._bind_prepared_allocation(
@@ -1318,12 +1340,32 @@ class PaperOperationsService:
             now=plan.decision_at if snapshot_bound else simulated_at,
         )
         fills = _with_stable_fill_ids(fills, opportunity_id, modes, simulate_external=simulate_external)
+        if bound_min_net:
+            min_net_reason = _post_trigger_min_net_rejection(plan, fills, fill_config)
+            if min_net_reason is not None:
+                self._fail_entry(opportunity_id, min_net_reason, simulated_at)
         if require_complete and not _complete_opening_fills(fills, opening_legs):
             reason = fills.rejection_reasons[0] if fills.rejection_reasons else "incomplete_opening_hedge"
+            if bound_min_net and reason in {
+                "snapshot_stale_at_decision",
+                "snapshot_stale_at_simulated_arrival",
+                "unknown_quote_age",
+                "stale_quote",
+                "execution_risk_above_threshold",
+            }:
+                reason = "incomplete_opening_hedge"
             self._fail_entry(opportunity_id, reason, simulated_at)
         stage = _fill_stage(fills)
         if stage is None:
             reason = fills.rejection_reasons[0] if fills.rejection_reasons else "paper_fill_rejected"
+            if bound_min_net and reason in {
+                "snapshot_stale_at_decision",
+                "snapshot_stale_at_simulated_arrival",
+                "unknown_quote_age",
+                "stale_quote",
+                "execution_risk_above_threshold",
+            }:
+                reason = "paper_fill_rejected"
             self._fail_entry(opportunity_id, reason, simulated_at)
         if require_complete and stage is not OpportunityStatus.FILLED:
             self._fail_entry(opportunity_id, "incomplete_opening_hedge", simulated_at)
@@ -2644,6 +2686,56 @@ def _solver_is_arbitrage(decision: PaperScanDecision) -> bool:
     if decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage:
         return True
     return bool(decision.payoff_scan is not None and decision.payoff_scan.solution.is_arbitrage)
+
+
+def _plan_satisfies_min_net_arb(plan: PaperFillPlan) -> bool:
+    bound = plan.net_edge if plan.net_edge is not None else decision_net_edge(plan.decision)
+    if bound is None:
+        return False
+    return qualifies_min_net_arb(bound, plan.decision.minimum_net_edge)
+
+
+def _post_trigger_min_net_rejection(
+    plan: PaperFillPlan,
+    fills: PaperOpportunityFills,
+    config: PaperFillConfig,
+) -> str | None:
+    bound = plan.net_edge if plan.net_edge is not None else decision_net_edge(plan.decision)
+    if bound is None:
+        return None
+    arrival = config.modeled_arrival_net_edge
+    if arrival is None:
+        arrival = _arrival_net_edge_from_fills(plan, fills)
+    if arrival is None:
+        return None
+    return evaluate_post_trigger_min_net_arb(
+        bound_net_edge=bound,
+        arrival_net_edge=arrival,
+        trigger_net_edge=plan.decision.minimum_net_edge,
+    )
+
+
+def _arrival_net_edge_from_fills(
+    plan: PaperFillPlan,
+    fills: PaperOpportunityFills,
+) -> Decimal | None:
+    """Post-cost arrival net from simulated fill odds + bound venue costs.
+
+    Does not treat fill decimal odds as net ROI.
+    """
+
+    arrival_legs: list[tuple[VenueName, str | None, Decimal]] = []
+    for fill in fills.fills:
+        if fill.weighted_odds is None or fill.filled_stake <= 0:
+            continue
+        arrival_legs.append((fill.venue, fill.source_market_id, fill.weighted_odds))
+    if not arrival_legs:
+        return None
+    return arrival_net_edge_after_venue_costs(
+        arrival_legs=arrival_legs,
+        venue_costs=plan.venue_costs,
+        as_of=plan.scanned_at,
+    )
 
 
 def _complete_opening_fills(

@@ -50,6 +50,11 @@ from sports_hedge.application.scan_lanes import (
     ScanLane,
     freshness_class,
 )
+from sports_hedge.arbitrage.watchlist.economics import (
+    distance_to_trigger_pp,
+    is_net_proximity_hot,
+    qualifies_min_net_arb,
+)
 
 _MAPPING_INCOMPATIBLE = frozenset(
     {
@@ -636,7 +641,9 @@ def stored_row_proves_qualifying_executable(
         return False
     if row.current_net_edge is None:
         return False
-    if row.trigger_net_edge is not None and row.current_net_edge < row.trigger_net_edge:
+    if row.trigger_net_edge is not None and not qualifies_min_net_arb(
+        row.current_net_edge, row.trigger_net_edge
+    ):
         return False
     quote_age = row_quote_age_ms(row)
     if quote_age is None or quote_age >= max_quote_age_ms:
@@ -679,19 +686,51 @@ def current_slots_prove_qualifying_opportunity(
 
 
 def stored_row_proves_surveillance_opportunity(row: FixtureMarketInventoryRow) -> bool:
-    """True when matcher economics show a positive cross-venue edge worth watching.
+    """True when merged economics justify HOT without being a paper fill.
 
-    HOT surveillance is broader than paper eligibility: a positive edge below
-    the trade trigger may enter HOT. Settlement/mapping contradictions still
-    fail closed. Allocator, depth, fees, and 1s executable quote-age remain
-    paper gates and do not block surveillance.
+    Already-triggered net ROI (`current_net_edge >= trigger_net_edge`) stays
+    HOT even when executable quote-age / allocator / risk gates fail. A
+    below-trigger approved market is HOT only inside the 0.50pp proximity
+    band via `distance_to_trigger_pp`. Arbitrary positive edge, gross edge,
+    or a hard-coded zero trigger do not promote. Settlement/mapping
+    contradictions still fail closed.
     """
 
+    if not _row_has_comparable_cross_venue_economics(row):
+        return False
+    current = row.current_net_edge
+    trigger = row.trigger_net_edge
+    if current is None:
+        return False
+    if trigger is None:
+        return False
+    if qualifies_min_net_arb(current, trigger):
+        return True
+    return is_net_proximity_hot(current, trigger)
+
+
+def stored_row_proves_net_proximity(row: FixtureMarketInventoryRow) -> bool:
+    """Below Min Net Arb but within 0.50pp. Not a fill."""
+
+    if not _row_has_comparable_cross_venue_economics(row):
+        return False
+    if row.current_net_edge is None or row.trigger_net_edge is None:
+        return False
+    return is_net_proximity_hot(row.current_net_edge, row.trigger_net_edge)
+
+
+def stored_row_net_proximity_distance_pp(row: FixtureMarketInventoryRow) -> Decimal | None:
+    if not stored_row_proves_net_proximity(row):
+        return None
+    assert row.current_net_edge is not None
+    assert row.trigger_net_edge is not None
+    return distance_to_trigger_pp(row.current_net_edge, row.trigger_net_edge)
+
+
+def _row_has_comparable_cross_venue_economics(row: FixtureMarketInventoryRow) -> bool:
     if not inventory_is_comparable_opportunity(row.comparison_status):
         return False
     if set(row.rejection_reasons) & _MAPPING_INCOMPATIBLE:
-        return False
-    if row.current_net_edge is None or row.current_net_edge <= 0:
         return False
     venues = [
         facts
@@ -710,7 +749,7 @@ def current_slots_prove_surveillance_opportunity(
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     **_: object,
 ) -> bool:
-    """True when a radar-current slot has a positive equivalent edge below trade gates."""
+    """True when a radar-current slot is triggered or within 0.50pp of Min Net Arb."""
 
     evaluated = require_aware_instant(now, "now")
     for slot in slots:
@@ -728,6 +767,59 @@ def current_slots_prove_surveillance_opportunity(
         if stored_row_proves_surveillance_opportunity(slot.row):
             return True
     return False
+
+
+def current_slots_prove_net_proximity(
+    slots: list[CurrentMarketSlot],
+    *,
+    now: datetime,
+    hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
+    universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    **_: object,
+) -> bool:
+    """True when any radar-current approved market is in the 0.50pp proximity band."""
+
+    return current_slots_net_proximity_distance_pp(
+        slots,
+        now=now,
+        hot_ttl_seconds=hot_ttl_seconds,
+        universe_ttl_seconds=universe_ttl_seconds,
+        max_quote_age_ms=max_quote_age_ms,
+    ) is not None
+
+
+def current_slots_net_proximity_distance_pp(
+    slots: list[CurrentMarketSlot],
+    *,
+    now: datetime,
+    hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
+    universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    **_: object,
+) -> Decimal | None:
+    """Closest in-band distance among radar-current approved markets, else None."""
+
+    evaluated = require_aware_instant(now, "now")
+    closest: Decimal | None = None
+    for slot in slots:
+        if slot.evaluated_absent:
+            continue
+        freshness = slot_freshness(
+            slot,
+            now=evaluated,
+            hot_ttl_seconds=hot_ttl_seconds,
+            universe_ttl_seconds=universe_ttl_seconds,
+            max_quote_age_ms=max_quote_age_ms,
+        )
+        if freshness == FRESHNESS_EXPIRED:
+            continue
+        distance = stored_row_net_proximity_distance_pp(slot.row)
+        if distance is None:
+            continue
+        if closest is None or distance < closest:
+            closest = distance
+    return closest
 
 
 def row_quote_age_ms(row: FixtureMarketInventoryRow) -> int | None:

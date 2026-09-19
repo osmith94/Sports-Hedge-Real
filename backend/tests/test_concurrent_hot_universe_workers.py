@@ -423,7 +423,7 @@ def test_promotion_occurs_mid_sweep_and_does_not_stop_universe() -> None:
 
 def test_sub_threshold_positive_edge_promotes_without_paper_trade() -> None:
     store = FixtureCurrentStateStore()
-    row = _market_row(edge=Decimal("0.004"), arb=False, trigger=Decimal("0.01"))
+    row = _market_row(edge=Decimal("0.008"), arb=False, trigger=Decimal("0.01"))
     assert stored_row_proves_surveillance_opportunity(row) is True
     fixture = _fixture(CANONICAL_ID, kickoff=KICKOFF, evaluation="evaluated")
     fixture = fixture.model_copy(update={"opportunity_state": "near", "solver_is_arbitrage": False})
@@ -441,7 +441,8 @@ def test_sub_threshold_positive_edge_promotes_without_paper_trade() -> None:
     assert CANONICAL_ID in store.hot_identity_scope(NOW)
     inventory = store.inventory(NOW)
     shown = next(item for item in inventory if item.canonical_event_id == CANONICAL_ID)
-    assert HOT_REASON_SURVEILLANCE in shown.hot_reasons
+    assert any(str(reason).startswith("NET PROXIMITY") for reason in shown.hot_reasons)
+    assert HOT_REASON_SURVEILLANCE not in shown.hot_reasons
 
 
 def test_source_aliases_collapse_to_one_hot_scheduling_unit() -> None:

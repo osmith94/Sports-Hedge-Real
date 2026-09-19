@@ -7,19 +7,8 @@ paper capture. Data class: deterministic fixture current-state payloads.
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 
-from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
-from sports_hedge.application.scan_lanes import (
-    DEFAULT_HOT_HORIZON,
-    HOT_REASON_ARB_PROMOTION,
-    HOT_REASON_SURVEILLANCE,
-    HOT_REASON_IN_PLAY,
-    HOT_REASON_POST_KICKOFF_STATUS_PENDING,
-    ScanLane,
-    classify_scan_lane,
-    hot_reason_labels,
-    kickoff_horizon_reason_label,
-)
 from test_fixture_lifecycle_eviction import NOW, _fixture, _report
 from test_issue200_universe_hot_promotion import (
     CANONICAL_ID,
@@ -27,6 +16,20 @@ from test_issue200_universe_hot_promotion import (
     _market_row,
     _qualifying_universe_report,
 )
+
+from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
+from sports_hedge.application.scan_lanes import (
+    DEFAULT_HOT_HORIZON,
+    HOT_REASON_ARB_PROMOTION,
+    HOT_REASON_IN_PLAY,
+    HOT_REASON_POST_KICKOFF_STATUS_PENDING,
+    HOT_REASON_SURVEILLANCE,
+    ScanLane,
+    classify_scan_lane,
+    hot_reason_labels,
+    kickoff_horizon_reason_label,
+)
+from sports_hedge.arbitrage.watchlist.economics import net_proximity_reason_label
 
 
 def test_hot_reason_labels_are_empty_for_universe_membership() -> None:
@@ -97,6 +100,15 @@ def test_arb_promotion_only_when_lifecycle_would_otherwise_be_universe() -> None
         lifecycle=ScanLane.UNIVERSE,
         qualifying_promotion=True,
     ) == [HOT_REASON_ARB_PROMOTION]
+    assert hot_reason_labels(
+        distant,
+        NOW,
+        membership=ScanLane.HOT,
+        lifecycle=ScanLane.UNIVERSE,
+        qualifying_promotion=False,
+        net_proximity_promotion=True,
+        net_proximity_distance_pp=Decimal("0.20"),
+    ) == [net_proximity_reason_label(Decimal("0.20"))]
     assert hot_reason_labels(
         distant,
         NOW,
