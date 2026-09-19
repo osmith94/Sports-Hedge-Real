@@ -166,6 +166,7 @@ def _bind(engine, *, scan, watchlist, ops, audit, monkeypatch) -> list:
 async def _slice_and_drain(engine, priority, **kwargs):
     result = await engine.run_slice(priority, **kwargs)
     await engine.drain_item_captures()
+    await engine.drain_observability()
     return result
 
 
@@ -752,8 +753,11 @@ def test_phase4_preserves_paper_boundary_and_does_not_fork_capture() -> None:
         CataloguePriceEngine._run_item_capture
     )
     persist_src = inspect.getsource(paper_api.persist_price_engine_item_decision)
-    assert "_persist_decision(" in persist_src
-    assert "persist_triggered_chain" in persist_src
+    assert "persist_price_engine_item_capture" in persist_src
+    capture_src = inspect.getsource(paper_api.persist_price_engine_item_capture)
+    assert "_persist_decision(" in capture_src
+    assert "write_audit=False" in capture_src
+    assert "persist_triggered_chain" in inspect.getsource(paper_api._persist_decision)
     chain_src = inspect.getsource(PaperOperationsService.persist_triggered_chain)
     assert "PAPER-ONLY autofill; no venue order placed" in chain_src
     tick_src = inspect.getsource(paper_api.server_owned_refresh_tick)

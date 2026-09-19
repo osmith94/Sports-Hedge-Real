@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { LaneRefreshStatus, LiveRefreshStatus } from "./api";
-import { dualScanStatusLines, fastScanCopy, fullSweepCopy } from "./scan-status-display";
+import { backgroundPriceCopy, dualScanStatusLines, fastScanCopy, fullSweepCopy } from "./scan-status-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = join(here, "..");
@@ -66,6 +66,23 @@ describe("dual cadence operator copy", () => {
     assert.doesNotMatch(fullSweepCopy(status(), now).detail, /chunk/i);
     assert.doesNotMatch(fullSweepCopy(status(), now).detail, /HOT next due/);
     assert.doesNotMatch(fullSweepCopy(status(), now).detail, /until HOT/i);
+    const withBackground = status({
+      price_engine: {
+        background: {
+          working_set: 12,
+          evaluated: 4,
+          in_flight: 1,
+          retry_wait: 2,
+          deferred: 0,
+          not_started_this_cadence: 5,
+        },
+      },
+    });
+    const backgroundLines = dualScanStatusLines(withBackground, now);
+    assert.equal(backgroundLines.length, 3);
+    assert.match(backgroundLines[2], /Background price engine/);
+    assert.match(backgroundLines[2], /12 ACTIVE/);
+    assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /4 evaluated/);
     const persistFailed = status({
       last_error: null,
       hot: {

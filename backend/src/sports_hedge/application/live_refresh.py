@@ -70,6 +70,11 @@ from sports_hedge.application.provider_access import (
     HEALTH_UNAVAILABLE,
     get_shared_provider_access,
 )
+from sports_hedge.application.scanner_observability import (
+    PriceEnginePublicStatus,
+    ScannerObservabilitySink,
+    empty_price_engine_status,
+)
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
     UNIVERSE_MIN_CHUNK_SECONDS,
@@ -238,6 +243,13 @@ class LiveRefreshStatus(BaseModel):
             generation_budget_seconds=150,
         )
     )
+    background: LaneRefreshStatus = Field(
+        default_factory=lambda: LaneRefreshStatus(
+            cadence_seconds=180,
+            cycle_timeout_seconds=None,
+        )
+    )
+    price_engine: PriceEnginePublicStatus = Field(default_factory=empty_price_engine_status)
     venue_participation: LaneVenueParticipation | None = None
     recent_scan_cycles: list[PaperScanCycleRecord] = Field(default_factory=list)
     provider_access: dict[str, Any] = Field(default_factory=dict)
@@ -371,6 +383,7 @@ class LiveRefreshCoordinator:
         self._next_background_due: datetime | None = None
         self._catalogue_store = catalogue_store
         self._price_engine = price_engine
+        self._observability = ScannerObservabilitySink()
         self._hot_due_started: datetime | None = None
         self._universe_generation_id = 0
         self._universe_generation_started_at: datetime | None = None
@@ -468,6 +481,11 @@ class LiveRefreshCoordinator:
                             "generation_budget_seconds": float(
                                 resolved.paper_scan_universe_generation_budget_seconds
                             ),
+                        }
+                    ),
+                    "background": self.status.background.model_copy(
+                        update={
+                            "cadence_seconds": resolved.paper_live_refresh_universe_interval_seconds,
                         }
                     ),
                 }
@@ -593,6 +611,11 @@ class LiveRefreshCoordinator:
             return dict(self._last_request)
 
     def reset(self) -> None:
+        # Quarantine pre-reset observability before clearing current-state so
+        # an already-running UI projection cannot resurrect emptied rows.
+        # Drain is not awaited here: a blocked consumer must not deadlock
+        # operator reset. Commit is generation-guarded instead.
+        self._observability.reset()
         self._fixture_state.clear()
         orphans: list[asyncio.Task[Any]] = []
         with self._state_lock:
@@ -768,6 +791,7 @@ class LiveRefreshCoordinator:
     def bind_price_engine(self, engine: CataloguePriceEngine) -> None:
         self._price_engine = engine
         engine.fixture_state = self._fixture_state
+        engine.observability = self._observability
         if engine.catalogue_store is None:
             engine.catalogue_store = self._catalogue_store
 
@@ -777,7 +801,12 @@ class LiveRefreshCoordinator:
                 catalogue_store=self._catalogue_store,
                 fixture_state=self._fixture_state,
                 clock=self.now,
+                observability=self._observability,
             )
+        else:
+            self._price_engine.observability = self._observability
+            if self._price_engine.fixture_state is None:
+                self._price_engine.fixture_state = self._fixture_state
         return self._price_engine
 
     async def run_price_engine_slice(
@@ -806,6 +835,7 @@ class LiveRefreshCoordinator:
             engine.fx_snapshots = list(fx_snapshots)
         engine.fixture_state = self._fixture_state
         result = await engine.run_slice(priority, slice_wall_seconds=slice_wall_seconds)
+        self._apply_price_engine_slice_status(priority, result)
         if priority is PriceEnginePriority.BACKGROUND:
             with self._state_lock:
                 settings = get_settings()
@@ -813,6 +843,77 @@ class LiveRefreshCoordinator:
                     seconds=settings.paper_live_refresh_universe_interval_seconds
                 )
         return result
+
+    def _apply_price_engine_slice_status(self, priority: PriceEnginePriority, result: Any) -> None:
+        """Record HOT/BACKGROUND engine truth without leftover-as-exhausted assembly."""
+
+        engine_status = self.price_engine().public_status()
+        tier = (
+            engine_status.hot
+            if priority is PriceEnginePriority.HOT
+            else engine_status.background
+        )
+        last_error = None
+        for issue in list(getattr(result, "issues", []) or []):
+            detail = getattr(issue, "detail", None)
+            if detail and str(detail) != "scan_budget_exhausted":
+                last_error = str(detail)
+        lane_update = {
+            "evaluated_count": tier.evaluated,
+            "not_evaluated_count": (
+                tier.not_started_this_cadence + tier.retry_wait + tier.deferred
+            ),
+            "operation_health": dict(tier.operation_health),
+            "venue_health": dict(tier.venue_health),
+            "degraded": any(
+                is_provider_health_failure(value) for value in tier.venue_health.values()
+            ),
+            "last_diagnostics": {
+                "price_engine": True,
+                "priority": priority.value,
+                "working_set": tier.working_set,
+                "due": tier.due,
+                "queued": tier.queued,
+                "in_flight": tier.in_flight,
+                "evaluated": tier.evaluated,
+                "evaluated_definition": tier.evaluated_definition,
+                "retry_wait": tier.retry_wait,
+                "deferred": tier.deferred,
+                "provider_capacity_saturated": tier.provider_capacity_saturated,
+                "not_started_this_cadence": tier.not_started_this_cadence,
+                "revalidation_needed": tier.revalidation_needed,
+                "persist_failures": list(getattr(result, "persist_failures", []) or []),
+            },
+            "last_error": last_error,
+            "worker_state": WORKER_RUNNING
+            if (
+                (priority is PriceEnginePriority.HOT and self._hot_in_progress)
+                or (
+                    priority is PriceEnginePriority.BACKGROUND
+                    and self._background_in_progress
+                )
+            )
+            else WORKER_IDLE,
+        }
+        with self._state_lock:
+            if priority is PriceEnginePriority.HOT:
+                hot = self.status.hot.model_copy(update=lane_update)
+                background = self.status.background
+            else:
+                background = self.status.background.model_copy(update=lane_update)
+                hot = self.status.hot
+            self.status = self.status.model_copy(
+                update={
+                    "hot": hot,
+                    "background": background,
+                    "price_engine": engine_status,
+                    "venue_health": _merge_top_level_venue_health(
+                        hot.venue_health,
+                        background.venue_health,
+                        self.status.universe.venue_health,
+                    ),
+                }
+            )
 
     def plan_universe_tick(
         self,
@@ -2535,6 +2636,9 @@ class LiveRefreshCoordinator:
             "server_loop_enabled": status.server_loop_enabled,
             "paper_autofill_enabled": status.paper_autofill_enabled,
             "interval_seconds": status.interval_seconds,
+            "hot_in_progress": self._hot_in_progress,
+            "background_in_progress": self._background_in_progress,
+            "universe_in_progress": self._universe_in_progress,
         }
 
     def _restore_universe_checkpoint(self) -> None:
@@ -3117,27 +3221,65 @@ class LiveRefreshCoordinator:
         unique, lifecycle, promoted = self._fixture_state.hot_membership_breakdown(
             now, **classify
         )
+        engine_status = (
+            self._price_engine.public_status(now=now)
+            if self._price_engine is not None
+            else empty_price_engine_status()
+        )
         with self._state_lock:
+            hot_update = {
+                "fixture_count": unique or hot_count,
+                "lifecycle_hot_count": lifecycle,
+                "promoted_hot_count": promoted,
+                "cycle_in_progress": self._hot_in_progress or self._manual_hot_in_progress,
+                "evaluated_count": engine_status.hot.evaluated,
+                "not_evaluated_count": (
+                    engine_status.hot.not_started_this_cadence
+                    + engine_status.hot.retry_wait
+                    + engine_status.hot.deferred
+                ),
+                "operation_health": dict(engine_status.hot.operation_health)
+                or dict(self.status.hot.operation_health),
+                "venue_health": dict(engine_status.hot.venue_health)
+                or dict(self.status.hot.venue_health),
+            }
+            background_update = {
+                "cycle_in_progress": self._background_in_progress,
+                "next_due_at": self._next_background_due,
+                "evaluated_count": engine_status.background.evaluated,
+                "not_evaluated_count": (
+                    engine_status.background.not_started_this_cadence
+                    + engine_status.background.retry_wait
+                    + engine_status.background.deferred
+                ),
+                "operation_health": dict(engine_status.background.operation_health)
+                or dict(self.status.background.operation_health),
+                "venue_health": dict(engine_status.background.venue_health)
+                or dict(self.status.background.venue_health),
+                "worker_state": WORKER_RUNNING
+                if self._background_in_progress
+                else self.status.background.worker_state,
+            }
+            hot = self.status.hot.model_copy(update=hot_update)
+            background = self.status.background.model_copy(update=background_update)
             self.status = self.status.model_copy(
                 update={
                     "discovered_fixtures": inventory,
-                    "hot": self.status.hot.model_copy(
-                        update={
-                            "fixture_count": unique or hot_count,
-                            "lifecycle_hot_count": lifecycle,
-                            "promoted_hot_count": promoted,
-                        }
-                    ),
+                    "hot": hot,
+                    "background": background,
+                    "price_engine": engine_status,
                     "universe": self.status.universe.model_copy(
                         update={"fixture_count": universe_count}
                     ),
                     "venue_health": _merge_top_level_venue_health(
-                        self.status.hot.venue_health,
+                        hot.venue_health,
+                        background.venue_health,
                         self.status.universe.venue_health,
                     ),
                     "provider_access": get_shared_provider_access().snapshot().as_dict(),
                     "cycle_in_progress": self._hot_in_progress
                     or self._universe_in_progress
+                    or self._background_in_progress
                     or self._manual_hot_in_progress,
                 }
             )
@@ -3149,6 +3291,7 @@ class LiveRefreshCoordinator:
                     ),
                     "cycle_in_progress": self._hot_in_progress
                     or self._universe_in_progress
+                    or self._background_in_progress
                     or self._manual_hot_in_progress,
                 }
             )
@@ -3632,40 +3775,41 @@ _UNHEALTHY_VENUE_HEALTH = frozenset(
         "partial",
     }
 )
-_SCHEDULER_VENUE_HEALTH = frozenset({"waiting", "deferred", "rate_limited", "cancelled"})
+_SCHEDULER_VENUE_HEALTH = frozenset(
+    {"waiting", "deferred", "rate_limited", "cancelled", "provider_capacity_saturated"}
+)
 
 
 def _merge_top_level_venue_health(
-    hot: dict[str, str] | None,
-    universe: dict[str, str] | None,
+    *lane_maps: dict[str, str] | None,
 ) -> dict[str, str]:
     """Top-level ok only when every relevant lane path is healthy.
 
     One healthy lane must never paint the other lane's provider failure green.
-    Scheduler wait is not a provider outage.
+    Scheduler wait / capacity saturation is not a provider outage.
+    A Kalshi operation failure never becomes Matchbook FAILED.
     """
 
+    maps = [dict(item or {}) for item in lane_maps]
     merged: dict[str, str] = {}
-    keys = set(hot or {}) | set(universe or {})
+    keys: set[str] = set()
+    for item in maps:
+        keys.update(item)
     for venue in keys:
-        left = (hot or {}).get(venue)
-        right = (universe or {}).get(venue)
-        left_bad = left in _UNHEALTHY_VENUE_HEALTH
-        right_bad = right in _UNHEALTHY_VENUE_HEALTH
-        if left_bad and right_bad:
-            merged[venue] = left if left == right else "degraded"
-        elif left_bad and right == "ok":
+        values = [item.get(venue) for item in maps if item.get(venue)]
+        bad = [value for value in values if value in _UNHEALTHY_VENUE_HEALTH]
+        ok = [value for value in values if value == "ok"]
+        waiting = [value for value in values if value in _SCHEDULER_VENUE_HEALTH]
+        if len(bad) >= 2:
+            merged[venue] = bad[0] if len(set(bad)) == 1 else "degraded"
+        elif bad and ok:
             merged[venue] = "degraded"
-        elif right_bad and left == "ok":
-            merged[venue] = "degraded"
-        elif left_bad:
-            merged[venue] = left or "degraded"
-        elif right_bad:
-            merged[venue] = right or "degraded"
-        elif left == "ok" or right == "ok":
+        elif bad:
+            merged[venue] = bad[0]
+        elif ok:
             merged[venue] = "ok"
-        elif left in _SCHEDULER_VENUE_HEALTH or right in _SCHEDULER_VENUE_HEALTH:
+        elif waiting:
             merged[venue] = "ok"
-        else:
-            merged[venue] = right or left or "unknown"
+        elif values:
+            merged[venue] = values[-1]
     return merged

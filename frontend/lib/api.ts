@@ -527,6 +527,33 @@ export type LaneRefreshStatus = {
   canonical_remaining?: number;
 };
 
+export type PriceEngineTierStatus = {
+  working_set?: number;
+  due?: number;
+  queued?: number;
+  in_flight?: number;
+  evaluated?: number;
+  evaluated_definition?: string;
+  retry_wait?: number;
+  deferred?: number;
+  provider_capacity_saturated?: number;
+  not_started_this_cadence?: number;
+  revalidation_needed?: number;
+  persist_failures?: number;
+  last_error?: string | null;
+  operation_health?: Record<string, unknown>;
+  venue_health?: Record<string, string>;
+};
+
+export type PriceEnginePublicStatus = {
+  hot?: PriceEngineTierStatus;
+  background?: PriceEngineTierStatus;
+  durable_queue?: boolean;
+  observability_lag?: number;
+  observability_dropped?: number;
+  observability_error?: string | null;
+};
+
 export type LaneVenueFlags = {
   matchbook: boolean;
   polymarket: boolean;
@@ -573,6 +600,8 @@ export type LiveRefreshStatus = {
   discovered_fixtures: DiscoveredFixture[];
   hot?: LaneRefreshStatus;
   universe?: LaneRefreshStatus;
+  background?: LaneRefreshStatus;
+  price_engine?: PriceEnginePublicStatus;
   venue_participation?: LaneVenueParticipation | null;
   recent_scan_cycles?: PaperScanCycleRecord[];
   provider_access?: Record<string, unknown>;

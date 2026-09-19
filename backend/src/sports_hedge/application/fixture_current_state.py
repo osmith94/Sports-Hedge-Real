@@ -164,6 +164,7 @@ class FixtureCurrentStateStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._generation = 0
+        self._reset_generation = 0
         self._rows: dict[str, _FixtureRecord] = {}
         self._aliases: dict[str, str] = {}
         self._tombstones: dict[str, CurrentStateTombstone] = {}
@@ -175,6 +176,7 @@ class FixtureCurrentStateStore:
 
     def clear(self, *, keep_tombstones: bool = False, keep_universe_generation: bool = False) -> None:
         with self._lock:
+            self._reset_generation += 1
             self._generation = 0
             self._rows = {}
             self._aliases = {}
@@ -191,6 +193,13 @@ class FixtureCurrentStateStore:
     def generation(self) -> int:
         with self._lock:
             return self._generation
+
+    @property
+    def reset_generation(self) -> int:
+        """Monotonic reset epoch. Pre-reset projections must not commit after clear()."""
+
+        with self._lock:
+            return self._reset_generation
 
     def replace_from_report(self, report: CollectionReport) -> None:
         """Compatibility generation replace used by explicit diagnostic collects."""
@@ -250,8 +259,14 @@ class FixtureCurrentStateStore:
         scan_lane: ScanLane | str = ScanLane.UNIVERSE,
         now: datetime | None = None,
         universe_generation_id: int | None = None,
+        reset_generation: int | None = None,
     ) -> None:
         with self._lock:
+            if (
+                reset_generation is not None
+                and reset_generation != self._reset_generation
+            ):
+                return
             self._upsert_from_report_unlocked(
                 report,
                 scan_lane=scan_lane,

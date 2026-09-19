@@ -72,10 +72,20 @@ from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.provider_access import (
     HEALTH_CAPACITY_SATURATED,
     HEALTH_DEFERRED,
+    HEALTH_MARKET_TIMEOUT,
+    HEALTH_OK,
     PRICE_ENGINE_BACKGROUND_LANE,
     ProviderAccessLayer,
     ProviderLease,
     get_shared_provider_access,
+)
+from sports_hedge.application.scanner_observability import (
+    PRICE_ENGINE_EVALUATED_DEFINITION,
+    PriceEnginePublicStatus,
+    PriceEngineTierStatus,
+    ScannerObservabilitySink,
+    record_operation_health,
+    venue_health_from_operation_health,
 )
 from sports_hedge.application.quote_freshness import (
     QuoteAgeAssessment,
@@ -163,6 +173,24 @@ class PriceEngineRuntimeItem:
         return f"{self.identity.catalogue_row_id}:{self.identity.content_version}"
 
 
+@dataclass(frozen=True)
+class PriceEngineProjectionEvent:
+    """Immutable item-event inputs for lagged UI/current-state projection.
+
+    Projection may lag, but must not reread later ``PriceEngineRuntimeItem``
+    mutation for catalogue identity, lane/priority, observations, or decision.
+    ``reset_generation`` is the FixtureCurrentStateStore epoch at emit time;
+    a pre-reset callback must not commit after coordinator/store reset.
+    """
+
+    identity: DerivedPriceEngineItem
+    priority: PriceEnginePriority
+    matchbook_obs: VenueMarketObservation
+    kalshi_obs: VenueMarketObservation
+    decision: PaperScanDecision | None
+    reset_generation: int = 0
+
+
 @dataclass
 class PriceEngineSliceResult:
     evaluated: list[str] = field(default_factory=list)
@@ -178,6 +206,8 @@ class PriceEngineSliceResult:
     provider_capacity_saturated: bool = False
     promotions: list[str] = field(default_factory=list)
     persist_failures: list[str] = field(default_factory=list)
+    operation_health: dict[str, Any] = field(default_factory=dict)
+    venue_health: dict[str, str] = field(default_factory=dict)
 
     def statuses(self) -> dict[str, str]:
         payload: dict[str, str] = {}
@@ -225,6 +255,7 @@ class CataloguePriceEngine:
         hot_interval_seconds: int | None = None,
         background_interval_seconds: int | None = None,
         on_item_decision: Callable[[PaperScanDecision, PriceEngineRuntimeItem], Any] | None = None,
+        observability: ScannerObservabilitySink | None = None,
     ) -> None:
         resolved = settings or get_settings()
         self.catalogue_store = catalogue_store
@@ -252,7 +283,14 @@ class CataloguePriceEngine:
         self.venue_costs = list(venue_costs or [])
         self.fx_snapshots = list(fx_snapshots or [])
         self.on_item_decision = on_item_decision
+        self.observability = observability if observability is not None else ScannerObservabilitySink()
         self._items: dict[str, PriceEngineRuntimeItem] = {}
+        self._promoted_hot_rows: dict[str, int] = {}
+        self._promoted_hot_ids: set[str] = set()
+        self._operation_health: dict[str, dict[str, Any]] = {
+            PriceEnginePriority.HOT.value: {},
+            PriceEnginePriority.BACKGROUND.value: {},
+        }
         self.revalidation_requests: list[dict[str, str]] = []
         self.matchbook_builder = MatchbookObservationBuilder()
         self.kalshi_builder = KalshiObservationBuilder()
@@ -262,6 +300,10 @@ class CataloguePriceEngine:
         }
         self._slice_remaining: Callable[[], float | None] | None = None
         self._pending_item_captures: set[asyncio.Task[Any]] = set()
+        self._last_slice_not_started: dict[str, int] = {
+            PriceEnginePriority.HOT.value: 0,
+            PriceEnginePriority.BACKGROUND.value: 0,
+        }
 
     def now(self) -> datetime:
         return self._clock()
@@ -298,25 +340,41 @@ class CataloguePriceEngine:
             else:
                 runtime = existing
                 runtime.identity = identity
-            runtime.priority = self.classify_priority(runtime.identity)
             rebuilt.append(runtime)
+        self._refresh_promoted_hot_ids()
+        for runtime in rebuilt:
+            runtime.priority = self.classify_priority(runtime.identity)
         return rebuilt
 
     def restart(self) -> list[PriceEngineRuntimeItem]:
         """Process restart: reconstruct ACTIVE work and reset short backoff."""
 
         self._items.clear()
+        self._promoted_hot_rows.clear()
+        self._promoted_hot_ids.clear()
         self.revalidation_requests.clear()
+        self._operation_health = {
+            PriceEnginePriority.HOT.value: {},
+            PriceEnginePriority.BACKGROUND.value: {},
+        }
+        self.observability.reset()
         return self.reconstruct()
 
     def classify_priority(self, identity: DerivedPriceEngineItem) -> PriceEnginePriority:
+        """Scheduler HOT vs BACKGROUND from lifecycle + engine-local promotion.
+
+        UI/current-state projection is not scheduler authority. A lagged
+        ``FixtureCurrentStateStore`` upsert cannot grant or revoke priority.
+        """
+
         fixture = _fixture_like(identity)
         lifecycle = classify_scan_lane(fixture, self.now())
         if lifecycle is ScanLane.HOT:
             return PriceEnginePriority.HOT
-        if self.fixture_state is not None:
-            if identity.canonical_event_id in self.fixture_state.hot_identity_scope(self.now()):
-                return PriceEnginePriority.HOT
+        if lifecycle is ScanLane.DROP:
+            return PriceEnginePriority.BACKGROUND
+        if identity.canonical_event_id in self._promoted_hot_ids:
+            return PriceEnginePriority.HOT
         return PriceEnginePriority.BACKGROUND
 
     def due_items(
@@ -442,6 +500,10 @@ class CataloguePriceEngine:
                 result.not_started.append(runtime.identity.catalogue_row_id)
         finally:
             self._slice_remaining = None
+        self._last_slice_not_started[priority.value] = len(result.not_started)
+        result.operation_health = dict(self._operation_health.get(priority.value) or {})
+        result.venue_health = venue_health_from_operation_health(result.operation_health)
+        result.scan_budget_exhausted = False
         return result
 
     async def _price_item(
@@ -620,12 +682,12 @@ class CataloguePriceEngine:
                 scan_kwargs["assumed_latency_ms"] = int(settings.simulated_latency_ms)
             decision = self.paper_scan.scan_pair(matchbook_obs, kalshi_obs, **scan_kwargs)
             result.decisions.append(decision)
-        self._publish(
+        self._maybe_promote(runtime, decision, result)
+        self._schedule_projection(
             runtime,
             matchbook_obs=matchbook_obs,
             kalshi_obs=kalshi_obs,
             decision=decision,
-            result=result,
         )
         await self._handoff_item_decision(runtime, decision, result)
         runtime.last_priced_at = evaluated_at
@@ -636,18 +698,92 @@ class CataloguePriceEngine:
         runtime.status = PriceEngineItemStatus.EVALUATED
         return PriceEngineItemStatus.EVALUATED
 
-    def _publish(
+    def _refresh_promoted_hot_ids(self) -> None:
+        """Derive fixture HOT from any live interesting catalogue row.
+
+        Reconstruct / content-version invalidation drops stale row state.
+        There is no durable promotion table.
+        """
+
+        live_versions = {
+            runtime.identity.catalogue_row_id: runtime.identity.content_version
+            for runtime in self._items.values()
+        }
+        for row_id, version in list(self._promoted_hot_rows.items()):
+            if live_versions.get(row_id) != version:
+                self._promoted_hot_rows.pop(row_id, None)
+        self._promoted_hot_ids = {
+            runtime.identity.canonical_event_id
+            for runtime in self._items.values()
+            if self._promoted_hot_rows.get(runtime.identity.catalogue_row_id)
+            == runtime.identity.content_version
+        }
+
+    def _reclassify_fixture(self, canonical_event_id: str) -> None:
+        for runtime in self._items.values():
+            if runtime.identity.canonical_event_id == canonical_event_id:
+                runtime.priority = self.classify_priority(runtime.identity)
+
+    def _maybe_promote(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        decision: PaperScanDecision | None,
+        result: PriceEngineSliceResult,
+    ) -> None:
+        """HOT promotion/demotion is scheduler truth in process memory.
+
+        Opportunity truth is per catalogue row. Fixture/event promotion is
+        the OR of current interesting rows for that canonical_event_id.
+        One cooling sibling must not clear another interesting row.
+        Lifecycle HOT remains independent of opportunity demotion.
+        Lagged UI projection cannot grant or revoke this set.
+        """
+
+        row_id = runtime.identity.catalogue_row_id
+        version = runtime.identity.content_version
+        canonical_id = runtime.identity.canonical_event_id
+        if _decision_is_interesting(decision):
+            already_fixture = canonical_id in self._promoted_hot_ids
+            self._promoted_hot_rows[row_id] = version
+            self._promoted_hot_ids.add(canonical_id)
+            if not already_fixture:
+                result.promotions.append(canonical_id)
+        else:
+            self._promoted_hot_rows.pop(row_id, None)
+            self._refresh_promoted_hot_ids()
+        self._reclassify_fixture(canonical_id)
+
+    def _schedule_projection(
         self,
         runtime: PriceEngineRuntimeItem,
         *,
         matchbook_obs: VenueMarketObservation,
         kalshi_obs: VenueMarketObservation,
         decision: PaperScanDecision | None,
-        result: PriceEngineSliceResult,
     ) -> None:
+        """UI/current-state projection is a consumer. It must not delay the next item."""
+
+        event = PriceEngineProjectionEvent(
+            identity=runtime.identity.model_copy(deep=True),
+            priority=runtime.priority,
+            matchbook_obs=matchbook_obs.model_copy(deep=True),
+            kalshi_obs=kalshi_obs.model_copy(deep=True),
+            decision=None if decision is None else decision.model_copy(deep=True),
+            reset_generation=(
+                0 if self.fixture_state is None else self.fixture_state.reset_generation
+            ),
+        )
+        self.observability.emit(lambda snapshot=event: self._project_item_state(snapshot))
+
+    def _project_item_state(self, event: PriceEngineProjectionEvent) -> None:
         if self.fixture_state is None:
             return
-        identity = runtime.identity
+        if event.reset_generation != self.fixture_state.reset_generation:
+            return
+        identity = event.identity
+        matchbook_obs = event.matchbook_obs
+        kalshi_obs = event.kalshi_obs
+        decision = event.decision
         observed_at = matchbook_obs.observed_at
         fixture = DiscoveredFixture(
             source=VenueName.MATCHBOOK,
@@ -665,7 +801,7 @@ class CataloguePriceEngine:
             opportunity_state="matched",
             scan_lane=(
                 ScanLane.HOT.value
-                if runtime.priority is PriceEnginePriority.HOT
+                if event.priority is PriceEnginePriority.HOT
                 else ScanLane.UNIVERSE.value
             ),
             current_net_edge=None if decision is None else decision_net_edge(decision),
@@ -711,7 +847,7 @@ class CataloguePriceEngine:
         )
         rows = _overlay_decision_inventory(
             rows,
-            runtime=runtime,
+            identity=identity,
             matchbook_obs=matchbook_obs,
             kalshi_obs=kalshi_obs,
             decision=decision,
@@ -731,21 +867,18 @@ class CataloguePriceEngine:
             scan_lane=fixture.scan_lane,
             scan_diagnostics={
                 "price_engine": True,
-                "priority": runtime.priority.value,
+                "priority": event.priority.value,
                 "catalogue_row_id": identity.catalogue_row_id,
             },
         )
-        before = set(self.fixture_state.hot_identity_scope(observed_at))
         self.fixture_state.upsert_from_report(
             report,
             scan_lane=ScanLane.UNIVERSE
-            if runtime.priority is PriceEnginePriority.BACKGROUND
+            if event.priority is PriceEnginePriority.BACKGROUND
             else ScanLane.HOT,
             now=observed_at,
+            reset_generation=event.reset_generation,
         )
-        after = set(self.fixture_state.hot_identity_scope(observed_at))
-        if identity.canonical_event_id in after and identity.canonical_event_id not in before:
-            result.promotions.append(identity.canonical_event_id)
 
     async def _handoff_item_decision(
         self,
@@ -807,6 +940,40 @@ class CataloguePriceEngine:
             return
         await asyncio.gather(*pending, return_exceptions=True)
 
+    async def drain_observability(self) -> None:
+        """Wait for lagged UI/audit consumers. Never called from the pricing worker."""
+
+        await self.observability.drain()
+
+    async def shutdown_observability(self) -> None:
+        """Finish accepted consumers then join the worker. Not a pricing await."""
+
+        await self.observability.shutdown()
+
+    def schedule_observability(self, fn: Callable[[], Any]) -> None:
+        """Enqueue non-critical audit/history work without delaying capture."""
+
+        self.observability.emit(fn)
+
+    def _record_lane_operation(
+        self,
+        lane: str,
+        venue: VenueName,
+        operation: str,
+        status: str,
+    ) -> None:
+        key = (
+            PriceEnginePriority.HOT.value
+            if str(lane).strip().casefold() == PriceEnginePriority.HOT.value
+            else PriceEnginePriority.BACKGROUND.value
+        )
+        self._operation_health[key] = record_operation_health(
+            self._operation_health.get(key),
+            venue=venue.value,
+            operation=operation,
+            status=status,
+        )
+
     async def _provider_call(
         self,
         venue: VenueName,
@@ -821,8 +988,10 @@ class CataloguePriceEngine:
         if access is None:
             try:
                 payload = await asyncio.wait_for(coro, timeout=timeout)
+                self._record_lane_operation(lane, venue, stage, HEALTH_OK)
                 return payload, None
             except TimeoutError:
+                self._record_lane_operation(lane, venue, stage, HEALTH_MARKET_TIMEOUT)
                 return None, PriceEngineItemStatus.RETRY_WAIT
 
         async def _close_unused() -> None:
@@ -837,6 +1006,7 @@ class CataloguePriceEngine:
         if slot_wait <= 0:
             await _close_unused()
             if access.venue_saturated(venue):
+                self._record_lane_operation(lane, venue, stage, PROVIDER_CAPACITY_SATURATED)
                 return None, PriceEngineItemStatus.DEFERRED
             return None, PriceEngineItemStatus.NOT_STARTED
         async with access.acquire_wait(
@@ -845,6 +1015,7 @@ class CataloguePriceEngine:
             if lease is None:
                 await _close_unused()
                 if access.venue_saturated(venue):
+                    self._record_lane_operation(lane, venue, stage, PROVIDER_CAPACITY_SATURATED)
                     return None, PriceEngineItemStatus.DEFERRED
                 return None, PriceEngineItemStatus.NOT_STARTED
             inflight = access.snapshot().inflight.get(venue.value, 0)
@@ -855,10 +1026,13 @@ class CataloguePriceEngine:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
             if task in done:
                 try:
-                    return task.result(), None
+                    payload = task.result()
+                    self._record_lane_operation(lane, venue, stage, HEALTH_OK)
+                    return payload, None
                 except MatchbookMarketGoneError:
                     raise
                 except Exception:
+                    self._record_lane_operation(lane, venue, stage, HEALTH_MARKET_TIMEOUT)
                     return None, PriceEngineItemStatus.RETRY_WAIT
             task.cancel()
             held = False
@@ -866,6 +1040,7 @@ class CataloguePriceEngine:
                 held = lease.hold_until_task(task)
             if not held and not task.done():
                 task.add_done_callback(lambda done_task: done_task.exception() if done_task.done() else None)
+            self._record_lane_operation(lane, venue, stage, HEALTH_MARKET_TIMEOUT)
             return None, PriceEngineItemStatus.RETRY_WAIT
 
     def _finalize_provider_status(
@@ -963,19 +1138,109 @@ class CataloguePriceEngine:
         }
 
     def snapshot(self) -> dict[str, Any]:
-        return {
-            "item_count": len(self._items),
-            "hot": sum(1 for item in self._items.values() if item.priority is PriceEnginePriority.HOT),
-            "background": sum(
-                1 for item in self._items.values() if item.priority is PriceEnginePriority.BACKGROUND
-            ),
-            "retry_wait": sum(
-                1 for item in self._items.values() if item.status is PriceEngineItemStatus.RETRY_WAIT
-            ),
-            "revalidation_requests": list(self.revalidation_requests),
-            "peak_held_slots": dict(self._peak_held_slots),
-            "durable_queue": False,
-        }
+        public = self.public_status()
+        payload = public.model_dump()
+        payload.update(
+            {
+                "item_count": len(self._items),
+                "retry_wait": public.hot.retry_wait + public.background.retry_wait,
+                "revalidation_requests": list(self.revalidation_requests),
+                "peak_held_slots": dict(self._peak_held_slots),
+                "durable_queue": False,
+            }
+        )
+        payload.pop("scan_budget_exhausted", None)
+        return payload
+
+    def public_status(self, *, now: datetime | None = None) -> PriceEnginePublicStatus:
+        """HOT vs BACKGROUND counters from current in-memory items.
+
+        Does not reconstruct from the catalogue, collector leftovers, or a
+        durable queue. ``scan_budget_exhausted`` is never emitted.
+        """
+
+        evaluated_at = now or self.now()
+        return PriceEnginePublicStatus(
+            hot=self._tier_status(PriceEnginePriority.HOT, now=evaluated_at),
+            background=self._tier_status(PriceEnginePriority.BACKGROUND, now=evaluated_at),
+            durable_queue=False,
+            observability_lag=self.observability.lag,
+            observability_dropped=self.observability.dropped,
+            observability_error=self.observability.last_error,
+        )
+
+    def _tier_status(
+        self,
+        priority: PriceEnginePriority,
+        *,
+        now: datetime,
+    ) -> PriceEngineTierStatus:
+        interval = self._hot_interval if priority is PriceEnginePriority.HOT else self._background_interval
+        items = [
+            item
+            for item in self._items.values()
+            if item.priority is priority
+        ]
+        due = 0
+        in_flight = 0
+        evaluated = 0
+        retry_wait = 0
+        deferred = 0
+        not_started = 0
+        revalidation = 0
+        persist_failures = 0
+        last_error: str | None = None
+        for runtime in items:
+            if runtime.last_persist_error:
+                persist_failures += 1
+            if runtime.last_error_detail and last_error is None:
+                if runtime.last_error_detail != SCAN_BUDGET_EXHAUSTED_REASON:
+                    last_error = runtime.last_error_detail
+            if runtime.in_flight or runtime.status is PriceEngineItemStatus.IN_FLIGHT:
+                in_flight += 1
+                continue
+            if runtime.status is PriceEngineItemStatus.RETRY_WAIT or (
+                runtime.next_retry_at is not None and now < runtime.next_retry_at
+            ):
+                retry_wait += 1
+                continue
+            if runtime.status is PriceEngineItemStatus.DEFERRED:
+                deferred += 1
+                continue
+            if runtime.status is PriceEngineItemStatus.NOT_STARTED:
+                not_started += 1
+                continue
+            if runtime.status is PriceEngineItemStatus.REVALIDATION_NEEDED:
+                revalidation += 1
+                continue
+            if runtime.status is PriceEngineItemStatus.EVALUATED:
+                if runtime.last_priced_at is None:
+                    evaluated += 1
+                    continue
+                if interval <= 0 or now <= runtime.last_priced_at + timedelta(seconds=interval):
+                    evaluated += 1
+                else:
+                    due += 1
+                continue
+            due += 1
+        operations = dict(self._operation_health.get(priority.value) or {})
+        return PriceEngineTierStatus(
+            working_set=len(items),
+            due=due,
+            queued=due,
+            in_flight=in_flight,
+            evaluated=evaluated,
+            evaluated_definition=PRICE_ENGINE_EVALUATED_DEFINITION,
+            retry_wait=retry_wait,
+            deferred=deferred,
+            provider_capacity_saturated=deferred,
+            not_started_this_cadence=not_started,
+            revalidation_needed=revalidation,
+            persist_failures=persist_failures,
+            last_error=last_error,
+            operation_health=operations,
+            venue_health=venue_health_from_operation_health(operations),
+        )
 
 
 def _oldest_retrieval_age(
@@ -1116,10 +1381,21 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
     return None
 
 
+def _decision_is_interesting(decision: PaperScanDecision | None) -> bool:
+    """Positive/near surveillance or solver-qualifying. Broader than paper entry."""
+
+    if decision is None:
+        return False
+    if decision_is_solver_arbitrage(decision):
+        return True
+    edge = decision_net_edge(decision)
+    return edge is not None and edge > 0
+
+
 def _overlay_decision_inventory(
     rows: list[FixtureMarketInventoryRow],
     *,
-    runtime: PriceEngineRuntimeItem,
+    identity: DerivedPriceEngineItem,
     matchbook_obs: VenueMarketObservation,
     kalshi_obs: VenueMarketObservation,
     decision: PaperScanDecision | None,
@@ -1152,18 +1428,17 @@ def _overlay_decision_inventory(
             if row.kalshi is not None and row.kalshi.quote_age_ms is None:
                 row.kalshi.quote_age_ms = kalshi_obs.quote_age_ms or 0
         return rows
-    return [*rows, _decision_inventory_row(runtime, matchbook_obs, kalshi_obs, decision, edge, is_arb)]
+    return [*rows, _decision_inventory_row(identity, matchbook_obs, kalshi_obs, decision, edge, is_arb)]
 
 
 def _decision_inventory_row(
-    runtime: PriceEngineRuntimeItem,
+    identity: DerivedPriceEngineItem,
     matchbook_obs: VenueMarketObservation,
     kalshi_obs: VenueMarketObservation,
     decision: PaperScanDecision,
     edge: Decimal,
     is_arb: bool,
 ) -> FixtureMarketInventoryRow:
-    identity = runtime.identity
     family = identity.family or matchbook_obs.market.family.value
     period = identity.period or matchbook_obs.market.period.value
 

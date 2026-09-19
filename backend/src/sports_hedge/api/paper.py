@@ -112,6 +112,7 @@ from sports_hedge.venues.matchbook import (
 router = APIRouter(prefix="/paper", tags=["paper"])
 LOGGER = getLogger(__name__)
 _PRICE_ENGINE_ITEM_PERSIST_LOCK = threading.Lock()
+_PRICE_ENGINE_AUDIT_LOCK = threading.Lock()
 PRICE_ENGINE_ITEM_COMPLETION_CAPTURE = "item_completion_capture"
 
 
@@ -796,8 +797,9 @@ def _status_with_scan_cycles(
 def live_refresh_status(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
 ) -> LiveRefreshStatus:
+    """Pure read model. Never starts collector, discovery, or checkpoint I/O."""
+
     coordinator = get_live_refresh_coordinator()
-    coordinator.configure_from_settings()
     return _status_with_scan_cycles(coordinator.public_status(), repository)
 
 
@@ -1339,6 +1341,8 @@ async def server_owned_refresh_tick(plan=None) -> None:
                 paper_decisions=list(result.decisions),
                 issues=list(result.issues),
                 scan_lane=ScanLane.HOT.value,
+                venue_health=dict(result.venue_health),
+                operation_health=dict(result.operation_health),
                 scan_diagnostics={
                     "price_engine": True,
                     "priority": PriceEnginePriority.HOT.value,
@@ -1637,6 +1641,62 @@ async def _aclose_soon(*clients: Any, timeout: float = 0.5) -> None:
             LOGGER.warning("venue_client_close_failed error=%s", exc)
 
 
+def persist_price_engine_item_capture(
+    decision: PaperScanDecision,
+    *,
+    service: PaperScanService,
+    watchlist: WatchlistService,
+    refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
+) -> list[Any] | None:
+    """Capture-critical watchlist + ``persist_triggered_chain`` only.
+
+    Append-only paper-scan audit is not capture-critical and must not run here.
+    Returns the market-history snapshot used at capture time so delayed audit
+    does not re-enter the intelligence store from another thread.
+    """
+
+    with _PRICE_ENGINE_ITEM_PERSIST_LOCK:
+        operations = get_paper_operations_service(watchlist, get_priority_alert_service())
+        return _persist_decision(
+            decision,
+            service=service,
+            audit=None,
+            watchlist=watchlist,
+            operations=operations,
+            quote_age_ms=decision.quote_age_ms,
+            refreshed_venues=(
+                refreshed_venues
+                if refreshed_venues is not None
+                else (VenueName.MATCHBOOK, VenueName.KALSHI)
+            ),
+            write_audit=False,
+        )
+
+
+def record_price_engine_item_audit(
+    decision: PaperScanDecision,
+    *,
+    audit: SqlitePaperScanRepository,
+    history: list[Any] | None = None,
+    service: PaperScanService | None = None,
+) -> None:
+    """Non-critical append-only scan history. Must not recapture or OPEN."""
+
+    if not decision.canonical_market_id:
+        return
+    if not decision.paper_audit_record_id:
+        decision.paper_audit_record_id = str(uuid4())
+    records = history
+    if records is None and service is not None:
+        records = service.market_intelligence.market_history(
+            canonical_market_id=decision.canonical_market_id,
+        )
+    if not records:
+        return
+    with _PRICE_ENGINE_AUDIT_LOCK:
+        audit.append_scan(build_paper_scan_record(decision, records))
+
+
 def persist_price_engine_item_decision(
     decision: PaperScanDecision,
     *,
@@ -1649,24 +1709,17 @@ def persist_price_engine_item_decision(
 
     Reuses ``_persist_decision`` / ``persist_triggered_chain``. Does not invent
     a second capture service. SQLite work is serialized across in-memory capture
-    tasks; pricing workers do not wait for this lock.
+    tasks; pricing workers do not wait for this lock. Audit is recorded after
+    capture and is not required for OPEN.
     """
 
-    with _PRICE_ENGINE_ITEM_PERSIST_LOCK:
-        operations = get_paper_operations_service(watchlist, get_priority_alert_service())
-        _persist_decision(
-            decision,
-            service=service,
-            audit=audit,
-            watchlist=watchlist,
-            operations=operations,
-            quote_age_ms=decision.quote_age_ms,
-            refreshed_venues=(
-                refreshed_venues
-                if refreshed_venues is not None
-                else (VenueName.MATCHBOOK, VenueName.KALSHI)
-            ),
-        )
+    history = persist_price_engine_item_capture(
+        decision,
+        service=service,
+        watchlist=watchlist,
+        refreshed_venues=refreshed_venues,
+    )
+    record_price_engine_item_audit(decision, audit=audit, history=history)
 
 
 def bind_price_engine_item_persist(
@@ -1679,17 +1732,22 @@ def bind_price_engine_item_persist(
     """Wire item-completion capture without putting it inside the price engine.
 
     The engine starts this callback immediately, then drains the in-memory
-    capture tasks outside the HOT ``run_cycle`` envelope.
+    capture tasks outside the HOT ``run_cycle`` envelope. Append-only audit is
+    scheduled on the observability sink and is never awaited by pricing.
     """
 
     async def _handoff(decision: PaperScanDecision, runtime: Any) -> None:
         del runtime
-        await asyncio.to_thread(
-            persist_price_engine_item_decision,
+        history = await asyncio.to_thread(
+            persist_price_engine_item_capture,
             decision,
             service=service,
-            audit=audit,
             watchlist=watchlist,
+        )
+        engine.schedule_observability(
+            lambda captured=history, item=decision: record_price_engine_item_audit(
+                item, audit=audit, history=captured
+            )
         )
 
     engine.on_item_decision = _handoff
@@ -1699,24 +1757,26 @@ def _persist_decision(
     decision: PaperScanDecision,
     *,
     service: PaperScanService,
-    audit: SqlitePaperScanRepository,
+    audit: SqlitePaperScanRepository | None,
     watchlist: WatchlistService,
     operations: PaperOperationsService | None = None,
     quote_age_ms: int | None = None,
     refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
-) -> None:
+    write_audit: bool = True,
+) -> list[Any] | None:
     if not decision.canonical_market_id:
-        return
+        return None
     if not decision.paper_audit_record_id:
         decision.paper_audit_record_id = str(uuid4())
     history = service.market_intelligence.market_history(
         canonical_market_id=decision.canonical_market_id,
     )
-    if history:
+    if write_audit and audit is not None and history:
         audit.append_scan(build_paper_scan_record(decision, history))
     watchlist.observe_paper_decision(decision, history, quote_age_ms=quote_age_ms)
     if operations is not None:
         operations.persist_triggered_chain(decision, refreshed_venues=refreshed_venues)
+    return history
 
 
 def _build_observation(request: RawVenueObservationRequest) -> VenueMarketObservation:

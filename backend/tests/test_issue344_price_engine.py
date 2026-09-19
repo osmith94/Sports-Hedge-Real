@@ -706,8 +706,9 @@ async def test_background_coverage_promotes_qualifying_row_immediately() -> None
     assert "amc-cover" in result.evaluated
     assert paper.calls >= 1
     assert distant.canonical_event_id in result.promotions
-    assert distant.canonical_event_id in fixture_state.hot_identity_scope(NOW)
     assert engine.classify_priority(runtime.identity) is PriceEnginePriority.HOT
+    await engine.drain_observability()
+    assert distant.canonical_event_id in fixture_state.hot_identity_scope(NOW)
     assert "amc-noise" in result.retry_wait
     assert result.decisions
     assert result.decisions[0].payoff_scan is not None

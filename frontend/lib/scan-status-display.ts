@@ -102,5 +102,30 @@ export function dualScanStatusLines(
 ): string[] {
   const fast = fastScanCopy(status, now);
   const full = fullSweepCopy(status, now);
-  return [`${fast.label} · ${fast.detail}`, `${full.label} · ${full.detail}`];
+  const lines = [`${fast.label} · ${fast.detail}`, `${full.label} · ${full.detail}`];
+  const background = backgroundPriceCopy(status, now);
+  if (background) {
+    lines.push(`${background.label} · ${background.detail}`);
+  }
+  return lines;
+}
+
+export function backgroundPriceCopy(
+  status: LiveRefreshStatus | null,
+  _now: number | null = null,
+): LaneScanCopy | null {
+  const engine = status?.price_engine?.background;
+  const lane = status?.background;
+  if (!engine && !lane) return null;
+  const evaluated = engine?.evaluated ?? lane?.evaluated_count ?? 0;
+  const retry = engine?.retry_wait ?? 0;
+  const deferred = engine?.deferred ?? engine?.provider_capacity_saturated ?? 0;
+  const notStarted = engine?.not_started_this_cadence ?? lane?.not_evaluated_count ?? 0;
+  const working = engine?.working_set ?? 0;
+  const inFlight = engine?.in_flight ?? 0;
+  const suffix = lane?.cycle_in_progress ? " · in progress" : "";
+  return {
+    label: "Background price engine",
+    detail: `${working} ACTIVE · ${evaluated} evaluated · ${inFlight} in flight · ${retry} retry · ${deferred} deferred · ${notStarted} not started${suffix}`,
+  };
 }
