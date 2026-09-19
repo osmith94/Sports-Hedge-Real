@@ -14,6 +14,7 @@ import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-
 import { dualScanStatusLines } from "../lib/scan-status-display";
 import { downloadVenueWhyIncident } from "../lib/venue-degradation-incident";
 import { scanHealthTone, venueHealthCaption, venueHealthNeedsWhy } from "../lib/venue-health-display";
+import { SystemLoadSummaryCard } from "./system-load-summary";
 
 const FIRST_CLASS: Array<{ venue: VenueHealth["venue"]; label: string }> = [
   { venue: "matchbook", label: "Matchbook" },
@@ -67,6 +68,7 @@ export function VenueHealthBar() {
 
   return (
     <div className="status-cluster" aria-label="First-class venue data health">
+      <SystemLoadSummaryCard status={refresh} />
       {FIRST_CLASS.map((item) => {
         const row = byVenue.get(item.venue);
         const scan = scanHealth[item.venue];

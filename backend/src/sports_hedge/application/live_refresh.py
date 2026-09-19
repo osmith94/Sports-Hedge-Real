@@ -86,6 +86,7 @@ from sports_hedge.application.scanner_observability import (
     ScannerObservabilitySink,
     empty_price_engine_status,
 )
+from sports_hedge.application.system_load import SystemLoadSummary, system_load_from_status
 from sports_hedge.application.venue_degradation_incident import (
     VenueDegradationIncidentStore,
     fallback_venue_degradation_incident,
@@ -268,6 +269,7 @@ class LiveRefreshStatus(BaseModel):
     venue_degradation_incidents: dict[str, VenueDegradationIncidentRef] = Field(
         default_factory=dict
     )
+    system_load: SystemLoadSummary = Field(default_factory=SystemLoadSummary)
 
 
 class DualCadencePlan(BaseModel):
@@ -3310,6 +3312,10 @@ class LiveRefreshCoordinator:
                     or self._universe_in_progress
                     or self._background_in_progress
                     or self._manual_hot_in_progress,
+                    "system_load": system_load_from_status(
+                        self.status,
+                        universe_work_used_s=self._status_universe_work_used(),
+                    ),
                 }
             )
             return self.status

@@ -559,6 +559,40 @@ export type PriceEnginePublicStatus = {
   observability_error?: string | null;
 };
 
+export type ProviderSlotLoad = {
+  inflight?: number;
+  limit?: number;
+  waiting?: number;
+};
+
+export type HotLoad = {
+  fixtures?: number;
+  working_set?: number;
+  due?: number;
+  in_flight?: number;
+  retry_wait?: number;
+  deferred?: number;
+  last_cycle_ms?: number | null;
+  cadence_seconds?: number;
+  cadence_utilisation?: number | null;
+};
+
+export type UniverseLoad = {
+  evaluated?: number;
+  total?: number;
+  remaining?: number;
+  generation_work_used_s?: number | null;
+  generation_budget_seconds?: number | null;
+};
+
+export type SystemLoadSummary = {
+  hot?: HotLoad;
+  matchbook?: ProviderSlotLoad;
+  kalshi?: ProviderSlotLoad;
+  universe?: UniverseLoad;
+  catalogue_items?: number;
+};
+
 export type LaneVenueFlags = {
   matchbook: boolean;
   polymarket: boolean;
@@ -645,6 +679,7 @@ export type LiveRefreshStatus = {
   recent_scan_cycles?: PaperScanCycleRecord[];
   provider_access?: Record<string, unknown>;
   venue_degradation_incidents?: Record<string, VenueDegradationIncidentRef>;
+  system_load?: SystemLoadSummary;
 };
 
 export type VenueHealth = {

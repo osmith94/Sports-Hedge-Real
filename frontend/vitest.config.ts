@@ -21,6 +21,7 @@ export default defineConfig({
       "lib/scan-cycle-history-display.test.ts",
       "lib/catalogue-coverage-display.test.ts",
       "lib/venue-degradation-incident.test.ts",
+      "lib/system-load-display.test.ts",
     ],
   },
 });
