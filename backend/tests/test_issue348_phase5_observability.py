@@ -35,12 +35,11 @@ from sports_hedge.application.provider_access import (
     HEALTH_OK,
     ProviderAccessLayer,
 )
-from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.application.scanner_observability import ScannerObservabilitySink
 from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.trades import PaperTradeState
 from sports_hedge.persistence.universe_checkpoint import SqliteUniverseCheckpointStore
-from test_dual_cadence_scheduler import NOW, FakeClock
+from test_dual_cadence_scheduler import NOW
 from test_issue344_price_engine import (
     DISTANT_KICKOFF,
     FakeKalshi,
