@@ -4,16 +4,38 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { LiveRefreshStatus } from "./api";
-import {
-  cadenceUtilisation,
-  deriveSystemLoad,
-  resolveSystemLoad,
-  systemLoadLines,
-} from "./system-load-display";
+import { LiveRefreshStatus, SystemLoadSummary } from "./api";
+import { systemLoadLines } from "./system-load-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = join(here, "..");
+
+function load(overrides: SystemLoadSummary = {}): SystemLoadSummary {
+  return {
+    hot: {
+      fixtures: 8,
+      working_set: 18,
+      due: 4,
+      in_flight: 1,
+      retry_wait: 2,
+      deferred: 0,
+      last_cycle_ms: 3800,
+      cadence_seconds: 30,
+      cadence_utilisation: 0.1267,
+    },
+    matchbook: { inflight: 2, limit: 4, waiting: 0 },
+    kalshi: { inflight: 1, limit: 4, waiting: 0 },
+    universe: {
+      evaluated: 24,
+      total: 30,
+      remaining: 6,
+      generation_work_used_s: 42,
+      generation_budget_seconds: 150,
+    },
+    catalogue_items: 49,
+    ...overrides,
+  };
+}
 
 function status(overrides: Partial<LiveRefreshStatus> = {}): LiveRefreshStatus {
   return {
@@ -24,36 +46,13 @@ function status(overrides: Partial<LiveRefreshStatus> = {}): LiveRefreshStatus {
     cycle_in_progress: false,
     live_scores: "unavailable_unless_matchbook_payload_includes_scores",
     discovered_fixtures: [],
-    hot: {
-      cadence_seconds: 30,
-      fixture_count: 8,
-      last_duration_ms: 3800,
-    },
-    universe: {
-      cadence_seconds: 180,
-      generation_budget_seconds: 150,
-      generation_work_used_s: 42,
-      canonical_evaluated: 24,
-      canonical_work_total: 30,
-      canonical_remaining: 6,
-      fixture_count: 12,
-    },
-    price_engine: {
-      hot: { working_set: 18, due: 4, in_flight: 1, retry_wait: 2, deferred: 0 },
-      background: { working_set: 31 },
-    },
-    provider_access: {
-      inflight: { matchbook: 2, kalshi: 1 },
-      waiting: { matchbook: 0, kalshi: 0 },
-      limits: { matchbook: 4, kalshi: 4 },
-    },
     ...overrides,
   };
 }
 
 describe("system load display", () => {
-  it("renders the compact current-load card from public status fields", () => {
-    const lines = systemLoadLines(status());
+  it("formats compact copy from backend system_load only", () => {
+    const lines = systemLoadLines(load());
     assert.deepEqual(
       lines.map((line) => `${line.key}  ${line.detail}`),
       [
@@ -64,38 +63,30 @@ describe("system load display", () => {
         "ALL  49 catalogue items",
       ],
     );
-    const derived = deriveSystemLoad(status());
-    assert.equal(derived.hot?.fixtures, 8);
-    assert.equal(derived.hot?.working_set, 18);
-    assert.equal(derived.catalogue_items, 49);
-    assert.notEqual(derived.catalogue_items, derived.hot?.fixtures);
   });
 
-  it("counts TOTAL 2.5/3.5/4.5 as extra catalogue items, not extra fixtures", () => {
-    const load = deriveSystemLoad(
-      status({
-        hot: { cadence_seconds: 30, fixture_count: 1, last_duration_ms: 1200 },
-        price_engine: {
-          hot: { working_set: 3, due: 3 },
-          background: { working_set: 0 },
-        },
+  it("keeps fixture count distinct from catalogue items using backend fields", () => {
+    const lines = systemLoadLines(
+      load({
+        hot: { fixtures: 1, working_set: 3, due: 3, last_cycle_ms: 1200, cadence_seconds: 30 },
+        catalogue_items: 3,
       }),
     );
-    assert.equal(load.hot?.fixtures, 1);
-    assert.equal(load.hot?.working_set, 3);
-    assert.equal(load.catalogue_items, 3);
+    assert.match(lines[0].detail, /1 fixtures · 3 items/);
+    assert.equal(lines[4].detail, "3 catalogue items");
   });
 
-  it("handles missing and zero HOT cycle duration without NaN utilisation", () => {
-    assert.equal(cadenceUtilisation(null, 30), null);
-    assert.equal(cadenceUtilisation(3800, 0), null);
-    assert.equal(cadenceUtilisation(0, 30), 0);
-    assert.equal(cadenceUtilisation(Number.NaN, 30), null);
+  it("displays backend missing cycle duration without computing utilisation", () => {
     const missing = systemLoadLines(
-      status({
-        hot: { cadence_seconds: 30, fixture_count: 8, last_duration_ms: null },
-        system_load: undefined,
-        price_engine: { hot: { working_set: 18, due: 4 }, background: { working_set: 31 } },
+      load({
+        hot: {
+          fixtures: 8,
+          working_set: 18,
+          due: 4,
+          last_cycle_ms: null,
+          cadence_seconds: 30,
+          cadence_utilisation: null,
+        },
       }),
     );
     assert.match(missing[0].detail, /cycle — \/ 30s/);
@@ -103,48 +94,38 @@ describe("system load display", () => {
     assert.doesNotMatch(missing[0].detail, /%\)/);
   });
 
-  it("prefers backend system_load when present and does not invent a safe/unsafe score", () => {
-    const live = status({
-      system_load: {
-        hot: {
-          fixtures: 2,
-          working_set: 5,
-          due: 1,
-          last_cycle_ms: 1500,
-          cadence_seconds: 30,
-          cadence_utilisation: 0.05,
-        },
-        matchbook: { inflight: 0, limit: 4, waiting: 0 },
-        kalshi: { inflight: 0, limit: 4, waiting: 0 },
-        universe: {
-          evaluated: 3,
-          total: 10,
-          remaining: 7,
-          generation_work_used_s: 12,
-          generation_budget_seconds: 150,
-        },
-        catalogue_items: 9,
-      },
-    });
-    const resolved = resolveSystemLoad(live);
-    assert.equal(resolved.catalogue_items, 9);
-    const text = systemLoadLines(live)
+  it("does not reconstruct load from raw lane or provider fields when system_load is absent", () => {
+    const absent = systemLoadLines(status({
+      hot: { cadence_seconds: 30, fixture_count: 8, last_duration_ms: 3800 },
+      price_engine: { hot: { working_set: 18, due: 4 }, background: { working_set: 31 } },
+      provider_access: { inflight: { matchbook: 2 }, limits: { matchbook: 4 } },
+    }).system_load);
+    assert.deepEqual(absent, [{ key: "—", detail: "unavailable" }]);
+    assert.doesNotMatch(absent.map((line) => line.detail).join(" "), /8 fixtures/);
+    const text = systemLoadLines(load())
       .map((line) => `${line.key} ${line.detail}`)
       .join(" ");
-    assert.match(text, /HOT 2 fixtures/);
     assert.doesNotMatch(text, /safe/i);
     assert.doesNotMatch(text, /unsafe/i);
     assert.doesNotMatch(text, /p50/i);
     assert.doesNotMatch(text, /p95/i);
   });
 
-  it("renders from existing live-refresh polls without extra fetch, scan, or interval", () => {
+  it("renders one header card from existing live-refresh polls without extra work or duplicate copies", () => {
     const display = readFileSync(join(frontendRoot, "lib/system-load-display.ts"), "utf8");
     const card = readFileSync(join(frontendRoot, "components/system-load-summary.tsx"), "utf8");
     const bar = readFileSync(join(frontendRoot, "components/venue-health-bar.tsx"), "utf8");
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
     assert.match(bar, /SystemLoadSummaryCard/);
-    assert.match(scan, /SystemLoadSummaryCard/);
+    assert.match(card, /status\?\.system_load/);
+    assert.doesNotMatch(scan, /SystemLoadSummaryCard/);
+    assert.doesNotMatch(display, /deriveSystemLoad/);
+    assert.doesNotMatch(display, /resolveSystemLoad/);
+    assert.doesNotMatch(display, /cadenceUtilisation/);
+    assert.doesNotMatch(display, /DEFAULT_PROVIDER/);
+    assert.doesNotMatch(display, /price_engine/);
+    assert.doesNotMatch(display, /provider_access/);
+    assert.doesNotMatch(display, /canonical_evaluated/);
     assert.doesNotMatch(display, /getLiveRefreshStatus/);
     assert.doesNotMatch(display, /fetch\(/);
     assert.doesNotMatch(display, /setInterval/);

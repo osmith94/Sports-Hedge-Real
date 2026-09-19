@@ -18,7 +18,6 @@ import {
 } from "../lib/api";
 import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
 import { dualScanStatusLines } from "../lib/scan-status-display";
-import { SystemLoadSummaryCard } from "./system-load-summary";
 import { CONFIG_WARNING_BANNER_CLASS } from "../lib/config-warning-display";
 import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-refresh-poll-guard";
 import { venueHealthIsDegraded } from "../lib/venue-health-display";
@@ -553,7 +552,6 @@ export function RunPaperScan() {
           lanes.
         </div>
         <div className="scan-note" aria-label="Fast scan and Full sweep status">
-          <SystemLoadSummaryCard status={liveRefresh} />
           {dualScanStatusLines(liveRefresh, nowMs).map((line) => (
             <div key={line}>{line}</div>
           ))}
