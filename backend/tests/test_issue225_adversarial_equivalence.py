@@ -21,7 +21,6 @@ import pytest
 from sports_hedge.application.complete_set import scan_eligible_pair, solver_eligible_market
 from sports_hedge.application.market_observation import (
     MatchbookObservationBuilder,
-    PolymarketObservationBuilder,
 )
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.domain.football import (
@@ -59,7 +58,7 @@ from sports_hedge.normalization.venues import (
     classify_settlement_wording,
 )
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
+from registered_kalshi import registered_right_observation, scan_costs_for
 
 
 KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
@@ -291,18 +290,18 @@ def _scan(mb_market: dict[str, Any], pm_market: dict[str, Any], books: dict[str,
     matchbook = MatchbookObservationBuilder().build(
         MB_EVENT, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        PM_EVENT, pm_market, books, observed_at=OBSERVED, quote_age_ms=150
+    right = registered_right_observation(
+        PM_EVENT, pm_market, books, observed_at=OBSERVED, matchbook_event=MB_EVENT
     )
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs(),
+            right,
+            venue_costs=scan_costs_for(right),
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
         )
-        return decision, matchbook, polymarket
+        return decision, matchbook, right
     finally:
         repository.close()
 
@@ -315,6 +314,14 @@ def _assert_not_in_solver(decision, left, right) -> None:
     assert decision.solver_model is None
     assert decision.eligible_for_paper_simulation is False
     assert decision.depth_scan is None
+
+
+def _assert_paper_admitted(decision, left, right) -> None:
+    match = MarketMatcher().match(left.market, right.market)
+    assert match.matched is True
+    assert scan_eligible_pair(left.market, right.market, match) is True
+    assert decision.market_match.matched is True
+    assert decision.solver_model == "simple_complete_set"
 
 
 def _event(home: str, away: str, venue: VenueName, source: str) -> CanonicalEvent:
@@ -383,7 +390,6 @@ def test_m1_settlement_mutations_do_not_claim_regulation(text: str) -> None:
         f"{REGULATION} Includes penalties.",
         f"{REGULATION} Settles after 120 minutes.",
         f"{REGULATION} This market is not excluding extra time.",
-        f"{REGULATION} If the match is called off, all bets are refunded.",
     ),
 )
 def test_m1_quoted_blockers_fail_closed_on_production_scan(text: str) -> None:
@@ -394,6 +400,18 @@ def test_m1_quoted_blockers_fail_closed_on_production_scan(text: str) -> None:
     )
     assert polymarket.market.settlement.scope is SettlementScope.UNKNOWN
     _assert_not_in_solver(decision, matchbook, polymarket)
+
+
+def test_called_off_refund_wording_does_not_veto_registered_game() -> None:
+    decision, matchbook, kalshi = _scan(
+        _mb_1x2(),
+        _pm_1x2(
+            f"{REGULATION} If the match is called off, all bets are refunded.",
+            market_id="pm-called-off",
+        ),
+        _pm_books("h", "d", "a"),
+    )
+    _assert_paper_admitted(decision, matchbook, kalshi)
 
 
 @pytest.mark.parametrize("title", TEAM_TOTAL_SHORTHAND)
@@ -561,7 +579,7 @@ def test_positive_controls_remain_paper_eligible() -> None:
         EventMatcher(learned_applicator=LearnedMappingApplicator(rules=[suffix]))
     ).match(
         _1x2(_event("Leeds United", "Chelsea", VenueName.MATCHBOOK, "mb-fc"), VenueName.MATCHBOOK, "mb-1x2"),
-        _1x2(_event("Leeds United FC", "Chelsea FC", VenueName.POLYMARKET, "pm-fc"), VenueName.POLYMARKET, "pm-1x2"),
+        _1x2(_event("Leeds United FC", "Chelsea FC", VenueName.KALSHI, "k-fc"), VenueName.KALSHI, "k-1x2"),
     )
     assert safe.matched is True
 

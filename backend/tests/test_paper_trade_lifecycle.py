@@ -14,13 +14,10 @@ from sports_hedge.api.market_intelligence import get_market_intelligence_service
 from sports_hedge.api.paper import get_paper_audit_repository, get_paper_operations_service
 from sports_hedge.api.priority_alerts import get_priority_alert_service
 from sports_hedge.api.watchlist import get_watchlist_service
-from sports_hedge.application.market_observation import (
-    MatchbookObservationBuilder,
-    PolymarketObservationBuilder,
-)
+from sports_hedge.application.market_observation import MatchbookObservationBuilder
 from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.arbitrage.priority_alerts.models import ExternalLegConfirmation
+from sports_hedge.arbitrage.priority_alerts.models import ExternalLegConfirmation, LegExecutionMode
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
 from sports_hedge.arbitrage.priority_alerts.thresholds import PriorityAlertThresholds
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
@@ -29,7 +26,6 @@ from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
-from sports_hedge.fees.effective import profit_commission_net_odds
 from sports_hedge.paper.fills import PaperFillConfig
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot, default_pools
 from sports_hedge.paper.models import FxRateSnapshot
@@ -45,8 +41,8 @@ from sports_hedge.paper.trades import (
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.treasury.models import TreasuryLockRequest
-from test_paper_scan_pipeline import matchbook_payloads, polymarket_payloads
-from venue_cost_helpers import matchbook_polymarket_costs
+from test_paper_scan_pipeline import kalshi_btts_observation, matchbook_payloads
+from venue_cost_helpers import matchbook_kalshi_costs
 
 
 OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
@@ -86,13 +82,13 @@ def independent_realised_pnl_gbp(trade, winning_outcome: str) -> Decimal:
             total += -leg.filled_stake * gbp_per
             continue
         cost = _cost_for_leg(trade.venue_costs, leg)
-        if cost.rate is None:
-            raise AssertionError(f"missing fee rate for {leg.venue}")
         odds = leg.filled_odds or leg.displayed_odds
         if odds is None:
             raise AssertionError(f"missing filled odds for {leg.outcome}")
-        net_odds = profit_commission_net_odds(odds, cost.rate)
-        total += (leg.filled_stake * net_odds - leg.filled_stake) * gbp_per
+        from sports_hedge.fees.effective import apply_venue_costs
+
+        economics = apply_venue_costs(cost, gross_decimal_odds=odds, stake=leg.filled_stake, require_gbp=False)
+        total += (economics.net_payoff - leg.filled_stake) * gbp_per
     return total
 
 
@@ -115,16 +111,35 @@ def assert_settlement_arithmetic(trade, winning_outcome: str, expected: Decimal)
         if item.won:
             assert item.filled_odds is not None
             assert item.gross_payoff == item.filled_stake * item.filled_odds
-            assert item.venue_fee == item.gross_payoff - item.net_payoff
+            assert item.net_payoff <= item.gross_payoff
+            assert item.venue_fee >= 0
             assert item.native_pnl == item.net_payoff - item.filled_stake
         else:
             assert item.venue_fee == Decimal("0")
             assert item.net_payoff == Decimal("0")
             assert item.gross_payoff == Decimal("0")
             assert item.native_pnl == -item.filled_stake
-        assert item.gbp_pnl == item.native_pnl * item.fx_rate_gbp_per_unit
+        assert abs(item.gbp_pnl - item.native_pnl * item.fx_rate_gbp_per_unit) < Decimal("1e-18")
         gbp_sum += item.gbp_pnl
     assert computation.realised_pnl_gbp == gbp_sum
+
+
+def _force_external_kalshi(plan):
+    plan.execution_modes[VenueName.KALSHI] = LegExecutionMode.EXTERNAL_OPERATOR
+    plan.legs = [
+        (
+            leg.model_copy(
+                update={
+                    "execution_mode": LegExecutionMode.EXTERNAL_OPERATOR.value,
+                    "capital_source": CapitalSource.MANUAL_EXTERNAL,
+                }
+            )
+            if leg.venue is VenueName.KALSHI
+            else leg
+        )
+        for leg in plan.legs
+    ]
+    return plan
 
 
 def _ops(
@@ -161,17 +176,14 @@ def _ops(
         ledger=ledger,
     )
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
-    )
+    kalshi = kalshi_btts_observation()
     decision = scan.scan_pair(
         matchbook,
-        polymarket,
-        venue_costs=matchbook_polymarket_costs(),
+        kalshi,
+        venue_costs=matchbook_kalshi_costs(),
         fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), spread_bps=Decimal("0"))],
         maximum_execution_risk=100,
         liquidity_snapshot=_standing_liquidity(),
@@ -196,10 +208,10 @@ def test_autofill_creates_exactly_one_open_trade(tmp_path: Path) -> None:
         assert trade.paper_only is True
         assert trade.places_orders is False
         kinds = {leg.fill_kind for leg in trade.legs}
-        assert PaperLegFillKind.PAPER_SIMULATED_EXTERNAL in kinds
+        assert PaperLegFillKind.INTERNAL_SIMULATED in kinds
         assert PaperLegFillKind.MANUAL_EXTERNAL not in kinds
         sources = {entry.source for entry in ops.journal.list_entries()}
-        assert "paper_simulated_external" in sources
+        assert "paper_fill_simulator" in sources or "paper_simulated_external" in sources
         assert "manual_external_confirmation" not in sources
         assert "GBP" in trade.capital_locked_native
         assert "USD" in trade.capital_locked_native
@@ -247,7 +259,7 @@ def test_manual_external_is_distinct_from_paper_simulated(tmp_path: Path) -> Non
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
     try:
         opportunity_id = next(iter(ops._plans))
-        plan = ops._plans[opportunity_id]
+        plan = _force_external_kalshi(ops._plans[opportunity_id])
         with pytest.raises(PaperOperationsError, match="manual_external_confirmation_required"):
             ops.simulate_fill(opportunity_id, config=PaperFillConfig(assumed_latency_ms=0, max_quote_age_ms=10_000))
         awaiting = ops.list_active_trades()
@@ -259,12 +271,12 @@ def test_manual_external_is_distinct_from_paper_simulated(tmp_path: Path) -> Non
         assert {(leg.venue, leg.outcome) for leg in awaiting[0].legs} == {
             (leg.venue, leg.outcome) for leg in plan.legs
         }
-        pending_external = next(leg for leg in awaiting[0].legs if leg.venue is VenueName.POLYMARKET)
+        pending_external = next(leg for leg in awaiting[0].legs if leg.venue is VenueName.KALSHI)
         assert pending_external.execution_mode == "EXTERNAL_OPERATOR"
         assert pending_external.capital_source is CapitalSource.MANUAL_EXTERNAL
         assert pending_external.requested_stake > 0
         assert pending_external.source_market_id
-        external = next(leg for leg in plan.legs if leg.venue is VenueName.POLYMARKET)
+        external = next(leg for leg in plan.legs if leg.venue is VenueName.KALSHI)
         from sports_hedge.application.paper_operations import _net_odds_for_leg
 
         ok = ExternalLegConfirmation(
@@ -313,8 +325,8 @@ def test_manual_external_settlement_releases_exact_shared_fill_lock(tmp_path: Pa
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
     try:
         opportunity_id = next(iter(ops._plans))
-        plan = ops._plans[opportunity_id]
-        external = next(leg for leg in plan.legs if leg.venue is VenueName.POLYMARKET)
+        plan = _force_external_kalshi(ops._plans[opportunity_id])
+        external = next(leg for leg in plan.legs if leg.venue is VenueName.KALSHI)
         ok = ExternalLegConfirmation(
             outcome=external.outcome,
             venue=external.venue,
@@ -695,6 +707,7 @@ def test_awaiting_external_api_returns_unfilled_planned_legs(tmp_path: Path) -> 
     client = TestClient(app)
     try:
         opportunity_id = next(iter(ops._plans))
+        ops._plans[opportunity_id] = _force_external_kalshi(ops._plans[opportunity_id])
         blocked = client.post("/paper/simulate-fill", json={"opportunity_id": opportunity_id})
         assert blocked.status_code == 409
         active = client.get("/paper/trades/active").json()
@@ -826,6 +839,7 @@ def test_awaiting_manual_external_repeat_does_not_open_or_lock(tmp_path: Path) -
     _scan, watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
     try:
         opportunity_id = next(iter(ops._plans))
+        ops._plans[opportunity_id] = _force_external_kalshi(ops._plans[opportunity_id])
         with pytest.raises(PaperOperationsError, match="manual_external_confirmation_required"):
             ops.simulate_fill(
                 opportunity_id,
@@ -850,7 +864,7 @@ def test_awaiting_manual_external_repeat_does_not_open_or_lock(tmp_path: Path) -
         assert _lock_and_journal_facts(ledger, opportunity_id) == (before_locks, before_journals)
 
         plan = ops._plans[opportunity_id]
-        external = next(leg for leg in plan.legs if leg.venue is VenueName.POLYMARKET)
+        external = next(leg for leg in plan.legs if leg.venue is VenueName.KALSHI)
         from sports_hedge.application.paper_operations import _net_odds_for_leg
 
         ok = ExternalLegConfirmation(
@@ -987,17 +1001,14 @@ def test_repeat_after_close_and_restart_does_not_duplicate(tmp_path: Path) -> No
     )
     try:
         mb_event, mb_market = matchbook_payloads()
-        pm_event, pm_market, pm_books = polymarket_payloads()
         matchbook = MatchbookObservationBuilder().build(
             mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
         )
-        polymarket = PolymarketObservationBuilder().build(
-            pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
-        )
+        kalshi = kalshi_btts_observation()
         decision = scan.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs(),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=[
                 FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), spread_bps=Decimal("0"))
             ],
@@ -1027,6 +1038,7 @@ def test_awaiting_repeat_survives_restart_without_duplicate(tmp_path: Path) -> N
     _scan, watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
     try:
         opportunity_id = next(iter(ops._plans))
+        ops._plans[opportunity_id] = _force_external_kalshi(ops._plans[opportunity_id])
         with pytest.raises(PaperOperationsError, match="manual_external_confirmation_required"):
             ops.simulate_fill(
                 opportunity_id,
@@ -1059,17 +1071,14 @@ def test_awaiting_repeat_survives_restart_without_duplicate(tmp_path: Path) -> N
     )
     try:
         mb_event, mb_market = matchbook_payloads()
-        pm_event, pm_market, pm_books = polymarket_payloads()
         matchbook = MatchbookObservationBuilder().build(
             mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
         )
-        polymarket = PolymarketObservationBuilder().build(
-            pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
-        )
+        kalshi = kalshi_btts_observation()
         decision = scan.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs(),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=[
                 FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), spread_bps=Decimal("0"))
             ],

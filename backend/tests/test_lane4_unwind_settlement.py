@@ -116,7 +116,7 @@ def _treasury_fingerprint(ledger: SqlitePaperLedger) -> dict[tuple[VenueName, st
 
 
 def _open_mb_pm(demo: DemoWalkthroughService):
-    opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+    opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
     assert opened.trade is not None
     assert opened.trade.state is PaperTradeState.OPEN
     assert opened.trade.close_fills == []
@@ -132,12 +132,12 @@ def test_hold_and_inferior_unwind_release_nothing(tmp_path: Path) -> None:
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
         before = _treasury_fingerprint(ledger)
-        locked_mb, locked_pm = (
+        locked_mb, locked_k = (
             before[(VenueName.MATCHBOOK, "GBP")][1],
-            before[(VenueName.POLYMARKET, "USD")][1],
+            before[(VenueName.KALSHI, "USD")][1],
         )
         assert locked_mb > 0
-        assert locked_pm > 0
+        assert locked_k > 0
         journals_before = [
             entry.source_id
             for entry in ops.journal.list_entries(opportunity_id=trade.opportunity_id)
@@ -187,9 +187,9 @@ def test_validated_unwind_and_settlement_capital_arithmetic(tmp_path: Path) -> N
         opening_legs = {leg.fill_id: (leg.filled_stake, leg.venue, leg.currency) for leg in trade.legs}
         assert all(fill_id for fill_id in opening_legs)
         pre_mb = _pool_tuple(ledger, VenueName.MATCHBOOK, "GBP")
-        pre_pm = _pool_tuple(ledger, VenueName.POLYMARKET, "USD")
+        pre_k = _pool_tuple(ledger, VenueName.KALSHI, "USD")
         assert pre_mb[1] > 0
-        assert pre_pm[1] > 0
+        assert pre_k[1] > 0
 
         closed = ops.complete_validated_unwind(
             trade.trade_id,
@@ -227,19 +227,19 @@ def test_validated_unwind_and_settlement_capital_arithmetic(tmp_path: Path) -> N
 
         assert closed.realised_pnl_gbp == sum((item.gbp_close_pnl for item in closed.close_fills), Decimal("0"))
         post_mb = _pool_tuple(ledger, VenueName.MATCHBOOK, "GBP")
-        post_pm = _pool_tuple(ledger, VenueName.POLYMARKET, "USD")
+        post_k = _pool_tuple(ledger, VenueName.KALSHI, "USD")
         mb_pnl = by_pool[(VenueName.MATCHBOOK, "GBP")]["pnl"]
         mb_fee = by_pool[(VenueName.MATCHBOOK, "GBP")]["fee"]
-        pm_pnl = by_pool[(VenueName.POLYMARKET, "USD")]["pnl"]
-        pm_fee = by_pool[(VenueName.POLYMARKET, "USD")]["fee"]
+        k_pnl = by_pool[(VenueName.KALSHI, "USD")]["pnl"]
+        k_fee = by_pool[(VenueName.KALSHI, "USD")]["fee"]
         assert post_mb[1] == Decimal("0")
-        assert post_pm[1] == Decimal("0")
+        assert post_k[1] == Decimal("0")
         assert post_mb[0] == pre_mb[0] + pre_mb[1] + mb_pnl
-        assert post_pm[0] == pre_pm[0] + pre_pm[1] + pm_pnl
+        assert post_k[0] == pre_k[0] + pre_k[1] + k_pnl
         assert post_mb[2] == pre_mb[2] + mb_pnl
-        assert post_pm[2] == pre_pm[2] + pm_pnl
+        assert post_k[2] == pre_k[2] + k_pnl
         assert post_mb[3] == pre_mb[3] + mb_fee
-        assert post_pm[3] == pre_pm[3] + pm_fee
+        assert post_k[3] == pre_k[3] + k_fee
         assert closed.capital_locked_native == {}
         assert _gbp_book_is_balanced(ops.journal.postings(opportunity_id=trade.opportunity_id))
         unwind_journals = [
@@ -261,7 +261,7 @@ def test_validated_unwind_and_settlement_capital_arithmetic(tmp_path: Path) -> N
         assert again.state is PaperTradeState.CLOSED
         assert len(again.close_fills) == len(closed.close_fills)
         assert _pool_tuple(ledger, VenueName.MATCHBOOK, "GBP") == post_mb
-        assert _pool_tuple(ledger, VenueName.POLYMARKET, "USD") == post_pm
+        assert _pool_tuple(ledger, VenueName.KALSHI, "USD") == post_k
         assert [
             entry.source_id
             for entry in ops.journal.list_entries(opportunity_id=trade.opportunity_id)
@@ -282,13 +282,13 @@ def test_validated_unwind_and_settlement_capital_arithmetic(tmp_path: Path) -> N
         assert ops.trades.get(trade.trade_id).state is PaperTradeState.CLOSED
         assert _pool_tuple(ledger, VenueName.MATCHBOOK, "GBP") == post_mb
 
-        second = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        second = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         settle_trade = second.trade
         assert settle_trade is not None
         assert settle_trade.trade_id != trade.trade_id
         assert settle_trade.state is PaperTradeState.OPEN
         settle_pre_mb = _pool_tuple(ledger, VenueName.MATCHBOOK, "GBP")
-        settle_pre_pm = _pool_tuple(ledger, VenueName.POLYMARKET, "USD")
+        settle_pre_k = _pool_tuple(ledger, VenueName.KALSHI, "USD")
         winning = next(leg.outcome for leg in settle_trade.legs if leg.filled_stake > 0)
         computation = compute_paper_settlement(settle_trade, winning_outcome=winning)
         expected_gbp = computation.realised_pnl_gbp
@@ -316,9 +316,9 @@ def test_validated_unwind_and_settlement_capital_arithmetic(tmp_path: Path) -> N
             assert leg.net_payoff == Decimal("0")
             assert leg.native_pnl == -leg.filled_stake
         settle_post_mb = _pool_tuple(ledger, VenueName.MATCHBOOK, "GBP")
-        settle_post_pm = _pool_tuple(ledger, VenueName.POLYMARKET, "USD")
+        settle_post_k = _pool_tuple(ledger, VenueName.KALSHI, "USD")
         assert settle_post_mb[1] == Decimal("0")
-        assert settle_post_pm[1] == Decimal("0")
+        assert settle_post_k[1] == Decimal("0")
         native_by_pool: dict[tuple[str, str], dict[str, Decimal]] = defaultdict(
             lambda: {"payoff": Decimal("0"), "pnl": Decimal("0"), "fee": Decimal("0"), "stake": Decimal("0")}
         )
@@ -329,13 +329,13 @@ def test_validated_unwind_and_settlement_capital_arithmetic(tmp_path: Path) -> N
             native_by_pool[key]["fee"] += leg.venue_fee
             native_by_pool[key]["stake"] += leg.filled_stake
         mb_set = native_by_pool[("matchbook", "GBP")]
-        pm_set = native_by_pool[("polymarket", "USD")]
+        k_set = native_by_pool[("kalshi", "USD")]
         assert settle_post_mb[0] == settle_pre_mb[0] + mb_set["payoff"]
-        assert settle_post_pm[0] == settle_pre_pm[0] + pm_set["payoff"]
+        assert settle_post_k[0] == settle_pre_k[0] + k_set["payoff"]
         assert settle_post_mb[2] == settle_pre_mb[2] + mb_set["pnl"]
-        assert settle_post_pm[2] == settle_pre_pm[2] + pm_set["pnl"]
+        assert settle_post_k[2] == settle_pre_k[2] + k_set["pnl"]
         assert settle_post_mb[3] == settle_pre_mb[3] + mb_set["fee"]
-        assert settle_post_pm[3] == settle_pre_pm[3] + pm_set["fee"]
+        assert settle_post_k[3] == settle_pre_k[3] + k_set["fee"]
         assert _gbp_book_is_balanced(ops.journal.postings(opportunity_id=settle_trade.opportunity_id))
         settle_journals = [
             entry
@@ -361,7 +361,7 @@ def test_validated_unwind_and_settlement_capital_arithmetic(tmp_path: Path) -> N
             ]
         ) == 1
         assert _pool_tuple(ledger, VenueName.MATCHBOOK, "GBP") == settle_post_mb
-        assert _pool_tuple(ledger, VenueName.POLYMARKET, "USD") == settle_post_pm
+        assert _pool_tuple(ledger, VenueName.KALSHI, "USD") == settle_post_k
         with pytest.raises(PaperOperationsError, match="already_settled"):
             ops.complete_validated_unwind(
                 settle_trade.trade_id,
@@ -371,7 +371,7 @@ def test_validated_unwind_and_settlement_capital_arithmetic(tmp_path: Path) -> N
             )
         assert ops.trades.get(settle_trade.trade_id).state is PaperTradeState.CLOSED
         assert _pool_tuple(ledger, VenueName.MATCHBOOK, "GBP") == settle_post_mb
-        assert _pool_tuple(ledger, VenueName.POLYMARKET, "USD") == settle_post_pm
+        assert _pool_tuple(ledger, VenueName.KALSHI, "USD") == settle_post_k
     finally:
         repository.close()
         ledger.close()

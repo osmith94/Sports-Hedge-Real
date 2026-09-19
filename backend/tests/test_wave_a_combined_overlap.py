@@ -40,10 +40,10 @@ from test_paper_audit_repository import SCANNED, make_record
 from test_step8f_automatic_paper_entry import (
     FX as AUTOFILL_FX,
     _matchbook_btts,
-    _polymarket_btts,
+    _kalshi_btts,
+    _kalshi_costs,
     _standing,
 )
-from venue_cost_helpers import matchbook_polymarket_costs
 
 
 def test_one_coordinator_owns_one_current_state_store() -> None:
@@ -183,21 +183,21 @@ async def test_scheduled_persist_retry_respects_disabled_venues_and_stays_idempo
     try:
         decision = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=AUTOFILL_FX,
             maximum_execution_risk=100,
             liquidity_snapshot=_standing(),
         )
         assert decision.eligible_for_paper_simulation is True, decision.rejection_reasons
-        assert any(leg.venue is VenueName.POLYMARKET for leg in decision.fill_legs)
+        assert any(leg.venue is VenueName.KALSHI for leg in decision.fill_legs)
 
         coordinator = LiveRefreshCoordinator()
         coordinator.reset()
-        disabled_pm = _hot_leftover_report(cancelled=False).model_copy(
+        disabled_k = _hot_leftover_report(cancelled=False).model_copy(
             update={
                 "paper_decisions": [decision],
-                "enabled_venues": [VenueName.MATCHBOOK, VenueName.KALSHI],
+                "enabled_venues": [VenueName.MATCHBOOK, VenueName.POLYMARKET],
             }
         )
 
@@ -210,7 +210,7 @@ async def test_scheduled_persist_retry_respects_disabled_venues_and_stays_idempo
         monkeypatch.setattr(paper_api, "get_paper_operations_service", operations_factory)
         await paper_api.persist_scheduled_collection_report(
             coordinator,
-            disabled_pm,
+            disabled_k,
             service=scan,
             audit=audit,
             watchlist=watchlist,
@@ -220,7 +220,7 @@ async def test_scheduled_persist_retry_respects_disabled_venues_and_stays_idempo
         assert coordinator.status.hot.last_error is None
         assert coordinator.status.hot.persist_ok is True
 
-        enabled = disabled_pm.model_copy(
+        enabled = disabled_k.model_copy(
             update={
                 "enabled_venues": [
                     VenueName.MATCHBOOK,

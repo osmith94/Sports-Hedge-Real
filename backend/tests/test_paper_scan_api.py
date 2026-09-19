@@ -14,6 +14,7 @@ from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
+from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from venue_cost_helpers import venue_cost_payload
 
 
@@ -67,41 +68,51 @@ def test_paper_pair_scan_api_is_research_only_and_returns_auditable_decision() -
             "quote_age_ms": 100,
         },
         "right": {
-            "venue": "polymarket",
+            "venue": "kalshi",
             "event_payload": {
-                "id": "pm-event-1",
+                "event_ticker": "KXEPLGAME-26SEP20NEWCHE",
+                "series_ticker": "KXEPLGAME",
                 "title": "Newcastle United vs Chelsea",
-                "startTime": KICKOFF.isoformat(),
-                "competition": "Premier League",
+                "category": "Sports",
+                "strike_date": KICKOFF.isoformat(),
+                "product_metadata": {"competition": "Premier League"},
             },
             "market_payload": {
-                "id": "pm-market-1",
-                "question": "Both teams to score?",
-                "sportsMarketType": "both teams to score",
-                "outcomes": '["Yes", "No"]',
-                "clobTokenIds": '["yes-token", "no-token"]',
-                "description": "Resolves based on 90 minutes of regulation time.",
+                "ticker": "KXEPLGAME-26SEP20NEWCHE-BTTS",
+                "event_ticker": "KXEPLGAME-26SEP20NEWCHE",
+                "title": "Both Teams To Score",
+                "yes_sub_title": "Yes",
+                "rules_primary": "Resolves on 90 minutes of regulation time. Extra time and penalties do not count.",
+                "series": {
+                    "ticker": "KXEPLGAME",
+                    "title": "Premier League",
+                    "fee_type": "quadratic",
+                    "fee_multiplier": 1,
+                },
+                "kalshi_fee": {"fee_type": "quadratic", "fee_multiplier": "1"},
             },
             "books_by_token": {
-                "yes-token": {
-                    "bids": [{"price": "0.49", "size": "250"}],
-                    "asks": [{"price": "0.51", "size": "250"}],
-                },
-                "no-token": {
-                    "bids": [{"price": "0.41", "size": "300"}],
-                    "asks": [{"price": "0.43", "size": "300"}],
-                },
+                "KXEPLGAME-26SEP20NEWCHE-BTTS": {
+                    "orderbook_fp": {
+                        "yes_dollars": [["0.20", "500.00"]],
+                        "no_dollars": [["0.70", "500.00"]],
+                    }
+                }
             },
             "observed_at": OBSERVED.isoformat(),
-            "quote_age_ms": 150,
+            "quote_age_ms": 80,
         },
-        "fee_snapshots": [
-            {"venue": "matchbook", "profit_haircut_rate": "0.02", "source": "test"},
-            {"venue": "polymarket", "profit_haircut_rate": "0", "zero_rate_basis": "assumed_zero", "source": "test"},
-        ],
+        "fee_snapshots": [],
         "venue_costs": [
             venue_cost_payload("matchbook", "0.02"),
-            venue_cost_payload("polymarket", "0", detail="assumed_zero operator test cost"),
+            kalshi_cost_from_series(
+                {
+                    "ticker": "KXEPLGAME",
+                    "title": "Premier League",
+                    "fee_type": "quadratic",
+                    "fee_multiplier": 1,
+                }
+            ).model_dump(mode="json"),
         ],
         "fx_snapshots": [
             {"currency": "USD", "gbp_per_unit": "0.75", "source": "test"}
@@ -128,7 +139,7 @@ def test_paper_pair_scan_api_is_research_only_and_returns_auditable_decision() -
         assert scan_rows[0]["eligible_for_paper_simulation"] is True
         assert float(scan_rows[0]["net_edge"]) > 0
         assert float(scan_rows[0]["guaranteed_profit_gbp"]) > 0
-        assert set(scan_rows[0]["venues"]) == {"matchbook", "polymarket"}
+        assert set(scan_rows[0]["venues"]) == {"matchbook", "kalshi"}
 
         watchlist = client.get("/paper/watchlist/triggered")
         assert watchlist.status_code == 200

@@ -2,8 +2,8 @@
 
 Deterministic fixture/demo plus cited captured public payloads. Matcher
 recognition, HOT/UNIVERSE concurrency, paper autofill, and execution are
-unchanged. Solver/paper admission requires APPROVED_EQUIVALENT or the
-Issue #326 PAPER_ASSUMED_EQUIVALENT locked-family exception.
+unchanged. Solver/paper admission requires Approved Match Register admission.
+Independently proven APPROVED_EQUIVALENT remains offline census knowledge.
 """
 
 from __future__ import annotations
@@ -153,8 +153,16 @@ def test_corpus_classifications_match_expected_states() -> None:
             assert assessment.state is CatalogueApprovalState.APPROVED_EQUIVALENT
             assert assessment.solver_model is not None
             assert assessment.settlement_complete is True
-            assert assessment.paper_mode_admitted is True
             assert assessment.execution_eligible is False
+            if {entry.left.venue, entry.right.venue} == {
+                VenueName.MATCHBOOK,
+                VenueName.KALSHI,
+            }:
+                assert assessment.paper_mode_admitted is True
+                assert assessment.matcher_matched is True
+            else:
+                assert assessment.paper_mode_admitted is False
+                assert assessment.matcher_matched is False
         elif entry.known_kind == "paper_assumed":
             assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
             assert assessment.settlement_complete is False
@@ -348,7 +356,7 @@ def test_family_coverage_report_has_no_silent_regressions() -> None:
     assert report.conflict_entry_ids == []
     assert report.families["match_result_1x2"].after_approved == 3
     assert report.families["match_result_1x2"].paper_assumed_equivalent == 2
-    assert report.families["match_result_1x2"].before_solver_admitted == 5
+    assert report.families["match_result_1x2"].before_solver_admitted == 3
     assert report.families["both_teams_to_score"].paper_assumed_equivalent == 1
     assert report.families["total_goals_half_line"].paper_assumed_equivalent == 1
     assert report.families["first_team_to_score"].paper_assumed_equivalent == 1
@@ -412,14 +420,22 @@ def _scan_service() -> tuple[PaperScanService, SqliteMarketIntelligenceRepositor
     return PaperScanService(MarketIntelligenceService(repository)), repository
 
 
-def test_approved_catalogue_pair_reaches_solver_eligibility() -> None:
+def test_independently_proven_unregistered_pair_is_not_paper_admitted() -> None:
     entry = next(item for item in census_corpus() if item.entry_id == "good-1x2-mb-pm")
     left = normalize_payload_side(entry.left)
     right = normalize_payload_side(entry.right)
     match = MarketMatcher().match(left, right)
-    assert match.matched is True
-    assert catalogue_allows_solver(left, right) is True
-    assert scan_eligible_pair(left, right, match) is True
+    assert match.matched is False
+    assert "not_registered" in match.reasons
+    assessment = classify_payload_pair(entry.left, entry.right)
+    assert assessment.state is CatalogueApprovalState.APPROVED_EQUIVALENT
+    assert assessment.paper_mode_admitted is False
+    assert catalogue_allows_solver(left, right) is False
+    assert scan_eligible_pair(left, right, match) is False
+    admission = assess_catalogue_admission(left, right)
+    assert admission.allowed is False
+    assert admission.paper_mode_admitted is False
+    assert admission.rejection_reason == "catalogue_not_registered"
 
     service, repository = _scan_service()
     try:
@@ -452,10 +468,10 @@ def test_approved_catalogue_pair_reaches_solver_eligibility() -> None:
             ],
             maximum_execution_risk=100,
         )
-        assert decision.market_match.matched is True
-        assert decision.solver_model == "simple_complete_set"
+        assert decision.market_match.matched is False
+        assert "not_registered" in decision.market_match.reasons
         assert decision.mapping_review_candidate is None
-        assert not any(reason.startswith("catalogue_") for reason in decision.rejection_reasons)
+        assert "market_not_equivalent" in decision.rejection_reasons
         assert Settings().sports_hedge_execution_enabled is False
     finally:
         repository.close()

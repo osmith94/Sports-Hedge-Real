@@ -45,7 +45,7 @@ from sports_hedge.normalization.venues import (
     promote_polymarket_complete_match_result,
 )
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
 
 
 KICKOFF = datetime(2026, 9, 15, 19, 0, tzinfo=UTC)
@@ -518,11 +518,12 @@ async def test_baseline_match_result_is_kept_when_pair_cap_is_one() -> None:
     collector = ReadOnlyCrossVenueCollector(
         matchbook=ElcheMatchbook(markets=_elche_match_odds(include_btts=True)),
         polymarket=ElchePolymarket(markets=pm_markets),
+        kalshi=ElcheKalshi(),
         paper_scan=PaperScanService(MarketIntelligenceService(repository)),
     )
     try:
         report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=matchbook_kalshi_costs() + matchbook_polymarket_costs(),
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
             max_market_pairs_per_event=1,

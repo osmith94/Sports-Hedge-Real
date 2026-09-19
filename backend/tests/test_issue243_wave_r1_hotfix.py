@@ -51,7 +51,8 @@ from sports_hedge.matching.events import EventMatcher
 from sports_hedge.normalization.text import normalize_text
 from sports_hedge.normalization.venues import KalshiNormalizer, MatchbookNormalizer
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs, profit_commission_cost
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs, profit_commission_cost
+from registered_kalshi import FakeKalshiBTTS
 
 
 KICKOFF = datetime(2026, 9, 16, 18, 30, tzinfo=UTC)
@@ -697,10 +698,13 @@ async def test_collector_clusters_malaga_villarreal_suffix_names() -> None:
     collector = ReadOnlyCrossVenueCollector(
         matchbook=NamedMatchbook(home="Málaga", away="Villarreal", competition="La Liga"),
         polymarket=NamedPolymarket(home="Malaga CF", away="Villarreal CF", competition="La Liga"),
+        kalshi=FakeKalshiBTTS([("La Liga", "Málaga", "Villarreal", KICKOFF)]),
         paper_scan=PaperScanService(MarketIntelligenceService(repository)),
     )
     try:
-        report = await collector.collect_and_scan(venue_costs=matchbook_polymarket_costs())
+        report = await collector.collect_and_scan(
+            venue_costs=matchbook_kalshi_costs() + matchbook_polymarket_costs()
+        )
         clustered = [
             item
             for item in report.discovered_fixtures

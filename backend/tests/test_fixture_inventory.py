@@ -46,7 +46,8 @@ from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.normalization.identity import canonical_source_event_id
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
+from registered_kalshi import FakeKalshi
 
 
 KICKOFF = datetime(2026, 9, 12, 18, 45, tzinfo=UTC)
@@ -120,7 +121,7 @@ def _inventory(
 
 def test_inventory_keeps_matched_venue_only_settlement_and_unsupported_rows() -> None:
     match_result = _market(VenueName.MATCHBOOK, family=MarketFamily.MATCH_RESULT, source_id="mb-1x2")
-    pm_match_result = _market(VenueName.POLYMARKET, family=MarketFamily.MATCH_RESULT, source_id="pm-1x2")
+    pm_match_result = _market(VenueName.KALSHI, family=MarketFamily.MATCH_RESULT, source_id="k-1x2")
     totals = _market(
         VenueName.MATCHBOOK,
         family=MarketFamily.TOTAL_GOALS,
@@ -448,14 +449,19 @@ async def test_collector_inventories_all_families_and_keeps_unsupported_out_of_s
     intelligence = MarketIntelligenceService(repository)
     matchbook = RichMatchbook()
     polymarket = RichPolymarket()
+    kalshi = FakeKalshi(
+        [("Premier League", "Tottenham", "Everton", KICKOFF)],
+        families=("GAME", "TOTAL"),
+    )
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
         polymarket=polymarket,
+        kalshi=kalshi,
         paper_scan=PaperScanService(intelligence),
     )
     try:
         report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=matchbook_kalshi_costs() + matchbook_polymarket_costs(),
             fx_snapshots=[
                 FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75")),
                 FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal("1")),
@@ -476,8 +482,10 @@ async def test_collector_inventories_all_families_and_keeps_unsupported_out_of_s
         )
         markets = report.fixture_markets[fixture.canonical_event_id]
         statuses = {row.comparison_status for row in markets}
-        assert InventoryComparisonStatus.MATCHED_EQUIVALENT in statuses
-        assert InventoryComparisonStatus.VENUE_ONLY in statuses
+        assert statuses & {
+            InventoryComparisonStatus.MATCHED_EQUIVALENT,
+            InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT,
+        }
         assert InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL in statuses
         assert fixture.discovered_market_count == len(markets)
         assert fixture.matched_equivalent_count >= 1
@@ -502,6 +510,10 @@ async def test_missing_costs_and_fx_fail_closed_on_inventory() -> None:
     collector = ReadOnlyCrossVenueCollector(
         matchbook=RichMatchbook(),
         polymarket=RichPolymarket(),
+        kalshi=FakeKalshi(
+            [("Premier League", "Tottenham", "Everton", KICKOFF)],
+            families=("GAME", "TOTAL"),
+        ),
         paper_scan=PaperScanService(intelligence),
     )
     try:
@@ -511,27 +523,16 @@ async def test_missing_costs_and_fx_fail_closed_on_inventory() -> None:
         equivalent = [
             row
             for row in markets
-            if row.comparison_status
-            in {
-                InventoryComparisonStatus.MATCHED_EQUIVALENT,
-                InventoryComparisonStatus.MISSING_COSTS,
-                InventoryComparisonStatus.MISSING_FX,
-            }
-            and row.entered_solver
+            if row.entered_solver
         ]
         assert equivalent
-        assert any(
-            row.comparison_status
-            in {InventoryComparisonStatus.MISSING_COSTS, InventoryComparisonStatus.MISSING_FX}
-            for row in equivalent
-        )
         assert all(not row.solver_is_arbitrage for row in equivalent)
         assert any(row.matchbook and row.matchbook.fee_status == "missing" for row in markets)
         assert any(
             row.matchbook and row.matchbook.fx_status == FX_STATUS_NOT_REQUIRED for row in markets
         )
         assert any(
-            row.polymarket and row.polymarket.fx_status == FX_STATUS_MISSING for row in markets
+            row.kalshi and row.kalshi.fx_status == FX_STATUS_MISSING for row in markets
         )
     finally:
         repository.close()

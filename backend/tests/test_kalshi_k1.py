@@ -449,9 +449,10 @@ def test_polymarket_kalshi_scan_does_not_require_matchbook() -> None:
         fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="test")],
         maximum_execution_risk=100,
     )
+    assert decision.market_match.matched is False
+    assert "not_registered" in decision.market_match.reasons
+    assert decision.eligible_for_paper_simulation is False
     assert VenueName.MATCHBOOK not in decision.execution_modes
-    assert decision.execution_modes[VenueName.KALSHI] == LegExecutionMode.INTERNAL
-    assert decision.solver_model == "simple_complete_set"
 
 
 def test_three_venue_inventory_does_not_duplicate_canonical_markets() -> None:

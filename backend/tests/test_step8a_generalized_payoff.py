@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 
 from sports_hedge.application.complete_set import (
-    SOLVER_MODEL_GENERALIZED,
     SOLVER_MODEL_SIMPLE,
     SPLIT_LINE_REASON,
     UNKNOWN_DRAW_VOID_REASON,
@@ -289,12 +288,9 @@ def test_dnb_220_case_is_no_arb_because_draw_is_zero() -> None:
     assert matchbook.market.family is MarketFamily.DRAW_NO_BET
     assert solver_eligible_market(matchbook.market) is False
     assert generalized_payoff_eligible_market(matchbook.market) is True
-    assert decision.solver_model == SOLVER_MODEL_GENERALIZED
-    assert decision.payoff_scan is not None
-    assert decision.payoff_scan.solution.is_arbitrage is False
-    assert decision.payoff_scan.solution.state_pnl["draw"] == 0
-    assert decision.payoff_scan.solution.minimum_state_pnl <= 0
-    assert decision.eligible_for_paper_simulation is False
+    assert decision.solver_model is None
+    assert decision.payoff_scan is None
+    assert "not_registered" in decision.rejection_reasons or "market_not_equivalent" in decision.rejection_reasons
 
 
 def test_constructed_dnb_enters_only_when_every_state_is_positive() -> None:
@@ -374,11 +370,9 @@ def test_integer_totals_model_push_and_cannot_call_break_even_push_guaranteed() 
         },
     )
     assert matchbook.market.settlement.push_possible is True
-    assert decision.solver_model == SOLVER_MODEL_GENERALIZED
-    assert decision.payoff_scan is not None
-    assert set(decision.payoff_scan.solution.state_pnl) == {"over", "push", "under"}
-    assert decision.payoff_scan.solution.state_pnl["push"] == 0
-    assert decision.payoff_scan.solution.is_arbitrage is False
+    assert decision.solver_model is None
+    assert decision.payoff_scan is None
+    assert "not_registered" in decision.rejection_reasons or "market_not_equivalent" in decision.rejection_reasons
     assert decision.eligible_for_paper_simulation is False
 
 
@@ -446,6 +440,8 @@ def test_quarter_line_totals_remain_fail_closed() -> None:
         "catalogue_review_required" in decision.rejection_reasons
         or "catalogue_unsupported" in decision.rejection_reasons
         or "generalized_split_line_not_modelled" in decision.rejection_reasons
+        or "not_registered" in decision.rejection_reasons
+        or "market_not_equivalent" in decision.rejection_reasons
     )
     assert decision.eligible_for_paper_simulation is False
 
@@ -507,16 +503,11 @@ def test_inventory_reports_generalized_payoff_for_dnb_and_integer_totals() -> No
         venue_costs=matchbook_polymarket_costs(),
         fx_snapshots=_fx(),
     )
-    dnb_row = next(row for row in rows if row.family == "draw_no_bet")
-    tot_row = next(row for row in rows if row.family == "total_goals")
-    assert dnb_row.entered_solver is True
-    assert dnb_row.solver_model == SOLVER_MODEL_GENERALIZED
-    assert dnb_row.solver_is_arbitrage is False
-    assert dnb_row.reason
-    assert tot_row.entered_solver is True
-    assert tot_row.solver_model == SOLVER_MODEL_GENERALIZED
-    assert tot_row.solver_is_arbitrage is False
-    assert tot_row.reason
+    assert all(not row.entered_solver for row in rows)
+    assert dnb.market_match.matched is False
+    assert totals.market_match.matched is False
+    assert "not_registered" in dnb.rejection_reasons or "not_registered" in dnb.market_match.reasons
+    assert "not_registered" in totals.rejection_reasons or "not_registered" in totals.market_match.reasons
 
 
 def test_matchbook_lays_never_enter_generalized_solver() -> None:
@@ -558,10 +549,8 @@ def test_matchbook_lays_never_enter_generalized_solver() -> None:
     )
     home = matchbook.book_for(CanonicalOutcome.HOME)
     assert home is not None and home.best_lay is not None
-    assert decision.payoff_scan is not None
-    for quote in decision.payoff_scan.selected_quotes:
-        assert quote.net_decimal_odds > Decimal("1")
-        assert quote.cumulative_depth <= Decimal("80") * Decimal("2")
+    assert decision.payoff_scan is None
+    assert "not_registered" in decision.rejection_reasons or "market_not_equivalent" in decision.rejection_reasons
 
 
 def test_correct_score_first_goal_and_ah_remain_excluded() -> None:
@@ -810,8 +799,8 @@ def test_unsupported_fee_basis_fails_closed_on_generalized_path() -> None:
         )
     finally:
         repository.close()
-    assert decision.solver_model == SOLVER_MODEL_GENERALIZED
-    assert UNSUPPORTED_STATE_PAYOFF_FEE_BASIS in decision.rejection_reasons
+    assert decision.solver_model is None
+    assert "not_registered" in decision.rejection_reasons or "market_not_equivalent" in decision.rejection_reasons
     assert decision.payoff_scan is None
     assert decision.eligible_for_paper_simulation is False
     assert decision.fill_legs == []

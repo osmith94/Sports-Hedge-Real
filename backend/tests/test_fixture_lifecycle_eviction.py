@@ -7,7 +7,8 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
+from registered_kalshi import FakeKalshi
 
 from sports_hedge.application.collector import (
     CollectionReport,
@@ -676,10 +677,16 @@ async def test_matchbook_finished_stops_hot_market_book_and_economics_calls() ->
     intelligence = MarketIntelligenceService(repository)
     matchbook = LifecycleMatchbook(kickoff=kickoff, status="open", in_running=True)
     polymarket = LifecyclePolymarket(kickoff=kickoff)
+    kalshi = FakeKalshi(
+        [("Championship", "Norwich City", "West Bromwich Albion", kickoff)],
+        families=("GAME",),
+        competition="Championship",
+    )
     paper_scan = CountingPaperScan(intelligence)
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
         polymarket=polymarket,
+        kalshi=kalshi,
         paper_scan=paper_scan,
     )
     clock = {"now": kickoff + timedelta(minutes=25)}
@@ -687,24 +694,25 @@ async def test_matchbook_finished_stops_hot_market_book_and_economics_calls() ->
     coordinator.reset()
     coordinator._clock = lambda: clock["now"]
     try:
-        costs = matchbook_polymarket_costs()
+        costs = matchbook_kalshi_costs()
         fx = [
             FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75")),
             FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal("1")),
         ]
+        venues = [VenueName.MATCHBOOK, VenueName.KALSHI]
         universe = await collector.collect_and_scan(
             venue_costs=costs,
             fx_snapshots=fx,
             maximum_execution_risk=100,
             scan_lane=ScanLane.UNIVERSE.value,
+            enabled_venues=venues,
         )
         coordinator.record_report(universe, scan_lane=ScanLane.UNIVERSE)
         assert matchbook.list_markets_calls
-        assert polymarket.list_markets_calls
-        assert polymarket.book_calls
+        assert kalshi.book_calls
         assert paper_scan.scan_pair_calls > 0
         universe_markets = list(matchbook.list_markets_calls)
-        universe_pm_markets = list(polymarket.list_markets_calls)
+        universe_k_books = kalshi.book_calls
         fixture = next(item for item in universe.discovered_fixtures if item.matchbook_matched)
         live_report = await collector.collect_and_scan(
             venue_costs=costs,
@@ -714,16 +722,15 @@ async def test_matchbook_finished_stops_hot_market_book_and_economics_calls() ->
             identity_scope=[fixture.canonical_event_id],
             known_source_events=universe.fixture_source_events,
             hot_market_relationships=relationships_from_fixture_markets(universe.fixture_markets),
+            enabled_venues=venues,
         )
         coordinator.record_report(live_report, scan_lane=ScanLane.HOT)
         assert matchbook.list_markets_calls == universe_markets
-        assert polymarket.list_markets_calls == universe_pm_markets
         assert matchbook.get_market_calls
-        assert polymarket.book_calls
+        assert kalshi.book_calls > universe_k_books
         assert paper_scan.scan_pair_calls > 0
         live_markets = list(matchbook.list_markets_calls)
-        live_pm_markets = list(polymarket.list_markets_calls)
-        live_books = list(polymarket.book_calls)
+        live_k_books = kalshi.book_calls
         live_scans = paper_scan.scan_pair_calls
         live_get_market = list(matchbook.get_market_calls)
         assert coordinator.fixture_current_state().hot_identity_scope(clock["now"])
@@ -735,11 +742,11 @@ async def test_matchbook_finished_stops_hot_market_book_and_economics_calls() ->
             fx_snapshots=fx,
             maximum_execution_risk=100,
             scan_lane=ScanLane.UNIVERSE.value,
+            enabled_venues=venues,
         )
         coordinator.record_report(finished_report, scan_lane=ScanLane.UNIVERSE)
         assert matchbook.list_markets_calls == live_markets
-        assert polymarket.list_markets_calls == live_pm_markets
-        assert polymarket.book_calls == live_books
+        assert kalshi.book_calls == live_k_books
         assert paper_scan.scan_pair_calls == live_scans
         assert matchbook.get_market_calls == live_get_market
         store = coordinator.fixture_current_state()
@@ -764,11 +771,11 @@ async def test_matchbook_finished_stops_hot_market_book_and_economics_calls() ->
                 store.hot_identity_scope(clock["now"]),
                 now=clock["now"],
             ),
+            enabled_venues=venues,
         )
         coordinator.record_report(hot_report, scan_lane=ScanLane.HOT)
         assert matchbook.list_markets_calls == live_markets
-        assert polymarket.list_markets_calls == live_pm_markets
-        assert polymarket.book_calls == live_books
+        assert kalshi.book_calls == live_k_books
         assert paper_scan.scan_pair_calls == live_scans
         assert matchbook.get_market_calls == live_get_market
         assert coordinator.public_status().discovered_fixtures == []

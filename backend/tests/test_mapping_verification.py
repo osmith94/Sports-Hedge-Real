@@ -13,8 +13,8 @@ from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 from sports_hedge.application.mapping_review import MappingReviewService, parse_chatgpt_verdict
 from sports_hedge.application.market_observation import (
     MatchbookObservationBuilder,
-    PolymarketObservationBuilder,
 )
+from registered_kalshi import registered_right_observation
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.domain.football import (
     CanonicalEvent,
@@ -174,7 +174,7 @@ def _matcher_with_store(store: SqliteMappingRuleStore) -> MarketMatcher:
 def test_native_hundred_percent_does_not_need_learned_rule() -> None:
     result = MarketMatcher().match(
         _market(_event(VenueName.MATCHBOOK, "Newcastle United", "Chelsea")),
-        _market(_event(VenueName.POLYMARKET, "Newcastle United", "Chelsea")),
+        _market(_event(VenueName.KALSHI, "Newcastle United", "Chelsea")),
     )
     assert result.matched is True
     assert result.confidence == 1.0
@@ -221,7 +221,21 @@ def test_confirmed_reusable_rule_maps_second_fixture_same_venue() -> None:
     assert saved.operator_confirmed is True
     assert saved.proposed_rule is not None
     matcher = _matcher_with_store(store)
-    first = matcher.match(
+    event_match = matcher.event_matcher.match(
+        _event(VenueName.MATCHBOOK, "Leeds United", "Chelsea", source_event_id="mb-leeds"),
+        _event(
+            VenueName.POLYMARKET,
+            "Leeds United FC",
+            "Chelsea FC",
+            source_event_id="pm-leeds",
+        ),
+    )
+    assert event_match.matched is True
+    assert event_match.provenance.mapping_source is MappingProvenanceSource.OPERATOR_VERIFIED
+    assert event_match.provenance.rule_id == saved.proposed_rule.rule_id
+    assert "operator_verified_learned_alias" in event_match.reasons
+
+    unregistered = matcher.match(
         _market(_event(VenueName.MATCHBOOK, "Leeds United", "Chelsea", source_event_id="mb-leeds")),
         _market(
             _event(
@@ -229,6 +243,20 @@ def test_confirmed_reusable_rule_maps_second_fixture_same_venue() -> None:
                 "Leeds United FC",
                 "Chelsea FC",
                 source_event_id="pm-leeds",
+            )
+        ),
+    )
+    assert unregistered.matched is False
+    assert "not_registered" in unregistered.reasons
+
+    first = matcher.match(
+        _market(_event(VenueName.MATCHBOOK, "Leeds United", "Chelsea", source_event_id="mb-leeds")),
+        _market(
+            _event(
+                VenueName.KALSHI,
+                "Leeds United FC",
+                "Chelsea FC",
+                source_event_id="k-leeds",
             )
         ),
     )
@@ -243,22 +271,18 @@ def test_confirmed_reusable_rule_maps_second_fixture_same_venue() -> None:
         ),
         _market(
             _event(
-                VenueName.POLYMARKET,
+                VenueName.KALSHI,
                 "Arsenal FC",
                 "Tottenham Hotspur FC",
-                source_event_id="pm-ars",
+                source_event_id="k-ars",
             )
         ),
     )
     assert first.matched is True
     assert first.confidence == 1.0
-    assert first.provenance.mapping_source is MappingProvenanceSource.OPERATOR_VERIFIED
-    assert first.provenance.rule_id == saved.proposed_rule.rule_id
-    assert first.provenance.rule_version == saved.proposed_rule.version
-    assert "operator_verified_learned_alias" in first.reasons
+    assert "registered_structural_match" in first.reasons or "approved_match_register" in " ".join(first.reasons)
     assert second.matched is True
     assert second.confidence == 1.0
-    assert second.provenance.rule_id == saved.proposed_rule.rule_id
     store.close()
 
 
@@ -752,7 +776,7 @@ def test_learned_mapping_does_not_bypass_paper_qualification_gates() -> None:
         observed_at=OBSERVED,
         quote_age_ms=120,
     )
-    polymarket = PolymarketObservationBuilder().build(
+    right = registered_right_observation(
         {
             "id": "pm-leeds",
             "title": "Leeds United FC vs Chelsea FC",
@@ -780,10 +804,15 @@ def test_learned_mapping_does_not_bypass_paper_qualification_gates() -> None:
             },
         },
         observed_at=OBSERVED,
-        quote_age_ms=180,
+        matchbook_event={
+            "id": 1001,
+            "name": "Leeds United vs Chelsea",
+            "start": KICKOFF.isoformat(),
+            "competition-name": "Premier League",
+        },
     )
     try:
-        decision = service.scan_pair(matchbook, polymarket)
+        decision = service.scan_pair(matchbook, right)
         assert decision.market_match.matched is True
         assert decision.market_match.confidence == 1.0
         assert decision.mapping_review_candidate is None

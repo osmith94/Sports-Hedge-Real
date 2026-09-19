@@ -162,7 +162,11 @@ UNSUPPORTED
 
 Both venue markets normalize to the same approved archetype and all required parameters/outcome semantics agree.
 
-Only this state is eligible for **live execution**.
+Only this state is eligible for **live execution**, and only when the same
+pair is also admitted by the Approved Match Register. Unregistered
+independently proven fingerprints remain census/onboarding knowledge.
+No register entry means no runtime matcher match and no PAPER solver
+admission, even when both settlement fingerprints are independently complete.
 
 ### PAPER_ASSUMED_EQUIVALENT
 
@@ -181,7 +185,7 @@ This state is visibly labelled, carries `settlement_assumption=regulation_time`,
 
 Kalshi cancel/reschedule-to-fair-price wording does not block PAPER admission. Extra time, penalties, and to-qualify are unregistered native archetypes (they do not map to the onboarded full-time keys). Incomplete outcome sets, wrong period, and TOTAL line mismatch remain fail-closed through the register structural gate. Settlement fingerprints are not a second runtime tribunal after register lookup.
 
-Independently proven complete fingerprints remain `APPROVED_EQUIVALENT`. DNB, handicap, double chance, team total, team-to-score, and clean sheet stay explicit in the versioned registry as deferred / unsupported / venue-unavailable and must not trigger Phase-1 settlement/depth/solver/HOT work.
+Independently proven complete fingerprints remain `APPROVED_EQUIVALENT` as **offline census/onboarding knowledge**. They do not grant runtime PAPER matcher or solver admission until that venue-native archetype is added to the Approved Match Register. DNB, handicap, double chance, team total, team-to-score, and clean sheet stay explicit in the versioned registry as deferred / unsupported / venue-unavailable and must not trigger Phase-1 settlement/depth/solver/HOT work.
 
 ### APPROVED_PARAMETER_MISMATCH
 

@@ -26,6 +26,7 @@ from sports_hedge.application.live_refresh import LiveRefreshCoordinator
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.domain.football import FootballPeriod, MarketFamily, SettlementScope
+from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.events import EventMatcher
@@ -267,6 +268,7 @@ async def test_expensive_clustering_returns_inside_cycle_envelope(
     )
     started = time.monotonic()
     report = await collector.collect_and_scan(
+        enabled_venues=[VenueName.MATCHBOOK, VenueName.POLYMARKET],
         venue_costs=matchbook_polymarket_costs(),
         fx_snapshots=AUTOFILL_FX,
         cycle_timeout_seconds=0.45,
@@ -650,12 +652,12 @@ async def test_persist_retry_does_not_duplicate_audit_but_new_scans_append(
     scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
     audit = SqlitePaperScanRepository(tmp_path / "paper-audit.sqlite")
     try:
-        from test_step8f_automatic_paper_entry import _matchbook_btts, _polymarket_btts
+        from test_step8f_automatic_paper_entry import _matchbook_btts, _kalshi_btts, _kalshi_costs
 
         decision = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=AUTOFILL_FX,
             maximum_execution_risk=100,
             liquidity_snapshot=_standing(),
@@ -711,8 +713,8 @@ async def test_persist_retry_does_not_duplicate_audit_but_new_scans_append(
 
         second = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=AUTOFILL_FX,
             maximum_execution_risk=100,
             liquidity_snapshot=_standing(),

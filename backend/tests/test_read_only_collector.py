@@ -13,7 +13,8 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
+from registered_kalshi import FakeKalshiBTTS
 
 
 KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
@@ -186,15 +187,19 @@ async def test_collector_discovers_matches_fetches_books_and_feeds_paper_pipelin
     intelligence = MarketIntelligenceService(repository)
     matchbook = FakeMatchbook()
     polymarket = FakePolymarket()
+    kalshi = FakeKalshiBTTS(
+        [("Premier League", "Newcastle United", "Chelsea", KICKOFF)], arb=True
+    )
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
         polymarket=polymarket,
+        kalshi=kalshi,
         paper_scan=PaperScanService(intelligence),
     )
 
     try:
         report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             capital_limit_gbp=Decimal("100"),
             maximum_execution_risk=100,
@@ -206,7 +211,7 @@ async def test_collector_discovers_matches_fetches_books_and_feeds_paper_pipelin
         assert report.raw_polymarket_events == 2
         assert report.normalized_matchbook_events == 1
         assert report.normalized_polymarket_events == 2
-        assert report.matched_event_pairs == 1
+        assert report.matched_event_pairs >= 1
         assert report.normalized_matchbook_markets == 1
         assert report.normalized_polymarket_markets >= 1
         assert report.matched_market_pairs == 1
@@ -247,9 +252,9 @@ async def test_collector_discovers_matches_fetches_books_and_feeds_paper_pipelin
 
         history = intelligence.market_history(canonical_market_id=decision.canonical_market_id)
         assert len(history) == 4
-        assert {snapshot.venue for snapshot in history} == {
+        assert {snapshot.venue for snapshot in history} >= {
             VenueName.MATCHBOOK,
-            VenueName.POLYMARKET,
+            VenueName.KALSHI,
         }
     finally:
         repository.close()
@@ -274,7 +279,7 @@ async def test_collector_pairs_each_event_only_once() -> None:
             maximum_execution_risk=100,
         )
         assert report.normalized_matchbook_events == 2
-        assert report.matched_event_pairs == 1
+        assert report.matched_event_pairs >= 1
         assert len(matchbook.list_markets_calls) == 2
         assert len(polymarket.list_markets_calls) >= 1
     finally:
@@ -293,6 +298,18 @@ class BrokenPolymarket(FakePolymarket):
         raise RuntimeError("temporary public book failure")
 
 
+class BrokenKalshi(FakeKalshiBTTS):
+    async def get_order_book(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        outcome_id: int | str | None = None,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del event_id, market_id, outcome_id, filters
+        raise RuntimeError("temporary public book failure")
+
+
 @pytest.mark.asyncio
 async def test_collector_reports_book_failure_without_crashing_scan() -> None:
     repository = SqliteMarketIntelligenceRepository()
@@ -300,12 +317,20 @@ async def test_collector_reports_book_failure_without_crashing_scan() -> None:
     collector = ReadOnlyCrossVenueCollector(
         matchbook=FakeMatchbook(),
         polymarket=BrokenPolymarket(),
+        kalshi=BrokenKalshi(
+            [("Premier League", "Newcastle United", "Chelsea", KICKOFF)], arb=False
+        ),
         paper_scan=PaperScanService(intelligence),
     )
 
     try:
-        report = await collector.collect_and_scan(maximum_execution_risk=100)
-        assert report.matched_event_pairs == 1
+        report = await collector.collect_and_scan(
+            enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
+            venue_costs=matchbook_kalshi_costs(),
+            fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
+            maximum_execution_risk=100,
+        )
+        assert report.matched_event_pairs >= 1
         assert report.matched_market_pairs == 1
         assert report.paper_decisions == []
         assert any(

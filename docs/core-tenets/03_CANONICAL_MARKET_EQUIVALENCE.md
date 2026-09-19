@@ -47,7 +47,11 @@ REVIEW_REQUIRED
 UNSUPPORTED
 ```
 
-Only `APPROVED_EQUIVALENT` may enter the **live-execution** path.
+Only independently proven `APPROVED_EQUIVALENT` rows that are also in the
+Approved Match Register may enter the **live-execution** path. Unregistered
+independently proven fingerprints may still classify `APPROVED_EQUIVALENT` for
+offline census/onboarding; they do not grant runtime matcher or paper-solver
+admission until that venue-native archetype is added to the register.
 
 `PAPER_ASSUMED_EQUIVALENT` is an owner-approved Phase-1 **paper-mode** path for Matchbook↔Kalshi rows in the Approved Match Register: MATCH_RESULT / 1X2, BTTS, exact-line TOTAL_GOALS, and FIRST_TEAM_TO_SCORE. The register itself is the PAPER cross-venue equivalence decision. Once canonical fixture identity and canonical market identity/parameters match, the scanner must not re-litigate settlement wording, mapping confidence, or learned labels on every scan. It carries `settlement_assumption=regulation_time` and an owner-approved paper-equivalence / register audit marker. It is never represented as independently proven settlement and is never live-execution eligible.
 

@@ -27,13 +27,9 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatchResult
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
-from venue_cost_helpers import matchbook_polymarket_costs, profit_commission_cost
-
-from test_paper_scan_pipeline import matchbook_payloads, polymarket_payloads
-from sports_hedge.application.market_observation import (
-    MatchbookObservationBuilder,
-    PolymarketObservationBuilder,
-)
+from test_paper_scan_pipeline import kalshi_btts_observation, matchbook_payloads
+from sports_hedge.application.market_observation import MatchbookObservationBuilder
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs, profit_commission_cost
 
 
 OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
@@ -275,13 +271,10 @@ def test_paper_scan_rejects_maker_opening_role() -> None:
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(intelligence)
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
-    )
+    kalshi = kalshi_btts_observation()
     captured = datetime.now(UTC)
     costs = [
         profit_commission_cost(
@@ -289,16 +282,12 @@ def test_paper_scan_rejects_maker_opening_role() -> None:
             Decimal("0.02"),
             captured_at=captured,
         ).model_copy(update={"order_role": OrderRole.MAKER}),
-        profit_commission_cost(
-            VenueName.POLYMARKET,
-            Decimal("0"),
-            captured_at=captured,
-        ),
+        *matchbook_kalshi_costs(captured_at=captured)[1:],
     ]
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
+            kalshi,
             venue_costs=costs,
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="test_fx")],
             maximum_execution_risk=100,
@@ -317,18 +306,15 @@ def test_stale_taker_quote_is_rejected_before_risk_scoring() -> None:
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(intelligence)
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=5_000
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=5_000
-    )
+    kalshi = kalshi_btts_observation(quote_age_ms=5_000)
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs(),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="test_fx")],
             maximum_execution_risk=100,
         )

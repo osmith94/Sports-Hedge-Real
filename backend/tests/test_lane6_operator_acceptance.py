@@ -248,7 +248,7 @@ def test_uninterrupted_fixture_replay_walkthrough_records_locks_fills_and_persis
         assert before[VenueName.KALSHI].native_currency == "USD"
 
         opened = demo.replay(
-            FixtureReplayRequest(venue_pair="matchbook_polymarket", solver="simple", close_via="hold")
+            FixtureReplayRequest(venue_pair="matchbook_kalshi", solver="simple", close_via="hold")
         )
         assert opened.label == DEMO_FIXTURE_LABEL
         assert opened.data_kind == DEMO_DATA_KIND
@@ -260,16 +260,15 @@ def test_uninterrupted_fixture_replay_walkthrough_records_locks_fills_and_persis
         assert trade.entry_risk is not None
         assert trade.legs
         kinds = {leg.fill_kind for leg in trade.legs}
-        assert PaperLegFillKind.INTERNAL_SIMULATED in kinds
-        assert PaperLegFillKind.PAPER_SIMULATED_EXTERNAL in kinds
+        assert kinds == {PaperLegFillKind.INTERNAL_SIMULATED}
         assert PaperLegFillKind.MANUAL_EXTERNAL not in kinds
         assert all(leg.filled_stake > 0 for leg in trade.legs)
         after = {pool.venue: pool for pool in opened.treasury.pools}
         assert after[VenueName.MATCHBOOK].locked_capital > 0
-        assert after[VenueName.POLYMARKET].locked_capital > 0
+        assert after[VenueName.KALSHI].locked_capital > 0
         assert after[VenueName.MATCHBOOK].available_cash < before[VenueName.MATCHBOOK].available_cash
-        assert after[VenueName.POLYMARKET].available_cash < before[VenueName.POLYMARKET].available_cash
-        assert after[VenueName.KALSHI].locked_capital == 0
+        assert after[VenueName.KALSHI].available_cash < before[VenueName.KALSHI].available_cash
+        assert after[VenueName.POLYMARKET].locked_capital == 0
         stored = watchlist.repository.get(trade.opportunity_id)
         assert stored is not None
         assert stored.data_kind == DEMO_DATA_KIND
@@ -286,7 +285,7 @@ def test_uninterrupted_fixture_replay_walkthrough_records_locks_fills_and_persis
         assert gbp_is_balanced(postings)
         trade_id = trade.trade_id
         mb_locked = after[VenueName.MATCHBOOK].locked_capital
-        pm_locked = after[VenueName.POLYMARKET].locked_capital
+        k_locked = after[VenueName.KALSHI].locked_capital
     finally:
         repository.close()
         ledger.close()
@@ -303,7 +302,7 @@ def test_uninterrupted_fixture_replay_walkthrough_records_locks_fills_and_persis
         assert persisted.state is PaperTradeState.OPEN
         treasury = reopened.treasury.snapshot()
         assert treasury.pool(VenueName.MATCHBOOK, "GBP").locked_capital == mb_locked
-        assert treasury.pool(VenueName.POLYMARKET, "USD").locked_capital == pm_locked
+        assert treasury.pool(VenueName.KALSHI, "USD").locked_capital == k_locked
         assert treasury.execution_enabled is False
     finally:
         reopened.close()
@@ -314,7 +313,7 @@ def test_early_unwind_path_is_separate_from_settlement(tmp_path: Path) -> None:
     demo, ops, watchlist, ledger, repository = _bundle(tmp_path)
     try:
         opened = demo.replay(
-            FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold")
+            FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold")
         )
         assert opened.trade is not None
         assert opened.unwind is not None
@@ -333,7 +332,7 @@ def test_early_unwind_path_is_separate_from_settlement(tmp_path: Path) -> None:
         assert closed.realised_pnl_gbp is not None
         released = ledger.treasury.snapshot()
         assert released.pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
-        assert released.pool(VenueName.POLYMARKET, "USD").locked_capital == 0
+        assert released.pool(VenueName.KALSHI, "USD").locked_capital == 0
         postings = ops.journal.postings(opportunity_id=closed.opportunity_id)
         signed = sum((item.signed_gbp for item in postings), Decimal("0"))
         # Unwind FX presentation can leave a sub-tick residue (observed ~1e-27).
@@ -349,7 +348,7 @@ def test_settlement_path_releases_and_balances_without_unwind(tmp_path: Path) ->
     demo, ops, watchlist, ledger, repository = _bundle(tmp_path)
     try:
         opened = demo.replay(
-            FixtureReplayRequest(venue_pair="matchbook_polymarket", solver="simple", close_via="hold")
+            FixtureReplayRequest(venue_pair="matchbook_kalshi", solver="simple", close_via="hold")
         )
         assert opened.trade is not None
         assert opened.trade.state is PaperTradeState.OPEN
@@ -363,7 +362,7 @@ def test_settlement_path_releases_and_balances_without_unwind(tmp_path: Path) ->
         assert closed.journal_balanced is True
         released = ledger.treasury.snapshot()
         assert released.pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
-        assert released.pool(VenueName.POLYMARKET, "USD").locked_capital == 0
+        assert released.pool(VenueName.KALSHI, "USD").locked_capital == 0
         postings = ops.journal.postings(opportunity_id=closed.trade.opportunity_id)
         assert gbp_is_balanced(postings)
         currencies = {posting.dimensions.currency for posting in postings}

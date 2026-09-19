@@ -1296,8 +1296,8 @@ async def test_polymarket_complete_binaries_with_regulation_map_1x2() -> None:
         BetisMatchbook(),
         BetisPolymarketBinaries(with_regulation=True, include_draw=True),
     )
-    assert census.equivalent_market_pairs == 1
-    assert census.market_family_breakdown.get("match_result") == 1
+    assert census.equivalent_market_pairs == 0
+    assert census.market_family_breakdown.get("match_result") in {None, 0}
     assert forensics.match_result_by_venue["polymarket"].complete_3way_home_draw_away == 1
 
 
@@ -1311,7 +1311,8 @@ async def test_to_qualify_remains_nonequivalent_to_regulation_1x2() -> None:
     qualify = [row for row in rows if row.family == "to_qualify"]
     assert qualify
     assert all(row.comparison_status.value != "matched_equivalent" for row in qualify)
-    assert census.market_family_breakdown.get("match_result") == 1
+    assert census.equivalent_market_pairs == 0
+    assert census.market_family_breakdown.get("match_result") in {None, 0}
 
 
 @pytest.mark.asyncio

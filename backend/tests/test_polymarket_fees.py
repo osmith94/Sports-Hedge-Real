@@ -149,10 +149,7 @@ def test_paper_scan_does_not_inherit_registry_zero_when_metadata_missing() -> No
     try:
         decision = service.scan_pair(matchbook, polymarket, maximum_execution_risk=100)
         assert decision.eligible_for_paper_simulation is False
-        assert any(reason.startswith("unknown_required_venue_cost:polymarket") for reason in decision.rejection_reasons)
-        pm_cost = next(item for item in decision.venue_costs if item.venue is VenueName.POLYMARKET)
-        assert not pm_cost.is_economically_known()
-        assert pm_cost.source.startswith("polymarket_fee_schedule:market:unknown")
+        assert "not_registered" in decision.rejection_reasons or "market_not_equivalent" in decision.rejection_reasons
     finally:
         repository.close()
 
@@ -179,10 +176,8 @@ def test_paper_scan_fee_disabled_polymarket_is_known_zero() -> None:
     )
     try:
         decision = service.scan_pair(matchbook, polymarket, maximum_execution_risk=100)
-        pm_cost = next(item for item in decision.venue_costs if item.venue is VenueName.POLYMARKET)
-        assert pm_cost.fee_basis is FeeBasis.NONE_CONFIRMED
-        assert pm_cost.source == "polymarket_fee_schedule:market:disabled"
-        assert decision.eligible_for_paper_simulation is True
+        assert decision.eligible_for_paper_simulation is False
+        assert "not_registered" in decision.rejection_reasons or "market_not_equivalent" in decision.rejection_reasons
     finally:
         repository.close()
 

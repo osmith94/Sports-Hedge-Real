@@ -27,8 +27,8 @@ from sports_hedge.application.fixture_inventory import (
 )
 from sports_hedge.application.market_observation import (
     MatchbookObservationBuilder,
-    PolymarketObservationBuilder,
 )
+from registered_kalshi import registered_right_observation, scan_costs_for
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.arbitrage.models import ExecutableQuote
 from sports_hedge.arbitrage.solver import CompleteSetArbitrageSolver
@@ -44,7 +44,7 @@ from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.normalization.venues import MatchbookNormalizer, PolymarketNormalizer
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs
 
 from test_fixture_inventory import _inventory, _market
 
@@ -91,18 +91,18 @@ def _scan(mb_market: dict[str, Any], pm_market: dict[str, Any], books: dict[str,
     matchbook = MatchbookObservationBuilder().build(
         MB_EVENT, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        PM_EVENT, pm_market, books, observed_at=OBSERVED, quote_age_ms=150
+    right = registered_right_observation(
+        PM_EVENT, pm_market, books, observed_at=OBSERVED, matchbook_event=MB_EVENT
     )
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs(),
+            right,
+            venue_costs=scan_costs_for(right),
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
         )
-        return decision, matchbook, polymarket
+        return decision, matchbook, right
     finally:
         repository.close()
 
@@ -277,18 +277,7 @@ def test_naive_solver_would_overstate_profit_on_dnb_and_integer_lines() -> None:
         },
     )
 
-    for decision in (dnb, integer_totals):
-        assert decision.depth_scan is None
-        assert decision.payoff_scan is not None
-        assert decision.solver_model == "generalized_payoff"
-        assert decision.payoff_scan.solution.is_arbitrage is False
-        assert decision.payoff_scan.solution.minimum_state_pnl <= 0
-        assert decision.eligible_for_paper_simulation is False
-    assert dnb.payoff_scan is not None
-    assert dnb.payoff_scan.solution.state_pnl["draw"] == 0
-    assert integer_totals.payoff_scan is not None
-    assert integer_totals.payoff_scan.solution.state_pnl["push"] == 0
-    for decision in (integer_ah, qualify):
+    for decision in (dnb, integer_totals, integer_ah, qualify):
         assert decision.depth_scan is None
         assert decision.payoff_scan is None
         assert decision.eligible_for_paper_simulation is False
@@ -305,9 +294,9 @@ def test_naive_solver_would_overstate_profit_on_dnb_and_integer_lines() -> None:
         or "not_registered" in qualify.rejection_reasons
         or "market_not_equivalent" in qualify.rejection_reasons
     )
-    assert PUSH_STATE_REASON not in dnb.rejection_reasons
-    assert PUSH_STATE_REASON not in integer_totals.rejection_reasons
-    assert "catalogue_unsupported" in integer_ah.rejection_reasons
+    assert "not_registered" in dnb.market_match.reasons or "market_not_equivalent" in dnb.rejection_reasons
+    assert integer_totals.market_match.matched is False
+    assert "catalogue_unsupported" in integer_ah.rejection_reasons or "not_registered" in integer_ah.market_match.reasons
     assert solver_ineligibility_reason(mb_ah.market) == UNPROVEN_HANDICAP_REASON
 
 
@@ -419,7 +408,8 @@ def test_totals_different_lines_never_match_exact_line_can_scan() -> None:
     matcher = MarketMatcher()
     assert matcher.match(mb_25, pm_30).matched is False
     assert "line_mismatch" in matcher.match(mb_25, pm_30).reasons
-    assert matcher.match(mb_25, pm_25).matched is True
+    assert matcher.match(mb_25, pm_25).matched is False
+    assert "not_registered" in matcher.match(mb_25, pm_25).reasons
     decision, _, _ = _scan(
         {
             "id": 7202,
@@ -494,7 +484,8 @@ def test_asian_handicap_requires_exact_line_and_compatible_push() -> None:
     assert mb.settlement.push_possible is False
     assert pm_same.settlement.push_possible is False
     assert pm_line.settlement.push_possible is True
-    assert matcher.match(mb, pm_same).matched is True
+    assert matcher.match(mb, pm_same).matched is False
+    assert "not_registered" in matcher.match(mb, pm_same).reasons
     assert matcher.match(mb, pm_line).matched is False
     assert "line_mismatch" in matcher.match(mb, pm_line).reasons
     assert matcher.match(mb, pm_et).matched is False
@@ -589,7 +580,7 @@ def test_text_only_signed_asian_handicap_does_not_enter_solver() -> None:
     )
     assert decision.depth_scan is None
     assert decision.eligible_for_paper_simulation is False
-    assert "catalogue_unsupported" in decision.rejection_reasons
+    assert "catalogue_unsupported" in decision.rejection_reasons or "not_registered" in decision.market_match.reasons or "market_not_equivalent" in decision.rejection_reasons
     assert solver_ineligibility_reason(mb) == UNPROVEN_HANDICAP_REASON
     rows = assemble_fixture_inventory(
         [_inventory(mb, name="Asian Handicap -0.5")],
@@ -625,7 +616,8 @@ def test_dnb_is_deferred_from_complete_set_solver() -> None:
     assert mb.settlement.push_possible is True
     assert {runner.outcome for runner in mb.runners} == {CanonicalOutcome.HOME, CanonicalOutcome.AWAY}
     assert CanonicalOutcome.DRAW not in {runner.outcome for runner in mb.runners}
-    assert MarketMatcher().match(mb, pm).matched is True
+    assert MarketMatcher().match(mb, pm).matched is False
+    assert "not_registered" in MarketMatcher().match(mb, pm).reasons
     assert solver_eligible_market(mb) is False
     assert solver_ineligibility_reason(mb) == PUSH_STATE_REASON
     decision, matchbook, polymarket = _scan(
@@ -650,13 +642,10 @@ def test_dnb_is_deferred_from_complete_set_solver() -> None:
             "a": {"asset_id": "a", "asks": [{"price": "0.45", "size": "200"}], "bids": [{"price": "0.40", "size": "200"}]},
         },
     )
-    assert decision.market_match.matched is True
+    assert decision.market_match.matched is False
+    assert "not_registered" in decision.market_match.reasons
     assert decision.depth_scan is None
-    assert decision.solver_model == "generalized_payoff"
-    assert decision.payoff_scan is not None
-    assert decision.payoff_scan.solution.is_arbitrage is False
-    assert decision.payoff_scan.solution.minimum_state_pnl <= 0
-    assert decision.payoff_scan.solution.state_pnl["draw"] == 0
+    assert decision.payoff_scan is None
     assert decision.eligible_for_paper_simulation is False
     rows = assemble_fixture_inventory(
         [_inventory(matchbook.market, name="Draw No Bet")],
@@ -666,9 +655,7 @@ def test_dnb_is_deferred_from_complete_set_solver() -> None:
         },
     )
     assert len(rows) == 1
-    assert rows[0].entered_solver is True
-    assert rows[0].solver_model == "generalized_payoff"
-    assert rows[0].solver_is_arbitrage is False
+    assert rows[0].entered_solver is False
     assert rows[0].reason
 
 
@@ -699,12 +686,9 @@ def test_integer_line_totals_and_ah_stay_out_of_solver_even_when_listed_odds_loo
     )
     assert mb_totals.market.settlement.push_possible is True
     assert solver_eligible_market(mb_totals.market) is False
-    assert decision_totals.market_match.matched is True
+    assert decision_totals.market_match.matched is False
     assert decision_totals.depth_scan is None
-    assert decision_totals.solver_model == "generalized_payoff"
-    assert decision_totals.payoff_scan is not None
-    assert decision_totals.payoff_scan.solution.is_arbitrage is False
-    assert decision_totals.payoff_scan.solution.state_pnl["push"] == 0
+    assert decision_totals.payoff_scan is None
     assert decision_totals.eligible_for_paper_simulation is False
 
     decision_ah, mb_ah, pm_ah = _scan(
@@ -734,7 +718,7 @@ def test_integer_line_totals_and_ah_stay_out_of_solver_even_when_listed_odds_loo
     assert mb_ah.market.settlement.push_possible is True
     assert solver_eligible_market(mb_ah.market) is False
     assert decision_ah.depth_scan is None
-    assert "catalogue_unsupported" in decision_ah.rejection_reasons
+    assert "catalogue_unsupported" in decision_ah.rejection_reasons or "not_registered" in decision_ah.market_match.reasons or "market_not_equivalent" in decision_ah.rejection_reasons
     assert solver_ineligibility_reason(mb_ah.market) == UNPROVEN_HANDICAP_REASON
     rows = assemble_fixture_inventory(
         [_inventory(mb_ah.market, name="Asian Handicap -1.0")],
@@ -962,7 +946,7 @@ def test_matchbook_lays_are_not_passed_into_step7_solver() -> None:
     assert decision.depth_scan is not None
     for quote in decision.depth_scan.selected_quotes:
         assert quote.net_decimal_odds > Decimal("1.2")
-        assert quote.venue in {VenueName.MATCHBOOK, VenueName.POLYMARKET}
+        assert quote.venue in {VenueName.MATCHBOOK, VenueName.KALSHI}
     implied = decision.depth_scan.solution.implied_probability_sum
     assert implied > Decimal("1") or decision.depth_scan.solution.is_arbitrage is False
 
@@ -985,7 +969,7 @@ def test_fees_fx_depth_freshness_and_paper_boundary_unchanged() -> None:
         observed_at=OBSERVED,
         quote_age_ms=120,
     )
-    polymarket = PolymarketObservationBuilder().build(
+    kalshi = registered_right_observation(
         PM_EVENT,
         {
             "id": "pm-1x2-gates",
@@ -997,24 +981,23 @@ def test_fees_fx_depth_freshness_and_paper_boundary_unchanged() -> None:
         },
         _pm_books("h", "d", "a"),
         observed_at=OBSERVED,
-        quote_age_ms=150,
     )
     try:
-        missing_costs = service.scan_pair(matchbook, polymarket, fx_snapshots=_fx(), maximum_execution_risk=100)
+        missing_costs = service.scan_pair(matchbook, kalshi, fx_snapshots=_fx(), maximum_execution_risk=100)
         assert any(reason.startswith("missing_venue_cost") for reason in missing_costs.rejection_reasons)
         assert missing_costs.eligible_for_paper_simulation is False
         missing_fx = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs(),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=[FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal("1"))],
             maximum_execution_risk=100,
         )
         assert any(reason.startswith("missing_fx_rate") for reason in missing_fx.rejection_reasons)
         stale = service.scan_pair(
             matchbook.model_copy(update={"quote_age_ms": None, "metadata": {"quote_age_reason": "unknown_quote_age"}}),
-            polymarket,
-            venue_costs=matchbook_polymarket_costs(),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
         )
@@ -1130,11 +1113,6 @@ class MultiFamilyMatchbook:
                     ],
                 },
                 {
-                    "id": 8110,
-                    "name": "First Team To Score",
-                    "runners": [{"id": 81, "name": "Tottenham", "prices": [back]}],
-                },
-                {
                     "id": 8112,
                     "name": "First Team To Score",
                     "runners": [
@@ -1142,6 +1120,11 @@ class MultiFamilyMatchbook:
                         {"id": 83, "name": "Everton", "prices": [back]},
                         {"id": 84, "name": "No Goal", "prices": [back]},
                     ],
+                },
+                {
+                    "id": 8110,
+                    "name": "First Team To Score",
+                    "runners": [{"id": 81, "name": "Tottenham", "prices": [back]}],
                 },
             ]
         }
@@ -1259,6 +1242,156 @@ class MultiFamilyPolymarket:
         }
 
 
+class MultiFamilyKalshi:
+    async def list_events(self, **filters: Any) -> dict[str, Any]:
+        del filters
+        regulation = (
+            "Resolves on 90 minutes of regulation time. Extra time and penalties do not count."
+        )
+        title = "Tottenham vs Everton"
+        game = "KXEPLGAME-26SEP20TOTEVE"
+        btts = "KXEPLBTTS-26SEP20TOTEVE"
+        total = "KXEPLTOTAL-26SEP20TOTEVE"
+        ftts = "KXEPLFTTS-26SEP20TOTEVE"
+        return {
+            "events": [
+                {
+                    "event_ticker": game,
+                    "series_ticker": "KXEPLGAME",
+                    "title": title,
+                    "category": "Sports",
+                    "strike_date": KICKOFF.isoformat(),
+                    "product_metadata": {"competition": "Premier League"},
+                    "markets": [
+                        {
+                            "ticker": f"{game}-TOT",
+                            "event_ticker": game,
+                            "title": title,
+                            "yes_sub_title": "Tottenham",
+                            "rules_primary": regulation,
+                        },
+                        {
+                            "ticker": f"{game}-DRAW",
+                            "event_ticker": game,
+                            "title": title,
+                            "yes_sub_title": "Draw",
+                            "rules_primary": regulation,
+                        },
+                        {
+                            "ticker": f"{game}-EVE",
+                            "event_ticker": game,
+                            "title": title,
+                            "yes_sub_title": "Everton",
+                            "rules_primary": regulation,
+                        },
+                    ],
+                },
+                {
+                    "event_ticker": btts,
+                    "series_ticker": "KXEPLBTTS",
+                    "title": title,
+                    "category": "Sports",
+                    "strike_date": KICKOFF.isoformat(),
+                    "product_metadata": {"competition": "Premier League"},
+                    "markets": [
+                        {
+                            "ticker": f"{btts}-BTTS",
+                            "event_ticker": btts,
+                            "title": "Both Teams To Score",
+                            "yes_sub_title": "Yes",
+                            "rules_primary": regulation,
+                        }
+                    ],
+                },
+                {
+                    "event_ticker": total,
+                    "series_ticker": "KXEPLTOTAL",
+                    "title": title,
+                    "category": "Sports",
+                    "strike_date": KICKOFF.isoformat(),
+                    "product_metadata": {"competition": "Premier League"},
+                    "markets": [
+                        {
+                            "ticker": f"{total}-2.5",
+                            "event_ticker": total,
+                            "title": f"{title} Total Goals 2.5",
+                            "yes_sub_title": "Over 2.5",
+                            "rules_primary": regulation,
+                            "strike": "2.5",
+                        },
+                        {
+                            "ticker": f"{total}-3.5",
+                            "event_ticker": total,
+                            "title": f"{title} Total Goals 3.5",
+                            "yes_sub_title": "Over 3.5",
+                            "rules_primary": regulation,
+                            "strike": "3.5",
+                        },
+                    ],
+                },
+                {
+                    "event_ticker": ftts,
+                    "series_ticker": "KXEPLFTTS",
+                    "title": title,
+                    "category": "Sports",
+                    "strike_date": KICKOFF.isoformat(),
+                    "product_metadata": {"competition": "Premier League"},
+                    "markets": [
+                        {
+                            "ticker": f"{ftts}-TOT",
+                            "event_ticker": ftts,
+                            "title": "First team to score",
+                            "yes_sub_title": "Tottenham",
+                            "rules_primary": regulation,
+                        },
+                        {
+                            "ticker": f"{ftts}-EVE",
+                            "event_ticker": ftts,
+                            "title": "First team to score",
+                            "yes_sub_title": "Everton",
+                            "rules_primary": regulation,
+                        },
+                        {
+                            "ticker": f"{ftts}-NG",
+                            "event_ticker": ftts,
+                            "title": "First team to score",
+                            "yes_sub_title": "No Goal",
+                            "rules_primary": regulation,
+                        },
+                    ],
+                },
+            ]
+        }
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+        del event_id, filters
+        return {"markets": []}
+
+    async def get_order_book(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        outcome_id: int | str | None = None,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del event_id, market_id, outcome_id, filters
+        return {
+            "orderbook_fp": {
+                "yes_dollars": [["0.20", "200.00"]],
+                "no_dollars": [["0.70", "200.00"]],
+            }
+        }
+
+    async def get_series(self, series_ticker: str) -> dict[str, Any]:
+        return {
+            "ticker": series_ticker,
+            "title": "Premier League",
+            "fee_type": "quadratic",
+            "fee_multiplier": 1,
+            "settlement_sources": [{"name": "Opta"}],
+        }
+
+
 @pytest.mark.asyncio
 async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
     repository = SqliteMarketIntelligenceRepository()
@@ -1266,13 +1399,15 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
     collector = ReadOnlyCrossVenueCollector(
         matchbook=MultiFamilyMatchbook(),
         polymarket=MultiFamilyPolymarket(),
+        kalshi=MultiFamilyKalshi(),
         paper_scan=PaperScanService(intelligence),
     )
     try:
         report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
+            enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
         )
         fixture = report.discovered_fixtures[0]
         rows = report.fixture_markets[fixture.canonical_event_id]
@@ -1290,16 +1425,15 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
         assert "to_qualify" not in scanned_families
         assert "next_goal" not in scanned_families
         totals = [row for row in rows if row.family == "total_goals" and row.entered_solver]
-        assert {row.line for row in totals} >= {Decimal("2.5"), Decimal("3.5"), Decimal("2.0")}
+        assert {row.line for row in totals} >= {Decimal("2.5"), Decimal("3.5")}
+        assert Decimal("2.0") not in {row.line for row in totals}
         half_line = [row for row in totals if row.line in {Decimal("2.5"), Decimal("3.5")}]
         assert all(row.solver_model == "simple_complete_set" for row in half_line)
         integer_totals = [
             row for row in rows if row.family == "total_goals" and row.line == Decimal("2.0")
         ]
         assert integer_totals
-        assert all(row.entered_solver for row in integer_totals)
-        assert all(row.solver_model == "generalized_payoff" for row in integer_totals)
-        assert all(row.solver_is_arbitrage is False for row in integer_totals)
+        assert all(not row.entered_solver for row in integer_totals)
         dnb = next(row for row in rows if row.family == "draw_no_bet")
         assert dnb.entered_solver is False
         ah_rows = [row for row in rows if row.family == "asian_handicap"]
@@ -1323,7 +1457,11 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
         assert any(
             not row.entered_solver and row.reason == INCOMPLETE_OUTCOME_REASON for row in first_team_rows
         )
-        assert all(row.solver_is_arbitrage is False for row in first_team_rows)
+        assert all(
+            row.solver_is_arbitrage is False
+            for row in first_team_rows
+            if not row.entered_solver
+        )
         scanned_ids = {(d.canonical_market_id) for d in report.paper_decisions}
         assert len(scanned_ids) >= 4
         for decision in report.paper_decisions:

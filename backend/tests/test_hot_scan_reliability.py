@@ -40,15 +40,17 @@ from sports_hedge.paper.trades import PaperTradeState
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from test_dual_cadence_scheduler import NOW, FakeClock, _fixture, _report
-from test_read_only_collector import FakeMatchbook, FakePolymarket
+from test_read_only_collector import FakeMatchbook, FakePolymarket, KICKOFF
+from registered_kalshi import FakeKalshiBTTS
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
 from test_step8f_automatic_paper_entry import (
     FX as AUTOFILL_FX,
     _matchbook_btts,
     _ops_bundle,
-    _polymarket_btts,
+    _kalshi_btts,
+    _kalshi_costs,
     _standing,
 )
-from venue_cost_helpers import matchbook_polymarket_costs
 
 
 def _hung_hot_relationships() -> dict[str, list[HotMarketRelationship]]:
@@ -520,6 +522,7 @@ async def test_hot_diagnostics_include_provider_and_stage_attribution() -> None:
     collector = ReadOnlyCrossVenueCollector(
         matchbook=FakeMatchbook(),
         polymarket=FakePolymarket(),
+        kalshi=FakeKalshiBTTS([("Newcastle United", "Chelsea", KICKOFF)]),
         paper_scan=PaperScanService(MarketIntelligenceService(repository)),
         venue_timeout_seconds=0.4,
         provider_call_timeout_seconds=0.4,
@@ -527,12 +530,14 @@ async def test_hot_diagnostics_include_provider_and_stage_attribution() -> None:
     )
     try:
         universe = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+            enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
+            venue_costs=matchbook_kalshi_costs("0"),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
             maximum_execution_risk=100,
         )
         report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+            enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
+            venue_costs=matchbook_kalshi_costs("0"),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
             maximum_execution_risk=100,
             scan_lane=ScanLane.HOT.value,
@@ -552,8 +557,8 @@ async def test_hot_diagnostics_include_provider_and_stage_attribution() -> None:
                 diagnostics["stages"][stage]
             )
         assert diagnostics["providers"]["matchbook"]["calls"] >= 1
-        assert diagnostics["providers"]["polymarket"]["calls"] >= 1
-        assert diagnostics["providers"]["kalshi"]["calls"] == 0
+        assert diagnostics["providers"]["kalshi"]["calls"] >= 1
+        assert diagnostics["providers"]["polymarket"]["calls"] == 0
         assert diagnostics["stages"]["event_lookup"]["elapsed_ms"] >= 0
         assert diagnostics["stages"]["market_discovery"]["calls"] >= 1
         assert diagnostics["stages"]["book_depth"]["calls"] >= 0
@@ -641,8 +646,8 @@ async def test_scheduled_persist_failure_is_visible_without_scan_timeout(
     try:
         decision = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=AUTOFILL_FX,
             maximum_execution_risk=100,
             liquidity_snapshot=_standing(),

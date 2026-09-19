@@ -4,9 +4,10 @@ After fixture identity, Matchbook↔Kalshi rows that resolve to one register
 canonical key (MATCH_RESULT_FT / BTTS_FT / TOTAL_GOALS_FT:{line} / FTTS_FT)
 are PAPER_ASSUMED_EQUIVALENT, or APPROVED_EQUIVALENT when independently
 proven. Extra-time / penalties / to-qualify contracts are a different native
-archetype and are not registered. Unregistered pairs are unsupported / not
-admitted. Numeric mapping confidence and mapping review are not admission.
-Never live-execution eligible.
+archetype and are not registered. Independently proven unregistered pairs
+may still classify APPROVED_EQUIVALENT for offline census/onboarding, but
+they are not runtime-matched or paper-admitted. Numeric mapping confidence
+and mapping review are not admission. Never live-execution eligible.
 """
 
 from __future__ import annotations
@@ -193,10 +194,7 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
     archetype = _archetype_from_markets(left, right)
     state, reason, notes = _economic_state(left, right)
     paper_assumed = state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
-    paper_admitted = matcher.matched and (
-        registered_structural_match(left, right)
-        or state is CatalogueApprovalState.APPROVED_EQUIVALENT
-    )
+    paper_admitted = matcher.matched and registered_structural_match(left, right)
     conflict = (
         state is not CatalogueApprovalState.APPROVED_EQUIVALENT
         and not paper_assumed

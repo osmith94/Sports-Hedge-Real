@@ -32,17 +32,11 @@ from sports_hedge.paper.bet_ticket import (
 from sports_hedge.treasury.models import TreasuryLockRequest
 from test_lane2_fixed_paper_preparation import TEN, _persist_qualified
 from test_step8f_automatic_paper_entry import (
-    OBSERVED,
     _matchbook_btts,
     _ops_bundle,
-    _polymarket_btts,
+    _kalshi_btts,
 )
-from sports_hedge.application.market_observation import (
-    MatchbookObservationBuilder,
-    PolymarketObservationBuilder,
-)
-from test_step8b_first_team_to_score import _ftts_books, _ftts_mb_payload, _ftts_pm_payload
-from test_step7_safe_market_expansion import MB_EVENT, PM_EVENT
+from sports_hedge.application.demo_fixtures import kalshi_ftts, matchbook_ftts
 from test_tracked_current_snapshot import _report
 
 
@@ -86,7 +80,7 @@ def test_recommended_deployment_cannot_be_actionable_when_rejected() -> None:
 
 def test_recommended_size_is_allocator_not_hardcoded_ten(tmp_path: Path) -> None:
     _scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
-        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+        tmp_path, left=_matchbook_btts(), right=_kalshi_btts()
     )
     try:
         opportunity_id = _opportunity_id(decision.canonical_market_id)
@@ -136,7 +130,7 @@ def test_recommended_size_is_allocator_not_hardcoded_ten(tmp_path: Path) -> None
 
 def test_bet_ticket_shows_legs_fees_fx_depth_risk_and_treasury(tmp_path: Path) -> None:
     _scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
-        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+        tmp_path, left=_matchbook_btts(), right=_kalshi_btts()
     )
     try:
         opportunity_id = _opportunity_id(decision.canonical_market_id)
@@ -223,7 +217,7 @@ def test_qualified_row_loses_bet_when_authoritative_treasury_is_consumed(
     """
 
     _scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
-        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+        tmp_path, left=_matchbook_btts(), right=_kalshi_btts()
     )
     try:
         opportunity_id = _opportunity_id(decision.canonical_market_id)
@@ -305,7 +299,7 @@ def test_qualified_row_loses_bet_when_authoritative_treasury_is_consumed(
 
 def test_recommend_and_prepare_api_keep_paper_boundary(tmp_path: Path) -> None:
     _scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
-        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+        tmp_path, left=_matchbook_btts(), right=_kalshi_btts()
     )
     try:
         app.dependency_overrides[get_paper_operations_service] = lambda: ops
@@ -375,14 +369,8 @@ def test_recommend_and_prepare_api_keep_paper_boundary(tmp_path: Path) -> None:
 
 
 def test_generalized_ticket_still_paper_only(tmp_path: Path) -> None:
-    matchbook = MatchbookObservationBuilder().build(
-        MB_EVENT, _ftts_mb_payload(), observed_at=OBSERVED, quote_age_ms=120
-    )
-    polymarket = PolymarketObservationBuilder().build(
-        PM_EVENT, _ftts_pm_payload(), _ftts_books(), observed_at=OBSERVED, quote_age_ms=150
-    )
     _scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
-        tmp_path, left=matchbook, right=polymarket
+        tmp_path, left=matchbook_ftts(), right=kalshi_ftts()
     )
     try:
         opportunity_id = _opportunity_id(decision.canonical_market_id)

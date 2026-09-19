@@ -11,7 +11,6 @@ from sports_hedge.matching.learned_rules import (
 from sports_hedge.matching.paper_assumed import (
     OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
     PAPER_ASSUMED_REASON,
-    both_independently_proven_regulation,
     paper_assumed_match_reasons,
 )
 from sports_hedge.matching.approved_register import (
@@ -118,30 +117,11 @@ class MarketMatcher:
             )
 
         reasons = structural_mismatch_reasons(left, right)
-        if reasons:
-            return MarketMatchResult(
-                matched=False,
-                confidence=event_result.confidence,
-                reasons=reasons,
-                provenance=event_result.provenance,
-            )
-
-        # Unregistered pairs are not scored, reviewed, or learned. Independently
-        # proven complete fingerprints remain matcher-equivalent for census and
-        # the existing APPROVED_EQUIVALENT paper path. Extra-time / incomplete
-        # contracts are simply not registered.
-        if both_independently_proven_regulation(left, right):
-            proven_reasons = list(event_result.reasons)
-            proven_reasons.append("independently_proven_settlement")
-            return MarketMatchResult(
-                matched=True,
-                confidence=event_result.confidence,
-                reasons=proven_reasons,
-                provenance=event_result.provenance,
-            )
+        if not reasons:
+            reasons = [NOT_REGISTERED_REASON]
         return MarketMatchResult(
             matched=False,
             confidence=event_result.confidence,
-            reasons=[NOT_REGISTERED_REASON],
+            reasons=reasons,
             provenance=event_result.provenance,
         )
