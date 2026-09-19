@@ -1011,9 +1011,19 @@ def _endpoint_attempted(samples: list[SoakEndpointSample], suffix: str) -> bool:
     return any(_endpoint_path(item).endswith(suffix) for item in samples)
 
 
+def _endpoint_ok(sample: SoakEndpointSample) -> bool:
+    if sample.error:
+        return False
+    if not sample.available:
+        return False
+    if sample.status_code is not None and not (200 <= sample.status_code < 300):
+        return False
+    return True
+
+
 def _endpoint_available(samples: list[SoakEndpointSample], suffix: str) -> bool:
     return any(
-        item.available and _endpoint_path(item).endswith(suffix) for item in samples
+        _endpoint_ok(item) and _endpoint_path(item).endswith(suffix) for item in samples
     )
 
 
@@ -1021,7 +1031,7 @@ def _endpoint_failures(samples: list[SoakEndpointSample], suffix: str) -> list[S
     return [
         item
         for item in samples
-        if _endpoint_path(item).endswith(suffix) and not item.available
+        if _endpoint_path(item).endswith(suffix) and not _endpoint_ok(item)
     ]
 
 
@@ -1070,7 +1080,7 @@ def _stamp_endpoint_integrity(
 ) -> list[str]:
     stamped = list(errors)
     for item in endpoint_samples:
-        if item.available:
+        if _endpoint_ok(item):
             continue
         path = _endpoint_path(item)
         if any(path.endswith(core) for core in CORE_OBSERVER_PATHS):

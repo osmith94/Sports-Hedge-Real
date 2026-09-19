@@ -1235,6 +1235,18 @@ def test_owner_live_core_endpoint_must_stay_available() -> None:
     assert ok.accepted is True
     assert ok.observed_build_sha == "abc123def"
 
+    non_2xx = _owner_live_ok(
+        endpoints=[
+            SoakEndpointSample(path="/health", status_code=503, available=True, elapsed_ms=1.0),
+            *[item for item in _core_endpoints() if item.path != "/health"],
+        ]
+    )
+    non_2xx_report = accumulate_soak_report(
+        [non_2xx, later], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION
+    )
+    assert non_2xx_report.accepted is False
+    assert "core_endpoints_unavailable" in {item.code for item in non_2xx_report.hard_fails}
+
 
 def test_owner_live_missing_build_sha_is_rejected() -> None:
     snapshot = _owner_live_ok(sha="")
@@ -1259,3 +1271,11 @@ def test_owner_live_missing_build_sha_is_rejected() -> None:
     )
     assert via_http.evidence_errors
     assert "missing_build_sha" in {item.code for item in http_report.hard_fails}
+
+    later = _owner_live_ok().model_copy(update={"observed_at": NOW + timedelta(minutes=12)})
+    mixed = accumulate_soak_report(
+        [snapshot, later], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION
+    )
+    assert mixed.accepted is False
+    assert mixed.observed_build_sha == "abc123def"
+    assert "missing_build_sha" in {item.code for item in mixed.hard_fails}
