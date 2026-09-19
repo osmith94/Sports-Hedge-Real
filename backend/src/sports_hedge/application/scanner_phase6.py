@@ -91,6 +91,17 @@ TIMEOUT_ERROR_TOKENS = (
     "market_timeout",
     "provider_timeout",
 )
+EVIDENCE_INTEGRITY_CODES = frozenset(
+    {
+        "build_sha_inconsistent",
+        "catalogue_count_mismatch",
+        "scanner_validation_unavailable",
+        "capture_evidence_unavailable",
+        "core_endpoint_unavailable",
+        "missing_build_sha",
+        "observer_payload_inconsistent",
+    }
+)
 CONFIDENCE_REVIEW_TOKENS = (
     "min_mapping_confidence",
     "mapping_confidence",
@@ -1006,6 +1017,20 @@ def _endpoint_available(samples: list[SoakEndpointSample], suffix: str) -> bool:
     )
 
 
+def _endpoint_failures(samples: list[SoakEndpointSample], suffix: str) -> list[SoakEndpointSample]:
+    return [
+        item
+        for item in samples
+        if _endpoint_path(item).endswith(suffix) and not item.available
+    ]
+
+
+def _add_fail(fails: list[SoakHardFail], code: str, detail: str) -> None:
+    if any(item.code == code for item in fails):
+        return
+    fails.append(SoakHardFail(code=code, detail=detail))
+
+
 def _has_timeout_token(text: str | None) -> bool:
     blob = (text or "").casefold()
     return any(token in blob for token in TIMEOUT_ERROR_TOKENS)
@@ -1037,57 +1062,103 @@ def _build_sha(sample: ScannerValidationSnapshot) -> str | None:
     return sha or None
 
 
+def _stamp_endpoint_integrity(
+    errors: list[str],
+    endpoint_samples: list[SoakEndpointSample],
+    *,
+    paper_autofill_enabled: bool,
+) -> list[str]:
+    stamped = list(errors)
+    for item in endpoint_samples:
+        if item.available:
+            continue
+        path = _endpoint_path(item)
+        if any(path.endswith(core) for core in CORE_OBSERVER_PATHS):
+            stamped.append("core_endpoint_unavailable")
+            if path.endswith("/paper/scanner-validation"):
+                stamped.append("scanner_validation_unavailable")
+        if paper_autofill_enabled and any(
+            path.endswith(capture) for capture in CAPTURE_OBSERVER_PATHS
+        ):
+            stamped.append("capture_evidence_unavailable")
+    return list(dict.fromkeys(stamped))
+
+
 def evaluate_soak_acceptance(report: SoakReport) -> list[SoakHardFail]:
     fails: list[SoakHardFail] = []
+    owner_live = report.data_kind == DATA_CLASS_OWNER_LIVE_OBSERVATION
     if report.usable_sample_count <= 0 or report.sample_count <= 0:
-        fails.append(
-            SoakHardFail(
-                code="no_usable_samples",
-                detail="no usable observer samples; soak cannot pass closed",
-            )
+        _add_fail(
+            fails,
+            "no_usable_samples",
+            "no usable observer samples; soak cannot pass closed",
         )
-    missing_core = [
-        path
-        for path in CORE_OBSERVER_PATHS
-        if _endpoint_attempted(report.endpoint_samples, path)
-        and not _endpoint_available(report.endpoint_samples, path)
-    ]
-    if report.data_kind == DATA_CLASS_OWNER_LIVE_OBSERVATION:
+    if owner_live:
+        failed_core = [
+            path
+            for path in CORE_OBSERVER_PATHS
+            if _endpoint_failures(report.endpoint_samples, path)
+        ]
+        if failed_core:
+            _add_fail(
+                fails,
+                "core_endpoints_unavailable",
+                "core observer poll failed during soak: " + ",".join(failed_core),
+            )
+        if _endpoint_failures(report.endpoint_samples, "/paper/scanner-validation"):
+            _add_fail(
+                fails,
+                "scanner_validation_unavailable",
+                "scanner-validation poll failed; empty catalogue was not assumed",
+            )
+    else:
         missing_core = [
             path
             for path in CORE_OBSERVER_PATHS
-            if not _endpoint_available(report.endpoint_samples, path)
+            if _endpoint_attempted(report.endpoint_samples, path)
+            and not _endpoint_available(report.endpoint_samples, path)
         ]
-    if missing_core:
-        fails.append(
-            SoakHardFail(
-                code="core_endpoints_unavailable",
-                detail="core observer endpoints unavailable: " + ",".join(missing_core),
+        if missing_core:
+            _add_fail(
+                fails,
+                "core_endpoints_unavailable",
+                "core observer endpoints unavailable: " + ",".join(missing_core),
             )
-        )
-    if _endpoint_attempted(report.endpoint_samples, "/paper/scanner-validation") and not _endpoint_available(
-        report.endpoint_samples, "/paper/scanner-validation"
-    ):
-        fails.append(
-            SoakHardFail(
-                code="scanner_validation_unavailable",
-                detail="scanner-validation missing; empty catalogue was not assumed",
+        if _endpoint_attempted(
+            report.endpoint_samples, "/paper/scanner-validation"
+        ) and not _endpoint_available(report.endpoint_samples, "/paper/scanner-validation"):
+            _add_fail(
+                fails,
+                "scanner_validation_unavailable",
+                "scanner-validation missing; empty catalogue was not assumed",
             )
-        )
+    integrity_codes = [
+        code for code in report.evidence_errors if code in EVIDENCE_INTEGRITY_CODES
+    ]
+    if owner_live or integrity_codes:
+        for code in dict.fromkeys(integrity_codes):
+            _add_fail(
+                fails,
+                code,
+                "evidence integrity error on at least one soak sample: " + code,
+            )
     if report.catalogue_count_mismatches:
-        fails.append(
-            SoakHardFail(
-                code="catalogue_count_mismatch",
-                detail="stated ACTIVE count disagrees with row payload",
-            )
+        _add_fail(
+            fails,
+            "catalogue_count_mismatch",
+            "stated ACTIVE count disagrees with row payload",
         )
     if report.build_sha_changed:
-        fails.append(
-            SoakHardFail(
-                code="build_sha_changed",
-                detail="serving build SHA changed mid-soak: "
-                + ",".join(report.observed_build_shas),
-            )
+        _add_fail(
+            fails,
+            "build_sha_changed",
+            "serving build SHA changed mid-soak: " + ",".join(report.observed_build_shas),
+        )
+    if owner_live and not report.observed_build_sha:
+        _add_fail(
+            fails,
+            "missing_build_sha",
+            "owner-live soak has no attributable serving git SHA",
         )
     if report.usable_sample_count > 0 and report.active_catalogue_row_count <= 0:
         fails.append(
@@ -1131,26 +1202,30 @@ def evaluate_soak_acceptance(report: SoakReport) -> list[SoakHardFail]:
             )
         )
     if report.capture.paper_autofill_enabled and not report.capture.evidence_usable:
-        fails.append(
-            SoakHardFail(
-                code="capture_evidence_unavailable",
-                detail="autofill ON but capture reads were unusable",
-            )
+        _add_fail(
+            fails,
+            "capture_evidence_unavailable",
+            "autofill ON but capture reads were unusable",
         )
-    missing_capture = [
+    failed_capture = [
         path
         for path in CAPTURE_OBSERVER_PATHS
         if report.capture.paper_autofill_enabled
-        and _endpoint_attempted(report.endpoint_samples, path)
-        and not _endpoint_available(report.endpoint_samples, path)
-    ]
-    if missing_capture and "capture_evidence_unavailable" not in {item.code for item in fails}:
-        fails.append(
-            SoakHardFail(
-                code="capture_evidence_unavailable",
-                detail="autofill ON but capture observer endpoints unavailable: "
-                + ",".join(missing_capture),
+        and (
+            _endpoint_failures(report.endpoint_samples, path)
+            if owner_live
+            else (
+                _endpoint_attempted(report.endpoint_samples, path)
+                and not _endpoint_available(report.endpoint_samples, path)
             )
+        )
+    ]
+    if failed_capture:
+        _add_fail(
+            fails,
+            "capture_evidence_unavailable",
+            "autofill ON but capture observer endpoints unavailable: "
+            + ",".join(failed_capture),
         )
     for row in report.unevaluated_rows:
         if row.reason == SCAN_BUDGET_EXHAUSTED_REASON:
@@ -1305,6 +1380,8 @@ def accumulate_soak_report(
         if sample.active_catalogue_row_count != len(sample.rows):
             mismatches += 1
             evidence_errors.append("catalogue_count_mismatch")
+        if data_kind == DATA_CLASS_OWNER_LIVE_OBSERVATION and not _build_sha(sample):
+            evidence_errors.append("missing_build_sha")
         capture = merge_capture_summaries(capture, sample.capture)
         if sample.hot_in_progress:
             hot_work += 1
@@ -1536,16 +1613,28 @@ def snapshot_from_http_payloads(
         if snapshot.active_catalogue_row_count != len(snapshot.rows):
             errors.append("catalogue_count_mismatch")
         if build:
-            build_sha = str(build.get("git_sha") or "").strip()
-            snap_sha = str(snapshot.build.get("git_sha") or "").strip()
+            build_sha = str(build.get("git_sha") or build.get("sha") or "").strip()
+            snap_sha = str(snapshot.build.get("git_sha") or snapshot.build.get("sha") or "").strip()
             if build_sha and snap_sha and build_sha != snap_sha:
                 errors.append("build_sha_inconsistent")
-            if not snapshot.build:
+            if not snap_sha and build_sha:
+                merged = dict(snapshot.build or {})
+                merged.update(build)
+                snapshot.build = merged
+            elif not snapshot.build:
                 snapshot.build = dict(build)
         snapshot.capture = merge_capture_summaries(snapshot.capture, extra_capture)
-        if snapshot.paper_autofill_enabled and not capture_available:
+        autofill = bool(snapshot.paper_autofill_enabled or extra_capture.paper_autofill_enabled)
+        if autofill and not capture_available:
             errors.append("capture_evidence_unavailable")
             snapshot.capture.evidence_usable = False
+        errors = _stamp_endpoint_integrity(
+            errors, endpoint_samples, paper_autofill_enabled=autofill
+        )
+        if data_kind == DATA_CLASS_OWNER_LIVE_OBSERVATION and not str(
+            snapshot.build.get("git_sha") or snapshot.build.get("sha") or ""
+        ).strip():
+            errors.append("missing_build_sha")
         snapshot.evidence_errors = list(dict.fromkeys(errors))
         blocking = {
             "catalogue_count_mismatch",
@@ -1558,6 +1647,17 @@ def snapshot_from_http_payloads(
     health = health or {}
     live = live or {}
     build_payload = dict(build or health.get("build") or {})
+    autofill = bool(health.get("paper_autofill_enabled") or extra_capture.paper_autofill_enabled)
+    if autofill and not capture_available:
+        errors.append("capture_evidence_unavailable")
+        extra_capture.evidence_usable = False
+    errors = _stamp_endpoint_integrity(
+        errors, endpoint_samples, paper_autofill_enabled=autofill
+    )
+    if data_kind == DATA_CLASS_OWNER_LIVE_OBSERVATION and not str(
+        build_payload.get("git_sha") or build_payload.get("sha") or ""
+    ).strip():
+        errors.append("missing_build_sha")
     return ScannerValidationSnapshot(
         observed_at=observed_at,
         data_kind=data_kind,

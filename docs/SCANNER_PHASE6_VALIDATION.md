@@ -94,10 +94,17 @@ Hard-fail (exit code 2) when any of these are present:
 - no usable observer samples, or core GET evidence missing/inconsistent
   (`/health`, `/build-info`, `/paper/live-refresh`,
   `/paper/scanner-validation`);
+- owner-live: **any** sampled core GET that is unavailable/non-2xx/transport
+  error (a later success does not clear it);
 - `/paper/scanner-validation` unavailable (never treated as a valid empty
   catalogue);
 - stated ACTIVE catalogue count disagrees with the row payload;
-- serving build SHA changes mid-soak;
+- owner-live serving build SHA missing, inconsistent, or changed mid-soak;
+- any owner-live sample with evidence-integrity errors
+  (`build_sha_inconsistent`, `catalogue_count_mismatch`,
+  `scanner_validation_unavailable`, `capture_evidence_unavailable`, or
+  equivalent observer-payload corruption) — later healthy samples do not
+  average it away;
 - no ACTIVE catalogue row observed for the whole bounded soak;
 - coordinator catalogue/engine wiring unbound on the observer GET;
 - silent ACTIVE identities with no evaluated result and no truthful

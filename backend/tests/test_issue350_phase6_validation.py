@@ -1137,3 +1137,125 @@ def test_no_active_catalogue_rows_fail_closed() -> None:
     report = accumulate_soak_report([empty], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION)
     assert report.accepted is False
     assert "no_active_catalogue_rows" in {item.code for item in report.hard_fails}
+
+
+def _owner_live_ok(
+    *,
+    sha: str = "abc123def",
+    endpoints: list[SoakEndpointSample] | None = None,
+    capture: SoakCaptureSummary | None = None,
+    evidence_errors: list[str] | None = None,
+    count: int | None = None,
+    rows: list[SoakRowState] | None = None,
+) -> ScannerValidationSnapshot:
+    snapshot = _usable_snapshot(
+        rows
+        or [_row_state("amc-a", evaluated=True, status="evaluated", reason="evaluated")],
+        sha=sha,
+        endpoints=endpoints if endpoints is not None else _core_endpoints(),
+        capture=capture,
+        bound=True,
+        hot=True,
+        universe=True,
+        count=count,
+    )
+    return snapshot.model_copy(
+        update={
+            "data_kind": DATA_CLASS_OWNER_LIVE_OBSERVATION,
+            "evidence_errors": list(evidence_errors or []),
+        }
+    )
+
+
+def test_owner_live_corrupt_sample_is_not_averaged_away() -> None:
+    healthy = _owner_live_ok()
+    later = healthy.model_copy(update={"observed_at": NOW + timedelta(minutes=12)})
+    sha_bad = snapshot_from_http_payloads(
+        observed_at=NOW,
+        health={"mode": "paper", "paper_autofill_enabled": False},
+        build={"git_sha": "other-sha"},
+        live={},
+        validation=healthy.model_dump(mode="json"),
+        trades=[],
+        activity=[],
+        endpoint_samples=_core_endpoints(),
+        data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION,
+        trades_available=True,
+        activity_available=True,
+    )
+    sha_report = accumulate_soak_report(
+        [sha_bad, later], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION
+    )
+    assert sha_bad.usable is False
+    assert "build_sha_inconsistent" in sha_bad.evidence_errors
+    assert sha_report.accepted is False
+    assert "build_sha_inconsistent" in {item.code for item in sha_report.hard_fails}
+
+    mismatch = _owner_live_ok(count=2)
+    mismatch_report = accumulate_soak_report(
+        [mismatch, later], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION
+    )
+    assert mismatch_report.accepted is False
+    assert "catalogue_count_mismatch" in {item.code for item in mismatch_report.hard_fails}
+
+    capture_bad = _owner_live_ok(
+        capture=SoakCaptureSummary(paper_autofill_enabled=True, evidence_usable=False),
+        endpoints=_core_endpoints(trades=False, activity=False),
+        evidence_errors=["capture_evidence_unavailable"],
+    )
+    capture_ok = _owner_live_ok(
+        capture=SoakCaptureSummary(paper_autofill_enabled=True, evidence_usable=True),
+    ).model_copy(update={"observed_at": NOW + timedelta(minutes=12)})
+    capture_report = accumulate_soak_report(
+        [capture_bad, capture_ok], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION
+    )
+    assert capture_report.accepted is False
+    assert "capture_evidence_unavailable" in {item.code for item in capture_report.hard_fails}
+
+
+def test_owner_live_core_endpoint_must_stay_available() -> None:
+    healthy = _owner_live_ok()
+    later = healthy.model_copy(update={"observed_at": NOW + timedelta(minutes=12)})
+    health_blip = _owner_live_ok(endpoints=_core_endpoints(health=False))
+    health_report = accumulate_soak_report(
+        [health_blip, later], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION
+    )
+    assert health_report.accepted is False
+    assert "core_endpoints_unavailable" in {item.code for item in health_report.hard_fails}
+    assert any(not item.available and item.path.endswith("/health") for item in health_report.endpoint_samples)
+
+    live_blip = _owner_live_ok(endpoints=_core_endpoints(live=False))
+    live_report = accumulate_soak_report(
+        [live_blip, later], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION
+    )
+    assert live_report.accepted is False
+    assert "core_endpoints_unavailable" in {item.code for item in live_report.hard_fails}
+
+    ok = accumulate_soak_report([healthy, later], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION)
+    assert ok.accepted is True
+    assert ok.observed_build_sha == "abc123def"
+
+
+def test_owner_live_missing_build_sha_is_rejected() -> None:
+    snapshot = _owner_live_ok(sha="")
+    report = accumulate_soak_report([snapshot], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION)
+    assert report.accepted is False
+    assert "missing_build_sha" in {item.code for item in report.hard_fails}
+    via_http = snapshot_from_http_payloads(
+        observed_at=NOW,
+        health={"mode": "paper"},
+        build={"git_branch": "owner-live"},
+        live={},
+        validation=_owner_live_ok(sha="").model_dump(mode="json"),
+        trades=[],
+        activity=[],
+        endpoint_samples=_core_endpoints(),
+        data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION,
+        trades_available=True,
+        activity_available=True,
+    )
+    http_report = accumulate_soak_report(
+        [via_http], data_kind=DATA_CLASS_OWNER_LIVE_OBSERVATION
+    )
+    assert via_http.evidence_errors
+    assert "missing_build_sha" in {item.code for item in http_report.hard_fails}
