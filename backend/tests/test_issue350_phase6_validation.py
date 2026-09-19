@@ -59,6 +59,7 @@ from sports_hedge.venues.polymarket import PolymarketClient
 from test_issue316_catalogue_registry import (
     MB_EVENT_ID,
     _all_books,
+    _kalshi_ftts_event,
     _kalshi_game_event,
     _kalshi_total_event,
     _mb_event,
@@ -369,7 +370,8 @@ async def test_soak_report_coverage_lists_unevaluated_rows_with_truthful_state()
         "provider_capacity_saturated",
     }
     assert report.scan_budget_exhausted_price_engine == 0
-    assert SCAN_BUDGET_EXHAUSTED_REASON not in report.model_dump_json()
+    assert SCAN_BUDGET_EXHAUSTED_REASON not in first.price_engine.model_dump_json()
+    assert SCAN_BUDGET_EXHAUSTED_REASON not in second.price_engine.model_dump_json()
     assert report.data_kind == DATA_CLASS_FIXTURE_DEMO
 
 
@@ -460,7 +462,13 @@ async def test_hot_overlaps_universe_and_background_receives_work() -> None:
         kalshi_event="KXEPLBTTS-OVB",
     )
     store = SqliteApprovedMarketCatalogueStore(":memory:")
-    engine, _mb, _ks, _layer = _engine([hot_row, bg_row], store=store)
+    engine, _mb, _ks, _layer = _engine(
+        [hot_row, bg_row],
+        store=store,
+        paper_scan=StubPaperScan(
+            __import__("test_issue348_phase5_observability", fromlist=["_flat_decision"])._flat_decision()
+        ),
+    )
     await engine.run_slice(PriceEnginePriority.HOT, now=NOW)
     await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
     sample = _snapshot_from_engine(engine, store, hot=True, universe=True, background=True)
@@ -522,7 +530,8 @@ async def test_health_build_info_live_refresh_and_validation_are_observer_only(
         assert payload["triggered_discovery"] is False
         assert payload["triggered_pricing"] is False
         assert payload["execution_enabled"] is False
-        assert SCAN_BUDGET_EXHAUSTED_REASON not in repr(payload)
+        assert payload["scan_budget_exhausted_price_engine"] == 0
+        assert SCAN_BUDGET_EXHAUSTED_REASON not in repr(payload.get("price_engine") or {})
 
 
 def test_soak_harness_read_only_boundary_and_timeouts_unchanged() -> None:
@@ -567,7 +576,9 @@ def test_phase2_to_phase5_regression_bundles_remain_importable() -> None:
 async def test_one_slow_matchbook_and_kalshi_item_do_not_fail_siblings() -> None:
     from test_issue344_price_engine import test_one_slow_item_lets_fast_siblings_use_remaining_slots
 
-    await test_one_slow_item_lets_fast_siblings_use_remaining_slots()
+    await test_one_slow_item_lets_fast_siblings_use_remaining_slots(
+        PriceEnginePriority.HOT, NEAR_KICKOFF
+    )
     matchbook = FakeMatchbook()
     matchbook.hang.add("316650")
     rows = [

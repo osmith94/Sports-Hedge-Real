@@ -870,7 +870,9 @@ def accumulate_soak_report(
 
 
 def soak_harness_is_observer_only() -> bool:
-    source = inspect.getsource(run_http_soak)
+    soak_src = inspect.getsource(run_http_soak)
+    get_src = inspect.getsource(_get_json)
+    source = soak_src + "\n" + get_src
     if "collect_and_scan" in source:
         return False
     if "place_order" in source or "cancel_order" in source or "sign_wallet" in source:
