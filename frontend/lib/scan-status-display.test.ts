@@ -306,6 +306,8 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /runPaperHotRefresh\(payload\)/);
     assert.match(scan, /Run scan/);
     assert.match(scan, /Run full diagnostic/);
+    assert.match(scan, /disabled=\{loading \|\| scannerStopped\}/);
+    assert.match(scan, /if \(liveRefresh\?\.scanner_stopped\) return;/);
     assert.match(scan, /collect\("diagnostic"\)/);
     assert.match(scan, /does not\s+rediscover the full universe/);
     assert.match(scan, /HOT cadence s/);

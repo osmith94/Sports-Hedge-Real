@@ -103,6 +103,7 @@ from sports_hedge.persistence.matchbook_account_fee import (
 )
 from sports_hedge.persistence.mapping_rules import get_mapping_rule_store
 from sports_hedge.persistence.operator_scanner_settings import (
+    SCANNER_STOPPED_BY_OPERATOR,
     OperatorScannerSettings,
     OperatorScannerSettingsUpdate,
     effective_operator_scanner_settings,
@@ -929,8 +930,10 @@ async def refresh_hot_read_only_market_data(
     and retains all normal paper qualification gates.
     """
 
-    kwargs = request.model_dump()
     coordinator = get_live_refresh_coordinator()
+    if coordinator.operator_scanner_stopped:
+        raise HTTPException(status_code=409, detail=SCANNER_STOPPED_BY_OPERATOR)
+    kwargs = request.model_dump()
     coordinator.remember_request(kwargs)
     plan = coordinator.manual_hot_plan()
 
@@ -1000,8 +1003,10 @@ async def collect_read_only_market_data(
     drill-down reads current-state inventory instead of this diagnostic payload.
     """
 
-    kwargs = request.model_dump()
     coordinator = get_live_refresh_coordinator()
+    if coordinator.operator_scanner_stopped:
+        raise HTTPException(status_code=409, detail=SCANNER_STOPPED_BY_OPERATOR)
+    kwargs = request.model_dump()
     coordinator.remember_request(kwargs)
     settings = get_settings()
     diagnostic_timeout = float(settings.paper_scan_manual_diagnostic_timeout_seconds)

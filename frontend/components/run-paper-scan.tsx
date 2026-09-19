@@ -299,6 +299,7 @@ export function RunPaperScan() {
   );
 
   const collect = useCallback(async (mode: ScanMode) => {
+    if (liveRefresh?.scanner_stopped) return;
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     liveRefreshPollGuardRef.current.begin();
@@ -350,7 +351,7 @@ export function RunPaperScan() {
       setLoadingMode(null);
       router.refresh();
     }
-  }, [applyLiveRefresh, buildPayload, refreshEconomics, router]);
+  }, [applyLiveRefresh, buildPayload, liveRefresh?.scanner_stopped, refreshEconomics, router]);
 
   const pollLiveStatus = useCallback(async () => {
     try {
@@ -604,7 +605,13 @@ export function RunPaperScan() {
             errorMessage={state.kind === "error" ? state.message : null}
           />
           <div className="scan-action">
-            <button className="scan-button" type="submit" disabled={loading} aria-busy={loading}>
+            <button
+              className="scan-button"
+              type="submit"
+              disabled={loading || scannerStopped}
+              aria-busy={loading}
+              title={scannerStopped ? "Scanner stopped by operator" : undefined}
+            >
               {loadingMode === "hot" ? "Scanning… Refreshing HOT…" : "Run scan"}
             </button>
           </div>
@@ -675,8 +682,9 @@ export function RunPaperScan() {
             <button
               className="scan-button"
               type="button"
-              disabled={loading}
+              disabled={loading || scannerStopped}
               aria-busy={loadingMode === "diagnostic"}
+              title={scannerStopped ? "Scanner stopped by operator" : undefined}
               onClick={() => void collect("diagnostic")}
             >
               {loadingMode === "diagnostic" ? "Running full diagnostic…" : "Run full diagnostic"}

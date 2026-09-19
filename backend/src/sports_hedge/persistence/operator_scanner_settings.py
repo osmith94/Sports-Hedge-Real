@@ -39,6 +39,7 @@ LOGGER = logging.getLogger(__name__)
 HOT_CADENCE_MIN_SECONDS = 15
 HOT_CADENCE_MAX_SECONDS = 60
 OPERATOR_SCANNER_RESTART_SEMANTICS = "remain_stopped_until_resume"
+SCANNER_STOPPED_BY_OPERATOR = "scanner_stopped_by_operator"
 
 
 class OperatorScannerSettings(BaseModel):

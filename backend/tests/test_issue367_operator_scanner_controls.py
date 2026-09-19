@@ -15,12 +15,14 @@ from sports_hedge.api import paper as paper_api
 from sports_hedge.api.main import app
 from sports_hedge.application.collector import CollectionReport
 from sports_hedge.application.live_refresh import (
+    ExplicitCollectBusy,
     LiveRefreshCoordinator,
     get_live_refresh_coordinator,
 )
 from sports_hedge.application.paper_operations import PaperOperationsService
 from sports_hedge.config import Settings
 from sports_hedge.persistence.operator_scanner_settings import (
+    SCANNER_STOPPED_BY_OPERATOR,
     SqliteOperatorScannerSettingsStore,
     bind_runtime_operator_scanner_settings_store,
     effective_operator_scanner_settings,
@@ -250,6 +252,9 @@ def test_frontend_renders_backend_settings_not_a_second_authority() -> None:
     assert "saveOperatorScannerSettings" in text
     assert "Auto refresh view" in text
     assert "HOT cadence s" in text
+    assert "disabled={loading || scannerStopped}" in text
+    assert "if (liveRefresh?.scanner_stopped) return;" in text
+    assert text.count("disabled={loading || scannerStopped}") >= 2
 
 
 def test_effective_settings_follow_runtime_store(tmp_path: Path) -> None:
@@ -287,4 +292,132 @@ def test_health_exposes_stopped_flag_without_provider_io(tmp_path: Path) -> None
         assert health["live_refresh"]["scanner_stopped"] is True
         assert "place_order" not in health
     finally:
+        _unbind(coordinator, store)
+
+
+@pytest.mark.asyncio
+async def test_stopped_coordinator_manuals_raise_without_running_runner(
+    tmp_path: Path,
+) -> None:
+    coordinator, store = _bind_store(tmp_path)
+    calls: list[str] = []
+
+    async def runner() -> CollectionReport:
+        calls.append("run")
+        raise AssertionError("stopped manuals must not start collector work")
+
+    try:
+        coordinator.apply_operator_scanner_stopped(True)
+        with pytest.raises(ExplicitCollectBusy, match=SCANNER_STOPPED_BY_OPERATOR):
+            await coordinator.run_manual_hot(runner)
+        with pytest.raises(ExplicitCollectBusy, match=SCANNER_STOPPED_BY_OPERATOR):
+            await coordinator.run_explicit_collect(runner)
+        assert calls == []
+
+        coordinator.apply_operator_scanner_stopped(False)
+        now = datetime.now(UTC)
+
+        async def ok() -> CollectionReport:
+            calls.append("ok")
+            return CollectionReport(started_at=now, completed_at=now)
+
+        await coordinator.run_manual_hot(ok, timeout_seconds=0.5)
+        await coordinator.run_explicit_collect(ok)
+        assert calls == ["ok", "ok"]
+    finally:
+        _unbind(coordinator, store)
+
+
+def test_stopped_manual_http_does_not_invoke_collector_and_resume_restores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sports_hedge.api.watchlist import get_watchlist_service
+
+    coordinator, store = _bind_store(tmp_path)
+    collect_calls: list[str] = []
+    persist_calls: list[str] = []
+    previous_request = coordinator.last_request()
+
+    async def boom(_kwargs, **_kwargs_extra):
+        collect_calls.append("collect")
+        raise AssertionError("stopped manuals must not invoke collector/provider work")
+
+    def persist_boom(*_args, **_kwargs) -> None:
+        persist_calls.append("persist")
+        raise AssertionError("stopped manuals must not persist")
+
+    monkeypatch.setattr(paper_api, "_collect_report", boom)
+    monkeypatch.setattr(paper_api, "persist_manual_hot_after_http_response", persist_boom)
+    monkeypatch.setattr(paper_api, "persist_explicit_collect_after_http_response", persist_boom)
+    app.dependency_overrides[paper_api.get_paper_scan_service] = lambda: object()
+    app.dependency_overrides[paper_api.get_paper_audit_repository] = lambda: object()
+    app.dependency_overrides[get_watchlist_service] = lambda: object()
+    client = TestClient(app)
+    try:
+        stopped = client.post("/paper/scanner/stop")
+        assert stopped.status_code == 200
+        assert stopped.json()["scanner_stopped"] is True
+
+        hot = client.post("/paper/collect/hot", json={"maximum_execution_risk": 60})
+        assert hot.status_code == 409
+        assert hot.json()["detail"] == SCANNER_STOPPED_BY_OPERATOR
+
+        diagnostic = client.post("/paper/collect", json={"maximum_execution_risk": 60})
+        assert diagnostic.status_code == 409
+        assert diagnostic.json()["detail"] == SCANNER_STOPPED_BY_OPERATOR
+
+        assert collect_calls == []
+        assert persist_calls == []
+        assert coordinator.last_request() == previous_request
+        assert coordinator.operator_scanner_stopped is True
+
+        live = client.get("/paper/live-refresh")
+        assert live.status_code == 200
+        assert live.json()["scanner_stopped"] is True
+
+        update = client.put(
+            "/paper/operator-scanner-settings",
+            json={
+                "min_net_edge": "0.006",
+                "max_execution_risk": 55,
+                "hot_cadence_seconds": 18,
+            },
+        )
+        assert update.status_code == 200
+        assert update.json()["scanner_stopped"] is True
+        assert collect_calls == []
+
+        hot_src = inspect.getsource(paper_api.refresh_hot_read_only_market_data)
+        collect_src = inspect.getsource(paper_api.collect_read_only_market_data)
+        assert hot_src.index("operator_scanner_stopped") < hot_src.index("remember_request")
+        assert collect_src.index("operator_scanner_stopped") < collect_src.index(
+            "remember_request"
+        )
+
+        resumed = client.post("/paper/scanner/resume")
+        assert resumed.status_code == 200
+        assert resumed.json()["scanner_stopped"] is False
+
+        now = datetime.now(UTC)
+
+        async def fake_collect(_kwargs, **_kwargs_extra):
+            collect_calls.append("collect")
+            return CollectionReport(started_at=now, completed_at=now)
+
+        monkeypatch.setattr(paper_api, "_collect_report", fake_collect)
+        monkeypatch.setattr(
+            paper_api, "persist_manual_hot_after_http_response", lambda *_a, **_k: None
+        )
+        monkeypatch.setattr(
+            paper_api, "persist_explicit_collect_after_http_response", lambda *_a, **_k: None
+        )
+
+        restored_hot = client.post("/paper/collect/hot", json={"maximum_execution_risk": 60})
+        assert restored_hot.status_code == 200, restored_hot.text
+        restored_diag = client.post("/paper/collect", json={"maximum_execution_risk": 60})
+        assert restored_diag.status_code == 200, restored_diag.text
+        assert collect_calls == ["collect", "collect"]
+        assert persist_calls == []
+    finally:
+        app.dependency_overrides.clear()
         _unbind(coordinator, store)

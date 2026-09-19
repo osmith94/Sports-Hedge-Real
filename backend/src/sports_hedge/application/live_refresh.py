@@ -96,6 +96,7 @@ from sports_hedge.persistence.lane_venue_settings import (
     resolve_lane_venue_participation,
 )
 from sports_hedge.persistence.operator_scanner_settings import (
+    SCANNER_STOPPED_BY_OPERATOR,
     OperatorScannerSettings,
     SqliteOperatorScannerSettingsStore,
     bind_runtime_operator_scanner_settings_store,
@@ -1359,6 +1360,8 @@ class LiveRefreshCoordinator:
     ) -> CollectionReport:
         """Run a manual HOT refresh without moving scheduled lane due-times."""
 
+        if self._operator_scanner_stopped:
+            raise ExplicitCollectBusy(SCANNER_STOPPED_BY_OPERATOR)
         if self._manual_hot_in_progress:
             raise ExplicitCollectBusy("manual HOT refresh in progress")
         if self.scheduled_hot_active():
@@ -1424,6 +1427,8 @@ class LiveRefreshCoordinator:
     async def run_explicit_collect(self, runner) -> CollectionReport:
         """Manual diagnostic collect. Does not own HOT/UNIVERSE generation progress."""
 
+        if self._operator_scanner_stopped:
+            raise ExplicitCollectBusy(SCANNER_STOPPED_BY_OPERATOR)
         if self.scheduled_universe_active():
             raise ExplicitCollectBusy("UNIVERSE scan in progress")
         timeout = self.explicit_collect_timeout_seconds()
