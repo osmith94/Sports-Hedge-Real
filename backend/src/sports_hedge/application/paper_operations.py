@@ -328,7 +328,10 @@ class PaperOperationsService:
                     # Eligible LIVE_PAPER + autofill ON must never vanish. Keep
                     # the fail-closed gate and persist the exact capture reason.
                     self._record_entry_rejection(
-                        opportunity_id, skip_reason, occurred_at=dispatched
+                        opportunity_id,
+                        skip_reason,
+                        occurred_at=dispatched,
+                        reject_triggered=True,
                     )
         return candidate
 
@@ -1946,12 +1949,15 @@ class PaperOperationsService:
         opportunity_id: str,
         reason: str,
         occurred_at: datetime | None = None,
+        *,
+        reject_triggered: bool = False,
     ) -> None:
         self._entry_rejections[opportunity_id] = reason
         self.watchlist.record_paper_fill_rejection(
             opportunity_id,
             occurred_at=occurred_at or datetime.now(UTC),
             detail=reason,
+            reject_triggered=reject_triggered,
         )
 
     def _get_trade_by_opportunity(self, opportunity_id: str) -> PaperTrade | None:
