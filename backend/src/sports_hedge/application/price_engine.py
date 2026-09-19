@@ -900,6 +900,11 @@ class CataloguePriceEngine:
 
         await self.observability.drain()
 
+    async def shutdown_observability(self) -> None:
+        """Finish accepted consumers then join the worker. Not a pricing await."""
+
+        await self.observability.shutdown()
+
     def schedule_observability(self, fn: Callable[[], Any]) -> None:
         """Enqueue non-critical audit/history work without delaying capture."""
 

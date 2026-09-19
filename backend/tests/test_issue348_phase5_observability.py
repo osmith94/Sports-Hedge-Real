@@ -392,6 +392,7 @@ async def test_slow_audit_does_not_delay_next_price_item_or_scan_timeout(
         assert release.wait(timeout=2.0)
 
     monkeypatch.setattr(paper_api, "record_price_engine_item_audit", slow_audit)
+    engine = None
     try:
         rows = [
             _row(
@@ -420,6 +421,8 @@ async def test_slow_audit_does_not_delay_next_price_item_or_scan_timeout(
         assert "scan_cycle_timeout" not in (result.issues and result.issues[0].detail or "")
     finally:
         release.set()
+        if engine is not None:
+            await engine.shutdown_observability()
         repository.close()
         ledger.close()
         audit.close()
@@ -470,6 +473,7 @@ async def test_delayed_audit_cannot_recapture_phase4_open(
 ) -> None:
     scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
     audit = _audit(tmp_path)
+    engine = None
     try:
         row = _row(
             suffix="once5",
@@ -501,6 +505,8 @@ async def test_delayed_audit_cannot_recapture_phase4_open(
         assert "append_scan" not in capture_src
         assert "persist_triggered_chain" in inspect.getsource(paper_api._persist_decision)
     finally:
+        if engine is not None:
+            await engine.shutdown_observability()
         repository.close()
         ledger.close()
         audit.close()
@@ -513,7 +519,13 @@ def test_phase5_does_not_create_durable_queue_or_weaken_paper_boundary() -> None
     paper_src = inspect.getsource(paper_api.live_refresh_status)
     assert "CREATE TABLE" not in sink_src
     assert "CREATE TABLE" not in engine_src
-    assert "cancel" not in emit_src
+    assert ".cancel(" not in emit_src
+    assert "await asyncio.to_thread" not in sink_src
+    assert "_decision_is_interesting" in inspect.getsource(CataloguePriceEngine._maybe_promote)
+    assert "discard" in inspect.getsource(CataloguePriceEngine._maybe_promote)
+    assert "PriceEngineProjectionEvent" in inspect.getsource(
+        CataloguePriceEngine._schedule_projection
+    )
     assert "durable_queue" in inspect.getsource(CataloguePriceEngine.public_status)
     assert "collect_and_scan" not in paper_src
     for token in FORBIDDEN_WRITE_METHODS:
@@ -561,6 +573,43 @@ async def test_saturated_sink_does_not_orphan_running_to_thread(
         assert len(finished) == len(started)
         assert len(started) + sink.dropped == 5
         assert sink.lag == 0
+        repo.list_scans(limit=1)
+    finally:
+        release.set()
+        await sink.shutdown()
+        repo.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_asyncio_waiter_does_not_orphan_running_consumer(
+    tmp_path: Path,
+) -> None:
+    repo = SqlitePaperScanRepository(tmp_path / "obs-cancel.sqlite")
+    sink = ScannerObservabilitySink(maxsize=2)
+    release = threading.Event()
+    started_event = threading.Event()
+    finished: list[int] = []
+
+    def callback() -> None:
+        started_event.set()
+        assert release.wait(timeout=2.0)
+        repo.list_scans(limit=1)
+        finished.append(1)
+
+    try:
+        sink.emit(callback)
+        assert started_event.wait(timeout=1.0)
+        waiter = asyncio.create_task(sink.drain())
+        await asyncio.sleep(0.05)
+        assert not waiter.done()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert finished == []
+        assert sink.lag >= 1
+        release.set()
+        await sink.shutdown()
+        assert finished == [1]
         repo.list_scans(limit=1)
     finally:
         release.set()

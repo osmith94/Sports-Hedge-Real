@@ -4,10 +4,10 @@ Phase 5: audit/history/UI projection/health read-models sit behind the
 price-engine critical path. This module is process-memory only. It is not a
 durable work queue and must not decide what to price next.
 
-Accepted work is a bounded in-memory queue plus at most one running
-``to_thread`` callback. Overflow drops a **not-yet-started** event. Already
-running worker threads are never cancelled, and ``drain()`` returns only after
-every accepted callback has actually finished.
+Accepted work is a bounded in-memory queue plus a persistent daemon thread.
+Overflow drops a **not-yet-started** queued event. Running callbacks are never
+cancelled, including via ``asyncio.Task.cancel`` / ``asyncio.to_thread``.
+``drain()`` returns only after every accepted callback has actually finished.
 
 PAPER / read-only. Fixture/demo clocks in tests; no live HTTP.
 """
@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from inspect import isawaitable
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -81,11 +81,10 @@ class ScannerObservabilitySink:
     """Bounded in-process fan-out for non-critical projection/audit work.
 
     Emit never waits for the consumer. Overflow drops the oldest **queued**
-    event before it starts a worker thread. A worker task runs accepted
-    callbacks via ``asyncio.to_thread`` until the queue is empty, then exits;
-    the next emit starts another worker. Running callbacks are never cancelled
-    to enforce maxsize. Pricing/capture must never await ``drain()`` on the
-    critical path.
+    event before that callback starts. A persistent daemon thread runs accepted
+    callbacks; there is no per-item ``asyncio.to_thread`` wrapper, so cancelling
+    an asyncio waiter cannot orphan a still-running consumer. Pricing/capture
+    must never await ``drain()`` on the critical path.
     """
 
     maxsize: int = 256
@@ -93,149 +92,156 @@ class ScannerObservabilitySink:
     dropped: int = 0
     last_error: str | None = None
     _queue: deque[Callable[[], Any]] = field(default_factory=deque)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _work: threading.Event = field(default_factory=threading.Event)
+    _idle: threading.Event = field(default_factory=threading.Event)
     _in_flight: int = 0
     _closed: bool = False
-    _loop: asyncio.AbstractEventLoop | None = None
-    _worker: asyncio.Task[Any] | None = None
-    _idle: asyncio.Event | None = None
+    _worker: threading.Thread | None = None
+
+    def __post_init__(self) -> None:
+        self._idle.set()
 
     def emit(self, fn: Callable[[], Any]) -> None:
         """Schedule ``fn`` behind the critical path. Never await it here."""
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
+        with self._lock:
             if self._closed:
                 self.dropped += 1
-                self._refresh_lag()
+                self._refresh_lag_unlocked()
+                LOGGER.warning("observability sink closed; dropping consumer")
                 return
+            if self.maxsize > 0 and len(self._queue) >= self.maxsize:
+                self._queue.popleft()
+                self.dropped += 1
+                LOGGER.warning("observability sink saturated; dropping oldest queued consumer")
+            self._queue.append(fn)
+            self._idle.clear()
+            self._refresh_lag_unlocked()
+        self._ensure_worker()
+        self._work.set()
+
+    def _ensure_worker(self) -> None:
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                return
+            worker = threading.Thread(
+                target=self._worker_loop,
+                name="scanner-observability-worker",
+                daemon=True,
+            )
+            self._worker = worker
+            worker.start()
+
+    def _refresh_lag_unlocked(self) -> None:
+        self.lag = len(self._queue) + self._in_flight
+
+    def _maybe_idle_unlocked(self) -> None:
+        if not self._queue and self._in_flight == 0:
+            self._idle.set()
+        else:
+            self._idle.clear()
+
+    def _pop_work(self) -> Callable[[], Any] | None:
+        with self._lock:
+            if self._queue:
+                fn = self._queue.popleft()
+                self._in_flight += 1
+                self._idle.clear()
+                self._refresh_lag_unlocked()
+                return fn
+            self._maybe_idle_unlocked()
+            self._work.clear()
+            if self._queue:
+                fn = self._queue.popleft()
+                self._in_flight += 1
+                self._idle.clear()
+                self._refresh_lag_unlocked()
+                return fn
+            return None
+
+    def _worker_loop(self) -> None:
+        """Run accepted callbacks on a real thread. Never cancelled for maxsize."""
+
+        while True:
+            fn = self._pop_work()
+            if fn is None:
+                with self._lock:
+                    if self._closed and not self._queue and self._in_flight == 0:
+                        self._idle.set()
+                        return
+                self._work.wait(timeout=0.25)
+                continue
             try:
                 fn()
             except Exception as exc:
                 self.last_error = str(exc)
-                LOGGER.exception("observability consumer failed without a running loop")
-            return
-        if self._closed:
-            self.dropped += 1
-            self._refresh_lag()
-            LOGGER.warning("observability sink closed; dropping consumer")
-            return
-        if self.maxsize > 0 and len(self._queue) >= self.maxsize:
-            self._queue.popleft()
-            self.dropped += 1
-            LOGGER.warning("observability sink saturated; dropping oldest queued consumer")
-        self._queue.append(fn)
-        self._ensure_idle_event(loop)
-        self._mark_busy()
-        self._ensure_worker(loop)
-        self._refresh_lag()
-
-    def _ensure_idle_event(self, loop: asyncio.AbstractEventLoop) -> None:
-        if self._loop is not loop or self._idle is None:
-            self._loop = loop
-            self._idle = asyncio.Event()
-            if not self._queue and not self._in_flight:
-                self._idle.set()
-
-    def _ensure_worker(self, loop: asyncio.AbstractEventLoop) -> None:
-        self._ensure_idle_event(loop)
-        if self._worker is None or self._worker.done():
-            self._worker = loop.create_task(
-                self._run_queued(),
-                name="scanner-observability-worker",
-            )
-
-    def _mark_busy(self) -> None:
-        if self._idle is not None and self._idle.is_set():
-            self._idle.clear()
-
-    def _maybe_idle(self) -> None:
-        if self._queue or self._in_flight:
-            return
-        if self._idle is not None and not self._idle.is_set():
-            self._idle.set()
-
-    def _refresh_lag(self) -> None:
-        self.lag = len(self._queue) + self._in_flight
-
-    def _pop_queued(self) -> Callable[[], Any] | None:
-        if not self._queue:
-            return None
-        fn = self._queue.popleft()
-        self._refresh_lag()
-        return fn
-
-    async def _run_queued(self) -> None:
-        """Run accepted callbacks until the queue is empty. Do not wait forever."""
-
-        try:
-            while True:
-                fn = self._pop_queued()
-                if fn is None:
-                    await asyncio.sleep(0)
-                    fn = self._pop_queued()
-                    if fn is None:
-                        return
-                self._in_flight += 1
-                self._mark_busy()
-                self._refresh_lag()
-                try:
-                    outcome = await asyncio.to_thread(fn)
-                    if isawaitable(outcome):
-                        await outcome
-                except Exception as exc:
-                    self.last_error = str(exc)
-                    LOGGER.exception("observability consumer failed")
-                finally:
+                LOGGER.exception("observability consumer failed")
+            finally:
+                with self._lock:
                     self._in_flight -= 1
-                    self._refresh_lag()
-        finally:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                self._worker = None
-                self._maybe_idle()
-                return
-            if self._queue and not self._closed:
-                self._worker = loop.create_task(
-                    self._run_queued(),
-                    name="scanner-observability-worker",
-                )
-            else:
-                self._worker = None
-                self._maybe_idle()
+                    self._refresh_lag_unlocked()
+                    self._maybe_idle_unlocked()
+
+    def wait_until_idle(self) -> None:
+        """Block until accepted queued/running callbacks have finished."""
+
+        while True:
+            with self._lock:
+                if not self._queue and self._in_flight == 0:
+                    return
+            self._idle.wait(timeout=0.05)
 
     async def drain(self) -> None:
-        """Return only after every accepted queued/running callback has finished."""
+        """Return only after every accepted queued/running callback has finished.
 
-        while self._queue or self._in_flight or (
-            self._worker is not None and not self._worker.done()
-        ):
-            if self._idle is not None:
-                await self._idle.wait()
-            else:
-                worker = self._worker
-                if worker is None or worker.done():
+        Cancelling this waiter does **not** complete or orphan accepted work.
+        Call ``shutdown()`` before closing repositories used by consumers.
+        """
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self.wait_until_idle()
+            return
+        while True:
+            with self._lock:
+                if not self._queue and self._in_flight == 0:
                     return
-                await worker
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
 
     def reset(self) -> None:
-        """Drop not-yet-started work. Do not cancel a running ``to_thread``."""
+        """Drop not-yet-started work. Do not interrupt a running callback."""
 
-        self._queue.clear()
-        self.dropped = 0
-        self.last_error = None
-        self._closed = False
-        self._refresh_lag()
-        self._maybe_idle()
+        with self._lock:
+            self._queue.clear()
+            self.dropped = 0
+            self.last_error = None
+            self._closed = False
+            self._refresh_lag_unlocked()
+            self._maybe_idle_unlocked()
+        self._work.set()
 
     async def shutdown(self) -> None:
-        """Stop accepting work, then finish accepted callbacks."""
+        """Stop accepting work, finish accepted callbacks, then join the worker."""
 
-        self._closed = True
-        await self.drain()
-        self._worker = None
+        with self._lock:
+            self._closed = True
+        self._work.set()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.wait_until_idle()
+        else:
+            try:
+                await loop.run_in_executor(None, self.wait_until_idle)
+            except asyncio.CancelledError:
+                self.wait_until_idle()
+                raise
+        worker = self._worker
+        if worker is not None and worker.is_alive() and worker is not threading.current_thread():
+            await asyncio.sleep(0)
+            worker.join(timeout=2.0)
 
     def snapshot(self) -> dict[str, Any]:
         return {
