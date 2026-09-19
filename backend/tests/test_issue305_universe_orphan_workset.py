@@ -28,8 +28,6 @@ from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.provider_access import HEALTH_AUTH_FAILURE, HEALTH_DISCOVERY_TIMEOUT
 from sports_hedge.application.scan_lanes import WORKER_COMPLETE, ScanLane
 from sports_hedge.application.universe_checkpoint import (
-    LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION,
-    STALE_ORPHAN_REASON,
     SWEEP_EVALUATED,
     SWEEP_OK,
     SWEEP_PENDING,
@@ -98,7 +96,7 @@ def _seed_owner_live_generation_26(store: SqliteUniverseCheckpointStore) -> None
         for index in range(1, 31)
     }
     first._next_universe_due = NOW
-    first._persist_universe_checkpoint_unlocked()
+    first.flush_universe_checkpoint()
 
 
 def _restore_owner_live(store: SqliteUniverseCheckpointStore) -> tuple[FakeClock, LiveRefreshCoordinator]:
@@ -120,7 +118,6 @@ def _assert_owner_live_restored(coordinator: LiveRefreshCoordinator) -> None:
     assert {coordinator._universe_work[item].state for item in ORPHAN_IDS} == {SWEEP_PENDING}
     assert len(coordinator._universe_series_work) == 30
     assert all(unit.state == SWEEP_OK for unit in coordinator._universe_series_work.values())
-    assert coordinator._universe_discovery_snapshot is not None
     skip = set(coordinator._universe_skip_ids_unlocked(NOW))
     assert skip == set(EVALUATED_IDS)
     assert set(ORPHAN_IDS).isdisjoint(skip)
@@ -539,8 +536,8 @@ def test_compatible_retry_wait_checkpoint_still_restores(tmp_path: Path) -> None
     payload = store.load()
     assert payload is not None
     assert payload["semantics_version"] == UNIVERSE_CHECKPOINT_SEMANTICS_VERSION
-    payload.pop("semantics_version", None)
-    store.save(payload, updated_at=NOW.isoformat())
+    assert payload.get("report") in (None, {}, [])
+    assert payload.get("discovery_snapshot") in (None, {}, [])
 
     restarted = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
     restarted.configure_from_settings()
@@ -553,7 +550,6 @@ def test_compatible_retry_wait_checkpoint_still_restores(tmp_path: Path) -> None
 
 def test_unversioned_legacy_checkpoint_invalidates_when_runtime_semantics_bumped(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = SqliteUniverseCheckpointStore(tmp_path / "issue305-legacy-bump.sqlite")
     first = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
@@ -570,16 +566,7 @@ def test_unversioned_legacy_checkpoint_invalidates_when_runtime_semantics_bumped
     payload.pop("semantics_version", None)
     store.save(payload, updated_at=NOW.isoformat())
     parsed = checkpoint_from_payload(store.load())
-    assert parsed is not None
-    assert parsed.semantics_version == LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION
-    monkeypatch.setattr(
-        "sports_hedge.application.live_refresh.UNIVERSE_CHECKPOINT_SEMANTICS_VERSION",
-        LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION + 1,
-    )
-    monkeypatch.setattr(
-        "sports_hedge.application.universe_checkpoint.UNIVERSE_CHECKPOINT_SEMANTICS_VERSION",
-        LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION + 1,
-    )
+    assert parsed is None
     restarted = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
     restarted.configure_from_settings()
     assert restarted._universe_generation_started_at is None

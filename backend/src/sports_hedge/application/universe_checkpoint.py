@@ -3,15 +3,20 @@
 Successful-work accounting, resume cursor and evaluated IDs belong to one
 generation until that sweep genuinely completes or an explicit reset/invalid
 checkpoint proves it cannot be resumed safely.
+
+Durable payloads are compact resume state only. Raw venue event bodies and
+full CollectionReport snapshots stay in-memory for the live process and are
+never written to SQLite.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from sports_hedge.application.collector import CollectionReport
 
@@ -20,12 +25,19 @@ LOGGER = logging.getLogger(__name__)
 UNIVERSE_PROVIDER_BACKOFF_SECONDS = (2.0, 5.0, 10.0, 20.0, 30.0)
 UNIVERSE_WORK_RETRY_BACKOFF_SECONDS = (2.0, 5.0, 10.0)
 
-# Identity/normalization/work-set contract. Bump UNIVERSE_CHECKPOINT_SEMANTICS_VERSION
-# when resume skip IDs or canonical clustering would mis-handle an older checkpoint.
-# Unversioned (#304) payloads must always parse as the legacy constant, not the
-# current runtime version, so a future 1→2 bump invalidates them.
+# Compact durable resume contract. Bump UNIVERSE_CHECKPOINT_SEMANTICS_VERSION
+# when skip IDs, work-unit resume, or the persisted field set would mis-handle
+# an older checkpoint. Unversioned (#304) and v1 fat payloads parse as the
+# legacy constant so a 1→2 bump fail-closes them instead of restoring 50MB
+# venue/report blobs onto the event loop.
 LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION = 1
-UNIVERSE_CHECKPOINT_SEMANTICS_VERSION = 1
+UNIVERSE_CHECKPOINT_SEMANTICS_VERSION = 2
+
+# Hard cap for encoded durable JSON. Realistic synthetic work-sets of a few
+# hundred compact SweepWorkUnit/SeriesWorkUnit rows stay well under this;
+# raw venue bodies and CollectionReport dumps do not.
+UNIVERSE_CHECKPOINT_MAX_ENCODED_BYTES = 256 * 1024
+FAT_CHECKPOINT_PAYLOAD_KEYS = frozenset({"report", "discovery_snapshot"})
 
 SWEEP_PENDING = "pending"
 SWEEP_RUNNING = "running"
@@ -77,7 +89,15 @@ def series_work_key(venue: str, series: str) -> str:
     return f"{venue}:{series}"
 
 
+class UniverseCheckpointTooLarge(ValueError):
+    """Encoded durable checkpoint exceeded the compact size cap."""
+
+
 class UniverseGenerationCheckpoint(BaseModel):
+    """Resume-critical UNIVERSE generation state. Compact by contract."""
+
+    model_config = ConfigDict(extra="ignore")
+
     generation_id: int = Field(ge=1)
     generation_started_at: datetime
     successful_work_used_s: float = Field(default=0.0, ge=0)
@@ -87,10 +107,8 @@ class UniverseGenerationCheckpoint(BaseModel):
     provider_failure_count: int = Field(default=0, ge=0)
     retry_at: datetime | None = None
     budget_paused: bool = False
-    report: dict[str, Any] | None = None
     updated_at: datetime
     sweep_id: str | None = None
-    discovery_snapshot: dict[str, list[dict[str, Any]]] | None = None
     discovered_total: int = Field(default=0, ge=0)
     failed_ids: dict[str, str] = Field(default_factory=dict)
     skipped_ids: dict[str, str] = Field(default_factory=dict)
@@ -103,7 +121,6 @@ class UniverseGenerationCheckpoint(BaseModel):
     hot_promotions: int = Field(default=0, ge=0)
     raw_events_by_venue: dict[str, int] = Field(default_factory=dict)
     work_units: dict[str, SweepWorkUnit] = Field(default_factory=dict)
-    series_results: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     series_work: dict[str, SeriesWorkUnit] = Field(default_factory=dict)
     semantics_version: int = Field(default=LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION)
 
@@ -175,11 +192,48 @@ def collection_report_from_snapshot(payload: dict[str, Any] | None) -> Collectio
         return None
 
 
+def durable_checkpoint_has_fat_payload(payload: dict[str, Any] | None) -> bool:
+    """True when a payload still carries v1 report/raw-event blobs."""
+
+    if not payload:
+        return False
+    for key in FAT_CHECKPOINT_PAYLOAD_KEYS:
+        value = payload.get(key)
+        if value:
+            return True
+    return False
+
+
+def encode_durable_universe_checkpoint(payload: dict[str, Any]) -> str:
+    """JSON-encode a compact checkpoint and fail closed over the size cap."""
+
+    encoded = json.dumps(payload, separators=(",", ":"), default=str)
+    size = len(encoded.encode("utf-8"))
+    if size > UNIVERSE_CHECKPOINT_MAX_ENCODED_BYTES:
+        raise UniverseCheckpointTooLarge(
+            f"universe checkpoint encoded size {size} exceeds "
+            f"{UNIVERSE_CHECKPOINT_MAX_ENCODED_BYTES} byte compact cap"
+        )
+    return encoded
+
+
 def checkpoint_from_payload(payload: dict[str, Any] | None) -> UniverseGenerationCheckpoint | None:
     if not payload:
         return None
+    if durable_checkpoint_has_fat_payload(payload):
+        LOGGER.warning("universe checkpoint has fat report/discovery payload; not resuming unsafely")
+        return None
     try:
-        return UniverseGenerationCheckpoint.model_validate(payload)
+        checkpoint = UniverseGenerationCheckpoint.model_validate(payload)
     except ValidationError:
         LOGGER.warning("universe checkpoint failed validation; not resuming unsafely")
         return None
+    if checkpoint.semantics_version != UNIVERSE_CHECKPOINT_SEMANTICS_VERSION:
+        LOGGER.warning(
+            "universe checkpoint semantics_version=%s incompatible with runtime %s; "
+            "not resuming unsafely",
+            checkpoint.semantics_version,
+            UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
+        )
+        return None
+    return checkpoint
