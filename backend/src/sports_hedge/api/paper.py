@@ -35,11 +35,13 @@ from sports_hedge.application.lane_venues import (
     LaneVenueParticipation,
 )
 from sports_hedge.application.live_refresh import (
+    SCAN_CYCLE_RETURN_GRACE_SECONDS,
     ExplicitCollectBusy,
     LiveRefreshStatus,
     ScanCycleTimeout,
     get_live_refresh_coordinator,
 )
+from sports_hedge.application.price_engine import PriceEnginePriority
 from sports_hedge.application.market_observation import (
     KalshiObservationBuilder,
     MatchbookObservationBuilder,
@@ -1266,19 +1268,93 @@ def scheduled_collection_kwargs() -> dict[str, Any]:
     ).model_dump()
 
 
-async def server_owned_refresh_tick(plan=None) -> None:
-    """Background tick used when PAPER_LIVE_REFRESH_ENABLED is true."""
+def scheduled_paper_scan_service() -> PaperScanService:
+    """Paper scan service for server-owned ticks. Manual HTTP uses FastAPI Depends."""
 
-    coordinator = get_live_refresh_coordinator()
-    resolved = plan if plan is not None and getattr(plan, "lane", "idle") != "idle" else coordinator.plan_tick()
-    if resolved.lane == "idle":
-        return
-    service = get_paper_scan_service(
+    return get_paper_scan_service(
         get_market_intelligence_service(),
         get_fx_rate_service(),
         get_venue_cost_resolver(),
         get_paper_liquidity_repository(),
     )
+
+
+async def server_owned_refresh_tick(plan=None) -> None:
+    """Background tick used when PAPER_LIVE_REFRESH_ENABLED is true."""
+
+    coordinator = get_live_refresh_coordinator()
+    if coordinator._catalogue_store is None:
+        coordinator.bind_catalogue_store(get_approved_market_catalogue_store())
+    resolved = plan if plan is not None else coordinator.plan_tick()
+    if resolved.lane == "idle" and getattr(resolved, "reason", "") != "hot_scope_empty":
+        return
+    service = scheduled_paper_scan_service()
+    settings = get_settings()
+    runtime = get_shared_provider_runtime(settings)
+    if resolved.lane == "background":
+        await coordinator.run_price_engine_slice(
+            PriceEnginePriority.BACKGROUND,
+            matchbook=runtime.matchbook,
+            kalshi=runtime.kalshi,
+            paper_scan=service,
+        )
+        return
+    if resolved.lane == ScanLane.HOT.value or getattr(resolved, "reason", "") == "hot_scope_empty":
+        hot_wall = float(settings.paper_scan_hot_cycle_timeout_seconds)
+        price_engine_venues = [VenueName.MATCHBOOK, VenueName.KALSHI]
+
+        async def hot_runner() -> CollectionReport:
+            started = coordinator.now()
+            result = await coordinator.run_price_engine_slice(
+                PriceEnginePriority.HOT,
+                slice_wall_seconds=hot_wall,
+                matchbook=runtime.matchbook,
+                kalshi=runtime.kalshi,
+                paper_scan=service,
+            )
+            finished = coordinator.now()
+            return CollectionReport(
+                started_at=started,
+                completed_at=finished,
+                matching_venues=list(price_engine_venues),
+                enabled_venues=list(price_engine_venues),
+                paper_decisions=list(result.decisions),
+                issues=list(result.issues),
+                scan_lane=ScanLane.HOT.value,
+                scan_diagnostics={
+                    "price_engine": True,
+                    "priority": PriceEnginePriority.HOT.value,
+                    "evaluated": list(result.evaluated),
+                    "deferred": list(result.deferred),
+                    "not_started": list(result.not_started),
+                    "legacy_hot_collector": False,
+                },
+            )
+
+        try:
+            report = await coordinator.run_cycle(
+                hot_runner,
+                timeout_seconds=hot_wall + SCAN_CYCLE_RETURN_GRACE_SECONDS,
+                scan_lane=ScanLane.HOT,
+            )
+        except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, httpx.HTTPError):
+            return
+        # Existing #336/#338 batch-end capture: persist off-loop after the
+        # price-engine slice. Do not call persist_triggered_chain here (Phase 4)
+        # and do not re-enter the legacy HOT collector.
+        audit = get_paper_audit_repository()
+        from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
+
+        watchlist = get_watchlist_service(get_watchlist_repository())
+        await persist_scheduled_collection_report(
+            coordinator,
+            report,
+            service=service,
+            audit=audit,
+            watchlist=watchlist,
+            scan_lane=ScanLane.HOT,
+        )
+        return
     audit = get_paper_audit_repository()
     from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
 

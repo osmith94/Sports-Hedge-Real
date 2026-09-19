@@ -244,10 +244,16 @@ class DerivedPriceEngineItem(BaseModel):
     matchbook_runner_ids: list[OutcomeNativeId] = Field(default_factory=list)
     kalshi_event_ticker: str | None = None
     kalshi_market_tickers: list[str] = Field(default_factory=list)
+    kalshi_outcome_ids: list[OutcomeNativeId] = Field(default_factory=list)
     kalshi_fee_snapshot_id: str | None = None
     family: str | None = None
     period: str | None = None
     line: str | None = None
+    required_outcomes: list[str] = Field(default_factory=list)
+    competition: str | None = None
+    home_canonical: str | None = None
+    away_canonical: str | None = None
+    kickoff_utc: datetime | None = None
 
 
 def classify_kalshi_fee_resolution(metadata: dict[str, Any]) -> tuple[str, str | None]:
@@ -389,10 +395,16 @@ def derived_price_engine_working_set(
                 matchbook_runner_ids=list(row.matchbook_runner_ids),
                 kalshi_event_ticker=row.kalshi_event_ticker,
                 kalshi_market_tickers=list(row.kalshi_market_tickers),
+                kalshi_outcome_ids=list(row.kalshi_outcome_ids),
                 kalshi_fee_snapshot_id=row.kalshi_fee_snapshot_id,
                 family=row.family,
                 period=row.period,
                 line=row.line,
+                required_outcomes=list(row.required_outcomes),
+                competition=row.competition,
+                home_canonical=row.home_canonical,
+                away_canonical=row.away_canonical,
+                kickoff_utc=row.kickoff_utc,
             )
         )
     return items
