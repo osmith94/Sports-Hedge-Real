@@ -121,8 +121,10 @@ from sports_hedge.application.target_competitions import (
     TargetCompetitionCode,
     filter_in_scope_events,
     resolve_target_competition,
+    resolve_target_competition_from_kalshi_ticker,
     scope_matchbook_event,
 )
+from sports_hedge.config import Settings
 from sports_hedge.arbitrage.watchlist.economics import (
     distance_to_trigger_pp,
     net_edge_from_implied_sum,
@@ -1714,6 +1716,8 @@ class ReadOnlyCrossVenueCollector:
         client_report = list(getattr(client, "last_series_report", None) or [])
         if extra.get("series_results"):
             client_report = list(extra.get("series_results") or [])
+        if not client_report and venue is VenueName.KALSHI and events:
+            client_report = _combined_kalshi_series_ok_rows(events)
         if client_report:
             self._op_series_results[venue.value] = client_report
             if extra.get("partial") or any(item.get("status") != "ok" for item in client_report):
@@ -5435,6 +5439,49 @@ def _payload_events(payload: Any, venue: VenueName) -> tuple[list[dict[str, Any]
     if isinstance(payload, dict):
         return _extract_matchbook_items(payload, "events"), dict(payload)
     return [], {}
+
+
+def _combined_kalshi_series_ok_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Evidence for a successful combined Kalshi list_events (no per-series report).
+
+    Configured series for competitions present in the payload are marked ok.
+    This does not invent a timeout as success. Per-series discovery remains
+    the production path and supplies explicit timeout/not-queried rows.
+    """
+
+    seen_codes: set[str] = set()
+    for item in events:
+        if not isinstance(item, dict):
+            continue
+        ticker = str(item.get("series_ticker") or item.get("event_ticker") or "").strip()
+        competition = resolve_target_competition_from_kalshi_ticker(ticker)
+        if competition is not None:
+            seen_codes.add(competition.code.value)
+    if not seen_codes:
+        return []
+    rows: list[dict[str, Any]] = []
+    for ticker in Settings().kalshi_series_tickers:
+        series = str(ticker).strip()
+        if not series:
+            continue
+        competition = resolve_target_competition_from_kalshi_ticker(series)
+        if competition is None or competition.code.value not in seen_codes:
+            continue
+        count = sum(
+            1
+            for item in events
+            if isinstance(item, dict) and str(item.get("series_ticker") or "").strip() == series
+        )
+        rows.append(
+            {
+                "series": series,
+                "status": "ok",
+                "retryable": False,
+                "event_count": count,
+                "reason": None,
+            }
+        )
+    return rows
 
 
 def _discovery_event_id(item: dict[str, Any], venue: VenueName) -> str:

@@ -131,6 +131,7 @@ class _SeriesFilteredKalshi(OverlapKalshi):
     ) -> None:
         super().__init__(events, series_by_ticker=series_by_ticker, books=books)
         self.timeout_series = {str(item).strip() for item in (timeout_series or set())}
+        self.settings = Settings()
 
     async def list_events(self, **filters: Any) -> dict[str, Any]:
         ticker = str(filters.get("series_ticker") or "").strip()
@@ -464,6 +465,9 @@ def test_wave2_does_not_change_scanner_architecture() -> None:
             assert not hasattr(client, method)
 
     persist_src = inspect.getsource(persist_universe_catalogue_pass)
+    import sports_hedge.application.catalogue_maintenance as catalogue_maintenance
+
+    maintenance_src = inspect.getsource(catalogue_maintenance)
     offloop_src = inspect.getsource(persist_universe_catalogue_pass_offloop)
     collector_persist = inspect.getsource(
         ReadOnlyCrossVenueCollector._persist_universe_catalogue_from_pairs
@@ -473,7 +477,7 @@ def test_wave2_does_not_change_scanner_architecture() -> None:
     )
     assert "listed_ok" not in persist_src
     assert "FamilyDiscoveryCompleteness" in persist_src
-    assert "complete_family_keys" in persist_src
+    assert "complete_family_keys" in maintenance_src
     assert "asyncio.to_thread" in offloop_src
     assert "persist_universe_catalogue_pass_offloop" in collector_persist
     assert "persist_universe_catalogue_pass_offloop" in collector_terminal
