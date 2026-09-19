@@ -39,20 +39,25 @@ HEALTH_AUTH_FAILURE = "auth_failure"
 HEALTH_CANCELLED = "cancelled"
 HEALTH_DEGRADED = "degraded"
 HEALTH_DISABLED = "disabled"
+HEALTH_CAPACITY_SATURATED = "provider_capacity_saturated"
 
 DEFAULT_STARVATION_HOT_GRANTS = 8
+PRICE_ENGINE_BACKGROUND_LANE = "background"
 
 
 class ProviderPriority(IntEnum):
     HOT = 0
     UNIVERSE = 1
     MANUAL = 1
+    BACKGROUND = 2
 
 
 def priority_for_lane(lane: ScanLane | str | None) -> ProviderPriority:
     text = str(lane or "").strip().casefold()
     if text == ScanLane.HOT.value:
         return ProviderPriority.HOT
+    if text == PRICE_ENGINE_BACKGROUND_LANE:
+        return ProviderPriority.BACKGROUND
     return ProviderPriority.UNIVERSE
 
 
@@ -184,13 +189,19 @@ class ProviderAccessLayer:
         waiting_by_lane = {
             "hot": {venue.value: 0 for venue in self._limits},
             "universe": {venue.value: 0 for venue in self._limits},
+            "background": {venue.value: 0 for venue in self._limits},
         }
         waiting = {venue.value: 0 for venue in self._limits}
         for venue, waiters in self._waiters.items():
             pending = [item for item in waiters if not item.granted and not item.cancelled]
             waiting[venue.value] = len(pending)
             for waiter in pending:
-                lane = "hot" if waiter.priority is ProviderPriority.HOT else "universe"
+                if waiter.priority is ProviderPriority.HOT:
+                    lane = "hot"
+                elif waiter.priority is ProviderPriority.BACKGROUND:
+                    lane = "background"
+                else:
+                    lane = "universe"
                 waiting_by_lane[lane][venue.value] += 1
         return ProviderAccessSnapshot(
             inflight={venue.value: count for venue, count in self._in_use.items()},
@@ -258,21 +269,84 @@ class ProviderAccessLayer:
         stage: str,
     ) -> _Waiter:
         async with self._cond:
-            self._seq += 1
-            priority = priority_for_lane(lane)
-            reason = HEALTH_WAITING
-            if priority is ProviderPriority.UNIVERSE and self._hot_ahead(venue):
-                reason = HEALTH_DEFERRED
-            waiter = _Waiter(
-                priority=priority,
-                seq=self._seq,
-                lane=ScanLane.HOT.value if priority is ProviderPriority.HOT else ScanLane.UNIVERSE.value,
-                stage=stage,
-                reason=reason,
-            )
+            waiter = self._make_waiter(venue, lane=lane, stage=stage)
             self._waiters[venue].append(waiter)
             self._pump(venue)
             return waiter
+
+    def _make_waiter(
+        self,
+        venue: VenueName,
+        *,
+        lane: ScanLane | str | None,
+        stage: str,
+    ) -> _Waiter:
+        self._seq += 1
+        priority = priority_for_lane(lane)
+        reason = HEALTH_WAITING
+        if priority is not ProviderPriority.HOT and self._hot_ahead(venue):
+            reason = HEALTH_DEFERRED
+        if priority is ProviderPriority.HOT:
+            waiter_lane = ScanLane.HOT.value
+        elif priority is ProviderPriority.BACKGROUND:
+            waiter_lane = PRICE_ENGINE_BACKGROUND_LANE
+        else:
+            waiter_lane = ScanLane.UNIVERSE.value
+        return _Waiter(
+            priority=priority,
+            seq=self._seq,
+            lane=waiter_lane,
+            stage=stage,
+            reason=reason,
+        )
+
+    @asynccontextmanager
+    async def try_acquire(
+        self,
+        venue: VenueName,
+        *,
+        lane: ScanLane | str | None = None,
+        stage: str = "provider",
+    ) -> AsyncIterator[ProviderLease | None]:
+        """Grant a free slot immediately, or return None without queueing.
+
+        Price-engine items must not block the slice when every slot is already
+        occupied. That state is ``provider_capacity_saturated`` / deferred, not
+        a scan-budget failure and not a venue outage.
+        """
+
+        if venue not in self._limits:
+            yield ProviderLease.unbound()
+            return
+        lease: ProviderLease | None = None
+        async with self._cond:
+            waiter = self._make_waiter(venue, lane=lane, stage=stage)
+            self._waiters[venue].append(waiter)
+            picked = self._pick(venue)
+            if picked is waiter and self._in_use[venue] < self._limits[venue]:
+                waiter.granted = True
+                waiter.event.set()
+                self._in_use[venue] += 1
+                self._peak_inflight[venue] = max(self._peak_inflight[venue], self._in_use[venue])
+                if waiter.priority is ProviderPriority.HOT:
+                    self._hot_grants_since_universe[venue] += 1
+                else:
+                    self._hot_grants_since_universe[venue] = 0
+                lease = ProviderLease(
+                    _layer=self,
+                    _venue=venue,
+                    _waiter=waiter,
+                    _loop=asyncio.get_running_loop(),
+                )
+            else:
+                self._waiters[venue].remove(waiter)
+        if lease is None:
+            yield None
+            return
+        try:
+            yield lease
+        finally:
+            await lease.release()
 
     async def _release(self, venue: VenueName, waiter: _Waiter) -> None:
         async with self._cond:
@@ -291,9 +365,19 @@ class ProviderAccessLayer:
             for item in self._waiters[venue]
         )
 
+    def available_slots(self, venue: VenueName) -> int:
+        if venue not in self._limits:
+            return 0
+        return max(0, self._limits[venue] - self._in_use[venue])
+
+    def venue_saturated(self, venue: VenueName) -> bool:
+        return venue in self._limits and self.available_slots(venue) <= 0
+
     def _universe_waiting(self, venue: VenueName) -> bool:
         return any(
-            item.priority is not ProviderPriority.HOT and not item.granted and not item.cancelled
+            item.priority is ProviderPriority.UNIVERSE
+            and not item.granted
+            and not item.cancelled
             for item in self._waiters[venue]
         )
 
@@ -308,7 +392,7 @@ class ProviderAccessLayer:
 
         def sort_key(item: _Waiter) -> tuple[int, int]:
             effective = int(item.priority)
-            if starve and item.priority is not ProviderPriority.HOT:
+            if starve and item.priority is ProviderPriority.UNIVERSE:
                 effective = -1
             return (effective, item.seq)
 

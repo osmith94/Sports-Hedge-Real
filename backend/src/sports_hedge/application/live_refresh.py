@@ -20,6 +20,10 @@ from sports_hedge.application.collector import (
     DiscoveredFixture,
     FixtureDetailReadModel,
 )
+from sports_hedge.application.price_engine import (
+    CataloguePriceEngine,
+    PriceEnginePriority,
+)
 from sports_hedge.application.universe_checkpoint import (
     SERIES_TERMINAL_STATES,
     STALE_ORPHAN_REASON,
@@ -240,7 +244,7 @@ class LiveRefreshStatus(BaseModel):
 
 
 class DualCadencePlan(BaseModel):
-    lane: Literal["hot", "universe", "idle"]
+    lane: Literal["hot", "universe", "background", "idle"]
     collector_timeout_seconds: float | None = None
     coordinator_timeout_seconds: float | None = None
     identity_scope: list[str] | None = None
@@ -340,15 +344,19 @@ class LiveRefreshCoordinator:
         clock: Callable[[], datetime] | None = None,
         venue_settings_store: SqliteLaneVenueSettingsStore | None = None,
         universe_checkpoint_store: SqliteUniverseCheckpointStore | None = None,
+        catalogue_store: Any | None = None,
+        price_engine: CataloguePriceEngine | None = None,
     ) -> None:
         self._lock = asyncio.Lock()
         self._hot_lock = asyncio.Lock()
         self._universe_lock = asyncio.Lock()
+        self._background_lock = asyncio.Lock()
         self._state_lock = _CountedRLock()
         self._universe_checkpoint_io_lock = threading.Lock()
         self._task: asyncio.Task[None] | None = None
         self._hot_task: asyncio.Task[None] | None = None
         self._universe_task: asyncio.Task[None] | None = None
+        self._background_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._last_request: dict[str, Any] = {}
         self._last_report: CollectionReport | None = None
@@ -356,9 +364,13 @@ class LiveRefreshCoordinator:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._hot_in_progress = False
         self._universe_in_progress = False
+        self._background_in_progress = False
         self._manual_hot_in_progress = False
         self._next_hot_due: datetime | None = None
         self._next_universe_due: datetime | None = None
+        self._next_background_due: datetime | None = None
+        self._catalogue_store = catalogue_store
+        self._price_engine = price_engine
         self._hot_due_started: datetime | None = None
         self._universe_generation_id = 0
         self._universe_generation_started_at: datetime | None = None
@@ -588,9 +600,11 @@ class LiveRefreshCoordinator:
             self._last_report = None
             self._hot_in_progress = False
             self._universe_in_progress = False
+            self._background_in_progress = False
             self._manual_hot_in_progress = False
             self._next_hot_due = None
             self._next_universe_due = None
+            self._next_background_due = None
             self._hot_due_started = None
             self._universe_generation_id = 0
             self._universe_generation_started_at = None
@@ -646,6 +660,8 @@ class LiveRefreshCoordinator:
         self.flush_universe_checkpoint()
         self.configure_from_settings()
         self._drain_orphaned_collection_tasks(orphans)
+        if self._price_engine is not None:
+            self._price_engine.restart()
 
     def _ensure_due_times(self, now: datetime, settings: Settings | None = None) -> None:
         with self._state_lock:
@@ -660,6 +676,8 @@ class LiveRefreshCoordinator:
             self._next_universe_due = now
         if self._next_hot_due is None:
             self._next_hot_due = now
+        if self._next_background_due is None:
+            self._next_background_due = now
         self.status = self.status.model_copy(
             update={
                 "hot": self.status.hot.model_copy(
@@ -719,6 +737,82 @@ class LiveRefreshCoordinator:
         if hot_due:
             return DualCadencePlan(lane="idle", reason="hot_scope_empty")
         return DualCadencePlan(lane="idle", reason="waiting")
+
+    def plan_background_tick(
+        self,
+        now: datetime | None = None,
+        settings: Settings | None = None,
+    ) -> DualCadencePlan:
+        resolved = settings or get_settings()
+        evaluated = require_aware_instant(now or self.now(), "now")
+        with self._state_lock:
+            self._ensure_due_times_unlocked(evaluated, resolved)
+            if self._background_in_progress:
+                return DualCadencePlan(lane="idle", reason="background_in_progress")
+            next_due = self._next_background_due
+        if next_due is not None and evaluated >= next_due:
+            return DualCadencePlan(
+                lane="background",
+                collector_timeout_seconds=None,
+                coordinator_timeout_seconds=None,
+                enabled_venues=list(self.pending_venues_for(ScanLane.HOT)),
+                reason="background_due",
+            )
+        return DualCadencePlan(lane="idle", reason="waiting")
+
+    def bind_catalogue_store(self, store: Any) -> None:
+        self._catalogue_store = store
+        if self._price_engine is not None:
+            self._price_engine.catalogue_store = store
+
+    def bind_price_engine(self, engine: CataloguePriceEngine) -> None:
+        self._price_engine = engine
+        engine.fixture_state = self._fixture_state
+        if engine.catalogue_store is None:
+            engine.catalogue_store = self._catalogue_store
+
+    def price_engine(self) -> CataloguePriceEngine:
+        if self._price_engine is None:
+            self._price_engine = CataloguePriceEngine(
+                catalogue_store=self._catalogue_store,
+                fixture_state=self._fixture_state,
+                clock=self.now,
+            )
+        return self._price_engine
+
+    async def run_price_engine_slice(
+        self,
+        priority: PriceEnginePriority,
+        *,
+        slice_wall_seconds: float | None = None,
+        matchbook: Any = None,
+        kalshi: Any = None,
+        paper_scan: Any = None,
+        venue_costs: list[Any] | None = None,
+        fx_snapshots: list[Any] | None = None,
+    ) -> Any:
+        """Price ACTIVE catalogue rows without holding the UNIVERSE lock."""
+
+        engine = self.price_engine()
+        if matchbook is not None:
+            engine.matchbook = matchbook
+        if kalshi is not None:
+            engine.kalshi = kalshi
+        if paper_scan is not None:
+            engine.paper_scan = paper_scan
+        if venue_costs is not None:
+            engine.venue_costs = list(venue_costs)
+        if fx_snapshots is not None:
+            engine.fx_snapshots = list(fx_snapshots)
+        engine.fixture_state = self._fixture_state
+        result = await engine.run_slice(priority, slice_wall_seconds=slice_wall_seconds)
+        if priority is PriceEnginePriority.BACKGROUND:
+            with self._state_lock:
+                settings = get_settings()
+                self._next_background_due = self.now() + timedelta(
+                    seconds=settings.paper_live_refresh_universe_interval_seconds
+                )
+        return result
 
     def plan_universe_tick(
         self,
@@ -3095,6 +3189,9 @@ class LiveRefreshCoordinator:
         self._universe_task = asyncio.create_task(
             self._universe_loop(tick), name="universe-worker"
         )
+        self._background_task = asyncio.create_task(
+            self._background_loop(tick), name="background-price-worker"
+        )
         self._task = self._hot_task
 
     async def stop_server_loop(self) -> None:
@@ -3107,7 +3204,7 @@ class LiveRefreshCoordinator:
                 await persist_task
             except (asyncio.CancelledError, Exception):
                 pass
-        for task in (self._hot_task, self._universe_task, self._task):
+        for task in (self._hot_task, self._universe_task, self._background_task, self._task):
             if task is None:
                 continue
             task.cancel()
@@ -3117,6 +3214,7 @@ class LiveRefreshCoordinator:
                 pass
         self._hot_task = None
         self._universe_task = None
+        self._background_task = None
         self._task = None
 
     async def _invoke_tick(self, tick, plan: DualCadencePlan | None = None) -> None:
@@ -3138,6 +3236,15 @@ class LiveRefreshCoordinator:
                     raise
                 except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, Exception):
                     pass
+            elif plan.reason == "hot_scope_empty":
+                engine = self._price_engine
+                if engine is not None and engine.matchbook is not None:
+                    try:
+                        await self.run_price_engine_slice(PriceEnginePriority.HOT)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
             delay = min(self._seconds_until_hot(), float(self.status.interval_seconds))
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, delay))
@@ -3208,6 +3315,39 @@ class LiveRefreshCoordinator:
                 update={"universe": self.status.universe.model_copy(update=universe_update)}
             )
             self._apply_universe_honesty_unlocked()
+
+    async def _background_loop(self, tick) -> None:
+        while not self._stop.is_set():
+            plan = self.plan_background_tick()
+            if plan.lane == "background":
+                with self._state_lock:
+                    self._background_in_progress = True
+                try:
+                    await self._invoke_tick(tick, plan)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    with self._state_lock:
+                        settings = get_settings()
+                        self._next_background_due = self.now() + timedelta(
+                            seconds=settings.paper_live_refresh_universe_interval_seconds
+                        )
+                finally:
+                    with self._state_lock:
+                        self._background_in_progress = False
+            delay = min(self._seconds_until_background(), 30.0)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, delay))
+            except TimeoutError:
+                continue
+
+    def _seconds_until_background(self) -> float:
+        now = self.now()
+        if self._background_in_progress:
+            return 1.0
+        if self._next_background_due is None:
+            return 0.05
+        return max(0.05, (self._next_background_due - now).total_seconds())
 
     def _seconds_until_hot(self) -> float:
         now = self.now()
