@@ -44,10 +44,11 @@ from test_matchbook_event_discovery import (
     _settings as matchbook_discovery_settings,
 )
 from test_paper_scan_pipeline import OBSERVED, matchbook_payloads, polymarket_payloads
+from fx_test_helpers import fresh_usd_ecb_close
 from sports_hedge.application.market_observation import (
     MatchbookObservationBuilder,
-    PolymarketObservationBuilder,
 )
+from registered_kalshi import FakeKalshiBTTS, registered_right_observation
 
 
 KICKOFF = datetime(2026, 9, 12, 16, 30, tzinfo=UTC)
@@ -189,18 +190,7 @@ class MultiSeriesPolymarket:
 
 def _backend_fx(gbp_per_usd: Decimal = Decimal("0.50000000")) -> FxRateService:
     fx = FxRateService(SqliteFxRateRepository())
-    fx.persist_ecb_closes(
-        [
-            PublishedFxClose(
-                currency="USD",
-                gbp_per_unit=gbp_per_usd,
-                source_date=date(2026, 9, 11),
-                retrieved_at=datetime(2026, 9, 11, 16, tzinfo=UTC),
-                source="ecb_eurofxref",
-                source_id="ecb:2026-09-11:USD",
-            )
-        ]
-    )
+    fx.persist_ecb_closes([fresh_usd_ecb_close(gbp_per_usd)])
     return fx
 
 
@@ -230,6 +220,7 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
         {
             VenueName.MATCHBOOK: Decimal("5"),
             VenueName.POLYMARKET: Decimal("10"),
+            VenueName.KALSHI: Decimal("10"),
             VenueName.SMARKETS: Decimal("5000"),
         }
     )
@@ -245,6 +236,12 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
         polymarket=polymarket,
+        kalshi=FakeKalshiBTTS(
+            [
+                ("Premier League", "Newcastle United", "Chelsea", KICKOFF),
+                ("La Liga", "Athletic Bilbao", "Elche", KICKOFF),
+            ]
+        ),
         paper_scan=service,
     )
     report = await collector.collect_and_scan(
@@ -278,19 +275,19 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
         usd = next(item for item in decision.fx_snapshots if item.currency == "USD")
         assert usd.source == "ecb_eurofxref"
         assert usd.gbp_per_unit == Decimal("0.50000000")
-        assert {item.venue.value for item in decision.venue_costs} == {"matchbook", "polymarket"}
+        assert {item.venue.value for item in decision.venue_costs} == {"matchbook", "kalshi"}
         sources = {item.venue.value: item.source for item in decision.venue_costs}
         assert sources["matchbook"].startswith("venue_cost_registry")
-        assert sources["polymarket"].startswith("polymarket_fee_schedule")
-        used_pm = sum(
+        assert "kalshi" in sources
+        used_kalshi = sum(
             (
                 stake.stake
                 for stake in (decision.depth_scan.solution.stakes if decision.depth_scan else [])
-                if stake.venue is VenueName.POLYMARKET
+                if stake.venue is VenueName.KALSHI
             ),
             Decimal("0"),
         )
-        assert used_pm <= Decimal("5") + Decimal("0.0000001")
+        assert used_kalshi <= Decimal("10") + Decimal("0.0000001")
         used_mb = sum(
             (
                 stake.stake
@@ -419,15 +416,19 @@ def test_paper_scan_fail_closes_stale_fx_on_the_same_path_as_liquidity_sizing() 
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
+    right = registered_right_observation(
+        pm_event,
+        pm_market,
+        pm_books,
+        observed_at=OBSERVED,
+        matchbook_event=mb_event,
     )
     decision = PaperScanService(
         intelligence,
         fx_service=fx,
         cost_resolver=VenueCostResolver(),
         liquidity=liquidity,
-    ).scan_pair(matchbook, polymarket, maximum_execution_risk=100)
+    ).scan_pair(matchbook, right, maximum_execution_risk=100)
     assert decision.eligible_for_paper_simulation is False
     assert any(reason.startswith("stale_fx_rate") for reason in decision.rejection_reasons)
 

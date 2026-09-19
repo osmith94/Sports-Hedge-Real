@@ -305,15 +305,15 @@ def test_explicit_paper_session_reset_releases_locks_archives_trade_and_is_idemp
     client = _client()
     try:
         opened = demo.replay(
-            FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold")
+            FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold")
         )
         assert opened.trade is not None
         assert opened.trade.state is PaperTradeState.OPEN
         trade_id = opened.trade.trade_id
         mb_locked = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital
-        pm_locked = ledger.treasury.snapshot().pool(VenueName.POLYMARKET, "USD").locked_capital
+        k_locked = ledger.treasury.snapshot().pool(VenueName.KALSHI, "USD").locked_capital
         assert mb_locked > 0
-        assert pm_locked > 0
+        assert k_locked > 0
         journals_before = {entry.journal_id for entry in ledger.journal.list_entries()}
         first_session = ledger.treasury.snapshot().session.session_id
 
@@ -536,7 +536,7 @@ def test_owner_reset_demo_session_path_ordinary_api_stays_blocked_demo_cleanup_c
     client = _client()
     try:
         opened = demo.replay(
-            FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold")
+            FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold")
         )
         assert opened.trade is not None
         assert opened.trade.state is PaperTradeState.OPEN
@@ -544,9 +544,9 @@ def test_owner_reset_demo_session_path_ordinary_api_stays_blocked_demo_cleanup_c
         before = client.get("/paper/treasury").json()
         venues = _pools(before)
         mb_locked = Decimal(venues["matchbook"]["locked_capital"])
-        pm_locked = Decimal(venues["polymarket"]["locked_capital"])
+        k_locked = Decimal(venues["kalshi"]["locked_capital"])
         assert mb_locked > 0
-        assert pm_locked > 0
+        assert k_locked > 0
         journals_before = {entry.journal_id for entry in ledger.journal.list_entries()}
 
         ordinary = client.post(
@@ -558,7 +558,7 @@ def test_owner_reset_demo_session_path_ordinary_api_stays_blocked_demo_cleanup_c
         assert "active_treasury_locks" in ordinary_detail
         still_locked = _pools(client.get("/paper/treasury").json())
         assert Decimal(still_locked["matchbook"]["locked_capital"]) == mb_locked
-        assert Decimal(still_locked["polymarket"]["locked_capital"]) == pm_locked
+        assert Decimal(still_locked["kalshi"]["locked_capital"]) == k_locked
         assert ops.list_active_trades()
         assert {entry.journal_id for entry in ledger.journal.list_entries()} == journals_before
 

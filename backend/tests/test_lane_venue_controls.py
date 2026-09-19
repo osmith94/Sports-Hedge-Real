@@ -428,7 +428,7 @@ def test_disabled_polymarket_cannot_auto_capture(tmp_path: Path) -> None:
     try:
         opportunity_id = next(iter(ops._plans))
         decision = ops._plans[opportunity_id].decision
-        assert any(leg.venue is VenueName.POLYMARKET for leg in decision.fill_legs)
+        assert any(leg.venue is VenueName.KALSHI for leg in decision.fill_legs)
         called: list[int] = []
 
         def _blocked(*_args: Any, **_kwargs: Any) -> None:
@@ -439,13 +439,13 @@ def test_disabled_polymarket_cannot_auto_capture(tmp_path: Path) -> None:
         ops.persist_triggered_chain(
             decision,
             autofill=True,
-            refreshed_venues=(VenueName.MATCHBOOK, VenueName.KALSHI),
+            refreshed_venues=(VenueName.MATCHBOOK, VenueName.POLYMARKET),
         )
         assert called == []
         ops.persist_triggered_chain(
             decision,
             autofill=True,
-            refreshed_venues=(VenueName.MATCHBOOK, VenueName.POLYMARKET),
+            refreshed_venues=(VenueName.MATCHBOOK, VenueName.KALSHI),
         )
         assert called == [1]
     finally:

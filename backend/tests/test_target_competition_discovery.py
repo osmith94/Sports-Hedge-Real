@@ -24,7 +24,8 @@ from sports_hedge.config import Settings
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
+from registered_kalshi import FakeKalshiBTTS
 
 
 KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
@@ -497,11 +498,14 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
         polymarket=polymarket,
+        kalshi=FakeKalshiBTTS(
+            [("Premier League", "Newcastle United", "Chelsea", KICKOFF)]
+        ),
         paper_scan=PaperScanService(intelligence),
     )
     try:
         report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=matchbook_kalshi_costs() + matchbook_polymarket_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             capital_limit_gbp=Decimal("100"),
             maximum_execution_risk=100,
@@ -525,7 +529,7 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
         assert epl.market_family == "both_teams_to_score"
         assert epl.outcome_context == "yes/no"
         assert epl.best_matchbook_price is not None
-        assert epl.best_polymarket_price is not None
+        assert epl.best_kalshi_price is not None
         assert epl.current_net_edge is not None
         assert epl.trigger_net_edge == Decimal("0.005")
         assert epl.distance_to_trigger_pp is not None

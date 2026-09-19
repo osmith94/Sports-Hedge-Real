@@ -6,15 +6,26 @@ from sports_hedge.domain.football import CanonicalMarket
 from sports_hedge.matching.events import EventMatcher
 from sports_hedge.matching.learned_rules import (
     MappingProvenance,
-    MappingRuleType,
-    economic_mismatch_reasons,
     participant_identity_preserved,
 )
+from sports_hedge.matching.paper_assumed import (
+    OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
+    PAPER_ASSUMED_REASON,
+    paper_assumed_match_reasons,
+)
+from sports_hedge.matching.approved_register import (
+    NOT_REGISTERED_REASON,
+    REGISTER_ADMITTED_REASON,
+    register_key_reason,
+    registered_canonical_key,
+    structural_mismatch_reasons,
+)
 from sports_hedge.matching.ordinary_1x2 import (
-    PAPER_ASSUMED_1X2_REASON,
+    GAMEWIN_ORDINARY_1X2_AUDIT_REASON,
+    UNKNOWN_SETTLEMENT_ALLOWED_REASON,
     allow_unknown_settlement_for_ordinary_1x2,
+    kalshi_gamewin_scope_unavailable,
     ordinary_1x2_match_reasons,
-    paper_assumed_ordinary_1x2,
 )
 
 
@@ -26,15 +37,13 @@ class MarketMatchResult(BaseModel):
 
 
 class MarketMatcher:
-    """Strict economic-equivalence matcher.
+    """Runtime PAPER matcher. Fixture identity first, then the register.
 
-    Event labels may be fuzzy for discovery, but paper-eligible identity is not.
-    Family, period, line and outcome space must match. Proven settlement
-    contradictions fail closed. Matchbook↔Kalshi ordinary full-time HOME/DRAW/AWAY
-    1X2 may match when Kalshi settlement is unknown and not contradictory.
-    Learned naming rules may help aliases; they cannot override period, line,
-    family, outcome-model mismatch, fixture participant identity, or a proven
-    settlement contradiction.
+    After canonical fixture identity is established, the Approved Match
+    Register is the sole PAPER market-equivalence authority. Same registered
+    canonical key plus required structural parameters is admitted. Settlement
+    fingerprints, mapping confidence, learned market labels, and mapping
+    review are not runtime equivalence permission.
     """
 
     def __init__(self, event_matcher: EventMatcher | None = None) -> None:
@@ -76,39 +85,43 @@ class MarketMatcher:
                 provenance=event_result.provenance,
             )
 
-        reasons = economic_mismatch_reasons(left, right)
-        unknown_allowed = allow_unknown_settlement_for_ordinary_1x2(left, right)
-        paper_assumed = paper_assumed_ordinary_1x2(left, right)
-        if reasons:
+        key = registered_canonical_key(left, right)
+        if key is not None:
+            match_reasons = list(event_result.reasons)
+            match_reasons.extend(paper_assumed_match_reasons())
+            if REGISTER_ADMITTED_REASON not in match_reasons:
+                match_reasons.append(REGISTER_ADMITTED_REASON)
+            key_reason = register_key_reason(key)
+            if key_reason not in match_reasons:
+                match_reasons.append(key_reason)
+            if PAPER_ASSUMED_REASON not in match_reasons:
+                match_reasons.append(PAPER_ASSUMED_REASON)
+            if OWNER_APPROVED_PAPER_EQUIVALENCE_REASON not in match_reasons:
+                match_reasons.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
+            if allow_unknown_settlement_for_ordinary_1x2(left, right):
+                for reason in ordinary_1x2_match_reasons():
+                    if reason not in match_reasons:
+                        match_reasons.append(reason)
+                if kalshi_gamewin_scope_unavailable(left) or kalshi_gamewin_scope_unavailable(
+                    right
+                ):
+                    if GAMEWIN_ORDINARY_1X2_AUDIT_REASON not in match_reasons:
+                        match_reasons.append(GAMEWIN_ORDINARY_1X2_AUDIT_REASON)
+                    if UNKNOWN_SETTLEMENT_ALLOWED_REASON not in match_reasons:
+                        match_reasons.append(UNKNOWN_SETTLEMENT_ALLOWED_REASON)
             return MarketMatchResult(
-                matched=False,
-                confidence=min(event_result.confidence, left.confidence, right.confidence),
-                reasons=reasons,
+                matched=True,
+                confidence=event_result.confidence,
+                reasons=match_reasons,
                 provenance=event_result.provenance,
             )
 
-        match_reasons = list(event_result.reasons)
-        if unknown_allowed and (
-            not left.settlement.is_economically_complete()
-            or not right.settlement.is_economically_complete()
-        ):
-            match_reasons.extend(ordinary_1x2_match_reasons())
-        if paper_assumed:
-            match_reasons.append(PAPER_ASSUMED_1X2_REASON)
-            match_reasons.append("settlement_assumption=regulation_time")
-        if (
-            event_result.provenance.rule_type
-            is MappingRuleType.VENUE_MARKET_LABEL_CONVENTION
-        ):
-            match_reasons.append("operator_verified_market_label")
-        confidence_parts = [event_result.confidence]
-        for market in (left, right):
-            if unknown_allowed and not market.settlement.is_economically_complete():
-                continue
-            confidence_parts.append(market.confidence)
+        reasons = structural_mismatch_reasons(left, right)
+        if not reasons:
+            reasons = [NOT_REGISTERED_REASON]
         return MarketMatchResult(
-            matched=True,
-            confidence=min(confidence_parts),
-            reasons=match_reasons,
+            matched=False,
+            confidence=event_result.confidence,
+            reasons=reasons,
             provenance=event_result.provenance,
         )

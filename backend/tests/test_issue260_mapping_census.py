@@ -83,14 +83,14 @@ EXPECTED_FULL_CENSUS = {
         "polymarket": 3,
         "kalshi": 2,
     },
-    "equivalent_market_pairs": 5,
+    "equivalent_market_pairs": 2,
     "market_family_breakdown": {
-        "match_result": 4,
+        "match_result": 1,
         "total_goals": 1,
     },
-    "evaluated_zero_equivalent_fixtures": 0,
+    "evaluated_zero_equivalent_fixtures": 3,
     "unsupported_market_skips": 2,
-    "qualifying_arbs": 5,
+    "qualifying_arbs": 2,
 }
 
 
@@ -462,7 +462,7 @@ async def test_deterministic_mapping_census_exact_counts() -> None:
     ]
     team_totals = [row for row in rows if row.family == "team_total"]
     qualify_rows = [row for row in rows if row.family == "to_qualify"]
-    assert len(match_result) == 4
+    assert len(match_result) == 1
     assert len(totals) == 1
     assert totals[0].matchbook is not None
     assert totals[0].kalshi is not None
@@ -487,8 +487,8 @@ async def test_resumed_universe_census_still_reaches_equivalent_markets() -> Non
     assert skip
     resumed_report, resumed = await _collect(skip_event_ids=skip, generation_resume=True)
     assert resumed.generation_resume is True
-    assert resumed.equivalent_market_pairs == 4
-    assert resumed.market_family_breakdown.get("match_result") == 3
+    assert resumed.equivalent_market_pairs == 2
+    assert resumed.market_family_breakdown.get("match_result") == 1
     assert resumed.market_family_breakdown.get("total_goals") == 1
     assert resumed.cross_venue_matched_events == 4
     assert cycle_last_error(resumed_report) is None

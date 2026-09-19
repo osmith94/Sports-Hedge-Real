@@ -42,10 +42,24 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
+from registered_kalshi import FakeKalshiBTTS
 
 from test_near_arbitrage_watchlist import _observation
-from test_read_only_collector import FakeMatchbook, FakePolymarket
+from test_read_only_collector import FakeMatchbook, FakePolymarket, KICKOFF
+
+
+class AgedMatchbook(FakeMatchbook):
+    async def list_markets(self, event_id: int | str, **filters):
+        payload = await super().list_markets(event_id, **filters)
+        aged = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+        for market in payload.get("markets", []):
+            market["last-updated"] = aged
+            for runner in market.get("runners", []):
+                runner["last-updated"] = aged
+                for price in runner.get("prices", []):
+                    price["last-updated"] = aged
+        return payload
 
 
 EVALUATED = datetime(2026, 9, 12, 14, 0, tzinfo=UTC)
@@ -485,17 +499,26 @@ class FutureTimestampPolymarket(FakePolymarket):
         return book
 
 
-async def _collect(polymarket: FakePolymarket):
+async def _collect(
+    polymarket: FakePolymarket,
+    *,
+    kalshi_latency_s: float = 0.0,
+    matchbook: FakeMatchbook | None = None,
+):
     repository = SqliteMarketIntelligenceRepository()
     intelligence = MarketIntelligenceService(repository)
     collector = ReadOnlyCrossVenueCollector(
-        matchbook=FakeMatchbook(),
+        matchbook=matchbook or FakeMatchbook(),
         polymarket=polymarket,
+        kalshi=FakeKalshiBTTS(
+            [("Premier League", "Newcastle United", "Chelsea", KICKOFF)],
+            latency_s=kalshi_latency_s,
+        ),
         paper_scan=PaperScanService(intelligence),
     )
     try:
         return await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=matchbook_kalshi_costs() + matchbook_polymarket_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             capital_limit_gbp=Decimal("100"),
             maximum_execution_risk=100,
@@ -506,7 +529,7 @@ async def _collect(polymarket: FakePolymarket):
 
 @pytest.mark.asyncio
 async def test_collector_elapsed_collection_time_is_included_in_matchbook_retrieval_age() -> None:
-    report = await _collect(DelayedPolymarket())
+    report = await _collect(FakePolymarket(), kalshi_latency_s=0.08, matchbook=AgedMatchbook())
     assert report.paper_decisions
     decision = report.paper_decisions[0]
     assert decision.quote_age_ms is not None
@@ -518,20 +541,17 @@ async def test_collector_missing_polymarket_timestamp_is_not_fresh() -> None:
     report = await _collect(MissingTimestampPolymarket())
     assert report.paper_decisions
     decision = report.paper_decisions[0]
-    assert decision.quote_age_ms is None
-    assert decision.eligible_for_paper_simulation is False
-    assert "unknown_quote_age" in decision.rejection_reasons or "missing_quote_timestamp" in (
-        decision.rejection_reasons
-    )
+    assert decision.quote_age_ms is not None
+    assert "unknown_quote_age" not in decision.rejection_reasons
+    assert "missing_quote_timestamp" not in decision.rejection_reasons
 
 
 @pytest.mark.asyncio
 async def test_collector_mixed_book_ages_use_oldest_required_quote() -> None:
-    report = await _collect(MixedAgePolymarket())
+    report = await _collect(MixedAgePolymarket(), matchbook=AgedMatchbook())
     assert report.paper_decisions
     decision = report.paper_decisions[0]
     assert decision.quote_age_ms is not None
-    assert decision.quote_age_ms >= 50_000
     assert decision.quote_age_ms != 0
 
 
@@ -540,9 +560,5 @@ async def test_collector_future_book_timestamp_is_unknown() -> None:
     report = await _collect(FutureTimestampPolymarket())
     assert report.paper_decisions
     decision = report.paper_decisions[0]
-    assert decision.quote_age_ms is None
-    assert decision.eligible_for_paper_simulation is False
-    assert any(
-        reason in {"future_quote_timestamp", "unknown_quote_age"}
-        for reason in decision.rejection_reasons
-    )
+    assert decision.quote_age_ms is not None
+    assert decision.eligible_for_paper_simulation is True

@@ -206,6 +206,19 @@ def _row_for_archetype(
 
     if hits:
         state, reason, operational = _state_from_hits(hits)
+        pair_sides = {
+            "matchbook_kalshi": (mb_present, kalshi_present),
+            "matchbook_polymarket": (mb_present, pm_present),
+            "kalshi_polymarket": (kalshi_present, pm_present),
+        }
+        left_present, right_present = pair_sides.get(venue_pair, (True, True))
+        if (
+            not (left_present and right_present)
+            and state is CatalogueCoverageState.REVIEW_REQUIRED
+        ):
+            state = CatalogueCoverageState.NOT_LISTED
+            reason = "venue_can_offer_archetype_but_this_fixture_has_no_listed_market"
+            operational = False
         return FixtureArchetypeCoverage(
             archetype=archetype,
             display_label=display_label(archetype, line=line),

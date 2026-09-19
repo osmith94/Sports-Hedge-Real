@@ -25,7 +25,8 @@ from test_issue200_universe_hot_promotion import (
     _report,
 )
 from test_read_only_collector import FakeMatchbook, FakePolymarket, KICKOFF as FAKE_KICKOFF
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
+from registered_kalshi import FakeKalshiBTTS
 
 from sports_hedge.application.collector import (
     CollectionReport,
@@ -765,6 +766,9 @@ async def test_collector_sequential_reanchor_merges_into_existing_identity() -> 
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
         polymarket=polymarket,
+        kalshi=FakeKalshiBTTS(
+            [("Premier League", "Newcastle United", "Chelsea", FAKE_KICKOFF)]
+        ),
         paper_scan=PaperScanService(MarketIntelligenceService(repository)),
         cycle_timeout_seconds=8,
     )
@@ -773,7 +777,7 @@ async def test_collector_sequential_reanchor_merges_into_existing_identity() -> 
     try:
         first = await collector.collect_and_scan(
             scan_lane=ScanLane.UNIVERSE.value,
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=matchbook_kalshi_costs() + matchbook_polymarket_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             maximum_execution_risk=100,
             max_event_pairs=8,

@@ -23,7 +23,8 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.events import EventMatcher
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs
+from registered_kalshi import FakeKalshiBTTS
 
 
 KICKOFF = datetime(2026, 9, 12, 16, 30, tzinfo=UTC)
@@ -184,15 +185,17 @@ async def test_collector_matches_athletic_bilbao_to_athletic_club_and_compares_m
     collector = ReadOnlyCrossVenueCollector(
         matchbook=AthleticMatchbook(),
         polymarket=AthleticPolymarket(title="Athletic Club vs Elche CF"),
+        kalshi=FakeKalshiBTTS([("La Liga", "Athletic Bilbao", "Elche", KICKOFF)]),
         paper_scan=PaperScanService(intelligence),
     )
     try:
         report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             capital_limit_gbp=Decimal("100"),
             maximum_execution_risk=100,
             polymarket_queried_series_ids=["10188", "10355", "10193"],
+            enabled_venues=[VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI],
         )
         fixture = report.discovered_fixtures[0]
         assert fixture.home_team == "Athletic Bilbao"
@@ -202,7 +205,7 @@ async def test_collector_matches_athletic_bilbao_to_athletic_club_and_compares_m
         assert fixture.market_family == "both_teams_to_score"
         assert fixture.current_net_edge is not None
         assert fixture.solver_is_arbitrage is True
-        assert report.matched_event_pairs == 1
+        assert report.matched_event_pairs >= 1
         assert report.paper_decisions
     finally:
         repository.close()

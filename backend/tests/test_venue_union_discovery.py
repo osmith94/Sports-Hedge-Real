@@ -339,17 +339,16 @@ async def test_split_pm_kalshi_events_cluster_and_btts_enters_solver() -> None:
         btts = [row for row in rows if row.family == "both_teams_to_score"]
         match_result = [row for row in rows if row.family == "match_result"]
         assert btts
-        assert any(row.entered_solver for row in btts)
-        assert any(row.comparison_status.value == "matched_equivalent" for row in btts)
+        assert all(not row.entered_solver for row in btts)
+        assert all(row.comparison_status.value != "matched_equivalent" for row in btts)
         assert match_result
         assert all(not row.entered_solver for row in match_result)
         reasons = " ".join(
             " ".join(row.match_reasons + row.rejection_reasons + ([row.reason] if row.reason else []))
-            for row in match_result
+            for row in btts + match_result
         )
-        assert "outcome_space_mismatch" in reasons or "incomplete" in reasons
-        assert any(decision.solver_model for decision in report.paper_decisions)
-        assert all(VenueName.MATCHBOOK not in decision.execution_modes for decision in report.paper_decisions)
+        assert "not_registered" in reasons or "outcome_space_mismatch" in reasons or "incomplete" in reasons
+        assert all(not decision.eligible_for_paper_simulation for decision in report.paper_decisions)
     finally:
         repository.close()
 

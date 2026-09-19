@@ -24,7 +24,7 @@ from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
-from sports_hedge.normalization.venues import KalshiNormalizer, VenueNormalizationError
+from sports_hedge.normalization.venues import KalshiNormalizer
 from sports_hedge.paper.liquidity import default_pools
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.venues.kalshi import KalshiClient
@@ -171,9 +171,16 @@ def test_kalshi_ftts_requires_three_states_and_regulation_rules() -> None:
     ]
     assembled = normalizer.assemble_canonical_markets(event, markets, series=KALSHI_SERIES)
     assert assembled[0].family is MarketFamily.FIRST_TEAM_TO_SCORE
-    with pytest.raises(VenueNormalizationError, match="regulation-time"):
-        ambiguous = [{**item, "rules_primary": "Winner of the match."} for item in markets]
-        normalizer.assemble_canonical_markets(event, ambiguous, series=KALSHI_SERIES)
+    ambiguous = [{**item, "rules_primary": "Winner of the match."} for item in markets]
+    incomplete = normalizer.assemble_canonical_markets(event, ambiguous, series=KALSHI_SERIES)
+    assert len(incomplete) == 1
+    assert incomplete[0].family is MarketFamily.FIRST_TEAM_TO_SCORE
+    assert incomplete[0].settlement.is_economically_complete() is False
+    assert {runner.outcome for runner in incomplete[0].runners} == {
+        CanonicalOutcome.HOME,
+        CanonicalOutcome.AWAY,
+        CanonicalOutcome.NO_GOAL,
+    }
 
 
 def test_ambiguous_settlement_is_visible_but_incomplete() -> None:
@@ -442,9 +449,10 @@ def test_polymarket_kalshi_scan_does_not_require_matchbook() -> None:
         fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="test")],
         maximum_execution_risk=100,
     )
+    assert decision.market_match.matched is False
+    assert "not_registered" in decision.market_match.reasons
+    assert decision.eligible_for_paper_simulation is False
     assert VenueName.MATCHBOOK not in decision.execution_modes
-    assert decision.execution_modes[VenueName.KALSHI] == LegExecutionMode.INTERNAL
-    assert decision.solver_model == "simple_complete_set"
 
 
 def test_three_venue_inventory_does_not_duplicate_canonical_markets() -> None:

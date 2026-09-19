@@ -18,9 +18,9 @@ from test_step8f_automatic_paper_entry import (
     _matchbook_btts,
     _observe_and_persist,
     _ops_bundle,
-    _polymarket_btts,
+    _kalshi_btts,
+    _kalshi_costs,
 )
-from venue_cost_helpers import matchbook_polymarket_costs
 
 from sports_hedge.accounting.paper_journal import DataProvenance
 from sports_hedge.application.collector import (
@@ -520,8 +520,8 @@ def test_universe_qualifying_persists_immediately_and_hot_refresh_is_idempotent(
             watchlist,
             ops,
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
         )
         first_trades = ops.list_active_trades()
         assert len(first_trades) == 1

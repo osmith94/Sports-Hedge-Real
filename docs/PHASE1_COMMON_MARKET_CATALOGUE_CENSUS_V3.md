@@ -1,9 +1,9 @@
-# Phase-1 common-market catalogue census v3 (Issue #316)
+# Phase-1 common-market catalogue census v4 (Issue #326)
 
-**Base:** current owner-live `46d20dd2e1f64a7445ca70bfcdcc184525e26485`  
-**Registry:** `backend/src/sports_hedge/catalogue/registry.py` (`REGISTRY_VERSION=v3`)  
+**Base:** current owner-live `cf541aa857b19efb2d96cce54489c916bc1a38ba`  
+**Registry:** `backend/src/sports_hedge/catalogue/registry.py` (`REGISTRY_VERSION=v4`)  
 **Team registry:** `backend/src/sports_hedge/facts/team_registry.py`  
-**Tenet:** Core Tenet 20, with Core Tenet 03 remaining settlement-safety authority. The 1X2 paper-mode assumption is an explicit owner-approved exception.  
+**Tenet:** Core Tenet 20, with Core Tenet 03 remaining settlement-safety authority. The four locked Matchbook↔Kalshi families are an explicit owner-approved PAPER-mode exception.  
 **Mode:** PAPER MODE · EXECUTION DISABLED  
 **Data class:** DETERMINISTIC REGISTRY from owner-live code, tests, captured public payloads, and documented read-only series metadata. Not live quotes. Not modelled probabilities.
 
@@ -19,18 +19,18 @@ For each genuinely offered Matchbook↔Kalshi fixture, UNIVERSE attempts these f
 
 | Family | Paper-mode admission | Live-execution | Notes |
 |---|---|---|---|
-| MATCH_RESULT / 1X2 | `PAPER_ASSUMED_EQUIVALENT` when GAME HOME/DRAW/AWAY is complete and there is no contradictory wording | never, unless independently proven `APPROVED_EQUIVALENT` | `settlement_assumption=regulation_time` |
-| BTTS | `APPROVED_EQUIVALENT` when proven | never in Phase 1 (execution disabled) | independent settlement proof required |
-| TOTAL_GOALS (safe half-line) | `APPROVED_EQUIVALENT` when exact line matches | never in Phase 1 | 2.5↔2.5 yes; 2.5↔3.5 no; integer/quarter deferred |
-| FTTS | `APPROVED_EQUIVALENT` when 3-state regulation is proven | never in Phase 1 | no player first-goalscorer confusion |
+| MATCH_RESULT / 1X2 | `PAPER_ASSUMED_EQUIVALENT` when GAME HOME/DRAW/AWAY is complete; fair-price wording does not block PAPER | never, unless independently proven `APPROVED_EQUIVALENT` | `settlement_assumption=regulation_time` |
+| BTTS | `PAPER_ASSUMED_EQUIVALENT` when YES/NO identity matches; `APPROVED_EQUIVALENT` when proven | never in Phase 1 (execution disabled) | no fresh settlement-proof gate on each scan |
+| TOTAL_GOALS (safe half-line) | `PAPER_ASSUMED_EQUIVALENT` when exact line matches; `APPROVED_EQUIVALENT` when proven | never in Phase 1 | 2.5↔2.5 yes; 2.5↔3.5 no; integer/quarter deferred |
+| FTTS | `PAPER_ASSUMED_EQUIVALENT` when HOME/AWAY/NO_GOAL is listed; `APPROVED_EQUIVALENT` when proven | never in Phase 1 | no player first-goalscorer confusion |
 
 Example fixture diagnostics:
 
 ```text
 MATCH_RESULT  | PAPER_ASSUMED_EQUIVALENT | GAME HOME/DRAW/AWAY complete | regulation-time assumption
-BTTS          | APPROVED_EQUIVALENT       | proven
-TOTAL_GOALS   | APPROVED_EQUIVALENT       | exact line 2.5 | proven
-FTTS          | APPROVED_EQUIVALENT       | proven
+BTTS          | PAPER_ASSUMED_EQUIVALENT | YES/NO identity matched | or APPROVED_EQUIVALENT when proven
+TOTAL_GOALS   | PAPER_ASSUMED_EQUIVALENT | exact line 2.5 | or APPROVED_EQUIVALENT when proven
+FTTS          | PAPER_ASSUMED_EQUIVALENT | HOME/AWAY/NO_GOAL listed | or APPROVED_EQUIVALENT when proven
 DNB           | VENUE_UNAVAILABLE
 ```
 
@@ -42,11 +42,11 @@ Layers are separate. No archetype becomes live-execution eligible just to increa
 
 | Archetype | TARGET | Phase-1 four-family | Matchbook recognizer | Kalshi recognizer / series | Settlement proof | Solver | Current MB↔K admission | Exact reason when not operational | Evidence |
 |---|---|---|---|---|---|---|---|---|---|
-| 1X2 | yes | yes | Match Odds / Match Result | `*GAME`; YES HOME/DRAW/AWAY | Proven only from market-specific 90-minute wording. GAMEWIN template is **not** independently proven | simple complete-set | `PAPER_ASSUMED_EQUIVALENT` when H/D/A complete and no contradiction; `APPROVED_EQUIVALENT` when 90-minute wording independently proves regulation | Extra time / penalties / to-qualify / fair-price cancel → fail closed. Incomplete H/D/A → not paper-assumed. Series ticker never approves. | Census v1 §3.1/§9; owner #316 paper-mode contract |
-| BTTS | yes | yes | `both teams to score` / `btts` | `*BTTS` | Proven when market rules prove regulation | simple complete-set | `APPROVED_EQUIVALENT` when instance complete | Ambiguous Kalshi rules → `REVIEW_REQUIRED` | Census v1 §3.2; owner-live #301 |
-| TOTAL half-line | yes | yes | total goal / over-under goal | `*TOTAL`; half-line only | Proven when half-line rules prove regulation | simple complete-set | `APPROVED_EQUIVALENT` when exact line matches | Line mismatch → `APPROVED_PARAMETER_MISMATCH`. Integer/quarter Kalshi totals not assembled | Census v1 §3.3 |
+| 1X2 | yes | yes | Match Odds / Match Result | `*GAME`; YES HOME/DRAW/AWAY | Proven only from market-specific 90-minute wording. GAMEWIN template is **not** independently proven | simple complete-set | `PAPER_ASSUMED_EQUIVALENT` when H/D/A complete; `APPROVED_EQUIVALENT` when 90-minute wording independently proves regulation | Extra time / penalties / to-qualify → fail closed. Fair-price cancel does not block PAPER. Incomplete H/D/A → not paper-assumed. Series ticker never approves. | Census v1 §3.1/§9; owner #326 paper-mode contract |
+| BTTS | yes | yes | `both teams to score` / `btts` | `*BTTS` | Proven when market rules prove regulation | simple complete-set | `PAPER_ASSUMED_EQUIVALENT` when YES/NO identity matches; `APPROVED_EQUIVALENT` when instance complete | Incomplete YES/NO → not paper-assumed | Census v1 §3.2; owner #326 |
+| TOTAL half-line | yes | yes | total goal / over-under goal | `*TOTAL`; half-line only | Proven when half-line rules prove regulation | simple complete-set | `PAPER_ASSUMED_EQUIVALENT` when exact line matches; `APPROVED_EQUIVALENT` when proven | Line mismatch → `APPROVED_PARAMETER_MISMATCH`. Integer/quarter Kalshi totals not assembled | Census v1 §3.3; owner #326 |
 | TOTAL integer | yes | no | integer Over/Under | **unavailable** | n/a on Kalshi | generalized on MB↔PM only | `VENUE_UNAVAILABLE` MB↔K | Kalshi integer/quarter totals deferred | Census v1 §3.3 |
-| FTTS | yes | yes | FTTS / first goal with 3-state runners | `*FTTS` except Championship and Intl friendlies | Proven only with NO_GOAL **and** `REGULATION_TIME` | generalized payoff | `APPROVED_EQUIVALENT` when instance complete | Missing NO_GOAL / unproven regulation → `REVIEW_REQUIRED` | Census v1 §3.4 |
+| FTTS | yes | yes | FTTS / first goal with 3-state runners | `*FTTS` except Championship and Intl friendlies | Proven only with NO_GOAL **and** `REGULATION_TIME` | generalized payoff | `PAPER_ASSUMED_EQUIVALENT` when 3-state identity is listed; `APPROVED_EQUIVALENT` when instance complete | Missing NO_GOAL → `REVIEW_REQUIRED`. Championship / friendlies → `VENUE_UNAVAILABLE` | Census v1 §3.4; owner #326 |
 | TEAM TOTAL | yes | no | recognized | **unavailable** | unproven | none | `VENUE_UNAVAILABLE` MB↔K | No Kalshi team-total series. Not a Phase-1 expensive-work family | Census v1 §3.5 |
 | HANDICAP | yes | no | recognized, unproven | **unavailable** | unproven | none | `VENUE_UNAVAILABLE` MB↔K | No Kalshi handicap series | Census v1 §3.6 |
 | DNB | yes | no | recognized | **unavailable** | n/a on Kalshi | generalized on MB↔PM only | `VENUE_UNAVAILABLE` MB↔K | No Kalshi DNB series. Must not trigger depth/solver | Census v1 §3.7 |

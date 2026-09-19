@@ -67,12 +67,14 @@ from sports_hedge.application.provider_access import (
 )
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
+    UNIVERSE_MIN_CHUNK_SECONDS,
     WORKER_COMPLETE,
     WORKER_DEGRADED,
     WORKER_IDLE,
     WORKER_RUNNING,
     WORKER_WAITING,
     ScanLane,
+    universe_chunk_wall_seconds,
 )
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
@@ -90,6 +92,14 @@ LOGGER = logging.getLogger(__name__)
 
 class ScanCycleTimeout(TimeoutError):
     """Raised when a live-refresh cycle exceeds its bounded deadline."""
+
+
+class CollectionRunnerTimeout(TimeoutError):
+    """Raised when harvest expires while the child collection task is still running."""
+
+    def __init__(self, leftover: asyncio.Task[Any] | None = None) -> None:
+        super().__init__("collection runner harvest expired")
+        self.leftover = leftover
 
 
 class ExplicitCollectBusy(RuntimeError):
@@ -115,6 +125,7 @@ class ExplicitCollectBusy(RuntimeError):
 # rather than the scheduler tick, and leftover + aclose finish inside harvest.
 SCAN_CYCLE_RETURN_GRACE_SECONDS = 5.0
 SCAN_CYCLE_PARTIAL_HARVEST_SECONDS = 0.8
+UNIVERSE_ORPHAN_TASK_WARN_LIMIT = 3
 
 
 class LaneRefreshStatus(BaseModel):
@@ -145,6 +156,7 @@ class LaneRefreshStatus(BaseModel):
     last_successful_fixture: str | None = None
     current_fixture: str | None = None
     sweep_id: str | None = None
+    generation_id: int | None = None
     last_error: str | None = None
     last_diagnostics: dict[str, Any] | None = None
     last_persist_error: str | None = None
@@ -214,8 +226,9 @@ class LiveRefreshStatus(BaseModel):
     universe: LaneRefreshStatus = Field(
         default_factory=lambda: LaneRefreshStatus(
             cadence_seconds=8,
-            # Telemetry of accumulated successful UNIVERSE work. Not a cycle deadline;
-            # UNIVERSE generations remain unbounded (Tenet 19).
+            # Per-chunk watchdog, not a generation lifetime. UNIVERSE generations
+            # remain resumable/unbounded (Tenet 19 / Issue #328).
+            cycle_timeout_seconds=150,
             generation_budget_seconds=150,
         )
     )
@@ -328,6 +341,11 @@ class LiveRefreshCoordinator:
         self._universe_series_results: dict[str, list[dict[str, Any]]] = {}
         self._universe_series_work: dict[str, SeriesWorkUnit] = {}
         self._universe_series_applied_this_cycle: set[str] = set()
+        self._universe_chunk_seq = 0
+        self._universe_active_chunk_epoch: int | None = None
+        self._universe_orphaned_tasks: list[asyncio.Task[Any]] = []
+        self._universe_orphaned_chunk_count = 0
+        self._universe_stale_callback_count = 0
         self._universe_checkpoint_store = universe_checkpoint_store
         self._universe_checkpoint_restored = False
         self._venue_store = venue_settings_store
@@ -374,6 +392,9 @@ class LiveRefreshCoordinator:
                     "universe": self.status.universe.model_copy(
                         update={
                             "cadence_seconds": resolved.paper_universe_worker_cooldown_seconds,
+                            "cycle_timeout_seconds": self._universe_chunk_collector_timeout(
+                                now=self.now(), settings=resolved
+                            ),
                             "generation_budget_seconds": float(
                                 resolved.paper_scan_universe_generation_budget_seconds
                             ),
@@ -503,6 +524,7 @@ class LiveRefreshCoordinator:
 
     def reset(self) -> None:
         self._fixture_state.clear()
+        orphans: list[asyncio.Task[Any]] = []
         with self._state_lock:
             self._last_request = {}
             self._last_report = None
@@ -544,6 +566,12 @@ class LiveRefreshCoordinator:
             self._universe_series_results = {}
             self._universe_series_work = {}
             self._universe_series_applied_this_cycle = set()
+            orphans = list(self._universe_orphaned_tasks)
+            self._universe_orphaned_tasks = []
+            self._universe_active_chunk_epoch = None
+            self._universe_chunk_seq = 0
+            self._universe_orphaned_chunk_count = 0
+            self._universe_stale_callback_count = 0
             self._clear_universe_checkpoint_unlocked()
             self._universe_checkpoint_restored = False
             self._cycle_hot_venues = None
@@ -554,6 +582,7 @@ class LiveRefreshCoordinator:
                 interval_seconds=30,
             )
         self.configure_from_settings()
+        self._drain_orphaned_collection_tasks(orphans)
 
     def _ensure_due_times(self, now: datetime, settings: Settings | None = None) -> None:
         with self._state_lock:
@@ -669,10 +698,13 @@ class LiveRefreshCoordinator:
                 return DualCadencePlan(lane="idle", reason="universe_cooldown")
             return DualCadencePlan(lane="idle", reason="waiting")
         reuse = bool(snapshot) and generation_resume
+        collector_timeout, coordinator_timeout = self._universe_chunk_timeouts(
+            now=evaluated, settings=resolved
+        )
         return DualCadencePlan(
             lane=ScanLane.UNIVERSE.value,
-            collector_timeout_seconds=None,
-            coordinator_timeout_seconds=None,
+            collector_timeout_seconds=collector_timeout,
+            coordinator_timeout_seconds=coordinator_timeout,
             resume_cursor=universe_cursor,
             skip_event_ids=skip_event_ids,
             universe_generation_id=universe_generation_id,
@@ -680,11 +712,49 @@ class LiveRefreshCoordinator:
             discovery_snapshot=snapshot,
             reuse_discovery=reuse,
             retry_series=retry_series,
-            unbounded_cycle=True,
+            unbounded_cycle=False,
             sweep_id=sweep_id,
             enabled_venues=universe_venues,
             reason="universe_sweep",
         )
+
+    def _universe_chunk_timeouts(
+        self,
+        now: datetime | None = None,
+        settings: Settings | None = None,
+    ) -> tuple[float, float]:
+        """Return (collector_timeout, coordinator_timeout) for one UNIVERSE chunk.
+
+        Generation lifetime stays unbounded. Only the scheduled chunk is bounded.
+        """
+
+        resolved = settings or get_settings()
+        evaluated = require_aware_instant(now or self.now(), "now")
+        budget = float(resolved.paper_scan_universe_generation_budget_seconds)
+        wall = universe_chunk_wall_seconds(
+            now=evaluated,
+            next_hot_due=self._next_hot_due,
+            remaining_generation_budget=budget,
+            safety_margin_seconds=float(resolved.paper_universe_hot_yield_safety_margin_seconds),
+        )
+        collector = float(wall if wall is not None else UNIVERSE_MIN_CHUNK_SECONDS)
+        return collector, collector + SCAN_CYCLE_RETURN_GRACE_SECONDS
+
+    def _universe_chunk_collector_timeout(
+        self,
+        now: datetime | None = None,
+        settings: Settings | None = None,
+    ) -> float:
+        collector, _coordinator = self._universe_chunk_timeouts(now=now, settings=settings)
+        return collector
+
+    def _universe_chunk_coordinator_timeout(
+        self,
+        now: datetime | None = None,
+        settings: Settings | None = None,
+    ) -> float:
+        _collector, coordinator = self._universe_chunk_timeouts(now=now, settings=settings)
+        return coordinator
 
     def manual_hot_plan(
         self,
@@ -784,6 +854,8 @@ class LiveRefreshCoordinator:
             timeout: float | None = float(
                 settings.paper_scan_hot_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
             )
+        elif timeout_seconds is None and lane is ScanLane.UNIVERSE:
+            timeout = self._universe_chunk_coordinator_timeout(now=self.now(), settings=settings)
         elif timeout_seconds is None:
             timeout = None
         else:
@@ -796,6 +868,8 @@ class LiveRefreshCoordinator:
                 self.record_report(report, scan_lane=lane)
                 return report
             except TimeoutError as exc:
+                leftover = getattr(exc, "leftover", None)
+                self._adopt_leftover_collection_task(leftover, lane=lane)
                 finished = self.now()
                 message = (
                     f"scan_cycle_timeout after {timeout:g}s"
@@ -847,7 +921,8 @@ class LiveRefreshCoordinator:
         Scheduled Fast/Full keep their own HOT 25s / UNIVERSE-chunk budgets.
         Advanced full diagnostic is a bounded one-shot and must return before
         the frontend's 60s PAPER_COLLECTION_TIMEOUT_MS. Scheduled UNIVERSE
-        generations are unbounded; this envelope is not a generation deadline.
+        generations stay unbounded across chunks; each scheduled chunk uses
+        `universe_chunk_wall_seconds` rather than awaiting the runner forever.
         """
 
         resolved = settings or get_settings()
@@ -891,6 +966,8 @@ class LiveRefreshCoordinator:
                     )
                     return report
                 except TimeoutError as exc:
+                    leftover = getattr(exc, "leftover", None)
+                    self._adopt_leftover_collection_task(leftover, lane=ScanLane.HOT)
                     message = f"scan_cycle_timeout after {timeout:g}s"
                     self._mark_lane_error(
                         ScanLane.HOT,
@@ -942,6 +1019,8 @@ class LiveRefreshCoordinator:
                 self.record_explicit_report(report)
                 return report
             except TimeoutError as exc:
+                leftover = getattr(exc, "leftover", None)
+                self._adopt_leftover_collection_task(leftover, lane=None)
                 message = f"scan_cycle_timeout after {timeout:g}s"
                 raise ScanCycleTimeout(message) from exc
             finally:
@@ -1160,6 +1239,18 @@ class LiveRefreshCoordinator:
                 }
             )
             self._cycle_enabled_venues = None
+            if lane is not ScanLane.HOT:
+                self._apply_universe_honesty_unlocked()
+                self.status = self.status.model_copy(
+                    update={
+                        "operator_summary": _combined_operator_summary(
+                            self.status.hot, self.status.universe, universe_count
+                        ),
+                        "cycle_in_progress": self._hot_in_progress
+                        or self._universe_in_progress
+                        or self._manual_hot_in_progress,
+                    }
+                )
             self._sync_venue_status_unlocked()
 
     def record_persist_outcome(
@@ -1227,6 +1318,7 @@ class LiveRefreshCoordinator:
     ) -> None:
         if self._universe_generation_started_at is None:
             self._ensure_universe_generation(report.started_at)
+        self._invalidate_universe_chunk_epoch_unlocked()
         duration_s = max(0.0, (report.completed_at - report.started_at).total_seconds())
         newly_evaluated = [
             item.canonical_event_id
@@ -1328,11 +1420,15 @@ class LiveRefreshCoordinator:
                         "last_successful_fixture": self._universe_last_successful,
                         "fixture_count": universe_count,
                         "degraded": degraded,
+                        "last_heartbeat_at": report.completed_at,
                         "last_error": None,
                         "last_persist_error": None,
                         "persist_ok": None,
                         "last_diagnostics": _lane_diagnostics(
-                            report, series_work=series_snapshot
+                            report,
+                            series_work=series_snapshot,
+                            sweep_id=self._universe_sweep_id,
+                            generation_id=self._universe_generation_id,
                         ),
                         "resume_cursor": resume_cursor,
                         "next_due_at": self._next_universe_due,
@@ -1359,9 +1455,14 @@ class LiveRefreshCoordinator:
         )
 
     def record_universe_discovery_snapshot(
-        self, snapshot: dict[str, list[dict[str, Any]]]
+        self,
+        snapshot: dict[str, list[dict[str, Any]]],
+        *,
+        chunk_epoch: int | None = None,
     ) -> None:
         with self._state_lock:
+            if self._reject_stale_universe_chunk_unlocked(chunk_epoch):
+                return
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(self.now())
             series = snapshot.get("series_results")
@@ -1396,8 +1497,11 @@ class LiveRefreshCoordinator:
         *,
         authoritative: bool = False,
         partial_reason: str | None = None,
+        chunk_epoch: int | None = None,
     ) -> None:
         with self._state_lock:
+            if self._reject_stale_universe_chunk_unlocked(chunk_epoch):
+                return
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(self.now())
             current: list[str] = []
@@ -1486,6 +1590,8 @@ class LiveRefreshCoordinator:
         fixture: Any,
         decisions: list[Any],
         inventory: list[Any],
+        *,
+        chunk_epoch: int | None = None,
     ) -> None:
         canonical_id = str(getattr(fixture, "canonical_event_id", "") or "")
         if not canonical_id:
@@ -1502,22 +1608,24 @@ class LiveRefreshCoordinator:
                 for item in cluster_member_events(cluster)
             ]
         scanned = getattr(fixture, "last_scanned_at", None) or self.now()
-        generation_id = self._ensure_store_universe_generation(scanned)
-        before_hot, _before_universe = self._fixture_state.membership_counts(scanned)
-        self._fixture_state.upsert_evaluated_fixture(
-            fixture,
-            markets=inventory,
-            decisions=decisions,
-            aliases=aliases,
-            source_events=source_events,
-            scan_lane=ScanLane.UNIVERSE,
-            now=scanned,
-            universe_generation_id=generation_id,
-        )
-        after_hot, _after_universe = self._fixture_state.membership_counts(scanned)
-        promoted_now = after_hot > before_hot
-        inventory_now = self._fixture_state.inventory(scanned)
         with self._state_lock:
+            if self._reject_stale_universe_chunk_unlocked(chunk_epoch):
+                return
+            generation_id = self._ensure_store_universe_generation(scanned)
+            before_hot, _before_universe = self._fixture_state.membership_counts(scanned)
+            self._fixture_state.upsert_evaluated_fixture(
+                fixture,
+                markets=inventory,
+                decisions=decisions,
+                aliases=aliases,
+                source_events=source_events,
+                scan_lane=ScanLane.UNIVERSE,
+                now=scanned,
+                universe_generation_id=generation_id,
+            )
+            after_hot, _after_universe = self._fixture_state.membership_counts(scanned)
+            promoted_now = after_hot > before_hot
+            inventory_now = self._fixture_state.inventory(scanned)
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(scanned)
             state = str(getattr(fixture, "market_evaluation_state", "") or "")
@@ -1590,6 +1698,7 @@ class LiveRefreshCoordinator:
                             "current_fixture": self._universe_current_fixture,
                             "resume_cursor": self._universe_cursor,
                             "cycle_in_progress": True,
+                            "last_heartbeat_at": scanned,
                         }
                     ),
                 }
@@ -1740,14 +1849,117 @@ class LiveRefreshCoordinator:
             retry.setdefault(unit.venue, []).append(unit.series)
         return {key: value for key, value in retry.items() if value}
 
+    def _open_universe_chunk_epoch_unlocked(self) -> int:
+        self._universe_chunk_seq += 1
+        self._universe_active_chunk_epoch = self._universe_chunk_seq
+        return self._universe_chunk_seq
+
+    def _invalidate_universe_chunk_epoch_unlocked(self) -> None:
+        self._universe_active_chunk_epoch = None
+
+    def _reject_stale_universe_chunk_unlocked(self, chunk_epoch: int | None) -> bool:
+        if chunk_epoch is None:
+            return False
+        if chunk_epoch == self._universe_active_chunk_epoch:
+            return False
+        self._universe_stale_callback_count += 1
+        LOGGER.info(
+            "quarantined stale UNIVERSE chunk callback epoch=%s active=%s total=%s",
+            chunk_epoch,
+            self._universe_active_chunk_epoch,
+            self._universe_stale_callback_count,
+        )
+        return True
+
+    def _prune_finished_orphaned_universe_tasks_unlocked(self) -> None:
+        self._universe_orphaned_tasks = [
+            task for task in self._universe_orphaned_tasks if not task.done()
+        ]
+
+    def _on_orphaned_universe_task_done(self, task: asyncio.Task[Any]) -> None:
+        _consume_orphaned_task_result(task)
+        with self._state_lock:
+            self._prune_finished_orphaned_universe_tasks_unlocked()
+
+    def _adopt_orphaned_universe_task(self, task: asyncio.Task[Any]) -> None:
+        with self._state_lock:
+            self._universe_orphaned_chunk_count += 1
+            self._universe_orphaned_tasks.append(task)
+        task.add_done_callback(self._on_orphaned_universe_task_done)
+        with self._state_lock:
+            self._prune_finished_orphaned_universe_tasks_unlocked()
+            live = sum(1 for item in self._universe_orphaned_tasks if not item.done())
+            adopted = self._universe_orphaned_chunk_count
+        if live >= UNIVERSE_ORPHAN_TASK_WARN_LIMIT:
+            LOGGER.warning(
+                "UNIVERSE cancellation-ignoring orphaned chunks live=%s total_adopted=%s",
+                live,
+                adopted,
+            )
+
+    def _adopt_leftover_collection_task(
+        self,
+        leftover: asyncio.Task[Any] | None,
+        *,
+        lane: ScanLane | None,
+    ) -> None:
+        if leftover is None:
+            return
+        if leftover.done():
+            _consume_orphaned_task_result(leftover)
+            return
+        leftover.cancel()
+        if lane is ScanLane.UNIVERSE:
+            self._adopt_orphaned_universe_task(leftover)
+            return
+        leftover.add_done_callback(_consume_orphaned_task_result)
+
+    def _drain_orphaned_collection_tasks(self, tasks: list[asyncio.Task[Any]]) -> None:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+            if task.done():
+                _consume_orphaned_task_result(task)
+            else:
+                task.add_done_callback(_consume_orphaned_task_result)
+
     def universe_collect_callbacks(
         self,
     ) -> tuple[Callable[..., None], Callable[..., None], Callable[..., None]]:
-        return (
-            self.record_universe_discovery_snapshot,
-            self.record_universe_fixture_progress,
-            self.record_universe_work_set,
-        )
+        with self._state_lock:
+            epoch = self._universe_active_chunk_epoch
+
+        def on_discovery(snapshot: dict[str, list[dict[str, Any]]]) -> None:
+            self.record_universe_discovery_snapshot(snapshot, chunk_epoch=epoch)
+
+        def on_fixture(
+            cluster: Any,
+            fixture: Any,
+            decisions: list[Any],
+            inventory: list[Any],
+        ) -> None:
+            self.record_universe_fixture_progress(
+                cluster,
+                fixture,
+                decisions,
+                inventory,
+                chunk_epoch=epoch,
+            )
+
+        def on_work(
+            canonical_ids: list[str],
+            *,
+            authoritative: bool = False,
+            partial_reason: str | None = None,
+        ) -> None:
+            self.record_universe_work_set(
+                canonical_ids,
+                authoritative=authoritative,
+                partial_reason=partial_reason,
+                chunk_epoch=epoch,
+            )
+
+        return on_discovery, on_fixture, on_work
 
     def _universe_plan_resume_state_unlocked(
         self,
@@ -2218,6 +2430,9 @@ class LiveRefreshCoordinator:
                 self._sync_venue_status_unlocked()
                 return
             self._ensure_universe_generation(started)
+            self._open_universe_chunk_epoch_unlocked()
+            chunk_timeout = self._universe_chunk_collector_timeout(now=started)
+            counts = self._lane_progress_fields()
             self.status = self.status.model_copy(
                 update={
                     **top,
@@ -2226,7 +2441,10 @@ class LiveRefreshCoordinator:
                             "cycle_in_progress": True,
                             "worker_state": WORKER_RUNNING,
                             "sweep_id": self._universe_sweep_id,
+                            "generation_id": self._universe_generation_id or None,
+                            "cycle_timeout_seconds": chunk_timeout,
                             "last_started_at": started,
+                            "last_heartbeat_at": started,
                             "last_error": None,
                             "last_persist_error": None,
                             "persist_ok": None,
@@ -2237,10 +2455,12 @@ class LiveRefreshCoordinator:
                                 self._universe_discovered_total
                                 - len(self._universe_evaluated_ids),
                             ),
+                            **counts,
                         }
                     ),
                 }
             )
+            self._apply_universe_honesty_unlocked()
             self._sync_venue_status_unlocked()
 
     def _mark_manual_hot_started(self, started: datetime) -> None:
@@ -2311,6 +2531,7 @@ class LiveRefreshCoordinator:
                 update["last_completed_at"] = finished
             else:
                 self._ensure_universe_generation(started)
+                self._invalidate_universe_chunk_epoch_unlocked()
                 self._universe_provider_failures += 1
                 delay = universe_provider_backoff_seconds(self._universe_provider_failures)
                 self._universe_retry_at = finished + timedelta(seconds=delay)
@@ -2325,6 +2546,7 @@ class LiveRefreshCoordinator:
                         "last_error": message,
                         "last_completed_at": finished,
                         "last_duration_ms": duration,
+                        "last_heartbeat_at": finished,
                         "chunk_last_duration_ms": duration,
                         "generation_work_used_s": round(work_used, 3),
                         "evaluated_count": evaluated_count,
@@ -2350,6 +2572,8 @@ class LiveRefreshCoordinator:
                 if self.status.last_completed_at is None:
                     update["last_completed_at"] = finished
             self.status = self.status.model_copy(update=update)
+            if lane is not ScanLane.HOT:
+                self._apply_universe_honesty_unlocked()
             self._cycle_enabled_venues = None
             self._sync_venue_status_unlocked()
 
@@ -2371,6 +2595,109 @@ class LiveRefreshCoordinator:
             if self._universe_generation_started_at is None:
                 return None
             return self._universe_generation_id
+
+    def _diagnostics_belong_to_current_generation(
+        self, diagnostics: dict[str, Any] | None
+    ) -> bool:
+        if not diagnostics:
+            return True
+        current_sweep = self._universe_sweep_id
+        diag_sweep = diagnostics.get("sweep_id")
+        if current_sweep and diag_sweep and str(diag_sweep) != str(current_sweep):
+            return False
+        diag_gen = diagnostics.get("generation_id")
+        if diag_gen is not None:
+            try:
+                if int(diag_gen) != int(self._universe_generation_id):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        if self._universe_generation_started_at is not None and not diag_sweep:
+            completeness = str(diagnostics.get("completeness") or "").casefold()
+            if completeness == "complete":
+                return False
+        return True
+
+    def _universe_live_worker_state_unlocked(self) -> str:
+        if self._universe_in_progress:
+            return WORKER_RUNNING
+        if self._universe_generation_started_at is None:
+            if self.status.universe.worker_state == WORKER_COMPLETE:
+                return WORKER_COMPLETE
+            return self.status.universe.worker_state or WORKER_IDLE
+        retry_wait = self._earliest_retry_wait_unlocked(self.now())
+        if self._universe_retry_at is not None or retry_wait is not None:
+            return WORKER_WAITING
+        if self.status.universe.degraded:
+            return WORKER_DEGRADED
+        if self.status.universe.worker_state == WORKER_COMPLETE:
+            return WORKER_WAITING
+        return self.status.universe.worker_state or WORKER_IDLE
+
+    def _apply_universe_honesty_unlocked(self) -> None:
+        """Keep UNIVERSE operator status generation-consistent.
+
+        A running/waiting generation must not display a prior generation's
+        complete summary or diagnostics. cycle_in_progress follows the actual
+        in-progress flag so retry_wait cannot look permanently running.
+        """
+
+        current = self.status.universe
+        worker_state = self._universe_live_worker_state_unlocked()
+        diagnostics = current.last_diagnostics
+        if not self._diagnostics_belong_to_current_generation(diagnostics):
+            diagnostics = None
+        counts = self._lane_progress_fields() if self._universe_generation_started_at is not None else {}
+        evaluated = (
+            counts.get("canonical_evaluated", self._status_universe_evaluated_count())
+            if counts
+            else self._status_universe_evaluated_count()
+        )
+        discovered = (
+            counts.get("canonical_work_total", self._universe_discovered_total)
+            if counts
+            else (current.canonical_work_total or current.discovered_total or 0)
+        )
+        leftover = current.not_evaluated_count
+        remaining = (
+            counts.get("canonical_remaining")
+            if counts
+            else max(0, int(discovered or 0) - int(evaluated or 0))
+        )
+        if remaining is None:
+            remaining = max(0, int(discovered or 0) - int(evaluated or 0))
+        budget = float(get_settings().paper_scan_universe_generation_budget_seconds)
+        update = {
+            "cycle_in_progress": bool(self._universe_in_progress),
+            "worker_state": worker_state,
+            "sweep_id": self._universe_sweep_id or current.sweep_id,
+            "generation_id": self._universe_generation_id or current.generation_id,
+            "last_diagnostics": diagnostics,
+            "operator_summary": _universe_operator_summary(
+                current.last_duration_ms or 0,
+                self._status_universe_work_used(),
+                budget,
+                current.fixture_count,
+                int(evaluated or 0),
+                leftover,
+                discovered_total=int(discovered or 0),
+                remaining=int(remaining or 0),
+                worker_state=worker_state,
+                venue_health=current.venue_health,
+                active_venues=current.active_venues,
+                plan_reason=current.last_plan_reason,
+            ),
+        }
+        if counts:
+            update.update(counts)
+        self.status = self.status.model_copy(
+            update={
+                "universe": current.model_copy(update=update),
+                "cycle_in_progress": self._hot_in_progress
+                or self._universe_in_progress
+                or self._manual_hot_in_progress,
+            }
+        )
 
     def _ensure_store_universe_generation(self, scanned: datetime) -> int:
         with self._state_lock:
@@ -2418,14 +2745,22 @@ class LiveRefreshCoordinator:
                     "universe": self.status.universe.model_copy(
                         update={"fixture_count": universe_count}
                     ),
-                    "operator_summary": _combined_operator_summary(
-                        self.status.hot, self.status.universe, universe_count
-                    ),
                     "venue_health": _merge_top_level_venue_health(
                         self.status.hot.venue_health,
                         self.status.universe.venue_health,
                     ),
                     "provider_access": get_shared_provider_access().snapshot().as_dict(),
+                    "cycle_in_progress": self._hot_in_progress
+                    or self._universe_in_progress
+                    or self._manual_hot_in_progress,
+                }
+            )
+            self._apply_universe_honesty_unlocked()
+            self.status = self.status.model_copy(
+                update={
+                    "operator_summary": _combined_operator_summary(
+                        self.status.hot, self.status.universe, universe_count
+                    ),
                     "cycle_in_progress": self._hot_in_progress
                     or self._universe_in_progress
                     or self._manual_hot_in_progress,
@@ -2541,6 +2876,7 @@ class LiveRefreshCoordinator:
     async def _universe_loop(self, tick) -> None:
         while not self._stop.is_set():
             plan = self.plan_universe_tick()
+            self._record_universe_heartbeat(plan)
             if plan.lane == ScanLane.UNIVERSE.value:
                 try:
                     await self._invoke_tick(tick, plan)
@@ -2553,6 +2889,25 @@ class LiveRefreshCoordinator:
                 await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, delay))
             except TimeoutError:
                 continue
+
+    def _record_universe_heartbeat(self, plan: DualCadencePlan) -> None:
+        """Mark the UNIVERSE worker alive, including retry/backoff idle.
+
+        Retry wait must not look like a permanently running in-progress cycle.
+        """
+
+        now = self.now()
+        with self._state_lock:
+            universe_update: dict[str, Any] = {
+                "last_heartbeat_at": now,
+                "last_plan_reason": plan.reason,
+            }
+            if plan.lane != ScanLane.UNIVERSE.value and not self._universe_in_progress:
+                universe_update["cycle_in_progress"] = False
+            self.status = self.status.model_copy(
+                update={"universe": self.status.universe.model_copy(update=universe_update)}
+            )
+            self._apply_universe_honesty_unlocked()
 
     def _seconds_until_hot(self) -> float:
         now = self.now()
@@ -2588,6 +2943,17 @@ def get_live_refresh_coordinator() -> LiveRefreshCoordinator:
     return _COORDINATOR
 
 
+def _consume_orphaned_task_result(task: asyncio.Task[Any]) -> None:
+    if not task.done():
+        return
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        LOGGER.info("orphaned collection task finished with %s", type(exc).__name__)
+
+
 def _collection_task_result(task: asyncio.Task[Any]) -> CollectionReport:
     try:
         return task.result()
@@ -2602,7 +2968,9 @@ async def _await_collection_runner(runner, timeout: float | None) -> CollectionR
     the scheduler tick, and a swallowed leftover is not TimeoutError. Persist
     after a timely leftover *inside* that wait is the envelope overrun. This
     helper cancels only the child and harvests leftover + aclose inside
-    `timeout` so the coordinator envelope stays ≤30s for HOT.
+    `timeout` so the coordinator envelope stays ≤30s for HOT. If the child
+    ignores cancellation, harvest still returns and the leftover task is
+    attached to CollectionRunnerTimeout for the coordinator to quarantine.
     """
 
     if timeout is None:
@@ -2621,7 +2989,7 @@ async def _await_collection_runner(runner, timeout: float | None) -> CollectionR
             await asyncio.wait({task}, timeout=remaining)
         if task.done():
             return _collection_task_result(task)
-        raise TimeoutError
+        raise CollectionRunnerTimeout(task)
     finally:
         if not task.done():
             task.cancel()
@@ -2631,12 +2999,19 @@ def _lane_diagnostics(
     report: CollectionReport,
     *,
     series_work: dict[str, SeriesWorkUnit] | None = None,
+    sweep_id: str | None = None,
+    generation_id: int | None = None,
 ) -> dict[str, Any]:
     payload = dict(report.scan_diagnostics or {})
     if series_work:
         payload["series_work"] = {
             key: unit.model_dump(mode="json") for key, unit in series_work.items()
         }
+    resolved_sweep = sweep_id or report.sweep_id
+    if resolved_sweep:
+        payload["sweep_id"] = resolved_sweep
+    if generation_id is not None:
+        payload["generation_id"] = generation_id
     payload.setdefault("soft_deadline_reached", False)
     payload.setdefault("cancelled", False)
     payload.setdefault("provider_cancels", 0)
@@ -2750,18 +3125,26 @@ def _universe_operator_summary(
     leftover_n: int,
     *,
     discovered_total: int = 0,
+    remaining: int | None = None,
     worker_state: str = WORKER_IDLE,
     venue_health: dict[str, str] | None = None,
     active_venues: list[VenueName] | None = None,
+    plan_reason: str | None = None,
 ) -> str:
+    del budget
     elapsed_s = round(max(work_used, duration_ms / 1000), 1)
     venue_clause = last_scan_venue_clause(venue_health, configured=active_venues)
     discovered = discovered_total or fixture_count
-    remaining = max(0, discovered - evaluated_n)
+    computed_remaining = remaining if remaining is not None else max(0, discovered - evaluated_n)
     state = worker_state or WORKER_IDLE
+    reason = str(plan_reason or "")
+    if reason in {"universe_retry_wait", "universe_provider_backoff"} and state == WORKER_WAITING:
+        state = "waiting · retry"
+    elif reason == "universe_cooldown" and state in {WORKER_IDLE, WORKER_WAITING, WORKER_COMPLETE}:
+        state = "waiting"
     return (
         f"Full sweep · {state} · elapsed {elapsed_s}s · "
-        f"{evaluated_n}/{discovered} evaluated · {remaining} remaining · "
+        f"{evaluated_n}/{discovered} evaluated · {computed_remaining} remaining · "
         f"{fixture_count} universe · {leftover_n} leftover · {venue_clause}"
     )
 

@@ -412,16 +412,24 @@ def freshness_class(
 def universe_chunk_wall_seconds(
     *,
     now: datetime,
-    next_hot_due: datetime,
+    next_hot_due: datetime | None = None,
     remaining_generation_budget: float,
     safety_margin_seconds: float = 2.0,
     min_chunk_seconds: float = UNIVERSE_MIN_CHUNK_SECONDS,
 ) -> float | None:
-    """Return the UNIVERSE chunk wall, or None when the slot cannot fit min_chunk."""
+    """Return the scheduled UNIVERSE chunk watchdog wall, or None if too small.
 
-    until_hot = (require_aware_instant(next_hot_due, "next_hot_due") - require_aware_instant(now, "now")).total_seconds()
-    until_hot -= safety_margin_seconds
-    chunk_wall = min(float(remaining_generation_budget), until_hot)
+    This bounds one scheduled chunk/cycle so a hung provider cannot wedge the
+    worker forever. It is not a generation lifetime: UNIVERSE generations stay
+    resumable and unbounded (Tenet 19).
+
+    `next_hot_due` is accepted for call-site compatibility and must not shrink
+    the chunk. HOT remains independently schedulable and must not time-slice
+    UNIVERSE into leftover-until-HOT slots.
+    """
+
+    del now, next_hot_due
+    chunk_wall = float(remaining_generation_budget) - float(safety_margin_seconds)
     if chunk_wall < min_chunk_seconds:
         return None
     return chunk_wall

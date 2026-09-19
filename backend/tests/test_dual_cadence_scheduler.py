@@ -263,8 +263,9 @@ async def test_universe_chunk_yields_and_cursor_advances_across_hot_cycles() -> 
 
     first = coordinator.plan_tick(now=clock.now)
     assert first.lane == "universe"
-    assert first.collector_timeout_seconds is None
-    assert first.unbounded_cycle is True
+    assert first.collector_timeout_seconds is not None
+    assert first.coordinator_timeout_seconds is not None
+    assert first.unbounded_cycle is False
     assert first.reason == "universe_sweep"
     await coordinator.run_cycle(
         runner,
@@ -527,8 +528,8 @@ def test_startup_universe_due_immediately_and_tracked_empty() -> None:
     plan = coordinator.plan_tick(now=NOW)
     assert plan.lane == "universe"
     assert plan.reason == "universe_sweep"
-    assert plan.collector_timeout_seconds is None
-    assert plan.unbounded_cycle is True
+    assert plan.collector_timeout_seconds is not None
+    assert plan.unbounded_cycle is False
     assert coordinator._next_hot_due == NOW
 
 

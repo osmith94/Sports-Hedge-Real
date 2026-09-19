@@ -17,6 +17,7 @@ from sports_hedge.accounting.paper_journal import (
 )
 from sports_hedge.accounting.strategy_books import DimensionedPosting
 from sports_hedge.application.executable_liquidity import decision_net_edge
+from sports_hedge.application.ftts_alert_bridge import attach_ftts_ordinary_depth
 from sports_hedge.application.paper_scan import FillPlanMappingError, apply_allocation_to_fill_legs
 from sports_hedge.arbitrage.allocation.adapters import (
     balances_from_treasury,
@@ -251,6 +252,7 @@ class PaperOperationsService:
         candidate = None
         solver_arb = _solver_is_arbitrage(decision)
         if decision.eligible_for_paper_simulation and solver_arb:
+            decision = attach_ftts_ordinary_depth(decision)
             if decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage:
                 candidate = _candidate_from_decision(decision, opportunity_id)
                 self.alerts.ingest(candidate)

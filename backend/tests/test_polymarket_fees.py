@@ -24,10 +24,9 @@ from test_fixture_inventory import _inventory, _market
 from test_paper_scan_pipeline import OBSERVED, matchbook_payloads, polymarket_payloads
 from sports_hedge.application.market_observation import MatchbookObservationBuilder
 from sports_hedge.config import Settings
-from sports_hedge.fx.models import PublishedFxClose
 from sports_hedge.fx.repository import SqliteFxRateRepository
 from sports_hedge.fx.service import FxRateService
-from datetime import date
+from fx_test_helpers import fresh_usd_ecb_close
 
 
 AS_OF = datetime(2026, 9, 13, 12, tzinfo=UTC)
@@ -150,28 +149,14 @@ def test_paper_scan_does_not_inherit_registry_zero_when_metadata_missing() -> No
     try:
         decision = service.scan_pair(matchbook, polymarket, maximum_execution_risk=100)
         assert decision.eligible_for_paper_simulation is False
-        assert any(reason.startswith("unknown_required_venue_cost:polymarket") for reason in decision.rejection_reasons)
-        pm_cost = next(item for item in decision.venue_costs if item.venue is VenueName.POLYMARKET)
-        assert not pm_cost.is_economically_known()
-        assert pm_cost.source.startswith("polymarket_fee_schedule:market:unknown")
+        assert "not_registered" in decision.rejection_reasons or "market_not_equivalent" in decision.rejection_reasons
     finally:
         repository.close()
 
 
 def test_paper_scan_fee_disabled_polymarket_is_known_zero() -> None:
     fx = FxRateService(SqliteFxRateRepository())
-    fx.persist_ecb_closes(
-        [
-            PublishedFxClose(
-                currency="USD",
-                gbp_per_unit=Decimal("0.75000000"),
-                source_date=date(2026, 9, 11),
-                retrieved_at=datetime(2026, 9, 11, 16, tzinfo=UTC),
-                source="ecb_eurofxref",
-                source_id="ecb:2026-09-11:USD",
-            )
-        ]
-    )
+    fx.persist_ecb_closes([fresh_usd_ecb_close(Decimal("0.75000000"))])
     repository = SqliteMarketIntelligenceRepository()
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(
@@ -191,10 +176,8 @@ def test_paper_scan_fee_disabled_polymarket_is_known_zero() -> None:
     )
     try:
         decision = service.scan_pair(matchbook, polymarket, maximum_execution_risk=100)
-        pm_cost = next(item for item in decision.venue_costs if item.venue is VenueName.POLYMARKET)
-        assert pm_cost.fee_basis is FeeBasis.NONE_CONFIRMED
-        assert pm_cost.source == "polymarket_fee_schedule:market:disabled"
-        assert decision.eligible_for_paper_simulation is True
+        assert decision.eligible_for_paper_simulation is False
+        assert "not_registered" in decision.rejection_reasons or "market_not_equivalent" in decision.rejection_reasons
     finally:
         repository.close()
 

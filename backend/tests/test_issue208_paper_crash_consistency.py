@@ -51,10 +51,10 @@ from test_step8f_automatic_paper_entry import (
     _matchbook_btts,
     _observe_and_persist,
     _ops_bundle,
-    _polymarket_btts,
+    _kalshi_btts,
+    _kalshi_costs,
     _standing,
 )
-from venue_cost_helpers import matchbook_polymarket_costs
 
 
 FILL_JOURNAL_SOURCES = {
@@ -124,14 +124,14 @@ def _fill_complete_events(watchlist: WatchlistService, opportunity_id: str) -> l
 
 def _qualifying_decision(scan, watchlist, extra=None):
     kwargs = dict(
-        venue_costs=matchbook_polymarket_costs(),
+        venue_costs=_kalshi_costs(),
         fx_snapshots=AUTOFILL_FX,
         maximum_execution_risk=100,
         liquidity_snapshot=_standing(),
     )
     if extra:
         kwargs.update(extra)
-    decision = scan.scan_pair(_matchbook_btts(), _polymarket_btts(), **kwargs)
+    decision = scan.scan_pair(_matchbook_btts(), _kalshi_btts(), **kwargs)
     assert decision.eligible_for_paper_simulation is True, decision.rejection_reasons
     assert decision.allocation is not None and decision.allocation.accepted
     watchlist.observe_paper_decision(
@@ -184,8 +184,8 @@ def test_exact_same_stamped_retry_does_not_duplicate_open_locks_or_journals(tmp_
             watchlist,
             ops,
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
         )
         first = _state_report(
             ops=ops,
@@ -222,8 +222,8 @@ def test_new_scan_same_economics_appends_audit_without_new_open(tmp_path: Path) 
     try:
         first = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=AUTOFILL_FX,
             maximum_execution_risk=100,
             liquidity_snapshot=_standing(),
@@ -240,8 +240,8 @@ def test_new_scan_same_economics_appends_audit_without_new_open(tmp_path: Path) 
         assert len(ops.list_active_trades()) == 1
         second = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=AUTOFILL_FX,
             maximum_execution_risk=100,
             liquidity_snapshot=_standing(),
@@ -275,8 +275,8 @@ def test_allocator_resize_on_retry_does_not_top_up_existing_open(tmp_path: Path)
             watchlist,
             ops,
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
         )
         trade = ops.list_active_trades()[0]
         original_stakes = {(leg.venue, leg.outcome): leg.filled_stake for leg in trade.legs}
@@ -302,11 +302,11 @@ def test_stale_evidence_cannot_create_a_new_open(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
     try:
         stale_left = _matchbook_btts().model_copy(update={"quote_age_ms": 5_000})
-        stale_right = _polymarket_btts().model_copy(update={"quote_age_ms": 5_000})
+        stale_right = _kalshi_btts().model_copy(update={"quote_age_ms": 5_000})
         decision = scan.scan_pair(
             stale_left,
             stale_right,
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=AUTOFILL_FX,
             maximum_execution_risk=100,
             liquidity_snapshot=_standing(),
@@ -335,7 +335,7 @@ def test_disabled_venue_insufficient_capital_missing_fx_fee_risk_leak_zero_locks
         ops.persist_triggered_chain(
             decision,
             provenance=DataProvenance.LIVE_PAPER,
-            refreshed_venues=(VenueName.MATCHBOOK, VenueName.KALSHI),
+            refreshed_venues=(VenueName.MATCHBOOK,),
         )
         assert ops.list_active_trades() == []
         assert _lock_rows(ledger) == []
@@ -344,8 +344,8 @@ def test_disabled_venue_insufficient_capital_missing_fx_fee_risk_leak_zero_locks
 
         empty = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=AUTOFILL_FX,
             maximum_execution_risk=100,
             liquidity_snapshot=_standing(
@@ -364,8 +364,8 @@ def test_disabled_venue_insufficient_capital_missing_fx_fee_risk_leak_zero_locks
 
         missing_fx = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=[],
             maximum_execution_risk=100,
             liquidity_snapshot=_standing(),
@@ -380,7 +380,7 @@ def test_disabled_venue_insufficient_capital_missing_fx_fee_risk_leak_zero_locks
 
         missing_fee = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
+            _kalshi_btts(),
             venue_costs=[],
             fx_snapshots=AUTOFILL_FX,
             maximum_execution_risk=100,
@@ -396,8 +396,8 @@ def test_disabled_venue_insufficient_capital_missing_fx_fee_risk_leak_zero_locks
 
         risky = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=AUTOFILL_FX,
             maximum_execution_risk=0,
             liquidity_snapshot=_standing(),
@@ -431,8 +431,8 @@ async def test_persist_ok_false_when_qualifying_autofill_raises_and_no_open(
     try:
         decision = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=AUTOFILL_FX,
             maximum_execution_risk=100,
             liquidity_snapshot=_standing(),
@@ -509,8 +509,8 @@ def test_open_without_locks_is_repaired_on_retry_not_healthy_short_circuit(
             watchlist,
             ops,
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
         )
         trade = ops.list_active_trades()[0]
         opportunity_id = trade.opportunity_id
@@ -797,8 +797,8 @@ async def test_crash_after_audit_before_open_retries_without_duplicate_audit(
     try:
         decision = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=AUTOFILL_FX,
             maximum_execution_risk=100,
             liquidity_snapshot=_standing(),
@@ -961,9 +961,9 @@ def test_unwind_after_failure_retry_is_idempotent_one_realised_pnl(tmp_path: Pat
 
         ops.simulate_fill = crash_first_fill  # type: ignore[method-assign]
         with pytest.raises(PaperOperationsError, match="injected_confirm_crash"):
-            demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+            demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         ops.simulate_fill = real_fill  # type: ignore[method-assign]
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         assert trade.state is PaperTradeState.OPEN

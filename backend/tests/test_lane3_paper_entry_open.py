@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 from test_paper_fill_simulator import _leg, _two_level_book
 from test_step8f_automatic_paper_entry import (
+    FX,
     OBSERVED,
     _assert_allocator_sized,
     _kalshi_btts,
@@ -25,9 +26,9 @@ from test_step8f_automatic_paper_entry import (
     _ops_bundle,
     _pm_kalshi_costs,
     _polymarket_btts,
+    _standing,
 )
 from test_step9_operator_demo import _bundle as _demo_bundle
-from venue_cost_helpers import matchbook_polymarket_costs
 
 from sports_hedge.accounting.dimensions import EconomicAccount
 from sports_hedge.accounting.paper_journal import DataProvenance
@@ -126,8 +127,8 @@ def test_lane3_mb_pm_arithmetic_lock_ids_and_open_fields(tmp_path: Path) -> None
             watchlist,
             ops,
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
         )
         trades = ops.list_active_trades()
         assert len(trades) == 1
@@ -142,7 +143,7 @@ def test_lane3_mb_pm_arithmetic_lock_ids_and_open_fields(tmp_path: Path) -> None
         after = ledger.treasury.snapshot()
         deltas = _deltas(opening, after)
         mb_req = requested[(VenueName.MATCHBOOK, "GBP")]
-        pm_req = requested[(VenueName.POLYMARKET, "USD")]
+        k_req = requested[(VenueName.KALSHI, "USD")]
 
         for venue, currency in POOLS:
             assert _native(deltas[(venue, currency)]["available_delta"]) == _native(
@@ -157,9 +158,9 @@ def test_lane3_mb_pm_arithmetic_lock_ids_and_open_fields(tmp_path: Path) -> None
             assert _native(native_total_after) == _native(native_total_before)
 
         assert _native(deltas[(VenueName.MATCHBOOK, "GBP")]["locked_delta"]) == _native(mb_req)
-        assert _native(deltas[(VenueName.POLYMARKET, "USD")]["locked_delta"]) == _native(pm_req)
-        assert deltas[(VenueName.KALSHI, "USD")]["available_delta"] == 0
-        assert deltas[(VenueName.KALSHI, "USD")]["locked_delta"] == 0
+        assert _native(deltas[(VenueName.KALSHI, "USD")]["locked_delta"]) == _native(k_req)
+        assert deltas[(VenueName.POLYMARKET, "USD")]["available_delta"] == 0
+        assert deltas[(VenueName.POLYMARKET, "USD")]["locked_delta"] == 0
 
         locks = _lock_rows(ledger, trade.trade_id)
         assert len(locks) == len(trade.legs)
@@ -198,18 +199,18 @@ def test_lane3_mb_pm_arithmetic_lock_ids_and_open_fields(tmp_path: Path) -> None
 
         kinds = {leg.venue: leg.fill_kind for leg in trade.legs}
         assert kinds[VenueName.MATCHBOOK] is PaperLegFillKind.INTERNAL_SIMULATED
-        assert kinds[VenueName.POLYMARKET] is PaperLegFillKind.PAPER_SIMULATED_EXTERNAL
+        assert kinds[VenueName.KALSHI] is PaperLegFillKind.INTERNAL_SIMULATED
         assert trade.guaranteed_profit_gbp_at_open == decision.allocation.guaranteed_profit
 
-        print("LANE3_ARITHMETIC_MB_PM")
+        print("LANE3_ARITHMETIC_MB_K")
         print(f"trade_id={trade.trade_id}")
         print(f"opportunity_id={trade.opportunity_id}")
         print(f"lock_ids={sorted(lock_ids)}")
         print(f"opening_MB_GBP available={opening.pool(VenueName.MATCHBOOK, 'GBP').available_cash} locked={opening.pool(VenueName.MATCHBOOK, 'GBP').locked_capital}")
         print(f"opening_PM_USD available={opening.pool(VenueName.POLYMARKET, 'USD').available_cash} locked={opening.pool(VenueName.POLYMARKET, 'USD').locked_capital}")
         print(f"opening_K_USD available={opening.pool(VenueName.KALSHI, 'USD').available_cash} locked={opening.pool(VenueName.KALSHI, 'USD').locked_capital}")
-        print(f"request_MB_GBP={mb_req} PM_USD={pm_req}")
-        print(f"filled_MB_GBP={filled[(VenueName.MATCHBOOK, 'GBP')]} PM_USD={filled[(VenueName.POLYMARKET, 'USD')]}")
+        print(f"request_MB_GBP={mb_req} K_USD={k_req}")
+        print(f"filled_MB_GBP={filled[(VenueName.MATCHBOOK, 'GBP')]} K_USD={filled[(VenueName.KALSHI, 'USD')]}")
         print(f"post_MB_GBP available={after.pool(VenueName.MATCHBOOK, 'GBP').available_cash} locked={after.pool(VenueName.MATCHBOOK, 'GBP').locked_capital}")
         print(f"post_PM_USD available={after.pool(VenueName.POLYMARKET, 'USD').available_cash} locked={after.pool(VenueName.POLYMARKET, 'USD').locked_capital}")
         print(f"post_K_USD available={after.pool(VenueName.KALSHI, 'USD').available_cash} locked={after.pool(VenueName.KALSHI, 'USD').locked_capital}")
@@ -252,31 +253,25 @@ def test_lane3_mb_k_and_pm_k_lock_correct_pools(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger = _ops_bundle(pmk, autofill=True)
     try:
         opening = ledger.treasury.snapshot()
-        _observe_and_persist(
-            scan,
-            watchlist,
-            ops,
-            _polymarket_btts(),
-            _kalshi_btts(),
+        kwargs = dict(
             venue_costs=_pm_kalshi_costs(),
+            fx_snapshots=FX,
+            maximum_execution_risk=100,
+            liquidity_snapshot=_standing(),
         )
-        trade = ops.list_active_trades()[0]
-        _assert_open_surface(trade, provenance=DataProvenance.LIVE_PAPER)
+        decision = scan.scan_pair(_polymarket_btts(), _kalshi_btts(), **kwargs)
+        assert decision.market_match.matched is False
+        assert "not_registered" in decision.market_match.reasons
+        assert decision.eligible_for_paper_simulation is False
+        assert ops.list_active_trades() == []
         after = ledger.treasury.snapshot()
-        pm = next(leg for leg in trade.legs if leg.venue is VenueName.POLYMARKET)
-        ks = next(leg for leg in trade.legs if leg.venue is VenueName.KALSHI)
-        assert after.pool(VenueName.POLYMARKET, "USD").locked_capital == pm.filled_stake
-        assert after.pool(VenueName.KALSHI, "USD").locked_capital == ks.filled_stake
-        assert after.pool(VenueName.MATCHBOOK, "GBP").locked_capital == opening.pool(
-            VenueName.MATCHBOOK, "GBP"
+        assert after.pool(VenueName.POLYMARKET, "USD").locked_capital == opening.pool(
+            VenueName.POLYMARKET, "USD"
         ).locked_capital
-        kinds = {leg.venue: leg.fill_kind for leg in trade.legs}
-        assert kinds[VenueName.KALSHI] is PaperLegFillKind.INTERNAL_SIMULATED
-        assert kinds[VenueName.POLYMARKET] is PaperLegFillKind.PAPER_SIMULATED_EXTERNAL
-        print("LANE3_ARITHMETIC_PM_K")
-        print(f"trade_id={trade.trade_id} lock_ids={[leg.fill_id for leg in trade.legs]}")
-        print(f"PM_USD {opening.pool(VenueName.POLYMARKET, 'USD').available_cash}->{after.pool(VenueName.POLYMARKET, 'USD').available_cash} lock+{pm.filled_stake}")
-        print(f"K_USD {opening.pool(VenueName.KALSHI, 'USD').available_cash}->{after.pool(VenueName.KALSHI, 'USD').available_cash} lock+{ks.filled_stake}")
+        assert after.pool(VenueName.KALSHI, "USD").locked_capital == opening.pool(
+            VenueName.KALSHI, "USD"
+        ).locked_capital
+        print("LANE3_PM_K_NOT_REGISTERED")
     finally:
         repository.close()
         ledger.close()
@@ -344,8 +339,8 @@ def test_lane3_stale_partial_do_not_open_or_leak_locks(tmp_path: Path) -> None:
             watchlist,
             ops,
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
         )
         opportunity_id = next(iter(ops._plans))
         before = ledger.treasury.snapshot()
@@ -384,8 +379,8 @@ def test_lane3_retries_idempotent_and_identity_survives_reload(tmp_path: Path) -
             watchlist,
             ops,
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
         )
         trade = ops.list_active_trades()[0]
         first_locks = _lock_rows(ledger, trade.trade_id)
@@ -468,7 +463,7 @@ def test_lane3_fixture_replay_with_production_fill_settings(tmp_path: Path) -> N
     )
     try:
         opening = ledger.treasury.snapshot()
-        replay = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        replay = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         assert replay.label == "DEMO / FIXTURE REPLAY"
         assert replay.data_kind == "demo_fixture_replay"
         assert replay.execution_enabled is False
@@ -482,7 +477,7 @@ def test_lane3_fixture_replay_with_production_fill_settings(tmp_path: Path) -> N
             assert pool.available_cash + pool.locked_capital == before_pool.available_cash + before_pool.locked_capital
             assert _native(pool.locked_capital) == _native(leg.filled_stake)
             assert _native(before_pool.available_cash - pool.available_cash) == _native(leg.filled_stake)
-        assert after.pool(VenueName.KALSHI, "USD").locked_capital == 0
+        assert after.pool(VenueName.POLYMARKET, "USD").locked_capital == 0
         fills_cfg = PaperFillConfig(
             assumed_latency_ms=settings.simulated_latency_ms,
             max_quote_age_ms=settings.paper_entry_max_quote_age_ms,
@@ -505,7 +500,7 @@ def test_lane3_open_trade_api_and_no_execution_paths(tmp_path: Path) -> None:
     app.dependency_overrides[get_paper_operations_service] = lambda: ops
     app.dependency_overrides[get_paper_ledger] = lambda: ledger
     try:
-        replay = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        replay = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = replay.trade
         assert trade is not None
         body = client.get(f"/paper/trades/{trade.trade_id}").json()

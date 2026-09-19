@@ -818,7 +818,7 @@ def test_insufficient_depth_stale_unknown_fx_and_partial_leg_fail_closed() -> No
 def test_auto_unwind_second_revalidation_abort_and_no_treasury_mutation(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         good = tighten_reverse_quotes(opened.quotes)
@@ -874,7 +874,7 @@ def test_auto_unwind_second_revalidation_abort_and_no_treasury_mutation(tmp_path
 def test_same_timestamp_second_pass_cannot_auto_close(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
@@ -929,7 +929,7 @@ def _collection_report() -> CollectionReport:
 def test_first_eligible_cycle_pends_without_closing(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
@@ -959,7 +959,7 @@ def test_first_eligible_cycle_pends_without_closing(tmp_path: Path) -> None:
 def test_first_pass_quotes_for_is_not_reused_for_auto_close(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
@@ -997,7 +997,7 @@ def test_production_manage_open_positions_first_cycle_does_not_auto_close(
 ) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
@@ -1025,7 +1025,7 @@ def test_production_manage_open_positions_first_cycle_does_not_auto_close(
 def test_scheduled_two_scan_closes_once_on_newer_qualifying_cycle(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
@@ -1117,7 +1117,7 @@ def test_scheduled_two_scan_closes_once_on_newer_qualifying_cycle(tmp_path: Path
 def test_scheduled_two_scan_non_eligible_newer_cycle_stays_open(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
@@ -1167,7 +1167,7 @@ def test_scheduled_two_scan_non_eligible_newer_cycle_stays_open(tmp_path: Path) 
 def test_scheduled_two_scan_changed_eligible_facts_stay_open(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
@@ -1228,7 +1228,7 @@ def test_scheduled_two_scan_changed_eligible_facts_stay_open(tmp_path: Path) -> 
 def test_auto_unwind_releases_once_and_survives_restart(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
@@ -1321,7 +1321,7 @@ def test_auto_unwind_releases_once_and_survives_restart(tmp_path: Path) -> None:
 def test_concurrent_cycles_produce_one_unwind(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
@@ -1363,7 +1363,7 @@ def test_concurrent_cycles_produce_one_unwind(tmp_path: Path) -> None:
 def test_unwind_then_settlement_remain_mutually_exclusive(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         quotes = tighten_reverse_quotes(opened.quotes)
@@ -1543,7 +1543,7 @@ def test_awaiting_manual_external_is_excluded_from_auto_close(tmp_path: Path) ->
 def test_repeat_evaluation_does_not_spam_audit(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         quotes = opened.quotes
@@ -1622,7 +1622,7 @@ def test_paper_only_boundary_and_feature_gate_default() -> None:
 def test_position_management_api_seam(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         manager.manage_trade(
@@ -1661,11 +1661,11 @@ def test_position_management_api_seam(tmp_path: Path) -> None:
 def test_simulated_external_may_be_auto_managed(tmp_path: Path) -> None:
     demo, ops, ledger, repository, manager = _bundle(tmp_path, auto_unwind=True)
     try:
-        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold"))
+        opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         trade = opened.trade
         assert trade is not None
         kinds = {leg.fill_kind for leg in trade.legs}
-        assert PaperLegFillKind.PAPER_SIMULATED_EXTERNAL in kinds
+        assert PaperLegFillKind.INTERNAL_SIMULATED in kinds
         result = manager.manage_trade(
             trade.trade_id,
             quotes=tighten_reverse_quotes(opened.quotes),

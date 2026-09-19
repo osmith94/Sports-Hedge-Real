@@ -271,10 +271,10 @@ async def _run_universe(
     collector: ReadOnlyCrossVenueCollector,
     **kwargs: Any,
 ) -> Any:
-    on_discovery, on_fixture, on_work = coordinator.universe_collect_callbacks()
     enabled = kwargs.pop("enabled_venues", [VenueName.KALSHI])
 
     async def runner() -> Any:
+        on_discovery, on_fixture, on_work = coordinator.universe_collect_callbacks()
         return await collector.collect_and_scan(
             scan_lane=ScanLane.UNIVERSE.value,
             unbounded_cycle=True,
@@ -368,9 +368,9 @@ async def test_fixture_streams_before_collect_returns(tmp_path: Path) -> None:
         return row
 
     collector._scan_cluster = gated  # type: ignore[method-assign]
-    on_discovery, on_fixture, on_work = coordinator.universe_collect_callbacks()
 
     async def runner() -> Any:
+        on_discovery, on_fixture, on_work = coordinator.universe_collect_callbacks()
         return await collector.collect_and_scan(
             scan_lane=ScanLane.UNIVERSE.value,
             unbounded_cycle=True,
@@ -827,9 +827,9 @@ async def test_integrated_concurrent_streaming_pipeline(tmp_path: Path) -> None:
         return row
 
     collector._scan_cluster = gated  # type: ignore[method-assign]
-    on_discovery, on_fixture, on_work = coordinator.universe_collect_callbacks()
 
     async def universe_runner() -> Any:
+        on_discovery, on_fixture, on_work = coordinator.universe_collect_callbacks()
         trace.append((monotonic() - origin, "universe_start"))
         return await collector.collect_and_scan(
             scan_lane=ScanLane.UNIVERSE.value,
@@ -883,6 +883,7 @@ async def test_integrated_concurrent_streaming_pipeline(tmp_path: Path) -> None:
     kalshi.fail_once = None
 
     async def retry_runner() -> Any:
+        on_discovery, on_fixture, on_work = coordinator.universe_collect_callbacks()
         return await collector.collect_and_scan(
             scan_lane=ScanLane.UNIVERSE.value,
             unbounded_cycle=True,

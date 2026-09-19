@@ -456,7 +456,7 @@ def test_generated_prompt_contains_current_evidence_and_excludes_secrets() -> No
     assert "should-not-leak" not in prompt.prompt_text
 
 
-def test_scan_pair_attaches_current_review_candidate() -> None:
+def test_scan_pair_does_not_attach_mapping_review_candidate() -> None:
     repository = SqliteMarketIntelligenceRepository()
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(intelligence)
@@ -504,9 +504,7 @@ def test_scan_pair_attaches_current_review_candidate() -> None:
     )
     try:
         decision = service.scan_pair(matchbook, polymarket)
-        assert decision.mapping_review_candidate is not None
-        assert len(decision.mapping_review_candidate.sides) == 2
-        assert decision.market_match.confidence == decision.mapping_review_candidate.current_confidence
+        assert decision.mapping_review_candidate is None
         rebuilt = evidence_from_markets(
             matchbook.market,
             polymarket.market,

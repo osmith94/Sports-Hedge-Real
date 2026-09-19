@@ -247,6 +247,28 @@ describe("dual cadence operator copy", () => {
     assert.doesNotMatch(fullSweepCopy(canonical, now).detail, /2 not evaluated/);
   });
 
+  it("does not label UNIVERSE retry_wait as in progress", () => {
+    const waiting = status({
+      universe: {
+        cadence_seconds: 8,
+        generation_budget_seconds: 150,
+        cycle_in_progress: false,
+        worker_state: "waiting",
+        last_plan_reason: "universe_retry_wait",
+        last_heartbeat_at: "2026-09-18T22:40:00Z",
+        fixture_count: 41,
+        evaluated_count: 72,
+        canonical_work_total: 113,
+        canonical_evaluated: 72,
+        canonical_remaining: 41,
+        canonical_retryable: 6,
+      },
+    });
+    assert.doesNotMatch(fullSweepCopy(waiting).detail, /in progress/);
+    assert.match(fullSweepCopy(waiting).detail, /waiting/);
+    assert.match(fullSweepCopy(waiting).detail, /72 evaluated/);
+  });
+
   it("routes primary Run scan to HOT and labels full discovery as advanced", () => {
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
     const api = readFileSync(join(frontendRoot, "lib/api.ts"), "utf8");

@@ -9,13 +9,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from sports_hedge.application.market_observation import (
     KalshiObservationBuilder,
     MatchbookObservationBuilder,
     PolymarketObservationBuilder,
     VenueMarketObservation,
+    _kalshi_price_levels,
+    _kalshi_runner_ticker_side,
 )
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import (
@@ -217,19 +219,78 @@ def polymarket_ftts() -> VenueMarketObservation:
     )
 
 
+def kalshi_ftts() -> VenueMarketObservation:
+    event = {
+        "event_ticker": "KXEPLFTTS-26SEP12TOTEVE",
+        "series_ticker": "KXEPLFTTS",
+        "title": "Tottenham vs Everton",
+        "category": "Sports",
+        "strike_date": FTTS_KICKOFF.isoformat(),
+    }
+    series = {
+        "ticker": "KXEPLFTTS",
+        "title": "Premier League First Team To Score",
+        "fee_type": "quadratic",
+        "fee_multiplier": 1,
+        "settlement_sources": [{"name": "Opta"}],
+    }
+    markets = [
+        {
+            "ticker": "KXEPLFTTS-26SEP12TOTEVE-TOT",
+            "event_ticker": event["event_ticker"],
+            "title": "First team to score",
+            "yes_sub_title": "Tottenham",
+            "rules_primary": "Resolves on 90 minutes of regulation time. Extra time and penalties do not count.",
+        },
+        {
+            "ticker": "KXEPLFTTS-26SEP12TOTEVE-EVE",
+            "event_ticker": event["event_ticker"],
+            "title": "First team to score",
+            "yes_sub_title": "Everton",
+            "rules_primary": "Resolves on 90 minutes of regulation time. Extra time and penalties do not count.",
+        },
+        {
+            "ticker": "KXEPLFTTS-26SEP12TOTEVE-NG",
+            "event_ticker": event["event_ticker"],
+            "title": "First team to score",
+            "yes_sub_title": "No Goal",
+            "rules_primary": "Resolves on 90 minutes of regulation time. Extra time and penalties do not count.",
+        },
+    ]
+    book = {
+        "orderbook_fp": {
+            "yes_dollars": [["0.22", "1000.00"]],
+            "no_dollars": [["0.75", "1000.00"]],
+        }
+    }
+    books = {item["ticker"]: dict(book) for item in markets}
+    return KalshiObservationBuilder().build(
+        event,
+        markets,
+        books,
+        series=series,
+        observed_at=FTTS_OBSERVED,
+        quote_age_ms=80,
+        quote_age_basis="retrieval",
+        fee_snapshot={"fee_type": "quadratic", "fee_multiplier": "1"},
+    )
+
+
 def fixture_pair(
     venue_pair: VenuePair,
     *,
     solver: SolverKind = "simple",
 ) -> tuple[VenueMarketObservation, VenueMarketObservation]:
     if solver == "generalized":
-        if venue_pair != "matchbook_polymarket":
-            raise ValueError("generalized fixture replay is Matchbook↔Polymarket first-team-to-score only")
-        return matchbook_ftts(), polymarket_ftts()
-    if venue_pair == "matchbook_polymarket":
-        return matchbook_btts(), polymarket_btts()
+        if venue_pair != "matchbook_kalshi":
+            raise ValueError(
+                "generalized fixture replay is Matchbook↔Kalshi first-team-to-score only"
+            )
+        return matchbook_ftts(), kalshi_ftts()
     if venue_pair == "matchbook_kalshi":
         return matchbook_btts(), kalshi_btts()
+    if venue_pair == "matchbook_polymarket":
+        return matchbook_btts(), polymarket_btts()
     if venue_pair == "polymarket_kalshi":
         return polymarket_btts(), kalshi_btts()
     raise ValueError(f"unsupported venue pair: {venue_pair}")
@@ -264,7 +325,11 @@ def reverse_quotes_from_observations(
     for observation in observations:
         fingerprint = observation.market.settlement.deterministic_key()
         for book in observation.outcome_books:
-            if not book.lay_levels:
+            levels = list(book.lay_levels)
+            if observation.venue is VenueName.KALSHI and not levels:
+                _ticker, side = _kalshi_runner_ticker_side(book.source_runner_id)
+                levels = _kalshi_demo_sell_levels(book.raw_book, side=side)
+            if not levels:
                 continue
             quotes.append(
                 ReverseQuote(
@@ -275,7 +340,7 @@ def reverse_quotes_from_observations(
                     canonical_outcome=book.outcome.value,
                     settlement_fingerprint_key=fingerprint,
                     native_currency=observation.native_currency,
-                    levels=list(book.lay_levels),
+                    levels=levels,
                     quote_age_ms=observation.quote_age_ms,
                     quote_age_basis=str(observation.metadata.get("quote_age_basis") or "retrieval"),
                     quoted_at=when,
@@ -283,6 +348,26 @@ def reverse_quotes_from_observations(
                 )
             )
     return quotes
+
+
+def _kalshi_demo_sell_levels(raw_book: dict[str, Any], *, side: str) -> list[BookLevel]:
+    """DEMO-only Kalshi SELL book from yes/no dollar bids. Not a live scanner path."""
+
+    orderbook = raw_book.get("orderbook_fp")
+    if not isinstance(orderbook, dict):
+        orderbook = raw_book if "yes_dollars" in raw_book or "no_dollars" in raw_book else {}
+    own_bids = _kalshi_price_levels(
+        orderbook.get("yes_dollars") if side == "YES" else orderbook.get("no_dollars")
+    )
+    result: list[BookLevel] = []
+    for price, quantity in own_bids:
+        result.append(
+            BookLevel(
+                decimal_odds=Decimal("1") / price,
+                available_stake=price * quantity,
+            )
+        )
+    return sorted(result, key=lambda item: item.decimal_odds)
 
 
 def tighten_reverse_quotes(quotes: list[ReverseQuote]) -> list[ReverseQuote]:

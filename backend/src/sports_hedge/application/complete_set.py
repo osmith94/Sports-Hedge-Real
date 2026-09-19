@@ -11,7 +11,7 @@ from sports_hedge.domain.football import (
     line_push_possible,
 )
 from sports_hedge.matching.markets import MarketMatchResult
-from sports_hedge.matching.ordinary_1x2 import allow_unknown_settlement_for_ordinary_1x2
+from sports_hedge.matching.paper_assumed import paper_assumed_solver_model
 
 # Step 7 allowlist: conventional families whose listed outcomes are mutually
 # exclusive AND exhaustive for the existing complete-set solver (no unmodelled
@@ -208,16 +208,27 @@ def generalized_payoff_eligible_pair(left: CanonicalMarket, right: CanonicalMark
 def solver_model_for_pair(left: CanonicalMarket, right: CanonicalMarket) -> str | None:
     if solver_eligible_market(left) and solver_eligible_market(right):
         return SOLVER_MODEL_SIMPLE
-    if allow_unknown_settlement_for_ordinary_1x2(left, right):
-        if (
-            has_complete_canonical_outcomes(left)
-            and has_complete_canonical_outcomes(right)
-            and left.settlement.push_possible is not True
-            and right.settlement.push_possible is not True
-        ):
-            return SOLVER_MODEL_SIMPLE
+    paper_model = paper_assumed_solver_model(left, right)
+    if paper_model is not None:
+        return paper_model
     if generalized_payoff_eligible_pair(left, right):
         return SOLVER_MODEL_GENERALIZED
+    return None
+
+
+def generalized_state_model_for_pair(
+    left: CanonicalMarket, right: CanonicalMarket
+) -> GeneralizedStateModel | None:
+    """Pair-level generalized model. Paper-assumed FTTS is Matchbook↔Kalshi only."""
+
+    model = generalized_state_model(left)
+    if model is not None and model == generalized_state_model(right):
+        return model
+    if (
+        paper_assumed_solver_model(left, right) == SOLVER_MODEL_GENERALIZED
+        and left.family is MarketFamily.FIRST_TEAM_TO_SCORE
+    ):
+        return GeneralizedStateModel.FIRST_TEAM_TO_SCORE
     return None
 
 

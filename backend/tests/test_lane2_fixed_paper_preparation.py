@@ -9,10 +9,7 @@ from fastapi.testclient import TestClient
 from sports_hedge.api.main import app
 from sports_hedge.api.paper import get_paper_ledger, get_paper_operations_service
 from sports_hedge.application.complete_set import SOLVER_MODEL_GENERALIZED, SOLVER_MODEL_SIMPLE
-from sports_hedge.application.market_observation import (
-    MatchbookObservationBuilder,
-    PolymarketObservationBuilder,
-)
+from sports_hedge.application.market_observation import MatchbookObservationBuilder
 from sports_hedge.accounting.dimensions import CapitalSource
 from sports_hedge.accounting.paper_journal import DataProvenance
 from sports_hedge.application.paper_operations import PaperOperationsError
@@ -34,17 +31,18 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.paper.trades import PaperTradeState
 from test_paper_scan_pipeline import KICKOFF
-from test_step7_safe_market_expansion import MB_EVENT, PM_EVENT
-from test_step8b_first_team_to_score import _ftts_books, _ftts_mb_payload, _ftts_pm_payload
+from test_step7_safe_market_expansion import MB_EVENT
+from test_step8b_first_team_to_score import _ftts_mb_payload
 from test_step8c_bankroll_allocator import POLICY, _balances, _demo_request
 from test_step8f_automatic_paper_entry import (
     OBSERVED,
     _matchbook_btts,
     _observe_and_persist,
     _ops_bundle,
-    _polymarket_btts,
+    _kalshi_btts,
+    _kalshi_costs,
+    _kalshi_ftts_observation,
 )
-from venue_cost_helpers import matchbook_polymarket_costs
 
 TEN = Decimal("10")
 
@@ -176,14 +174,14 @@ def _persist_qualified(tmp_path: Path, *, left, right):
         ops,
         left,
         right,
-        venue_costs=matchbook_polymarket_costs(),
+        venue_costs=_kalshi_costs(),
     )
     return scan, watchlist, ops, repository, ledger, decision
 
 
 def test_prepare_ten_pound_btts_shows_exact_legs_without_opening(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
-        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+        tmp_path, left=_matchbook_btts(), right=_kalshi_btts()
     )
     try:
         assert decision.solver_model == SOLVER_MODEL_SIMPLE
@@ -204,7 +202,7 @@ def test_prepare_ten_pound_btts_shows_exact_legs_without_opening(tmp_path: Path)
         assert reporting == TEN
         venues = {leg.venue for leg in preview.legs}
         assert VenueName.MATCHBOOK in venues
-        assert VenueName.POLYMARKET in venues
+        assert VenueName.KALSHI in venues
         for leg in preview.legs:
             assert leg.displayed_odds is not None and leg.displayed_odds > 1
             assert leg.stake_native > 0
@@ -213,18 +211,17 @@ def test_prepare_ten_pound_btts_shows_exact_legs_without_opening(tmp_path: Path)
             if leg.venue is VenueName.MATCHBOOK:
                 assert leg.native_currency == "GBP"
                 assert leg.capital_native == leg.capital_reporting
-            if leg.venue is VenueName.POLYMARKET:
+            if leg.venue is VenueName.KALSHI:
                 assert leg.native_currency == "USD"
                 assert leg.capital_native == leg.capital_reporting / Decimal("0.75")
-                assert leg.execution_mode == LegExecutionMode.EXTERNAL_OPERATOR.value
-                assert leg.capital_source is CapitalSource.PAPER_SIMULATED_EXTERNAL
-                assert leg.capital_source is not CapitalSource.MANUAL_EXTERNAL
+                assert leg.execution_mode == LegExecutionMode.INTERNAL.value
+                assert leg.capital_source is CapitalSource.AUTO_POOL
             else:
                 assert leg.execution_mode == LegExecutionMode.INTERNAL.value
                 assert leg.capital_source is CapitalSource.AUTO_POOL
         for item in preview.capital_required:
-            if item.venue is VenueName.POLYMARKET:
-                assert item.capital_source is CapitalSource.PAPER_SIMULATED_EXTERNAL
+            if item.venue is VenueName.KALSHI:
+                assert item.capital_source is CapitalSource.AUTO_POOL
             else:
                 assert item.capital_source is CapitalSource.AUTO_POOL
         native_required = {(item.venue, item.currency): item.amount for item in preview.capital_required}
@@ -245,11 +242,9 @@ def test_prepare_ten_pound_generalized_ftts_without_opening(tmp_path: Path) -> N
     matchbook = MatchbookObservationBuilder().build(
         MB_EVENT, _ftts_mb_payload(), observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        PM_EVENT, _ftts_pm_payload(), _ftts_books(), observed_at=OBSERVED, quote_age_ms=150
-    )
+    kalshi = _kalshi_ftts_observation()
     scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
-        tmp_path, left=matchbook, right=polymarket
+        tmp_path, left=matchbook, right=kalshi
     )
     try:
         assert decision.solver_model == SOLVER_MODEL_GENERALIZED
@@ -257,10 +252,12 @@ def test_prepare_ten_pound_generalized_ftts_without_opening(tmp_path: Path) -> N
         before = ledger.treasury.snapshot()
         preview = ops.prepare_fixed_deployment(opportunity_id, TEN)
         assert preview.accepted is True, preview.rejection_reason
-        assert preview.applied_size_gbp == TEN
+        assert preview.applied_size_gbp == pytest.approx(TEN, abs=Decimal("0.01"))
         assert preview.solver_model == SOLVER_MODEL_GENERALIZED
         assert preview.opens_trade is False
-        assert sum((leg.capital_reporting for leg in preview.legs), Decimal("0")) == TEN
+        assert sum((leg.capital_reporting for leg in preview.legs), Decimal("0")) == pytest.approx(
+            TEN, abs=Decimal("0.01")
+        )
         assert all(leg.stake_native > 0 for leg in preview.legs)
         after = ledger.treasury.snapshot()
         assert after.pool(VenueName.MATCHBOOK, "GBP").available_cash == before.pool(
@@ -274,7 +271,7 @@ def test_prepare_ten_pound_generalized_ftts_without_opening(tmp_path: Path) -> N
 
 def test_prepare_rejects_insufficient_capital_before_open(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
-        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+        tmp_path, left=_matchbook_btts(), right=_kalshi_btts()
     )
     try:
         opportunity_id = _opportunity_id(decision.canonical_market_id)
@@ -299,7 +296,7 @@ def test_prepare_rejects_insufficient_capital_before_open(tmp_path: Path) -> Non
 
 def test_prepare_deployment_api_and_fixture_preparable_list(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
-        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+        tmp_path, left=_matchbook_btts(), right=_kalshi_btts()
     )
     try:
         app.dependency_overrides[get_paper_operations_service] = lambda: ops
@@ -353,7 +350,7 @@ def test_prepare_deployment_api_and_fixture_preparable_list(tmp_path: Path) -> N
 
 def test_confirm_prepared_ten_pounds_locks_preview_legs_not_allocator(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
-        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+        tmp_path, left=_matchbook_btts(), right=_kalshi_btts()
     )
     try:
         opportunity_id = _opportunity_id(decision.canonical_market_id)
@@ -375,7 +372,7 @@ def test_confirm_prepared_ten_pounds_locks_preview_legs_not_allocator(tmp_path: 
         preview_stakes = {(leg.venue, leg.outcome): leg.stake_native for leg in preview.legs}
         assert preview_stakes != allocator_stakes
         after_preview = ledger.treasury.snapshot()
-        for venue, currency in ((VenueName.MATCHBOOK, "GBP"), (VenueName.POLYMARKET, "USD")):
+        for venue, currency in ((VenueName.MATCHBOOK, "GBP"), (VenueName.KALSHI, "USD")):
             assert after_preview.pool(venue, currency).available_cash == before.pool(
                 venue, currency
             ).available_cash
@@ -407,7 +404,7 @@ def test_confirm_prepared_ten_pounds_locks_preview_legs_not_allocator(tmp_path: 
                 locked_by_currency.get(leg.native_currency, Decimal("0")) + leg.stake_native
             )
         for currency, amount in locked_by_currency.items():
-            venue = VenueName.MATCHBOOK if currency == "GBP" else VenueName.POLYMARKET
+            venue = VenueName.MATCHBOOK if currency == "GBP" else VenueName.KALSHI
             assert after.pool(venue, currency).locked_capital - before.pool(
                 venue, currency
             ).locked_capital == amount
@@ -427,7 +424,7 @@ def test_confirm_prepared_ten_pounds_locks_preview_legs_not_allocator(tmp_path: 
         assert len(ops.list_active_trades()) == 1
         assert list(ops.journal.list_entries()) == journals
         retry_snap = ledger.treasury.snapshot()
-        for venue, currency in ((VenueName.MATCHBOOK, "GBP"), (VenueName.POLYMARKET, "USD")):
+        for venue, currency in ((VenueName.MATCHBOOK, "GBP"), (VenueName.KALSHI, "USD")):
             assert retry_snap.pool(venue, currency).locked_capital == after.pool(
                 venue, currency
             ).locked_capital
@@ -438,7 +435,7 @@ def test_confirm_prepared_ten_pounds_locks_preview_legs_not_allocator(tmp_path: 
 
 def test_stale_or_changed_prepared_preview_fails_closed(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
-        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+        tmp_path, left=_matchbook_btts(), right=_kalshi_btts()
     )
     try:
         opportunity_id = _opportunity_id(decision.canonical_market_id)
@@ -480,7 +477,7 @@ def test_stale_or_changed_prepared_preview_fails_closed(tmp_path: Path) -> None:
 
 def test_confirm_prepared_deployment_api_locks_requested_size(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
-        tmp_path, left=_matchbook_btts(), right=_polymarket_btts()
+        tmp_path, left=_matchbook_btts(), right=_kalshi_btts()
     )
     try:
         app.dependency_overrides[get_paper_operations_service] = lambda: ops

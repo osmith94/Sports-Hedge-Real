@@ -68,7 +68,7 @@ class DemoResetRequest(BaseModel):
 
 
 class FixtureReplayRequest(BaseModel):
-    venue_pair: VenuePair = "matchbook_polymarket"
+    venue_pair: VenuePair = "matchbook_kalshi"
     solver: SolverKind = "simple"
     close_via: CloseVia = "settlement"
     winning_outcome: str | None = None

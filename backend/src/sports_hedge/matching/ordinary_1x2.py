@@ -11,8 +11,10 @@ proven extra-time/penalties contradictions, and unknown Kalshi settlement
 without GAMEWIN placeholder evidence stay fail-closed.
 
 Issue #316 additionally admits a bounded PAPER-MODE assumption for ordinary
-Matchbook↔Kalshi 1X2 when GAME HOME/DRAW/AWAY is complete and there is no
-contradictory wording. That assumption is never live-execution eligible.
+Matchbook↔Kalshi 1X2 when GAME HOME/DRAW/AWAY is complete. Issue #326 extends
+that owner-approved paper assumption to BTTS, exact-line TOTAL, and FTTS, and
+does not let Kalshi cancel/reschedule-to-fair-price wording block PAPER
+admission. That assumption is never live-execution eligible.
 """
 
 from __future__ import annotations
@@ -154,11 +156,6 @@ _CONTRADICTION_TOKENS = (
     "penalties",
     "to qualify",
     "to-qualify",
-    "fair price",
-    "fair-price",
-    "reschedule",
-    "cancelled",
-    "canceled",
 )
 
 
@@ -166,8 +163,9 @@ def paper_assumed_ordinary_1x2(left: CanonicalMarket, right: CanonicalMarket) ->
     """Owner-accepted paper-mode 1X2 assumption. Never live-execution eligible.
 
     Requires exact ordinary HOME/DRAW/AWAY, Matchbook regulation convention,
-    structurally consistent period, and no known contradictory Kalshi wording.
-    Independent settlement proof is not required.
+    and no proven extra-time/penalties/to-qualify contradiction. Kalshi
+    cancel/reschedule-to-fair-price wording does not block PAPER admission
+    (Issue #326). Independent settlement proof is not required.
     """
 
     if not is_matchbook_kalshi_pair(left, right):
@@ -193,6 +191,15 @@ def paper_assumed_ordinary_1x2(left: CanonicalMarket, right: CanonicalMarket) ->
         return False
     unknown = str(kalshi.settlement.unknown_reason or "").casefold()
     if kalshi.settlement.unknown_reason == KALSHI_CONTRACT_FAMILY_NOT_MATCH_RESULT_REASON:
+        return False
+    from sports_hedge.normalization.venues import (
+        KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
+        KALSHI_UNMODELLED_EXTRA_TIME_OR_PENALTIES_REASON,
+    )
+
+    if kalshi.settlement.unknown_reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON:
+        return True
+    if kalshi.settlement.unknown_reason == KALSHI_UNMODELLED_EXTRA_TIME_OR_PENALTIES_REASON:
         return False
     if any(token in unknown for token in _CONTRADICTION_TOKENS):
         return False

@@ -49,10 +49,10 @@ from test_step8f_automatic_paper_entry import (
     FX,
     _assert_allocator_sized,
     _matchbook_btts,
-    _polymarket_btts,
+    _kalshi_btts,
+    _kalshi_costs,
     _standing,
 )
-from venue_cost_helpers import matchbook_polymarket_costs
 
 T1 = datetime(2026, 9, 17, 17, 0, 0, 300000, tzinfo=UTC)
 
@@ -120,8 +120,8 @@ def _qualify(
 ):
     decision = scan.scan_pair(
         _matchbook_btts(),
-        _polymarket_btts(),
-        venue_costs=matchbook_polymarket_costs(),
+        _kalshi_btts(),
+        venue_costs=_kalshi_costs(),
         fx_snapshots=FX,
         maximum_execution_risk=100,
         liquidity_snapshot=_standing(),
@@ -695,7 +695,7 @@ def test_scan_pair_final_qualification_includes_allocator_delay() -> None:
         settings=Settings(max_slippage_bps=0, fx_spread_bps=0, simulated_latency_ms=500),
     )
     left = _matchbook_btts().model_copy(update={"observed_at": captured, "quote_age_ms": 100})
-    right = _polymarket_btts().model_copy(update={"observed_at": captured, "quote_age_ms": 150})
+    right = _kalshi_btts().model_copy(update={"observed_at": captured, "quote_age_ms": 150})
     real_allocate = scan._allocate_draft
 
     def delayed_allocate(*args, **kwargs):
@@ -706,7 +706,7 @@ def test_scan_pair_final_qualification_includes_allocator_delay() -> None:
     decision = scan.scan_pair(
         left,
         right,
-        venue_costs=matchbook_polymarket_costs(),
+        venue_costs=_kalshi_costs(),
         fx_snapshots=FX,
         maximum_execution_risk=100,
         liquidity_snapshot=_standing(),

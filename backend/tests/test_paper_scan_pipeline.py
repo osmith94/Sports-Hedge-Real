@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from sports_hedge.application.market_observation import (
+    KalshiObservationBuilder,
     MatchbookObservationBuilder,
     PolymarketObservationBuilder,
 )
@@ -29,7 +30,7 @@ from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.risk.execution import ExecutionRiskInputs
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs
 
 
 KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
@@ -102,6 +103,55 @@ def polymarket_payloads() -> tuple[dict, dict, dict[str, dict]]:
     return event, market, books
 
 
+KALSHI_BTTS_EVENT = {
+    "event_ticker": "KXEPLGAME-26SEP20NEWCHE",
+    "series_ticker": "KXEPLGAME",
+    "title": "Newcastle United vs Chelsea",
+    "category": "Sports",
+    "strike_date": KICKOFF.isoformat(),
+}
+KALSHI_BTTS_SERIES = {
+    "ticker": "KXEPLGAME",
+    "title": "Premier League",
+    "fee_type": "quadratic",
+    "fee_multiplier": 1,
+    "settlement_sources": [{"name": "Opta"}],
+}
+
+
+def kalshi_btts_payloads() -> tuple[dict, dict, dict[str, dict], dict]:
+    market = {
+        "ticker": "KXEPLGAME-26SEP20NEWCHE-BTTS",
+        "event_ticker": KALSHI_BTTS_EVENT["event_ticker"],
+        "title": "Both Teams To Score",
+        "yes_sub_title": "Yes",
+        "rules_primary": "Resolves on 90 minutes of regulation time. Extra time and penalties do not count.",
+    }
+    books = {
+        market["ticker"]: {
+            "orderbook_fp": {
+                "yes_dollars": [["0.20", "500.00"]],
+                "no_dollars": [["0.70", "500.00"]],
+            }
+        }
+    }
+    return KALSHI_BTTS_EVENT, market, books, KALSHI_BTTS_SERIES
+
+
+def kalshi_btts_observation(*, observed_at=OBSERVED, quote_age_ms: int = 80):
+    event, market, books, series = kalshi_btts_payloads()
+    return KalshiObservationBuilder().build(
+        event,
+        market,
+        books,
+        series=series,
+        observed_at=observed_at,
+        quote_age_ms=quote_age_ms,
+        quote_age_basis="retrieval",
+        fee_snapshot={"fee_type": "quadratic", "fee_multiplier": "1"},
+    )
+
+
 def test_source_rule_version_does_not_break_economic_market_equivalence() -> None:
     def event(venue: VenueName) -> CanonicalEvent:
         return CanonicalEvent(
@@ -135,7 +185,7 @@ def test_source_rule_version_does_not_break_economic_market_equivalence() -> Non
 
     result = MarketMatcher().match(
         market(VenueName.MATCHBOOK, None),
-        market(VenueName.POLYMARKET, "pm-market-1"),
+        market(VenueName.KALSHI, "kx-market-1"),
     )
     assert result.matched is True
 
@@ -180,7 +230,6 @@ def test_matched_scan_records_shared_history_and_finds_depth_aware_paper_arb() -
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(intelligence)
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(
         mb_event,
         mb_market,
@@ -188,20 +237,13 @@ def test_matched_scan_records_shared_history_and_finds_depth_aware_paper_arb() -
         source_latency_ms=80,
         quote_age_ms=120,
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event,
-        pm_market,
-        pm_books,
-        observed_at=OBSERVED,
-        source_latency_ms=110,
-        quote_age_ms=180,
-    )
+    kalshi = kalshi_btts_observation()
 
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs(),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=[
                 FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="test_fx")
             ],
@@ -225,7 +267,7 @@ def test_matched_scan_records_shared_history_and_finds_depth_aware_paper_arb() -
         assert len(history) == 4
         assert {snapshot.venue for snapshot in history} == {
             VenueName.MATCHBOOK,
-            VenueName.POLYMARKET,
+            VenueName.KALSHI,
         }
         assert {snapshot.canonical_event_id for snapshot in history} == {
             decision.canonical_event_id
@@ -240,20 +282,14 @@ def test_cross_currency_scan_refuses_to_combine_depth_without_fx_snapshot() -> N
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(intelligence)
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(mb_event, mb_market, observed_at=OBSERVED)
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event,
-        pm_market,
-        pm_books,
-        observed_at=OBSERVED,
-    )
+    kalshi = kalshi_btts_observation()
 
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs("0.02"),
         )
         assert decision.depth_scan is None
         assert decision.eligible_for_paper_simulation is False
@@ -268,19 +304,13 @@ def test_missing_fee_assumption_does_not_invent_zero_cost_margin() -> None:
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(intelligence)
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(mb_event, mb_market, observed_at=OBSERVED)
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event,
-        pm_market,
-        pm_books,
-        observed_at=OBSERVED,
-    )
+    kalshi = kalshi_btts_observation()
 
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
+            kalshi,
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             maximum_execution_risk=100,
         )
@@ -288,13 +318,8 @@ def test_missing_fee_assumption_does_not_invent_zero_cost_margin() -> None:
         assert decision.execution_risk is None
         assert decision.eligible_for_paper_simulation is False
         assert "missing_venue_cost:matchbook" in decision.rejection_reasons
-        assert any(
-            reason.startswith("unknown_required_venue_cost:polymarket") or reason == "unknown_costs"
-            for reason in decision.rejection_reasons
-        )
-        pm_costs = [item for item in decision.venue_costs if item.venue is VenueName.POLYMARKET]
-        assert pm_costs
-        assert not pm_costs[0].is_economically_known()
+        assert decision.eligible_for_paper_simulation is False
+        assert decision.depth_scan is None
     finally:
         repository.close()
 
@@ -335,20 +360,17 @@ def test_future_cost_snapshots_fail_closed_before_depth_scan() -> None:
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(intelligence)
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
-    )
+    kalshi = kalshi_btts_observation()
     future = datetime.now(UTC) + timedelta(hours=1)
 
     try:
         fee_future = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs(captured_at=future),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs(captured_at=future),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             maximum_execution_risk=100,
         )
@@ -358,8 +380,8 @@ def test_future_cost_snapshots_fail_closed_before_depth_scan() -> None:
 
         fx_future = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs("0.02"),
             fx_snapshots=[
                 FxRateSnapshot(
                     currency="USD",
@@ -403,19 +425,16 @@ def test_complete_below_threshold_candidate_scores_risk_from_stakes() -> None:
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(intelligence)
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
-    )
+    kalshi = kalshi_btts_observation()
 
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs("0.02"),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             minimum_net_edge=Decimal("0.50"),
             maximum_execution_risk=0,
@@ -438,32 +457,34 @@ def test_negative_margin_without_stakes_rejects_missing_risk_evidence() -> None:
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(intelligence)
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
-    pm_books = {
-        **pm_books,
-        "yes-token": {
-            "asset_id": "yes-token",
-            "bids": [{"price": "0.01", "size": "10"}],
-            "asks": [{"price": "0.99", "size": "10"}],
-        },
-        "no-token": {
-            "asset_id": "no-token",
-            "bids": [{"price": "0.01", "size": "10"}],
-            "asks": [{"price": "0.99", "size": "10"}],
-        },
+    event, market, _books, series = kalshi_btts_payloads()
+    expensive = {
+        market["ticker"]: {
+            "orderbook_fp": {
+            "yes_dollars": [["0.01", "10.00"]],
+            "no_dollars": [["0.01", "10.00"]],
+            }
+        }
     }
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
+    kalshi = KalshiObservationBuilder().build(
+        event,
+        market,
+        expensive,
+        series=series,
+        observed_at=OBSERVED,
+        quote_age_ms=80,
+        quote_age_basis="retrieval",
+        fee_snapshot={"fee_type": "quadratic", "fee_multiplier": "1"},
     )
 
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs("0.02"),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             maximum_execution_risk=0,
         )
@@ -512,7 +533,7 @@ def test_incomplete_settlement_fingerprints_are_not_equivalent() -> None:
 
     result = MarketMatcher().match(market(VenueName.MATCHBOOK), market(VenueName.POLYMARKET))
     assert result.matched is False
-    assert "incomplete_settlement" in result.reasons
+    assert "not_registered" in result.reasons
 
 
 def test_legacy_fee_snapshot_alone_cannot_produce_a_strike() -> None:
@@ -520,17 +541,14 @@ def test_legacy_fee_snapshot_alone_cannot_produce_a_strike() -> None:
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(intelligence)
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
-    )
+    kalshi = kalshi_btts_observation()
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
+            kalshi,
             fee_snapshots=[
                 FeeSnapshot(venue=VenueName.MATCHBOOK, profit_haircut_rate=Decimal("0.02")),
                 FeeSnapshot(
@@ -555,19 +573,16 @@ def test_unsupported_fee_scope_rejects_without_generic_haircut() -> None:
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(intelligence)
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
-    )
-    costs = matchbook_polymarket_costs()
+    kalshi = kalshi_btts_observation()
+    costs = matchbook_kalshi_costs()
     costs[0] = costs[0].model_copy(update={"fee_scope": FeeScope.MARKET_NET_PNL})
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
+            kalshi,
             venue_costs=costs,
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             maximum_execution_risk=100,
@@ -588,26 +603,23 @@ def test_explicit_supported_costs_change_guaranteed_payoff() -> None:
     settings = Settings(max_slippage_bps=0, fx_spread_bps=0)
     service = PaperScanService(intelligence, settings=settings)
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
-    )
+    kalshi = kalshi_btts_observation()
     fx = [FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), spread_bps=Decimal("0"))]
     try:
         cheap = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs("0", "0"),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs("0"),
             fx_snapshots=fx,
             maximum_execution_risk=100,
         )
         dear = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs("0.05", "0"),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs("0.05"),
             fx_snapshots=fx,
             maximum_execution_risk=100,
         )
@@ -627,18 +639,15 @@ def test_configured_fx_spread_is_applied_and_labelled() -> None:
         settings=Settings(max_slippage_bps=0, fx_spread_bps=100),
     )
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
-    )
+    kalshi = kalshi_btts_observation()
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=matchbook_polymarket_costs(),
+            kalshi,
+            venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             maximum_execution_risk=100,
         )

@@ -31,7 +31,8 @@ from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.persistence.universe_checkpoint import SqliteUniverseCheckpointStore
 from test_dual_cadence_scheduler import NOW, FakeClock, _fixture, _report
 from test_issue245_scan_cycle_history import _report as _cycle_report
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
+from registered_kalshi import FakeKalshi
 
 
 KICKOFF = NOW + timedelta(days=2)
@@ -404,11 +405,15 @@ async def test_resumed_universe_still_counts_equivalent_match_result_pair() -> N
     collector = ReadOnlyCrossVenueCollector(
         matchbook=_MatchResultMatchbook(),
         polymarket=_MatchResultPolymarket(),
+        kalshi=FakeKalshi(
+            [("Premier League", "Newcastle United", "Arsenal", KICKOFF)],
+            families=("GAME",),
+        ),
         paper_scan=PaperScanService(MarketIntelligenceService(repository)),
     )
     try:
         baseline = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+            venue_costs=matchbook_kalshi_costs() + matchbook_polymarket_costs("0.02", "0.02"),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             maximum_execution_risk=100,
             scan_lane=ScanLane.UNIVERSE.value,
@@ -428,7 +433,7 @@ async def test_resumed_universe_still_counts_equivalent_match_result_pair() -> N
         ids = [item.canonical_event_id for item in baseline.discovered_fixtures]
         skip = [event_id for event_id in ids if "8199" in event_id]
         resumed = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
+            venue_costs=matchbook_kalshi_costs() + matchbook_polymarket_costs("0.02", "0.02"),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             maximum_execution_risk=100,
             scan_lane=ScanLane.UNIVERSE.value,

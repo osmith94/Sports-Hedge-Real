@@ -45,10 +45,10 @@ from test_step8f_automatic_paper_entry import (
     FX,
     _assert_allocator_sized,
     _matchbook_btts,
-    _polymarket_btts,
+    _kalshi_btts,
+    _kalshi_costs,
     _standing,
 )
-from venue_cost_helpers import matchbook_polymarket_costs
 
 REPO = Path(__file__).resolve().parents[2]
 FRONTEND = REPO / "frontend"
@@ -114,8 +114,8 @@ def _scan(
 ):
     return scan.scan_pair(
         left if left is not None else _matchbook_btts(),
-        right if right is not None else _polymarket_btts(),
-        venue_costs=venue_costs if venue_costs is not None else matchbook_polymarket_costs(),
+        right if right is not None else _kalshi_btts(),
+        venue_costs=venue_costs if venue_costs is not None else _kalshi_costs(),
         fx_snapshots=fx_snapshots,
         maximum_execution_risk=maximum_execution_risk,
         liquidity_snapshot=_standing() if liquidity_snapshot is None else liquidity_snapshot,
@@ -195,22 +195,21 @@ def test_wave_e_positive_live_paper_chain_opens_once_with_locks_and_journal(tmp_
         assert trade.paper_only is True
         assert trade.places_orders is False
         kinds = {leg.fill_kind for leg in trade.legs}
-        assert PaperLegFillKind.INTERNAL_SIMULATED in kinds
-        assert PaperLegFillKind.PAPER_SIMULATED_EXTERNAL in kinds
+        assert kinds == {PaperLegFillKind.INTERNAL_SIMULATED}
         assert PaperLegFillKind.MANUAL_EXTERNAL not in kinds
         _assert_allocator_sized(ops, trade)
 
         after = ledger.treasury.snapshot()
         locked_gbp = next(leg.filled_stake for leg in trade.legs if leg.venue is VenueName.MATCHBOOK)
-        locked_usd = next(leg.filled_stake for leg in trade.legs if leg.venue is VenueName.POLYMARKET)
+        locked_usd = next(leg.filled_stake for leg in trade.legs if leg.venue is VenueName.KALSHI)
         mb = after.pool(VenueName.MATCHBOOK, "GBP")
-        pm = after.pool(VenueName.POLYMARKET, "USD")
+        ks = after.pool(VenueName.KALSHI, "USD")
         assert locked_gbp > 0 and locked_usd > 0
         assert mb.locked_capital == locked_gbp
         assert mb.available_cash == before.pool(VenueName.MATCHBOOK, "GBP").available_cash - locked_gbp
-        assert pm.locked_capital == locked_usd
-        assert pm.available_cash == before.pool(VenueName.POLYMARKET, "USD").available_cash - locked_usd
-        assert after.pool(VenueName.KALSHI, "USD").locked_capital == 0
+        assert ks.locked_capital == locked_usd
+        assert ks.available_cash == before.pool(VenueName.KALSHI, "USD").available_cash - locked_usd
+        assert after.pool(VenueName.POLYMARKET, "USD").locked_capital == 0
 
         journals = _fill_journals(ops)
         assert journals
@@ -225,7 +224,7 @@ def test_wave_e_positive_live_paper_chain_opens_once_with_locks_and_journal(tmp_
             if "LOCKED" in posting.account_code
         }
         assert native_locked[VenueName.MATCHBOOK, "GBP"] == locked_gbp
-        assert native_locked[VenueName.POLYMARKET, "USD"] == locked_usd
+        assert native_locked[VenueName.KALSHI, "USD"] == locked_usd
 
         health = TestClient(app).get("/health").json()
         venues = TestClient(app).get("/venues").json()
@@ -301,7 +300,7 @@ def test_wave_e_stale_quote_inside_radar_ttl_does_not_auto_open(tmp_path: Path) 
 
         stale_left = _matchbook_btts()
         stale_left = stale_left.model_copy(update={"quote_age_ms": radar_age_ms})
-        stale_right = _polymarket_btts()
+        stale_right = _kalshi_btts()
         stale_right = stale_right.model_copy(update={"quote_age_ms": radar_age_ms})
         decision = _scan(scan, left=stale_left, right=stale_right)
         assert decision.eligible_for_paper_simulation is False
@@ -416,8 +415,8 @@ def test_wave_e_allocator_reject_or_size_zero_does_not_auto_open(tmp_path: Path)
     try:
         decision = scan.scan_pair(
             _matchbook_btts(),
-            _polymarket_btts(),
-            venue_costs=matchbook_polymarket_costs(),
+            _kalshi_btts(),
+            venue_costs=_kalshi_costs(),
             fx_snapshots=FX,
             maximum_execution_risk=100,
         )
@@ -434,22 +433,12 @@ def test_wave_e_allocator_reject_or_size_zero_does_not_auto_open(tmp_path: Path)
 def test_wave_e_near_only_does_not_auto_open(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger = _ops(tmp_path)
     try:
-        pm_event, pm_market, books = polymarket_payloads()
-        # Same equivalent BTTS pair as the positive chain, but the No ask is
-        # worsened so production solver ROI sits under the 0.50% trigger.
-        near_books = {
-            **books,
-            "no-token": {
-                "asset_id": "no-token",
-                "bids": [{"price": "0.41", "size": "300"}],
-                "asks": [{"price": "0.536", "size": "160"}],
-            },
-        }
-        near_pm = PolymarketObservationBuilder().build(
-            pm_event, pm_market, near_books, observed_at=OBSERVED, quote_age_ms=180
-        )
+        # Same registered MB↔K BTTS pair as the positive chain, but Kalshi
+        # bids are worsened so the implied No ask sits under the 0.50% trigger.
+        # Kalshi taker Yes/No asks are 1 - opposite bid.
+        near_k = _kalshi_btts(yes_price="0.462", no_price="0.56")
         before = ledger.treasury.snapshot()
-        decision = _scan(scan, right=near_pm)
+        decision = _scan(scan, right=near_k)
         assert decision.market_match.matched is True
         assert decision.depth_scan is not None
         assert decision.depth_scan.solution.is_arbitrage is True
@@ -492,7 +481,7 @@ def test_wave_e_disabled_venue_leg_does_not_auto_open(tmp_path: Path) -> None:
         ops.persist_triggered_chain(
             decision,
             provenance=DataProvenance.LIVE_PAPER,
-            refreshed_venues=(VenueName.MATCHBOOK, VenueName.KALSHI),
+            refreshed_venues=(VenueName.MATCHBOOK,),
         )
         _assert_zero_capture(ops, ledger)
     finally:

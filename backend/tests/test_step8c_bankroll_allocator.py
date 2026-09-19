@@ -63,10 +63,12 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
+from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from venue_cost_helpers import venue_cost_payload
+from registered_kalshi import kalshi_payloads_for_counterpart
 
 from test_paper_scan_api import KICKOFF, OBSERVED
-from test_step8b_first_team_to_score import _ftts_books, _ftts_mb_payload, _ftts_pm_payload
+from test_step8b_first_team_to_score import _ftts_mb_payload, _ftts_pm_payload
 
 
 SOLVER = CompleteSetArbitrageSolver()
@@ -594,31 +596,50 @@ def test_api_allocator_output_on_simple_and_generalized_decisions() -> None:
             "quote_age_ms": 100,
         },
         "right": {
-            "venue": "polymarket",
+            "venue": "kalshi",
             "event_payload": {
-                "id": "pm-event-1",
+                "event_ticker": "KXEPLBTTS-26SEP20NEWCHE",
+                "series_ticker": "KXEPLBTTS",
                 "title": "Newcastle United vs Chelsea",
-                "startTime": KICKOFF.isoformat(),
-                "competition": "Premier League",
+                "category": "Sports",
+                "strike_date": KICKOFF.isoformat(),
+                "product_metadata": {"competition": "Premier League"},
             },
             "market_payload": {
-                "id": "pm-market-1",
-                "question": "Both teams to score?",
-                "sportsMarketType": "both teams to score",
-                "outcomes": '["Yes", "No"]',
-                "clobTokenIds": '["yes-token", "no-token"]',
-                "description": "Resolves based on 90 minutes of regulation time.",
+                "ticker": "KXEPLBTTS-26SEP20NEWCHE-BTTS",
+                "event_ticker": "KXEPLBTTS-26SEP20NEWCHE",
+                "title": "Both Teams To Score",
+                "yes_sub_title": "Yes",
+                "rules_primary": "Resolves on 90 minutes of regulation time. Extra time and penalties do not count.",
+                "series": {
+                    "ticker": "KXEPLBTTS",
+                    "title": "Premier League",
+                    "fee_type": "quadratic",
+                    "fee_multiplier": 1,
+                },
+                "kalshi_fee": {"fee_type": "quadratic", "fee_multiplier": "1"},
             },
             "books_by_token": {
-                "yes-token": {"bids": [{"price": "0.49", "size": "20000"}], "asks": [{"price": "0.51", "size": "20000"}]},
-                "no-token": {"bids": [{"price": "0.41", "size": "20000"}], "asks": [{"price": "0.43", "size": "20000"}]},
+                "KXEPLBTTS-26SEP20NEWCHE-BTTS": {
+                    "orderbook_fp": {
+                        "yes_dollars": [["0.20", "500.00"]],
+                        "no_dollars": [["0.70", "500.00"]],
+                    }
+                }
             },
             "observed_at": OBSERVED.isoformat(),
-            "quote_age_ms": 120,
+            "quote_age_ms": 80,
         },
         "venue_costs": [
             venue_cost_payload("matchbook", "0.02"),
-            venue_cost_payload("polymarket", "0", detail="assumed_zero operator test cost"),
+            kalshi_cost_from_series(
+                {
+                    "ticker": "KXEPLBTTS",
+                    "title": "Premier League",
+                    "fee_type": "quadratic",
+                    "fee_multiplier": 1,
+                }
+            ).model_dump(mode="json"),
         ],
         "fx_snapshots": [{"currency": "USD", "gbp_per_unit": "0.75", "source": "test"}],
         "maximum_execution_risk": 100,
@@ -641,6 +662,17 @@ def test_api_allocator_output_on_simple_and_generalized_decisions() -> None:
             "native_venue_balance",
         }
 
+        ftts_event, ftts_markets, ftts_books, ftts_series = kalshi_payloads_for_counterpart(
+            {
+                "title": "Tottenham vs Everton",
+                "startTime": KICKOFF.isoformat(),
+                "competition": "Premier League",
+            },
+            _ftts_pm_payload(),
+            arb=True,
+            home="Tottenham",
+            away="Everton",
+        )
         generalized = {
             "left": {
                 "venue": "matchbook",
@@ -656,21 +688,27 @@ def test_api_allocator_output_on_simple_and_generalized_decisions() -> None:
                 "quote_age_ms": 100,
             },
             "right": {
-                "venue": "polymarket",
-                "event_payload": {
-                    "id": "pm-tot-eve-step7",
-                    "title": "Tottenham vs Everton",
-                    "startTime": KICKOFF.isoformat(),
-                    "competition": "Premier League",
+                "venue": "kalshi",
+                "event_payload": ftts_event,
+                "market_payload": {
+                    "grouped_payloads": ftts_markets,
+                    "series": ftts_series,
+                    "kalshi_fee": {"fee_type": "quadratic", "fee_multiplier": "1"},
                 },
-                "market_payload": _ftts_pm_payload(),
-                "books_by_token": _ftts_books(),
+                "books_by_token": ftts_books,
                 "observed_at": OBSERVED.isoformat(),
-                "quote_age_ms": 150,
+                "quote_age_ms": 80,
             },
             "venue_costs": [
                 venue_cost_payload("matchbook", "0.02"),
-                venue_cost_payload("polymarket", "0", detail="assumed_zero operator test cost"),
+                kalshi_cost_from_series(
+                    {
+                        "ticker": "KXEPLFTTS",
+                        "title": "Premier League",
+                        "fee_type": "quadratic",
+                        "fee_multiplier": 1,
+                    }
+                ).model_dump(mode="json"),
             ],
             "fx_snapshots": [{"currency": "USD", "gbp_per_unit": "0.75", "source": "test"}],
             "maximum_execution_risk": 100,

@@ -22,10 +22,6 @@ from sports_hedge.application.collector import (
     ReadOnlyCrossVenueCollector,
 )
 from sports_hedge.application.complete_set import scan_eligible_pair
-from sports_hedge.application.equivalence_diagnostics import (
-    CATALOGUE_REVIEW_REQUIRED,
-    zero_equivalent_reason_from_inventory,
-)
 from sports_hedge.application.fixture_clusters import cluster_canonical_event_id, cluster_identity_aliases, cluster_venue_events
 from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
 from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
@@ -419,7 +415,7 @@ def test_generic_gamewin_and_title_only_reg_time_are_paper_assumed_not_approved(
     assert titled.settlement_complete is False
 
 
-def test_material_kalshi_fair_price_cannot_silently_enter_solver() -> None:
+def test_material_kalshi_fair_price_is_paper_assumed_never_approved() -> None:
     captured = _captured()["payload"]
     assert "cancelled or rescheduled" in captured["markets"][0]["rules_secondary"].casefold()
     assert "fair price" in captured["markets"][0]["rules_secondary"].casefold()
@@ -431,14 +427,16 @@ def test_material_kalshi_fair_price_cannot_silently_enter_solver() -> None:
         series=GAMEWIN_SERIES,
     )
     assessment = classify_payload_pair(left, right)
-    assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
+    assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
-    assert assessment.reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
+    assert assessment.reason == "paper_assumed_equivalent"
+    assert assessment.execution_eligible is False
     mb = normalize_payload_side(left)
     kalshi = normalize_payload_side(right)
     assert kalshi.settlement.unknown_reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
-    assert catalogue_allows_solver(mb, kalshi) is False
-    assert scan_eligible_pair(mb, kalshi, MarketMatcher().match(mb, kalshi)) is False
+    assert catalogue_allows_solver(mb, kalshi) is True
+    assert scan_eligible_pair(mb, kalshi, MarketMatcher().match(mb, kalshi)) is True
+    assert assess_catalogue_admission(mb, kalshi).live_execution_eligible is False
 
 
 @pytest.mark.asyncio
@@ -503,18 +501,16 @@ async def test_collector_fair_price_monza_collapses_with_precise_reason_and_solv
     clustered = [item for item in report.discovered_fixtures if item.matchbook_matched and item.kalshi_matched]
     assert len(clustered) == 1
     fixture = clustered[0]
-    assert fixture.matched_equivalent_count == 0
+    assert fixture.matched_equivalent_count == 1
     rows = report.fixture_markets[fixture.canonical_event_id]
+    assert any(
+        row.comparison_status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
+        and row.family == "match_result"
+        for row in rows
+    )
     assert not any(row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT for row in rows)
-    assert not any(row.entered_solver for row in rows)
-    reason = zero_equivalent_reason_from_inventory(rows)
-    assert reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
-    assert fixture.no_comparison_reason in {
-        KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
-        CATALOGUE_REVIEW_REQUIRED,
-    }
     coverage = report.scan_diagnostics["matching_coverage"]
-    assert coverage["equivalent_markets"] == 0
+    assert coverage["equivalent_markets"] == 1
     assert kalshi.get_market_calls == []
     mb = normalize_payload_side(
         PayloadSide(
@@ -527,9 +523,10 @@ async def test_collector_fair_price_monza_collapses_with_precise_reason_and_solv
         PayloadSide(venue=VenueName.KALSHI, event=event, markets=list(event["markets"]), series=SERIE_A_SERIES)
     )
     assert kalshi_side.settlement.unknown_reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
-    assert catalogue_allows_solver(mb, kalshi_side) is False
-    assert assess_catalogue_admission(mb, kalshi_side).allowed is False
-    assert scan_eligible_pair(mb, kalshi_side, MarketMatcher().match(mb, kalshi_side)) is False
+    assert catalogue_allows_solver(mb, kalshi_side) is True
+    assert assess_catalogue_admission(mb, kalshi_side).allowed is True
+    assert assess_catalogue_admission(mb, kalshi_side).live_execution_eligible is False
+    assert scan_eligible_pair(mb, kalshi_side, MarketMatcher().match(mb, kalshi_side)) is True
 
 
 def test_fresh_process_current_state_starts_empty() -> None:

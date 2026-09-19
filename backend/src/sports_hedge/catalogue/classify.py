@@ -1,11 +1,13 @@
-"""Deterministic Tenet 20 classification. Confidence is never executable permission.
+"""Deterministic Tenet 20 classification via the Approved Match Register.
 
-Independently proven settlement is APPROVED_EQUIVALENT. Matchbook↔Kalshi ordinary
-1X2 with complete HOME/DRAW/AWAY and no contradictory wording may be
-PAPER_ASSUMED_EQUIVALENT in paper mode only (settlement_assumption=regulation_time).
-That path is never live-execution eligible. Extra time, penalties, to-qualify,
-and cancel/reschedule-to-fair-price remain fail-closed REVIEW_REQUIRED /
-KNOWN_CONTRADICTION. HOT and UNIVERSE share this classifier.
+After fixture identity, Matchbook↔Kalshi rows that resolve to one register
+canonical key (MATCH_RESULT_FT / BTTS_FT / TOTAL_GOALS_FT:{line} / FTTS_FT)
+are PAPER_ASSUMED_EQUIVALENT, or APPROVED_EQUIVALENT when independently
+proven. Extra-time / penalties / to-qualify contracts are a different native
+archetype and are not registered. Independently proven unregistered pairs
+may still classify APPROVED_EQUIVALENT for offline census/onboarding, but
+they are not runtime-matched or paper-admitted. Numeric mapping confidence
+and mapping review are not admission. Never live-execution eligible.
 """
 
 from __future__ import annotations
@@ -35,8 +37,17 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.matching.ordinary_1x2 import (
     allow_unknown_settlement_for_ordinary_1x2,
-    paper_assumed_ordinary_1x2,
-    settlement_fingerprints_contradict,
+)
+from sports_hedge.matching.paper_assumed import (
+    FAIR_PRICE_PAPER_ADMITTED_REASON,
+    OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
+    both_independently_proven_regulation,
+)
+from sports_hedge.matching.approved_register import (
+    NOT_REGISTERED_REASON,
+    REGISTER_ADMITTED_REASON,
+    canonical_key_for_market,
+    registered_structural_match,
 )
 from sports_hedge.normalization.venues import (
     KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
@@ -183,10 +194,7 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
     archetype = _archetype_from_markets(left, right)
     state, reason, notes = _economic_state(left, right)
     paper_assumed = state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
-    paper_admitted = state in {
-        CatalogueApprovalState.APPROVED_EQUIVALENT,
-        CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT,
-    }
+    paper_admitted = matcher.matched and registered_structural_match(left, right)
     conflict = (
         state is not CatalogueApprovalState.APPROVED_EQUIVALENT
         and not paper_assumed
@@ -202,6 +210,10 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
         settlement_assumption = "regulation_time"
         notes.append("settlement_assumption=regulation_time")
         notes.append("paper_mode_only_not_live_execution_eligible")
+        if OWNER_APPROVED_PAPER_EQUIVALENCE_REASON not in notes:
+            notes.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
+        if REGISTER_ADMITTED_REASON not in notes:
+            notes.append(REGISTER_ADMITTED_REASON)
     return CataloguePairAssessment(
         state=state,
         reason=reason,
@@ -242,6 +254,24 @@ def _economic_state(
     notes: list[str] = []
     from sports_hedge.catalogue.registry import target_market_families
 
+    if registered_structural_match(left, right):
+        notes.append(REGISTER_ADMITTED_REASON)
+        notes.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
+        cancel_reason = KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
+        if (
+            left.settlement.unknown_reason == cancel_reason
+            or right.settlement.unknown_reason == cancel_reason
+        ):
+            notes.append(FAIR_PRICE_PAPER_ADMITTED_REASON)
+        if both_independently_proven_regulation(left, right):
+            return CatalogueApprovalState.APPROVED_EQUIVALENT, "approved_equivalent", notes
+        notes.append("paper_assumed_equivalent_not_settlement_proven")
+        return (
+            CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT,
+            "paper_assumed_equivalent",
+            notes,
+        )
+
     catalogue_families = target_market_families() | CENSUS_V1_FAMILIES
     left_in = left.family in catalogue_families
     right_in = right.family in catalogue_families
@@ -259,8 +289,11 @@ def _economic_state(
         return CatalogueApprovalState.APPROVED_PARAMETER_MISMATCH, "period_mismatch", notes
     if left.line != right.line:
         return CatalogueApprovalState.APPROVED_PARAMETER_MISMATCH, "line_mismatch", notes
-    if settlement_fingerprints_contradict(left.settlement, right.settlement):
-        return CatalogueApprovalState.KNOWN_CONTRADICTION, "settlement_mismatch", notes
+
+    left_key = canonical_key_for_market(left)
+    right_key = canonical_key_for_market(right)
+    if left_key is not None and right_key is not None and left_key != right_key:
+        return CatalogueApprovalState.APPROVED_PARAMETER_MISMATCH, "register_key_mismatch", notes
 
     left_outcomes = runner_outcomes(left)
     right_outcomes = runner_outcomes(right)
@@ -277,39 +310,20 @@ def _economic_state(
                 )
         if left.family is MarketFamily.MATCH_RESULT:
             return (
-                CatalogueApprovalState.REVIEW_REQUIRED,
+                CatalogueApprovalState.UNSUPPORTED,
                 "match_result_outcome_space_incomplete_or_mismatched",
                 notes,
             )
         return CatalogueApprovalState.KNOWN_CONTRADICTION, "outcome_space_mismatch", notes
     if CanonicalOutcome.OTHER in left_outcomes:
-        return CatalogueApprovalState.REVIEW_REQUIRED, "unmapped_runner_outcomes", notes
+        return CatalogueApprovalState.UNSUPPORTED, "unmapped_runner_outcomes", notes
     if left_outcomes != required:
-        return CatalogueApprovalState.REVIEW_REQUIRED, "incomplete_outcome_set", notes
+        return CatalogueApprovalState.UNSUPPORTED, "incomplete_outcome_set", notes
 
-    cancel_reason = KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
-    if left.settlement.unknown_reason == cancel_reason or right.settlement.unknown_reason == cancel_reason:
-        notes.append("incomplete_settlement_is_review_required_not_confidence")
-        notes.append("no_matchbook_kalshi_cancel_reschedule_fair_price_assumption")
-        return CatalogueApprovalState.REVIEW_REQUIRED, cancel_reason, notes
-    if not left.settlement.is_economically_complete() or not right.settlement.is_economically_complete():
-        if paper_assumed_ordinary_1x2(left, right):
-            notes.append("paper_assumed_equivalent_not_settlement_proven")
-            return (
-                CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT,
-                "paper_assumed_equivalent",
-                notes,
-            )
-        notes.append("incomplete_settlement_is_review_required_not_confidence")
-        return CatalogueApprovalState.REVIEW_REQUIRED, "incomplete_settlement", notes
-    if left.settlement.deterministic_key() != right.settlement.deterministic_key():
-        return CatalogueApprovalState.KNOWN_CONTRADICTION, "settlement_key_mismatch", notes
-    if left.family is MarketFamily.TOTAL_GOALS and line_push_possible(left.line) is None:
-        return CatalogueApprovalState.REVIEW_REQUIRED, "unproven_split_line_push", notes
     if left.family is MarketFamily.TEAM_TOTAL:
         notes.append("canonical_market_has_no_team_scope_parameter")
         return (
-            CatalogueApprovalState.REVIEW_REQUIRED,
+            CatalogueApprovalState.UNSUPPORTED,
             "team_scope_not_extracted_on_canonical_market",
             notes,
         )
@@ -318,11 +332,8 @@ def _economic_state(
     if left.family is MarketFamily.DOUBLE_CHANCE:
         return CatalogueApprovalState.UNSUPPORTED, "double_chance_solver_not_modelled", notes
 
-    solver_model = solver_model_for_pair(left, right)
-    if solver_model is None:
-        return (
-            CatalogueApprovalState.REVIEW_REQUIRED,
-            "solver_cannot_model_settlement_states",
-            notes,
-        )
-    return CatalogueApprovalState.APPROVED_EQUIVALENT, "approved_equivalent", notes
+    if both_independently_proven_regulation(left, right):
+        return CatalogueApprovalState.APPROVED_EQUIVALENT, "approved_equivalent", notes
+
+    notes.append("unregistered_pair_is_not_runtime_admitted")
+    return CatalogueApprovalState.UNSUPPORTED, NOT_REGISTERED_REASON, notes

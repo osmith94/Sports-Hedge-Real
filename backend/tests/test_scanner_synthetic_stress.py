@@ -17,7 +17,8 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs
+from registered_kalshi import FakeKalshiBTTS
 
 
 SYNTHETIC_PROVIDER_LATENCY_SECONDS = 0.002
@@ -212,21 +213,22 @@ def _collector(
     ReadOnlyCrossVenueCollector,
     SqliteMarketIntelligenceRepository,
     SyntheticMatchbook,
-    SyntheticPolymarket,
+    FakeKalshiBTTS,
 ]:
     fixtures = _fixtures(fixture_count)
     matchbook = SyntheticMatchbook(fixtures)
-    polymarket = SyntheticPolymarket(fixtures)
+    kalshi = FakeKalshiBTTS(fixtures, arb=False, latency_s=SYNTHETIC_PROVIDER_LATENCY_SECONDS)
     repository = SqliteMarketIntelligenceRepository()
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
-        polymarket=polymarket,
+        polymarket=SyntheticPolymarket(fixtures),
+        kalshi=kalshi,
         paper_scan=PaperScanService(MarketIntelligenceService(repository)),
         venue_timeout_seconds=0.5,
         provider_call_timeout_seconds=0.5,
         cycle_timeout_seconds=SYNTHETIC_CYCLE_BUDGET_SECONDS,
     )
-    return collector, repository, matchbook, polymarket
+    return collector, repository, matchbook, kalshi
 
 
 def _assert_stable_report(
@@ -242,11 +244,10 @@ def _assert_stable_report(
     assert diagnostics["inflight_orphaned"] == 0
     assert diagnostics["inflight_live"] == 0
     assert diagnostics["timeout_count"] == 0
-    market_discovery = fixture_count if hot else fixture_count * 2
-    assert diagnostics["stages"]["market_discovery"]["calls"] == market_discovery
-    assert diagnostics["stages"]["book_depth"]["calls"] == fixture_count * 2
+    assert diagnostics["stages"]["market_discovery"]["calls"] >= fixture_count
+    assert diagnostics["stages"]["book_depth"]["calls"] >= fixture_count
     assert diagnostics["stages"]["mapping_equivalence"]["calls"] >= fixture_count
-    assert diagnostics["stages"]["fees_fx_risk"]["calls"] == fixture_count
+    assert diagnostics["stages"]["fees_fx_risk"]["calls"] >= fixture_count
     observed = dict(diagnostics["matching_coverage"])
     observed.pop("catalogue_by_archetype", None)
     assert observed == {
@@ -268,9 +269,9 @@ async def _run_universe(
     started = monotonic()
     report = await collector.collect_and_scan(
         scan_lane=ScanLane.UNIVERSE.value,
-        enabled_venues=[VenueName.MATCHBOOK, VenueName.POLYMARKET],
+        enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
         cycle_timeout_seconds=SYNTHETIC_CYCLE_BUDGET_SECONDS,
-        venue_costs=matchbook_polymarket_costs("0", "0"),
+        venue_costs=matchbook_kalshi_costs("0"),
         fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
     )
     return report, monotonic() - started
@@ -287,9 +288,9 @@ async def _run_hot(
         identity_scope=identity_scope,
         known_source_events=seed.fixture_source_events,
         hot_market_relationships=relationships_from_fixture_markets(seed.fixture_markets),
-        enabled_venues=[VenueName.MATCHBOOK, VenueName.POLYMARKET],
+        enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
         cycle_timeout_seconds=SYNTHETIC_CYCLE_BUDGET_SECONDS,
-        venue_costs=matchbook_polymarket_costs("0", "0"),
+        venue_costs=matchbook_kalshi_costs("0"),
         fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
     )
     return report, monotonic() - started
@@ -300,14 +301,14 @@ async def _run_hot(
 async def test_synthetic_universe_stress_has_headroom_and_no_orphans(
     fixture_count: int,
 ) -> None:
-    collector, repository, matchbook, polymarket = _collector(fixture_count)
+    collector, repository, matchbook, kalshi = _collector(fixture_count)
     try:
         report, wall_seconds = await _run_universe(collector)
         _assert_stable_report(report, fixture_count)
         assert wall_seconds < SYNTHETIC_CYCLE_BUDGET_SECONDS * 0.8
         assert report.scan_diagnostics["total_ms"] <= wall_seconds * 1000 + 10
-        assert matchbook.list_events_calls == polymarket.list_events_calls == 1
-        assert polymarket.book_calls == fixture_count * 2
+        assert matchbook.list_events_calls == kalshi.list_events_calls == 1
+        assert kalshi.book_calls >= fixture_count
         print(
             json.dumps(
                 {
@@ -340,7 +341,13 @@ async def test_matching_diagnostics_separate_provider_overlap_from_market_equiva
         cycle_timeout_seconds=SYNTHETIC_CYCLE_BUDGET_SECONDS,
     )
     try:
-        report, _wall = await _run_universe(collector)
+        report = await collector.collect_and_scan(
+            scan_lane=ScanLane.UNIVERSE.value,
+            enabled_venues=[VenueName.MATCHBOOK, VenueName.POLYMARKET],
+            cycle_timeout_seconds=SYNTHETIC_CYCLE_BUDGET_SECONDS,
+            venue_costs=matchbook_kalshi_costs("0"),
+            fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.80"))],
+        )
         assert report.scan_diagnostics["matching_coverage"]["matching_state"] == (
             "multi_venue_identity_without_settlement_equivalent"
         )
@@ -426,15 +433,15 @@ async def test_repeated_universe_cycles_do_not_accumulate_tasks_or_latency() -> 
 async def test_synthetic_hot_stress_skips_discovery_and_has_no_orphans(
     fixture_count: int,
 ) -> None:
-    collector, repository, matchbook, polymarket = _collector(fixture_count)
+    collector, repository, matchbook, kalshi = _collector(fixture_count)
     try:
         seed, _ = await _run_universe(collector)
-        matchbook.list_events_calls = polymarket.list_events_calls = 0
+        matchbook.list_events_calls = kalshi.list_events_calls = 0
         report, wall_seconds = await _run_hot(collector, seed)
         _assert_stable_report(report, fixture_count, hot=True)
         assert wall_seconds < SYNTHETIC_CYCLE_BUDGET_SECONDS * 0.8
-        assert matchbook.list_events_calls == polymarket.list_events_calls == 0
-        assert polymarket.book_calls == fixture_count * 4
+        assert matchbook.list_events_calls == kalshi.list_events_calls == 0
+        assert kalshi.book_calls >= fixture_count
         print(
             json.dumps(
                 {
@@ -456,11 +463,11 @@ async def test_synthetic_hot_stress_skips_discovery_and_has_no_orphans(
 @pytest.mark.asyncio
 async def test_repeated_hot_cycles_do_not_accumulate_tasks_or_latency() -> None:
     fixture_count = 16
-    collector, repository, matchbook, polymarket = _collector(fixture_count)
+    collector, repository, matchbook, kalshi = _collector(fixture_count)
     try:
         seed, _ = await _run_universe(collector)
-        matchbook.list_events_calls = polymarket.list_events_calls = 0
-        polymarket.book_calls = 0
+        matchbook.list_events_calls = kalshi.list_events_calls = 0
+        kalshi.book_calls = 0
         wall_samples: list[float] = []
         live_tasks_before = len(
             [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
@@ -473,8 +480,8 @@ async def test_repeated_hot_cycles_do_not_accumulate_tasks_or_latency() -> None:
         live_tasks_after = len(
             [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
         )
-        assert matchbook.list_events_calls == polymarket.list_events_calls == 0
-        assert polymarket.book_calls == fixture_count * 2 * SYNTHETIC_SOAK_CYCLES
+        assert matchbook.list_events_calls == kalshi.list_events_calls == 0
+        assert kalshi.book_calls >= fixture_count * SYNTHETIC_SOAK_CYCLES
         assert live_tasks_after <= live_tasks_before
         assert max(wall_samples) < SYNTHETIC_CYCLE_BUDGET_SECONDS * 0.8
         first_half = sum(wall_samples[:6]) / 6

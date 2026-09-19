@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from time import monotonic
@@ -9,12 +10,11 @@ from sports_hedge.application.complete_set import (
     UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
     complete_set_outcomes,
     generalized_payoff_eligible_pair,
-    generalized_state_model,
+    generalized_state_model_for_pair,
     scan_ineligibility_reason,
     solver_eligible_market,
     solver_model_for_pair,
 )
-from sports_hedge.application.mapping_review import evidence_from_markets
 from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.executable_liquidity import (
     opening_liquidity_rejection_reasons,
@@ -31,7 +31,7 @@ from sports_hedge.arbitrage.payoff_scan import (
     is_state_safe_fee,
 )
 from sports_hedge.config import Settings, get_settings
-from sports_hedge.domain.football import CanonicalOutcome, SettlementScope
+from sports_hedge.domain.football import CanonicalOutcome
 from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
@@ -43,8 +43,8 @@ from sports_hedge.fx.service import FxRateService
 from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.events import EventMatcher
-from sports_hedge.matching.learned_rules import LearnedMappingApplicator
 from sports_hedge.matching.markets import MarketMatcher
+from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
 from sports_hedge.normalization.identity import (
     canonical_matched_event_id,
     canonical_matched_market_id,
@@ -70,7 +70,13 @@ from sports_hedge.risk.execution import ExecutionRiskInputs, ExecutionRiskScorer
 
 
 class PaperScanService:
-    """Orchestrate strict matching, snapshot capture and paper-only arb analysis."""
+    """Orchestrate register-based matching, snapshot capture and paper-only arb analysis.
+
+    Runtime PAPER market equivalence is the Approved Match Register after
+    fixture identity. Mapping confidence, learned market labels, and mapping
+    review are not admission gates. ``minimum_mapping_confidence`` is a
+    deprecated API field with zero runtime effect.
+    """
 
     def __init__(
         self,
@@ -87,15 +93,12 @@ class PaperScanService:
         open_trades: list[PaperTrade] | None = None,
         mapping_rule_store: object | None = None,
         reverse_catalog: LatestObservationCatalog | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
+        del mapping_rule_store
         self.market_intelligence = market_intelligence
         if market_matcher is None:
-            applicator = (
-                LearnedMappingApplicator(mapping_rule_store)
-                if mapping_rule_store is not None
-                else None
-            )
-            market_matcher = MarketMatcher(EventMatcher(learned_applicator=applicator))
+            market_matcher = MarketMatcher(EventMatcher())
         self.market_matcher = market_matcher
         self.depth_scanner = depth_scanner or DepthAwareCompleteSetScanner()
         self.payoff_scanner = payoff_scanner or DepthAwarePayoffScanner()
@@ -106,6 +109,7 @@ class PaperScanService:
         self.liquidity = liquidity
         self.open_trades = open_trades or []
         self.reverse_catalog = reverse_catalog
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.last_scan_phase_ms: dict[str, int] = {
             "mapping_equivalence": 0,
             "fees_fx_risk": 0,
@@ -158,32 +162,18 @@ class PaperScanService:
             raise ValueError("maximum_execution_risk must be between 0 and 100")
         if not 0 <= minimum_mapping_confidence <= 1:
             raise ValueError("minimum_mapping_confidence must be between 0 and 1")
+        # Deprecated API field. Runtime PAPER equivalence is the register only.
+        del minimum_mapping_confidence
 
         map_started = monotonic()
         match = self.market_matcher.match(left.market, right.market)
         mapping_ms = max(0, int((monotonic() - map_started) * 1000))
-
-        def mapping_review_evidence():
-            """Package operator evidence only after executable work for this branch."""
-
-            nonlocal mapping_ms
-            review_started = monotonic()
-            candidate = evidence_from_markets(
-                left.market,
-                right.market,
-                matcher=self.market_matcher,
-                match=match,
-                left_raw=left.metadata if isinstance(left.metadata, dict) else None,
-                right_raw=right.metadata if isinstance(right.metadata, dict) else None,
-            )
-            mapping_ms += max(0, int((monotonic() - review_started) * 1000))
-            return candidate
         fee_started = monotonic()
         solver_started: float | None = None
         fees = list(fee_snapshots or [])
         rejections: list[str] = []
         assumption_labels: list[str] = []
-        evaluated_at = datetime.now(UTC)
+        evaluated_at = self._clock()
         costs, cost_resolve_reasons = self._resolve_costs(
             left,
             right,
@@ -227,7 +217,6 @@ class PaperScanService:
 
         if not match.matched:
             recorded = self.record_observation(left) + self.record_observation(right)
-            mapping_review_candidate = mapping_review_evidence()
             self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
@@ -241,7 +230,7 @@ class PaperScanService:
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
-                mapping_review_candidate=mapping_review_candidate,
+                mapping_review_candidate=None,
             )
 
         pair_event_id = canonical_matched_event_id([left.market.event, right.market.event])
@@ -253,27 +242,14 @@ class PaperScanService:
 
         if left.venue == right.venue:
             rejections.append("same_venue_pair")
-        if match.confidence < minimum_mapping_confidence:
-            rejections.append("mapping_confidence_below_threshold")
-        if (
-            left.market.settlement.scope == SettlementScope.UNKNOWN
-            or right.market.settlement.scope == SettlementScope.UNKNOWN
-        ):
-            from sports_hedge.matching.ordinary_1x2 import (
-                allow_unknown_settlement_for_ordinary_1x2,
-            )
-
-            if not allow_unknown_settlement_for_ordinary_1x2(left.market, right.market):
-                rejections.append("unknown_settlement_scope")
 
         from sports_hedge.catalogue.admission import assess_catalogue_admission
 
         catalogue_admission = assess_catalogue_admission(left.market, right.market)
         if not catalogue_admission.allowed:
             rejections.append(
-                catalogue_admission.rejection_reason or "catalogue_review_required"
+                catalogue_admission.rejection_reason or "catalogue_not_registered"
             )
-            mapping_review_candidate = mapping_review_evidence()
             self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
@@ -290,7 +266,7 @@ class PaperScanService:
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
-                mapping_review_candidate=mapping_review_candidate,
+                mapping_review_candidate=None,
                 solver_model=None,
             )
 
@@ -302,7 +278,6 @@ class PaperScanService:
             ):
                 ineligible = scan_ineligibility_reason(right.market)
             rejections.append(ineligible)
-            mapping_review_candidate = mapping_review_evidence()
             self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
@@ -319,7 +294,7 @@ class PaperScanService:
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
-                mapping_review_candidate=mapping_review_candidate,
+                mapping_review_candidate=None,
                 solver_model=None,
             )
 
@@ -383,7 +358,6 @@ class PaperScanService:
             for reason in rejections
         )
         if missing_fees or missing_fx or cost_clock_blocked:
-            mapping_review_candidate = mapping_review_evidence()
             self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
@@ -400,7 +374,7 @@ class PaperScanService:
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
-                mapping_review_candidate=mapping_review_candidate,
+                mapping_review_candidate=None,
                 solver_model=solver_model,
             )
 
@@ -477,7 +451,7 @@ class PaperScanService:
             elif solution.roi < minimum_net_edge:
                 rejections.append("net_edge_below_threshold")
         else:
-            state_model = generalized_state_model(left.market)
+            state_model = generalized_state_model_for_pair(left.market, right.market)
             assert state_model is not None
             payoff_scan = self.payoff_scanner.scan(
                 sources,
@@ -548,7 +522,7 @@ class PaperScanService:
             payoff_scan=payoff_scan,
             execution_risk=risk,
             execution_risk_inputs=risk_inputs,
-            eligible_for_paper_simulation=not rejections,
+            eligible_for_paper_simulation=not _paper_blocking_reasons(rejections),
             rejection_reasons=_dedupe(rejections),
             fee_snapshots=fees,
             venue_costs=list(scan_costs.values()),
@@ -582,7 +556,6 @@ class PaperScanService:
                 except FillPlanMappingError as exc:
                     alloc_reasons.append(f"allocation_failed:{exc.reason}")
         rejections.extend(alloc_reasons)
-        mapping_review_candidate = mapping_review_evidence()
         self._stamp_scan_phases(
             mapping_ms=mapping_ms,
             fee_started=fee_started,
@@ -590,9 +563,9 @@ class PaperScanService:
         )
         return draft.model_copy(
             update={
-                "eligible_for_paper_simulation": not rejections,
+                "eligible_for_paper_simulation": not _paper_blocking_reasons(rejections),
                 "rejection_reasons": _dedupe(rejections),
-                "mapping_review_candidate": mapping_review_candidate,
+                "mapping_review_candidate": None,
                 "scanned_at": datetime.now(UTC),
             }
         )
@@ -861,6 +834,12 @@ def _with_gbp_rate(rates: list[FxRateSnapshot], *, as_of: datetime | None = None
 
 def _dedupe(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+def _paper_blocking_reasons(reasons: list[str]) -> list[str]:
+    """Audit labels such as paper_assumed_equivalent do not block PAPER admission."""
+
+    return [reason for reason in reasons if reason not in PAPER_NONBLOCKING_REJECTION_REASONS]
 
 
 def _default_execution_mode(venue: VenueName) -> LegExecutionMode:

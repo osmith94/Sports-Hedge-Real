@@ -32,15 +32,13 @@ from sports_hedge.application.capture_replay import (
     scenario3_safe_90m_bundle,
 )
 from sports_hedge.application.complete_set import scan_eligible_pair
-from sports_hedge.application.equivalence_diagnostics import zero_equivalent_reason_from_inventory
 from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
-from sports_hedge.catalogue.admission import catalogue_allows_solver
+from sports_hedge.catalogue.admission import assess_catalogue_admission, catalogue_allows_solver
 from sports_hedge.catalogue.classify import PayloadSide, classify_payload_pair, normalize_payload_side
 from sports_hedge.catalogue.states import CatalogueApprovalState
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.markets import MarketMatcher
-from sports_hedge.normalization.venues import KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
 from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import MatchbookClient
 from sports_hedge.venues.polymarket import PolymarketClient
@@ -113,7 +111,7 @@ def test_live_attempt_fixture_does_not_fabricate_a_pair() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scenario2_fair_price_stays_blocked_on_production_path() -> None:
+async def test_scenario2_fair_price_is_paper_assumed_not_approved() -> None:
     bundle = scenario2_bayern_fair_price_bundle()
     assert bundle.data_class == DATA_CLASS_FIXTURE_DEMO
     assert bundle.matchbook.provenance == PROVENANCE_FIXTURE
@@ -125,18 +123,14 @@ async def test_scenario2_fair_price_stays_blocked_on_production_path() -> None:
     ]
     assert len(clustered) == 1
     fixture = clustered[0]
-    assert fixture.matched_equivalent_count == 0
+    assert fixture.matched_equivalent_count == 1
     rows = report.fixture_markets[fixture.canonical_event_id]
+    assert any(
+        row.comparison_status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
+        for row in rows
+    )
     assert not any(row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT for row in rows)
-    assert not any(row.entered_solver for row in rows)
-    reason = zero_equivalent_reason_from_inventory(rows)
-    assert reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
-    assert summary.matched_equivalent is False
-    assert summary.entered_solver is False
-    assert summary.comparison_economics_computed is False
-    assert summary.arb is False
-    assert summary.catalogue_admission_allowed is False
-    assert summary.block_reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
+    assert summary.catalogue_admission_allowed is True
     assert summary.network_used is False
     left = PayloadSide(
         venue=VenueName.MATCHBOOK,
@@ -150,11 +144,13 @@ async def test_scenario2_fair_price_stays_blocked_on_production_path() -> None:
         series=bundle.kalshi.series,
     )
     assessment = classify_payload_pair(left, right)
-    assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
+    assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
     mb = normalize_payload_side(left)
     kalshi = normalize_payload_side(right)
-    assert catalogue_allows_solver(mb, kalshi) is False
-    assert scan_eligible_pair(mb, kalshi, MarketMatcher().match(mb, kalshi)) is False
+    assert catalogue_allows_solver(mb, kalshi) is True
+    assert scan_eligible_pair(mb, kalshi, MarketMatcher().match(mb, kalshi)) is True
+    assert assess_catalogue_admission(mb, kalshi).live_execution_eligible is False
 
 
 @pytest.mark.asyncio

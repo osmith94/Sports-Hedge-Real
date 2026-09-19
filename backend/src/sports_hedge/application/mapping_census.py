@@ -132,13 +132,15 @@ def census_from_report(
         (
             "Inventory MATCHED_EQUIVALENT / PAPER_ASSUMED_EQUIVALENT and "
             "market_family_breakdown require the shared catalogue gate. "
-            "PAPER_ASSUMED_EQUIVALENT is 1X2 paper-mode only and is never "
-            "live-execution eligible. Matcher structural hits remain on match_reasons."
+            "PAPER_ASSUMED_EQUIVALENT is the locked four-family paper-mode "
+            "assumption (MATCH_RESULT / BTTS / exact-line TOTAL / FTTS) and is "
+            "never live-execution eligible. Matcher structural hits remain on match_reasons."
         ),
         (
             "catalogue_by_archetype counts Tenet-20 coverage states per target "
             "archetype. VENUE_UNAVAILABLE means the venue does not offer the "
-            "contract; PAPER_ASSUMED_EQUIVALENT is the 1X2 paper-mode assumption."
+            "contract; PAPER_ASSUMED_EQUIVALENT is the owner-approved paper-mode "
+            "assumption for the four locked Matchbook↔Kalshi families."
         ),
     ]
     if data_class == CENSUS_DATA_CLASS_OWNER_LIVE:

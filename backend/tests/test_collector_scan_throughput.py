@@ -40,7 +40,7 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
 from test_issue_147_market_evaluation_state import THREE_LEAGUE_FIXTURES
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs
 
 
 SYNTHETIC_PROVIDER_LATENCY_S = 0.04
@@ -124,6 +124,37 @@ def _book(token: str) -> dict[str, Any]:
     }
 
 
+def _btts_kalshi_event(index: int, competition: str, home: str, away: str, kickoff: datetime) -> dict[str, Any]:
+    ticker = f"KXEPLBTTS-26SEP20F{index:02d}"
+    return {
+        "event_ticker": ticker,
+        "series_ticker": "KXEPLBTTS",
+        "title": f"{home} vs {away}",
+        "category": "Sports",
+        "strike_date": kickoff.isoformat(),
+        "competition": competition,
+        "product_metadata": {"competition": competition},
+        "markets": [
+            {
+                "ticker": f"{ticker}-BTTS",
+                "event_ticker": ticker,
+                "title": "Both Teams To Score",
+                "yes_sub_title": "Yes",
+                "rules_primary": "Resolves on 90 minutes of regulation time. Extra time and penalties do not count.",
+            }
+        ],
+    }
+
+
+def _btts_kalshi_book() -> dict[str, Any]:
+    return {
+        "orderbook_fp": {
+            "yes_dollars": [["0.20", "500.00"]],
+            "no_dollars": [["0.70", "500.00"]],
+        }
+    }
+
+
 class SyntheticUniverse:
     """Matchbook + Polymarket universe with controlled per-call latency."""
 
@@ -142,7 +173,7 @@ class SyntheticUniverse:
         self.stall_matchbook_markets = stall_matchbook_markets
         self.stall_after_calls = stall_after_calls
         self.list_events_calls = {"matchbook": 0, "polymarket": 0, "kalshi": 0}
-        self.list_markets_calls = {"matchbook": 0, "polymarket": 0}
+        self.list_markets_calls = {"matchbook": 0, "polymarket": 0, "kalshi": 0}
         self.book_calls = 0
         self.live_provider_calls = 0
         self.peak_live_provider_calls = 0
@@ -277,7 +308,7 @@ class SyntheticPolymarket:
 
 
 class SyntheticKalshi:
-    """Present so discovery has a third venue; returns no in-scope events."""
+    """Registered Matchbook↔Kalshi BTTS counterpart for the synthetic workload."""
 
     def __init__(self, universe: SyntheticUniverse) -> None:
         self._universe = universe
@@ -286,10 +317,19 @@ class SyntheticKalshi:
         del filters
         self._universe.list_events_calls["kalshi"] += 1
         await self._universe._pace()
-        return {"events": []}
+        return {
+            "events": [
+                _btts_kalshi_event(index, competition, home, away, kickoff)
+                for index, (competition, home, away, kickoff) in enumerate(
+                    _synthetic_fixtures(self._universe.fixture_count)
+                )
+            ]
+        }
 
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
         del event_id, filters
+        self._universe.list_markets_calls["kalshi"] += 1
+        await self._universe._pace()
         return {"markets": []}
 
     async def get_order_book(
@@ -299,12 +339,19 @@ class SyntheticKalshi:
         outcome_id: int | str | None = None,
         **filters: Any,
     ) -> dict[str, Any]:
-        del event_id, market_id, outcome_id, filters
-        return {}
+        del event_id, outcome_id, filters
+        self._universe.book_calls += 1
+        await self._universe._pace()
+        return _btts_kalshi_book()
 
     async def get_series(self, series_ticker: str) -> dict[str, Any]:
         del series_ticker
-        return {}
+        return {
+            "ticker": "KXEPLBTTS",
+            "title": "Premier League Both Teams To Score",
+            "fee_type": "quadratic",
+            "fee_multiplier": 1,
+        }
 
 
 def _collector(universe: SyntheticUniverse) -> tuple[ReadOnlyCrossVenueCollector, SqliteMarketIntelligenceRepository]:
@@ -323,7 +370,7 @@ def _collector(universe: SyntheticUniverse) -> tuple[ReadOnlyCrossVenueCollector
 
 async def _scan(collector: ReadOnlyCrossVenueCollector, *, max_event_pairs: int, **kwargs: Any):
     return await collector.collect_and_scan(
-        venue_costs=matchbook_polymarket_costs(),
+        venue_costs=matchbook_kalshi_costs(),
         fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
         capital_limit_gbp=Decimal("100"),
         maximum_execution_risk=100,

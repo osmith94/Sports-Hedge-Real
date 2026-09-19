@@ -123,6 +123,9 @@ _REFUND_RE = re.compile(
 KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON = (
     "kalshi_unmodelled_cancellation_reschedule_fair_price"
 )
+KALSHI_UNMODELLED_EXTRA_TIME_OR_PENALTIES_REASON = (
+    "kalshi_unmodelled_extra_time_or_penalties_wording"
+)
 _KALSHI_CANCEL_RESCHEDULE_FAIR_PRICE_RE = re.compile(
     r"(?:cancel+ed|reschedul\w*).{0,200}fair price"
     r"|fair price.{0,200}(?:cancel+ed|reschedul\w*)"
@@ -2051,6 +2054,23 @@ def _kalshi_settlement(
                 )
 
                 unknown_reason = KALSHI_CONTRACT_FAMILY_NOT_MATCH_RESULT_REASON
+    if (
+        unknown_reason is None
+        and scope is SettlementScope.UNKNOWN
+        and not cancel_fair_price
+    ):
+        rule_blob = " ".join(
+            text for text in (primary, secondary, rules, *descriptions) if text
+        )
+        if rule_blob and not kalshi_rule_field_is_generic_scope_template(rule_blob):
+            normalized_rules = normalize_text(rule_blob)
+            if (
+                _has_extra_time_token(normalized_rules)
+                or _has_penalties_token(normalized_rules)
+                or "to qualify" in normalized_rules
+                or "to-qualify" in normalized_rules
+            ):
+                unknown_reason = KALSHI_UNMODELLED_EXTRA_TIME_OR_PENALTIES_REASON
     return SettlementFingerprint(
         scope=scope,
         period=period,
@@ -2299,10 +2319,6 @@ def _assemble_first_team_to_score(
         raise VenueNormalizationError(
             "Kalshi First Team To Score requires HOME/AWAY/NO_GOAL contracts"
         )
-    if settlement.scope is not SettlementScope.REGULATION_TIME:
-        raise VenueNormalizationError(
-            "Kalshi First Team To Score requires proven regulation-time rules"
-        )
     runners = [
         CanonicalRunner(
             source_runner_id=f"{by_outcome[outcome].ticker}:YES",
@@ -2320,7 +2336,7 @@ def _assemble_first_team_to_score(
         line=None,
         settlement=settlement,
         runners=runners,
-        confidence=1.0,
+        confidence=1.0 if settlement.scope != SettlementScope.UNKNOWN else 0.75,
     )
 
 

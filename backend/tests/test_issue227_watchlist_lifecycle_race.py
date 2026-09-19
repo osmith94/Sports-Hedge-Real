@@ -54,10 +54,10 @@ from test_near_arbitrage_watchlist import EDGE_080, OBSERVED, _observation
 from test_step8f_automatic_paper_entry import (
     FX as AUTOFILL_FX,
     _matchbook_btts,
-    _polymarket_btts,
+    _kalshi_btts,
+    _kalshi_costs,
     _standing,
 )
-from venue_cost_helpers import matchbook_polymarket_costs
 
 
 def _file_ops_bundle(tmp_path: Path, *, autofill: bool = True):
@@ -92,14 +92,14 @@ def _file_ops_bundle(tmp_path: Path, *, autofill: bool = True):
 
 def _qualifying_pair(scan, extra=None):
     kwargs = dict(
-        venue_costs=matchbook_polymarket_costs(),
+        venue_costs=_kalshi_costs(),
         fx_snapshots=AUTOFILL_FX,
         maximum_execution_risk=100,
         liquidity_snapshot=_standing(),
     )
     if extra:
         kwargs.update(extra)
-    decision = scan.scan_pair(_matchbook_btts(), _polymarket_btts(), **kwargs)
+    decision = scan.scan_pair(_matchbook_btts(), _kalshi_btts(), **kwargs)
     assert decision.eligible_for_paper_simulation is True, decision.rejection_reasons
     assert decision.allocation is not None and decision.allocation.accepted
     return decision
