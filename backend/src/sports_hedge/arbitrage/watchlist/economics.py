@@ -10,6 +10,7 @@ from sports_hedge.arbitrage.watchlist.models import (
     WatchLeg,
     WatchObservation,
 )
+from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
 
 EDGE_QUANT = Decimal("0.00000001")
 PP_QUANT = Decimal("0.0001")
@@ -191,7 +192,15 @@ def classify_status(
     if "execution_risk_above_threshold" in reasons:
         return OpportunityStatus.REJECTED, _dedupe(reasons)
 
-    leftover = [reason for reason in reasons if reason not in NEAR_ELIGIBLE_REASONS]
+    # Paper-admission audit labels (paper_assumed_equivalent, etc.) do not
+    # block LIVE_PAPER capture. They must not leftover-REJECT a scan-eligible
+    # Matchbook/Kalshi decision before persist_triggered_chain runs.
+    leftover = [
+        reason
+        for reason in reasons
+        if reason not in NEAR_ELIGIBLE_REASONS
+        and reason not in PAPER_NONBLOCKING_REJECTION_REASONS
+    ]
     if leftover:
         return OpportunityStatus.REJECTED, _dedupe(reasons)
 

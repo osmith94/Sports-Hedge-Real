@@ -45,6 +45,7 @@ from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import MarketAction
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
+from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
 from sports_hedge.paper.bet_ticket import (
     BetTicketExecutionSeam,
     BetTicketFxAssumption,
@@ -166,6 +167,8 @@ _AUTOFILL_GATE_REASONS = frozenset(
         "unknown_opportunity",
         "must_not_auto_capture",
         "orphaned_paper_filling_reconciled",
+        "watchlist_not_triggered",
+        "venues_not_refreshed_this_cycle",
     }
 )
 
@@ -179,6 +182,15 @@ def _is_expected_autofill_gate(exc: BaseException) -> bool:
     if reason in _AUTOFILL_GATE_REASONS:
         return True
     return reason.startswith("allocation_failed:")
+
+
+def _autofill_begin_rejection_reason(exc: BaseException) -> str:
+    """Map a bound-snapshot begin failure to a durable capture-rejection code."""
+
+    text = str(exc)
+    if text.startswith("unknown opportunity"):
+        return "unknown_opportunity"
+    return "watchlist_not_triggered"
 
 
 class PaperOperationsService:
@@ -256,14 +268,18 @@ class PaperOperationsService:
             if decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage:
                 candidate = _candidate_from_decision(decision, opportunity_id)
                 self.alerts.ingest(candidate)
-            if (
-                self._should_autofill(autofill=autofill, provenance=provenance)
-                and opening_legs
-                and self._venues_refreshed_this_cycle(opening_legs, refreshed_venues)
-            ):
+            if self._should_autofill(autofill=autofill, provenance=provenance):
                 current_watch = self.watchlist.repository.get(opportunity_id)
+                if (
+                    existing_trade is None
+                    and current_watch is not None
+                    and current_watch.status is OpportunityStatus.REJECTED
+                ):
+                    self._promote_eligible_capture_retry(opportunity_id, decision)
+                    current_watch = self.watchlist.repository.get(opportunity_id)
                 bound_active = self.watchlist.has_active_bound_attempt(opportunity_id)
                 should_simulate = False
+                skip_reason: str | None = None
                 repairable = existing_trade is not None and current_watch is not None and (
                     current_watch.status
                     in {
@@ -274,6 +290,10 @@ class PaperOperationsService:
                 )
                 if repairable or (bound_active and opportunity_id in self._plans):
                     should_simulate = True
+                elif not opening_legs:
+                    skip_reason = "no_positive_opening_legs"
+                elif not self._venues_refreshed_this_cycle(opening_legs, refreshed_venues):
+                    skip_reason = "venues_not_refreshed_this_cycle"
                 elif current_watch is None or current_watch.status not in {
                     OpportunityStatus.PAPER_FILLING,
                     OpportunityStatus.PARTIAL,
@@ -288,8 +308,8 @@ class PaperOperationsService:
                             decision_at=decision.scanned_at,
                         )
                         should_simulate = True
-                    except ValueError:
-                        should_simulate = False
+                    except ValueError as exc:
+                        skip_reason = _autofill_begin_rejection_reason(exc)
                 if should_simulate:
                     try:
                         self.simulate_fill(
@@ -304,6 +324,15 @@ class PaperOperationsService:
                             pass
                         else:
                             raise
+                elif skip_reason:
+                    # Eligible LIVE_PAPER + autofill ON must never vanish. Keep
+                    # the fail-closed gate and persist the exact capture reason.
+                    self._record_entry_rejection(
+                        opportunity_id,
+                        skip_reason,
+                        occurred_at=dispatched,
+                        reject_triggered=True,
+                    )
         return candidate
 
     def reconcile_orphaned_paper_fills(self, *, now: datetime | None = None) -> list[str]:
@@ -342,6 +371,46 @@ class PaperOperationsService:
                 "classification": classification_for(OpportunityStatus.TRIGGERED),
                 "is_arbitrage": True,
                 "rejection_reasons": reasons,
+                "last_seen_at": decision.scanned_at,
+            }
+        )
+        self.watchlist.repository.upsert_opportunity(promoted, force_status=True)
+
+    def _promote_eligible_capture_retry(
+        self, opportunity_id: str, decision: PaperScanDecision
+    ) -> None:
+        """A still-eligible LIVE_PAPER snapshot may retry after a capture skip."""
+
+        current = self.watchlist.repository.get(opportunity_id)
+        if current is None or current.status is not OpportunityStatus.REJECTED:
+            return
+        if not decision.eligible_for_paper_simulation:
+            return
+        capture_skip_reasons = {
+            "venues_not_refreshed_this_cycle",
+            "no_positive_opening_legs",
+            "watchlist_not_triggered",
+            "must_not_auto_capture",
+            ORPHANED_PAPER_FILLING_RECONCILED,
+        }
+        remaining = [
+            reason
+            for reason in current.rejection_reasons
+            if reason not in capture_skip_reasons
+            and reason not in PAPER_NONBLOCKING_REJECTION_REASONS
+        ]
+        if remaining:
+            return
+        promoted = current.model_copy(
+            update={
+                "status": OpportunityStatus.TRIGGERED,
+                "classification": classification_for(OpportunityStatus.TRIGGERED),
+                "is_arbitrage": True,
+                "rejection_reasons": [
+                    reason
+                    for reason in current.rejection_reasons
+                    if reason not in capture_skip_reasons
+                ],
                 "last_seen_at": decision.scanned_at,
             }
         )
@@ -1880,12 +1949,15 @@ class PaperOperationsService:
         opportunity_id: str,
         reason: str,
         occurred_at: datetime | None = None,
+        *,
+        reject_triggered: bool = False,
     ) -> None:
         self._entry_rejections[opportunity_id] = reason
         self.watchlist.record_paper_fill_rejection(
             opportunity_id,
             occurred_at=occurred_at or datetime.now(UTC),
             detail=reason,
+            reject_triggered=reject_triggered,
         )
 
     def _get_trade_by_opportunity(self, opportunity_id: str) -> PaperTrade | None:

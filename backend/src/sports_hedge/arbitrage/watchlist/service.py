@@ -489,8 +489,14 @@ class WatchlistService:
         *,
         occurred_at,
         detail: str,
+        reject_triggered: bool = False,
     ) -> NearOpportunity | None:
-        """Surface a failed paper-entry attempt without OPEN/PARTIAL/FILLED mutation."""
+        """Surface a failed paper-entry attempt without OPEN/PARTIAL/FILLED mutation.
+
+        `reject_triggered=True` is for persist_triggered_chain capture skips
+        only. Operator/manual-external `_fail_entry` must leave TRIGGERED so
+        Tenet 16 confirmation can continue.
+        """
 
         with self.repository.transaction():
             current = self.repository.get(opportunity_id)
@@ -507,7 +513,9 @@ class WatchlistService:
                     detail=detail,
                 )
             status = current.status
-            if current.status is OpportunityStatus.PAPER_FILLING:
+            if current.status is OpportunityStatus.PAPER_FILLING or (
+                reject_triggered and current.status is OpportunityStatus.TRIGGERED
+            ):
                 reasons = list(dict.fromkeys([*current.rejection_reasons, detail]))
                 current = current.model_copy(
                     update={

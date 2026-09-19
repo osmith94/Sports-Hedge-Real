@@ -120,6 +120,7 @@ const ACTIVITY_TITLES: Record<WatchlistLifecycleEventType, string> = {
   paper_fill_attempted: "Paper fill attempted",
   paper_fill_partial: "Partial paper fill",
   paper_fill_complete: "Paper position completed",
+  paper_fill_rejected: "Paper capture rejected",
   rejected_stale_quote: "Rejected · stale quote",
   rejected_insufficient_depth: "Rejected · insufficient depth",
   rejected_semantics: "Rejected · semantics",
@@ -135,6 +136,7 @@ function activityKind(eventType: WatchlistLifecycleEventType): string {
   if (eventType === "paper_fill_attempted") return "PAPER_FILL_ATTEMPTED";
   if (eventType === "paper_fill_partial") return "PARTIAL_FILL";
   if (eventType === "paper_fill_complete") return "PAPER_POSITION_COMPLETED";
+  if (eventType === "paper_fill_rejected") return "PAPER_CAPTURE_REJECTED";
   if (eventType === "closed") return "CLOSED";
   if (eventType.startsWith("rejected_")) return "REJECTED";
   return eventType.toUpperCase();
