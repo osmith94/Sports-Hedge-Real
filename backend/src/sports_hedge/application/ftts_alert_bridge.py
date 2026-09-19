@@ -2,8 +2,13 @@
 
 Issue #331 / architect review: FTTS uses the generalized payoff solver, while
 Priority Alerts ingest `depth_scan`. After a complete HOME/AWAY/NO_GOAL
-generalized arbitrage, re-solve the selected executable quotes with the
-ordinary complete-set solver and attach that as `depth_scan`.
+generalized arbitrage on a register-admitted FTTS_FT row, re-solve the
+selected executable quotes with the ordinary complete-set solver and attach
+that as `depth_scan`.
+
+The bridge is keyed from Approved Match Register identity
+(`approved_match_register` + `canonical_key=FTTS_FT`), not merely
+generalized_payoff + HOME/AWAY/NO_GOAL shape.
 
 Do not use this for DNB, integer totals, or other push/refund models.
 """
@@ -18,6 +23,11 @@ from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
 from sports_hedge.arbitrage.solver import CompleteSetArbitrageSolver
 from sports_hedge.domain.football import CanonicalOutcome, MarketFamily
 from sports_hedge.domain.models import VenueName
+from sports_hedge.matching.approved_register import (
+    CANONICAL_FTTS_FT,
+    REGISTER_ADMITTED_REASON,
+    register_key_reason,
+)
 from sports_hedge.paper.models import PaperScanDecision
 
 FTTS_ORDINARY_OUTCOMES = frozenset(
@@ -76,7 +86,19 @@ def project_ftts_payoff_to_ordinary_depth(
     )
 
 
+def ftts_register_admitted(decision: PaperScanDecision) -> bool:
+    """True only for an Approved Match Register FTTS_FT row."""
+
+    reasons = decision.market_match.reasons
+    return (
+        REGISTER_ADMITTED_REASON in reasons
+        and register_key_reason(CANONICAL_FTTS_FT) in reasons
+    )
+
+
 def ftts_family_from_decision(decision: PaperScanDecision) -> bool:
+    if not ftts_register_admitted(decision):
+        return False
     if decision.solver_model != "generalized_payoff":
         return False
     if decision.payoff_scan is None:

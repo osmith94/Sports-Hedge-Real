@@ -224,7 +224,10 @@ def test_identity_gates_remain_fail_closed() -> None:
             series=_series("KXEPLGAME"),
         ),
     )
-    assert et.state is CatalogueApprovalState.KNOWN_CONTRADICTION
+    assert et.state is CatalogueApprovalState.UNSUPPORTED
+    assert et.paper_mode_admitted is False
+    assert et.state is not CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert et.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
     incomplete_1x2 = classify_payload_pair(
         PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[_mb_match_odds()]),
         PayloadSide(
@@ -262,18 +265,18 @@ def test_identity_gates_remain_fail_closed() -> None:
     assert ftts.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
 
 
-def test_polymarket_incomplete_settlement_stays_review_required() -> None:
+def test_polymarket_incomplete_settlement_is_not_registered() -> None:
     one_x_two = classify_payload_pair(
         _mb([_mb_1x2()]),
         _pm([_pm_1x2(description="See market rules.")]),
     )
-    assert one_x_two.state is CatalogueApprovalState.REVIEW_REQUIRED
+    assert one_x_two.state is CatalogueApprovalState.UNSUPPORTED
     assert one_x_two.paper_mode_admitted is False
     btts = classify_payload_pair(
         _mb([_census_mb_btts()]),
         _pm([_pm_btts(description="See market rules.")]),
     )
-    assert btts.state is CatalogueApprovalState.REVIEW_REQUIRED
+    assert btts.state is CatalogueApprovalState.UNSUPPORTED
     assert btts.paper_mode_admitted is False
 
 

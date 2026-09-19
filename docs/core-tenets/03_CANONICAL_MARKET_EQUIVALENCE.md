@@ -12,8 +12,9 @@ Two venue markets may be treated as paper-mode equivalents when:
 
 1. they refer to the same canonical event;
 2. each side maps through a venue-native archetype to the same canonical key;
-3. all required archetype parameters match (period, line, outcome space);
-4. no proven extra-time / penalties / to-qualify contradiction exists.
+3. all required archetype parameters match (period, line, outcome space).
+
+Extra-time, penalties, and to-qualify contracts are different native archetypes and do not receive a full-time register key. The scanner does not re-litigate settlement fingerprints after a registered key is resolved.
 
 A generic confidence percentage is not permission to treat ambiguous contracts as economically equivalent.
 
@@ -50,7 +51,7 @@ Only `APPROVED_EQUIVALENT` may enter the **live-execution** path.
 
 `PAPER_ASSUMED_EQUIVALENT` is an owner-approved Phase-1 **paper-mode** path for Matchbook↔Kalshi rows in the Approved Match Register: MATCH_RESULT / 1X2, BTTS, exact-line TOTAL_GOALS, and FIRST_TEAM_TO_SCORE. The register itself is the PAPER cross-venue equivalence decision. Once canonical fixture identity and canonical market identity/parameters match, the scanner must not re-litigate settlement wording, mapping confidence, or learned labels on every scan. It carries `settlement_assumption=regulation_time` and an owner-approved paper-equivalence / register audit marker. It is never represented as independently proven settlement and is never live-execution eligible.
 
-Kalshi cancel/reschedule-to-fair-price wording does **not** block PAPER admission for these four families. Extra time, penalties, to-qualify, wrong fixture/family/period, TOTAL line mismatch, and incomplete/incorrect outcome-space identity remain fail-closed. Genuinely absent venue markets stay NOT_LISTED / VENUE_UNAVAILABLE and must not be invented.
+Kalshi cancel/reschedule-to-fair-price wording does **not** block PAPER admission for these four families. Extra time, penalties, and to-qualify are different/unregistered native archetypes at register mapping — they do not receive a full-time GAME/BTTS/TOTAL/FTTS key, and the scanner does not veto a registered row by re-reading settlement fingerprints. Wrong fixture/family/period, TOTAL line mismatch, and incomplete/incorrect outcome-space identity remain fail-closed through the register structural gate. Genuinely absent venue markets stay NOT_LISTED / VENUE_UNAVAILABLE and must not be invented.
 
 If semantics are incomplete or ambiguous but the market is **not** a registered structural match, do not admit it. Unregistered/unsupported markets are ignored by the scanner. Parameter/structural mismatch is rejected. Genuinely absent markets stay NOT_LISTED / VENUE_UNAVAILABLE.
 

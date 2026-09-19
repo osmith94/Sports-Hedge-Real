@@ -1,11 +1,14 @@
 """Shared HOT/UNIVERSE catalogue gate for solver/paper admission.
 
-APPROVED_EQUIVALENT may enter the normal paper solver.
+Registered Matchbook↔Kalshi rows are paper-admitted from the Approved Match
+Register without settlement-fingerprint re-litigation.
 
-PAPER_ASSUMED_EQUIVALENT is an owner-accepted Phase-1 paper-mode path for the
-four locked Matchbook↔Kalshi families (MATCH_RESULT / BTTS / exact-line TOTAL /
-FTTS). It is visibly labelled, carries settlement_assumption=regulation_time,
-and is never live-execution eligible.
+Independently proven APPROVED_EQUIVALENT may still enter the paper solver.
+That path is not a confidence/review loop: unregistered incomplete or
+extra-time contracts are simply not registered.
+
+PAPER_ASSUMED_EQUIVALENT and registered APPROVED_EQUIVALENT carry
+settlement_assumption=regulation_time and are never live-execution eligible.
 
 REVIEW_REQUIRED, UNSUPPORTED, parameter mismatch and known contradiction
 cannot reach the solver. This module is scan-lane independent.
@@ -46,14 +49,7 @@ def assess_catalogue_admission(
     left: CanonicalMarket, right: CanonicalMarket
 ) -> CatalogueAdmission:
     assessment = classify_pair(left, right)
-    if assessment.state is CatalogueApprovalState.APPROVED_EQUIVALENT:
-        return CatalogueAdmission(
-            allowed=True,
-            assessment=assessment,
-            paper_mode_admitted=True,
-            live_execution_eligible=False,
-        )
-    if assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT:
+    if assessment.paper_mode_admitted:
         return CatalogueAdmission(
             allowed=True,
             assessment=assessment,

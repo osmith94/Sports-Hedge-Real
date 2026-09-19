@@ -33,7 +33,6 @@ from sports_hedge.matching.ordinary_1x2 import (
     allow_unknown_settlement_for_ordinary_1x2,
     is_complete_regulation_time_1x2,
     is_ordinary_full_time_1x2,
-    paper_assumed_ordinary_1x2,
     settlement_fingerprints_contradict,
 )
 from sports_hedge.matching.approved_register import (
@@ -215,40 +214,24 @@ def both_independently_proven_regulation(left: CanonicalMarket, right: Canonical
 
 
 def paper_assumed_locked_family(left: CanonicalMarket, right: CanonicalMarket) -> bool:
-    """Owner-accepted paper-mode assumption for the four locked families.
+    """PAPER admission is the Approved Match Register after fixture identity.
 
-    Requires the Approved Match Register structural identity (Issue #331),
-    Matchbook regulation convention, and no proven extra-time/penalties/
-    to-qualify contradiction. Independent Kalshi settlement proof is not
-    required. Fair-price wording does not block this path. Never live-execution
-    eligible.
+    Settlement fingerprints, fair-price wording, and learned labels are not
+    consulted. Extra-time / penalties / to-qualify contracts are a different
+    native archetype and do not receive a register key.
     """
 
-    if not registered_structural_match(left, right):
-        return False
-    if left.family is MarketFamily.MATCH_RESULT or right.family is MarketFamily.MATCH_RESULT:
-        return paper_assumed_ordinary_1x2(left, right)
-    if settlement_fingerprints_contradict(left.settlement, right.settlement):
-        return False
-    matchbook = left if left.source_venue is VenueName.MATCHBOOK else right
-    kalshi = right if matchbook is left else left
-    if not matchbook_regulation_convention(matchbook):
-        return False
-    if kalshi_has_proven_settlement_contradiction(kalshi):
-        return False
-    if both_independently_proven_regulation(left, right):
-        return False
-    return True
+    return registered_structural_match(left, right)
 
 
 def allow_unknown_settlement_for_paper_assumed(
     left: CanonicalMarket, right: CanonicalMarket
 ) -> bool:
-    """Permit incomplete Kalshi settlement when the paper-assumed identity holds."""
+    """Incomplete Kalshi settlement is allowed when the register admits the pair."""
 
     if allow_unknown_settlement_for_ordinary_1x2(left, right):
         return True
-    return paper_assumed_locked_family(left, right)
+    return registered_structural_match(left, right)
 
 
 def paper_assumed_match_reasons() -> list[str]:
@@ -256,13 +239,9 @@ def paper_assumed_match_reasons() -> list[str]:
 
 
 def paper_assumed_solver_model(left: CanonicalMarket, right: CanonicalMarket) -> str | None:
-    """Solver path for a paper-assumed locked pair. None if identity does not hold."""
+    """Solver path for a registered PAPER pair. None if the register does not admit."""
 
-    if not allow_unknown_settlement_for_paper_assumed(left, right):
-        return None
-    if not pair_structural_identity_matches(left, right):
-        return None
-    if left.settlement.push_possible is True or right.settlement.push_possible is True:
+    if not registered_structural_match(left, right):
         return None
     if left.family is MarketFamily.FIRST_TEAM_TO_SCORE:
         return "generalized_payoff"

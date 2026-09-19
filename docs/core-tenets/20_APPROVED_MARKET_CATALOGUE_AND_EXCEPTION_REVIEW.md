@@ -179,7 +179,7 @@ The register itself is the PAPER cross-venue equivalence decision. Once canonica
 
 This state is visibly labelled, carries `settlement_assumption=regulation_time`, may enter the **paper** solver and Priority Alerts path, and is never live-execution eligible. It is not independently proven settlement.
 
-Kalshi cancel/reschedule-to-fair-price wording does not block PAPER admission. Extra time, penalties, to-qualify, incomplete outcome sets, wrong period, and TOTAL line mismatch remain fail-closed.
+Kalshi cancel/reschedule-to-fair-price wording does not block PAPER admission. Extra time, penalties, and to-qualify are unregistered native archetypes (they do not map to the onboarded full-time keys). Incomplete outcome sets, wrong period, and TOTAL line mismatch remain fail-closed through the register structural gate. Settlement fingerprints are not a second runtime tribunal after register lookup.
 
 Independently proven complete fingerprints remain `APPROVED_EQUIVALENT`. DNB, handicap, double chance, team total, team-to-score, and clean sheet stay explicit in the versioned registry as deferred / unsupported / venue-unavailable and must not trigger Phase-1 settlement/depth/solver/HOT work.
 

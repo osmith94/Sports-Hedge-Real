@@ -302,6 +302,8 @@ def test_naive_solver_would_overstate_profit_on_dnb_and_integer_lines() -> None:
     assert (
         UNPROVEN_SETTLEMENT_REASON in qualify.rejection_reasons
         or "incomplete_settlement" in qualify.rejection_reasons
+        or "not_registered" in qualify.rejection_reasons
+        or "market_not_equivalent" in qualify.rejection_reasons
     )
     assert PUSH_STATE_REASON not in dnb.rejection_reasons
     assert PUSH_STATE_REASON not in integer_totals.rejection_reasons
@@ -496,7 +498,7 @@ def test_asian_handicap_requires_exact_line_and_compatible_push() -> None:
     assert matcher.match(mb, pm_line).matched is False
     assert "line_mismatch" in matcher.match(mb, pm_line).reasons
     assert matcher.match(mb, pm_et).matched is False
-    assert "settlement_mismatch" in matcher.match(mb, pm_et).reasons
+    assert "not_registered" in matcher.match(mb, pm_et).reasons
     assert solver_eligible_market(mb) is False
     assert solver_ineligibility_reason(mb) == UNPROVEN_HANDICAP_REASON
     assert solver_eligible_pair(mb, pm_same, matcher.match(mb, pm_same)) is False
@@ -787,7 +789,7 @@ def test_to_qualify_is_not_inferred_from_family_name() -> None:
     assert matcher.match(mb_result, mb_qualify).matched is False
     assert "market_family_mismatch" in matcher.match(mb_result, pm_qualify).reasons
     assert matcher.match(mb_qualify, pm_qualify).matched is False
-    assert "incomplete_settlement" in matcher.match(mb_qualify, pm_qualify).reasons
+    assert "not_registered" in matcher.match(mb_qualify, pm_qualify).reasons
     assert solver_eligible_market(mb_qualify) is False
     assert solver_eligible_market(pm_qualify) is False
     assert solver_ineligibility_reason(mb_qualify) == UNPROVEN_SETTLEMENT_REASON

@@ -51,7 +51,7 @@ PAIRWISE_MATRIX: tuple[PairwiseCell, ...] = (
             "REVIEW_REQUIRED: Polymarket missing/unparsed settlement wording",
             "REVIEW_REQUIRED: lone Polymarket moneyline binary is not 3-way 1X2",
             "APPROVED_PARAMETER_MISMATCH: first-half vs full-time",
-            "KNOWN_CONTRADICTION: extra-time/penalties vs regulation",
+            "UNSUPPORTED/not_registered: extra-time/penalties is a different native archetype",
         ],
     ),
     PairwiseCell(
@@ -67,7 +67,7 @@ PAIRWISE_MATRIX: tuple[PairwiseCell, ...] = (
         sibling_states=[
             "PAPER_ASSUMED_EQUIVALENT: Kalshi GAMEWIN result-scope placeholder unavailable",
             "PAPER_ASSUMED_EQUIVALENT: Kalshi cancellation/reschedule-to-fair-price; owner-approved paper assumption",
-            "KNOWN_CONTRADICTION: proven extra-time/penalties vs Matchbook regulation",
+            "UNSUPPORTED/not_registered: extra-time/penalties is a different native archetype",
             "UNSUPPORTED: To Qualify / two-way books",
         ],
     ),
@@ -191,7 +191,7 @@ PAIRWISE_MATRIX: tuple[PairwiseCell, ...] = (
         sibling_states=[
             "REVIEW_REQUIRED: both sides missing NO_GOAL (void/0-0 unproven)",
             "KNOWN_CONTRADICTION: one side has NO_GOAL, the other does not",
-            "KNOWN_CONTRADICTION: extra time vs regulation",
+            "UNSUPPORTED/not_registered: extra time is a different native archetype",
             "UNSUPPORTED: player first-goalscorer / next-goal",
         ],
     ),

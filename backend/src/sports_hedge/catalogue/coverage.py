@@ -137,13 +137,16 @@ def coverage_from_corpus(
             "HOT and UNIVERSE share this catalogue; classifier has no scan_lane.",
             (
                 "Before = matcher.matched and solver_model_for_pair capability. "
+                "PAPER_ASSUMED_EQUIVALENT register rows never live-execution eligible. "
                 "After = Tenet 20 catalogue state. Production paper scan admits "
-                "APPROVED_EQUIVALENT and PAPER_ASSUMED_EQUIVALENT (Matchbook↔Kalshi "
-                "locked four families, settlement_assumption=regulation_time). "
-                "GAMEWIN-unknown ordinary 1X2 and structurally matched BTTS/TOTAL/FTTS "
-                "without independent settlement proof are paper-assumed, never "
-                "live-execution eligible. Extra-time / penalties / to-qualify stay "
-                "fail-closed. Kalshi fair-price wording does not block PAPER admission."
+                "only Approved Match Register rows (Matchbook↔Kalshi locked four "
+                "families, settlement_assumption=regulation_time). Independently "
+                "proven unregistered pairs may still classify APPROVED_EQUIVALENT "
+                "for census but are not paper-admitted. GAMEWIN-unknown ordinary "
+                "1X2 and structurally matched BTTS/TOTAL/FTTS without independent "
+                "settlement proof are paper-assumed, never live-execution eligible. "
+                "Extra-time / penalties / to-qualify are unregistered native "
+                "archetypes. Kalshi fair-price wording does not block PAPER admission."
             ),
         ],
     )

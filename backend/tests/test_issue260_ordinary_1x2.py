@@ -226,7 +226,7 @@ def test_matchbook_extra_time_does_not_use_gamewin_unknown_tolerance() -> None:
     kalshi = _unknown_kalshi()
     result = MarketMatcher().match(mb, kalshi)
     assert result.matched is False
-    assert "incomplete_settlement" in result.reasons
+    assert "not_registered" in result.reasons
     assert allow_unknown_settlement_for_ordinary_1x2(mb, kalshi) is False
 
 
@@ -244,7 +244,7 @@ def test_polymarket_unknown_1x2_still_fails_closed() -> None:
     )
     result = MarketMatcher().match(mb, polymarket)
     assert result.matched is False
-    assert "incomplete_settlement" in result.reasons
+    assert "not_registered" in result.reasons
 
 
 def test_to_qualify_and_two_way_and_first_half_reject() -> None:
@@ -294,7 +294,8 @@ def test_explicit_extra_time_contradiction_rejects() -> None:
     )
     result = MarketMatcher().match(mb, extra_time)
     assert result.matched is False
-    assert "settlement_mismatch" in result.reasons
+    assert "settlement_mismatch" not in result.reasons
+    assert "not_registered" in result.reasons
 
 
 def test_unrelated_fixture_rejects() -> None:

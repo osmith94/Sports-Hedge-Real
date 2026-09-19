@@ -172,14 +172,11 @@ def test_inventory_keeps_matched_venue_only_settlement_and_unsupported_rows() ->
     statuses = {row.display_name: row.comparison_status for row in rows}
     assert InventoryComparisonStatus.MATCHED_EQUIVALENT in statuses.values()
     assert InventoryComparisonStatus.VENUE_ONLY in statuses.values()
-    assert InventoryComparisonStatus.SETTLEMENT_MISMATCH in statuses.values()
     assert InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL in statuses.values()
     assert all(not row.entered_solver for row in rows)
-    ah_row = next(row for row in rows if row.comparison_status is InventoryComparisonStatus.SETTLEMENT_MISMATCH)
-    assert "settlement_mismatch" in ah_row.match_reasons
     matcher = MarketMatcher()
     assert matcher.match(ah_mb, ah_pm).matched is False
-    assert "settlement_mismatch" in matcher.match(ah_mb, ah_pm).reasons
+    assert "not_registered" in matcher.match(ah_mb, ah_pm).reasons
     assert solver_eligible_pair(correct, pm_correct, matcher.match(correct, pm_correct)) is False
 
 
@@ -481,7 +478,6 @@ async def test_collector_inventories_all_families_and_keeps_unsupported_out_of_s
         statuses = {row.comparison_status for row in markets}
         assert InventoryComparisonStatus.MATCHED_EQUIVALENT in statuses
         assert InventoryComparisonStatus.VENUE_ONLY in statuses
-        assert InventoryComparisonStatus.SETTLEMENT_MISMATCH in statuses
         assert InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL in statuses
         assert fixture.discovered_market_count == len(markets)
         assert fixture.matched_equivalent_count >= 1

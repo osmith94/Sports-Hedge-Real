@@ -402,7 +402,9 @@ def test_parameter_mismatch_and_contradiction_remain_blocked() -> None:
             series=GAMEWIN_SERIES,
         ),
     )
-    assert contradiction.state is CatalogueApprovalState.KNOWN_CONTRADICTION
+    assert contradiction.state is CatalogueApprovalState.UNSUPPORTED
+    assert contradiction.paper_mode_admitted is False
+    assert contradiction.state is not CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     ftts = classify_payload_pair(
         PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[
             {
@@ -443,9 +445,10 @@ def test_parameter_mismatch_and_contradiction_remain_blocked() -> None:
             ],
         ),
     )
-    assert ftts.state is CatalogueApprovalState.KNOWN_CONTRADICTION
+    assert ftts.state is CatalogueApprovalState.UNSUPPORTED
     assert ftts.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
     assert ftts.state is not CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert ftts.paper_mode_admitted is False
     corpus_ftts = classify_payload_pair(_mb([_mb_ftts()]), _kalshi([
         {
             "ticker": "KX-FTTS-H",

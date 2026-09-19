@@ -31,7 +31,11 @@ from sports_hedge.arbitrage.priority_alerts.thresholds import PriorityAlertThres
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.catalogue.classify import PayloadSide, classify_payload_pair, normalize_payload_side
-from sports_hedge.catalogue.corpus import CANCEL_RESCHEDULE_FAIR_PRICE, REGULATION
+from sports_hedge.catalogue.corpus import (
+    CANCEL_RESCHEDULE_FAIR_PRICE,
+    ET_RULES,
+    REGULATION,
+)
 from sports_hedge.catalogue.states import CatalogueApprovalState
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
@@ -574,3 +578,267 @@ def test_ftts_bridge_does_not_project_dnb_or_integer_totals() -> None:
         }
     )
     assert project_ftts_payoff_to_ordinary_depth(integer_total) is None
+
+
+def _registered_payload_pairs() -> list[tuple[str, PayloadSide, PayloadSide]]:
+    game = _kalshi_game_event(rules=REGULATION, secondary=CANCEL_RESCHEDULE_FAIR_PRICE)
+    btts = _kalshi_btts_event()
+    btts["markets"][0]["rules_primary"] = "See contract URL."
+    total = _kalshi_total_event("2.5")
+    total["markets"][0]["rules_primary"] = "See contract URL."
+    ftts = _kalshi_ftts_event()
+    for market in ftts["markets"]:
+        market["rules_primary"] = "Winner of the match."
+    return [
+        (
+            CANONICAL_MATCH_RESULT_FT,
+            PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[_arb_mb_match_odds()]),
+            PayloadSide(
+                venue=VenueName.KALSHI,
+                event=game,
+                markets=list(game["markets"]),
+                series=_series("KXEPLGAME"),
+            ),
+        ),
+        (
+            CANONICAL_BTTS_FT,
+            PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[_arb_mb_btts()]),
+            PayloadSide(
+                venue=VenueName.KALSHI,
+                event=btts,
+                markets=list(btts["markets"]),
+                series=_series("KXEPLBTTS"),
+            ),
+        ),
+        (
+            "TOTAL_GOALS_FT:2.5",
+            PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[_arb_mb_totals("2.5")]),
+            PayloadSide(
+                venue=VenueName.KALSHI,
+                event=total,
+                markets=list(total["markets"]),
+                series=_series("KXEPLTOTAL"),
+            ),
+        ),
+        (
+            CANONICAL_FTTS_FT,
+            PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[_arb_mb_ftts()]),
+            PayloadSide(
+                venue=VenueName.KALSHI,
+                event=ftts,
+                markets=list(ftts["markets"]),
+                series=_series("KXEPLFTTS"),
+            ),
+        ),
+    ]
+
+
+@pytest.mark.parametrize("expected_key,_left,_right", _registered_payload_pairs())
+def test_settlement_prose_cannot_veto_registered_paper_admission(
+    expected_key: str,
+    _left: PayloadSide,
+    _right: PayloadSide,
+) -> None:
+    left = normalize_payload_side(_left)
+    right = normalize_payload_side(_right)
+    assert canonical_key_for_market(left) == expected_key
+    assert canonical_key_for_market(right) == expected_key
+    baseline = MarketMatcher().match(left, right)
+    assert baseline.matched is True
+    mutated = right.model_copy(
+        update={
+            "settlement": right.settlement.model_copy(
+                update={
+                    "unknown_reason": "see_contract_url",
+                    "postponement_rule": "fair-price-on-cancel",
+                    "abandonment_rule": "void-or-fair-price",
+                    "source_rule_version": "mutated-for-test",
+                }
+            )
+        }
+    )
+    after = MarketMatcher().match(left, mutated)
+    assert after.matched is True
+    assert REGISTER_ADMITTED_REASON in after.reasons
+    assert f"canonical_key={expected_key}" in after.reasons
+    assessment = classify_payload_pair(_left, _right)
+    assert assessment.paper_mode_admitted is True
+    assert assessment.state in {
+        CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT,
+        CatalogueApprovalState.APPROVED_EQUIVALENT,
+    }
+
+
+def test_registered_key_and_structure_are_sufficient_after_fixture_identity() -> None:
+    for expected_key, left_side, right_side in _registered_payload_pairs():
+        left = normalize_payload_side(left_side)
+        right = normalize_payload_side(right_side)
+        match = MarketMatcher().match(left, right)
+        assert match.matched is True, expected_key
+        assert REGISTER_ADMITTED_REASON in match.reasons
+        assert registered_structural_match(left, right) is True
+        assert classify_payload_pair(left_side, right_side).paper_mode_admitted is True
+
+
+def test_wrong_fixture_family_period_line_and_outcomes_fail_register_gate() -> None:
+    mb = normalize_payload_side(
+        PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[_arb_mb_match_odds()])
+    )
+    game = _kalshi_game_event(rules=REGULATION, secondary=CANCEL_RESCHEDULE_FAIR_PRICE)
+    kalshi = normalize_payload_side(
+        PayloadSide(
+            venue=VenueName.KALSHI,
+            event=game,
+            markets=list(game["markets"]),
+            series=_series("KXEPLGAME"),
+        )
+    )
+    wrong_event = kalshi.model_copy(
+        update={"event": kalshi.event.model_copy(update={"home_team": "Different FC"})}
+    )
+    fixture = MarketMatcher().match(mb, wrong_event)
+    assert fixture.matched is False
+    assert "event_mismatch" in fixture.reasons
+
+    btts = _kalshi_btts_event()
+    family = MarketMatcher().match(
+        mb,
+        normalize_payload_side(
+            PayloadSide(
+                venue=VenueName.KALSHI,
+                event=btts,
+                markets=list(btts["markets"]),
+                series=_series("KXEPLBTTS"),
+            )
+        ),
+    )
+    assert family.matched is False
+    assert "market_family_mismatch" in family.reasons
+
+    from sports_hedge.domain.football import FootballPeriod
+
+    half = kalshi.model_copy(update={"period": FootballPeriod.FIRST_HALF})
+    period = MarketMatcher().match(mb, half)
+    assert period.matched is False
+    assert "period_mismatch" in period.reasons
+
+    totals_left = normalize_payload_side(
+        PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[_arb_mb_totals("2.5")])
+    )
+    wrong_line = _kalshi_total_event("3.5")
+    line = MarketMatcher().match(
+        totals_left,
+        normalize_payload_side(
+            PayloadSide(
+                venue=VenueName.KALSHI,
+                event=wrong_line,
+                markets=list(wrong_line["markets"]),
+                series=_series("KXEPLTOTAL"),
+            )
+        ),
+    )
+    assert line.matched is False
+    assert "line_mismatch" in line.reasons
+
+    drop_draw = kalshi.model_copy(
+        update={"runners": [runner for runner in kalshi.runners if runner.outcome.value != "draw"]}
+    )
+    outcomes = MarketMatcher().match(mb, drop_draw)
+    assert outcomes.matched is False
+    assert "outcome_space_mismatch" in outcomes.reasons
+
+
+def test_extra_time_is_unregistered_archetype_not_fingerprint_veto() -> None:
+    from sports_hedge.matching.approved_register import canonical_key_for_market
+
+    mb = PayloadSide(venue=VenueName.MATCHBOOK, event=_mb_event(), markets=[_arb_mb_match_odds()])
+    et_event = _kalshi_game_event(rules=ET_RULES)
+    et = PayloadSide(
+        venue=VenueName.KALSHI,
+        event=et_event,
+        markets=list(et_event["markets"]),
+        series=_series("KXEPLGAME"),
+    )
+    right = normalize_payload_side(et)
+    assert canonical_key_for_market(right) is None
+    match = MarketMatcher().match(normalize_payload_side(mb), right)
+    assert match.matched is False
+    assert "settlement_mismatch" not in match.reasons
+    assert "incomplete_settlement" not in match.reasons
+    assessment = classify_payload_pair(mb, et)
+    assert assessment.state is CatalogueApprovalState.UNSUPPORTED
+    assert assessment.paper_mode_admitted is False
+    assert assessment.state is not CatalogueApprovalState.KNOWN_CONTRADICTION
+
+
+def test_unregistered_pair_does_not_invoke_mapping_review_or_confidence_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sports_hedge.application.paper_scan as paper_scan_mod
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("mapping review must not run for unregistered pairs")
+
+    monkeypatch.setattr(
+        "sports_hedge.application.mapping_review.evidence_from_markets",
+        boom,
+    )
+    from sports_hedge.catalogue.corpus import census_corpus
+
+    entry = next(item for item in census_corpus() if item.entry_id == "bad-1x2-mb-pm-unknown-settlement")
+    left_m = normalize_payload_side(entry.left).model_copy(update={"confidence": 0.11})
+    right_m = normalize_payload_side(entry.right).model_copy(update={"confidence": 0.11})
+    intelligence = MarketIntelligenceService(SqliteMarketIntelligenceRepository())
+    decision = PaperScanService(intelligence).scan_pair(
+        _observation_from_canonical(left_m),
+        _observation_from_canonical(right_m),
+        minimum_mapping_confidence=0.99,
+        maximum_execution_risk=100,
+        fx_snapshots=_fx(),
+        venue_costs=_costs(),
+    )
+    assert decision.market_match.matched is False
+    assert "not_registered" in decision.market_match.reasons
+    assert decision.mapping_review_candidate is None
+    assert "mapping_confidence_below_threshold" not in decision.rejection_reasons
+    assert "evidence_from_markets" not in paper_scan_mod.__dict__
+
+
+def test_ftts_bridge_requires_register_identity() -> None:
+    from sports_hedge.application.ftts_alert_bridge import (
+        attach_ftts_ordinary_depth,
+        ftts_register_admitted,
+    )
+    from sports_hedge.arbitrage.depth import DepthQuoteCandidate
+    from sports_hedge.arbitrage.models import PayoffSolution
+    from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
+    from sports_hedge.matching.markets import MarketMatchResult
+    from sports_hedge.paper.models import PaperScanDecision
+
+    quotes = [
+        DepthQuoteCandidate(
+            outcome=outcome,
+            venue=VenueName.MATCHBOOK,
+            source_market_id="1",
+            source_runner_id=str(index),
+            gross_weighted_odds=Decimal("3.30"),
+            net_decimal_odds=Decimal("3.30"),
+            cumulative_depth=Decimal("100"),
+            levels_consumed=1,
+        )
+        for index, outcome in enumerate(("home", "away", "no_goal"), start=1)
+    ]
+    payoff = PayoffScanResult(
+        solution=PayoffSolution(is_arbitrage=True, minimum_state_pnl=Decimal("1")),
+        selected_quotes=quotes,
+        combinations_evaluated=1,
+    )
+    unregistered = PaperScanDecision(
+        market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=["teams_equivalent"]),
+        payoff_scan=payoff,
+        solver_model="generalized_payoff",
+        eligible_for_paper_simulation=True,
+    )
+    assert ftts_register_admitted(unregistered) is False
+    assert attach_ftts_ordinary_depth(unregistered).depth_scan is None
+

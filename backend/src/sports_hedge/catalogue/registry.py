@@ -308,7 +308,7 @@ ARCHETYPE_SPECS: tuple[CatalogueArchetypeSpec, ...] = (
                 ),
                 sibling_states=(
                     "APPROVED_EQUIVALENT: nested/Get Market 90-minute wording independently proves regulation",
-                    "KNOWN_CONTRADICTION: extra-time/penalties/to-qualify vs Matchbook regulation",
+                    "UNSUPPORTED/not_registered: extra-time/penalties/to-qualify is a different native archetype",
                     "PAPER_ASSUMED_EQUIVALENT: cancel/reschedule-to-fair-price; owner-approved paper assumption",
                     "REVIEW_REQUIRED: incomplete HOME/DRAW/AWAY outcome set",
                 ),

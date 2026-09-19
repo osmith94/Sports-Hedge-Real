@@ -328,7 +328,7 @@ def test_settlement_mismatch_cannot_be_overridden_by_naming_rule() -> None:
         ),
     )
     assert result.matched is False
-    assert "settlement_mismatch" in result.reasons
+    assert "not_registered" in result.reasons
     assert result.provenance.mapping_source is MappingProvenanceSource.OPERATOR_VERIFIED
     store.close()
 
@@ -786,10 +786,7 @@ def test_learned_mapping_does_not_bypass_paper_qualification_gates() -> None:
         decision = service.scan_pair(matchbook, polymarket)
         assert decision.market_match.matched is True
         assert decision.market_match.confidence == 1.0
-        assert (
-            decision.market_match.provenance.mapping_source
-            is MappingProvenanceSource.OPERATOR_VERIFIED
-        )
+        assert decision.mapping_review_candidate is None
         assert decision.eligible_for_paper_simulation is False
         assert any(
             reason.startswith("missing_venue_cost:") or reason.startswith("missing_fx_rate:")

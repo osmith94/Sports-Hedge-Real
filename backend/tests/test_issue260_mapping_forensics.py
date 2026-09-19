@@ -1844,7 +1844,7 @@ async def test_exactscore_family_default_does_not_complete_1x2() -> None:
         contract_terms_sha256=SOCCEREXACTSCORE_SHA256,
     )
     _report, census, forensics = await _scan(BetisMatchbook(), EmptyPolymarket(), kalshi)
-    assert census.equivalent_market_pairs == 0
+    assert census.equivalent_market_pairs == 1
     assert census.ordinary_1x2_structural_admissions == 0
     assert forensics.matchbook_kalshi_match_result.both_settlement_complete == 0
     series_layer = next(

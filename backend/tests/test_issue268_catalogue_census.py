@@ -84,7 +84,7 @@ def test_classifier_has_no_scan_lane_and_is_shared_by_hot_and_universe() -> None
     assert "scan_lane" not in inspect.signature(classify_payload_pair).parameters
     assert "scan_lane" not in inspect.signature(assess_catalogue_admission).parameters
     assert "scan_lane" not in inspect.signature(scan_eligible_pair).parameters
-    sample = next(item for item in census_corpus() if item.entry_id == "good-1x2-mb-pm")
+    sample = next(item for item in census_corpus() if item.entry_id == "good-1x2-mb-k-complete")
     assessment = classify_payload_pair(sample.left, sample.right)
     assert assessment.catalogue_shared_by == ("hot", "universe")
     assert assessment.execution_eligible is False
@@ -95,6 +95,7 @@ def test_classifier_has_no_scan_lane_and_is_shared_by_hot_and_universe() -> None
     )
     assert admission.catalogue_shared_by == ("hot", "universe")
     assert admission.allowed is True
+    assert admission.paper_mode_admitted is True
 
 
 def test_execution_remains_disabled() -> None:
@@ -240,12 +241,13 @@ def test_high_confidence_does_not_approve_incomplete_settlement() -> None:
         confidence=0.99,
     )
     assessment = classify_pair(left, right)
-    assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED
-    assert assessment.reason == "incomplete_settlement"
+    assert assessment.state is CatalogueApprovalState.UNSUPPORTED
+    assert assessment.reason == "not_registered"
     assert assessment.matcher_matched is False
+    assert assessment.paper_mode_admitted is False
 
 
-def test_review_required_examples_are_explicit() -> None:
+def test_unregistered_examples_are_not_runtime_review_loops() -> None:
     ids = {
         "bad-1x2-mb-pm-unknown-settlement",
         "bad-ftts-missing-no-goal-both",
@@ -254,7 +256,8 @@ def test_review_required_examples_are_explicit() -> None:
     by_id = {item.entry_id: item for item in census_corpus()}
     for entry_id in ids:
         assessment = classify_payload_pair(by_id[entry_id].left, by_id[entry_id].right)
-        assert assessment.state is CatalogueApprovalState.REVIEW_REQUIRED, entry_id
+        assert assessment.state is CatalogueApprovalState.UNSUPPORTED, entry_id
+        assert assessment.paper_mode_admitted is False
     paper_assumed_ids = {
         "bad-btts-k-ambiguous-rules",
         "bad-totals-k-ambiguous-rules",
@@ -285,7 +288,7 @@ def test_unsupported_and_parameter_and_contradiction_examples() -> None:
         classify_payload_pair(
             by_id["bad-1x2-et-contradiction"].left, by_id["bad-1x2-et-contradiction"].right
         ).state
-        is CatalogueApprovalState.KNOWN_CONTRADICTION
+        is CatalogueApprovalState.UNSUPPORTED
     )
     assert (
         classify_payload_pair(
@@ -451,6 +454,7 @@ def test_approved_catalogue_pair_reaches_solver_eligibility() -> None:
         )
         assert decision.market_match.matched is True
         assert decision.solver_model == "simple_complete_set"
+        assert decision.mapping_review_candidate is None
         assert not any(reason.startswith("catalogue_") for reason in decision.rejection_reasons)
         assert Settings().sports_hedge_execution_enabled is False
     finally:
@@ -514,9 +518,9 @@ def test_unsupported_mismatch_and_contradiction_are_blocked_from_solver() -> Non
     cases = {
         "bad-totals-integer-mb-k": "catalogue_unsupported",
         "bad-totals-line-mismatch": "catalogue_approved_parameter_mismatch",
-        "bad-1x2-et-contradiction": "catalogue_known_contradiction",
+        "bad-1x2-et-contradiction": "catalogue_unsupported",
         "bad-handicap-mb-pm": "catalogue_unsupported",
-        "review-team-total-mb-pm": "catalogue_review_required",
+        "review-team-total-mb-pm": "catalogue_unsupported",
     }
     for entry_id, rejection in cases.items():
         entry = by_id[entry_id]

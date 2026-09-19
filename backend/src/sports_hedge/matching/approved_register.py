@@ -21,6 +21,7 @@ from sports_hedge.domain.football import (
     CanonicalOutcome,
     FootballPeriod,
     MarketFamily,
+    SettlementScope,
     line_push_possible,
 )
 from sports_hedge.domain.models import VenueName
@@ -39,6 +40,11 @@ CANONICAL_FTTS_FT = "FTTS_FT"
 APPROVED_PAPER_VENUE_PAIR = frozenset({VenueName.MATCHBOOK, VenueName.KALSHI})
 REGISTER_ADMITTED_REASON = "approved_match_register"
 REGISTER_PAPER_MODE_REASON = "register_paper_admitted_not_live_execution"
+NOT_REGISTERED_REASON = "not_registered"
+CANONICAL_KEY_REASON_PREFIX = "canonical_key="
+_EXTRA_TIME_OR_PENALTIES_ARCHETYPE_REASON = (
+    "kalshi_unmodelled_extra_time_or_penalties_wording"
+)
 
 MATCH_RESULT_OUTCOMES = frozenset(
     {CanonicalOutcome.HOME, CanonicalOutcome.DRAW, CanonicalOutcome.AWAY}
@@ -153,15 +159,37 @@ def _line_key(line: Decimal) -> str:
     return format(line.normalize(), "f")
 
 
+def register_key_reason(key: str) -> str:
+    return f"{CANONICAL_KEY_REASON_PREFIX}{key}"
+
+
+def _is_onboarded_full_time_regulation_contract(market: CanonicalMarket) -> bool:
+    """FT register archetypes are regulation-time contracts, not extra-time/to-qualify."""
+
+    if market.period is not FootballPeriod.FULL_TIME:
+        return False
+    if market.family is MarketFamily.TO_QUALIFY:
+        return False
+    settlement = market.settlement
+    if settlement.extra_time_included is True or settlement.penalties_included is True:
+        return False
+    if settlement.scope in {
+        SettlementScope.INCLUDING_EXTRA_TIME,
+        SettlementScope.INCLUDING_PENALTIES,
+    }:
+        return False
+    if settlement.unknown_reason == _EXTRA_TIME_OR_PENALTIES_ARCHETYPE_REASON:
+        return False
+    return True
+
+
 def venue_native_archetype_for(market: CanonicalMarket) -> VenueNativeArchetype | None:
     """Map a normalized venue market onto one onboarded native archetype."""
 
     outcomes = _outcomes(market)
     if CanonicalOutcome.OTHER in outcomes:
         return None
-    if market.period is not FootballPeriod.FULL_TIME:
-        return None
-    if market.settlement.period not in {FootballPeriod.FULL_TIME, FootballPeriod.UNKNOWN}:
+    if not _is_onboarded_full_time_regulation_contract(market):
         return None
     for item in VENUE_NATIVE_ARCHETYPES:
         if item.venue is not market.source_venue:
@@ -215,3 +243,18 @@ def registered_structural_match(left: CanonicalMarket, right: CanonicalMarket) -
     """True when onboarded native archetypes resolve to one canonical key."""
 
     return registered_canonical_key(left, right) is not None
+
+
+def structural_mismatch_reasons(left: CanonicalMarket, right: CanonicalMarket) -> list[str]:
+    """Family / period / line / outcome-space only. Not settlement fingerprints."""
+
+    reasons: list[str] = []
+    if left.family != right.family:
+        reasons.append("market_family_mismatch")
+    if left.period != right.period:
+        reasons.append("period_mismatch")
+    if left.line != right.line:
+        reasons.append("line_mismatch")
+    if _outcomes(left) != _outcomes(right):
+        reasons.append("outcome_space_mismatch")
+    return reasons

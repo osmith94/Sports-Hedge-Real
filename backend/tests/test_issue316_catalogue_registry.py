@@ -197,7 +197,9 @@ def test_gamewin_is_paper_assumed_and_proven_90m_is_approved() -> None:
             series=_series("KXEPLGAME"),
         ),
     )
-    assert et.state is CatalogueApprovalState.KNOWN_CONTRADICTION
+    assert et.state is CatalogueApprovalState.UNSUPPORTED
+    assert et.paper_mode_admitted is False
+    assert et.state is not CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     fair = classify_payload_pair(
         PayloadSide(venue=VenueName.MATCHBOOK, event=mb_event, markets=[_mb_match_odds()]),
         PayloadSide(
