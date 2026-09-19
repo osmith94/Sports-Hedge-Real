@@ -762,6 +762,7 @@ def test_wave2_does_not_change_scanner_architecture() -> None:
     collector_terminal = inspect.getsource(
         ReadOnlyCrossVenueCollector._mark_universe_catalogue_terminal
     )
+    collector_scan = inspect.getsource(ReadOnlyCrossVenueCollector._scan_cluster)
     collector_kalshi = inspect.getsource(ReadOnlyCrossVenueCollector._fetch_kalshi_cluster_side)
     collector_matchbook = inspect.getsource(
         ReadOnlyCrossVenueCollector._fetch_matchbook_cluster_side
@@ -775,8 +776,8 @@ def test_wave2_does_not_change_scanner_architecture() -> None:
     assert "persist_universe_catalogue_pass_offloop" in collector_terminal
     assert "FamilyDiscoveryCompleteness" in collector_persist
     assert "listed_ok" not in collector_persist
-    assert "matchbook_side.listing_complete" in collector_persist
-    assert "matchbook_listing_complete=matchbook_side.listed" not in collector_persist
+    assert "matchbook_side.listing_complete" in collector_scan
+    assert "matchbook_listing_complete=matchbook_side.listed" not in collector_scan
     assert "_mark_unprocessed_kalshi_families_incomplete" in collector_kalshi
     assert "truncated" in collector_matchbook
     assert "listing_complete" in collector_matchbook
