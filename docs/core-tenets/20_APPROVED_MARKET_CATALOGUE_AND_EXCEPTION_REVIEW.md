@@ -388,22 +388,37 @@ This tenet narrows the operational strategy:
 
 Therefore an ambiguous market should be **excluded from executable comparison and surfaced for review**, rather than admitted through a general confidence score or silently guessed.
 
-## 14. Relationship to HOT and UNIVERSE
+## 14. Relationship to UNIVERSE, catalogue and the price engine
 
-HOT and UNIVERSE must use the same approved catalogue and the same venue recognition rules.
+Core Tenet 19 defines the authoritative runtime flow:
+
+```text
+UNIVERSE discovery
+    ↓
+durable approved-market catalogue
+    ↓
+one price engine
+    ↓
+HOT / BACKGROUND priority
+```
+
+UNIVERSE and the price engine must use the same Approved Match Register and venue recognition rules.
 
 There must not be:
 
 - a HOT-only approved catalogue;
 - a UNIVERSE-only catalogue;
+- a HOT-only matcher or equivalence tribunal;
 - separate exception rules;
 - separate settlement semantics.
 
-UNIVERSE discovers approved-market candidates and exceptions.
+UNIVERSE discovers and maintains approved-market identity: canonical fixture, canonical key, exact parameters, exact native IDs and required outcome mapping.
 
-HOT watches already-known approved-equivalent markets and promoted fixtures.
+HOT and BACKGROUND then reprice those already-known catalogue rows from exact native IDs. They do not re-run broad discovery or re-litigate registered equivalence on every cadence.
 
-Execution decides only after approved equivalence plus all economic, freshness, liquidity, treasury and safety gates pass.
+For parameterized archetypes such as Total Goals, every exact approved line is its own catalogue row. Discovery completeness is family-scoped: successful discovery of MATCH_RESULT or BTTS must not be used as evidence that TOTAL or FTTS is absent when that family timed out, was deferred, or was not queried.
+
+Execution decides only after approved equivalence plus the applicable economic, treasury and PAPER/execution rules.
 
 ## 15. Non-goals
 
