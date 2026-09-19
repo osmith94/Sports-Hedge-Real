@@ -674,6 +674,7 @@ class CataloguePriceEngine:
             started_at=observed_at,
             completed_at=observed_at,
             matching_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
+            enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
             paper_decisions=decisions,
             discovered_fixtures=[fixture],
             fixture_markets={identity.canonical_event_id: rows},

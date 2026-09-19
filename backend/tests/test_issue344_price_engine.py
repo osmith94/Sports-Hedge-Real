@@ -939,9 +939,9 @@ async def test_four_hung_kalshi_slots_defer_or_not_start_later_items(
     assert layer.limits[VenueName.KALSHI] == 4
 
 
-@pytest.mark.asyncio
-async def test_scheduled_hot_tick_uses_price_engine_not_legacy_collector(monkeypatch) -> None:
+def _scheduled_hot_tick_env(monkeypatch):
     from sports_hedge.api import paper as paper_api
+    from sports_hedge.api import watchlist as watchlist_api
     from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 
     row = _row(
@@ -967,20 +967,31 @@ async def test_scheduled_hot_tick_uses_price_engine_not_legacy_collector(monkeyp
     coordinator.bind_catalogue_store(store)
     paper = StubPaperScan()
     monkeypatch.setattr(paper_api, "scheduled_paper_scan_service", lambda: paper)
+    monkeypatch.setattr(paper_api, "get_paper_audit_repository", lambda: object())
+    monkeypatch.setattr(watchlist_api, "get_watchlist_repository", lambda: object())
+    monkeypatch.setattr(watchlist_api, "get_watchlist_service", lambda repo: object())
 
     async def forbidden_collect(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("legacy HOT collector must not run on scheduled HOT")
 
-    async def forbidden_persist(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("scheduled HOT must not persist a legacy collector report")
-
     monkeypatch.setattr(paper_api, "_collect_report", forbidden_collect)
-    monkeypatch.setattr(paper_api, "persist_scheduled_collection_report", forbidden_persist)
     plan = DualCadencePlan(
         lane="hot",
         reason="hot_due",
         identity_scope=[row.canonical_event_id],
     )
+    return paper_api, coordinator, matchbook, kalshi, paper, plan
+
+
+@pytest.mark.asyncio
+async def test_scheduled_hot_tick_uses_price_engine_not_legacy_collector(monkeypatch) -> None:
+    paper_api, coordinator, matchbook, kalshi, paper, plan = _scheduled_hot_tick_env(monkeypatch)
+    persist_calls: list[dict[str, Any]] = []
+
+    async def capture_persist(*args: Any, **kwargs: Any) -> None:
+        persist_calls.append({"args": args, "kwargs": kwargs})
+
+    monkeypatch.setattr(paper_api, "persist_scheduled_collection_report", capture_persist)
     try:
         await paper_api.server_owned_refresh_tick(plan)
         engine = coordinator.price_engine()
@@ -988,15 +999,62 @@ async def test_scheduled_hot_tick_uses_price_engine_not_legacy_collector(monkeyp
         assert runtime is not None
         assert runtime.priority is PriceEnginePriority.HOT
         assert runtime.status.value == "evaluated"
+        assert paper.calls == 1
         assert matchbook.get_market_calls == [("8801", "316201")]
         assert kalshi.book_calls == ["KXEPLBTTS-SCHED-BTTS"]
         assert matchbook.list_events_calls == 0
         assert matchbook.list_markets_calls == []
         assert kalshi.list_events_calls == 0
         assert kalshi.list_markets_calls == []
+        assert len(persist_calls) == 1
+        persist_kwargs = persist_calls[0]["kwargs"]
+        report = persist_calls[0]["args"][1]
+        assert persist_kwargs["scan_lane"] is ScanLane.HOT
+        assert report.enabled_venues == [VenueName.MATCHBOOK, VenueName.KALSHI]
+        assert report.matching_venues == [VenueName.MATCHBOOK, VenueName.KALSHI]
+        assert report.paper_decisions == [paper.decision]
+        assert report.scan_diagnostics["price_engine"] is True
+        assert report.scan_diagnostics["legacy_hot_collector"] is False
         tick_src = inspect.getsource(paper_api.server_owned_refresh_tick)
         assert tick_src.index("PriceEnginePriority.HOT") < tick_src.index("_collect_report(")
+        assert tick_src.index("run_cycle") < tick_src.index("persist_scheduled_collection_report")
         assert "legacy_hot_collector" in tick_src
+        engine_src = inspect.getsource(CataloguePriceEngine)
+        assert "persist_triggered_chain" not in engine_src
+        assert "persist_scheduled_collection_report" not in engine_src
+        assert "_collect_report" not in engine_src
+        assert "persist_triggered_chain(" not in tick_src
+    finally:
+        coordinator.reset()
+        set_shared_provider_runtime(None)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_hot_persist_failure_is_not_scan_cycle_timeout(monkeypatch) -> None:
+    paper_api, coordinator, matchbook, kalshi, _paper, plan = _scheduled_hot_tick_env(monkeypatch)
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("audit_write_failed")
+
+    monkeypatch.setattr(paper_api, "_persist_collection_report", boom)
+    try:
+        await paper_api.server_owned_refresh_tick(plan)
+        assert matchbook.get_market_calls == [("8801", "316201")]
+        assert kalshi.book_calls == ["KXEPLBTTS-SCHED-BTTS"]
+        assert matchbook.list_events_calls == 0
+        assert kalshi.list_events_calls == 0
+        assert coordinator.status.last_error is None
+        assert coordinator.status.hot.last_error is None
+        assert coordinator.status.hot.persist_ok is False
+        assert coordinator.status.hot.last_persist_error == "audit_write_failed"
+        assert "scan_cycle_timeout" not in (coordinator.status.hot.last_error or "")
+        assert "scan_cycle_timeout" not in (coordinator.status.last_error or "")
+        persist_stage = (coordinator.status.hot.last_diagnostics or {}).get("stages", {}).get(
+            "persistence"
+        )
+        assert persist_stage is not None
+        assert persist_stage["ok"] is False
+        assert persist_stage["error"] == "audit_write_failed"
     finally:
         coordinator.reset()
         set_shared_provider_runtime(None)
