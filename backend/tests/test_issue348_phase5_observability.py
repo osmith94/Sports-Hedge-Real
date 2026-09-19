@@ -36,6 +36,7 @@ from sports_hedge.application.provider_access import (
     HEALTH_OK,
     ProviderAccessLayer,
 )
+from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.application.scanner_observability import ScannerObservabilitySink
 from sports_hedge.arbitrage.models import PayoffSolution
 from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
@@ -45,11 +46,12 @@ from sports_hedge.paper.models import PaperScanDecision
 from sports_hedge.paper.trades import PaperTradeState
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.universe_checkpoint import SqliteUniverseCheckpointStore
-from test_dual_cadence_scheduler import NOW
+from test_dual_cadence_scheduler import FakeClock
 from test_issue344_price_engine import (
     DISTANT_KICKOFF,
     FakeKalshi,
     NEAR_KICKOFF,
+    NOW,
     StubPaperScan,
     _engine,
     _hold_slot,
@@ -606,35 +608,39 @@ async def test_non_interesting_evaluation_demotes_unless_lifecycle_hot() -> None
     distant = _row(
         suffix="demote",
         kickoff=DISTANT_KICKOFF,
+        matchbook_event_id="8851",
         matchbook_market_id="316581",
         kalshi_event="KXEPLBTTS-DEMOTE",
     )
     near = _row(
         suffix="keep",
         kickoff=NEAR_KICKOFF,
+        matchbook_event_id="8852",
         matchbook_market_id="316582",
         kalshi_event="KXEPLBTTS-KEEP",
     )
+    clock = FakeClock(NOW)
     engine, _mb, _ks, _layer = _engine(
-        [distant, near], paper_scan=paper, fixture_state=fixture_state
+        [distant, near], paper_scan=paper, fixture_state=fixture_state, clock=clock
     )
     distant_runtime = engine.item("amc-demote")
     near_runtime = engine.item("amc-keep")
     assert distant_runtime is not None and near_runtime is not None
-    first = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
+    first = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=clock.now)
     assert distant.canonical_event_id in first.promotions
     assert engine.classify_priority(distant_runtime.identity) is PriceEnginePriority.HOT
     assert engine.classify_priority(near_runtime.identity) is PriceEnginePriority.HOT
     paper.decision = _flat_decision()
-    cooled = await engine.run_slice(PriceEnginePriority.HOT, now=NOW)
+    clock.advance(30)
+    cooled = await engine.run_slice(PriceEnginePriority.HOT, now=clock.now)
     assert "amc-demote" in cooled.evaluated
     assert "amc-keep" in cooled.evaluated
     assert distant.canonical_event_id not in engine._promoted_hot_ids
     assert engine.classify_priority(distant_runtime.identity) is PriceEnginePriority.BACKGROUND
     assert engine.classify_priority(near_runtime.identity) is PriceEnginePriority.HOT
     await engine.drain_observability()
-    assert distant.canonical_event_id not in fixture_state.hot_identity_scope(NOW)
-    assert near.canonical_event_id in fixture_state.hot_identity_scope(NOW)
+    assert distant.canonical_event_id not in fixture_state.hot_identity_scope(clock.now)
+    assert near.canonical_event_id in fixture_state.hot_identity_scope(clock.now)
 
 
 @pytest.mark.asyncio
@@ -647,14 +653,18 @@ async def test_lagged_ui_projection_cannot_change_scheduler_promotion() -> None:
         matchbook_market_id="316583",
         kalshi_event="KXEPLBTTS-IGNOREUI",
     )
-    engine, _mb, _ks, _layer = _engine([row], paper_scan=paper, fixture_state=fixture_state)
+    clock = FakeClock(NOW)
+    engine, _mb, _ks, _layer = _engine(
+        [row], paper_scan=paper, fixture_state=fixture_state, clock=clock
+    )
     runtime = engine.item("amc-ignoreui")
     assert runtime is not None
-    await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
+    await engine.run_slice(PriceEnginePriority.BACKGROUND, now=clock.now)
     fixture_state.hot_identity_scope = lambda now, **kwargs: []  # type: ignore[method-assign]
     assert engine.classify_priority(runtime.identity) is PriceEnginePriority.HOT
     paper.decision = _flat_decision()
-    await engine.run_slice(PriceEnginePriority.HOT, now=NOW)
+    clock.advance(30)
+    await engine.run_slice(PriceEnginePriority.HOT, now=clock.now)
     fixture_state.hot_identity_scope = (  # type: ignore[method-assign]
         lambda now, **kwargs: [row.canonical_event_id]
     )
@@ -707,7 +717,7 @@ async def test_delayed_projection_keeps_emitted_event_lane_and_identity() -> Non
     await engine.drain_observability()
     assert seen
     assert seen[0]["priority"] == PriceEnginePriority.HOT.value
-    assert seen[0]["scan_lane"] is ScanLane.HOT
+    assert seen[0]["scan_lane"] == ScanLane.HOT
     assert seen[0]["canonical_event_id"] == row.canonical_event_id
     assert seen[0]["catalogue_row_id"] == "amc-snap"
     assert runtime.priority is PriceEnginePriority.BACKGROUND
