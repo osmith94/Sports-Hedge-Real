@@ -70,12 +70,6 @@ from sports_hedge.application.provider_access import (
     HEALTH_UNAVAILABLE,
     get_shared_provider_access,
 )
-from sports_hedge.application.scanner_observability import (
-    PriceEnginePublicStatus,
-    ScannerObservabilitySink,
-    empty_price_engine_status,
-)
-from sports_hedge.application.venue_degradation_incident import VenueDegradationIncidentStore
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
     UNIVERSE_MIN_CHUNK_SECONDS,
@@ -86,6 +80,15 @@ from sports_hedge.application.scan_lanes import (
     WORKER_WAITING,
     ScanLane,
     universe_chunk_wall_seconds,
+)
+from sports_hedge.application.scanner_observability import (
+    PriceEnginePublicStatus,
+    ScannerObservabilitySink,
+    empty_price_engine_status,
+)
+from sports_hedge.application.venue_degradation_incident import (
+    VenueDegradationIncidentStore,
+    fallback_venue_degradation_incident,
 )
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
@@ -203,6 +206,14 @@ class LaneRefreshStatus(BaseModel):
     series_skipped: int = 0
 
 
+class VenueDegradationIncidentRef(BaseModel):
+    """Compact Why? pointer on the high-frequency live-refresh poll."""
+
+    available: bool = True
+    captured_at: str
+    incident_id: str
+
+
 class LiveRefreshStatus(BaseModel):
     discovery_source: VenueName = VenueName.MATCHBOOK
     discovery_mode: str = "venue_union"
@@ -254,7 +265,9 @@ class LiveRefreshStatus(BaseModel):
     venue_participation: LaneVenueParticipation | None = None
     recent_scan_cycles: list[PaperScanCycleRecord] = Field(default_factory=list)
     provider_access: dict[str, Any] = Field(default_factory=dict)
-    venue_degradation_incidents: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    venue_degradation_incidents: dict[str, VenueDegradationIncidentRef] = Field(
+        default_factory=dict
+    )
 
 
 class DualCadencePlan(BaseModel):
@@ -3301,10 +3314,25 @@ class LiveRefreshCoordinator:
             )
             return self.status
 
-    def observe_degradation_incidents(self, status: LiveRefreshStatus) -> dict[str, dict[str, Any]]:
-        """Bounded OK→degraded snapshots from an already-built live-refresh read model."""
+    def observe_degradation_incidents(
+        self, status: LiveRefreshStatus
+    ) -> dict[str, VenueDegradationIncidentRef]:
+        """Bounded OK→degraded capture. Returns compact refs for the poll payload."""
 
-        return self._degradation_incidents.observe(status, captured_at=self.now())
+        refs = self._degradation_incidents.observe(status, captured_at=self.now())
+        return {
+            venue: VenueDegradationIncidentRef.model_validate(ref) for venue, ref in refs.items()
+        }
+
+    def degradation_incident(self, venue: str) -> dict[str, Any] | None:
+        """Already-captured in-memory snapshot. Never probes venues or starts scans."""
+
+        return self._degradation_incidents.get(venue)
+
+    def fallback_degradation_incident(self, status: LiveRefreshStatus, venue: str) -> dict[str, Any]:
+        """Package the current coordinator read model when no transition snapshot exists."""
+
+        return fallback_venue_degradation_incident(status, venue, captured_at=self.now())
 
     def fixture_detail(self, canonical_event_id: str) -> FixtureDetailReadModel | None:
         return self._fixture_state.detail(

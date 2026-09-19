@@ -580,9 +580,16 @@ export type LaneVenueParticipationUpdate = {
   universe: LaneVenueFlags;
 };
 
+export type VenueDegradationIncidentRef = {
+  available: boolean;
+  captured_at: string;
+  incident_id: string;
+};
+
 export type VenueDegradationIncident = {
   schema?: string;
   data_kind?: string;
+  incident_id?: string;
   captured_at: string;
   build?: {
     git_sha?: string | null;
@@ -637,7 +644,7 @@ export type LiveRefreshStatus = {
   venue_participation?: LaneVenueParticipation | null;
   recent_scan_cycles?: PaperScanCycleRecord[];
   provider_access?: Record<string, unknown>;
-  venue_degradation_incidents?: Record<string, VenueDegradationIncident>;
+  venue_degradation_incidents?: Record<string, VenueDegradationIncidentRef>;
 };
 
 export type VenueHealth = {
@@ -1163,6 +1170,10 @@ export async function recommendPaperDeployment(payload: {
 
 export function getLiveRefreshStatus(): Promise<LiveRefreshStatus> {
   return request("/paper/live-refresh");
+}
+
+export function getVenueDegradationIncident(venue: string): Promise<VenueDegradationIncident> {
+  return request(`/paper/venue-degradation-incident/${encodeURIComponent(venue)}`);
 }
 
 export async function saveVenueParticipation(

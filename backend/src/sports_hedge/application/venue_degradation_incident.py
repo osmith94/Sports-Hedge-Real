@@ -13,6 +13,7 @@ import threading
 from collections import deque
 from datetime import UTC, datetime
 from typing import Any, Mapping
+from uuid import uuid4
 
 from sports_hedge.application.lane_venues import (
     OPERATOR_SCAN_VENUES,
@@ -38,6 +39,7 @@ FALLBACK_DATA_KIND = "already_polled_live_refresh_read_model"
 MAX_SCAN_CYCLE_SUMMARIES = 10
 MAX_STORED_INCIDENTS = 8
 FIRST_CLASS_VENUES: tuple[str, ...] = tuple(venue.value for venue in OPERATOR_SCAN_VENUES)
+INCIDENT_REF_KEYS = ("available", "captured_at", "incident_id")
 
 _UI_DEGRADED_EXTRA = frozenset({"retry_wait", "partial"})
 _LOCAL_BACKPRESSURE_HEALTH = frozenset(
@@ -277,6 +279,7 @@ def build_venue_degradation_incident(
     return {
         "schema": INCIDENT_SCHEMA,
         "data_kind": snapshot_kind,
+        "incident_id": str(uuid4()),
         "captured_at": _iso(moment),
         "build": {
             "git_sha": identity.git_sha,
@@ -304,6 +307,42 @@ def build_venue_degradation_incident(
     }
 
 
+def fallback_venue_degradation_incident(
+    status: Any,
+    venue: str,
+    *,
+    captured_at: datetime | None = None,
+    build: ServingBuildInfo | None = None,
+) -> dict[str, Any]:
+    """Current already-built read model only. Does not become the transition snapshot."""
+
+    top = dict(getattr(status, "venue_health", None) or {})
+    return build_venue_degradation_incident(
+        status,
+        venue,
+        previous_health=None,
+        new_health=top.get(venue),
+        captured_at=captured_at,
+        build=build,
+        snapshot_kind=FALLBACK_DATA_KIND,
+    )
+
+
+def incident_ref(incident: Mapping[str, Any]) -> dict[str, Any]:
+    """Tiny live-refresh pointer. Never includes lane dumps or cycle rows."""
+
+    return {
+        "available": True,
+        "captured_at": str(incident.get("captured_at") or ""),
+        "incident_id": str(incident.get("incident_id") or ""),
+    }
+
+
+def is_compact_incident_ref(payload: Mapping[str, Any] | None) -> bool:
+    keys = set(payload or {})
+    return keys == set(INCIDENT_REF_KEYS)
+
+
 class VenueDegradationIncidentStore:
     """Latest-per-venue snapshots plus a hard cap on retained incidents."""
 
@@ -325,6 +364,12 @@ class VenueDegradationIncidentStore:
         with self._lock:
             return len(self._retained)
 
+    def get(self, venue: str) -> dict[str, Any] | None:
+        key = str(venue or "").strip().casefold()
+        with self._lock:
+            incident = self._latest.get(key)
+            return dict(incident) if incident else None
+
     def observe(
         self,
         status: Any,
@@ -332,7 +377,7 @@ class VenueDegradationIncidentStore:
         captured_at: datetime | None = None,
         build: ServingBuildInfo | None = None,
     ) -> dict[str, dict[str, Any]]:
-        """Capture once per OK→degraded edge. Repeated degraded polls reuse the snapshot."""
+        """Capture once per OK→degraded edge. Returns compact refs, not full packets."""
 
         top = dict(getattr(status, "venue_health", None) or {})
         captured_at = captured_at or datetime.now(UTC)
@@ -356,7 +401,7 @@ class VenueDegradationIncidentStore:
                     self._latest.pop(venue, None)
                 self._previous_health[venue] = current
             return {
-                venue: dict(incident)
+                venue: incident_ref(incident)
                 for venue, incident in self._latest.items()
                 if is_ui_degraded_health(top.get(venue))
             }

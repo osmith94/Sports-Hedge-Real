@@ -3,15 +3,18 @@ export const VENUE_HEALTH_DISABLED = "disabled";
 export const PROVIDER_HEALTH_FAILURES = new Set([
   "unavailable",
   "timeout",
-  "discovery_timeout",
-  "market_timeout",
-  "auth_failure",
   "degraded",
   "error",
   "failed",
 ]);
 
-const UI_DEGRADED_EXTRA = new Set(["retry_wait", "partial"]);
+const WHY_ELIGIBLE_EXTRA = new Set([
+  "discovery_timeout",
+  "market_timeout",
+  "auth_failure",
+  "retry_wait",
+  "partial",
+]);
 
 export type VenueHealthTone = "ok" | "warn" | "down" | "unknown" | "off";
 
@@ -23,18 +26,16 @@ export function isProviderHealthFailure(value: string | undefined): boolean {
   return Boolean(value && PROVIDER_HEALTH_FAILURES.has(value));
 }
 
-export function isUiDegradedHealth(value: string | undefined): boolean {
+export function venueHealthNeedsWhy(value: string | undefined): boolean {
   if (!value || isOperatorDisabledHealth(value)) return false;
-  return isProviderHealthFailure(value) || UI_DEGRADED_EXTRA.has(value);
+  return isProviderHealthFailure(value) || WHY_ELIGIBLE_EXTRA.has(value);
 }
 
 export function venueHealthIsDegraded(health: Record<string, string> | undefined): boolean {
   if (!health) return false;
-  return ["matchbook", "polymarket", "kalshi"].some((venue) => isUiDegradedHealth(health[venue]));
-}
-
-export function venueHealthNeedsWhy(value: string | undefined): boolean {
-  return isUiDegradedHealth(value);
+  return ["matchbook", "polymarket", "kalshi"].some((venue) =>
+    isProviderHealthFailure(health[venue]),
+  );
 }
 
 export function scanHealthTone(value: string | undefined): VenueHealthTone | null {
@@ -61,7 +62,7 @@ export function pulseVenueTone(value: string | undefined): "ok" | "down" | "unkn
   if (!value) return "unknown";
   if (value === "ok") return "ok";
   if (isOperatorDisabledHealth(value)) return "off";
-  if (isUiDegradedHealth(value)) return "down";
+  if (isProviderHealthFailure(value)) return "down";
   return "unknown";
 }
 

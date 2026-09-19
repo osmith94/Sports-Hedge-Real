@@ -60,6 +60,7 @@ from sports_hedge.application.paper_operations import PaperOperationsError, Pape
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_cycle_audit import build_paper_scan_cycle_record
 from sports_hedge.application.scan_lanes import ScanLane
+from sports_hedge.application.venue_degradation_incident import FIRST_CLASS_VENUES
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.config import get_settings
@@ -798,12 +799,12 @@ def _status_with_scan_cycles(
     repository: Any,
     coordinator: Any | None = None,
 ) -> LiveRefreshStatus:
-    """Attach recent cycle rows and bounded Why? incidents. Never starts scan work."""
+    """Attach recent cycle rows and compact Why? refs. Never starts scan work."""
 
     resolved = coordinator or get_live_refresh_coordinator()
     with_cycles = status.model_copy(update={"recent_scan_cycles": _cycles_from(repository)})
-    incidents = resolved.observe_degradation_incidents(with_cycles)
-    return with_cycles.model_copy(update={"venue_degradation_incidents": incidents})
+    refs = resolved.observe_degradation_incidents(with_cycles)
+    return with_cycles.model_copy(update={"venue_degradation_incidents": refs})
 
 
 @router.get("/live-refresh", response_model=LiveRefreshStatus)
@@ -814,6 +815,25 @@ def live_refresh_status(
 
     coordinator = get_live_refresh_coordinator()
     return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+
+
+@router.get("/venue-degradation-incident/{venue}")
+def venue_degradation_incident(
+    venue: str,
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> dict[str, Any]:
+    """Cheap in-memory Why? snapshot. Never calls venues, /venues/health, or scan workers."""
+
+    key = str(venue or "").strip().casefold()
+    if key not in FIRST_CLASS_VENUES:
+        raise HTTPException(status_code=404, detail="unknown_venue")
+    coordinator = get_live_refresh_coordinator()
+    stored = coordinator.degradation_incident(key)
+    if stored:
+        return stored
+    status = coordinator.public_status()
+    with_cycles = status.model_copy(update={"recent_scan_cycles": _cycles_from(repository)})
+    return coordinator.fallback_degradation_incident(with_cycles, key)
 
 
 @router.get("/scanner-validation", response_model=ScannerValidationSnapshot)

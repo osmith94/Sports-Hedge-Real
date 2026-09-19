@@ -2,16 +2,17 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { LiveRefreshStatus, VenueHealth, getLiveRefreshStatus, getVenueHealth } from "../lib/api";
+import {
+  LiveRefreshStatus,
+  VenueHealth,
+  getLiveRefreshStatus,
+  getVenueDegradationIncident,
+  getVenueHealth,
+} from "../lib/api";
 import { useHydratedNowMs } from "./hydrated-relative-time";
 import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-refresh-poll-guard";
 import { dualScanStatusLines } from "../lib/scan-status-display";
-import {
-  createVenueDegradationIncidentStore,
-  downloadVenueWhyIncident,
-  observeVenueDegradationIncidents,
-  resolveVenueWhyIncident,
-} from "../lib/venue-degradation-incident";
+import { downloadVenueWhyIncident } from "../lib/venue-degradation-incident";
 import { scanHealthTone, venueHealthCaption, venueHealthNeedsWhy } from "../lib/venue-health-display";
 
 const FIRST_CLASS: Array<{ venue: VenueHealth["venue"]; label: string }> = [
@@ -36,8 +37,6 @@ export function VenueHealthBar() {
   const [refresh, setRefresh] = useState<LiveRefreshStatus | null>(null);
   const nowMs = useHydratedNowMs();
   const liveRefreshPollGuardRef = useRef(createLiveRefreshPollGuard());
-  const incidentStoreRef = useRef(createVenueDegradationIncidentStore());
-  const [incidents, setIncidents] = useState(incidentStoreRef.current.latest);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,7 +44,6 @@ export function VenueHealthBar() {
       applyLatestLiveRefresh(liveRefreshPollGuardRef.current, getLiveRefreshStatus, (status) => {
         if (cancelled) return;
         setRefresh(status);
-        setIncidents(observeVenueDegradationIncidents(incidentStoreRef.current, status));
       }).catch(() => undefined);
     void pollLiveRefresh();
     void getVenueHealth()
@@ -83,9 +81,9 @@ export function VenueHealthBar() {
                 className="status-why"
                 aria-label={`Why is ${item.label} degraded?`}
                 onClick={() => {
-                  const incident = resolveVenueWhyIncident(item.venue, incidents, refresh);
-                  if (!incident) return;
-                  downloadVenueWhyIncident(incident);
+                  void getVenueDegradationIncident(item.venue)
+                    .then((incident) => downloadVenueWhyIncident(incident))
+                    .catch(() => undefined);
                 }}
               >
                 Why?

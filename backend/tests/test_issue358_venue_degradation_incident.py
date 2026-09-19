@@ -7,6 +7,7 @@ HOT/BACKGROUND/UNIVERSE work, never hits /venues/health.
 from __future__ import annotations
 
 import inspect
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -35,8 +36,10 @@ from sports_hedge.application.scanner_observability import (
 )
 from sports_hedge.application.serving_build import ServingBuildInfo
 from sports_hedge.application.venue_degradation_incident import (
+    INCIDENT_REF_KEYS,
     MAX_STORED_INCIDENTS,
     VenueDegradationIncidentStore,
+    is_compact_incident_ref,
     is_ui_degraded_health,
 )
 from sports_hedge.paper.audit import PaperScanCycleRecord
@@ -159,9 +162,11 @@ def test_ok_to_degraded_captures_once() -> None:
         recent_scan_cycles=[_cycle(i, health="degraded" if i == 0 else "ok") for i in range(12)],
     )
     assert store.observe(healthy, captured_at=NOW, build=BUILD) == {}
-    first = store.observe(degraded, captured_at=NOW + timedelta(seconds=5), build=BUILD)
-    assert set(first) == {"matchbook"}
-    incident = first["matchbook"]
+    first_refs = store.observe(degraded, captured_at=NOW + timedelta(seconds=5), build=BUILD)
+    assert set(first_refs) == {"matchbook"}
+    assert is_compact_incident_ref(first_refs["matchbook"])
+    incident = store.get("matchbook")
+    assert incident is not None
     assert incident["captured_at"] == "2026-09-19T20:00:05Z"
     assert incident["build"]["git_sha"] == "abc123def"
     assert incident["transition"]["previous_health"] == "ok"
@@ -173,9 +178,12 @@ def test_ok_to_degraded_captures_once() -> None:
             "universe": degraded.universe.model_copy(update={"last_error": "later noise"}),
         }
     )
-    second = store.observe(mutated, captured_at=NOW + timedelta(seconds=10), build=BUILD)
-    assert second["matchbook"]["captured_at"] == "2026-09-19T20:00:05Z"
-    assert second["matchbook"]["universe"]["last_error"] == "list_events discovery_timeout"
+    second_refs = store.observe(mutated, captured_at=NOW + timedelta(seconds=10), build=BUILD)
+    assert second_refs["matchbook"]["captured_at"] == "2026-09-19T20:00:05Z"
+    assert second_refs["matchbook"]["incident_id"] == first_refs["matchbook"]["incident_id"]
+    stored_after_noise = store.get("matchbook")
+    assert stored_after_noise is not None
+    assert stored_after_noise["universe"]["last_error"] == "list_events discovery_timeout"
     assert store.retained_count == 1
 
 
@@ -189,6 +197,7 @@ def test_recovery_then_new_degradation_captures_again() -> None:
     assert recovered == {}
     second = store.observe(degraded, captured_at=NOW + timedelta(seconds=3), build=BUILD)
     assert first["matchbook"]["captured_at"] != second["matchbook"]["captured_at"]
+    assert first["matchbook"]["incident_id"] != second["matchbook"]["incident_id"]
     assert store.retained_count == 2
 
 
@@ -225,9 +234,15 @@ def test_hot_ok_universe_discovery_timeout_is_not_hot_market_timeout() -> None:
             }
         ),
     )
-    mixed_incident = store.observe(mixed, captured_at=NOW, build=BUILD)["matchbook"]
+    mixed_refs = store.observe(mixed, captured_at=NOW, build=BUILD)
+    mixed_incident = store.get("matchbook")
     store.reset()
-    hot_incident = store.observe(hot_timeout, captured_at=NOW, build=BUILD)["matchbook"]
+    hot_refs = store.observe(hot_timeout, captured_at=NOW, build=BUILD)
+    hot_incident = store.get("matchbook")
+    assert mixed_incident is not None
+    assert hot_incident is not None
+    assert is_compact_incident_ref(mixed_refs["matchbook"])
+    assert is_compact_incident_ref(hot_refs["matchbook"])
     assert mixed_incident["classification"]["hot_ok"] is True
     assert mixed_incident["classification"]["universe_discovery_timeout"] is True
     assert mixed_incident["classification"]["hot_market_timeout"] is False
@@ -278,7 +293,10 @@ def test_capacity_waiting_deferred_remain_local_backpressure() -> None:
             "limits": {"matchbook": 4},
         },
     )
-    incident = store.observe(status, captured_at=NOW, build=BUILD)["matchbook"]
+    refs = store.observe(status, captured_at=NOW, build=BUILD)
+    incident = store.get("matchbook")
+    assert incident is not None
+    assert is_compact_incident_ref(refs["matchbook"])
     assert incident["classification"]["local_backpressure"] is True
     assert incident["classification"]["universe_discovery_timeout"] is True
     assert incident["background"]["operation_health"]["matchbook"]["order_book"] == HEALTH_CAPACITY_SATURATED
@@ -307,9 +325,15 @@ def test_auth_unavailable_and_retry_wait_painting_are_identifiable() -> None:
             update={"venue_health": {"matchbook": "retry_wait"}, "canonical_retryable": 5}
         ),
     )
-    auth_incident = store.observe(auth, captured_at=NOW, build=BUILD)["kalshi"]
+    auth_refs = store.observe(auth, captured_at=NOW, build=BUILD)
+    auth_incident = store.get("kalshi")
     store.reset()
-    retry_incident = store.observe(retry, captured_at=NOW, build=BUILD)["matchbook"]
+    retry_refs = store.observe(retry, captured_at=NOW, build=BUILD)
+    retry_incident = store.get("matchbook")
+    assert auth_incident is not None
+    assert retry_incident is not None
+    assert is_compact_incident_ref(auth_refs["kalshi"])
+    assert is_compact_incident_ref(retry_refs["matchbook"])
     assert auth_incident["classification"]["auth_or_unavailable"] is True
     assert retry_incident["classification"]["retry_wait_painting"] is True
     assert is_ui_degraded_health("retry_wait")
@@ -330,7 +354,9 @@ def test_incident_storage_is_bounded() -> None:
             build=BUILD,
         )
     assert store.retained_count == MAX_STORED_INCIDENTS
-    assert len(store.observe(degraded, captured_at=NOW, build=BUILD)) == 1
+    refs = store.observe(degraded, captured_at=NOW, build=BUILD)
+    assert set(refs["matchbook"]) == set(INCIDENT_REF_KEYS)
+    assert len(refs) == 1
 
 
 def _install_coordinator(monkeypatch: pytest.MonkeyPatch, coordinator: LiveRefreshCoordinator) -> None:
@@ -338,14 +364,7 @@ def _install_coordinator(monkeypatch: pytest.MonkeyPatch, coordinator: LiveRefre
     monkeypatch.setattr(paper_api, "get_live_refresh_coordinator", lambda: coordinator)
 
 
-def test_live_refresh_poll_captures_transition_without_provider_or_scan_calls(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = _Clock(NOW)
-    coordinator = LiveRefreshCoordinator(clock=clock)
-    _install_coordinator(monkeypatch, coordinator)
-    calls = {"provider": 0, "scan": 0, "health": 0}
-
+def _boom_providers(monkeypatch: pytest.MonkeyPatch, calls: dict[str, int]) -> None:
     async def boom_provider(*_args: Any, **_kwargs: Any) -> None:
         calls["provider"] += 1
         raise AssertionError("Why? / live-refresh must not call providers")
@@ -375,15 +394,44 @@ def test_live_refresh_poll_captures_transition_without_provider_or_scan_calls(
     monkeypatch.setattr(ReadOnlyCrossVenueCollector, "collect_and_scan", boom_scan)
     monkeypatch.setattr(paper_api, "_collect_report", boom_scan)
 
+
+def _assert_compact_live_refresh_refs(payload: dict[str, Any]) -> None:
+    refs = payload.get("venue_degradation_incidents") or {}
+    for ref in refs.values():
+        assert is_compact_incident_ref(ref)
+        assert "classification" not in ref
+        assert "hot" not in ref
+        assert "universe" not in ref
+        assert "provider_access" not in ref
+        assert "recent_scan_cycles" not in ref
+        assert "data_kind" not in ref
+
+
+def test_live_refresh_poll_keeps_compact_refs_and_why_returns_transition_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock(NOW)
+    coordinator = LiveRefreshCoordinator(clock=clock)
+    _install_coordinator(monkeypatch, coordinator)
+    calls = {"provider": 0, "scan": 0, "health": 0}
+    _boom_providers(monkeypatch, calls)
+
     live_src = inspect.getsource(paper_api.live_refresh_status)
+    why_src = inspect.getsource(paper_api.venue_degradation_incident)
     helper_src = inspect.getsource(paper_api._status_with_scan_cycles)
     observe_src = inspect.getsource(LiveRefreshCoordinator.observe_degradation_incidents)
     assert "collect_and_scan" not in live_src
+    assert "collect_and_scan" not in why_src
     assert "list_events" not in live_src
+    assert "list_events" not in why_src
     assert "list_markets" not in helper_src
     assert "/venues/health" not in helper_src
+    assert "/venues/health" not in why_src
     assert "run_slice" not in observe_src
+    assert "run_slice" not in why_src
+    assert "observe_degradation_incidents" not in why_src
     assert "bind_catalogue_store" not in helper_src
+    assert "configure_from_settings" not in why_src
 
     _paint(coordinator, **_healthy_lanes())
     client = TestClient(main_api.app)
@@ -436,14 +484,23 @@ def test_live_refresh_poll_captures_transition_without_provider_or_scan_calls(
     assert degraded.status_code == 200
     body = degraded.json()
     assert body["venue_health"]["matchbook"] == "degraded"
-    incidents = body["venue_degradation_incidents"]
-    assert "matchbook" in incidents
-    captured_at = incidents["matchbook"]["captured_at"]
-    assert incidents["matchbook"]["classification"]["hot_ok"] is True
-    assert incidents["matchbook"]["classification"]["universe_discovery_timeout"] is True
-    assert incidents["matchbook"]["classification"]["hot_market_timeout"] is False
-    assert incidents["matchbook"]["classification"]["local_backpressure"] is True
-    assert incidents["matchbook"]["data_kind"] == "in_memory_transition_snapshot"
+    _assert_compact_live_refresh_refs(body)
+    ref = body["venue_degradation_incidents"]["matchbook"]
+    captured_at = ref["captured_at"]
+    incident_id = ref["incident_id"]
+    assert ref["available"] is True
+
+    why = client.get("/paper/venue-degradation-incident/matchbook")
+    assert why.status_code == 200
+    packet = why.json()
+    assert "data_kind" not in json.dumps(body["venue_degradation_incidents"])
+    assert packet["incident_id"] == incident_id
+    assert packet["captured_at"] == captured_at
+    assert packet["data_kind"] == "in_memory_transition_snapshot"
+    assert packet["classification"]["hot_ok"] is True
+    assert packet["classification"]["universe_discovery_timeout"] is True
+    assert packet["classification"]["hot_market_timeout"] is False
+    assert packet["classification"]["local_backpressure"] is True
 
     _paint(
         coordinator,
@@ -459,11 +516,14 @@ def test_live_refresh_poll_captures_transition_without_provider_or_scan_calls(
     )
     clock.now = NOW + timedelta(seconds=25)
     again = client.get("/paper/live-refresh")
-    assert again.json()["venue_degradation_incidents"]["matchbook"]["captured_at"] == captured_at
-    assert (
-        again.json()["venue_degradation_incidents"]["matchbook"]["universe"]["last_error"]
-        == "discovery_timeout"
-    )
+    again_body = again.json()
+    _assert_compact_live_refresh_refs(again_body)
+    assert again_body["venue_degradation_incidents"]["matchbook"]["captured_at"] == captured_at
+    assert again_body["venue_degradation_incidents"]["matchbook"]["incident_id"] == incident_id
+    why_again = client.get("/paper/venue-degradation-incident/matchbook")
+    assert why_again.json()["incident_id"] == incident_id
+    assert why_again.json()["universe"]["last_error"] == "discovery_timeout"
+    assert why_again.json()["data_kind"] == "in_memory_transition_snapshot"
 
     _paint(coordinator, **_healthy_lanes())
     clock.now = NOW + timedelta(seconds=40)
@@ -489,10 +549,42 @@ def test_live_refresh_poll_captures_transition_without_provider_or_scan_calls(
     )
     clock.now = NOW + timedelta(seconds=50)
     second = client.get("/paper/live-refresh")
-    new_incident = second.json()["venue_degradation_incidents"]["matchbook"]
-    assert new_incident["captured_at"] != captured_at
-    assert new_incident["classification"]["hot_market_timeout"] is True
-    assert new_incident["classification"]["universe_discovery_timeout"] is False
+    new_ref = second.json()["venue_degradation_incidents"]["matchbook"]
+    _assert_compact_live_refresh_refs(second.json())
+    assert new_ref["captured_at"] != captured_at
+    assert new_ref["incident_id"] != incident_id
+    new_why = client.get("/paper/venue-degradation-incident/matchbook")
+    assert new_why.json()["incident_id"] == new_ref["incident_id"]
+    assert new_why.json()["classification"]["hot_market_timeout"] is True
+    assert new_why.json()["classification"]["universe_discovery_timeout"] is False
+    assert calls == before
+
+
+def test_why_fallback_is_current_read_model_not_a_provider_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = LiveRefreshCoordinator(clock=lambda: NOW)
+    _install_coordinator(monkeypatch, coordinator)
+    calls = {"provider": 0, "scan": 0, "health": 0}
+    _boom_providers(monkeypatch, calls)
+    _paint(
+        coordinator,
+        hot={"venue_health": {"matchbook": "ok"}},
+        universe={
+            "venue_health": {"matchbook": HEALTH_DISCOVERY_TIMEOUT},
+            "last_error": "current discovery timeout",
+        },
+    )
+    client = TestClient(main_api.app)
+    before = dict(calls)
+    missing = client.get("/paper/venue-degradation-incident/smarkets")
+    assert missing.status_code == 404
+    why = client.get("/paper/venue-degradation-incident/matchbook")
+    assert why.status_code == 200
+    body = why.json()
+    assert body["data_kind"] == "already_polled_live_refresh_read_model"
+    assert body["affected_venue"] == "matchbook"
+    assert coordinator.degradation_incident("matchbook") is None
     assert calls == before
 
 
@@ -502,17 +594,25 @@ async def test_live_refresh_why_path_is_observer_only(monkeypatch: pytest.Monkey
     _install_coordinator(monkeypatch, coordinator)
     source = inspect.getsource(paper_api.live_refresh_status)
     helper = inspect.getsource(paper_api._status_with_scan_cycles)
+    why_src = inspect.getsource(paper_api.venue_degradation_incident)
     assert "collect_and_scan" not in source
     assert "_collect_report" not in source
     assert "configure_from_settings" not in source
+    assert "configure_from_settings" not in why_src
     assert "run_price_engine_slice" not in helper
     assert "run_slice" not in helper
+    assert "run_slice" not in why_src
     assert "list_events" not in helper
+    assert "list_events" not in why_src
     transport = httpx.ASGITransport(app=main_api.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         status = await client.get("/paper/live-refresh")
+        why = await client.get("/paper/venue-degradation-incident/matchbook")
         assert status.status_code == 200
-        assert "venue_degradation_incidents" in status.json()
+        assert why.status_code == 200
+        refs = status.json()["venue_degradation_incidents"]
+        for ref in refs.values():
+            assert is_compact_incident_ref(ref)
         assert coordinator._hot_in_progress is False
         assert coordinator._universe_in_progress is False
         assert coordinator._background_in_progress is False

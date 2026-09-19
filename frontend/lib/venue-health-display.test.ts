@@ -31,9 +31,8 @@ describe("operator-disabled venue health vs provider failure", () => {
     assert.equal(isProviderHealthFailure("unavailable"), true);
     assert.equal(isProviderHealthFailure("timeout"), true);
     assert.equal(isProviderHealthFailure("degraded"), true);
-    assert.equal(isProviderHealthFailure("discovery_timeout"), true);
-    assert.equal(isProviderHealthFailure("market_timeout"), true);
-    assert.equal(isProviderHealthFailure("auth_failure"), true);
+    assert.equal(isProviderHealthFailure("discovery_timeout"), false);
+    assert.equal(isProviderHealthFailure("market_timeout"), false);
     assert.equal(scanHealthTone("unavailable"), "down");
     assert.equal(scanHealthTone("timeout"), "warn");
     assert.equal(scanHealthTone("discovery_timeout"), "warn");
@@ -97,6 +96,7 @@ describe("operator-disabled venue health vs provider failure", () => {
     assert.doesNotMatch(pulse, /phase === "degraded"[\s\S]*Scan failed/);
     assert.match(bar, /Why\?/);
     assert.match(bar, /downloadVenueWhyIncident/);
+    assert.match(bar, /getVenueDegradationIncident/);
     assert.match(bar, /venueHealthNeedsWhy/);
     const whyBlock = bar.slice(bar.indexOf("status-why"));
     assert.doesNotMatch(whyBlock, /getVenueHealth/);
