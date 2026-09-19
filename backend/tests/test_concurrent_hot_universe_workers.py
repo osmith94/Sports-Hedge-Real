@@ -36,6 +36,7 @@ from sports_hedge.application.scan_lanes import (
     HOT_REASON_SURVEILLANCE,
     WORKER_RUNNING,
     ScanLane,
+    classify_scan_lane,
 )
 from sports_hedge.domain.models import VenueName
 from sports_hedge.persistence.universe_checkpoint import SqliteUniverseCheckpointStore
@@ -399,11 +400,17 @@ def test_useful_fixture_result_persists_before_universe_completion() -> None:
 
 
 def test_promotion_occurs_mid_sweep_and_does_not_stop_universe() -> None:
-    coordinator = LiveRefreshCoordinator()
+    clock = FakeClock(NOW)
+    coordinator = LiveRefreshCoordinator(clock=clock)
+    coordinator._clock = clock
     coordinator._mark_lane_started(ScanLane.UNIVERSE, NOW)
-    report = _qualifying_universe_report()
-    fixture = report.discovered_fixtures[0]
+    # Freeze evaluation time and keep kickoff outside the HOT lifecycle horizon.
+    # Wall-clock now + calendar DISTANT_KICKOFF becomes post-kickoff DROP after
+    # the 3h unknown window, so this would stop testing BACKGROUND→HOT promotion.
+    report = _qualifying_universe_report(kickoff=KICKOFF, when=NOW)
+    fixture = report.discovered_fixtures[0].model_copy(update={"last_scanned_at": NOW})
     markets = report.fixture_markets[CANONICAL_ID]
+    assert classify_scan_lane(fixture, NOW) is ScanLane.UNIVERSE
     coordinator.record_universe_fixture_progress(None, fixture, list(report.paper_decisions), markets)
     assert CANONICAL_ID in coordinator.fixture_current_state().hot_identity_scope(NOW)
     assert coordinator._universe_in_progress is True

@@ -91,7 +91,13 @@ from sports_hedge.application.quote_freshness import (
     polymarket_books_quote_age,
     retrieval_quote_age,
 )
+from sports_hedge.application.approved_market_catalogue import FEE_SOURCE_GET_SERIES
+from sports_hedge.application.catalogue_maintenance import (
+    pair_identity_from_markets,
+    persist_universe_catalogue_pass_offloop,
+)
 from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key, should_skip_market_work
+from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
 from sports_hedge.venues.matchbook import MatchbookMarketGoneError
 from sports_hedge.catalogue.classify import classify_pair
 from sports_hedge.catalogue.coverage_rows import (
@@ -615,6 +621,7 @@ class ReadOnlyCrossVenueCollector:
         cluster_concurrency: int = DEFAULT_CLUSTER_CONCURRENCY,
         provider_concurrency: dict[VenueName, int] | None = None,
         provider_access: ProviderAccessLayer | None = None,
+        catalogue_store: SqliteApprovedMarketCatalogueStore | None = None,
     ) -> None:
         self.matchbook = matchbook
         self.polymarket = polymarket
@@ -638,6 +645,9 @@ class ReadOnlyCrossVenueCollector:
             for venue in DEFAULT_PROVIDER_CONCURRENCY
         }
         self._provider_access = provider_access
+        self.catalogue_store = catalogue_store
+        self._catalogue_persist_sema = asyncio.Semaphore(1)
+        self._op_universe_generation_id: int | None = None
         self._cluster_sema: asyncio.Semaphore | None = None
         self._provider_semaphores: dict[VenueName, asyncio.Semaphore] = {}
         self._op_request_lane: str | None = None
@@ -727,6 +737,7 @@ class ReadOnlyCrossVenueCollector:
         )
         self._op_enabled_venues = enabled
         self._op_request_lane = (scan_lane or "").strip().casefold() or None
+        self._op_universe_generation_id = universe_generation_id
         self._op_operation_health = {}
         self._on_discovery_complete = on_discovery_complete
         self._on_fixture_evaluated = on_fixture_evaluated
@@ -2542,6 +2553,7 @@ class ReadOnlyCrossVenueCollector:
             queried_series_ids=queried_series_ids,
         )
         if should_skip_market_work(fixture, seen_at):
+            await self._mark_universe_catalogue_terminal(fixture)
             return fixture, [], [], {}, 0, 0
         if self._op_request_lane == ScanLane.HOT.value:
             return await self._refresh_hot_cluster(
@@ -2713,6 +2725,15 @@ class ReadOnlyCrossVenueCollector:
         # observations after a leftover depth attempt — leftover books are
         # never fetched.
         self._kalshi_books_skipped_unapproved += len(leftover_kalshi)
+        await self._persist_universe_catalogue_from_pairs(
+            fixture=fixture,
+            eligible_pairs=eligible_pairs,
+            k_events=k_events,
+            listed_ok=(
+                VenueName.MATCHBOOK in listed_venues and VenueName.KALSHI in listed_venues
+            ),
+            issues=issues,
+        )
         if kalshi_depth_markets:
             await self._fetch_kalshi_depth_for_markets(
                 k_events,
@@ -2858,6 +2879,91 @@ class ReadOnlyCrossVenueCollector:
             order_books_fetched,
             matched_market_pairs,
         )
+
+    async def _mark_universe_catalogue_terminal(self, fixture: DiscoveredFixture) -> None:
+        store = self.catalogue_store
+        if store is None or self._op_request_lane == ScanLane.HOT.value:
+            return
+        generation = self._op_universe_generation_id
+        async with self._catalogue_persist_sema:
+            await persist_universe_catalogue_pass_offloop(
+                store,
+                canonical_event_id=fixture.canonical_event_id,
+                competition=fixture.target_competition_code or fixture.competition,
+                home_canonical=fixture.home_team,
+                away_canonical=fixture.away_team,
+                kickoff_utc=fixture.kickoff_utc,
+                pairs=[],
+                now=datetime.now(UTC),
+                generation_id=None if generation is None else str(generation),
+                listed_ok=False,
+                terminal=True,
+            )
+
+    async def _persist_universe_catalogue_from_pairs(
+        self,
+        *,
+        fixture: DiscoveredFixture,
+        eligible_pairs: list[
+            tuple[VenueName, VenueName, _NormalizedMarket, _NormalizedMarket, MarketMatchResult]
+        ],
+        k_events: list[_NormalizedEvent],
+        listed_ok: bool,
+        issues: list[CollectorIssue],
+    ) -> None:
+        """Persist approved-family identity before depth/solver (Tenet 19 / #341)."""
+
+        store = self.catalogue_store
+        if store is None or self._op_request_lane == ScanLane.HOT.value:
+            return
+        identities = []
+        series_by_event: dict[str, dict[str, Any] | None] = {}
+        for left_venue, right_venue, left_market, right_market, _match in eligible_pairs:
+            if {left_venue, right_venue} != {VenueName.MATCHBOOK, VenueName.KALSHI}:
+                continue
+            if left_venue is VenueName.MATCHBOOK:
+                matchbook_market, kalshi_market = left_market, right_market
+            else:
+                matchbook_market, kalshi_market = right_market, left_market
+            k_event = _event_for_source(k_events, kalshi_market.canonical.event.source_event_id)
+            event_payload = k_event.raw if k_event is not None and isinstance(k_event.raw, dict) else {}
+            source_event_id = str(kalshi_market.canonical.event.source_event_id)
+            if source_event_id not in series_by_event:
+                series = None
+                if isinstance(kalshi_market.raw, dict) and isinstance(kalshi_market.raw.get("series"), dict):
+                    series = kalshi_market.raw.get("series")
+                elif k_event is not None:
+                    series = await self._fetch_kalshi_series_metadata(
+                        k_event,
+                        issues=issues,
+                        attach_contract_family=False,
+                    )
+                series_by_event[source_event_id] = series if isinstance(series, dict) else None
+            series_payload = series_by_event.get(source_event_id)
+            identity = pair_identity_from_markets(
+                matchbook_market.canonical,
+                kalshi_market.canonical,
+                kalshi_event_payload=event_payload,
+                kalshi_series_payload=series_payload,
+                fee_source=FEE_SOURCE_GET_SERIES,
+            )
+            if identity is not None:
+                identities.append(identity)
+        generation = self._op_universe_generation_id
+        async with self._catalogue_persist_sema:
+            await persist_universe_catalogue_pass_offloop(
+                store,
+                canonical_event_id=fixture.canonical_event_id,
+                competition=fixture.target_competition_code or fixture.competition,
+                home_canonical=fixture.home_team,
+                away_canonical=fixture.away_team,
+                kickoff_utc=fixture.kickoff_utc,
+                pairs=identities,
+                now=datetime.now(UTC),
+                generation_id=None if generation is None else str(generation),
+                listed_ok=listed_ok,
+                terminal=False,
+            )
 
     async def _refresh_hot_cluster(
         self,
