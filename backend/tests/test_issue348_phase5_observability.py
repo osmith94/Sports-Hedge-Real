@@ -50,11 +50,15 @@ from test_dual_cadence_scheduler import FakeClock
 from test_issue344_price_engine import (
     DISTANT_KICKOFF,
     FakeKalshi,
+    FakeMatchbook,
     NEAR_KICKOFF,
     NOW,
     StubPaperScan,
     _engine,
+    _hda_row,
     _hold_slot,
+    _mb_btts,
+    _mb_match_odds,
     _qualifying_decision,
     _row,
 )
@@ -107,6 +111,20 @@ def _flat_decision(*, scanned_at=NOW) -> PaperScanDecision:
         solver_model="strict_complete_set",
         eligible_for_paper_simulation=False,
     )
+
+
+class _DecisionByMarket:
+    """Return a configured decision per Matchbook market id."""
+
+    def __init__(self, by_market: dict[str, PaperScanDecision]) -> None:
+        self.by_market = by_market
+        self.market_matcher = None
+        self.cost_resolver = None
+        self.settings = None
+
+    def scan_pair(self, matchbook_obs: Any, *args: Any, **kwargs: Any) -> PaperScanDecision:
+        del args, kwargs
+        return self.by_market[str(matchbook_obs.market.source_market_id)]
 
 
 @pytest.mark.asyncio
@@ -522,7 +540,13 @@ def test_phase5_does_not_create_durable_queue_or_weaken_paper_boundary() -> None
     assert ".cancel(" not in emit_src
     assert "await asyncio.to_thread" not in sink_src
     assert "_decision_is_interesting" in inspect.getsource(CataloguePriceEngine._maybe_promote)
-    assert "discard" in inspect.getsource(CataloguePriceEngine._maybe_promote)
+    assert "_promoted_hot_rows" in inspect.getsource(CataloguePriceEngine._maybe_promote)
+    assert "_refresh_promoted_hot_ids" in inspect.getsource(CataloguePriceEngine)
+    assert "reset_generation" in inspect.getsource(CataloguePriceEngine._schedule_projection)
+    reset_src = inspect.getsource(LiveRefreshCoordinator.reset)
+    assert reset_src.find("self._observability.reset()") < reset_src.find(
+        "self._fixture_state.clear()"
+    )
     assert "PriceEngineProjectionEvent" in inspect.getsource(
         CataloguePriceEngine._schedule_projection
     )
@@ -771,3 +795,168 @@ async def test_delayed_projection_keeps_emitted_event_lane_and_identity() -> Non
     assert seen[0]["catalogue_row_id"] == "amc-snap"
     assert runtime.priority is PriceEnginePriority.BACKGROUND
     assert runtime.identity.canonical_event_id == "evt-mutated-after-emit"
+
+
+@pytest.mark.asyncio
+async def test_fixture_hot_promotion_aggregates_sibling_catalogue_rows() -> None:
+    shared = "evt-shared-agg"
+    btts = _row(
+        suffix="aggbtts",
+        kickoff=DISTANT_KICKOFF,
+        matchbook_event_id="8901",
+        matchbook_market_id="316601",
+        kalshi_event="KXEPLBTTS-AGGBTTS",
+    ).model_copy(update={"canonical_event_id": shared})
+    match = _hda_row("aggmr", kickoff=DISTANT_KICKOFF).model_copy(
+        update={"canonical_event_id": shared, "matchbook_event_id": "8901"}
+    )
+    near = _row(
+        suffix="agglife",
+        kickoff=NEAR_KICKOFF,
+        matchbook_event_id="8902",
+        matchbook_market_id="316603",
+        kalshi_event="KXEPLBTTS-AGGLIFE",
+    )
+    by_market = {
+        "316601": _positive_near_decision(),
+        str(match.matchbook_market_id): _flat_decision(),
+        "316603": _flat_decision(),
+    }
+    paper = _DecisionByMarket(by_market)
+    matchbook = FakeMatchbook()
+    matchbook.payloads["316601"] = _mb_btts(316601)
+    matchbook.payloads[str(match.matchbook_market_id)] = _mb_match_odds(
+        int(match.matchbook_market_id)
+    )
+    matchbook.payloads["316603"] = _mb_btts(316603)
+    clock = FakeClock(NOW)
+    engine, _mb, _ks, _layer = _engine(
+        [btts, match, near],
+        paper_scan=paper,
+        matchbook=matchbook,
+        clock=clock,
+    )
+    btts_runtime = engine.item("amc-aggbtts")
+    match_runtime = engine.item("amc-aggmr")
+    near_runtime = engine.item("amc-agglife")
+    assert btts_runtime is not None and match_runtime is not None and near_runtime is not None
+    assert btts_runtime.priority is PriceEnginePriority.BACKGROUND
+    assert match_runtime.priority is PriceEnginePriority.BACKGROUND
+    assert near_runtime.priority is PriceEnginePriority.HOT
+    first = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=clock.now)
+    assert "amc-aggbtts" in first.evaluated
+    assert "amc-aggmr" in first.evaluated
+    assert shared in first.promotions
+    assert shared in engine._promoted_hot_ids
+    assert "amc-aggbtts" in engine._promoted_hot_rows
+    assert "amc-aggmr" not in engine._promoted_hot_rows
+    assert engine.classify_priority(btts_runtime.identity) is PriceEnginePriority.HOT
+    assert engine.classify_priority(match_runtime.identity) is PriceEnginePriority.HOT
+    by_market["316601"] = _flat_decision()
+    clock.advance(30)
+    cooled = await engine.run_slice(PriceEnginePriority.HOT, now=clock.now)
+    assert "amc-aggbtts" in cooled.evaluated
+    assert "amc-aggmr" in cooled.evaluated
+    assert "amc-agglife" in cooled.evaluated
+    assert shared not in engine._promoted_hot_ids
+    assert engine.classify_priority(btts_runtime.identity) is PriceEnginePriority.BACKGROUND
+    assert engine.classify_priority(match_runtime.identity) is PriceEnginePriority.BACKGROUND
+    assert engine.classify_priority(near_runtime.identity) is PriceEnginePriority.HOT
+    await engine.drain_observability()
+
+
+@pytest.mark.asyncio
+async def test_stale_catalogue_row_promotion_cannot_keep_fixture_hot() -> None:
+    shared = "evt-shared-stale"
+    btts = _row(
+        suffix="stalebtts",
+        kickoff=DISTANT_KICKOFF,
+        matchbook_event_id="8911",
+        matchbook_market_id="316611",
+        kalshi_event="KXEPLBTTS-STALEBTTS",
+    ).model_copy(update={"canonical_event_id": shared})
+    match = _hda_row("stalemr", kickoff=DISTANT_KICKOFF).model_copy(
+        update={"canonical_event_id": shared, "matchbook_event_id": "8911"}
+    )
+    paper = _DecisionByMarket(
+        {
+            "316611": _positive_near_decision(),
+            str(match.matchbook_market_id): _flat_decision(),
+        }
+    )
+    matchbook = FakeMatchbook()
+    matchbook.payloads["316611"] = _mb_btts(316611)
+    matchbook.payloads[str(match.matchbook_market_id)] = _mb_match_odds(
+        int(match.matchbook_market_id)
+    )
+    engine, _mb, _ks, _layer = _engine(
+        [btts, match], paper_scan=paper, matchbook=matchbook
+    )
+    result = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
+    assert shared in result.promotions
+    assert shared in engine._promoted_hot_ids
+    assert engine.catalogue_store is not None
+    engine.catalogue_store.upsert_catalogue_row(
+        btts.model_copy(update={"content_version": 2})
+    )
+    rebuilt = engine.reconstruct()
+    assert rebuilt
+    assert "amc-stalebtts" not in engine._promoted_hot_rows
+    assert shared not in engine._promoted_hot_ids
+    btts_runtime = engine.item("amc-stalebtts")
+    match_runtime = engine.item("amc-stalemr")
+    assert btts_runtime is not None and match_runtime is not None
+    assert btts_runtime.identity.content_version == 2
+    assert engine.classify_priority(btts_runtime.identity) is PriceEnginePriority.BACKGROUND
+    assert engine.classify_priority(match_runtime.identity) is PriceEnginePriority.BACKGROUND
+    await engine.drain_observability()
+
+
+@pytest.mark.asyncio
+async def test_pre_reset_projection_cannot_repopulate_cleared_current_state() -> None:
+    row = _row(
+        suffix="rstproj",
+        kickoff=DISTANT_KICKOFF,
+        matchbook_market_id="316621",
+        kalshi_event="KXEPLBTTS-RSTPROJ",
+    )
+    coordinator = LiveRefreshCoordinator(clock=lambda: NOW)
+    fixture_state = coordinator.fixture_current_state()
+    paper = StubPaperScan(_positive_near_decision())
+    engine, _mb, _ks, _layer = _engine(
+        [row], paper_scan=paper, fixture_state=fixture_state
+    )
+    coordinator.bind_price_engine(engine)
+    started = threading.Event()
+    release = threading.Event()
+    original = fixture_state.upsert_from_report
+
+    def blocked_upsert(*args: Any, **kwargs: Any) -> None:
+        started.set()
+        assert release.wait(timeout=2.0)
+        original(*args, **kwargs)
+
+    fixture_state.upsert_from_report = blocked_upsert  # type: ignore[method-assign]
+    try:
+        result = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
+        assert "amc-rstproj" in result.evaluated
+        assert started.wait(timeout=1.0)
+        pre_reset_generation = fixture_state.reset_generation
+        coordinator.reset()
+        assert fixture_state.reset_generation != pre_reset_generation
+        assert fixture_state.has_collection() is False
+        assert row.canonical_event_id not in fixture_state.hot_identity_scope(NOW)
+        assert fixture_state.current_radar_rows(NOW) == []
+        release.set()
+        await engine.drain_observability()
+        assert fixture_state.has_collection() is False
+        assert row.canonical_event_id not in fixture_state.hot_identity_scope(NOW)
+        assert fixture_state.current_radar_rows(NOW) == []
+        post = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
+        assert "amc-rstproj" in post.evaluated
+        await engine.drain_observability()
+        assert fixture_state.has_collection() is True
+        assert row.canonical_event_id in fixture_state.hot_identity_scope(NOW)
+    finally:
+        release.set()
+        await engine.shutdown_observability()

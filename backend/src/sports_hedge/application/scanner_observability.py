@@ -76,6 +76,14 @@ class PriceEnginePublicStatus(BaseModel):
     observability_error: str | None = None
 
 
+@dataclass(frozen=True)
+class _ObservabilityJob:
+    """One accepted callback tagged with the sink generation at enqueue."""
+
+    generation: int
+    fn: Callable[[], Any]
+
+
 @dataclass
 class ScannerObservabilitySink:
     """Bounded in-process fan-out for non-critical projection/audit work.
@@ -85,22 +93,33 @@ class ScannerObservabilitySink:
     callbacks; there is no per-item ``asyncio.to_thread`` wrapper, so cancelling
     an asyncio waiter cannot orphan a still-running consumer. Pricing/capture
     must never await ``drain()`` on the critical path.
+
+    ``reset()`` starts a new generation, drops not-yet-started work, and never
+    cancels a backing thread. In-flight callbacks may finish, but consumers
+    that capture the emit-time generation must refuse to commit into
+    post-reset state.
     """
 
     maxsize: int = 256
     lag: int = 0
     dropped: int = 0
     last_error: str | None = None
-    _queue: deque[Callable[[], Any]] = field(default_factory=deque)
+    _queue: deque[_ObservabilityJob] = field(default_factory=deque)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _work: threading.Event = field(default_factory=threading.Event)
     _idle: threading.Event = field(default_factory=threading.Event)
     _in_flight: int = 0
     _closed: bool = False
     _worker: threading.Thread | None = None
+    _generation: int = 0
 
     def __post_init__(self) -> None:
         self._idle.set()
+
+    @property
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
 
     def emit(self, fn: Callable[[], Any]) -> None:
         """Schedule ``fn`` behind the critical path. Never await it here."""
@@ -115,7 +134,7 @@ class ScannerObservabilitySink:
                 self._queue.popleft()
                 self.dropped += 1
                 LOGGER.warning("observability sink saturated; dropping oldest queued consumer")
-            self._queue.append(fn)
+            self._queue.append(_ObservabilityJob(generation=self._generation, fn=fn))
             self._idle.clear()
             self._refresh_lag_unlocked()
         self._ensure_worker()
@@ -142,30 +161,30 @@ class ScannerObservabilitySink:
         else:
             self._idle.clear()
 
-    def _pop_work(self) -> Callable[[], Any] | None:
+    def _pop_work(self) -> _ObservabilityJob | None:
         with self._lock:
             if self._queue:
-                fn = self._queue.popleft()
+                job = self._queue.popleft()
                 self._in_flight += 1
                 self._idle.clear()
                 self._refresh_lag_unlocked()
-                return fn
+                return job
             self._maybe_idle_unlocked()
             self._work.clear()
             if self._queue:
-                fn = self._queue.popleft()
+                job = self._queue.popleft()
                 self._in_flight += 1
                 self._idle.clear()
                 self._refresh_lag_unlocked()
-                return fn
+                return job
             return None
 
     def _worker_loop(self) -> None:
         """Run accepted callbacks on a real thread. Never cancelled for maxsize."""
 
         while True:
-            fn = self._pop_work()
-            if fn is None:
+            job = self._pop_work()
+            if job is None:
                 with self._lock:
                     if self._closed and not self._queue and self._in_flight == 0:
                         self._idle.set()
@@ -173,7 +192,8 @@ class ScannerObservabilitySink:
                 self._work.wait(timeout=0.25)
                 continue
             try:
-                fn()
+                if job.generation == self.generation:
+                    job.fn()
             except Exception as exc:
                 self.last_error = str(exc)
                 LOGGER.exception("observability consumer failed")
@@ -211,9 +231,15 @@ class ScannerObservabilitySink:
             await asyncio.sleep(0.01)
 
     def reset(self) -> None:
-        """Drop not-yet-started work. Do not interrupt a running callback."""
+        """Start a new generation and drop not-yet-started work.
+
+        Does not interrupt a running callback and does not wait for it.
+        Pricing/capture never calls this. In-flight consumers must still
+        refuse to commit into post-reset current-state.
+        """
 
         with self._lock:
+            self._generation += 1
             self._queue.clear()
             self.dropped = 0
             self.last_error = None

@@ -611,6 +611,11 @@ class LiveRefreshCoordinator:
             return dict(self._last_request)
 
     def reset(self) -> None:
+        # Quarantine pre-reset observability before clearing current-state so
+        # an already-running UI projection cannot resurrect emptied rows.
+        # Drain is not awaited here: a blocked consumer must not deadlock
+        # operator reset. Commit is generation-guarded instead.
+        self._observability.reset()
         self._fixture_state.clear()
         orphans: list[asyncio.Task[Any]] = []
         with self._state_lock:
@@ -678,7 +683,6 @@ class LiveRefreshCoordinator:
         self.flush_universe_checkpoint()
         self.configure_from_settings()
         self._drain_orphaned_collection_tasks(orphans)
-        self._observability.reset()
         if self._price_engine is not None:
             self._price_engine.restart()
 

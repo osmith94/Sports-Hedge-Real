@@ -179,6 +179,8 @@ class PriceEngineProjectionEvent:
 
     Projection may lag, but must not reread later ``PriceEngineRuntimeItem``
     mutation for catalogue identity, lane/priority, observations, or decision.
+    ``reset_generation`` is the FixtureCurrentStateStore epoch at emit time;
+    a pre-reset callback must not commit after coordinator/store reset.
     """
 
     identity: DerivedPriceEngineItem
@@ -186,6 +188,7 @@ class PriceEngineProjectionEvent:
     matchbook_obs: VenueMarketObservation
     kalshi_obs: VenueMarketObservation
     decision: PaperScanDecision | None
+    reset_generation: int = 0
 
 
 @dataclass
@@ -282,6 +285,7 @@ class CataloguePriceEngine:
         self.on_item_decision = on_item_decision
         self.observability = observability if observability is not None else ScannerObservabilitySink()
         self._items: dict[str, PriceEngineRuntimeItem] = {}
+        self._promoted_hot_rows: dict[str, int] = {}
         self._promoted_hot_ids: set[str] = set()
         self._operation_health: dict[str, dict[str, Any]] = {
             PriceEnginePriority.HOT.value: {},
@@ -336,14 +340,17 @@ class CataloguePriceEngine:
             else:
                 runtime = existing
                 runtime.identity = identity
-            runtime.priority = self.classify_priority(runtime.identity)
             rebuilt.append(runtime)
+        self._refresh_promoted_hot_ids()
+        for runtime in rebuilt:
+            runtime.priority = self.classify_priority(runtime.identity)
         return rebuilt
 
     def restart(self) -> list[PriceEngineRuntimeItem]:
         """Process restart: reconstruct ACTIVE work and reset short backoff."""
 
         self._items.clear()
+        self._promoted_hot_rows.clear()
         self._promoted_hot_ids.clear()
         self.revalidation_requests.clear()
         self._operation_health = {
@@ -691,6 +698,32 @@ class CataloguePriceEngine:
         runtime.status = PriceEngineItemStatus.EVALUATED
         return PriceEngineItemStatus.EVALUATED
 
+    def _refresh_promoted_hot_ids(self) -> None:
+        """Derive fixture HOT from any live interesting catalogue row.
+
+        Reconstruct / content-version invalidation drops stale row state.
+        There is no durable promotion table.
+        """
+
+        live_versions = {
+            runtime.identity.catalogue_row_id: runtime.identity.content_version
+            for runtime in self._items.values()
+        }
+        for row_id, version in list(self._promoted_hot_rows.items()):
+            if live_versions.get(row_id) != version:
+                self._promoted_hot_rows.pop(row_id, None)
+        self._promoted_hot_ids = {
+            runtime.identity.canonical_event_id
+            for runtime in self._items.values()
+            if self._promoted_hot_rows.get(runtime.identity.catalogue_row_id)
+            == runtime.identity.content_version
+        }
+
+    def _reclassify_fixture(self, canonical_event_id: str) -> None:
+        for runtime in self._items.values():
+            if runtime.identity.canonical_event_id == canonical_event_id:
+                runtime.priority = self.classify_priority(runtime.identity)
+
     def _maybe_promote(
         self,
         runtime: PriceEngineRuntimeItem,
@@ -699,20 +732,26 @@ class CataloguePriceEngine:
     ) -> None:
         """HOT promotion/demotion is scheduler truth in process memory.
 
-        Positive/near or solver-qualifying BACKGROUND work promotes immediately.
-        A later non-interesting evaluation revokes opportunity promotion unless
-        lifecycle independently classifies HOT. Lagged UI projection cannot
-        grant or revoke this set.
+        Opportunity truth is per catalogue row. Fixture/event promotion is
+        the OR of current interesting rows for that canonical_event_id.
+        One cooling sibling must not clear another interesting row.
+        Lifecycle HOT remains independent of opportunity demotion.
+        Lagged UI projection cannot grant or revoke this set.
         """
 
+        row_id = runtime.identity.catalogue_row_id
+        version = runtime.identity.content_version
         canonical_id = runtime.identity.canonical_event_id
         if _decision_is_interesting(decision):
-            if canonical_id not in self._promoted_hot_ids:
-                self._promoted_hot_ids.add(canonical_id)
+            already_fixture = canonical_id in self._promoted_hot_ids
+            self._promoted_hot_rows[row_id] = version
+            self._promoted_hot_ids.add(canonical_id)
+            if not already_fixture:
                 result.promotions.append(canonical_id)
         else:
-            self._promoted_hot_ids.discard(canonical_id)
-        runtime.priority = self.classify_priority(runtime.identity)
+            self._promoted_hot_rows.pop(row_id, None)
+            self._refresh_promoted_hot_ids()
+        self._reclassify_fixture(canonical_id)
 
     def _schedule_projection(
         self,
@@ -730,11 +769,16 @@ class CataloguePriceEngine:
             matchbook_obs=matchbook_obs.model_copy(deep=True),
             kalshi_obs=kalshi_obs.model_copy(deep=True),
             decision=None if decision is None else decision.model_copy(deep=True),
+            reset_generation=(
+                0 if self.fixture_state is None else self.fixture_state.reset_generation
+            ),
         )
         self.observability.emit(lambda snapshot=event: self._project_item_state(snapshot))
 
     def _project_item_state(self, event: PriceEngineProjectionEvent) -> None:
         if self.fixture_state is None:
+            return
+        if event.reset_generation != self.fixture_state.reset_generation:
             return
         identity = event.identity
         matchbook_obs = event.matchbook_obs
@@ -833,6 +877,7 @@ class CataloguePriceEngine:
             if event.priority is PriceEnginePriority.BACKGROUND
             else ScanLane.HOT,
             now=observed_at,
+            reset_generation=event.reset_generation,
         )
 
     async def _handoff_item_decision(
