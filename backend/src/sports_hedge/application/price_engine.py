@@ -9,7 +9,10 @@ pricing-work queue.
 
 Phase 4 publishes economics at item completion and hands the decision to the
 injected ``on_item_decision`` callback (wired by the paper API to the existing
-paper capture chain). This module does not own capture.
+paper capture chain). Capture is started immediately, then waited on outside
+the provider-pricing worker and HOT ``run_cycle`` envelope. This module does
+not own capture. Quote age uses each exact provider response's retrieval
+instant; a multi-constituent item is as old as its oldest required quote.
 
 PAPER / read-only. Exact persisted Matchbook/Kalshi IDs only — never
 ``list_events`` / ``list_markets`` rediscovery on this path.
@@ -74,7 +77,11 @@ from sports_hedge.application.provider_access import (
     ProviderLease,
     get_shared_provider_access,
 )
-from sports_hedge.application.quote_freshness import retrieval_quote_age
+from sports_hedge.application.quote_freshness import (
+    QuoteAgeAssessment,
+    matchbook_market_quote_age,
+    retrieval_quote_age,
+)
 from sports_hedge.application.scan_lanes import (
     DEFAULT_HOT_INTERVAL_SECONDS,
     DEFAULT_UNIVERSE_INTERVAL_SECONDS,
@@ -124,6 +131,14 @@ class PriceEngineItemStatus(StrEnum):
     NOT_STARTED = "not_started_this_cadence"
     REVALIDATION_NEEDED = "revalidation_needed"
     FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class RetrievedVenuePayload:
+    """One exact provider response plus the instant that response completed."""
+
+    payload: dict[str, Any]
+    retrieved_at: datetime
 
 
 @dataclass
@@ -246,6 +261,7 @@ class CataloguePriceEngine:
             VenueName.KALSHI.value: 0,
         }
         self._slice_remaining: Callable[[], float | None] | None = None
+        self._pending_item_captures: set[asyncio.Task[Any]] = set()
 
     def now(self) -> datetime:
         return self._clock()
@@ -463,7 +479,7 @@ class CataloguePriceEngine:
 
             return await self._evaluate_complete_item(
                 runtime,
-                matchbook_payload=matchbook_payload,
+                matchbook=matchbook_payload,
                 kalshi_books=kalshi_books,
                 result=result,
             )
@@ -475,7 +491,7 @@ class CataloguePriceEngine:
         runtime: PriceEngineRuntimeItem,
         *,
         lane: str,
-    ) -> dict[str, Any] | PriceEngineItemStatus:
+    ) -> RetrievedVenuePayload | PriceEngineItemStatus:
         identity = runtime.identity
         getter = getattr(self.matchbook, "get_market", None)
         if not callable(getter):
@@ -500,20 +516,20 @@ class CataloguePriceEngine:
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:gone")
         if str(market.get("id") or "") != str(identity.matchbook_market_id):
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:identity")
-        return market
+        return RetrievedVenuePayload(payload=market, retrieved_at=self.now())
 
     async def _refresh_kalshi_constituents(
         self,
         runtime: PriceEngineRuntimeItem,
         *,
         lane: str,
-    ) -> dict[str, dict[str, Any]] | PriceEngineItemStatus:
+    ) -> dict[str, RetrievedVenuePayload] | PriceEngineItemStatus:
         identity = runtime.identity
         client = self.kalshi
         getter = getattr(client, "get_order_book", None) if client is not None else None
         if not callable(getter):
             return self._request_revalidation(runtime, "kalshi_order_book_unavailable")
-        books: dict[str, dict[str, Any]] = {}
+        books: dict[str, RetrievedVenuePayload] = {}
         for ticker in _kalshi_tickers(identity):
             payload, status = await self._provider_call(
                 VenueName.KALSHI,
@@ -531,29 +547,42 @@ class CataloguePriceEngine:
                 runtime.last_error_stage = "order_book"
                 runtime.last_error_detail = PRICE_ENGINE_ITEM_TIMEOUT_REASON
                 return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
-            books[ticker] = payload
+            books[ticker] = RetrievedVenuePayload(payload=payload, retrieved_at=self.now())
         return books
 
     async def _evaluate_complete_item(
         self,
         runtime: PriceEngineRuntimeItem,
         *,
-        matchbook_payload: dict[str, Any],
-        kalshi_books: Mapping[str, dict[str, Any]],
+        matchbook: RetrievedVenuePayload,
+        kalshi_books: Mapping[str, RetrievedVenuePayload],
         result: PriceEngineSliceResult,
     ) -> PriceEngineItemStatus:
         identity = runtime.identity
-        retrieved_at = self.now()
         evaluated_at = self.now()
-        age = retrieval_quote_age(retrieved_at=retrieved_at, evaluated_at=evaluated_at)
+        matchbook_age = matchbook_market_quote_age(
+            matchbook.payload,
+            retrieved_at=matchbook.retrieved_at,
+            evaluated_at=evaluated_at,
+        )
+        required_tickers = _required_tickers(identity)
+        kalshi_age = _oldest_retrieval_age(
+            [
+                kalshi_books[ticker].retrieved_at
+                for ticker in required_tickers
+                if ticker in kalshi_books
+            ],
+            evaluated_at=evaluated_at,
+            required=len(required_tickers),
+        )
         try:
             matchbook_obs = self.matchbook_builder.build(
                 _synthetic_matchbook_event(identity),
-                matchbook_payload,
-                observed_at=retrieved_at,
-                quote_age_ms=age.quote_age_ms,
-                quote_age_basis=age.basis or "retrieval",
-                quote_age_reason=age.reason,
+                matchbook.payload,
+                observed_at=evaluated_at,
+                quote_age_ms=matchbook_age.quote_age_ms,
+                quote_age_basis=matchbook_age.basis or "retrieval",
+                quote_age_reason=matchbook_age.reason,
             )
         except Exception as exc:
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:{exc}")
@@ -561,14 +590,15 @@ class CataloguePriceEngine:
         if kalshi_market is None:
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:kalshi_identity")
         fee_snapshot = self._fee_snapshot_payload(identity)
+        kalshi_payloads = {ticker: item.payload for ticker, item in kalshi_books.items()}
         try:
             kalshi_obs = self.kalshi_builder.build_from_canonical(
                 kalshi_market,
-                kalshi_books,
-                observed_at=retrieved_at,
-                quote_age_ms=age.quote_age_ms,
-                quote_age_basis=age.basis,
-                quote_age_reason=age.reason,
+                kalshi_payloads,
+                observed_at=evaluated_at,
+                quote_age_ms=kalshi_age.quote_age_ms,
+                quote_age_basis=kalshi_age.basis,
+                quote_age_reason=kalshi_age.reason,
                 fee_snapshot=fee_snapshot,
             )
         except Exception as exc:
@@ -723,10 +753,21 @@ class CataloguePriceEngine:
         decision: PaperScanDecision | None,
         result: PriceEngineSliceResult,
     ) -> None:
-        """Publish-time capture hook. Persist failure must not retry the item."""
+        """Start capture immediately. Do not hold a pricing worker for persist."""
 
         if decision is None or self.on_item_decision is None:
             return
+        task = asyncio.create_task(self._run_item_capture(runtime, decision, result))
+        self._pending_item_captures.add(task)
+        task.add_done_callback(self._capture_task_done)
+        await asyncio.sleep(0)
+
+    async def _run_item_capture(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        decision: PaperScanDecision,
+        result: PriceEngineSliceResult,
+    ) -> None:
         row_id = runtime.identity.catalogue_row_id
         try:
             outcome = self.on_item_decision(decision, runtime)
@@ -746,6 +787,25 @@ class CataloguePriceEngine:
                     detail=str(exc),
                 )
             )
+
+    def _capture_task_done(self, task: asyncio.Task[Any]) -> None:
+        self._pending_item_captures.discard(task)
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            LOGGER.exception("price-engine capture task crashed", exc_info=exc)
+
+    async def drain_item_captures(self) -> None:
+        """Await in-memory item captures outside the HOT pricing envelope."""
+
+        pending = list(self._pending_item_captures)
+        if not pending:
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
 
     async def _provider_call(
         self,
@@ -916,6 +976,30 @@ class CataloguePriceEngine:
             "peak_held_slots": dict(self._peak_held_slots),
             "durable_queue": False,
         }
+
+
+def _oldest_retrieval_age(
+    retrieved_at: list[datetime],
+    *,
+    evaluated_at: datetime,
+    required: int,
+) -> QuoteAgeAssessment:
+    """Age from the oldest required retrieval instant. Missing times fail closed."""
+
+    if required <= 0:
+        return QuoteAgeAssessment(
+            quote_age_ms=None,
+            basis="unknown",
+            reason="missing_quote_timestamp",
+        )
+    if len(retrieved_at) < required:
+        return QuoteAgeAssessment(
+            quote_age_ms=None,
+            basis="unknown",
+            reason="missing_quote_timestamp",
+        )
+    oldest = min(retrieved_at)
+    return retrieval_quote_age(retrieved_at=oldest, evaluated_at=evaluated_at)
 
 
 def _fixture_like(identity: DerivedPriceEngineItem) -> Any:

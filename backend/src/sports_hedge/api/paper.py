@@ -1315,6 +1315,7 @@ async def server_owned_refresh_tick(plan=None) -> None:
             kalshi=runtime.kalshi,
             paper_scan=service,
         )
+        await coordinator.price_engine().drain_item_captures()
         return
     if resolved.lane == ScanLane.HOT.value or getattr(resolved, "reason", "") == "hot_scope_empty":
         hot_wall = float(settings.paper_scan_hot_cycle_timeout_seconds)
@@ -1358,6 +1359,9 @@ async def server_owned_refresh_tick(plan=None) -> None:
             )
         except (MatchbookAuthError, MatchbookDiscoveryError, ScanCycleTimeout, httpx.HTTPError):
             return
+        # Item captures started during the slice. Drain them outside run_cycle
+        # so slow SQLite/treasury work cannot become scan_cycle_timeout.
+        await coordinator.price_engine().drain_item_captures()
         # Cycle history / position management only. Capture already ran at
         # item completion. Do not recapture the same decision here.
         await persist_scheduled_collection_report(
@@ -1644,7 +1648,8 @@ def persist_price_engine_item_decision(
     """Watchlist-publish and capture one completed price-engine item.
 
     Reuses ``_persist_decision`` / ``persist_triggered_chain``. Does not invent
-    a second capture service. SQLite work is serialized across in-slice workers.
+    a second capture service. SQLite work is serialized across in-memory capture
+    tasks; pricing workers do not wait for this lock.
     """
 
     with _PRICE_ENGINE_ITEM_PERSIST_LOCK:
@@ -1671,7 +1676,11 @@ def bind_price_engine_item_persist(
     audit: SqlitePaperScanRepository,
     watchlist: WatchlistService,
 ) -> None:
-    """Wire item-completion capture without putting it inside the price engine."""
+    """Wire item-completion capture without putting it inside the price engine.
+
+    The engine starts this callback immediately, then drains the in-memory
+    capture tasks outside the HOT ``run_cycle`` envelope.
+    """
 
     async def _handoff(decision: PaperScanDecision, runtime: Any) -> None:
         del runtime
