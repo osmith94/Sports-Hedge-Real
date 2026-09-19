@@ -39,12 +39,14 @@ Copy repository-root `.env.example` to repository-root `.env` if you want local 
 Double-click:
 
 - `scripts\windows\Start-SportsHedge-Demo.bat` — starts FastAPI `:8000` and Next `:3000`, waits for health, opens **`/`** (not `/demo`). Prints current branch/SHA and whether backend/frontend were reused or restarted. Reuses a healthy process only when launcher PID identity, command, repo root, and Git HEAD match this checkout.
-- `scripts\windows\Stop-SportsHedge-Demo.bat` — stops only launcher-owned PIDs.
+- `scripts\windows\Stop-SportsHedge-Demo.bat` — stops only launcher-owned PIDs, including verified Next.js descendants of the frontend `npm` wrapper. Unrelated Node processes are not killed.
+- `scripts\windows\Refresh-SportsHedge-Demo.ps1` — one-command refresh onto latest `owner-live`: stop owned tree, verify ports 3000/8000 are gone, `git fetch` / `switch owner-live` / `pull --ff-only`, clear `frontend\.next` only, print branch/SHA, then start. Fails closed if git or stop fails; does not delete `node_modules`.
 
 Or from PowerShell:
 
 ```powershell
 .\scripts\windows\Start-SportsHedge-Demo.ps1
+powershell.exe -ExecutionPolicy Bypass -File .\scripts\windows\Refresh-SportsHedge-Demo.ps1
 ```
 
 The launcher sets `PAPER_AUTOFILL_ENABLED=true` so qualifying **LIVE_PAPER** opportunities auto-capture through the existing paper autofill path (allocator-sized; fail-closed; no venue orders). The console should show **AUTO PAPER CAPTURE ON** while retaining **PAPER MODE · NO EXECUTION**. Labelled `/demo` fixture replay does **not** inherit that setting: qualify → preview £10 → confirm remains explicit. It sets `PAPER_LIVE_REFRESH_ENABLED=true` and `ACCOUNTING_SCHEDULE_ENABLED=true` for this local process only. It never sets `SPORTS_HEDGE_EXECUTION_ENABLED=true`.

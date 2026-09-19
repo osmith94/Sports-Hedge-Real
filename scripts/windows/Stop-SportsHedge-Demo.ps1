@@ -1,6 +1,8 @@
 # Stop processes started by Start-SportsHedge-Demo.ps1.
 # Never force-kill a reused PID. Identity JSON (pid + path + command tokens)
 # must match the live process command/path before Stop-Process.
+# Owned frontend npm wrappers also stop verified Next.js descendants discovered
+# via Win32_Process.ParentProcessId. Unrelated Node processes are not killed.
 # Decision contract matches sports_hedge.application.demo_launcher_pid.
 
 $ErrorActionPreference = "Stop"
