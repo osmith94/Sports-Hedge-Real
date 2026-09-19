@@ -128,10 +128,14 @@ async def test_cancel_ignoring_work_unit_still_returns_control() -> None:
         coordinator.record_universe_fixture_progress(
             None, _universe_fixture("a"), [], []
         )
+        ignored = 0
         while True:
             try:
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
+                ignored += 1
+                if ignored >= 8:
+                    return _partial_report("a", leftover="b")
                 continue
 
     started = monotonic()
@@ -142,6 +146,161 @@ async def test_cancel_ignoring_work_unit_still_returns_control() -> None:
     assert monotonic() - started < 1.5
     assert coordinator.status.universe.cycle_in_progress is False
     assert "a" in coordinator._universe_evaluated_ids
+    assert coordinator._universe_orphaned_chunk_count >= 1
+    assert coordinator._universe_active_chunk_epoch is None
+
+
+@pytest.mark.asyncio
+async def test_timed_out_chunk_cannot_mutate_replacement_checkpoint() -> None:
+    """Cancellation-ignoring chunk cannot append to a later UNIVERSE chunk."""
+
+    clock = FakeClock(NOW)
+    coordinator = LiveRefreshCoordinator(clock=clock)
+    coordinator._clock = clock
+    recorded_a = asyncio.Event()
+    after_replacement = asyncio.Event()
+    stale_attempted = asyncio.Event()
+    replacement_started = asyncio.Event()
+    zombie_epoch: dict[str, int | None] = {}
+    original_snapshot = {
+        "matchbook": [{"id": "mb-safe"}],
+        "polymarket": [],
+        "kalshi": [],
+    }
+
+    async def zombie_chunk() -> CollectionReport:
+        on_discovery, on_fixture, on_work = coordinator.universe_collect_callbacks()
+        zombie_epoch["value"] = coordinator._universe_active_chunk_epoch
+        on_discovery(original_snapshot)
+        on_work(["a", "b", "c"], authoritative=True)
+        on_fixture(None, _universe_fixture("a"), [], [])
+        recorded_a.set()
+        while not after_replacement.is_set():
+            try:
+                await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                continue
+        on_discovery(
+            {
+                "matchbook": [{"id": "zombie-stale"}],
+                "polymarket": [],
+                "kalshi": [],
+            }
+        )
+        on_work(["a", "b", "zombie-extra"], authoritative=True)
+        on_fixture(None, _universe_fixture("b"), [], [])
+        stale_attempted.set()
+        return _partial_report("a", leftover="b", when=clock.now)
+
+    started = monotonic()
+    with pytest.raises(ScanCycleTimeout):
+        await coordinator.run_cycle(
+            zombie_chunk, timeout_seconds=0.25, scan_lane=ScanLane.UNIVERSE
+        )
+    assert monotonic() - started < 1.5
+    await asyncio.wait_for(recorded_a.wait(), timeout=1)
+    assert "a" in coordinator._universe_evaluated_ids
+    assert "b" not in coordinator._universe_evaluated_ids
+    assert coordinator._universe_active_chunk_epoch is None
+    assert coordinator._universe_orphaned_chunk_count >= 1
+    generation = coordinator._universe_generation_id
+    sweep = coordinator._universe_sweep_id
+    safe_events = (coordinator._universe_discovery_snapshot or {}).get("matchbook") or []
+    assert any(isinstance(row, dict) and row.get("id") == "mb-safe" for row in safe_events)
+
+    live = _fixture("live", kickoff=NOW - timedelta(minutes=1), in_running=True)
+
+    async def hot_runner() -> CollectionReport:
+        return _report([live], when=clock.now, scan_lane=ScanLane.HOT.value)
+
+    await coordinator.run_cycle(hot_runner, timeout_seconds=2.0, scan_lane=ScanLane.HOT)
+    assert coordinator.status.hot.cycle_in_progress is False
+    assert coordinator._universe_generation_started_at is not None
+    assert coordinator._universe_generation_id == generation
+
+    coordinator._universe_retry_at = None
+    plan = coordinator.plan_universe_tick(now=clock.now)
+    assert plan.lane == "universe"
+    assert plan.generation_resume is True
+    assert "a" in plan.skip_event_ids
+    assert plan.unbounded_cycle is False
+
+    async def replacement_chunk() -> CollectionReport:
+        replacement_started.set()
+        await stale_attempted.wait()
+        on_discovery, on_fixture, on_work = coordinator.universe_collect_callbacks()
+        assert coordinator._universe_active_chunk_epoch != zombie_epoch["value"]
+        on_work(["a", "b", "c"], authoritative=True)
+        on_fixture(None, _universe_fixture("c"), [], [])
+        return _partial_report("c", leftover="b", when=clock.now)
+
+    replacement_task = asyncio.create_task(
+        coordinator.run_cycle(
+            replacement_chunk, timeout_seconds=2.0, scan_lane=ScanLane.UNIVERSE
+        )
+    )
+    await asyncio.wait_for(replacement_started.wait(), timeout=1)
+    after_replacement.set()
+    await asyncio.wait_for(stale_attempted.wait(), timeout=1)
+    assert "b" not in coordinator._universe_evaluated_ids
+    assert "zombie-extra" not in coordinator._universe_work
+    discovery = coordinator._universe_discovery_snapshot or {}
+    matchbook_events = discovery.get("matchbook") or []
+    assert not any(
+        isinstance(row, dict) and row.get("id") == "zombie-stale" for row in matchbook_events
+    )
+    assert coordinator._universe_stale_callback_count >= 3
+    running = coordinator.public_status()
+    summary = (running.universe.operator_summary or "") + " " + (running.operator_summary or "")
+    assert "68/68" not in summary
+    assert "complete" not in (running.universe.operator_summary or "").casefold()
+    diagnostics = running.universe.last_diagnostics or {}
+    if diagnostics:
+        assert diagnostics.get("sweep_id") in {None, running.universe.sweep_id, sweep}
+        assert diagnostics.get("generation_id") in {None, generation}
+    await replacement_task
+    leftovers = [task for task in coordinator._universe_orphaned_tasks if not task.done()]
+    if leftovers:
+        await asyncio.wait(leftovers, timeout=1.0)
+    assert coordinator._universe_generation_id == generation
+    assert coordinator._universe_evaluated_ids >= {"a", "c"}
+    assert "b" not in coordinator._universe_evaluated_ids
+    assert coordinator._universe_cursor == "c"
+
+    async def finishing_chunk() -> CollectionReport:
+        on_discovery, on_fixture, on_work = coordinator.universe_collect_callbacks()
+        on_work(["a", "b", "c"], authoritative=True)
+        on_fixture(None, _universe_fixture("b"), [], [])
+        report = _report(
+            [
+                _universe_fixture("a"),
+                _universe_fixture("b"),
+                _universe_fixture("c"),
+            ],
+            when=clock.now,
+            scan_lane=ScanLane.UNIVERSE.value,
+        )
+        return report.model_copy(
+            update={
+                "sweep_id": coordinator._universe_sweep_id,
+                "scan_diagnostics": {
+                    "completeness": "complete",
+                    "canonical_work_total": 3,
+                },
+            }
+        )
+
+    await coordinator.run_cycle(
+        finishing_chunk, timeout_seconds=2.0, scan_lane=ScanLane.UNIVERSE
+    )
+    assert coordinator._universe_evaluated_ids >= {"a", "b", "c"}
+    finished = coordinator.public_status()
+    assert finished.universe.cycle_in_progress is False
+    assert coordinator._universe_generation_started_at is None or (
+        finished.universe.worker_state == "complete"
+    )
+    assert finished.universe.sweep_id in {None, sweep}
+    assert "68/68" not in (finished.universe.operator_summary or "")
 
 
 @pytest.mark.asyncio

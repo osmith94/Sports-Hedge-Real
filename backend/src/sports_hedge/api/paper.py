@@ -1280,11 +1280,11 @@ async def server_owned_refresh_tick(plan=None) -> None:
 
     watchlist = get_watchlist_service(get_watchlist_repository())
     kwargs = scheduled_collection_kwargs()
-    on_discovery = on_fixture = on_work_set = None
-    if resolved.lane == ScanLane.UNIVERSE.value:
-        on_discovery, on_fixture, on_work_set = coordinator.universe_collect_callbacks()
 
     async def runner() -> CollectionReport:
+        on_discovery = on_fixture = on_work_set = None
+        if resolved.lane == ScanLane.UNIVERSE.value:
+            on_discovery, on_fixture, on_work_set = coordinator.universe_collect_callbacks()
         return await _collect_report(
             kwargs,
             service=service,
