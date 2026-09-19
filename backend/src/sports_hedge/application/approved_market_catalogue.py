@@ -1,0 +1,365 @@
+"""Durable approved-market catalogue identity (Issue #341 Phase 2).
+
+UNIVERSE persists exact Matchbook↔Kalshi native IDs and Kalshi fee metadata
+for the four registered families. This module is identity / lifecycle truth,
+not a second matcher and not a price engine.
+
+Admission (`paper_admission`, `settlement_assumption`, live-execution
+eligibility) is derived at use time from the live Approved Match Register and
+PAPER mode. Those policy fields must never be stored on catalogue rows.
+Quotes, solver output, mapping confidence, and work-queue state are also
+forbidden.
+
+Data class: durable identity/fee-metadata. Not live quotes.
+PAPER / read-only.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from enum import StrEnum
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from sports_hedge.domain.football import CanonicalOutcome, FootballPeriod, MarketFamily
+from sports_hedge.fees.kalshi import resolve_kalshi_fee_metadata
+from sports_hedge.matching.approved_register import REGISTER_VERSION
+
+CATALOGUE_SCHEMA_VERSION = 1
+CATALOGUE_ISSUE = 341
+FEE_SNAPSHOT_SCHEMA_VERSION = 1
+
+FEE_STATUS_KNOWN = "known"
+FEE_STATUS_UNKNOWN = "unknown"
+FEE_STATUS_PARTIAL = "partial_event_fee_override"
+FEE_STATUS_UNSUPPORTED = "unsupported"
+
+FEE_SOURCE_NESTED_LIST_EVENTS = "nested_list_events"
+FEE_SOURCE_GET_SERIES = "get_series"
+FEE_SOURCE_EVENT_PAYLOAD = "event_payload"
+
+CATALOGUE_FORBIDDEN_COLUMNS = frozenset(
+    {
+        "paper_admission",
+        "settlement_assumption",
+        "live_execution_eligible",
+        "mapping_confidence",
+        "min_mapping_confidence",
+        "confidence",
+        "quotes",
+        "quote",
+        "best_back",
+        "best_lay",
+        "solver_output",
+        "paper_eligible",
+        "work_queue_state",
+        "next_retry_at",
+        "in_flight",
+        "priority",
+    }
+)
+FEE_SNAPSHOT_FORBIDDEN_COLUMNS = frozenset(
+    {
+        "quote",
+        "quotes",
+        "best_bid",
+        "best_ask",
+        "yes_bid",
+        "yes_ask",
+        "order_book",
+        "odds",
+        "decimal_odds",
+        "size_at_touch",
+    }
+)
+
+SUPPORTED_KALSHI_FEE_TYPES = frozenset({"quadratic", "quadratic_with_maker_fees"})
+
+
+class CatalogueRowState(StrEnum):
+    ACTIVE = "ACTIVE"
+    NOT_LISTED = "NOT_LISTED"
+    TERMINAL = "TERMINAL"
+    DISAPPEARED = "DISAPPEARED"
+    INVALIDATED = "INVALIDATED"
+    VENUE_UNAVAILABLE = "VENUE_UNAVAILABLE"
+
+
+class OutcomeNativeId(BaseModel):
+    """Exact native identifier for one required register outcome."""
+
+    outcome: str
+    native_id: str
+
+
+class KalshiFeeSnapshotRecord(BaseModel):
+    """Compact Kalshi fee metadata. Never quotes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str
+    series_ticker: str
+    event_ticker: str | None = None
+    market_ticker: str | None = None
+    fee_type: str | None = None
+    fee_multiplier: str | None = None
+    fee_type_override: Any = None
+    fee_multiplier_override: Any = None
+    series_fee_type: Any = None
+    series_fee_multiplier: Any = None
+    fee_provenance: str | None = None
+    fee_resolution_status: str
+    fee_resolution_error: str | None = None
+    captured_at: datetime
+    confirmed_at: datetime | None = None
+    source: str | None = None
+
+    def is_known(self) -> bool:
+        return self.fee_resolution_status == FEE_STATUS_KNOWN and self.fee_type is not None
+
+
+class ApprovedMarketCatalogueRow(BaseModel):
+    """One durable approved-family identity row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    catalogue_row_id: str
+    schema_version: int = CATALOGUE_SCHEMA_VERSION
+    register_version: str = REGISTER_VERSION
+    register_canonical_key: str
+    canonical_event_id: str
+    competition: str | None = None
+    home_canonical: str | None = None
+    away_canonical: str | None = None
+    kickoff_utc: datetime | None = None
+    matchbook_event_id: str | None = None
+    matchbook_market_id: str | None = None
+    matchbook_runner_ids: list[OutcomeNativeId] = Field(default_factory=list)
+    kalshi_event_ticker: str | None = None
+    kalshi_market_tickers: list[str] = Field(default_factory=list)
+    kalshi_outcome_ids: list[OutcomeNativeId] = Field(default_factory=list)
+    kalshi_series_ticker: str | None = None
+    family: str | None = None
+    period: str | None = None
+    line: str | None = None
+    required_outcomes: list[str] = Field(default_factory=list)
+    kalshi_fee_snapshot_id: str | None = None
+    row_state: CatalogueRowState = CatalogueRowState.ACTIVE
+    invalidation_reason: str | None = None
+    first_catalogued_at: datetime
+    last_confirmed_at: datetime | None = None
+    last_seen_generation_id: str | None = None
+    content_version: int = 1
+
+    def native_identity_tuple(self) -> tuple[Any, ...]:
+        return (
+            self.matchbook_event_id,
+            self.matchbook_market_id,
+            tuple((item.outcome, item.native_id) for item in self.matchbook_runner_ids),
+            self.kalshi_event_ticker,
+            tuple(self.kalshi_market_tickers),
+            tuple((item.outcome, item.native_id) for item in self.kalshi_outcome_ids),
+            self.kalshi_series_ticker,
+        )
+
+
+class DerivedPriceEngineItem(BaseModel):
+    """In-memory price-engine claim copied from an ACTIVE catalogue row.
+
+    Not persisted. Phase 3 schedules these; Phase 2 only reconstructs identity.
+    """
+
+    catalogue_row_id: str
+    content_version: int
+    canonical_event_id: str
+    register_canonical_key: str
+    matchbook_event_id: str | None = None
+    matchbook_market_id: str | None = None
+    matchbook_runner_ids: list[OutcomeNativeId] = Field(default_factory=list)
+    kalshi_event_ticker: str | None = None
+    kalshi_market_tickers: list[str] = Field(default_factory=list)
+    kalshi_fee_snapshot_id: str | None = None
+    family: str | None = None
+    period: str | None = None
+    line: str | None = None
+
+
+def classify_kalshi_fee_resolution(metadata: dict[str, Any]) -> tuple[str, str | None]:
+    """Map `resolve_kalshi_fee_metadata` output onto snapshot status.
+
+    Preserves fail-closed semantics: partial override, missing, flat, and
+    unknown types never become known 0%.
+    """
+
+    error = str(metadata.get("fee_resolution_error") or "").strip()
+    if error == "partial_event_fee_override":
+        return FEE_STATUS_PARTIAL, error
+    if error:
+        return FEE_STATUS_UNKNOWN, error
+    fee_type = str(metadata.get("fee_type") or "").strip().casefold()
+    if not fee_type:
+        return FEE_STATUS_UNKNOWN, "missing_fee_type"
+    if fee_type == "flat":
+        return FEE_STATUS_UNSUPPORTED, "flat_fee_type_unmodelled"
+    if fee_type not in SUPPORTED_KALSHI_FEE_TYPES:
+        return FEE_STATUS_UNSUPPORTED, f"unsupported_fee_type:{fee_type}"
+    multiplier = metadata.get("fee_multiplier")
+    if multiplier is None or multiplier == "":
+        return FEE_STATUS_UNKNOWN, "missing_fee_multiplier"
+    try:
+        Decimal(str(multiplier))
+    except (InvalidOperation, ValueError, TypeError):
+        return FEE_STATUS_UNKNOWN, "invalid_fee_multiplier"
+    return FEE_STATUS_KNOWN, None
+
+
+def kalshi_fee_snapshot_from_payloads(
+    *,
+    series: dict[str, Any] | None,
+    event: dict[str, Any] | None,
+    market_ticker: str | None,
+    captured_at: datetime,
+    source: str,
+    snapshot_id: str,
+    confirmed_at: datetime | None = None,
+) -> KalshiFeeSnapshotRecord:
+    metadata = resolve_kalshi_fee_metadata(event=event, series=series)
+    status, error = classify_kalshi_fee_resolution(metadata)
+    fee_type_raw = metadata.get("fee_type")
+    fee_multiplier_raw = metadata.get("fee_multiplier")
+    stored_type: str | None = None
+    stored_multiplier: str | None = None
+    if status == FEE_STATUS_KNOWN:
+        stored_type = str(fee_type_raw)
+        stored_multiplier = str(fee_multiplier_raw)
+    elif status == FEE_STATUS_UNSUPPORTED and fee_type_raw not in (None, ""):
+        # Audit the unsupported type; never invent a 0% multiplier.
+        stored_type = str(fee_type_raw)
+    event_payload = event or {}
+    series_payload = series or {}
+    return KalshiFeeSnapshotRecord(
+        snapshot_id=snapshot_id,
+        series_ticker=str(
+            series_payload.get("ticker")
+            or event_payload.get("series_ticker")
+            or ""
+        ).strip(),
+        event_ticker=_optional_text(event_payload.get("event_ticker")),
+        market_ticker=_optional_text(market_ticker),
+        fee_type=stored_type,
+        fee_multiplier=stored_multiplier,
+        fee_type_override=metadata.get("fee_type_override"),
+        fee_multiplier_override=metadata.get("fee_multiplier_override"),
+        series_fee_type=metadata.get("series_fee_type"),
+        series_fee_multiplier=metadata.get("series_fee_multiplier"),
+        fee_provenance=None if metadata.get("fee_provenance") in (None, "") else str(
+            metadata.get("fee_provenance")
+        ),
+        fee_resolution_status=status,
+        fee_resolution_error=error,
+        captured_at=captured_at,
+        confirmed_at=confirmed_at,
+        source=source,
+    )
+
+
+def catalogue_row_supports_paper_eligibility(
+    row: ApprovedMarketCatalogueRow,
+    snapshot: KalshiFeeSnapshotRecord | None,
+) -> bool:
+    """Later economics may mark paper-eligible only with a known fee snapshot.
+
+    Unknown / partial / unsupported / missing never become 0%. This is not a
+    solver decision; it is the catalogue-side fail-closed gate.
+    """
+
+    if row.row_state is not CatalogueRowState.ACTIVE:
+        return False
+    if not row.kalshi_fee_snapshot_id:
+        return False
+    if snapshot is None:
+        return False
+    if snapshot.snapshot_id != row.kalshi_fee_snapshot_id:
+        return False
+    if snapshot.fee_resolution_status != FEE_STATUS_KNOWN:
+        return False
+    if not snapshot.fee_type:
+        return False
+    if snapshot.fee_multiplier is None or snapshot.fee_multiplier == "":
+        return False
+    try:
+        Decimal(str(snapshot.fee_multiplier))
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+    return True
+
+
+def derived_price_engine_working_set(
+    rows: list[ApprovedMarketCatalogueRow],
+) -> list[DerivedPriceEngineItem]:
+    """Rebuild in-memory price-engine identity from ACTIVE rows. No list_markets."""
+
+    items: list[DerivedPriceEngineItem] = []
+    for row in rows:
+        if row.row_state is not CatalogueRowState.ACTIVE:
+            continue
+        items.append(
+            DerivedPriceEngineItem(
+                catalogue_row_id=row.catalogue_row_id,
+                content_version=row.content_version,
+                canonical_event_id=row.canonical_event_id,
+                register_canonical_key=row.register_canonical_key,
+                matchbook_event_id=row.matchbook_event_id,
+                matchbook_market_id=row.matchbook_market_id,
+                matchbook_runner_ids=list(row.matchbook_runner_ids),
+                kalshi_event_ticker=row.kalshi_event_ticker,
+                kalshi_market_tickers=list(row.kalshi_market_tickers),
+                kalshi_fee_snapshot_id=row.kalshi_fee_snapshot_id,
+                family=row.family,
+                period=row.period,
+                line=row.line,
+            )
+        )
+    return items
+
+
+def family_period_line_from_key(register_canonical_key: str) -> tuple[str | None, str, str | None]:
+    if register_canonical_key == "MATCH_RESULT_FT":
+        return MarketFamily.MATCH_RESULT.value, FootballPeriod.FULL_TIME.value, None
+    if register_canonical_key == "BTTS_FT":
+        return MarketFamily.BOTH_TEAMS_TO_SCORE.value, FootballPeriod.FULL_TIME.value, None
+    if register_canonical_key == "FTTS_FT":
+        return MarketFamily.FIRST_TEAM_TO_SCORE.value, FootballPeriod.FULL_TIME.value, None
+    if register_canonical_key.startswith("TOTAL_GOALS_FT:"):
+        line = register_canonical_key.split(":", 1)[1]
+        return MarketFamily.TOTAL_GOALS.value, FootballPeriod.FULL_TIME.value, line
+    return None, FootballPeriod.FULL_TIME.value, None
+
+
+def required_outcomes_for_key(register_canonical_key: str) -> list[str]:
+    if register_canonical_key == "MATCH_RESULT_FT":
+        return [
+            CanonicalOutcome.HOME.value,
+            CanonicalOutcome.DRAW.value,
+            CanonicalOutcome.AWAY.value,
+        ]
+    if register_canonical_key == "BTTS_FT":
+        return [CanonicalOutcome.YES.value, CanonicalOutcome.NO.value]
+    if register_canonical_key == "FTTS_FT":
+        return [
+            CanonicalOutcome.HOME.value,
+            CanonicalOutcome.AWAY.value,
+            CanonicalOutcome.NO_GOAL.value,
+        ]
+    if register_canonical_key.startswith("TOTAL_GOALS_FT:"):
+        return [CanonicalOutcome.OVER.value, CanonicalOutcome.UNDER.value]
+    return []
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

@@ -84,6 +84,7 @@ from sports_hedge.paper.trades import (
 )
 from sports_hedge.paper.unwind.models import PaperClosePlanRequest, UnwindDecision, UnwindPolicy
 from sports_hedge.paper.position_management.models import PositionManagementSnapshot
+from sports_hedge.persistence.approved_market_catalogue import get_approved_market_catalogue_store
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.persistence.matchbook_account_fee import (
     MatchbookAccountFeeStatus,
@@ -996,6 +997,7 @@ async def _collect_report(
             VenueName.KALSHI: settings.paper_scan_kalshi_concurrency,
         },
         provider_access=runtime.access,
+        catalogue_store=get_approved_market_catalogue_store(),
         cycle_timeout_seconds=(
             settings.paper_scan_cycle_timeout_seconds
             if cycle_timeout_seconds is None

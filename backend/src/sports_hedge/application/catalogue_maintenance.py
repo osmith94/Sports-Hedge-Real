@@ -1,0 +1,276 @@
+"""UNIVERSE catalogue maintenance for Issue #341 Phase 2.
+
+Uses the Approved Match Register as the only runtime equivalence function.
+Persists exact native IDs and compact Kalshi fee snapshots. Does not fetch
+order books, run the solver, or create a durable price-engine queue.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from hashlib import sha256
+from typing import Any
+
+from sports_hedge.application.approved_market_catalogue import (
+    CATALOGUE_SCHEMA_VERSION,
+    FEE_SOURCE_EVENT_PAYLOAD,
+    FEE_SOURCE_GET_SERIES,
+    ApprovedMarketCatalogueRow,
+    CatalogueRowState,
+    OutcomeNativeId,
+    family_period_line_from_key,
+    kalshi_fee_snapshot_from_payloads,
+    required_outcomes_for_key,
+)
+from sports_hedge.domain.football import CanonicalMarket
+from sports_hedge.matching.approved_register import REGISTER_VERSION, registered_canonical_key
+from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
+
+DISAPPEARED_FAMILY_REASON = "family_not_listed_this_generation"
+TERMINAL_FIXTURE_REASON = "fixture_terminal"
+
+
+class CataloguePairIdentity:
+    """Exact MB↔Kalshi identity for one registered canonical key."""
+
+    def __init__(
+        self,
+        *,
+        register_canonical_key: str,
+        matchbook: CanonicalMarket,
+        kalshi: CanonicalMarket,
+        kalshi_event_payload: dict[str, Any] | None,
+        kalshi_series_payload: dict[str, Any] | None,
+        fee_source: str,
+    ) -> None:
+        self.register_canonical_key = register_canonical_key
+        self.matchbook = matchbook
+        self.kalshi = kalshi
+        self.kalshi_event_payload = kalshi_event_payload or {}
+        self.kalshi_series_payload = kalshi_series_payload or {}
+        self.fee_source = fee_source
+
+
+def catalogue_row_id_for(canonical_event_id: str, register_canonical_key: str) -> str:
+    digest = sha256(f"{canonical_event_id}|{register_canonical_key}".encode()).hexdigest()[:24]
+    return f"amc:{digest}"
+
+
+def fee_snapshot_id_for(
+    *,
+    series_ticker: str,
+    event_ticker: str | None,
+    market_ticker: str | None,
+    status: str,
+    fee_type: str | None,
+    fee_multiplier: str | None,
+    provenance: str | None,
+) -> str:
+    payload = "|".join(
+        [
+            series_ticker,
+            event_ticker or "",
+            market_ticker or "",
+            status,
+            fee_type or "",
+            fee_multiplier or "",
+            provenance or "",
+        ]
+    )
+    digest = sha256(payload.encode()).hexdigest()[:24]
+    return f"kfee:{digest}"
+
+
+def ordered_native_ids(market: CanonicalMarket, register_canonical_key: str) -> list[OutcomeNativeId]:
+    by_outcome = {runner.outcome.value: runner.source_runner_id for runner in market.runners}
+    return [
+        OutcomeNativeId(outcome=outcome, native_id=by_outcome[outcome])
+        for outcome in required_outcomes_for_key(register_canonical_key)
+        if outcome in by_outcome
+    ]
+
+
+def kalshi_constituent_tickers(market: CanonicalMarket) -> list[str]:
+    tickers: list[str] = []
+    for runner in market.runners:
+        ticker = str(runner.source_runner_id).rsplit(":", 1)[0].strip()
+        if ticker and ticker not in tickers:
+            tickers.append(ticker)
+    if not tickers:
+        source = str(market.source_market_id or "").strip()
+        if source:
+            tickers.append(source)
+    return tickers
+
+
+def persist_universe_catalogue_pass(
+    store: SqliteApprovedMarketCatalogueStore,
+    *,
+    canonical_event_id: str,
+    competition: str | None,
+    home_canonical: str | None,
+    away_canonical: str | None,
+    kickoff_utc: datetime | None,
+    pairs: list[CataloguePairIdentity],
+    now: datetime,
+    generation_id: str | None,
+    listed_ok: bool,
+    terminal: bool,
+) -> list[ApprovedMarketCatalogueRow]:
+    """Upsert ACTIVE rows for registered pairs and invalidate missing families.
+
+    Catalogue completion does not require executable books or solver output.
+    """
+
+    if terminal:
+        return store.mark_fixture_terminal(
+            canonical_event_id,
+            reason=TERMINAL_FIXTURE_REASON,
+            now=now,
+            generation_id=generation_id,
+        )
+
+    found_keys: set[str] = set()
+    rows: list[ApprovedMarketCatalogueRow] = []
+    for pair in pairs:
+        key = pair.register_canonical_key or registered_canonical_key(pair.matchbook, pair.kalshi)
+        if key is None:
+            continue
+        found_keys.add(key)
+        rows.append(
+            _upsert_active_pair(
+                store,
+                canonical_event_id=canonical_event_id,
+                competition=competition,
+                home_canonical=home_canonical,
+                away_canonical=away_canonical,
+                kickoff_utc=kickoff_utc,
+                pair=pair,
+                register_canonical_key=key,
+                now=now,
+                generation_id=generation_id,
+            )
+        )
+
+    if listed_ok:
+        for existing in store.list_rows_for_event(canonical_event_id):
+            if existing.register_canonical_key in found_keys:
+                continue
+            if existing.row_state is CatalogueRowState.ACTIVE:
+                disappeared = store.mark_disappeared(
+                    existing.catalogue_row_id,
+                    reason=DISAPPEARED_FAMILY_REASON,
+                    now=now,
+                    generation_id=generation_id,
+                )
+                rows.append(disappeared or existing)
+    return rows
+
+
+def _upsert_active_pair(
+    store: SqliteApprovedMarketCatalogueStore,
+    *,
+    canonical_event_id: str,
+    competition: str | None,
+    home_canonical: str | None,
+    away_canonical: str | None,
+    kickoff_utc: datetime | None,
+    pair: CataloguePairIdentity,
+    register_canonical_key: str,
+    now: datetime,
+    generation_id: str | None,
+) -> ApprovedMarketCatalogueRow:
+    family, period, line = family_period_line_from_key(register_canonical_key)
+    mb_runners = ordered_native_ids(pair.matchbook, register_canonical_key)
+    kalshi_outcomes = ordered_native_ids(pair.kalshi, register_canonical_key)
+    tickers = kalshi_constituent_tickers(pair.kalshi)
+    series_ticker = str(
+        pair.kalshi_series_payload.get("ticker")
+        or pair.kalshi_event_payload.get("series_ticker")
+        or ""
+    ).strip()
+    event_ticker = str(
+        pair.kalshi_event_payload.get("event_ticker") or pair.kalshi.event.source_event_id or ""
+    ).strip() or None
+    market_ticker = tickers[0] if tickers else None
+    provisional = kalshi_fee_snapshot_from_payloads(
+        series=pair.kalshi_series_payload,
+        event=pair.kalshi_event_payload,
+        market_ticker=market_ticker,
+        captured_at=now,
+        source=pair.fee_source or FEE_SOURCE_EVENT_PAYLOAD,
+        snapshot_id="provisional",
+        confirmed_at=now,
+    )
+    snapshot = provisional.model_copy(
+        update={
+            "snapshot_id": fee_snapshot_id_for(
+                series_ticker=series_ticker or provisional.series_ticker,
+                event_ticker=event_ticker,
+                market_ticker=market_ticker,
+                status=provisional.fee_resolution_status,
+                fee_type=provisional.fee_type,
+                fee_multiplier=provisional.fee_multiplier,
+                provenance=provisional.fee_provenance,
+            ),
+            "series_ticker": series_ticker or provisional.series_ticker,
+        }
+    )
+    store.upsert_fee_snapshot(snapshot)
+    row_id = catalogue_row_id_for(canonical_event_id, register_canonical_key)
+    existing = store.get_row(row_id) or store.get_row_for_identity(
+        canonical_event_id, register_canonical_key
+    )
+    incoming = ApprovedMarketCatalogueRow(
+        catalogue_row_id=row_id if existing is None else existing.catalogue_row_id,
+        schema_version=CATALOGUE_SCHEMA_VERSION,
+        register_version=REGISTER_VERSION,
+        register_canonical_key=register_canonical_key,
+        canonical_event_id=canonical_event_id,
+        competition=competition,
+        home_canonical=home_canonical,
+        away_canonical=away_canonical,
+        kickoff_utc=kickoff_utc,
+        matchbook_event_id=str(pair.matchbook.event.source_event_id),
+        matchbook_market_id=str(pair.matchbook.source_market_id),
+        matchbook_runner_ids=mb_runners,
+        kalshi_event_ticker=event_ticker or str(pair.kalshi.event.source_event_id),
+        kalshi_market_tickers=tickers,
+        kalshi_outcome_ids=kalshi_outcomes,
+        kalshi_series_ticker=series_ticker or None,
+        family=family,
+        period=period,
+        line=line,
+        required_outcomes=required_outcomes_for_key(register_canonical_key),
+        kalshi_fee_snapshot_id=snapshot.snapshot_id,
+        row_state=CatalogueRowState.ACTIVE,
+        invalidation_reason=None,
+        first_catalogued_at=now if existing is None else existing.first_catalogued_at,
+        last_confirmed_at=now,
+        last_seen_generation_id=generation_id,
+        content_version=1 if existing is None else existing.content_version,
+    )
+    if existing is not None and existing.native_identity_tuple() != incoming.native_identity_tuple():
+        incoming = incoming.model_copy(update={"content_version": existing.content_version + 1})
+    return store.upsert_catalogue_row(incoming)
+
+
+def pair_identity_from_markets(
+    matchbook: CanonicalMarket,
+    kalshi: CanonicalMarket,
+    *,
+    kalshi_event_payload: dict[str, Any] | None = None,
+    kalshi_series_payload: dict[str, Any] | None = None,
+    fee_source: str = FEE_SOURCE_GET_SERIES,
+) -> CataloguePairIdentity | None:
+    key = registered_canonical_key(matchbook, kalshi)
+    if key is None:
+        return None
+    return CataloguePairIdentity(
+        register_canonical_key=key,
+        matchbook=matchbook,
+        kalshi=kalshi,
+        kalshi_event_payload=kalshi_event_payload,
+        kalshi_series_payload=kalshi_series_payload,
+        fee_source=fee_source,
+    )
