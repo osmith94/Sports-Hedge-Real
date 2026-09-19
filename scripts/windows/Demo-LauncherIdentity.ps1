@@ -1,5 +1,7 @@
 # Shared PID / Git-HEAD identity contract for the Windows demo launchers.
 # Decision contract matches sports_hedge.application.demo_launcher_pid.
+# Owned stop also terminates verified ParentProcessId descendants of that PID.
+# Never broad-kill Node. Unrelated port occupants are refused, not killed.
 # Dot-source only. Do not execute this file directly.
 
 function ConvertTo-NormalizedRepoRoot {
@@ -178,6 +180,180 @@ function Write-DemoPidIdentity {
     ($payload | ConvertTo-Json -Compress) | Set-Content -Path $PidFile -Encoding utf8
 }
 
+function Get-DemoCimProcessSnapshot {
+    try {
+        return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    } catch {
+        return @()
+    }
+}
+
+function Get-DemoOwnedTreePids {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RootPid,
+        $Processes = $null
+    )
+    if ($null -eq $Processes) {
+        $Processes = Get-DemoCimProcessSnapshot
+    }
+    $children = @{}
+    foreach ($proc in @($Processes)) {
+        $pidValue = $null
+        $ppid = $null
+        try {
+            if ($null -ne $proc.ProcessId) {
+                $pidValue = [int]$proc.ProcessId
+                $ppid = [int]$proc.ParentProcessId
+            } elseif ($null -ne $proc.pid) {
+                $pidValue = [int]$proc.pid
+                $ppid = [int]$proc.parent_pid
+            }
+        } catch {
+            continue
+        }
+        if ($null -eq $pidValue -or $pidValue -eq $ppid) {
+            continue
+        }
+        if (-not $children.ContainsKey($ppid)) {
+            $children[$ppid] = New-Object System.Collections.Generic.List[int]
+        }
+        [void]$children[$ppid].Add($pidValue)
+    }
+    $ordered = New-Object System.Collections.Generic.List[int]
+    $visited = New-Object "System.Collections.Generic.HashSet[int]"
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push(@{ Pid = $RootPid; Expanded = $false })
+    while ($stack.Count -gt 0) {
+        $frame = $stack.Pop()
+        $pidValue = [int]$frame.Pid
+        if ($frame.Expanded) {
+            [void]$ordered.Add($pidValue)
+            continue
+        }
+        if ($visited.Contains($pidValue)) {
+            continue
+        }
+        [void]$visited.Add($pidValue)
+        $stack.Push(@{ Pid = $pidValue; Expanded = $true })
+        $childList = @()
+        if ($children.ContainsKey($pidValue)) {
+            $childList = @($children[$pidValue])
+        }
+        for ($i = $childList.Count - 1; $i -ge 0; $i--) {
+            $child = [int]$childList[$i]
+            if (-not $visited.Contains($child)) {
+                $stack.Push(@{ Pid = $child; Expanded = $false })
+            }
+        }
+    }
+    if ($ordered.Count -eq 0) {
+        [void]$ordered.Add($RootPid)
+    }
+    return @($ordered)
+}
+
+function Test-DemoDescendantOwned {
+    param(
+        [hashtable]$Identity,
+        [int[]]$TreePids,
+        [string]$Label,
+        [int]$DescendantPid,
+        [hashtable]$Live
+    )
+    if ($null -eq $TreePids -or (@($TreePids) -notcontains $DescendantPid)) {
+        return "refuse"
+    }
+    if ($null -eq $Live -or -not $Live.present) {
+        return "missing"
+    }
+    $name = ([string]$Live.name).Trim().ToLowerInvariant()
+    if ($name.EndsWith(".exe")) {
+        $name = $name.Substring(0, $name.Length - 4)
+    }
+    $wrappers = @("cmd", "npm", "conhost", "powershell", "pwsh")
+    if ($wrappers -contains $name) {
+        return "stop"
+    }
+    $haystack = (@($Live.command_line, $Live.path, $Live.name) -join " ").ToLowerInvariant()
+    $repo = ConvertTo-NormalizedRepoRoot ([string]$Identity.repo_root)
+    $kind = ([string]$Label).Trim().ToLowerInvariant()
+    $commandAvailable = -not [string]::IsNullOrWhiteSpace([string]$Live.command_line)
+    if ($kind -eq "frontend") {
+        $looksNode = ($name -eq "node") -or ($name -eq "nodejs") -or ($haystack.IndexOf("node") -ge 0) -or ($haystack.IndexOf("next") -ge 0)
+        if (-not $looksNode) {
+            return "refuse"
+        }
+        if (-not $commandAvailable) {
+            return "stop"
+        }
+        if ($repo -and $haystack.IndexOf($repo) -ge 0) {
+            return "stop"
+        }
+        foreach ($token in @("next", "frontend", "3000", "npm")) {
+            if ($haystack.IndexOf($token) -ge 0) {
+                return "stop"
+            }
+        }
+        return "refuse"
+    }
+    if ($kind -eq "backend") {
+        $looksPython = ($name -eq "python") -or ($name -eq "pythonw") -or ($name -eq "py") -or ($haystack.IndexOf("python") -ge 0) -or ($haystack.IndexOf("uvicorn") -ge 0)
+        if (-not $looksPython) {
+            return "refuse"
+        }
+        if (-not $commandAvailable) {
+            return "stop"
+        }
+        if ($repo -and $haystack.IndexOf($repo) -ge 0) {
+            return "stop"
+        }
+        foreach ($token in @("uvicorn", "sports_hedge.api.main:app")) {
+            if ($haystack.IndexOf($token) -ge 0) {
+                return "stop"
+            }
+        }
+        return "refuse"
+    }
+    return "refuse"
+}
+
+function Test-DemoPortListening {
+    param([int]$Port)
+    try {
+        $conns = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+        if ($conns.Count -gt 0) {
+            return $true
+        }
+    } catch {
+        # Fall through to netstat; some hosts restrict Get-NetTCPConnection.
+    }
+    try {
+        $escaped = [regex]::Escape([string]$Port)
+        $pattern = "[:.]$escaped\s+\S+\s+\S+\s+LISTENING"
+        $lines = @(netstat -ano | Select-String -Pattern $pattern)
+        return ($lines.Count -gt 0)
+    } catch {
+        return $false
+    }
+}
+
+function Wait-DemoPortGone {
+    param(
+        [int]$Port,
+        [int]$Seconds = 10,
+        [string]$Label
+    )
+    for ($i = 0; $i -lt $Seconds; $i++) {
+        if (-not (Test-DemoPortListening -Port $Port)) {
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+    Write-Host "$Label port $Port is still listening after stopping the launcher-owned process tree. Refusing to kill an unexpected occupant of the port." -ForegroundColor Yellow
+    exit 1
+}
+
 function Stop-DemoPid {
     param(
         [string]$PidFile,
@@ -204,13 +380,45 @@ function Stop-DemoPid {
         Remove-Item $PidFile -ErrorAction SilentlyContinue
         return
     }
-    Write-Host "Stopping $Label PID $($identity.pid)"
-    Stop-Process -Id $identity.pid -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 400
-    $still = Get-Process -Id $identity.pid -ErrorAction SilentlyContinue
-    if ($null -ne $still) {
-        Write-Host "Could not stop $Label PID $($identity.pid)" -ForegroundColor Yellow
-        exit 1
+    $snapshot = Get-DemoCimProcessSnapshot
+    $treePids = @(Get-DemoOwnedTreePids -RootPid $identity.pid -Processes $snapshot)
+    $stopPids = New-Object System.Collections.Generic.List[int]
+    foreach ($procId in $treePids) {
+        if ([int]$procId -eq [int]$identity.pid) {
+            [void]$stopPids.Add([int]$procId)
+            continue
+        }
+        $childLive = Get-DemoLiveProcess -ProcId ([int]$procId)
+        $childAction = Test-DemoDescendantOwned -Identity $identity -TreePids $treePids -Label $Label -DescendantPid ([int]$procId) -Live $childLive
+        if ($childAction -eq "stop") {
+            [void]$stopPids.Add([int]$procId)
+        } elseif ($childAction -eq "refuse") {
+            Write-Host "Refusing to stop $Label descendant PID $procId; not a verified Sports Hedge descendant. Unrelated process was not killed." -ForegroundColor Yellow
+        }
+    }
+    foreach ($procId in @($stopPids)) {
+        Write-Host "Stopping $Label PID $procId"
+        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+    }
+    $deadline = (Get-Date).AddSeconds(5)
+    foreach ($procId in @($stopPids)) {
+        while ((Get-Date) -lt $deadline) {
+            $still = Get-Process -Id $procId -ErrorAction SilentlyContinue
+            if ($null -eq $still) {
+                break
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        $still = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if ($null -ne $still) {
+            Write-Host "Could not stop $Label PID $procId" -ForegroundColor Yellow
+            exit 1
+        }
+    }
+    if ($Label -eq "frontend") {
+        Wait-DemoPortGone -Port 3000 -Label $Label
+    } elseif ($Label -eq "backend") {
+        Wait-DemoPortGone -Port 8000 -Label $Label
     }
     Remove-Item $PidFile -ErrorAction SilentlyContinue
 }
