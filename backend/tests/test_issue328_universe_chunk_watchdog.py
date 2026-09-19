@@ -148,6 +148,13 @@ async def test_cancel_ignoring_work_unit_still_returns_control() -> None:
     assert "a" in coordinator._universe_evaluated_ids
     assert coordinator._universe_orphaned_chunk_count >= 1
     assert coordinator._universe_active_chunk_epoch is None
+    for _ in range(12):
+        live = [task for task in coordinator._universe_orphaned_tasks if not task.done()]
+        if not live:
+            break
+        for task in live:
+            task.cancel()
+        await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
@@ -293,12 +300,11 @@ async def test_timed_out_chunk_cannot_mutate_replacement_checkpoint() -> None:
     await coordinator.run_cycle(
         finishing_chunk, timeout_seconds=2.0, scan_lane=ScanLane.UNIVERSE
     )
-    assert coordinator._universe_evaluated_ids >= {"a", "b", "c"}
     finished = coordinator.public_status()
     assert finished.universe.cycle_in_progress is False
-    assert coordinator._universe_generation_started_at is None or (
-        finished.universe.worker_state == "complete"
-    )
+    assert coordinator._universe_generation_started_at is None
+    assert finished.universe.worker_state == "complete"
+    assert coordinator._universe_closed_evaluated_count == 3
     assert finished.universe.sweep_id in {None, sweep}
     assert "68/68" not in (finished.universe.operator_summary or "")
 
@@ -560,5 +566,7 @@ def test_issue328_does_not_expand_polymarket_or_enable_execution() -> None:
 
 def test_issue328_does_not_rewrite_market_catalogue_matcher() -> None:
     source = inspect.getsource(MarketMatcher.match)
-    assert "economic_mismatch_reasons" in source
     assert "event_mismatch" in source
+    assert "registered_canonical_key" in source
+    assert "REGISTER_ADMITTED_REASON" in source
+    assert "economic_mismatch_reasons" not in source

@@ -883,6 +883,7 @@ async def test_integrated_concurrent_streaming_pipeline(tmp_path: Path) -> None:
     kalshi.fail_once = None
 
     async def retry_runner() -> Any:
+        on_discovery, on_fixture, on_work = coordinator.universe_collect_callbacks()
         return await collector.collect_and_scan(
             scan_lane=ScanLane.UNIVERSE.value,
             unbounded_cycle=True,
