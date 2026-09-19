@@ -366,6 +366,8 @@ class LiveRefreshCoordinator:
         self._universe_cursor: str | None = None
         self._universe_evaluated_ids: set[str] = set()
         self._universe_needs_rehydration: set[str] = set()
+        self._universe_rehydration_retry_at: dict[str, datetime] = {}
+        self._universe_rehydration_attempts: dict[str, int] = {}
         self._universe_progress_generation_id: int | None = None
         self._universe_closed_generation_id = 0
         self._universe_closed_work_used = 0.0
@@ -596,6 +598,8 @@ class LiveRefreshCoordinator:
             self._universe_cursor = None
             self._universe_evaluated_ids = set()
             self._universe_needs_rehydration = set()
+            self._universe_rehydration_retry_at = {}
+            self._universe_rehydration_attempts = {}
             self._universe_progress_generation_id = None
             self._universe_closed_generation_id = 0
             self._universe_closed_work_used = 0.0
@@ -1664,7 +1668,11 @@ class LiveRefreshCoordinator:
         if not self._universe_work_set_may_retire_unlocked():
             return
         current = {item for item in current_ids if item}
+        dropped = self._universe_needs_rehydration - current
         self._universe_needs_rehydration.intersection_update(current)
+        for canonical_id in dropped:
+            self._universe_rehydration_retry_at.pop(canonical_id, None)
+            self._universe_rehydration_attempts.pop(canonical_id, None)
 
     def record_universe_fixture_progress(
         self,
@@ -1693,6 +1701,23 @@ class LiveRefreshCoordinator:
         with self._state_lock:
             if self._reject_stale_universe_chunk_unlocked(chunk_epoch):
                 return
+            state = str(getattr(fixture, "market_evaluation_state", "") or "")
+            rehydrating = canonical_id in self._universe_needs_rehydration
+            if rehydrating and state != "evaluated":
+                self._schedule_universe_rehydration_retry_unlocked(canonical_id, scanned)
+                self._universe_current_fixture = canonical_id
+                self.status = self.status.model_copy(
+                    update={
+                        "universe": self.status.universe.model_copy(
+                            update={
+                                "current_fixture": canonical_id,
+                                "last_heartbeat_at": scanned,
+                                "worker_state": WORKER_RUNNING,
+                            }
+                        )
+                    }
+                )
+                return
             generation_id = self._ensure_store_universe_generation(scanned)
             before_hot, _before_universe = self._fixture_state.membership_counts(scanned)
             self._fixture_state.upsert_evaluated_fixture(
@@ -1705,13 +1730,13 @@ class LiveRefreshCoordinator:
                 now=scanned,
                 universe_generation_id=generation_id,
             )
-            self._universe_needs_rehydration.discard(canonical_id)
+            if rehydrating:
+                self._clear_universe_rehydration_unlocked(canonical_id)
             after_hot, _after_universe = self._fixture_state.membership_counts(scanned)
             promoted_now = after_hot > before_hot
             inventory_now = self._fixture_state.inventory(scanned)
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(scanned)
-            state = str(getattr(fixture, "market_evaluation_state", "") or "")
             previous = self._universe_work.get(canonical_id)
             already_evaluated = previous is not None and previous.state == SWEEP_EVALUATED
             self._apply_work_unit_result_unlocked(
@@ -2067,11 +2092,14 @@ class LiveRefreshCoordinator:
 
     def _universe_skip_ids_unlocked(self, now: datetime | None = None) -> list[str]:
         pending_rehydration = self._universe_needs_rehydration
+        now = now or self.now()
         if self._universe_work:
             skip: list[str] = []
-            now = now or self.now()
             for canonical_id, unit in self._universe_work.items():
                 if canonical_id in pending_rehydration:
+                    retry_at = self._universe_rehydration_retry_at.get(canonical_id)
+                    if retry_at is not None and now < retry_at:
+                        skip.append(canonical_id)
                     continue
                 if unit.state in SWEEP_TERMINAL_STATES:
                     skip.append(canonical_id)
@@ -2082,22 +2110,37 @@ class LiveRefreshCoordinator:
                 ):
                     skip.append(canonical_id)
             return sorted(skip)
-        return sorted(
-            canonical_id
-            for canonical_id in self._universe_evaluated_ids
-            if canonical_id not in pending_rehydration
-        )
+        skip: list[str] = []
+        for canonical_id in self._universe_evaluated_ids:
+            if canonical_id in pending_rehydration:
+                retry_at = self._universe_rehydration_retry_at.get(canonical_id)
+                if retry_at is not None and now < retry_at:
+                    skip.append(canonical_id)
+                continue
+            skip.append(canonical_id)
+        return sorted(skip)
 
     def _earliest_retry_wait_unlocked(self, now: datetime) -> datetime | None:
         if any(
             unit.state in {SWEEP_PENDING, SWEEP_RUNNING} for unit in self._universe_work.values()
         ) or any(unit.state == SWEEP_PENDING for unit in self._universe_series_work.values()):
             return None
+        if any(
+            self._universe_rehydration_retry_at.get(canonical_id) is None
+            or now >= self._universe_rehydration_retry_at[canonical_id]
+            for canonical_id in self._universe_needs_rehydration
+        ):
+            return None
         times = [
             unit.next_retry_at
             for unit in (*self._universe_work.values(), *self._universe_series_work.values())
             if unit.state == SWEEP_RETRY_WAIT and unit.next_retry_at is not None
         ]
+        times.extend(
+            self._universe_rehydration_retry_at[canonical_id]
+            for canonical_id in self._universe_needs_rehydration
+            if canonical_id in self._universe_rehydration_retry_at
+        )
         if not times:
             return None
         earliest = min(times)
@@ -2185,6 +2228,8 @@ class LiveRefreshCoordinator:
             self._universe_closed_evaluated_count = len(self._universe_evaluated_ids)
         self._universe_evaluated_ids = set()
         self._universe_needs_rehydration = set()
+        self._universe_rehydration_retry_at = {}
+        self._universe_rehydration_attempts = {}
         self._universe_work = {}
         self._universe_series_work = {}
         self._universe_series_results = {}
@@ -2510,6 +2555,24 @@ class LiveRefreshCoordinator:
         }
         pending.update(self._universe_evaluated_ids)
         self._universe_needs_rehydration = pending
+        self._universe_rehydration_retry_at = {}
+        self._universe_rehydration_attempts = {}
+
+    def _schedule_universe_rehydration_retry_unlocked(
+        self, canonical_id: str, scanned: datetime
+    ) -> None:
+        """Backoff a failed current-state rebuild without changing durable EVALUATED."""
+
+        attempts = self._universe_rehydration_attempts.get(canonical_id, 0) + 1
+        self._universe_rehydration_attempts[canonical_id] = attempts
+        self._universe_rehydration_retry_at[canonical_id] = scanned + timedelta(
+            seconds=universe_work_retry_backoff_seconds(attempts)
+        )
+
+    def _clear_universe_rehydration_unlocked(self, canonical_id: str) -> None:
+        self._universe_needs_rehydration.discard(canonical_id)
+        self._universe_rehydration_retry_at.pop(canonical_id, None)
+        self._universe_rehydration_attempts.pop(canonical_id, None)
 
     def _ensure_universe_generation(self, started: datetime) -> None:
         if self._universe_generation_started_at is not None:
@@ -2519,6 +2582,8 @@ class LiveRefreshCoordinator:
         self._universe_work_used = 0.0
         self._universe_evaluated_ids = set()
         self._universe_needs_rehydration = set()
+        self._universe_rehydration_retry_at = {}
+        self._universe_rehydration_attempts = {}
         self._universe_cursor = None
         self._universe_progress_generation_id = self._universe_generation_id
         self._universe_sweep_id = f"sweep-{self._universe_generation_id}-{started.isoformat()}"

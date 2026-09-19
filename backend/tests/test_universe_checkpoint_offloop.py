@@ -554,6 +554,67 @@ def test_restart_mixed_set_rehydrates_only_missing_evaluated_current_state(
     _assert_compact_checkpoint(store.load())
 
 
+def test_restart_failed_rehydration_keeps_hot_absent_and_backs_off(
+    tmp_path: Path,
+) -> None:
+    store = SqliteUniverseCheckpointStore(tmp_path / "failed-rehydrate.sqlite")
+    first = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
+    first.configure_from_settings()
+    fixture = _lifecycle_hot_fixture("hot-a")
+    inventory = [_hot_equivalent_row("hot-a")]
+    decisions = [_decision("hot-a", "mkt-hot-a")]
+    first.record_universe_work_set(["hot-a"], authoritative=True)
+    first.record_universe_fixture_progress(None, fixture, decisions, inventory)
+    matched = first._universe_matched_fixtures
+    equivalent = first._universe_equivalent_markets
+    evaluated = first.status.universe.canonical_evaluated
+    _assert_compact_checkpoint(store.load())
+
+    clock = FakeClock(NOW)
+    restarted = LiveRefreshCoordinator(clock=clock, universe_checkpoint_store=store)
+    restarted._clock = clock
+    restarted.configure_from_settings()
+    assert restarted._universe_work["hot-a"].state == "evaluated"
+    assert "hot-a" in restarted._universe_needs_rehydration
+    assert restarted.status.universe.canonical_evaluated == evaluated
+
+    restarted.record_universe_work_set(["hot-a"], authoritative=True)
+    unavailable = fixture.model_copy(
+        update={"market_evaluation_state": "market_fetch_unavailable", "matched_equivalent_count": 0}
+    )
+    restarted.record_universe_fixture_progress(None, unavailable, [], [])
+    assert "hot-a" in restarted._universe_needs_rehydration
+    assert restarted._universe_work["hot-a"].state == "evaluated"
+    assert restarted.fixture_current_state().hot_identity_scope(clock.now) == []
+    assert restarted.hot_market_relationships(["hot-a"]) == {}
+    assert restarted.status.universe.canonical_evaluated == evaluated
+    assert restarted._universe_matched_fixtures == matched
+    assert restarted._universe_equivalent_markets == equivalent
+    waiting = restarted.plan_universe_tick(now=clock.now)
+    assert waiting.lane == "idle"
+    assert waiting.reason == "universe_retry_wait"
+    assert restarted._seconds_until_universe() >= 2.0
+    payload = store.load()
+    _assert_compact_checkpoint(payload)
+    assert payload is not None
+    assert payload["work_units"]["hot-a"]["state"] == "evaluated"
+
+    clock.advance(3)
+    due = restarted.plan_universe_tick(now=clock.now)
+    assert due.lane == ScanLane.UNIVERSE.value
+    assert "hot-a" not in due.skip_event_ids
+    restarted.record_universe_fixture_progress(None, fixture, decisions, inventory)
+    assert "hot-a" not in restarted._universe_needs_rehydration
+    assert "hot-a" in restarted.fixture_current_state().hot_identity_scope(clock.now)
+    relationships = restarted.hot_market_relationships(["hot-a"])
+    assert "hot-a" in relationships
+    assert restarted.status.universe.canonical_evaluated == evaluated
+    assert restarted._universe_matched_fixtures == matched
+    later = restarted.plan_universe_tick(now=clock.now)
+    assert "hot-a" in later.skip_event_ids
+    _assert_compact_checkpoint(store.load())
+
+
 def test_transient_checkpoint_save_failure_remains_retryable(tmp_path: Path) -> None:
     store = _FailingCheckpointStore(tmp_path / "retry.sqlite", fail_saves=1)
     coordinator = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
