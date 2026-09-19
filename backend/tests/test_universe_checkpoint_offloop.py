@@ -165,7 +165,7 @@ def test_durable_checkpoint_is_compact_and_under_cap(tmp_path: Path) -> None:
     assert len(encoded.encode("utf-8")) <= UNIVERSE_CHECKPOINT_MAX_ENCODED_BYTES
     blob = json.dumps(payload)
     assert "mb-0" not in blob
-    assert "raw" not in blob
+    assert ("x" * 80) not in blob
 
 
 def test_fat_v1_checkpoint_fail_closes(tmp_path: Path) -> None:

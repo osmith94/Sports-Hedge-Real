@@ -28,6 +28,7 @@ from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.provider_access import HEALTH_AUTH_FAILURE, HEALTH_DISCOVERY_TIMEOUT
 from sports_hedge.application.scan_lanes import WORKER_COMPLETE, ScanLane
 from sports_hedge.application.universe_checkpoint import (
+    STALE_ORPHAN_REASON,
     SWEEP_EVALUATED,
     SWEEP_OK,
     SWEEP_PENDING,
@@ -96,6 +97,7 @@ def _seed_owner_live_generation_26(store: SqliteUniverseCheckpointStore) -> None
         for index in range(1, 31)
     }
     first._next_universe_due = NOW
+    first._persist_universe_checkpoint_unlocked()
     first.flush_universe_checkpoint()
 
 

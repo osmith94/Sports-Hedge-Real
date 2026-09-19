@@ -391,10 +391,12 @@ async def test_fixture_streams_before_collect_returns(tmp_path: Path) -> None:
     early_id = streamed[0]
     assert coordinator.fixture_current_state().detail(early_id, now=NOW) is not None
     assert early_id in coordinator._universe_evaluated_ids
+    await coordinator._await_universe_checkpoint_persist()
     payload = store.load()
     assert payload is not None
     work = payload.get("work_units") or {}
     assert work[early_id]["state"] == SWEEP_EVALUATED
+    assert task.done() is False
     assert early_id in coordinator.fixture_current_state().hot_identity_scope(NOW)
     assert coordinator._universe_sweep_is_complete_unlocked() is False
     matchbook.hold.set()
