@@ -176,7 +176,6 @@ def test_process_restart_restores_open_generation_from_sqlite(tmp_path: Path) ->
     generation = first._universe_generation_id
     cursor = first._universe_cursor
     assert store.load() is not None
-    assert first.fixture_current_state().has_collection() is True
 
     restarted = LiveRefreshCoordinator(clock=clock, universe_checkpoint_store=store)
     restarted.configure_from_settings()
@@ -184,15 +183,13 @@ def test_process_restart_restores_open_generation_from_sqlite(tmp_path: Path) ->
     assert restarted._universe_generation_started_at is not None
     assert set(evaluated) <= restarted._universe_evaluated_ids
     assert restarted._universe_cursor == cursor
-    assert restarted.fixture_current_state().has_collection() is True
-    inventory_ids = {item.canonical_event_id for item in restarted.public_status().discovered_fixtures}
-    assert set(evaluated) <= inventory_ids
     restarted._next_hot_due = clock.now + timedelta(seconds=1_000)
     resumed = restarted.plan_tick(now=clock.now)
     assert resumed.lane == "universe"
     assert resumed.universe_generation_id == generation
     assert resumed.generation_resume is True
-    assert set(evaluated) <= set(resumed.skip_event_ids)
+    assert set(evaluated) <= restarted._universe_needs_rehydration
+    assert not set(evaluated) & set(resumed.skip_event_ids)
 
 
 def test_explicit_reset_clears_universe_checkpoint(tmp_path: Path) -> None:

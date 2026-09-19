@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any, Literal
@@ -34,12 +35,12 @@ from sports_hedge.application.universe_checkpoint import (
     UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
     SeriesWorkUnit,
     SweepWorkUnit,
-    discovery_event_snapshot,
-    merge_series_reports,
+    UniverseCheckpointTooLarge,
     UniverseGenerationCheckpoint,
     checkpoint_from_payload,
-    collection_report_from_snapshot,
     collection_report_snapshot,
+    discovery_event_snapshot,
+    merge_series_reports,
     series_work_key,
     universe_provider_backoff_seconds,
     universe_work_retry_backoff_seconds,
@@ -126,6 +127,7 @@ class ExplicitCollectBusy(RuntimeError):
 SCAN_CYCLE_RETURN_GRACE_SECONDS = 5.0
 SCAN_CYCLE_PARTIAL_HARVEST_SECONDS = 0.8
 UNIVERSE_ORPHAN_TASK_WARN_LIMIT = 3
+UNIVERSE_CHECKPOINT_FLUSH_FIXTURE_THRESHOLD = 20
 
 
 class LaneRefreshStatus(BaseModel):
@@ -282,6 +284,54 @@ def _schedule_capped_retry(
     )
 
 
+class _CountedRLock:
+    """RLock that exposes whether any thread currently holds it.
+
+    Checkpoint SQLite I/O must observe `held is False`.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._depth = 0
+        self._owner: int | None = None
+
+    def __enter__(self) -> _CountedRLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        acquired = self._lock.acquire(blocking, timeout)
+        if acquired:
+            self._depth += 1
+            self._owner = threading.get_ident()
+        return acquired
+
+    def release(self) -> None:
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+        self._lock.release()
+
+    @property
+    def held(self) -> bool:
+        return self._depth > 0
+
+    @property
+    def held_by_current_thread(self) -> bool:
+        return self._depth > 0 and self._owner == threading.get_ident()
+
+
+@dataclass(frozen=True)
+class _UniverseCheckpointWrite:
+    token: int
+    action: Literal["save", "clear"]
+    payload: dict[str, Any] | None = None
+    updated_at: str | None = None
+
+
 class LiveRefreshCoordinator:
     """Independent HOT and UNIVERSE workers with scoped locks (Tenet 19)."""
 
@@ -294,7 +344,8 @@ class LiveRefreshCoordinator:
         self._lock = asyncio.Lock()
         self._hot_lock = asyncio.Lock()
         self._universe_lock = asyncio.Lock()
-        self._state_lock = threading.RLock()
+        self._state_lock = _CountedRLock()
+        self._universe_checkpoint_io_lock = threading.Lock()
         self._task: asyncio.Task[None] | None = None
         self._hot_task: asyncio.Task[None] | None = None
         self._universe_task: asyncio.Task[None] | None = None
@@ -314,6 +365,9 @@ class LiveRefreshCoordinator:
         self._universe_work_used = 0.0
         self._universe_cursor: str | None = None
         self._universe_evaluated_ids: set[str] = set()
+        self._universe_needs_rehydration: set[str] = set()
+        self._universe_rehydration_retry_at: dict[str, datetime] = {}
+        self._universe_rehydration_attempts: dict[str, int] = {}
         self._universe_progress_generation_id: int | None = None
         self._universe_closed_generation_id = 0
         self._universe_closed_work_used = 0.0
@@ -348,6 +402,10 @@ class LiveRefreshCoordinator:
         self._universe_stale_callback_count = 0
         self._universe_checkpoint_store = universe_checkpoint_store
         self._universe_checkpoint_restored = False
+        self._universe_checkpoint_dirty = False
+        self._universe_checkpoint_unpersisted_fixtures = 0
+        self._universe_checkpoint_write_seq = 0
+        self._universe_checkpoint_persist_task: asyncio.Task[None] | None = None
         self._venue_store = venue_settings_store
         self._pending_participation = participation_from_lists(
             default_operator_venues(),
@@ -539,6 +597,9 @@ class LiveRefreshCoordinator:
             self._universe_work_used = 0.0
             self._universe_cursor = None
             self._universe_evaluated_ids = set()
+            self._universe_needs_rehydration = set()
+            self._universe_rehydration_retry_at = {}
+            self._universe_rehydration_attempts = {}
             self._universe_progress_generation_id = None
             self._universe_closed_generation_id = 0
             self._universe_closed_work_used = 0.0
@@ -572,7 +633,8 @@ class LiveRefreshCoordinator:
             self._universe_chunk_seq = 0
             self._universe_orphaned_chunk_count = 0
             self._universe_stale_callback_count = 0
-            self._clear_universe_checkpoint_unlocked()
+            self._universe_checkpoint_dirty = True
+            self._universe_checkpoint_unpersisted_fixtures = 0
             self._universe_checkpoint_restored = False
             self._cycle_hot_venues = None
             self._cycle_universe_venues = None
@@ -581,6 +643,7 @@ class LiveRefreshCoordinator:
                 server_loop_enabled=False,
                 interval_seconds=30,
             )
+        self.flush_universe_checkpoint()
         self.configure_from_settings()
         self._drain_orphaned_collection_tasks(orphans)
 
@@ -896,6 +959,8 @@ class LiveRefreshCoordinator:
                         finished,
                         self.status.last_error or "scan_cycle_abandoned",
                     )
+                if lane is ScanLane.UNIVERSE:
+                    await self._await_universe_checkpoint_persist()
 
     def scheduled_hot_active(self) -> bool:
         return (
@@ -1252,6 +1317,8 @@ class LiveRefreshCoordinator:
                     }
                 )
             self._sync_venue_status_unlocked()
+        if lane is not ScanLane.HOT:
+            self._request_universe_checkpoint_persist(force=True)
 
     def record_persist_outcome(
         self,
@@ -1384,7 +1451,7 @@ class LiveRefreshCoordinator:
             leftover_n=leftover_n,
             completeness=completeness,
         )
-        self._persist_universe_checkpoint_unlocked()
+        self._mark_universe_checkpoint_dirty_unlocked()
         work_used = self._status_universe_work_used()
         evaluated_count = self._status_universe_evaluated_count()
         resume_cursor = self._status_universe_cursor()
@@ -1476,7 +1543,7 @@ class LiveRefreshCoordinator:
                 key: len(value or [])
                 for key, value in self._universe_discovery_snapshot.items()
             }
-            self._persist_universe_checkpoint_unlocked()
+            self._mark_universe_checkpoint_dirty_unlocked()
             self.status = self.status.model_copy(
                 update={
                     "universe": self.status.universe.model_copy(
@@ -1490,6 +1557,7 @@ class LiveRefreshCoordinator:
                     )
                 }
             )
+        self._request_universe_checkpoint_persist(force=True)
 
     def record_universe_work_set(
         self,
@@ -1523,8 +1591,9 @@ class LiveRefreshCoordinator:
                     current,
                     partial_reason=partial_reason,
                 )
+                self._prune_universe_rehydration_unlocked(current)
             self._universe_discovered_total = len(self._universe_work)
-            self._persist_universe_checkpoint_unlocked()
+            self._mark_universe_checkpoint_dirty_unlocked()
             counts = self._lane_progress_fields()
             self.status = self.status.model_copy(
                 update={
@@ -1539,6 +1608,7 @@ class LiveRefreshCoordinator:
                     )
                 }
             )
+        self._request_universe_checkpoint_persist(force=True)
 
     def _reconcile_universe_work_set_unlocked(
         self,
@@ -1584,6 +1654,26 @@ class LiveRefreshCoordinator:
             return False
         return True
 
+    def _prune_universe_rehydration_unlocked(self, current_ids: list[str]) -> None:
+        """Drop vanished evaluated IDs so they cannot pin an open generation.
+
+        Authoritative rediscovery is allowed to omit fixtures that no longer
+        exist. Those IDs stay EVALUATED for accounting but must not block
+        sweep completion waiting for current-state that will never return.
+        Partial/non-authoritative cluster sets must not prune.
+        """
+
+        if not self._universe_needs_rehydration:
+            return
+        if not self._universe_work_set_may_retire_unlocked():
+            return
+        current = {item for item in current_ids if item}
+        dropped = self._universe_needs_rehydration - current
+        self._universe_needs_rehydration.intersection_update(current)
+        for canonical_id in dropped:
+            self._universe_rehydration_retry_at.pop(canonical_id, None)
+            self._universe_rehydration_attempts.pop(canonical_id, None)
+
     def record_universe_fixture_progress(
         self,
         cluster: Any,
@@ -1611,6 +1701,23 @@ class LiveRefreshCoordinator:
         with self._state_lock:
             if self._reject_stale_universe_chunk_unlocked(chunk_epoch):
                 return
+            state = str(getattr(fixture, "market_evaluation_state", "") or "")
+            rehydrating = canonical_id in self._universe_needs_rehydration
+            if rehydrating and state != "evaluated":
+                self._schedule_universe_rehydration_retry_unlocked(canonical_id, scanned)
+                self._universe_current_fixture = canonical_id
+                self.status = self.status.model_copy(
+                    update={
+                        "universe": self.status.universe.model_copy(
+                            update={
+                                "current_fixture": canonical_id,
+                                "last_heartbeat_at": scanned,
+                                "worker_state": WORKER_RUNNING,
+                            }
+                        )
+                    }
+                )
+                return
             generation_id = self._ensure_store_universe_generation(scanned)
             before_hot, _before_universe = self._fixture_state.membership_counts(scanned)
             self._fixture_state.upsert_evaluated_fixture(
@@ -1623,12 +1730,13 @@ class LiveRefreshCoordinator:
                 now=scanned,
                 universe_generation_id=generation_id,
             )
+            if rehydrating:
+                self._clear_universe_rehydration_unlocked(canonical_id)
             after_hot, _after_universe = self._fixture_state.membership_counts(scanned)
             promoted_now = after_hot > before_hot
             inventory_now = self._fixture_state.inventory(scanned)
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(scanned)
-            state = str(getattr(fixture, "market_evaluation_state", "") or "")
             previous = self._universe_work.get(canonical_id)
             already_evaluated = previous is not None and previous.state == SWEEP_EVALUATED
             self._apply_work_unit_result_unlocked(
@@ -1668,7 +1776,7 @@ class LiveRefreshCoordinator:
                     self._universe_hot_promotions += 1
             counts = self._lane_progress_fields()
             self._universe_discovered_total = counts["canonical_work_total"]
-            self._persist_universe_checkpoint_unlocked()
+            self._mark_universe_checkpoint_dirty_unlocked(fixture=True)
             venue_health = _honest_universe_venue_health(
                 self.status.universe.venue_health,
                 retryable=counts["canonical_retryable"] + counts["series_retryable"],
@@ -1703,6 +1811,7 @@ class LiveRefreshCoordinator:
                     ),
                 }
             )
+        self._request_universe_checkpoint_persist(force=False)
 
     def _apply_work_unit_result_unlocked(
         self,
@@ -1982,10 +2091,16 @@ class LiveRefreshCoordinator:
         )
 
     def _universe_skip_ids_unlocked(self, now: datetime | None = None) -> list[str]:
+        pending_rehydration = self._universe_needs_rehydration
+        now = now or self.now()
         if self._universe_work:
             skip: list[str] = []
-            now = now or self.now()
             for canonical_id, unit in self._universe_work.items():
+                if canonical_id in pending_rehydration:
+                    retry_at = self._universe_rehydration_retry_at.get(canonical_id)
+                    if retry_at is not None and now < retry_at:
+                        skip.append(canonical_id)
+                    continue
                 if unit.state in SWEEP_TERMINAL_STATES:
                     skip.append(canonical_id)
                 elif (
@@ -1995,18 +2110,37 @@ class LiveRefreshCoordinator:
                 ):
                     skip.append(canonical_id)
             return sorted(skip)
-        return sorted(self._universe_evaluated_ids)
+        skip: list[str] = []
+        for canonical_id in self._universe_evaluated_ids:
+            if canonical_id in pending_rehydration:
+                retry_at = self._universe_rehydration_retry_at.get(canonical_id)
+                if retry_at is not None and now < retry_at:
+                    skip.append(canonical_id)
+                continue
+            skip.append(canonical_id)
+        return sorted(skip)
 
     def _earliest_retry_wait_unlocked(self, now: datetime) -> datetime | None:
         if any(
             unit.state in {SWEEP_PENDING, SWEEP_RUNNING} for unit in self._universe_work.values()
         ) or any(unit.state == SWEEP_PENDING for unit in self._universe_series_work.values()):
             return None
+        if any(
+            self._universe_rehydration_retry_at.get(canonical_id) is None
+            or now >= self._universe_rehydration_retry_at[canonical_id]
+            for canonical_id in self._universe_needs_rehydration
+        ):
+            return None
         times = [
             unit.next_retry_at
             for unit in (*self._universe_work.values(), *self._universe_series_work.values())
             if unit.state == SWEEP_RETRY_WAIT and unit.next_retry_at is not None
         ]
+        times.extend(
+            self._universe_rehydration_retry_at[canonical_id]
+            for canonical_id in self._universe_needs_rehydration
+            if canonical_id in self._universe_rehydration_retry_at
+        )
         if not times:
             return None
         earliest = min(times)
@@ -2039,6 +2173,8 @@ class LiveRefreshCoordinator:
         )
 
     def _universe_sweep_is_complete_unlocked(self) -> bool:
+        if self._universe_needs_rehydration:
+            return False
         series_terminal = self._universe_series_is_terminal_unlocked()
         if self._universe_series_work and not series_terminal:
             return False
@@ -2091,6 +2227,9 @@ class LiveRefreshCoordinator:
         else:
             self._universe_closed_evaluated_count = len(self._universe_evaluated_ids)
         self._universe_evaluated_ids = set()
+        self._universe_needs_rehydration = set()
+        self._universe_rehydration_retry_at = {}
+        self._universe_rehydration_attempts = {}
         self._universe_work = {}
         self._universe_series_work = {}
         self._universe_series_results = {}
@@ -2100,16 +2239,25 @@ class LiveRefreshCoordinator:
         self._universe_progress_generation_id = None
         self._universe_discovery_snapshot = None
 
+    def _mark_universe_checkpoint_dirty_unlocked(self, *, fixture: bool = False) -> None:
+        self._universe_checkpoint_dirty = True
+        if fixture:
+            self._universe_checkpoint_unpersisted_fixtures += 1
+
     def _persist_universe_checkpoint_unlocked(self) -> None:
-        store = self._universe_checkpoint_store
-        if store is None:
-            return
+        """Mark resume state dirty. Must not perform SQLite or JSON file I/O."""
+
+        self._mark_universe_checkpoint_dirty_unlocked()
+
+    def _snapshot_universe_checkpoint_write_unlocked(self) -> _UniverseCheckpointWrite | None:
+        if not self._universe_checkpoint_dirty:
+            return None
+        self._universe_checkpoint_dirty = False
+        self._universe_checkpoint_unpersisted_fixtures = 0
+        self._universe_checkpoint_write_seq += 1
+        token = self._universe_checkpoint_write_seq
         if self._universe_generation_started_at is None:
-            try:
-                store.clear()
-            except Exception:
-                LOGGER.warning("failed to clear universe generation checkpoint", exc_info=True)
-            return
+            return _UniverseCheckpointWrite(token=token, action="clear")
         checkpoint = UniverseGenerationCheckpoint(
             generation_id=max(1, self._universe_generation_id),
             generation_started_at=self._universe_generation_started_at,
@@ -2120,10 +2268,8 @@ class LiveRefreshCoordinator:
             provider_failure_count=self._universe_provider_failures,
             retry_at=self._universe_retry_at,
             budget_paused=False,
-            report=self._universe_last_report_snapshot,
             updated_at=self.now(),
             sweep_id=self._universe_sweep_id,
-            discovery_snapshot=self._universe_discovery_snapshot,
             discovered_total=self._universe_discovered_total,
             failed_ids=dict(self._universe_failed_ids),
             skipped_ids=dict(self._universe_skipped_ids),
@@ -2136,26 +2282,166 @@ class LiveRefreshCoordinator:
             hot_promotions=self._universe_hot_promotions,
             raw_events_by_venue=dict(self._universe_raw_events),
             work_units=dict(self._universe_work),
-            series_results=dict(self._universe_series_results),
             series_work=dict(self._universe_series_work),
             semantics_version=UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
         )
-        try:
-            store.save(
-                checkpoint.model_dump(mode="json"),
-                updated_at=checkpoint.updated_at.isoformat(),
-            )
-        except Exception:
-            LOGGER.warning("failed to persist universe generation checkpoint", exc_info=True)
+        return _UniverseCheckpointWrite(
+            token=token,
+            action="save",
+            payload=checkpoint.model_dump(mode="json"),
+            updated_at=checkpoint.updated_at.isoformat(),
+        )
 
-    def _clear_universe_checkpoint_unlocked(self) -> None:
+    def _commit_universe_checkpoint_write(self, write: _UniverseCheckpointWrite) -> bool:
+        if self._state_lock.held_by_current_thread:
+            raise RuntimeError("universe checkpoint I/O while _state_lock is held")
         store = self._universe_checkpoint_store
         if store is None:
+            self._apply_universe_checkpoint_write_outcome(write, ok=True, retryable=False, error=None)
+            return True
+        try:
+            if write.action == "clear":
+                store.clear()
+            elif write.payload is None or write.updated_at is None:
+                self._apply_universe_checkpoint_write_outcome(
+                    write, ok=True, retryable=False, error=None
+                )
+                return True
+            else:
+                store.save(write.payload, updated_at=write.updated_at)
+        except UniverseCheckpointTooLarge as exc:
+            LOGGER.warning("refusing oversized universe checkpoint payload", exc_info=True)
+            self._apply_universe_checkpoint_write_outcome(
+                write,
+                ok=False,
+                retryable=False,
+                error=str(exc) or "universe_checkpoint_too_large",
+            )
+            return False
+        except Exception as exc:
+            LOGGER.warning("failed to persist universe generation checkpoint", exc_info=True)
+            self._apply_universe_checkpoint_write_outcome(
+                write,
+                ok=False,
+                retryable=True,
+                error=str(exc) or "universe_checkpoint_persist_failed",
+            )
+            return False
+        self._apply_universe_checkpoint_write_outcome(write, ok=True, retryable=False, error=None)
+        return True
+
+    def _apply_universe_checkpoint_write_outcome(
+        self,
+        write: _UniverseCheckpointWrite,
+        *,
+        ok: bool,
+        retryable: bool,
+        error: str | None,
+    ) -> None:
+        """Keep transient I/O failures retryable; never tight-loop oversize."""
+
+        with self._state_lock:
+            superseded = self._universe_checkpoint_write_seq != write.token
+            if not ok and retryable and not superseded:
+                self._universe_checkpoint_dirty = True
+            self.status = self.status.model_copy(
+                update={
+                    "universe": self.status.universe.model_copy(
+                        update={
+                            "last_persist_error": None if ok else error,
+                            "persist_ok": ok,
+                        }
+                    )
+                }
+            )
+
+    def _run_universe_checkpoint_persist_once(self) -> bool:
+        with self._universe_checkpoint_io_lock:
+            with self._state_lock:
+                write = self._snapshot_universe_checkpoint_write_unlocked()
+            if write is None:
+                return True
+            return self._commit_universe_checkpoint_write(write)
+
+    def flush_universe_checkpoint(self) -> None:
+        """Persist coalesced compact resume state without holding `_state_lock`."""
+
+        while True:
+            with self._state_lock:
+                if not self._universe_checkpoint_dirty:
+                    return
+                if self._universe_checkpoint_store is None:
+                    self._universe_checkpoint_dirty = False
+                    self._universe_checkpoint_unpersisted_fixtures = 0
+                    return
+            if not self._run_universe_checkpoint_persist_once():
+                return
+
+    def _request_universe_checkpoint_persist(self, *, force: bool) -> None:
+        with self._state_lock:
+            dirty = self._universe_checkpoint_dirty
+            threshold = (
+                self._universe_checkpoint_unpersisted_fixtures
+                >= UNIVERSE_CHECKPOINT_FLUSH_FIXTURE_THRESHOLD
+            )
+            store = self._universe_checkpoint_store
+        if store is None or not dirty:
             return
         try:
-            store.clear()
-        except Exception:
-            LOGGER.warning("failed to clear universe generation checkpoint", exc_info=True)
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.flush_universe_checkpoint()
+            return
+        if not force and not threshold:
+            return
+        self._schedule_universe_checkpoint_persist(loop)
+
+    def _schedule_universe_checkpoint_persist(self, loop: asyncio.AbstractEventLoop) -> None:
+        task = self._universe_checkpoint_persist_task
+        if task is not None and not task.done():
+            return
+        self._universe_checkpoint_persist_task = loop.create_task(
+            self._universe_checkpoint_persist_worker(),
+            name="universe-checkpoint-persist",
+        )
+
+    async def _universe_checkpoint_persist_worker(self) -> None:
+        try:
+            while True:
+                with self._state_lock:
+                    dirty = self._universe_checkpoint_dirty
+                if not dirty:
+                    return
+                ok = await asyncio.to_thread(self._run_universe_checkpoint_persist_once)
+                if not ok:
+                    return
+        finally:
+            self._universe_checkpoint_persist_task = None
+
+    async def _await_universe_checkpoint_persist(self) -> None:
+        task = self._universe_checkpoint_persist_task
+        if task is not None and not task.done():
+            await task
+        with self._state_lock:
+            dirty = self._universe_checkpoint_dirty
+            store = self._universe_checkpoint_store
+        if store is None or not dirty:
+            return
+        await asyncio.to_thread(self.flush_universe_checkpoint)
+
+    def health_live_refresh_fields(self) -> dict[str, object]:
+        """Already-configured status snapshot. No settings DB or checkpoint I/O."""
+
+        status = self.status
+        return {
+            "discovery_source": "matchbook",
+            "discovery_mode": "venue_union",
+            "matching_venue": "polymarket",
+            "matching_venues": ["polymarket", "kalshi"],
+            "server_loop_enabled": status.server_loop_enabled,
+            "paper_autofill_enabled": status.paper_autofill_enabled,
+            "interval_seconds": status.interval_seconds,
+        }
 
     def _restore_universe_checkpoint(self) -> None:
         with self._state_lock:
@@ -2183,32 +2469,9 @@ class LiveRefreshCoordinator:
                         exc_info=True,
                     )
             return
-        if checkpoint.semantics_version != UNIVERSE_CHECKPOINT_SEMANTICS_VERSION:
-            LOGGER.warning(
-                "universe checkpoint semantics_version=%s incompatible with runtime %s; "
-                "invalidating for a fresh generation",
-                checkpoint.semantics_version,
-                UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
-            )
-            try:
-                store.clear()
-            except Exception:
-                LOGGER.warning(
-                    "failed to invalidate incompatible universe checkpoint",
-                    exc_info=True,
-                )
-            return
-        report = collection_report_from_snapshot(checkpoint.report)
         self._fixture_state.open_universe_generation(
             checkpoint.generation_id, started_at=checkpoint.generation_started_at
         )
-        if report is not None:
-            self._last_report = report
-            self._fixture_state.upsert_from_report(
-                report,
-                scan_lane=ScanLane.UNIVERSE,
-                universe_generation_id=checkpoint.generation_id,
-            )
         inventory = self._fixture_state.inventory(self.now())
         _hot_count, universe_count = self._fixture_state.membership_counts(self.now())
         with self._state_lock:
@@ -2223,11 +2486,9 @@ class LiveRefreshCoordinator:
             self._universe_provider_failures = checkpoint.provider_failure_count
             self._universe_retry_at = checkpoint.retry_at
             self._universe_budget_paused = False
-            self._universe_last_report_snapshot = checkpoint.report
             self._universe_sweep_id = checkpoint.sweep_id or (
                 f"sweep-{checkpoint.generation_id}-{checkpoint.generation_started_at.isoformat()}"
             )
-            self._universe_discovery_snapshot = checkpoint.discovery_snapshot
             self._universe_discovered_total = checkpoint.discovered_total
             self._universe_failed_ids = dict(checkpoint.failed_ids)
             self._universe_skipped_ids = dict(checkpoint.skipped_ids)
@@ -2239,19 +2500,11 @@ class LiveRefreshCoordinator:
             self._universe_qualifying_count = checkpoint.qualifying_count
             self._universe_hot_promotions = checkpoint.hot_promotions
             self._universe_raw_events = dict(checkpoint.raw_events_by_venue)
-            self._universe_series_results = {
-                key: list(value)
-                for key, value in (checkpoint.series_results or {}).items()
-            }
             self._universe_series_work = {
                 key: value if isinstance(value, SeriesWorkUnit) else SeriesWorkUnit.model_validate(value)
                 for key, value in (checkpoint.series_work or {}).items()
             }
             self._universe_series_applied_this_cycle = set()
-            if not self._universe_series_work and checkpoint.series_results:
-                self._apply_series_reports_unlocked(
-                    checkpoint.series_results, scanned=checkpoint.updated_at
-                )
             self._universe_work = {
                 key: value if isinstance(value, SweepWorkUnit) else SweepWorkUnit.model_validate(value)
                 for key, value in (checkpoint.work_units or {}).items()
@@ -2261,32 +2514,65 @@ class LiveRefreshCoordinator:
                     item: SweepWorkUnit(canonical_id=item, state=SWEEP_EVALUATED)
                     for item in checkpoint.evaluated_ids
                 }
-            status_update: dict[str, Any] = {
-                "discovered_fixtures": inventory,
-                "universe": self.status.universe.model_copy(
-                    update={
-                        "generation_work_used_s": round(self._universe_work_used, 3),
-                        **self._lane_progress_fields(),
-                        "resume_cursor": self._universe_cursor,
-                        "fixture_count": universe_count,
-                        "next_due_at": self._next_universe_due,
-                        "sweep_id": self._universe_sweep_id,
-                        "matched_fixtures": self._universe_matched_fixtures,
-                        "equivalent_markets": self._universe_equivalent_markets,
-                        "hot_promotions": self._universe_hot_promotions,
-                        "last_successful_fixture": self._universe_last_successful,
-                        "worker_state": WORKER_WAITING
-                        if self._universe_retry_at is not None
-                        else WORKER_IDLE,
-                        "degraded": self._universe_provider_failures > 0,
-                    }
-                ),
-            }
-            if report is not None:
-                status_update["last_matched_event_pairs"] = report.matched_event_pairs
-                status_update["last_matched_market_pairs"] = report.matched_market_pairs
-                status_update["last_completed_at"] = report.completed_at
-            self.status = self.status.model_copy(update=status_update)
+            self._seed_universe_rehydration_unlocked()
+            self.status = self.status.model_copy(
+                update={
+                    "discovered_fixtures": inventory,
+                    "universe": self.status.universe.model_copy(
+                        update={
+                            "generation_work_used_s": round(self._universe_work_used, 3),
+                            **self._lane_progress_fields(),
+                            "resume_cursor": self._universe_cursor,
+                            "fixture_count": universe_count,
+                            "next_due_at": self._next_universe_due,
+                            "sweep_id": self._universe_sweep_id,
+                            "matched_fixtures": self._universe_matched_fixtures,
+                            "equivalent_markets": self._universe_equivalent_markets,
+                            "hot_promotions": self._universe_hot_promotions,
+                            "last_successful_fixture": self._universe_last_successful,
+                            "worker_state": WORKER_WAITING
+                            if self._universe_retry_at is not None
+                            else WORKER_IDLE,
+                            "degraded": self._universe_provider_failures > 0,
+                        }
+                    ),
+                }
+            )
+
+    def _seed_universe_rehydration_unlocked(self) -> None:
+        """Mark restored EVALUATED IDs as missing process-memory current-state.
+
+        Compact checkpoints do not persist FixtureCurrentStateStore rows or
+        ApprovedEquivalent HOT relationships. A fresh process must rediscover
+        and re-upsert those fixtures before skip_event_ids may omit them.
+        The set is process-memory only and is never written to SQLite.
+        """
+
+        pending = {
+            canonical_id
+            for canonical_id, unit in self._universe_work.items()
+            if unit.state == SWEEP_EVALUATED
+        }
+        pending.update(self._universe_evaluated_ids)
+        self._universe_needs_rehydration = pending
+        self._universe_rehydration_retry_at = {}
+        self._universe_rehydration_attempts = {}
+
+    def _schedule_universe_rehydration_retry_unlocked(
+        self, canonical_id: str, scanned: datetime
+    ) -> None:
+        """Backoff a failed current-state rebuild without changing durable EVALUATED."""
+
+        attempts = self._universe_rehydration_attempts.get(canonical_id, 0) + 1
+        self._universe_rehydration_attempts[canonical_id] = attempts
+        self._universe_rehydration_retry_at[canonical_id] = scanned + timedelta(
+            seconds=universe_work_retry_backoff_seconds(attempts)
+        )
+
+    def _clear_universe_rehydration_unlocked(self, canonical_id: str) -> None:
+        self._universe_needs_rehydration.discard(canonical_id)
+        self._universe_rehydration_retry_at.pop(canonical_id, None)
+        self._universe_rehydration_attempts.pop(canonical_id, None)
 
     def _ensure_universe_generation(self, started: datetime) -> None:
         if self._universe_generation_started_at is not None:
@@ -2295,6 +2581,9 @@ class LiveRefreshCoordinator:
         self._universe_generation_started_at = started
         self._universe_work_used = 0.0
         self._universe_evaluated_ids = set()
+        self._universe_needs_rehydration = set()
+        self._universe_rehydration_retry_at = {}
+        self._universe_rehydration_attempts = {}
         self._universe_cursor = None
         self._universe_progress_generation_id = self._universe_generation_id
         self._universe_sweep_id = f"sweep-{self._universe_generation_id}-{started.isoformat()}"
@@ -2318,7 +2607,7 @@ class LiveRefreshCoordinator:
         self._universe_series_results = {}
         self._universe_series_work = {}
         self._universe_series_applied_this_cycle = set()
-        self._persist_universe_checkpoint_unlocked()
+        self._mark_universe_checkpoint_dirty_unlocked()
 
     def _charge_successful_universe_work(
         self,
@@ -2354,7 +2643,7 @@ class LiveRefreshCoordinator:
             return
         self._universe_work_used = 0.0
         self._universe_budget_paused = False
-        self._persist_universe_checkpoint_unlocked()
+        self._mark_universe_checkpoint_dirty_unlocked()
 
     def _close_universe_generation(self, finished: datetime) -> None:
         if self._universe_generation_started_at is None:
@@ -2371,7 +2660,7 @@ class LiveRefreshCoordinator:
         self._universe_retry_at = None
         self._universe_provider_failures = 0
         self._universe_last_report_snapshot = None
-        self._persist_universe_checkpoint_unlocked()
+        self._mark_universe_checkpoint_dirty_unlocked()
 
     def _advance_hot_due(self, now: datetime) -> None:
         settings = get_settings()
@@ -2462,6 +2751,7 @@ class LiveRefreshCoordinator:
             )
             self._apply_universe_honesty_unlocked()
             self._sync_venue_status_unlocked()
+        self._request_universe_checkpoint_persist(force=True)
 
     def _mark_manual_hot_started(self, started: datetime) -> None:
         """Expose manual HOT activity without claiming a scheduled due slot."""
@@ -2538,7 +2828,7 @@ class LiveRefreshCoordinator:
                 budget = float(get_settings().paper_scan_universe_generation_budget_seconds)
                 work_used = self._status_universe_work_used()
                 evaluated_count = self._status_universe_evaluated_count()
-                self._persist_universe_checkpoint_unlocked()
+                self._mark_universe_checkpoint_dirty_unlocked()
                 update["universe"] = self.status.universe.model_copy(
                     update={
                         "cycle_in_progress": False,
@@ -2576,6 +2866,8 @@ class LiveRefreshCoordinator:
                 self._apply_universe_honesty_unlocked()
             self._cycle_enabled_venues = None
             self._sync_venue_status_unlocked()
+        if lane is not ScanLane.HOT:
+            self._request_universe_checkpoint_persist(force=True)
 
     def last_report(self) -> CollectionReport | None:
         return self._last_report
@@ -2807,6 +3099,14 @@ class LiveRefreshCoordinator:
 
     async def stop_server_loop(self) -> None:
         self._stop.set()
+        await self._await_universe_checkpoint_persist()
+        persist_task = self._universe_checkpoint_persist_task
+        if persist_task is not None and not persist_task.done():
+            persist_task.cancel()
+            try:
+                await persist_task
+            except (asyncio.CancelledError, Exception):
+                pass
         for task in (self._hot_task, self._universe_task, self._task):
             if task is None:
                 continue

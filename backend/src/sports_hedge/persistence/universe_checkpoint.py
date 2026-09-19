@@ -17,6 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from sports_hedge.application.universe_checkpoint import encode_durable_universe_checkpoint
 from sports_hedge.config import get_settings
 
 LOGGER = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ class SqliteUniverseCheckpointStore:
         connection.executescript(_CREATE_CHECKPOINT_SQL)
 
     def save(self, payload: dict[str, Any], *, updated_at: str) -> None:
-        encoded = json.dumps(payload, separators=(",", ":"), default=str)
+        encoded = encode_durable_universe_checkpoint(payload)
         with self._connect() as connection:
             connection.execute(
                 """

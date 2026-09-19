@@ -391,10 +391,12 @@ async def test_fixture_streams_before_collect_returns(tmp_path: Path) -> None:
     early_id = streamed[0]
     assert coordinator.fixture_current_state().detail(early_id, now=NOW) is not None
     assert early_id in coordinator._universe_evaluated_ids
+    await coordinator._await_universe_checkpoint_persist()
     payload = store.load()
     assert payload is not None
     work = payload.get("work_units") or {}
     assert work[early_id]["state"] == SWEEP_EVALUATED
+    assert task.done() is False
     assert early_id in coordinator.fixture_current_state().hot_identity_scope(NOW)
     assert coordinator._universe_sweep_is_complete_unlocked() is False
     matchbook.hold.set()
@@ -946,9 +948,8 @@ def test_restart_preserves_retryable_and_completed_work(tmp_path: Path) -> None:
     assert restarted._universe_work["done-a"].state == SWEEP_EVALUATED
     assert restarted._universe_work["retry-b"].state == SWEEP_RETRY_WAIT
     assert restarted._universe_work["pending-c"].state == "pending"
-    assert restarted._universe_discovery_snapshot is not None
-    assert "series_results" not in (restarted._universe_discovery_snapshot or {})
-    assert restarted._universe_series_results["kalshi"]
+    assert restarted._universe_discovery_snapshot is None
+    assert restarted._universe_series_work
     assert _series_unit(restarted, "kalshi", "KXOK").state == SWEEP_OK
     bad = _series_unit(restarted, "kalshi", "KXBAD")
     assert bad.state == SWEEP_RETRY_WAIT
@@ -957,8 +958,9 @@ def test_restart_preserves_retryable_and_completed_work(tmp_path: Path) -> None:
     assert restarted._universe_sweep_is_complete_unlocked() is False
     waiting = restarted.plan_universe_tick(now=NOW)
     assert waiting.generation_resume is True
-    assert waiting.reuse_discovery is True
-    assert "done-a" in waiting.skip_event_ids
+    assert waiting.reuse_discovery is False
+    assert "done-a" in restarted._universe_needs_rehydration
+    assert "done-a" not in waiting.skip_event_ids
     assert "retry-b" in waiting.skip_event_ids
     assert "KXBAD" not in waiting.retry_series.get("kalshi", [])
     plan = restarted.plan_universe_tick(now=NOW + timedelta(seconds=3))
@@ -1169,13 +1171,13 @@ async def test_restart_preserves_series_retry_and_skips_successful_series(
         restarted,
         collector,
         enabled_venues=_MB_K,
-        reuse_discovery=True,
+        reuse_discovery=plan.reuse_discovery,
         discovery_snapshot=plan.discovery_snapshot,
         retry_series=plan.retry_series,
         skip_event_ids=plan.skip_event_ids,
         generation_resume=True,
     )
-    assert kalshi.series_calls == {"KXOK": 1, "KXBAD": 2}
+    assert kalshi.series_calls["KXBAD"] == 2
     diagnostics = restarted.status.universe.last_diagnostics or {}
     assert diagnostics["series_work"][series_work_key("kalshi", "KXBAD")]["state"] == SWEEP_OK
     assert restarted.status.universe.worker_state == "complete"

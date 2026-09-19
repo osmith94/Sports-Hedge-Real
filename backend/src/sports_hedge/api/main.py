@@ -74,17 +74,16 @@ app.include_router(priority_alerts_router)
 
 
 @app.get("/build-info")
-def build_info() -> dict[str, object]:
+async def build_info() -> dict[str, object]:
     """Cheap serving identity so soak/UI can prove which Git SHA is running."""
 
     return get_serving_build_info().as_public_dict()
 
 
 @app.get("/health")
-def health() -> dict[str, object]:
+async def health() -> dict[str, object]:
     settings = get_settings()
     coordinator = get_live_refresh_coordinator()
-    coordinator.configure_from_settings(settings)
     return {
         "status": "ok",
         "mode": settings.sports_hedge_mode,
@@ -93,15 +92,7 @@ def health() -> dict[str, object]:
         "paper_auto_unwind_enabled": settings.paper_auto_unwind_enabled,
         "dotenv": inspect_dotenv_sources().as_public_dict(),
         "build": get_serving_build_info().as_public_dict(),
-        "live_refresh": {
-            "discovery_source": "matchbook",
-            "discovery_mode": "venue_union",
-            "matching_venue": "polymarket",
-            "matching_venues": ["polymarket", "kalshi"],
-            "server_loop_enabled": coordinator.status.server_loop_enabled,
-            "paper_autofill_enabled": coordinator.status.paper_autofill_enabled,
-            "interval_seconds": coordinator.status.interval_seconds,
-        },
+        "live_refresh": coordinator.health_live_refresh_fields(),
     }
 
 

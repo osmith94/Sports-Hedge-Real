@@ -523,11 +523,12 @@ def test_restart_resume_preserves_completed_universe_progress(tmp_path: Path) ->
     restarted.configure_from_settings()
     assert restarted._universe_evaluated_ids == evaluated
     assert restarted._universe_sweep_id == sweep_id
-    assert restarted._universe_discovery_snapshot is not None
+    assert restarted._universe_discovery_snapshot is None
     plan = restarted.plan_universe_tick(now=NOW)
     assert plan.generation_resume is True
-    assert plan.reuse_discovery is True
-    assert set(plan.skip_event_ids) == evaluated
+    assert plan.reuse_discovery is False
+    assert evaluated <= restarted._universe_needs_rehydration
+    assert not (evaluated & set(plan.skip_event_ids))
 
 
 def test_lane_specific_health_can_be_hot_ok_and_universe_discovery_degraded() -> None:

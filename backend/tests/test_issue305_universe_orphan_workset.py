@@ -28,7 +28,6 @@ from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.provider_access import HEALTH_AUTH_FAILURE, HEALTH_DISCOVERY_TIMEOUT
 from sports_hedge.application.scan_lanes import WORKER_COMPLETE, ScanLane
 from sports_hedge.application.universe_checkpoint import (
-    LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION,
     STALE_ORPHAN_REASON,
     SWEEP_EVALUATED,
     SWEEP_OK,
@@ -99,6 +98,7 @@ def _seed_owner_live_generation_26(store: SqliteUniverseCheckpointStore) -> None
     }
     first._next_universe_due = NOW
     first._persist_universe_checkpoint_unlocked()
+    first.flush_universe_checkpoint()
 
 
 def _restore_owner_live(store: SqliteUniverseCheckpointStore) -> tuple[FakeClock, LiveRefreshCoordinator]:
@@ -120,11 +120,18 @@ def _assert_owner_live_restored(coordinator: LiveRefreshCoordinator) -> None:
     assert {coordinator._universe_work[item].state for item in ORPHAN_IDS} == {SWEEP_PENDING}
     assert len(coordinator._universe_series_work) == 30
     assert all(unit.state == SWEEP_OK for unit in coordinator._universe_series_work.values())
-    assert coordinator._universe_discovery_snapshot is not None
     skip = set(coordinator._universe_skip_ids_unlocked(NOW))
-    assert skip == set(EVALUATED_IDS)
+    assert skip == set()
+    assert set(EVALUATED_IDS) <= coordinator._universe_needs_rehydration
     assert set(ORPHAN_IDS).isdisjoint(skip)
-    assert set(CURRENT_CLUSTER_IDS) <= skip
+    assert set(ORPHAN_IDS).isdisjoint(coordinator._universe_needs_rehydration)
+
+
+def _rehydrate_restored_evaluated(coordinator: LiveRefreshCoordinator) -> None:
+    for canonical_id in list(coordinator._universe_needs_rehydration):
+        coordinator.record_universe_fixture_progress(
+            None, _universe_fixture(canonical_id), [], []
+        )
 
 
 def _zero_work_complete_report(*, when) -> object:
@@ -169,6 +176,12 @@ def test_owner_live_orphan_shape_is_reconciled_without_false_evaluated(tmp_path:
     assert counts["canonical_evaluated"] == 75
     assert counts["canonical_stale_orphan"] == 2
     assert counts["canonical_remaining"] == 0
+    vanished = set(EVALUATED_IDS) - set(CURRENT_CLUSTER_IDS)
+    assert vanished <= set(EVALUATED_IDS)
+    assert coordinator._universe_needs_rehydration == set(CURRENT_CLUSTER_IDS)
+    assert coordinator._universe_sweep_is_complete_unlocked() is False
+    _rehydrate_restored_evaluated(coordinator)
+    assert coordinator._universe_needs_rehydration == set()
     assert coordinator._universe_sweep_is_complete_unlocked() is True
 
     coordinator.record_report(_zero_work_complete_report(when=clock.now), scan_lane=ScanLane.UNIVERSE)
@@ -445,9 +458,11 @@ def test_fresh_generation_repopulates_fixture_radar_and_equivalents(tmp_path: Pa
     store = SqliteUniverseCheckpointStore(tmp_path / "issue305-radar.sqlite")
     _seed_owner_live_generation_26(store)
     clock, coordinator = _restore_owner_live(store)
-    coordinator.record_universe_work_set(CURRENT_CLUSTER_IDS, authoritative=True)
-    coordinator.record_report(_zero_work_complete_report(when=clock.now), scan_lane=ScanLane.UNIVERSE)
     assert coordinator.fixture_current_state().inventory(clock.now) == []
+    assert coordinator.fixture_current_state().hot_identity_scope(clock.now) == []
+    coordinator.record_universe_work_set(CURRENT_CLUSTER_IDS, authoritative=True)
+    _rehydrate_restored_evaluated(coordinator)
+    coordinator.record_report(_zero_work_complete_report(when=clock.now), scan_lane=ScanLane.UNIVERSE)
 
     clock.now = coordinator._next_universe_due
     plan = coordinator.plan_universe_tick(now=clock.now)
@@ -539,8 +554,8 @@ def test_compatible_retry_wait_checkpoint_still_restores(tmp_path: Path) -> None
     payload = store.load()
     assert payload is not None
     assert payload["semantics_version"] == UNIVERSE_CHECKPOINT_SEMANTICS_VERSION
-    payload.pop("semantics_version", None)
-    store.save(payload, updated_at=NOW.isoformat())
+    assert payload.get("report") in (None, {}, [])
+    assert payload.get("discovery_snapshot") in (None, {}, [])
 
     restarted = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
     restarted.configure_from_settings()
@@ -553,7 +568,6 @@ def test_compatible_retry_wait_checkpoint_still_restores(tmp_path: Path) -> None
 
 def test_unversioned_legacy_checkpoint_invalidates_when_runtime_semantics_bumped(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = SqliteUniverseCheckpointStore(tmp_path / "issue305-legacy-bump.sqlite")
     first = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
@@ -570,16 +584,7 @@ def test_unversioned_legacy_checkpoint_invalidates_when_runtime_semantics_bumped
     payload.pop("semantics_version", None)
     store.save(payload, updated_at=NOW.isoformat())
     parsed = checkpoint_from_payload(store.load())
-    assert parsed is not None
-    assert parsed.semantics_version == LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION
-    monkeypatch.setattr(
-        "sports_hedge.application.live_refresh.UNIVERSE_CHECKPOINT_SEMANTICS_VERSION",
-        LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION + 1,
-    )
-    monkeypatch.setattr(
-        "sports_hedge.application.universe_checkpoint.UNIVERSE_CHECKPOINT_SEMANTICS_VERSION",
-        LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION + 1,
-    )
+    assert parsed is None
     restarted = LiveRefreshCoordinator(clock=lambda: NOW, universe_checkpoint_store=store)
     restarted.configure_from_settings()
     assert restarted._universe_generation_started_at is None
@@ -636,6 +641,7 @@ def test_retry_backoff_caps_remain_2_5_10_and_hot_stays_independent(tmp_path: Pa
     hot = coordinator.plan_hot_tick(now=clock.now)
     assert hot.lane in {ScanLane.HOT.value, "idle"}
     coordinator.record_universe_work_set(CURRENT_CLUSTER_IDS, authoritative=True)
+    _rehydrate_restored_evaluated(coordinator)
     coordinator.record_report(_zero_work_complete_report(when=clock.now), scan_lane=ScanLane.UNIVERSE)
     coordinator._next_hot_due = clock.now
     hot_during_cooldown = coordinator.plan_hot_tick(now=clock.now)

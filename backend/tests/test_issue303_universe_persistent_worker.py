@@ -606,7 +606,8 @@ def test_checkpoint_restore_keeps_running_and_retry_wait_safe(tmp_path: Path) ->
     assert restarted._universe_work["pending-c"].state == SWEEP_PENDING
     waiting = restarted.plan_universe_tick(now=NOW)
     assert waiting.generation_resume is True
-    assert waiting.reuse_discovery is True
+    assert waiting.reuse_discovery is False
+    assert waiting.discovery_snapshot is None
     assert waiting.reason in {None, "universe_sweep", "universe_retry_wait"}
     if waiting.lane == "idle":
         assert waiting.reason == "universe_retry_wait"
