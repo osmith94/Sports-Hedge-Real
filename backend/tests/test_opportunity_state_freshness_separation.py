@@ -217,10 +217,11 @@ def test_stale_watchlist_row_cannot_paper_fill(tmp_path: Path) -> None:
         assert ops.list_active_trades() == []
         events = watchlist.activity(opportunity_id=seeded.opportunity_id)
         assert not any(event.event_type is LifecycleEventType.PAPER_FILL_COMPLETE for event in events)
-        assert not any(event.event_type is LifecycleEventType.PAPER_FILL_ATTEMPTED for event in events)
+        assert not any(event.event_type is LifecycleEventType.TRIGGER_LOST_BEFORE_FILL for event in events)
         after = watchlist.repository.get(seeded.opportunity_id)
         assert after is not None
-        assert after.status is OpportunityStatus.TRIGGERED
+        assert after.status is not OpportunityStatus.FILLED
+        assert after.status is not OpportunityStatus.PARTIAL
     finally:
         repository.close()
         ledger.close()

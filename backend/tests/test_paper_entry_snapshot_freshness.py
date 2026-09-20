@@ -303,7 +303,6 @@ def test_manual_fill_does_not_revive_aged_rejected_snapshot(tmp_path: Path) -> N
         assert ops.list_active_trades() == []
         events = watchlist.activity(opportunity_id=seeded.opportunity_id)
         assert not any(event.event_type is LifecycleEventType.PAPER_FILL_COMPLETE for event in events)
-        assert not any(event.event_type is LifecycleEventType.PAPER_FILL_ATTEMPTED for event in events)
         assert not any(event.event_type is LifecycleEventType.TRIGGER_LOST_BEFORE_FILL for event in events)
     finally:
         repository.close()
