@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -17,7 +17,7 @@ from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_cost
 from registered_kalshi import FakeKalshiBTTS
 
 
-KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
+KICKOFF = datetime.now(UTC) + timedelta(days=3)
 
 
 class FakeMatchbook:
