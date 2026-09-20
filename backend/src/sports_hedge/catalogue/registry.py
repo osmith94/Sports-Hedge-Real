@@ -435,7 +435,11 @@ ARCHETYPE_SPECS: tuple[CatalogueArchetypeSpec, ...] = (
             availability=VenueAvailability.AVAILABLE,
             settlement=SettlementProofStatus.PROVEN_WHEN_INSTANCE_COMPLETE,
             solver=SolverSupportStatus.SIMPLE_COMPLETE_SET,
-            recognizer="total goal or (over under and goal); team total tokens fail closed",
+            recognizer=(
+                "total goal or (over under and goal) or exact name Total "
+                "(live point-total Over/Under); team total tokens fail closed; "
+                "1st Half Total stays unsupported"
+            ),
             reason="Exact half-line required. 2.5 vs 3.5 is APPROVED_PARAMETER_MISMATCH.",
         ),
         kalshi=_venue(

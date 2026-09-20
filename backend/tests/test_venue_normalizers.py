@@ -96,6 +96,27 @@ def test_matchbook_total_goals_preserves_line_and_push_semantics() -> None:
     ]
 
 
+def test_matchbook_live_named_total_is_full_match_total_goals() -> None:
+    normalizer = MatchbookNormalizer()
+    event = normalizer.normalize_event(MATCHBOOK_EVENT)
+    market = normalizer.normalize_market(
+        event,
+        {
+            "id": 2008,
+            "name": "Total",
+            "market-type": "point-total",
+            "runners": [
+                {"id": 10, "name": "Over 2.5"},
+                {"id": 11, "name": "Under 2.5"},
+            ],
+        },
+    )
+
+    assert market.family == MarketFamily.TOTAL_GOALS
+    assert market.line == Decimal("2.5")
+    assert market.period.value == "full_time"
+
+
 def test_matchbook_named_team_total_is_not_full_match_total_goals() -> None:
     normalizer = MatchbookNormalizer()
     event = normalizer.normalize_event(MATCHBOOK_EVENT)

@@ -748,6 +748,8 @@ def test_wave2_does_not_change_scanner_architecture() -> None:
     assert settings.paper_scan_matchbook_concurrency == 4
     assert settings.paper_scan_kalshi_concurrency == 4
     assert settings.matchbook_event_per_page == 100
+    assert settings.matchbook_market_per_page == 100
+    assert settings.matchbook_market_max_pages == 10
     assert "KXEPLTOTAL" in settings.kalshi_series_tickers
     assert "KXEPLFTTS" in settings.kalshi_series_tickers
     assert "KXEFLCHAMPIONSHIPFTTS" not in settings.kalshi_series_tickers

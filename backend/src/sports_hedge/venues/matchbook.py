@@ -496,15 +496,96 @@ class MatchbookClient(ReadOnlyVenue):
         return int(after.timestamp()), int(before.timestamp())
 
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+        """List Matchbook markets for one event, paging until complete or capped.
+
+        Official GET /edge/rest/events/{id}/markets defaults to 20 rows. Callers
+        that pass ``offset`` receive a single page. The collector still makes one
+        list_markets call; extra pages are sequential inside this client.
+        """
+
+        per_page = int(filters.get("per-page") or self.settings.matchbook_market_per_page)
         params = {
             **self._market_data_params(),
             "states": "open,suspended",
             "include-prices": "true",
             "price-depth": self.settings.matchbook_price_depth,
-            "per-page": 100,
+            "per-page": per_page,
             **filters,
         }
-        return await self._get(f"/edge/rest/events/{event_id}/markets", params=params)
+        params["per-page"] = per_page
+        if "offset" in filters:
+            page = await self._get(f"/edge/rest/events/{event_id}/markets", params=params)
+            return {
+                **page,
+                "markets": _extract_items(page, "markets"),
+                "truncated": False,
+            }
+        return await self._paginate_markets(event_id, params, per_page=per_page)
+
+    async def _paginate_markets(
+        self,
+        event_id: int | str,
+        params: dict[str, Any],
+        *,
+        per_page: int,
+    ) -> dict[str, Any]:
+        markets: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        max_pages = self.settings.matchbook_market_max_pages
+        max_markets = max_pages * per_page
+        reported_total: int | None = None
+        offset = 0
+        pages_fetched = 0
+        last_page_len = 0
+        last_page: dict[str, Any] = {}
+        path = f"/edge/rest/events/{event_id}/markets"
+        while pages_fetched < max_pages and len(markets) < max_markets:
+            page_params = {**params, "offset": offset, "per-page": per_page}
+            last_page = await self._get(path, params=page_params)
+            reported_total = _optional_int(last_page.get("total")) or reported_total
+            page_markets = _extract_items(last_page, "markets")
+            last_page_len = len(page_markets)
+            pages_fetched += 1
+            for item in page_markets:
+                market_id = str(item.get("id", "")).strip()
+                if market_id and market_id in seen_ids:
+                    continue
+                if market_id:
+                    seen_ids.add(market_id)
+                markets.append(item)
+            if last_page_len == 0:
+                break
+            offset += last_page_len
+            if reported_total is not None and offset >= reported_total:
+                break
+            if last_page_len < per_page:
+                break
+
+        truncated = len(markets) >= max_markets and (
+            reported_total is None or len(markets) < reported_total or last_page_len >= per_page
+        )
+        if reported_total is not None and len(markets) < reported_total and pages_fetched >= max_pages:
+            truncated = True
+        if last_page_len < per_page and (reported_total is None or len(markets) >= reported_total):
+            truncated = False
+
+        truncation_detail = None
+        if truncated:
+            truncation_detail = (
+                f"Matchbook market list truncated after {len(markets)} markets "
+                f"({pages_fetched} pages of {per_page}) for event {event_id}; "
+                f"provider total="
+                f"{reported_total if reported_total is not None else 'unknown'}"
+            )
+        return {
+            **last_page,
+            "offset": 0,
+            "per-page": per_page,
+            "total": reported_total if reported_total is not None else len(markets),
+            "markets": markets,
+            "truncated": truncated,
+            "truncation-detail": truncation_detail,
+        }
 
     async def get_market(
         self,

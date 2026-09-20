@@ -195,6 +195,10 @@ class Settings(BaseSettings):
     # Provider-side event paging. sport-ids is resolved via GET /edge/rest/lookups/sports.
     matchbook_event_per_page: int = Field(default=100, ge=1, le=100)
     matchbook_event_max_pages: int = Field(default=10, ge=1, le=50)
+    # GET /events/{id}/markets defaults to 20 and is independently paged.
+    # Sequential pages stay inside one list_markets call (no extra concurrency).
+    matchbook_market_per_page: int = Field(default=100, ge=1, le=100)
+    matchbook_market_max_pages: int = Field(default=10, ge=1, le=50)
     matchbook_fixture_lookback_hours: int = Field(default=6, ge=1, le=24)
     # Sunday operator scans must still see the following weekend's PL/Championship
     # cards. 168h is the documented max and the demo-phase default.

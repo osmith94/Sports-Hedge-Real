@@ -2493,7 +2493,7 @@ def _matchbook_market_family(
         return MarketFamily.ASIAN_HANDICAP, line
     if any(token in text for token in _TEAM_TOTAL_TOKENS):
         return MarketFamily.TEAM_TOTAL, line
-    if _matchbook_looks_like_match_total(text):
+    if _matchbook_looks_like_match_total(text, payload):
         if _matchbook_is_participant_or_team_total(
             name,
             payload,
@@ -2502,7 +2502,7 @@ def _matchbook_market_family(
         ):
             return MarketFamily.TEAM_TOTAL, line
         return MarketFamily.TOTAL_GOALS, line
-    if _looks_like_totals_surface(text) and _is_named_team_or_participant_total(
+    if _looks_like_totals_surface(text, payload) and _is_named_team_or_participant_total(
         text,
         home_team=home_team,
         away_team=away_team,
@@ -2826,8 +2826,20 @@ def _matchbook_compound_exotic_runner_reason(
     return None
 
 
-def _matchbook_looks_like_match_total(text: str) -> bool:
-    return "total goal" in text or ("over under" in text and "goal" in text)
+def _matchbook_looks_like_match_total(text: str, payload: dict[str, Any] | None = None) -> bool:
+    """True for full-match totals, including live Matchbook 'Total' books.
+
+    Exact Over/Under + Goals wording remains the primary recogniser. Live
+    Matchbook also lists the same contract as name ``Total`` with Over/Under
+    runners (often grading-type ``point-total``). ``payload`` is accepted so
+    call sites can pass market metadata, but grading-type alone is not enough:
+    ``1st Half Total`` stays out of this recogniser even when typed point-total.
+    """
+
+    del payload
+    if "total goal" in text or ("over under" in text and "goal" in text):
+        return True
+    return text == "total"
 
 
 def _has_exactly_one_role_side(text: str) -> bool:
@@ -2836,10 +2848,10 @@ def _has_exactly_one_role_side(text: str) -> bool:
     return home_role != away_role
 
 
-def _looks_like_totals_surface(text: str) -> bool:
+def _looks_like_totals_surface(text: str, payload: dict[str, Any] | None = None) -> bool:
     """Totals-like wording used only to fail closed into TEAM_TOTAL, never to invent match totals."""
 
-    if _matchbook_looks_like_match_total(text):
+    if _matchbook_looks_like_match_total(text, payload):
         return True
     if _TEAM_GOALS_RE.search(text):
         return True
@@ -2946,7 +2958,7 @@ def _matchbook_is_participant_or_team_total(
         away_team=away_team,
     ):
         return True
-    if _matchbook_looks_like_match_total(text) and len(runner_ids) > 1:
+    if _matchbook_looks_like_match_total(text, payload) and len(runner_ids) > 1:
         # Over/Under runners carrying distinct participant ids is unproven match
         # vs team scope. Fail closed: do not treat as full-match TOTAL_GOALS.
         return True
@@ -3094,7 +3106,7 @@ def _period_from_text(value: str) -> FootballPeriod:
 def _line_from_payload_or_text(payload: dict[str, Any], text: str) -> Decimal | None:
     for key in ("line", "handicap", "points", "total", "strike"):
         value = payload.get(key)
-        if value is not None:
+        if value is not None and str(value).strip() != "":
             try:
                 return Decimal(str(value))
             except InvalidOperation:
@@ -3105,6 +3117,23 @@ def _line_from_payload_or_text(payload: dict[str, Any], text: str) -> Decimal | 
             return Decimal(match.group(1))
         except InvalidOperation:
             return None
+    return _consistent_line_from_labels(_payload_runner_labels(payload))
+
+
+def _consistent_line_from_labels(labels: list[str]) -> Decimal | None:
+    """Use Over/Under runner lines only when every numeric label agrees."""
+
+    found: set[Decimal] = set()
+    for label in labels:
+        match = _NUMBER.search(str(label))
+        if not match:
+            continue
+        try:
+            found.add(Decimal(match.group(1)))
+        except InvalidOperation:
+            return None
+    if len(found) == 1:
+        return next(iter(found))
     return None
 
 

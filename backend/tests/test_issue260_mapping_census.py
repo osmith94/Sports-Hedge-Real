@@ -79,7 +79,7 @@ EXPECTED_FULL_CENSUS = {
     "discovered_fixtures": 5,
     "cross_venue_matched_events": 5,
     "normalized_markets_by_venue": {
-        "matchbook": 5,
+        "matchbook": 6,
         "polymarket": 3,
         "kalshi": 2,
     },
@@ -89,7 +89,7 @@ EXPECTED_FULL_CENSUS = {
         "total_goals": 1,
     },
     "evaluated_zero_equivalent_fixtures": 3,
-    "unsupported_market_skips": 2,
+    "unsupported_market_skips": 1,
     "qualifying_arbs": 2,
 }
 
@@ -440,11 +440,13 @@ async def test_deterministic_mapping_census_exact_counts() -> None:
     assert census.kalshi_match_result_rule_enrichment["skipped_complete"] == 3
     assert census.kalshi_match_result_rule_enrichment["attempted"] == 0
     assert "kalshi_match_result_rule_enrichment=" in rendered
-    assert census.skip_failure_reasons.get("unsupported_market:matchbook", 0) >= 2
+    assert census.skip_failure_reasons.get("unsupported_market:matchbook", 0) >= 1
     assert cycle_last_error(report) is None
-    assert any("Unsupported Matchbook market: Total" in issue.detail for issue in report.issues)
     assert any(
         "Unsupported Matchbook market: 1st Half Total" in issue.detail for issue in report.issues
+    )
+    assert not any(
+        issue.detail == "Unsupported Matchbook market: Total" for issue in report.issues
     )
 
     rows = [row for items in report.fixture_markets.values() for row in items]

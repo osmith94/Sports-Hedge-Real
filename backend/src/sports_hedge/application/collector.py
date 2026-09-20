@@ -3706,6 +3706,9 @@ class ReadOnlyCrossVenueCollector:
             if mb_listed:
                 side.listed = True
                 processed += 1
+            if isinstance(mb_market_payload, dict) and mb_market_payload.get("truncated"):
+                truncated = True
+                issues.extend(_matchbook_market_listing_issues(mb_market_payload))
             raw_matchbook = _extract_matchbook_items(mb_market_payload, "markets")
             markets, inventory = self._inventory_markets(
                 mb_event, raw_matchbook, venue=VenueName.MATCHBOOK, issues=issues
@@ -5135,6 +5138,20 @@ def _matchbook_discovery_issues(payload: dict[str, Any]) -> list[CollectorIssue]
             stage="matchbook_discovery",
             venue=VenueName.MATCHBOOK,
             detail=str(detail or "Matchbook event list truncated at safety cap"),
+        )
+    ]
+
+
+def _matchbook_market_listing_issues(payload: dict[str, Any]) -> list[CollectorIssue]:
+    if not payload.get("truncated"):
+        return []
+    detail = payload.get("truncation-detail") or payload.get("truncation_detail")
+    return [
+        CollectorIssue(
+            stage="list_markets",
+            venue=VenueName.MATCHBOOK,
+            source_id=str(payload.get("event-id") or payload.get("event_id") or "") or None,
+            detail=str(detail or "Matchbook market list truncated at safety cap"),
         )
     ]
 
