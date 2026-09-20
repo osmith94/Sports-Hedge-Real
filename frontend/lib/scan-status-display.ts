@@ -114,19 +114,40 @@ export function dualScanStatusLines(
 ): string[] {
   if (status?.scanner_stopped) {
     return [
+      "ACTIVE TRADE · stopped by operator · no provider call",
       `${HOT_PRICING_LABEL} · stopped by operator · no provider call`,
       `${BACKGROUND_PRICING_LABEL} · stopped by operator · no provider call`,
       `${UNIVERSE_DISCOVERY_LABEL} · stopped by operator · no provider call`,
     ];
   }
+  const active = activeTradeCopy(status, now);
   const hot = hotPricingCopy(status, now);
   const background = backgroundPriceCopy(status, now);
   const universe = universeDiscoveryCopy(status, now);
   return [
+    `${active.label} · ${active.detail}`,
     `${hot.label} · ${hot.detail}`,
     `${background.label} · ${background.detail}`,
     `${universe.label} · ${universe.detail}`,
   ];
+}
+
+export function activeTradeCopy(
+  status: LiveRefreshStatus | null,
+  now: number | null = null,
+): LaneScanCopy {
+  const lane = status?.active_trade;
+  if (!lane) {
+    return { label: "ACTIVE TRADE", detail: "none" };
+  }
+  if (lane.cycle_in_progress) {
+    return { label: "ACTIVE TRADE", detail: "in progress · exact-ID 5s" };
+  }
+  const open = lane.fixture_count ?? 0;
+  return {
+    label: "ACTIVE TRADE",
+    detail: `${open} open · exact-ID 5s · ${nextDueClock(lane.next_due_at, now)}`,
+  };
 }
 
 export function backgroundPriceCopy(

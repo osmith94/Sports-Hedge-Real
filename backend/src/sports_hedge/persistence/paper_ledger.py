@@ -23,11 +23,14 @@ from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.paper.trades import (
+    OPENING_TRANCHE_ID,
+    PaperActiveTradePhase,
     PaperCloseFill,
     PaperTrade,
     PaperTradeAuditEvent,
     PaperTradeLeg,
     PaperTradeState,
+    PaperTradeTranche,
 )
 from sports_hedge.paper.position_management.models import PositionManagementSnapshot
 from sports_hedge.paper.risk_snapshot import PaperExecutionRiskSnapshot
@@ -253,6 +256,8 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 if trade.position_management is not None
                 else None
             ),
+            json.dumps([item.model_dump(mode="json") for item in trade.tranches]),
+            None if trade.active_trade_phase is None else trade.active_trade_phase.value,
         )
         self._connection.execute(
             """
@@ -263,8 +268,9 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 guaranteed_profit_gbp_at_open, realised_pnl_gbp, capital_locked_native_json,
                 capital_locked_gbp, settlement_outcome, settlement_source, settlement_source_id,
                 settlement_detail, provenance, fx_snapshots_json, venue_costs_json,
-                entry_risk_json, close_risks_json, close_fills_json, position_management_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                entry_risk_json, close_risks_json, close_fills_json, position_management_json,
+                tranches_json, active_trade_phase
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(trade_id) DO UPDATE SET
                 opportunity_id = excluded.opportunity_id,
                 canonical_event_id = excluded.canonical_event_id,
@@ -296,7 +302,9 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 entry_risk_json = COALESCE(paper_trades.entry_risk_json, excluded.entry_risk_json),
                 close_risks_json = excluded.close_risks_json,
                 close_fills_json = excluded.close_fills_json,
-                position_management_json = excluded.position_management_json
+                position_management_json = excluded.position_management_json,
+                tranches_json = excluded.tranches_json,
+                active_trade_phase = excluded.active_trade_phase
             """,
             payload,
         )
@@ -308,8 +316,9 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                     trade_id, venue, outcome, currency, requested_stake, filled_stake,
                     displayed_odds, filled_odds, source_market_id, source_event_id,
                     source_runner_id, source_contract_id, opening_action, canonical_state,
-                    settlement_fingerprint_key, fill_id, fill_kind, capital_source, execution_mode
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    settlement_fingerprint_key, fill_id, fill_kind, capital_source, execution_mode,
+                    tranche_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade.trade_id,
@@ -331,6 +340,7 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                     leg.fill_kind.value,
                     leg.capital_source.value,
                     leg.execution_mode,
+                    leg.tranche_id,
                 ),
             )
         for event in trade.audit:
@@ -445,6 +455,8 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             close_risks=_close_risks_from_row(row),
             close_fills=_models_from_json(_row_value(row, "close_fills_json"), PaperCloseFill),
             position_management=_position_management_from_row(row),
+            tranches=_models_from_json(_row_value(row, "tranches_json"), PaperTradeTranche),
+            active_trade_phase=_active_trade_phase_from_row(row),
             audit=audit,
         )
 
@@ -690,6 +702,7 @@ class SqlitePaperLedger:
         self._ensure_position_management_column()
         self._ensure_trade_leg_compat_columns()
         self._ensure_treasury_pool_fx_columns()
+        self._ensure_trade_tranche_columns()
 
     def _ensure_risk_snapshot_columns(self) -> None:
         trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
@@ -769,10 +782,34 @@ class SqlitePaperLedger:
             "opening_action": "TEXT",
             "canonical_state": "TEXT",
             "settlement_fingerprint_key": "TEXT",
+            "tranche_id": f"TEXT NOT NULL DEFAULT '{OPENING_TRANCHE_ID}'",
         }
         for name, spec in additions.items():
             if name not in columns:
                 self._connection.execute(f"ALTER TABLE paper_trade_legs ADD COLUMN {name} {spec}")
+        self._connection.commit()
+
+    def _ensure_trade_tranche_columns(self) -> None:
+        """Additive top-up tranche storage. Never overwrites opening legs."""
+
+        if "paper_trades" not in _table_names(self._connection):
+            return
+        trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
+        if "tranches_json" not in trade_cols:
+            self._connection.execute(
+                "ALTER TABLE paper_trades ADD COLUMN tranches_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "active_trade_phase" not in trade_cols:
+            self._connection.execute("ALTER TABLE paper_trades ADD COLUMN active_trade_phase TEXT")
+        if "paper_trade_legs" in _table_names(self._connection):
+            leg_cols = {
+                row[1] for row in self._connection.execute("PRAGMA table_info(paper_trade_legs)")
+            }
+            if "tranche_id" not in leg_cols:
+                self._connection.execute(
+                    "ALTER TABLE paper_trade_legs "
+                    f"ADD COLUMN tranche_id TEXT NOT NULL DEFAULT '{OPENING_TRANCHE_ID}'"
+                )
         self._connection.commit()
 
     def _ensure_treasury_pool_fx_columns(self) -> None:
@@ -846,8 +883,19 @@ def _leg_from_row(item: sqlite3.Row) -> PaperTradeLeg:
             "fill_kind": _row_value(item, "fill_kind") or "INTERNAL_SIMULATED",
             "capital_source": _row_value(item, "capital_source") or "AUTO_POOL",
             "execution_mode": _row_value(item, "execution_mode") or "INTERNAL",
+            "tranche_id": _row_value(item, "tranche_id") or OPENING_TRANCHE_ID,
         }
     )
+
+
+def _active_trade_phase_from_row(row: sqlite3.Row) -> PaperActiveTradePhase | None:
+    raw = _row_value(row, "active_trade_phase")
+    if not raw:
+        return None
+    try:
+        return PaperActiveTradePhase(str(raw))
+    except ValueError:
+        return None
 
 
 def _aware_payload(payload: dict[str, Any]) -> dict[str, Any]:

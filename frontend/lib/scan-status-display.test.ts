@@ -53,10 +53,11 @@ describe("dual cadence operator copy", () => {
   it("renders HOT pricing, BACKGROUND pricing and UNIVERSE discovery as distinct lines", () => {
     const now = Date.parse("2026-09-14T12:00:12Z");
     const lines = dualScanStatusLines(status(), now);
-    assert.equal(lines.length, 3);
-    assert.match(lines[0], /HOT pricing/);
-    assert.match(lines[1], /BACKGROUND pricing/);
-    assert.match(lines[2], /UNIVERSE discovery/);
+    assert.equal(lines.length, 4);
+    assert.match(lines[0], /ACTIVE TRADE/);
+    assert.match(lines[1], /HOT pricing/);
+    assert.match(lines[2], /BACKGROUND pricing/);
+    assert.match(lines[3], /UNIVERSE discovery/);
     assert.doesNotMatch(lines.join(" "), /Fast scan|Full sweep|Fast Scan|Full Sweep/);
     assert.doesNotMatch(lines.join(" "), /^Last scan /);
     assert.match(fastScanCopy(status(), now).detail, /completed 12s ago/);
@@ -86,9 +87,10 @@ describe("dual cadence operator copy", () => {
       },
     });
     const backgroundLines = dualScanStatusLines(withBackground, now);
-    assert.equal(backgroundLines.length, 3);
-    assert.match(backgroundLines[1], /BACKGROUND pricing/);
-    assert.match(backgroundLines[1], /12 ACTIVE/);
+    assert.equal(backgroundLines.length, 4);
+    assert.match(backgroundLines[0], /ACTIVE TRADE/);
+    assert.match(backgroundLines[2], /BACKGROUND pricing/);
+    assert.match(backgroundLines[2], /12 ACTIVE/);
     assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /4 evaluated/);
     assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /cadence 90s/);
     assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /next due in 90s/);
@@ -307,20 +309,22 @@ describe("dual cadence operator copy", () => {
     assert.match(fullSweepCopy(waiting).detail, /72 evaluated/);
   });
 
-  it("makes operator-stopped status explicit for HOT/BACKGROUND/UNIVERSE", () => {
+  it("makes operator-stopped status explicit for ACTIVE TRADE/HOT/BACKGROUND/UNIVERSE", () => {
     const lines = dualScanStatusLines(
       status({
         scanner_stopped: true,
         background: { cadence_seconds: 90, cycle_timeout_seconds: null },
       }),
     );
-    assert.equal(lines.length, 3);
-    assert.match(lines[0], /HOT pricing/);
-    assert.match(lines[1], /BACKGROUND pricing/);
-    assert.match(lines[2], /UNIVERSE discovery/);
+    assert.equal(lines.length, 4);
+    assert.match(lines[0], /ACTIVE TRADE/);
+    assert.match(lines[1], /HOT pricing/);
+    assert.match(lines[2], /BACKGROUND pricing/);
+    assert.match(lines[3], /UNIVERSE discovery/);
     assert.match(lines[0], /stopped by operator/);
     assert.match(lines[1], /stopped by operator/);
     assert.match(lines[2], /stopped by operator/);
+    assert.match(lines[3], /stopped by operator/);
     assert.doesNotMatch(lines.join(" "), /Fast scan|Full sweep|Fast Scan|Full Sweep/);
   });
 
@@ -347,7 +351,20 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /Update/);
     assert.match(scan, /Stop scanner/);
     assert.match(scan, /Resume scanner/);
-    assert.match(scan, /saveOperatorScannerSettings/);
+    assert.match(scan, /DEFAULT_MIN_NET_ARB_PERCENT = "1.00"/);
+    assert.match(scan, /DEFAULT_MAX_RISK = "60"/);
+    assert.match(scan, /DEFAULT_HOT_CADENCE_SECONDS = 30/);
+    assert.match(scan, /DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP = "1000"/);
+    assert.match(scan, /useState\(DEFAULT_MIN_NET_ARB_PERCENT\)/);
+    assert.match(scan, /useState\(DEFAULT_MAX_RISK\)/);
+    assert.match(scan, /useState\(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP\)/);
+    assert.match(scan, /max_allocated_per_trade_gbp: allocated/);
+    assert.match(scan, /ACTIVE TRADE \/ HOT pricing \/ BACKGROUND pricing \/ UNIVERSE discovery paused/);
+    const pulse = readFileSync(join(frontendRoot, "components/live-scan-pulse.tsx"), "utf8");
+    assert.match(
+      pulse,
+      /ACTIVE TRADE \/ HOT pricing \/ BACKGROUND pricing \/ UNIVERSE discovery paused/,
+    );
     assert.match(scan, /stopPaperScanner/);
     assert.match(scan, /resumePaperScanner/);
     assert.doesNotMatch(scan, /Refresh interval/);

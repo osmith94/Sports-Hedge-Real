@@ -41,7 +41,8 @@ DEFAULT_UNIVERSE_DISCOVERY_INTERVAL_SECONDS = 600
 DEFAULT_EXECUTABLE_QUOTE_AGE_MS = 1000
 UNIVERSE_MIN_CHUNK_SECONDS = 6.0
 
-# Canonical operator-facing lane names. JSON fields stay hot/background/universe.
+# Canonical operator-facing lane names. JSON fields stay hot/background/universe/active_trade.
+OPERATOR_ACTIVE_TRADE_LABEL = "ACTIVE TRADE"
 OPERATOR_HOT_PRICING_LABEL = "HOT pricing"
 OPERATOR_BACKGROUND_PRICING_LABEL = "BACKGROUND pricing"
 OPERATOR_UNIVERSE_DISCOVERY_LABEL = "UNIVERSE discovery"

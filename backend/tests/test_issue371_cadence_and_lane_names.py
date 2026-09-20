@@ -194,10 +194,11 @@ def test_system_load_and_status_expose_truthful_independent_cadences() -> None:
 
 def test_no_new_polling_loop_or_provider_concurrency_increase() -> None:
     live_src = inspect.getsource(LiveRefreshCoordinator.start_server_loop)
-    assert live_src.count("create_task") == 3
+    assert live_src.count("create_task") == 4
     assert "hot-worker" in live_src
     assert "universe-worker" in live_src
     assert "background-price-worker" in live_src
+    assert "active-trade-worker" in live_src
     settings = Settings()
     assert settings.paper_scan_kalshi_concurrency == 4
     assert settings.paper_scan_matchbook_concurrency == 4

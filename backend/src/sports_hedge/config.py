@@ -290,6 +290,9 @@ class Settings(BaseSettings):
     # After a terminal-complete UNIVERSE generation, wait this long before the
     # next fresh discovery generation. Incomplete chunks/retries do not use this.
     paper_universe_discovery_interval_seconds: int = Field(default=600, ge=60, le=3600)
+    # Config-authoritative ACTIVE TRADE exact-ID cadence. Not an operator field
+    # in this first pass. Do not discover/rematch on this lane.
+    paper_active_trade_interval_seconds: int = Field(default=5, ge=1, le=15)
     # Intra-generation pause only (incomplete chunk yield). Not UNIVERSE
     # discovery cadence and not BACKGROUND pricing.
     paper_universe_worker_cooldown_seconds: int = Field(default=8, ge=5, le=15)
@@ -358,7 +361,8 @@ class Settings(BaseSettings):
     paper_treasury_demo_usd_gbp_per_unit: float = Field(default=0.80, gt=0)
     paper_treasury_demo_fx_source: str = "paper_demo_fx_snapshot"
     paper_treasury_include_kalshi: bool = True
-    min_net_edge: float = Field(default=0.005, ge=0)
+    min_net_edge: float = Field(default=0.01, ge=0)
+    max_allocated_per_trade_gbp: float = Field(default=1000.0, gt=0)
     max_slippage_bps: int = Field(default=25, ge=0)
     max_event_exposure_gbp: float = Field(default=1000.0, gt=0)
     max_total_exposure_gbp: float = Field(default=5000.0, gt=0)
@@ -388,7 +392,7 @@ class Settings(BaseSettings):
     allocation_max_open_capital_fraction: float = Field(default=0.70, gt=0, le=1)
     allocation_max_same_fixture_fraction: float = Field(default=0.40, gt=0, le=1)
     allocation_max_concurrent_open: int = Field(default=4, ge=0)
-    allocation_per_opportunity_limit_gbp: float | None = Field(default=None, gt=0)
+    allocation_per_opportunity_limit_gbp: float | None = Field(default=1000.0, gt=0)
     allocation_matchbook_limit_gbp: float | None = Field(default=None, gt=0)
     allocation_polymarket_limit_usd: float | None = Field(default=None, gt=0)
     allocation_external_leg_cap_native: float | None = Field(default=None, gt=0)

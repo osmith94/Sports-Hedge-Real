@@ -30,7 +30,9 @@ def position_from_trade(trade: PaperTrade) -> OpenPaperPosition:
         raise UnwindIdentityError("unknown_or_stale_settlement_identity")
     if trade.guaranteed_profit_gbp_at_open is None:
         raise UnwindIdentityError("unknown_hold_pnl")
-    legs = [open_leg_from_trade_leg(trade, leg) for leg in trade.legs if leg.filled_stake > 0]
+    legs = _aggregate_same_market_close_legs(
+        [open_leg_from_trade_leg(trade, leg) for leg in trade.legs if leg.filled_stake > 0]
+    )
     if not legs:
         raise UnwindIdentityError("no_filled_legs")
     return OpenPaperPosition(
@@ -84,6 +86,36 @@ def open_leg_from_trade_leg(trade: PaperTrade, leg) -> OpenPaperLeg:
         fill_kind=leg.fill_kind,
         fill_id=leg.fill_id,
     )
+
+
+def _aggregate_same_market_close_legs(legs: list[OpenPaperLeg]) -> list[OpenPaperLeg]:
+    """One shared reverse book per native market / runner / close action.
+
+    Multiple top-up tranches on the same Matchbook/Kalshi identity must consume
+    executable close depth once, not independently reuse the full book.
+    Settlement still iterates every fill_id on the trade itself.
+    """
+
+    grouped: dict[tuple, OpenPaperLeg] = {}
+    order: list[tuple] = []
+    for leg in legs:
+        key = (
+            leg.venue,
+            leg.source_event_id,
+            leg.source_market_id,
+            leg.source_runner_id,
+            leg.opening_action,
+            leg.canonical_outcome,
+        )
+        existing = grouped.get(key)
+        if existing is None:
+            grouped[key] = leg
+            order.append(key)
+            continue
+        grouped[key] = existing.model_copy(
+            update={"filled_size": existing.filled_size + leg.filled_size}
+        )
+    return [grouped[key] for key in order]
 
 
 def close_fills_from_decision(

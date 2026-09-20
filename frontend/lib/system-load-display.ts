@@ -16,12 +16,17 @@ export function systemLoadLines(
   const mb = load.matchbook ?? {};
   const kalshi = load.kalshi ?? {};
   const universe = load.universe ?? {};
+  const active = load.active_trade ?? {};
   const uniProgress = `${asCount(universe.evaluated)}/${asCount(universe.total)} evaluated`;
   const uniBudget = formatBudget(
     universe.generation_work_used_s,
     universe.generation_budget_seconds,
   );
   return [
+    {
+      key: "ACTIVE TRADE",
+      detail: `${asCount(active.open_trades)} open · ${asCount(active.due)} due · cadence ${formatCadence(active.cadence_seconds, "5s")}`,
+    },
     {
       key: "HOT pricing",
       detail: `${asCount(hot.fixtures)} fixtures · ${asCount(hot.working_set)} items · ${asCount(hot.due)} due · ${formatCycle(hot)}`,
@@ -61,9 +66,9 @@ function formatCycle(hot: NonNullable<SystemLoadSummary["hot"]>): string {
   return `cycle ${duration} / ${cadence} (${Math.round(ratio * 100)}%)`;
 }
 
-function formatCadence(seconds: unknown): string {
+function formatCadence(seconds: unknown, fallback = "—"): string {
   const cadence = asCount(seconds);
-  return cadence > 0 ? `${cadence}s` : "—";
+  return cadence > 0 ? `${cadence}s` : fallback;
 }
 
 function formatBudget(used: number | null | undefined, budget: number | null | undefined): string | null {

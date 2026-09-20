@@ -64,6 +64,7 @@ def test_absent_override_uses_environment_defaults(tmp_path: Path) -> None:
     assert resolved.max_execution_risk == 40
     assert resolved.hot_cadence_seconds == 45
     assert resolved.background_cadence_seconds == 90
+    assert resolved.max_allocated_per_trade_gbp == Decimal("1000")
     assert resolved.scanner_stopped is False
     assert resolved.source == "env_default"
     assert resolved.restart_semantics == "remain_stopped_until_resume"
@@ -184,6 +185,7 @@ def test_stop_prevents_hot_universe_background_and_preserves_state(tmp_path: Pat
         assert coordinator.plan_hot_tick(now=NOW).reason == "operator_stopped"
         assert coordinator.plan_universe_tick(now=NOW).reason == "operator_stopped"
         assert coordinator.plan_background_tick(now=NOW).reason == "operator_stopped"
+        assert coordinator.plan_active_trade_tick(now=NOW).reason == "operator_stopped"
         assert coordinator.status.last_matched_event_pairs == previous_pairs
         assert coordinator._catalogue_store is sentinel
         live = client.get("/paper/live-refresh").json()
@@ -224,15 +226,17 @@ async def test_stopped_workers_do_not_invoke_ticks(tmp_path: Path) -> None:
     hot = asyncio.create_task(coordinator._hot_loop(tick))
     universe = asyncio.create_task(coordinator._universe_loop(tick))
     background = asyncio.create_task(coordinator._background_loop(tick))
+    active = asyncio.create_task(coordinator._active_trade_loop(tick))
     try:
         await asyncio.sleep(0.15)
         assert ticks == []
         assert coordinator.status.hot.last_plan_reason == "operator_stopped"
+        assert coordinator.status.active_trade.last_plan_reason == "operator_stopped"
         coordinator._stop.set()
         coordinator._pulse_control()
-        await asyncio.wait_for(asyncio.gather(hot, universe, background), timeout=2)
+        await asyncio.wait_for(asyncio.gather(hot, universe, background, active), timeout=2)
     finally:
-        for task in (hot, universe, background):
+        for task in (hot, universe, background, active):
             if not task.done():
                 task.cancel()
         bind_runtime_operator_scanner_settings_store(None)

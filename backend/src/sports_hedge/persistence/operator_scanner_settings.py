@@ -6,6 +6,7 @@ One singleton SQLite row is the operator override for:
 - Max Risk / ``maximum_execution_risk`` (scan/watchlist threshold only)
 - HOT cadence seconds
 - BACKGROUND pricing cadence seconds
+- Max allocated per trade (GBP) — allocator per-opportunity cap authority
 - operator Stop / Resume pause flag
 
 Environment/config values remain the defaults when no operator settings
@@ -29,7 +30,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +43,9 @@ HOT_CADENCE_MAX_SECONDS = 60
 BACKGROUND_CADENCE_MIN_SECONDS = 60
 BACKGROUND_CADENCE_MAX_SECONDS = 600
 DEFAULT_BACKGROUND_CADENCE_SECONDS = 90
+MAX_ALLOCATED_PER_TRADE_MIN_GBP = Decimal("1")
+MAX_ALLOCATED_PER_TRADE_MAX_GBP = Decimal("1000000")
+DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP = Decimal("1000")
 OPERATOR_SCANNER_RESTART_SEMANTICS = "remain_stopped_until_resume"
 SCANNER_STOPPED_BY_OPERATOR = "scanner_stopped_by_operator"
 
@@ -57,6 +61,11 @@ class OperatorScannerSettings(BaseModel):
         ge=BACKGROUND_CADENCE_MIN_SECONDS,
         le=BACKGROUND_CADENCE_MAX_SECONDS,
     )
+    max_allocated_per_trade_gbp: Decimal = Field(
+        default=DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP,
+        ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
+        le=MAX_ALLOCATED_PER_TRADE_MAX_GBP,
+    )
     scanner_stopped: bool = False
     source: Literal["operator", "env_default"] = "env_default"
     updated_at: datetime | None = None
@@ -71,6 +80,11 @@ class OperatorScannerSettingsUpdate(BaseModel):
         ge=BACKGROUND_CADENCE_MIN_SECONDS,
         le=BACKGROUND_CADENCE_MAX_SECONDS,
     )
+    max_allocated_per_trade_gbp: Decimal | None = Field(
+        default=None,
+        ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
+        le=MAX_ALLOCATED_PER_TRADE_MAX_GBP,
+    )
 
 
 def clamp_hot_cadence_seconds(value: int) -> int:
@@ -82,6 +96,22 @@ def clamp_background_cadence_seconds(value: int) -> int:
         BACKGROUND_CADENCE_MAX_SECONDS,
         max(BACKGROUND_CADENCE_MIN_SECONDS, int(value)),
     )
+
+
+def clamp_max_allocated_per_trade_gbp(value: Decimal | float | int | str) -> Decimal:
+    amount = Decimal(str(value))
+    if amount < MAX_ALLOCATED_PER_TRADE_MIN_GBP:
+        return MAX_ALLOCATED_PER_TRADE_MIN_GBP
+    if amount > MAX_ALLOCATED_PER_TRADE_MAX_GBP:
+        return MAX_ALLOCATED_PER_TRADE_MAX_GBP
+    return amount
+
+
+def _env_max_allocated_per_trade_gbp(settings: Settings) -> Decimal:
+    configured = settings.allocation_per_opportunity_limit_gbp
+    if configured is None:
+        configured = settings.max_allocated_per_trade_gbp
+    return clamp_max_allocated_per_trade_gbp(configured)
 
 
 def env_operator_scanner_settings(
@@ -100,6 +130,7 @@ def env_operator_scanner_settings(
         background_cadence_seconds=clamp_background_cadence_seconds(
             resolved.paper_background_price_interval_seconds
         ),
+        max_allocated_per_trade_gbp=_env_max_allocated_per_trade_gbp(resolved),
         scanner_stopped=scanner_stopped,
         source="env_default",
         updated_at=updated_at,
@@ -166,6 +197,7 @@ class SqliteOperatorScannerSettingsStore:
                 max_execution_risk INTEGER NOT NULL,
                 hot_cadence_seconds INTEGER NOT NULL,
                 background_cadence_seconds INTEGER NOT NULL DEFAULT 90,
+                max_allocated_per_trade_gbp TEXT,
                 scanner_stopped INTEGER NOT NULL,
                 source TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -181,13 +213,17 @@ class SqliteOperatorScannerSettingsStore:
                 "ALTER TABLE operator_scanner_settings "
                 "ADD COLUMN background_cadence_seconds INTEGER NOT NULL DEFAULT 90"
             )
+        if "max_allocated_per_trade_gbp" not in columns:
+            connection.execute(
+                "ALTER TABLE operator_scanner_settings "
+                "ADD COLUMN max_allocated_per_trade_gbp TEXT"
+            )
 
     def load(self) -> OperatorScannerSettings | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT min_net_edge, max_execution_risk, hot_cadence_seconds,
-                       background_cadence_seconds, scanner_stopped, source, updated_at
+                SELECT *
                 FROM operator_scanner_settings
                 WHERE id = 1
                 """
@@ -202,20 +238,36 @@ class SqliteOperatorScannerSettingsStore:
         min_net_edge: Decimal,
         max_execution_risk: int,
         hot_cadence_seconds: int,
-        background_cadence_seconds: int,
+        background_cadence_seconds: int | None = None,
+        max_allocated_per_trade_gbp: Decimal | None = None,
         scanner_stopped: bool | None = None,
     ) -> OperatorScannerSettings:
         current = self.load()
         stopped = current.scanner_stopped if current is not None and scanner_stopped is None else bool(
             scanner_stopped if scanner_stopped is not None else False
         )
+        if background_cadence_seconds is None:
+            if current is not None:
+                background = current.background_cadence_seconds
+            else:
+                background = clamp_background_cadence_seconds(
+                    get_settings().paper_background_price_interval_seconds
+                )
+        else:
+            background = clamp_background_cadence_seconds(background_cadence_seconds)
+        if max_allocated_per_trade_gbp is None:
+            if current is not None:
+                allocated = current.max_allocated_per_trade_gbp
+            else:
+                allocated = _env_max_allocated_per_trade_gbp(get_settings())
+        else:
+            allocated = clamp_max_allocated_per_trade_gbp(max_allocated_per_trade_gbp)
         payload = OperatorScannerSettings(
             min_net_edge=min_net_edge,
             max_execution_risk=int(max_execution_risk),
             hot_cadence_seconds=clamp_hot_cadence_seconds(hot_cadence_seconds),
-            background_cadence_seconds=clamp_background_cadence_seconds(
-                background_cadence_seconds
-            ),
+            background_cadence_seconds=background,
+            max_allocated_per_trade_gbp=allocated,
             scanner_stopped=stopped,
             source="operator",
             updated_at=datetime.now(UTC),
@@ -260,14 +312,16 @@ class SqliteOperatorScannerSettingsStore:
                 """
                 INSERT INTO operator_scanner_settings (
                     id, min_net_edge, max_execution_risk, hot_cadence_seconds,
-                    background_cadence_seconds, scanner_stopped, source, updated_at
+                    background_cadence_seconds, max_allocated_per_trade_gbp,
+                    scanner_stopped, source, updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     min_net_edge = excluded.min_net_edge,
                     max_execution_risk = excluded.max_execution_risk,
                     hot_cadence_seconds = excluded.hot_cadence_seconds,
                     background_cadence_seconds = excluded.background_cadence_seconds,
+                    max_allocated_per_trade_gbp = excluded.max_allocated_per_trade_gbp,
                     scanner_stopped = excluded.scanner_stopped,
                     source = excluded.source,
                     updated_at = excluded.updated_at
@@ -277,6 +331,7 @@ class SqliteOperatorScannerSettingsStore:
                     int(payload.max_execution_risk),
                     int(payload.hot_cadence_seconds),
                     int(payload.background_cadence_seconds),
+                    str(payload.max_allocated_per_trade_gbp),
                     1 if payload.scanner_stopped else 0,
                     payload.source,
                     now,
@@ -344,6 +399,15 @@ def get_operator_scanner_settings_store() -> SqliteOperatorScannerSettingsStore:
     return SqliteOperatorScannerSettingsStore(database)
 
 
+def _row_optional(row: sqlite3.Row, key: str) -> Any:
+    try:
+        if key not in row.keys():
+            return None
+        return row[key]
+    except Exception:
+        return None
+
+
 def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
     source_raw = str(row["source"] or "")
     source: Literal["operator", "env_default"] = (
@@ -374,7 +438,7 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         )
         source = "env_default"
     try:
-        raw_background = row["background_cadence_seconds"]
+        raw_background = _row_optional(row, "background_cadence_seconds")
         if raw_background is None:
             raise ValueError
         background_cadence_seconds = clamp_background_cadence_seconds(int(raw_background))
@@ -383,6 +447,16 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         background_cadence_seconds = clamp_background_cadence_seconds(
             get_settings().paper_background_price_interval_seconds
         )
+        source = "env_default"
+    try:
+        raw_allocated = _row_optional(row, "max_allocated_per_trade_gbp")
+        if raw_allocated is None or str(raw_allocated).strip() == "":
+            max_allocated_per_trade_gbp = _env_max_allocated_per_trade_gbp(get_settings())
+        else:
+            max_allocated_per_trade_gbp = clamp_max_allocated_per_trade_gbp(raw_allocated)
+    except (InvalidOperation, ArithmeticError, TypeError, ValueError):
+        LOGGER.warning("malformed operator scanner max_allocated_per_trade_gbp; using env default")
+        max_allocated_per_trade_gbp = _env_max_allocated_per_trade_gbp(get_settings())
         source = "env_default"
     try:
         updated = datetime.fromisoformat(str(row["updated_at"]))
@@ -394,6 +468,7 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         max_execution_risk=max_execution_risk,
         hot_cadence_seconds=hot_cadence_seconds,
         background_cadence_seconds=background_cadence_seconds,
+        max_allocated_per_trade_gbp=max_allocated_per_trade_gbp,
         scanner_stopped=bool(int(row["scanner_stopped"] or 0)),
         source=source,
         updated_at=updated,

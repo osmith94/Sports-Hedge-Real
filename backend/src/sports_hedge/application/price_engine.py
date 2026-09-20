@@ -522,17 +522,20 @@ class CataloguePriceEngine:
         self,
         runtime: PriceEngineRuntimeItem,
         result: PriceEngineSliceResult,
+        *,
+        lane: str | None = None,
     ) -> PriceEngineItemStatus:
         identity = runtime.identity
         runtime.in_flight = True
         runtime.status = PriceEngineItemStatus.IN_FLIGHT
         runtime.list_events_calls = 0
         runtime.list_markets_calls = 0
-        lane = (
-            ScanLane.HOT.value
-            if runtime.priority is PriceEnginePriority.HOT
-            else PRICE_ENGINE_BACKGROUND_LANE
-        )
+        if lane is None:
+            lane = (
+                ScanLane.HOT.value
+                if runtime.priority is PriceEnginePriority.HOT
+                else PRICE_ENGINE_BACKGROUND_LANE
+            )
         try:
             if not identity.matchbook_event_id or not identity.matchbook_market_id:
                 return self._request_revalidation(runtime, "missing_matchbook_identity")

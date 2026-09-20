@@ -32,6 +32,7 @@ class PaperOpportunityLeg(BaseModel):
     venue: VenueName
     source_market_id: str
     source_runner_id: str
+    source_event_id: str | None = None
     currency: str = "GBP"
     requested_stake: Decimal = Field(gt=Decimal("0"))
     displayed_odds: Decimal = Field(gt=Decimal("1"))

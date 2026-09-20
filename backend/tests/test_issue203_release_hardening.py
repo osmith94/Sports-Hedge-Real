@@ -564,7 +564,7 @@ def test_manual_collect_kwargs_do_not_poison_scheduled_scan_config() -> None:
     coordinator.remember_request(unusual)
     scheduled = paper_api.scheduled_collection_kwargs()
     assert scheduled["max_event_pairs"] == DEFAULT_MAX_EVENT_PAIRS == 60
-    assert Decimal(str(scheduled["minimum_net_edge"])) == Decimal("0.005")
+    assert Decimal(str(scheduled["minimum_net_edge"])) == Decimal("0.01")
     assert scheduled["maximum_execution_risk"] == 60
     assert scheduled["assumed_latency_ms"] == 500
     tick_src = inspect.getsource(paper_api.server_owned_refresh_tick)

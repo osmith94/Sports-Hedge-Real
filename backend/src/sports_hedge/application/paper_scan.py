@@ -906,6 +906,7 @@ def _fill_legs_from_observations(
                     venue=observation.venue,
                     source_market_id=observation.market.source_market_id,
                     source_runner_id=book.source_runner_id,
+                    source_event_id=str(observation.market.event.source_event_id),
                     currency=observation.native_currency,
                     requested_stake=requested,
                     displayed_odds=best.decimal_odds,

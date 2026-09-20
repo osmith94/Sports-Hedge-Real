@@ -62,6 +62,7 @@ describe("system load display", () => {
     assert.deepEqual(
       lines.map((line) => `${line.key}  ${line.detail}`),
       [
+        "ACTIVE TRADE  0 open · 0 due · cadence 5s",
         "HOT pricing  8 fixtures · 18 items · 4 due · cycle 3.8s / 30s (13%)",
         "BACKGROUND pricing  31 items · 6 due · cadence 90s",
         "UNIVERSE discovery  24/30 evaluated · cadence 600s · 42s / 150s",
@@ -79,8 +80,8 @@ describe("system load display", () => {
         catalogue_items: 3,
       }),
     );
-    assert.match(lines[0].detail, /1 fixtures · 3 items/);
-    assert.equal(lines[5].detail, "3 catalogue items");
+    assert.match(lines[1].detail, /1 fixtures · 3 items/);
+    assert.equal(lines[6].detail, "3 catalogue items");
   });
 
   it("displays backend missing cycle duration without computing utilisation", () => {
@@ -96,9 +97,9 @@ describe("system load display", () => {
         },
       }),
     );
-    assert.match(missing[0].detail, /cycle — \/ 30s/);
-    assert.doesNotMatch(missing[0].detail, /NaN/);
-    assert.doesNotMatch(missing[0].detail, /%\)/);
+    assert.match(missing[1].detail, /cycle — \/ 30s/);
+    assert.doesNotMatch(missing[1].detail, /NaN/);
+    assert.doesNotMatch(missing[1].detail, /%\)/);
   });
 
   it("does not reconstruct load from raw lane or provider fields when system_load is absent", () => {
