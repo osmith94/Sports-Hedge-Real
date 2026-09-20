@@ -151,5 +151,4 @@ export function backgroundPriceCopy(
     label: BACKGROUND_PRICING_LABEL,
     detail: `${working} ACTIVE · ${evaluated} evaluated · ${inFlight} in flight · ${retry} retry · ${deferred} deferred · ${notStarted} not started${cadence} · ${due}${suffix}`,
   };
-  };
 }
