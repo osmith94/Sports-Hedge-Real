@@ -327,6 +327,10 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /collect\("diagnostic"\)/);
     assert.match(scan, /does not\s+rediscover the full universe/);
     assert.match(scan, /HOT cadence s/);
+    assert.match(scan, /BACKGROUND cadence s/);
+    assert.match(scan, /background_cadence_seconds/);
+    assert.match(scan, /clampBackgroundCadenceSeconds/);
+    assert.match(scan, /HOT cadence and BACKGROUND cadence/);
     assert.match(scan, /Update/);
     assert.match(scan, /Stop scanner/);
     assert.match(scan, /Resume scanner/);

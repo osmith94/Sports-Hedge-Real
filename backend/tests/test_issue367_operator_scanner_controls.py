@@ -63,6 +63,7 @@ def test_absent_override_uses_environment_defaults(tmp_path: Path) -> None:
     assert resolved.min_net_edge == Decimal("0.02")
     assert resolved.max_execution_risk == 40
     assert resolved.hot_cadence_seconds == 45
+    assert resolved.background_cadence_seconds == 90
     assert resolved.scanner_stopped is False
     assert resolved.source == "env_default"
     assert resolved.restart_semantics == "remain_stopped_until_resume"
@@ -76,6 +77,7 @@ def test_saved_settings_used_by_scheduled_kwargs_and_survive_restart(tmp_path: P
             min_net_edge=Decimal("0.0125"),
             max_execution_risk=33,
             hot_cadence_seconds=15,
+            background_cadence_seconds=90,
         )
         assert saved.source == "operator"
         scheduled = paper_api.scheduled_collection_kwargs()
@@ -89,6 +91,7 @@ def test_saved_settings_used_by_scheduled_kwargs_and_survive_restart(tmp_path: P
         assert loaded.min_net_edge == Decimal("0.0125")
         assert loaded.max_execution_risk == 33
         assert loaded.hot_cadence_seconds == 15
+        assert loaded.background_cadence_seconds == 90
         restarted.close()
         store = SqliteOperatorScannerSettingsStore(tmp_path / "operator-scanner.sqlite")
         coordinator.bind_operator_settings_store(store)
@@ -114,6 +117,7 @@ def test_update_http_is_backend_authoritative_and_does_not_scan(tmp_path: Path) 
                 "min_net_edge": "0.0075",
                 "max_execution_risk": 41,
                 "hot_cadence_seconds": 20,
+                "background_cadence_seconds": 90,
             },
         )
         assert response.status_code == 200
@@ -122,9 +126,11 @@ def test_update_http_is_backend_authoritative_and_does_not_scan(tmp_path: Path) 
         assert Decimal(str(settings["min_net_edge"])) == Decimal("0.0075")
         assert settings["max_execution_risk"] == 41
         assert settings["hot_cadence_seconds"] == 20
+        assert settings["background_cadence_seconds"] == 90
         assert settings["source"] == "operator"
         assert body["interval_seconds"] == 20
         assert body["hot"]["cadence_seconds"] == 20
+        assert body["background"]["cadence_seconds"] == 90
         again = client.get("/paper/live-refresh").json()
         assert Decimal(str(again["operator_settings"]["min_net_edge"])) == Decimal("0.0075")
         assert ticks == []
@@ -151,6 +157,7 @@ def test_update_shifts_hot_due_without_running_a_cycle(tmp_path: Path) -> None:
         min_net_edge=Decimal("0.005"),
         max_execution_risk=60,
         hot_cadence_seconds=15,
+        background_cadence_seconds=90,
     )
     assert coordinator._next_hot_due == NOW + timedelta(seconds=15)
     assert coordinator.plan_hot_tick(now=NOW).reason == "waiting"
@@ -252,6 +259,8 @@ def test_frontend_renders_backend_settings_not_a_second_authority() -> None:
     assert "saveOperatorScannerSettings" in text
     assert "Auto refresh view" in text
     assert "HOT cadence s" in text
+    assert "BACKGROUND cadence s" in text
+    assert "background_cadence_seconds" in text
     assert "disabled={loading || scannerStopped}" in text
     assert "if (liveRefresh?.scanner_stopped) return;" in text
     assert text.count("disabled={loading || scannerStopped}") >= 2
@@ -264,17 +273,20 @@ def test_effective_settings_follow_runtime_store(tmp_path: Path) -> None:
             min_net_edge=Decimal("0.009"),
             max_execution_risk=22,
             hot_cadence_seconds=60,
+            background_cadence_seconds=90,
         )
         effective = effective_operator_scanner_settings()
         assert effective.min_net_edge == Decimal("0.009")
         assert effective.max_execution_risk == 22
         assert effective.hot_cadence_seconds == 60
+        assert effective.background_cadence_seconds == 90
         invalid = TestClient(app).put(
             "/paper/operator-scanner-settings",
             json={
                 "min_net_edge": "1.5",
                 "max_execution_risk": 22,
                 "hot_cadence_seconds": 60,
+                "background_cadence_seconds": 90,
             },
         )
         assert invalid.status_code == 422
@@ -381,6 +393,7 @@ def test_stopped_manual_http_does_not_invoke_collector_and_resume_restores(
                 "min_net_edge": "0.006",
                 "max_execution_risk": 55,
                 "hot_cadence_seconds": 18,
+                "background_cadence_seconds": 90,
             },
         )
         assert update.status_code == 200

@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import ast
 import inspect
+import sqlite3
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,12 @@ from sports_hedge.application.universe_checkpoint import (
 )
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
+from sports_hedge.persistence.operator_scanner_settings import (
+    BACKGROUND_CADENCE_MAX_SECONDS,
+    BACKGROUND_CADENCE_MIN_SECONDS,
+    SqliteOperatorScannerSettingsStore,
+    bind_runtime_operator_scanner_settings_store,
+)
 from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import MatchbookClient
 from sports_hedge.venues.polymarket import PolymarketClient
@@ -200,8 +207,10 @@ def test_hot_cadence_remains_operator_controlled_default_30s(tmp_path) -> None:
             min_net_edge=Decimal(str(settings.min_net_edge)),
             max_execution_risk=settings.max_execution_risk,
             hot_cadence_seconds=15,
+            background_cadence_seconds=90,
         )
         assert saved.hot_cadence_seconds == 15
+        assert saved.background_cadence_seconds == 90
         assert coordinator.status.hot.cadence_seconds == 15
         assert coordinator.status.interval_seconds == 15
         assert coordinator.status.background.cadence_seconds == 90
@@ -210,6 +219,7 @@ def test_hot_cadence_remains_operator_controlled_default_30s(tmp_path) -> None:
             min_net_edge=Decimal(str(settings.min_net_edge)),
             max_execution_risk=settings.max_execution_risk,
             hot_cadence_seconds=30,
+            background_cadence_seconds=90,
         )
         assert restored.hot_cadence_seconds == 30
     finally:
@@ -321,3 +331,238 @@ def test_hot_remains_schedulable_during_600s_universe_discovery_gap() -> None:
     assert hot.lane == ScanLane.HOT.value
     background = coordinator.plan_background_tick(now=NOW)
     assert background.lane in {"background", "idle"}
+
+
+def test_background_cadence_defaults_to_90s(tmp_path) -> None:
+    coordinator, store = _bind_store(tmp_path)
+    try:
+        resolved = coordinator.effective_scanner_settings()
+        assert resolved.background_cadence_seconds == 90
+        assert resolved.source == "env_default"
+        coordinator.configure_from_settings()
+        assert coordinator.status.background.cadence_seconds == 90
+        assert coordinator.status.operator_settings is not None
+        assert coordinator.status.operator_settings.background_cadence_seconds == 90
+        assert coordinator.status.universe.cadence_seconds == 600
+    finally:
+        _unbind(coordinator, store)
+
+
+@pytest.mark.asyncio
+async def test_persisted_background_cadence_is_used_by_scheduler_without_restart(
+    tmp_path,
+) -> None:
+    clock = FakeClock(NOW)
+    store = SqliteOperatorScannerSettingsStore(tmp_path / "background-cadence.sqlite")
+    coordinator = LiveRefreshCoordinator(clock=clock, operator_settings_store=store)
+    try:
+        coordinator.configure_from_settings()
+        coordinator._clock = clock
+        coordinator._next_background_due = NOW
+        saved = coordinator.apply_operator_scan_settings(
+            min_net_edge=Decimal("0.005"),
+            max_execution_risk=60,
+            hot_cadence_seconds=30,
+            background_cadence_seconds=180,
+        )
+        assert saved.background_cadence_seconds == 180
+        assert saved.source == "operator"
+        assert coordinator.status.background.cadence_seconds == 180
+        assert coordinator._next_background_due == NOW + timedelta(seconds=180)
+        waiting = coordinator.plan_background_tick(now=NOW + timedelta(seconds=179))
+        assert waiting.lane == "idle"
+        due = coordinator.plan_background_tick(now=NOW + timedelta(seconds=180))
+        assert due.lane == "background"
+        clock.now = NOW + timedelta(seconds=180)
+        coordinator._next_background_due = clock.now
+        await coordinator.run_price_engine_slice(PriceEnginePriority.BACKGROUND)
+        assert coordinator._next_background_due == clock.now + timedelta(seconds=180)
+        assert coordinator.status.background.cadence_seconds == 180
+        load = coordinator.public_status().system_load
+        assert load.background.cadence_seconds == 180
+        assert coordinator.status.universe.cadence_seconds == 600
+    finally:
+        bind_runtime_operator_scanner_settings_store(None)
+        store.close()
+
+
+def test_background_cadence_survives_store_reopen(tmp_path) -> None:
+    db = tmp_path / "restart-background.sqlite"
+    first = SqliteOperatorScannerSettingsStore(db)
+    first.save_settings(
+        min_net_edge=Decimal("0.01"),
+        max_execution_risk=40,
+        hot_cadence_seconds=20,
+        background_cadence_seconds=240,
+    )
+    first.close()
+    restarted = SqliteOperatorScannerSettingsStore(db)
+    loaded = restarted.load()
+    assert loaded is not None
+    assert loaded.hot_cadence_seconds == 20
+    assert loaded.background_cadence_seconds == 240
+    assert loaded.source == "operator"
+    coordinator = LiveRefreshCoordinator(operator_settings_store=restarted)
+    coordinator.configure_from_settings()
+    assert coordinator.status.background.cadence_seconds == 240
+    assert coordinator.status.hot.cadence_seconds == 20
+    assert coordinator.status.universe.cadence_seconds == 600
+    restarted.close()
+
+
+def test_background_cadence_invalid_range_rejected(tmp_path) -> None:
+    coordinator, store = _bind_store(tmp_path)
+    client = TestClient(app)
+    try:
+        for value in (59, 601, 0, 30, BACKGROUND_CADENCE_MIN_SECONDS - 1, BACKGROUND_CADENCE_MAX_SECONDS + 1):
+            response = client.put(
+                "/paper/operator-scanner-settings",
+                json={
+                    "min_net_edge": "0.005",
+                    "max_execution_risk": 60,
+                    "hot_cadence_seconds": 30,
+                    "background_cadence_seconds": value,
+                },
+            )
+            assert response.status_code == 422, value
+        missing = client.put(
+            "/paper/operator-scanner-settings",
+            json={
+                "min_net_edge": "0.005",
+                "max_execution_risk": 60,
+                "hot_cadence_seconds": 30,
+            },
+        )
+        assert missing.status_code == 422
+        ok = client.put(
+            "/paper/operator-scanner-settings",
+            json={
+                "min_net_edge": "0.005",
+                "max_execution_risk": 60,
+                "hot_cadence_seconds": 30,
+                "background_cadence_seconds": 90,
+            },
+        )
+        assert ok.status_code == 200
+        assert ok.json()["operator_settings"]["background_cadence_seconds"] == 90
+        bounds = client.put(
+            "/paper/operator-scanner-settings",
+            json={
+                "min_net_edge": "0.005",
+                "max_execution_risk": 60,
+                "hot_cadence_seconds": 30,
+                "background_cadence_seconds": 600,
+            },
+        )
+        assert bounds.status_code == 200
+        assert bounds.json()["background"]["cadence_seconds"] == 600
+        low = client.put(
+            "/paper/operator-scanner-settings",
+            json={
+                "min_net_edge": "0.005",
+                "max_execution_risk": 60,
+                "hot_cadence_seconds": 30,
+                "background_cadence_seconds": 60,
+            },
+        )
+        assert low.status_code == 200
+        assert low.json()["background"]["cadence_seconds"] == 60
+    finally:
+        _unbind(coordinator, store)
+
+
+def test_legacy_singleton_row_migrates_background_cadence_default_90(tmp_path) -> None:
+    db = tmp_path / "legacy-operator.sqlite"
+    connection = sqlite3.connect(db)
+    connection.execute(
+        """
+        CREATE TABLE operator_scanner_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            min_net_edge TEXT NOT NULL,
+            max_execution_risk INTEGER NOT NULL,
+            hot_cadence_seconds INTEGER NOT NULL,
+            scanner_stopped INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO operator_scanner_settings (
+            id, min_net_edge, max_execution_risk, hot_cadence_seconds,
+            scanner_stopped, source, updated_at
+        ) VALUES (1, ?, ?, ?, ?, ?, ?)
+        """,
+        ("0.0125", 33, 15, 0, "operator", datetime.now(UTC).isoformat()),
+    )
+    connection.commit()
+    connection.close()
+    store = SqliteOperatorScannerSettingsStore(db)
+    loaded = store.load()
+    assert loaded is not None
+    assert loaded.source == "operator"
+    assert loaded.hot_cadence_seconds == 15
+    assert loaded.background_cadence_seconds == 90
+    columns = {
+        str(row[1])
+        for row in sqlite3.connect(db).execute("PRAGMA table_info(operator_scanner_settings)")
+    }
+    assert "background_cadence_seconds" in columns
+    store.close()
+
+
+def test_background_cadence_update_does_not_trigger_scan(tmp_path) -> None:
+    coordinator, store = _bind_store(tmp_path)
+    client = TestClient(app)
+    ticks: list[str] = []
+
+    async def boom(_plan=None) -> None:
+        ticks.append("tick")
+        raise AssertionError("BACKGROUND cadence Update must not trigger scanner work")
+
+    from sports_hedge.api import paper as paper_api
+
+    original = paper_api.server_owned_refresh_tick
+    paper_api.server_owned_refresh_tick = boom  # type: ignore[method-assign]
+    try:
+        response = client.put(
+            "/paper/operator-scanner-settings",
+            json={
+                "min_net_edge": "0.005",
+                "max_execution_risk": 60,
+                "hot_cadence_seconds": 30,
+                "background_cadence_seconds": 120,
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["operator_settings"]["background_cadence_seconds"] == 120
+        assert body["background"]["cadence_seconds"] == 120
+        assert body["hot"]["cadence_seconds"] == 30
+        assert body["universe"]["cadence_seconds"] == 600
+        assert ticks == []
+        put_src = inspect.getsource(paper_api.put_operator_scanner_settings)
+        assert "collect_and_scan" not in put_src
+        assert "run_price_engine_slice" not in put_src
+        assert "server_owned_refresh_tick" not in put_src
+    finally:
+        paper_api.server_owned_refresh_tick = original
+        _unbind(coordinator, store)
+
+
+def test_frontend_exposes_background_cadence_beside_hot() -> None:
+    scan = (REPO_ROOT / "frontend" / "components" / "run-paper-scan.tsx").read_text(
+        encoding="utf-8"
+    )
+    api = (REPO_ROOT / "frontend" / "lib" / "api.ts").read_text(encoding="utf-8")
+    assert "BACKGROUND cadence s" in scan
+    assert "HOT cadence s" in scan
+    assert scan.index("HOT cadence s") < scan.index("BACKGROUND cadence s")
+    assert "background_cadence_seconds: backgroundCadence" in scan
+    assert "clampBackgroundCadenceSeconds" in scan
+    assert "Math.min(600, Math.max(60" in scan
+    assert "does not trigger a scan" in scan
+    assert "HOT cadence and BACKGROUND cadence" in scan
+    assert "background_cadence_seconds: number" in api
+    assert DEFAULT_BACKGROUND_CADENCE_SECONDS == 90

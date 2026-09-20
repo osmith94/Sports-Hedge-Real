@@ -5,12 +5,13 @@ One singleton SQLite row is the operator override for:
 - Min Net Arb / ``minimum_net_edge``
 - Max Risk / ``maximum_execution_risk`` (scan/watchlist threshold only)
 - HOT cadence seconds
+- BACKGROUND pricing cadence seconds
 - operator Stop / Resume pause flag
 
 Environment/config values remain the defaults when no operator settings
 override exists. This store never mutates ``.env``. Update, Stop and Resume
 are persistence/control seams only: they must not scan, discover, or call
-providers.
+providers. UNIVERSE discovery cadence stays architecture/config authority.
 
 Backend-restart semantics (safety-first): a persisted operator Stop remains
 stopped across process restart until an explicit Resume. Catalogue, fixture
@@ -38,6 +39,9 @@ LOGGER = logging.getLogger(__name__)
 
 HOT_CADENCE_MIN_SECONDS = 15
 HOT_CADENCE_MAX_SECONDS = 60
+BACKGROUND_CADENCE_MIN_SECONDS = 60
+BACKGROUND_CADENCE_MAX_SECONDS = 600
+DEFAULT_BACKGROUND_CADENCE_SECONDS = 90
 OPERATOR_SCANNER_RESTART_SEMANTICS = "remain_stopped_until_resume"
 SCANNER_STOPPED_BY_OPERATOR = "scanner_stopped_by_operator"
 
@@ -48,6 +52,11 @@ class OperatorScannerSettings(BaseModel):
     min_net_edge: Decimal = Field(ge=0, lt=1)
     max_execution_risk: int = Field(ge=0, le=100)
     hot_cadence_seconds: int = Field(ge=HOT_CADENCE_MIN_SECONDS, le=HOT_CADENCE_MAX_SECONDS)
+    background_cadence_seconds: int = Field(
+        default=DEFAULT_BACKGROUND_CADENCE_SECONDS,
+        ge=BACKGROUND_CADENCE_MIN_SECONDS,
+        le=BACKGROUND_CADENCE_MAX_SECONDS,
+    )
     scanner_stopped: bool = False
     source: Literal["operator", "env_default"] = "env_default"
     updated_at: datetime | None = None
@@ -58,10 +67,21 @@ class OperatorScannerSettingsUpdate(BaseModel):
     min_net_edge: Decimal = Field(ge=0, lt=1)
     max_execution_risk: int = Field(ge=0, le=100)
     hot_cadence_seconds: int = Field(ge=HOT_CADENCE_MIN_SECONDS, le=HOT_CADENCE_MAX_SECONDS)
+    background_cadence_seconds: int = Field(
+        ge=BACKGROUND_CADENCE_MIN_SECONDS,
+        le=BACKGROUND_CADENCE_MAX_SECONDS,
+    )
 
 
 def clamp_hot_cadence_seconds(value: int) -> int:
     return min(HOT_CADENCE_MAX_SECONDS, max(HOT_CADENCE_MIN_SECONDS, int(value)))
+
+
+def clamp_background_cadence_seconds(value: int) -> int:
+    return min(
+        BACKGROUND_CADENCE_MAX_SECONDS,
+        max(BACKGROUND_CADENCE_MIN_SECONDS, int(value)),
+    )
 
 
 def env_operator_scanner_settings(
@@ -76,6 +96,9 @@ def env_operator_scanner_settings(
         max_execution_risk=int(resolved.max_execution_risk),
         hot_cadence_seconds=clamp_hot_cadence_seconds(
             resolved.paper_live_refresh_hot_interval_seconds
+        ),
+        background_cadence_seconds=clamp_background_cadence_seconds(
+            resolved.paper_background_price_interval_seconds
         ),
         scanner_stopped=scanner_stopped,
         source="env_default",
@@ -142,19 +165,29 @@ class SqliteOperatorScannerSettingsStore:
                 min_net_edge TEXT NOT NULL,
                 max_execution_risk INTEGER NOT NULL,
                 hot_cadence_seconds INTEGER NOT NULL,
+                background_cadence_seconds INTEGER NOT NULL DEFAULT 90,
                 scanner_stopped INTEGER NOT NULL,
                 source TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
             """
         )
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(operator_scanner_settings)")
+        }
+        if "background_cadence_seconds" not in columns:
+            connection.execute(
+                "ALTER TABLE operator_scanner_settings "
+                "ADD COLUMN background_cadence_seconds INTEGER NOT NULL DEFAULT 90"
+            )
 
     def load(self) -> OperatorScannerSettings | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT min_net_edge, max_execution_risk, hot_cadence_seconds,
-                       scanner_stopped, source, updated_at
+                       background_cadence_seconds, scanner_stopped, source, updated_at
                 FROM operator_scanner_settings
                 WHERE id = 1
                 """
@@ -169,6 +202,7 @@ class SqliteOperatorScannerSettingsStore:
         min_net_edge: Decimal,
         max_execution_risk: int,
         hot_cadence_seconds: int,
+        background_cadence_seconds: int,
         scanner_stopped: bool | None = None,
     ) -> OperatorScannerSettings:
         current = self.load()
@@ -179,6 +213,9 @@ class SqliteOperatorScannerSettingsStore:
             min_net_edge=min_net_edge,
             max_execution_risk=int(max_execution_risk),
             hot_cadence_seconds=clamp_hot_cadence_seconds(hot_cadence_seconds),
+            background_cadence_seconds=clamp_background_cadence_seconds(
+                background_cadence_seconds
+            ),
             scanner_stopped=stopped,
             source="operator",
             updated_at=datetime.now(UTC),
@@ -223,13 +260,14 @@ class SqliteOperatorScannerSettingsStore:
                 """
                 INSERT INTO operator_scanner_settings (
                     id, min_net_edge, max_execution_risk, hot_cadence_seconds,
-                    scanner_stopped, source, updated_at
+                    background_cadence_seconds, scanner_stopped, source, updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     min_net_edge = excluded.min_net_edge,
                     max_execution_risk = excluded.max_execution_risk,
                     hot_cadence_seconds = excluded.hot_cadence_seconds,
+                    background_cadence_seconds = excluded.background_cadence_seconds,
                     scanner_stopped = excluded.scanner_stopped,
                     source = excluded.source,
                     updated_at = excluded.updated_at
@@ -238,6 +276,7 @@ class SqliteOperatorScannerSettingsStore:
                     str(payload.min_net_edge),
                     int(payload.max_execution_risk),
                     int(payload.hot_cadence_seconds),
+                    int(payload.background_cadence_seconds),
                     1 if payload.scanner_stopped else 0,
                     payload.source,
                     now,
@@ -335,6 +374,17 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         )
         source = "env_default"
     try:
+        raw_background = row["background_cadence_seconds"]
+        if raw_background is None:
+            raise ValueError
+        background_cadence_seconds = clamp_background_cadence_seconds(int(raw_background))
+    except (KeyError, IndexError, TypeError, ValueError):
+        LOGGER.warning("malformed operator scanner background_cadence_seconds; using env default")
+        background_cadence_seconds = clamp_background_cadence_seconds(
+            get_settings().paper_background_price_interval_seconds
+        )
+        source = "env_default"
+    try:
         updated = datetime.fromisoformat(str(row["updated_at"]))
     except ValueError:
         updated = datetime.now(UTC)
@@ -343,6 +393,7 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         min_net_edge=min_net_edge,
         max_execution_risk=max_execution_risk,
         hot_cadence_seconds=hot_cadence_seconds,
+        background_cadence_seconds=background_cadence_seconds,
         scanner_stopped=bool(int(row["scanner_stopped"] or 0)),
         source=source,
         updated_at=updated,

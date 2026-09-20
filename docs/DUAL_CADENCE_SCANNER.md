@@ -490,7 +490,7 @@ generation budget remains a separate decision.
 | Setting | Default | Notes |
 | --- | --- | --- |
 | `paper_live_refresh_hot_interval_seconds` | 30 | ge 15, le 60. Wall-clock HOT cadence. |
-| `paper_background_price_interval_seconds` | **90** | Independent BACKGROUND price-engine cadence. ge 30, le 300. Not UNIVERSE discovery. |
+| `paper_background_price_interval_seconds` | **90** | Env fallback for BACKGROUND price-engine cadence. ge 30, le 300. Runtime operator authority is `background_cadence_seconds` (default 90, 60–600). Not UNIVERSE discovery. |
 | `paper_universe_discovery_interval_seconds` | **600** | Post-terminal UNIVERSE discovery gap. ge 60, le 3600. Not a between-chunk sleep. |
 | `paper_live_refresh_universe_interval_seconds` | 180 | Fixture radar / membership interval. ge 60, le 300. Not BACKGROUND pricing and not UNIVERSE discovery. |
 | `paper_live_refresh_interval_seconds` | 30 | **Alias of HOT.** Keep for env/launcher compat. |

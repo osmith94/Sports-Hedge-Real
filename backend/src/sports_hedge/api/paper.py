@@ -903,13 +903,14 @@ def put_operator_scanner_settings(
     update: OperatorScannerSettingsUpdate,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
 ) -> LiveRefreshStatus:
-    """Persist Min Net Arb, Max Risk and HOT cadence. Does not scan or call providers."""
+    """Persist Min Net Arb, Max Risk, HOT cadence and BACKGROUND cadence. Does not scan or call providers."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_operator_scan_settings(
         min_net_edge=update.min_net_edge,
         max_execution_risk=update.max_execution_risk,
         hot_cadence_seconds=update.hot_cadence_seconds,
+        background_cadence_seconds=update.background_cadence_seconds,
     )
     return _status_with_scan_cycles(coordinator.public_status(), repository)
 

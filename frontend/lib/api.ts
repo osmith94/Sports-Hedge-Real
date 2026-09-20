@@ -660,6 +660,7 @@ export type OperatorScannerSettings = {
   min_net_edge: string;
   max_execution_risk: number;
   hot_cadence_seconds: number;
+  background_cadence_seconds: number;
   scanner_stopped: boolean;
   source?: "operator" | "env_default";
   updated_at?: string | null;
@@ -670,6 +671,7 @@ export type OperatorScannerSettingsUpdate = {
   min_net_edge: string;
   max_execution_risk: number;
   hot_cadence_seconds: number;
+  background_cadence_seconds: number;
 };
 
 export type LiveRefreshStatus = {

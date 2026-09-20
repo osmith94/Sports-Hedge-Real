@@ -181,7 +181,7 @@ Every ACTIVE supported catalogue row is eventually refreshed and evaluated, incl
 Priority tiers:
 
 - **HOT** — in-play, near kickoff, already-interesting, opportunity-promoted; frequent cadence. Default **30s**, operator-adjustable within the existing safe range. HOT cadence is independent of BACKGROUND and UNIVERSE.
-- **BACKGROUND / CATALOGUE** — the remaining ACTIVE rows, at a slower bounded cadence. Default **90s** (`paper_background_price_interval_seconds`). BACKGROUND does not rediscover, rematch, or wait for UNIVERSE cadence.
+- **BACKGROUND / CATALOGUE** — the remaining ACTIVE rows, at a slower bounded cadence. Default **90s**, operator-adjustable within **60–600s** (`background_cadence_seconds`). Environment fallback is `paper_background_price_interval_seconds`. BACKGROUND does not rediscover, rematch, or wait for UNIVERSE cadence. UNIVERSE discovery cadence remains architecture/config authority, not an everyday operator pricing control.
 - **UNIVERSE discovery** — generation 0 is due immediately. Incomplete generations resume/chunk/retry as today. After a terminal-complete generation, the next fresh discovery generation waits **600s** (`paper_universe_discovery_interval_seconds`). Provider retry/backoff inside an open generation may resume sooner. These cadences are independent authorities; do not reuse radar membership interval as worker cadence.
 
 A positive, near, or qualifying BACKGROUND decision may promote that row to HOT immediately, without waiting for kickoff or the lifecycle horizon. Promotion does not stop UNIVERSE.
