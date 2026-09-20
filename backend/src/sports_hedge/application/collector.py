@@ -126,6 +126,8 @@ from sports_hedge.application.target_competitions import (
     resolve_target_competition,
     resolve_target_competition_from_kalshi_ticker,
     scope_matchbook_event,
+    selected_includes_nfl,
+    selected_includes_soccer,
 )
 from sports_hedge.arbitrage.watchlist.economics import (
     distance_to_trigger_pp,
@@ -920,11 +922,16 @@ class ReadOnlyCrossVenueCollector:
                             venue_health=venue_health,
                         )
                 else:
+                    mb_filters = dict(matchbook_event_filters or {})
+                    if "sport-ids" not in mb_filters:
+                        sport_ids = await self._matchbook_sport_ids_for_scope()
+                        if sport_ids:
+                            mb_filters["sport-ids"] = sport_ids
                     mb_task = self._discovery_task(
                         self.matchbook,
                         venue=VenueName.MATCHBOOK,
                         enabled=enabled,
-                        filters=matchbook_event_filters or {},
+                        filters=mb_filters,
                         issues=issues,
                         venue_health=venue_health,
                     )
@@ -1667,6 +1674,28 @@ class ReadOnlyCrossVenueCollector:
             if current == "ok":
                 self._op_venue_health[venue.value] = "degraded"
             return default, True
+
+    async def _matchbook_sport_ids_for_scope(self) -> str | None:
+        """Association football and/or American Football ids. Soccer-only by default."""
+
+        client = self.matchbook
+        if client is None:
+            return None
+        codes = self._op_selected_competition_codes
+        ids: list[str] = []
+        if selected_includes_soccer(codes):
+            resolver = getattr(client, "resolve_football_sport_id", None)
+            if resolver is not None:
+                ids.append(str(await resolver()))
+        if selected_includes_nfl(codes):
+            resolver = getattr(client, "resolve_american_football_sport_id", None)
+            if resolver is not None:
+                ids.append(str(await resolver()))
+        if not ids:
+            resolver = getattr(client, "resolve_football_sport_id", None)
+            if resolver is not None:
+                ids.append(str(await resolver()))
+        return ",".join(ids) if ids else None
 
     async def _discovery_task(
         self,

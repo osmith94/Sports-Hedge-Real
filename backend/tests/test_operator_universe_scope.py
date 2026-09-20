@@ -144,7 +144,7 @@ def test_clean_install_defaults_to_current_eight_competitions(tmp_path: Path) ->
         assert resolved.scope_version == 0
         catalog_codes = {row.code for row in resolved.catalog}
         assert catalog_codes >= set(DEFAULT_EIGHT)
-        assert len(resolved.catalog) == 30
+        assert len(resolved.catalog) == 31
         assert resolved.saved_default_competition_codes == list(DEFAULT_EIGHT)
         assert resolved.is_session_override is False
         assert "champions_league" in catalog_codes
@@ -493,6 +493,7 @@ def test_verified_new_competition_mappings_and_no_guessed_tickers() -> None:
         "ligue_1",
         "liga_mx",
         "brasileirao",
+        "nfl",
     ):
         assert catalog[code]["selectable"] is True
         assert catalog[code]["unavailable_reason"] is None
@@ -510,6 +511,10 @@ def test_verified_new_competition_mappings_and_no_guessed_tickers() -> None:
     assert resolve_target_competition_from_kalshi_ticker("KXDENSUPERLIGAGAME") is None
     assert resolve_target_competition_from_kalshi_ticker("KXLIGUE2GAME") is None
     assert resolve_target_competition_from_kalshi_ticker("KXJ2LEAGUEGAME") is None
+    assert resolve_target_competition_from_kalshi_ticker("KXNFLGAME") is not None
+    assert resolve_target_competition_from_kalshi_ticker("KXNFLGAME-26SEP20INDKC") is not None
+    assert resolve_target_competition_from_kalshi_ticker("KXNFLGAMEFG") is None
+    assert catalog["nfl"]["default_selected"] is False
     settings = Settings()
     assert "KXUCLGAME" not in settings.kalshi_series_tickers
     assert "10204" not in settings.resolved_polymarket_series_ids()
@@ -665,7 +670,7 @@ def test_thirty_row_matrix_only_verified_all_three_are_selectable() -> None:
             assert "KX" in "".join(row.kalshi_series_tickers)
     docs = Path(__file__).resolve().parents[2] / "docs" / "OPERATOR_COMPETITION_VERIFICATION_MATRIX.md"
     text = docs.read_text(encoding="utf-8")
-    assert "OPERATOR_COMPETITION_REGISTRY_VERSION = 3" in text
+    assert "OPERATOR_COMPETITION_REGISTRY_VERSION = 4" in text
     assert "VERIFIED_ALL_3" in text
     for row in matrix:
         assert row.code in text

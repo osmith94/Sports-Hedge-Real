@@ -12,6 +12,7 @@ import { formatObservationAge, parseObservationTimestampMs } from "./observation
 import { backgroundPriceCopy, fastScanCopy, fullSweepCopy } from "./scan-status-display";
 import { trackedMarketHref } from "./tracked-markets-display";
 import { lastScanVenuesLabel } from "./venue-participation-display";
+import { NFL_SETTLEMENT_CAVEAT_TEXT, reasonsIncludeNflSettlementCaveat } from "./paper-trade-display";
 
 export const OPPORTUNITY_MONITOR_SORT_COLUMNS = [
   "age",
@@ -236,6 +237,9 @@ export function opportunityMonitorStateTitle(item: NearOpportunity): string {
   const classification = item.classification.replaceAll("_", " ");
   const parts = [status, classification];
   if (reasons) parts.push(reasons);
+  if (reasonsIncludeNflSettlementCaveat([...item.rejection_reasons, ...item.insufficiency_reasons, ...(item.mapping_reasons ?? [])])) {
+    parts.push(NFL_SETTLEMENT_CAVEAT_TEXT);
+  }
   if (isPreTradeTrigger(item) && !isExecutableRadarFreshness(item.freshness_class)) {
     const freshness = freshnessLabel(item.freshness_class);
     parts.push(
@@ -277,6 +281,9 @@ export function mappingDisplay(item?: NearOpportunity | null): {
     provenanceLabel,
     reasons,
   ].filter(Boolean);
+  if (reasonsIncludeNflSettlementCaveat(item?.mapping_reasons)) {
+    titleParts.push(NFL_SETTLEMENT_CAVEAT_TEXT);
+  }
   return {
     text: `${mappingConfidencePercent(confidence)} · ${provenanceLabel}`,
     title: titleParts.join(" · "),

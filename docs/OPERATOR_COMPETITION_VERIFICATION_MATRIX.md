@@ -1,8 +1,8 @@
 # Operator football competition verification matrix
 
-`OPERATOR_COMPETITION_REGISTRY_VERSION = 3`
+`OPERATOR_COMPETITION_REGISTRY_VERSION = 4`
 
-Principal visible catalogue: **30** rows.
+Principal visible catalogue: **31** rows.
 Operator UI/state uses canonical codes only. Venue identifiers below are backend evidence, not operator-selectable tickers.
 
 Retrieved 2026-09-20 from read-only public metadata:
@@ -46,6 +46,7 @@ Partial rows remain visible and disabled. Identifiers were not guessed.
 | `saudi_pro_league` | Saudi Pro League | Saudi Arabia | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXSAUDIPLGAME,KXSAUDIPLBTTS,KXSAUDIPLTOTAL; Gamma spl/10361 |
 | `j1_league` | J1 League | Japan | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXJLEAGUEGAME,KXJLEAGUEBTTS,KXJLEAGUETOTAL; Gamma jap/10360 |
 | `south_african_premiership` | South African Premiership | South Africa | no | PARTIAL | verified | unverified | verified | Kalshi match-level series not verified |
+| `nfl` | NFL | NFL | yes | VERIFIED_ALL_3 | verified | verified | verified | Stage 1B PAPER: KXNFLGAME,KXNFLSPREAD,KXNFLTOTAL (full-game half-point families only); Gamma nfl/12185; Matchbook American Football + NFL competition tag. Not in the default eight. Exceptional tie/cancel/suspend differences are an audit caveat, not live-execution equivalence. |
 
 ## Deliberately excluded neighbours
 
@@ -56,4 +57,4 @@ Partial rows remain visible and disabled. Identifiers were not guessed.
   `uwcl` Women's Champions League, `tur2` Turkey 1. Lig.
 - Matchbook labels still unmatched: EFL Trophy / Vertu Trophy, club friendlies, women's/youth cups.
 
-Default selected startup scope remains the original eight competitions.
+Default selected startup scope remains the original eight competitions. NFL is selectable and is not default.

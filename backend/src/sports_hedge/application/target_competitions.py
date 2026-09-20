@@ -40,6 +40,7 @@ class TargetCompetitionCode(StrEnum):
     SAUDI_PRO_LEAGUE = "saudi_pro_league"
     J1_LEAGUE = "j1_league"
     SOUTH_AFRICAN_PREMIERSHIP = "south_african_premiership"
+    NFL = "nfl"
 
 
 class VenueMappingStatus(StrEnum):
@@ -47,7 +48,7 @@ class VenueMappingStatus(StrEnum):
     UNVERIFIED = "unverified"
 
 
-PRINCIPAL_OPERATOR_COMPETITION_COUNT = 30
+PRINCIPAL_OPERATOR_COMPETITION_COUNT = 31
 VERIFIED_ALL_3 = "VERIFIED_ALL_3"
 PARTIAL_PROVIDER_MAPPING = "PARTIAL"
 PROVIDER_MATRIX_RETRIEVED_AT = "2026-09-20"
@@ -717,6 +718,19 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
         # Kalshi match-level series were not present on public GET /series 2026-09-20.
         kalshi_series_prefixes=(),
     ),
+    TargetCompetition(
+        code=TargetCompetitionCode.NFL,
+        display_name="NFL",
+        aliases=(
+            "nfl",
+            "national football league",
+            "pro football",
+            "american football nfl",
+        ),
+        polymarket_gamma_series_id="12185",
+        polymarket_gamma_sport="nfl",
+        kalshi_series_prefixes=("KXNFLGAME", "KXNFLSPREAD", "KXNFLTOTAL"),
+    ),
 )
 
 _ALIAS_INDEX: dict[str, TargetCompetition] = {}
@@ -770,7 +784,7 @@ MATCHBOOK_ALIASES_NOT_VERIFIED = "Matchbook label aliases not verified"
 
 # Operator selector grouping. Canonical codes are the operator model; venue
 # tickers stay backend-only.
-OPERATOR_COMPETITION_REGISTRY_VERSION = 3
+OPERATOR_COMPETITION_REGISTRY_VERSION = 4
 OPERATOR_UNIVERSE_SPORT = "football"
 OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("uefa", "UEFA"),
@@ -793,6 +807,7 @@ OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("japan", "Japan"),
     ("south_africa", "South Africa"),
     ("international", "International"),
+    ("nfl", "NFL"),
 )
 OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
     TargetCompetitionCode.CHAMPIONS_LEAGUE: ("uefa", "UEFA", "Champions League"),
@@ -833,6 +848,7 @@ OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
         "International",
         "International Friendlies",
     ),
+    TargetCompetitionCode.NFL: ("nfl", "NFL", "NFL"),
 }
 DEFAULT_OPERATOR_COMPETITION_CODES: tuple[TargetCompetitionCode, ...] = (
     TargetCompetitionCode.PREMIER_LEAGUE,
@@ -1000,6 +1016,11 @@ KALSHI_SERIES_TICKERS_BY_CODE: dict[TargetCompetitionCode, tuple[str, ...]] = {
         "KXJLEAGUEBTTS",
         "KXJLEAGUETOTAL",
     ),
+    TargetCompetitionCode.NFL: (
+        "KXNFLGAME",
+        "KXNFLSPREAD",
+        "KXNFLTOTAL",
+    ),
 }
 
 
@@ -1041,6 +1062,28 @@ def resolve_target_competition_from_series_id(series_id: str | None) -> TargetCo
     return _SERIES_INDEX.get(str(series_id).strip())
 
 
+_KALSHI_SERIES_FAMILY_TAILS = frozenset({"GAME", "BTTS", "TOTAL", "FTTS", "SPREAD"})
+
+
+def kalshi_ticker_matches_prefix(ticker: str, prefix: str) -> bool:
+    """Match a Kalshi series ticker to a registered prefix without neighbor leakage.
+
+    Soccer family roots such as ``KXEPL`` still match ``KXEPLGAME``. Complete
+    NFL series names such as ``KXNFLGAME`` do not match ``KXNFLGAMEFG``.
+    """
+
+    if not ticker or not prefix:
+        return False
+    if ticker == prefix or ticker.startswith(prefix + "-"):
+        return True
+    head = ticker.split("-", 1)[0]
+    if head == prefix:
+        return True
+    if head.startswith(prefix):
+        return head[len(prefix) :] in _KALSHI_SERIES_FAMILY_TAILS
+    return False
+
+
 def resolve_target_competition_from_kalshi_ticker(series_ticker: str | None) -> TargetCompetition | None:
     ticker = str(series_ticker or "").strip().upper()
     if not ticker:
@@ -1048,7 +1091,7 @@ def resolve_target_competition_from_kalshi_ticker(series_ticker: str | None) -> 
     matches: list[tuple[int, TargetCompetition]] = []
     for item in TARGET_COMPETITIONS:
         for prefix in item.kalshi_series_prefixes:
-            if ticker.startswith(prefix):
+            if kalshi_ticker_matches_prefix(ticker, prefix):
                 matches.append((len(prefix), item))
                 break
     if not matches:
@@ -1276,6 +1319,19 @@ def operator_competition_catalog() -> list[dict[str, Any]]:
     return rows
 
 
+def selected_includes_nfl(
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
+) -> bool:
+    return TargetCompetitionCode.NFL.value in _selected_code_set(selected_codes)
+
+
+def selected_includes_soccer(
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
+) -> bool:
+    codes = _selected_code_set(selected_codes)
+    return any(code != TargetCompetitionCode.NFL.value for code in codes)
+
+
 def _selected_code_set(
     selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
 ) -> frozenset[str]:
@@ -1322,14 +1378,23 @@ def scope_matchbook_event(
     sport = matchbook_sport_label(payload)
     if sport:
         sport_norm = normalize_text(sport)
-        if sport_norm in _NON_FOOTBALL_SPORTS:
+        nfl_selected = TargetCompetitionCode.NFL.value in _selected_code_set(selected_codes)
+        if sport_norm in {"american football", "nfl"}:
+            if not nfl_selected:
+                return ScopeDecision(
+                    allowed=False,
+                    reason=NON_FOOTBALL_SPORT,
+                    label=matchbook_competition_label(payload),
+                    sport=sport,
+                )
+        elif sport_norm in _NON_FOOTBALL_SPORTS:
             return ScopeDecision(
                 allowed=False,
                 reason=NON_FOOTBALL_SPORT,
                 label=matchbook_competition_label(payload),
                 sport=sport,
             )
-        if sport_norm not in _FOOTBALL_SPORTS:
+        elif sport_norm not in _FOOTBALL_SPORTS:
             return ScopeDecision(
                 allowed=False,
                 reason=NON_FOOTBALL_SPORT,
@@ -1483,6 +1548,18 @@ def _scope_for_venue(
 
 
 def _polymarket_series_target(payload: dict[str, Any]) -> TargetCompetition | None:
+    sport_obj = payload.get("sport")
+    if isinstance(sport_obj, dict):
+        series = str(sport_obj.get("series") or sport_obj.get("series_id") or "").strip()
+        if series:
+            resolved = resolve_target_competition_from_series_id(series)
+            if resolved is not None:
+                return resolved
+        sport_code = str(sport_obj.get("sport") or "").strip()
+        if sport_code:
+            resolved = resolve_target_competition(sport_code)
+            if resolved is not None:
+                return resolved
     series_id = payload.get("series_id") or payload.get("seriesId")
     if isinstance(series_id, (int, str)):
         resolved = resolve_target_competition_from_series_id(str(series_id))

@@ -272,6 +272,11 @@ class OpportunityLifecycleEvent(BaseModel):
 
 def fixture_label_from_teams(home_team: str | None, away_team: str | None) -> str | None:
     if home_team and away_team:
+        from sports_hedge.nfl.teams import is_canonical_nfl_team
+        from sports_hedge.nfl.labels import nfl_fixture_label
+
+        if is_canonical_nfl_team(home_team) and is_canonical_nfl_team(away_team):
+            return nfl_fixture_label(home_team=home_team, away_team=away_team)
         return f"{home_team} v {away_team}"
     return home_team or away_team
 
@@ -280,6 +285,12 @@ def market_label_from_family(market_family: MarketFamily | str | None) -> str | 
     if market_family is None:
         return None
     value = market_family.value if isinstance(market_family, MarketFamily) else str(market_family)
+    if value == "game_winner":
+        return "Game winner"
+    if value == "point_spread":
+        return "Point spread"
+    if value == "total_points":
+        return "Total points"
     label = value.replace("_", " ").strip()
     return label or None
 

@@ -27,12 +27,19 @@ HOT_KICKOFF_TOLERANCE = timedelta(minutes=5)
 def scheduling_team_key(name: str | None, competition: str | None = None) -> str:
     """Resolve a team label to the longest curated canonical prefix."""
 
+    from sports_hedge.nfl.teams import is_canonical_nfl_team, resolve_nfl_team
+
+    nfl = resolve_nfl_team(str(name or ""))
+    if nfl.ok and nfl.canonical:
+        return nfl.canonical
     resolved = resolve_team_name_for_competition(str(name or ""), competition)
     tokens = resolved.split()
     for index in range(len(tokens), 0, -1):
         candidate = " ".join(tokens[:index])
         mapped = resolve_team_name_for_competition(candidate, competition)
         if mapped in _CANONICAL_TEAM_NAMES:
+            return mapped
+        if is_canonical_nfl_team(mapped):
             return mapped
     return resolved
 
@@ -56,7 +63,10 @@ def hot_scheduling_team_pair(fixture: Any) -> tuple[str, str] | None:
     if not home or not away:
         return None
     if home not in _CANONICAL_TEAM_NAMES or away not in _CANONICAL_TEAM_NAMES:
-        return None
+        from sports_hedge.nfl.teams import is_canonical_nfl_team
+
+        if not (is_canonical_nfl_team(home) and is_canonical_nfl_team(away)):
+            return None
     pair = tuple(sorted((home, away)))
     return pair[0], pair[1]
 

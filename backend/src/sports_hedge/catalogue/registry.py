@@ -1065,6 +1065,9 @@ def phase1_expensive_work_families() -> frozenset[MarketFamily]:
             MarketFamily.BOTH_TEAMS_TO_SCORE,
             MarketFamily.TOTAL_GOALS,
             MarketFamily.FIRST_TEAM_TO_SCORE,
+            MarketFamily.GAME_WINNER,
+            MarketFamily.POINT_SPREAD,
+            MarketFamily.TOTAL_POINTS,
         }
     )
 

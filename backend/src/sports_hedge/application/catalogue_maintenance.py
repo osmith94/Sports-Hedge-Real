@@ -85,6 +85,12 @@ def catalogue_family_key(register_canonical_key: str) -> str:
     key = str(register_canonical_key or "").strip()
     if key.startswith(f"{CANONICAL_TOTAL_GOALS_FT}:"):
         return CANONICAL_TOTAL_GOALS_FT
+    from sports_hedge.nfl.constants import CANONICAL_NFL_POINT_SPREAD, CANONICAL_NFL_TOTAL_POINTS
+
+    if key.startswith(f"{CANONICAL_NFL_POINT_SPREAD}:"):
+        return CANONICAL_NFL_POINT_SPREAD
+    if key.startswith(f"{CANONICAL_NFL_TOTAL_POINTS}:"):
+        return CANONICAL_NFL_TOTAL_POINTS
     return key
 
 
@@ -94,6 +100,23 @@ def family_key_from_kalshi_series(series_ticker: str | None) -> str | None:
     ticker = str(series_ticker or "").strip().upper()
     if not ticker:
         return None
+    from sports_hedge.nfl.constants import (
+        CANONICAL_NFL_GAME_WINNER,
+        CANONICAL_NFL_POINT_SPREAD,
+        CANONICAL_NFL_TOTAL_POINTS,
+        NFL_KALSHI_GAME_SERIES,
+        NFL_KALSHI_SPREAD_SERIES,
+        NFL_KALSHI_TOTAL_SERIES,
+    )
+    from sports_hedge.nfl.detect import approved_kalshi_nfl_series
+
+    nfl_series = approved_kalshi_nfl_series(ticker)
+    if nfl_series == NFL_KALSHI_GAME_SERIES:
+        return CANONICAL_NFL_GAME_WINNER
+    if nfl_series == NFL_KALSHI_SPREAD_SERIES:
+        return CANONICAL_NFL_POINT_SPREAD
+    if nfl_series == NFL_KALSHI_TOTAL_SERIES:
+        return CANONICAL_NFL_TOTAL_POINTS
     head = ticker.split("-", 1)[0]
     for suffix, key in _KALSHI_SERIES_FAMILY_SUFFIXES:
         if head.endswith(suffix) or ticker.endswith(suffix):

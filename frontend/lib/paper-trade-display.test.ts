@@ -164,4 +164,60 @@ describe("active-trade canonical line and compact odds", () => {
     assert.match(detail, /leg\.fill_kind/);
     assert.match(book, /leg\.fill_kind/);
   });
+
+  it("renders NFL Game winner / spread / total plain-English sides and the settlement caveat", () => {
+    const spread = trade({
+      market_family: "point_spread",
+      market_label: "Point spread",
+      line: "-6.5",
+      competition: "NFL",
+      home_team: "Kansas City Chiefs",
+      away_team: "Indianapolis Colts",
+      fixture_label: "NFL · Indianapolis Colts at Kansas City Chiefs",
+      legs: [
+        leg({ outcome: "home", source_market_id: "33306878118900023" }),
+        leg({
+          venue: "kalshi",
+          outcome: "away",
+          currency: "USD",
+          source_market_id: "KXNFLSPREAD-26SEP20INDKC-KC7",
+        }),
+      ],
+    });
+    assert.equal(compactMarketHeading(spread), "Point spread -6.5");
+    assert.match(compactLegLine(spread, spread.legs[0]), /Chiefs -6\.5 · must win by 7\+/);
+    assert.match(compactLegLine(spread, spread.legs[1]), /Colts \+6\.5 · may lose by up to 6, or win/);
+    const total = trade({
+      market_family: "total_points",
+      market_label: "Total points",
+      line: "47.5",
+      competition: "NFL",
+      home_team: "Kansas City Chiefs",
+      away_team: "Indianapolis Colts",
+      legs: [
+        leg({ outcome: "over" }),
+        leg({ venue: "kalshi", outcome: "under", currency: "USD" }),
+      ],
+    });
+    assert.match(compactLegLine(total, total.legs[0]), /Over 47\.5 · 48\+ combined points/);
+    assert.match(compactLegLine(total, total.legs[1]), /Under 47\.5 · 47 or fewer combined points/);
+    const winner = trade({
+      market_family: "game_winner",
+      market_label: "Game winner",
+      line: null,
+      competition: "NFL",
+      home_team: "Kansas City Chiefs",
+      away_team: "Indianapolis Colts",
+      legs: [
+        leg({ outcome: "home" }),
+        leg({ venue: "polymarket", outcome: "away", currency: "USD" }),
+      ],
+    });
+    assert.equal(compactMarketHeading(winner), "Game winner");
+    assert.match(compactLegLine(winner, winner.legs[0]), /Chiefs · Game winner/);
+    const bookSrc = readFileSync(join(frontendRoot, "components/paper-trade-book.tsx"), "utf8");
+    assert.match(bookSrc, /NFL_SETTLEMENT_CAVEAT_TEXT/);
+    const detailSrc = readFileSync(join(frontendRoot, "app/paper/[tradeId]/page.tsx"), "utf8");
+    assert.match(detailSrc, /NFL_SETTLEMENT_CAVEAT_TEXT/);
+  });
 });

@@ -32,6 +32,7 @@ const GROUP_ORDER = [
   "japan",
   "south_africa",
   "international",
+  "nfl",
 ];
 
 type FootballCompetitionsModalProps = {

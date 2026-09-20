@@ -214,6 +214,11 @@ def venue_native_archetype_for(market: CanonicalMarket) -> VenueNativeArchetype 
 def canonical_key_for_market(market: CanonicalMarket) -> str | None:
     """Instance canonical key. TOTAL includes the exact safe half-line."""
 
+    from sports_hedge.nfl.register import nfl_canonical_key_for_market
+
+    nfl_key = nfl_canonical_key_for_market(market)
+    if nfl_key is not None:
+        return nfl_key
     archetype = venue_native_archetype_for(market)
     if archetype is None:
         return None
@@ -228,8 +233,13 @@ def approved_paper_venue_pair(left: CanonicalMarket, right: CanonicalMarket) -> 
 
 
 def registered_canonical_key(left: CanonicalMarket, right: CanonicalMarket) -> str | None:
-    """Same canonical key on the approved Matchbook↔Kalshi PAPER pair, or None."""
+    """Same canonical key on an approved PAPER venue pair, or None."""
 
+    from sports_hedge.nfl.register import nfl_registered_canonical_key
+
+    nfl_key = nfl_registered_canonical_key(left, right)
+    if nfl_key is not None:
+        return nfl_key
     if not approved_paper_venue_pair(left, right):
         return None
     left_key = canonical_key_for_market(left)
