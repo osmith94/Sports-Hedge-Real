@@ -718,10 +718,10 @@ export function RunPaperScan() {
         <div className="scan-note">
           Manual HOT refresh performs a HOT pricing refresh of current known fixtures.
           It does not rediscover the catalogue or advance scheduled ACTIVE TRADE, HOT pricing,
-          BACKGROUND pricing or UNIVERSE discovery. Update saves Min Net Arb, Max Risk, HOT cadence,
-          BACKGROUND cadence and max allocated per trade for subsequent server-owned work and does
-          not trigger a scan. HOT cadence is how often HOT pricing is due; BACKGROUND cadence is how
-          often the rest of the known ACTIVE catalogue is repriced. ACTIVE TRADE reprices open paper
+          BACKGROUND pricing or UNIVERSE discovery. Update saves Min Net Arb, Max Risk, HOT cadence and BACKGROUND cadence
+          and max allocated per trade for subsequent server-owned work and does not trigger a scan.
+          HOT cadence is how often HOT pricing is due; BACKGROUND cadence is how often the
+          rest of the known ACTIVE catalogue is repriced. ACTIVE TRADE reprices open paper
           trades every 5s from exact known IDs. Auto refresh view only polls status.
           UNIVERSE discovery stays on the architecture 10-minute post-completion schedule.
         </div>

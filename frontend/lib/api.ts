@@ -599,12 +599,6 @@ export type ActiveTradeLoad = {
   cadence_seconds?: number;
 };
 
-export type BackgroundLoad = {
-  working_set?: number;
-  due?: number;
-  cadence_seconds?: number;
-};
-
 export type SystemLoadSummary = {
   active_trade?: ActiveTradeLoad;
   hot?: HotLoad;
