@@ -922,16 +922,11 @@ class ReadOnlyCrossVenueCollector:
                             venue_health=venue_health,
                         )
                 else:
-                    mb_filters = dict(matchbook_event_filters or {})
-                    if "sport-ids" not in mb_filters:
-                        sport_ids = await self._matchbook_sport_ids_for_scope()
-                        if sport_ids:
-                            mb_filters["sport-ids"] = sport_ids
                     mb_task = self._discovery_task(
                         self.matchbook,
                         venue=VenueName.MATCHBOOK,
                         enabled=enabled,
-                        filters=mb_filters,
+                        filters=matchbook_event_filters or {},
                         issues=issues,
                         venue_health=venue_health,
                     )
@@ -1676,25 +1671,27 @@ class ReadOnlyCrossVenueCollector:
             return default, True
 
     async def _matchbook_sport_ids_for_scope(self) -> str | None:
-        """Association football and/or American Football ids. Soccer-only by default."""
+        """Extra Matchbook sport-ids only when NFL is in operator scope.
+
+        Soccer-only discovery keeps the historical unfiltered list_events path
+        so login/429 handling stays inside that call. NFL adds American Football
+        (and soccer when both are selected) without raising provider concurrency.
+        """
 
         client = self.matchbook
         if client is None:
             return None
         codes = self._op_selected_competition_codes
+        if not selected_includes_nfl(codes):
+            return None
         ids: list[str] = []
         if selected_includes_soccer(codes):
             resolver = getattr(client, "resolve_football_sport_id", None)
-            if resolver is not None:
+            if callable(resolver):
                 ids.append(str(await resolver()))
-        if selected_includes_nfl(codes):
-            resolver = getattr(client, "resolve_american_football_sport_id", None)
-            if resolver is not None:
-                ids.append(str(await resolver()))
-        if not ids:
-            resolver = getattr(client, "resolve_football_sport_id", None)
-            if resolver is not None:
-                ids.append(str(await resolver()))
+        resolver = getattr(client, "resolve_american_football_sport_id", None)
+        if callable(resolver):
+            ids.append(str(await resolver()))
         return ",".join(ids) if ids else None
 
     async def _discovery_task(
@@ -1752,10 +1749,22 @@ class ReadOnlyCrossVenueCollector:
             )
             return [], {}
 
+        list_filters = dict(filters)
+        if venue is VenueName.MATCHBOOK and "sport-ids" not in list_filters:
+            try:
+                sport_ids = await self._matchbook_sport_ids_for_scope()
+            except Exception as exc:
+                issues.append(CollectorIssue(stage="list_events", venue=venue, detail=str(exc)))
+                if venue_health.get(venue.value) != VENUE_HEALTH_DISABLED:
+                    venue_health[venue.value] = "unavailable"
+                return [], {}
+            if sport_ids:
+                list_filters["sport-ids"] = sport_ids
+
         try:
             async with self._provider_capacity(venue, stage="list_events") as lease:
                 payload, timed_out = await self._await_bounded_with_capacity(
-                    client.list_events(**filters),
+                    client.list_events(**list_filters),
                     timeout,
                     venue=venue,
                     lease=lease,

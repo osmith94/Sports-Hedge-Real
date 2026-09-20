@@ -540,9 +540,12 @@ def test_catalogue_relevant_series_is_not_game_only() -> None:
     assert "KXEFLCHAMPIONSHIPBTTS" in series
     assert not set(series) <= game_only
     assert game_only < set(series)
-    nfl_only = Settings(kalshi_series_tickers=["KXNFLGAME", "KXEPLBTTS"])
-    bounded = catalogue_relevant_kalshi_series(nfl_only)
-    assert bounded == ["KXEPLBTTS"]
+    nfl_and_soccer = Settings(kalshi_series_tickers=["KXNFLGAME", "KXEPLBTTS", "KXCLUBFGAME"])
+    bounded = catalogue_relevant_kalshi_series(nfl_and_soccer)
+    assert bounded == ["KXNFLGAME", "KXEPLBTTS"]
+    assert catalogue_relevant_kalshi_series(
+        Settings(kalshi_series_tickers=["KXNFLGAMEFG", "KXEPLBTTS"])
+    ) == ["KXEPLBTTS"]
 
 
 @pytest.mark.asyncio

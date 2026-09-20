@@ -201,6 +201,10 @@ def test_nfl_aliases_do_not_leak_into_soccer() -> None:
     assert football_alias_registry.resolve("Chiefs") == "chiefs"
     assert resolve_nfl_team("Arsenal").ok is False
     assert resolve_nfl_team("Newcastle United").ok is False
+    from sports_hedge.application.hot_identity import scheduling_team_key
+
+    assert scheduling_team_key("Saints") != "new orleans saints"
+    assert scheduling_team_key("Chiefs") != "kansas city chiefs"
 
 
 def test_indkc_same_fixture_across_three_providers() -> None:
