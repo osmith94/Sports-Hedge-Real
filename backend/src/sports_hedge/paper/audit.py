@@ -70,7 +70,7 @@ class PaperScanSummary(BaseModel):
 
 
 class PaperScanCycleRecord(BaseModel):
-    """One completed HOT / UNIVERSE refresh cycle. Not a market-decision row."""
+    """One completed HOT / BACKGROUND / UNIVERSE refresh cycle. Not a market-decision row."""
 
     cycle_id: str
     started_at: datetime

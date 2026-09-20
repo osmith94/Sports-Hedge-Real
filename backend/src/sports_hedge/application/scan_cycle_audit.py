@@ -1,4 +1,4 @@
-"""Completed HOT / UNIVERSE scan-cycle audit rows.
+"""Completed HOT / BACKGROUND / UNIVERSE scan-cycle audit rows.
 
 One append-only row per completed refresh cycle, including cycles with zero
 paper_decisions. Distinct from per-market ``paper_scan_records``.
@@ -6,10 +6,19 @@ paper_decisions. Distinct from per-market ``paper_scan_records``.
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any
+
 from sports_hedge.application.collector import CollectionReport, CollectorIssue
+from sports_hedge.application.executable_liquidity import decision_is_solver_arbitrage
 from sports_hedge.application.lane_venues import is_provider_health_failure
-from sports_hedge.application.scan_lanes import ScanLane
+from sports_hedge.application.scan_lanes import OPERATOR_BACKGROUND_PRICING_LABEL, ScanLane
+from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.audit import PaperScanCycleRecord, scan_cycle_identity
+
+BACKGROUND_CYCLE_LANE = "background"
+PRICE_ENGINE_ITEM_COMPLETION_CAPTURE = "item_completion_capture"
+_PRICE_ENGINE_VENUES = (VenueName.MATCHBOOK, VenueName.KALSHI)
 
 SCAN_CYCLE_DEADLINE_DETAIL = "scan_cycle_deadline_reached"
 UNSUPPORTED_MARKET_STAGES = frozenset({"normalize_market"})
@@ -35,7 +44,63 @@ def coerce_cycle_lane(scan_lane: ScanLane | str | None) -> str:
     text = str(scan_lane or "").strip().casefold()
     if text == ScanLane.HOT.value:
         return ScanLane.HOT.value
+    if text == BACKGROUND_CYCLE_LANE:
+        return BACKGROUND_CYCLE_LANE
     return ScanLane.UNIVERSE.value
+
+
+def build_background_price_engine_cycle_report(
+    result: Any,
+    *,
+    started_at: datetime,
+    completed_at: datetime,
+) -> CollectionReport:
+    """Wrap an already-produced BACKGROUND price-engine result for cycle history.
+
+    Telemetry only: no discovery, no extra provider call, no fabricated work.
+    Counts come from the slice result that already ran.
+    """
+
+    decisions = list(getattr(result, "decisions", []) or [])
+    evaluated = list(getattr(result, "evaluated", []) or [])
+    failed = list(getattr(result, "failed", []) or [])
+    deferred = list(getattr(result, "deferred", []) or [])
+    not_started = list(getattr(result, "not_started", []) or [])
+    retry_wait = list(getattr(result, "retry_wait", []) or [])
+    revalidation = list(getattr(result, "revalidation", []) or [])
+    considered = list(
+        dict.fromkeys(
+            [*evaluated, *failed, *deferred, *not_started, *retry_wait, *revalidation]
+        )
+    )
+    leftover = len(not_started) + len(deferred) + len(retry_wait)
+    qualifying = sum(1 for decision in decisions if decision_is_solver_arbitrage(decision))
+    return CollectionReport(
+        started_at=started_at,
+        completed_at=completed_at,
+        matching_venues=list(_PRICE_ENGINE_VENUES),
+        enabled_venues=list(_PRICE_ENGINE_VENUES),
+        paper_decisions=decisions,
+        issues=list(getattr(result, "issues", []) or []),
+        scan_lane=BACKGROUND_CYCLE_LANE,
+        qualifying_arbs=qualifying,
+        venue_health=dict(getattr(result, "venue_health", {}) or {}),
+        operation_health=dict(getattr(result, "operation_health", {}) or {}),
+        operator_summary=OPERATOR_BACKGROUND_PRICING_LABEL,
+        scan_diagnostics={
+            "price_engine": True,
+            "priority": BACKGROUND_CYCLE_LANE,
+            "evaluated": evaluated,
+            "evaluated_count": len(evaluated),
+            "not_evaluated_count": leftover,
+            "fixture_count": len(considered),
+            "deferred": deferred,
+            "not_started": not_started,
+            "legacy_hot_collector": False,
+            PRICE_ENGINE_ITEM_COMPLETION_CAPTURE: True,
+            "persist_failures": list(getattr(result, "persist_failures", []) or []),
+        },
+    )
 
 
 def build_paper_scan_cycle_record(
@@ -60,6 +125,13 @@ def build_paper_scan_cycle_record(
     duration_ms = max(
         0, int((report.completed_at - report.started_at).total_seconds() * 1000)
     )
+    fixture_count = len(report.discovered_fixtures)
+    raw_fixture_count = diagnostics.get("fixture_count")
+    if raw_fixture_count is not None:
+        try:
+            fixture_count = int(raw_fixture_count)
+        except (TypeError, ValueError):
+            pass
     last_error = cycle_last_error(report, diagnostics)
     skipped_unsupported = sum(
         1 for issue in report.issues if issue_is_unsupported_market_skip(issue)
@@ -87,7 +159,7 @@ def build_paper_scan_cycle_record(
         completed_at=report.completed_at,
         scan_lane=lane,
         duration_ms=duration_ms,
-        fixture_count=len(report.discovered_fixtures),
+        fixture_count=fixture_count,
         evaluated_count=evaluated_count,
         not_evaluated_count=not_evaluated_count,
         matched_event_pairs=report.matched_event_pairs,

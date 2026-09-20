@@ -58,7 +58,11 @@ from sports_hedge.application.market_observation import (
 )
 from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.scan_cycle_audit import build_paper_scan_cycle_record
+from sports_hedge.application.scan_cycle_audit import (
+    BACKGROUND_CYCLE_LANE,
+    build_background_price_engine_cycle_report,
+    build_paper_scan_cycle_record,
+)
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.application.venue_degradation_incident import FIRST_CLASS_VENUES
 from sports_hedge.arbitrage.priority_alerts.service import PriorityAlertService
@@ -1388,6 +1392,24 @@ async def persist_manual_hot_after_http_response(
     )
 
 
+async def persist_background_price_cycle_history(
+    report: CollectionReport,
+    *,
+    audit: SqlitePaperScanRepository,
+) -> None:
+    """Persist one BACKGROUND pricing cycle-history row. Telemetry only.
+
+    Reuses the existing cycle-record builder and the already-produced
+    BACKGROUND price-engine result. Does not recapture decisions, run
+    position management, or call venues/discovery.
+    """
+
+    await asyncio.to_thread(
+        audit.append_cycle,
+        build_paper_scan_cycle_record(report, scan_lane=BACKGROUND_CYCLE_LANE),
+    )
+
+
 async def persist_scheduled_collection_report(
     coordinator,
     report: CollectionReport,
@@ -1520,13 +1542,25 @@ async def server_owned_refresh_tick(plan=None) -> None:
         watchlist=watchlist,
     )
     if resolved.lane == "background":
-        await coordinator.run_price_engine_slice(
+        started = coordinator.now()
+        result = await coordinator.run_price_engine_slice(
             PriceEnginePriority.BACKGROUND,
             matchbook=runtime.matchbook,
             kalshi=runtime.kalshi,
             paper_scan=service,
         )
+        finished = coordinator.now()
         await coordinator.price_engine().drain_item_captures()
+        # Cycle history only. Capture already ran at item completion.
+        # Do not recapture, rediscover, or run position management here.
+        await persist_background_price_cycle_history(
+            build_background_price_engine_cycle_report(
+                result,
+                started_at=started,
+                completed_at=finished,
+            ),
+            audit=audit,
+        )
         return
     if resolved.lane == ScanLane.HOT.value or getattr(resolved, "reason", "") == "hot_scope_empty":
         hot_wall = float(settings.paper_scan_hot_cycle_timeout_seconds)
