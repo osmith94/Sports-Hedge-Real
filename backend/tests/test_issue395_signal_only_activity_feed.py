@@ -152,7 +152,7 @@ def test_noise_lifecycle_events_stay_persisted_but_leave_operator_feed() -> None
     )
     service.observe(
         _observation(
-            rejection_reasons=["unsupported_fee_basis"],
+            rejection_reasons=["market_not_equivalent"],
             observed_at=OBSERVED + timedelta(seconds=15),
         )
     )
