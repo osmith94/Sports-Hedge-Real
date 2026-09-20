@@ -3130,7 +3130,10 @@ class PaperOperationsService:
                 gbp += filled_stake * rate
 
         fully = bool(legs) and all(
-            leg.filled_stake > 0 and leg.fill_kind is not PaperLegFillKind.UNFILLED for leg in legs
+            leg.filled_stake > 0
+            and leg.fill_kind is not PaperLegFillKind.UNFILLED
+            and leg.filled_stake >= leg.requested_stake
+            for leg in legs
         )
         partial = any(leg.filled_stake > 0 for leg in legs) and not fully
         if require_complete and not fully:

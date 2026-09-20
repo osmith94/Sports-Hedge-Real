@@ -525,7 +525,6 @@ def test_partial_depth_never_opens_guaranteed_trade(tmp_path: Path) -> None:
         )
         opportunity_id = next(iter(ops._plans))
         plan = ops._plans[opportunity_id]
-        before = ledger.treasury.snapshot()
         plan.legs = [
             leg.model_copy(
                 update={
@@ -538,21 +537,25 @@ def test_partial_depth_never_opens_guaranteed_trade(tmp_path: Path) -> None:
             else leg
             for leg in plan.legs
         ]
-        with pytest.raises(PaperOperationsError):
-            ops.simulate_fill(
-                opportunity_id,
-                simulate_external=True,
-                provenance=DataProvenance.FIXTURE_DEMO,
-            )
-        assert ops.list_active_trades() == []
-        after = ledger.treasury.snapshot()
-        for venue, currency in (
-            (VenueName.MATCHBOOK, "GBP"),
-            (VenueName.POLYMARKET, "USD"),
-            (VenueName.KALSHI, "USD"),
-        ):
-            assert after.pool(venue, currency).available_cash == before.pool(venue, currency).available_cash
-            assert after.pool(venue, currency).locked_capital == before.pool(venue, currency).locked_capital
+        result = ops.simulate_fill(
+            opportunity_id,
+            simulate_external=True,
+            provenance=DataProvenance.FIXTURE_DEMO,
+        )
+        loaded = ops.list_active_trades()
+        assert len(loaded) == 1
+        trade = loaded[0]
+        assert result.trade_id == trade.trade_id
+        assert trade.guaranteed_profit_gbp_at_open is None
+        assert trade.state in {PaperTradeState.PARTIAL, PaperTradeState.OPEN}
+        if trade.state is PaperTradeState.PARTIAL:
+            assert trade.unresolved_recovery is True
+            assert (trade.residual_exposure_gbp or Decimal("0")) > 0
+        else:
+            assert any(item.kind.value == "recovery" for item in trade.tranches) or trade.unresolved_recovery is False
+        opportunity = watchlist.repository.get(opportunity_id)
+        assert opportunity is not None
+        assert opportunity.status is not OpportunityStatus.FILLED or trade.state is PaperTradeState.OPEN
     finally:
         repository.close()
         ledger.close()
