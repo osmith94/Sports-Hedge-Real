@@ -74,6 +74,7 @@ class LifecycleEventType(StrEnum):
     MOVED_FURTHER_FROM_TRIGGER = "moved_further_from_trigger"
     TRIGGER_CROSSED = "trigger_crossed"
     TRIGGER_LOST_BEFORE_FILL = "trigger_lost_before_fill"
+    PROMOTED_TO_HOT = "promoted_to_hot"
     PAPER_FILL_ATTEMPTED = "paper_fill_attempted"
     PAPER_FILL_PARTIAL = "paper_fill_partial"
     PAPER_FILL_COMPLETE = "paper_fill_complete"
@@ -85,6 +86,16 @@ class LifecycleEventType(StrEnum):
     REJECTED_EXECUTION_RISK = "rejected_execution_risk"
     CLOSED = "closed"
     EXPIRED = "expired"
+
+
+OPERATOR_ACTIVITY_EVENT_TYPES = frozenset(
+    {
+        LifecycleEventType.PROMOTED_TO_HOT,
+        LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
+        LifecycleEventType.PAPER_FILL_COMPLETE,
+        LifecycleEventType.CLOSED,
+    }
+)
 
 
 class WatchLeg(BaseModel):
@@ -252,6 +263,44 @@ def paper_fill_lifecycle_event_id(
     if attempt_id:
         return f"{opportunity_id}:{event_type.value}:{attempt_id}"
     return f"{opportunity_id}:{event_type.value}"
+
+
+def hot_promotion_opportunity_id(canonical_event_id: str) -> str:
+    """Fixture-scoped identity. Promotion is not a market-row watchlist observe."""
+
+    return f"hot:{canonical_event_id}"
+
+
+def hot_promotion_lifecycle_event_id(canonical_event_id: str, episode: int) -> str:
+    """One durable id per real BACKGROUND→HOT promotion episode."""
+
+    return f"{canonical_event_id}:promoted_to_hot:{episode}"
+
+
+def format_hot_promotion_detail(
+    *,
+    canonical_event_id: str,
+    fixture_label: str | None,
+    market_family: str | None,
+    pricing_lane: str | None,
+    current_net_edge: Decimal | None,
+    distance_to_trigger_pp: Decimal | None,
+) -> str:
+    """Operator-readable HOT promotion facts. No causal claim."""
+
+    parts: list[str] = []
+    if fixture_label:
+        parts.append(fixture_label)
+    if market_family:
+        parts.append(str(market_family).replace("_", " "))
+    lane = (pricing_lane or "background").strip() or "background"
+    parts.append(f"{lane.upper()} → HOT")
+    if current_net_edge is not None:
+        parts.append(f"net edge {current_net_edge * Decimal('100'):.2f}%")
+    if distance_to_trigger_pp is not None:
+        parts.append(f"{distance_to_trigger_pp}pp to trigger")
+    parts.append(f"event {canonical_event_id}")
+    return " · ".join(parts)
 
 
 class OpportunityObservationPoint(BaseModel):

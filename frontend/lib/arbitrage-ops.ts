@@ -78,6 +78,9 @@ export type ActivityEvent = {
   kind: string;
   title: string;
   detail: string;
+  opportunityId?: string;
+  eventType?: string;
+  missedTriggerEventId?: string | null;
 };
 
 export type CapitalSnapshot = {

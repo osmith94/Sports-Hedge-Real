@@ -23,6 +23,7 @@ from sports_hedge.arbitrage.watchlist.economics import (
 )
 from sports_hedge.arbitrage.watchlist.models import (
     ORPHANED_PAPER_FILLING_RECONCILED,
+    OPERATOR_ACTIVITY_EVENT_TYPES,
     LifecycleEventType,
     NearOpportunity,
     OpportunityLifecycleEvent,
@@ -30,6 +31,9 @@ from sports_hedge.arbitrage.watchlist.models import (
     PaperFillAttempt,
     PaperFillAttemptStatus,
     WatchObservation,
+    format_hot_promotion_detail,
+    hot_promotion_lifecycle_event_id,
+    hot_promotion_opportunity_id,
     paper_fill_lifecycle_event_id,
     strike_distance_narrative,
     OpportunityObservationPoint,
@@ -565,6 +569,50 @@ class WatchlistService:
             detail=detail,
         )
 
+    def record_hot_promotion(
+        self,
+        *,
+        canonical_event_id: str,
+        occurred_at,
+        episode: int,
+        fixture_label: str | None = None,
+        market_family: str | None = None,
+        pricing_lane: str | None = None,
+        current_net_edge: Decimal | None = None,
+        distance_to_trigger_pp: Decimal | None = None,
+        opportunity_id: str | None = None,
+        detail: str | None = None,
+    ) -> OpportunityLifecycleEvent:
+        """Persist one BACKGROUND→HOT promotion episode. Idempotent per episode.
+
+        Does not observe, qualify, capture, or change scheduler membership.
+        """
+
+        if episode <= 0:
+            raise ValueError("hot promotion episode must be positive")
+        evaluated = require_aware_instant(occurred_at, "occurred_at")
+        event_opportunity_id = opportunity_id or hot_promotion_opportunity_id(canonical_event_id)
+        event = OpportunityLifecycleEvent(
+            event_id=hot_promotion_lifecycle_event_id(canonical_event_id, episode),
+            opportunity_id=event_opportunity_id,
+            occurred_at=evaluated,
+            event_type=LifecycleEventType.PROMOTED_TO_HOT,
+            status=OpportunityStatus.WATCHING,
+            current_net_edge=current_net_edge,
+            distance_to_trigger_pp=distance_to_trigger_pp,
+            detail=detail
+            or format_hot_promotion_detail(
+                canonical_event_id=canonical_event_id,
+                fixture_label=fixture_label,
+                market_family=market_family,
+                pricing_lane=pricing_lane,
+                current_net_edge=current_net_edge,
+                distance_to_trigger_pp=distance_to_trigger_pp,
+            ),
+        )
+        self.repository.append_event(event)
+        return event
+
     def expire(
         self, opportunity_id: str, *, occurred_at, detail: str | None = None
     ) -> NearOpportunity:
@@ -655,11 +703,17 @@ class WatchlistService:
         limit: int = 100,
         opportunity_id: str | None = None,
         since=None,
+        operator_signal: bool = False,
+        event_types: Sequence[LifecycleEventType] | None = None,
     ) -> list[OpportunityLifecycleEvent]:
+        selected_types: Sequence[LifecycleEventType] | None = event_types
+        if operator_signal:
+            selected_types = tuple(OPERATOR_ACTIVITY_EVENT_TYPES)
         events = self.repository.list_events(
             limit=limit if opportunity_id else limit * 2,
             opportunity_id=opportunity_id,
             since=since,
+            event_types=selected_types,
         )
         if opportunity_id is not None:
             return events
@@ -669,6 +723,22 @@ class WatchlistService:
             if item.data_kind == "demo_fixture_replay"
         }
         return [event for event in events if event.opportunity_id not in demo_ids][:limit]
+
+    def operator_activity(
+        self,
+        *,
+        limit: int = 100,
+        opportunity_id: str | None = None,
+        since=None,
+    ) -> list[OpportunityLifecycleEvent]:
+        """Primary operator timeline. Noise events stay persisted in ``activity()``."""
+
+        return self.activity(
+            limit=limit,
+            opportunity_id=opportunity_id,
+            since=since,
+            operator_signal=True,
+        )
 
     def _freshness_filtered(
         self,

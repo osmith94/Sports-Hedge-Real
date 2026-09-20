@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from sports_hedge.arbitrage.watchlist.models import (
     LifecycleEventType,
@@ -439,6 +440,7 @@ class SqliteWatchlistRepository:
         limit: int = 100,
         opportunity_id: str | None = None,
         since: datetime | None = None,
+        event_types: Collection[LifecycleEventType] | None = None,
     ) -> list[OpportunityLifecycleEvent]:
         if limit <= 0:
             raise ValueError("limit must be positive")
@@ -450,6 +452,11 @@ class SqliteWatchlistRepository:
         if since is not None:
             clauses.append("occurred_at >= ?")
             parameters.append(since.isoformat())
+        if event_types:
+            types = tuple(event.value for event in event_types)
+            placeholders = ", ".join("?" for _ in types)
+            clauses.append(f"event_type IN ({placeholders})")
+            parameters.extend(types)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         parameters.append(limit)
         with self.exclusive():

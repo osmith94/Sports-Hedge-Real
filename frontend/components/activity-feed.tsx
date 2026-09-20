@@ -13,17 +13,25 @@ export function ActivityFeed({
       <div className="panel-header">
         <div>
           <div className="panel-title">Activity feed</div>
-          <div className="panel-meta">Paper watchlist, threshold, fill and rejection events</div>
+          <div className="panel-meta">
+            PAPER operator timeline · Promoted to HOT, trigger lost, trade entered, trade exited
+          </div>
         </div>
           <span className={usedFixture ? "demo-chip" : "status-badge"}>
-          {usedFixture ? "DEMO / FIXTURE" : "WATCHLIST"}
+          {usedFixture ? "DEMO / FIXTURE" : "PAPER LIVE"}
         </span>
       </div>
       <div className="panel-body feed-list">
         {items.length === 0 ? (
-          <div className="empty-live-compact">No watchlist events yet.</div>
+          <div className="empty-live-compact">No operator-significant activity yet.</div>
         ) : items.map((item) => (
-          <div className="feed-row" key={item.id}>
+          <div
+            className="feed-row"
+            key={item.id}
+            data-event-type={item.eventType}
+            data-opportunity-id={item.opportunityId}
+            data-missed-trigger-event-id={item.missedTriggerEventId ?? undefined}
+          >
             <div className="feed-kind">{item.kind.replaceAll("_", " ")}</div>
             <div className="feed-body">
               <div className="feed-title">

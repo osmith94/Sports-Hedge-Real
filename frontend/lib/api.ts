@@ -1117,6 +1117,7 @@ export type WatchlistLifecycleEventType =
   | "moved_further_from_trigger"
   | "trigger_crossed"
   | "trigger_lost_before_fill"
+  | "promoted_to_hot"
   | "paper_fill_attempted"
   | "paper_fill_partial"
   | "paper_fill_complete"

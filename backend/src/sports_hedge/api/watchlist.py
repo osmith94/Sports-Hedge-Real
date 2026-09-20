@@ -142,9 +142,18 @@ def recent_lifecycle_activity(
     limit: int = Query(default=100, ge=1, le=1000),
     opportunity_id: str | None = None,
     since: datetime | None = None,
+    operator_signal: bool = Query(
+        default=False,
+        description="Primary operator Activity feed only. Unfiltered remains the audit trail.",
+    ),
     service: WatchlistService = Depends(get_watchlist_service),
 ) -> list[OpportunityLifecycleEvent]:
-    return service.activity(limit=limit, opportunity_id=opportunity_id, since=since)
+    return service.activity(
+        limit=limit,
+        opportunity_id=opportunity_id,
+        since=since,
+        operator_signal=operator_signal,
+    )
 
 
 def _read_watchlist(reader, operations: PaperOperationsService, **kwargs):

@@ -42,7 +42,11 @@ from sports_hedge.application.live_refresh import (
     ScanCycleTimeout,
     get_live_refresh_coordinator,
 )
-from sports_hedge.application.price_engine import CataloguePriceEngine, PriceEnginePriority
+from sports_hedge.application.price_engine import (
+    CataloguePriceEngine,
+    HotPromotionFact,
+    PriceEnginePriority,
+)
 from sports_hedge.application.scanner_phase6 import (
     DATA_CLASS_OWNER_LIVE_OBSERVATION,
     ScannerValidationSnapshot,
@@ -2030,7 +2034,21 @@ def bind_price_engine_item_persist(
             )
         )
 
+    def _persist_hot_promotion(fact: HotPromotionFact) -> None:
+        watchlist.record_hot_promotion(
+            canonical_event_id=fact.canonical_event_id,
+            occurred_at=fact.occurred_at,
+            episode=fact.episode,
+            fixture_label=fact.fixture_label,
+            market_family=fact.market_family,
+            pricing_lane=fact.pricing_lane,
+            current_net_edge=fact.current_net_edge,
+            distance_to_trigger_pp=fact.distance_to_trigger_pp,
+            opportunity_id=fact.opportunity_id,
+        )
+
     engine.on_item_decision = _handoff
+    engine.on_hot_promotion = _persist_hot_promotion
 
 
 def _persist_decision(
