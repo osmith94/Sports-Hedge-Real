@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from json import JSONDecodeError, loads
 from logging import getLogger
+from os import environ
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -29,6 +30,12 @@ EMPTY_LEGACY_POLYMARKET_SERIES_WARNING = (
     "target-series filtering, or set POLYMARKET_GAMMA_SERIES_IDS explicitly. "
     "This is configuration, not a provider outage."
 )
+RETIRED_ALLOCATION_MAX_CONCURRENT_OPEN_WARNING = (
+    "allocator_configuration: ALLOCATION_MAX_CONCURRENT_OPEN is retired and ignored. "
+    "The standard PAPER allocator no longer rejects on open-opportunity count. "
+    "Capital, reserve, venue, same-fixture, depth and risk constraints still apply."
+)
+_RETIRED_ALLOCATION_MAX_CONCURRENT_OPEN_ENV = "ALLOCATION_MAX_CONCURRENT_OPEN"
 
 
 def legacy_extra_polymarket_series_warning(single: str, resolved: list[str]) -> str:
@@ -398,7 +405,8 @@ class Settings(BaseSettings):
     allocation_max_pool_fraction_per_opportunity: float = Field(default=0.25, gt=0, le=1)
     allocation_max_open_capital_fraction: float = Field(default=0.70, gt=0, le=1)
     allocation_max_same_fixture_fraction: float = Field(default=0.40, gt=0, le=1)
-    allocation_max_concurrent_open: int = Field(default=4, ge=0)
+    # ALLOCATION_MAX_CONCURRENT_OPEN is retired. Leftover env/dotenv values are
+    # ignored via extra="ignore" and must not restore an open-count cap.
     allocation_per_opportunity_limit_gbp: float | None = Field(default=1000.0, gt=0)
     allocation_matchbook_limit_gbp: float | None = Field(default=None, gt=0)
     allocation_polymarket_limit_usd: float | None = Field(default=None, gt=0)
@@ -485,6 +493,9 @@ class Settings(BaseSettings):
         self.paper_live_refresh_hot_interval_seconds = hot_cadence
         for warning in self.polymarket_series_config_warnings():
             LOGGER.warning("%s", warning)
+        leftover_concurrent = environ.get(_RETIRED_ALLOCATION_MAX_CONCURRENT_OPEN_ENV)
+        if leftover_concurrent is not None and leftover_concurrent.strip() != "":
+            LOGGER.warning("%s", RETIRED_ALLOCATION_MAX_CONCURRENT_OPEN_WARNING)
         return self
 
 

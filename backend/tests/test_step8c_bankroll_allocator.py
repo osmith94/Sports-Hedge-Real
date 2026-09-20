@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from inspect import getsource
 
+import pytest
 from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
@@ -20,6 +22,8 @@ from sports_hedge.arbitrage.allocation.adapters import (
     request_from_payoff,
 )
 from sports_hedge.arbitrage.allocation.engine import allocate
+from sports_hedge.arbitrage.allocation import engine as allocation_engine
+from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.arbitrage.allocation.models import (
     AllocatedStake,
     AllocationBalance,
@@ -44,7 +48,7 @@ from sports_hedge.arbitrage.priority_alerts.models import (
 from sports_hedge.arbitrage.solver import CompleteSetArbitrageSolver
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
-from sports_hedge.config import Settings
+from sports_hedge.config import RETIRED_ALLOCATION_MAX_CONCURRENT_OPEN_WARNING, Settings
 from sports_hedge.domain.football import (
     CanonicalEvent,
     CanonicalMarket,
@@ -77,7 +81,6 @@ POLICY = BankrollAllocationPolicy(
     max_pool_fraction_per_opportunity=Decimal("0.25"),
     max_open_capital_fraction=Decimal("0.70"),
     max_same_fixture_capital_fraction=Decimal("0.40"),
-    max_concurrent_open_opportunities=4,
     safety_haircut=Decimal("0.05"),
 )
 
@@ -283,13 +286,163 @@ def test_acceptance_concurrency_existing_open_reduces_size() -> None:
         max_pool_fraction_per_opportunity=Decimal("1"),
         max_open_capital_fraction=Decimal("0.70"),
         max_same_fixture_capital_fraction=Decimal("1"),
-        max_concurrent_open_opportunities=4,
         safety_haircut=Decimal("0"),
     )
     deep = allocate(_demo_request(policy=policy, fill=_fill_high()))
     reduced = allocate(_demo_request(balances=balances, open_positions=open_pos, policy=policy, fill=_fill_high()))
     assert reduced.accepted is True
     assert reduced.maximum_validated_capital < deep.maximum_validated_capital
+
+
+def _count_only_opens(count: int) -> list[OpenPositionExposure]:
+    """Open trades that contribute count, not capital, so count cannot be a proxy for risk caps."""
+
+    return [
+        OpenPositionExposure(
+            opportunity_id=f"open-{index}",
+            canonical_event_id=f"other-evt-{index}",
+            capital_native=[],
+            capital_reporting=Decimal("0"),
+        )
+        for index in range(count)
+    ]
+
+
+def _uncapped_count_policy(**overrides) -> BankrollAllocationPolicy:
+    payload = dict(
+        min_reserve_fraction=Decimal("0"),
+        max_pool_fraction_per_opportunity=Decimal("1"),
+        max_open_capital_fraction=Decimal("1"),
+        max_same_fixture_capital_fraction=Decimal("1"),
+        safety_haircut=Decimal("0"),
+        concurrency_reduction_per_open=Decimal("0"),
+        max_concurrency_reduction=Decimal("0"),
+    )
+    payload.update(overrides)
+    return BankrollAllocationPolicy(**payload)
+
+
+def _assert_not_open_count_rejection(result: AllocationResult) -> None:
+    assert result.limiting_constraint is not AllocationConstraintKind.CONCURRENCY
+    assert all(item.kind is not AllocationConstraintKind.CONCURRENCY for item in result.hard_constraints)
+    assert result.rejection_reason != "maximum concurrent open opportunities"
+    assert "maximum concurrent open opportunities" not in (result.limiting_constraint_detail or "")
+    assert "maximum concurrent open opportunities" not in (result.rejection_reason or "")
+
+
+@pytest.mark.parametrize("open_count", [4, 5, 10, 12])
+def test_open_opportunity_count_does_not_independently_reject(open_count: int) -> None:
+    result = allocate(
+        _demo_request(
+            open_positions=_count_only_opens(open_count),
+            policy=_uncapped_count_policy(),
+            fill=_fill_high(),
+        )
+    )
+    assert result.accepted is True
+    _assert_not_open_count_rejection(result)
+
+
+def test_standard_allocator_cannot_emit_retired_open_count_rejection() -> None:
+    source = getsource(allocation_engine)
+    assert "maximum concurrent open opportunities" not in source
+    assert "max_concurrent_open_opportunities" not in source
+    assert "AllocationConstraintKind.CONCURRENCY" not in source
+    defaulted = allocate(_demo_request(open_positions=_count_only_opens(10), fill=_fill_high()))
+    assert defaulted.accepted is True
+    _assert_not_open_count_rejection(defaulted)
+
+
+def test_legacy_policy_kwarg_cannot_restore_open_count_cap() -> None:
+    policy = _uncapped_count_policy(max_concurrent_open_opportunities=1)
+    result = allocate(
+        _demo_request(open_positions=_count_only_opens(5), policy=policy, fill=_fill_high())
+    )
+    assert result.accepted is True
+    _assert_not_open_count_rejection(result)
+
+
+def test_legacy_allocation_max_concurrent_open_env_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("ALLOCATION_MAX_CONCURRENT_OPEN", "1")
+    with caplog.at_level("WARNING", logger="sports_hedge.config"):
+        settings = Settings()
+    assert not hasattr(settings, "allocation_max_concurrent_open")
+    assert any(
+        record.message == RETIRED_ALLOCATION_MAX_CONCURRENT_OPEN_WARNING
+        for record in caplog.records
+    )
+    policy = policy_from_settings(settings)
+    assert "max_concurrent_open_opportunities" not in type(policy).model_fields
+    result = allocate(
+        _demo_request(open_positions=_count_only_opens(10), policy=policy, fill=_fill_high())
+    )
+    assert result.accepted is True
+    _assert_not_open_count_rejection(result)
+
+
+def test_capital_constraints_still_reject_with_many_open_opportunities() -> None:
+    opens = _count_only_opens(10)
+    venue_blocked = allocate(
+        _demo_request(
+            open_positions=opens,
+            policy=_uncapped_count_policy(venue_limits_native={VenueName.MATCHBOOK: Decimal("0")}),
+            fill=_fill_high(),
+        )
+    )
+    assert venue_blocked.accepted is False
+    assert venue_blocked.limiting_constraint is AllocationConstraintKind.VENUE_LIMIT
+    _assert_not_open_count_rejection(venue_blocked)
+
+    reserve_blocked = allocate(
+        _demo_request(
+            open_positions=opens,
+            policy=_uncapped_count_policy(min_reserve_fraction=Decimal("1")),
+            fill=_fill_high(),
+        )
+    )
+    assert reserve_blocked.accepted is False
+    assert reserve_blocked.limiting_constraint is AllocationConstraintKind.MIN_FREE_RESERVE
+    _assert_not_open_count_rejection(reserve_blocked)
+
+    portfolio_blocked = allocate(
+        _demo_request(
+            open_positions=[
+                OpenPositionExposure(
+                    opportunity_id=f"open-{index}",
+                    canonical_event_id=f"other-evt-{index}",
+                    capital_native=[
+                        VenueNativeAmount(
+                            venue=VenueName.MATCHBOOK, currency="GBP", amount=Decimal("80")
+                        )
+                    ],
+                    capital_reporting=Decimal("80"),
+                )
+                for index in range(10)
+            ],
+            balances=[
+                AllocationBalance(
+                    venue=VenueName.MATCHBOOK,
+                    currency="GBP",
+                    available=Decimal("200"),
+                    locked=Decimal("800"),
+                ),
+                AllocationBalance(
+                    venue=VenueName.POLYMARKET,
+                    currency="USD",
+                    available=Decimal("1333.333333333"),
+                    gbp_per_unit=Decimal("0.75"),
+                ),
+                AllocationBalance(venue=VenueName.SMARKETS, currency="GBP", available=Decimal("0")),
+            ],
+            policy=_uncapped_count_policy(max_open_capital_fraction=Decimal("0.70")),
+            fill=_fill_high(),
+        )
+    )
+    assert portfolio_blocked.accepted is False
+    assert portfolio_blocked.limiting_constraint is AllocationConstraintKind.PORTFOLIO_CAP
+    _assert_not_open_count_rejection(portfolio_blocked)
 
 
 def test_acceptance_conditionally_releasable_is_not_spendable() -> None:

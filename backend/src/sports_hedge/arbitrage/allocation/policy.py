@@ -33,7 +33,6 @@ def policy_from_settings(settings: Settings) -> BankrollAllocationPolicy:
         venue_limits[VenueName.MATCHBOOK] = Decimal(str(settings.allocation_matchbook_limit_gbp))
     if settings.allocation_polymarket_limit_usd is not None:
         venue_limits[VenueName.POLYMARKET] = Decimal(str(settings.allocation_polymarket_limit_usd))
-    concurrent = settings.allocation_max_concurrent_open
     return BankrollAllocationPolicy(
         min_reserve_amount=(
             Decimal(str(settings.allocation_min_reserve_amount))
@@ -48,7 +47,6 @@ def policy_from_settings(settings: Settings) -> BankrollAllocationPolicy:
         max_same_fixture_capital_fraction=Decimal(
             str(settings.allocation_max_same_fixture_fraction)
         ),
-        max_concurrent_open_opportunities=concurrent if concurrent and concurrent > 0 else None,
         per_opportunity_limit_reporting=_per_opportunity_limit(settings),
         venue_limits_native=venue_limits,
         portfolio_cap_reporting=(
