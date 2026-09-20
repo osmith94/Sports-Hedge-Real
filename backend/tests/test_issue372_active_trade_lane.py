@@ -28,11 +28,16 @@ from sports_hedge.application.active_trade_lane import (
 )
 from sports_hedge.application.approved_market_catalogue import DerivedPriceEngineItem
 from sports_hedge.application.live_refresh import (
+    DualCadencePlan,
     LiveRefreshCoordinator,
     get_live_refresh_coordinator,
 )
 from sports_hedge.application.paper_operations import PaperOperationsService
-from sports_hedge.application.price_engine import CataloguePriceEngine, PriceEngineRuntimeItem
+from sports_hedge.application.price_engine import (
+    CataloguePriceEngine,
+    PriceEngineItemStatus,
+    PriceEngineRuntimeItem,
+)
 from sports_hedge.application.provider_access import (
     DEFAULT_PROVIDER_CONCURRENCY,
     PRICE_ENGINE_ACTIVE_TRADE_LANE,
@@ -800,7 +805,7 @@ async def test_active_trade_tick_prices_due_trades_concurrently_under_provider_l
 
     fake_ops = SimpleNamespace(
         trades=_FakeRepo(),
-        maybe_top_up_open_trade=lambda trade, now=None: None,
+        maybe_top_up_open_trade=lambda trade, now=None, **kwargs: None,
     )
     monkeypatch.setattr(
         "sports_hedge.api.paper.get_paper_operations_service",
@@ -845,6 +850,145 @@ async def test_active_trade_tick_prices_due_trades_concurrently_under_provider_l
         assert overdue_late == 2
     finally:
         coordinator.reset()
+        reset_active_trade_registry()
+
+
+@pytest.mark.asyncio
+async def test_active_trade_tick_does_not_top_up_from_stale_plan_when_refresh_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed CURRENT exact-ID refresh must not buy from a prior qualifying plan."""
+
+    tick_src = inspect.getsource(LiveRefreshCoordinator._run_active_trade_tick)
+    assert "require_current_plan" in tick_src
+    assert "_active_trade_fresh_fill_plan" in tick_src
+    assert "EVALUATED" in inspect.getsource(
+        LiveRefreshCoordinator._active_trade_fresh_fill_plan
+    )
+    locked_src = inspect.getsource(PaperOperationsService._maybe_top_up_open_trade_locked)
+    assert "require_current_plan" in locked_src
+
+    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
+    _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
+    coordinator = None
+    try:
+        trade = ops.list_active_trades()[0]
+        old_plan = ops._plans[trade.opportunity_id]
+        assert old_plan is not None
+        assert old_plan.decision.canonical_market_id
+        before_tranches = [item.tranche_id for item in trade.tranches]
+        before_locks = _lock_fingerprint(ledger, trade.trade_id)
+        before_capital = trade.capital_locked_gbp
+        before_legs = len(trade.legs)
+        before_plan_scanned_at = old_plan.scanned_at
+        assert not any(item.kind is PaperTradeTrancheKind.TOP_UP for item in trade.tranches)
+        skipped = ops.maybe_top_up_open_trade(
+            trade, now=OBSERVED, plan=None, require_current_plan=True
+        )
+        assert skipped is None
+        assert [item.tranche_id for item in ops.list_active_trades()[0].tranches] == before_tranches
+
+        mode = {"status": "retry_wait"}
+
+        class _FakeEngine:
+            async def _price_item(self, runtime, slice_result, *, lane=None):
+                if mode["status"] == "retry_wait":
+                    runtime.status = PriceEngineItemStatus.RETRY_WAIT
+                    return PriceEngineItemStatus.RETRY_WAIT
+                if mode["status"] == "revalidation":
+                    runtime.status = PriceEngineItemStatus.REVALIDATION_NEEDED
+                    return PriceEngineItemStatus.REVALIDATION_NEEDED
+                if mode["status"] == "capture_fail":
+                    runtime.status = PriceEngineItemStatus.EVALUATED
+                    runtime.last_persist_error = "injected_capture_failure"
+                    slice_result.decisions.append(old_plan.decision)
+                    slice_result.persist_failures.append(runtime.identity.catalogue_row_id)
+                    return PriceEngineItemStatus.EVALUATED
+                if mode["status"] == "evaluated":
+                    runtime.status = PriceEngineItemStatus.EVALUATED
+                    later = old_plan.decision.scanned_at + timedelta(milliseconds=100)
+                    slice_result.decisions.append(
+                        old_plan.decision.model_copy(update={"scanned_at": later})
+                    )
+                    return PriceEngineItemStatus.EVALUATED
+                raise AssertionError(mode["status"])
+
+            async def drain_item_captures(self) -> None:
+                return None
+
+            def set_background_interval_seconds(self, _cadence: int) -> None:
+                return None
+
+            def restart(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            "sports_hedge.api.paper.get_paper_operations_service",
+            lambda *_args, **_kwargs: ops,
+        )
+
+        coordinator = LiveRefreshCoordinator(
+            clock=lambda: OBSERVED, price_engine=_FakeEngine()
+        )
+        tick_plan = DualCadencePlan(
+            lane=ACTIVE_TRADE_LANE,
+            reason="active_trade_due",
+            identity_scope=[trade.trade_id],
+        )
+
+        def _assert_unchanged() -> None:
+            loaded = ops.list_active_trades()[0]
+            assert [item.tranche_id for item in loaded.tranches] == before_tranches
+            assert not any(
+                item.kind is PaperTradeTrancheKind.TOP_UP for item in loaded.tranches
+            )
+            assert _lock_fingerprint(ledger, loaded.trade_id) == before_locks
+            assert loaded.capital_locked_gbp == before_capital
+            assert len(loaded.legs) == before_legs
+            assert ops._plans[loaded.opportunity_id].scanned_at == before_plan_scanned_at
+
+        await coordinator._run_active_trade_tick(tick_plan)
+        _assert_unchanged()
+
+        mode["status"] = "revalidation"
+        await coordinator._run_active_trade_tick(tick_plan)
+        _assert_unchanged()
+
+        mode["status"] = "capture_fail"
+        await coordinator._run_active_trade_tick(tick_plan)
+        _assert_unchanged()
+
+        monkeypatch.setattr(
+            "sports_hedge.application.live_refresh.identity_from_open_trade",
+            lambda _trade: None,
+        )
+        mode["status"] = "evaluated"
+        await coordinator._run_active_trade_tick(tick_plan)
+        _assert_unchanged()
+        monkeypatch.setattr(
+            "sports_hedge.application.live_refresh.identity_from_open_trade",
+            identity_from_open_trade,
+        )
+
+        mode["status"] = "evaluated"
+        await coordinator._run_active_trade_tick(tick_plan)
+        loaded = ops.list_active_trades()[0]
+        topups = [
+            item for item in loaded.tranches if item.kind is PaperTradeTrancheKind.TOP_UP
+        ]
+        assert len(topups) == 1
+        assert (loaded.capital_locked_gbp or Decimal("0")) > (before_capital or Decimal("0"))
+        assert len(loaded.legs) > before_legs
+        assert len(_lock_fingerprint(ledger, loaded.trade_id)) > len(before_locks)
+    finally:
+        if coordinator is not None:
+            coordinator.reset()
+        repository.close()
+        ledger.close()
+        store.close()
+        bind_runtime_operator_scanner_settings_store(None)
         reset_active_trade_registry()
 
 

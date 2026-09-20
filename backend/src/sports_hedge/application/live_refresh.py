@@ -4078,18 +4078,63 @@ class LiveRefreshCoordinator:
             snapshot["operator_summary"] = summary
         return snapshot
 
+    def _active_trade_fresh_fill_plan(
+        self,
+        operations: Any,
+        trade: Any,
+        *,
+        status: Any,
+        runtime: Any,
+        slice_result: Any,
+    ) -> Any:
+        """ACTIVE top-up may use only THIS cycle's evaluated current books."""
+
+        from sports_hedge.application.price_engine import PriceEngineItemStatus
+        from sports_hedge.arbitrage.watchlist.service import _opportunity_id
+        from sports_hedge.accounting.paper_journal import DataProvenance
+
+        if status is not PriceEngineItemStatus.EVALUATED:
+            return None
+        if runtime is None or getattr(runtime, "last_persist_error", None):
+            return None
+        if slice_result is None:
+            return None
+        persist_failures = getattr(slice_result, "persist_failures", None)
+        if persist_failures:
+            return None
+        decisions = list(getattr(slice_result, "decisions", None) or [])
+        if not decisions:
+            return None
+        opportunity_id = getattr(trade, "opportunity_id", None)
+        matching = [
+            decision
+            for decision in decisions
+            if getattr(decision, "canonical_market_id", None)
+            and _opportunity_id(decision.canonical_market_id) == opportunity_id
+        ]
+        if not matching:
+            return None
+        plan_from = getattr(operations, "_plan_from_decision", None)
+        if not callable(plan_from):
+            return None
+        provenance = getattr(trade, "provenance", None) or DataProvenance.LIVE_PAPER
+        return plan_from(matching[-1], opportunity_id, provenance)
+
     async def _run_active_trade_tick(self, plan: DualCadencePlan) -> None:
         """Exact-ID refresh + optional top-up. Never list_events/list_markets.
 
         Due trades are priced concurrently. The shared provider-access layer
         remains the 4/4/8 concurrency authority. Top-up persistence stays
         serialized. Each trade's next_due_at is its own pricing completion + 5s.
+
+        A failed CURRENT refresh never buys from a stale prior qualifying plan.
         """
 
         from sports_hedge.api.paper import get_paper_operations_service
         from sports_hedge.api.priority_alerts import get_priority_alert_service
         from sports_hedge.api.watchlist import get_watchlist_service
         from sports_hedge.application.price_engine import (
+            PriceEngineItemStatus,
             PriceEngineRuntimeItem,
             PriceEngineSliceResult,
         )
@@ -4114,17 +4159,32 @@ class LiveRefreshCoordinator:
 
         engine = self._price_engine
 
-        async def _price_one(trade: Any) -> tuple[Any, datetime]:
+        async def _price_one(
+            trade: Any,
+        ) -> tuple[
+            Any,
+            datetime,
+            PriceEngineItemStatus | None,
+            PriceEngineRuntimeItem | None,
+            PriceEngineSliceResult | None,
+        ]:
             priced_at = self.now()
             identity = identity_from_open_trade(trade)
-            if engine is not None and identity is not None:
-                slice_result = PriceEngineSliceResult()
-                runtime = PriceEngineRuntimeItem(identity=identity)
-                await engine._price_item(
-                    runtime, slice_result, lane=PRICE_ENGINE_ACTIVE_TRADE_LANE
+            if engine is None or identity is None:
+                return trade, priced_at, None, None, None
+            slice_result = PriceEngineSliceResult()
+            runtime = PriceEngineRuntimeItem(identity=identity)
+            status = await engine._price_item(
+                runtime, slice_result, lane=PRICE_ENGINE_ACTIVE_TRADE_LANE
+            )
+            priced_at = self.now()
+            if not isinstance(status, PriceEngineItemStatus):
+                status = (
+                    runtime.status
+                    if isinstance(runtime.status, PriceEngineItemStatus)
+                    else None
                 )
-                priced_at = self.now()
-            return trade, priced_at
+            return trade, priced_at, status, runtime, slice_result
 
         priced_results = (
             await asyncio.gather(*[_price_one(trade) for trade in jobs], return_exceptions=True)
@@ -4140,11 +4200,24 @@ class LiveRefreshCoordinator:
         for item in priced_results:
             if isinstance(item, BaseException):
                 continue
-            trade, priced_at = item
-            try:
-                operations.maybe_top_up_open_trade(trade, now=self.now())
-            except Exception:
-                pass
+            trade, priced_at, status, runtime, slice_result = item
+            fresh_plan = self._active_trade_fresh_fill_plan(
+                operations,
+                trade,
+                status=status,
+                runtime=runtime,
+                slice_result=slice_result,
+            )
+            if fresh_plan is not None:
+                try:
+                    operations.maybe_top_up_open_trade(
+                        trade,
+                        now=self.now(),
+                        plan=fresh_plan,
+                        require_current_plan=True,
+                    )
+                except Exception:
+                    pass
             loaded = trade
             if operations.trades is not None:
                 loaded = operations.trades.get(trade.trade_id) or trade

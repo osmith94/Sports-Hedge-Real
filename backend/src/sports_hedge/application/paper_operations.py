@@ -1092,12 +1092,17 @@ class PaperOperationsService:
         now: datetime | None = None,
         plan: PaperFillPlan | None = None,
         config: PaperFillConfig | None = None,
+        require_current_plan: bool = False,
     ) -> SimulatePaperFillResult | None:
         """ACTIVE TRADE complete-set top-up. Never creates naked paper exposure."""
 
         with self._fill_persist_lock:
             return self._maybe_top_up_open_trade_locked(
-                trade, now=now, plan=plan, config=config
+                trade,
+                now=now,
+                plan=plan,
+                config=config,
+                require_current_plan=require_current_plan,
             )
 
     def _maybe_top_up_open_trade_locked(
@@ -1107,6 +1112,7 @@ class PaperOperationsService:
         now: datetime | None = None,
         plan: PaperFillPlan | None = None,
         config: PaperFillConfig | None = None,
+        require_current_plan: bool = False,
     ) -> SimulatePaperFillResult | None:
         when = now or datetime.now(UTC)
         if self.trades is not None:
@@ -1117,7 +1123,11 @@ class PaperOperationsService:
             return None
         self._ensure_opening_tranche(trade, when)
         self._promote_active_trade(trade, when)
-        plan = plan or self._plans.get(trade.opportunity_id)
+        if require_current_plan:
+            if plan is None:
+                return None
+        else:
+            plan = plan or self._plans.get(trade.opportunity_id)
         operator = effective_operator_scanner_settings(self.settings)
         cap = operator.max_allocated_per_trade_gbp
         trigger = operator.min_net_edge
