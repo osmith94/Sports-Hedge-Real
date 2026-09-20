@@ -105,6 +105,28 @@ def test_incomplete_generation_resumes_without_600s_sleep() -> None:
     assert coordinator._seconds_until_universe() == pytest.approx(0.05)
 
 
+def test_incomplete_universe_chunk_yields_about_8s_not_zero_or_600() -> None:
+    clock = FakeClock(NOW)
+    coordinator = LiveRefreshCoordinator(clock=clock)
+    coordinator.configure_from_settings()
+    coordinator._clock = clock
+    coordinator._universe_generation_id = 2
+    coordinator._universe_generation_started_at = NOW
+    coordinator._pause_universe_generation(NOW + timedelta(seconds=1))
+    paused = NOW + timedelta(seconds=1)
+    assert coordinator._next_universe_due == paused + timedelta(seconds=8)
+    clock.now = paused + timedelta(seconds=7)
+    waiting = coordinator.plan_universe_tick(now=clock.now)
+    assert waiting.lane == "idle"
+    assert waiting.reason == "universe_cooldown"
+    delay = coordinator._seconds_until_universe()
+    assert delay == pytest.approx(1.0)
+    clock.now = paused + timedelta(seconds=8)
+    resumed = coordinator.plan_universe_tick(now=clock.now)
+    assert resumed.lane == ScanLane.UNIVERSE.value
+    assert coordinator.status.universe.cadence_seconds == 600
+
+
 def test_retry_wait_can_resume_sooner_than_discovery_interval() -> None:
     clock = FakeClock(NOW)
     coordinator = LiveRefreshCoordinator(clock=clock)

@@ -284,7 +284,8 @@ class Settings(BaseSettings):
     # Fixture radar / membership TTL only. Not BACKGROUND pricing cadence and
     # not the UNIVERSE discovery restart gap.
     paper_live_refresh_universe_interval_seconds: int = Field(default=180, ge=60, le=300)
-    # Independent BACKGROUND pricing cadence for known ACTIVE catalogue rows.
+    # Independent BACKGROUND price-engine cadence. Reprices known ACTIVE
+    # catalogue rows. Operator override is background_cadence_seconds (60–600).
     paper_background_price_interval_seconds: int = Field(default=90, ge=30, le=300)
     # After a terminal-complete UNIVERSE generation, wait this long before the
     # next fresh discovery generation. Incomplete chunks/retries do not use this.

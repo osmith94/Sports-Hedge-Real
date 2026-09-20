@@ -194,6 +194,7 @@ def test_live_scan_pulse_states_are_real_and_last_scan_is_not_invented() -> None
     assert "Full sweep" not in scan
     assert "Refresh interval" not in scan
     assert "HOT cadence s" in scan
+    assert "BACKGROUND cadence s" in scan
     assert "Update" in scan
     assert "Stop scanner" in scan
     assert "Resume scanner" in scan

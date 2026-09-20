@@ -315,6 +315,11 @@ class CataloguePriceEngine:
     def now(self) -> datetime:
         return self._clock()
 
+    def set_background_interval_seconds(self, seconds: int) -> None:
+        """Apply the operator/env BACKGROUND cadence without reconstructing work."""
+
+        self._background_interval = int(seconds)
+
     def items(self) -> list[PriceEngineRuntimeItem]:
         return list(self._items.values())
 

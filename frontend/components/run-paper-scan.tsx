@@ -73,6 +73,11 @@ function clampHotCadenceSeconds(value: number): number {
   return Math.min(60, Math.max(15, Math.round(value)));
 }
 
+function clampBackgroundCadenceSeconds(value: number): number {
+  if (!Number.isFinite(value)) return 90;
+  return Math.min(600, Math.max(60, Math.round(value)));
+}
+
 function minNetPercentFromRate(value: string | number | null | undefined): string {
   if (value == null || value === "") return "";
   const parsed = Number(value);
@@ -211,6 +216,8 @@ export function RunPaperScan() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [intervalSeconds, setIntervalSeconds] = useState(30);
   const [intervalDraft, setIntervalDraft] = useState("");
+  const [backgroundIntervalSeconds, setBackgroundIntervalSeconds] = useState(90);
+  const [backgroundIntervalDraft, setBackgroundIntervalDraft] = useState("");
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [scannerControlBusy, setScannerControlBusy] = useState(false);
@@ -269,6 +276,13 @@ export function RunPaperScan() {
         const clamped = clampHotCadenceSeconds(cadence);
         setIntervalSeconds(clamped);
         setIntervalDraft(String(clamped));
+      }
+      const backgroundCadence =
+        saved?.background_cadence_seconds ?? status.background?.cadence_seconds ?? 90;
+      if (backgroundCadence && (!settingsDirty || options?.forceSettings)) {
+        const clampedBackground = clampBackgroundCadenceSeconds(backgroundCadence);
+        setBackgroundIntervalSeconds(clampedBackground);
+        setBackgroundIntervalDraft(String(clampedBackground));
       }
       if (saved && (!settingsDirty || options?.forceSettings)) {
         setMinNetArbPercent(minNetPercentFromRate(saved.min_net_edge));
@@ -431,10 +445,12 @@ export function RunPaperScan() {
         throw new Error("Maximum execution risk must be a whole number from 0 to 100.");
       }
       const cadence = clampHotCadenceSeconds(Number(intervalDraft));
+      const backgroundCadence = clampBackgroundCadenceSeconds(Number(backgroundIntervalDraft));
       const status = await saveOperatorScannerSettings({
         min_net_edge: minNet,
         max_execution_risk: risk,
         hot_cadence_seconds: cadence,
+        background_cadence_seconds: backgroundCadence,
       });
       applyLiveRefresh(status, { forceSettings: true });
       setSettingsDirty(false);
@@ -589,6 +605,24 @@ export function RunPaperScan() {
               title="Server-owned HOT pricing cadence. Safe range 15–60 seconds. Not the view refresh."
             />
           </label>
+          <label className="scan-field scan-field-compact">
+            <span>BACKGROUND cadence s</span>
+            <input
+              inputMode="numeric"
+              value={backgroundIntervalDraft}
+              onChange={(event) => {
+                setBackgroundIntervalDraft(event.target.value);
+                setSettingsDirty(true);
+              }}
+              onBlur={() => {
+                const clamped = clampBackgroundCadenceSeconds(Number(backgroundIntervalDraft));
+                setBackgroundIntervalSeconds(clamped);
+                setBackgroundIntervalDraft(String(clamped));
+              }}
+              aria-label="BACKGROUND cadence seconds"
+              title="Server-owned BACKGROUND pricing cadence. Safe range 60–600 seconds. Not UNIVERSE discovery."
+            />
+          </label>
           <label className="scan-refresh">
             <input
               type="checkbox"
@@ -654,9 +688,11 @@ export function RunPaperScan() {
         <div className="scan-note">
           Manual HOT refresh performs a HOT pricing refresh of current known fixtures.
           It does not rediscover the catalogue or advance scheduled HOT pricing, BACKGROUND
-          pricing or UNIVERSE discovery. Update saves Min Net Arb, Max Risk and HOT cadence for subsequent server-owned work
-          and does not trigger a scan. HOT cadence is how often HOT pricing is due; Auto refresh view
-          only polls status.
+          pricing or UNIVERSE discovery. Update saves Min Net Arb, Max Risk, HOT cadence and
+          BACKGROUND cadence for subsequent server-owned work and does not trigger a scan.
+          HOT cadence is how often HOT pricing is due; BACKGROUND cadence is how often the
+          rest of the known ACTIVE catalogue is repriced. Auto refresh view only polls status.
+          UNIVERSE discovery stays on the architecture 10-minute post-completion schedule.
         </div>
         <div className="scan-note" aria-label="HOT pricing, BACKGROUND pricing and UNIVERSE discovery status">
           {dualScanStatusLines(liveRefresh, nowMs).map((line) => (

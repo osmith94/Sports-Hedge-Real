@@ -62,6 +62,7 @@ describe("system load display", () => {
     assert.deepEqual(
       lines.map((line) => `${line.key}  ${line.detail}`),
       [
+      [
         "HOT pricing  8 fixtures · 18 items · 4 due · cycle 3.8s / 30s (13%)",
         "BACKGROUND pricing  31 items · 6 due · cadence 90s",
         "UNIVERSE discovery  24/30 evaluated · cadence 600s · 42s / 150s",
