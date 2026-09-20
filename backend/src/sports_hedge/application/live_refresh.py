@@ -87,6 +87,7 @@ from sports_hedge.paper.trades import (
 )
 from sports_hedge.paper.active_trade_journal import ActiveTradeTimelineItem
 from sports_hedge.application.scan_lanes import (
+    DEFAULT_UNIVERSE_DISCOVERY_INTERVAL_SECONDS,
     OPERATOR_ACTIVE_TRADE_LABEL,
     OPERATOR_BACKGROUND_PRICING_LABEL,
     OPERATOR_HOT_PRICING_LABEL,
@@ -296,7 +297,7 @@ class LiveRefreshStatus(BaseModel):
     )
     universe: LaneRefreshStatus = Field(
         default_factory=lambda: LaneRefreshStatus(
-            cadence_seconds=600,
+            cadence_seconds=DEFAULT_UNIVERSE_DISCOVERY_INTERVAL_SECONDS,
             # Per-chunk watchdog, not a generation lifetime. UNIVERSE generations
             # remain resumable/unbounded (Tenet 19 / Issue #328).
             cycle_timeout_seconds=150,
