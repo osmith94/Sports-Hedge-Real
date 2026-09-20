@@ -16,11 +16,14 @@ from fastapi.testclient import TestClient
 from sports_hedge.api.main import app
 from sports_hedge.api.paper import bind_price_engine_item_persist
 from sports_hedge.api.watchlist import get_watchlist_service
+from sports_hedge.application.collector import CollectionReport, DiscoveredFixture
+from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
 from sports_hedge.application.price_engine import (
     CataloguePriceEngine,
     HotPromotionFact,
     PriceEnginePriority,
 )
+from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.arbitrage.models import PayoffSolution
 from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
 from sports_hedge.arbitrage.watchlist.models import (
@@ -429,6 +432,58 @@ def test_bind_persist_wires_price_engine_hot_promotion_without_capture_ownership
     promote_src = inspect.getsource(CataloguePriceEngine._maybe_promote)
     assert "_emit_operator_hot_promotion" in promote_src
     assert "moved_closer_to_trigger" not in promote_src
+
+
+def test_hot_promotion_persist_is_observational_and_cannot_drop_fixture_state() -> None:
+    emit_src = inspect.getsource(CataloguePriceEngine._emit_operator_hot_promotion)
+    persist_src = inspect.getsource(WatchlistService.record_hot_promotion)
+    bind_src = inspect.getsource(bind_price_engine_item_persist)
+    for src in (emit_src, persist_src, bind_src):
+        assert "_drop_identity" not in src
+        assert "upsert_from_report" not in src
+        assert "fixture_current_state" not in src
+        assert "hot_identity_scope" not in src
+    maybe_src = inspect.getsource(CataloguePriceEngine._maybe_promote)
+    assert maybe_src.index("_promoted_hot_ids.add") < maybe_src.index(
+        "_emit_operator_hot_promotion"
+    )
+
+    now = datetime.now(UTC)
+    kickoff = now + timedelta(days=3)
+    store = FixtureCurrentStateStore()
+    fixture = DiscoveredFixture(
+        source=VenueName.MATCHBOOK,
+        source_event_id="1001",
+        canonical_event_id="evt-radar",
+        home_team="Brentford",
+        away_team="Chelsea",
+        competition="Premier League",
+        kickoff_utc=kickoff,
+        last_seen_at=now,
+        matchbook_matched=True,
+        market_evaluation_state="evaluated",
+        opportunity_state="unmatched",
+    )
+    store.upsert_from_report(
+        CollectionReport(started_at=now, completed_at=now, discovered_fixtures=[fixture]),
+        scan_lane=ScanLane.UNIVERSE,
+        now=now,
+    )
+    before = [row.canonical_event_id for row in store.inventory(now)]
+    assert before == ["evt-radar"]
+    service = WatchlistService(SqliteWatchlistRepository())
+    service.record_hot_promotion(
+        canonical_event_id="evt-radar",
+        occurred_at=now,
+        episode=1,
+        fixture_label="Brentford v Chelsea",
+        market_family="both_teams_to_score",
+    )
+    after = [row.canonical_event_id for row in store.inventory(now)]
+    assert after == before
+    assert [event.event_type for event in service.operator_activity()] == [
+        LifecycleEventType.PROMOTED_TO_HOT
+    ]
 
 
 def test_economic_only_trigger_lost_stays_in_audit_not_operator_feed() -> None:

@@ -49,7 +49,7 @@ from test_concurrent_hot_universe_workers import _named_fixture, _universe_fixtu
 from test_dual_cadence_scheduler import NOW, FakeClock, _report
 from test_issue200_universe_hot_promotion import _market_row
 
-KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
+KICKOFF = datetime.now(UTC) + timedelta(days=3)
 REGULATION = "Resolves based on 90 minutes of regulation time."
 
 

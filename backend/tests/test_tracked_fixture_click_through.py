@@ -25,8 +25,8 @@ from sports_hedge.matching.markets import MarketMatchResult
 from sports_hedge.normalization.identity import canonical_matched_event_id
 from sports_hedge.paper.models import PaperScanDecision
 
-KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
-OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
+OBSERVED = datetime.now(UTC)
+KICKOFF = OBSERVED + timedelta(days=3)
 
 
 def _venue_event(venue: VenueName, source_event_id: str) -> VenueEvent:
