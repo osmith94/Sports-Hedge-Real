@@ -16,6 +16,7 @@ from sports_hedge.application.collector import (
 from sports_hedge.application.live_refresh import LiveRefreshCoordinator
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
+from sports_hedge.config import get_settings
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
@@ -275,7 +276,21 @@ async def test_mixed_ticks_every_new_generation_re_evaluates_universe() -> None:
     false_complete = 0
     lane_ticks = 0
     plans = 0
-    while plans < 60:
+    # Fresh-generation wait is UNIVERSE cadence (default 1800s), independent of
+    # HOT 30s. The mixed-tick loop must cover two complete generations without
+    # treating the discovery interval as HOT cadence or worker cooldown.
+    hot_cadence = max(1, int(coordinator.status.hot.cadence_seconds or 30))
+    universe_cadence = max(
+        1,
+        int(
+            coordinator.status.universe.cadence_seconds
+            or get_settings().paper_universe_discovery_interval_seconds
+        ),
+    )
+    assert universe_cadence == get_settings().paper_universe_discovery_interval_seconds
+    assert universe_cadence != hot_cadence
+    max_plans = max(60, 2 * ((universe_cadence // hot_cadence) + 4) * 2)
+    while plans < max_plans:
         plan = coordinator.plan_tick(now=clock.now)
         plans += 1
         if plan.lane == "idle":
