@@ -102,6 +102,14 @@ describe("system load display", () => {
     assert.doesNotMatch(missing[1].detail, /%\)/);
   });
 
+  it("exposes ACTIVE TRADE overdue count only when capacity is late", () => {
+    const hidden = systemLoadLines(load({ active_trade: { open_trades: 2, due: 2, overdue: 0, cadence_seconds: 5 } }));
+    assert.equal(hidden[0].detail, "2 open · 2 due · cadence 5s");
+    assert.doesNotMatch(hidden[0].detail, /overdue/);
+    const late = systemLoadLines(load({ active_trade: { open_trades: 2, due: 2, overdue: 1, cadence_seconds: 5 } }));
+    assert.equal(late[0].detail, "2 open · 2 due · 1 overdue · cadence 5s");
+  });
+
   it("does not reconstruct load from raw lane or provider fields when system_load is absent", () => {
     const absent = systemLoadLines(status({
       hot: { cadence_seconds: 30, fixture_count: 8, last_duration_ms: 3800 },

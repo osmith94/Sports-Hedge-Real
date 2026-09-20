@@ -132,6 +132,7 @@ from sports_hedge.paper.unwind import (
     close_fills_from_decision,
     position_from_trade,
 )
+from sports_hedge.paper.unwind.adapter import allocated_close_shares
 from sports_hedge.paper.unwind.models import (
     CapitalScarcityInput,
     RemainingLockSource,
@@ -1198,8 +1199,12 @@ class PaperOperationsService:
             occurred_at=when,
         )
         if self.ledger is not None:
-            with self.ledger.exclusive():
-                committed = commit()
+            try:
+                with self.ledger.transaction():
+                    committed = commit()
+            except Exception:
+                self.ledger.reload_journal()
+                raise
         else:
             committed = commit()
         return self._result_from_existing_trade(committed, when)
@@ -2107,23 +2112,24 @@ class PaperOperationsService:
         }
         releases: list[UnwindReleaseLeg] = []
         fx_rates: dict[tuple, Decimal] = {}
-        for close_leg, open_leg in zip(decision.close_plan.legs, position.legs, strict=True):
-            if not open_leg.fill_id:
-                raise PaperOperationsError("missing_lock_identity")
-            rate = self._lock_fx_rate(open_leg.venue, open_leg.native_currency, fx_map)
-            fx_rates[(close_leg.venue, close_leg.native_currency.upper())] = rate
-            releases.append(
-                UnwindReleaseLeg(
-                    venue=close_leg.venue,
-                    native_currency=close_leg.native_currency,
-                    lock_id=open_leg.fill_id,
-                    amount_native=open_leg.filled_size,
-                    realised_pnl_native=close_leg.native_close_pnl,
-                    fee_native=close_leg.closing_fee,
-                    fx_rate_gbp_per_unit=rate,
-                )
-            )
         try:
+            for close_leg, open_leg in zip(decision.close_plan.legs, position.legs, strict=True):
+                rate = self._lock_fx_rate(open_leg.venue, open_leg.native_currency, fx_map)
+                fx_rates[(close_leg.venue, close_leg.native_currency.upper())] = rate
+                for share, _quantity, _proceeds, fee, native_pnl, _gbp_pnl in allocated_close_shares(
+                    open_leg, close_leg
+                ):
+                    releases.append(
+                        UnwindReleaseLeg(
+                            venue=close_leg.venue,
+                            native_currency=close_leg.native_currency,
+                            lock_id=share.fill_id,
+                            amount_native=share.filled_size,
+                            realised_pnl_native=native_pnl,
+                            fee_native=fee,
+                            fx_rate_gbp_per_unit=rate,
+                        )
+                    )
             close_fills = close_fills_from_decision(position, decision, fx_rates=fx_rates)
         except UnwindIdentityError as exc:
             raise PaperOperationsError(str(exc)) from exc

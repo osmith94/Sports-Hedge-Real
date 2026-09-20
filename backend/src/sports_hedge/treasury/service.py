@@ -1197,7 +1197,16 @@ class PaperTreasuryService(SerializedLedgerBound):
         locked = Decimal(pool["locked_capital"])
         available = Decimal(pool["available_cash"])
         if amount > locked:
-            raise PaperTreasuryError("release_exceeds_lock")
+            # Sequential native-lock releases can exceed stored pool locked
+            # by Decimal representation dust (sum(locks) == pool, but
+            # pool - a - b < c). Clamp that dust so every lock can still
+            # be released exactly once.
+            dust = amount - locked
+            if dust <= Decimal("1e-18"):
+                into_available -= dust
+                amount = locked
+            else:
+                raise PaperTreasuryError("release_exceeds_lock")
         new_locked = locked - amount
         new_available = available + into_available
         if new_available < 0 or new_locked < 0:

@@ -129,6 +129,20 @@ class ActiveTradeRegistry:
             dues = [member.next_due_at for member in self._members.values() if member.next_due_at]
             return min(dues) if dues else None
 
+    def cadence_counts(self, now: datetime) -> tuple[int, int, int]:
+        """Return (open, due, overdue) membership counts at ``now``."""
+
+        with self._lock:
+            open_n = len(self._members)
+            due_n = 0
+            overdue_n = 0
+            for member in self._members.values():
+                if member.next_due_at is None or now >= member.next_due_at:
+                    due_n += 1
+                    if member.next_due_at is not None and now > member.next_due_at:
+                        overdue_n += 1
+            return open_n, due_n, overdue_n
+
     def clear(self) -> None:
         with self._lock:
             self._members.clear()

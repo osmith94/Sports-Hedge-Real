@@ -66,6 +66,7 @@ class ActiveTradeLoad(BaseModel):
 
     open_trades: int = Field(default=0, ge=0)
     due: int = Field(default=0, ge=0)
+    overdue: int = Field(default=0, ge=0)
     last_cycle_ms: int | None = Field(default=None, ge=0)
     cadence_seconds: int = Field(default=0, ge=0)
 
@@ -146,7 +147,8 @@ def system_load_from_status(
     return SystemLoadSummary(
         active_trade=ActiveTradeLoad(
             open_trades=_count(_attr(active_trade, "fixture_count")),
-            due=_count(_attr(active_trade, "evaluated_count")),
+            due=_count(_attr(active_trade, "remaining")),
+            overdue=_count(_attr(active_trade, "not_evaluated_count")),
             last_cycle_ms=_optional_int(_attr(active_trade, "last_duration_ms")),
             cadence_seconds=_count(_attr(active_trade, "cadence_seconds")),
         ),

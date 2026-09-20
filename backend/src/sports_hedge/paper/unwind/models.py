@@ -172,6 +172,14 @@ class CapitalScarcityInput(BaseModel):
     opportunity_cost_gbp: Decimal | None = Field(default=None, ge=0)
 
 
+class OpenPaperFillShare(BaseModel):
+    """One underlying opening fill inside an aggregated same-market close leg."""
+
+    fill_id: str
+    filled_size: Decimal = Field(gt=0)
+    filled_price: Decimal = Field(gt=1)
+
+
 class OpenPaperLeg(BaseModel):
     """Identity required to find the economically correct reverse transaction."""
 
@@ -191,6 +199,7 @@ class OpenPaperLeg(BaseModel):
     settlement_fingerprint_key: str
     fill_kind: PaperLegFillKind = PaperLegFillKind.INTERNAL_SIMULATED
     fill_id: str | None = None
+    opening_fills: list[OpenPaperFillShare] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def require_identity(self) -> OpenPaperLeg:
@@ -207,6 +216,16 @@ class OpenPaperLeg(BaseModel):
                 raise ValueError("unknown_or_stale_leg_identity")
         if self.opening_action not in {MarketAction.BACK, MarketAction.BUY}:
             raise ValueError("opening_lay_not_supported")
+        if not self.opening_fills and self.fill_id:
+            self.opening_fills = [
+                OpenPaperFillShare(
+                    fill_id=self.fill_id,
+                    filled_size=self.filled_size,
+                    filled_price=self.filled_price,
+                )
+            ]
+        elif self.opening_fills and not self.fill_id:
+            self.fill_id = self.opening_fills[0].fill_id
         return self
 
 

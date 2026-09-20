@@ -595,6 +595,7 @@ export type UniverseLoad = {
 export type ActiveTradeLoad = {
   open_trades?: number;
   due?: number;
+  overdue?: number;
   last_cycle_ms?: number | null;
   cadence_seconds?: number;
 };

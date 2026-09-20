@@ -144,9 +144,11 @@ export function activeTradeCopy(
     return { label: "ACTIVE TRADE", detail: "in progress · exact-ID 5s" };
   }
   const open = lane.fixture_count ?? 0;
+  const overdue = lane.not_evaluated_count ?? 0;
+  const overdueBit = overdue > 0 ? ` · ${overdue} overdue` : "";
   return {
     label: "ACTIVE TRADE",
-    detail: `${open} open · exact-ID 5s · ${nextDueClock(lane.next_due_at, now)}`,
+    detail: `${open} open · exact-ID 5s${overdueBit} · ${nextDueClock(lane.next_due_at, now)}`,
   };
 }
 

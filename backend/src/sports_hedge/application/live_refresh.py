@@ -1035,7 +1035,7 @@ class LiveRefreshCoordinator:
                         "next_due_at": self._active_trades.next_due_at()
                         or self._next_active_trade_due,
                         "cadence_seconds": active_trade_cadence_seconds(resolved),
-                        "fixture_count": len(self._active_trades.members()),
+                        **self._active_trade_status_snapshot(now),
                     }
                 ),
             }
@@ -3691,10 +3691,10 @@ class LiveRefreshCoordinator:
                     "next_due_at": self._active_trades.next_due_at()
                     or self._next_active_trade_due,
                     "cadence_seconds": active_trade_cadence_seconds(),
-                    "fixture_count": len(self._active_trades.members()),
                     "worker_state": WORKER_RUNNING
                     if self._active_trade_in_progress
                     else self.status.active_trade.worker_state,
+                    **self._active_trade_status_snapshot(),
                 }
             )
             self.status = self.status.model_copy(
@@ -4016,6 +4016,7 @@ class LiveRefreshCoordinator:
                 await self._sleep_interruptible(2.0)
                 continue
             plan = self.plan_active_trade_tick()
+            snapshot = self._active_trade_status_snapshot(include_summary=True)
             with self._state_lock:
                 self.status = self.status.model_copy(
                     update={
@@ -4026,11 +4027,7 @@ class LiveRefreshCoordinator:
                                 "worker_state": WORKER_WAITING
                                 if plan.lane != ACTIVE_TRADE_LANE
                                 else WORKER_RUNNING,
-                                "fixture_count": len(self._active_trades.members()),
-                                "operator_summary": (
-                                    "ACTIVE TRADE · exact-ID 5s · "
-                                    f"{len(self._active_trades.members())} open"
-                                ),
+                                **snapshot,
                             }
                         )
                     }
@@ -4059,19 +4056,53 @@ class LiveRefreshCoordinator:
             return 0.05
         return max(0.05, (nxt - now).total_seconds())
 
+    def _active_trade_status_snapshot(
+        self,
+        now: datetime | None = None,
+        *,
+        include_summary: bool = False,
+    ) -> dict[str, Any]:
+        """Open / due / overdue membership for truthful ACTIVE TRADE copy."""
+
+        when = now or self.now()
+        open_n, due_n, overdue_n = self._active_trades.cadence_counts(when)
+        snapshot: dict[str, Any] = {
+            "fixture_count": open_n,
+            "remaining": due_n,
+            "not_evaluated_count": overdue_n,
+        }
+        if include_summary and not self._operator_scanner_stopped:
+            summary = f"ACTIVE TRADE · exact-ID 5s · {open_n} open"
+            if overdue_n:
+                summary = f"{summary} · {overdue_n} overdue"
+            snapshot["operator_summary"] = summary
+        return snapshot
+
     async def _run_active_trade_tick(self, plan: DualCadencePlan) -> None:
-        """Exact-ID refresh + optional top-up. Never list_events/list_markets."""
+        """Exact-ID refresh + optional top-up. Never list_events/list_markets.
+
+        Due trades are priced concurrently. The shared provider-access layer
+        remains the 4/4/8 concurrency authority. Top-up persistence stays
+        serialized. Each trade's next_due_at is its own pricing completion + 5s.
+        """
 
         from sports_hedge.api.paper import get_paper_operations_service
         from sports_hedge.api.priority_alerts import get_priority_alert_service
         from sports_hedge.api.watchlist import get_watchlist_service
+        from sports_hedge.application.price_engine import (
+            PriceEngineRuntimeItem,
+            PriceEngineSliceResult,
+        )
+        from sports_hedge.application.provider_access import (
+            PRICE_ENGINE_ACTIVE_TRADE_LANE,
+        )
 
         started = self.now()
         cadence = active_trade_cadence_seconds()
         operations = get_paper_operations_service(
             get_watchlist_service(), get_priority_alert_service()
         )
-        priced = 0
+        jobs: list[Any] = []
         for trade_id in plan.identity_scope or []:
             trade = None
             if operations.trades is not None:
@@ -4079,40 +4110,59 @@ class LiveRefreshCoordinator:
             if trade is None or trade.state is not PaperTradeState.OPEN:
                 self._active_trades.drop(trade_id)
                 continue
-            identity = identity_from_open_trade(trade)
-            engine = self._price_engine
-            if engine is not None and identity is not None:
-                from sports_hedge.application.price_engine import (
-                    PriceEngineRuntimeItem,
-                    PriceEngineSliceResult,
-                )
-                from sports_hedge.application.provider_access import (
-                    PRICE_ENGINE_ACTIVE_TRADE_LANE,
-                )
+            jobs.append(trade)
 
+        engine = self._price_engine
+
+        async def _price_one(trade: Any) -> tuple[Any, datetime]:
+            priced_at = self.now()
+            identity = identity_from_open_trade(trade)
+            if engine is not None and identity is not None:
                 slice_result = PriceEngineSliceResult()
                 runtime = PriceEngineRuntimeItem(identity=identity)
                 await engine._price_item(
                     runtime, slice_result, lane=PRICE_ENGINE_ACTIVE_TRADE_LANE
                 )
-                await engine.drain_item_captures()
-            operations.maybe_top_up_open_trade(trade, now=self.now())
+                priced_at = self.now()
+            return trade, priced_at
+
+        priced_results = (
+            await asyncio.gather(*[_price_one(trade) for trade in jobs], return_exceptions=True)
+            if jobs
+            else []
+        )
+        if engine is not None:
+            drain = getattr(engine, "drain_item_captures", None)
+            if callable(drain):
+                await drain()
+
+        priced = 0
+        for item in priced_results:
+            if isinstance(item, BaseException):
+                continue
+            trade, priced_at = item
+            try:
+                operations.maybe_top_up_open_trade(trade, now=self.now())
+            except Exception:
+                pass
             loaded = trade
             if operations.trades is not None:
                 loaded = operations.trades.get(trade.trade_id) or trade
             self._active_trades.mark_priced(
                 loaded.trade_id,
-                now=self.now(),
+                now=priced_at,
                 cadence_seconds=cadence,
                 phase=loaded.active_trade_phase or PaperActiveTradePhase.ACCUMULATING,
                 list_events_calls=0,
                 list_markets_calls=0,
             )
             priced += 1
-            del identity
         completed = self.now()
         duration_ms = int((completed - started).total_seconds() * 1000)
-        self._next_active_trade_due = completed + timedelta(seconds=cadence)
+        self._next_active_trade_due = self._active_trades.next_due_at() or (
+            completed + timedelta(seconds=cadence)
+        )
+        snapshot = self._active_trade_status_snapshot(completed, include_summary=True)
         with self._state_lock:
             self.status = self.status.model_copy(
                 update={
@@ -4124,13 +4174,10 @@ class LiveRefreshCoordinator:
                             "next_due_at": self._next_active_trade_due,
                             "cadence_seconds": cadence,
                             "evaluated_count": priced,
-                            "fixture_count": len(self._active_trades.members()),
                             "cycle_in_progress": False,
                             "worker_state": WORKER_WAITING,
                             "last_plan_reason": plan.reason,
-                            "operator_summary": (
-                                f"ACTIVE TRADE · exact-ID 5s · {len(self._active_trades.members())} open"
-                            ),
+                            **snapshot,
                         }
                     )
                 }

@@ -12,6 +12,8 @@ from sports_hedge.paper.trades import (
     paper_close_fill_id,
 )
 from sports_hedge.paper.unwind.models import (
+    CloseLegPlan,
+    OpenPaperFillShare,
     OpenPaperLeg,
     OpenPaperPosition,
     RemainingLockSource,
@@ -85,6 +87,17 @@ def open_leg_from_trade_leg(trade: PaperTrade, leg) -> OpenPaperLeg:
         settlement_fingerprint_key=fingerprint,
         fill_kind=leg.fill_kind,
         fill_id=leg.fill_id,
+        opening_fills=(
+            [
+                OpenPaperFillShare(
+                    fill_id=leg.fill_id,
+                    filled_size=leg.filled_stake,
+                    filled_price=price,
+                )
+            ]
+            if leg.fill_id
+            else []
+        ),
     )
 
 
@@ -93,7 +106,7 @@ def _aggregate_same_market_close_legs(legs: list[OpenPaperLeg]) -> list[OpenPape
 
     Multiple top-up tranches on the same Matchbook/Kalshi identity must consume
     executable close depth once, not independently reuse the full book.
-    Settlement still iterates every fill_id on the trade itself.
+    The aggregated opening price preserves Σ(size_i * price_i).
     """
 
     grouped: dict[tuple, OpenPaperLeg] = {}
@@ -112,10 +125,85 @@ def _aggregate_same_market_close_legs(legs: list[OpenPaperLeg]) -> list[OpenPape
             grouped[key] = leg
             order.append(key)
             continue
+        total_size = existing.filled_size + leg.filled_size
+        total_payout = (existing.filled_size * existing.filled_price) + (
+            leg.filled_size * leg.filled_price
+        )
+        weighted_price = total_payout / total_size
         grouped[key] = existing.model_copy(
-            update={"filled_size": existing.filled_size + leg.filled_size}
+            update={
+                "filled_size": total_size,
+                "filled_price": weighted_price,
+                "opening_fills": _opening_shares(existing) + _opening_shares(leg),
+                "fill_id": existing.fill_id or leg.fill_id,
+            }
         )
     return [grouped[key] for key in order]
+
+
+def _opening_shares(leg: OpenPaperLeg) -> list[OpenPaperFillShare]:
+    if leg.opening_fills:
+        return list(leg.opening_fills)
+    if leg.fill_id:
+        return [
+            OpenPaperFillShare(
+                fill_id=leg.fill_id,
+                filled_size=leg.filled_size,
+                filled_price=leg.filled_price,
+            )
+        ]
+    return []
+
+
+def _split_total(total: Decimal, weights: list[Decimal]) -> list[Decimal]:
+    if not weights:
+        return []
+    whole = sum(weights, Decimal("0"))
+    if whole <= 0:
+        raise UnwindIdentityError("aggregate_open_basis_zero")
+    parts: list[Decimal] = []
+    running = Decimal("0")
+    last = len(weights) - 1
+    for index, weight in enumerate(weights):
+        if index == last:
+            parts.append(total - running)
+            break
+        part = total * weight / whole
+        parts.append(part)
+        running += part
+    return parts
+
+
+def allocated_close_shares(
+    open_leg: OpenPaperLeg,
+    close_leg: CloseLegPlan,
+) -> list[tuple[OpenPaperFillShare, Decimal, Decimal, Decimal, Decimal, Decimal]]:
+    """Allocate one aggregate close across every underlying opening fill/lock."""
+
+    shares = _opening_shares(open_leg)
+    if not shares:
+        if not open_leg.fill_id:
+            raise UnwindIdentityError("missing_lock_identity")
+        shares = [
+            OpenPaperFillShare(
+                fill_id=open_leg.fill_id,
+                filled_size=open_leg.filled_size,
+                filled_price=open_leg.filled_price,
+            )
+        ]
+    weights = [share.filled_size * share.filled_price for share in shares]
+    proceeds = close_leg.proceeds if close_leg.proceeds else close_leg.matched_stake
+    quantities = _split_total(close_leg.filled_close_quantity, weights)
+    proceeds_parts = _split_total(proceeds, weights)
+    fee_parts = _split_total(close_leg.closing_fee, weights)
+    native_parts = _split_total(close_leg.native_close_pnl, weights)
+    gbp_parts = _split_total(close_leg.gbp_close_pnl, weights)
+    allocated = []
+    for share, quantity, proceeds_part, fee, native_pnl, gbp_pnl in zip(
+        shares, quantities, proceeds_parts, fee_parts, native_parts, gbp_parts, strict=True
+    ):
+        allocated.append((share, quantity, proceeds_part, fee, native_pnl, gbp_pnl))
+    return allocated
 
 
 def close_fills_from_decision(
@@ -130,33 +218,34 @@ def close_fills_from_decision(
         raise UnwindIdentityError("unwind_leg_mismatch")
     fills: list[PaperCloseFill] = []
     for close_leg, open_leg in zip(decision.close_plan.legs, position.legs, strict=True):
-        if not open_leg.fill_id:
-            raise UnwindIdentityError("missing_lock_identity")
         if not close_leg.executable:
             raise UnwindIdentityError("close_not_fully_executable")
         rate = fx_rates.get((close_leg.venue, close_leg.native_currency.upper()))
         if rate is None:
             raise UnwindIdentityError(f"missing_fx_rate:{close_leg.native_currency}")
-        fills.append(
-            PaperCloseFill(
-                fill_id=paper_close_fill_id(open_leg.fill_id),
-                opening_fill_id=open_leg.fill_id,
-                venue=close_leg.venue,
-                outcome=close_leg.canonical_outcome,
-                native_currency=close_leg.native_currency,
-                close_action=close_leg.close_action,
-                filled_close_quantity=close_leg.filled_close_quantity,
-                weighted_closing_price=close_leg.weighted_closing_price,
-                proceeds_native=close_leg.proceeds if close_leg.proceeds else close_leg.matched_stake,
-                closing_fee_native=close_leg.closing_fee,
-                native_close_pnl=close_leg.native_close_pnl,
-                gbp_close_pnl=close_leg.gbp_close_pnl,
-                fx_rate_gbp_per_unit=rate,
-                lock_id=open_leg.fill_id,
-                fee_snapshot_id=close_leg.fee_snapshot_id,
-                quote_age_ms=close_leg.quote_age_ms,
+        for share, quantity, proceeds, fee, native_pnl, gbp_pnl in allocated_close_shares(
+            open_leg, close_leg
+        ):
+            fills.append(
+                PaperCloseFill(
+                    fill_id=paper_close_fill_id(share.fill_id),
+                    opening_fill_id=share.fill_id,
+                    venue=close_leg.venue,
+                    outcome=close_leg.canonical_outcome,
+                    native_currency=close_leg.native_currency,
+                    close_action=close_leg.close_action,
+                    filled_close_quantity=quantity,
+                    weighted_closing_price=close_leg.weighted_closing_price,
+                    proceeds_native=proceeds,
+                    closing_fee_native=fee,
+                    native_close_pnl=native_pnl,
+                    gbp_close_pnl=gbp_pnl,
+                    fx_rate_gbp_per_unit=rate,
+                    lock_id=share.fill_id,
+                    fee_snapshot_id=close_leg.fee_snapshot_id,
+                    quote_age_ms=close_leg.quote_age_ms,
+                )
             )
-        )
     return fills
 
 

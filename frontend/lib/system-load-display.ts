@@ -17,6 +17,8 @@ export function systemLoadLines(
   const kalshi = load.kalshi ?? {};
   const universe = load.universe ?? {};
   const active = load.active_trade ?? {};
+  const overdue = asCount(active.overdue);
+  const overdueBit = overdue > 0 ? ` · ${overdue} overdue` : "";
   const uniProgress = `${asCount(universe.evaluated)}/${asCount(universe.total)} evaluated`;
   const uniBudget = formatBudget(
     universe.generation_work_used_s,
@@ -25,7 +27,7 @@ export function systemLoadLines(
   return [
     {
       key: "ACTIVE TRADE",
-      detail: `${asCount(active.open_trades)} open · ${asCount(active.due)} due · cadence ${formatCadence(active.cadence_seconds, "5s")}`,
+      detail: `${asCount(active.open_trades)} open · ${asCount(active.due)} due${overdueBit} · cadence ${formatCadence(active.cadence_seconds, "5s")}`,
     },
     {
       key: "HOT pricing",
