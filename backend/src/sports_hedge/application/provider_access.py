@@ -43,17 +43,21 @@ HEALTH_CAPACITY_SATURATED = "provider_capacity_saturated"
 
 DEFAULT_STARVATION_HOT_GRANTS = 8
 PRICE_ENGINE_BACKGROUND_LANE = "background"
+PRICE_ENGINE_ACTIVE_TRADE_LANE = "active_trade"
 
 
 class ProviderPriority(IntEnum):
-    HOT = 0
-    UNIVERSE = 1
-    MANUAL = 1
-    BACKGROUND = 2
+    ACTIVE_TRADE = 0
+    HOT = 1
+    UNIVERSE = 2
+    MANUAL = 2
+    BACKGROUND = 3
 
 
 def priority_for_lane(lane: ScanLane | str | None) -> ProviderPriority:
     text = str(lane or "").strip().casefold()
+    if text in {PRICE_ENGINE_ACTIVE_TRADE_LANE, "active-trade"}:
+        return ProviderPriority.ACTIVE_TRADE
     if text == ScanLane.HOT.value:
         return ProviderPriority.HOT
     if text == PRICE_ENGINE_BACKGROUND_LANE:
@@ -187,6 +191,7 @@ class ProviderAccessLayer:
 
     def snapshot(self) -> ProviderAccessSnapshot:
         waiting_by_lane = {
+            "active_trade": {venue.value: 0 for venue in self._limits},
             "hot": {venue.value: 0 for venue in self._limits},
             "universe": {venue.value: 0 for venue in self._limits},
             "background": {venue.value: 0 for venue in self._limits},
@@ -196,7 +201,9 @@ class ProviderAccessLayer:
             pending = [item for item in waiters if not item.granted and not item.cancelled]
             waiting[venue.value] = len(pending)
             for waiter in pending:
-                if waiter.priority is ProviderPriority.HOT:
+                if waiter.priority is ProviderPriority.ACTIVE_TRADE:
+                    lane = "active_trade"
+                elif waiter.priority is ProviderPriority.HOT:
                     lane = "hot"
                 elif waiter.priority is ProviderPriority.BACKGROUND:
                     lane = "background"
@@ -284,9 +291,14 @@ class ProviderAccessLayer:
         self._seq += 1
         priority = priority_for_lane(lane)
         reason = HEALTH_WAITING
-        if priority is not ProviderPriority.HOT and self._hot_ahead(venue):
+        if (
+            priority not in {ProviderPriority.HOT, ProviderPriority.ACTIVE_TRADE}
+            and self._hot_ahead(venue)
+        ):
             reason = HEALTH_DEFERRED
-        if priority is ProviderPriority.HOT:
+        if priority is ProviderPriority.ACTIVE_TRADE:
+            waiter_lane = PRICE_ENGINE_ACTIVE_TRADE_LANE
+        elif priority is ProviderPriority.HOT:
             waiter_lane = ScanLane.HOT.value
         elif priority is ProviderPriority.BACKGROUND:
             waiter_lane = PRICE_ENGINE_BACKGROUND_LANE
@@ -373,10 +385,7 @@ class ProviderAccessLayer:
                 waiter.event.set()
                 self._in_use[venue] += 1
                 self._peak_inflight[venue] = max(self._peak_inflight[venue], self._in_use[venue])
-                if waiter.priority is ProviderPriority.HOT:
-                    self._hot_grants_since_universe[venue] += 1
-                else:
-                    self._hot_grants_since_universe[venue] = 0
+                self._count_high_priority_grant(venue, waiter.priority)
                 lease = ProviderLease(
                     _layer=self,
                     _venue=venue,
@@ -406,9 +415,17 @@ class ProviderAccessLayer:
 
     def _hot_ahead(self, venue: VenueName) -> bool:
         return any(
-            item.priority is ProviderPriority.HOT and not item.granted and not item.cancelled
+            item.priority in {ProviderPriority.HOT, ProviderPriority.ACTIVE_TRADE}
+            and not item.granted
+            and not item.cancelled
             for item in self._waiters[venue]
         )
+
+    def _count_high_priority_grant(self, venue: VenueName, priority: ProviderPriority) -> None:
+        if priority in {ProviderPriority.HOT, ProviderPriority.ACTIVE_TRADE}:
+            self._hot_grants_since_universe[venue] += 1
+        else:
+            self._hot_grants_since_universe[venue] = 0
 
     def available_slots(self, venue: VenueName) -> int:
         if venue not in self._limits:
@@ -451,10 +468,7 @@ class ProviderAccessLayer:
             nxt.granted = True
             self._in_use[venue] += 1
             self._peak_inflight[venue] = max(self._peak_inflight[venue], self._in_use[venue])
-            if nxt.priority is ProviderPriority.HOT:
-                self._hot_grants_since_universe[venue] += 1
-            else:
-                self._hot_grants_since_universe[venue] = 0
+            self._count_high_priority_grant(venue, nxt.priority)
             nxt.event.set()
 
 

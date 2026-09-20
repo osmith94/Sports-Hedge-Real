@@ -53,9 +53,10 @@ describe("dual cadence operator copy", () => {
   it("renders Fast scan and Full sweep as distinct lines", () => {
     const now = Date.parse("2026-09-14T12:00:12Z");
     const lines = dualScanStatusLines(status(), now);
-    assert.equal(lines.length, 2);
-    assert.match(lines[0], /Fast scan/);
-    assert.match(lines[1], /Full sweep/);
+    assert.equal(lines.length, 3);
+    assert.match(lines[0], /ACTIVE TRADE/);
+    assert.match(lines[1], /Fast scan/);
+    assert.match(lines[2], /Full sweep/);
     assert.doesNotMatch(lines.join(" "), /^Last scan /);
     assert.match(fastScanCopy(status(), now).detail, /completed 12s ago/);
     assert.match(fastScanCopy(status(), now).detail, /next due in 6s/);
@@ -79,8 +80,9 @@ describe("dual cadence operator copy", () => {
       },
     });
     const backgroundLines = dualScanStatusLines(withBackground, now);
-    assert.equal(backgroundLines.length, 3);
-    assert.match(backgroundLines[2], /Background price engine/);
+    assert.equal(backgroundLines.length, 4);
+    assert.match(backgroundLines[0], /ACTIVE TRADE/);
+    assert.match(backgroundLines[3], /Background price engine/);
     assert.match(backgroundLines[2], /12 ACTIVE/);
     assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /4 evaluated/);
     const persistFailed = status({
@@ -286,17 +288,19 @@ describe("dual cadence operator copy", () => {
     assert.match(fullSweepCopy(waiting).detail, /72 evaluated/);
   });
 
-  it("makes operator-stopped status explicit for Fast/Full/Background", () => {
+  it("makes operator-stopped status explicit for ACTIVE TRADE/Fast/Full/Background", () => {
     const lines = dualScanStatusLines(
       status({
         scanner_stopped: true,
         background: { cadence_seconds: 180, cycle_timeout_seconds: null },
       }),
     );
-    assert.equal(lines.length, 3);
+    assert.equal(lines.length, 4);
+    assert.match(lines[0], /ACTIVE TRADE/);
     assert.match(lines[0], /stopped by operator/);
     assert.match(lines[1], /stopped by operator/);
     assert.match(lines[2], /stopped by operator/);
+    assert.match(lines[3], /stopped by operator/);
   });
 
   it("routes primary Run scan to HOT and labels full discovery as advanced", () => {
@@ -314,7 +318,15 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /Update/);
     assert.match(scan, /Stop scanner/);
     assert.match(scan, /Resume scanner/);
-    assert.match(scan, /saveOperatorScannerSettings/);
+    assert.match(scan, /DEFAULT_MIN_NET_ARB_PERCENT = "1.00"/);
+    assert.match(scan, /DEFAULT_MAX_RISK = "60"/);
+    assert.match(scan, /DEFAULT_HOT_CADENCE_SECONDS = 30/);
+    assert.match(scan, /DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP = "1000"/);
+    assert.match(scan, /useState\(DEFAULT_MIN_NET_ARB_PERCENT\)/);
+    assert.match(scan, /useState\(DEFAULT_MAX_RISK\)/);
+    assert.match(scan, /useState\(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP\)/);
+    assert.match(scan, /max_allocated_per_trade_gbp: allocated/);
+    assert.match(scan, /ACTIVE TRADE\/HOT\/UNIVERSE\/BACKGROUND paused/);
     assert.match(scan, /stopPaperScanner/);
     assert.match(scan, /resumePaperScanner/);
     assert.doesNotMatch(scan, /Refresh interval/);

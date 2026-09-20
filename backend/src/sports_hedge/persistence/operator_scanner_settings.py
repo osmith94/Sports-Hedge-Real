@@ -5,12 +5,18 @@ One singleton SQLite row is the operator override for:
 - Min Net Arb / ``minimum_net_edge``
 - Max Risk / ``maximum_execution_risk`` (scan/watchlist threshold only)
 - HOT cadence seconds
+- Max allocated per trade (GBP) — allocator per-opportunity cap authority
 - operator Stop / Resume pause flag
 
 Environment/config values remain the defaults when no operator settings
 override exists. This store never mutates ``.env``. Update, Stop and Resume
 are persistence/control seams only: they must not scan, discover, or call
 providers.
+
+Issue #371 may add ``background_cadence_seconds`` (default 90s, 60–600s) to
+the same singleton row. This module never owns that authority: schema changes
+are additive ALTER TABLE only, and upserts write only this module's columns so
+a later BACKGROUND-cadence column/migration is preserved on compose.
 
 Backend-restart semantics (safety-first): a persisted operator Stop remains
 stopped across process restart until an explicit Resume. Catalogue, fixture
@@ -28,7 +34,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -38,8 +44,23 @@ LOGGER = logging.getLogger(__name__)
 
 HOT_CADENCE_MIN_SECONDS = 15
 HOT_CADENCE_MAX_SECONDS = 60
+MAX_ALLOCATED_PER_TRADE_MIN_GBP = Decimal("1")
+MAX_ALLOCATED_PER_TRADE_MAX_GBP = Decimal("1000000")
+DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP = Decimal("1000")
 OPERATOR_SCANNER_RESTART_SEMANTICS = "remain_stopped_until_resume"
 SCANNER_STOPPED_BY_OPERATOR = "scanner_stopped_by_operator"
+
+# Columns this module writes. Any other column on the singleton row — including
+# a future #371 ``background_cadence_seconds`` — is preserved on UPDATE.
+_OPERATOR_SETTINGS_WRITE_COLUMNS = (
+    "min_net_edge",
+    "max_execution_risk",
+    "hot_cadence_seconds",
+    "max_allocated_per_trade_gbp",
+    "scanner_stopped",
+    "source",
+    "updated_at",
+)
 
 
 class OperatorScannerSettings(BaseModel):
@@ -48,6 +69,9 @@ class OperatorScannerSettings(BaseModel):
     min_net_edge: Decimal = Field(ge=0, lt=1)
     max_execution_risk: int = Field(ge=0, le=100)
     hot_cadence_seconds: int = Field(ge=HOT_CADENCE_MIN_SECONDS, le=HOT_CADENCE_MAX_SECONDS)
+    max_allocated_per_trade_gbp: Decimal = Field(
+        ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP, le=MAX_ALLOCATED_PER_TRADE_MAX_GBP
+    )
     scanner_stopped: bool = False
     source: Literal["operator", "env_default"] = "env_default"
     updated_at: datetime | None = None
@@ -58,10 +82,31 @@ class OperatorScannerSettingsUpdate(BaseModel):
     min_net_edge: Decimal = Field(ge=0, lt=1)
     max_execution_risk: int = Field(ge=0, le=100)
     hot_cadence_seconds: int = Field(ge=HOT_CADENCE_MIN_SECONDS, le=HOT_CADENCE_MAX_SECONDS)
+    max_allocated_per_trade_gbp: Decimal | None = Field(
+        default=None,
+        ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
+        le=MAX_ALLOCATED_PER_TRADE_MAX_GBP,
+    )
 
 
 def clamp_hot_cadence_seconds(value: int) -> int:
     return min(HOT_CADENCE_MAX_SECONDS, max(HOT_CADENCE_MIN_SECONDS, int(value)))
+
+
+def clamp_max_allocated_per_trade_gbp(value: Decimal | float | int | str) -> Decimal:
+    amount = Decimal(str(value))
+    if amount < MAX_ALLOCATED_PER_TRADE_MIN_GBP:
+        return MAX_ALLOCATED_PER_TRADE_MIN_GBP
+    if amount > MAX_ALLOCATED_PER_TRADE_MAX_GBP:
+        return MAX_ALLOCATED_PER_TRADE_MAX_GBP
+    return amount
+
+
+def _env_max_allocated_per_trade_gbp(settings: Settings) -> Decimal:
+    configured = settings.allocation_per_opportunity_limit_gbp
+    if configured is None:
+        configured = settings.max_allocated_per_trade_gbp
+    return clamp_max_allocated_per_trade_gbp(configured)
 
 
 def env_operator_scanner_settings(
@@ -77,6 +122,7 @@ def env_operator_scanner_settings(
         hot_cadence_seconds=clamp_hot_cadence_seconds(
             resolved.paper_live_refresh_hot_interval_seconds
         ),
+        max_allocated_per_trade_gbp=_env_max_allocated_per_trade_gbp(resolved),
         scanner_stopped=scanner_stopped,
         source="env_default",
         updated_at=updated_at,
@@ -148,13 +194,21 @@ class SqliteOperatorScannerSettingsStore:
             );
             """
         )
+        existing = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(operator_scanner_settings)").fetchall()
+        }
+        if "max_allocated_per_trade_gbp" not in existing:
+            connection.execute(
+                "ALTER TABLE operator_scanner_settings "
+                "ADD COLUMN max_allocated_per_trade_gbp TEXT"
+            )
 
     def load(self) -> OperatorScannerSettings | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT min_net_edge, max_execution_risk, hot_cadence_seconds,
-                       scanner_stopped, source, updated_at
+                SELECT *
                 FROM operator_scanner_settings
                 WHERE id = 1
                 """
@@ -169,16 +223,25 @@ class SqliteOperatorScannerSettingsStore:
         min_net_edge: Decimal,
         max_execution_risk: int,
         hot_cadence_seconds: int,
+        max_allocated_per_trade_gbp: Decimal | None = None,
         scanner_stopped: bool | None = None,
     ) -> OperatorScannerSettings:
         current = self.load()
         stopped = current.scanner_stopped if current is not None and scanner_stopped is None else bool(
             scanner_stopped if scanner_stopped is not None else False
         )
+        if max_allocated_per_trade_gbp is None:
+            if current is not None:
+                allocated = current.max_allocated_per_trade_gbp
+            else:
+                allocated = _env_max_allocated_per_trade_gbp(get_settings())
+        else:
+            allocated = clamp_max_allocated_per_trade_gbp(max_allocated_per_trade_gbp)
         payload = OperatorScannerSettings(
             min_net_edge=min_net_edge,
             max_execution_risk=int(max_execution_risk),
             hot_cadence_seconds=clamp_hot_cadence_seconds(hot_cadence_seconds),
+            max_allocated_per_trade_gbp=allocated,
             scanner_stopped=stopped,
             source="operator",
             updated_at=datetime.now(UTC),
@@ -219,29 +282,39 @@ class SqliteOperatorScannerSettingsStore:
     def _upsert(self, payload: OperatorScannerSettings) -> None:
         now = (payload.updated_at or datetime.now(UTC)).isoformat()
         with self._connect() as connection:
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(operator_scanner_settings)"
+                ).fetchall()
+            }
+            write_columns = [
+                name for name in _OPERATOR_SETTINGS_WRITE_COLUMNS if name in columns
+            ]
+            values: dict[str, object] = {
+                "min_net_edge": str(payload.min_net_edge),
+                "max_execution_risk": int(payload.max_execution_risk),
+                "hot_cadence_seconds": int(payload.hot_cadence_seconds),
+                "max_allocated_per_trade_gbp": str(payload.max_allocated_per_trade_gbp),
+                "scanner_stopped": 1 if payload.scanner_stopped else 0,
+                "source": payload.source,
+                "updated_at": now,
+            }
+            placeholders = ", ".join("?" for _ in write_columns)
+            col_sql = ", ".join(write_columns)
+            update_sql = ", ".join(
+                f"{name} = excluded.{name}" for name in write_columns
+            )
             connection.execute(
-                """
+                f"""
                 INSERT INTO operator_scanner_settings (
-                    id, min_net_edge, max_execution_risk, hot_cadence_seconds,
-                    scanner_stopped, source, updated_at
+                    id, {col_sql}
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?)
+                VALUES (1, {placeholders})
                 ON CONFLICT(id) DO UPDATE SET
-                    min_net_edge = excluded.min_net_edge,
-                    max_execution_risk = excluded.max_execution_risk,
-                    hot_cadence_seconds = excluded.hot_cadence_seconds,
-                    scanner_stopped = excluded.scanner_stopped,
-                    source = excluded.source,
-                    updated_at = excluded.updated_at
+                    {update_sql}
                 """,
-                (
-                    str(payload.min_net_edge),
-                    int(payload.max_execution_risk),
-                    int(payload.hot_cadence_seconds),
-                    1 if payload.scanner_stopped else 0,
-                    payload.source,
-                    now,
-                ),
+                tuple(values[name] for name in write_columns),
             )
 
     def close(self) -> None:
@@ -335,6 +408,16 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         )
         source = "env_default"
     try:
+        raw_allocated = _row_optional(row, "max_allocated_per_trade_gbp")
+        if raw_allocated is None or str(raw_allocated).strip() == "":
+            max_allocated_per_trade_gbp = _env_max_allocated_per_trade_gbp(get_settings())
+        else:
+            max_allocated_per_trade_gbp = clamp_max_allocated_per_trade_gbp(raw_allocated)
+    except (InvalidOperation, ArithmeticError, TypeError, ValueError):
+        LOGGER.warning("malformed operator scanner max_allocated_per_trade_gbp; using env default")
+        max_allocated_per_trade_gbp = _env_max_allocated_per_trade_gbp(get_settings())
+        source = "env_default"
+    try:
         updated = datetime.fromisoformat(str(row["updated_at"]))
     except ValueError:
         updated = datetime.now(UTC)
@@ -343,8 +426,18 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         min_net_edge=min_net_edge,
         max_execution_risk=max_execution_risk,
         hot_cadence_seconds=hot_cadence_seconds,
+        max_allocated_per_trade_gbp=max_allocated_per_trade_gbp,
         scanner_stopped=bool(int(row["scanner_stopped"] or 0)),
         source=source,
         updated_at=updated,
         restart_semantics=OPERATOR_SCANNER_RESTART_SEMANTICS,
     )
+
+
+def _row_optional(row: sqlite3.Row, key: str) -> Any:
+    try:
+        if key not in row.keys():
+            return None
+        return row[key]
+    except Exception:
+        return None

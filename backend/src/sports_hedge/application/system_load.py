@@ -17,7 +17,7 @@ from sports_hedge.domain.models import VenueName
 
 _MATCHBOOK = VenueName.MATCHBOOK.value
 _KALSHI = VenueName.KALSHI.value
-SYSTEM_LOAD_JSON_BUDGET_BYTES = 768
+SYSTEM_LOAD_JSON_BUDGET_BYTES = 1024
 
 
 class ProviderSlotLoad(BaseModel):
@@ -50,12 +50,32 @@ class UniverseLoad(BaseModel):
     remaining: int = Field(default=0, ge=0)
     generation_work_used_s: float | None = Field(default=None, ge=0)
     generation_budget_seconds: float | None = Field(default=None, ge=0)
+    cadence_seconds: int = Field(default=0, ge=0)
+
+
+class ActiveTradeLoad(BaseModel):
+    """ACTIVE TRADE exact-ID membership vs 5s cadence."""
+
+    open_trades: int = Field(default=0, ge=0)
+    due: int = Field(default=0, ge=0)
+    last_cycle_ms: int | None = Field(default=None, ge=0)
+    cadence_seconds: int = Field(default=0, ge=0)
+
+
+class BackgroundLoad(BaseModel):
+    """BACKGROUND pricing counters. Cadence authority remains #371 on compose."""
+
+    working_set: int = Field(default=0, ge=0)
+    due: int = Field(default=0, ge=0)
+    cadence_seconds: int = Field(default=0, ge=0)
 
 
 class SystemLoadSummary(BaseModel):
     """Tiny current-state load card. Display numbers only; not a health score."""
 
+    active_trade: ActiveTradeLoad = Field(default_factory=ActiveTradeLoad)
     hot: HotLoad = Field(default_factory=HotLoad)
+    background: BackgroundLoad = Field(default_factory=BackgroundLoad)
     matchbook: ProviderSlotLoad = Field(default_factory=ProviderSlotLoad)
     kalshi: ProviderSlotLoad = Field(default_factory=ProviderSlotLoad)
     universe: UniverseLoad = Field(default_factory=UniverseLoad)
@@ -87,11 +107,15 @@ def system_load_from_status(
 
     hot = getattr(status, "hot", None)
     universe = getattr(status, "universe", None)
+    active_trade = getattr(status, "active_trade", None)
+    background_lane = getattr(status, "background", None)
     engine = getattr(status, "price_engine", None)
     access = getattr(status, "provider_access", None)
     if isinstance(status, dict):
         hot = status.get("hot", hot)
         universe = status.get("universe", universe)
+        active_trade = status.get("active_trade", active_trade)
+        background_lane = status.get("background", background_lane)
         engine = status.get("price_engine", engine)
         access = status.get("provider_access", access)
     hot_engine = _attr(engine, "hot")
@@ -120,6 +144,12 @@ def system_load_from_status(
     else:
         remaining = _count(remaining)
     return SystemLoadSummary(
+        active_trade=ActiveTradeLoad(
+            open_trades=_count(_attr(active_trade, "fixture_count")),
+            due=_count(_attr(active_trade, "evaluated_count")),
+            last_cycle_ms=_optional_int(_attr(active_trade, "last_duration_ms")),
+            cadence_seconds=_count(_attr(active_trade, "cadence_seconds")),
+        ),
         hot=HotLoad(
             fixtures=_count(_attr(hot, "fixture_count")),
             working_set=hot_working,
@@ -131,6 +161,11 @@ def system_load_from_status(
             cadence_seconds=cadence_seconds,
             cadence_utilisation=cadence_utilisation(last_cycle_ms, cadence_seconds),
         ),
+        background=BackgroundLoad(
+            working_set=background_working,
+            due=_count(_attr(background_engine, "due")),
+            cadence_seconds=_count(_attr(background_lane, "cadence_seconds")),
+        ),
         matchbook=_provider_slot(access, _MATCHBOOK),
         kalshi=_provider_slot(access, _KALSHI),
         universe=UniverseLoad(
@@ -141,6 +176,7 @@ def system_load_from_status(
             generation_budget_seconds=_optional_float(
                 _attr(universe, "generation_budget_seconds")
             ),
+            cadence_seconds=_count(_attr(universe, "cadence_seconds")),
         ),
         catalogue_items=hot_working + background_working,
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 from uuid import uuid4
 
 from sports_hedge.accounting.dimensions import CapitalSource
@@ -16,6 +17,11 @@ from sports_hedge.accounting.paper_journal import (
     settlement_leg_postings,
 )
 from sports_hedge.accounting.strategy_books import DimensionedPosting
+from sports_hedge.application.active_trade_lane import (
+    active_trade_cadence_seconds,
+    get_active_trade_registry,
+    remaining_trade_room_gbp,
+)
 from sports_hedge.application.executable_liquidity import decision_net_edge
 from sports_hedge.application.ftts_alert_bridge import attach_ftts_ordinary_depth
 from sports_hedge.application.paper_scan import FillPlanMappingError, apply_allocation_to_fill_legs
@@ -98,7 +104,10 @@ from sports_hedge.paper.risk_snapshot import (
 from sports_hedge.paper.settlement import PaperSettlementError, compute_paper_settlement
 from sports_hedge.paper.simulator import PaperFillSimulator
 from sports_hedge.paper.trades import (
+    OPENING_TRANCHE_ID,
+    OPENING_TRANCHE_SEQUENCE,
     PAPER_UNWIND_SOURCE,
+    PaperActiveTradePhase,
     PaperLegFillKind,
     PaperSettlementRequest,
     PaperTrade,
@@ -108,7 +117,12 @@ from sports_hedge.paper.trades import (
     PaperTradeDetail,
     PaperTradeLeg,
     PaperTradeState,
+    PaperTradeTranche,
+    PaperTradeTrancheKind,
     paper_unwind_source_id,
+)
+from sports_hedge.persistence.operator_scanner_settings import (
+    effective_operator_scanner_settings,
 )
 from sports_hedge.paper.unwind import (
     PaperUnwindEngine,
@@ -263,13 +277,7 @@ class PaperOperationsService:
         opening_legs = [leg for leg in decision.fill_legs if leg.requested_stake > 0]
         current_watch = self.watchlist.repository.get(opportunity_id)
         existing_trade = self._get_trade_by_opportunity(opportunity_id)
-        recoverable_inflight = current_watch is not None and current_watch.status in {
-            OpportunityStatus.PARTIAL,
-            OpportunityStatus.FILLED,
-        }
-        if current_watch is not None and current_watch.status is OpportunityStatus.PAPER_FILLING:
-            recoverable_inflight = existing_trade is not None or opportunity_id in self._plans
-        if opening_legs and not recoverable_inflight:
+        if opening_legs:
             self._plans[opportunity_id] = self._plan_from_decision(
                 decision, opportunity_id, provenance
             )
@@ -1009,23 +1017,50 @@ class PaperOperationsService:
         )
         return self.trades.save(trade)
 
+    def _note_deferred_to_active_trade(self, trade: PaperTrade, when: datetime) -> PaperTrade:
+        """Scan/submit path defers top-ups to the ACTIVE TRADE 5s lane."""
+
+        if self.trades is None:
+            return trade
+        plan = self._plans.get(trade.opportunity_id)
+        current_edge = None
+        if plan is not None:
+            current_edge = decision_net_edge(plan.decision)
+        parts = [
+            "repeat observation deferred to ACTIVE TRADE; scan path does not top up",
+        ]
+        if current_edge is not None:
+            parts.append(f"current_net_edge={current_edge}")
+        trade.audit.append(
+            PaperTradeAuditEvent(
+                occurred_at=when,
+                event_type=PaperTradeAuditEventType.DEFERRED_TO_ACTIVE_TRADE,
+                detail="; ".join(parts),
+            )
+        )
+        return self.trades.save(trade)
+
     def _complete_or_repeat_existing(
         self,
         trade: PaperTrade,
         *,
         simulated_at: datetime,
         operator_note: str,
+        allow_top_up: bool = False,
     ) -> SimulatePaperFillResult | None:
         """Complete missing durable side effects for an existing trade, or repeat.
 
         PENDING/PARTIAL fall through so the opening fill path can finish them.
-        OPEN repairs missing locks/journals/watchlist FILLED, then repeats.
+        OPEN repairs missing locks/journals/watchlist FILLED, promotes ACTIVE TRADE,
+        and only tops up when ``allow_top_up`` (the 5s ACTIVE TRADE cycle).
         AWAITING_MANUAL_EXTERNAL without confirmation repeats; confirmation
         bypasses this method and continues the opening path.
         """
 
         if trade.state in {PaperTradeState.PENDING, PaperTradeState.PARTIAL}:
             return None
+        if trade.state is PaperTradeState.CLOSED:
+            return self._result_from_existing_trade(trade, simulated_at)
         if trade.state is PaperTradeState.OPEN:
             self._repair_opening_side_effects(trade, occurred_at=simulated_at)
             self._record_watchlist_fill(
@@ -1036,8 +1071,347 @@ class PaperOperationsService:
             )
             if not self._opening_side_effects_complete(trade):
                 raise PaperOperationsError("inconsistent_paper_state:incomplete_opening_side_effects")
+            self._ensure_opening_tranche(trade, simulated_at)
+            self._promote_active_trade(trade, simulated_at)
+            if allow_top_up:
+                topped = self._maybe_top_up_open_trade_locked(trade, now=simulated_at)
+                if topped is not None:
+                    return topped
+                loaded = self.trades.get(trade.trade_id) if self.trades is not None else trade
+                return self._result_from_existing_trade(loaded or trade, simulated_at)
+            noted = self._note_deferred_to_active_trade(trade, simulated_at)
+            return self._result_from_existing_trade(noted, simulated_at)
         noted = self._note_repeat_observation(trade, simulated_at)
         return self._result_from_existing_trade(noted, simulated_at)
+
+    def maybe_top_up_open_trade(
+        self,
+        trade: PaperTrade,
+        *,
+        now: datetime | None = None,
+        plan: PaperFillPlan | None = None,
+        config: PaperFillConfig | None = None,
+    ) -> SimulatePaperFillResult | None:
+        """ACTIVE TRADE complete-set top-up. Never creates naked paper exposure."""
+
+        with self._fill_persist_lock:
+            return self._maybe_top_up_open_trade_locked(
+                trade, now=now, plan=plan, config=config
+            )
+
+    def _maybe_top_up_open_trade_locked(
+        self,
+        trade: PaperTrade,
+        *,
+        now: datetime | None = None,
+        plan: PaperFillPlan | None = None,
+        config: PaperFillConfig | None = None,
+    ) -> SimulatePaperFillResult | None:
+        when = now or datetime.now(UTC)
+        if self.trades is not None:
+            loaded = self.trades.get(trade.trade_id)
+            if loaded is not None:
+                trade = loaded
+        if trade.state is not PaperTradeState.OPEN:
+            return None
+        self._ensure_opening_tranche(trade, when)
+        self._promote_active_trade(trade, when)
+        plan = plan or self._plans.get(trade.opportunity_id)
+        operator = effective_operator_scanner_settings(self.settings)
+        cap = operator.max_allocated_per_trade_gbp
+        trigger = operator.min_net_edge
+        if plan is None:
+            return None
+        current_net = plan.net_edge if plan.net_edge is not None else decision_net_edge(plan.decision)
+        if current_net is None or not qualifies_min_net_arb(current_net, trigger):
+            trade.active_trade_phase = PaperActiveTradePhase.EXIT_MANAGEMENT
+            self._append_trade_event_once(
+                trade,
+                event_type=PaperTradeAuditEventType.TOP_UP_BELOW_MIN_NET,
+                occurred_at=when,
+                detail=f"current_net={current_net} trigger={trigger}; exit-management handoff",
+            )
+            if self.trades is not None:
+                trade = self.trades.save(trade)
+            return self._result_from_existing_trade(trade, when)
+        room = remaining_trade_room_gbp(trade, cap)
+        if room <= 0:
+            trade.active_trade_phase = PaperActiveTradePhase.MONITORING_CAP_REACHED
+            self._append_trade_event_once(
+                trade,
+                event_type=PaperTradeAuditEventType.TOP_UP_CAP_REACHED,
+                occurred_at=when,
+                detail=f"locked={trade.capital_locked_gbp} cap={cap}; monitoring continues",
+            )
+            if self.trades is not None:
+                trade = self.trades.save(trade)
+            return self._result_from_existing_trade(trade, when)
+        incremental = self._size_incremental_tranche(trade, plan, remaining_gbp=room)
+        if incremental is None:
+            return self._result_from_existing_trade(trade, when)
+        mapped_legs, allocation, incremental_gbp = incremental
+        fill_config = config or PaperFillConfig(
+            assumed_latency_ms=0,
+            max_quote_age_ms=self.settings.paper_entry_max_quote_age_ms,
+            slippage_bps=Decimal(self.settings.max_slippage_bps),
+        )
+        fills = self.simulator.simulate(
+            mapped_legs,
+            fill_config,
+            opportunity_id=trade.opportunity_id,
+            now=when,
+        )
+        sequence = 1 + max((item.sequence for item in trade.tranches), default=0)
+        tranche_id = f"topup:{trade.trade_id}:{sequence}"
+        if any(item.tranche_id == tranche_id for item in trade.tranches):
+            return self._result_from_existing_trade(trade, when)
+        fills = _with_stable_fill_ids(
+            fills,
+            trade.opportunity_id,
+            plan.execution_modes,
+            simulate_external=True,
+            tranche_id=tranche_id,
+        )
+        if not _complete_opening_fills(fills, mapped_legs):
+            trade.audit.append(
+                PaperTradeAuditEvent(
+                    occurred_at=when,
+                    event_type=PaperTradeAuditEventType.TOP_UP_INCOMPLETE_ABORTED,
+                    detail="incomplete complete-set top-up; no capital locked",
+                )
+            )
+            if self.trades is not None:
+                trade = self.trades.save(trade)
+            return self._result_from_existing_trade(trade, when)
+        existing_gbp = trade.capital_locked_gbp or Decimal("0")
+        if existing_gbp + incremental_gbp > cap:
+            return self._result_from_existing_trade(trade, when)
+        commit = lambda: self._commit_top_up_tranche(
+            trade,
+            plan=plan,
+            fills=fills,
+            mapped_legs=mapped_legs,
+            allocation=allocation,
+            incremental_gbp=incremental_gbp,
+            tranche_id=tranche_id,
+            sequence=sequence,
+            occurred_at=when,
+        )
+        if self.ledger is not None:
+            with self.ledger.exclusive():
+                committed = commit()
+        else:
+            committed = commit()
+        return self._result_from_existing_trade(committed, when)
+
+    def _size_incremental_tranche(
+        self,
+        trade: PaperTrade,
+        plan: PaperFillPlan,
+        *,
+        remaining_gbp: Decimal,
+    ) -> tuple[list[PaperOpportunityLeg], Any, Decimal] | None:
+        policy = policy_from_settings(self.settings).model_copy(
+            update={"per_opportunity_limit_reporting": remaining_gbp}
+        )
+        balances = []
+        if self.ledger is not None:
+            balances = balances_from_treasury(self.ledger.treasury.snapshot())
+        siblings = [
+            item for item in self.list_active_trades() if item.trade_id != trade.trade_id
+        ]
+        existing = trade.capital_locked_gbp or Decimal("0")
+        if policy.portfolio_cap_reporting is not None:
+            policy = policy.model_copy(
+                update={
+                    "portfolio_cap_reporting": max(
+                        Decimal("0"), policy.portfolio_cap_reporting - existing
+                    )
+                }
+            )
+        request = request_from_paper_decision(
+            plan.decision,
+            policy=policy,
+            balances=balances,
+            open_positions=exposures_from_trades(siblings),
+        )
+        if request is None:
+            return None
+        allocation = allocate(request)
+        if not allocation.accepted:
+            return None
+        try:
+            mapped = apply_allocation_to_fill_legs(
+                [leg for leg in plan.legs if leg.requested_stake > 0],
+                allocation,
+            )
+        except FillPlanMappingError:
+            return None
+        fx = {item.currency.upper(): item.gbp_per_unit for item in plan.fx_snapshots}
+        fx.setdefault("GBP", Decimal("1"))
+        incremental_gbp = Decimal("0")
+        for leg in mapped:
+            rate = Decimal("1") if leg.currency.upper() == "GBP" else fx.get(leg.currency.upper(), Decimal("1"))
+            incremental_gbp += leg.requested_stake * rate
+        if incremental_gbp <= 0:
+            return None
+        if incremental_gbp > remaining_gbp:
+            scale = remaining_gbp / incremental_gbp
+            mapped = [
+                leg.model_copy(update={"requested_stake": (leg.requested_stake * scale)})
+                for leg in mapped
+            ]
+            incremental_gbp = remaining_gbp
+        try:
+            self._assert_spendable_treasury(mapped)
+        except PaperOperationsError:
+            return None
+        return mapped, allocation, incremental_gbp
+
+    def _commit_top_up_tranche(
+        self,
+        trade: PaperTrade,
+        *,
+        plan: PaperFillPlan,
+        fills: PaperOpportunityFills,
+        mapped_legs: list[PaperOpportunityLeg],
+        allocation: Any,
+        incremental_gbp: Decimal,
+        tranche_id: str,
+        sequence: int,
+        occurred_at: datetime,
+    ) -> PaperTrade:
+        if any(item.tranche_id == tranche_id for item in trade.tranches):
+            return trade
+        self._post_fills(
+            plan,
+            fills,
+            confirmation=None,
+            capital_source=CapitalSource.AUTO_POOL,
+            occurred_at=occurred_at,
+            provenance=trade.provenance,
+            simulate_external=True,
+        )
+        fill_by_key = {
+            (fill.venue, fill.outcome, fill.source_market_id, fill.source_runner_id): fill
+            for fill in fills.fills
+        }
+        new_legs: list[PaperTradeLeg] = []
+        native = dict(trade.capital_locked_native)
+        gbp = trade.capital_locked_gbp or Decimal("0")
+        fx = {item.currency: item for item in plan.fx_snapshots}
+        fill_ids: list[str] = []
+        for plan_leg in mapped_legs:
+            fill = fill_by_key.get(
+                (plan_leg.venue, plan_leg.outcome, plan_leg.source_market_id, plan_leg.source_runner_id)
+            )
+            if fill is None or fill.filled_stake <= 0:
+                continue
+            fill_ids.append(fill.fill_id)
+            new_legs.append(
+                PaperTradeLeg(
+                    venue=plan_leg.venue,
+                    outcome=plan_leg.outcome,
+                    currency=plan_leg.currency,
+                    requested_stake=plan_leg.requested_stake,
+                    filled_stake=fill.filled_stake,
+                    displayed_odds=plan_leg.displayed_odds,
+                    filled_odds=fill.weighted_odds or fill.displayed_odds,
+                    source_market_id=plan_leg.source_market_id,
+                    source_event_id=plan.canonical_event_id,
+                    source_runner_id=plan_leg.source_runner_id,
+                    source_contract_id=(
+                        plan_leg.source_runner_id if plan_leg.venue is VenueName.POLYMARKET else None
+                    ),
+                    opening_action=(
+                        MarketAction.BUY
+                        if plan_leg.venue in {VenueName.POLYMARKET, VenueName.KALSHI}
+                        else MarketAction.BACK
+                    ),
+                    canonical_state=plan_leg.outcome,
+                    settlement_fingerprint_key=trade.settlement_key,
+                    fill_id=fill.fill_id,
+                    fill_kind=PaperLegFillKind.INTERNAL_SIMULATED,
+                    capital_source=CapitalSource.AUTO_POOL,
+                    execution_mode=plan.execution_modes.get(
+                        plan_leg.venue, LegExecutionMode.INTERNAL
+                    ).value,
+                    tranche_id=tranche_id,
+                )
+            )
+            native[plan_leg.currency] = native.get(plan_leg.currency, Decimal(0)) + fill.filled_stake
+            rate = Decimal(1) if plan_leg.currency == "GBP" else fx[plan_leg.currency].gbp_per_unit
+            gbp += fill.filled_stake * rate
+        guaranteed = allocation.guaranteed_profit if allocation is not None else None
+        existing_guaranteed = trade.guaranteed_profit_gbp_at_open or Decimal("0")
+        trade.legs = list(trade.legs) + new_legs
+        trade.capital_locked_native = native
+        trade.capital_locked_gbp = gbp
+        trade.last_updated_at = occurred_at
+        if guaranteed is not None:
+            trade.guaranteed_profit_gbp_at_open = existing_guaranteed + guaranteed
+        trade.tranches.append(
+            PaperTradeTranche(
+                tranche_id=tranche_id,
+                sequence=sequence,
+                kind=PaperTradeTrancheKind.TOP_UP,
+                occurred_at=occurred_at,
+                capital_locked_gbp=incremental_gbp,
+                guaranteed_profit_gbp=guaranteed,
+                fill_ids=fill_ids,
+                idempotency_key=tranche_id,
+            )
+        )
+        trade.active_trade_phase = PaperActiveTradePhase.ACCUMULATING
+        trade.audit.append(
+            PaperTradeAuditEvent(
+                event_id=f"{trade.trade_id}:{tranche_id}",
+                occurred_at=occurred_at,
+                event_type=PaperTradeAuditEventType.TOP_UP_TRANCHE_RECORDED,
+                detail=f"tranche={tranche_id} incremental_gbp={incremental_gbp}",
+            )
+        )
+        if self.trades is None:
+            return trade
+        return self.trades.save(trade)
+
+    def _ensure_opening_tranche(self, trade: PaperTrade, when: datetime) -> None:
+        if any(item.kind is PaperTradeTrancheKind.OPENING for item in trade.tranches):
+            return
+        fill_ids = [leg.fill_id for leg in trade.legs if leg.fill_id]
+        trade.tranches.append(
+            PaperTradeTranche(
+                tranche_id=OPENING_TRANCHE_ID,
+                sequence=OPENING_TRANCHE_SEQUENCE,
+                kind=PaperTradeTrancheKind.OPENING,
+                occurred_at=trade.opened_at or when,
+                capital_locked_gbp=trade.capital_locked_gbp or Decimal("0"),
+                guaranteed_profit_gbp=trade.guaranteed_profit_gbp_at_open,
+                fill_ids=[item for item in fill_ids if item],
+                idempotency_key=f"opening:{trade.trade_id}",
+            )
+        )
+        if self.trades is not None:
+            self.trades.save(trade)
+
+    def _promote_active_trade(self, trade: PaperTrade, when: datetime) -> None:
+        if trade.state is not PaperTradeState.OPEN:
+            return
+        if trade.active_trade_phase is None:
+            trade.active_trade_phase = PaperActiveTradePhase.ACCUMULATING
+            self._append_trade_event_once(
+                trade,
+                event_type=PaperTradeAuditEventType.ACTIVE_TRADE_PROMOTED,
+                occurred_at=when,
+                detail="fully hedged OPEN paper fill promoted to ACTIVE TRADE 5s lane",
+            )
+            if self.trades is not None:
+                self.trades.save(trade)
+        get_active_trade_registry().promote(
+            trade,
+            now=when,
+            cadence_seconds=active_trade_cadence_seconds(self.settings),
+        )
 
     def _lock_source_for_leg(self, leg: PaperTradeLeg) -> tuple[str, CapitalSource]:
         if leg.fill_kind is PaperLegFillKind.PAPER_SIMULATED_EXTERNAL:
@@ -1162,6 +1536,7 @@ class PaperOperationsService:
         simulate_external: bool = False,
         prepared_deployment_id: str | None = None,
         requested_size_gbp: Decimal | None = None,
+        allow_top_up: bool = False,
     ) -> SimulatePaperFillResult:
         simulated_at = now or datetime.now(UTC)
         require_complete = simulate_external
@@ -1178,6 +1553,7 @@ class PaperOperationsService:
                 prepared_deployment_id=prepared_deployment_id,
                 requested_size_gbp=requested_size_gbp,
                 require_complete=require_complete,
+                allow_top_up=allow_top_up,
             )
 
     def _simulate_fill_locked(
@@ -1194,6 +1570,7 @@ class PaperOperationsService:
         prepared_deployment_id: str | None,
         requested_size_gbp: Decimal | None,
         require_complete: bool,
+        allow_top_up: bool = False,
     ) -> SimulatePaperFillResult:
         existing = self._get_trade_by_opportunity(opportunity_id)
         if existing is not None:
@@ -1206,6 +1583,7 @@ class PaperOperationsService:
                     existing,
                     simulated_at=simulated_at,
                     operator_note=operator_note,
+                    allow_top_up=allow_top_up,
                 )
                 if completed is not None:
                     return completed
@@ -2151,6 +2529,7 @@ class PaperOperationsService:
                     fill_kind=fill_kind,
                     capital_source=capital,
                     execution_mode=mode.value,
+                    tranche_id=OPENING_TRANCHE_ID,
                 )
             )
             if filled_stake > 0:
@@ -2240,7 +2619,13 @@ class PaperOperationsService:
             occurred_at=occurred_at,
             detail=f"state={trade.state.value}",
         )
-        return self.trades.save(trade)
+        saved = self.trades.save(trade)
+        if saved.state is PaperTradeState.OPEN:
+            self._ensure_opening_tranche(saved, occurred_at)
+            self._promote_active_trade(saved, occurred_at)
+            reloaded = self.trades.get(saved.trade_id)
+            return reloaded or saved
+        return saved
 
     def _new_trade_shell(
         self,
@@ -2505,6 +2890,7 @@ def _with_stable_fill_ids(
     modes: dict[VenueName, LegExecutionMode],
     *,
     simulate_external: bool,
+    tranche_id: str | None = None,
 ) -> PaperOpportunityFills:
     rewritten: list[PaperFillRecord] = []
     for fill in fills.fills:
@@ -2514,11 +2900,11 @@ def _with_stable_fill_ids(
             if simulate_external and mode is LegExecutionMode.EXTERNAL_OPERATOR
             else "paper-fill"
         )
-        rewritten.append(
-            fill.model_copy(
-                update={"fill_id": f"{prefix}:{opportunity_id}:{fill.venue.value}:{fill.outcome}"}
-            )
-        )
+        if tranche_id and tranche_id != OPENING_TRANCHE_ID:
+            fill_id = f"{prefix}:{opportunity_id}:{tranche_id}:{fill.venue.value}:{fill.outcome}"
+        else:
+            fill_id = f"{prefix}:{opportunity_id}:{fill.venue.value}:{fill.outcome}"
+        rewritten.append(fill.model_copy(update={"fill_id": fill_id}))
     return fills.model_copy(update={"fills": rewritten})
 
 

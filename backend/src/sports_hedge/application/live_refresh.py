@@ -12,6 +12,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from sports_hedge.application.active_trade_lane import (
+    ACTIVE_TRADE_LANE,
+    DEFAULT_ACTIVE_TRADE_CADENCE_SECONDS,
+    active_trade_cadence_seconds,
+    get_active_trade_registry,
+    identity_from_open_trade,
+    reset_active_trade_registry,
+)
 from sports_hedge.application.hot_market_relationships import HotMarketRelationship
 from sports_hedge.application.collector import (
     DIAGNOSTIC_PROVIDERS,
@@ -71,7 +79,7 @@ from sports_hedge.application.provider_access import (
     HEALTH_UNAVAILABLE,
     get_shared_provider_access,
 )
-from sports_hedge.application.quote_freshness import require_aware_instant
+from sports_hedge.paper.trades import PaperActiveTradePhase, PaperTradeState
 from sports_hedge.application.scan_lanes import (
     UNIVERSE_MIN_CHUNK_SECONDS,
     WORKER_COMPLETE,
@@ -88,6 +96,7 @@ from sports_hedge.application.scanner_observability import (
     empty_price_engine_status,
 )
 from sports_hedge.application.system_load import SystemLoadSummary, system_load_from_status
+from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.venue_degradation_incident import (
     VenueDegradationIncidentStore,
     fallback_venue_degradation_incident,
@@ -274,6 +283,12 @@ class LiveRefreshStatus(BaseModel):
             cycle_timeout_seconds=None,
         )
     )
+    active_trade: LaneRefreshStatus = Field(
+        default_factory=lambda: LaneRefreshStatus(
+            cadence_seconds=DEFAULT_ACTIVE_TRADE_CADENCE_SECONDS,
+            cycle_timeout_seconds=None,
+        )
+    )
     price_engine: PriceEnginePublicStatus = Field(default_factory=empty_price_engine_status)
     venue_participation: LaneVenueParticipation | None = None
     recent_scan_cycles: list[PaperScanCycleRecord] = Field(default_factory=list)
@@ -285,7 +300,7 @@ class LiveRefreshStatus(BaseModel):
 
 
 class DualCadencePlan(BaseModel):
-    lane: Literal["hot", "universe", "background", "idle"]
+    lane: Literal["hot", "universe", "background", "active_trade", "idle"]
     collector_timeout_seconds: float | None = None
     coordinator_timeout_seconds: float | None = None
     identity_scope: list[str] | None = None
@@ -399,6 +414,7 @@ class LiveRefreshCoordinator:
         self._hot_task: asyncio.Task[None] | None = None
         self._universe_task: asyncio.Task[None] | None = None
         self._background_task: asyncio.Task[None] | None = None
+        self._active_trade_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._control = asyncio.Event()
         self._operator_scanner_stopped = False
@@ -409,10 +425,13 @@ class LiveRefreshCoordinator:
         self._hot_in_progress = False
         self._universe_in_progress = False
         self._background_in_progress = False
+        self._active_trade_in_progress = False
         self._manual_hot_in_progress = False
         self._next_hot_due: datetime | None = None
         self._next_universe_due: datetime | None = None
         self._next_background_due: datetime | None = None
+        self._next_active_trade_due: datetime | None = None
+        self._active_trades = get_active_trade_registry()
         self._catalogue_store = catalogue_store
         self._price_engine = price_engine
         self._observability = ScannerObservabilitySink()
@@ -542,6 +561,22 @@ class LiveRefreshCoordinator:
                             "cadence_seconds": resolved.paper_live_refresh_universe_interval_seconds,
                         }
                     ),
+                    "active_trade": self.status.active_trade.model_copy(
+                        update={
+                            "cadence_seconds": active_trade_cadence_seconds(resolved),
+                            **(
+                                {
+                                    "last_plan_reason": "operator_stopped",
+                                    "worker_state": WORKER_WAITING,
+                                    "operator_summary": (
+                                        "ACTIVE TRADE · stopped by operator · no provider call"
+                                    ),
+                                }
+                                if operator.scanner_stopped
+                                else {}
+                            ),
+                        }
+                    ),
                 }
             )
             self._sync_venue_status_unlocked()
@@ -575,12 +610,14 @@ class LiveRefreshCoordinator:
         min_net_edge: Decimal,
         max_execution_risk: int,
         hot_cadence_seconds: int,
+        max_allocated_per_trade_gbp: Decimal | None = None,
     ) -> OperatorScannerSettings:
         store = self._resolved_operator_store()
         saved = store.save_settings(
             min_net_edge=min_net_edge,
             max_execution_risk=max_execution_risk,
             hot_cadence_seconds=hot_cadence_seconds,
+            max_allocated_per_trade_gbp=max_allocated_per_trade_gbp,
         )
         with self._state_lock:
             previous = (
@@ -633,17 +670,58 @@ class LiveRefreshCoordinator:
             hot_update["operator_summary"] = (
                 "Fast scan · stopped by operator · no provider call"
             )
+        stopped_lane = {
+            "last_plan_reason": "operator_stopped",
+            "worker_state": WORKER_WAITING,
+            "cycle_in_progress": False,
+        }
         self.status = self.status.model_copy(
             update={
                 "scanner_stopped": operator.scanner_stopped,
                 "operator_settings": operator,
                 "interval_seconds": operator.hot_cadence_seconds,
                 "hot": self.status.hot.model_copy(update=hot_update),
+                "active_trade": self.status.active_trade.model_copy(
+                    update={
+                        **stopped_lane,
+                        "operator_summary": (
+                            "ACTIVE TRADE · stopped by operator · no provider call"
+                            if operator.scanner_stopped
+                            else self.status.active_trade.operator_summary
+                        ),
+                    }
+                )
+                if operator.scanner_stopped
+                else self.status.active_trade,
+                "background": self.status.background.model_copy(
+                    update={
+                        **stopped_lane,
+                        "operator_summary": (
+                            "Background price engine · stopped by operator · no provider call"
+                            if operator.scanner_stopped
+                            else self.status.background.operator_summary
+                        ),
+                    }
+                )
+                if operator.scanner_stopped
+                else self.status.background,
+                "universe": self.status.universe.model_copy(
+                    update={
+                        **stopped_lane,
+                        "operator_summary": (
+                            "Full sweep · stopped by operator · no provider call"
+                            if operator.scanner_stopped
+                            else self.status.universe.operator_summary
+                        ),
+                    }
+                )
+                if operator.scanner_stopped
+                else self.status.universe,
             }
         )
 
     def _pulse_control(self) -> None:
-        """Wake parked HOT/UNIVERSE/BACKGROUND loops after Update/Stop/Resume."""
+        """Wake parked HOT/UNIVERSE/BACKGROUND/ACTIVE TRADE loops after Update/Stop/Resume."""
 
         def _set() -> None:
             self._control.set()
@@ -652,7 +730,12 @@ class LiveRefreshCoordinator:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
-            for task in (self._hot_task, self._universe_task, self._background_task):
+            for task in (
+                self._hot_task,
+                self._universe_task,
+                self._background_task,
+                self._active_trade_task,
+            ):
                 if task is not None:
                     loop = task.get_loop()
                     break
@@ -795,10 +878,12 @@ class LiveRefreshCoordinator:
             self._hot_in_progress = False
             self._universe_in_progress = False
             self._background_in_progress = False
+            self._active_trade_in_progress = False
             self._manual_hot_in_progress = False
             self._next_hot_due = None
             self._next_universe_due = None
             self._next_background_due = None
+            self._next_active_trade_due = None
             self._hot_due_started = None
             self._universe_generation_id = 0
             self._universe_generation_started_at = None
@@ -853,6 +938,8 @@ class LiveRefreshCoordinator:
             )
             self._degradation_incidents.reset()
         self.flush_universe_checkpoint()
+        reset_active_trade_registry()
+        self._active_trades = get_active_trade_registry()
         self.configure_from_settings()
         self._drain_orphaned_collection_tasks(orphans)
         if self._price_engine is not None:
@@ -873,6 +960,8 @@ class LiveRefreshCoordinator:
             self._next_hot_due = now
         if self._next_background_due is None:
             self._next_background_due = now
+        if self._next_active_trade_due is None:
+            self._next_active_trade_due = now
         self.status = self.status.model_copy(
             update={
                 "hot": self.status.hot.model_copy(
@@ -887,6 +976,14 @@ class LiveRefreshCoordinator:
                         "cadence_seconds": resolved.paper_universe_worker_cooldown_seconds,
                         "resume_cursor": self._status_universe_cursor(),
                         "generation_work_used_s": round(self._status_universe_work_used(), 3),
+                    }
+                ),
+                "active_trade": self.status.active_trade.model_copy(
+                    update={
+                        "next_due_at": self._active_trades.next_due_at()
+                        or self._next_active_trade_due,
+                        "cadence_seconds": active_trade_cadence_seconds(resolved),
+                        "fixture_count": len(self._active_trades.members()),
                     }
                 ),
             }
@@ -960,6 +1057,32 @@ class LiveRefreshCoordinator:
                 reason="background_due",
             )
         return DualCadencePlan(lane="idle", reason="waiting")
+
+    def plan_active_trade_tick(
+        self,
+        now: datetime | None = None,
+        settings: Settings | None = None,
+    ) -> DualCadencePlan:
+        resolved = settings or get_settings()
+        evaluated = require_aware_instant(now or self.now(), "now")
+        if self._operator_scanner_stopped:
+            return DualCadencePlan(lane="idle", reason="operator_stopped")
+        with self._state_lock:
+            self._ensure_due_times_unlocked(evaluated, resolved)
+            if self._active_trade_in_progress:
+                return DualCadencePlan(lane="idle", reason="active_trade_in_progress")
+        due = self._active_trades.due_members(evaluated)
+        if not due:
+            members = self._active_trades.members()
+            if not members:
+                return DualCadencePlan(lane="idle", reason="active_trade_scope_empty")
+            return DualCadencePlan(lane="idle", reason="waiting")
+        return DualCadencePlan(
+            lane=ACTIVE_TRADE_LANE,
+            enabled_venues=list(self.pending_venues_for(ScanLane.HOT)),
+            reason="active_trade_due",
+            identity_scope=[member.trade_id for member in due],
+        )
 
     def bind_catalogue_store(self, store: Any) -> None:
         self._catalogue_store = store
@@ -1669,7 +1792,10 @@ class LiveRefreshCoordinator:
                     "last_issue_count": len(report.issues),
                     "skipped_out_of_scope": report.skipped_out_of_scope,
                     "operator_summary": _combined_operator_summary(
-                        self.status.hot, self.status.universe, universe_count
+                        self.status.hot,
+                        self.status.universe,
+                        universe_count,
+                        self.status.active_trade,
                     ),
                     "config_warnings": report.config_warnings,
                     "venue_health": _merge_top_level_venue_health(
@@ -3447,11 +3573,24 @@ class LiveRefreshCoordinator:
             }
             hot = self.status.hot.model_copy(update=hot_update)
             background = self.status.background.model_copy(update=background_update)
+            active_trade = self.status.active_trade.model_copy(
+                update={
+                    "cycle_in_progress": self._active_trade_in_progress,
+                    "next_due_at": self._active_trades.next_due_at()
+                    or self._next_active_trade_due,
+                    "cadence_seconds": active_trade_cadence_seconds(),
+                    "fixture_count": len(self._active_trades.members()),
+                    "worker_state": WORKER_RUNNING
+                    if self._active_trade_in_progress
+                    else self.status.active_trade.worker_state,
+                }
+            )
             self.status = self.status.model_copy(
                 update={
                     "discovered_fixtures": inventory,
                     "hot": hot,
                     "background": background,
+                    "active_trade": active_trade,
                     "price_engine": engine_status,
                     "universe": self.status.universe.model_copy(
                         update={"fixture_count": universe_count}
@@ -3465,6 +3604,7 @@ class LiveRefreshCoordinator:
                     "cycle_in_progress": self._hot_in_progress
                     or self._universe_in_progress
                     or self._background_in_progress
+                    or self._active_trade_in_progress
                     or self._manual_hot_in_progress,
                     "scanner_stopped": self._operator_scanner_stopped,
                     "operator_settings": self.status.operator_settings
@@ -3476,11 +3616,15 @@ class LiveRefreshCoordinator:
             self.status = self.status.model_copy(
                 update={
                     "operator_summary": _combined_operator_summary(
-                        self.status.hot, self.status.universe, universe_count
+                        self.status.hot,
+                        self.status.universe,
+                        universe_count,
+                        self.status.active_trade,
                     ),
                     "cycle_in_progress": self._hot_in_progress
                     or self._universe_in_progress
                     or self._background_in_progress
+                    or self._active_trade_in_progress
                     or self._manual_hot_in_progress,
                     "system_load": system_load_from_status(
                         self.status,
@@ -3549,6 +3693,9 @@ class LiveRefreshCoordinator:
         self._background_task = asyncio.create_task(
             self._background_loop(tick), name="background-price-worker"
         )
+        self._active_trade_task = asyncio.create_task(
+            self._active_trade_loop(tick), name="active-trade-worker"
+        )
         self._task = self._hot_task
 
     async def stop_server_loop(self) -> None:
@@ -3562,7 +3709,13 @@ class LiveRefreshCoordinator:
                 await persist_task
             except (asyncio.CancelledError, Exception):
                 pass
-        for task in (self._hot_task, self._universe_task, self._background_task, self._task):
+        for task in (
+            self._hot_task,
+            self._universe_task,
+            self._background_task,
+            self._active_trade_task,
+            self._task,
+        ):
             if task is None:
                 continue
             task.cancel()
@@ -3573,6 +3726,7 @@ class LiveRefreshCoordinator:
         self._hot_task = None
         self._universe_task = None
         self._background_task = None
+        self._active_trade_task = None
         self._task = None
 
     async def _invoke_tick(self, tick, plan: DualCadencePlan | None = None) -> None:
@@ -3720,6 +3874,148 @@ class LiveRefreshCoordinator:
                         self._background_in_progress = False
             delay = min(self._seconds_until_background(), 30.0)
             await self._sleep_interruptible(delay)
+
+    async def _active_trade_loop(self, tick) -> None:
+        while not self._stop.is_set():
+            if self._operator_scanner_stopped:
+                with self._state_lock:
+                    self.status = self.status.model_copy(
+                        update={
+                            "active_trade": self.status.active_trade.model_copy(
+                                update={
+                                    "last_heartbeat_at": self.now(),
+                                    "last_plan_reason": "operator_stopped",
+                                    "worker_state": WORKER_WAITING,
+                                    "cycle_in_progress": False,
+                                    "operator_summary": (
+                                        "ACTIVE TRADE · stopped by operator · no provider call"
+                                    ),
+                                }
+                            )
+                        }
+                    )
+                await self._sleep_interruptible(2.0)
+                continue
+            plan = self.plan_active_trade_tick()
+            with self._state_lock:
+                self.status = self.status.model_copy(
+                    update={
+                        "active_trade": self.status.active_trade.model_copy(
+                            update={
+                                "last_heartbeat_at": self.now(),
+                                "last_plan_reason": plan.reason,
+                                "worker_state": WORKER_WAITING
+                                if plan.lane != ACTIVE_TRADE_LANE
+                                else WORKER_RUNNING,
+                                "fixture_count": len(self._active_trades.members()),
+                                "operator_summary": (
+                                    "ACTIVE TRADE · exact-ID 5s · "
+                                    f"{len(self._active_trades.members())} open"
+                                ),
+                            }
+                        )
+                    }
+                )
+            if plan.lane == ACTIVE_TRADE_LANE:
+                with self._state_lock:
+                    self._active_trade_in_progress = True
+                try:
+                    await self._run_active_trade_tick(plan)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+                finally:
+                    with self._state_lock:
+                        self._active_trade_in_progress = False
+            delay = min(self._seconds_until_active_trade(), float(active_trade_cadence_seconds()))
+            await self._sleep_interruptible(delay)
+
+    def _seconds_until_active_trade(self) -> float:
+        now = self.now()
+        if self._active_trade_in_progress:
+            return 1.0
+        nxt = self._active_trades.next_due_at() or self._next_active_trade_due
+        if nxt is None:
+            return 0.05
+        return max(0.05, (nxt - now).total_seconds())
+
+    async def _run_active_trade_tick(self, plan: DualCadencePlan) -> None:
+        """Exact-ID refresh + optional top-up. Never list_events/list_markets."""
+
+        from sports_hedge.api.paper import get_paper_operations_service
+        from sports_hedge.api.priority_alerts import get_priority_alert_service
+        from sports_hedge.api.watchlist import get_watchlist_service
+
+        started = self.now()
+        cadence = active_trade_cadence_seconds()
+        operations = get_paper_operations_service(
+            get_watchlist_service(), get_priority_alert_service()
+        )
+        priced = 0
+        for trade_id in plan.identity_scope or []:
+            trade = None
+            if operations.trades is not None:
+                trade = operations.trades.get(trade_id)
+            if trade is None or trade.state is not PaperTradeState.OPEN:
+                self._active_trades.drop(trade_id)
+                continue
+            identity = identity_from_open_trade(trade)
+            engine = self._price_engine
+            if engine is not None and identity is not None:
+                from sports_hedge.application.price_engine import (
+                    PriceEngineRuntimeItem,
+                    PriceEngineSliceResult,
+                )
+                from sports_hedge.application.provider_access import (
+                    PRICE_ENGINE_ACTIVE_TRADE_LANE,
+                )
+
+                slice_result = PriceEngineSliceResult()
+                runtime = PriceEngineRuntimeItem(identity=identity)
+                await engine._price_item(
+                    runtime, slice_result, lane=PRICE_ENGINE_ACTIVE_TRADE_LANE
+                )
+                await engine.drain_item_captures()
+            operations.maybe_top_up_open_trade(trade, now=self.now())
+            loaded = trade
+            if operations.trades is not None:
+                loaded = operations.trades.get(trade.trade_id) or trade
+            self._active_trades.mark_priced(
+                loaded.trade_id,
+                now=self.now(),
+                cadence_seconds=cadence,
+                phase=loaded.active_trade_phase or PaperActiveTradePhase.ACCUMULATING,
+                list_events_calls=0,
+                list_markets_calls=0,
+            )
+            priced += 1
+            del identity
+        completed = self.now()
+        duration_ms = int((completed - started).total_seconds() * 1000)
+        self._next_active_trade_due = completed + timedelta(seconds=cadence)
+        with self._state_lock:
+            self.status = self.status.model_copy(
+                update={
+                    "active_trade": self.status.active_trade.model_copy(
+                        update={
+                            "last_started_at": started,
+                            "last_completed_at": completed,
+                            "last_duration_ms": duration_ms,
+                            "next_due_at": self._next_active_trade_due,
+                            "cadence_seconds": cadence,
+                            "evaluated_count": priced,
+                            "fixture_count": len(self._active_trades.members()),
+                            "cycle_in_progress": False,
+                            "worker_state": WORKER_WAITING,
+                            "last_plan_reason": plan.reason,
+                            "operator_summary": (
+                                f"ACTIVE TRADE · exact-ID 5s · {len(self._active_trades.members())} open"
+                            ),
+                        }
+                    )
+                }
+            )
 
     def _seconds_until_background(self) -> float:
         now = self.now()
@@ -3973,6 +4269,7 @@ def _combined_operator_summary(
     hot: LaneRefreshStatus,
     universe: LaneRefreshStatus,
     universe_count: int,
+    active_trade: LaneRefreshStatus | None = None,
 ) -> str:
     fast = hot.operator_summary or (
         f"Fast scan · never · ran — · next due — · {hot.fixture_count} hot"
@@ -3982,9 +4279,17 @@ def _combined_operator_summary(
         f"{universe.evaluated_count}/{universe.discovered_total or universe_count} evaluated · "
         f"{universe_count} universe"
     )
+    active = None
+    if active_trade is not None:
+        active = active_trade.operator_summary or (
+            f"ACTIVE TRADE · exact-ID {active_trade.cadence_seconds}s · "
+            f"{active_trade.fixture_count} open"
+        )
     if hot.last_plan_reason == "operator_stopped" or universe.last_plan_reason == "operator_stopped":
-        return f"Scanner stopped by operator · {fast} · {full}"
-    return f"{fast} · {full}"
+        stopped = f"Scanner stopped by operator · {fast} · {full}"
+        return f"{stopped} · {active}" if active else stopped
+    combined = f"{fast} · {full}"
+    return f"{active} · {combined}" if active else combined
 
 
 def _honest_universe_venue_health(

@@ -799,6 +799,10 @@ def test_repeat_submit_is_idempotent_in_every_active_state(tmp_path: Path) -> No
         assert after_open.state is PaperTradeState.OPEN
         assert after_open.capital_locked_native == opened_locks
         assert any(
+            event.event_type is PaperTradeAuditEventType.DEFERRED_TO_ACTIVE_TRADE
+            for event in after_open.audit
+        )
+        assert not any(
             event.event_type is PaperTradeAuditEventType.REPEAT_OBSERVATION_NO_TOP_UP
             for event in after_open.audit
         )
@@ -936,6 +940,10 @@ def test_unchanged_and_improved_repeat_do_not_top_up_open_position(tmp_path: Pat
         assert after_improved.capital_locked_native == original_locks
         assert list(ops.journal.list_entries()) == original_journals
         assert any(
+            event.event_type is PaperTradeAuditEventType.DEFERRED_TO_ACTIVE_TRADE
+            for event in after_improved.audit
+        )
+        assert not any(
             event.event_type is PaperTradeAuditEventType.REPEAT_OBSERVATION_NO_TOP_UP
             for event in after_improved.audit
         )

@@ -903,13 +903,14 @@ def put_operator_scanner_settings(
     update: OperatorScannerSettingsUpdate,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
 ) -> LiveRefreshStatus:
-    """Persist Min Net Arb, Max Risk and HOT cadence. Does not scan or call providers."""
+    """Persist Min Net Arb, Max Risk, HOT cadence and max allocated per trade. Does not scan or call providers."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_operator_scan_settings(
         min_net_edge=update.min_net_edge,
         max_execution_risk=update.max_execution_risk,
         hot_cadence_seconds=update.hot_cadence_seconds,
+        max_allocated_per_trade_gbp=update.max_allocated_per_trade_gbp,
     )
     return _status_with_scan_cycles(coordinator.public_status(), repository)
 
@@ -918,7 +919,7 @@ def put_operator_scanner_settings(
 def stop_paper_scanner(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
 ) -> LiveRefreshStatus:
-    """Pause server-owned HOT, UNIVERSE and BACKGROUND work without clearing state."""
+    """Pause server-owned ACTIVE TRADE, HOT, UNIVERSE and BACKGROUND work without clearing state."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_operator_scanner_stopped(True)

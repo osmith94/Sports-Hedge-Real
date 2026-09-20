@@ -585,8 +585,23 @@ export type UniverseLoad = {
   generation_budget_seconds?: number | null;
 };
 
+export type ActiveTradeLoad = {
+  open_trades?: number;
+  due?: number;
+  last_cycle_ms?: number | null;
+  cadence_seconds?: number;
+};
+
+export type BackgroundLoad = {
+  working_set?: number;
+  due?: number;
+  cadence_seconds?: number;
+};
+
 export type SystemLoadSummary = {
+  active_trade?: ActiveTradeLoad;
   hot?: HotLoad;
+  background?: BackgroundLoad;
   matchbook?: ProviderSlotLoad;
   kalshi?: ProviderSlotLoad;
   universe?: UniverseLoad;
@@ -652,6 +667,7 @@ export type OperatorScannerSettings = {
   min_net_edge: string;
   max_execution_risk: number;
   hot_cadence_seconds: number;
+  max_allocated_per_trade_gbp?: string;
   scanner_stopped: boolean;
   source?: "operator" | "env_default";
   updated_at?: string | null;
@@ -662,6 +678,7 @@ export type OperatorScannerSettingsUpdate = {
   min_net_edge: string;
   max_execution_risk: number;
   hot_cadence_seconds: number;
+  max_allocated_per_trade_gbp?: string;
 };
 
 export type LiveRefreshStatus = {
@@ -692,6 +709,7 @@ export type LiveRefreshStatus = {
   hot?: LaneRefreshStatus;
   universe?: LaneRefreshStatus;
   background?: LaneRefreshStatus;
+  active_trade?: LaneRefreshStatus;
   price_engine?: PriceEnginePublicStatus;
   venue_participation?: LaneVenueParticipation | null;
   recent_scan_cycles?: PaperScanCycleRecord[];

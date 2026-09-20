@@ -15,6 +15,8 @@ export function systemLoadLines(
   const mb = load.matchbook ?? {};
   const kalshi = load.kalshi ?? {};
   const universe = load.universe ?? {};
+  const active = load.active_trade ?? {};
+  const background = load.background ?? {};
   const uniProgress = `${asCount(universe.evaluated)}/${asCount(universe.total)} evaluated`;
   const uniBudget = formatBudget(
     universe.generation_work_used_s,
@@ -22,8 +24,16 @@ export function systemLoadLines(
   );
   return [
     {
+      key: "ACTIVE",
+      detail: `${asCount(active.open_trades)} open · ${asCount(active.due)} due · ${formatActiveCadence(active)}`,
+    },
+    {
       key: "HOT",
       detail: `${asCount(hot.fixtures)} fixtures · ${asCount(hot.working_set)} items · ${asCount(hot.due)} due · ${formatCycle(hot)}`,
+    },
+    {
+      key: "BG",
+      detail: `${asCount(background.working_set)} items · ${asCount(background.due)} due · ${formatBackgroundCadence(background)}`,
     },
     {
       key: "MB",
@@ -52,6 +62,16 @@ function formatCycle(hot: NonNullable<SystemLoadSummary["hot"]>): string {
   const ratio = hot.cadence_utilisation;
   if (ratio == null || !Number.isFinite(ratio)) return `cycle ${duration} / ${cadence}`;
   return `cycle ${duration} / ${cadence} (${Math.round(ratio * 100)}%)`;
+}
+
+function formatActiveCadence(active: NonNullable<SystemLoadSummary["active_trade"]>): string {
+  const cadenceSeconds = asCount(active.cadence_seconds);
+  return cadenceSeconds > 0 ? `${cadenceSeconds}s` : "5s";
+}
+
+function formatBackgroundCadence(background: NonNullable<SystemLoadSummary["background"]>): string {
+  const cadenceSeconds = asCount(background.cadence_seconds);
+  return cadenceSeconds > 0 ? `${cadenceSeconds}s` : "—";
 }
 
 function formatBudget(used: number | null | undefined, budget: number | null | undefined): string | null {

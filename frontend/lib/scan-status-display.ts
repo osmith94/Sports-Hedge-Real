@@ -102,6 +102,7 @@ export function dualScanStatusLines(
 ): string[] {
   if (status?.scanner_stopped) {
     const lines = [
+      "ACTIVE TRADE · stopped by operator · no provider call",
       "Fast scan · stopped by operator · no provider call",
       "Full sweep · stopped by operator · no provider call",
     ];
@@ -110,14 +111,37 @@ export function dualScanStatusLines(
     }
     return lines;
   }
+  const active = activeTradeCopy(status, now);
   const fast = fastScanCopy(status, now);
   const full = fullSweepCopy(status, now);
-  const lines = [`${fast.label} · ${fast.detail}`, `${full.label} · ${full.detail}`];
+  const lines = [
+    `${active.label} · ${active.detail}`,
+    `${fast.label} · ${fast.detail}`,
+    `${full.label} · ${full.detail}`,
+  ];
   const background = backgroundPriceCopy(status, now);
   if (background) {
     lines.push(`${background.label} · ${background.detail}`);
   }
   return lines;
+}
+
+export function activeTradeCopy(
+  status: LiveRefreshStatus | null,
+  now: number | null = null,
+): LaneScanCopy {
+  const lane = status?.active_trade;
+  if (!lane) {
+    return { label: "ACTIVE TRADE", detail: "none" };
+  }
+  if (lane.cycle_in_progress) {
+    return { label: "ACTIVE TRADE", detail: "in progress · exact-ID 5s" };
+  }
+  const open = lane.fixture_count ?? 0;
+  return {
+    label: "ACTIVE TRADE",
+    detail: `${open} open · exact-ID 5s · ${nextDueClock(lane.next_due_at, now)}`,
+  };
 }
 
 export function backgroundPriceCopy(

@@ -44,9 +44,49 @@ class PaperLegFillKind(StrEnum):
     UNFILLED = "UNFILLED"
 
 
+OPENING_TRANCHE_ID = "opening"
+OPENING_TRANCHE_SEQUENCE = 0
+
+
+class PaperTradeTrancheKind(StrEnum):
+    OPENING = "opening"
+    TOP_UP = "top_up"
+
+
+class PaperActiveTradePhase(StrEnum):
+    ACCUMULATING = "accumulating"
+    MONITORING_CAP_REACHED = "monitoring_cap_reached"
+    EXIT_MANAGEMENT = "exit_management"
+
+
+class PaperTradeTranche(BaseModel):
+    """One complete-set paper tranche. Opening fill is never overwritten."""
+
+    tranche_id: str
+    sequence: int = Field(ge=0)
+    kind: PaperTradeTrancheKind
+    occurred_at: datetime
+    capital_locked_gbp: Decimal = Field(ge=0)
+    guaranteed_profit_gbp: Decimal | None = None
+    fill_ids: list[str] = Field(default_factory=list)
+    idempotency_key: str
+
+    @model_validator(mode="after")
+    def ensure_timezone(self) -> PaperTradeTranche:
+        if self.occurred_at.tzinfo is None:
+            self.occurred_at = self.occurred_at.replace(tzinfo=UTC)
+        return self
+
+
 class PaperTradeAuditEventType(StrEnum):
     TRADE_OPENED = "trade_opened"
     REPEAT_OBSERVATION_NO_TOP_UP = "repeat_observation_no_top_up"
+    DEFERRED_TO_ACTIVE_TRADE = "deferred_to_active_trade"
+    ACTIVE_TRADE_PROMOTED = "active_trade_promoted"
+    TOP_UP_TRANCHE_RECORDED = "top_up_tranche_recorded"
+    TOP_UP_INCOMPLETE_ABORTED = "top_up_incomplete_aborted"
+    TOP_UP_CAP_REACHED = "top_up_cap_reached"
+    TOP_UP_BELOW_MIN_NET = "top_up_below_min_net"
     AWAITING_MANUAL_EXTERNAL = "awaiting_manual_external"
     PAPER_AUTOFILL = "paper_autofill"
     PAPER_ENTRY_REJECTED = "paper_entry_rejected"
@@ -98,6 +138,7 @@ class PaperTradeLeg(BaseModel):
     fill_kind: PaperLegFillKind = PaperLegFillKind.UNFILLED
     capital_source: CapitalSource = CapitalSource.AUTO_POOL
     execution_mode: str = "INTERNAL"
+    tranche_id: str = OPENING_TRANCHE_ID
 
     @model_validator(mode="after")
     def normalize(self) -> PaperTradeLeg:
@@ -184,6 +225,8 @@ class PaperTrade(BaseModel):
     # Runtime type is PositionManagementSnapshot | None. Imported lazily to
     # avoid trades <-> unwind.models <-> position_management cycles.
     position_management: Any | None = None
+    tranches: list[PaperTradeTranche] = Field(default_factory=list)
+    active_trade_phase: PaperActiveTradePhase | None = None
     audit: list[PaperTradeAuditEvent] = Field(default_factory=list)
 
     @model_validator(mode="after")

@@ -69,14 +69,19 @@ function reportSummary(report: PaperCollectionReport): string {
 }
 
 function clampHotCadenceSeconds(value: number): number {
-  if (!Number.isFinite(value)) return 30;
+  if (!Number.isFinite(value)) return DEFAULT_HOT_CADENCE_SECONDS;
   return Math.min(60, Math.max(15, Math.round(value)));
 }
 
+const DEFAULT_MIN_NET_ARB_PERCENT = "1.00";
+const DEFAULT_MAX_RISK = "60";
+const DEFAULT_HOT_CADENCE_SECONDS = 30;
+const DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP = "1000";
+
 function minNetPercentFromRate(value: string | number | null | undefined): string {
-  if (value == null || value === "") return "";
+  if (value == null || value === "") return DEFAULT_MIN_NET_ARB_PERCENT;
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return "";
+  if (!Number.isFinite(parsed)) return DEFAULT_MIN_NET_ARB_PERCENT;
   return (parsed * 100).toFixed(2);
 }
 
@@ -204,13 +209,14 @@ function economicsChips(status: EconomicsStatus | null): StripChip[] {
 export function RunPaperScan() {
   const router = useRouter();
   const [capitalLimit, setCapitalLimit] = useState("");
-  const [minNetArbPercent, setMinNetArbPercent] = useState("");
-  const [maxRisk, setMaxRisk] = useState("");
+  const [minNetArbPercent, setMinNetArbPercent] = useState(DEFAULT_MIN_NET_ARB_PERCENT);
+  const [maxRisk, setMaxRisk] = useState(DEFAULT_MAX_RISK);
+  const [maxAllocatedPerTrade, setMaxAllocatedPerTrade] = useState(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP);
   const [loadingMode, setLoadingMode] = useState<ScanMode | null>(null);
   const [state, setState] = useState<ScanState>({ kind: "idle" });
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [intervalSeconds, setIntervalSeconds] = useState(30);
-  const [intervalDraft, setIntervalDraft] = useState("");
+  const [intervalSeconds, setIntervalSeconds] = useState(DEFAULT_HOT_CADENCE_SECONDS);
+  const [intervalDraft, setIntervalDraft] = useState(String(DEFAULT_HOT_CADENCE_SECONDS));
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [scannerControlBusy, setScannerControlBusy] = useState(false);
@@ -272,7 +278,12 @@ export function RunPaperScan() {
       }
       if (saved && (!settingsDirty || options?.forceSettings)) {
         setMinNetArbPercent(minNetPercentFromRate(saved.min_net_edge));
-        setMaxRisk(String(saved.max_execution_risk));
+        setMaxRisk(String(saved.max_execution_risk ?? DEFAULT_MAX_RISK));
+        if (saved.max_allocated_per_trade_gbp != null && saved.max_allocated_per_trade_gbp !== "") {
+          setMaxAllocatedPerTrade(String(saved.max_allocated_per_trade_gbp));
+        } else {
+          setMaxAllocatedPerTrade(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP);
+        }
         if (options?.forceSettings) setSettingsDirty(false);
       }
       const completed =
@@ -431,10 +442,15 @@ export function RunPaperScan() {
         throw new Error("Maximum execution risk must be a whole number from 0 to 100.");
       }
       const cadence = clampHotCadenceSeconds(Number(intervalDraft));
+      const allocated = optionalPositive(maxAllocatedPerTrade, "Max allocated per trade");
+      if (!allocated) {
+        throw new Error("Max allocated per trade is required.");
+      }
       const status = await saveOperatorScannerSettings({
         min_net_edge: minNet,
         max_execution_risk: risk,
         hot_cadence_seconds: cadence,
+        max_allocated_per_trade_gbp: allocated,
       });
       applyLiveRefresh(status, { forceSettings: true });
       setSettingsDirty(false);
@@ -555,7 +571,7 @@ export function RunPaperScan() {
                 setMinNetArbPercent(event.target.value);
                 setSettingsDirty(true);
               }}
-              placeholder="0.50"
+              placeholder="1.00"
               aria-label="Minimum net arbitrage trigger percent"
             />
           </label>
@@ -587,6 +603,20 @@ export function RunPaperScan() {
               }}
               aria-label="HOT cadence seconds"
               title="Server-owned HOT pricing cadence. Safe range 15–60 seconds. Not the view refresh."
+            />
+          </label>
+          <label className="scan-field scan-field-compact">
+            <span>Max £ / trade</span>
+            <input
+              inputMode="decimal"
+              value={maxAllocatedPerTrade}
+              onChange={(event) => {
+                setMaxAllocatedPerTrade(event.target.value);
+                setSettingsDirty(true);
+              }}
+              placeholder="1000"
+              aria-label="Maximum allocated pounds per trade"
+              title="Cumulative capital cap for one paper trade including top-ups. Default £1,000."
             />
           </label>
           <label className="scan-refresh">
@@ -642,7 +672,7 @@ export function RunPaperScan() {
           </button>
           {scannerStopped ? (
             <span className="status-badge" role="status">
-              SCANNER STOPPED · HOT/UNIVERSE/BACKGROUND paused
+              SCANNER STOPPED · ACTIVE TRADE/HOT/UNIVERSE/BACKGROUND paused
             </span>
           ) : null}
         </div>
@@ -654,11 +684,12 @@ export function RunPaperScan() {
         <div className="scan-note">
           Run scan performs a manual HOT refresh of current known fixtures.
           It does not rediscover the full universe or advance the scheduled Fast Scan / Full Sweep
-          lanes. Update saves Min Net Arb, Max Risk and HOT cadence for subsequent server-owned work
-          and does not trigger a scan. HOT cadence is how often HOT pricing is due; Auto refresh view
-          only polls status.
+          lanes. Update saves Min Net Arb, Max Risk, HOT cadence and max allocated per trade for
+          subsequent server-owned work and does not trigger a scan. HOT cadence is how often HOT
+          pricing is due; Auto refresh view only polls status. ACTIVE TRADE reprices open paper
+          trades every 5s from exact known IDs.
         </div>
-        <div className="scan-note" aria-label="Fast scan and Full sweep status">
+        <div className="scan-note" aria-label="ACTIVE TRADE, Fast scan and Full sweep status">
           {dualScanStatusLines(liveRefresh, nowMs).map((line) => (
             <div key={line}>{line}</div>
           ))}
