@@ -722,7 +722,8 @@ describe("opportunity monitor table contract", () => {
     assert.match(trades, /Active trades/);
     assert.match(trades, /formatPositionManagementCell/);
     assert.match(display, /PENDING CONFIRMATION/);
-    assert.match(display, /CLOSURE: ELIGIBLE/);
+    assert.match(display, /CLOSURE: \$\{baseState\}/);
+    assert.match(display, /"ELIGIBLE"/);
     assert.match(display, /NOT SAFE/);
     assert.match(display, /after authoritative settlement/);
     assert.doesNotMatch(table, /UNWIND ELIGIBLE/);
