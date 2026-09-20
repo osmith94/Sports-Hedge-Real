@@ -12,17 +12,45 @@ from sports_hedge.normalization.text import normalize_text
 class TargetCompetitionCode(StrEnum):
     PREMIER_LEAGUE = "premier_league"
     CHAMPIONSHIP = "championship"
+    LEAGUE_ONE = "league_one"
+    LEAGUE_TWO = "league_two"
     LA_LIGA = "la_liga"
+    COPA_DEL_REY = "copa_del_rey"
     CARABAO_CUP = "carabao_cup"
     FA_CUP = "fa_cup"
     INTERNATIONAL_FRIENDLIES = "international_friendlies"
     BUNDESLIGA = "bundesliga"
+    DFB_POKAL = "dfb_pokal"
     SERIE_A = "serie_a"
+    COPPA_ITALIA = "coppa_italia"
+    LIGUE_1 = "ligue_1"
+    EREDIVISIE = "eredivisie"
+    PRIMEIRA_LIGA = "primeira_liga"
+    SCOTTISH_PREMIERSHIP = "scottish_premiership"
+    BELGIAN_PRO_LEAGUE = "belgian_pro_league"
     CHAMPIONS_LEAGUE = "champions_league"
     EUROPA_LEAGUE = "europa_league"
     CONFERENCE_LEAGUE = "conference_league"
     SUPER_LIG = "super_lig"
     MLS = "mls"
+    LIGA_MX = "liga_mx"
+    BRASILEIRAO = "brasileirao"
+    ARGENTINA_PRIMERA = "argentina_primera"
+    COPA_LIBERTADORES = "copa_libertadores"
+    SAUDI_PRO_LEAGUE = "saudi_pro_league"
+    J1_LEAGUE = "j1_league"
+    SOUTH_AFRICAN_PREMIERSHIP = "south_african_premiership"
+
+
+class VenueMappingStatus(StrEnum):
+    VERIFIED = "verified"
+    UNVERIFIED = "unverified"
+
+
+PRINCIPAL_OPERATOR_COMPETITION_COUNT = 30
+VERIFIED_ALL_3 = "VERIFIED_ALL_3"
+PARTIAL_PROVIDER_MAPPING = "PARTIAL"
+PROVIDER_MATRIX_RETRIEVED_AT = "2026-09-20"
 
 
 class TargetCompetition(BaseModel):
@@ -36,30 +64,33 @@ class TargetCompetition(BaseModel):
 
 # Provider coverage is claimed only from read-only metadata. Empty series_id /
 # empty Kalshi prefixes means Sports Hedge must not invent that venue's markets.
+# Selectable operator rows require VERIFIED_ALL_3: Matchbook label aliases +
+# Kalshi match-level series + Polymarket Gamma series. Partial rows stay visible
+# and disabled.
 #
 # Public Gamma GET /sports (retrieved 2026-09-16):
 #   epl=10188, elc=10355, lal=10193, efl=10329 (EFL CUP), efa=10307 (FA Cup),
 #   fif=10238 (FIFA Friendlies), bun=10194 (Bundesliga), sea=10203 (Serie A).
 # Public Gamma GET /sports (retrieved 2026-09-20) additional football series:
-#   ucl=10204 (UEFA Champions League), uel=10209 (UEFA Europa League),
-#   col=10437 (UEFA Conference League), tur=10292 (Süper Lig), mls=10189 (MLS).
-# Near-neighbor Gamma series left unmatched: bl2=10670 (2. Bundesliga),
-# itsb=10676 (Serie B), clf=12410 (Club Friendlies), ecu1=11863 (LigaPro Serie A),
-# uwcl=11240 (UEFA Women's Champions League), tur2=12362 (Turkey 1. Lig).
+#   ucl=10204, uel=10209, col=10437, tur=10292, mls=10189,
+#   el1=11435 (League One), el2=11436 (League Two), cdr=10316, dfb=10317,
+#   itc=10287, fl1=10195, ere=10286, por=10330, scop=10674, bel1=12351,
+#   mex=10290, bra=10359, arg=10312, lib=10289, spl=10361, jap=10360,
+#   saf1=12360 (South Africa Premiership).
+# Near-neighbor Gamma series left unmatched: bl2 (2. Bundesliga), itsb (Serie B),
+# clf (Club Friendlies), ecu1 (LigaPro Serie A), uwcl (Women's UCL),
+# tur2 (Turkey 1. Lig), ja2/j2100 (J2), bra2/bra3, fr2 (Ligue 2).
 #
-# Public Kalshi GET /series (retrieved 2026-09-16): KXEFLCUP*, KXFACUP*,
-# KXINTLFRIENDLY*, plus match-level Bundesliga/Serie A GAME/BTTS/TOTAL/FTTS.
-# Public Kalshi GET /series (retrieved 2026-09-20) additional match-level
-# GAME/BTTS/TOTAL/(FTTS where present): KXUCL*, KXUEL*, KXUECL*, KXSUPERLIG*,
-# KXMLS*. Short KXUCL/KXMLS prefixes are not used: they would also match
-# KXUCLW* (women's UCL) and KXMLSAST* (MLS All-Star).
-# Short KXBUNDESLIGA/KXSERIEA prefixes are not used: they would also match
-# KXBUNDESLIGA2GAME (2. Bundesliga) and KXSERIEAWGAME (Serie A Femminile).
+# Public Kalshi GET /series category=Sports (retrieved 2026-09-20) match-level
+# GAME/BTTS/TOTAL/(FTTS where present). Short prefixes are not used when they
+# would also match a neighbour (women's, All-Star, 2. Bundesliga, Serie B/C,
+# Ligue 2, J2, Sudamericana).
+# Not present on that listing and therefore not invented:
+#   EFL League Two match-level series, South African Premiership match-level series.
 #
 # Aliases include observed Matchbook / Gamma / Kalshi label shapes. Matching is
-# exact after normalize_text; unknown labels fail closed.
-# Europa League / Conference League / Super Lig FTTS series were not present on
-# public GET /series 2026-09-20 and are not invented.
+# exact after normalize_text; unknown labels fail closed. Matchbook has no
+# competition-ID filter — verification is label-alias matching only.
 TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
     TargetCompetition(
         code=TargetCompetitionCode.PREMIER_LEAGUE,
@@ -342,6 +373,346 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
             "KXMLSFTTS",
         ),
     ),
+    TargetCompetition(
+        code=TargetCompetitionCode.LEAGUE_ONE,
+        display_name="EFL League One",
+        aliases=(
+            "league one",
+            "efl league one",
+            "english league one",
+            "england league one",
+            "sky bet league one",
+            "skybet league one",
+            "league 1",
+            "efl league 1",
+            "league one 2025/26",
+            "league one 2026/27",
+        ),
+        polymarket_gamma_series_id="11435",
+        polymarket_gamma_sport="el1",
+        kalshi_series_prefixes=(
+            "KXEFLL1GAME",
+            "KXEFLL1BTTS",
+            "KXEFLL1TOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.LEAGUE_TWO,
+        display_name="EFL League Two",
+        aliases=(
+            "league two",
+            "efl league two",
+            "english league two",
+            "england league two",
+            "sky bet league two",
+            "skybet league two",
+            "league 2",
+            "efl league 2",
+            "league two 2025/26",
+            "league two 2026/27",
+        ),
+        polymarket_gamma_series_id="11436",
+        polymarket_gamma_sport="el2",
+        # Kalshi match-level series were not present on public GET /series 2026-09-20.
+        kalshi_series_prefixes=(),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.COPA_DEL_REY,
+        display_name="Copa del Rey",
+        aliases=(
+            "copa del rey",
+            "the copa del rey",
+            "spanish copa del rey",
+            "spain copa del rey",
+            "copa del rey 2025/26",
+            "copa del rey 2026/27",
+        ),
+        polymarket_gamma_series_id="10316",
+        polymarket_gamma_sport="cdr",
+        kalshi_series_prefixes=(
+            "KXCOPADELREYGAME",
+            "KXCOPADELREYBTTS",
+            "KXCOPADELREYTOTAL",
+            "KXCOPADELREYFTTS",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.DFB_POKAL,
+        display_name="DFB-Pokal",
+        aliases=(
+            "dfb pokal",
+            "dfb-pokal",
+            "german cup",
+            "germany dfb pokal",
+            "dfb pokal 2025/26",
+            "dfb pokal 2026/27",
+        ),
+        polymarket_gamma_series_id="10317",
+        polymarket_gamma_sport="dfb",
+        kalshi_series_prefixes=(
+            "KXDFBPOKALGAME",
+            "KXDFBPOKALBTTS",
+            "KXDFBPOKALTOTAL",
+            "KXDFBPOKALFTTS",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.COPPA_ITALIA,
+        display_name="Coppa Italia",
+        aliases=(
+            "coppa italia",
+            "italian cup",
+            "italy coppa italia",
+            "coppa italia 2025/26",
+            "coppa italia 2026/27",
+        ),
+        polymarket_gamma_series_id="10287",
+        polymarket_gamma_sport="itc",
+        kalshi_series_prefixes=(
+            "KXCOPPAITALIAGAME",
+            "KXCOPPAITALIABTTS",
+            "KXCOPPAITALIATOTAL",
+            "KXCOPPAITALIAFTTS",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.LIGUE_1,
+        display_name="Ligue 1",
+        aliases=(
+            "ligue 1",
+            "ligue1",
+            "french ligue 1",
+            "france ligue 1",
+            "ligue 1 uber eats",
+            "ligue 1 mc donalds",
+            "ligue 1 2025/26",
+            "ligue 1 2026/27",
+        ),
+        polymarket_gamma_series_id="10195",
+        polymarket_gamma_sport="fl1",
+        kalshi_series_prefixes=(
+            "KXLIGUE1GAME",
+            "KXLIGUE1BTTS",
+            "KXLIGUE1TOTAL",
+            "KXLIGUE1FTTS",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.EREDIVISIE,
+        display_name="Eredivisie",
+        aliases=(
+            "eredivisie",
+            "dutch eredivisie",
+            "netherlands eredivisie",
+            "holland eredivisie",
+            "eredivisie 2025/26",
+            "eredivisie 2026/27",
+        ),
+        polymarket_gamma_series_id="10286",
+        polymarket_gamma_sport="ere",
+        # Match-level only. Short KXEREDIVISIE also matches Eredivisie Vrouwen.
+        kalshi_series_prefixes=(
+            "KXEREDIVISIEGAME",
+            "KXEREDIVISIEBTTS",
+            "KXEREDIVISIETOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.PRIMEIRA_LIGA,
+        display_name="Primeira Liga",
+        aliases=(
+            "primeira liga",
+            "liga portugal",
+            "liga portugal betclic",
+            "portuguese primeira liga",
+            "portugal primeira liga",
+            "primeira liga 2025/26",
+            "primeira liga 2026/27",
+        ),
+        polymarket_gamma_series_id="10330",
+        polymarket_gamma_sport="por",
+        kalshi_series_prefixes=(
+            "KXLIGAPORTUGALGAME",
+            "KXLIGAPORTUGALBTTS",
+            "KXLIGAPORTUGALTOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.SCOTTISH_PREMIERSHIP,
+        display_name="Scottish Premiership",
+        aliases=(
+            "scottish premiership",
+            "cinch premiership",
+            "william hill premiership",
+            "scotland premiership",
+            "scottish premiership 2025/26",
+            "scottish premiership 2026/27",
+        ),
+        polymarket_gamma_series_id="10674",
+        polymarket_gamma_sport="scop",
+        kalshi_series_prefixes=(
+            "KXSCOTTISHPREMGAME",
+            "KXSCOTTISHPREMBTTS",
+            "KXSCOTTISHPREMTOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.BELGIAN_PRO_LEAGUE,
+        display_name="Belgian Pro League",
+        aliases=(
+            "belgian pro league",
+            "belgium pro league",
+            "jupiler pro league",
+            "pro league belgium",
+            "belgian first division a",
+            "belgian pro league 2025/26",
+            "belgian pro league 2026/27",
+        ),
+        polymarket_gamma_series_id="12351",
+        polymarket_gamma_sport="bel1",
+        kalshi_series_prefixes=(
+            "KXBELGIANPLGAME",
+            "KXBELGIANPLBTTS",
+            "KXBELGIANPLTOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.LIGA_MX,
+        display_name="Liga MX",
+        aliases=(
+            "liga mx",
+            "mexican liga mx",
+            "mexico liga mx",
+            "liga mx apertura",
+            "liga mx clausura",
+            "liga mx 2026",
+        ),
+        polymarket_gamma_series_id="10290",
+        polymarket_gamma_sport="mex",
+        kalshi_series_prefixes=(
+            "KXLIGAMXGAME",
+            "KXLIGAMXBTTS",
+            "KXLIGAMXTOTAL",
+            "KXLIGAMXFTTS",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.BRASILEIRAO,
+        display_name="Brazilian Série A",
+        aliases=(
+            "brasileirao",
+            "brasileirão",
+            "brasileirao serie a",
+            "brasileirão série a",
+            "brazilian serie a",
+            "brazil serie a",
+            "campeonato brasileiro serie a",
+            "campeonato brasileiro série a",
+            "brasileirao 2026",
+        ),
+        polymarket_gamma_series_id="10359",
+        polymarket_gamma_sport="bra",
+        # Match-level Serie A only. Short KXBRASILEIRO also matches Serie B/C.
+        kalshi_series_prefixes=(
+            "KXBRASILEIROGAME",
+            "KXBRASILEIROBTTS",
+            "KXBRASILEIROTOTAL",
+            "KXBRASILEIROFTTS",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.ARGENTINA_PRIMERA,
+        display_name="Argentine Primera División",
+        aliases=(
+            "liga profesional",
+            "liga profesional de futbol",
+            "liga profesional de fútbol",
+            "argentine primera",
+            "argentina primera",
+            "primera division argentina",
+            "primera división argentina",
+            "liga profesional 2026",
+        ),
+        polymarket_gamma_series_id="10312",
+        polymarket_gamma_sport="arg",
+        kalshi_series_prefixes=(
+            "KXARGPREMDIVGAME",
+            "KXARGPREMDIVBTTS",
+            "KXARGPREMDIVTOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.COPA_LIBERTADORES,
+        display_name="Copa Libertadores",
+        aliases=(
+            "copa libertadores",
+            "conmebol libertadores",
+            "libertadores",
+            "copa libertadores 2026",
+        ),
+        polymarket_gamma_series_id="10289",
+        polymarket_gamma_sport="lib",
+        kalshi_series_prefixes=(
+            "KXCONMEBOLLIBGAME",
+            "KXCONMEBOLLIBBTTS",
+            "KXCONMEBOLLIBTOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.SAUDI_PRO_LEAGUE,
+        display_name="Saudi Pro League",
+        aliases=(
+            "saudi pro league",
+            "roshn saudi league",
+            "saudi professional league",
+            "spl saudi",
+            "saudi pro league 2025/26",
+            "saudi pro league 2026/27",
+        ),
+        polymarket_gamma_series_id="10361",
+        polymarket_gamma_sport="spl",
+        kalshi_series_prefixes=(
+            "KXSAUDIPLGAME",
+            "KXSAUDIPLBTTS",
+            "KXSAUDIPLTOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.J1_LEAGUE,
+        display_name="J1 League",
+        aliases=(
+            "j1 league",
+            "j-league",
+            "j league",
+            "japan j1",
+            "japanese j1 league",
+            "meiji yasuda j1",
+            "j1 league 2026",
+        ),
+        polymarket_gamma_series_id="10360",
+        polymarket_gamma_sport="jap",
+        # Match-level J1 only. KXJ2LEAGUE* is J2 and is not claimed here.
+        kalshi_series_prefixes=(
+            "KXJLEAGUEGAME",
+            "KXJLEAGUEBTTS",
+            "KXJLEAGUETOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.SOUTH_AFRICAN_PREMIERSHIP,
+        display_name="South African Premiership",
+        aliases=(
+            "south african premiership",
+            "south africa premiership",
+            "premier soccer league south africa",
+            "south african premiership 2025/26",
+            "south african premiership 2026/27",
+        ),
+        polymarket_gamma_series_id="12360",
+        polymarket_gamma_sport="saf1",
+        # Kalshi match-level series were not present on public GET /series 2026-09-20.
+        kalshi_series_prefixes=(),
+    ),
 )
 
 _ALIAS_INDEX: dict[str, TargetCompetition] = {}
@@ -389,10 +760,13 @@ UNKNOWN_COMPETITION = "unknown_or_ambiguous_competition"
 NON_FOOTBALL_SPORT = "non_football_sport"
 OUT_OF_SCOPE_COMPETITION = "out_of_scope_competition"
 NO_VERIFIED_CROSS_VENUE_MAPPING = "No verified cross-venue mapping"
+KALSHI_SERIES_NOT_VERIFIED = "Kalshi match-level series not verified"
+POLYMARKET_SERIES_NOT_VERIFIED = "Polymarket Gamma series not verified"
+MATCHBOOK_ALIASES_NOT_VERIFIED = "Matchbook label aliases not verified"
 
 # Operator selector grouping. Canonical codes are the operator model; venue
 # tickers stay backend-only.
-OPERATOR_COMPETITION_REGISTRY_VERSION = 2
+OPERATOR_COMPETITION_REGISTRY_VERSION = 3
 OPERATOR_UNIVERSE_SPORT = "football"
 OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("uefa", "UEFA"),
@@ -400,8 +774,20 @@ OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("spain", "Spain"),
     ("germany", "Germany"),
     ("italy", "Italy"),
+    ("france", "France"),
+    ("netherlands", "Netherlands"),
+    ("portugal", "Portugal"),
+    ("scotland", "Scotland"),
+    ("belgium", "Belgium"),
     ("turkey", "Turkey"),
     ("usa_canada", "USA / Canada"),
+    ("mexico", "Mexico"),
+    ("brazil", "Brazil"),
+    ("argentina", "Argentina"),
+    ("south_america", "South America"),
+    ("saudi_arabia", "Saudi Arabia"),
+    ("japan", "Japan"),
+    ("south_africa", "South Africa"),
     ("international", "International"),
 )
 OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
@@ -410,13 +796,34 @@ OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
     TargetCompetitionCode.CONFERENCE_LEAGUE: ("uefa", "UEFA", "Conference League"),
     TargetCompetitionCode.PREMIER_LEAGUE: ("england", "England", "Premier League"),
     TargetCompetitionCode.CHAMPIONSHIP: ("england", "England", "Championship"),
+    TargetCompetitionCode.LEAGUE_ONE: ("england", "England", "League One"),
+    TargetCompetitionCode.LEAGUE_TWO: ("england", "England", "League Two"),
     TargetCompetitionCode.FA_CUP: ("england", "England", "FA Cup"),
     TargetCompetitionCode.CARABAO_CUP: ("england", "England", "Carabao Cup"),
     TargetCompetitionCode.LA_LIGA: ("spain", "Spain", "La Liga"),
+    TargetCompetitionCode.COPA_DEL_REY: ("spain", "Spain", "Copa del Rey"),
     TargetCompetitionCode.BUNDESLIGA: ("germany", "Germany", "Bundesliga"),
+    TargetCompetitionCode.DFB_POKAL: ("germany", "Germany", "DFB-Pokal"),
     TargetCompetitionCode.SERIE_A: ("italy", "Italy", "Serie A"),
+    TargetCompetitionCode.COPPA_ITALIA: ("italy", "Italy", "Coppa Italia"),
+    TargetCompetitionCode.LIGUE_1: ("france", "France", "Ligue 1"),
+    TargetCompetitionCode.EREDIVISIE: ("netherlands", "Netherlands", "Eredivisie"),
+    TargetCompetitionCode.PRIMEIRA_LIGA: ("portugal", "Portugal", "Primeira Liga"),
+    TargetCompetitionCode.SCOTTISH_PREMIERSHIP: ("scotland", "Scotland", "Scottish Premiership"),
+    TargetCompetitionCode.BELGIAN_PRO_LEAGUE: ("belgium", "Belgium", "Pro League"),
     TargetCompetitionCode.SUPER_LIG: ("turkey", "Turkey", "Süper Lig"),
     TargetCompetitionCode.MLS: ("usa_canada", "USA / Canada", "MLS"),
+    TargetCompetitionCode.LIGA_MX: ("mexico", "Mexico", "Liga MX"),
+    TargetCompetitionCode.BRASILEIRAO: ("brazil", "Brazil", "Série A"),
+    TargetCompetitionCode.ARGENTINA_PRIMERA: ("argentina", "Argentina", "Primera División"),
+    TargetCompetitionCode.COPA_LIBERTADORES: ("south_america", "South America", "Libertadores"),
+    TargetCompetitionCode.SAUDI_PRO_LEAGUE: ("saudi_arabia", "Saudi Arabia", "Pro League"),
+    TargetCompetitionCode.J1_LEAGUE: ("japan", "Japan", "J1 League"),
+    TargetCompetitionCode.SOUTH_AFRICAN_PREMIERSHIP: (
+        "south_africa",
+        "South Africa",
+        "Premiership",
+    ),
     TargetCompetitionCode.INTERNATIONAL_FRIENDLIES: (
         "international",
         "International",
@@ -508,6 +915,87 @@ KALSHI_SERIES_TICKERS_BY_CODE: dict[TargetCompetitionCode, tuple[str, ...]] = {
         "KXMLSTOTAL",
         "KXMLSFTTS",
     ),
+    TargetCompetitionCode.LEAGUE_ONE: (
+        "KXEFLL1GAME",
+        "KXEFLL1BTTS",
+        "KXEFLL1TOTAL",
+    ),
+    TargetCompetitionCode.COPA_DEL_REY: (
+        "KXCOPADELREYGAME",
+        "KXCOPADELREYBTTS",
+        "KXCOPADELREYTOTAL",
+        "KXCOPADELREYFTTS",
+    ),
+    TargetCompetitionCode.DFB_POKAL: (
+        "KXDFBPOKALGAME",
+        "KXDFBPOKALBTTS",
+        "KXDFBPOKALTOTAL",
+        "KXDFBPOKALFTTS",
+    ),
+    TargetCompetitionCode.COPPA_ITALIA: (
+        "KXCOPPAITALIAGAME",
+        "KXCOPPAITALIABTTS",
+        "KXCOPPAITALIATOTAL",
+        "KXCOPPAITALIAFTTS",
+    ),
+    TargetCompetitionCode.LIGUE_1: (
+        "KXLIGUE1GAME",
+        "KXLIGUE1BTTS",
+        "KXLIGUE1TOTAL",
+        "KXLIGUE1FTTS",
+    ),
+    TargetCompetitionCode.EREDIVISIE: (
+        "KXEREDIVISIEGAME",
+        "KXEREDIVISIEBTTS",
+        "KXEREDIVISIETOTAL",
+    ),
+    TargetCompetitionCode.PRIMEIRA_LIGA: (
+        "KXLIGAPORTUGALGAME",
+        "KXLIGAPORTUGALBTTS",
+        "KXLIGAPORTUGALTOTAL",
+    ),
+    TargetCompetitionCode.SCOTTISH_PREMIERSHIP: (
+        "KXSCOTTISHPREMGAME",
+        "KXSCOTTISHPREMBTTS",
+        "KXSCOTTISHPREMTOTAL",
+    ),
+    TargetCompetitionCode.BELGIAN_PRO_LEAGUE: (
+        "KXBELGIANPLGAME",
+        "KXBELGIANPLBTTS",
+        "KXBELGIANPLTOTAL",
+    ),
+    TargetCompetitionCode.LIGA_MX: (
+        "KXLIGAMXGAME",
+        "KXLIGAMXBTTS",
+        "KXLIGAMXTOTAL",
+        "KXLIGAMXFTTS",
+    ),
+    TargetCompetitionCode.BRASILEIRAO: (
+        "KXBRASILEIROGAME",
+        "KXBRASILEIROBTTS",
+        "KXBRASILEIROTOTAL",
+        "KXBRASILEIROFTTS",
+    ),
+    TargetCompetitionCode.ARGENTINA_PRIMERA: (
+        "KXARGPREMDIVGAME",
+        "KXARGPREMDIVBTTS",
+        "KXARGPREMDIVTOTAL",
+    ),
+    TargetCompetitionCode.COPA_LIBERTADORES: (
+        "KXCONMEBOLLIBGAME",
+        "KXCONMEBOLLIBBTTS",
+        "KXCONMEBOLLIBTOTAL",
+    ),
+    TargetCompetitionCode.SAUDI_PRO_LEAGUE: (
+        "KXSAUDIPLGAME",
+        "KXSAUDIPLBTTS",
+        "KXSAUDIPLTOTAL",
+    ),
+    TargetCompetitionCode.J1_LEAGUE: (
+        "KXJLEAGUEGAME",
+        "KXJLEAGUEBTTS",
+        "KXJLEAGUETOTAL",
+    ),
 }
 
 
@@ -588,9 +1076,113 @@ def competition_by_code(code: str | TargetCompetitionCode | None) -> TargetCompe
 
 
 def competition_has_verified_cross_venue_mapping(item: TargetCompetition) -> bool:
-    """Selectable when Matchbook aliases and Kalshi match-level series both exist."""
+    """Selectable only when Matchbook, Kalshi and Polymarket are all verified."""
 
-    return bool(item.aliases) and bool(KALSHI_SERIES_TICKERS_BY_CODE.get(item.code))
+    return competition_verification_status(item) == VERIFIED_ALL_3
+
+
+def matchbook_mapping_verified(item: TargetCompetition) -> bool:
+    return bool(item.aliases)
+
+
+def kalshi_mapping_verified(item: TargetCompetition) -> bool:
+    return bool(KALSHI_SERIES_TICKERS_BY_CODE.get(item.code)) and bool(item.kalshi_series_prefixes)
+
+
+def polymarket_mapping_verified(item: TargetCompetition) -> bool:
+    return bool(item.polymarket_gamma_series_id) and bool(item.polymarket_gamma_sport)
+
+
+def competition_verification_status(item: TargetCompetition) -> str:
+    if (
+        matchbook_mapping_verified(item)
+        and kalshi_mapping_verified(item)
+        and polymarket_mapping_verified(item)
+    ):
+        return VERIFIED_ALL_3
+    return PARTIAL_PROVIDER_MAPPING
+
+
+def competition_unavailable_reason(item: TargetCompetition) -> str | None:
+    if competition_verification_status(item) == VERIFIED_ALL_3:
+        return None
+    missing: list[str] = []
+    if not matchbook_mapping_verified(item):
+        missing.append(MATCHBOOK_ALIASES_NOT_VERIFIED)
+    if not kalshi_mapping_verified(item):
+        missing.append(KALSHI_SERIES_NOT_VERIFIED)
+    if not polymarket_mapping_verified(item):
+        missing.append(POLYMARKET_SERIES_NOT_VERIFIED)
+    if len(missing) == 1:
+        return missing[0]
+    return NO_VERIFIED_CROSS_VENUE_MAPPING
+
+
+class CompetitionVerificationRow(BaseModel):
+    code: str
+    display_name: str
+    selector_label: str
+    group_id: str
+    group_label: str
+    default_selected: bool
+    selectable: bool
+    verification_status: str
+    matchbook_status: VenueMappingStatus
+    matchbook_evidence: str
+    kalshi_status: VenueMappingStatus
+    kalshi_series_tickers: tuple[str, ...] = Field(default_factory=tuple)
+    polymarket_status: VenueMappingStatus
+    polymarket_gamma_series_id: str | None = None
+    polymarket_gamma_sport: str | None = None
+    retrieved_at: str = PROVIDER_MATRIX_RETRIEVED_AT
+    unavailable_reason: str | None = None
+
+
+def operator_verification_matrix() -> list[CompetitionVerificationRow]:
+    """Backend registry view. Identifiers stay out of operator UI state."""
+
+    rows: list[CompetitionVerificationRow] = []
+    for item in TARGET_COMPETITIONS:
+        group_id, group_label, selector_label = OPERATOR_SELECTOR_META[item.code]
+        selectable = competition_has_verified_cross_venue_mapping(item)
+        rows.append(
+            CompetitionVerificationRow(
+                code=item.code.value,
+                display_name=item.display_name,
+                selector_label=selector_label,
+                group_id=group_id,
+                group_label=group_label,
+                default_selected=item.code in DEFAULT_OPERATOR_COMPETITION_CODES,
+                selectable=selectable,
+                verification_status=competition_verification_status(item),
+                matchbook_status=(
+                    VenueMappingStatus.VERIFIED
+                    if matchbook_mapping_verified(item)
+                    else VenueMappingStatus.UNVERIFIED
+                ),
+                matchbook_evidence=(
+                    "Label aliases; Matchbook has no competition IDs."
+                    if matchbook_mapping_verified(item)
+                    else "No verified Matchbook label aliases."
+                ),
+                kalshi_status=(
+                    VenueMappingStatus.VERIFIED
+                    if kalshi_mapping_verified(item)
+                    else VenueMappingStatus.UNVERIFIED
+                ),
+                kalshi_series_tickers=KALSHI_SERIES_TICKERS_BY_CODE.get(item.code, ()),
+                polymarket_status=(
+                    VenueMappingStatus.VERIFIED
+                    if polymarket_mapping_verified(item)
+                    else VenueMappingStatus.UNVERIFIED
+                ),
+                polymarket_gamma_series_id=item.polymarket_gamma_series_id,
+                polymarket_gamma_sport=item.polymarket_gamma_sport,
+                retrieved_at=PROVIDER_MATRIX_RETRIEVED_AT,
+                unavailable_reason=competition_unavailable_reason(item),
+            )
+        )
+    return rows
 
 
 def kalshi_series_tickers_for_codes(codes: list[str] | tuple[str, ...] | None) -> list[str]:
@@ -673,7 +1265,8 @@ def operator_competition_catalog() -> list[dict[str, Any]]:
                 "group_label": group_label,
                 "default_selected": item.code in DEFAULT_OPERATOR_COMPETITION_CODES,
                 "selectable": selectable,
-                "unavailable_reason": None if selectable else NO_VERIFIED_CROSS_VENUE_MAPPING,
+                "verification_status": competition_verification_status(item),
+                "unavailable_reason": competition_unavailable_reason(item),
             }
         )
     return rows

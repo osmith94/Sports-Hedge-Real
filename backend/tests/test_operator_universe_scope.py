@@ -33,12 +33,16 @@ from sports_hedge.application.live_refresh import (
 from sports_hedge.application.price_engine import CataloguePriceEngine
 from sports_hedge.application.target_competitions import (
     DEFAULT_OPERATOR_COMPETITION_CODES,
+    KALSHI_SERIES_NOT_VERIFIED,
     NO_VERIFIED_CROSS_VENUE_MAPPING,
     OUT_OF_SCOPE_COMPETITION,
+    PRINCIPAL_OPERATOR_COMPETITION_COUNT,
+    VERIFIED_ALL_3,
     competition_has_verified_cross_venue_mapping,
     default_operator_competition_code_values,
     kalshi_series_tickers_for_codes,
     operator_competition_catalog,
+    operator_verification_matrix,
     polymarket_series_ids_for_codes,
     resolve_target_competition,
     resolve_target_competition_from_kalshi_ticker,
@@ -139,6 +143,9 @@ def test_clean_install_defaults_to_current_eight_competitions(tmp_path: Path) ->
         assert resolved.scope_version == 0
         catalog_codes = {row.code for row in resolved.catalog}
         assert catalog_codes >= set(DEFAULT_EIGHT)
+        assert len(resolved.catalog) == 30
+        assert resolved.saved_default_competition_codes == list(DEFAULT_EIGHT)
+        assert resolved.is_session_override is False
         assert "champions_league" in catalog_codes
         assert all("KX" not in row.code for row in resolved.catalog)
         assert all("ticker" not in row.selector_label.lower() for row in resolved.catalog)
@@ -158,6 +165,11 @@ def test_saved_scope_survives_backend_restart(tmp_path: Path) -> None:
     loaded = restarted.load()
     assert loaded is not None
     assert loaded.selected_competition_codes == ["premier_league", "champions_league", "mls"]
+    assert loaded.saved_default_competition_codes == [
+        "premier_league",
+        "champions_league",
+        "mls",
+    ]
     assert loaded.scope_version == 1
     assert loaded.needs_first_run_confirmation is False
     restarted.close()
@@ -193,8 +205,13 @@ def test_http_hydrates_backend_scope_and_apply_does_not_call_providers(tmp_path:
         assert response.status_code == 200
         saved = response.json()["universe_scope"]
         assert saved["selected_competition_codes"] == ["premier_league", "champions_league"]
+        assert saved["saved_default_competition_codes"] == list(DEFAULT_EIGHT)
+        assert saved["is_session_override"] is True
         assert saved["needs_first_run_confirmation"] is False
-        assert saved["source"] == "operator"
+        assert saved["source"] == "env_default"
+        persist = scope_store.load()
+        assert persist is not None
+        assert persist.saved_default_competition_codes == list(DEFAULT_EIGHT)
         assert ticks == []
         put_src = inspect.getsource(paper_api.put_universe_scope)
         assert "collect_and_scan" not in put_src
@@ -425,6 +442,8 @@ def test_stop_refuses_manual_lanes_but_allows_scope_edit(tmp_path: Path) -> None
             "premier_league",
             "la_liga",
         ]
+        assert body["universe_scope"]["saved_default_competition_codes"] == list(DEFAULT_EIGHT)
+        assert body["universe_scope"]["is_session_override"] is True
         assert coordinator._universe_run_now_pending is False
         assert coordinator.plan_universe_tick(now=NOW).reason == "operator_stopped"
     finally:
@@ -433,22 +452,33 @@ def test_stop_refuses_manual_lanes_but_allows_scope_edit(tmp_path: Path) -> None
 
 def test_verified_new_competition_mappings_and_no_guessed_tickers() -> None:
     catalog = {row["code"]: row for row in operator_competition_catalog()}
+    assert len(catalog) == PRINCIPAL_OPERATOR_COMPETITION_COUNT
     for code in (
         "champions_league",
         "europa_league",
         "conference_league",
         "super_lig",
         "mls",
+        "ligue_1",
+        "liga_mx",
+        "brasileirao",
     ):
         assert catalog[code]["selectable"] is True
         assert catalog[code]["unavailable_reason"] is None
+        assert catalog[code]["verification_status"] == VERIFIED_ALL_3
         item = resolve_target_competition(catalog[code]["display_name"])
         assert item is not None
         assert competition_has_verified_cross_venue_mapping(item)
+    for code in ("league_two", "south_african_premiership"):
+        assert catalog[code]["selectable"] is False
+        assert catalog[code]["unavailable_reason"] == KALSHI_SERIES_NOT_VERIFIED
+        assert catalog[code]["verification_status"] != VERIFIED_ALL_3
     assert resolve_target_competition_from_kalshi_ticker("KXUCLGAME") is not None
     assert resolve_target_competition_from_kalshi_ticker("KXUCLWGAME") is None
     assert resolve_target_competition_from_kalshi_ticker("KXMLSASTGAME") is None
     assert resolve_target_competition_from_kalshi_ticker("KXDENSUPERLIGAGAME") is None
+    assert resolve_target_competition_from_kalshi_ticker("KXLIGUE2GAME") is None
+    assert resolve_target_competition_from_kalshi_ticker("KXJ2LEAGUEGAME") is None
     settings = Settings()
     assert "KXUCLGAME" not in settings.kalshi_series_tickers
     assert "10204" not in settings.resolved_polymarket_series_ids()
@@ -463,12 +493,137 @@ def test_verified_new_competition_mappings_and_no_guessed_tickers() -> None:
     assert "needs_first_run_confirmation" in scan
     assert "Apply & Run UNIVERSE now" in modal
     assert "Select defaults" in modal
+    assert "Save this selection as my default" in modal
+    assert "Restore saved default" in modal
     assert "unavailable_reason" in modal
     assert "KXUCL" not in modal
     assert "/paper/universe-scope" in api
+    assert "save_as_default" in api
     assert "/paper/collect/background" in api
     assert "/paper/collect/universe" in api
     assert NO_VERIFIED_CROSS_VENUE_MAPPING == "No verified cross-venue mapping"
     assert discovery_filters_for_codes(["champions_league"])["kalshi_series_tickers"]
     assert polymarket_series_ids_for_codes(["champions_league"]) == ["10204"]
     assert "KXUCLW" not in "".join(kalshi_series_tickers_for_codes(["champions_league"]))
+
+
+def test_session_scope_does_not_overwrite_saved_default_or_survive_restart(tmp_path: Path) -> None:
+    coordinator, scope_store, settings_store = _bind_scope(tmp_path)
+    try:
+        applied = coordinator.apply_universe_scope(
+            ["premier_league", "ligue_1"],
+            save_as_default=False,
+        )
+        assert applied.selected_competition_codes == ["premier_league", "ligue_1"]
+        assert applied.saved_default_competition_codes == list(DEFAULT_EIGHT)
+        assert applied.is_session_override is True
+        persisted = scope_store.load()
+        assert persisted is not None
+        assert persisted.saved_default_competition_codes == list(DEFAULT_EIGHT)
+        coordinator.reset()
+        coordinator.bind_universe_scope_store(scope_store)
+        restarted = coordinator.effective_universe_scope()
+        assert restarted.selected_competition_codes == list(DEFAULT_EIGHT)
+        assert restarted.is_session_override is False
+        coordinator._ensure_universe_generation(NOW)
+        assert tuple(coordinator._universe_generation_selected_codes) == DEFAULT_EIGHT
+    finally:
+        _unbind(coordinator, scope_store, settings_store)
+
+
+def test_saved_default_survives_restart_and_first_universe_uses_it(tmp_path: Path) -> None:
+    coordinator, scope_store, settings_store = _bind_scope(tmp_path)
+    try:
+        saved = coordinator.apply_universe_scope(
+            ["premier_league", "champions_league", "mls"],
+            save_as_default=True,
+        )
+        assert saved.saved_default_competition_codes == [
+            "premier_league",
+            "champions_league",
+            "mls",
+        ]
+        assert saved.is_session_override is False
+        coordinator.apply_universe_scope(
+            ["premier_league", "ligue_1"],
+            save_as_default=False,
+        )
+        assert coordinator.effective_universe_scope().is_session_override is True
+        coordinator.reset()
+        coordinator.bind_universe_scope_store(scope_store)
+        hydrated = coordinator.effective_universe_scope()
+        assert hydrated.selected_competition_codes == [
+            "premier_league",
+            "champions_league",
+            "mls",
+        ]
+        coordinator._ensure_universe_generation(NOW)
+        assert list(coordinator._universe_generation_selected_codes) == [
+            "premier_league",
+            "champions_league",
+            "mls",
+        ]
+    finally:
+        _unbind(coordinator, scope_store, settings_store)
+
+
+def test_restore_saved_default_restores_current_scope(tmp_path: Path) -> None:
+    coordinator, scope_store, settings_store = _bind_scope(tmp_path)
+    client = TestClient(app)
+    try:
+        coordinator.apply_universe_scope(
+            ["premier_league", "mls"],
+            save_as_default=True,
+        )
+        coordinator.apply_universe_scope(
+            ["premier_league", "ligue_1", "liga_mx"],
+            save_as_default=False,
+        )
+        restored = client.put(
+            "/paper/universe-scope",
+            json={"restore_saved_default": True, "run_universe_now": False},
+        )
+        assert restored.status_code == 200
+        body = restored.json()["universe_scope"]
+        assert body["selected_competition_codes"] == ["premier_league", "mls"]
+        assert body["saved_default_competition_codes"] == ["premier_league", "mls"]
+        assert body["is_session_override"] is False
+    finally:
+        _unbind(coordinator, scope_store, settings_store)
+
+
+def test_thirty_row_matrix_only_verified_all_three_are_selectable() -> None:
+    catalog = operator_competition_catalog()
+    matrix = operator_verification_matrix()
+    assert len(catalog) == PRINCIPAL_OPERATOR_COMPETITION_COUNT
+    assert len(matrix) == PRINCIPAL_OPERATOR_COMPETITION_COUNT
+    assert {row["code"] for row in catalog} == {row.code for row in matrix}
+    selectable = [row for row in matrix if row.selectable]
+    disabled = [row for row in matrix if not row.selectable]
+    assert all(row.verification_status == VERIFIED_ALL_3 for row in selectable)
+    assert all(
+        row.matchbook_status.value == "verified"
+        and row.kalshi_status.value == "verified"
+        and row.polymarket_status.value == "verified"
+        and row.kalshi_series_tickers
+        and row.polymarket_gamma_series_id
+        for row in selectable
+    )
+    assert {row.code for row in disabled} == {"league_two", "south_african_premiership"}
+    for row in disabled:
+        assert row.kalshi_status.value == "unverified"
+        assert row.kalshi_series_tickers == ()
+        assert row.unavailable_reason == KALSHI_SERIES_NOT_VERIFIED
+    for row in matrix:
+        assert row.code == row.code.lower()
+        assert not row.code.startswith("KX")
+        if row.selectable:
+            assert "KX" in "".join(row.kalshi_series_tickers)
+    docs = Path(__file__).resolve().parents[2] / "docs" / "OPERATOR_COMPETITION_VERIFICATION_MATRIX.md"
+    text = docs.read_text(encoding="utf-8")
+    assert "OPERATOR_COMPETITION_REGISTRY_VERSION = 3" in text
+    assert "VERIFIED_ALL_3" in text
+    for row in matrix:
+        assert row.code in text
+        assert row.display_name in text
+

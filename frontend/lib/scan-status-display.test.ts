@@ -382,6 +382,8 @@ describe("dual cadence operator copy", () => {
     assert.match(modal, /Apply & Run UNIVERSE now/);
     assert.match(modal, /Select defaults/);
     assert.match(modal, /Select all supported/);
+    assert.match(modal, /Save this selection as my default/);
+    assert.match(modal, /Restore saved default/);
     assert.doesNotMatch(modal, /KXUCL|KXEPLGAME|series_ticker/);
   });
 });

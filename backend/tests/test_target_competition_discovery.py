@@ -121,6 +121,80 @@ VARIANT_LABELS = {
         "MLS",
         "Major League Soccer",
     ),
+    TargetCompetitionCode.LEAGUE_ONE: (
+        "League One",
+        "EFL League One",
+        "Sky Bet League One",
+    ),
+    TargetCompetitionCode.COPA_DEL_REY: (
+        "Copa del Rey",
+        "Spanish Copa del Rey",
+    ),
+    TargetCompetitionCode.DFB_POKAL: (
+        "DFB-Pokal",
+        "DFB Pokal",
+        "German Cup",
+    ),
+    TargetCompetitionCode.COPPA_ITALIA: (
+        "Coppa Italia",
+        "Italian Cup",
+    ),
+    TargetCompetitionCode.LIGUE_1: (
+        "Ligue 1",
+        "French Ligue 1",
+        "France Ligue 1",
+    ),
+    TargetCompetitionCode.EREDIVISIE: (
+        "Eredivisie",
+        "Dutch Eredivisie",
+    ),
+    TargetCompetitionCode.PRIMEIRA_LIGA: (
+        "Primeira Liga",
+        "Liga Portugal",
+    ),
+    TargetCompetitionCode.SCOTTISH_PREMIERSHIP: (
+        "Scottish Premiership",
+        "Cinch Premiership",
+    ),
+    TargetCompetitionCode.BELGIAN_PRO_LEAGUE: (
+        "Belgian Pro League",
+        "Jupiler Pro League",
+    ),
+    TargetCompetitionCode.LIGA_MX: (
+        "Liga MX",
+        "Mexico Liga MX",
+    ),
+    TargetCompetitionCode.BRASILEIRAO: (
+        "Brasileirão",
+        "Brazilian Serie A",
+        "Campeonato Brasileiro Série A",
+    ),
+    TargetCompetitionCode.ARGENTINA_PRIMERA: (
+        "Liga Profesional",
+        "Argentine Primera",
+        "Primera División Argentina",
+    ),
+    TargetCompetitionCode.COPA_LIBERTADORES: (
+        "Copa Libertadores",
+        "CONMEBOL Libertadores",
+    ),
+    TargetCompetitionCode.SAUDI_PRO_LEAGUE: (
+        "Saudi Pro League",
+        "Roshn Saudi League",
+    ),
+    TargetCompetitionCode.J1_LEAGUE: (
+        "J1 League",
+        "J-League",
+        "Japan J1",
+    ),
+    TargetCompetitionCode.SOUTH_AFRICAN_PREMIERSHIP: (
+        "South African Premiership",
+        "South Africa Premiership",
+    ),
+    TargetCompetitionCode.LEAGUE_TWO: (
+        "League Two",
+        "EFL League Two",
+    ),
 }
 
 REJECTED_LABELS = (
@@ -133,18 +207,12 @@ REJECTED_LABELS = (
     "",
     "EFL Trophy",
     "Vertu Trophy",
-    "League One",
-    "EFL League One",
-    "League Two",
-    "EFL League Two",
     "2. Bundesliga",
     "Bundesliga 2",
     "Women's Bundesliga",
     "Frauen-Bundesliga",
     "Austria Bundesliga",
     "Serie B",
-    "Brazilian Serie A",
-    "Serie A Brazil",
     "Serie A Femminile",
     "Women's Serie A",
     "FA Trophy",
@@ -226,8 +294,6 @@ def test_matchbook_scope_accepts_new_target_competitions(
 @pytest.mark.parametrize(
     "label",
     (
-        "League One",
-        "League Two",
         "EFL Trophy",
         "Vertu Trophy",
         "2. Bundesliga",
@@ -250,6 +316,20 @@ def test_matchbook_scope_rejects_out_of_scope_and_near_neighbors(label: str) -> 
     assert decision.reason == "unknown_or_ambiguous_competition"
 
 
+@pytest.mark.parametrize("label", ("League One", "League Two", "EFL League One", "Ligue 1"))
+def test_unselected_registered_competitions_are_out_of_scope(label: str) -> None:
+    decision = scope_matchbook_event(
+        {
+            "id": 12,
+            "name": "Home vs Away",
+            "sport-name": "Football",
+            "competition-name": label,
+        }
+    )
+    assert decision.allowed is False
+    assert decision.reason == "out_of_scope_competition"
+
+
 @pytest.mark.parametrize(
     ("series_id", "code"),
     [
@@ -266,6 +346,23 @@ def test_matchbook_scope_rejects_out_of_scope_and_near_neighbors(label: str) -> 
         ("10437", TargetCompetitionCode.CONFERENCE_LEAGUE),
         ("10292", TargetCompetitionCode.SUPER_LIG),
         ("10189", TargetCompetitionCode.MLS),
+        ("11435", TargetCompetitionCode.LEAGUE_ONE),
+        ("11436", TargetCompetitionCode.LEAGUE_TWO),
+        ("10316", TargetCompetitionCode.COPA_DEL_REY),
+        ("10317", TargetCompetitionCode.DFB_POKAL),
+        ("10287", TargetCompetitionCode.COPPA_ITALIA),
+        ("10195", TargetCompetitionCode.LIGUE_1),
+        ("10286", TargetCompetitionCode.EREDIVISIE),
+        ("10330", TargetCompetitionCode.PRIMEIRA_LIGA),
+        ("10674", TargetCompetitionCode.SCOTTISH_PREMIERSHIP),
+        ("12351", TargetCompetitionCode.BELGIAN_PRO_LEAGUE),
+        ("10290", TargetCompetitionCode.LIGA_MX),
+        ("10359", TargetCompetitionCode.BRASILEIRAO),
+        ("10312", TargetCompetitionCode.ARGENTINA_PRIMERA),
+        ("10289", TargetCompetitionCode.COPA_LIBERTADORES),
+        ("10361", TargetCompetitionCode.SAUDI_PRO_LEAGUE),
+        ("10360", TargetCompetitionCode.J1_LEAGUE),
+        ("12360", TargetCompetitionCode.SOUTH_AFRICAN_PREMIERSHIP),
     ],
 )
 def test_verified_polymarket_series_ids_resolve(
@@ -335,6 +432,21 @@ def test_polymarket_scope_uses_verified_series_coverage() -> None:
         ("KXUECLGAME", TargetCompetitionCode.CONFERENCE_LEAGUE),
         ("KXSUPERLIGGAME", TargetCompetitionCode.SUPER_LIG),
         ("KXMLSGAME", TargetCompetitionCode.MLS),
+        ("KXEFLL1GAME", TargetCompetitionCode.LEAGUE_ONE),
+        ("KXCOPADELREYGAME", TargetCompetitionCode.COPA_DEL_REY),
+        ("KXDFBPOKALGAME", TargetCompetitionCode.DFB_POKAL),
+        ("KXCOPPAITALIAGAME", TargetCompetitionCode.COPPA_ITALIA),
+        ("KXLIGUE1GAME", TargetCompetitionCode.LIGUE_1),
+        ("KXEREDIVISIEGAME", TargetCompetitionCode.EREDIVISIE),
+        ("KXLIGAPORTUGALGAME", TargetCompetitionCode.PRIMEIRA_LIGA),
+        ("KXSCOTTISHPREMGAME", TargetCompetitionCode.SCOTTISH_PREMIERSHIP),
+        ("KXBELGIANPLGAME", TargetCompetitionCode.BELGIAN_PRO_LEAGUE),
+        ("KXLIGAMXGAME", TargetCompetitionCode.LIGA_MX),
+        ("KXBRASILEIROGAME", TargetCompetitionCode.BRASILEIRAO),
+        ("KXARGPREMDIVGAME", TargetCompetitionCode.ARGENTINA_PRIMERA),
+        ("KXCONMEBOLLIBGAME", TargetCompetitionCode.COPA_LIBERTADORES),
+        ("KXSAUDIPLGAME", TargetCompetitionCode.SAUDI_PRO_LEAGUE),
+        ("KXJLEAGUEGAME", TargetCompetitionCode.J1_LEAGUE),
     ],
 )
 def test_verified_kalshi_tickers_resolve(ticker: str, code: TargetCompetitionCode) -> None:
@@ -350,7 +462,11 @@ def test_verified_kalshi_tickers_resolve(ticker: str, code: TargetCompetitionCod
         "KXBUNDESLIGA2BTTS",
         "KXSERIEAWGAME",
         "KXSERIEBGAME",
-        "KXBRASILEIROGAME",
+        "KXBRASILEIROBGAME",
+        "KXLIGUE2GAME",
+        "KXEREDIVISIEWGAME",
+        "KXJ2LEAGUEGAME",
+        "KXCONMEBOLSUDGAME",
         "KXCLUBFGAME",
         "KXEFLTROPHYGAME",
         "KXFIFAWGAME",
@@ -623,27 +739,17 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
         repository.close()
 
 
-def test_target_set_excludes_league_one_two_and_efl_trophy() -> None:
+def test_principal_register_has_thirty_rows_and_still_excludes_efl_trophy() -> None:
     codes = {item.code for item in TARGET_COMPETITIONS}
-    assert TargetCompetitionCode.PREMIER_LEAGUE in codes
-    assert TargetCompetitionCode.CHAMPIONSHIP in codes
-    assert TargetCompetitionCode.LA_LIGA in codes
-    assert codes == {
-        TargetCompetitionCode.PREMIER_LEAGUE,
-        TargetCompetitionCode.CHAMPIONSHIP,
-        TargetCompetitionCode.LA_LIGA,
-        TargetCompetitionCode.CARABAO_CUP,
-        TargetCompetitionCode.FA_CUP,
-        TargetCompetitionCode.INTERNATIONAL_FRIENDLIES,
-        TargetCompetitionCode.BUNDESLIGA,
-        TargetCompetitionCode.SERIE_A,
-        TargetCompetitionCode.CHAMPIONS_LEAGUE,
-        TargetCompetitionCode.EUROPA_LEAGUE,
-        TargetCompetitionCode.CONFERENCE_LEAGUE,
-        TargetCompetitionCode.SUPER_LIG,
-        TargetCompetitionCode.MLS,
-    }
-    for label in ("League One", "League Two", "EFL Trophy", "Vertu Trophy"):
+    assert len(TARGET_COMPETITIONS) == 30
+    assert len(codes) == 30
+    assert TargetCompetitionCode.LEAGUE_ONE in codes
+    assert TargetCompetitionCode.LEAGUE_TWO in codes
+    assert TargetCompetitionCode.LIGUE_1 in codes
+    assert TargetCompetitionCode.SOUTH_AFRICAN_PREMIERSHIP in codes
+    assert resolve_target_competition("League One") is not None
+    assert resolve_target_competition("League Two") is not None
+    for label in ("EFL Trophy", "Vertu Trophy"):
         assert resolve_target_competition(label) is None
 
 

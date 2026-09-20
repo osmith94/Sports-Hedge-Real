@@ -724,6 +724,7 @@ export type OperatorCompetitionOption = {
   group_label: string;
   default_selected: boolean;
   selectable: boolean;
+  verification_status?: string;
   unavailable_reason?: string | null;
 };
 
@@ -731,6 +732,9 @@ export type OperatorUniverseScope = {
   sport: string;
   selected_competition_codes: string[];
   selected_count: number;
+  saved_default_competition_codes?: string[];
+  saved_default_count?: number;
+  is_session_override?: boolean;
   scope_version: number;
   registry_version: number;
   source: "operator" | "env_default";
@@ -748,6 +752,8 @@ export type OperatorUniverseScopeUpdate = {
   selected_competition_codes: string[];
   sport?: string;
   run_universe_now?: boolean;
+  save_as_default?: boolean;
+  restore_saved_default?: boolean;
 };
 
 export type LiveRefreshStatus = {

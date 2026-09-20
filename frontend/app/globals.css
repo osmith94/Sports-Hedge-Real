@@ -123,6 +123,8 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 .competition-modal-row strong { font-weight: 650; }
 .competition-modal-row em { display: block; color: var(--amber); font-style: normal; font-size: 10px; margin-top: 2px; }
 .competition-modal-row-disabled { opacity: .62; cursor: not-allowed; }
+.competition-modal-scope-meta { margin: 8px 0 0; color: var(--muted-2); font-size: 10px; line-height: 1.45; max-width: 58ch; }
+.competition-modal-save-default { display: flex; gap: 8px; align-items: center; margin: 12px 0 0; font-size: 12px; font-weight: 650; }
 .competition-modal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .scan-button-secondary { border: 1px solid var(--line-strong); background: transparent; color: var(--muted); border-radius: 8px; padding: 9px 13px; min-height: 35px; font-size: 10px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; cursor: pointer; }
 .scan-button-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }

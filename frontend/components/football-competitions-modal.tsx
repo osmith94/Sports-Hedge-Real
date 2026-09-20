@@ -10,8 +10,20 @@ const GROUP_ORDER = [
   "spain",
   "germany",
   "italy",
+  "france",
+  "netherlands",
+  "portugal",
+  "scotland",
+  "belgium",
   "turkey",
   "usa_canada",
+  "mexico",
+  "brazil",
+  "argentina",
+  "south_america",
+  "saudi_arabia",
+  "japan",
+  "south_africa",
   "international",
 ];
 
@@ -22,7 +34,7 @@ type FootballCompetitionsModalProps = {
   saving?: boolean;
   errorMessage?: string | null;
   onClose: () => void;
-  onApply: (codes: string[], runUniverseNow: boolean) => Promise<void> | void;
+  onApply: (codes: string[], runUniverseNow: boolean, saveAsDefault: boolean) => Promise<void> | void;
 };
 
 function defaultCodes(catalog: OperatorCompetitionOption[]): string[] {
@@ -31,6 +43,13 @@ function defaultCodes(catalog: OperatorCompetitionOption[]): string[] {
 
 function supportedCodes(catalog: OperatorCompetitionOption[]): string[] {
   return catalog.filter((row) => row.selectable).map((row) => row.code);
+}
+
+function namesFor(codes: string[], catalog: OperatorCompetitionOption[]): string {
+  const labels = new Map(catalog.map((row) => [row.code, row.selector_label]));
+  const named = codes.map((code) => labels.get(code) ?? code);
+  if (named.length <= 3) return named.join(", ");
+  return `${named.slice(0, 3).join(", ")} +${named.length - 3}`;
 }
 
 export function FootballCompetitionsModal({
@@ -45,12 +64,14 @@ export function FootballCompetitionsModal({
   const catalog = scope?.catalog ?? [];
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState<string[]>(scope?.selected_competition_codes ?? []);
+  const [saveAsDefault, setSaveAsDefault] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setQuery("");
     const rows = scope?.catalog ?? [];
     setDraft(scope?.selected_competition_codes ?? defaultCodes(rows));
+    setSaveAsDefault(Boolean(scope?.needs_first_run_confirmation));
   }, [open, scope]);
 
   const groups = useMemo(() => {
@@ -66,7 +87,8 @@ export function FootballCompetitionsModal({
         byGroup.set(row.group_id, { label: row.group_label, rows: [row] });
       }
     }
-    return GROUP_ORDER.flatMap((id) => {
+    const extras = [...byGroup.keys()].filter((id) => !GROUP_ORDER.includes(id));
+    return [...GROUP_ORDER, ...extras].flatMap((id) => {
       const group = byGroup.get(id);
       return group ? [{ id, ...group }] : [];
     });
@@ -77,6 +99,8 @@ export function FootballCompetitionsModal({
   const selectedSet = new Set(draft);
   const selectedCount = draft.length;
   const firstRun = Boolean(scope?.needs_first_run_confirmation);
+  const savedDefault = scope?.saved_default_competition_codes ?? defaultCodes(catalog);
+  const savedCount = savedDefault.length;
 
   function toggle(row: OperatorCompetitionOption) {
     if (!row.selectable) return;
@@ -102,8 +126,14 @@ export function FootballCompetitionsModal({
             <h2 id="football-competitions-title">Football competitions</h2>
             <p>
               {firstRun
-                ? "Confirm the default UNIVERSE discovery scope. Saved selection is reused after this."
+                ? "Confirm the default UNIVERSE discovery scope. Checking Save this selection as my default stores it for restart."
                 : "Canonical competition codes control UNIVERSE discovery. Venue tickers stay backend-only."}
+            </p>
+            <p className="competition-modal-scope-meta">
+              Active: {namesFor(scope?.selected_competition_codes ?? draft, catalog)} ({scope?.selected_count ?? selectedCount})
+              {" · "}
+              Saved default: {namesFor(savedDefault, catalog)} ({savedCount})
+              {scope?.is_session_override ? " · session override" : ""}
             </p>
           </div>
           <button className="scan-button-secondary" type="button" onClick={onClose}>
@@ -136,6 +166,14 @@ export function FootballCompetitionsModal({
           </button>
           <button className="scan-button-secondary" type="button" onClick={() => setDraft([])}>
             Clear all
+          </button>
+          <button
+            className="scan-button-secondary"
+            type="button"
+            disabled={saving}
+            onClick={() => void onApply(savedDefault, false, false)}
+          >
+            Restore saved default
           </button>
           <span className="competition-modal-count">{selectedCount} selected</span>
         </div>
@@ -173,6 +211,15 @@ export function FootballCompetitionsModal({
             </section>
           ))}
         </div>
+        <label className="competition-modal-save-default">
+          <input
+            type="checkbox"
+            checked={saveAsDefault}
+            onChange={(event) => setSaveAsDefault(event.target.checked)}
+            aria-label="Save this selection as my default"
+          />
+          Save this selection as my default
+        </label>
         {errorMessage ? (
           <div className="scan-note" role="alert">
             {errorMessage}
@@ -183,7 +230,7 @@ export function FootballCompetitionsModal({
             className="scan-button-secondary"
             type="button"
             disabled={saving}
-            onClick={() => void onApply(draft, false)}
+            onClick={() => void onApply(draft, false, saveAsDefault)}
           >
             {saving ? "Saving…" : "Apply"}
           </button>
@@ -192,7 +239,7 @@ export function FootballCompetitionsModal({
             type="button"
             disabled={saving || scannerStopped}
             title={scannerStopped ? "Scanner stopped by operator" : undefined}
-            onClick={() => void onApply(draft, true)}
+            onClick={() => void onApply(draft, true, saveAsDefault)}
           >
             Apply & Run UNIVERSE now
           </button>

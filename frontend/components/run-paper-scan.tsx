@@ -511,7 +511,11 @@ export function RunPaperScan() {
     }
   }
 
-  async function applyCompetitionScope(codes: string[], runUniverseNow: boolean) {
+  async function applyCompetitionScope(
+    codes: string[],
+    runUniverseNow: boolean,
+    saveAsDefault: boolean,
+  ) {
     setCompetitionsSaving(true);
     setCompetitionsError(null);
     try {
@@ -519,13 +523,18 @@ export function RunPaperScan() {
         selected_competition_codes: codes,
         sport: "football",
         run_universe_now: runUniverseNow,
+        save_as_default: saveAsDefault,
       });
       applyLiveRefresh(status, { forceSettings: true });
       setCompetitionsOpen(false);
       setSettingsMessage(
         runUniverseNow
-          ? "Saved football competition scope and requested UNIVERSE now."
-          : "Saved football competition scope. UNIVERSE discovery will use it on the next generation.",
+          ? saveAsDefault
+            ? "Saved football competition default and requested UNIVERSE now."
+            : "Applied football competition scope for this session and requested UNIVERSE now."
+          : saveAsDefault
+            ? "Saved football competition startup default. UNIVERSE discovery will use it on the next generation."
+            : "Applied football competition scope for this session. Saved startup default is unchanged.",
       );
     } catch (error) {
       setCompetitionsError(
@@ -846,7 +855,8 @@ export function RunPaperScan() {
           Run UNIVERSE now bypasses only the 10-minute wait and uses the real selected-scope generation worker.
           Update saves Min Net Arb, Max Risk, HOT cadence and BACKGROUND cadence
           and max allocated per trade for subsequent server-owned work and does not trigger a scan.
-          Football competitions Apply persists canonical codes only and does not itself call providers.
+          Football competitions Apply changes the current session scope and does not itself call providers.
+          Save this selection as my default is required to persist startup scope across restart.
           HOT cadence is how often HOT pricing is due; BACKGROUND cadence is how often the
           rest of the known ACTIVE catalogue is repriced. ACTIVE TRADE reprices open paper
           trades every 5s from exact known IDs. Auto refresh view only polls status.

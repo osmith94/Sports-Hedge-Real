@@ -917,13 +917,18 @@ def put_universe_scope(
     update: OperatorUniverseScopeUpdate,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
 ) -> LiveRefreshStatus:
-    """Persist canonical competition codes. Apply itself never calls providers."""
+    """Apply current session scope. Saved startup default changes only when requested.
+
+    Apply itself never calls providers.
+    """
 
     coordinator = get_live_refresh_coordinator()
     try:
         coordinator.apply_universe_scope(
             update.selected_competition_codes,
             run_universe_now=update.run_universe_now,
+            save_as_default=update.save_as_default,
+            restore_saved_default=update.restore_saved_default,
             sport=update.sport,
         )
     except ValueError as exc:

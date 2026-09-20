@@ -141,6 +141,7 @@ from sports_hedge.persistence.operator_universe_scope import (
 )
 from sports_hedge.application.target_competitions import (
     default_operator_competition_code_values,
+    normalize_selected_competition_codes,
 )
 from sports_hedge.persistence.universe_checkpoint import SqliteUniverseCheckpointStore
 from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookDiscoveryError
@@ -461,6 +462,8 @@ class LiveRefreshCoordinator:
         self._universe_run_now_pending = False
         self._universe_generation_superseded = False
         self._universe_generation_scope_version = 0
+        self._session_selected_codes: tuple[str, ...] | None = None
+        self._session_scope_version = 0
         self._universe_generation_selected_codes: tuple[str, ...] = (
             default_operator_competition_code_values()
         )
@@ -658,8 +661,8 @@ class LiveRefreshCoordinator:
             self._universe_scope_store = store
 
     def effective_universe_scope(self) -> OperatorUniverseScope:
-        scope = resolve_operator_universe_scope(self._resolved_universe_scope_store())
-        return self._decorate_universe_scope(scope)
+        saved = resolve_operator_universe_scope(self._resolved_universe_scope_store())
+        return self._decorate_universe_scope(saved)
 
     def _decorate_universe_scope(self, scope: OperatorUniverseScope) -> OperatorUniverseScope:
         with self._state_lock:
@@ -672,6 +675,17 @@ class LiveRefreshCoordinator:
             background_busy = (
                 self._manual_background_in_progress or self._background_in_progress
             )
+            session_codes = self._session_selected_codes
+            session_version = self._session_scope_version
+        saved_default = list(scope.saved_default_competition_codes)
+        if session_codes is not None:
+            current = list(session_codes)
+            is_override = current != saved_default
+            scope_version = max(int(scope.scope_version), int(session_version))
+        else:
+            current = list(scope.selected_competition_codes)
+            is_override = False
+            scope_version = int(scope.scope_version)
         if running:
             state = UNIVERSE_MANUAL_RUNNING
         elif pending:
@@ -680,6 +694,12 @@ class LiveRefreshCoordinator:
             state = UNIVERSE_MANUAL_IDLE
         return scope.model_copy(
             update={
+                "selected_competition_codes": current,
+                "selected_count": len(current),
+                "saved_default_competition_codes": saved_default,
+                "saved_default_count": len(saved_default),
+                "is_session_override": is_override,
+                "scope_version": scope_version,
                 "generation_scope_version": generation_version or None,
                 "generation_selected_competition_codes": generation_codes,
                 "manual_universe_state": state,
@@ -692,18 +712,40 @@ class LiveRefreshCoordinator:
         selected_competition_codes: list[str] | tuple[str, ...],
         *,
         run_universe_now: bool = False,
+        save_as_default: bool = False,
+        restore_saved_default: bool = False,
         sport: str = "football",
     ) -> OperatorUniverseScope:
-        """Persist canonical competition scope. Apply never calls providers."""
+        """Apply current session scope. Persist saved default only when requested.
+
+        Apply itself never calls providers. Run UNIVERSE now is the only path
+        that requests a generation.
+        """
 
         store = self._resolved_universe_scope_store()
-        saved = store.save_scope(selected_competition_codes, sport=sport)
+        previous_scope = self.effective_universe_scope()
+        previous = tuple(previous_scope.selected_competition_codes)
+        saved = resolve_operator_universe_scope(store)
+        if restore_saved_default:
+            codes = list(
+                normalize_selected_competition_codes(saved.saved_default_competition_codes)
+            )
+            save_as_default = False
+        else:
+            codes = list(normalize_selected_competition_codes(selected_competition_codes))
+        if save_as_default:
+            store.save_scope(codes, sport=sport, source="operator")
+        else:
+            store.confirm_first_run(sport=sport)
         with self._state_lock:
-            previous = tuple(self._universe_generation_selected_codes)
-            current = tuple(saved.selected_competition_codes)
+            self._session_selected_codes = tuple(codes)
+            if previous != tuple(codes):
+                self._session_scope_version = max(
+                    int(self._session_scope_version), int(previous_scope.scope_version)
+                ) + 1
             if (
                 self._universe_generation_started_at is not None
-                and previous != current
+                and previous != tuple(codes)
             ):
                 self._universe_generation_superseded = True
         self._reconstruct_price_engine_for_scope()
@@ -711,7 +753,7 @@ class LiveRefreshCoordinator:
             self.request_universe_run_now()
         else:
             self._pulse_control()
-        return self._decorate_universe_scope(saved)
+        return self.effective_universe_scope()
 
     def request_universe_run_now(self) -> str:
         """Make a fresh selected-scope generation due now, or coalesce if busy."""
@@ -1093,6 +1135,8 @@ class LiveRefreshCoordinator:
             self._universe_run_now_pending = False
             self._universe_generation_superseded = False
             self._universe_generation_scope_version = 0
+            self._session_selected_codes = None
+            self._session_scope_version = 0
             self._universe_generation_selected_codes = default_operator_competition_code_values()
             self._next_hot_due = None
             self._next_universe_due = None
@@ -3408,7 +3452,7 @@ class LiveRefreshCoordinator:
     def _ensure_universe_generation(self, started: datetime) -> None:
         if self._universe_generation_started_at is not None:
             return
-        scope = resolve_operator_universe_scope(self._resolved_universe_scope_store())
+        scope = self.effective_universe_scope()
         self._universe_generation_id += 1
         self._universe_generation_started_at = started
         self._universe_generation_selected_codes = tuple(scope.selected_competition_codes)

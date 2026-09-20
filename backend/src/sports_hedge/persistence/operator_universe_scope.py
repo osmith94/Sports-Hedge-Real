@@ -4,6 +4,9 @@ One singleton SQLite row stores the operator-selected canonical football
 competition codes and a monotonic scope version. Environment defaults seed a
 clean install; a persisted row wins after the operator confirms.
 
+SQLite stores only the saved startup default. Current/effective session
+scope lives on the live-refresh coordinator and is lost on process restart.
+
 This store never mutates ``.env`` and never calls providers.
 """
 
@@ -49,6 +52,7 @@ class OperatorCompetitionOption(BaseModel):
     group_label: str
     default_selected: bool = False
     selectable: bool = True
+    verification_status: str = "VERIFIED_ALL_3"
     unavailable_reason: str | None = None
 
 
@@ -58,6 +62,11 @@ class OperatorUniverseScope(BaseModel):
         default_factory=lambda: list(default_operator_competition_code_values())
     )
     selected_count: int = 0
+    saved_default_competition_codes: list[str] = Field(
+        default_factory=lambda: list(default_operator_competition_code_values())
+    )
+    saved_default_count: int = 0
+    is_session_override: bool = False
     scope_version: int = Field(default=0, ge=0)
     registry_version: int = OPERATOR_COMPETITION_REGISTRY_VERSION
     source: Literal["operator", "env_default"] = "env_default"
@@ -75,9 +84,11 @@ class OperatorUniverseScope(BaseModel):
 
 
 class OperatorUniverseScopeUpdate(BaseModel):
-    selected_competition_codes: list[str]
+    selected_competition_codes: list[str] = Field(default_factory=list)
     sport: str = OPERATOR_UNIVERSE_SPORT
     run_universe_now: bool = False
+    save_as_default: bool = False
+    restore_saved_default: bool = False
 
 
 def default_universe_scope(
@@ -90,6 +101,9 @@ def default_universe_scope(
         sport=OPERATOR_UNIVERSE_SPORT,
         selected_competition_codes=codes,
         selected_count=len(codes),
+        saved_default_competition_codes=codes,
+        saved_default_count=len(codes),
+        is_session_override=False,
         scope_version=0,
         registry_version=OPERATOR_COMPETITION_REGISTRY_VERSION,
         source="env_default",
@@ -197,10 +211,13 @@ class SqliteOperatorUniverseScopeStore:
         selected_competition_codes: list[str] | tuple[str, ...],
         *,
         sport: str = OPERATOR_UNIVERSE_SPORT,
+        source: Literal["operator", "env_default"] = "operator",
     ) -> OperatorUniverseScope:
+        """Persist the saved startup default. Does not write session-only scope."""
+
         codes = list(normalize_selected_competition_codes(selected_competition_codes))
         current = self.load()
-        previous = list(current.selected_competition_codes) if current is not None else None
+        previous = list(current.saved_default_competition_codes) if current is not None else None
         scope_version = int(current.scope_version) if current is not None else 0
         if previous != codes:
             scope_version += 1
@@ -208,9 +225,12 @@ class SqliteOperatorUniverseScopeStore:
             sport=str(sport or OPERATOR_UNIVERSE_SPORT).strip() or OPERATOR_UNIVERSE_SPORT,
             selected_competition_codes=codes,
             selected_count=len(codes),
+            saved_default_competition_codes=codes,
+            saved_default_count=len(codes),
+            is_session_override=False,
             scope_version=scope_version,
             registry_version=OPERATOR_COMPETITION_REGISTRY_VERSION,
-            source="operator",
+            source=source,
             updated_at=datetime.now(UTC),
             needs_first_run_confirmation=False,
             new_competitions_available=False,
@@ -220,6 +240,22 @@ class SqliteOperatorUniverseScopeStore:
         loaded = self.load()
         assert loaded is not None
         return loaded
+
+    def confirm_first_run(
+        self,
+        *,
+        sport: str = OPERATOR_UNIVERSE_SPORT,
+    ) -> OperatorUniverseScope:
+        """Persist the eight-competition startup default without a session override."""
+
+        current = self.load()
+        if current is not None:
+            return current
+        return self.save_scope(
+            default_operator_competition_code_values(),
+            sport=sport,
+            source="env_default",
+        )
 
     def _upsert(self, payload: OperatorUniverseScope) -> None:
         now = (payload.updated_at or datetime.now(UTC)).isoformat()
@@ -324,6 +360,9 @@ def _scope_from_row(row: sqlite3.Row) -> OperatorUniverseScope:
         sport=str(row["sport"] or OPERATOR_UNIVERSE_SPORT) or OPERATOR_UNIVERSE_SPORT,
         selected_competition_codes=normalized,
         selected_count=len(normalized),
+        saved_default_competition_codes=normalized,
+        saved_default_count=len(normalized),
+        is_session_override=False,
         scope_version=scope_version,
         registry_version=OPERATOR_COMPETITION_REGISTRY_VERSION,
         source=source,
