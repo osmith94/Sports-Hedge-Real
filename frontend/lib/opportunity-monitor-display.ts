@@ -55,8 +55,7 @@ export type OpportunityMonitorStateBadge =
   | "QUALIFYING"
   | "NEAR"
   | "BELOW BREAK-EVEN"
-  | "REJECTED"
-  | "STALE";
+  | "REJECTED";
 
 export type OpportunityMonitorLegView = {
   outcome: string;
@@ -125,7 +124,6 @@ const QUALIFYING_STATUSES = new Set(["TRIGGERED"]);
 const NEAR_STATUSES = new Set(["WATCHING", "APPROACHING"]);
 const REJECTED_STATUSES = new Set(["REJECTED", "EXPIRED"]);
 const CAPTURED_LIFECYCLE_STATUSES = new Set(["PAPER_FILLING", "PARTIAL"]);
-const STALE_REASONS = new Set(["stale_quote", "rejected_stale_quote", "unknown_quote_age"]);
 
 export const MAPPING_UNAVAILABLE_TITLE =
   "Current mapping confidence/provenance is not on this radar observation";
@@ -202,24 +200,14 @@ export function opportunityMonitorRows(
 }
 
 export function opportunityMonitorState(item: NearOpportunity): OpportunityMonitorStateBadge {
-  const freshness = (item.freshness_class || "").toLowerCase();
-  const reasons = [...item.rejection_reasons, ...item.insufficiency_reasons].map((reason) =>
-    reason.toLowerCase(),
-  );
-  if (freshness === "expired" || item.status === "EXPIRED" || reasons.some((reason) => STALE_REASONS.has(reason))) {
-    return "STALE";
-  }
-  if (isPreTradeTrigger(item) && isExecutableRadarFreshness(item.freshness_class)) {
-    return "QUALIFYING";
-  }
-  // Historical TRIGGERED remaining on radar after the ~1s executable gate.
-  // Do not infer executable freshness from stored status, is_arbitrage, or quote_age_ms.
-  if (isPreTradeTrigger(item)) {
-    return "STALE";
-  }
+  // Primary state is economic/radar classification. Quote freshness is a
+  // separate Lane / freshness property and a paper-entry gate, not a badge.
   const net = number(item.current_net_edge);
   if (net !== null && net < 0) {
     return "BELOW BREAK-EVEN";
+  }
+  if (isPreTradeTrigger(item)) {
+    return "QUALIFYING";
   }
   if (REJECTED_STATUSES.has(item.status) || item.classification === "rejected") {
     return "REJECTED";
@@ -227,16 +215,16 @@ export function opportunityMonitorState(item: NearOpportunity): OpportunityMonit
   if (NEAR_STATUSES.has(item.status)) {
     return "NEAR";
   }
+  const reasons = [...item.rejection_reasons, ...item.insufficiency_reasons];
   if (reasons.length) return "REJECTED";
   return "NEAR";
 }
 
 export function opportunityMonitorStateTone(
   state: OpportunityMonitorStateBadge,
-): "hot" | "watch" | "reject" | "stale" {
+): "hot" | "watch" | "reject" {
   if (state === "QUALIFYING") return "hot";
   if (state === "NEAR") return "watch";
-  if (state === "STALE") return "stale";
   return "reject";
 }
 
@@ -471,7 +459,6 @@ function isMissing(value: number | string | null | undefined): boolean {
 function defaultStateRank(state: OpportunityMonitorStateBadge): number {
   if (state === "QUALIFYING") return 0;
   if (state === "NEAR") return 1;
-  if (state === "STALE") return 3;
   return 2;
 }
 

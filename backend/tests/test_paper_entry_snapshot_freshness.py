@@ -291,8 +291,8 @@ def test_manual_fill_does_not_revive_aged_rejected_snapshot(tmp_path: Path) -> N
         assert aged == []
         row = watchlist.repository.get(seeded.opportunity_id)
         assert row is not None
-        assert row.status is OpportunityStatus.REJECTED
-        assert "stale_quote" in row.rejection_reasons
+        assert row.status is OpportunityStatus.TRIGGERED
+        assert "stale_quote" not in row.rejection_reasons
         with pytest.raises(PaperOperationsError, match=MARKET_REVALIDATION_FAILED):
             ops.simulate_fill(
                 seeded.opportunity_id,
@@ -303,7 +303,8 @@ def test_manual_fill_does_not_revive_aged_rejected_snapshot(tmp_path: Path) -> N
         assert ops.list_active_trades() == []
         events = watchlist.activity(opportunity_id=seeded.opportunity_id)
         assert not any(event.event_type is LifecycleEventType.PAPER_FILL_COMPLETE for event in events)
-        assert any(event.event_type is LifecycleEventType.TRIGGER_LOST_BEFORE_FILL for event in events)
+        assert not any(event.event_type is LifecycleEventType.PAPER_FILL_ATTEMPTED for event in events)
+        assert not any(event.event_type is LifecycleEventType.TRIGGER_LOST_BEFORE_FILL for event in events)
     finally:
         repository.close()
         ledger.close()
@@ -445,14 +446,14 @@ def test_rejected_attempt_does_not_suppress_later_trigger_lost(tmp_path: Path) -
         assert aged == []
         row = watchlist.repository.get(seeded.opportunity_id)
         assert row is not None
-        assert row.status is OpportunityStatus.REJECTED
+        assert row.status is OpportunityStatus.TRIGGERED
         lost = [
             event
             for event in watchlist.activity(opportunity_id=seeded.opportunity_id)
             if event.event_type is LifecycleEventType.TRIGGER_LOST_BEFORE_FILL
             and event.occurred_at >= later
         ]
-        assert lost
+        assert lost == []
         assert watchlist.has_active_bound_attempt(seeded.opportunity_id) is False
     finally:
         repository.close()
@@ -578,11 +579,11 @@ def test_normal_watchlist_freshness_ages_out_without_entry_attempt(tmp_path: Pat
         assert aged == []
         row = watchlist.repository.get(seeded.opportunity_id)
         assert row is not None
-        assert row.status is OpportunityStatus.REJECTED
-        assert "stale_quote" in row.rejection_reasons
+        assert row.status is OpportunityStatus.TRIGGERED
+        assert "stale_quote" not in row.rejection_reasons
         assert ops.list_active_trades() == []
         events = watchlist.activity(opportunity_id=seeded.opportunity_id)
-        assert any(event.event_type is LifecycleEventType.TRIGGER_LOST_BEFORE_FILL for event in events)
+        assert not any(event.event_type is LifecycleEventType.TRIGGER_LOST_BEFORE_FILL for event in events)
         assert not any(event.event_type is LifecycleEventType.PAPER_FILL_ATTEMPTED for event in events)
     finally:
         repository.close()

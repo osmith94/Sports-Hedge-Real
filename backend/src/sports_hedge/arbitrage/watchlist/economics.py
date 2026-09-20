@@ -46,6 +46,8 @@ NEAR_ELIGIBLE_REASONS = (
     "no_positive_edge",
     "no_arbitrage",
 )
+# Quote age is an execution/paper-entry gate, not an economic radar status.
+FRESHNESS_NONBLOCKING_REASONS = frozenset({"stale_quote", "unknown_quote_age"})
 COST_CLOCK_REASONS = (
     "future_fee_snapshot",
     "future_fx_snapshot",
@@ -278,6 +280,16 @@ LIFECYCLE_STATUSES_PROTECTED_FROM_OBSERVATION = frozenset(
 )
 
 
+def quote_is_execution_fresh(quote_age_ms: int | None, max_quote_age_ms: int) -> bool:
+    """True when the exact quote snapshot is fresh enough to paper-fill."""
+
+    if max_quote_age_ms < 0:
+        raise ValueError("max_quote_age_ms must be non-negative")
+    if quote_age_ms is None:
+        return False
+    return quote_age_ms < max_quote_age_ms
+
+
 def classify_status(
     observation: WatchObservation,
     *,
@@ -285,6 +297,8 @@ def classify_status(
     max_quote_age_ms: int,
     previous: OpportunityStatus | None = None,
 ) -> tuple[OpportunityStatus, list[str]]:
+    if max_quote_age_ms < 0:
+        raise ValueError("max_quote_age_ms must be non-negative")
     if previous in LIFECYCLE_STATUSES_PROTECTED_FROM_OBSERVATION:
         return previous, list(observation.rejection_reasons)
 
@@ -299,12 +313,6 @@ def classify_status(
         return OpportunityStatus.REJECTED, _dedupe([*reasons, *rejections])
     if semantics:
         rejections.extend(semantics)
-        return OpportunityStatus.REJECTED, _dedupe([*reasons, *rejections])
-    if observation.quote_age_ms is None:
-        rejections.append("unknown_quote_age")
-        return OpportunityStatus.REJECTED, _dedupe([*reasons, *rejections])
-    if observation.quote_age_ms >= max_quote_age_ms:
-        rejections.append("stale_quote")
         return OpportunityStatus.REJECTED, _dedupe([*reasons, *rejections])
     if observation.current_net_edge is None:
         rejections.append("missing_net_edge")
@@ -324,18 +332,22 @@ def classify_status(
     # Paper-admission audit labels (paper_assumed_equivalent, etc.) do not
     # block LIVE_PAPER capture. They must not leftover-REJECT a scan-eligible
     # Matchbook/Kalshi decision before persist_triggered_chain runs.
+    # Quote age is recorded on the observation and gated at paper entry; it
+    # must not overwrite economic/radar status.
     leftover = [
         reason
         for reason in reasons
         if reason not in NEAR_ELIGIBLE_REASONS
         and reason not in PAPER_NONBLOCKING_REJECTION_REASONS
+        and reason not in FRESHNESS_NONBLOCKING_REASONS
     ]
     if leftover:
         return OpportunityStatus.REJECTED, _dedupe(reasons)
 
+    # Economic trigger crossing is independent of whether the exact quote is
+    # currently execution-fresh. Paper fill still fail-closes on freshness.
     triggered = (
-        observation.eligible_for_paper_simulation
-        and observation.solver_is_arbitrage
+        observation.solver_is_arbitrage
         and observation.current_net_edge >= observation.trigger_net_edge
     )
     if triggered:

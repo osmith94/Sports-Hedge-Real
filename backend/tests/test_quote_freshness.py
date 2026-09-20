@@ -377,14 +377,14 @@ def test_stopped_refresh_drops_near_triggered_but_keeps_tracked_history() -> Non
     assert service.triggered(as_of=aged, limit=10) == []
     tracked = service.tracked(as_of=aged, limit=10)
     assert len(tracked) == 1
-    assert tracked[0].status == OpportunityStatus.REJECTED
-    assert tracked[0].is_arbitrage is False
-    assert tracked[0].guaranteed_profit_gbp is None
-    assert "stale_quote" in tracked[0].rejection_reasons
+    assert tracked[0].status == OpportunityStatus.TRIGGERED
+    assert tracked[0].is_arbitrage is True
+    assert tracked[0].guaranteed_profit_gbp == Decimal("1.50")
+    assert "stale_quote" not in tracked[0].rejection_reasons
     persisted = service.repository.get(triggered.opportunity_id)
     assert persisted is not None
     assert persisted.quote_age_ms == 120
-    assert persisted.status == OpportunityStatus.REJECTED
+    assert persisted.status == OpportunityStatus.TRIGGERED
 
 
 def test_demo_fixture_replay_is_not_rejected_stale_on_wall_clock() -> None:
@@ -416,13 +416,16 @@ def test_demo_fixture_replay_is_not_rejected_stale_on_wall_clock() -> None:
     aged = last_seen + timedelta(seconds=2)
     live_presented = service._present_freshness(live, aged)
     demo_presented = service._present_freshness(demo, aged)
-    assert live_presented.status == OpportunityStatus.REJECTED
-    assert "stale_quote" in live_presented.rejection_reasons
+    assert live_presented.status == OpportunityStatus.TRIGGERED
+    assert "stale_quote" not in live_presented.rejection_reasons
     assert demo_presented.status == OpportunityStatus.TRIGGERED
     assert "stale_quote" not in demo_presented.rejection_reasons
     persisted_demo = service.repository.get(demo.opportunity_id)
     assert persisted_demo is not None
     assert persisted_demo.status == OpportunityStatus.TRIGGERED
+    persisted_live = service.repository.get(live.opportunity_id)
+    assert persisted_live is not None
+    assert persisted_live.status == OpportunityStatus.TRIGGERED
     assert service.triggered(as_of=aged) == []
     tracked_ids = {item.opportunity_id for item in service.tracked(as_of=aged)}
     assert demo.opportunity_id not in tracked_ids
@@ -460,8 +463,8 @@ def test_watchlist_api_uses_server_clock_not_client_as_of() -> None:
         assert ignored_fresh.json() == []
         tracked = client.get("/paper/watchlist/tracked")
         assert tracked.status_code == 200
-        assert tracked.json()[0]["status"] == "REJECTED"
-        assert "stale_quote" in tracked.json()[0]["rejection_reasons"]
+        assert tracked.json()[0]["status"] == "TRIGGERED"
+        assert "stale_quote" not in tracked.json()[0]["rejection_reasons"]
     finally:
         app.dependency_overrides.clear()
         coordinator.reset()

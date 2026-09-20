@@ -179,7 +179,7 @@ describe("opportunity monitor state badges", () => {
           rejection_reasons: ["stale_quote"],
         }),
       ),
-      "STALE",
+      "NEAR",
     );
     const rejected = opportunityMonitorRow(
       watch({
@@ -194,7 +194,34 @@ describe("opportunity monitor state badges", () => {
     assert.notEqual(rejected.state, rejected.stateTitle);
   });
 
-  it("labels a radar-current historical trigger STALE and excludes it from qualifying count", () => {
+  it("keeps below-break-even and genuine rejections even when the quote is old", () => {
+    assert.equal(
+      opportunityMonitorState(
+        watch({
+          opportunity_id: "old-negative",
+          current_net_edge: -0.004,
+          freshness_class: "expired",
+          quote_age_ms: 31000,
+          rejection_reasons: ["stale_quote"],
+        }),
+      ),
+      "BELOW BREAK-EVEN",
+    );
+    assert.equal(
+      opportunityMonitorState(
+        watch({
+          opportunity_id: "old-rejected",
+          status: "REJECTED",
+          classification: "rejected",
+          freshness_class: "radar_current",
+          rejection_reasons: ["insufficient_depth", "stale_quote"],
+        }),
+      ),
+      "REJECTED",
+    );
+  });
+
+  it("keeps a radar-current historical trigger economically QUALIFYING and shows freshness separately", () => {
     const aged = watch({
       opportunity_id: "aged-trigger",
       status: "TRIGGERED",
@@ -220,9 +247,9 @@ describe("opportunity monitor state badges", () => {
     });
     const agedRow = opportunityMonitorRow(aged);
     const liveRow = opportunityMonitorRow(live);
-    assert.equal(opportunityMonitorState(aged), "STALE");
-    assert.notEqual(opportunityMonitorState(aged), "QUALIFYING");
-    assert.equal(agedRow.state, "STALE");
+    assert.equal(opportunityMonitorState(aged), "QUALIFYING");
+    assert.notEqual(opportunityMonitorState(aged), "REJECTED");
+    assert.equal(agedRow.state, "QUALIFYING");
     assert.match(agedRow.stateTitle, /not currently executable/);
     assert.match(agedRow.stateTitle, /radar current/);
     assert.equal(agedRow.netEdge, 0.021);
@@ -242,9 +269,9 @@ describe("opportunity monitor state badges", () => {
         quote_age_ms: 120,
       }),
     );
-    assert.equal(unknownFreshness, "STALE");
+    assert.equal(unknownFreshness, "QUALIFYING");
     const summary = opportunityMonitorSummary([agedRow, liveRow], refresh(), true, true);
-    assert.equal(summary.qualifyingCount, 1);
+    assert.equal(summary.qualifyingCount, 2);
     assert.equal(summary.nearCount, 0);
   });
 
@@ -290,7 +317,7 @@ describe("opportunity monitor state badges", () => {
     assert.notEqual(opportunityMonitorState(filling), "QUALIFYING");
     assert.notEqual(opportunityMonitorState(partial), "QUALIFYING");
     assert.equal(opportunityMonitorState(triggered), "QUALIFYING");
-    assert.equal(opportunityMonitorState(aged), "STALE");
+    assert.equal(opportunityMonitorState(aged), "QUALIFYING");
     const rows = opportunityMonitorRows([filling, partial, triggered, aged]);
     assert.deepEqual(
       rows.map((row) => row.id),
@@ -298,10 +325,10 @@ describe("opportunity monitor state badges", () => {
     );
     assert.equal(
       rows.filter((row) => row.state === "QUALIFYING").length,
-      1,
+      2,
     );
     const summary = opportunityMonitorSummary(rows, refresh(), true, true);
-    assert.equal(summary.qualifyingCount, 1);
+    assert.equal(summary.qualifyingCount, 2);
     assert.ok(!rows.some((row) => row.id === "filling" || row.id === "partial"));
   });
 });
@@ -366,7 +393,7 @@ describe("opportunity monitor default ordering and user sort", () => {
     const sorted = sortOpportunityMonitor(rows, null);
     assert.deepEqual(
       sorted.map((row) => row.id),
-      ["qual-high", "qual-low", "near-new", "near-old", "below", "stale"],
+      ["qual-high", "qual-low", "stale", "near-new", "near-old", "below"],
     );
     assert.equal(compareDefaultOpportunityOrder(rows[4], rows[3]) < 0, true);
   });
@@ -598,7 +625,7 @@ describe("opportunity monitor age, provenance, navigation, legs, empty honesty",
     assert.equal(missingCandidate.offerVerify, false);
   });
 
-  it("does not let richer mapping metadata turn a radar-current trigger into QUALIFYING", () => {
+  it("keeps mapping verify available on a radar-current trigger without hiding economic QUALIFYING", () => {
     const aged = watch({
       opportunity_id: "aged-mapped",
       status: "TRIGGERED",
@@ -630,8 +657,8 @@ describe("opportunity monitor age, provenance, navigation, legs, empty honesty",
         ],
       },
     });
-    assert.equal(opportunityMonitorState(aged), "STALE");
-    assert.notEqual(opportunityMonitorState(aged), "QUALIFYING");
+    assert.equal(opportunityMonitorState(aged), "QUALIFYING");
+    assert.equal(opportunityMonitorRow(aged).freshnessLabel, "radar current");
     assert.equal(opportunityMonitorRow(aged).offerVerify, true);
   });
 
@@ -669,6 +696,7 @@ describe("opportunity monitor table contract", () => {
     assert.match(table, /aria-sort=\{ariaSort\}/);
     assert.match(table, /fixture-link tracked-market-link/);
     assert.match(table, /Toggle outcome legs/);
+    assert.match(table, /economic\/radar classification/);
     assert.match(table, /loaded current set only/);
     assert.match(table, /label: "HOT pricing"/);
     assert.match(table, /label: "BACKGROUND pricing"/);
@@ -677,6 +705,15 @@ describe("opportunity monitor table contract", () => {
     assert.match(table, /MappingVerificationPanel/);
     assert.match(table, /opportunity-mapping-verify/);
     assert.doesNotMatch(table, /tabIndex=\{0\}/);
+  });
+
+  it("does not use STALE as a primary Opportunity Monitor state badge", () => {
+    const monitorDisplay = readFileSync(
+      join(frontendRoot, "lib/opportunity-monitor-display.ts"),
+      "utf8",
+    );
+    assert.doesNotMatch(monitorDisplay, /\| "STALE"/);
+    assert.match(monitorDisplay, /economic\/radar classification/);
   });
 
   it("preserves Open paper positions management copy and does not absorb trades", () => {

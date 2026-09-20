@@ -18,6 +18,7 @@ from sports_hedge.arbitrage.watchlist.economics import (
     distance_to_trigger_pp,
     insufficiency_reasons,
     missing_cost_reasons,
+    quote_is_execution_fresh,
     semantic_reasons,
 )
 from sports_hedge.arbitrage.watchlist.models import (
@@ -631,6 +632,7 @@ class WatchlistService:
         rows. This does not delete persisted observations or lifecycle history.
         Tracked does not fail-close on executable quote age; that gate stays on
         Near / Triggered / paper entry. Radar rows may be `radar_current`.
+        Read/ranking paths never persist REJECTED for wall-clock quote age.
         """
 
         items = self._filtered(
@@ -676,93 +678,32 @@ class WatchlistService:
         market_family: MarketFamily | None,
         as_of: datetime | None,
     ) -> list[NearOpportunity]:
+        """Executable Near/Triggered query: in-memory freshness filter, no writes."""
+
         evaluated = require_aware_instant(as_of or self._clock(), "as_of")
-        return [
-            self._present_freshness(item, evaluated)
-            for item in self._filtered(
-                competition=competition,
-                venue=venue,
-                market_family=market_family,
-            )
-        ]
+        presented: list[NearOpportunity] = []
+        for item in self._filtered(
+            competition=competition,
+            venue=venue,
+            market_family=market_family,
+        ):
+            current = self._present_freshness(item, evaluated)
+            if self._execution_fresh(current):
+                presented.append(current)
+        return presented
+
+    def _execution_fresh(self, item: NearOpportunity) -> bool:
+        # Labelled DEMO / FIXTURE REPLAY books are frozen snapshots, not live
+        # venue quotes. Live paper still fail-closes on unknown/stale age.
+        if item.data_kind == "demo_fixture_replay":
+            return True
+        return quote_is_execution_fresh(item.quote_age_ms, self.max_quote_age_ms)
 
     def _present_freshness(self, item: NearOpportunity, as_of: datetime) -> NearOpportunity:
-        fill_or_terminal = {
-            OpportunityStatus.PAPER_FILLING,
-            OpportunityStatus.PARTIAL,
-            OpportunityStatus.FILLED,
-            OpportunityStatus.CLOSED,
-            OpportunityStatus.EXPIRED,
-        }
-        # Labelled DEMO / FIXTURE REPLAY books are frozen snapshots, not live
-        # venue quotes. Do not fail-close them on wall-clock quote age, and do
-        # not persist REJECTED into the live watchlist. Live `live_paper` rows
-        # still reject stale quotes below.
-        if item.data_kind == "demo_fixture_replay":
-            effective = effective_quote_age_ms(item.quote_age_ms, item.last_seen_at, as_of)
-            return item.model_copy(update={"quote_age_ms": effective})
+        """Attach current wall-clock quote age. Never persist lifecycle changes."""
+
         effective = effective_quote_age_ms(item.quote_age_ms, item.last_seen_at, as_of)
-        if item.status in fill_or_terminal:
-            return item.model_copy(update={"quote_age_ms": effective})
-
-        stale = effective is None or effective >= self.max_quote_age_ms
-        if not stale:
-            return item.model_copy(update={"quote_age_ms": effective})
-
-        reason = "unknown_quote_age" if effective is None else "stale_quote"
-        if item.status not in {
-            OpportunityStatus.WATCHING,
-            OpportunityStatus.APPROACHING,
-            OpportunityStatus.TRIGGERED,
-        }:
-            persisted = item.model_copy(
-                update={
-                    "status": OpportunityStatus.REJECTED,
-                    "classification": classification_for(OpportunityStatus.REJECTED),
-                    "is_arbitrage": False,
-                    "guaranteed_profit_gbp": None,
-                    "rejection_reasons": list(dict.fromkeys([*item.rejection_reasons, reason])),
-                }
-            )
-            return persisted.model_copy(update={"quote_age_ms": effective})
-
-        with self.repository.transaction():
-            current = self.repository.get(item.opportunity_id)
-            if current is None or current.status in fill_or_terminal:
-                latest = current if current is not None else item
-                latest_effective = effective_quote_age_ms(
-                    latest.quote_age_ms, latest.last_seen_at, as_of
-                )
-                return latest.model_copy(update={"quote_age_ms": latest_effective})
-            reasons = list(dict.fromkeys([*current.rejection_reasons, reason]))
-            persisted = current.model_copy(
-                update={
-                    "status": OpportunityStatus.REJECTED,
-                    "classification": classification_for(OpportunityStatus.REJECTED),
-                    "is_arbitrage": False,
-                    "guaranteed_profit_gbp": None,
-                    "rejection_reasons": reasons,
-                }
-            )
-            self.repository.upsert_opportunity(persisted)
-            events = [
-                self._event(
-                    persisted, LifecycleEventType.REJECTED_STALE_QUOTE, detail=reason
-                ).model_copy(update={"occurred_at": as_of})
-            ]
-            if current.status == OpportunityStatus.TRIGGERED and not self._fill_attempt_started(
-                current.opportunity_id
-            ):
-                events.append(
-                    self._event(
-                        persisted,
-                        LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
-                        detail="quotes_aged_out_before_paper_fill",
-                    ).model_copy(update={"occurred_at": as_of})
-                )
-            for event in events:
-                self.repository.append_event(event)
-            return persisted.model_copy(update={"quote_age_ms": effective})
+        return item.model_copy(update={"quote_age_ms": effective})
 
     def _filtered(
         self,

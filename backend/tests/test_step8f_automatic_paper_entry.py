@@ -743,8 +743,8 @@ def test_watchlist_stale_clock_ages_radar_without_open_trade(tmp_path: Path) -> 
         assert aged == []
         row = watchlist.repository.get(opportunity_id)
         assert row is not None
-        assert row.status is OpportunityStatus.REJECTED
-        assert "stale_quote" in row.rejection_reasons
+        assert row.status is OpportunityStatus.TRIGGERED
+        assert "stale_quote" not in row.rejection_reasons
         assert ops.list_active_trades() == []
         after = ledger.treasury.snapshot()
         assert after.pool(VenueName.MATCHBOOK, "GBP").available_cash == before.pool(

@@ -2179,6 +2179,10 @@ class PaperOperationsService:
             }
         )
         self._plans[opportunity_id] = plan
+        # Fail closed on stale/unknown quotes before any PAPER_FILLING mutation.
+        # Economic radar status may remain TRIGGERED; freshness is the fill gate.
+        if freshness.rejection_reason and not bound_min_net:
+            self._fail_entry(opportunity_id, freshness.rejection_reason, simulated_at)
         if require_complete:
             try:
                 current = self.watchlist.begin_paper_fill_attempt(
@@ -2188,8 +2192,6 @@ class PaperOperationsService:
                 )
             except ValueError:
                 self._fail_entry(opportunity_id, MARKET_REVALIDATION_FAILED, simulated_at)
-        if freshness.rejection_reason and not bound_min_net:
-            self._fail_entry(opportunity_id, freshness.rejection_reason, simulated_at)
         if bound_min_net:
             # Post-trigger: model movement for fill outcome/tolerance only.
             # Do not requalify via a second exact-odds refresh or quote-age veto.
