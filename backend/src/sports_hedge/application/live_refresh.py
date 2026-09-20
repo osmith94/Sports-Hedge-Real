@@ -80,7 +80,11 @@ from sports_hedge.application.provider_access import (
     HEALTH_UNAVAILABLE,
     get_shared_provider_access,
 )
-from sports_hedge.paper.trades import PaperActiveTradePhase, PaperTradeState
+from sports_hedge.paper.trades import (
+    PaperActiveTradePhase,
+    PaperTradeState,
+    PaperTradeTrancheKind,
+)
 from sports_hedge.paper.active_trade_journal import ActiveTradeTimelineItem
 from sports_hedge.application.scan_lanes import (
     OPERATOR_ACTIVE_TRADE_LABEL,
@@ -4314,7 +4318,7 @@ class LiveRefreshCoordinator:
                     dedupe_key=f"no-action-stale:{cycle_id}",
                     cycle_id=cycle_id,
                 )
-            if fresh_plan is not None and journal_ok:
+            if fresh_plan is not None:
                 try:
                     operations.maybe_top_up_open_trade(
                         trade,
@@ -4335,6 +4339,22 @@ class LiveRefreshCoordinator:
                 list_events_calls=0,
                 list_markets_calls=0,
             )
+            last_tranche = None
+            tranches = getattr(loaded, "tranches", None) or []
+            if tranches:
+                last_tranche = tranches[-1]
+            last_kind = getattr(last_tranche, "kind", None)
+            recovering = bool(
+                getattr(loaded, "unresolved_recovery", False)
+                or getattr(loaded, "active_trade_phase", None)
+                is PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
+            )
+            if recovering and last_kind is not PaperTradeTrancheKind.RECOVERY:
+                self._active_trades.mark_due_now(
+                    loaded.trade_id,
+                    now=priced_at,
+                    phase=PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
+                )
             priced += 1
         completed = self.now()
         duration_ms = int((completed - started).total_seconds() * 1000)

@@ -39,6 +39,7 @@ describe("ACTIVE TRADE timeline display", () => {
     assert.equal(activeTradeEventQuestion("entry_attempt"), "What happened on the initial fill attempt?");
     assert.equal(activeTradeEventQuestion("entry_fill"), "What was the initial fill result?");
     assert.equal(activeTradeEventQuestion("entry_no_fill"), "What was the initial fill result?");
+    assert.equal(activeTradeEventQuestion("entry_blocked"), "Why didn't we buy?");
     assert.equal(activeTradeEventQuestion("promoted_to_active"), "How did ACTIVE TRADE management start?");
     assert.equal(activeTradeEventQuestion("no_action"), "Why didn't we top up?");
     assert.equal(activeTradeEventQuestion("active_refresh_result"), "What happened on this 5s cycle?");

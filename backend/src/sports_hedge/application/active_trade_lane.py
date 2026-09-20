@@ -76,6 +76,23 @@ class ActiveTradeRegistry:
             self._members[trade.trade_id] = member
             return member
 
+    def mark_due_now(
+        self,
+        trade_id: str,
+        *,
+        now: datetime,
+        phase: PaperActiveTradePhase | None = None,
+    ) -> None:
+        """Schedule the next exact-ID refresh immediately. Used after a partial buy."""
+
+        with self._lock:
+            member = self._members.get(trade_id)
+            if member is None:
+                return
+            member.next_due_at = now
+            if phase is not None:
+                member.phase = phase
+
     def drop(self, trade_id: str) -> None:
         with self._lock:
             self._members.pop(trade_id, None)

@@ -20,6 +20,7 @@ from sports_hedge.accounting.strategy_books import DimensionedPosting
 from sports_hedge.application.active_trade_recovery import (
     recovery_legs_from_plan,
     residual_exposure_gbp,
+    subtract_consumed_depth,
 )
 from sports_hedge.application.active_trade_lane import (
     active_trade_cadence_seconds,
@@ -1666,7 +1667,10 @@ class PaperOperationsService:
         config: PaperFillConfig,
         kind: str,
     ) -> SimulatePaperFillResult | None:
-        """Persist actual partial fills then buy risk-reducing hedge legs."""
+        """Persist actual partial fills, enter recovery, and wait for a fresh exact-ID book.
+
+        Recovery is not simulated against this same pre-fill snapshot.
+        """
 
         partial_type = (
             ActiveTradeEventType.TOPUP_PARTIAL_FILL
@@ -1712,7 +1716,13 @@ class PaperOperationsService:
                 raise
         else:
             committed = _persist_partial()
-        return self._retry_entry_recovery(committed, plan, occurred_at, config)
+        self._promote_active_trade(committed, occurred_at)
+        get_active_trade_registry().mark_due_now(
+            committed.trade_id,
+            now=occurred_at,
+            phase=PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
+        )
+        return self._result_from_existing_trade(committed, occurred_at)
 
     def _retry_entry_recovery(
         self,
@@ -1770,6 +1780,7 @@ class PaperOperationsService:
             if below_min
             else ActiveTradeReasonCode.RECOVERY_COMMITTED
         )
+        remaining_legs = subtract_consumed_depth(list(plan.legs), list(trade.legs))
         self.record_active_lifecycle_event(
             trade,
             event_type=ActiveTradeEventType.ENTRY_RECOVERY_DECISION,
@@ -1782,11 +1793,13 @@ class PaperOperationsService:
                 "residual_before": residual,
                 "below_min_net": below_min,
                 "net_edge": current_net,
-                "books": compact_executable_books(plan.legs),
+                "books": compact_executable_books(remaining_legs),
             },
             raise_on_error=True,
         )
-        needed, size_reason = recovery_legs_from_plan(trade, list(plan.legs), remaining_gbp=room)
+        needed, size_reason = recovery_legs_from_plan(
+            trade, remaining_legs, remaining_gbp=room
+        )
         fills = None
         if needed:
             simulated = self.simulator.simulate(
@@ -2248,7 +2261,9 @@ class PaperOperationsService:
         if bound_min_net:
             min_net_reason = _post_trigger_min_net_rejection(plan, fills, fill_config)
             if min_net_reason is not None:
-                self._fail_entry(opportunity_id, min_net_reason, simulated_at)
+                self._fail_entry(
+                    opportunity_id, min_net_reason, simulated_at, fill_attempted=True
+                )
         recover_partial = False
         if require_complete and not _complete_opening_fills(fills, opening_legs):
             if any(item.filled_stake > 0 for item in fills.fills):
@@ -2263,7 +2278,9 @@ class PaperOperationsService:
                     "execution_risk_above_threshold",
                 }:
                     reason = "incomplete_opening_hedge"
-                self._fail_entry(opportunity_id, reason, simulated_at)
+                self._fail_entry(
+                    opportunity_id, reason, simulated_at, fill_attempted=True
+                )
         if not require_complete:
             recover_partial = False
         stage = _fill_stage(fills)
@@ -2280,9 +2297,13 @@ class PaperOperationsService:
                     "execution_risk_above_threshold",
                 }:
                     reason = "paper_fill_rejected"
-                self._fail_entry(opportunity_id, reason, simulated_at)
+                self._fail_entry(
+                    opportunity_id, reason, simulated_at, fill_attempted=True
+                )
         if require_complete and not recover_partial and stage is not OpportunityStatus.FILLED:
-            self._fail_entry(opportunity_id, "incomplete_opening_hedge", simulated_at)
+            self._fail_entry(
+                opportunity_id, "incomplete_opening_hedge", simulated_at, fill_attempted=True
+            )
 
         confirmed = confirmation if external_venues and not simulate_external else None
         try:
@@ -2330,7 +2351,9 @@ class PaperOperationsService:
                     require_complete=require_complete and not recover_partial,
                 )
         except (PaperOperationsError, PaperTreasuryError) as exc:
-            self._fail_entry(opportunity_id, str(exc), simulated_at)
+            self._fail_entry(
+                opportunity_id, str(exc), simulated_at, fill_attempted=True
+            )
 
         if (
             require_complete
@@ -2338,33 +2361,18 @@ class PaperOperationsService:
             and trade is not None
             and trade.state is not PaperTradeState.OPEN
         ):
-            self._fail_entry(opportunity_id, "incomplete_opening_hedge", simulated_at)
+            self._fail_entry(
+                opportunity_id, "incomplete_opening_hedge", simulated_at, fill_attempted=True
+            )
         if recover_partial and trade is not None:
-            try:
-                if self.ledger is not None:
-                    with self.ledger.transaction():
-                        trade = self._apply_recovery_hedge(
-                            trade,
-                            plan,
-                            simulated_at,
-                            fill_config,
-                            origin_tranche_id=OPENING_TRANCHE_ID,
-                        )
-                else:
-                    trade = self._apply_recovery_hedge(
-                        trade,
-                        plan,
-                        simulated_at,
-                        fill_config,
-                        origin_tranche_id=OPENING_TRANCHE_ID,
-                    )
-            except Exception:
-                if self.trades is not None:
-                    trade = self.trades.get(trade.trade_id) or trade
-            if trade.state is PaperTradeState.OPEN:
-                stage = OpportunityStatus.FILLED
-            elif trade.state is PaperTradeState.PARTIAL:
-                stage = OpportunityStatus.PARTIAL
+            trade = self._mark_unresolved_recovery(trade, simulated_at)
+            self._promote_active_trade(trade, simulated_at)
+            get_active_trade_registry().mark_due_now(
+                trade.trade_id,
+                now=simulated_at,
+                phase=PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
+            )
+            stage = OpportunityStatus.PARTIAL
 
         opportunity = self._record_watchlist_fill(
             opportunity_id,
@@ -2992,14 +3000,18 @@ class PaperOperationsService:
         opportunity_id: str,
         reason: str,
         occurred_at: datetime | None = None,
+        *,
+        fill_attempted: bool = False,
     ) -> None:
         when = occurred_at or datetime.now(UTC)
         plan = self._plans.get(opportunity_id)
         provenance = DataProvenance.LIVE_PAPER if plan is None else plan.provenance
         if plan is not None:
             self._record_opening_qualifying_decision(opportunity_id, plan, when, provenance)
-            self._record_opening_attempt(opportunity_id, plan, when, provenance)
-            self._record_opening_no_fill(opportunity_id, plan, when, provenance, reason)
+            if fill_attempted:
+                self._record_opening_no_fill(opportunity_id, plan, when, provenance, reason)
+            else:
+                self._record_opening_blocked(opportunity_id, plan, when, provenance, reason)
         self._record_entry_rejection(opportunity_id, reason, occurred_at=when)
         raise PaperOperationsError(reason)
 
@@ -3069,6 +3081,28 @@ class PaperOperationsService:
             dedupe_key=f"entry-attempt:{shell.trade_id}:{OPENING_TRANCHE_ID}",
             tranche_id=OPENING_TRANCHE_ID,
             payload={"pricing_lane": plan.pricing_lane},
+        )
+
+    def _record_opening_blocked(
+        self,
+        opportunity_id: str,
+        plan: PaperFillPlan,
+        occurred_at: datetime,
+        provenance: DataProvenance,
+        reason: str,
+    ) -> None:
+        shell = self._opening_journal_shell(opportunity_id, plan, occurred_at, provenance)
+        if shell is None:
+            return
+        self.record_active_lifecycle_event(
+            shell,
+            event_type=ActiveTradeEventType.ENTRY_BLOCKED,
+            reason_code=ActiveTradeReasonCode.ENTRY_BLOCKED,
+            operator_copy=f"Initial PAPER fill blocked before simulator ({reason})",
+            occurred_at=occurred_at,
+            dedupe_key=f"entry-blocked:{shell.trade_id}:{reason}",
+            tranche_id=OPENING_TRANCHE_ID,
+            payload={"reason": reason, "pricing_lane": plan.pricing_lane},
         )
 
     def _record_opening_no_fill(

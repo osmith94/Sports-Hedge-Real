@@ -1933,9 +1933,15 @@ def _persist_decision(
 
 
 def _pricing_lane_from_runtime(runtime: Any) -> str | None:
-    """HOT or BACKGROUND pricing priority. Never invents a promotion gate."""
+    """HOT or BACKGROUND priority of the qualifying pricing slice.
 
-    priority = getattr(runtime, "priority", None)
+    Prefers ``pricing_slice_priority`` captured before HOT promotion so a
+    BACKGROUND slice that finds a qualifying opportunity is journaled as
+    BACKGROUND, not as the post-promotion HOT scheduler lane.
+    """
+
+    slice_priority = getattr(runtime, "pricing_slice_priority", None)
+    priority = slice_priority if slice_priority is not None else getattr(runtime, "priority", None)
     if priority is None:
         return None
     value = getattr(priority, "value", priority)

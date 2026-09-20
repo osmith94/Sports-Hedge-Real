@@ -18,11 +18,13 @@ from sports_hedge.api.main import app
 from sports_hedge.api.paper import get_paper_operations_service
 from sports_hedge.application.active_trade_lane import (
     ACTIVE_TRADE_LANE,
+    get_active_trade_registry,
     reset_active_trade_registry,
 )
 from sports_hedge.application.active_trade_recovery import (
     recovery_legs_from_plan,
     residual_exposure_gbp,
+    subtract_consumed_depth,
     worst_case_settlement_pnl_gbp,
 )
 from sports_hedge.application.live_refresh import DualCadencePlan, LiveRefreshCoordinator
@@ -50,6 +52,32 @@ from test_issue372_active_trade_lane import (
     _raise_trade_cap,
 )
 from test_paper_trade_lifecycle import OBSERVED, _ops
+
+
+def _fresh_current_plan(ops: PaperOperationsService, opportunity_id: str):
+    plan = ops._plans[opportunity_id]
+    later = plan.scanned_at + timedelta(seconds=5)
+    decision = plan.decision.model_copy(update={"scanned_at": later})
+    return ops._plan_from_decision(decision, opportunity_id, plan.provenance)
+
+
+def _one_sided_simulator(real):
+    calls = {"n": 0}
+
+    class _OneSided:
+        def simulate(self, *args, **kwargs):
+            calls["n"] += 1
+            filled = real.simulate(*args, **kwargs)
+            if not filled.fills:
+                return filled
+            first = filled.fills[0]
+            rest = [
+                item.model_copy(update={"filled_stake": Decimal("0"), "fully_filled": False})
+                for item in filled.fills[1:]
+            ]
+            return filled.model_copy(update={"fills": [first, *rest], "fully_filled": False})
+
+    return _OneSided(), calls
 
 
 def _types(ops: PaperOperationsService, trade_id: str) -> list[ActiveTradeEventType]:
@@ -216,6 +244,7 @@ def test_empty_opening_fill_is_journaled_without_fabricated_exposure(
 
 def test_handoff_keeps_runtime_pricing_lane_for_same_cycle_fill() -> None:
     from sports_hedge.api import paper as paper_api
+    from sports_hedge.application.price_engine import PriceEnginePriority
 
     src = inspect.getsource(paper_api.bind_price_engine_item_persist)
     assert "del runtime" not in src
@@ -223,6 +252,295 @@ def test_handoff_keeps_runtime_pricing_lane_for_same_cycle_fill() -> None:
     helper = inspect.getsource(paper_api._pricing_lane_from_runtime)
     assert '"hot"' in helper
     assert '"background"' in helper
+    assert "pricing_slice_priority" in helper
+
+    class _Runtime:
+        priority = PriceEnginePriority.HOT
+        pricing_slice_priority = PriceEnginePriority.BACKGROUND
+
+    assert paper_api._pricing_lane_from_runtime(_Runtime()) == "background"
+
+
+def test_pre_attempt_hard_block_is_not_an_entry_attempt(tmp_path: Path) -> None:
+    ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
+    _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
+    try:
+        opportunity_id = next(iter(ops._plans))
+        plan = ops._plans[opportunity_id]
+        ops._plans[opportunity_id] = plan.model_copy(update={"legs": []})
+        with pytest.raises(PaperOperationsError, match="no_positive_opening_legs"):
+            ops.simulate_fill(
+                opportunity_id,
+                simulate_external=True,
+                now=datetime.now(UTC),
+            )
+        trade_id = paper_trade_id(opportunity_id)
+        types = _types(ops, trade_id)
+        assert ActiveTradeEventType.ENTRY_DECISION in types
+        assert ActiveTradeEventType.ENTRY_BLOCKED in types
+        assert ActiveTradeEventType.ENTRY_ATTEMPT not in types
+        assert ActiveTradeEventType.ENTRY_NO_FILL not in types
+        blocked = next(
+            item
+            for item in ops.query_active_trade_events(trade_id=trade_id, limit=500)
+            if item.event_type is ActiveTradeEventType.ENTRY_BLOCKED
+        )
+        assert blocked.payload.get("reason") == "no_positive_opening_legs"
+        assert ops.list_active_trades() == []
+    finally:
+        repository.close()
+        ledger.close()
+        reset_active_trade_registry()
+
+
+def test_recovery_subtracts_already_consumed_snapshot_depth(tmp_path: Path) -> None:
+    ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
+    _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
+    try:
+        opportunity_id = next(iter(ops._plans))
+        real = ops.simulator
+        one_sided, _calls = _one_sided_simulator(real)
+        ops.simulator = one_sided
+        ops.simulate_fill(opportunity_id, simulate_external=True, now=datetime.now(UTC))
+        loaded = ops.list_active_trades()[0]
+        plan = ops._plans[opportunity_id]
+        filled = [leg for leg in loaded.legs if leg.filled_stake > 0]
+        assert filled
+        remaining = subtract_consumed_depth(list(plan.legs), filled)
+        hedge_src = inspect.getsource(PaperOperationsService._apply_recovery_hedge)
+        assert "subtract_consumed_depth" in hedge_src
+        for original, adjusted in zip(plan.legs, remaining, strict=True):
+            orig_depth = sum((level.available_stake for level in original.levels), Decimal("0"))
+            left_depth = sum((level.available_stake for level in adjusted.levels), Decimal("0"))
+            consumed = next(
+                (
+                    leg.filled_stake
+                    for leg in filled
+                    if leg.venue == original.venue
+                    and leg.outcome == original.outcome
+                    and leg.source_market_id == original.source_market_id
+                ),
+                Decimal("0"),
+            )
+            assert left_depth == orig_depth - consumed or left_depth <= orig_depth - consumed
+            if consumed > 0:
+                assert left_depth < orig_depth
+    finally:
+        repository.close()
+        ledger.close()
+        reset_active_trade_registry()
+
+
+def test_residual_uses_canonical_post_cost_settlement() -> None:
+    from sports_hedge.domain.models import VenueName
+    from sports_hedge.fees.cost import MarketAction
+    from sports_hedge.paper.models import FxRateSnapshot
+    from sports_hedge.paper.trades import PaperLegFillKind, PaperTrade, PaperTradeLeg
+    from venue_cost_helpers import profit_commission_cost
+
+    now = OBSERVED
+    legs = [
+        PaperTradeLeg(
+            venue=VenueName.MATCHBOOK,
+            outcome="yes",
+            currency="GBP",
+            requested_stake=Decimal("100"),
+            filled_stake=Decimal("100"),
+            displayed_odds=Decimal("2"),
+            filled_odds=Decimal("2"),
+            source_market_id="m-yes",
+            fill_id="f-yes",
+            fill_kind=PaperLegFillKind.INTERNAL_SIMULATED,
+            opening_action=MarketAction.BACK,
+        ),
+        PaperTradeLeg(
+            venue=VenueName.MATCHBOOK,
+            outcome="no",
+            currency="GBP",
+            requested_stake=Decimal("100"),
+            filled_stake=Decimal("100"),
+            displayed_odds=Decimal("2"),
+            filled_odds=Decimal("2"),
+            source_market_id="m-no",
+            fill_id="f-no",
+            fill_kind=PaperLegFillKind.INTERNAL_SIMULATED,
+            opening_action=MarketAction.BACK,
+        ),
+    ]
+    trade = PaperTrade(
+        trade_id="t-post-cost",
+        opportunity_id="opp-post-cost",
+        state=PaperTradeState.OPEN,
+        opened_at=now,
+        last_updated_at=now,
+        legs=legs,
+        venue_costs=[profit_commission_cost(VenueName.MATCHBOOK, Decimal("0.20"))],
+        fx_snapshots=[
+            FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal("1"), spread_bps=Decimal("0"))
+        ],
+    )
+    src = inspect.getsource(worst_case_settlement_pnl_gbp)
+    assert "compute_paper_settlement" in src
+    assert "after fees are ignored" not in src
+    assert worst_case_settlement_pnl_gbp(trade) < Decimal("0")
+    assert residual_exposure_gbp(trade) > Decimal("0")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("priority_name", "lane", "suffix"),
+    [
+        ("HOT", "hot", "hotpath"),
+        ("BACKGROUND", "background", "bgpath"),
+    ],
+)
+async def test_qualifying_price_engine_cycle_attempts_fill_immediately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    priority_name: str,
+    lane: str,
+    suffix: str,
+) -> None:
+    from sports_hedge.application.price_engine import PriceEnginePriority
+    from sports_hedge.domain.models import VenueName
+    from test_issue344_price_engine import DISTANT_KICKOFF, NEAR_KICKOFF, NOW, _engine, _row
+    from test_issue346_item_completion_capture import (
+        PerItemScan,
+        _audit,
+        _bind,
+        _item_decision,
+        _slice_and_drain,
+    )
+    from test_step8f_automatic_paper_entry import _ops_bundle
+
+    priority = PriceEnginePriority[priority_name]
+    kickoff = NEAR_KICKOFF if priority is PriceEnginePriority.HOT else DISTANT_KICKOFF
+    scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
+    audit = _audit(tmp_path)
+    try:
+        row = _row(
+            suffix=suffix,
+            kickoff=kickoff,
+            matchbook_market_id="316510" if lane == "hot" else "316511",
+            kalshi_event=f"KXEPLBTTS-{suffix.upper()}",
+        )
+        paper = PerItemScan(lambda _fixture: _item_decision(scan))
+        engine, _mb, _ks, _layer = _engine([row], paper_scan=paper)
+        runtime = engine.item(f"amc-{suffix}")
+        assert runtime is not None
+        assert runtime.priority is priority
+        chain_calls = _bind(
+            engine, scan=scan, watchlist=watchlist, ops=ops, audit=audit, monkeypatch=monkeypatch
+        )
+        result = await _slice_and_drain(engine, priority, now=NOW)
+        assert f"amc-{suffix}" in result.evaluated
+        priced = engine.item(f"amc-{suffix}")
+        assert priced is not None
+        assert priced.pricing_slice_priority is priority
+        if priority is PriceEnginePriority.BACKGROUND:
+            assert priced.priority is PriceEnginePriority.HOT
+            assert result.promotions
+        assert len(chain_calls) == 1
+        assert chain_calls[0][1].get("pricing_lane") == lane
+        trades = ops.list_active_trades()
+        assert len(trades) == 1
+        trade = trades[0]
+        assert trade.state is PaperTradeState.OPEN
+        events = ops.query_active_trade_events(trade_id=trade.trade_id, limit=500)
+        types = [item.event_type for item in events]
+        assert types.index(ActiveTradeEventType.ENTRY_DECISION) < types.index(
+            ActiveTradeEventType.ENTRY_ATTEMPT
+        )
+        assert types.index(ActiveTradeEventType.ENTRY_ATTEMPT) < types.index(
+            ActiveTradeEventType.ENTRY_FILL
+        )
+        assert types.index(ActiveTradeEventType.ENTRY_FILL) < types.index(
+            ActiveTradeEventType.PROMOTED_TO_ACTIVE
+        )
+        decision = next(
+            item for item in events if item.event_type is ActiveTradeEventType.ENTRY_DECISION
+        )
+        assert decision.payload.get("pricing_lane") == lane
+        snap = ledger.treasury.snapshot()
+        assert snap.pool(VenueName.MATCHBOOK, "GBP").locked_capital > 0
+    finally:
+        repository.close()
+        ledger.close()
+        audit.close()
+        reset_active_trade_registry()
+
+
+@pytest.mark.asyncio
+async def test_refresh_telemetry_failure_does_not_veto_fresh_top_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
+    _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
+    coordinator = None
+    try:
+        trade = ops.list_active_trades()[0]
+        old_plan = ops._plans[trade.opportunity_id]
+        before_capital = trade.capital_locked_gbp
+        real = ops.record_active_lifecycle_event
+
+        def _drop_refresh(journal_trade, **kwargs):
+            event_type = kwargs.get("event_type")
+            if event_type in {
+                ActiveTradeEventType.ACTIVE_REFRESH_STARTED,
+                ActiveTradeEventType.ACTIVE_REFRESH_RESULT,
+            }:
+                return False
+            return real(journal_trade, **kwargs)
+
+        ops.record_active_lifecycle_event = _drop_refresh  # type: ignore[method-assign]
+
+        class _FakeEngine:
+            async def _price_item(self, runtime, slice_result, *, lane=None):
+                runtime.status = PriceEngineItemStatus.EVALUATED
+                later = old_plan.decision.scanned_at + timedelta(milliseconds=100)
+                slice_result.decisions.append(
+                    old_plan.decision.model_copy(update={"scanned_at": later})
+                )
+                return PriceEngineItemStatus.EVALUATED
+
+            async def drain_item_captures(self) -> None:
+                return None
+
+            def set_background_interval_seconds(self, _cadence: int) -> None:
+                return None
+
+            def restart(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            "sports_hedge.api.paper.get_paper_operations_service",
+            lambda *_args, **_kwargs: ops,
+        )
+        coordinator = LiveRefreshCoordinator(clock=lambda: OBSERVED, price_engine=_FakeEngine())
+        tick_src = inspect.getsource(LiveRefreshCoordinator._run_active_trade_tick)
+        assert "fresh_plan is not None and journal_ok" not in tick_src
+        await coordinator._run_active_trade_tick(
+            DualCadencePlan(
+                lane=ACTIVE_TRADE_LANE,
+                reason="active_trade_due",
+                identity_scope=[trade.trade_id],
+            )
+        )
+        loaded = ops.list_active_trades()[0]
+        assert any(item.kind is PaperTradeTrancheKind.TOP_UP for item in loaded.tranches)
+        assert (loaded.capital_locked_gbp or Decimal("0")) > (before_capital or Decimal("0"))
+        assert coordinator.status.active_trade.last_persist_error == "active_trade_journal_write_failed"
+        assert coordinator.status.active_trade.persist_ok is False
+    finally:
+        if coordinator is not None:
+            coordinator.reset()
+        repository.close()
+        ledger.close()
+        store.close()
+        bind_runtime_operator_scanner_settings_store(None)
+        reset_active_trade_registry()
 
 
 @pytest.mark.asyncio
@@ -404,24 +722,8 @@ def test_partial_entry_recovers_even_below_min_net_arb(tmp_path: Path) -> None:
     try:
         opportunity_id = next(iter(ops._plans))
         real = ops.simulator
-        calls = {"n": 0}
-
-        class _OpeningOneSidedThenRecover:
-            def simulate(self, *args, **kwargs):
-                calls["n"] += 1
-                filled = real.simulate(*args, **kwargs)
-                if calls["n"] == 1 and filled.fills:
-                    first = filled.fills[0]
-                    rest = [
-                        item.model_copy(update={"filled_stake": Decimal("0"), "fully_filled": False})
-                        for item in filled.fills[1:]
-                    ]
-                    return filled.model_copy(
-                        update={"fills": [first, *rest], "fully_filled": False}
-                    )
-                return filled
-
-        ops.simulator = _OpeningOneSidedThenRecover()
+        one_sided, calls = _one_sided_simulator(real)
+        ops.simulator = one_sided
         result = ops.simulate_fill(
             opportunity_id,
             simulate_external=True,
@@ -429,6 +731,9 @@ def test_partial_entry_recovers_even_below_min_net_arb(tmp_path: Path) -> None:
         )
         loaded = ops.list_active_trades()[0]
         assert result.trade_id == loaded.trade_id
+        assert calls["n"] == 1
+        assert loaded.state is PaperTradeState.PARTIAL
+        assert loaded.unresolved_recovery is True
         types = _types(ops, loaded.trade_id)
         assert types.index(ActiveTradeEventType.ENTRY_DECISION) < types.index(
             ActiveTradeEventType.ENTRY_ATTEMPT
@@ -439,24 +744,39 @@ def test_partial_entry_recovers_even_below_min_net_arb(tmp_path: Path) -> None:
         assert types.index(ActiveTradeEventType.ENTRY_PARTIAL_FILL) < types.index(
             ActiveTradeEventType.PROMOTED_TO_ACTIVE
         )
-        assert ActiveTradeEventType.ENTRY_RECOVERY_DECISION in types
-        assert ActiveTradeEventType.ENTRY_RECOVERY_FILL in types
-        assert ActiveTradeEventType.ENTRY_RECOVERY_RESIDUAL in types
-        assert ActiveTradeReasonCode.RECOVERY_BELOW_MIN_NET in _reasons(ops, loaded.trade_id)
+        assert ActiveTradeEventType.ENTRY_RECOVERY_FILL not in types
         promoted = next(
             item
             for item in ops.query_active_trade_events(trade_id=loaded.trade_id, limit=500)
             if item.event_type is ActiveTradeEventType.PROMOTED_TO_ACTIVE
         )
         assert "partial fill" in promoted.operator_copy.lower()
+        member = get_active_trade_registry().get(loaded.trade_id)
+        assert member is not None
+        assert member.next_due_at == loaded.last_updated_at or member.next_due_at <= loaded.last_updated_at
+
+        ops.simulator = real
+        recovered = ops.maybe_top_up_open_trade(
+            loaded,
+            now=OBSERVED + timedelta(seconds=5),
+            plan=_fresh_current_plan(ops, opportunity_id),
+            require_current_plan=True,
+        )
+        assert recovered is not None
+        again = ops.list_active_trades()[0]
+        types = _types(ops, again.trade_id)
+        assert ActiveTradeEventType.ENTRY_RECOVERY_DECISION in types
+        assert ActiveTradeEventType.ENTRY_RECOVERY_FILL in types
+        assert ActiveTradeEventType.ENTRY_RECOVERY_RESIDUAL in types
+        assert ActiveTradeReasonCode.RECOVERY_BELOW_MIN_NET in _reasons(ops, again.trade_id)
         recoveries = [
-            item for item in loaded.tranches if item.kind is PaperTradeTrancheKind.RECOVERY
+            item for item in again.tranches if item.kind is PaperTradeTrancheKind.RECOVERY
         ]
         assert recoveries
-        assert loaded.unresolved_recovery is False
-        assert loaded.state is PaperTradeState.OPEN
-        assert residual_exposure_gbp(loaded) == Decimal("0")
-        assert worst_case_settlement_pnl_gbp(loaded) >= Decimal("0")
+        assert again.unresolved_recovery is False
+        assert again.state is PaperTradeState.OPEN
+        assert residual_exposure_gbp(again) == Decimal("0")
+        assert worst_case_settlement_pnl_gbp(again) >= Decimal("0")
     finally:
         repository.close()
         ledger.close()
@@ -476,19 +796,25 @@ def test_bounded_recovery_leaves_durable_residual_and_retry_is_idempotent(
         real = ops.simulator
         calls = {"n": 0}
 
+        one_sided, calls = _one_sided_simulator(real)
+        ops.simulator = one_sided
+        ops.simulate_fill(opportunity_id, simulate_external=True, now=datetime.now(UTC))
+        loaded = ops.list_active_trades()[0]
+        assert calls["n"] == 1
+        assert loaded.unresolved_recovery is True
+        assert loaded.active_trade_phase is PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
+        assert (loaded.residual_exposure_gbp or Decimal("0")) > 0
+        before_ids = [item.tranche_id for item in loaded.tranches]
+        before_fills = [leg.fill_id for leg in loaded.legs]
+        before_locks = _lock_fingerprint(ledger, loaded.trade_id)
+        before_events = [
+            (item.event_type, item.dedupe_key)
+            for item in ops.query_active_trade_events(trade_id=loaded.trade_id, limit=500)
+        ]
+
         class _TinyRecovery:
             def simulate(self, *args, **kwargs):
-                calls["n"] += 1
                 filled = real.simulate(*args, **kwargs)
-                if calls["n"] == 1 and filled.fills:
-                    first = filled.fills[0]
-                    rest = [
-                        item.model_copy(update={"filled_stake": Decimal("0"), "fully_filled": False})
-                        for item in filled.fills[1:]
-                    ]
-                    return filled.model_copy(
-                        update={"fills": [first, *rest], "fully_filled": False}
-                    )
                 tiny = [
                     item.model_copy(
                         update={
@@ -503,23 +829,10 @@ def test_bounded_recovery_leaves_durable_residual_and_retry_is_idempotent(
                 return filled.model_copy(update={"fills": tiny, "fully_filled": False})
 
         ops.simulator = _TinyRecovery()
-        ops.simulate_fill(opportunity_id, simulate_external=True, now=datetime.now(UTC))
-        loaded = ops.list_active_trades()[0]
-        assert loaded.unresolved_recovery is True
-        assert loaded.active_trade_phase is PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
-        assert (loaded.residual_exposure_gbp or Decimal("0")) > 0
-        before_ids = [item.tranche_id for item in loaded.tranches]
-        before_fills = [leg.fill_id for leg in loaded.legs]
-        before_locks = _lock_fingerprint(ledger, loaded.trade_id)
-        before_events = [
-            (item.event_type, item.dedupe_key)
-            for item in ops.query_active_trade_events(trade_id=loaded.trade_id, limit=500)
-        ]
-        ops.simulator = real
         ops.maybe_top_up_open_trade(
             loaded,
             now=OBSERVED + timedelta(seconds=5),
-            plan=ops._plans[opportunity_id],
+            plan=_fresh_current_plan(ops, opportunity_id),
             require_current_plan=True,
         )
         again = ops.list_active_trades()[0]

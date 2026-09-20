@@ -9,6 +9,7 @@ const EVENT_QUESTIONS: Record<string, string> = {
   entry_fill: "What was the initial fill result?",
   entry_partial_fill: "Where did a partial fill occur?",
   entry_no_fill: "What was the initial fill result?",
+  entry_blocked: "Why didn't we buy?",
   entry_recovery_decision: "What recovery was attempted?",
   entry_recovery_fill: "What recovery was attempted?",
   entry_recovery_residual: "What recovery was attempted?",

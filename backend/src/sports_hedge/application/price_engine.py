@@ -174,6 +174,7 @@ class PriceEngineRuntimeItem:
     last_priced_at: datetime | None = None
     list_events_calls: int = 0
     list_markets_calls: int = 0
+    pricing_slice_priority: PriceEnginePriority | None = None
 
     @property
     def item_key(self) -> str:
@@ -530,6 +531,7 @@ class CataloguePriceEngine:
         runtime.status = PriceEngineItemStatus.IN_FLIGHT
         runtime.list_events_calls = 0
         runtime.list_markets_calls = 0
+        runtime.pricing_slice_priority = runtime.priority
         if lane is None:
             lane = (
                 ScanLane.HOT.value
@@ -698,6 +700,8 @@ class CataloguePriceEngine:
                 scan_kwargs["assumed_latency_ms"] = int(settings.simulated_latency_ms)
             decision = self.paper_scan.scan_pair(matchbook_obs, kalshi_obs, **scan_kwargs)
             result.decisions.append(decision)
+        if runtime.pricing_slice_priority is None:
+            runtime.pricing_slice_priority = runtime.priority
         self._maybe_promote(runtime, decision, result)
         self._schedule_projection(
             runtime,
