@@ -1404,7 +1404,8 @@ class LiveRefreshCoordinator:
     def explicit_collect_timeout_seconds(self, settings: Settings | None = None) -> float:
         """Coordinator envelope for manual diagnostic collect.
 
-        Scheduled Fast/Full keep their own HOT 25s / UNIVERSE-chunk budgets.
+        Scheduled HOT pricing and UNIVERSE discovery keep their own HOT 25s /
+        UNIVERSE-chunk budgets.
         Advanced full diagnostic is a bounded one-shot and must return before
         the frontend's 60s PAPER_COLLECTION_TIMEOUT_MS. Scheduled UNIVERSE
         generations stay unbounded across chunks; each scheduled chunk uses

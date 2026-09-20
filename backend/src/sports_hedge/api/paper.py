@@ -1261,7 +1261,8 @@ async def persist_explicit_collect_after_http_response(
 ) -> None:
     """Starlette BackgroundTask: runs after the collect HTTP body is sent.
 
-    Uses the same event-loop-safe persist wrapper as scheduled Fast/Full ticks.
+    Uses the same event-loop-safe persist wrapper as scheduled HOT pricing,
+    BACKGROUND pricing and UNIVERSE discovery ticks.
     Failures are recorded on live-refresh persist diagnostics.
     """
 

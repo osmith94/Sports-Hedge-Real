@@ -409,6 +409,10 @@ function OpportunitySummaryStrip({
       value: summary.fastScan,
     },
     {
+      label: "BACKGROUND pricing",
+      value: summary.backgroundPricing,
+    },
+    {
       label: "UNIVERSE discovery",
       value: summary.fullSweep,
     },

@@ -361,7 +361,7 @@ export function RunPaperScan() {
         applyLiveRefresh,
       );
     } catch {
-      // Status endpoint down: keep prior Fast/Full facts.
+      // Status endpoint down: keep prior HOT/BACKGROUND/UNIVERSE facts.
     }
   }, [applyLiveRefresh]);
 
@@ -533,7 +533,7 @@ export function RunPaperScan() {
         <div>
           <div className="panel-title">Paper scanner</div>
           <div className="panel-meta">
-            Server-owned Fast/Full scanner plus manual HOT refresh and bounded diagnostics.
+            Server-owned HOT pricing, BACKGROUND pricing and UNIVERSE discovery plus manual HOT refresh and bounded diagnostics.
           </div>
         </div>
         <div className="heading-actions">

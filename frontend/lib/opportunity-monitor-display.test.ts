@@ -644,6 +644,7 @@ describe("opportunity monitor age, provenance, navigation, legs, empty honesty",
     assert.equal(empty.dataClass, "LIVE PAPER");
     assert.match(empty.activeVenues, /matchbook/);
     assert.match(empty.fastScan, /HOT pricing/);
+    assert.match(empty.backgroundPricing, /BACKGROUND pricing/);
     assert.match(empty.fullSweep, /UNIVERSE discovery/);
     const unavailable = opportunityMonitorSummary([], null, false, false);
     assert.equal(unavailable.qualifyingCount, null);
@@ -669,6 +670,10 @@ describe("opportunity monitor table contract", () => {
     assert.match(table, /fixture-link tracked-market-link/);
     assert.match(table, /Toggle outcome legs/);
     assert.match(table, /loaded current set only/);
+    assert.match(table, /label: "HOT pricing"/);
+    assert.match(table, /label: "BACKGROUND pricing"/);
+    assert.match(table, /label: "UNIVERSE discovery"/);
+    assert.doesNotMatch(table, /Fast scan|Full sweep|Fast Scan|Full Sweep/);
     assert.match(table, /MappingVerificationPanel/);
     assert.match(table, /opportunity-mapping-verify/);
     assert.doesNotMatch(table, /tabIndex=\{0\}/);

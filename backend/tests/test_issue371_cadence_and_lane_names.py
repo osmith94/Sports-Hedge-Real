@@ -68,7 +68,8 @@ def test_startup_universe_is_immediately_due() -> None:
     assert coordinator.status.universe.cadence_seconds == 600
     plan = coordinator.plan_universe_tick(now=NOW)
     assert plan.lane == ScanLane.UNIVERSE.value
-    assert plan.universe_generation_id == 0
+    assert plan.universe_generation_id == 1
+    assert plan.generation_resume is False
 
 
 def test_completed_universe_schedules_next_fresh_generation_at_600s() -> None:
@@ -186,17 +187,26 @@ def test_operator_facing_copy_uses_canonical_lane_names() -> None:
     live_refresh = (REPO_ROOT / "backend/src/sports_hedge/application/live_refresh.py").read_text(
         encoding="utf-8"
     )
+    scan_lanes = (REPO_ROOT / "backend/src/sports_hedge/application/scan_lanes.py").read_text(
+        encoding="utf-8"
+    )
     scan_status = (FRONTEND / "lib/scan-status-display.ts").read_text(encoding="utf-8")
     system_load = (FRONTEND / "lib/system-load-display.ts").read_text(encoding="utf-8")
     paper_scan = (FRONTEND / "components/run-paper-scan.tsx").read_text(encoding="utf-8")
-    for blob in (live_refresh, scan_status, system_load, paper_scan):
+    opportunity_monitor = (FRONTEND / "components/opportunity-monitor.tsx").read_text(
+        encoding="utf-8"
+    )
+    for blob in (live_refresh, scan_lanes, scan_status, system_load, paper_scan, opportunity_monitor):
         assert "Fast scan" not in blob
         assert "Full sweep" not in blob
         assert "Fast Scan" not in blob
         assert "Full Sweep" not in blob
-    assert OPERATOR_HOT_PRICING_LABEL in live_refresh
-    assert OPERATOR_BACKGROUND_PRICING_LABEL in live_refresh
-    assert OPERATOR_UNIVERSE_DISCOVERY_LABEL in live_refresh
+    assert OPERATOR_HOT_PRICING_LABEL in scan_lanes
+    assert OPERATOR_BACKGROUND_PRICING_LABEL in scan_lanes
+    assert OPERATOR_UNIVERSE_DISCOVERY_LABEL in scan_lanes
+    assert "OPERATOR_HOT_PRICING_LABEL" in live_refresh
+    assert "OPERATOR_BACKGROUND_PRICING_LABEL" in live_refresh
+    assert "OPERATOR_UNIVERSE_DISCOVERY_LABEL" in live_refresh
     assert "Manual HOT refresh" in paper_scan
     assert "Run full diagnostic" in paper_scan
     assert "is not UNIVERSE discovery" in paper_scan
@@ -204,3 +214,6 @@ def test_operator_facing_copy_uses_canonical_lane_names() -> None:
     assert "HOT pricing" in system_load
     assert "BACKGROUND pricing" in system_load
     assert "UNIVERSE discovery" in system_load
+    assert 'label: "HOT pricing"' in opportunity_monitor
+    assert 'label: "BACKGROUND pricing"' in opportunity_monitor
+    assert 'label: "UNIVERSE discovery"' in opportunity_monitor

@@ -729,7 +729,7 @@ def test_frontend_auto_refresh_does_not_post_collect_when_server_owns_scans() ->
     ).read_text(encoding="utf-8")
     assert "pollLiveStatus" in scan
     assert "void collectRef.current()" not in scan
-    assert "server owns Fast/Full scans" in scan
+    assert "server owns HOT / BACKGROUND / UNIVERSE" in scan
     assert scan.count("runPaperCollection") == 2
     assert "AUTO PAPER CAPTURE ON" in scan
     assert "server_loop_enabled" in demo
