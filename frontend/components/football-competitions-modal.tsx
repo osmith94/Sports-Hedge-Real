@@ -1,8 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { OperatorCompetitionOption, OperatorUniverseScope } from "../lib/api";
+import {
+  competitionModalDraftFromScope,
+  defaultCompetitionCodes,
+  shouldInitializeCompetitionModalDraft,
+  supportedCompetitionCodes,
+  toggleCompetitionDraft,
+} from "../lib/competition-modal-draft";
 
 const GROUP_ORDER = [
   "uefa",
@@ -37,14 +44,6 @@ type FootballCompetitionsModalProps = {
   onApply: (codes: string[], runUniverseNow: boolean, saveAsDefault: boolean) => Promise<void> | void;
 };
 
-function defaultCodes(catalog: OperatorCompetitionOption[]): string[] {
-  return catalog.filter((row) => row.default_selected && row.selectable).map((row) => row.code);
-}
-
-function supportedCodes(catalog: OperatorCompetitionOption[]): string[] {
-  return catalog.filter((row) => row.selectable).map((row) => row.code);
-}
-
 function namesFor(codes: string[], catalog: OperatorCompetitionOption[]): string {
   const labels = new Map(catalog.map((row) => [row.code, row.selector_label]));
   const named = codes.map((code) => labels.get(code) ?? code);
@@ -65,13 +64,18 @@ export function FootballCompetitionsModal({
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState<string[]>(scope?.selected_competition_codes ?? []);
   const [saveAsDefault, setSaveAsDefault] = useState(false);
+  const wasOpenRef = useRef(false);
 
   useEffect(() => {
-    if (!open) return;
-    setQuery("");
-    const rows = scope?.catalog ?? [];
-    setDraft(scope?.selected_competition_codes ?? defaultCodes(rows));
-    setSaveAsDefault(Boolean(scope?.needs_first_run_confirmation));
+    // HOT/BACKGROUND/UNIVERSE polling replaces `scope` with a new object while the
+    // dialog stays open. Reinitialize only on a genuine closed → open transition.
+    if (shouldInitializeCompetitionModalDraft(wasOpenRef.current, open)) {
+      const next = competitionModalDraftFromScope(scope);
+      setQuery(next.query);
+      setDraft(next.draft);
+      setSaveAsDefault(next.saveAsDefault);
+    }
+    wasOpenRef.current = open;
   }, [open, scope]);
 
   const groups = useMemo(() => {
@@ -99,16 +103,12 @@ export function FootballCompetitionsModal({
   const selectedSet = new Set(draft);
   const selectedCount = draft.length;
   const firstRun = Boolean(scope?.needs_first_run_confirmation);
-  const savedDefault = scope?.saved_default_competition_codes ?? defaultCodes(catalog);
+  const savedDefault = scope?.saved_default_competition_codes ?? defaultCompetitionCodes(catalog);
   const savedCount = savedDefault.length;
 
   function toggle(row: OperatorCompetitionOption) {
     if (!row.selectable) return;
-    setDraft((current) =>
-      current.includes(row.code)
-        ? current.filter((code) => code !== row.code)
-        : [...current, row.code],
-    );
+    setDraft((current) => toggleCompetitionDraft(current, row.code));
   }
 
   return (
@@ -153,14 +153,14 @@ export function FootballCompetitionsModal({
           <button
             className="scan-button-secondary"
             type="button"
-            onClick={() => setDraft(defaultCodes(catalog))}
+            onClick={() => setDraft(defaultCompetitionCodes(catalog))}
           >
             Select defaults
           </button>
           <button
             className="scan-button-secondary"
             type="button"
-            onClick={() => setDraft(supportedCodes(catalog))}
+            onClick={() => setDraft(supportedCompetitionCodes(catalog))}
           >
             Select all supported
           </button>
