@@ -258,6 +258,8 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             ),
             json.dumps([item.model_dump(mode="json") for item in trade.tranches]),
             None if trade.active_trade_phase is None else trade.active_trade_phase.value,
+            _dec(trade.residual_exposure_gbp),
+            1 if trade.unresolved_recovery else 0,
         )
         self._connection.execute(
             """
@@ -269,8 +271,8 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 capital_locked_gbp, settlement_outcome, settlement_source, settlement_source_id,
                 settlement_detail, provenance, fx_snapshots_json, venue_costs_json,
                 entry_risk_json, close_risks_json, close_fills_json, position_management_json,
-                tranches_json, active_trade_phase
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tranches_json, active_trade_phase, residual_exposure_gbp, unresolved_recovery
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(trade_id) DO UPDATE SET
                 opportunity_id = excluded.opportunity_id,
                 canonical_event_id = excluded.canonical_event_id,
@@ -304,7 +306,9 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 close_fills_json = excluded.close_fills_json,
                 position_management_json = excluded.position_management_json,
                 tranches_json = excluded.tranches_json,
-                active_trade_phase = excluded.active_trade_phase
+                active_trade_phase = excluded.active_trade_phase,
+                residual_exposure_gbp = excluded.residual_exposure_gbp,
+                unresolved_recovery = excluded.unresolved_recovery
             """,
             payload,
         )
@@ -457,6 +461,8 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             position_management=_position_management_from_row(row),
             tranches=_models_from_json(_row_value(row, "tranches_json"), PaperTradeTranche),
             active_trade_phase=_active_trade_phase_from_row(row),
+            residual_exposure_gbp=_decimal(_row_value(row, "residual_exposure_gbp")),
+            unresolved_recovery=bool(int(_row_value(row, "unresolved_recovery", 0) or 0)),
             audit=audit,
         )
 
@@ -489,6 +495,11 @@ class SqlitePaperLedger:
         self._create_schema()
         self.journal = SqlitePaperJournal(self)
         self.trades = SqlitePaperTradeRepository(self)
+        from sports_hedge.persistence.active_trade_event_journal import (
+            SqliteActiveTradeEventJournal,
+        )
+
+        self.active_trade_events = SqliteActiveTradeEventJournal(self)
         self.treasury = PaperTreasuryService(self)
         if auto_seed:
             self.treasury.ensure_demo_session(
@@ -703,6 +714,12 @@ class SqlitePaperLedger:
         self._ensure_trade_leg_compat_columns()
         self._ensure_treasury_pool_fx_columns()
         self._ensure_trade_tranche_columns()
+        self._ensure_active_trade_recovery_columns()
+        from sports_hedge.persistence.active_trade_event_journal import (
+            ensure_active_trade_event_schema,
+        )
+
+        ensure_active_trade_event_schema(self._connection)
 
     def _ensure_risk_snapshot_columns(self) -> None:
         trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
@@ -810,6 +827,18 @@ class SqlitePaperLedger:
                     "ALTER TABLE paper_trade_legs "
                     f"ADD COLUMN tranche_id TEXT NOT NULL DEFAULT '{OPENING_TRANCHE_ID}'"
                 )
+        self._connection.commit()
+
+    def _ensure_active_trade_recovery_columns(self) -> None:
+        if "paper_trades" not in _table_names(self._connection):
+            return
+        trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
+        if "residual_exposure_gbp" not in trade_cols:
+            self._connection.execute("ALTER TABLE paper_trades ADD COLUMN residual_exposure_gbp TEXT")
+        if "unresolved_recovery" not in trade_cols:
+            self._connection.execute(
+                "ALTER TABLE paper_trades ADD COLUMN unresolved_recovery INTEGER NOT NULL DEFAULT 0"
+            )
         self._connection.commit()
 
     def _ensure_treasury_pool_fx_columns(self) -> None:

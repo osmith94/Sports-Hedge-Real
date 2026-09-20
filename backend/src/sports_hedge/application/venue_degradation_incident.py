@@ -270,6 +270,7 @@ def build_venue_degradation_incident(
     captured_at: datetime | None = None,
     build: ServingBuildInfo | None = None,
     snapshot_kind: str = INCIDENT_DATA_KIND,
+    active_trade_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compact JSON diagnostic. Omits discovered fixture rows to stay bounded."""
 
@@ -296,6 +297,8 @@ def build_venue_degradation_incident(
         "hot": _lane_snapshot(getattr(status, "hot", None)),
         "background": _lane_snapshot(getattr(status, "background", None)),
         "universe": _lane_snapshot(getattr(status, "universe", None)),
+        "active_trade": _lane_snapshot(getattr(status, "active_trade", None)),
+        "active_trade_context": dict(active_trade_context or {}),
         "price_engine": {
             "hot": _tier_snapshot(getattr(price_engine, "hot", None)),
             "background": _tier_snapshot(getattr(price_engine, "background", None)),
@@ -376,6 +379,7 @@ class VenueDegradationIncidentStore:
         *,
         captured_at: datetime | None = None,
         build: ServingBuildInfo | None = None,
+        active_trade_context: Mapping[str, Any] | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Capture once per OK→degraded edge. Returns compact refs, not full packets."""
 
@@ -394,6 +398,7 @@ class VenueDegradationIncidentStore:
                         new_health=current,
                         captured_at=captured_at,
                         build=identity,
+                        active_trade_context=active_trade_context,
                     )
                     self._latest[venue] = incident
                     self._retained.append(incident)

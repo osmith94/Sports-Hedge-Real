@@ -80,6 +80,7 @@ from sports_hedge.application.provider_access import (
     get_shared_provider_access,
 )
 from sports_hedge.paper.trades import PaperActiveTradePhase, PaperTradeState
+from sports_hedge.paper.active_trade_journal import ActiveTradeTimelineItem
 from sports_hedge.application.scan_lanes import (
     OPERATOR_ACTIVE_TRADE_LABEL,
     OPERATOR_BACKGROUND_PRICING_LABEL,
@@ -301,6 +302,7 @@ class LiveRefreshStatus(BaseModel):
     venue_degradation_incidents: dict[str, VenueDegradationIncidentRef] = Field(
         default_factory=dict
     )
+    active_trade_timeline: list[ActiveTradeTimelineItem] = Field(default_factory=list)
     system_load: SystemLoadSummary = Field(default_factory=SystemLoadSummary)
 
 
@@ -3751,16 +3753,77 @@ class LiveRefreshCoordinator:
                         self.status,
                         universe_work_used_s=self._status_universe_work_used(),
                     ),
+                    "active_trade_timeline": self._recent_active_trade_timeline(),
                 }
             )
             return self.status
+
+    def _recent_active_trade_timeline(self) -> list[ActiveTradeTimelineItem]:
+        try:
+            from sports_hedge.api.paper import get_paper_operations_service
+            from sports_hedge.api.priority_alerts import get_priority_alert_service
+            from sports_hedge.api.watchlist import get_watchlist_service
+
+            operations = get_paper_operations_service(
+                get_watchlist_service(), get_priority_alert_service()
+            )
+            return operations.recent_active_trade_timeline(limit=12)
+        except Exception:
+            return list(self.status.active_trade_timeline)
+
+    def _active_trade_degradation_context(self) -> dict[str, Any]:
+        """Local journal/status only. Zero provider calls."""
+
+        try:
+            from sports_hedge.api.paper import get_paper_operations_service
+            from sports_hedge.api.priority_alerts import get_priority_alert_service
+            from sports_hedge.api.watchlist import get_watchlist_service
+
+            operations = get_paper_operations_service(
+                get_watchlist_service(), get_priority_alert_service()
+            )
+            events = operations.query_active_trade_events(limit=20)
+        except Exception:
+            events = []
+        recent = events[-8:]
+        lane = self.status.active_trade
+        return {
+            "data_kind": "persisted_active_trade_journal",
+            "provider_calls": 0,
+            "trade_ids": sorted({item.trade_id for item in events}),
+            "event_ids": [item.event_id for item in recent],
+            "cycle_ids": [item.cycle_id for item in recent if item.cycle_id],
+            "lane": {
+                "venue_health": dict(getattr(lane, "venue_health", None) or {}),
+                "operation_health": dict(getattr(lane, "operation_health", None) or {}),
+                "worker_state": getattr(lane, "worker_state", None),
+                "last_error": getattr(lane, "last_error", None),
+                "degraded": bool(getattr(lane, "degraded", False)),
+                "last_persist_error": getattr(lane, "last_persist_error", None),
+            },
+            "recent_events": [
+                {
+                    "event_id": item.event_id,
+                    "event_type": item.event_type.value,
+                    "reason_code": item.reason_code.value,
+                    "operator_copy": item.operator_copy,
+                    "trade_id": item.trade_id,
+                    "occurred_at": item.occurred_at.isoformat(),
+                    "cycle_id": item.cycle_id,
+                }
+                for item in recent
+            ],
+        }
 
     def observe_degradation_incidents(
         self, status: LiveRefreshStatus
     ) -> dict[str, VenueDegradationIncidentRef]:
         """Bounded OK→degraded capture. Returns compact refs for the poll payload."""
 
-        refs = self._degradation_incidents.observe(status, captured_at=self.now())
+        context = self._active_trade_degradation_context()
+        refs = self._degradation_incidents.observe(
+            status, captured_at=self.now(), active_trade_context=context
+        )
         return {
             venue: VenueDegradationIncidentRef.model_validate(ref) for venue, ref in refs.items()
         }
@@ -4120,6 +4183,32 @@ class LiveRefreshCoordinator:
         provenance = getattr(trade, "provenance", None) or DataProvenance.LIVE_PAPER
         return plan_from(matching[-1], opportunity_id, provenance)
 
+    def _active_refresh_reason_for(
+        self,
+        status: Any,
+        runtime: Any,
+        fresh_plan: Any,
+    ) -> tuple[Any, str]:
+        from sports_hedge.application.price_engine import PriceEngineItemStatus
+        from sports_hedge.paper.active_trade_journal import ActiveTradeReasonCode
+
+        if fresh_plan is not None:
+            return ActiveTradeReasonCode.REFRESH_EVALUATED, "ACTIVE refresh evaluated current books"
+        if runtime is not None and getattr(runtime, "last_persist_error", None):
+            return ActiveTradeReasonCode.REFRESH_CAPTURE_FAILED, "ACTIVE capture/persistence failed"
+        if status is PriceEngineItemStatus.RETRY_WAIT:
+            return ActiveTradeReasonCode.REFRESH_RETRY_WAIT, "ACTIVE refresh retry-wait"
+        if status is PriceEngineItemStatus.REVALIDATION_NEEDED:
+            return (
+                ActiveTradeReasonCode.REFRESH_REVALIDATION_NEEDED,
+                "ACTIVE refresh needs catalogue revalidation",
+            )
+        if status is PriceEngineItemStatus.DEFERRED:
+            return ActiveTradeReasonCode.REFRESH_DEFERRED, "ACTIVE refresh deferred on provider capacity"
+        if status is None:
+            return ActiveTradeReasonCode.REFRESH_MISSING_IDENTITY, "ACTIVE refresh missing identity or engine"
+        return ActiveTradeReasonCode.REFRESH_FAILED, "ACTIVE refresh produced no fresh decision"
+
     async def _run_active_trade_tick(self, plan: DualCadencePlan) -> None:
         """Exact-ID refresh + optional top-up. Never list_events/list_markets.
 
@@ -4138,6 +4227,11 @@ class LiveRefreshCoordinator:
             PriceEngineRuntimeItem,
             PriceEngineSliceResult,
         )
+        from sports_hedge.paper.active_trade_journal import (
+            ActiveTradeEventType,
+            ActiveTradeReasonCode,
+            compact_native_ids,
+        )
         from sports_hedge.application.provider_access import (
             PRICE_ENGINE_ACTIVE_TRADE_LANE,
         )
@@ -4152,7 +4246,10 @@ class LiveRefreshCoordinator:
             trade = None
             if operations.trades is not None:
                 trade = operations.trades.get(trade_id)
-            if trade is None or trade.state is not PaperTradeState.OPEN:
+            if trade is None or trade.state not in {
+                PaperTradeState.OPEN,
+                PaperTradeState.PARTIAL,
+            }:
                 self._active_trades.drop(trade_id)
                 continue
             jobs.append(trade)
@@ -4201,6 +4298,16 @@ class LiveRefreshCoordinator:
             if isinstance(item, BaseException):
                 continue
             trade, priced_at, status, runtime, slice_result = item
+            cycle_id = f"{trade.trade_id}:{priced_at.isoformat()}"
+            started_logged = operations.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.ACTIVE_REFRESH_STARTED,
+                reason_code=ActiveTradeReasonCode.REFRESH_STARTED,
+                operator_copy="ACTIVE TRADE 5s exact-ID refresh started",
+                occurred_at=priced_at,
+                dedupe_key=f"refresh-started:{cycle_id}",
+                cycle_id=cycle_id,
+            )
             fresh_plan = self._active_trade_fresh_fill_plan(
                 operations,
                 trade,
@@ -4208,7 +4315,45 @@ class LiveRefreshCoordinator:
                 runtime=runtime,
                 slice_result=slice_result,
             )
-            if fresh_plan is not None:
+            reason, copy = self._active_refresh_reason_for(status, runtime, fresh_plan)
+            result_logged = operations.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.ACTIVE_REFRESH_RESULT,
+                reason_code=reason,
+                operator_copy=copy,
+                occurred_at=self.now(),
+                dedupe_key=f"refresh-result:{cycle_id}",
+                cycle_id=cycle_id,
+                payload={
+                    "status": None if status is None else getattr(status, "value", str(status)),
+                    "last_persist_error": getattr(runtime, "last_persist_error", None),
+                    "native_ids": compact_native_ids(trade),
+                },
+            )
+            journal_ok = bool(started_logged and result_logged)
+            if not journal_ok:
+                with self._state_lock:
+                    self.status = self.status.model_copy(
+                        update={
+                            "active_trade": self.status.active_trade.model_copy(
+                                update={
+                                    "last_persist_error": "active_trade_journal_write_failed",
+                                    "persist_ok": False,
+                                }
+                            )
+                        }
+                    )
+            if fresh_plan is None:
+                operations.record_active_lifecycle_event(
+                    trade,
+                    event_type=ActiveTradeEventType.NO_ACTION,
+                    reason_code=ActiveTradeReasonCode.NO_ACTION_STALE_REFRESH,
+                    operator_copy="Failed current refresh; no top-up from stale prior plan",
+                    occurred_at=self.now(),
+                    dedupe_key=f"no-action-stale:{cycle_id}",
+                    cycle_id=cycle_id,
+                )
+            if fresh_plan is not None and journal_ok:
                 try:
                     operations.maybe_top_up_open_trade(
                         trade,

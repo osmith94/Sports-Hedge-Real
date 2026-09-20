@@ -73,6 +73,7 @@ from sports_hedge.fx.repository import SqliteFxRateRepository
 from sports_hedge.fx.service import FxRateService
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.normalization.venues import VenueNormalizationError
+from sports_hedge.paper.active_trade_journal import ActiveTradeEvent
 from sports_hedge.paper.audit import (
     PaperScanCycleRecord,
     PaperScanRecord,
@@ -1540,6 +1541,32 @@ async def server_owned_refresh_tick(plan=None) -> None:
         audit=audit,
         watchlist=watchlist,
         scan_lane=ScanLane(resolved.lane),
+    )
+
+
+@router.get("/active-trade-events", response_model=list[ActiveTradeEvent])
+def list_active_trade_events(
+    trade_id: str | None = None,
+    event_type: str | None = None,
+    venue: str | None = None,
+    reason_code: str | None = None,
+    after: datetime | None = None,
+    before: datetime | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> list[ActiveTradeEvent]:
+    """Read-only ACTIVE TRADE journal. Never calls venues or starts workers."""
+
+    return operations.query_active_trade_events(
+        trade_id=trade_id,
+        event_type=event_type,
+        venue=venue,
+        reason_code=reason_code,
+        after=after,
+        before=before,
+        limit=limit,
+        offset=offset,
     )
 
 

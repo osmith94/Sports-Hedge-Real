@@ -51,12 +51,14 @@ OPENING_TRANCHE_SEQUENCE = 0
 class PaperTradeTrancheKind(StrEnum):
     OPENING = "opening"
     TOP_UP = "top_up"
+    RECOVERY = "recovery"
 
 
 class PaperActiveTradePhase(StrEnum):
     ACCUMULATING = "accumulating"
     MONITORING_CAP_REACHED = "monitoring_cap_reached"
     EXIT_MANAGEMENT = "exit_management"
+    RECOVERING_PARTIAL_ENTRY = "recovering_partial_entry"
 
 
 class PaperTradeTranche(BaseModel):
@@ -85,6 +87,8 @@ class PaperTradeAuditEventType(StrEnum):
     ACTIVE_TRADE_PROMOTED = "active_trade_promoted"
     TOP_UP_TRANCHE_RECORDED = "top_up_tranche_recorded"
     TOP_UP_INCOMPLETE_ABORTED = "top_up_incomplete_aborted"
+    TOP_UP_PARTIAL_RECORDED = "top_up_partial_recorded"
+    ENTRY_RECOVERY_RECORDED = "entry_recovery_recorded"
     TOP_UP_CAP_REACHED = "top_up_cap_reached"
     TOP_UP_BELOW_MIN_NET = "top_up_below_min_net"
     AWAITING_MANUAL_EXTERNAL = "awaiting_manual_external"
@@ -227,6 +231,8 @@ class PaperTrade(BaseModel):
     position_management: Any | None = None
     tranches: list[PaperTradeTranche] = Field(default_factory=list)
     active_trade_phase: PaperActiveTradePhase | None = None
+    residual_exposure_gbp: Decimal | None = None
+    unresolved_recovery: bool = False
     audit: list[PaperTradeAuditEvent] = Field(default_factory=list)
 
     @model_validator(mode="after")

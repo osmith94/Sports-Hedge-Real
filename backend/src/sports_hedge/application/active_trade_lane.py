@@ -168,7 +168,7 @@ def active_trade_cadence_seconds(settings: Settings | None = None) -> int:
 def identity_from_open_trade(trade: PaperTrade) -> DerivedPriceEngineItem | None:
     """Exact native IDs already on the OPEN trade. Never rediscovers markets."""
 
-    if trade.state is not PaperTradeState.OPEN:
+    if trade.state not in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
         return None
     matchbook_event = None
     matchbook_market = None

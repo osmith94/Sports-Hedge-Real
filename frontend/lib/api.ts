@@ -75,6 +75,18 @@ export type PaperScanRecord = {
   decision_json?: string;
 };
 
+export type ActiveTradeTimelineItem = {
+  event_id: string;
+  occurred_at: string;
+  event_type: string;
+  reason_code: string;
+  operator_copy: string;
+  trade_id: string;
+  cycle_id?: string | null;
+  venue?: string | null;
+  data_kind?: string;
+};
+
 export type PaperScanCycleRecord = {
   cycle_id: string;
   started_at: string;
@@ -657,6 +669,8 @@ export type VenueDegradationIncident = {
   hot?: Record<string, unknown>;
   background?: Record<string, unknown>;
   universe?: Record<string, unknown>;
+  active_trade?: Record<string, unknown>;
+  active_trade_context?: Record<string, unknown>;
   price_engine?: Record<string, unknown>;
   provider_access?: Record<string, unknown>;
   recent_scan_cycles?: Array<Record<string, unknown>>;
@@ -719,6 +733,7 @@ export type LiveRefreshStatus = {
   recent_scan_cycles?: PaperScanCycleRecord[];
   provider_access?: Record<string, unknown>;
   venue_degradation_incidents?: Record<string, VenueDegradationIncidentRef>;
+  active_trade_timeline?: ActiveTradeTimelineItem[];
   system_load?: SystemLoadSummary;
 };
 
@@ -1825,6 +1840,11 @@ export function getClosedPaperTrades(): Promise<PaperTrade[]> {
 
 export function getPaperTrade(tradeId: string): Promise<PaperTradeDetail> {
   return request(`/paper/trades/${encodeURIComponent(tradeId)}`);
+}
+
+export function getActiveTradeEvents(query = ""): Promise<ActiveTradeTimelineItem[]> {
+  const suffix = query ? `?${query}` : "";
+  return request(`/paper/active-trade-events${suffix}`);
 }
 
 export function getPaperPositionManagement(): Promise<PositionManagementSnapshot[]> {

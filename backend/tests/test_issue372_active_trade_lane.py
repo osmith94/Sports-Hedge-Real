@@ -243,10 +243,11 @@ def test_incomplete_complete_set_commits_nothing(tmp_path: Path) -> None:
                 filled = real.simulate(*args, **kwargs)
                 if not filled.fills:
                     return filled
-                first = filled.fills[0].model_copy(
-                    update={"filled_stake": Decimal("0"), "fully_filled": False}
-                )
-                return filled.model_copy(update={"fills": [first, *filled.fills[1:]]})
+                zeros = [
+                    item.model_copy(update={"filled_stake": Decimal("0"), "fully_filled": False})
+                    for item in filled.fills
+                ]
+                return filled.model_copy(update={"fills": zeros, "fully_filled": False})
 
         ops.simulator = PartialSimulator()
         ops.maybe_top_up_open_trade(trade, now=OBSERVED)

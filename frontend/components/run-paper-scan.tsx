@@ -20,6 +20,7 @@ import {
   stopPaperScanner,
 } from "../lib/api";
 import { dualScanStatusLines } from "../lib/scan-status-display";
+import { activeTradeTimelineLines } from "../lib/active-trade-timeline-display";
 import { CONFIG_WARNING_BANNER_CLASS } from "../lib/config-warning-display";
 import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-refresh-poll-guard";
 import { venueHealthIsDegraded } from "../lib/venue-health-display";
@@ -736,6 +737,11 @@ export function RunPaperScan() {
                 : " · auto on · view refresh · server owns HOT / BACKGROUND / UNIVERSE"
               : " · auto on · view refresh"
             : " · view refresh off"}
+        </div>
+        <div className="scan-note" aria-label="ACTIVE TRADE event journal">
+          {activeTradeTimelineLines(liveRefresh?.active_trade_timeline).map((line) => (
+            <div key={line}>{line}</div>
+          ))}
         </div>
         <VenueLaneControls
           status={liveRefresh}

@@ -17,6 +17,10 @@ from sports_hedge.accounting.paper_journal import (
     settlement_leg_postings,
 )
 from sports_hedge.accounting.strategy_books import DimensionedPosting
+from sports_hedge.application.active_trade_recovery import (
+    recovery_legs_from_plan,
+    residual_exposure_gbp,
+)
 from sports_hedge.application.active_trade_lane import (
     active_trade_cadence_seconds,
     get_active_trade_registry,
@@ -63,6 +67,16 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import MarketAction
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
+from sports_hedge.paper.active_trade_journal import (
+    ActiveTradeEvent,
+    ActiveTradeEventType,
+    ActiveTradeReasonCode,
+    compact_executable_books,
+    compact_native_ids,
+    json_safe,
+    serving_git_sha,
+    timeline_item_from_event,
+)
 from sports_hedge.paper.bet_ticket import (
     BetTicketExecutionSeam,
     BetTicketFxAssumption,
@@ -255,6 +269,95 @@ class PaperOperationsService:
         self._external_confirmations: dict[str, ExternalLegConfirmation] = {}
         self._entry_rejections: dict[str, str] = {}
         self._fill_persist_lock = threading.RLock()
+
+    def query_active_trade_events(
+        self,
+        *,
+        trade_id: str | None = None,
+        event_type: str | None = None,
+        venue: str | None = None,
+        reason_code: str | None = None,
+        after: datetime | None = None,
+        before: datetime | None = None,
+        cycle_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ActiveTradeEvent]:
+        journal = getattr(self.ledger, "active_trade_events", None) if self.ledger is not None else None
+        if journal is None:
+            return []
+        with self.ledger.exclusive():
+            return journal.query(
+                trade_id=trade_id,
+                event_type=event_type,
+                venue=venue,
+                reason_code=reason_code,
+                after=after,
+                before=before,
+                cycle_id=cycle_id,
+                limit=limit,
+                offset=offset,
+            )
+
+    def recent_active_trade_timeline(self, *, limit: int = 12) -> list[Any]:
+        journal = getattr(self.ledger, "active_trade_events", None) if self.ledger is not None else None
+        if journal is None:
+            return []
+        with self.ledger.exclusive():
+            events = journal.recent(limit=limit)
+        return [timeline_item_from_event(item) for item in events]
+
+    def record_active_lifecycle_event(
+        self,
+        trade: PaperTrade | None,
+        *,
+        event_type: ActiveTradeEventType,
+        reason_code: ActiveTradeReasonCode,
+        operator_copy: str,
+        occurred_at: datetime,
+        dedupe_key: str,
+        cycle_id: str | None = None,
+        tranche_id: str | None = None,
+        fill_id: str | None = None,
+        venue: str | None = None,
+        payload: dict[str, Any] | None = None,
+        raise_on_error: bool = False,
+    ) -> bool:
+        """Append one ACTIVE TRADE journal fact. Never calls providers."""
+
+        journal = getattr(self.ledger, "active_trade_events", None) if self.ledger is not None else None
+        if journal is None or trade is None:
+            return False
+        try:
+            with self.ledger.exclusive():
+                event = ActiveTradeEvent(
+                    event_id=dedupe_key,
+                    sequence=journal.next_sequence(),
+                    occurred_at=occurred_at,
+                    serving_git_sha=serving_git_sha(),
+                    trade_id=trade.trade_id,
+                    opportunity_id=trade.opportunity_id,
+                    canonical_event_id=trade.canonical_event_id,
+                    canonical_market_id=trade.canonical_market_id,
+                    competition=trade.competition,
+                    market_family=None if trade.market_family is None else trade.market_family.value,
+                    line=trade.market_label,
+                    active_phase=None if trade.active_trade_phase is None else trade.active_trade_phase.value,
+                    event_type=event_type,
+                    reason_code=reason_code,
+                    operator_copy=operator_copy,
+                    venue=venue,
+                    cycle_id=cycle_id,
+                    tranche_id=tranche_id,
+                    fill_id=fill_id,
+                    dedupe_key=dedupe_key,
+                    payload=json_safe(payload or {}),
+                )
+                return journal.append(event)
+        except Exception:
+            if raise_on_error:
+                raise
+            return False
 
     def persist_triggered_chain(
         self,
@@ -1051,13 +1154,30 @@ class PaperOperationsService:
     ) -> SimulatePaperFillResult | None:
         """Complete missing durable side effects for an existing trade, or repeat.
 
-        PENDING/PARTIAL fall through so the opening fill path can finish them.
+        PENDING and empty PARTIAL shells fall through so the opening fill path
+        can finish an interrupted create. PARTIAL with persisted fills and
+        unresolved recovery is already an ACTIVE TRADE position: the scan path
+        must not re-open; the 5s lane retries recovery.
         OPEN repairs missing locks/journals/watchlist FILLED, promotes ACTIVE TRADE,
         and only tops up when ``allow_top_up`` (the 5s ACTIVE TRADE cycle).
         AWAITING_MANUAL_EXTERNAL without confirmation repeats; confirmation
         bypasses this method and continues the opening path.
         """
 
+        if (
+            trade.state is PaperTradeState.PARTIAL
+            and trade.unresolved_recovery
+            and any(leg.filled_stake > 0 for leg in trade.legs)
+        ):
+            self._promote_active_trade(trade, simulated_at)
+            if allow_top_up:
+                topped = self._maybe_top_up_open_trade_locked(trade, now=simulated_at)
+                if topped is not None:
+                    return topped
+                loaded = self.trades.get(trade.trade_id) if self.trades is not None else trade
+                return self._result_from_existing_trade(loaded or trade, simulated_at)
+            noted = self._note_deferred_to_active_trade(trade, simulated_at)
+            return self._result_from_existing_trade(noted, simulated_at)
         if trade.state in {PaperTradeState.PENDING, PaperTradeState.PARTIAL}:
             return None
         if trade.state is PaperTradeState.CLOSED:
@@ -1119,7 +1239,7 @@ class PaperOperationsService:
             loaded = self.trades.get(trade.trade_id)
             if loaded is not None:
                 trade = loaded
-        if trade.state is not PaperTradeState.OPEN:
+        if trade.state not in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
             return None
         self._ensure_opening_tranche(trade, when)
         self._promote_active_trade(trade, when)
@@ -1133,6 +1253,21 @@ class PaperOperationsService:
         trigger = operator.min_net_edge
         if plan is None:
             return None
+        recovering = bool(
+            trade.unresolved_recovery
+            or trade.active_trade_phase is PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
+        )
+        if recovering:
+            self.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.NO_ACTION,
+                reason_code=ActiveTradeReasonCode.NO_ACTION_RECOVERING,
+                operator_copy="Unresolved partial entry; discretionary accumulation paused",
+                occurred_at=when,
+                dedupe_key=f"no-action-recovering:{trade.trade_id}:{when.isoformat()}",
+                payload={"residual_gbp": trade.residual_exposure_gbp},
+            )
+            return self._retry_entry_recovery(trade, plan, when, config)
         current_net = plan.net_edge if plan.net_edge is not None else decision_net_edge(plan.decision)
         if current_net is None or not qualifies_min_net_arb(current_net, trigger):
             trade.active_trade_phase = PaperActiveTradePhase.EXIT_MANAGEMENT
@@ -1144,6 +1279,15 @@ class PaperOperationsService:
             )
             if self.trades is not None:
                 trade = self.trades.save(trade)
+            self.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.BELOW_MIN_NET_ARB,
+                reason_code=ActiveTradeReasonCode.NO_ACTION_BELOW_MIN_NET,
+                operator_copy="Current post-cost net is below Min Net Arb; no new risk added",
+                occurred_at=when,
+                dedupe_key=f"below-min:{trade.trade_id}:{when.isoformat()}",
+                payload={"current_net": current_net, "trigger": trigger},
+            )
             return self._result_from_existing_trade(trade, when)
         room = remaining_trade_room_gbp(trade, cap)
         if room <= 0:
@@ -1156,15 +1300,46 @@ class PaperOperationsService:
             )
             if self.trades is not None:
                 trade = self.trades.save(trade)
+            self.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.CAP_REACHED,
+                reason_code=ActiveTradeReasonCode.NO_ACTION_CAP_REACHED,
+                operator_copy="Cumulative max/trade reached; 5s monitoring continues",
+                occurred_at=when,
+                dedupe_key=f"cap-reached:{trade.trade_id}",
+                payload={"locked_gbp": trade.capital_locked_gbp, "cap": cap},
+            )
             return self._result_from_existing_trade(trade, when)
         incremental = self._size_incremental_tranche(trade, plan, remaining_gbp=room)
         if incremental is None:
+            self.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.NO_ACTION,
+                reason_code=ActiveTradeReasonCode.NO_ACTION_NO_ROOM,
+                operator_copy="No treasury/depth-valid top-up sized this cycle",
+                occurred_at=when,
+                dedupe_key=f"no-action-room:{trade.trade_id}:{when.isoformat()}",
+            )
             return self._result_from_existing_trade(trade, when)
         mapped_legs, allocation, incremental_gbp = incremental
         fill_config = config or PaperFillConfig(
             assumed_latency_ms=0,
             max_quote_age_ms=self.settings.paper_entry_max_quote_age_ms,
             slippage_bps=Decimal(self.settings.max_slippage_bps),
+        )
+        self.record_active_lifecycle_event(
+            trade,
+            event_type=ActiveTradeEventType.TOPUP_DECISION,
+            reason_code=ActiveTradeReasonCode.TOPUP_COMMITTED,
+            operator_copy="Qualifying current complete-set top-up sized",
+            occurred_at=when,
+            dedupe_key=f"topup-decision:{trade.trade_id}:{when.isoformat()}",
+            payload={
+                "requested_gbp": incremental_gbp,
+                "net_edge": current_net,
+                "min_net": trigger,
+                "books": compact_executable_books(mapped_legs),
+            },
         )
         fills = self.simulator.simulate(
             mapped_legs,
@@ -1183,7 +1358,18 @@ class PaperOperationsService:
             simulate_external=True,
             tranche_id=tranche_id,
         )
-        if not _complete_opening_fills(fills, mapped_legs):
+        self.record_active_lifecycle_event(
+            trade,
+            event_type=ActiveTradeEventType.TOPUP_ATTEMPT,
+            reason_code=ActiveTradeReasonCode.TOPUP_COMMITTED,
+            operator_copy="Paper simulator attempted the sized top-up",
+            occurred_at=when,
+            dedupe_key=f"topup-attempt:{tranche_id}",
+            tranche_id=tranche_id,
+        )
+        actual_fills = [item for item in fills.fills if item.filled_stake > 0]
+        complete = _complete_opening_fills(fills, mapped_legs)
+        if not complete and not actual_fills:
             trade.audit.append(
                 PaperTradeAuditEvent(
                     occurred_at=when,
@@ -1193,8 +1379,32 @@ class PaperOperationsService:
             )
             if self.trades is not None:
                 trade = self.trades.save(trade)
+            self.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.NO_ACTION,
+                reason_code=ActiveTradeReasonCode.NO_ACTION_INCOMPLETE_EMPTY,
+                operator_copy="Top-up produced no fills; no capital locked",
+                occurred_at=when,
+                dedupe_key=f"topup-empty:{tranche_id}",
+                tranche_id=tranche_id,
+            )
             return self._result_from_existing_trade(trade, when)
         existing_gbp = trade.capital_locked_gbp or Decimal("0")
+        filled_gbp = _filled_gbp(fills, mapped_legs, plan)
+        if not complete and actual_fills:
+            return self._commit_partial_buy_and_recover(
+                trade,
+                plan=plan,
+                fills=fills,
+                mapped_legs=mapped_legs,
+                allocation=allocation,
+                incremental_gbp=filled_gbp,
+                tranche_id=tranche_id,
+                sequence=sequence,
+                occurred_at=when,
+                config=fill_config,
+                kind="topup",
+            )
         if existing_gbp + incremental_gbp > cap:
             return self._result_from_existing_trade(trade, when)
         commit = lambda: self._commit_top_up_tranche(
@@ -1207,6 +1417,8 @@ class PaperOperationsService:
             tranche_id=tranche_id,
             sequence=sequence,
             occurred_at=when,
+            event_type=ActiveTradeEventType.TOPUP_FILL,
+            reason_code=ActiveTradeReasonCode.TOPUP_COMMITTED,
         )
         if self.ledger is not None:
             try:
@@ -1302,9 +1514,13 @@ class PaperOperationsService:
         tranche_id: str,
         sequence: int,
         occurred_at: datetime,
+        event_type: ActiveTradeEventType = ActiveTradeEventType.TOPUP_FILL,
+        reason_code: ActiveTradeReasonCode = ActiveTradeReasonCode.TOPUP_COMMITTED,
+        kind: PaperTradeTrancheKind = PaperTradeTrancheKind.TOP_UP,
     ) -> PaperTrade:
         if any(item.tranche_id == tranche_id for item in trade.tranches):
             return trade
+        treasury_before = trade.capital_locked_gbp or Decimal("0")
         self._post_fills(
             plan,
             fills,
@@ -1376,7 +1592,7 @@ class PaperOperationsService:
             PaperTradeTranche(
                 tranche_id=tranche_id,
                 sequence=sequence,
-                kind=PaperTradeTrancheKind.TOP_UP,
+                kind=kind,
                 occurred_at=occurred_at,
                 capital_locked_gbp=incremental_gbp,
                 guaranteed_profit_gbp=guaranteed,
@@ -1395,7 +1611,246 @@ class PaperOperationsService:
         )
         if self.trades is None:
             return trade
-        return self.trades.save(trade)
+        saved = self.trades.save(trade)
+        for fill_id in fill_ids:
+            self.record_active_lifecycle_event(
+                saved,
+                event_type=event_type,
+                reason_code=reason_code,
+                operator_copy="Committed paper fill/tranche with treasury lock",
+                occurred_at=occurred_at,
+                dedupe_key=f"{event_type.value}:{tranche_id}:{fill_id}",
+                tranche_id=tranche_id,
+                fill_id=fill_id,
+                payload={
+                    "incremental_gbp": incremental_gbp,
+                    "native_ids": compact_native_ids(saved),
+                    "treasury_before_gbp": treasury_before,
+                    "treasury_after_gbp": saved.capital_locked_gbp,
+                },
+                raise_on_error=True,
+            )
+        return saved
+
+    def _commit_partial_buy_and_recover(
+        self,
+        trade: PaperTrade,
+        *,
+        plan: PaperFillPlan,
+        fills: PaperOpportunityFills,
+        mapped_legs: list[PaperOpportunityLeg],
+        allocation: Any,
+        incremental_gbp: Decimal,
+        tranche_id: str,
+        sequence: int,
+        occurred_at: datetime,
+        config: PaperFillConfig,
+        kind: str,
+    ) -> SimulatePaperFillResult | None:
+        """Persist actual partial fills then buy risk-reducing hedge legs."""
+
+        partial_type = (
+            ActiveTradeEventType.TOPUP_PARTIAL_FILL
+            if kind == "topup"
+            else ActiveTradeEventType.ENTRY_PARTIAL_FILL
+        )
+        partial_reason = (
+            ActiveTradeReasonCode.TOPUP_PARTIAL
+            if kind == "topup"
+            else ActiveTradeReasonCode.ENTRY_PARTIAL
+        )
+
+        def _persist_partial() -> PaperTrade:
+            committed = self._commit_top_up_tranche(
+                trade,
+                plan=plan,
+                fills=fills,
+                mapped_legs=mapped_legs,
+                allocation=allocation,
+                incremental_gbp=incremental_gbp,
+                tranche_id=tranche_id,
+                sequence=sequence,
+                occurred_at=occurred_at,
+                event_type=partial_type,
+                reason_code=partial_reason,
+                kind=PaperTradeTrancheKind.TOP_UP if kind == "topup" else PaperTradeTrancheKind.OPENING,
+            )
+            committed.audit.append(
+                PaperTradeAuditEvent(
+                    occurred_at=occurred_at,
+                    event_type=PaperTradeAuditEventType.TOP_UP_PARTIAL_RECORDED,
+                    detail=f"partial {kind} persisted; recovery hedge next",
+                )
+            )
+            return self._mark_unresolved_recovery(committed, occurred_at)
+
+        if self.ledger is not None:
+            try:
+                with self.ledger.transaction():
+                    committed = _persist_partial()
+            except Exception:
+                self.ledger.reload_journal()
+                raise
+        else:
+            committed = _persist_partial()
+        return self._retry_entry_recovery(committed, plan, occurred_at, config)
+
+    def _retry_entry_recovery(
+        self,
+        trade: PaperTrade,
+        plan: PaperFillPlan,
+        when: datetime,
+        config: PaperFillConfig | None,
+    ) -> SimulatePaperFillResult | None:
+        fill_config = config or PaperFillConfig(
+            assumed_latency_ms=0,
+            max_quote_age_ms=self.settings.paper_entry_max_quote_age_ms,
+            slippage_bps=Decimal(self.settings.max_slippage_bps),
+        )
+        origin = next(
+            (item.tranche_id for item in reversed(trade.tranches) if item.kind is not PaperTradeTrancheKind.RECOVERY),
+            OPENING_TRANCHE_ID,
+        )
+
+        def _commit() -> PaperTrade:
+            return self._apply_recovery_hedge(trade, plan, when, fill_config, origin_tranche_id=origin)
+
+        if self.ledger is not None:
+            try:
+                with self.ledger.transaction():
+                    committed = _commit()
+            except Exception:
+                self.ledger.reload_journal()
+                raise
+        else:
+            committed = _commit()
+        return self._result_from_existing_trade(committed, when)
+
+    def _apply_recovery_hedge(
+        self,
+        trade: PaperTrade,
+        plan: PaperFillPlan,
+        occurred_at: datetime,
+        config: PaperFillConfig,
+        *,
+        origin_tranche_id: str,
+    ) -> PaperTrade:
+        residual = residual_exposure_gbp(trade)
+        operator = effective_operator_scanner_settings(self.settings)
+        room = remaining_trade_room_gbp(trade, operator.max_allocated_per_trade_gbp)
+        recovery_id = f"recovery:{origin_tranche_id}"
+        if any(item.tranche_id == recovery_id for item in trade.tranches):
+            sequence = 1 + max((item.sequence for item in trade.tranches), default=0)
+            recovery_id = f"recovery:{origin_tranche_id}:{sequence}"
+        current_net = plan.net_edge if plan.net_edge is not None else decision_net_edge(plan.decision)
+        below_min = current_net is None or not qualifies_min_net_arb(
+            current_net, operator.min_net_edge
+        )
+        reason_code = (
+            ActiveTradeReasonCode.RECOVERY_BELOW_MIN_NET
+            if below_min
+            else ActiveTradeReasonCode.RECOVERY_COMMITTED
+        )
+        self.record_active_lifecycle_event(
+            trade,
+            event_type=ActiveTradeEventType.ENTRY_RECOVERY_DECISION,
+            reason_code=reason_code,
+            operator_copy="Risk-reducing recovery hedge sized from current exact-ID books",
+            occurred_at=occurred_at,
+            dedupe_key=f"recovery-decision:{recovery_id}",
+            tranche_id=recovery_id,
+            payload={
+                "residual_before": residual,
+                "below_min_net": below_min,
+                "net_edge": current_net,
+                "books": compact_executable_books(plan.legs),
+            },
+            raise_on_error=True,
+        )
+        needed, size_reason = recovery_legs_from_plan(trade, list(plan.legs), remaining_gbp=room)
+        fills = None
+        if needed:
+            simulated = self.simulator.simulate(
+                needed,
+                config,
+                opportunity_id=trade.opportunity_id,
+                now=occurred_at,
+            )
+            fills = _with_stable_fill_ids(
+                simulated,
+                trade.opportunity_id,
+                plan.execution_modes,
+                simulate_external=True,
+                tranche_id=recovery_id,
+            )
+            actual = [item for item in fills.fills if item.filled_stake > 0]
+            if actual:
+                sequence = 1 + max((item.sequence for item in trade.tranches), default=0)
+                incremental = _filled_gbp(fills, needed, plan)
+                trade = self._commit_top_up_tranche(
+                    trade,
+                    plan=plan,
+                    fills=fills,
+                    mapped_legs=needed,
+                    allocation=None,
+                    incremental_gbp=incremental,
+                    tranche_id=recovery_id,
+                    sequence=sequence,
+                    occurred_at=occurred_at,
+                    event_type=ActiveTradeEventType.ENTRY_RECOVERY_FILL,
+                    reason_code=ActiveTradeReasonCode.RECOVERY_COMMITTED,
+                    kind=PaperTradeTrancheKind.RECOVERY,
+                )
+                trade.audit.append(
+                    PaperTradeAuditEvent(
+                        occurred_at=occurred_at,
+                        event_type=PaperTradeAuditEventType.ENTRY_RECOVERY_RECORDED,
+                        detail=f"recovery={recovery_id} incremental_gbp={incremental}",
+                    )
+                )
+        residual_after = residual_exposure_gbp(trade)
+        trade.residual_exposure_gbp = residual_after
+        if residual_after > 0:
+            trade.unresolved_recovery = True
+            trade.active_trade_phase = PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
+            trade.state = PaperTradeState.PARTIAL
+        else:
+            trade.unresolved_recovery = False
+            trade.residual_exposure_gbp = Decimal("0")
+            trade.active_trade_phase = PaperActiveTradePhase.ACCUMULATING
+            if any(leg.filled_stake > 0 for leg in trade.legs):
+                trade.state = PaperTradeState.OPEN
+        if self.trades is not None:
+            trade = self.trades.save(trade)
+        self.record_active_lifecycle_event(
+            trade,
+            event_type=ActiveTradeEventType.ENTRY_RECOVERY_RESIDUAL,
+            reason_code=ActiveTradeReasonCode.RECOVERY_RESIDUAL
+            if residual_after > 0
+            else ActiveTradeReasonCode.RECOVERY_COMMITTED,
+            operator_copy=(
+                "Residual worst-case settlement exposure remains; ACTIVE TRADE will retry recovery"
+                if residual_after > 0
+                else "Recovery closed residual exposure; discretionary accumulation may resume"
+            ),
+            occurred_at=occurred_at,
+            dedupe_key=f"recovery-residual:{recovery_id}:{occurred_at.isoformat()}",
+            tranche_id=recovery_id,
+            payload={"residual_gbp": residual_after, "size_reason": size_reason},
+            raise_on_error=True,
+        )
+        self._promote_active_trade(trade, occurred_at)
+        return trade
+
+    def _mark_unresolved_recovery(self, trade: PaperTrade, when: datetime) -> PaperTrade:
+        trade.unresolved_recovery = True
+        trade.state = PaperTradeState.PARTIAL
+        trade.active_trade_phase = PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
+        trade.residual_exposure_gbp = residual_exposure_gbp(trade)
+        trade.last_updated_at = when
+        if self.trades is not None:
+            return self.trades.save(trade)
+        return trade
 
     def _ensure_opening_tranche(self, trade: PaperTrade, when: datetime) -> None:
         if any(item.kind is PaperTradeTrancheKind.OPENING for item in trade.tranches):
@@ -1417,18 +1872,31 @@ class PaperOperationsService:
             self.trades.save(trade)
 
     def _promote_active_trade(self, trade: PaperTrade, when: datetime) -> None:
-        if trade.state is not PaperTradeState.OPEN:
+        if trade.state not in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
             return
         if trade.active_trade_phase is None:
-            trade.active_trade_phase = PaperActiveTradePhase.ACCUMULATING
+            trade.active_trade_phase = (
+                PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
+                if trade.unresolved_recovery
+                else PaperActiveTradePhase.ACCUMULATING
+            )
             self._append_trade_event_once(
                 trade,
                 event_type=PaperTradeAuditEventType.ACTIVE_TRADE_PROMOTED,
                 occurred_at=when,
-                detail="fully hedged OPEN paper fill promoted to ACTIVE TRADE 5s lane",
+                detail="paper fill promoted to ACTIVE TRADE 5s lane",
             )
             if self.trades is not None:
                 self.trades.save(trade)
+            self.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.PROMOTED_TO_ACTIVE,
+                reason_code=ActiveTradeReasonCode.PROMOTED,
+                operator_copy="Trade promoted from paper fill into ACTIVE TRADE 5s management",
+                occurred_at=when,
+                dedupe_key=f"promoted:{trade.trade_id}",
+                payload={"native_ids": compact_native_ids(trade)},
+            )
         get_active_trade_registry().promote(
             trade,
             now=when,
@@ -1744,30 +2212,39 @@ class PaperOperationsService:
             min_net_reason = _post_trigger_min_net_rejection(plan, fills, fill_config)
             if min_net_reason is not None:
                 self._fail_entry(opportunity_id, min_net_reason, simulated_at)
+        recover_partial = False
         if require_complete and not _complete_opening_fills(fills, opening_legs):
-            reason = fills.rejection_reasons[0] if fills.rejection_reasons else "incomplete_opening_hedge"
-            if bound_min_net and reason in {
-                "snapshot_stale_at_decision",
-                "snapshot_stale_at_simulated_arrival",
-                "unknown_quote_age",
-                "stale_quote",
-                "execution_risk_above_threshold",
-            }:
-                reason = "incomplete_opening_hedge"
-            self._fail_entry(opportunity_id, reason, simulated_at)
+            if any(item.filled_stake > 0 for item in fills.fills):
+                recover_partial = True
+            else:
+                reason = fills.rejection_reasons[0] if fills.rejection_reasons else "incomplete_opening_hedge"
+                if bound_min_net and reason in {
+                    "snapshot_stale_at_decision",
+                    "snapshot_stale_at_simulated_arrival",
+                    "unknown_quote_age",
+                    "stale_quote",
+                    "execution_risk_above_threshold",
+                }:
+                    reason = "incomplete_opening_hedge"
+                self._fail_entry(opportunity_id, reason, simulated_at)
+        if not require_complete:
+            recover_partial = False
         stage = _fill_stage(fills)
         if stage is None:
-            reason = fills.rejection_reasons[0] if fills.rejection_reasons else "paper_fill_rejected"
-            if bound_min_net and reason in {
-                "snapshot_stale_at_decision",
-                "snapshot_stale_at_simulated_arrival",
-                "unknown_quote_age",
-                "stale_quote",
-                "execution_risk_above_threshold",
-            }:
-                reason = "paper_fill_rejected"
-            self._fail_entry(opportunity_id, reason, simulated_at)
-        if require_complete and stage is not OpportunityStatus.FILLED:
+            if recover_partial and any(item.filled_stake > 0 for item in fills.fills):
+                stage = OpportunityStatus.PARTIAL
+            else:
+                reason = fills.rejection_reasons[0] if fills.rejection_reasons else "paper_fill_rejected"
+                if bound_min_net and reason in {
+                    "snapshot_stale_at_decision",
+                    "snapshot_stale_at_simulated_arrival",
+                    "unknown_quote_age",
+                    "stale_quote",
+                    "execution_risk_above_threshold",
+                }:
+                    reason = "paper_fill_rejected"
+                self._fail_entry(opportunity_id, reason, simulated_at)
+        if require_complete and not recover_partial and stage is not OpportunityStatus.FILLED:
             self._fail_entry(opportunity_id, "incomplete_opening_hedge", simulated_at)
 
         confirmed = confirmation if external_venues and not simulate_external else None
@@ -1792,7 +2269,7 @@ class PaperOperationsService:
                         provenance=provenance,
                         simulate_external=simulate_external,
                         autofill=simulate_external,
-                        require_complete=require_complete,
+                        require_complete=require_complete and not recover_partial,
                     )
             else:
                 journals = self._post_fills(
@@ -1813,13 +2290,44 @@ class PaperOperationsService:
                     provenance=provenance,
                     simulate_external=simulate_external,
                     autofill=simulate_external,
-                    require_complete=require_complete,
+                    require_complete=require_complete and not recover_partial,
                 )
         except (PaperOperationsError, PaperTreasuryError) as exc:
             self._fail_entry(opportunity_id, str(exc), simulated_at)
 
-        if require_complete and trade is not None and trade.state is not PaperTradeState.OPEN:
+        if (
+            require_complete
+            and not recover_partial
+            and trade is not None
+            and trade.state is not PaperTradeState.OPEN
+        ):
             self._fail_entry(opportunity_id, "incomplete_opening_hedge", simulated_at)
+        if recover_partial and trade is not None:
+            try:
+                if self.ledger is not None:
+                    with self.ledger.transaction():
+                        trade = self._apply_recovery_hedge(
+                            trade,
+                            plan,
+                            simulated_at,
+                            fill_config,
+                            origin_tranche_id=OPENING_TRANCHE_ID,
+                        )
+                else:
+                    trade = self._apply_recovery_hedge(
+                        trade,
+                        plan,
+                        simulated_at,
+                        fill_config,
+                        origin_tranche_id=OPENING_TRANCHE_ID,
+                    )
+            except Exception:
+                if self.trades is not None:
+                    trade = self.trades.get(trade.trade_id) or trade
+            if trade.state is PaperTradeState.OPEN:
+                stage = OpportunityStatus.FILLED
+            elif trade.state is PaperTradeState.PARTIAL:
+                stage = OpportunityStatus.PARTIAL
 
         opportunity = self._record_watchlist_fill(
             opportunity_id,
@@ -1915,9 +2423,11 @@ class PaperOperationsService:
 
         if self.ledger is not None:
             try:
-                self.ledger.treasury.apply_settlement(
-                    trade, computation, request, settled_at=settled_at
-                )
+                with self.ledger.transaction():
+                    self.ledger.treasury.apply_settlement(
+                        trade, computation, request, settled_at=settled_at
+                    )
+                    self._finalize_settled_trade(trade, request, computation, settled_at)
             except (PaperTreasuryError, DuplicateJournalError) as exc:
                 raise PaperOperationsError(str(exc)) from exc
         else:
@@ -1958,7 +2468,22 @@ class PaperOperationsService:
                 self.journal.append_idempotent(entry)
             except DuplicateJournalError as exc:
                 raise PaperOperationsError("conflicting_journal_facts") from exc
+            self._finalize_settled_trade(trade, request, computation, settled_at)
 
+        if self.watchlist.repository.get(trade.opportunity_id) is not None:
+            try:
+                self.watchlist.close(trade.opportunity_id, occurred_at=settled_at, detail="paper settlement")
+            except Exception:
+                pass
+        return self.trade_detail(trade_id)
+
+    def _finalize_settled_trade(
+        self,
+        trade: PaperTrade,
+        request: PaperSettlementRequest,
+        computation: Any,
+        settled_at: datetime,
+    ) -> None:
         trade.state = PaperTradeState.CLOSED
         trade.settled_at = settled_at
         trade.last_updated_at = settled_at
@@ -1980,12 +2505,30 @@ class PaperOperationsService:
             )
         )
         self.trades.save(trade)
-        if self.watchlist.repository.get(trade.opportunity_id) is not None:
-            try:
-                self.watchlist.close(trade.opportunity_id, occurred_at=settled_at, detail="paper settlement")
-            except Exception:
-                pass
-        return self.trade_detail(trade_id)
+        self.record_active_lifecycle_event(
+            trade,
+            event_type=ActiveTradeEventType.SETTLED,
+            reason_code=ActiveTradeReasonCode.SETTLED,
+            operator_copy="Paper trade settled with final economics",
+            occurred_at=settled_at,
+            dedupe_key=f"settled:{trade.trade_id}:{request.source}:{request.source_id}",
+            payload={
+                "realised_pnl_gbp": trade.realised_pnl_gbp,
+                "settlement_outcome": trade.settlement_outcome,
+                "settlement_source": trade.settlement_source,
+            },
+            raise_on_error=True,
+        )
+        self.record_active_lifecycle_event(
+            trade,
+            event_type=ActiveTradeEventType.CLOSED,
+            reason_code=ActiveTradeReasonCode.CLOSED,
+            operator_copy="Paper trade closed",
+            occurred_at=settled_at,
+            dedupe_key=f"closed:{trade.trade_id}",
+            payload={"realised_pnl_gbp": trade.realised_pnl_gbp},
+            raise_on_error=True,
+        )
 
     def list_active_trades(self) -> list[PaperTrade]:
         if self.trades is None:
@@ -2056,6 +2599,18 @@ class PaperOperationsService:
                 )
             )
             self.trades.save(trade)
+            self.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.UNWIND_DECISION,
+                reason_code=ActiveTradeReasonCode.UNWIND_LOGGED,
+                operator_copy="Unwind/management decision logged; calculation/policy unchanged",
+                occurred_at=evaluated_at or datetime.now(UTC),
+                dedupe_key=f"unwind-decision:{trade.trade_id}:{decision.recommendation.value}:{decision.decision_reason}",
+                payload={
+                    "recommendation": decision.recommendation.value,
+                    "decision_reason": decision.decision_reason,
+                },
+            )
         return decision
 
     def complete_validated_unwind(
@@ -2144,71 +2699,85 @@ class PaperOperationsService:
         except UnwindIdentityError as exc:
             raise PaperOperationsError(str(exc)) from exc
         try:
-            self.ledger.treasury.post_unwind(
-                ValidatedUnwindResult(
-                    trade_id=trade.trade_id,
-                    close_completed=True,
+            with self.ledger.transaction():
+                self.ledger.treasury.post_unwind(
+                    ValidatedUnwindResult(
+                        trade_id=trade.trade_id,
+                        close_completed=True,
+                        opportunity_id=trade.opportunity_id,
+                        source=PAPER_UNWIND_SOURCE,
+                        source_id=unwind_id,
+                        reason="validated paper unwind",
+                        releases=releases,
+                    ),
+                    now=occurred,
+                )
+                opening_legs = [leg.model_copy() for leg in trade.legs]
+                trade.legs = opening_legs
+                trade.close_fills = close_fills
+                trade.state = PaperTradeState.CLOSED
+                trade.settled_at = occurred
+                trade.last_updated_at = occurred
+                trade.realised_pnl_gbp = decision.validated_exit_pnl_gbp
+                trade.settlement_outcome = None
+                trade.settlement_source = PAPER_UNWIND_SOURCE
+                trade.settlement_source_id = unwind_id
+                trade.settlement_detail = (
+                    f"validated unwind {decision.recommendation.value}; "
+                    "capital released only after 8E postings"
+                )
+                trade.capital_locked_native = {}
+                trade.capital_locked_gbp = Decimal(0)
+                trade.audit.append(
+                    PaperTradeAuditEvent(
+                        occurred_at=occurred,
+                        event_type=PaperTradeAuditEventType.CLOSE_FILLS_RECORDED,
+                        detail=f"close_fills={len(close_fills)} distinct from opening legs",
+                    )
+                )
+                trade.audit.append(
+                    PaperTradeAuditEvent(
+                        occurred_at=occurred,
+                        event_type=PaperTradeAuditEventType.UNWIND_COMPLETED,
+                        detail=(
+                            f"exit_pnl_gbp={decision.validated_exit_pnl_gbp} "
+                            f"unwind_cost_gbp={decision.unwind_cost_gbp}"
+                        ),
+                    )
+                )
+                unwind_risk = snapshot_from_execution_risk(
+                    decision.execution_risk,
+                    kind=PaperRiskSnapshotKind.UNWIND,
+                    recorded_at=occurred,
                     opportunity_id=trade.opportunity_id,
-                    source=PAPER_UNWIND_SOURCE,
-                    source_id=unwind_id,
-                    reason="validated paper unwind",
-                    releases=releases,
-                ),
-                now=occurred,
-            )
+                    trade_id=trade.trade_id,
+                    maximum_execution_risk=(policy or UnwindPolicy()).max_execution_risk,
+                )
+                if unwind_risk is not None:
+                    trade.close_risks.append(unwind_risk)
+                    trade.audit.append(
+                        PaperTradeAuditEvent(
+                            occurred_at=occurred,
+                            event_type=PaperTradeAuditEventType.UNWIND_RISK_RECORDED,
+                            detail=f"score={unwind_risk.score} band={unwind_risk.band}",
+                        )
+                    )
+                self.trades.save(trade)
+                self.record_active_lifecycle_event(
+                    trade,
+                    event_type=ActiveTradeEventType.CLOSED,
+                    reason_code=ActiveTradeReasonCode.CLOSED,
+                    operator_copy="Paper trade closed via validated unwind",
+                    occurred_at=occurred,
+                    dedupe_key=f"closed:{trade.trade_id}",
+                    payload={
+                        "exit_pnl_gbp": decision.validated_exit_pnl_gbp,
+                        "unwind_cost_gbp": decision.unwind_cost_gbp,
+                    },
+                    raise_on_error=True,
+                )
         except PaperTreasuryError as exc:
             raise PaperOperationsError(str(exc)) from exc
-        opening_legs = [leg.model_copy() for leg in trade.legs]
-        trade.legs = opening_legs
-        trade.close_fills = close_fills
-        trade.state = PaperTradeState.CLOSED
-        trade.settled_at = occurred
-        trade.last_updated_at = occurred
-        trade.realised_pnl_gbp = decision.validated_exit_pnl_gbp
-        trade.settlement_outcome = None
-        trade.settlement_source = PAPER_UNWIND_SOURCE
-        trade.settlement_source_id = unwind_id
-        trade.settlement_detail = (
-            f"validated unwind {decision.recommendation.value}; "
-            "capital released only after 8E postings"
-        )
-        trade.capital_locked_native = {}
-        trade.capital_locked_gbp = Decimal(0)
-        trade.audit.append(
-            PaperTradeAuditEvent(
-                occurred_at=occurred,
-                event_type=PaperTradeAuditEventType.CLOSE_FILLS_RECORDED,
-                detail=f"close_fills={len(close_fills)} distinct from opening legs",
-            )
-        )
-        trade.audit.append(
-            PaperTradeAuditEvent(
-                occurred_at=occurred,
-                event_type=PaperTradeAuditEventType.UNWIND_COMPLETED,
-                detail=(
-                    f"exit_pnl_gbp={decision.validated_exit_pnl_gbp} "
-                    f"unwind_cost_gbp={decision.unwind_cost_gbp}"
-                ),
-            )
-        )
-        unwind_risk = snapshot_from_execution_risk(
-            decision.execution_risk,
-            kind=PaperRiskSnapshotKind.UNWIND,
-            recorded_at=occurred,
-            opportunity_id=trade.opportunity_id,
-            trade_id=trade.trade_id,
-            maximum_execution_risk=(policy or UnwindPolicy()).max_execution_risk,
-        )
-        if unwind_risk is not None:
-            trade.close_risks.append(unwind_risk)
-            trade.audit.append(
-                PaperTradeAuditEvent(
-                    occurred_at=occurred,
-                    event_type=PaperTradeAuditEventType.UNWIND_RISK_RECORDED,
-                    detail=f"score={unwind_risk.score} band={unwind_risk.band}",
-                )
-            )
-        self.trades.save(trade)
         if self.watchlist.repository.get(trade.opportunity_id) is not None:
             try:
                 self.watchlist.close(trade.opportunity_id, occurred_at=occurred, detail="paper unwind")
@@ -2598,6 +3167,9 @@ class PaperOperationsService:
         elif partial:
             trade.state = PaperTradeState.PARTIAL
             trade.guaranteed_profit_gbp_at_open = None
+            trade.unresolved_recovery = True
+            trade.active_trade_phase = PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
+            trade.residual_exposure_gbp = residual_exposure_gbp(trade)
         else:
             trade.state = PaperTradeState.PENDING
             trade.guaranteed_profit_gbp_at_open = None
@@ -2643,7 +3215,64 @@ class PaperOperationsService:
             detail=f"state={trade.state.value}",
         )
         saved = self.trades.save(trade)
-        if saved.state is PaperTradeState.OPEN:
+        if saved.state in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
+            self.record_active_lifecycle_event(
+                saved,
+                event_type=ActiveTradeEventType.ENTRY_DECISION,
+                reason_code=ActiveTradeReasonCode.ENTRY_PARTIAL
+                if saved.state is PaperTradeState.PARTIAL
+                else ActiveTradeReasonCode.ENTRY_COMMITTED,
+                operator_copy="Opening paper entry decision recorded",
+                occurred_at=occurred_at,
+                dedupe_key=f"entry-decision:{saved.trade_id}",
+                tranche_id=OPENING_TRANCHE_ID,
+                payload={"books": compact_executable_books(plan.legs)},
+                raise_on_error=True,
+            )
+            self.record_active_lifecycle_event(
+                saved,
+                event_type=ActiveTradeEventType.ENTRY_ATTEMPT,
+                reason_code=ActiveTradeReasonCode.ENTRY_PARTIAL
+                if saved.state is PaperTradeState.PARTIAL
+                else ActiveTradeReasonCode.ENTRY_COMMITTED,
+                operator_copy="Opening paper simulator attempt recorded",
+                occurred_at=occurred_at,
+                dedupe_key=f"entry-attempt:{saved.trade_id}:{OPENING_TRANCHE_ID}",
+                tranche_id=OPENING_TRANCHE_ID,
+                raise_on_error=True,
+            )
+        fill_event = (
+            ActiveTradeEventType.ENTRY_PARTIAL_FILL
+            if saved.state is PaperTradeState.PARTIAL
+            else ActiveTradeEventType.ENTRY_FILL
+        )
+        fill_reason = (
+            ActiveTradeReasonCode.ENTRY_PARTIAL
+            if saved.state is PaperTradeState.PARTIAL
+            else ActiveTradeReasonCode.ENTRY_COMMITTED
+        )
+        for leg in saved.legs:
+            if not leg.fill_id or leg.filled_stake <= 0:
+                continue
+            self.record_active_lifecycle_event(
+                saved,
+                event_type=fill_event,
+                reason_code=fill_reason,
+                operator_copy="Opening paper fill recorded",
+                occurred_at=occurred_at,
+                dedupe_key=f"{fill_event.value}:{saved.trade_id}:{leg.fill_id}",
+                tranche_id=leg.tranche_id,
+                fill_id=leg.fill_id,
+                venue=leg.venue.value,
+                payload={
+                    "filled_stake": leg.filled_stake,
+                    "native_ids": compact_native_ids(saved),
+                    "treasury_after_gbp": saved.capital_locked_gbp,
+                    "residual_gbp": saved.residual_exposure_gbp,
+                },
+                raise_on_error=True,
+            )
+        if saved.state in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
             self._ensure_opening_tranche(saved, occurred_at)
             self._promote_active_trade(saved, occurred_at)
             reloaded = self.trades.get(saved.trade_id)
@@ -3145,6 +3774,27 @@ def _arrival_net_edge_from_fills(
         venue_costs=plan.venue_costs,
         as_of=plan.scanned_at,
     )
+
+
+def _filled_gbp(
+    fills: PaperOpportunityFills,
+    mapped_legs: list[PaperOpportunityLeg],
+    plan: PaperFillPlan,
+) -> Decimal:
+    fx = {item.currency.upper(): item.gbp_per_unit for item in plan.fx_snapshots}
+    fx.setdefault("GBP", Decimal("1"))
+    by_key = {
+        (fill.venue, fill.outcome, fill.source_market_id, fill.source_runner_id): fill
+        for fill in fills.fills
+    }
+    total = Decimal("0")
+    for leg in mapped_legs:
+        fill = by_key.get((leg.venue, leg.outcome, leg.source_market_id, leg.source_runner_id))
+        if fill is None or fill.filled_stake <= 0:
+            continue
+        rate = Decimal("1") if leg.currency.upper() == "GBP" else fx.get(leg.currency.upper(), Decimal("1"))
+        total += fill.filled_stake * rate
+    return total
 
 
 def _complete_opening_fills(
