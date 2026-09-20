@@ -287,7 +287,7 @@ def test_paper_polymarket_and_execution_boundaries_hold() -> None:
 def test_event_matcher_threshold_and_no_generic_stripping() -> None:
     assert EventMatcher().threshold == 0.92
     assert "threshold: float = 0.92" in inspect.getsource(EventMatcher.__init__)
-    assert SAFE_TEAM_AFFIX_TOKENS == frozenset({"fc", "cf", "afc", "sc"})
+    assert SAFE_TEAM_AFFIX_TOKENS == frozenset({"fc", "cf", "afc", "sc", "calcio", "bc"})
     assert resolve_team_name("AC Unknownville") == "ac unknownville"
     assert resolve_team_name("Unknownville Calcio") == "unknownville calcio"
     assert resolve_team_name("Unknownville Barcelona") == "unknownville barcelona"

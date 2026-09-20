@@ -173,9 +173,9 @@ BUNDESLIGA_CLUBS: tuple[SeniorClub, ...] = (
 SERIE_A_CLUBS: tuple[SeniorClub, ...] = (
     _club("Inter", "Inter Milan", "FC Internazionale", "Internazionale", "FC Inter"),
     _club("AC Milan", "Milan"),
-    _club("Juventus"),
+    _club("Juventus", "Juventus Turin"),
     _club("Napoli", "SSC Napoli"),
-    _club("Atalanta"),
+    _club("Atalanta", "Atalanta BC", "Atalanta B.C."),
     _club("Roma", "AS Roma"),
     _club("Lazio", "SS Lazio"),
     _club("Fiorentina"),
@@ -184,7 +184,7 @@ SERIE_A_CLUBS: tuple[SeniorClub, ...] = (
     _club("Udinese"),
     _club("Genoa"),
     _club("Cagliari"),
-    _club("Parma"),
+    _club("Parma", "Parma Calcio"),
     _club("Lecce"),
     _club("Como", "Como 1907"),
     _club("Sassuolo", "Sassuolo Calcio", "US Sassuolo", "US Sassuolo Calcio"),
@@ -192,6 +192,9 @@ SERIE_A_CLUBS: tuple[SeniorClub, ...] = (
     _club("Cremonese"),
     _club("Hellas Verona", "Verona"),
     _club("Monza", "AC Monza"),
+    # Kalshi Serie A GAME/FTTS sibling titles use the legal name. Capture/replay
+    # and owner-live both listed this fixture as KXSERIEAGAME.
+    _club("Frosinone", "Frosinone Calcio"),
 )
 
 NATIONAL_TEAMS: tuple[SeniorClub, ...] = (

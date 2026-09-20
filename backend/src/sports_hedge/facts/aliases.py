@@ -3,8 +3,10 @@ from __future__ import annotations
 from sports_hedge.facts.team_registry import alias_pairs, canonical_team_names
 from sports_hedge.normalization.text import AliasRegistry, normalize_text
 
-# Conservative affixes only. Never drop United/City/Athletic-style identity terms.
-SAFE_TEAM_AFFIX_TOKENS = frozenset({"fc", "cf", "afc", "sc"})
+# Conservative legal-form affixes only. Never drop United/City/Athletic/Turin-style
+# identity terms. Italian Calcio/BC are the Serie A equivalent of FC/SC; unknown
+# remainders stay unchanged so senior vs youth/women/reserves stay fail-closed.
+SAFE_TEAM_AFFIX_TOKENS = frozenset({"fc", "cf", "afc", "sc", "calcio", "bc"})
 
 
 def _registry() -> AliasRegistry:
