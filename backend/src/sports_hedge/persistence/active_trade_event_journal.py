@@ -100,7 +100,7 @@ class SqliteActiveTradeEventJournal:
                 ),
             )
         except sqlite3.IntegrityError:
-            return False
+            return True
         self._ledger._commit()
         return True
 

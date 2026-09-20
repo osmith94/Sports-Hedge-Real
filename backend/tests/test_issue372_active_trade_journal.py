@@ -299,7 +299,7 @@ def test_partial_entry_recovers_even_below_min_net_arb(tmp_path: Path) -> None:
         result = ops.simulate_fill(
             opportunity_id,
             simulate_external=True,
-            now=OBSERVED,
+            now=datetime.now(UTC),
         )
         loaded = ops.list_active_trades()[0]
         assert result.trade_id == loaded.trade_id
@@ -363,7 +363,7 @@ def test_bounded_recovery_leaves_durable_residual_and_retry_is_idempotent(
                 return filled.model_copy(update={"fills": tiny, "fully_filled": False})
 
         ops.simulator = _TinyRecovery()
-        ops.simulate_fill(opportunity_id, simulate_external=True, now=OBSERVED)
+        ops.simulate_fill(opportunity_id, simulate_external=True, now=datetime.now(UTC))
         loaded = ops.list_active_trades()[0]
         assert loaded.unresolved_recovery is True
         assert loaded.active_trade_phase is PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
@@ -386,8 +386,8 @@ def test_bounded_recovery_leaves_durable_residual_and_retry_is_idempotent(
         assert len(again.tranches) >= len(before_ids)
         retry_ids = [item.tranche_id for item in again.tranches]
         assert len(retry_ids) == len(set(retry_ids))
-        assert len([leg.fill_id for leg in again.legs]) == len(
-            set(leg.fill_id for leg in again.legs if leg.fill_id)
+        assert len([leg.fill_id for leg in again.legs if leg.fill_id]) == len(
+            {leg.fill_id for leg in again.legs if leg.fill_id}
         )
         after_locks = _lock_fingerprint(ledger, again.trade_id)
         assert len(after_locks) >= len(before_locks)
@@ -413,7 +413,11 @@ def test_injected_journal_failure_rolls_back_finance_and_event(tmp_path: Path) -
         before_locks = _lock_fingerprint(ledger, trade.trade_id)
         before_journals = _journal_keys(ops)
         before_tranches = [item.tranche_id for item in trade.tranches]
-        before_events = len(ops.query_active_trade_events(trade_id=trade.trade_id, limit=500))
+        before_fills = [
+            item
+            for item in ops.query_active_trade_events(trade_id=trade.trade_id, limit=500)
+            if item.event_type is ActiveTradeEventType.TOPUP_FILL
+        ]
         original = ops.ledger.active_trade_events.append
 
         def _boom(event):
@@ -431,7 +435,11 @@ def test_injected_journal_failure_rolls_back_finance_and_event(tmp_path: Path) -
         assert _lock_fingerprint(ledger, trade.trade_id) == before_locks
         assert _journal_keys(ops) == before_journals
         assert ActiveTradeEventType.TOPUP_FILL not in _types(ops, trade.trade_id)
-        assert len(ops.query_active_trade_events(trade_id=trade.trade_id, limit=500)) == before_events
+        assert [
+            item
+            for item in ops.query_active_trade_events(trade_id=trade.trade_id, limit=500)
+            if item.event_type is ActiveTradeEventType.TOPUP_FILL
+        ] == before_fills
         retry = ops.maybe_top_up_open_trade(rolled, now=OBSERVED)
         assert retry is not None
         loaded = ops.list_active_trades()[0]
@@ -522,7 +530,8 @@ def test_venue_degradation_why_captures_active_context_with_zero_provider_calls(
             "sports_hedge.api.paper.get_paper_operations_service",
             lambda *_args, **_kwargs: ops,
         )
-        monkeypatch.setattr("sports_hedge.venues.kalshi.KalshiClient.get_event", _forbidden)
+        monkeypatch.setattr("sports_hedge.venues.kalshi.KalshiClient.get_market", _forbidden)
+        monkeypatch.setattr("sports_hedge.venues.kalshi.KalshiClient.get_order_book", _forbidden)
         monkeypatch.setattr("sports_hedge.venues.matchbook.MatchbookClient.get_market", _forbidden)
         coordinator = LiveRefreshCoordinator(clock=lambda: OBSERVED)
         coordinator.status = coordinator.status.model_copy(

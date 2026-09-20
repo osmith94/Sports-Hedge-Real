@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import monotonic
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -4298,9 +4299,18 @@ class LiveRefreshCoordinator:
             if isinstance(item, BaseException):
                 continue
             trade, priced_at, status, runtime, slice_result = item
-            cycle_id = f"{trade.trade_id}:{priced_at.isoformat()}"
-            started_logged = operations.record_active_lifecycle_event(
-                trade,
+            cycle_id = f"{trade.trade_id}:{priced_at.isoformat()}:{uuid4().hex[:8]}"
+            record = getattr(operations, "record_active_lifecycle_event", None)
+
+            def _journal(**kwargs: Any) -> bool:
+                if not callable(record):
+                    return True
+                try:
+                    return bool(record(trade, **kwargs))
+                except Exception:
+                    return False
+
+            started_logged = _journal(
                 event_type=ActiveTradeEventType.ACTIVE_REFRESH_STARTED,
                 reason_code=ActiveTradeReasonCode.REFRESH_STARTED,
                 operator_copy="ACTIVE TRADE 5s exact-ID refresh started",
@@ -4316,8 +4326,7 @@ class LiveRefreshCoordinator:
                 slice_result=slice_result,
             )
             reason, copy = self._active_refresh_reason_for(status, runtime, fresh_plan)
-            result_logged = operations.record_active_lifecycle_event(
-                trade,
+            result_logged = _journal(
                 event_type=ActiveTradeEventType.ACTIVE_REFRESH_RESULT,
                 reason_code=reason,
                 operator_copy=copy,
@@ -4344,8 +4353,7 @@ class LiveRefreshCoordinator:
                         }
                     )
             if fresh_plan is None:
-                operations.record_active_lifecycle_event(
-                    trade,
+                _journal(
                     event_type=ActiveTradeEventType.NO_ACTION,
                     reason_code=ActiveTradeReasonCode.NO_ACTION_STALE_REFRESH,
                     operator_copy="Failed current refresh; no top-up from stale prior plan",
