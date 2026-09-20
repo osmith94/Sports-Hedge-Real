@@ -1152,6 +1152,7 @@ export type NearOpportunity = {
   away_team?: string | null;
   market_family?: MarketFamily | null;
   period?: FootballPeriod | null;
+  line?: string | number | null;
   venues: Venue[];
   legs: WatchLeg[];
   status: WatchlistOpportunityStatus;
@@ -1859,6 +1860,11 @@ export type PositionManagementSnapshot = {
   expected_settlement_at?: string | null;
   remaining_lock_advisory?: boolean;
   normal_release_context?: string;
+  exit_margin_gbp?: string | number | null;
+  exit_threshold_gbp?: string | number | null;
+  exit_margin_basis?: string | null;
+  exit_margin_actionable?: boolean;
+  close_blocker?: string | null;
   paper_only?: boolean;
   places_orders?: boolean;
   spendable?: boolean;
@@ -1878,6 +1884,7 @@ export type PaperTrade = {
   away_team?: string | null;
   fixture_label?: string | null;
   market_label?: string | null;
+  line?: string | number | null;
   state: PaperTradeState;
   opened_at: string;
   last_updated_at: string;

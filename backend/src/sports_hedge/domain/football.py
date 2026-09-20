@@ -125,6 +125,26 @@ def line_push_possible(line: Decimal | None) -> bool | None:
     return line == line.to_integral_value()
 
 
+LINE_PARAMETER_FAMILIES: frozenset[MarketFamily] = frozenset(
+    {
+        MarketFamily.TOTAL_GOALS,
+        MarketFamily.ASIAN_HANDICAP,
+        MarketFamily.TEAM_TOTAL,
+    }
+)
+
+
+def format_stored_line(line: Decimal | None) -> str | None:
+    """Render a persisted canonical line. Never invent a value from odds or names."""
+
+    if line is None:
+        return None
+    text = format(line, "f")
+    if "." in text:
+        return text.rstrip("0").rstrip(".")
+    return text
+
+
 class CanonicalEvent(BaseModel):
     sport: str = "football"
     competition: str

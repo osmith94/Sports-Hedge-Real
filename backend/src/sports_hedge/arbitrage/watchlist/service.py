@@ -127,6 +127,7 @@ class WatchlistService:
             away_team=observation.away_team,
             market_family=observation.market_family,
             period=observation.period,
+            line=observation.line,
             venues=observation.venues,
             legs=observation.legs,
             status=status,

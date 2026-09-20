@@ -1647,6 +1647,12 @@ def test_position_management_api_seam(tmp_path: Path) -> None:
         assert body[0]["normal_release_context"] == "after authoritative settlement"
         assert body[0]["remaining_lock_advisory"] is True
         assert "remaining_lock_basis" in body[0]
+        assert "exit_margin_gbp" in body[0]
+        assert "exit_threshold_gbp" in body[0]
+        assert "exit_margin_basis" in body[0]
+        assert "exit_margin_actionable" in body[0]
+        assert "close_blocker" in body[0]
+        assert body[0]["evaluated_at"]
         one = client.get(f"/paper/trades/{trade.trade_id}/position-management")
         assert one.status_code == 200
         assert one.json()["recommendation"] in {"HOLD", "UNWIND_ELIGIBLE", "UNWIND_NOT_SAFE"}

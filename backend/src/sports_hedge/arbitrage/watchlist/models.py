@@ -119,6 +119,7 @@ class WatchObservation(BaseModel):
     away_team: str | None = None
     market_family: MarketFamily | None = None
     period: FootballPeriod | None = None
+    line: Decimal | None = None
     venues: list[VenueName] = Field(default_factory=list)
     legs: list[WatchLeg] = Field(default_factory=list)
     trigger_net_edge: Decimal = Field(ge=0)
@@ -171,6 +172,7 @@ class NearOpportunity(BaseModel):
     away_team: str | None = None
     market_family: MarketFamily | None = None
     period: FootballPeriod | None = None
+    line: Decimal | None = None
     venues: list[VenueName] = Field(default_factory=list)
     legs: list[WatchLeg] = Field(default_factory=list)
     status: OpportunityStatus

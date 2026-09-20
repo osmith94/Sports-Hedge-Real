@@ -200,6 +200,7 @@ class PaperTrade(BaseModel):
     solver_model: str | None = None
     market_family: MarketFamily | None = None
     period: FootballPeriod | None = None
+    line: Decimal | None = None
     competition: str | None = None
     home_team: str | None = None
     away_team: str | None = None

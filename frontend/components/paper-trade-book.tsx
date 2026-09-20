@@ -12,6 +12,7 @@ import {
 } from "../lib/api";
 import { money } from "../lib/format";
 import { formatPositionManagementCell } from "../lib/paper-position-management-display";
+import { compactLegLines, compactMarketHeading } from "../lib/paper-trade-display";
 import { ActiveTradeLog } from "./active-trade-log";
 import { HydratedRelativeTime } from "./hydrated-relative-time";
 
@@ -54,6 +55,13 @@ function managementHint(trade: PaperTrade): string {
     snapshot.auto_action === "unwind_pending_confirmation"
       ? "awaiting newer reverse-book confirmation"
       : null,
+    snapshot.exit_margin_basis && snapshot.exit_margin_basis !== "unavailable"
+      ? `exit-margin basis ${snapshot.exit_margin_basis.replaceAll("_", " ")}`
+      : null,
+    "exit margin is modelled economic distance to the unwind threshold, not realised P&L",
+    snapshot.exit_margin_actionable === false && snapshot.recommendation === "UNWIND_NOT_SAFE"
+      ? "positive economic margin is not permission to close"
+      : null,
     snapshot.decision_reason?.replaceAll("_", " "),
   ].filter(Boolean);
   return bits.join(" · ");
@@ -64,7 +72,15 @@ function ManagementCell({ trade }: { trade: PaperTrade }) {
   return (
     <td title={managementHint(trade)}>
       <span className="status-badge">{cell.state}</span>
+      {cell.checkedIso ? (
+        <div className="panel-meta">
+          <HydratedRelativeTime iso={cell.checkedIso} prefix="checked" />
+        </div>
+      ) : null}
       <div className="panel-meta">{cell.economics}</div>
+      {cell.threshold ? <div className="panel-meta">{cell.threshold}</div> : null}
+      <div className="panel-meta">{cell.margin}</div>
+      {cell.blocker ? <div className="panel-meta">{cell.blocker}</div> : null}
       <div className="panel-meta">{cell.release}</div>
     </td>
   );
@@ -81,23 +97,16 @@ function fixture(trade: PaperTrade): string {
   return trade.fixture_label || `${trade.home_team ?? "Unknown"} v ${trade.away_team ?? "Unknown"}`;
 }
 
-function stakeLabel(leg: PaperTrade["legs"][number]): string {
-  const ccy = leg.currency === "USD" ? "USD" : "GBP";
-  if (leg.fill_kind === "UNFILLED") {
-    return `requested ${money(leg.requested_stake, ccy)} unfilled`;
-  }
-  return money(leg.filled_stake, ccy);
-}
-
-function legsLine(trade: PaperTrade): string {
-  if (!trade.legs.length) return "No legs recorded";
-  return trade.legs
-    .map((leg) => {
-      const odds = leg.filled_odds ?? leg.displayed_odds;
-      const mode = leg.execution_mode === "EXTERNAL_OPERATOR" ? " · EXTERNAL_OPERATOR" : "";
-      return `${leg.venue} ${leg.outcome} ${odds ?? "—"} × ${stakeLabel(leg)} (${leg.fill_kind}${mode})`;
-    })
-    .join(" · ");
+function LegsCell({ trade }: { trade: PaperTrade }) {
+  return (
+    <td>
+      {compactLegLines(trade).map((line) => (
+        <div key={line} className="panel-meta">
+          {line}
+        </div>
+      ))}
+    </td>
+  );
 }
 
 export function PaperTradeBook({ summary, active, closed, apiAvailable, compact = false }: Props) {
@@ -293,7 +302,7 @@ function TradeTable({
                         {fixture(trade)}
                       </button>
                       <div className="panel-meta">
-                        {trade.market_label ?? trade.market_family ?? "—"}
+                        {compactMarketHeading(trade)}
                         {trade.solver_model ? ` · ${trade.solver_model}` : ""}
                       </div>
                       <Link href={`/paper/${encodeURIComponent(trade.trade_id)}`} className="panel-meta">
@@ -315,7 +324,7 @@ function TradeTable({
                         </div>
                       ) : null}
                     </td>
-                    <td>{legsLine(trade)}</td>
+                    <LegsCell trade={trade} />
                     <td>{nativeLocked(trade)}</td>
                     <td title={riskTooltip(trade.entry_risk)}>{riskAtEntry(trade)}</td>
                     <td>{money(trade.guaranteed_profit_gbp_at_open)}</td>

@@ -277,6 +277,7 @@ export function venueTitle(venue: Venue): string {
   if (venue === "matchbook") return "Matchbook";
   if (venue === "polymarket") return "Polymarket";
   if (venue === "kalshi") return "Kalshi";
+  if (venue === "smarkets") return "Smarkets";
   return venue;
 }
 
