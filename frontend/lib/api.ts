@@ -1117,6 +1117,7 @@ export type WatchlistLifecycleEventType =
   | "moved_further_from_trigger"
   | "trigger_crossed"
   | "trigger_lost_before_fill"
+  | "promoted_to_hot"
   | "paper_fill_attempted"
   | "paper_fill_partial"
   | "paper_fill_complete"
@@ -1213,6 +1214,11 @@ export type OpportunityLifecycleEvent = {
   current_net_edge?: string | number | null;
   distance_to_trigger_pp?: string | number | null;
   detail?: string | null;
+  fixture_label?: string | null;
+  market_family?: string | null;
+  canonical_event_id?: string | null;
+  canonical_market_id?: string | null;
+  capture_eligible?: boolean | null;
 };
 
 export async function runPaperCollection(

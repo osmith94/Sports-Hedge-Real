@@ -100,9 +100,11 @@ from sports_hedge.application.scan_lanes import (
     classify_scan_lane,
 )
 from sports_hedge.arbitrage.watchlist.economics import (
+    distance_to_trigger_pp,
     is_net_proximity_hot,
     qualifies_min_net_arb,
 )
+from sports_hedge.arbitrage.watchlist.models import hot_promotion_opportunity_id
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.persistence.operator_scanner_settings import (
     effective_operator_scanner_settings,
@@ -200,6 +202,23 @@ class PriceEngineProjectionEvent:
     reset_generation: int = 0
 
 
+@dataclass(frozen=True)
+class HotPromotionFact:
+    """One scheduler BACKGROUND→HOT episode. Not inferred from watchlist movement."""
+
+    canonical_event_id: str
+    catalogue_row_id: str
+    content_version: int
+    occurred_at: datetime
+    opportunity_id: str
+    episode: int
+    fixture_label: str | None = None
+    market_family: str | None = None
+    pricing_lane: str = PriceEnginePriority.BACKGROUND.value
+    current_net_edge: Decimal | None = None
+    distance_to_trigger_pp: Decimal | None = None
+
+
 @dataclass
 class PriceEngineSliceResult:
     evaluated: list[str] = field(default_factory=list)
@@ -264,6 +283,7 @@ class CataloguePriceEngine:
         hot_interval_seconds: int | None = None,
         background_interval_seconds: int | None = None,
         on_item_decision: Callable[[PaperScanDecision, PriceEngineRuntimeItem], Any] | None = None,
+        on_hot_promotion: Callable[[HotPromotionFact], Any] | None = None,
         observability: ScannerObservabilitySink | None = None,
     ) -> None:
         resolved = settings or get_settings()
@@ -292,10 +312,12 @@ class CataloguePriceEngine:
         self.venue_costs = list(venue_costs or [])
         self.fx_snapshots = list(fx_snapshots or [])
         self.on_item_decision = on_item_decision
+        self.on_hot_promotion = on_hot_promotion
         self.observability = observability if observability is not None else ScannerObservabilitySink()
         self._items: dict[str, PriceEngineRuntimeItem] = {}
         self._promoted_hot_rows: dict[str, int] = {}
         self._promoted_hot_ids: set[str] = set()
+        self._hot_promotion_episodes: dict[str, int] = {}
         self._operation_health: dict[str, dict[str, Any]] = {
             PriceEnginePriority.HOT.value: {},
             PriceEnginePriority.BACKGROUND.value: {},
@@ -392,6 +414,7 @@ class CataloguePriceEngine:
         self._items.clear()
         self._promoted_hot_rows.clear()
         self._promoted_hot_ids.clear()
+        self._hot_promotion_episodes.clear()
         self.revalidation_requests.clear()
         self._operation_health = {
             PriceEnginePriority.HOT.value: {},
@@ -791,14 +814,67 @@ class CataloguePriceEngine:
         canonical_id = runtime.identity.canonical_event_id
         if _decision_is_interesting(decision):
             already_fixture = canonical_id in self._promoted_hot_ids
+            was_scheduler_hot = (
+                already_fixture
+                or runtime.priority is PriceEnginePriority.HOT
+                or runtime.pricing_slice_priority is PriceEnginePriority.HOT
+            )
             self._promoted_hot_rows[row_id] = version
             self._promoted_hot_ids.add(canonical_id)
             if not already_fixture:
                 result.promotions.append(canonical_id)
+                if not was_scheduler_hot:
+                    self._emit_operator_hot_promotion(runtime, decision, result)
         else:
             self._promoted_hot_rows.pop(row_id, None)
             self._refresh_promoted_hot_ids()
         self._reclassify_fixture(canonical_id)
+
+    def _emit_operator_hot_promotion(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        decision: PaperScanDecision | None,
+        result: PriceEngineSliceResult,
+    ) -> None:
+        """Persist one operator-feed event for a real BACKGROUND→HOT episode."""
+
+        identity = runtime.identity
+        canonical_id = identity.canonical_event_id
+        episode = self._hot_promotion_episodes.get(canonical_id, 0) + 1
+        self._hot_promotion_episodes[canonical_id] = episode
+        edge = decision_net_edge(decision) if decision is not None else None
+        trigger = None if decision is None else decision.minimum_net_edge
+        distance = None
+        if edge is not None and trigger is not None:
+            distance = distance_to_trigger_pp(edge, trigger)
+        home = identity.home_canonical
+        away = identity.away_canonical
+        fixture_label = None
+        if home and away:
+            fixture_label = f"{home} v {away}"
+        elif home or away:
+            fixture_label = home or away
+        lane = runtime.pricing_slice_priority or runtime.priority or PriceEnginePriority.BACKGROUND
+        fact = HotPromotionFact(
+            canonical_event_id=canonical_id,
+            catalogue_row_id=identity.catalogue_row_id,
+            content_version=identity.content_version,
+            occurred_at=self.now(),
+            opportunity_id=hot_promotion_opportunity_id(canonical_id),
+            episode=episode,
+            fixture_label=fixture_label,
+            market_family=identity.family,
+            pricing_lane=getattr(lane, "value", str(lane)),
+            current_net_edge=edge,
+            distance_to_trigger_pp=distance,
+        )
+        if self.on_hot_promotion is None:
+            return
+        try:
+            self.on_hot_promotion(fact)
+        except Exception as exc:
+            LOGGER.exception("hot promotion persist failed for %s", canonical_id)
+            result.persist_failures.append(f"hot_promotion:{canonical_id}:{exc}")
 
     def _schedule_projection(
         self,

@@ -84,7 +84,7 @@ export default async function ArbitragePage() {
 
   const tracked = await settledValue(getTrackedWatchlist("limit=100"), [] as NearOpportunity[]);
   const activityFetch = await settledValue(
-    getWatchlistActivity("limit=100"),
+    getWatchlistActivity("limit=100&operator_signal=true"),
     [] as OpportunityLifecycleEvent[],
   );
 

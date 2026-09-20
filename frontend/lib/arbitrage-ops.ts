@@ -77,7 +77,13 @@ export type ActivityEvent = {
   at: string;
   kind: string;
   title: string;
+  subject?: string | null;
   detail: string;
+  opportunityId?: string;
+  eventType?: string;
+  missedTriggerEventId?: string | null;
+  fixtureLabel?: string | null;
+  marketFamily?: string | null;
 };
 
 export type CapitalSnapshot = {

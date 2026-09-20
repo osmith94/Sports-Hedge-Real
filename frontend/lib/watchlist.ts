@@ -117,38 +117,88 @@ const ACTIVITY_TITLES: Record<WatchlistLifecycleEventType, string> = {
   moved_further_from_trigger: "Moved further from trigger",
   trigger_crossed: "Threshold crossed",
   trigger_lost_before_fill: "Trigger lost before fill",
+  promoted_to_hot: "Promoted to HOT",
   paper_fill_attempted: "Paper fill attempted",
   paper_fill_partial: "Partial paper fill",
-  paper_fill_complete: "Paper position completed",
+  paper_fill_complete: "Trade entered",
   paper_fill_rejected: "Paper capture rejected",
   rejected_stale_quote: "Rejected · stale quote",
   rejected_insufficient_depth: "Rejected · insufficient depth",
   rejected_semantics: "Rejected · semantics",
   rejected_missing_costs: "Rejected · missing costs",
   rejected_execution_risk: "Rejected · execution risk",
-  closed: "Closed",
+  closed: "Trade exited",
   expired: "Expired",
 };
 
+export const OPERATOR_ACTIVITY_EVENT_TYPES = [
+  "promoted_to_hot",
+  "trigger_lost_before_fill",
+  "paper_fill_complete",
+  "closed",
+] as const satisfies readonly WatchlistLifecycleEventType[];
+
+export function isOperatorActivityEvent(
+  eventType: string,
+): eventType is (typeof OPERATOR_ACTIVITY_EVENT_TYPES)[number] {
+  return (OPERATOR_ACTIVITY_EVENT_TYPES as readonly string[]).includes(eventType);
+}
+
+export function isVisibleOperatorActivityEvent(event: OpportunityLifecycleEvent): boolean {
+  if (!isOperatorActivityEvent(event.event_type)) return false;
+  if (event.event_type === "trigger_lost_before_fill") {
+    return event.capture_eligible === true;
+  }
+  return true;
+}
+
+export function activitySubjectFromEvent(event: OpportunityLifecycleEvent): string | null {
+  const fixture = event.fixture_label?.trim() || "";
+  const market = (event.market_family ?? "").replaceAll("_", " ").trim();
+  const parts = [fixture, market].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+function activityDetail(event: OpportunityLifecycleEvent, subject: string | null): string {
+  const raw = event.detail?.trim() ? event.detail.trim() : `opportunity ${event.opportunity_id}`;
+  if (!subject) return raw;
+  if (raw === subject) return "";
+  if (raw.startsWith(`${subject} · `)) return raw.slice(subject.length + 3).trim();
+  return raw;
+}
+
 function activityKind(eventType: WatchlistLifecycleEventType): string {
+  if (eventType === "promoted_to_hot") return "PROMOTED_TO_HOT";
+  if (eventType === "trigger_lost_before_fill") return "TRIGGER_LOST_BEFORE_FILL";
+  if (eventType === "paper_fill_complete") return "TRADE_ENTERED";
+  if (eventType === "closed") return "TRADE_EXITED";
   if (eventType === "candidate_first_seen") return "WATCHLIST_ENTERED";
   if (eventType === "trigger_crossed") return "THRESHOLD_CROSSED";
   if (eventType === "paper_fill_attempted") return "PAPER_FILL_ATTEMPTED";
   if (eventType === "paper_fill_partial") return "PARTIAL_FILL";
-  if (eventType === "paper_fill_complete") return "PAPER_POSITION_COMPLETED";
   if (eventType === "paper_fill_rejected") return "PAPER_CAPTURE_REJECTED";
-  if (eventType === "closed") return "CLOSED";
+  if (eventType === "expired") return "EXPIRED";
   if (eventType.startsWith("rejected_")) return "REJECTED";
   return eventType.toUpperCase();
 }
 
 export function activityFromWatchlist(events: OpportunityLifecycleEvent[]): ActivityEvent[] {
-  return events.map((item) => ({
-    id: item.event_id,
-    provenance: "LIVE_PAPER",
-    at: item.occurred_at,
-    kind: activityKind(item.event_type),
-    title: ACTIVITY_TITLES[item.event_type] ?? item.event_type.replaceAll("_", " "),
-    detail: item.detail?.trim() ? item.detail : `opportunity ${item.opportunity_id}`,
-  }));
+  return events.filter(isVisibleOperatorActivityEvent).map((item) => {
+    const subject = activitySubjectFromEvent(item);
+    return {
+      id: item.event_id,
+      provenance: "LIVE_PAPER",
+      at: item.occurred_at,
+      kind: activityKind(item.event_type),
+      title: ACTIVITY_TITLES[item.event_type] ?? item.event_type.replaceAll("_", " "),
+      subject,
+      detail: activityDetail(item, subject),
+      opportunityId: item.opportunity_id,
+      eventType: item.event_type,
+      missedTriggerEventId:
+        item.event_type === "trigger_lost_before_fill" ? item.event_id : null,
+      fixtureLabel: item.fixture_label ?? null,
+      marketFamily: item.market_family ?? null,
+    };
+  });
 }

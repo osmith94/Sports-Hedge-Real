@@ -30,6 +30,10 @@ from sports_hedge.arbitrage.watchlist.models import (
     PaperFillAttempt,
     PaperFillAttemptStatus,
     WatchObservation,
+    format_hot_promotion_detail,
+    hot_promotion_lifecycle_event_id,
+    hot_promotion_opportunity_id,
+    lifecycle_identity_from_opportunity,
     paper_fill_lifecycle_event_id,
     strike_distance_narrative,
     OpportunityObservationPoint,
@@ -164,6 +168,7 @@ class WatchlistService:
             mapping_reasons=list(observation.mapping_reasons),
             mapping_provenance=observation.mapping_provenance,
             mapping_review_candidate=observation.mapping_review_candidate,
+            capture_eligible=_episode_capture_eligible(previous, status, observation),
         )
         self.repository.append_observation(
             OpportunityObservationPoint(
@@ -286,6 +291,7 @@ class WatchlistService:
                 current_net_edge=updated.current_net_edge,
                 distance_to_trigger_pp=updated.distance_to_trigger_pp,
                 detail=event_detail,
+                **lifecycle_identity_from_opportunity(updated),
             )
         )
         return updated
@@ -413,6 +419,7 @@ class WatchlistService:
                     current_net_edge=updated.current_net_edge,
                     distance_to_trigger_pp=updated.distance_to_trigger_pp,
                     detail=event_detail,
+                    **lifecycle_identity_from_opportunity(updated),
                 )
             )
             self._active_bound_attempts.discard(opportunity_id)
@@ -550,6 +557,7 @@ class WatchlistService:
                     current_net_edge=current.current_net_edge,
                     distance_to_trigger_pp=current.distance_to_trigger_pp,
                     detail=event_detail,
+                    **lifecycle_identity_from_opportunity(current),
                 )
             )
             self._active_bound_attempts.discard(opportunity_id)
@@ -565,6 +573,55 @@ class WatchlistService:
             occurred_at=occurred_at,
             detail=detail,
         )
+
+    def record_hot_promotion(
+        self,
+        *,
+        canonical_event_id: str,
+        occurred_at,
+        episode: int,
+        fixture_label: str | None = None,
+        market_family: str | None = None,
+        pricing_lane: str | None = None,
+        current_net_edge: Decimal | None = None,
+        distance_to_trigger_pp: Decimal | None = None,
+        opportunity_id: str | None = None,
+        detail: str | None = None,
+    ) -> OpportunityLifecycleEvent:
+        """Persist one BACKGROUND→HOT promotion episode. Idempotent per episode.
+
+        Does not observe, qualify, capture, or change scheduler membership.
+        """
+
+        if episode <= 0:
+            raise ValueError("hot promotion episode must be positive")
+        evaluated = require_aware_instant(occurred_at, "occurred_at")
+        event_opportunity_id = opportunity_id or hot_promotion_opportunity_id(canonical_event_id)
+        event = OpportunityLifecycleEvent(
+            event_id=hot_promotion_lifecycle_event_id(canonical_event_id, episode),
+            opportunity_id=event_opportunity_id,
+            occurred_at=evaluated,
+            event_type=LifecycleEventType.PROMOTED_TO_HOT,
+            status=OpportunityStatus.WATCHING,
+            current_net_edge=current_net_edge,
+            distance_to_trigger_pp=distance_to_trigger_pp,
+            detail=detail
+            or format_hot_promotion_detail(
+                canonical_event_id=canonical_event_id,
+                fixture_label=fixture_label,
+                market_family=market_family,
+                pricing_lane=pricing_lane,
+                current_net_edge=current_net_edge,
+                distance_to_trigger_pp=distance_to_trigger_pp,
+            ),
+            fixture_label=fixture_label,
+            market_family=market_family,
+            canonical_event_id=canonical_event_id,
+            canonical_market_id=None,
+            capture_eligible=None,
+        )
+        self.repository.append_event(event)
+        return event
 
     def expire(
         self, opportunity_id: str, *, occurred_at, detail: str | None = None
@@ -656,11 +713,15 @@ class WatchlistService:
         limit: int = 100,
         opportunity_id: str | None = None,
         since=None,
+        operator_signal: bool = False,
+        event_types: Sequence[LifecycleEventType] | None = None,
     ) -> list[OpportunityLifecycleEvent]:
         events = self.repository.list_events(
             limit=limit if opportunity_id else limit * 2,
             opportunity_id=opportunity_id,
             since=since,
+            event_types=None if operator_signal else event_types,
+            operator_signal=operator_signal,
         )
         if opportunity_id is not None:
             return events
@@ -670,6 +731,22 @@ class WatchlistService:
             if item.data_kind == "demo_fixture_replay"
         }
         return [event for event in events if event.opportunity_id not in demo_ids][:limit]
+
+    def operator_activity(
+        self,
+        *,
+        limit: int = 100,
+        opportunity_id: str | None = None,
+        since=None,
+    ) -> list[OpportunityLifecycleEvent]:
+        """Primary operator timeline. Noise events stay persisted in ``activity()``."""
+
+        return self.activity(
+            limit=limit,
+            opportunity_id=opportunity_id,
+            since=since,
+            operator_signal=True,
+        )
 
     def _freshness_filtered(
         self,
@@ -763,6 +840,7 @@ class WatchlistService:
                     current_net_edge=updated.current_net_edge,
                     distance_to_trigger_pp=updated.distance_to_trigger_pp,
                     detail=detail,
+                    **lifecycle_identity_from_opportunity(updated),
                 )
             )
             return updated
@@ -838,12 +916,13 @@ class WatchlistService:
                 OpportunityStatus.APPROACHING,
                 OpportunityStatus.REJECTED,
             }:
-                if not self._fill_attempt_started(current.opportunity_id):
+                if not self._durable_fill_attempt_started(current.opportunity_id):
                     events.append(
                         self._event(
                             current,
                             LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
                             detail="trigger_lost_before_paper_fill",
+                            capture_eligible=previous.capture_eligible,
                         )
                     )
 
@@ -957,6 +1036,7 @@ class WatchlistService:
         event_type: LifecycleEventType,
         *,
         detail: str | None,
+        capture_eligible: bool | None = None,
     ) -> OpportunityLifecycleEvent:
         return OpportunityLifecycleEvent(
             opportunity_id=opportunity.opportunity_id,
@@ -966,10 +1046,35 @@ class WatchlistService:
             current_net_edge=opportunity.current_net_edge,
             distance_to_trigger_pp=opportunity.distance_to_trigger_pp,
             detail=detail,
+            **lifecycle_identity_from_opportunity(
+                opportunity, capture_eligible=capture_eligible
+            ),
         )
 
     def _fill_attempt_started(self, opportunity_id: str) -> bool:
         return self.has_active_bound_attempt(opportunity_id)
+
+    def _durable_fill_attempt_started(self, opportunity_id: str) -> bool:
+        """True when any STARTED paper-fill attempt exists, bound or unbound."""
+
+        return self.repository.get_started_paper_fill_attempt(opportunity_id) is not None
+
+
+def _episode_capture_eligible(
+    previous: NearOpportunity | None,
+    status: OpportunityStatus,
+    observation: WatchObservation,
+) -> bool:
+    """Sticky capture eligibility for one TRIGGERED stay. Independent of economic trigger."""
+
+    if status != OpportunityStatus.TRIGGERED:
+        return False
+    sticky = (
+        previous is not None
+        and previous.status == OpportunityStatus.TRIGGERED
+        and previous.capture_eligible
+    )
+    return sticky or observation.eligible_for_paper_simulation
 
 
 def _presentation_stale_only(reasons: list[str]) -> bool:

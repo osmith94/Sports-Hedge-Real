@@ -331,6 +331,7 @@ def _engine(
     hot_interval: int = 0,
     background_interval: int = 0,
     on_item_decision: Any = None,
+    on_hot_promotion: Any = None,
 ) -> tuple[CataloguePriceEngine, FakeMatchbook, FakeKalshi, ProviderAccessLayer]:
     mb = matchbook or FakeMatchbook()
     ks = kalshi or FakeKalshi()
@@ -358,6 +359,7 @@ def _engine(
         hot_interval_seconds=hot_interval,
         background_interval_seconds=background_interval,
         on_item_decision=on_item_decision,
+        on_hot_promotion=on_hot_promotion,
     )
     engine.reconstruct()
     return engine, mb, ks, layer

@@ -74,6 +74,7 @@ class LifecycleEventType(StrEnum):
     MOVED_FURTHER_FROM_TRIGGER = "moved_further_from_trigger"
     TRIGGER_CROSSED = "trigger_crossed"
     TRIGGER_LOST_BEFORE_FILL = "trigger_lost_before_fill"
+    PROMOTED_TO_HOT = "promoted_to_hot"
     PAPER_FILL_ATTEMPTED = "paper_fill_attempted"
     PAPER_FILL_PARTIAL = "paper_fill_partial"
     PAPER_FILL_COMPLETE = "paper_fill_complete"
@@ -85,6 +86,21 @@ class LifecycleEventType(StrEnum):
     REJECTED_EXECUTION_RISK = "rejected_execution_risk"
     CLOSED = "closed"
     EXPIRED = "expired"
+
+
+OPERATOR_ACTIVITY_UNCONDITIONAL_EVENT_TYPES = frozenset(
+    {
+        LifecycleEventType.PROMOTED_TO_HOT,
+        LifecycleEventType.PAPER_FILL_COMPLETE,
+        LifecycleEventType.CLOSED,
+    }
+)
+OPERATOR_ACTIVITY_EVENT_TYPES = frozenset(
+    {
+        *OPERATOR_ACTIVITY_UNCONDITIONAL_EVENT_TYPES,
+        LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
+    }
+)
 
 
 class WatchLeg(BaseModel):
@@ -217,6 +233,7 @@ class NearOpportunity(BaseModel):
     mapping_reasons: list[str] = Field(default_factory=list)
     mapping_provenance: MappingProvenance | None = None
     mapping_review_candidate: MappingReviewCandidate | None = None
+    capture_eligible: bool = False
 
     @model_validator(mode="after")
     def enforce_non_arbitrage_labelling(self) -> NearOpportunity:
@@ -237,11 +254,57 @@ class OpportunityLifecycleEvent(BaseModel):
     current_net_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
     detail: str | None = None
+    fixture_label: str | None = None
+    market_family: str | None = None
+    canonical_event_id: str | None = None
+    canonical_market_id: str | None = None
+    capture_eligible: bool | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> OpportunityLifecycleEvent:
         self.occurred_at = require_aware_instant(self.occurred_at, "occurred_at")
         return self
+
+
+def fixture_label_from_teams(home_team: str | None, away_team: str | None) -> str | None:
+    if home_team and away_team:
+        return f"{home_team} v {away_team}"
+    return home_team or away_team
+
+
+def market_label_from_family(market_family: MarketFamily | str | None) -> str | None:
+    if market_family is None:
+        return None
+    value = market_family.value if isinstance(market_family, MarketFamily) else str(market_family)
+    label = value.replace("_", " ").strip()
+    return label or None
+
+
+def operator_activity_subject(
+    *,
+    fixture_label: str | None,
+    market_family: str | None,
+) -> str | None:
+    parts = [part for part in (fixture_label, market_label_from_family(market_family)) if part]
+    return " · ".join(parts) if parts else None
+
+
+def lifecycle_identity_from_opportunity(
+    opportunity: NearOpportunity,
+    *,
+    capture_eligible: bool | None = None,
+) -> dict[str, str | bool | None]:
+    """Immutable glance fields copied onto append-only lifecycle events."""
+
+    family = opportunity.market_family.value if opportunity.market_family is not None else None
+    eligible = opportunity.capture_eligible if capture_eligible is None else capture_eligible
+    return {
+        "fixture_label": fixture_label_from_teams(opportunity.home_team, opportunity.away_team),
+        "market_family": family,
+        "canonical_event_id": opportunity.canonical_event_id,
+        "canonical_market_id": opportunity.canonical_market_id,
+        "capture_eligible": eligible,
+    }
 
 
 def paper_fill_lifecycle_event_id(
@@ -254,6 +317,44 @@ def paper_fill_lifecycle_event_id(
     if attempt_id:
         return f"{opportunity_id}:{event_type.value}:{attempt_id}"
     return f"{opportunity_id}:{event_type.value}"
+
+
+def hot_promotion_opportunity_id(canonical_event_id: str) -> str:
+    """Fixture-scoped identity. Promotion is not a market-row watchlist observe."""
+
+    return f"hot:{canonical_event_id}"
+
+
+def hot_promotion_lifecycle_event_id(canonical_event_id: str, episode: int) -> str:
+    """One durable id per real BACKGROUND→HOT promotion episode."""
+
+    return f"{canonical_event_id}:promoted_to_hot:{episode}"
+
+
+def format_hot_promotion_detail(
+    *,
+    canonical_event_id: str,
+    fixture_label: str | None,
+    market_family: str | None,
+    pricing_lane: str | None,
+    current_net_edge: Decimal | None,
+    distance_to_trigger_pp: Decimal | None,
+) -> str:
+    """Operator-readable HOT promotion facts. No causal claim."""
+
+    parts: list[str] = []
+    if fixture_label:
+        parts.append(fixture_label)
+    if market_family:
+        parts.append(str(market_family).replace("_", " "))
+    lane = (pricing_lane or "background").strip() or "background"
+    parts.append(f"{lane.upper()} → HOT")
+    if current_net_edge is not None:
+        parts.append(f"net edge {current_net_edge * Decimal('100'):.2f}%")
+    if distance_to_trigger_pp is not None:
+        parts.append(f"{distance_to_trigger_pp}pp to trigger")
+    parts.append(f"event {canonical_event_id}")
+    return " · ".join(parts)
 
 
 class OpportunityObservationPoint(BaseModel):
