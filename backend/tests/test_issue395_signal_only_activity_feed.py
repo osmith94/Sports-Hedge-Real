@@ -27,6 +27,8 @@ from sports_hedge.arbitrage.watchlist.models import (
     OPERATOR_ACTIVITY_EVENT_TYPES,
     LifecycleEventType,
     OpportunityStatus,
+    PaperFillAttempt,
+    PaperFillAttemptStatus,
     WatchLeg,
     WatchObservation,
     hot_promotion_lifecycle_event_id,
@@ -192,6 +194,10 @@ def test_trigger_lost_before_fill_stays_on_operator_feed() -> None:
     )
     types = [event.event_type for event in service.operator_activity()]
     assert types == [LifecycleEventType.TRIGGER_LOST_BEFORE_FILL]
+    lost = service.operator_activity()[0]
+    assert lost.fixture_label == "Brentford v Chelsea"
+    assert lost.market_family == "both_teams_to_score"
+    assert lost.capture_eligible is True
     audit = [event.event_type for event in service.activity(opportunity_id=triggered.opportunity_id)]
     assert LifecycleEventType.TRIGGER_LOST_BEFORE_FILL in audit
     assert LifecycleEventType.CANDIDATE_FIRST_SEEN in audit
@@ -226,6 +232,8 @@ def test_completed_paper_entry_renders_one_trade_entered_and_closed_renders_exit
         LifecycleEventType.CLOSED,
         LifecycleEventType.PAPER_FILL_COMPLETE,
     ]
+    assert all(event.fixture_label == "Brentford v Chelsea" for event in operator)
+    assert all(event.market_family == "both_teams_to_score" for event in operator)
     complete = [
         event
         for event in service.activity(opportunity_id=triggered.opportunity_id)
@@ -305,6 +313,9 @@ def test_hot_promotion_is_idempotent_per_episode() -> None:
     assert events[0].event_type is LifecycleEventType.PROMOTED_TO_HOT
     assert "Brentford v Chelsea" in (events[0].detail or "")
     assert "BACKGROUND → HOT" in (events[0].detail or "")
+    assert events[0].fixture_label == "Brentford v Chelsea"
+    assert events[0].market_family == "both_teams_to_score"
+    assert events[0].canonical_event_id == "evt-hot"
 
 
 def test_watchlist_activity_api_operator_signal_hides_noise() -> None:
@@ -334,6 +345,10 @@ def test_watchlist_activity_api_operator_signal_hides_noise() -> None:
         assert operator.status_code == 200
         operator_types = [item["event_type"] for item in operator.json()]
         assert operator_types == ["trigger_lost_before_fill"]
+        payload = operator.json()[0]
+        assert payload["fixture_label"] == "Brentford v Chelsea"
+        assert payload["market_family"] == "both_teams_to_score"
+        assert payload["capture_eligible"] is True
         assert OPERATOR_ACTIVITY_EVENT_TYPES == {
             LifecycleEventType.PROMOTED_TO_HOT,
             LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
@@ -414,3 +429,101 @@ def test_bind_persist_wires_price_engine_hot_promotion_without_capture_ownership
     promote_src = inspect.getsource(CataloguePriceEngine._maybe_promote)
     assert "_emit_operator_hot_promotion" in promote_src
     assert "moved_closer_to_trigger" not in promote_src
+
+
+def test_economic_only_trigger_lost_stays_in_audit_not_operator_feed() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    triggered = service.observe(_observation(edge=EDGE_120, eligible=False, observed_at=OBSERVED))
+    assert triggered.status is OpportunityStatus.TRIGGERED
+    assert triggered.capture_eligible is False
+    service.observe(
+        _observation(
+            edge=EDGE_080,
+            rejection_reasons=["net_edge_below_threshold"],
+            observed_at=OBSERVED + timedelta(seconds=8),
+        )
+    )
+    audit = [
+        event
+        for event in service.activity(opportunity_id=triggered.opportunity_id)
+        if event.event_type is LifecycleEventType.TRIGGER_LOST_BEFORE_FILL
+    ]
+    assert len(audit) == 1
+    assert audit[0].capture_eligible is False
+    assert audit[0].fixture_label == "Brentford v Chelsea"
+    assert LifecycleEventType.TRIGGER_CROSSED in {
+        event.event_type for event in service.activity(opportunity_id=triggered.opportunity_id)
+    }
+    assert service.operator_activity() == []
+
+
+def test_sticky_capture_eligible_during_triggered_episode_is_operator_visible() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    first = service.observe(_observation(edge=EDGE_120, eligible=False, observed_at=OBSERVED))
+    assert first.capture_eligible is False
+    second = service.observe(
+        _observation(edge=EDGE_120, eligible=True, observed_at=OBSERVED + timedelta(seconds=2))
+    )
+    assert second.status is OpportunityStatus.TRIGGERED
+    assert second.capture_eligible is True
+    service.observe(
+        _observation(
+            edge=EDGE_080,
+            rejection_reasons=["net_edge_below_threshold"],
+            observed_at=OBSERVED + timedelta(seconds=6),
+        )
+    )
+    operator = service.operator_activity()
+    assert [event.event_type for event in operator] == [LifecycleEventType.TRIGGER_LOST_BEFORE_FILL]
+    assert operator[0].capture_eligible is True
+    assert operator[0].canonical_event_id == "evt-signal"
+    assert operator[0].canonical_market_id == "mkt-signal"
+
+
+def test_durable_fill_attempt_start_suppresses_trigger_lost() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    triggered = service.observe(_observation(edge=EDGE_120, eligible=True, observed_at=OBSERVED))
+    service.repository.upsert_paper_fill_attempt(
+        PaperFillAttempt(
+            attempt_id="attempt-unbound",
+            opportunity_id=triggered.opportunity_id,
+            bound_snapshot=False,
+            status=PaperFillAttemptStatus.STARTED,
+            started_at=OBSERVED + timedelta(seconds=1),
+        )
+    )
+    service.observe(
+        _observation(
+            edge=EDGE_080,
+            rejection_reasons=["net_edge_below_threshold"],
+            observed_at=OBSERVED + timedelta(seconds=8),
+        )
+    )
+    types = {event.event_type for event in service.activity(opportunity_id=triggered.opportunity_id)}
+    assert LifecycleEventType.TRIGGER_LOST_BEFORE_FILL not in types
+    assert service.operator_activity() == []
+
+
+def test_operator_cards_carry_fixture_and_market_and_hide_trigger_crossed() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    triggered = service.observe(_observation(edge=EDGE_120, eligible=True, observed_at=OBSERVED))
+    assert triggered.status is OpportunityStatus.TRIGGERED
+    service.record_hot_promotion(
+        canonical_event_id="evt-signal",
+        occurred_at=OBSERVED + timedelta(seconds=1),
+        episode=1,
+        fixture_label="Brentford v Chelsea",
+        market_family="both_teams_to_score",
+    )
+    operator = service.operator_activity()
+    assert {event.event_type for event in operator} == {LifecycleEventType.PROMOTED_TO_HOT}
+    assert all(event.fixture_label == "Brentford v Chelsea" for event in operator)
+    assert all(event.market_family == "both_teams_to_score" for event in operator)
+    crossed = [
+        event
+        for event in service.activity(opportunity_id=triggered.opportunity_id)
+        if event.event_type is LifecycleEventType.TRIGGER_CROSSED
+    ]
+    assert crossed
+    assert crossed[0].fixture_label == "Brentford v Chelsea"
+    assert LifecycleEventType.TRIGGER_CROSSED not in {event.event_type for event in operator}

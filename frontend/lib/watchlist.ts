@@ -144,6 +144,29 @@ export function isOperatorActivityEvent(
   return (OPERATOR_ACTIVITY_EVENT_TYPES as readonly string[]).includes(eventType);
 }
 
+export function isVisibleOperatorActivityEvent(event: OpportunityLifecycleEvent): boolean {
+  if (!isOperatorActivityEvent(event.event_type)) return false;
+  if (event.event_type === "trigger_lost_before_fill") {
+    return event.capture_eligible === true;
+  }
+  return true;
+}
+
+export function activitySubjectFromEvent(event: OpportunityLifecycleEvent): string | null {
+  const fixture = event.fixture_label?.trim() || "";
+  const market = (event.market_family ?? "").replaceAll("_", " ").trim();
+  const parts = [fixture, market].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+function activityDetail(event: OpportunityLifecycleEvent, subject: string | null): string {
+  const raw = event.detail?.trim() ? event.detail.trim() : `opportunity ${event.opportunity_id}`;
+  if (!subject) return raw;
+  if (raw === subject) return "";
+  if (raw.startsWith(`${subject} · `)) return raw.slice(subject.length + 3).trim();
+  return raw;
+}
+
 function activityKind(eventType: WatchlistLifecycleEventType): string {
   if (eventType === "promoted_to_hot") return "PROMOTED_TO_HOT";
   if (eventType === "trigger_lost_before_fill") return "TRIGGER_LOST_BEFORE_FILL";
@@ -160,16 +183,22 @@ function activityKind(eventType: WatchlistLifecycleEventType): string {
 }
 
 export function activityFromWatchlist(events: OpportunityLifecycleEvent[]): ActivityEvent[] {
-  return events.filter((item) => isOperatorActivityEvent(item.event_type)).map((item) => ({
-    id: item.event_id,
-    provenance: "LIVE_PAPER",
-    at: item.occurred_at,
-    kind: activityKind(item.event_type),
-    title: ACTIVITY_TITLES[item.event_type] ?? item.event_type.replaceAll("_", " "),
-    detail: item.detail?.trim() ? item.detail : `opportunity ${item.opportunity_id}`,
-    opportunityId: item.opportunity_id,
-    eventType: item.event_type,
-    missedTriggerEventId:
-      item.event_type === "trigger_lost_before_fill" ? item.event_id : null,
-  }));
+  return events.filter(isVisibleOperatorActivityEvent).map((item) => {
+    const subject = activitySubjectFromEvent(item);
+    return {
+      id: item.event_id,
+      provenance: "LIVE_PAPER",
+      at: item.occurred_at,
+      kind: activityKind(item.event_type),
+      title: ACTIVITY_TITLES[item.event_type] ?? item.event_type.replaceAll("_", " "),
+      subject,
+      detail: activityDetail(item, subject),
+      opportunityId: item.opportunity_id,
+      eventType: item.event_type,
+      missedTriggerEventId:
+        item.event_type === "trigger_lost_before_fill" ? item.event_id : null,
+      fixtureLabel: item.fixture_label ?? null,
+      marketFamily: item.market_family ?? null,
+    };
+  });
 }

@@ -31,6 +31,8 @@ export function ActivityFeed({
             data-event-type={item.eventType}
             data-opportunity-id={item.opportunityId}
             data-missed-trigger-event-id={item.missedTriggerEventId ?? undefined}
+            data-fixture-label={item.fixtureLabel ?? undefined}
+            data-market-family={item.marketFamily ?? undefined}
           >
             <div className="feed-kind">{item.kind.replaceAll("_", " ")}</div>
             <div className="feed-body">
@@ -38,7 +40,8 @@ export function ActivityFeed({
                 {item.title}
                 {item.provenance === "DEMO_FIXTURE" ? <span className="demo-inline">DEMO</span> : null}
               </div>
-              <div className="feed-detail">{item.detail}</div>
+              {item.subject ? <div className="feed-subject">{item.subject}</div> : null}
+              {item.detail ? <div className="feed-detail">{item.detail}</div> : null}
             </div>
             <div className="feed-time">
               <HydratedRelativeTime iso={item.at} />

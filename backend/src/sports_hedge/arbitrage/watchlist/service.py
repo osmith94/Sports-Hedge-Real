@@ -23,7 +23,6 @@ from sports_hedge.arbitrage.watchlist.economics import (
 )
 from sports_hedge.arbitrage.watchlist.models import (
     ORPHANED_PAPER_FILLING_RECONCILED,
-    OPERATOR_ACTIVITY_EVENT_TYPES,
     LifecycleEventType,
     NearOpportunity,
     OpportunityLifecycleEvent,
@@ -34,6 +33,7 @@ from sports_hedge.arbitrage.watchlist.models import (
     format_hot_promotion_detail,
     hot_promotion_lifecycle_event_id,
     hot_promotion_opportunity_id,
+    lifecycle_identity_from_opportunity,
     paper_fill_lifecycle_event_id,
     strike_distance_narrative,
     OpportunityObservationPoint,
@@ -167,6 +167,7 @@ class WatchlistService:
             mapping_reasons=list(observation.mapping_reasons),
             mapping_provenance=observation.mapping_provenance,
             mapping_review_candidate=observation.mapping_review_candidate,
+            capture_eligible=_episode_capture_eligible(previous, status, observation),
         )
         self.repository.append_observation(
             OpportunityObservationPoint(
@@ -289,6 +290,7 @@ class WatchlistService:
                 current_net_edge=updated.current_net_edge,
                 distance_to_trigger_pp=updated.distance_to_trigger_pp,
                 detail=event_detail,
+                **lifecycle_identity_from_opportunity(updated),
             )
         )
         return updated
@@ -416,6 +418,7 @@ class WatchlistService:
                     current_net_edge=updated.current_net_edge,
                     distance_to_trigger_pp=updated.distance_to_trigger_pp,
                     detail=event_detail,
+                    **lifecycle_identity_from_opportunity(updated),
                 )
             )
             self._active_bound_attempts.discard(opportunity_id)
@@ -553,6 +556,7 @@ class WatchlistService:
                     current_net_edge=current.current_net_edge,
                     distance_to_trigger_pp=current.distance_to_trigger_pp,
                     detail=event_detail,
+                    **lifecycle_identity_from_opportunity(current),
                 )
             )
             self._active_bound_attempts.discard(opportunity_id)
@@ -609,6 +613,11 @@ class WatchlistService:
                 current_net_edge=current_net_edge,
                 distance_to_trigger_pp=distance_to_trigger_pp,
             ),
+            fixture_label=fixture_label,
+            market_family=market_family,
+            canonical_event_id=canonical_event_id,
+            canonical_market_id=None,
+            capture_eligible=None,
         )
         self.repository.append_event(event)
         return event
@@ -706,14 +715,12 @@ class WatchlistService:
         operator_signal: bool = False,
         event_types: Sequence[LifecycleEventType] | None = None,
     ) -> list[OpportunityLifecycleEvent]:
-        selected_types: Sequence[LifecycleEventType] | None = event_types
-        if operator_signal:
-            selected_types = tuple(OPERATOR_ACTIVITY_EVENT_TYPES)
         events = self.repository.list_events(
             limit=limit if opportunity_id else limit * 2,
             opportunity_id=opportunity_id,
             since=since,
-            event_types=selected_types,
+            event_types=None if operator_signal else event_types,
+            operator_signal=operator_signal,
         )
         if opportunity_id is not None:
             return events
@@ -832,6 +839,7 @@ class WatchlistService:
                     current_net_edge=updated.current_net_edge,
                     distance_to_trigger_pp=updated.distance_to_trigger_pp,
                     detail=detail,
+                    **lifecycle_identity_from_opportunity(updated),
                 )
             )
             return updated
@@ -907,12 +915,13 @@ class WatchlistService:
                 OpportunityStatus.APPROACHING,
                 OpportunityStatus.REJECTED,
             }:
-                if not self._fill_attempt_started(current.opportunity_id):
+                if not self._durable_fill_attempt_started(current.opportunity_id):
                     events.append(
                         self._event(
                             current,
                             LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
                             detail="trigger_lost_before_paper_fill",
+                            capture_eligible=previous.capture_eligible,
                         )
                     )
 
@@ -1026,6 +1035,7 @@ class WatchlistService:
         event_type: LifecycleEventType,
         *,
         detail: str | None,
+        capture_eligible: bool | None = None,
     ) -> OpportunityLifecycleEvent:
         return OpportunityLifecycleEvent(
             opportunity_id=opportunity.opportunity_id,
@@ -1035,10 +1045,35 @@ class WatchlistService:
             current_net_edge=opportunity.current_net_edge,
             distance_to_trigger_pp=opportunity.distance_to_trigger_pp,
             detail=detail,
+            **lifecycle_identity_from_opportunity(
+                opportunity, capture_eligible=capture_eligible
+            ),
         )
 
     def _fill_attempt_started(self, opportunity_id: str) -> bool:
         return self.has_active_bound_attempt(opportunity_id)
+
+    def _durable_fill_attempt_started(self, opportunity_id: str) -> bool:
+        """True when any STARTED paper-fill attempt exists, bound or unbound."""
+
+        return self.repository.get_started_paper_fill_attempt(opportunity_id) is not None
+
+
+def _episode_capture_eligible(
+    previous: NearOpportunity | None,
+    status: OpportunityStatus,
+    observation: WatchObservation,
+) -> bool:
+    """Sticky capture eligibility for one TRIGGERED stay. Independent of economic trigger."""
+
+    if status != OpportunityStatus.TRIGGERED:
+        return False
+    sticky = (
+        previous is not None
+        and previous.status == OpportunityStatus.TRIGGERED
+        and previous.capture_eligible
+    )
+    return sticky or observation.eligible_for_paper_simulation
 
 
 def _presentation_stale_only(reasons: list[str]) -> bool:

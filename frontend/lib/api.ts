@@ -1213,6 +1213,11 @@ export type OpportunityLifecycleEvent = {
   current_net_edge?: string | number | null;
   distance_to_trigger_pp?: string | number | null;
   detail?: string | null;
+  fixture_label?: string | null;
+  market_family?: string | null;
+  canonical_event_id?: string | null;
+  canonical_market_id?: string | null;
+  capture_eligible?: boolean | null;
 };
 
 export async function runPaperCollection(

@@ -88,12 +88,17 @@ class LifecycleEventType(StrEnum):
     EXPIRED = "expired"
 
 
-OPERATOR_ACTIVITY_EVENT_TYPES = frozenset(
+OPERATOR_ACTIVITY_UNCONDITIONAL_EVENT_TYPES = frozenset(
     {
         LifecycleEventType.PROMOTED_TO_HOT,
-        LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
         LifecycleEventType.PAPER_FILL_COMPLETE,
         LifecycleEventType.CLOSED,
+    }
+)
+OPERATOR_ACTIVITY_EVENT_TYPES = frozenset(
+    {
+        *OPERATOR_ACTIVITY_UNCONDITIONAL_EVENT_TYPES,
+        LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
     }
 )
 
@@ -226,6 +231,7 @@ class NearOpportunity(BaseModel):
     mapping_reasons: list[str] = Field(default_factory=list)
     mapping_provenance: MappingProvenance | None = None
     mapping_review_candidate: MappingReviewCandidate | None = None
+    capture_eligible: bool = False
 
     @model_validator(mode="after")
     def enforce_non_arbitrage_labelling(self) -> NearOpportunity:
@@ -246,11 +252,57 @@ class OpportunityLifecycleEvent(BaseModel):
     current_net_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
     detail: str | None = None
+    fixture_label: str | None = None
+    market_family: str | None = None
+    canonical_event_id: str | None = None
+    canonical_market_id: str | None = None
+    capture_eligible: bool | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> OpportunityLifecycleEvent:
         self.occurred_at = require_aware_instant(self.occurred_at, "occurred_at")
         return self
+
+
+def fixture_label_from_teams(home_team: str | None, away_team: str | None) -> str | None:
+    if home_team and away_team:
+        return f"{home_team} v {away_team}"
+    return home_team or away_team
+
+
+def market_label_from_family(market_family: MarketFamily | str | None) -> str | None:
+    if market_family is None:
+        return None
+    value = market_family.value if isinstance(market_family, MarketFamily) else str(market_family)
+    label = value.replace("_", " ").strip()
+    return label or None
+
+
+def operator_activity_subject(
+    *,
+    fixture_label: str | None,
+    market_family: str | None,
+) -> str | None:
+    parts = [part for part in (fixture_label, market_label_from_family(market_family)) if part]
+    return " · ".join(parts) if parts else None
+
+
+def lifecycle_identity_from_opportunity(
+    opportunity: NearOpportunity,
+    *,
+    capture_eligible: bool | None = None,
+) -> dict[str, str | bool | None]:
+    """Immutable glance fields copied onto append-only lifecycle events."""
+
+    family = opportunity.market_family.value if opportunity.market_family is not None else None
+    eligible = opportunity.capture_eligible if capture_eligible is None else capture_eligible
+    return {
+        "fixture_label": fixture_label_from_teams(opportunity.home_team, opportunity.away_team),
+        "market_family": family,
+        "canonical_event_id": opportunity.canonical_event_id,
+        "canonical_market_id": opportunity.canonical_market_id,
+        "capture_eligible": eligible,
+    }
 
 
 def paper_fill_lifecycle_event_id(

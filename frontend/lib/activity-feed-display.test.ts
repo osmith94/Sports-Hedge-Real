@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 import { OpportunityLifecycleEvent } from "./api";
 import {
   activityFromWatchlist,
+  activitySubjectFromEvent,
   isOperatorActivityEvent,
+  isVisibleOperatorActivityEvent,
   OPERATOR_ACTIVITY_EVENT_TYPES,
 } from "./watchlist";
 
@@ -24,6 +26,10 @@ function event(
     current_net_edge: "0.008",
     distance_to_trigger_pp: "0.2",
     detail: "fixture detail",
+    fixture_label: "Brentford v Chelsea",
+    market_family: "both_teams_to_score",
+    canonical_event_id: "evt-signal",
+    canonical_market_id: "mkt-1",
     ...overrides,
   };
 }
@@ -71,6 +77,7 @@ describe("signal-only Activity feed", () => {
         event_id: "lost-1",
         event_type: "trigger_lost_before_fill",
         occurred_at: "2026-09-20T13:00:07Z",
+        capture_eligible: true,
       }),
       event({
         event_id: "enter-1",
@@ -94,6 +101,9 @@ describe("signal-only Activity feed", () => {
     assert.equal(items[1]?.missedTriggerEventId, "lost-1");
     assert.equal(items[2]?.missedTriggerEventId, null);
     assert.equal(items.find((item) => item.title === "Trigger lost before fill")?.title.includes("Trade"), false);
+    assert.ok(items.every((item) => item.subject === "Brentford v Chelsea · both teams to score"));
+    assert.ok(items.every((item) => item.fixtureLabel === "Brentford v Chelsea"));
+    assert.ok(items.every((item) => item.marketFamily === "both_teams_to_score"));
   });
 
   it("keeps one trade-entered card for a completed multi-leg paper fill", () => {
@@ -131,6 +141,7 @@ describe("signal-only Activity feed", () => {
         event_id: "earlier",
         event_type: "trigger_lost_before_fill",
         occurred_at: "2026-09-20T13:00:07Z",
+        capture_eligible: true,
       }),
     ]);
     assert.deepEqual(
@@ -146,6 +157,8 @@ describe("signal-only Activity feed", () => {
     assert.match(page, /operator_signal=true/);
     assert.match(feed, /Promoted to HOT/);
     assert.match(feed, /data-missed-trigger-event-id/);
+    assert.match(feed, /feed-subject/);
+    assert.match(feed, /data-fixture-label/);
     assert.doesNotMatch(feed, /Paper watchlist, threshold, fill and rejection events/);
     assert.match(api, /promoted_to_hot/);
     assert.deepEqual([...OPERATOR_ACTIVITY_EVENT_TYPES], [
@@ -157,5 +170,79 @@ describe("signal-only Activity feed", () => {
     assert.equal(isOperatorActivityEvent("rejected_semantics"), false);
     assert.equal(isOperatorActivityEvent("paper_fill_attempted"), false);
     assert.equal(isOperatorActivityEvent("promoted_to_hot"), true);
+  });
+
+  it("shows fixture and market at a glance from durable event metadata", () => {
+    const items = activityFromWatchlist([
+      event({
+        event_id: "hot-1",
+        event_type: "promoted_to_hot",
+        occurred_at: "2026-09-20T13:00:06Z",
+        detail: "Brentford v Chelsea · both teams to score · BACKGROUND → HOT",
+      }),
+    ]);
+    assert.equal(items[0]?.subject, "Brentford v Chelsea · both teams to score");
+    assert.equal(items[0]?.detail, "BACKGROUND → HOT");
+    assert.equal(
+      activitySubjectFromEvent(
+        event({
+          event_id: "enter-1",
+          event_type: "paper_fill_complete",
+          occurred_at: "2026-09-20T13:00:08Z",
+        }),
+      ),
+      "Brentford v Chelsea · both teams to score",
+    );
+  });
+
+  it("hides economic-only trigger-lost and never treats trigger_crossed as a missed fill", () => {
+    const items = activityFromWatchlist([
+      event({
+        event_id: "cross-1",
+        event_type: "trigger_crossed",
+        occurred_at: "2026-09-20T13:00:03Z",
+        capture_eligible: true,
+      }),
+      event({
+        event_id: "econ-lost",
+        event_type: "trigger_lost_before_fill",
+        occurred_at: "2026-09-20T13:00:07Z",
+        capture_eligible: false,
+      }),
+      event({
+        event_id: "eligible-lost",
+        event_type: "trigger_lost_before_fill",
+        occurred_at: "2026-09-20T13:00:08Z",
+        capture_eligible: true,
+      }),
+    ]);
+    assert.deepEqual(
+      items.map((item) => item.id),
+      ["eligible-lost"],
+    );
+    assert.equal(items[0]?.title, "Trigger lost before fill");
+    assert.equal(items[0]?.kind, "TRIGGER_LOST_BEFORE_FILL");
+    assert.equal(
+      isVisibleOperatorActivityEvent(
+        event({
+          event_id: "econ-lost",
+          event_type: "trigger_lost_before_fill",
+          occurred_at: "2026-09-20T13:00:07Z",
+          capture_eligible: false,
+        }),
+      ),
+      false,
+    );
+    assert.equal(
+      isVisibleOperatorActivityEvent(
+        event({
+          event_id: "cross-1",
+          event_type: "trigger_crossed",
+          occurred_at: "2026-09-20T13:00:03Z",
+          capture_eligible: true,
+        }),
+      ),
+      false,
+    );
   });
 });

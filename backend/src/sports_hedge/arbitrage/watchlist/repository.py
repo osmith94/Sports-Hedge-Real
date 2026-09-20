@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from sports_hedge.arbitrage.watchlist.models import (
+    OPERATOR_ACTIVITY_UNCONDITIONAL_EVENT_TYPES,
     LifecycleEventType,
     NearOpportunity,
     OpportunityClassification,
@@ -199,11 +200,28 @@ class SqliteWatchlistRepository:
             "mapping_reasons_json": "TEXT",
             "mapping_provenance_json": "TEXT",
             "mapping_review_candidate_json": "TEXT",
+            "capture_eligible": "INTEGER",
         }
         for name, ddl in extras.items():
             if name not in columns:
                 self._connection.execute(
                     f"ALTER TABLE watchlist_opportunities ADD COLUMN {name} {ddl}"
+                )
+        event_columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(watchlist_lifecycle_events)")
+        }
+        event_extras = {
+            "fixture_label": "TEXT",
+            "market_family": "TEXT",
+            "canonical_event_id": "TEXT",
+            "canonical_market_id": "TEXT",
+            "capture_eligible": "INTEGER",
+        }
+        for name, ddl in event_extras.items():
+            if name not in event_columns:
+                self._connection.execute(
+                    f"ALTER TABLE watchlist_lifecycle_events ADD COLUMN {name} {ddl}"
                 )
         self._commit()
 
@@ -239,12 +257,13 @@ class SqliteWatchlistRepository:
                 live_score_supported, home_score, away_score, strike_narrative,
                 previous_net_edge, previous_distance_to_trigger_pp, observation_count,
                 quote_age_basis, data_kind, mapping_confidence, mapping_matched,
-                mapping_reasons_json, mapping_provenance_json, mapping_review_candidate_json
+                mapping_reasons_json, mapping_provenance_json, mapping_review_candidate_json,
+                capture_eligible
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?
+                ?, ?, ?
             )
             ON CONFLICT(opportunity_id) DO UPDATE SET
                 canonical_event_id = excluded.canonical_event_id,
@@ -304,7 +323,8 @@ class SqliteWatchlistRepository:
                 mapping_matched = excluded.mapping_matched,
                 mapping_reasons_json = excluded.mapping_reasons_json,
                 mapping_provenance_json = excluded.mapping_provenance_json,
-                mapping_review_candidate_json = excluded.mapping_review_candidate_json
+                mapping_review_candidate_json = excluded.mapping_review_candidate_json,
+                capture_eligible = excluded.capture_eligible
             """,
             (
                 opportunity.opportunity_id,
@@ -360,6 +380,7 @@ class SqliteWatchlistRepository:
                 json.dumps(opportunity.mapping_review_candidate.model_dump(mode="json"))
                 if opportunity.mapping_review_candidate is not None
                 else None,
+                int(opportunity.capture_eligible),
             ),
         )
 
@@ -369,8 +390,10 @@ class SqliteWatchlistRepository:
                 """
                 INSERT OR IGNORE INTO watchlist_lifecycle_events (
                     event_id, opportunity_id, occurred_at, event_type, status,
-                    current_net_edge, distance_to_trigger_pp, detail
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    current_net_edge, distance_to_trigger_pp, detail,
+                    fixture_label, market_family, canonical_event_id,
+                    canonical_market_id, capture_eligible
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
@@ -381,6 +404,11 @@ class SqliteWatchlistRepository:
                     _stringify(event.current_net_edge),
                     _stringify(event.distance_to_trigger_pp),
                     event.detail,
+                    event.fixture_label,
+                    event.market_family,
+                    event.canonical_event_id,
+                    event.canonical_market_id,
+                    None if event.capture_eligible is None else int(event.capture_eligible),
                 ),
             )
             self._commit()
@@ -441,6 +469,7 @@ class SqliteWatchlistRepository:
         opportunity_id: str | None = None,
         since: datetime | None = None,
         event_types: Collection[LifecycleEventType] | None = None,
+        operator_signal: bool = False,
     ) -> list[OpportunityLifecycleEvent]:
         if limit <= 0:
             raise ValueError("limit must be positive")
@@ -452,7 +481,18 @@ class SqliteWatchlistRepository:
         if since is not None:
             clauses.append("occurred_at >= ?")
             parameters.append(since.isoformat())
-        if event_types:
+        if operator_signal:
+            unconditional = tuple(
+                event.value for event in OPERATOR_ACTIVITY_UNCONDITIONAL_EVENT_TYPES
+            )
+            placeholders = ", ".join("?" for _ in unconditional)
+            clauses.append(
+                f"(event_type IN ({placeholders}) OR "
+                "(event_type = ? AND capture_eligible = 1))"
+            )
+            parameters.extend(unconditional)
+            parameters.append(LifecycleEventType.TRIGGER_LOST_BEFORE_FILL.value)
+        elif event_types:
             types = tuple(event.value for event in event_types)
             placeholders = ", ".join("?" for _ in types)
             clauses.append(f"event_type IN ({placeholders})")
@@ -586,6 +626,7 @@ def _opportunity_from_row(row: sqlite3.Row) -> NearOpportunity:
         mapping_reasons=_json_list(_row_get(row, "mapping_reasons_json")),
         mapping_provenance=_mapping_provenance(_row_get(row, "mapping_provenance_json")),
         mapping_review_candidate=_mapping_candidate(_row_get(row, "mapping_review_candidate_json")),
+        capture_eligible=bool(_row_get(row, "capture_eligible") or 0),
     )
 
 
@@ -616,6 +657,11 @@ def _event_from_row(row: sqlite3.Row) -> OpportunityLifecycleEvent:
         current_net_edge=_decimal(row["current_net_edge"]),
         distance_to_trigger_pp=_decimal(row["distance_to_trigger_pp"]),
         detail=row["detail"],
+        fixture_label=_row_get(row, "fixture_label"),
+        market_family=_row_get(row, "market_family"),
+        canonical_event_id=_row_get(row, "canonical_event_id"),
+        canonical_market_id=_row_get(row, "canonical_market_id"),
+        capture_eligible=_optional_bool(_row_get(row, "capture_eligible")),
     )
 
 
