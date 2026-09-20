@@ -879,7 +879,7 @@ export function RunPaperScan() {
                 : "Stop scanner"}
           </button>
           {scannerStopped ? (
-            <span className="status-badge" role="status">
+            <span className="status-badge status-badge-stopped" role="status">
               SCANNER STOPPED · ACTIVE TRADE / HOT pricing / BACKGROUND pricing / UNIVERSE discovery paused
             </span>
           ) : null}
@@ -889,23 +889,26 @@ export function RunPaperScan() {
             {settingsMessage}
           </div>
         ) : null}
-        <div className="scan-note">
-          Manual HOT refresh performs a HOT pricing refresh of current known fixtures.
-          It does not rediscover the catalogue. Manual BACKGROUND refresh reprices currently due ACTIVE catalogue rows from exact known IDs.
-          Neither HOT nor BACKGROUND rediscover the catalogue or advance UNIVERSE generation state.
-          Run UNIVERSE now bypasses only the UNIVERSE cadence wait and uses the real selected-scope generation worker.
-          Update saves Min Net Arb, Max Risk, HOT cadence, BACKGROUND cadence and UNIVERSE cadence
-          and max allocated per trade for subsequent server-owned work and does not trigger a scan.
-          Football competitions Apply changes the current session scope and does not itself call providers.
-          Save this selection as my default is required to persist startup scope across restart.
-          HOT cadence is how often HOT pricing is due; BACKGROUND cadence is how often the
-          rest of the known ACTIVE catalogue is repriced. UNIVERSE cadence is how often a fresh
-          discovery generation starts after the previous one completes (default 1800s).
-          ACTIVE TRADE reprices open paper
-          trades every 5s from exact known IDs. Auto refresh view only polls status.
-          Run UNIVERSE now is the explicit manual bypass of the cadence wait.
-        </div>
-        <div className="scan-note" aria-label="ACTIVE TRADE, HOT pricing, BACKGROUND pricing and UNIVERSE discovery status">
+        <details className="scan-help">
+          <summary>How scanning works</summary>
+          <div className="scan-note">
+            Manual HOT refresh performs a HOT pricing refresh of current known fixtures.
+            It does not rediscover the catalogue. Manual BACKGROUND refresh reprices currently due ACTIVE catalogue rows from exact known IDs.
+            Neither HOT nor BACKGROUND rediscover the catalogue or advance UNIVERSE generation state.
+            Run UNIVERSE now bypasses only the UNIVERSE cadence wait and uses the real selected-scope generation worker.
+            Update saves Min Net Arb, Max Risk, HOT cadence, BACKGROUND cadence and UNIVERSE cadence
+            and max allocated per trade for subsequent server-owned work and does not trigger a scan.
+            Football competitions Apply changes the current session scope and does not itself call providers.
+            Save this selection as my default is required to persist startup scope across restart.
+            HOT cadence is how often HOT pricing is due; BACKGROUND cadence is how often the
+            rest of the known ACTIVE catalogue is repriced. UNIVERSE cadence is how often a fresh
+            discovery generation starts after the previous one completes (default 1800s).
+            ACTIVE TRADE reprices open paper
+            trades every 5s from exact known IDs. Auto refresh view only polls status.
+            Run UNIVERSE now is the explicit manual bypass of the cadence wait.
+          </div>
+        </details>
+        <div className="scan-note scan-status-lines" aria-label="ACTIVE TRADE, HOT pricing, BACKGROUND pricing and UNIVERSE discovery status">
           {dualScanStatusLines(liveRefresh, nowMs).map((line) => (
             <div key={line}>{line}</div>
           ))}

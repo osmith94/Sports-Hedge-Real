@@ -175,16 +175,20 @@ describe("fixture discovery collapsed-by-default disclosure", () => {
 
   it("places HOT pricing fixtures after discovery and keeps Opportunity Monitor as the current-opportunity table", () => {
     const page = readFileSync(join(frontendRoot, "app/page.tsx"), "utf8");
+    const treasuryIndex = page.indexOf("<LiquidityPools");
+    const positionsIndex = page.indexOf("<span>Open paper positions</span>");
+    const scanIndex = page.indexOf("<RunPaperScan");
     const discoveryIndex = page.indexOf("<FixtureDiscoverySection");
     const hotIndex = page.indexOf("<HotFixturesPanel");
     const monitorIndex = page.indexOf("<OpportunityMonitor");
-    const positionsIndex = page.indexOf("<span>Open paper positions</span>");
     const auditIndex = page.indexOf("audit-disclosure");
-    assert.ok(discoveryIndex >= 0);
+    assert.ok(treasuryIndex >= 0);
+    assert.ok(positionsIndex > treasuryIndex);
+    assert.ok(scanIndex > positionsIndex);
+    assert.ok(discoveryIndex > scanIndex);
     assert.ok(hotIndex > discoveryIndex);
     assert.ok(monitorIndex > hotIndex);
-    assert.ok(positionsIndex > monitorIndex);
-    assert.ok(auditIndex > positionsIndex);
+    assert.ok(auditIndex > monitorIndex);
     assert.doesNotMatch(page, /<span>Tracked<\/span>/);
     assert.doesNotMatch(page, /TrackedMarketsBoard/);
     assert.doesNotMatch(page, /DiscoveredFixturesPanel/);

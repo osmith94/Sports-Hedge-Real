@@ -30,21 +30,35 @@ function statusLabel(pool: PaperLiquidityPool): string {
   return "connected · paper solver";
 }
 
-function carryingFromLiquidity(pool: PaperLiquidityPool): string {
+function carryingValue(pool: PaperLiquidityPool | PaperTreasuryPool): string {
   if (pool.gbp_carrying_status === "fx_unavailable") {
-    return "GBP carrying unavailable · no backend FX";
+    return "GBP carrying unavailable";
+  }
+  return money(pool.gbp_carrying_value);
+}
+
+function carryingProvenance(pool: PaperLiquidityPool | PaperTreasuryPool): string {
+  if ("available_cash" in pool) {
+    if (pool.gbp_carrying_status === "fx_unavailable") {
+      return "no backend FX";
+    }
+    const rate = pool.fx_rate_gbp_per_unit != null ? ` @ ${pool.fx_rate_gbp_per_unit}` : "";
+    const asOf = pool.fx_as_of ? ` · ${pool.fx_as_of}` : "";
+    return `${pool.fx_source ?? "FX"}${rate}${asOf}`;
+  }
+  if (pool.gbp_carrying_status === "fx_unavailable") {
+    return "no backend FX";
   }
   const source = pool.gbp_fx_source === "functional_currency" ? "GBP identity" : pool.gbp_fx_source ?? "FX";
-  return `${money(pool.gbp_carrying_value)} · ${source}`;
+  return source;
+}
+
+function carryingFromLiquidity(pool: PaperLiquidityPool): string {
+  return `${carryingValue(pool)} · ${carryingProvenance(pool)}`;
 }
 
 function carryingFromTreasury(pool: PaperTreasuryPool): string {
-  if (pool.gbp_carrying_status === "fx_unavailable") {
-    return "GBP carrying unavailable · no backend FX";
-  }
-  const rate = pool.fx_rate_gbp_per_unit != null ? ` @ ${pool.fx_rate_gbp_per_unit}` : "";
-  const asOf = pool.fx_as_of ? ` · ${pool.fx_as_of}` : "";
-  return `${money(pool.gbp_carrying_value)} · ${pool.fx_source ?? "FX"}${rate}${asOf}`;
+  return `${carryingValue(pool)} · ${carryingProvenance(pool)}`;
 }
 
 function lockedAmount(value: string | number | null | undefined): number {
@@ -217,7 +231,7 @@ export function LiquidityPools({
         <>
           <div className={compact ? "pool-table-wrap" : "pool-grid"}>
             {compact ? (
-              <table>
+              <table className="ops-compact">
                 <thead>
                   <tr>
                     <th>Venue</th>
@@ -237,7 +251,10 @@ export function LiquidityPools({
                           </td>
                           <td>{money(pool.available_cash, pool.native_currency === "USD" ? "USD" : "GBP")}</td>
                           <td>{money(pool.locked_capital, pool.native_currency === "USD" ? "USD" : "GBP")}</td>
-                          <td className="muted wrap">{carryingFromTreasury(pool)}</td>
+                          <td className="treasury-carrying" title={carryingFromTreasury(pool)}>
+                            <div className="treasury-carrying-value">{carryingValue(pool)}</div>
+                            <div className="treasury-carrying-source">{carryingProvenance(pool)}</div>
+                          </td>
                           <td>
                             <span className="status-badge">connected · paper solver</span>
                           </td>
@@ -251,7 +268,10 @@ export function LiquidityPools({
                           </td>
                           <td>{money(pool.available, pool.native_currency)}</td>
                           <td>{money(pool.locked, pool.native_currency)}</td>
-                          <td className="muted wrap">{carryingFromLiquidity(pool)}</td>
+                          <td className="treasury-carrying" title={carryingFromLiquidity(pool)}>
+                            <div className="treasury-carrying-value">{carryingValue(pool)}</div>
+                            <div className="treasury-carrying-source">{carryingProvenance(pool)}</div>
+                          </td>
                           <td>
                             <span className={pool.included_in_solver ? "status-badge" : "ops-status is-reject"}>
                               {statusLabel(pool)}

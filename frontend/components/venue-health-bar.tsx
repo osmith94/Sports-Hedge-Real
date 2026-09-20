@@ -69,44 +69,56 @@ export function VenueHealthBar() {
   return (
     <div className="status-cluster" aria-label="First-class venue data health">
       <SystemLoadSummaryCard status={refresh} />
-      {FIRST_CLASS.map((item) => {
-        const row = byVenue.get(item.venue);
-        const scan = scanHealth[item.venue];
-        const kind = tone(row, scan);
-        return (
-          <span className="status-item" key={item.venue} title={row?.detail ?? venueHealthCaption(item.label, scan, row)}>
-            <span className={`status-dot ${kind}`} />
-            {venueHealthCaption(item.label, scan, row)}
-            {venueHealthNeedsWhy(scan) ? (
-              <button
-                type="button"
-                className="status-why"
-                aria-label={`Why is ${item.label} degraded?`}
-                onClick={() => {
-                  void getVenueDegradationIncident(item.venue)
-                    .then((incident) => downloadVenueWhyIncident(incident))
-                    .catch(() => undefined);
-                }}
-              >
-                Why?
-              </button>
-            ) : null}
-          </span>
-        );
-      })}
-      {refresh?.paper_autofill_enabled ? (
-        <span className="status-item" aria-label="AUTO PAPER CAPTURE ON">
-          AUTO PAPER CAPTURE ON
-        </span>
-      ) : null}
-      {dualScanStatusLines(refresh, nowMs).map((line) => (
-        <span className="status-item muted" key={line} aria-label={line}>
-          {line}
-        </span>
-      ))}
-      {refresh?.last_error ? (
-        <span className="status-item muted">{refresh.last_error}</span>
-      ) : null}
+      <div className="status-side">
+        <div className="status-venues">
+          {FIRST_CLASS.map((item) => {
+            const row = byVenue.get(item.venue);
+            const scan = scanHealth[item.venue];
+            const kind = tone(row, scan);
+            return (
+              <span className="status-item" key={item.venue} title={row?.detail ?? venueHealthCaption(item.label, scan, row)}>
+                <span className={`status-dot ${kind}`} />
+                {venueHealthCaption(item.label, scan, row)}
+                {venueHealthNeedsWhy(scan) ? (
+                  <button
+                    type="button"
+                    className="status-why"
+                    aria-label={`Why is ${item.label} degraded?`}
+                    onClick={() => {
+                      void getVenueDegradationIncident(item.venue)
+                        .then((incident) => downloadVenueWhyIncident(incident))
+                        .catch(() => undefined);
+                    }}
+                  >
+                    Why?
+                  </button>
+                ) : null}
+              </span>
+            );
+          })}
+          {refresh?.paper_autofill_enabled ? (
+            <span className="status-item status-item-capture" aria-label="AUTO PAPER CAPTURE ON">
+              AUTO PAPER CAPTURE ON
+            </span>
+          ) : null}
+        </div>
+        <div className="status-lanes" aria-label="Scanner lane status">
+          {dualScanStatusLines(refresh, nowMs).map((line) => {
+            const sep = line.indexOf(" · ");
+            const key = sep >= 0 ? line.slice(0, sep) : line;
+            const detail = sep >= 0 ? line.slice(sep + 3) : "";
+            return (
+              <div className="status-lane" key={line} title={line} aria-label={line}>
+                <span className="status-lane-key">{key}</span>
+                <span className="status-lane-detail">{detail}</span>
+              </div>
+            );
+          })}
+        </div>
+        {refresh?.last_error ? (
+          <span className="status-item status-item-error">{refresh.last_error}</span>
+        ) : null}
+      </div>
     </div>
   );
 }

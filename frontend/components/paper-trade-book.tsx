@@ -70,7 +70,7 @@ function managementHint(trade: PaperTrade): string {
 function ManagementCell({ trade }: { trade: PaperTrade }) {
   const cell = formatPositionManagementCell(trade.position_management);
   return (
-    <td title={managementHint(trade)}>
+    <td className="paper-trade-management" title={managementHint(trade)}>
       <span className="status-badge">{cell.state}</span>
       {cell.checkedIso ? (
         <div className="panel-meta">
@@ -97,11 +97,18 @@ function fixture(trade: PaperTrade): string {
   return trade.fixture_label || `${trade.home_team ?? "Unknown"} v ${trade.away_team ?? "Unknown"}`;
 }
 
+function tradeStateBadgeClass(state: PaperTrade["state"]): string {
+  if (state === "PENDING" || state === "PARTIAL" || state === "AWAITING_MANUAL_EXTERNAL") {
+    return "status-badge status-badge-warn";
+  }
+  return "status-badge";
+}
+
 function LegsCell({ trade }: { trade: PaperTrade }) {
   return (
-    <td>
+    <td className="paper-trade-legs">
       {compactLegLines(trade).map((line) => (
-        <div key={line} className="panel-meta">
+        <div key={line} className="paper-trade-leg" title={line}>
           {line}
         </div>
       ))}
@@ -222,6 +229,7 @@ export function PaperTradeBook({ summary, active, closed, apiAvailable, compact 
         onToggle={toggle}
         onSettle={onSettle}
         empty="No persisted active paper trades."
+        compact={compact}
       />
 
       {compact ? null : (
@@ -253,6 +261,7 @@ function TradeTable({
   onToggle,
   onSettle,
   empty,
+  compact = false,
 }: {
   title: string;
   meta: string;
@@ -263,6 +272,7 @@ function TradeTable({
   onToggle: (id: string) => void;
   onSettle?: (event: FormEvent<HTMLFormElement>, trade: PaperTrade) => void;
   empty: string;
+  compact?: boolean;
 }) {
   return (
     <section className="panel">
@@ -274,7 +284,7 @@ function TradeTable({
         <span className="demo-chip">PAPER MODE · RECORDED</span>
       </div>
       <div className="table-wrap">
-        <table>
+        <table className={compact ? "ops-compact" : undefined}>
           <thead>
             <tr>
               <th>Fixture / market</th>
@@ -297,24 +307,22 @@ function TradeTable({
               rows.map((trade) => (
                 <Fragment key={trade.trade_id}>
                   <tr>
-                    <td className="row-title">
-                      <button type="button" className="text-link" onClick={() => onToggle(trade.trade_id)}>
+                    <td className="row-title paper-trade-fixture" title={fixture(trade)}>
+                      <button type="button" className="text-link paper-trade-fixture-name" onClick={() => onToggle(trade.trade_id)}>
                         {fixture(trade)}
                       </button>
-                      <div className="panel-meta">
+                      <div className="paper-trade-market" title={trade.solver_model ? `${compactMarketHeading(trade)} · ${trade.solver_model}` : compactMarketHeading(trade)}>
                         {compactMarketHeading(trade)}
-                        {trade.solver_model ? ` · ${trade.solver_model}` : ""}
                       </div>
-                      <Link href={`/paper/${encodeURIComponent(trade.trade_id)}`} className="panel-meta">
-                        Open detail
-                      </Link>
-                      {" · "}
-                      <Link
-                        href={`/paper/${encodeURIComponent(trade.trade_id)}#trade-log`}
-                        className="panel-meta"
-                      >
-                        Trade log
-                      </Link>
+                      <div className="paper-trade-actions">
+                        <Link href={`/paper/${encodeURIComponent(trade.trade_id)}`}>
+                          Open detail
+                        </Link>
+                        {" · "}
+                        <Link href={`/paper/${encodeURIComponent(trade.trade_id)}#trade-log`}>
+                          Trade log
+                        </Link>
+                      </div>
                     </td>
                     <td>
                       <HydratedRelativeTime iso={trade.opened_at} />
@@ -331,7 +339,7 @@ function TradeTable({
                     <td>{trade.state === "CLOSED" ? money(trade.realised_pnl_gbp) : "—"}</td>
                     <ManagementCell trade={trade} />
                     <td>
-                      <span className="status-badge">{trade.state}</span>
+                      <span className={tradeStateBadgeClass(trade.state)}>{trade.state}</span>
                     </td>
                   </tr>
                   {openId === trade.trade_id && detail?.trade_id === trade.trade_id ? (
@@ -368,6 +376,13 @@ function AuditBlock({
           ? ` · settled ${trade.settlement_outcome} via ${trade.settlement_source}:${trade.settlement_source_id}`
           : ""}
       </div>
+      <ul>
+        {trade.legs.map((leg) => (
+          <li key={`${leg.venue}-${leg.outcome}-${leg.source_market_id}`}>
+            {leg.venue} · {leg.outcome} · {leg.fill_kind} · odds {leg.filled_odds ?? leg.displayed_odds ?? "—"}
+          </li>
+        ))}
+      </ul>
       <ActiveTradeLog presetTradeId={trade.trade_id} compact />
       <ol>
         {trade.audit.map((event) => (

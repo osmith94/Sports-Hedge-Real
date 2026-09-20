@@ -12,6 +12,7 @@ import {
   scanCycleBadgeLabel,
   scanCycleHealthLabel,
   scanCycleLaneLabel,
+  scanCycleLatestSummary,
   scanCycleRow,
   scanCycleRows,
 } from "./scan-cycle-history-display";
@@ -121,6 +122,12 @@ describe("scan cycle history presentation", () => {
   it("keeps empty and unavailable states honest", () => {
     assert.equal(scanCycleBadgeLabel(true, []), "EMPTY");
     assert.equal(scanCycleBadgeLabel(false, null), "UNAVAILABLE");
+    assert.equal(scanCycleLatestSummary(false, null), "unavailable");
+    assert.equal(scanCycleLatestSummary(true, []), "no completed cycles");
+    assert.equal(
+      scanCycleLatestSummary(true, [cycle()]),
+      "latest HOT pricing · venues ok",
+    );
     assert.match(SCAN_CYCLE_EMPTY, /Zero-decision cycles still appear/);
     assert.match(SCAN_CYCLE_UNAVAILABLE, /No fabricated cycles/);
   });
@@ -147,6 +154,12 @@ describe("scan cycle history console wiring", () => {
     assert.match(scan, /last_completed_at/);
     assert.equal(SCAN_CYCLE_TITLE, "Scan cycle history");
     assert.match(panel, /scanCycleRows/);
+    assert.match(panel, /scanCycleLatestSummary/);
+    assert.match(panel, /<details className="scan-cycle-history-panel discovery-disclosure">/);
+    assert.match(panel, /Show history/);
+    assert.match(panel, /Hide history/);
+    assert.doesNotMatch(panel, /\sopen[={]/);
+    assert.doesNotMatch(panel, /open>/);
     assert.doesNotMatch(panel, /getPaperScans/);
     assert.doesNotMatch(panel, /PaperScanRecord/);
     assert.match(page, /market-decision audit/);

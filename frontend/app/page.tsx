@@ -156,6 +156,22 @@ export default async function ArbitragePage() {
         compact
       />
 
+      <section className="ops-section">
+        <div className="section-label">
+          <span>Open paper positions</span>
+          <span className={tradesAvailable ? "status-badge" : "demo-chip"}>
+            {tradesAvailable ? (activeTrades.length ? "LIVE PAPER" : "EMPTY") : "UNAVAILABLE"}
+          </span>
+        </div>
+        <PaperTradeBook
+          summary={tradeSummary}
+          active={activeTrades}
+          closed={[]}
+          apiAvailable={tradesAvailable}
+          compact
+        />
+      </section>
+
       <RunPaperScan />
 
       <PriorityAlertsSeam liveAvailable={livePriorityAvailable} liveCount={livePriorityCount} />
@@ -191,22 +207,6 @@ export default async function ArbitragePage() {
           </div>
         </section>
       ) : null}
-
-      <section className="ops-section">
-        <div className="section-label">
-          <span>Open paper positions</span>
-          <span className={tradesAvailable ? "status-badge" : "demo-chip"}>
-            {tradesAvailable ? (activeTrades.length ? "LIVE PAPER" : "EMPTY") : "UNAVAILABLE"}
-          </span>
-        </div>
-        <PaperTradeBook
-          summary={tradeSummary}
-          active={activeTrades}
-          closed={[]}
-          apiAvailable={tradesAvailable}
-          compact
-        />
-      </section>
 
       <section className="ops-section grid-2">
         <ActivityFeed items={activity.items} usedFixture={activity.usedFixture} />

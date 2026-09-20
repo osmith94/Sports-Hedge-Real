@@ -154,5 +154,17 @@ describe("system load display", () => {
     assert.equal([...bar.matchAll(/setInterval/g)].length, 1);
     assert.match(bar, /applyLatestLiveRefresh/);
     assert.match(scan, /applyLatestLiveRefresh/);
+    assert.match(card, /system-load-key/);
+    assert.match(card, /system-load-detail/);
+    const css = readFileSync(join(frontendRoot, "app/globals.css"), "utf8");
+    assert.match(css, /\.system-load-key \{ font-weight: 750; color: var\(--text\); white-space: nowrap; \}/);
+    assert.doesNotMatch(css, /system-load-key \{[^}]*width: 2\.6em/);
+    assert.match(css, /\.status-badge-stopped/);
+    assert.match(css, /\.live-scan-pulse-stopped \.live-scan-pulse-core \{ background: var\(--muted-2\); \}/);
+    const pools = readFileSync(join(frontendRoot, "components/liquidity-pools.tsx"), "utf8");
+    assert.match(pools, /treasury-carrying-value/);
+    assert.match(pools, /treasury-carrying-source/);
+    assert.match(pools, /title=\{carryingFromTreasury\(pool\)\}/);
+    assert.match(css, /\.treasury-carrying-value/);
   });
 });

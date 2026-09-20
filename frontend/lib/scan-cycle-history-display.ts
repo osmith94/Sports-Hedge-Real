@@ -119,3 +119,13 @@ export function scanCycleBadgeLabel(
   const count = cycles?.length ?? 0;
   return count ? `${Math.min(count, 100)} CYCLES` : "EMPTY";
 }
+
+export function scanCycleLatestSummary(
+  available: boolean,
+  cycles: PaperScanCycleRecord[] | null | undefined,
+): string {
+  if (!available) return "unavailable";
+  const latest = cycles?.[0];
+  if (!latest) return "no completed cycles";
+  return `latest ${scanCycleLaneLabel(latest.scan_lane)} · ${scanCycleHealthLabel(latest)}`;
+}

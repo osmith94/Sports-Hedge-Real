@@ -1,5 +1,7 @@
 "use client";
 
+import { Fragment } from "react";
+
 import { LiveRefreshStatus } from "../lib/api";
 import { systemLoadLines } from "../lib/system-load-display";
 
@@ -17,10 +19,12 @@ export function SystemLoadSummaryCard({
     >
       <div className="system-load-title">SYSTEM LOAD</div>
       {lines.map((line) => (
-        <div className="system-load-line" key={`${line.key}-${line.detail}`}>
-          {line.key ? <span className="system-load-key">{line.key}</span> : null}
-          {line.detail}
-        </div>
+        <Fragment key={`${line.key}-${line.detail}`}>
+          <span className="system-load-key">{line.key}</span>
+          <span className="system-load-detail" title={line.detail}>
+            {line.detail}
+          </span>
+        </Fragment>
       ))}
     </div>
   );

@@ -375,6 +375,9 @@ describe("dual cadence operator copy", () => {
     );
     assert.match(scan, /stopPaperScanner/);
     assert.match(scan, /resumePaperScanner/);
+    assert.match(scan, /How scanning works/);
+    assert.match(scan, /<details className="scan-help">/);
+    assert.match(scan, /status-badge status-badge-stopped/);
     assert.doesNotMatch(scan, /Refresh interval/);
     assert.match(api, /\/paper\/collect\/hot/);
     assert.match(api, /\/paper\/collect\/background/);

@@ -130,9 +130,12 @@ describe("opportunity monitor current-vs-audit separation", () => {
     assert.doesNotMatch(page, /TrackedMarketsBoard/);
     const hotIdx = page.indexOf("<HotFixturesPanel");
     const monitorIdx = page.indexOf("<OpportunityMonitor");
+    const treasuryIdx = page.indexOf("<LiquidityPools");
     const positionsIdx = page.indexOf("Open paper positions");
+    const scanIdx = page.indexOf("<RunPaperScan");
     const auditIdx = page.indexOf("audit-disclosure");
-    assert.ok(hotIdx > 0 && monitorIdx > hotIdx && positionsIdx > monitorIdx && auditIdx > positionsIdx);
+    assert.ok(treasuryIdx >= 0 && positionsIdx > treasuryIdx && scanIdx > positionsIdx);
+    assert.ok(hotIdx > 0 && monitorIdx > hotIdx && auditIdx > monitorIdx);
     assert.match(monitor, /Current radar set from tracked watchlist/);
     assert.doesNotMatch(monitor, /getPaperScans/);
     assert.doesNotMatch(monitor, /DEMO_NEAR_ARB/);

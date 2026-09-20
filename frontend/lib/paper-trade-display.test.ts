@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { PaperTrade, PaperTradeLeg } from "./api";
 import { money } from "./format";
 import {
+  compactFillKindLabel,
   compactLegLine,
   compactLegLines,
   compactMarketHeading,
@@ -75,11 +76,11 @@ describe("active-trade canonical line and compact odds", () => {
     assert.equal(compactMarketHeading(row), "Total Goals 2.5");
     assert.equal(
       compactLegLine(row, row.legs[0]),
-      `Matchbook · OVER 2.5 @ 1.935 · ${money("0.44")}`,
+      `Matchbook · OVER 2.5 @ 1.935 · ${money("0.44")} · PAPER`,
     );
     assert.equal(
       compactLegLine(row, row.legs[1]),
-      `Kalshi · UNDER 2.5 @ 2.168 · ${money("0.52", "USD")}`,
+      `Kalshi · UNDER 2.5 @ 2.168 · ${money("0.52", "USD")} · PAPER`,
     );
     const lines = compactLegLines(row);
     assert.equal(lines.length, 2);
@@ -149,5 +150,18 @@ describe("active-trade canonical line and compact odds", () => {
     assert.match(formatter, /formatStoredLine\(trade\.line\)/);
     assert.doesNotMatch(formatter, /parse.*market_label/);
     assert.doesNotMatch(formatter, /filled_odds.*line/);
+    const row = trade();
+    assert.equal(compactFillKindLabel("INTERNAL_SIMULATED"), "PAPER");
+    assert.equal(compactFillKindLabel("PAPER_SIMULATED_EXTERNAL"), "SIMULATED");
+    assert.equal(compactFillKindLabel("MANUAL_EXTERNAL"), "MANUAL");
+    assert.equal(compactFillKindLabel("UNFILLED"), null);
+    assert.doesNotMatch(compactLegLine(row, row.legs[0]), /INTERNAL_SIMULATED/);
+    assert.match(compactLegLine(row, row.legs[0]), /PAPER$/);
+    assert.doesNotMatch(book, /INTERNAL_SIMULATED/);
+    assert.match(book, /paper-trade-fixture-name/);
+    assert.match(book, /paper-trade-market/);
+    assert.match(book, /paper-trade-actions/);
+    assert.match(detail, /leg\.fill_kind/);
+    assert.match(book, /leg\.fill_kind/);
   });
 });

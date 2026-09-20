@@ -1,4 +1,4 @@
-import { MarketFamily, PaperTrade, PaperTradeLeg } from "./api";
+import { MarketFamily, PaperLegFillKind, PaperTrade, PaperTradeLeg } from "./api";
 import { money, number } from "./format";
 import { venueTitle } from "./fixture-inventory-display";
 
@@ -48,12 +48,22 @@ export function compactMarketHeading(trade: PaperTrade): string {
   return familyLabel;
 }
 
+export function compactFillKindLabel(kind: PaperLegFillKind | null | undefined): string | null {
+  if (kind === "INTERNAL_SIMULATED") return "PAPER";
+  if (kind === "PAPER_SIMULATED_EXTERNAL") return "SIMULATED";
+  if (kind === "MANUAL_EXTERNAL") return "MANUAL";
+  return null;
+}
+
 export function compactLegLine(trade: PaperTrade, leg: PaperTradeLeg): string {
   const venue = venueTitle(leg.venue);
   const outcome = compactOutcomeLabel(leg.outcome, trade);
   const odds = formatCompactDecimalOdds(leg.filled_odds ?? leg.displayed_odds);
   const stake = compactStakeLabel(leg);
-  return `${venue} · ${outcome} @ ${odds} · ${stake}`;
+  const fill = compactFillKindLabel(leg.fill_kind);
+  return fill
+    ? `${venue} · ${outcome} @ ${odds} · ${stake} · ${fill}`
+    : `${venue} · ${outcome} @ ${odds} · ${stake}`;
 }
 
 export function compactLegLines(trade: PaperTrade): string[] {
