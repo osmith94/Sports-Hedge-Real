@@ -83,7 +83,7 @@ describe("dual cadence operator copy", () => {
     assert.equal(backgroundLines.length, 4);
     assert.match(backgroundLines[0], /ACTIVE TRADE/);
     assert.match(backgroundLines[3], /Background price engine/);
-    assert.match(backgroundLines[2], /12 ACTIVE/);
+    assert.match(backgroundLines[3], /12 ACTIVE/);
     assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /4 evaluated/);
     const persistFailed = status({
       last_error: null,
