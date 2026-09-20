@@ -12,13 +12,13 @@ import {
 import { percent } from "./format";
 
 export const HOT_ZONE_KICKER = "HOT Zone";
-export const HOT_ROSTER_TITLE = "HOT Fixtures / Fast Scan";
+export const HOT_ROSTER_TITLE = "HOT pricing fixtures";
 
 export const HOT_ROSTER_COPY =
-  "Fixtures currently scheduled for high-frequency Fast Scan. Presence here is not an arbitrage. Opportunity Monitor remains the current/near qualifying surface.";
+  "Fixtures currently scheduled for high-frequency HOT pricing. Presence here is not an arbitrage. Opportunity Monitor remains the current/near qualifying surface.";
 
 export const HOT_ROSTER_EMPTY =
-  "No HOT fixtures. Fast Scan roster is empty. Opportunity Monitor is a separate current/near-opportunity surface.";
+  "No HOT fixtures. HOT pricing roster is empty. Opportunity Monitor is a separate current/near-opportunity surface.";
 
 export const HOT_ROSTER_UNAVAILABLE =
   "HOT roster unavailable. No fabricated fixtures.";

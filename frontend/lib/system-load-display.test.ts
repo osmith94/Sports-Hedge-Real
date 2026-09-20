@@ -25,10 +25,16 @@ function load(overrides: SystemLoadSummary = {}): SystemLoadSummary {
     },
     matchbook: { inflight: 2, limit: 4, waiting: 0 },
     kalshi: { inflight: 1, limit: 4, waiting: 0 },
+    background: {
+      working_set: 31,
+      due: 6,
+      cadence_seconds: 90,
+    },
     universe: {
       evaluated: 24,
       total: 30,
       remaining: 6,
+      cadence_seconds: 600,
       generation_work_used_s: 42,
       generation_budget_seconds: 150,
     },
@@ -56,10 +62,11 @@ describe("system load display", () => {
     assert.deepEqual(
       lines.map((line) => `${line.key}  ${line.detail}`),
       [
-        "HOT  8 fixtures · 18 items · 4 due · cycle 3.8s / 30s (13%)",
+        "HOT pricing  8 fixtures · 18 items · 4 due · cycle 3.8s / 30s (13%)",
+        "BACKGROUND pricing  31 items · 6 due · cadence 90s",
+        "UNIVERSE discovery  24/30 evaluated · cadence 600s · 42s / 150s",
         "MB  2/4 in use · queue 0",
         "K  1/4 in use · queue 0",
-        "UNI  24/30 evaluated · 42s / 150s",
         "ALL  49 catalogue items",
       ],
     );
@@ -73,7 +80,7 @@ describe("system load display", () => {
       }),
     );
     assert.match(lines[0].detail, /1 fixtures · 3 items/);
-    assert.equal(lines[4].detail, "3 catalogue items");
+    assert.equal(lines[5].detail, "3 catalogue items");
   });
 
   it("displays backend missing cycle duration without computing utilisation", () => {

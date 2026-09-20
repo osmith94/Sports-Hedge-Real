@@ -333,7 +333,7 @@ def test_hot_roster_and_kalshi_live_data_wording_remain_intact() -> None:
     assert 'from "../components/hot-fixtures-panel"' in page
     assert 'from "../components/opportunity-monitor"' in page
     assert 'from "../components/scan-cycle-history-panel"' in page
-    assert 'HOT_ROSTER_TITLE = "HOT Fixtures / Fast Scan"' in roster
+    assert 'HOT_ROSTER_TITLE = "HOT pricing fixtures"' in roster
     assert "Opportunity Monitor remains the current/near qualifying surface" in roster
     assert 'if (label === "Kalshi") return "Kalshi live data"' in health
     assert "read-only" not in health.casefold()

@@ -9,7 +9,7 @@ import {
   shouldOfferMappingVerifyAction,
 } from "./mapping-verification";
 import { formatObservationAge, parseObservationTimestampMs } from "./observation-age";
-import { fastScanCopy, fullSweepCopy } from "./scan-status-display";
+import { backgroundPriceCopy, fastScanCopy, fullSweepCopy } from "./scan-status-display";
 import { trackedMarketHref } from "./tracked-markets-display";
 import { lastScanVenuesLabel } from "./venue-participation-display";
 
@@ -106,6 +106,7 @@ export type OpportunityMonitorSummary = {
   newestObservedAt: string | null;
   activeVenues: string;
   fastScan: string;
+  backgroundPricing: string;
   fullSweep: string;
   dataClass: string;
 };
@@ -155,8 +156,9 @@ export function venueLegsLabel(item: NearOpportunity): string {
 export function scanLaneLabel(scanLane: string | null | undefined): string {
   if (!scanLane) return "—";
   const lane = scanLane.trim().toLowerCase();
-  if (lane === "hot") return "Fast Scan / HOT";
-  if (lane === "universe") return "Full Sweep / UNIVERSE";
+  if (lane === "hot") return "HOT pricing";
+  if (lane === "background") return "BACKGROUND pricing";
+  if (lane === "universe") return "UNIVERSE discovery";
   return scanLane;
 }
 
@@ -377,8 +379,12 @@ export function opportunityMonitorSummary(
   nowMs: number | null = null,
 ): OpportunityMonitorSummary {
   const fast = liveRefreshAvailable ? fastScanCopy(status, nowMs) : null;
+  const background = liveRefreshAvailable ? backgroundPriceCopy(status, nowMs) : null;
   const full = liveRefreshAvailable ? fullSweepCopy(status, nowMs) : null;
   const fastScan = fast ? `${fast.label} · ${fast.detail}` : "—";
+  const backgroundPricing = background
+    ? `${background.label} · ${background.detail}`
+    : "—";
   const fullSweep = full ? `${full.label} · ${full.detail}` : "—";
   if (!available) {
     return {
@@ -388,6 +394,7 @@ export function opportunityMonitorSummary(
       newestObservedAt: null,
       activeVenues: activeVenueSetLabel(status, liveRefreshAvailable),
       fastScan,
+      backgroundPricing,
       fullSweep,
       dataClass: "UNAVAILABLE",
     };
@@ -409,6 +416,7 @@ export function opportunityMonitorSummary(
     newestObservedAt: newest,
     activeVenues: activeVenueSetLabel(status, liveRefreshAvailable),
     fastScan,
+    backgroundPricing,
     fullSweep,
     dataClass: "LIVE PAPER",
   };

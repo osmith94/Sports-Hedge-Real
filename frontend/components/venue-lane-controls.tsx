@@ -65,7 +65,7 @@ export function VenueLaneControls({
         </p>
       ) : null}
       <LaneRow
-        label="Fast scan"
+        label="HOT pricing"
         lane="hot"
         flags={hotFlags}
         status={status}
@@ -75,7 +75,7 @@ export function VenueLaneControls({
         onToggle={(venue) => void toggle("hot", venue)}
       />
       <LaneRow
-        label="Full sweep"
+        label="UNIVERSE discovery"
         lane="universe"
         flags={universeFlags}
         status={status}

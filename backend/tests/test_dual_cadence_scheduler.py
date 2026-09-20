@@ -419,11 +419,15 @@ def test_live_refresh_exposes_distinct_hot_and_universe_status() -> None:
         payload = client.get("/paper/live-refresh").json()
         assert payload["hot"]["cadence_seconds"] == 30
         assert payload["hot"]["cycle_timeout_seconds"] == 25
-        assert payload["universe"]["cadence_seconds"] == 8
+        assert payload["universe"]["cadence_seconds"] == 600
+        assert payload["background"]["cadence_seconds"] == 90
         assert payload["universe"]["generation_budget_seconds"] == 150
         assert payload["interval_seconds"] == payload["hot"]["cadence_seconds"]
-        assert "Fast scan" in (payload["operator_summary"] or "")
-        assert "Full sweep" in (payload["operator_summary"] or "")
+        assert "HOT pricing" in (payload["operator_summary"] or "")
+        assert "BACKGROUND pricing" in (payload["operator_summary"] or "")
+        assert "UNIVERSE discovery" in (payload["operator_summary"] or "")
+        assert "Fast scan" not in (payload["operator_summary"] or "")
+        assert "Full sweep" not in (payload["operator_summary"] or "")
         discovered = payload["discovered_fixtures"]
         assert discovered
         assert discovered[0]["scan_lane"] == "universe"
@@ -725,7 +729,7 @@ def test_frontend_auto_refresh_does_not_post_collect_when_server_owns_scans() ->
     ).read_text(encoding="utf-8")
     assert "pollLiveStatus" in scan
     assert "void collectRef.current()" not in scan
-    assert "server owns Fast/Full scans" in scan
+    assert "server owns HOT / BACKGROUND / UNIVERSE" in scan
     assert scan.count("runPaperCollection") == 2
     assert "AUTO PAPER CAPTURE ON" in scan
     assert "server_loop_enabled" in demo

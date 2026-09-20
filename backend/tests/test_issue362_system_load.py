@@ -256,7 +256,7 @@ def test_live_refresh_status_endpoint_includes_compact_system_load() -> None:
     assert status.status_code == 200
     payload = status.json()
     load = payload["system_load"]
-    assert set(load) == {"hot", "matchbook", "kalshi", "universe", "catalogue_items"}
+    assert set(load) == {"hot", "background", "matchbook", "kalshi", "universe", "catalogue_items"}
     assert set(load["hot"]) == {
         "fixtures",
         "working_set",
@@ -268,6 +268,8 @@ def test_live_refresh_status_endpoint_includes_compact_system_load() -> None:
         "cadence_seconds",
         "cadence_utilisation",
     }
+    assert set(load["background"]) == {"working_set", "due", "cadence_seconds"}
+    assert "cadence_seconds" in load["universe"]
     assert "discovered_fixtures" not in load
     assert "recent_scan_cycles" not in load
     assert "execution_enabled" not in payload

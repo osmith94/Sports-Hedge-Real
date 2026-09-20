@@ -42,12 +42,21 @@ class HotLoad(BaseModel):
     cadence_utilisation: float | None = None
 
 
+class BackgroundLoad(BaseModel):
+    """BACKGROUND pricing cadence and working set. Independent of UNIVERSE."""
+
+    working_set: int = Field(default=0, ge=0)
+    due: int = Field(default=0, ge=0)
+    cadence_seconds: int = Field(default=0, ge=0)
+
+
 class UniverseLoad(BaseModel):
     """UNIVERSE catalogue progress from already-public lane counters."""
 
     evaluated: int = Field(default=0, ge=0)
     total: int = Field(default=0, ge=0)
     remaining: int = Field(default=0, ge=0)
+    cadence_seconds: int = Field(default=0, ge=0)
     generation_work_used_s: float | None = Field(default=None, ge=0)
     generation_budget_seconds: float | None = Field(default=None, ge=0)
 
@@ -56,6 +65,7 @@ class SystemLoadSummary(BaseModel):
     """Tiny current-state load card. Display numbers only; not a health score."""
 
     hot: HotLoad = Field(default_factory=HotLoad)
+    background: BackgroundLoad = Field(default_factory=BackgroundLoad)
     matchbook: ProviderSlotLoad = Field(default_factory=ProviderSlotLoad)
     kalshi: ProviderSlotLoad = Field(default_factory=ProviderSlotLoad)
     universe: UniverseLoad = Field(default_factory=UniverseLoad)
@@ -86,11 +96,13 @@ def system_load_from_status(
     """Project System Load from already-public in-memory / read-model fields."""
 
     hot = getattr(status, "hot", None)
+    background = getattr(status, "background", None)
     universe = getattr(status, "universe", None)
     engine = getattr(status, "price_engine", None)
     access = getattr(status, "provider_access", None)
     if isinstance(status, dict):
         hot = status.get("hot", hot)
+        background = status.get("background", background)
         universe = status.get("universe", universe)
         engine = status.get("price_engine", engine)
         access = status.get("provider_access", access)
@@ -131,12 +143,18 @@ def system_load_from_status(
             cadence_seconds=cadence_seconds,
             cadence_utilisation=cadence_utilisation(last_cycle_ms, cadence_seconds),
         ),
+        background=BackgroundLoad(
+            working_set=background_working,
+            due=_count(_attr(background_engine, "due")),
+            cadence_seconds=_count(_attr(background, "cadence_seconds")),
+        ),
         matchbook=_provider_slot(access, _MATCHBOOK),
         kalshi=_provider_slot(access, _KALSHI),
         universe=UniverseLoad(
             evaluated=evaluated,
             total=total,
             remaining=remaining,
+            cadence_seconds=_count(_attr(universe, "cadence_seconds")),
             generation_work_used_s=work_used,
             generation_budget_seconds=_optional_float(
                 _attr(universe, "generation_budget_seconds")

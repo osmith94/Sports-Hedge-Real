@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { LaneRefreshStatus, LiveRefreshStatus } from "./api";
-import { backgroundPriceCopy, dualScanStatusLines, fastScanCopy, fullSweepCopy } from "./scan-status-display";
+import { BACKGROUND_PRICING_LABEL, HOT_PRICING_LABEL, UNIVERSE_DISCOVERY_LABEL, backgroundPriceCopy, dualScanStatusLines, fastScanCopy, fullSweepCopy } from "./scan-status-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = join(here, "..");
@@ -50,12 +50,14 @@ function status(
 }
 
 describe("dual cadence operator copy", () => {
-  it("renders Fast scan and Full sweep as distinct lines", () => {
+  it("renders HOT pricing, BACKGROUND pricing and UNIVERSE discovery as distinct lines", () => {
     const now = Date.parse("2026-09-14T12:00:12Z");
     const lines = dualScanStatusLines(status(), now);
-    assert.equal(lines.length, 2);
-    assert.match(lines[0], /Fast scan/);
-    assert.match(lines[1], /Full sweep/);
+    assert.equal(lines.length, 3);
+    assert.match(lines[0], /HOT pricing/);
+    assert.match(lines[1], /BACKGROUND pricing/);
+    assert.match(lines[2], /UNIVERSE discovery/);
+    assert.doesNotMatch(lines.join(" "), /Fast scan|Full sweep|Fast Scan|Full Sweep/);
     assert.doesNotMatch(lines.join(" "), /^Last scan /);
     assert.match(fastScanCopy(status(), now).detail, /completed 12s ago/);
     assert.match(fastScanCopy(status(), now).detail, /next due in 6s/);
@@ -80,9 +82,12 @@ describe("dual cadence operator copy", () => {
     });
     const backgroundLines = dualScanStatusLines(withBackground, now);
     assert.equal(backgroundLines.length, 3);
-    assert.match(backgroundLines[2], /Background price engine/);
-    assert.match(backgroundLines[2], /12 ACTIVE/);
+    assert.match(backgroundLines[1], /BACKGROUND pricing/);
+    assert.match(backgroundLines[1], /12 ACTIVE/);
     assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /4 evaluated/);
+    assert.equal(fastScanCopy(status(), now).label, HOT_PRICING_LABEL);
+    assert.equal(fullSweepCopy(status(), now).label, UNIVERSE_DISCOVERY_LABEL);
+    assert.equal(backgroundPriceCopy(status(), now).label, BACKGROUND_PRICING_LABEL);
     const persistFailed = status({
       last_error: null,
       hot: {
@@ -286,30 +291,38 @@ describe("dual cadence operator copy", () => {
     assert.match(fullSweepCopy(waiting).detail, /72 evaluated/);
   });
 
-  it("makes operator-stopped status explicit for Fast/Full/Background", () => {
+  it("makes operator-stopped status explicit for HOT/BACKGROUND/UNIVERSE", () => {
     const lines = dualScanStatusLines(
       status({
         scanner_stopped: true,
-        background: { cadence_seconds: 180, cycle_timeout_seconds: null },
+        background: { cadence_seconds: 90, cycle_timeout_seconds: null },
       }),
     );
     assert.equal(lines.length, 3);
+    assert.match(lines[0], /HOT pricing/);
+    assert.match(lines[1], /BACKGROUND pricing/);
+    assert.match(lines[2], /UNIVERSE discovery/);
     assert.match(lines[0], /stopped by operator/);
     assert.match(lines[1], /stopped by operator/);
     assert.match(lines[2], /stopped by operator/);
+    assert.doesNotMatch(lines.join(" "), /Fast scan|Full sweep|Fast Scan|Full Sweep/);
   });
 
-  it("routes primary Run scan to HOT and labels full discovery as advanced", () => {
+  it("routes primary Manual HOT refresh to HOT and labels full discovery as advanced Full diagnostic", () => {
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
     const api = readFileSync(join(frontendRoot, "lib/api.ts"), "utf8");
     assert.match(scan, /await collect\("hot"\)/);
     assert.match(scan, /runPaperHotRefresh\(payload\)/);
-    assert.match(scan, /Run scan/);
+    assert.match(scan, /Manual HOT refresh/);
     assert.match(scan, /Run full diagnostic/);
+    assert.doesNotMatch(scan, /Run scan/);
+    assert.doesNotMatch(scan, /Fast [Ss]can|Full [Ss]weep/);
+    assert.doesNotMatch(scan, /collect\("universe"\)/);
     assert.match(scan, /disabled=\{loading \|\| scannerStopped\}/);
     assert.match(scan, /if \(liveRefresh\?\.scanner_stopped\) return;/);
     assert.match(scan, /collect\("diagnostic"\)/);
-    assert.match(scan, /does not\s+rediscover the full universe/);
+    assert.match(scan, /does not\s+rediscover the catalogue/);
+    assert.match(scan, /is not UNIVERSE discovery/);
     assert.match(scan, /HOT cadence s/);
     assert.match(scan, /Update/);
     assert.match(scan, /Stop scanner/);

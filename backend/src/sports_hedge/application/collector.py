@@ -1198,7 +1198,7 @@ class ReadOnlyCrossVenueCollector:
     def _discovery_timeout_budget(self, requested: float) -> float:
         """Cap list_events so clustering and evaluation keep a reserved soft slice.
 
-        Long cycles still use the configured venue timeout. Short Full Sweep
+        Long cycles still use the configured venue timeout. Short UNIVERSE discovery
         chunks reserve ``MIN_POST_DISCOVERY_SOFT_SECONDS`` so a hung/degraded
         venue cannot leftover the whole discovered universe unevaluated.
         Unbounded UNIVERSE has no assembly deadline, so the configured venue

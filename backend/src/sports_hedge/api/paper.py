@@ -948,11 +948,11 @@ async def refresh_hot_read_only_market_data(
     audit: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
     watchlist: WatchlistService = Depends(get_watchlist_service),
 ) -> CollectionReport:
-    """Refresh the current HOT identity scope with the scheduled Fast Scan contract.
+    """Refresh the current HOT identity scope with the scheduled HOT pricing contract.
 
     This primary operator action reuses current known source events, HOT venue
     participation, and the HOT timeout envelope. It never falls through to
-    universe discovery. Persistence/auto-capture remains after the HTTP response
+    UNIVERSE discovery. Persistence/auto-capture remains after the HTTP response
     and retains all normal paper qualification gates.
     """
 
@@ -1020,7 +1020,7 @@ async def collect_read_only_market_data(
 ) -> CollectionReport:
     """Run one bounded full-universe diagnostic and persist after the HTTP body.
 
-    This is not Fast Scan and not a Full Sweep generation chunk. Scheduled lanes
+    This is not HOT pricing and not a UNIVERSE discovery generation chunk. Scheduled lanes
     keep their own 25s HOT / chunked UNIVERSE budgets. Persistence/auto-capture
     is scheduled after Starlette sends the HTTP body so a slow persist cannot
     hold the browser past PAPER_COLLECTION_TIMEOUT_MS. Persistence remains
@@ -1261,7 +1261,8 @@ async def persist_explicit_collect_after_http_response(
 ) -> None:
     """Starlette BackgroundTask: runs after the collect HTTP body is sent.
 
-    Uses the same event-loop-safe persist wrapper as scheduled Fast/Full ticks.
+    Uses the same event-loop-safe persist wrapper as scheduled HOT pricing,
+    BACKGROUND pricing and UNIVERSE discovery ticks.
     Failures are recorded on live-refresh persist diagnostics.
     """
 
@@ -1283,7 +1284,7 @@ async def persist_manual_hot_after_http_response(
     audit: SqlitePaperScanRepository,
     watchlist: WatchlistService,
 ) -> None:
-    """Persist a manual Fast Scan result with HOT provenance after response."""
+    """Persist a manual HOT pricing result with HOT provenance after response."""
 
     await persist_scheduled_collection_report(
         coordinator,

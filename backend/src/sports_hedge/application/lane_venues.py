@@ -1,6 +1,6 @@
 """Lane-specific operator venue participation.
 
-Fast Scan (HOT) and Full Sweep (UNIVERSE) each have an independent enabled
+HOT pricing and UNIVERSE discovery each have an independent enabled
 set. This is scan scheduling only: it does not add venue write paths, fork
 identity/state stores, or hard-code Polymarket off.
 """

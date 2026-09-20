@@ -2,6 +2,10 @@ import { LiveRefreshStatus } from "./api";
 import { formatObservationAge } from "./observation-age";
 import { lastScanVenueClause } from "./venue-participation-display";
 
+export const HOT_PRICING_LABEL = "HOT pricing";
+export const BACKGROUND_PRICING_LABEL = "BACKGROUND pricing";
+export const UNIVERSE_DISCOVERY_LABEL = "UNIVERSE discovery";
+
 export type LaneScanCopy = {
   label: string;
   detail: string;
@@ -27,18 +31,18 @@ function nextDueClock(iso: string | null | undefined, now?: number | null): stri
   return `next due in ${delta}s`;
 }
 
-export function fastScanCopy(
+export function hotPricingCopy(
   status: LiveRefreshStatus | null,
   now: number | null = null,
 ): LaneScanCopy {
   const hot = status?.hot;
   if (!hot) {
-    return { label: "Fast scan", detail: "never" };
+    return { label: HOT_PRICING_LABEL, detail: "never" };
   }
   const venues = lastScanVenueClause(status, "hot");
   const venueSuffix = venues ? ` · ${venues}` : "";
   if (hot.cycle_in_progress) {
-    return { label: "Fast scan", detail: `in progress${venueSuffix}` };
+    return { label: HOT_PRICING_LABEL, detail: `in progress${venueSuffix}` };
   }
   const leftover = hot.not_evaluated_count
     ? ` · partial (${hot.not_evaluated_count} not evaluated)`
@@ -49,26 +53,29 @@ export function fastScanCopy(
       : "";
   if (hot.last_plan_reason === "hot_scope_empty" && hot.last_heartbeat_at) {
     return {
-      label: "Fast scan",
+      label: HOT_PRICING_LABEL,
       detail: `worker alive · scope empty · polling · no provider call${venueSuffix}${persist}`,
     };
   }
   if (!hot.last_completed_at && !hot.last_started_at && !hot.last_heartbeat_at) {
-    return { label: "Fast scan", detail: "never" };
+    return { label: HOT_PRICING_LABEL, detail: "never" };
   }
   return {
-    label: "Fast scan",
+    label: HOT_PRICING_LABEL,
     detail: `${completedClock(hot.last_completed_at, now)} · ran ${durationLabel(hot.last_duration_ms)} · ${nextDueClock(hot.next_due_at, now)} · ${hot.fixture_count} hot${venueSuffix}${leftover}${persist}`,
   };
 }
 
-export function fullSweepCopy(
+/** @deprecated Use hotPricingCopy. Kept as a compatibility alias. */
+export const fastScanCopy = hotPricingCopy;
+
+export function universeDiscoveryCopy(
   status: LiveRefreshStatus | null,
   now: number | null = null,
 ): LaneScanCopy {
   const universe = status?.universe;
   if (!universe) {
-    return { label: "Full sweep", detail: "never" };
+    return { label: UNIVERSE_DISCOVERY_LABEL, detail: "never" };
   }
   const venues = lastScanVenueClause(status, "universe");
   const venueSuffix = venues ? ` · ${venues}` : "";
@@ -84,49 +91,51 @@ export function fullSweepCopy(
     const progress =
       discovered > 0 ? `${evaluated}/${discovered} evaluated` : `${evaluated} evaluated`;
     return {
-      label: "Full sweep",
+      label: UNIVERSE_DISCOVERY_LABEL,
       detail: `in progress · ${progress}${venueSuffix}${persist}`,
     };
   }
   const elapsed = durationLabel(universe.chunk_last_duration_ms ?? universe.last_duration_ms);
   const state = universe.worker_state && universe.worker_state !== "idle" ? ` · ${universe.worker_state}` : "";
   return {
-    label: "Full sweep",
-    detail: `elapsed ${elapsed}${state} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${remaining} not evaluated${venueSuffix}${persist}`,
+    label: UNIVERSE_DISCOVERY_LABEL,
+    detail: `elapsed ${elapsed}${state} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${remaining} not evaluated · ${nextDueClock(universe.next_due_at, now)}${venueSuffix}${persist}`,
   };
 }
+
+/** @deprecated Use universeDiscoveryCopy. Kept as a compatibility alias. */
+export const fullSweepCopy = universeDiscoveryCopy;
 
 export function dualScanStatusLines(
   status: LiveRefreshStatus | null,
   now: number | null = null,
 ): string[] {
   if (status?.scanner_stopped) {
-    const lines = [
-      "Fast scan · stopped by operator · no provider call",
-      "Full sweep · stopped by operator · no provider call",
+    return [
+      `${HOT_PRICING_LABEL} · stopped by operator · no provider call`,
+      `${BACKGROUND_PRICING_LABEL} · stopped by operator · no provider call`,
+      `${UNIVERSE_DISCOVERY_LABEL} · stopped by operator · no provider call`,
     ];
-    if (status.background || status.price_engine?.background) {
-      lines.push("Background price engine · stopped by operator · no provider call");
-    }
-    return lines;
   }
-  const fast = fastScanCopy(status, now);
-  const full = fullSweepCopy(status, now);
-  const lines = [`${fast.label} · ${fast.detail}`, `${full.label} · ${full.detail}`];
+  const hot = hotPricingCopy(status, now);
   const background = backgroundPriceCopy(status, now);
-  if (background) {
-    lines.push(`${background.label} · ${background.detail}`);
-  }
-  return lines;
+  const universe = universeDiscoveryCopy(status, now);
+  return [
+    `${hot.label} · ${hot.detail}`,
+    `${background.label} · ${background.detail}`,
+    `${universe.label} · ${universe.detail}`,
+  ];
 }
 
 export function backgroundPriceCopy(
   status: LiveRefreshStatus | null,
-  _now: number | null = null,
-): LaneScanCopy | null {
+  now: number | null = null,
+): LaneScanCopy {
   const engine = status?.price_engine?.background;
   const lane = status?.background;
-  if (!engine && !lane) return null;
+  if (!engine && !lane) {
+    return { label: BACKGROUND_PRICING_LABEL, detail: "never" };
+  }
   const evaluated = engine?.evaluated ?? lane?.evaluated_count ?? 0;
   const retry = engine?.retry_wait ?? 0;
   const deferred = engine?.deferred ?? engine?.provider_capacity_saturated ?? 0;
@@ -134,8 +143,9 @@ export function backgroundPriceCopy(
   const working = engine?.working_set ?? 0;
   const inFlight = engine?.in_flight ?? 0;
   const suffix = lane?.cycle_in_progress ? " · in progress" : "";
+  const due = nextDueClock(lane?.next_due_at, now);
   return {
-    label: "Background price engine",
-    detail: `${working} ACTIVE · ${evaluated} evaluated · ${inFlight} in flight · ${retry} retry · ${deferred} deferred · ${notStarted} not started${suffix}`,
+    label: BACKGROUND_PRICING_LABEL,
+    detail: `${working} ACTIVE · ${evaluated} evaluated · ${inFlight} in flight · ${retry} retry · ${deferred} deferred · ${notStarted} not started · ${due}${suffix}`,
   };
 }

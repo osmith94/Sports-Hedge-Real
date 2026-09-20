@@ -271,7 +271,7 @@ export function OpportunityMonitor({
         <div>
           <div className="panel-title">Opportunity Monitor</div>
           <div className="panel-meta">
-            Current and recent cross-venue opportunities from Fast Scan + Full Sweep.
+            Current and recent cross-venue opportunities from HOT pricing, BACKGROUND pricing and UNIVERSE discovery.
             Paper describes execution mode, not this table. Current radar only — not the
             append-only scan audit.
           </div>
@@ -405,11 +405,15 @@ function OpportunitySummaryStrip({
       value: summary.activeVenues,
     },
     {
-      label: "Fast Scan",
+      label: "HOT pricing",
       value: summary.fastScan,
     },
     {
-      label: "Full Sweep",
+      label: "BACKGROUND pricing",
+      value: summary.backgroundPricing,
+    },
+    {
+      label: "UNIVERSE discovery",
       value: summary.fullSweep,
     },
   ];

@@ -78,7 +78,7 @@ describe("Wave N4 venue participation honesty", () => {
     assert.equal(mb?.participated, false);
     assert.equal(mb?.providerFailed, true);
     assert.equal(venueChipLabel(mb!), "MB ON · UNAVAILABLE");
-    assert.match(venueChipTitle(mb!, "Fast scan"), /did not receive MB data/);
+    assert.match(venueChipTitle(mb!, "HOT pricing"), /did not receive MB data/);
     assert.match(fastScanCopy(live, now).detail, /last scan PM·K/);
     assert.match(fastScanCopy(live, now).detail, /MB unavailable/);
     assert.doesNotMatch(fastScanCopy(live, now).detail, /last scan MB/);
@@ -178,7 +178,7 @@ describe("Wave N4 venue participation honesty", () => {
     assert.doesNotMatch(fastScanCopy(live).detail, /completed 0s ago|just now/);
   });
 
-  it("keeps Fast Scan last-scan truth after a later Full Sweep recovery", () => {
+  it("keeps HOT pricing last-scan truth after a later UNIVERSE discovery recovery", () => {
     const hotFailed = { matchbook: "unavailable", polymarket: "ok", kalshi: "ok" };
     const universeOk = { matchbook: "ok", polymarket: "ok", kalshi: "ok" };
     const live = status({
@@ -202,7 +202,7 @@ describe("Wave N4 venue participation honesty", () => {
     assert.equal(discoveryStatusBadgeLabel(true, live), "LIVE PAPER · MB / PM / K");
   });
 
-  it("keeps Full Sweep last-scan truth after a later Fast Scan recovery", () => {
+  it("keeps UNIVERSE discovery last-scan truth after a later HOT pricing recovery", () => {
     const universeFailed = { matchbook: "unavailable", polymarket: "ok", kalshi: "ok" };
     const hotOk = { matchbook: "ok", polymarket: "ok", kalshi: "ok" };
     const live = status({

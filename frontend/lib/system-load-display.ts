@@ -12,6 +12,7 @@ export function systemLoadLines(
     return [{ key: "—", detail: "unavailable" }];
   }
   const hot = load.hot ?? {};
+  const background = load.background ?? {};
   const mb = load.matchbook ?? {};
   const kalshi = load.kalshi ?? {};
   const universe = load.universe ?? {};
@@ -22,8 +23,18 @@ export function systemLoadLines(
   );
   return [
     {
-      key: "HOT",
+      key: "HOT pricing",
       detail: `${asCount(hot.fixtures)} fixtures · ${asCount(hot.working_set)} items · ${asCount(hot.due)} due · ${formatCycle(hot)}`,
+    },
+    {
+      key: "BACKGROUND pricing",
+      detail: `${asCount(background.working_set)} items · ${asCount(background.due)} due · cadence ${formatCadence(background.cadence_seconds)}`,
+    },
+    {
+      key: "UNIVERSE discovery",
+      detail: uniBudget
+        ? `${uniProgress} · cadence ${formatCadence(universe.cadence_seconds)} · ${uniBudget}`
+        : `${uniProgress} · cadence ${formatCadence(universe.cadence_seconds)}`,
     },
     {
       key: "MB",
@@ -32,10 +43,6 @@ export function systemLoadLines(
     {
       key: "K",
       detail: `${asCount(kalshi.inflight)}/${asCount(kalshi.limit)} in use · queue ${asCount(kalshi.waiting)}`,
-    },
-    {
-      key: "UNI",
-      detail: uniBudget ? `${uniProgress} · ${uniBudget}` : uniProgress,
     },
     {
       key: "ALL",
@@ -52,6 +59,11 @@ function formatCycle(hot: NonNullable<SystemLoadSummary["hot"]>): string {
   const ratio = hot.cadence_utilisation;
   if (ratio == null || !Number.isFinite(ratio)) return `cycle ${duration} / ${cadence}`;
   return `cycle ${duration} / ${cadence} (${Math.round(ratio * 100)}%)`;
+}
+
+function formatCadence(seconds: unknown): string {
+  const cadence = asCount(seconds);
+  return cadence > 0 ? `${cadence}s` : "—";
 }
 
 function formatBudget(used: number | null | undefined, budget: number | null | undefined): string | null {

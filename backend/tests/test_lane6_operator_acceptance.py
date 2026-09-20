@@ -186,8 +186,12 @@ def test_live_scan_pulse_states_are_real_and_last_scan_is_not_invented() -> None
     assert "Auto refresh off" in pulse
     assert "Scanner stopped" in pulse
     assert "Waiting for first scan" in pulse
-    assert "Fast scan" in scan
-    assert "Full sweep" in scan
+    assert "HOT pricing" in scan
+    assert "UNIVERSE discovery" in scan
+    assert "BACKGROUND pricing" in scan
+    assert "Manual HOT refresh" in scan
+    assert "Fast scan" not in scan
+    assert "Full sweep" not in scan
     assert "Refresh interval" not in scan
     assert "HOT cadence s" in scan
     assert "Update" in scan
@@ -199,9 +203,10 @@ def test_live_scan_pulse_states_are_real_and_last_scan_is_not_invented() -> None
     assert "dualScanStatusLines" in scan
     assert "pollLiveStatus" in scan
     assert "void collectRef.current()" not in scan
-    assert "server owns Fast/Full scans" in scan
+    assert "server owns HOT / BACKGROUND / UNIVERSE" in scan
     assert "Refreshing HOT…" in scan
-    assert "Run scan" in scan
+    assert "Manual HOT refresh" in scan
+    assert "Run scan" not in scan
     assert "Run full diagnostic" in scan
     assert "setLastCompletedAt(new Date().toISOString())" not in scan
     assert "Keep prior last-scan facts" in scan

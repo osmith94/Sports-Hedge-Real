@@ -361,7 +361,7 @@ export function RunPaperScan() {
         applyLiveRefresh,
       );
     } catch {
-      // Status endpoint down: keep prior Fast/Full facts.
+      // Status endpoint down: keep prior HOT/BACKGROUND/UNIVERSE facts.
     }
   }, [applyLiveRefresh]);
 
@@ -533,7 +533,7 @@ export function RunPaperScan() {
         <div>
           <div className="panel-title">Paper scanner</div>
           <div className="panel-meta">
-            Server-owned Fast/Full scanner plus manual HOT refresh and bounded diagnostics.
+            Server-owned HOT pricing, BACKGROUND pricing and UNIVERSE discovery plus manual HOT refresh and bounded diagnostics.
           </div>
         </div>
         <div className="heading-actions">
@@ -612,7 +612,7 @@ export function RunPaperScan() {
               aria-busy={loading}
               title={scannerStopped ? "Scanner stopped by operator" : undefined}
             >
-              {loadingMode === "hot" ? "Scanning… Refreshing HOT…" : "Run scan"}
+              {loadingMode === "hot" ? "Scanning… Refreshing HOT…" : "Manual HOT refresh"}
             </button>
           </div>
         </div>
@@ -642,7 +642,7 @@ export function RunPaperScan() {
           </button>
           {scannerStopped ? (
             <span className="status-badge" role="status">
-              SCANNER STOPPED · HOT/UNIVERSE/BACKGROUND paused
+              SCANNER STOPPED · HOT pricing / BACKGROUND pricing / UNIVERSE discovery paused
             </span>
           ) : null}
         </div>
@@ -652,13 +652,13 @@ export function RunPaperScan() {
           </div>
         ) : null}
         <div className="scan-note">
-          Run scan performs a manual HOT refresh of current known fixtures.
-          It does not rediscover the full universe or advance the scheduled Fast Scan / Full Sweep
-          lanes. Update saves Min Net Arb, Max Risk and HOT cadence for subsequent server-owned work
+          Manual HOT refresh performs a HOT pricing refresh of current known fixtures.
+          It does not rediscover the catalogue or advance scheduled HOT pricing, BACKGROUND
+          pricing or UNIVERSE discovery. Update saves Min Net Arb, Max Risk and HOT cadence for subsequent server-owned work
           and does not trigger a scan. HOT cadence is how often HOT pricing is due; Auto refresh view
           only polls status.
         </div>
-        <div className="scan-note" aria-label="Fast scan and Full sweep status">
+        <div className="scan-note" aria-label="HOT pricing, BACKGROUND pricing and UNIVERSE discovery status">
           {dualScanStatusLines(liveRefresh, nowMs).map((line) => (
             <div key={line}>{line}</div>
           ))}
@@ -666,7 +666,7 @@ export function RunPaperScan() {
             ? serverOwned
               ? scannerStopped
                 ? " · view refresh on · scanner stopped by operator"
-                : " · auto on · view refresh · server owns Fast/Full scans"
+                : " · auto on · view refresh · server owns HOT / BACKGROUND / UNIVERSE"
               : " · auto on · view refresh"
             : " · view refresh off"}
         </div>
@@ -691,9 +691,9 @@ export function RunPaperScan() {
             </button>
           </div>
           <p className="scan-advanced-copy">
-            Full diagnostic sweep performs broad venue discovery and can take substantially longer
-            than the HOT refresh. It is read-only and remains bounded by the diagnostic scan
-            envelope.
+            Full diagnostic performs bounded broad venue discovery for operator diagnosis.
+            It is not UNIVERSE discovery and does not advance the scheduled UNIVERSE discovery
+            generation. It is read-only and remains bounded by the diagnostic scan envelope.
           </p>
           <div className="econ-strip" aria-label="Backend-resolved FX and venue costs">
             {chips.map((chip) => (

@@ -1,4 +1,4 @@
-"""Backend-owned Fast Scan / Full Sweep venue participation.
+"""Backend-owned HOT pricing / UNIVERSE discovery venue participation.
 
 Operator selections persist across browser refresh and process restart.
 Env defaults are the fallback when no operator row exists. This is not a

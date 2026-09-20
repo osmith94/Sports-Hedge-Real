@@ -280,7 +280,7 @@ export function DemoWalkthroughBoard() {
             <div className="panel-title">2. Discovery / tracking</div>
             <div className="panel-meta">
               Read-only live/near-future football via the broad `/paper/collect` diagnostic path.
-              The operations console primary Run scan uses bounded HOT instead. Empty stays
+              The operations console primary Manual HOT refresh uses bounded HOT pricing instead. Empty stays
               empty.
               Fixture replay is never mixed into these rows.
             </div>

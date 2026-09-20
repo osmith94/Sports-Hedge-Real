@@ -444,17 +444,18 @@ describe("opportunity monitor age, provenance, navigation, legs, empty honesty",
     assert.equal(OBSERVATION_AGE_TICK_MS, 1000);
   });
 
-  it("labels HOT as Fast Scan and UNIVERSE as Full Sweep", () => {
-    assert.equal(scanLaneLabel("hot"), "Fast Scan / HOT");
-    assert.equal(scanLaneLabel("universe"), "Full Sweep / UNIVERSE");
+  it("labels HOT as HOT pricing and UNIVERSE as UNIVERSE discovery", () => {
+    assert.equal(scanLaneLabel("hot"), "HOT pricing");
+    assert.equal(scanLaneLabel("background"), "BACKGROUND pricing");
+    assert.equal(scanLaneLabel("universe"), "UNIVERSE discovery");
     assert.equal(scanLaneLabel(null), "—");
     const hot = opportunityMonitorRow(watch({ opportunity_id: "hot", scan_lane: "hot", freshness_class: "executable" }));
     const universe = opportunityMonitorRow(
       watch({ opportunity_id: "uni", scan_lane: "universe", freshness_class: "radar_current" }),
     );
-    assert.equal(hot.laneLabel, "Fast Scan / HOT");
+    assert.equal(hot.laneLabel, "HOT pricing");
     assert.equal(hot.freshnessLabel, "executable");
-    assert.equal(universe.laneLabel, "Full Sweep / UNIVERSE");
+    assert.equal(universe.laneLabel, "UNIVERSE discovery");
     assert.equal(universe.freshnessLabel, "radar current");
   });
 
@@ -642,8 +643,9 @@ describe("opportunity monitor age, provenance, navigation, legs, empty honesty",
     assert.equal(empty.newestObservedAt, null);
     assert.equal(empty.dataClass, "LIVE PAPER");
     assert.match(empty.activeVenues, /matchbook/);
-    assert.match(empty.fastScan, /Fast scan/);
-    assert.match(empty.fullSweep, /Full sweep/);
+    assert.match(empty.fastScan, /HOT pricing/);
+    assert.match(empty.backgroundPricing, /BACKGROUND pricing/);
+    assert.match(empty.fullSweep, /UNIVERSE discovery/);
     const unavailable = opportunityMonitorSummary([], null, false, false);
     assert.equal(unavailable.qualifyingCount, null);
     assert.equal(unavailable.bestNetEdge, null);
@@ -668,6 +670,10 @@ describe("opportunity monitor table contract", () => {
     assert.match(table, /fixture-link tracked-market-link/);
     assert.match(table, /Toggle outcome legs/);
     assert.match(table, /loaded current set only/);
+    assert.match(table, /label: "HOT pricing"/);
+    assert.match(table, /label: "BACKGROUND pricing"/);
+    assert.match(table, /label: "UNIVERSE discovery"/);
+    assert.doesNotMatch(table, /Fast scan|Full sweep|Fast Scan|Full Sweep/);
     assert.match(table, /MappingVerificationPanel/);
     assert.match(table, /opportunity-mapping-verify/);
     assert.doesNotMatch(table, /tabIndex=\{0\}/);
