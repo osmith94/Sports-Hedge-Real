@@ -118,6 +118,7 @@ const ACTIVITY_TITLES: Record<WatchlistLifecycleEventType, string> = {
   trigger_crossed: "Threshold crossed",
   trigger_lost_before_fill: "Trigger lost before fill",
   promoted_to_hot: "Promoted to HOT",
+  paper_eligible: "Paper eligible",
   paper_fill_attempted: "Paper fill attempted",
   paper_fill_partial: "Partial paper fill",
   paper_fill_complete: "Trade entered",
@@ -133,6 +134,7 @@ const ACTIVITY_TITLES: Record<WatchlistLifecycleEventType, string> = {
 
 export const OPERATOR_ACTIVITY_EVENT_TYPES = [
   "promoted_to_hot",
+  "paper_eligible",
   "trigger_lost_before_fill",
   "paper_fill_complete",
   "closed",
@@ -169,6 +171,7 @@ function activityDetail(event: OpportunityLifecycleEvent, subject: string | null
 
 function activityKind(eventType: WatchlistLifecycleEventType): string {
   if (eventType === "promoted_to_hot") return "PROMOTED_TO_HOT";
+  if (eventType === "paper_eligible") return "PAPER_ELIGIBLE";
   if (eventType === "trigger_lost_before_fill") return "TRIGGER_LOST_BEFORE_FILL";
   if (eventType === "paper_fill_complete") return "TRADE_ENTERED";
   if (eventType === "closed") return "TRADE_EXITED";
@@ -182,6 +185,14 @@ function activityKind(eventType: WatchlistLifecycleEventType): string {
   return eventType.toUpperCase();
 }
 
+export function lifecycleEventTitle(eventType: string): string {
+  return ACTIVITY_TITLES[eventType as WatchlistLifecycleEventType] ?? eventType.replaceAll("_", " ");
+}
+
+export function activityHistoryPath(opportunityId: string): string {
+  return `/activity/${encodeURIComponent(opportunityId)}`;
+}
+
 export function activityFromWatchlist(events: OpportunityLifecycleEvent[]): ActivityEvent[] {
   return events.filter(isVisibleOperatorActivityEvent).map((item) => {
     const subject = activitySubjectFromEvent(item);
@@ -190,7 +201,7 @@ export function activityFromWatchlist(events: OpportunityLifecycleEvent[]): Acti
       provenance: "LIVE_PAPER",
       at: item.occurred_at,
       kind: activityKind(item.event_type),
-      title: ACTIVITY_TITLES[item.event_type] ?? item.event_type.replaceAll("_", " "),
+      title: lifecycleEventTitle(item.event_type),
       subject,
       detail: activityDetail(item, subject),
       opportunityId: item.opportunity_id,

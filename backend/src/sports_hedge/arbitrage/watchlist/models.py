@@ -75,6 +75,7 @@ class LifecycleEventType(StrEnum):
     TRIGGER_CROSSED = "trigger_crossed"
     TRIGGER_LOST_BEFORE_FILL = "trigger_lost_before_fill"
     PROMOTED_TO_HOT = "promoted_to_hot"
+    PAPER_ELIGIBLE = "paper_eligible"
     PAPER_FILL_ATTEMPTED = "paper_fill_attempted"
     PAPER_FILL_PARTIAL = "paper_fill_partial"
     PAPER_FILL_COMPLETE = "paper_fill_complete"
@@ -91,6 +92,7 @@ class LifecycleEventType(StrEnum):
 OPERATOR_ACTIVITY_UNCONDITIONAL_EVENT_TYPES = frozenset(
     {
         LifecycleEventType.PROMOTED_TO_HOT,
+        LifecycleEventType.PAPER_ELIGIBLE,
         LifecycleEventType.PAPER_FILL_COMPLETE,
         LifecycleEventType.CLOSED,
     }

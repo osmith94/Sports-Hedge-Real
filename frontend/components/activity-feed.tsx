@@ -1,4 +1,7 @@
+import Link from "next/link";
+
 import { ActivityEvent } from "../lib/arbitrage-ops";
+import { activityHistoryPath } from "../lib/watchlist";
 import { HydratedRelativeTime } from "./hydrated-relative-time";
 
 export function ActivityFeed({
@@ -14,7 +17,7 @@ export function ActivityFeed({
         <div>
           <div className="panel-title">Activity feed</div>
           <div className="panel-meta">
-            PAPER operator timeline · Promoted to HOT, trigger lost, trade entered, trade exited
+            PAPER operator timeline · Promoted to HOT, paper eligible, trigger lost, trade entered, trade exited
           </div>
         </div>
           <span className={usedFixture ? "demo-chip" : "status-badge"}>
@@ -39,6 +42,15 @@ export function ActivityFeed({
               <div className="feed-title">
                 {item.title}
                 {item.provenance === "DEMO_FIXTURE" ? <span className="demo-inline">DEMO</span> : null}
+                {item.opportunityId ? (
+                  <Link
+                    className="feed-history"
+                    href={activityHistoryPath(item.opportunityId)}
+                    data-history-opportunity-id={item.opportunityId}
+                  >
+                    History
+                  </Link>
+                ) : null}
               </div>
               {item.subject ? <div className="feed-subject">{item.subject}</div> : null}
               {item.detail ? <div className="feed-detail">{item.detail}</div> : null}

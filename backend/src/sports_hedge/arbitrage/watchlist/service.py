@@ -926,6 +926,16 @@ class WatchlistService:
                         )
                     )
 
+        if _entered_capture_eligible_triggered_episode(previous, current):
+            events.append(
+                self._event(
+                    current,
+                    LifecycleEventType.PAPER_ELIGIBLE,
+                    detail="capture_eligible_triggered",
+                    capture_eligible=True,
+                )
+            )
+
         events.extend(self._rejection_events(previous, current, observation))
         for event in events:
             self.repository.append_event(event)
@@ -1075,6 +1085,19 @@ def _episode_capture_eligible(
         and previous.capture_eligible
     )
     return sticky or observation.eligible_for_paper_simulation
+
+
+def _entered_capture_eligible_triggered_episode(
+    previous: NearOpportunity | None,
+    current: NearOpportunity,
+) -> bool:
+    """Emit Paper eligible once when a TRIGGERED stay first becomes capture-eligible."""
+
+    if current.status != OpportunityStatus.TRIGGERED or not current.capture_eligible:
+        return False
+    if previous is None:
+        return True
+    return not (previous.status == OpportunityStatus.TRIGGERED and previous.capture_eligible)
 
 
 def _presentation_stale_only(reasons: list[str]) -> bool:
