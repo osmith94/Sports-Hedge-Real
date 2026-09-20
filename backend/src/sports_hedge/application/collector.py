@@ -120,7 +120,6 @@ from sports_hedge.application.target_competitions import (
     UNMATCHED_POLYMARKET_COVERAGE,
     TargetCompetition,
     TargetCompetitionCode,
-    default_operator_competition_code_values,
     filter_in_scope_events,
     kalshi_series_tickers_for_codes,
     polymarket_series_ids_for_codes,
@@ -750,10 +749,10 @@ class ReadOnlyCrossVenueCollector:
         self._op_enabled_venues = enabled
         self._op_request_lane = (scan_lane or "").strip().casefold() or None
         self._op_universe_generation_id = universe_generation_id
-        self._op_selected_competition_codes = tuple(
-            selected_competition_codes
+        self._op_selected_competition_codes = (
+            tuple(selected_competition_codes)
             if selected_competition_codes is not None
-            else default_operator_competition_code_values()
+            else None
         )
         self._op_generation_scope_version = generation_scope_version
         self._op_generation_superseded = bool(generation_superseded)
@@ -927,18 +926,19 @@ class ReadOnlyCrossVenueCollector:
                         issues=issues,
                         venue_health=venue_health,
                     )
-                    selected_pm_ids = polymarket_series_ids_for_codes(
-                        self._op_selected_competition_codes
-                    )
-                    selected_k_tickers = kalshi_series_tickers_for_codes(
-                        self._op_selected_competition_codes
-                    )
                     pm_filters = dict(polymarket_event_filters or {})
-                    if selected_pm_ids and "series_id" not in pm_filters:
-                        pm_filters["series_ids"] = selected_pm_ids
                     k_filters: dict[str, Any] = {}
-                    if selected_k_tickers:
-                        k_filters["series_tickers"] = selected_k_tickers
+                    if self._op_selected_competition_codes is not None:
+                        selected_pm_ids = polymarket_series_ids_for_codes(
+                            self._op_selected_competition_codes
+                        )
+                        selected_k_tickers = kalshi_series_tickers_for_codes(
+                            self._op_selected_competition_codes
+                        )
+                        if selected_pm_ids and "series_id" not in pm_filters:
+                            pm_filters["series_ids"] = selected_pm_ids
+                        if selected_k_tickers:
+                            k_filters["series_tickers"] = selected_k_tickers
                     pm_task = self._discovery_task(
                         self.polymarket,
                         venue=VenueName.POLYMARKET,
@@ -1012,9 +1012,12 @@ class ReadOnlyCrossVenueCollector:
                 )
                 queried_series_ids = _resolved_queried_series_ids(
                     polymarket_event_filters,
-                    polymarket_series_ids_for_codes(self._op_selected_competition_codes)
-                    if polymarket_queried_series_ids is None
-                    else polymarket_queried_series_ids,
+                    (
+                        polymarket_series_ids_for_codes(self._op_selected_competition_codes)
+                        if self._op_selected_competition_codes is not None
+                        and polymarket_queried_series_ids is None
+                        else polymarket_queried_series_ids
+                    ),
                 )
                 mb_items = [
                     to_venue_event(event, VenueName.MATCHBOOK) for event in matchbook_events
