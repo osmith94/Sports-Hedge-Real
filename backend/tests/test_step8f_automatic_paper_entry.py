@@ -47,6 +47,17 @@ OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
 FX = [FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), spread_bps=Decimal("0"), source="test")]
 
 
+def _quote_observed_at() -> datetime:
+    """Capture time aligned with scan/fill wall-clock.
+
+    Fixture `OBSERVED` is 13:00Z on the soak date. After that instant,
+    capture→T1 elapsed exceeds paper-entry freshness and fills fail closed
+    for the wrong reason. Quote age remains the configured `quote_age_ms`.
+    """
+
+    return datetime.now(UTC)
+
+
 def _standing_locked_matchbook() -> PaperLiquiditySnapshot:
     pools = default_pools(
         matchbook_gbp=Decimal("700"),
@@ -59,7 +70,7 @@ def _standing_locked_matchbook() -> PaperLiquiditySnapshot:
             updated.append(pool.model_copy(update={"available": Decimal("700"), "locked": Decimal("300")}))
         else:
             updated.append(pool)
-    return PaperLiquiditySnapshot(pools=updated, updated_at=OBSERVED)
+    return PaperLiquiditySnapshot(pools=updated, updated_at=_quote_observed_at())
 
 
 def _standing(
@@ -74,7 +85,7 @@ def _standing(
             polymarket_usd=polymarket_usd,
             kalshi_usd=kalshi_usd,
         ),
-        updated_at=OBSERVED,
+        updated_at=_quote_observed_at(),
     )
 
 
@@ -138,19 +149,31 @@ def _observe_and_persist(
     return decision
 
 
-def _matchbook_btts():
+def _matchbook_btts(*, observed_at: datetime | None = None):
     event, market = matchbook_payloads()
-    return MatchbookObservationBuilder().build(event, market, observed_at=OBSERVED, quote_age_ms=120)
-
-
-def _polymarket_btts():
-    event, market, books = polymarket_payloads()
-    return PolymarketObservationBuilder().build(
-        event, market, books, observed_at=OBSERVED, quote_age_ms=180
+    return MatchbookObservationBuilder().build(
+        event, market, observed_at=observed_at or _quote_observed_at(), quote_age_ms=120
     )
 
 
-def _kalshi_btts(*, yes_price: str = "0.20", no_price: str = "0.70", size: str = "500.00"):
+def _polymarket_btts(*, observed_at: datetime | None = None):
+    event, market, books = polymarket_payloads()
+    return PolymarketObservationBuilder().build(
+        event,
+        market,
+        books,
+        observed_at=observed_at or _quote_observed_at(),
+        quote_age_ms=180,
+    )
+
+
+def _kalshi_btts(
+    *,
+    yes_price: str = "0.20",
+    no_price: str = "0.70",
+    size: str = "500.00",
+    observed_at: datetime | None = None,
+):
     market = _btts_market()
     book = {
         "orderbook_fp": {
@@ -163,7 +186,7 @@ def _kalshi_btts(*, yes_price: str = "0.20", no_price: str = "0.70", size: str =
         market,
         {market["ticker"]: book},
         series=KALSHI_SERIES,
-        observed_at=OBSERVED,
+        observed_at=observed_at or _quote_observed_at(),
         quote_age_ms=80,
         quote_age_basis="retrieval",
         fee_snapshot={"fee_type": "quadratic", "fee_multiplier": "1"},
@@ -186,7 +209,7 @@ def _pm_kalshi_costs(captured: datetime | None = None):
     ]
 
 
-def _kalshi_ftts_observation():
+def _kalshi_ftts_observation(*, observed_at: datetime | None = None):
     from test_step7_safe_market_expansion import KICKOFF as FTTS_KICKOFF
 
     event = {
@@ -237,7 +260,7 @@ def _kalshi_ftts_observation():
         markets,
         {item["ticker"]: dict(book) for item in markets},
         series=series,
-        observed_at=OBSERVED,
+        observed_at=observed_at or _quote_observed_at(),
         quote_age_ms=80,
         quote_age_basis="retrieval",
         fee_snapshot={"fee_type": "quadratic", "fee_multiplier": "1"},
@@ -325,7 +348,7 @@ def test_generalized_payoff_autofill_skips_zero_stake_legs(tmp_path: Path) -> No
     scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
     try:
         matchbook = MatchbookObservationBuilder().build(
-            MB_EVENT, _ftts_mb_payload(), observed_at=OBSERVED, quote_age_ms=120
+            MB_EVENT, _ftts_mb_payload(), observed_at=_quote_observed_at(), quote_age_ms=120
         )
         kalshi = _kalshi_ftts_observation()
         decision = _observe_and_persist(
@@ -373,7 +396,7 @@ def test_generalized_missing_edge_fails_closed_without_implied_sum(tmp_path: Pat
     scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
     try:
         matchbook = MatchbookObservationBuilder().build(
-            MB_EVENT, _ftts_mb_payload(), observed_at=OBSERVED, quote_age_ms=120
+            MB_EVENT, _ftts_mb_payload(), observed_at=_quote_observed_at(), quote_age_ms=120
         )
         kalshi = _kalshi_ftts_observation()
         decision = scan.scan_pair(
@@ -756,7 +779,9 @@ def test_watchlist_stale_clock_ages_radar_without_open_trade(tmp_path: Path) -> 
         )
         opportunity_id = next(iter(ops._plans))
         before = ledger.treasury.snapshot()
-        aged = watchlist.triggered(as_of=OBSERVED + timedelta(seconds=30), limit=10)
+        row = watchlist.repository.get(opportunity_id)
+        assert row is not None
+        aged = watchlist.triggered(as_of=row.last_seen_at + timedelta(seconds=30), limit=10)
         assert aged == []
         row = watchlist.repository.get(opportunity_id)
         assert row is not None

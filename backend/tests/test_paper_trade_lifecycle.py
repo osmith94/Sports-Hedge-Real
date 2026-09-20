@@ -48,6 +48,17 @@ from venue_cost_helpers import matchbook_kalshi_costs
 OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
 
 
+def _quote_observed_at() -> datetime:
+    """Capture time aligned with scan/fill wall-clock.
+
+    Fixture `OBSERVED` is 13:00Z on the soak date. After that instant,
+    capture→T1 elapsed exceeds paper-entry freshness and fills fail closed
+    for the wrong reason. Quote age remains the configured `quote_age_ms`.
+    """
+
+    return datetime.now(UTC)
+
+
 def _standing_liquidity() -> PaperLiquiditySnapshot:
     return PaperLiquiditySnapshot(
         pools=default_pools(
@@ -55,7 +66,7 @@ def _standing_liquidity() -> PaperLiquiditySnapshot:
             polymarket_usd=Decimal("5000"),
             kalshi_usd=Decimal("5000"),
         ),
-        updated_at=OBSERVED,
+        updated_at=_quote_observed_at(),
     )
 
 
@@ -176,10 +187,11 @@ def _ops(
         ledger=ledger,
     )
     mb_event, mb_market = matchbook_payloads()
+    captured = _quote_observed_at()
     matchbook = MatchbookObservationBuilder().build(
-        mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
+        mb_event, mb_market, observed_at=captured, quote_age_ms=120
     )
-    kalshi = kalshi_btts_observation()
+    kalshi = kalshi_btts_observation(observed_at=captured)
     decision = scan.scan_pair(
         matchbook,
         kalshi,
@@ -1011,10 +1023,11 @@ def test_repeat_after_close_and_restart_does_not_duplicate(tmp_path: Path) -> No
     )
     try:
         mb_event, mb_market = matchbook_payloads()
+        captured = _quote_observed_at()
         matchbook = MatchbookObservationBuilder().build(
-            mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
+            mb_event, mb_market, observed_at=captured, quote_age_ms=120
         )
-        kalshi = kalshi_btts_observation()
+        kalshi = kalshi_btts_observation(observed_at=captured)
         decision = scan.scan_pair(
             matchbook,
             kalshi,
@@ -1081,10 +1094,11 @@ def test_awaiting_repeat_survives_restart_without_duplicate(tmp_path: Path) -> N
     )
     try:
         mb_event, mb_market = matchbook_payloads()
+        captured = _quote_observed_at()
         matchbook = MatchbookObservationBuilder().build(
-            mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
+            mb_event, mb_market, observed_at=captured, quote_age_ms=120
         )
-        kalshi = kalshi_btts_observation()
+        kalshi = kalshi_btts_observation(observed_at=captured)
         decision = scan.scan_pair(
             matchbook,
             kalshi,

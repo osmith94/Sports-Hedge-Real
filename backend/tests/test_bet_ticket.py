@@ -356,7 +356,9 @@ def test_recommend_and_prepare_api_keep_paper_boundary(tmp_path: Path) -> None:
         assert opportunity_id not in {
             item["opportunity_id"] for item in tracked_empty.json()
         }
-        coordinator.record_report(_report(decision.canonical_market_id))
+        coordinator.record_report(
+            _report(decision.canonical_market_id, when=decision.scanned_at)
+        )
         tracked = client.get("/paper/watchlist/tracked")
         assert tracked.status_code == 200
         rows = {item["opportunity_id"]: item for item in tracked.json()}

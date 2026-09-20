@@ -68,10 +68,11 @@ def _scan_and_persist() -> tuple[
         settings=settings,
     )
     mb_event, mb_market = matchbook_payloads()
+    captured = datetime.now(UTC)
     matchbook = MatchbookObservationBuilder().build(
-        mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
+        mb_event, mb_market, observed_at=captured, quote_age_ms=120
     )
-    kalshi = kalshi_btts_observation()
+    kalshi = kalshi_btts_observation(observed_at=captured)
     decision = scan.scan_pair(
         matchbook,
         kalshi,

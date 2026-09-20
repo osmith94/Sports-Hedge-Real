@@ -35,13 +35,13 @@ from test_step7_safe_market_expansion import MB_EVENT
 from test_step8b_first_team_to_score import _ftts_mb_payload
 from test_step8c_bankroll_allocator import POLICY, _balances, _demo_request
 from test_step8f_automatic_paper_entry import (
-    OBSERVED,
     _matchbook_btts,
     _observe_and_persist,
     _ops_bundle,
     _kalshi_btts,
     _kalshi_costs,
     _kalshi_ftts_observation,
+    _quote_observed_at,
 )
 
 TEN = Decimal("10")
@@ -240,7 +240,7 @@ def test_prepare_ten_pound_btts_shows_exact_legs_without_opening(tmp_path: Path)
 
 def test_prepare_ten_pound_generalized_ftts_without_opening(tmp_path: Path) -> None:
     matchbook = MatchbookObservationBuilder().build(
-        MB_EVENT, _ftts_mb_payload(), observed_at=OBSERVED, quote_age_ms=120
+        MB_EVENT, _ftts_mb_payload(), observed_at=_quote_observed_at(), quote_age_ms=120
     )
     kalshi = _kalshi_ftts_observation()
     scan, watchlist, ops, repository, ledger, decision = _persist_qualified(
