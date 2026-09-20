@@ -42,7 +42,6 @@ from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepositor
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
-from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.fills import FillMode, PaperFillConfig
@@ -331,7 +330,7 @@ def test_lane3_realistic_fill_model_depth_slippage_latency_stale_partial() -> No
     assert partial.rejection_reason == INSUFFICIENT_DEPTH
 
 
-def test_lane3_stale_partial_do_not_open_or_leak_locks(tmp_path: Path) -> None:
+def test_lane3_incomplete_opening_does_not_open_or_leak_locks(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=False)
     try:
         _observe_and_persist(
@@ -345,12 +344,8 @@ def test_lane3_stale_partial_do_not_open_or_leak_locks(tmp_path: Path) -> None:
         opportunity_id = next(iter(ops._plans))
         before = ledger.treasury.snapshot()
         plan = ops._plans[opportunity_id]
-        thin = plan.legs[-1]
-        plan.legs[-1] = thin.model_copy(
-            update={
-                "quote_age_ms": 50_000,
-                "levels": [BookLevel(decimal_odds=thin.displayed_odds, available_stake=thin.requested_stake / 10)],
-            }
+        ops._plans[opportunity_id] = plan.model_copy(
+            update={"legs": [leg.model_copy(update={"levels": []}) for leg in plan.legs]}
         )
         with pytest.raises(PaperOperationsError):
             ops.simulate_fill(

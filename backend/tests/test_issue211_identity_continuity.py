@@ -772,7 +772,8 @@ async def test_collector_sequential_reanchor_merges_into_existing_identity() -> 
         paper_scan=PaperScanService(MarketIntelligenceService(repository)),
         cycle_timeout_seconds=8,
     )
-    coordinator = LiveRefreshCoordinator(clock=FakeClock(FAKE_KICKOFF - timedelta(days=3)))
+    evaluated = FAKE_KICKOFF - timedelta(days=3)
+    coordinator = LiveRefreshCoordinator(clock=FakeClock(evaluated))
     coordinator.reset()
     try:
         first = await collector.collect_and_scan(
@@ -782,16 +783,17 @@ async def test_collector_sequential_reanchor_merges_into_existing_identity() -> 
             maximum_execution_risk=100,
             max_event_pairs=8,
         )
+        first = first.model_copy(update={"started_at": evaluated, "completed_at": evaluated})
         coordinator.record_report(first, scan_lane=ScanLane.UNIVERSE)
         store = coordinator.fixture_current_state()
         newcastle = [
             item
-            for item in store.inventory(first.completed_at)
+            for item in store.inventory(evaluated)
             if item.home_team == "Newcastle United" and item.away_team == "Chelsea"
         ]
         assert len(newcastle) == 1
         first_id = newcastle[0].canonical_event_id
-        assert first_id in store.hot_identity_scope(first.completed_at)
+        assert first_id in store.hot_identity_scope(evaluated)
         assert store.resolve_canonical_id("pm-event-1") == first_id
 
         second = await collector.collect_and_scan(
@@ -802,10 +804,11 @@ async def test_collector_sequential_reanchor_merges_into_existing_identity() -> 
             maximum_execution_risk=100,
             max_event_pairs=8,
         )
+        second = second.model_copy(update={"started_at": evaluated, "completed_at": evaluated})
         coordinator.record_report(second, scan_lane=ScanLane.UNIVERSE)
         later_rows = [
             item
-            for item in store.inventory(second.completed_at)
+            for item in store.inventory(evaluated)
             if item.home_team == "Newcastle United" and item.away_team == "Chelsea"
         ]
         assert len(later_rows) == 1
@@ -813,7 +816,7 @@ async def test_collector_sequential_reanchor_merges_into_existing_identity() -> 
         assert surviving == first_id
         assert store.resolve_canonical_id("pm-event-1") == first_id
         assert len([key for key in store._rows if store._rows[key].status_fixture() and store._rows[key].status_fixture().home_team == "Newcastle United"]) == 1
-        hot = store.hot_identity_scope(second.completed_at)
+        hot = store.hot_identity_scope(evaluated)
         assert hot.count(first_id) <= 1
         assert all(
             store.resolve_canonical_id(item) in {first_id, None} or item == first_id

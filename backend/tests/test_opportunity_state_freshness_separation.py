@@ -1,7 +1,8 @@
 """Economic radar status stays independent of execution freshness.
 
-Paper-only: stale/unknown quotes still cannot create a paper fill. Data class:
-deterministic watchlist observations and paper-scan fixtures, not live quotes.
+A min-net qualifying paper snapshot is not blocked by wall-clock quote age.
+Capture still fail-closes on depth, hedge, treasury, semantics, and post-trigger
+min-net. Data class: deterministic fixtures, not live quotes. Phase 1 paper-only.
 """
 
 from __future__ import annotations
@@ -10,10 +11,7 @@ from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
 from sports_hedge.accounting.paper_journal import DataProvenance
-from sports_hedge.application.paper_operations import PaperOperationsError
 from sports_hedge.arbitrage.watchlist.economics import (
     NET_PROXIMITY_BAND_PP,
     classify_status,
@@ -23,7 +21,6 @@ from sports_hedge.arbitrage.watchlist.models import LifecycleEventType, Opportun
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
 from sports_hedge.paper.entry_freshness import (
-    MARKET_REVALIDATION_FAILED,
     SNAPSHOT_STALE_AT_DECISION,
     UNKNOWN_QUOTE_AGE,
     snapshot_freshness_rejection,
@@ -182,7 +179,7 @@ def test_fresh_reobservation_restores_executable_triggered_without_stale_residue
     assert executable[0].status is OpportunityStatus.TRIGGERED
 
 
-def test_paper_entry_still_fail_closed_on_stale_and_unknown_quotes() -> None:
+def test_snapshot_freshness_rejection_still_reports_quote_age_codes() -> None:
     assert snapshot_freshness_rejection(
         quote_age_at_decision_ms=2000,
         simulated_latency_ms=0,
@@ -195,7 +192,7 @@ def test_paper_entry_still_fail_closed_on_stale_and_unknown_quotes() -> None:
     ) == UNKNOWN_QUOTE_AGE
 
 
-def test_stale_watchlist_row_cannot_paper_fill(tmp_path: Path) -> None:
+def test_aged_qualifying_snapshot_still_captures_when_min_net_holds(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=False)
     try:
         decision = _qualify(scan, age_ms=300)
@@ -207,21 +204,20 @@ def test_stale_watchlist_row_cannot_paper_fill(tmp_path: Path) -> None:
         persisted = watchlist.repository.get(seeded.opportunity_id)
         assert persisted is not None
         assert persisted.status is OpportunityStatus.TRIGGERED
-        with pytest.raises(PaperOperationsError, match=MARKET_REVALIDATION_FAILED):
-            ops.simulate_fill(
-                seeded.opportunity_id,
-                simulate_external=True,
-                provenance=DataProvenance.LIVE_PAPER,
-                now=dispatch_at,
-            )
-        assert ops.list_active_trades() == []
+        result = ops.simulate_fill(
+            seeded.opportunity_id,
+            simulate_external=True,
+            provenance=DataProvenance.LIVE_PAPER,
+            now=dispatch_at,
+        )
+        assert result.opportunity.status is OpportunityStatus.FILLED
+        trades = ops.list_active_trades()
+        assert len(trades) == 1
+        assert trades[0].paper_only is True
+        assert trades[0].places_orders is False
         events = watchlist.activity(opportunity_id=seeded.opportunity_id)
-        assert not any(event.event_type is LifecycleEventType.PAPER_FILL_COMPLETE for event in events)
+        assert any(event.event_type is LifecycleEventType.PAPER_FILL_COMPLETE for event in events)
         assert not any(event.event_type is LifecycleEventType.TRIGGER_LOST_BEFORE_FILL for event in events)
-        after = watchlist.repository.get(seeded.opportunity_id)
-        assert after is not None
-        assert after.status is not OpportunityStatus.FILLED
-        assert after.status is not OpportunityStatus.PARTIAL
     finally:
         repository.close()
         ledger.close()

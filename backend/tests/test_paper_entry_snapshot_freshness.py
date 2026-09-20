@@ -1,9 +1,9 @@
-"""Issue #264: snapshot-bound paper-entry freshness.
+"""Issue #264 / #388: quote-age is telemetry, not a capture admission veto.
 
-Paper fill ages the qualified snapshot (T1) by configured simulated latency
-only. Backend dispatch delay (T2 − T1) is telemetry. Data class: deterministic
-fixture/demo paper-scan payloads, not live venue quotes. Phase 1 remains
-paper-only / read-only toward venues.
+A min-net qualifying paper snapshot is not blocked by wall-clock quote age.
+Current-cycle venue refresh, arrival/min-net, depth, hedge, and treasury
+still fail closed. Data class: deterministic fixture/demo paper-scan payloads,
+not live venue quotes. Phase 1 remains paper-only / read-only toward venues.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.entry_freshness import (
-    MARKET_REVALIDATION_FAILED,
     SNAPSHOT_STALE_AT_DECISION,
     SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL,
     assess_paper_entry_freshness,
@@ -280,7 +279,7 @@ def test_presentation_aging_after_trigger_does_not_false_stale_bound_entry(
         ledger.close()
 
 
-def test_manual_fill_does_not_revive_aged_rejected_snapshot(tmp_path: Path) -> None:
+def test_manual_fill_captures_aged_min_net_qualifying_snapshot(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=False)
     try:
         decision = _qualify(scan, age_ms=300)
@@ -293,16 +292,16 @@ def test_manual_fill_does_not_revive_aged_rejected_snapshot(tmp_path: Path) -> N
         assert row is not None
         assert row.status is OpportunityStatus.TRIGGERED
         assert "stale_quote" not in row.rejection_reasons
-        with pytest.raises(PaperOperationsError, match=MARKET_REVALIDATION_FAILED):
-            ops.simulate_fill(
-                seeded.opportunity_id,
-                simulate_external=True,
-                provenance=DataProvenance.LIVE_PAPER,
-                now=dispatch_at,
-            )
-        assert ops.list_active_trades() == []
+        result = ops.simulate_fill(
+            seeded.opportunity_id,
+            simulate_external=True,
+            provenance=DataProvenance.LIVE_PAPER,
+            now=dispatch_at,
+        )
+        assert result.opportunity.status is OpportunityStatus.FILLED
+        assert ops.list_active_trades()[0].paper_only is True
         events = watchlist.activity(opportunity_id=seeded.opportunity_id)
-        assert not any(event.event_type is LifecycleEventType.PAPER_FILL_COMPLETE for event in events)
+        assert any(event.event_type is LifecycleEventType.PAPER_FILL_COMPLETE for event in events)
         assert not any(event.event_type is LifecycleEventType.TRIGGER_LOST_BEFORE_FILL for event in events)
     finally:
         repository.close()
@@ -339,7 +338,7 @@ def test_genuine_stale_at_simulated_arrival_is_diagnostic_not_post_trigger_veto(
         ledger.close()
 
 
-def test_stale_at_decision_fails(tmp_path: Path) -> None:
+def test_stale_at_decision_does_not_veto_min_net_qualifying_snapshot(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=False)
     try:
         decision = _qualify(scan, age_ms=300)
@@ -349,15 +348,15 @@ def test_stale_at_decision_fails(tmp_path: Path) -> None:
         ops._plans[seeded.opportunity_id] = ops._plan_from_decision(
             stale, seeded.opportunity_id, DataProvenance.LIVE_PAPER
         )
-        with pytest.raises(PaperOperationsError, match=SNAPSHOT_STALE_AT_DECISION):
-            ops.simulate_fill(
-                seeded.opportunity_id,
-                simulate_external=True,
-                provenance=DataProvenance.LIVE_PAPER,
-                now=T1 + timedelta(milliseconds=100),
-            )
-        assert ops.list_active_trades() == []
-        assert ops._entry_rejections[seeded.opportunity_id] == SNAPSHOT_STALE_AT_DECISION
+        result = ops.simulate_fill(
+            seeded.opportunity_id,
+            simulate_external=True,
+            provenance=DataProvenance.LIVE_PAPER,
+            now=T1 + timedelta(milliseconds=100),
+        )
+        assert result.opportunity.status is OpportunityStatus.FILLED
+        assert ops.list_active_trades()[0].paper_only is True
+        assert SNAPSHOT_STALE_AT_DECISION not in ops._entry_rejections.values()
     finally:
         repository.close()
         ledger.close()
@@ -414,18 +413,20 @@ def test_processing_delay_stale_arrival_does_not_veto_bound_min_net(
         ledger.close()
 
 
-def test_rejected_attempt_does_not_suppress_later_trigger_lost(tmp_path: Path) -> None:
+def test_failed_capture_does_not_persist_trigger_lost_on_later_aged_read(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=False)
     try:
-        stale = _qualify(scan, age_ms=1700)
-        seeded = _observe(scan, watchlist, stale)
+        decision = _qualify(scan, age_ms=1700)
+        seeded = _observe(scan, watchlist, decision)
         ops.persist_triggered_chain(
-            stale,
+            decision,
             provenance=DataProvenance.LIVE_PAPER,
             autofill=False,
             now=T1,
         )
-        with pytest.raises(PaperOperationsError, match=SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL):
+        plan = ops._plans[seeded.opportunity_id]
+        ops._plans[seeded.opportunity_id] = plan.model_copy(update={"legs": []})
+        with pytest.raises(PaperOperationsError, match="no_positive_opening_legs"):
             ops.simulate_fill(
                 seeded.opportunity_id,
                 simulate_external=True,
@@ -433,8 +434,6 @@ def test_rejected_attempt_does_not_suppress_later_trigger_lost(tmp_path: Path) -
                 now=T1,
             )
         assert ops.list_active_trades() == []
-        assert ops._entry_rejections[seeded.opportunity_id] == SNAPSHOT_STALE_AT_SIMULATED_ARRIVAL
-        assert watchlist.has_active_bound_attempt(seeded.opportunity_id) is False
 
         later = T1 + timedelta(seconds=3)
         fresh = _qualify(scan, age_ms=300, scanned_at=later)
@@ -740,7 +739,7 @@ def test_scan_pair_final_qualification_includes_allocator_delay() -> None:
     assert plan_age >= 750
 
 
-def test_manual_paper_filling_does_not_inherit_bound_snapshot_authority(tmp_path: Path) -> None:
+def test_unbound_manual_fill_still_captures_min_net_qualifying_snapshot(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger, _settings = _freshness_bundle(tmp_path, autofill=False)
     try:
         decision = _qualify(scan, age_ms=300)
@@ -756,14 +755,15 @@ def test_manual_paper_filling_does_not_inherit_bound_snapshot_authority(tmp_path
         assert attempt is not None
         assert attempt.bound_snapshot is False
         dispatch_at = T1 + timedelta(milliseconds=1800)
-        with pytest.raises(PaperOperationsError, match=MARKET_REVALIDATION_FAILED):
-            ops.simulate_fill(
-                seeded.opportunity_id,
-                simulate_external=True,
-                provenance=DataProvenance.LIVE_PAPER,
-                now=dispatch_at,
-            )
-        assert ops.list_active_trades() == []
+        result = ops.simulate_fill(
+            seeded.opportunity_id,
+            simulate_external=True,
+            provenance=DataProvenance.LIVE_PAPER,
+            now=dispatch_at,
+        )
+        assert result.opportunity.status is OpportunityStatus.FILLED
+        assert ops.list_active_trades()[0].paper_only is True
+        assert ops.list_active_trades()[0].places_orders is False
         assert watchlist.has_active_bound_attempt(seeded.opportunity_id) is False
     finally:
         repository.close()

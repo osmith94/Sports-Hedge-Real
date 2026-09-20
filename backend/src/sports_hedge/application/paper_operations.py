@@ -2138,7 +2138,11 @@ class PaperOperationsService:
         bound_autofill = self.watchlist.has_active_bound_attempt(opportunity_id)
         demo_frozen_snapshot = current.data_kind == "demo_fixture_replay"
         snapshot_bound = bound_autofill or demo_frozen_snapshot
-        bound_min_net = snapshot_bound and _plan_satisfies_min_net_arb(plan)
+        # Operator contract: a min-net qualifying fill plan is the capture
+        # snapshot. Wall-clock quote-age is telemetry, not a second admission
+        # veto. Fail-closed gates remain current-cycle venue refresh (autofill),
+        # arrival odds/slippage, post-trigger min-net, depth, hedge, treasury.
+        bound_min_net = _plan_satisfies_min_net_arb(plan)
         if not self.watchlist.allows_bound_snapshot_entry(
             current, bound_autofill=bound_autofill
         ):

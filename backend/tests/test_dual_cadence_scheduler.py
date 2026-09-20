@@ -410,6 +410,9 @@ def store_aliases_unique(coordinator: LiveRefreshCoordinator) -> bool:
 def test_live_refresh_exposes_distinct_hot_and_universe_status() -> None:
     coordinator = get_live_refresh_coordinator()
     coordinator.reset()
+    clock = FakeClock(NOW)
+    original_clock = coordinator._clock
+    coordinator._clock = clock
     coordinator.record_report(
         _report([_fixture("t6d", kickoff=NOW + timedelta(days=6))], when=NOW),
         scan_lane=ScanLane.UNIVERSE,
@@ -433,6 +436,7 @@ def test_live_refresh_exposes_distinct_hot_and_universe_status() -> None:
         assert discovered[0]["scan_lane"] == "universe"
     finally:
         coordinator.reset()
+        coordinator._clock = original_clock
 
 
 def test_hot_and_universe_ttl_expiry_omits_tracked_rows() -> None:

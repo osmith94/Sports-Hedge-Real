@@ -485,7 +485,7 @@ def test_polymarket_kalshi_pair_is_not_register_admitted(tmp_path: Path) -> None
         ledger.close()
 
 
-def test_stale_second_leg_fails_closed_and_reconciles_treasury(tmp_path: Path) -> None:
+def test_missing_opening_depth_fails_closed_and_reconciles_treasury(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=False)
     try:
         decision = _observe_and_persist(
@@ -499,12 +499,8 @@ def test_stale_second_leg_fails_closed_and_reconciles_treasury(tmp_path: Path) -
         opportunity_id = next(iter(ops._plans))
         plan = ops._plans[opportunity_id]
         before = ledger.treasury.snapshot()
-        thin = plan.legs[-1]
-        plan.legs[-1] = thin.model_copy(
-            update={
-                "quote_age_ms": 50_000,
-                "levels": [BookLevel(decimal_odds=thin.displayed_odds, available_stake=thin.requested_stake / 10)],
-            }
+        ops._plans[opportunity_id] = plan.model_copy(
+            update={"legs": [leg.model_copy(update={"levels": []}) for leg in plan.legs]}
         )
         ops.settings = _settings(autofill=True)
         with pytest.raises(PaperOperationsError):

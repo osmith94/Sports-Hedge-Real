@@ -140,7 +140,7 @@ def test_partial_paper_fill_records_partial_and_balances() -> None:
         repository.close()
 
 
-def test_stale_before_fill_is_rejected() -> None:
+def test_quote_age_does_not_reject_min_net_qualifying_fill() -> None:
     _scan, _watchlist, ops, repository = _scan_and_persist()
     try:
         opportunity_id = next(iter(ops._plans))
@@ -152,12 +152,14 @@ def test_stale_before_fill_is_rejected() -> None:
         ops._plans[opportunity_id] = plan.model_copy(
             update={"legs": stale_legs, "quote_age_ms": 50_000, "quote_age_at_decision_ms": 50_000}
         )
-        with pytest.raises(PaperOperationsError, match="snapshot_stale_at_decision"):
-            ops.simulate_fill(
-                opportunity_id,
-                config=PaperFillConfig(assumed_latency_ms=0, max_quote_age_ms=10_000),
-                now=OBSERVED,
-            )
+        result = ops.simulate_fill(
+            opportunity_id,
+            config=PaperFillConfig(assumed_latency_ms=0, max_quote_age_ms=10_000),
+            now=OBSERVED,
+        )
+        assert result.fills.fully_filled is True
+        assert result.places_orders is False
+        assert "snapshot_stale_at_decision" not in ops._entry_rejections.values()
     finally:
         repository.close()
 
