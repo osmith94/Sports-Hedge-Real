@@ -143,14 +143,14 @@ def test_lane6_records_exact_git_sha() -> None:
     )
 
 
-def test_operator_console_hierarchy_is_treasury_then_scan_then_discovery() -> None:
+def test_operator_console_hierarchy_is_treasury_then_positions_then_scan() -> None:
     page = (FRONTEND / "app" / "page.tsx").read_text(encoding="utf-8")
     order = [
         "<LiquidityPools",
+        "Open paper positions",
         "<RunPaperScan",
         "<FixtureDiscoverySection",
         "<OpportunityMonitor",
-        "Open paper positions",
         "<ActivityFeed",
         "<CapitalSummary",
         "Demo walkthrough · not live operations",
