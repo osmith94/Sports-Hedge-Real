@@ -1793,6 +1793,7 @@ def persist_price_engine_item_capture(
     service: PaperScanService,
     watchlist: WatchlistService,
     refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
+    pricing_lane: str | None = None,
 ) -> list[Any] | None:
     """Capture-critical watchlist + ``persist_triggered_chain`` only.
 
@@ -1816,6 +1817,7 @@ def persist_price_engine_item_capture(
                 else (VenueName.MATCHBOOK, VenueName.KALSHI)
             ),
             write_audit=False,
+            pricing_lane=pricing_lane,
         )
 
 
@@ -1883,12 +1885,12 @@ def bind_price_engine_item_persist(
     """
 
     async def _handoff(decision: PaperScanDecision, runtime: Any) -> None:
-        del runtime
         history = await asyncio.to_thread(
             persist_price_engine_item_capture,
             decision,
             service=service,
             watchlist=watchlist,
+            pricing_lane=_pricing_lane_from_runtime(runtime),
         )
         engine.schedule_observability(
             lambda captured=history, item=decision: record_price_engine_item_audit(
@@ -1909,6 +1911,7 @@ def _persist_decision(
     quote_age_ms: int | None = None,
     refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
     write_audit: bool = True,
+    pricing_lane: str | None = None,
 ) -> list[Any] | None:
     if not decision.canonical_market_id:
         return None
@@ -1921,8 +1924,25 @@ def _persist_decision(
         audit.append_scan(build_paper_scan_record(decision, history))
     watchlist.observe_paper_decision(decision, history, quote_age_ms=quote_age_ms)
     if operations is not None:
-        operations.persist_triggered_chain(decision, refreshed_venues=refreshed_venues)
+        operations.persist_triggered_chain(
+            decision,
+            refreshed_venues=refreshed_venues,
+            pricing_lane=pricing_lane,
+        )
     return history
+
+
+def _pricing_lane_from_runtime(runtime: Any) -> str | None:
+    """HOT or BACKGROUND pricing priority. Never invents a promotion gate."""
+
+    priority = getattr(runtime, "priority", None)
+    if priority is None:
+        return None
+    value = getattr(priority, "value", priority)
+    text = str(value).strip().lower()
+    if text in {"hot", "background"}:
+        return text
+    return None
 
 
 def _build_observation(request: RawVenueObservationRequest) -> VenueMarketObservation:

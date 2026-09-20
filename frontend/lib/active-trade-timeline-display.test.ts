@@ -34,8 +34,12 @@ describe("ACTIVE TRADE timeline display", () => {
     assert.match(lines[0], /kalshi/);
   });
 
-  it("labels operator questions for buy, no top-up, partial, recovery, and finish", () => {
-    assert.equal(activeTradeEventQuestion("entry_fill"), "Why did we buy?");
+  it("labels operator questions for qualify, fill attempt, management, and finish", () => {
+    assert.equal(activeTradeEventQuestion("entry_decision"), "Why did HOT/BACKGROUND qualify this?");
+    assert.equal(activeTradeEventQuestion("entry_attempt"), "What happened on the initial fill attempt?");
+    assert.equal(activeTradeEventQuestion("entry_fill"), "What was the initial fill result?");
+    assert.equal(activeTradeEventQuestion("entry_no_fill"), "What was the initial fill result?");
+    assert.equal(activeTradeEventQuestion("promoted_to_active"), "How did ACTIVE TRADE management start?");
     assert.equal(activeTradeEventQuestion("no_action"), "Why didn't we top up?");
     assert.equal(activeTradeEventQuestion("active_refresh_result"), "What happened on this 5s cycle?");
     assert.equal(activeTradeEventQuestion("entry_partial_fill"), "Where did a partial fill occur?");
@@ -43,11 +47,12 @@ describe("ACTIVE TRADE timeline display", () => {
     assert.equal(activeTradeEventQuestion("settled"), "How did the trade finish?");
     assert.match(
       activeTradePayloadBits({
+        pricing_lane: "hot",
         net_edge: "0.012",
         residual_gbp: "1.25",
         native_ids: [{ venue: "kalshi" }],
       }) ?? "",
-      /net edge 0.012/,
+      /pricing lane hot/,
     );
   });
 
@@ -63,6 +68,8 @@ describe("ACTIVE TRADE timeline display", () => {
     assert.doesNotMatch(scan, /downloadVenueWhyIncident|getVenueDegradationIncident/);
     assert.match(log, /getActiveTradeEvents/);
     assert.match(log, /Trade log · ACTIVE TRADE history/);
+    assert.match(log, /qualifying HOT\/BACKGROUND decision/);
+    assert.match(log, /same-cycle/);
     assert.doesNotMatch(log, /downloadVenueWhyIncident|venue-degradation|Why\?/);
     assert.match(book, /#trade-log/);
     assert.match(book, /<ActiveTradeLog/);

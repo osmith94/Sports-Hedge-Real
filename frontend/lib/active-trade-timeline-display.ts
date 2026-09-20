@@ -1,13 +1,14 @@
 import { ActiveTradeJournalEvent, ActiveTradeTimelineItem } from "./api";
 
 const EVENT_QUESTIONS: Record<string, string> = {
-  promoted_to_active: "How did this enter ACTIVE TRADE?",
+  promoted_to_active: "How did ACTIVE TRADE management start?",
   active_refresh_started: "What happened on this 5s cycle?",
   active_refresh_result: "What happened on this 5s cycle?",
-  entry_decision: "Why did we buy?",
-  entry_attempt: "Why did we buy?",
-  entry_fill: "Why did we buy?",
+  entry_decision: "Why did HOT/BACKGROUND qualify this?",
+  entry_attempt: "What happened on the initial fill attempt?",
+  entry_fill: "What was the initial fill result?",
   entry_partial_fill: "Where did a partial fill occur?",
+  entry_no_fill: "What was the initial fill result?",
   entry_recovery_decision: "What recovery was attempted?",
   entry_recovery_fill: "What recovery was attempted?",
   entry_recovery_residual: "What recovery was attempted?",
@@ -25,6 +26,9 @@ const EVENT_QUESTIONS: Record<string, string> = {
 };
 
 const PAYLOAD_LABELS: Array<[string, string]> = [
+  ["pricing_lane", "pricing lane"],
+  ["scan_lane", "pricing lane"],
+  ["fill_state", "fill state"],
   ["net_edge", "net edge"],
   ["current_net", "current net"],
   ["min_net", "min net arb"],

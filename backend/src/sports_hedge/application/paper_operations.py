@@ -170,6 +170,24 @@ def paper_trade_id(opportunity_id: str) -> str:
     return f"ptrade-{slug}"
 
 
+def _pricing_lane_label(lane: str | None) -> str:
+    normalized = (lane or "").strip().lower()
+    if normalized == "background":
+        return "BACKGROUND"
+    if normalized == "hot":
+        return "HOT"
+    return "HOT/BACKGROUND"
+
+
+def _qualifying_reason(lane: str | None) -> ActiveTradeReasonCode:
+    normalized = (lane or "").strip().lower()
+    if normalized == "background":
+        return ActiveTradeReasonCode.QUALIFYING_BACKGROUND
+    if normalized == "hot":
+        return ActiveTradeReasonCode.QUALIFYING_HOT
+    return ActiveTradeReasonCode.QUALIFYING_PRICING_CYCLE
+
+
 def manual_external_fill_id(opportunity_id: str, operator_counterparty_reference: str) -> str:
     """Stable fill/lock identity for an operator-recorded MANUAL_EXTERNAL leg.
 
@@ -367,6 +385,7 @@ class PaperOperationsService:
         autofill: bool | None = None,
         refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
         now: datetime | None = None,
+        pricing_lane: str | None = None,
     ) -> PriorityAlertCandidate | None:
         if not decision.canonical_market_id:
             return None
@@ -383,7 +402,7 @@ class PaperOperationsService:
         existing_trade = self._get_trade_by_opportunity(opportunity_id)
         if opening_legs:
             self._plans[opportunity_id] = self._plan_from_decision(
-                decision, opportunity_id, provenance
+                decision, opportunity_id, provenance, pricing_lane=pricing_lane
             )
         candidate = None
         solver_arb = _solver_is_arbitrage(decision)
@@ -1880,23 +1899,37 @@ class PaperOperationsService:
                 if trade.unresolved_recovery
                 else PaperActiveTradePhase.ACCUMULATING
             )
-            self._append_trade_event_once(
-                trade,
-                event_type=PaperTradeAuditEventType.ACTIVE_TRADE_PROMOTED,
-                occurred_at=when,
-                detail="paper fill promoted to ACTIVE TRADE 5s lane",
-            )
-            if self.trades is not None:
-                self.trades.save(trade)
-            self.record_active_lifecycle_event(
-                trade,
-                event_type=ActiveTradeEventType.PROMOTED_TO_ACTIVE,
-                reason_code=ActiveTradeReasonCode.PROMOTED,
-                operator_copy="Trade promoted from paper fill into ACTIVE TRADE 5s management",
-                occurred_at=when,
-                dedupe_key=f"promoted:{trade.trade_id}",
-                payload={"native_ids": compact_native_ids(trade)},
-            )
+        recovering = (
+            trade.unresolved_recovery
+            or trade.active_trade_phase is PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
+        )
+        self._append_trade_event_once(
+            trade,
+            event_type=PaperTradeAuditEventType.ACTIVE_TRADE_PROMOTED,
+            occurred_at=when,
+            detail="paper fill result entered ACTIVE TRADE 5s management",
+        )
+        if self.trades is not None:
+            self.trades.save(trade)
+        plan = self._plans.get(trade.opportunity_id)
+        lane = None if plan is None else plan.pricing_lane
+        self.record_active_lifecycle_event(
+            trade,
+            event_type=ActiveTradeEventType.PROMOTED_TO_ACTIVE,
+            reason_code=ActiveTradeReasonCode.PROMOTED,
+            operator_copy=(
+                "ACTIVE TRADE 5s management started after the initial partial fill; recovery is next"
+                if recovering
+                else "ACTIVE TRADE 5s management started after the initial fill result"
+            ),
+            occurred_at=when,
+            dedupe_key=f"promoted:{trade.trade_id}",
+            payload={
+                "native_ids": compact_native_ids(trade),
+                "pricing_lane": lane,
+                "fill_state": "partial" if recovering else "complete",
+            },
+        )
         get_active_trade_registry().promote(
             trade,
             now=when,
@@ -2086,6 +2119,9 @@ class PaperOperationsService:
             raise PaperOperationsError("unknown_opportunity")
         if current.data_kind == "demo_fixture_replay":
             provenance = DataProvenance.FIXTURE_DEMO
+        self._record_opening_qualifying_decision(
+            opportunity_id, plan, simulated_at, provenance
+        )
         bound_autofill = self.watchlist.has_active_bound_attempt(opportunity_id)
         demo_frozen_snapshot = current.data_kind == "demo_fixture_replay"
         snapshot_bound = bound_autofill or demo_frozen_snapshot
@@ -2201,6 +2237,7 @@ class PaperOperationsService:
         except ValueError:
             self._fail_entry(opportunity_id, MARKET_REVALIDATION_FAILED, simulated_at)
 
+        self._record_opening_attempt(opportunity_id, plan, simulated_at, provenance)
         fills = self.simulator.simulate(
             fill_legs,
             fill_config,
@@ -2863,6 +2900,8 @@ class PaperOperationsService:
         decision: PaperScanDecision,
         opportunity_id: str,
         provenance: DataProvenance,
+        *,
+        pricing_lane: str | None = None,
     ) -> PaperFillPlan:
         opening_legs = [leg for leg in decision.fill_legs if leg.requested_stake > 0]
         captured_at = None
@@ -2906,6 +2945,7 @@ class PaperOperationsService:
             fx_snapshots=list(decision.fx_snapshots),
             decision=decision,
             provenance=provenance,
+            pricing_lane=pricing_lane,
         )
 
     def _require_allocator_sized_plan(self, opportunity_id: str) -> None:
@@ -2953,8 +2993,105 @@ class PaperOperationsService:
         reason: str,
         occurred_at: datetime | None = None,
     ) -> None:
-        self._record_entry_rejection(opportunity_id, reason, occurred_at=occurred_at)
+        when = occurred_at or datetime.now(UTC)
+        plan = self._plans.get(opportunity_id)
+        provenance = DataProvenance.LIVE_PAPER if plan is None else plan.provenance
+        if plan is not None:
+            self._record_opening_qualifying_decision(opportunity_id, plan, when, provenance)
+            self._record_opening_attempt(opportunity_id, plan, when, provenance)
+            self._record_opening_no_fill(opportunity_id, plan, when, provenance, reason)
+        self._record_entry_rejection(opportunity_id, reason, occurred_at=when)
         raise PaperOperationsError(reason)
+
+    def _opening_journal_shell(
+        self,
+        opportunity_id: str,
+        plan: PaperFillPlan,
+        occurred_at: datetime,
+        provenance: DataProvenance,
+    ) -> PaperTrade | None:
+        existing = self._get_trade_by_opportunity(opportunity_id)
+        if existing is not None:
+            return existing
+        opportunity = self.watchlist.repository.get(opportunity_id)
+        if opportunity is None:
+            return None
+        return self._new_trade_shell(plan, opportunity, occurred_at, provenance)
+
+    def _opening_journal_payload(self, plan: PaperFillPlan) -> dict[str, Any]:
+        return {
+            "pricing_lane": plan.pricing_lane,
+            "scan_lane": plan.pricing_lane,
+            "net_edge": plan.net_edge,
+            "min_net": Decimal(str(self.settings.min_net_edge)),
+            "books": compact_executable_books(plan.legs),
+        }
+
+    def _record_opening_qualifying_decision(
+        self,
+        opportunity_id: str,
+        plan: PaperFillPlan,
+        occurred_at: datetime,
+        provenance: DataProvenance,
+    ) -> None:
+        shell = self._opening_journal_shell(opportunity_id, plan, occurred_at, provenance)
+        if shell is None:
+            return
+        lane_label = _pricing_lane_label(plan.pricing_lane)
+        self.record_active_lifecycle_event(
+            shell,
+            event_type=ActiveTradeEventType.ENTRY_DECISION,
+            reason_code=_qualifying_reason(plan.pricing_lane),
+            operator_copy=(
+                f"Qualifying {lane_label} paper opportunity; fill attempt in this same cycle"
+            ),
+            occurred_at=occurred_at,
+            dedupe_key=f"entry-decision:{shell.trade_id}",
+            payload=self._opening_journal_payload(plan),
+        )
+
+    def _record_opening_attempt(
+        self,
+        opportunity_id: str,
+        plan: PaperFillPlan,
+        occurred_at: datetime,
+        provenance: DataProvenance,
+    ) -> None:
+        shell = self._opening_journal_shell(opportunity_id, plan, occurred_at, provenance)
+        if shell is None:
+            return
+        self.record_active_lifecycle_event(
+            shell,
+            event_type=ActiveTradeEventType.ENTRY_ATTEMPT,
+            reason_code=ActiveTradeReasonCode.ENTRY_ATTEMPTED,
+            operator_copy="Initial PAPER fill attempt in the qualifying pricing cycle",
+            occurred_at=occurred_at,
+            dedupe_key=f"entry-attempt:{shell.trade_id}:{OPENING_TRANCHE_ID}",
+            tranche_id=OPENING_TRANCHE_ID,
+            payload={"pricing_lane": plan.pricing_lane},
+        )
+
+    def _record_opening_no_fill(
+        self,
+        opportunity_id: str,
+        plan: PaperFillPlan,
+        occurred_at: datetime,
+        provenance: DataProvenance,
+        reason: str,
+    ) -> None:
+        shell = self._opening_journal_shell(opportunity_id, plan, occurred_at, provenance)
+        if shell is None:
+            return
+        self.record_active_lifecycle_event(
+            shell,
+            event_type=ActiveTradeEventType.ENTRY_NO_FILL,
+            reason_code=ActiveTradeReasonCode.ENTRY_NO_FILL,
+            operator_copy=f"No paper fill; no exposure fabricated ({reason})",
+            occurred_at=occurred_at,
+            dedupe_key=f"entry-no-fill:{shell.trade_id}:{reason}",
+            tranche_id=OPENING_TRANCHE_ID,
+            payload={"reason": reason, "pricing_lane": plan.pricing_lane},
+        )
 
     def _record_entry_rejection(
         self,
@@ -3218,32 +3355,6 @@ class PaperOperationsService:
             detail=f"state={trade.state.value}",
         )
         saved = self.trades.save(trade)
-        if saved.state in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
-            self.record_active_lifecycle_event(
-                saved,
-                event_type=ActiveTradeEventType.ENTRY_DECISION,
-                reason_code=ActiveTradeReasonCode.ENTRY_PARTIAL
-                if saved.state is PaperTradeState.PARTIAL
-                else ActiveTradeReasonCode.ENTRY_COMMITTED,
-                operator_copy="Opening paper entry decision recorded",
-                occurred_at=occurred_at,
-                dedupe_key=f"entry-decision:{saved.trade_id}",
-                tranche_id=OPENING_TRANCHE_ID,
-                payload={"books": compact_executable_books(plan.legs)},
-                raise_on_error=True,
-            )
-            self.record_active_lifecycle_event(
-                saved,
-                event_type=ActiveTradeEventType.ENTRY_ATTEMPT,
-                reason_code=ActiveTradeReasonCode.ENTRY_PARTIAL
-                if saved.state is PaperTradeState.PARTIAL
-                else ActiveTradeReasonCode.ENTRY_COMMITTED,
-                operator_copy="Opening paper simulator attempt recorded",
-                occurred_at=occurred_at,
-                dedupe_key=f"entry-attempt:{saved.trade_id}:{OPENING_TRANCHE_ID}",
-                tranche_id=OPENING_TRANCHE_ID,
-                raise_on_error=True,
-            )
         fill_event = (
             ActiveTradeEventType.ENTRY_PARTIAL_FILL
             if saved.state is PaperTradeState.PARTIAL
@@ -3254,6 +3365,11 @@ class PaperOperationsService:
             if saved.state is PaperTradeState.PARTIAL
             else ActiveTradeReasonCode.ENTRY_COMMITTED
         )
+        fill_copy = (
+            "Initial PAPER fill was partial; actual filled size is preserved"
+            if saved.state is PaperTradeState.PARTIAL
+            else "Initial PAPER fill completed in the qualifying pricing cycle"
+        )
         for leg in saved.legs:
             if not leg.fill_id or leg.filled_stake <= 0:
                 continue
@@ -3261,7 +3377,7 @@ class PaperOperationsService:
                 saved,
                 event_type=fill_event,
                 reason_code=fill_reason,
-                operator_copy="Opening paper fill recorded",
+                operator_copy=fill_copy,
                 occurred_at=occurred_at,
                 dedupe_key=f"{fill_event.value}:{saved.trade_id}:{leg.fill_id}",
                 tranche_id=leg.tranche_id,
@@ -3272,6 +3388,7 @@ class PaperOperationsService:
                     "native_ids": compact_native_ids(saved),
                     "treasury_after_gbp": saved.capital_locked_gbp,
                     "residual_gbp": saved.residual_exposure_gbp,
+                    "pricing_lane": plan.pricing_lane,
                 },
                 raise_on_error=True,
             )

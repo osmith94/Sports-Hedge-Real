@@ -26,7 +26,11 @@ from sports_hedge.application.active_trade_recovery import (
     worst_case_settlement_pnl_gbp,
 )
 from sports_hedge.application.live_refresh import DualCadencePlan, LiveRefreshCoordinator
-from sports_hedge.application.paper_operations import PaperOperationsService
+from sports_hedge.application.paper_operations import (
+    PaperOperationsError,
+    PaperOperationsService,
+    paper_trade_id,
+)
 from sports_hedge.application.price_engine import PriceEngineItemStatus
 from sports_hedge.paper.active_trade_journal import ActiveTradeEventType, ActiveTradeReasonCode
 from sports_hedge.paper.trades import (
@@ -61,17 +65,34 @@ def test_hot_paper_promotion_creates_first_active_event(tmp_path: Path) -> None:
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
-        types = _types(ops, trade.trade_id)
-        assert ActiveTradeEventType.PROMOTED_TO_ACTIVE in types
-        assert ActiveTradeEventType.ENTRY_DECISION in types
-        assert ActiveTradeEventType.ENTRY_FILL in types
+        events = ops.query_active_trade_events(trade_id=trade.trade_id, limit=500)
+        types = [item.event_type for item in events]
+        assert types.index(ActiveTradeEventType.ENTRY_DECISION) < types.index(
+            ActiveTradeEventType.ENTRY_ATTEMPT
+        )
+        assert types.index(ActiveTradeEventType.ENTRY_ATTEMPT) < types.index(
+            ActiveTradeEventType.ENTRY_FILL
+        )
+        assert types.index(ActiveTradeEventType.ENTRY_FILL) < types.index(
+            ActiveTradeEventType.PROMOTED_TO_ACTIVE
+        )
+        assert ActiveTradeEventType.ENTRY_NO_FILL not in types
+        decision = next(
+            item for item in events if item.event_type is ActiveTradeEventType.ENTRY_DECISION
+        )
+        assert decision.reason_code is ActiveTradeReasonCode.QUALIFYING_HOT
+        assert decision.payload.get("pricing_lane") == "hot"
+        assert "HOT" in decision.operator_copy
+        assert "same cycle" in decision.operator_copy
         promoted = [
             item
-            for item in ops.query_active_trade_events(trade_id=trade.trade_id)
+            for item in events
             if item.event_type is ActiveTradeEventType.PROMOTED_TO_ACTIVE
         ]
         assert len(promoted) == 1
         assert promoted[0].dedupe_key == f"promoted:{trade.trade_id}"
+        assert "management started after the initial fill" in promoted[0].operator_copy
+        assert "promoted from paper fill" not in promoted[0].operator_copy.lower()
         ops.record_active_lifecycle_event(
             trade,
             event_type=ActiveTradeEventType.PROMOTED_TO_ACTIVE,
@@ -94,6 +115,114 @@ def test_hot_paper_promotion_creates_first_active_event(tmp_path: Path) -> None:
         repository.close()
         ledger.close()
         reset_active_trade_registry()
+
+
+def test_background_qualifying_decision_precedes_fill_and_management(
+    tmp_path: Path,
+) -> None:
+    ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
+    _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
+    try:
+        opportunity_id = next(iter(ops._plans))
+        ops._plans[opportunity_id] = ops._plans[opportunity_id].model_copy(
+            update={"pricing_lane": "background"}
+        )
+        result = ops.simulate_fill(
+            opportunity_id,
+            simulate_external=True,
+            now=datetime.now(UTC),
+        )
+        loaded = ops.list_active_trades()[0]
+        assert result.trade_id == loaded.trade_id
+        events = ops.query_active_trade_events(trade_id=loaded.trade_id, limit=500)
+        types = [item.event_type for item in events]
+        assert types.index(ActiveTradeEventType.ENTRY_DECISION) < types.index(
+            ActiveTradeEventType.ENTRY_ATTEMPT
+        )
+        assert types.index(ActiveTradeEventType.ENTRY_ATTEMPT) < types.index(
+            ActiveTradeEventType.ENTRY_FILL
+        )
+        assert types.index(ActiveTradeEventType.ENTRY_FILL) < types.index(
+            ActiveTradeEventType.PROMOTED_TO_ACTIVE
+        )
+        decision = next(
+            item for item in events if item.event_type is ActiveTradeEventType.ENTRY_DECISION
+        )
+        assert decision.reason_code is ActiveTradeReasonCode.QUALIFYING_BACKGROUND
+        assert decision.payload.get("pricing_lane") == "background"
+        assert "BACKGROUND" in decision.operator_copy
+    finally:
+        repository.close()
+        ledger.close()
+        reset_active_trade_registry()
+
+
+def test_empty_opening_fill_is_journaled_without_fabricated_exposure(
+    tmp_path: Path,
+) -> None:
+    ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
+    _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
+    try:
+        opportunity_id = next(iter(ops._plans))
+        trade_id = paper_trade_id(opportunity_id)
+        real = ops.simulator
+
+        class _EmptyOpening:
+            def simulate(self, *args, **kwargs):
+                filled = real.simulate(*args, **kwargs)
+                empty = [
+                    item.model_copy(
+                        update={
+                            "filled_stake": Decimal("0"),
+                            "remaining_stake": item.requested_stake,
+                            "fully_filled": False,
+                            "rejection_reason": "incomplete_opening_hedge",
+                        }
+                    )
+                    for item in filled.fills
+                ]
+                return filled.model_copy(update={"fills": empty})
+
+        ops.simulator = _EmptyOpening()
+        with pytest.raises(PaperOperationsError, match="incomplete_opening_hedge"):
+            ops.simulate_fill(
+                opportunity_id,
+                simulate_external=True,
+                now=datetime.now(UTC),
+            )
+        assert ops.list_active_trades() == []
+        assert ops.trades.get(trade_id) is None
+        assert _lock_fingerprint(ledger, trade_id) == []
+        events = ops.query_active_trade_events(trade_id=trade_id, limit=500)
+        types = [item.event_type for item in events]
+        assert types.index(ActiveTradeEventType.ENTRY_DECISION) < types.index(
+            ActiveTradeEventType.ENTRY_ATTEMPT
+        )
+        assert types.index(ActiveTradeEventType.ENTRY_ATTEMPT) < types.index(
+            ActiveTradeEventType.ENTRY_NO_FILL
+        )
+        assert ActiveTradeEventType.ENTRY_FILL not in types
+        assert ActiveTradeEventType.PROMOTED_TO_ACTIVE not in types
+        no_fill = next(
+            item for item in events if item.event_type is ActiveTradeEventType.ENTRY_NO_FILL
+        )
+        assert no_fill.reason_code is ActiveTradeReasonCode.ENTRY_NO_FILL
+        assert "no exposure fabricated" in no_fill.operator_copy.lower()
+    finally:
+        repository.close()
+        ledger.close()
+        reset_active_trade_registry()
+
+
+def test_handoff_keeps_runtime_pricing_lane_for_same_cycle_fill() -> None:
+    from sports_hedge.api import paper as paper_api
+
+    src = inspect.getsource(paper_api.bind_price_engine_item_persist)
+    assert "del runtime" not in src
+    assert "pricing_lane=_pricing_lane_from_runtime(runtime)" in src
+    helper = inspect.getsource(paper_api._pricing_lane_from_runtime)
+    assert '"hot"' in helper
+    assert '"background"' in helper
 
 
 @pytest.mark.asyncio
@@ -301,11 +430,25 @@ def test_partial_entry_recovers_even_below_min_net_arb(tmp_path: Path) -> None:
         loaded = ops.list_active_trades()[0]
         assert result.trade_id == loaded.trade_id
         types = _types(ops, loaded.trade_id)
-        assert ActiveTradeEventType.ENTRY_PARTIAL_FILL in types
+        assert types.index(ActiveTradeEventType.ENTRY_DECISION) < types.index(
+            ActiveTradeEventType.ENTRY_ATTEMPT
+        )
+        assert types.index(ActiveTradeEventType.ENTRY_ATTEMPT) < types.index(
+            ActiveTradeEventType.ENTRY_PARTIAL_FILL
+        )
+        assert types.index(ActiveTradeEventType.ENTRY_PARTIAL_FILL) < types.index(
+            ActiveTradeEventType.PROMOTED_TO_ACTIVE
+        )
         assert ActiveTradeEventType.ENTRY_RECOVERY_DECISION in types
         assert ActiveTradeEventType.ENTRY_RECOVERY_FILL in types
         assert ActiveTradeEventType.ENTRY_RECOVERY_RESIDUAL in types
         assert ActiveTradeReasonCode.RECOVERY_BELOW_MIN_NET in _reasons(ops, loaded.trade_id)
+        promoted = next(
+            item
+            for item in ops.query_active_trade_events(trade_id=loaded.trade_id, limit=500)
+            if item.event_type is ActiveTradeEventType.PROMOTED_TO_ACTIVE
+        )
+        assert "partial fill" in promoted.operator_copy.lower()
         recoveries = [
             item for item in loaded.tranches if item.kind is PaperTradeTrancheKind.RECOVERY
         ]

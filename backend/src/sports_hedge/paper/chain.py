@@ -65,6 +65,7 @@ class PaperFillPlan(BaseModel):
     fx_snapshots: list[FxRateSnapshot] = Field(default_factory=list)
     decision: PaperScanDecision
     provenance: DataProvenance = DataProvenance.LIVE_PAPER
+    pricing_lane: str | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> PaperFillPlan:

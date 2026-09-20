@@ -143,8 +143,9 @@ export function ActiveTradeLog({
     <>
       <p className="scan-advanced-copy">
         Persisted PAPER ACTIVE TRADE journal. Read-only. Opening this log does not call venues
-        or start a scan. Facts already recorded during ACTIVE TRADE processing, including
-        no-action 5s cycles.
+        or start a scan. Timeline is the qualifying HOT/BACKGROUND decision, the same-cycle
+        fill attempt, then ACTIVE TRADE 5s management — including no-action cycles. ACTIVE TRADE
+        is the management surface after the initial fill result, not a second promotion gate.
       </p>
       {locked ? null : (
         <label className="scan-field">
