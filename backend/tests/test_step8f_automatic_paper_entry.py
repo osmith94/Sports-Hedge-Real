@@ -528,19 +528,36 @@ def test_partial_depth_never_opens_guaranteed_trade(tmp_path: Path) -> None:
         plan.legs = [
             leg.model_copy(
                 update={
-                    "levels": [
-                        BookLevel(decimal_odds=leg.displayed_odds, available_stake=leg.requested_stake / 8)
-                    ]
+                    "quote_captured_at": OBSERVED,
+                    **(
+                        {
+                            "levels": [
+                                BookLevel(
+                                    decimal_odds=leg.displayed_odds,
+                                    available_stake=leg.requested_stake / 8,
+                                )
+                            ]
+                        }
+                        if leg.venue is VenueName.MATCHBOOK
+                        else {}
+                    ),
                 }
             )
-            if leg.venue is VenueName.MATCHBOOK
-            else leg
             for leg in plan.legs
         ]
+        ops._plans[opportunity_id] = plan.model_copy(
+            update={
+                "scanned_at": OBSERVED + timedelta(milliseconds=200),
+                "quote_captured_at": OBSERVED,
+                "quote_age_ms": 120,
+                "quote_age_at_decision_ms": 320,
+            }
+        )
         result = ops.simulate_fill(
             opportunity_id,
             simulate_external=True,
             provenance=DataProvenance.FIXTURE_DEMO,
+            now=OBSERVED + timedelta(milliseconds=250),
         )
         loaded = ops.list_active_trades()
         assert len(loaded) == 1

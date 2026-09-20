@@ -433,7 +433,7 @@ def test_demo_fixture_replay_is_not_rejected_stale_on_wall_clock() -> None:
 
 
 def test_watchlist_api_uses_server_clock_not_client_as_of() -> None:
-    last_seen = datetime.now(UTC)
+    last_seen = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
     aged = last_seen + timedelta(seconds=2)
     repository = SqliteWatchlistRepository()
     service = WatchlistService(repository, clock=lambda: aged, max_quote_age_ms=1000)
@@ -453,7 +453,7 @@ def test_watchlist_api_uses_server_clock_not_client_as_of() -> None:
     )
     from test_tracked_current_snapshot import _report
 
-    coordinator.record_report(_report("mkt-as-of"))
+    coordinator.record_report(_report("mkt-as-of", when=last_seen))
     try:
         ignored_fresh = client.get(
             "/paper/watchlist/triggered",
