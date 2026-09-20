@@ -56,16 +56,16 @@ def test_cadence_authorities_are_independent_and_named_honestly() -> None:
     settings = Settings()
     assert settings.paper_live_refresh_hot_interval_seconds == 30
     assert settings.paper_background_price_interval_seconds == 90
-    assert settings.paper_universe_discovery_interval_seconds == 600
+    assert settings.paper_universe_discovery_interval_seconds == 1800
     assert settings.paper_live_refresh_universe_interval_seconds == 180
     assert settings.paper_universe_worker_cooldown_seconds == 8
     assert DEFAULT_BACKGROUND_CADENCE_SECONDS == 90
-    assert _cooldown_seconds() == 600
+    assert _cooldown_seconds() == 1800
     coordinator = LiveRefreshCoordinator()
     coordinator.configure_from_settings()
     assert coordinator.status.hot.cadence_seconds == 30
     assert coordinator.status.background.cadence_seconds == 90
-    assert coordinator.status.universe.cadence_seconds == 600
+    assert coordinator.status.universe.cadence_seconds == 1800
 
 
 def test_startup_universe_is_immediately_due() -> None:
@@ -100,16 +100,16 @@ def test_completed_universe_schedules_next_fresh_generation_at_plus_600s() -> No
     )
     assert coordinator._universe_generation_started_at is None
     assert coordinator.status.universe.worker_state == WORKER_COMPLETE
-    assert coordinator._next_universe_due == finished + timedelta(seconds=600)
-    assert coordinator.status.universe.cadence_seconds == 600
+    assert coordinator._next_universe_due == finished + timedelta(seconds=1800)
+    assert coordinator.status.universe.cadence_seconds == 1800
     status = coordinator.public_status()
-    assert status.universe.next_due_at == finished + timedelta(seconds=600)
-    assert status.universe.cadence_seconds == 600
+    assert status.universe.next_due_at == finished + timedelta(seconds=1800)
+    assert status.universe.cadence_seconds == 1800
 
-    idle = coordinator.plan_universe_tick(now=finished + timedelta(seconds=599))
+    idle = coordinator.plan_universe_tick(now=finished + timedelta(seconds=1799))
     assert idle.lane == "idle"
     assert idle.reason == "universe_cooldown"
-    due = coordinator.plan_universe_tick(now=finished + timedelta(seconds=600))
+    due = coordinator.plan_universe_tick(now=finished + timedelta(seconds=1800))
     assert due.lane == ScanLane.UNIVERSE.value
     assert due.generation_resume is False
     assert due.resume_cursor is None
@@ -127,7 +127,7 @@ def test_incomplete_generation_resumes_without_600s_sleep() -> None:
     assert plan.generation_resume is True
     assert plan.universe_generation_id == 26
     assert coordinator._seconds_until_universe() == pytest.approx(0.05)
-    assert coordinator.status.universe.cadence_seconds == 600
+    assert coordinator.status.universe.cadence_seconds == 1800
 
 
 def test_incomplete_universe_chunk_yields_about_8s_not_zero_or_600() -> None:
@@ -147,9 +147,9 @@ def test_incomplete_universe_chunk_yields_about_8s_not_zero_or_600() -> None:
     assert waiting.reason == "universe_cooldown"
     delay = coordinator._seconds_until_universe()
     assert delay == pytest.approx(1.0)
-    assert delay < 600
+    assert delay < 1800
     status = coordinator.public_status()
-    assert status.universe.cadence_seconds == 600
+    assert status.universe.cadence_seconds == 1800
     assert status.universe.next_due_at == finished + timedelta(seconds=8)
     clock.now = finished + timedelta(seconds=8)
     due = coordinator.plan_universe_tick(now=clock.now)
@@ -241,7 +241,7 @@ def test_hot_cadence_remains_operator_controlled_default_30s(tmp_path) -> None:
         assert coordinator.status.hot.cadence_seconds == 15
         assert coordinator.status.interval_seconds == 15
         assert coordinator.status.background.cadence_seconds == 90
-        assert coordinator.status.universe.cadence_seconds == 600
+        assert coordinator.status.universe.cadence_seconds == 1800
         restored = coordinator.apply_operator_scan_settings(
             min_net_edge=Decimal(str(settings.min_net_edge)),
             max_execution_risk=settings.max_execution_risk,
@@ -259,11 +259,11 @@ def test_live_refresh_and_system_load_report_truthful_independent_cadences() -> 
     payload = client.get("/paper/live-refresh").json()
     assert payload["hot"]["cadence_seconds"] == 30
     assert payload["background"]["cadence_seconds"] == 90
-    assert payload["universe"]["cadence_seconds"] == 600
+    assert payload["universe"]["cadence_seconds"] == 1800
     load = payload["system_load"]
     assert load["hot"]["cadence_seconds"] == 30
     assert load["background"]["cadence_seconds"] == 90
-    assert load["universe"]["cadence_seconds"] == 600
+    assert load["universe"]["cadence_seconds"] == 1800
     assert load["hot"]["cadence_seconds"] != load["background"]["cadence_seconds"]
     assert load["background"]["cadence_seconds"] != load["universe"]["cadence_seconds"]
 
@@ -332,11 +332,11 @@ def test_old_universe_interval_env_does_not_control_background_or_discovery(
     assert settings.paper_live_refresh_universe_interval_seconds == 180
     assert settings.paper_universe_worker_cooldown_seconds == 8
     assert settings.paper_background_price_interval_seconds == 90
-    assert settings.paper_universe_discovery_interval_seconds == 600
+    assert settings.paper_universe_discovery_interval_seconds == 1800
     coordinator = LiveRefreshCoordinator()
     coordinator.configure_from_settings(settings)
     assert coordinator.status.background.cadence_seconds == 90
-    assert coordinator.status.universe.cadence_seconds == 600
+    assert coordinator.status.universe.cadence_seconds == 1800
 
 
 def test_hot_remains_schedulable_during_600s_universe_discovery_gap() -> None:
@@ -370,7 +370,7 @@ def test_background_cadence_defaults_to_90s(tmp_path) -> None:
         assert coordinator.status.background.cadence_seconds == 90
         assert coordinator.status.operator_settings is not None
         assert coordinator.status.operator_settings.background_cadence_seconds == 90
-        assert coordinator.status.universe.cadence_seconds == 600
+        assert coordinator.status.universe.cadence_seconds == 1800
     finally:
         _unbind(coordinator, store)
 
@@ -407,7 +407,7 @@ async def test_persisted_background_cadence_is_used_by_scheduler_without_restart
         assert coordinator.status.background.cadence_seconds == 180
         load = coordinator.public_status().system_load
         assert load.background.cadence_seconds == 180
-        assert coordinator.status.universe.cadence_seconds == 600
+        assert coordinator.status.universe.cadence_seconds == 1800
     finally:
         bind_runtime_operator_scanner_settings_store(None)
         store.close()
@@ -433,7 +433,7 @@ def test_background_cadence_survives_store_reopen(tmp_path) -> None:
     coordinator.configure_from_settings()
     assert coordinator.status.background.cadence_seconds == 240
     assert coordinator.status.hot.cadence_seconds == 20
-    assert coordinator.status.universe.cadence_seconds == 600
+    assert coordinator.status.universe.cadence_seconds == 1800
     restarted.close()
 
 
@@ -567,7 +567,7 @@ def test_background_cadence_update_does_not_trigger_scan(tmp_path) -> None:
         assert body["operator_settings"]["background_cadence_seconds"] == 120
         assert body["background"]["cadence_seconds"] == 120
         assert body["hot"]["cadence_seconds"] == 30
-        assert body["universe"]["cadence_seconds"] == 600
+        assert body["universe"]["cadence_seconds"] == 1800
         assert ticks == []
         put_src = inspect.getsource(paper_api.put_operator_scanner_settings)
         assert "collect_and_scan" not in put_src
@@ -590,6 +590,6 @@ def test_frontend_exposes_background_cadence_beside_hot() -> None:
     assert "clampBackgroundCadenceSeconds" in scan
     assert "Math.min(600, Math.max(60" in scan
     assert "does not trigger a scan" in scan
-    assert "HOT cadence and BACKGROUND cadence" in scan
+    assert "HOT cadence, BACKGROUND cadence and UNIVERSE cadence" in scan
     assert "background_cadence_seconds: number" in api
     assert DEFAULT_BACKGROUND_CADENCE_SECONDS == 90

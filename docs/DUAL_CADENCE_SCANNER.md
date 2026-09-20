@@ -192,7 +192,7 @@ Normal hot cohorts should finish well under 25s. The 25s timeout exists so a slo
 
 | Parameter | Accepted default |
 | --- | --- |
-| Generation cadence | Persistent worker. After a **terminal-complete** generation, wait `paper_universe_discovery_interval_seconds` (default **600s**). Then start a **new generation id**. Incomplete generations resume/chunk/retry without this wait. Fixture radar membership still uses `paper_live_refresh_universe_interval_seconds` (180s). BACKGROUND pricing uses `paper_background_price_interval_seconds` (90s) independently. |
+| Generation cadence | Persistent worker. After a **terminal-complete** generation, wait `paper_universe_discovery_interval_seconds` / operator `universe_cadence_seconds` (default **1800s**). Then start a **new generation id**. Incomplete generations resume/chunk/retry without this wait. Fixture radar membership still uses `paper_live_refresh_universe_interval_seconds` (180s). BACKGROUND pricing uses `paper_background_price_interval_seconds` (90s) independently. |
 | Generation work budget | **150 seconds** (`paper_scan_universe_generation_budget_seconds`). Accumulated collector time across chunks in one generation. **Not** one continuous 150s `collect_and_scan`. |
 | Per-run chunk | Bound by `min(remaining_generation_budget, next_hot_due - now - safety_margin)`. Persist cursor, yield, let HOT run, resume. |
 | Safety margin | `paper_universe_hot_yield_safety_margin_seconds` default **2s**. Chunk wall time must also leave #157 coordinator grace inside that bound (§5.2.1). |
@@ -491,7 +491,7 @@ generation budget remains a separate decision.
 | --- | --- | --- |
 | `paper_live_refresh_hot_interval_seconds` | 30 | ge 15, le 60. Wall-clock HOT cadence. |
 | `paper_background_price_interval_seconds` | **90** | Env fallback for BACKGROUND price-engine cadence. ge 30, le 300. Runtime operator authority is `background_cadence_seconds` (default 90, 60–600). Not UNIVERSE discovery. |
-| `paper_universe_discovery_interval_seconds` | **600** | Post-terminal UNIVERSE discovery gap. ge 60, le 3600. Not a between-chunk sleep. |
+| `paper_universe_discovery_interval_seconds` | **1800** | Env fallback for post-terminal UNIVERSE discovery gap. ge 60, le 3600. Runtime operator authority is `universe_cadence_seconds` (default 1800, 60–3600). Not a between-chunk sleep, radar TTL, or generation budget. |
 | `paper_universe_worker_cooldown_seconds` | **8** | Intra-generation pause only for incomplete chunk continuation. ge 5, le 15. Not discovery cadence and not BACKGROUND pricing. |
 | `paper_live_refresh_universe_interval_seconds` | 180 | Fixture radar / membership interval. ge 60, le 300. Not BACKGROUND pricing and not UNIVERSE discovery. |
 | `paper_live_refresh_interval_seconds` | 30 | **Alias of HOT.** Keep for env/launcher compat. |

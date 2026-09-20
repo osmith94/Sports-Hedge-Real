@@ -64,6 +64,7 @@ def test_absent_override_uses_environment_defaults(tmp_path: Path) -> None:
     assert resolved.max_execution_risk == 40
     assert resolved.hot_cadence_seconds == 45
     assert resolved.background_cadence_seconds == 90
+    assert resolved.universe_cadence_seconds == 1800
     assert resolved.max_allocated_per_trade_gbp == Decimal("1000")
     assert resolved.scanner_stopped is False
     assert resolved.source == "env_default"
@@ -264,7 +265,9 @@ def test_frontend_renders_backend_settings_not_a_second_authority() -> None:
     assert "Auto refresh view" in text
     assert "HOT cadence s" in text
     assert "BACKGROUND cadence s" in text
+    assert "UNIVERSE cadence s" in text
     assert "background_cadence_seconds" in text
+    assert "universe_cadence_seconds" in text
     assert "disabled={loading || scannerStopped}" in text
     assert "if (liveRefresh?.scanner_stopped) return;" in text
     assert text.count("disabled={loading || scannerStopped}") >= 2

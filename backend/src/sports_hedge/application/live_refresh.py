@@ -125,6 +125,7 @@ from sports_hedge.persistence.operator_scanner_settings import (
     SqliteOperatorScannerSettingsStore,
     bind_runtime_operator_scanner_settings_store,
     clamp_background_cadence_seconds,
+    clamp_universe_cadence_seconds,
     env_operator_scanner_settings,
     get_operator_scanner_settings_store,
     resolve_operator_scanner_settings,
@@ -555,6 +556,7 @@ class LiveRefreshCoordinator:
         )
         hot_cadence = operator.hot_cadence_seconds
         background_cadence = operator.background_cadence_seconds
+        universe_cadence = operator.universe_cadence_seconds
         pending = resolve_lane_venue_participation(
             self._resolved_store(resolved),
             resolved,
@@ -591,7 +593,7 @@ class LiveRefreshCoordinator:
                     ),
                     "universe": self.status.universe.model_copy(
                         update={
-                            "cadence_seconds": resolved.paper_universe_discovery_interval_seconds,
+                            "cadence_seconds": universe_cadence,
                             "cycle_timeout_seconds": self._universe_chunk_collector_timeout(
                                 now=self.now(), settings=resolved
                             ),
@@ -828,6 +830,7 @@ class LiveRefreshCoordinator:
         max_execution_risk: int,
         hot_cadence_seconds: int,
         background_cadence_seconds: int,
+        universe_cadence_seconds: int | None = None,
         max_allocated_per_trade_gbp: Decimal | None = None,
     ) -> OperatorScannerSettings:
         store = self._resolved_operator_store()
@@ -836,6 +839,7 @@ class LiveRefreshCoordinator:
             max_execution_risk=max_execution_risk,
             hot_cadence_seconds=hot_cadence_seconds,
             background_cadence_seconds=background_cadence_seconds,
+            universe_cadence_seconds=universe_cadence_seconds,
             max_allocated_per_trade_gbp=max_allocated_per_trade_gbp,
         )
         with self._state_lock:
@@ -849,11 +853,19 @@ class LiveRefreshCoordinator:
                 if self.status.operator_settings is not None
                 else self.status.background.cadence_seconds
             )
+            previous_universe = (
+                self.status.operator_settings.universe_cadence_seconds
+                if self.status.operator_settings is not None
+                else self.status.universe.cadence_seconds
+            )
             self._apply_operator_settings_unlocked(
                 saved,
                 hot_cadence_changed=previous_hot != saved.hot_cadence_seconds,
                 background_cadence_changed=(
                     previous_background != saved.background_cadence_seconds
+                ),
+                universe_cadence_changed=(
+                    previous_universe != saved.universe_cadence_seconds
                 ),
             )
         self._pulse_control()
@@ -885,6 +897,7 @@ class LiveRefreshCoordinator:
         cadence_changed: bool = False,
         hot_cadence_changed: bool | None = None,
         background_cadence_changed: bool = False,
+        universe_cadence_changed: bool = False,
     ) -> None:
         self._operator_scanner_stopped = operator.scanner_stopped
         hot_changed = cadence_changed if hot_cadence_changed is None else hot_cadence_changed
@@ -903,20 +916,36 @@ class LiveRefreshCoordinator:
                 seconds=operator.background_cadence_seconds
             )
             background_update["next_due_at"] = self._next_background_due
+        universe_update: dict[str, Any] = {
+            "cadence_seconds": operator.universe_cadence_seconds,
+        }
+        if (
+            universe_cadence_changed
+            and not self._universe_in_progress
+            and self._universe_generation_started_at is None
+        ):
+            # Fresh-generation wait only. Do not rewrite intra-generation yield
+            # or trigger UNIVERSE immediately.
+            self._next_universe_due = self.now() + timedelta(
+                seconds=operator.universe_cadence_seconds
+            )
+            universe_update["next_due_at"] = self._next_universe_due
         if operator.scanner_stopped:
             hot_update["last_plan_reason"] = "operator_stopped"
             hot_update["worker_state"] = WORKER_WAITING
             hot_update["operator_summary"] = (
                 f"{OPERATOR_HOT_PRICING_LABEL} · stopped by operator · no provider call"
             )
-            universe_update = {
-                "last_plan_reason": "operator_stopped",
-                "worker_state": WORKER_WAITING,
-                "cycle_in_progress": False,
-                "operator_summary": (
-                    f"{OPERATOR_UNIVERSE_DISCOVERY_LABEL} · stopped by operator · no provider call"
-                ),
-            }
+            universe_update.update(
+                {
+                    "last_plan_reason": "operator_stopped",
+                    "worker_state": WORKER_WAITING,
+                    "cycle_in_progress": False,
+                    "operator_summary": (
+                        f"{OPERATOR_UNIVERSE_DISCOVERY_LABEL} · stopped by operator · no provider call"
+                    ),
+                }
+            )
             background_update.update(
                 {
                     "last_plan_reason": "operator_stopped",
@@ -934,7 +963,6 @@ class LiveRefreshCoordinator:
                 "operator_summary": "ACTIVE TRADE · stopped by operator · no provider call",
             }
         else:
-            universe_update = {}
             active_update = {}
         self.status = self.status.model_copy(
             update={
@@ -942,9 +970,7 @@ class LiveRefreshCoordinator:
                 "operator_settings": operator,
                 "interval_seconds": operator.hot_cadence_seconds,
                 "hot": self.status.hot.model_copy(update=hot_update),
-                "universe": self.status.universe.model_copy(update=universe_update)
-                if universe_update
-                else self.status.universe,
+                "universe": self.status.universe.model_copy(update=universe_update),
                 "background": self.status.background.model_copy(update=background_update),
                 "active_trade": self.status.active_trade.model_copy(update=active_update)
                 if active_update
@@ -968,6 +994,21 @@ class LiveRefreshCoordinator:
         resolved = settings or get_settings()
         return clamp_background_cadence_seconds(
             resolved.paper_background_price_interval_seconds
+        )
+
+    def _effective_universe_cadence_seconds(
+        self,
+        settings: Settings | None = None,
+        operator: OperatorScannerSettings | None = None,
+    ) -> int:
+        resolved_operator = operator if operator is not None else self.status.operator_settings
+        if resolved_operator is not None:
+            return clamp_universe_cadence_seconds(
+                resolved_operator.universe_cadence_seconds
+            )
+        resolved = settings or get_settings()
+        return clamp_universe_cadence_seconds(
+            resolved.paper_universe_discovery_interval_seconds
         )
 
     def _sync_price_engine_background_interval_unlocked(self, cadence: int) -> None:
@@ -1234,7 +1275,9 @@ class LiveRefreshCoordinator:
                 "universe": self.status.universe.model_copy(
                     update={
                         "next_due_at": self._status_universe_next_due_unlocked(evaluated=now),
-                        "cadence_seconds": resolved.paper_universe_discovery_interval_seconds,
+                        "cadence_seconds": self._effective_universe_cadence_seconds(
+                            resolved
+                        ),
                         "resume_cursor": self._status_universe_cursor(),
                         "generation_work_used_s": round(self._status_universe_work_used(), 3),
                     }
@@ -1263,8 +1306,9 @@ class LiveRefreshCoordinator:
 
         Retry/backoff can show sooner than the discovery interval. A paused
         incomplete generation reports the bounded ~8s intra-generation yield.
-        Only a terminal-complete close uses +600s. Do not paint an open
-        generation as immediately due when a later due time is scheduled.
+        Only a terminal-complete close uses the operator UNIVERSE cadence.
+        Do not paint an open generation as immediately due when a later due
+        time is scheduled.
         """
 
         if self._universe_retry_at is not None and self._universe_retry_at > evaluated:
@@ -3539,7 +3583,7 @@ class LiveRefreshCoordinator:
         if self._universe_generation_started_at is None:
             return
         settings = get_settings()
-        cooldown = timedelta(seconds=settings.paper_universe_discovery_interval_seconds)
+        cooldown = timedelta(seconds=self._effective_universe_cadence_seconds(settings))
         self._next_universe_due = finished + cooldown
         self._fixture_state.close_universe_generation(
             self._universe_generation_id, closed_at=finished
@@ -3989,9 +4033,7 @@ class LiveRefreshCoordinator:
                     "universe": self.status.universe.model_copy(
                         update={
                             "fixture_count": universe_count,
-                            "cadence_seconds": int(
-                                get_settings().paper_universe_discovery_interval_seconds
-                            ),
+                            "cadence_seconds": self._effective_universe_cadence_seconds(),
                             "next_due_at": self._status_universe_next_due_unlocked(
                                 evaluated=now
                             ),

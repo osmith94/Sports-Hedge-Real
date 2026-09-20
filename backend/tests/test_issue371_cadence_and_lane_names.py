@@ -1,4 +1,4 @@
-"""Issue #371: independent BACKGROUND 90s / UNIVERSE 10m cadences and canonical lane names.
+"""Issue #371: independent BACKGROUND 90s / UNIVERSE 30m cadences and canonical lane names.
 
 PAPER / read-only. Deterministic coordinator clocks. Not live quotes.
 """
@@ -45,12 +45,12 @@ def test_cadence_settings_are_independent_and_named_honestly() -> None:
     settings = Settings()
     assert settings.paper_live_refresh_hot_interval_seconds == 30
     assert settings.paper_background_price_interval_seconds == 90
-    assert settings.paper_universe_discovery_interval_seconds == 600
+    assert settings.paper_universe_discovery_interval_seconds == 1800
     assert settings.paper_universe_worker_cooldown_seconds == 8
     assert settings.paper_live_refresh_universe_interval_seconds == 180
     assert DEFAULT_HOT_CADENCE_SECONDS == DEFAULT_HOT_INTERVAL_SECONDS == 30
     assert DEFAULT_BACKGROUND_CADENCE_SECONDS == DEFAULT_BACKGROUND_INTERVAL_SECONDS == 90
-    assert DEFAULT_UNIVERSE_DISCOVERY_INTERVAL_SECONDS == 600
+    assert DEFAULT_UNIVERSE_DISCOVERY_INTERVAL_SECONDS == 1800
     assert settings.paper_scan_hot_cycle_timeout_seconds == 25
     assert settings.paper_scan_universe_generation_budget_seconds == 150
     assert settings.paper_scan_provider_timeout_seconds == 8
@@ -65,14 +65,14 @@ def test_startup_universe_is_immediately_due() -> None:
     coordinator = LiveRefreshCoordinator(clock=clock)
     coordinator.configure_from_settings()
     assert coordinator.universe_due_immediately() is True
-    assert coordinator.status.universe.cadence_seconds == 600
+    assert coordinator.status.universe.cadence_seconds == 1800
     plan = coordinator.plan_universe_tick(now=NOW)
     assert plan.lane == ScanLane.UNIVERSE.value
     assert plan.universe_generation_id == 1
     assert plan.generation_resume is False
 
 
-def test_completed_universe_schedules_next_fresh_generation_at_600s() -> None:
+def test_completed_universe_schedules_next_fresh_generation_at_1800s() -> None:
     clock = FakeClock(NOW)
     coordinator = LiveRefreshCoordinator(clock=clock)
     coordinator._clock = clock
@@ -80,13 +80,13 @@ def test_completed_universe_schedules_next_fresh_generation_at_600s() -> None:
     coordinator._universe_generation_started_at = NOW
     coordinator._close_universe_generation(NOW + timedelta(seconds=12))
     assert coordinator._universe_generation_started_at is None
-    assert coordinator._next_universe_due == NOW + timedelta(seconds=612)
+    assert coordinator._next_universe_due == NOW + timedelta(seconds=1812)
     idle = coordinator.plan_universe_tick(now=NOW + timedelta(seconds=13))
     assert idle.lane == "idle"
     assert idle.reason == "universe_cooldown"
-    still_idle = coordinator.plan_universe_tick(now=NOW + timedelta(seconds=611))
+    still_idle = coordinator.plan_universe_tick(now=NOW + timedelta(seconds=1811))
     assert still_idle.reason == "universe_cooldown"
-    nxt = coordinator.plan_universe_tick(now=NOW + timedelta(seconds=612))
+    nxt = coordinator.plan_universe_tick(now=NOW + timedelta(seconds=1812))
     assert nxt.lane == ScanLane.UNIVERSE.value
     assert nxt.generation_resume is False
     assert nxt.universe_generation_id == 4
@@ -124,7 +124,7 @@ def test_incomplete_universe_chunk_yields_about_8s_not_zero_or_600() -> None:
     clock.now = paused + timedelta(seconds=8)
     resumed = coordinator.plan_universe_tick(now=clock.now)
     assert resumed.lane == ScanLane.UNIVERSE.value
-    assert coordinator.status.universe.cadence_seconds == 600
+    assert coordinator.status.universe.cadence_seconds == 1800
 
 
 def test_retry_wait_can_resume_sooner_than_discovery_interval() -> None:
@@ -156,7 +156,7 @@ async def test_background_next_due_is_90s_after_slice_and_independent_of_univers
     assert coordinator.status.background.next_due_at == coordinator._next_background_due
     summary = coordinator.status.background.operator_summary or ""
     assert OPERATOR_BACKGROUND_PRICING_LABEL in summary
-    assert coordinator.status.universe.cadence_seconds == 600
+    assert coordinator.status.universe.cadence_seconds == 1800
     assert coordinator.status.hot.cadence_seconds == 30
 
 
@@ -178,11 +178,11 @@ def test_system_load_and_status_expose_truthful_independent_cadences() -> None:
     status = coordinator.public_status()
     assert status.hot.cadence_seconds == 30
     assert status.background.cadence_seconds == 90
-    assert status.universe.cadence_seconds == 600
+    assert status.universe.cadence_seconds == 1800
     load = system_load_from_status(status)
     assert load.hot.cadence_seconds == 30
     assert load.background.cadence_seconds == 90
-    assert load.universe.cadence_seconds == 600
+    assert load.universe.cadence_seconds == 1800
     assert system_load_payload_bytes(load) < SYSTEM_LOAD_JSON_BUDGET_BYTES
     combined = status.operator_summary or ""
     assert OPERATOR_HOT_PRICING_LABEL in combined

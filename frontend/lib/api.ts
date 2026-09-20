@@ -701,6 +701,7 @@ export type OperatorScannerSettings = {
   max_execution_risk: number;
   hot_cadence_seconds: number;
   background_cadence_seconds: number;
+  universe_cadence_seconds?: number;
   max_allocated_per_trade_gbp?: string;
   scanner_stopped: boolean;
   source?: "operator" | "env_default";
@@ -713,6 +714,7 @@ export type OperatorScannerSettingsUpdate = {
   max_execution_risk: number;
   hot_cadence_seconds: number;
   background_cadence_seconds: number;
+  universe_cadence_seconds?: number;
   max_allocated_per_trade_gbp?: string;
 };
 

@@ -349,9 +349,13 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /is not UNIVERSE discovery/);
     assert.match(scan, /HOT cadence s/);
     assert.match(scan, /BACKGROUND cadence s/);
+    assert.match(scan, /UNIVERSE cadence s/);
     assert.match(scan, /background_cadence_seconds/);
+    assert.match(scan, /universe_cadence_seconds/);
     assert.match(scan, /clampBackgroundCadenceSeconds/);
-    assert.match(scan, /HOT cadence and BACKGROUND cadence/);
+    assert.match(scan, /clampUniverseCadenceSeconds/);
+    assert.match(scan, /HOT cadence, BACKGROUND cadence and UNIVERSE cadence/);
+    assert.match(scan, /DEFAULT_UNIVERSE_CADENCE_SECONDS = 1800/);
     assert.match(scan, /Update/);
     assert.match(scan, /Stop scanner/);
     assert.match(scan, /Resume scanner/);

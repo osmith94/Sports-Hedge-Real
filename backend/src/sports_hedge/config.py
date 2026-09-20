@@ -294,7 +294,9 @@ class Settings(BaseSettings):
     paper_background_price_interval_seconds: int = Field(default=90, ge=30, le=300)
     # After a terminal-complete UNIVERSE generation, wait this long before the
     # next fresh discovery generation. Incomplete chunks/retries do not use this.
-    paper_universe_discovery_interval_seconds: int = Field(default=600, ge=60, le=3600)
+    # Operator override is universe_cadence_seconds (60–3600). Not radar TTL,
+    # not intra-generation worker cooldown, and not generation budget.
+    paper_universe_discovery_interval_seconds: int = Field(default=1800, ge=60, le=3600)
     # Config-authoritative ACTIVE TRADE exact-ID cadence. Not an operator field
     # in this first pass. Do not discover/rematch on this lane.
     paper_active_trade_interval_seconds: int = Field(default=5, ge=1, le=15)

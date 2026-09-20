@@ -83,9 +83,15 @@ function clampBackgroundCadenceSeconds(value: number): number {
   return Math.min(600, Math.max(60, Math.round(value)));
 }
 
+function clampUniverseCadenceSeconds(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_UNIVERSE_CADENCE_SECONDS;
+  return Math.min(3600, Math.max(60, Math.round(value)));
+}
+
 const DEFAULT_MIN_NET_ARB_PERCENT = "1.00";
 const DEFAULT_MAX_RISK = "60";
 const DEFAULT_HOT_CADENCE_SECONDS = 30;
+const DEFAULT_UNIVERSE_CADENCE_SECONDS = 1800;
 const DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP = "1000";
 
 function minNetPercentFromRate(value: string | number | null | undefined): string {
@@ -229,6 +235,12 @@ export function RunPaperScan() {
   const [intervalDraft, setIntervalDraft] = useState(String(DEFAULT_HOT_CADENCE_SECONDS));
   const [backgroundIntervalSeconds, setBackgroundIntervalSeconds] = useState(90);
   const [backgroundIntervalDraft, setBackgroundIntervalDraft] = useState("90");
+  const [universeIntervalSeconds, setUniverseIntervalSeconds] = useState(
+    DEFAULT_UNIVERSE_CADENCE_SECONDS,
+  );
+  const [universeIntervalDraft, setUniverseIntervalDraft] = useState(
+    String(DEFAULT_UNIVERSE_CADENCE_SECONDS),
+  );
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [scannerControlBusy, setScannerControlBusy] = useState(false);
@@ -298,6 +310,15 @@ export function RunPaperScan() {
         const clampedBackground = clampBackgroundCadenceSeconds(backgroundCadence);
         setBackgroundIntervalSeconds(clampedBackground);
         setBackgroundIntervalDraft(String(clampedBackground));
+      }
+      const universeCadence =
+        saved?.universe_cadence_seconds ??
+        status.universe?.cadence_seconds ??
+        DEFAULT_UNIVERSE_CADENCE_SECONDS;
+      if (universeCadence && (!settingsDirty || options?.forceSettings)) {
+        const clampedUniverse = clampUniverseCadenceSeconds(universeCadence);
+        setUniverseIntervalSeconds(clampedUniverse);
+        setUniverseIntervalDraft(String(clampedUniverse));
       }
       if (saved && (!settingsDirty || options?.forceSettings)) {
         setMinNetArbPercent(minNetPercentFromRate(saved.min_net_edge));
@@ -473,6 +494,7 @@ export function RunPaperScan() {
       }
       const cadence = clampHotCadenceSeconds(Number(intervalDraft));
       const backgroundCadence = clampBackgroundCadenceSeconds(Number(backgroundIntervalDraft));
+      const universeCadence = clampUniverseCadenceSeconds(Number(universeIntervalDraft));
       const allocated = optionalPositive(maxAllocatedPerTrade, "Max allocated per trade");
       if (!allocated) {
         throw new Error("Max allocated per trade is required.");
@@ -482,6 +504,7 @@ export function RunPaperScan() {
         max_execution_risk: risk,
         hot_cadence_seconds: cadence,
         background_cadence_seconds: backgroundCadence,
+        universe_cadence_seconds: universeCadence,
         max_allocated_per_trade_gbp: allocated,
       });
       applyLiveRefresh(status, { forceSettings: true });
@@ -732,6 +755,24 @@ export function RunPaperScan() {
             />
           </label>
           <label className="scan-field scan-field-compact">
+            <span>UNIVERSE cadence s</span>
+            <input
+              inputMode="numeric"
+              value={universeIntervalDraft}
+              onChange={(event) => {
+                setUniverseIntervalDraft(event.target.value);
+                setSettingsDirty(true);
+              }}
+              onBlur={() => {
+                const clamped = clampUniverseCadenceSeconds(Number(universeIntervalDraft));
+                setUniverseIntervalSeconds(clamped);
+                setUniverseIntervalDraft(String(clamped));
+              }}
+              aria-label="UNIVERSE cadence seconds"
+              title="Fresh UNIVERSE discovery restart interval after a complete generation. Safe range 60–3600 seconds. Default 1800. Not radar TTL, worker cooldown, or generation budget."
+            />
+          </label>
+          <label className="scan-field scan-field-compact">
             <span>Max £ / trade</span>
             <input
               inputMode="decimal"
@@ -852,15 +893,17 @@ export function RunPaperScan() {
           Manual HOT refresh performs a HOT pricing refresh of current known fixtures.
           It does not rediscover the catalogue. Manual BACKGROUND refresh reprices currently due ACTIVE catalogue rows from exact known IDs.
           Neither HOT nor BACKGROUND rediscover the catalogue or advance UNIVERSE generation state.
-          Run UNIVERSE now bypasses only the 10-minute wait and uses the real selected-scope generation worker.
-          Update saves Min Net Arb, Max Risk, HOT cadence and BACKGROUND cadence
+          Run UNIVERSE now bypasses only the UNIVERSE cadence wait and uses the real selected-scope generation worker.
+          Update saves Min Net Arb, Max Risk, HOT cadence, BACKGROUND cadence and UNIVERSE cadence
           and max allocated per trade for subsequent server-owned work and does not trigger a scan.
           Football competitions Apply changes the current session scope and does not itself call providers.
           Save this selection as my default is required to persist startup scope across restart.
           HOT cadence is how often HOT pricing is due; BACKGROUND cadence is how often the
-          rest of the known ACTIVE catalogue is repriced. ACTIVE TRADE reprices open paper
+          rest of the known ACTIVE catalogue is repriced. UNIVERSE cadence is how often a fresh
+          discovery generation starts after the previous one completes (default 1800s).
+          ACTIVE TRADE reprices open paper
           trades every 5s from exact known IDs. Auto refresh view only polls status.
-          UNIVERSE discovery stays on the architecture 10-minute post-completion schedule unless Run UNIVERSE now is used.
+          Run UNIVERSE now is the explicit manual bypass of the cadence wait.
         </div>
         <div className="scan-note" aria-label="ACTIVE TRADE, HOT pricing, BACKGROUND pricing and UNIVERSE discovery status">
           {dualScanStatusLines(liveRefresh, nowMs).map((line) => (
