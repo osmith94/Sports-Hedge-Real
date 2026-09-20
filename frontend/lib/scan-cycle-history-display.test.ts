@@ -125,7 +125,7 @@ describe("scan cycle history presentation", () => {
     assert.equal(scanCycleLatestSummary(false, null), "unavailable");
     assert.equal(scanCycleLatestSummary(true, []), "no completed cycles");
     assert.equal(
-      scanCycleLatestSummary(true, [cycle()]),
+      scanCycleLatestSummary(true, [cycle({ not_evaluated_count: 0 })]),
       "latest HOT pricing · venues ok",
     );
     assert.match(SCAN_CYCLE_EMPTY, /Zero-decision cycles still appear/);
