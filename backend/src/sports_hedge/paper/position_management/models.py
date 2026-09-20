@@ -16,6 +16,7 @@ from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.paper.unwind.models import (
     CapitalPressure,
     EstimatedTimeToRelease,
+    ExitMarginBasis,
     IncrementalCloseCapitalStatus,
     RemainingLockClass,
     RemainingLockSource,
@@ -119,6 +120,17 @@ class PositionManagementSnapshot(BaseModel):
     pending_confirmation: PendingUnwindConfirmation | None = None
     auto_unwind_enabled: bool = False
     auto_close_allowed: bool = False
+    exit_margin_gbp: Decimal | None = Field(
+        default=None,
+        description=(
+            "Permitted give-up minus unwind_cost_gbp from the same hold-vs-unwind "
+            "policy branch. Not realised P&L. Not permission to close when unsafe."
+        ),
+    )
+    exit_threshold_gbp: Decimal | None = None
+    exit_margin_basis: ExitMarginBasis = ExitMarginBasis.UNAVAILABLE
+    exit_margin_actionable: bool = False
+    close_blocker: str | None = None
     paper_only: bool = True
     places_orders: bool = False
     spendable: bool = False
@@ -151,6 +163,15 @@ class PositionManagementSnapshot(BaseModel):
         self.remaining_lock_detail = estimate.detail
         if not self.close_executable:
             self.releasable_native = {}
+            self.exit_margin_actionable = False
+        if self.recommendation is UnwindRecommendation.UNWIND_NOT_SAFE:
+            self.exit_margin_actionable = False
+            if self.close_blocker is None:
+                self.close_blocker = self.decision_reason
+        if self.validated_exit_pnl_gbp is None:
+            self.exit_margin_gbp = None
+            if self.exit_margin_basis is ExitMarginBasis.UNAVAILABLE:
+                self.exit_threshold_gbp = None
         return self
 
 

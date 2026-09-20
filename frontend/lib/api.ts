@@ -1859,6 +1859,11 @@ export type PositionManagementSnapshot = {
   expected_settlement_at?: string | null;
   remaining_lock_advisory?: boolean;
   normal_release_context?: string;
+  exit_margin_gbp?: string | number | null;
+  exit_threshold_gbp?: string | number | null;
+  exit_margin_basis?: string | null;
+  exit_margin_actionable?: boolean;
+  close_blocker?: string | null;
   paper_only?: boolean;
   places_orders?: boolean;
   spendable?: boolean;

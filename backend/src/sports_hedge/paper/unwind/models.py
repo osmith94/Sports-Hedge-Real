@@ -27,6 +27,20 @@ class UnwindRecommendation(StrEnum):
     UNWIND_NOT_SAFE = "UNWIND_NOT_SAFE"
 
 
+class ExitMarginBasis(StrEnum):
+    """Which decide_recommendation() policy branch produced the exit threshold.
+
+    This is display/audit of the existing hold-vs-unwind rule. It is not a
+    second close model and never overrides UNWIND_NOT_SAFE.
+    """
+
+    UNAVAILABLE = "unavailable"
+    MIN_RETAINED_EXIT_PNL = "min_retained_exit_pnl"
+    SUPPLIED_OPPORTUNITY_COST = "supplied_opportunity_cost"
+    SCARCE_CAPITAL_BOUNDED_GIVE_UP = "scarce_capital_bounded_give_up"
+    ABUNDANT_CAPITAL_GIVE_UP = "abundant_capital_give_up"
+
+
 class VenueCloseMechanics(StrEnum):
     """Provider-neutral close mechanics. Named by economics, not a venue pair."""
 
@@ -431,6 +445,24 @@ class UnwindDecision(BaseModel):
     close_plan: ClosePlan
     execution_risk: ExecutionRiskResult | None = None
     capital_pressure: CapitalPressure = CapitalPressure.ABUNDANT
+    exit_margin_gbp: Decimal | None = Field(
+        default=None,
+        description=(
+            "allowed give-up minus unwind_cost_gbp from the same policy branch as "
+            "recommendation. Positive = inside the permitted economic threshold. "
+            "Not realised P&L and not permission to close when unsafe."
+        ),
+    )
+    exit_threshold_gbp: Decimal | None = Field(
+        default=None,
+        description="Permitted give-up (or min-retained implied give-up) used for exit_margin_gbp.",
+    )
+    exit_margin_basis: ExitMarginBasis = ExitMarginBasis.UNAVAILABLE
+    exit_margin_actionable: bool = False
+    close_blocker: str | None = Field(
+        default=None,
+        description="Safety/executability blocker. Distinct from a HOLD economic reason.",
+    )
     paper_only: bool = True
     places_orders: bool = False
     spendable: bool = False
@@ -445,8 +477,21 @@ class UnwindDecision(BaseModel):
             self.conditionally_releasable_by_venue_currency = {}
             self.incremental_close_capital_native = {}
             self.incremental_close_capital_status = IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
+            self.exit_margin_actionable = False
+            if self.validated_exit_pnl_gbp is None:
+                self.exit_margin_gbp = None
+                self.exit_threshold_gbp = None
+                self.exit_margin_basis = ExitMarginBasis.UNAVAILABLE
+            if self.close_blocker is None:
+                self.close_blocker = self.decision_reason
         if self.incremental_close_capital_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED:
             self.incremental_close_capital_native = {}
+        if self.recommendation is UnwindRecommendation.UNWIND_NOT_SAFE:
+            self.exit_margin_actionable = False
+            if self.close_blocker is None:
+                self.close_blocker = self.decision_reason
+        elif not self.close_plan.fully_executable:
+            self.exit_margin_actionable = False
         self.estimated_time_to_release.advisory = True
         self.estimated_time_to_release.settles_or_releases_capital = False
         self.spendable_release_requires = "validated_unwind_and_8e_or_venue_event_settlement_and_8e"

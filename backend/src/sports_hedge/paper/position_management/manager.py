@@ -39,6 +39,7 @@ from sports_hedge.paper.trades import (
 from sports_hedge.paper.unwind import PaperUnwindEngine, UnwindIdentityError, position_from_trade
 from sports_hedge.paper.unwind.models import (
     CapitalScarcityInput,
+    ExitMarginBasis,
     OpenPaperPosition,
     ReverseQuote,
     UnwindDecision,
@@ -371,6 +372,8 @@ class PaperPositionManager:
                     "decision_reason": abort,
                     "close_executable": False,
                     "releasable_native": {},
+                    "exit_margin_actionable": False,
+                    "close_blocker": abort,
                 }
             )
             self._persist_snapshot(trade, failed, occurred, audit=True, extra_detail=abort)
@@ -412,6 +415,8 @@ class PaperPositionManager:
                     "decision_reason": reason,
                     "close_executable": False,
                     "releasable_native": {},
+                    "exit_margin_actionable": False,
+                    "close_blocker": reason,
                 }
             )
             self._persist_snapshot(trade, failed, occurred, audit=True, extra_detail=reason)
@@ -559,6 +564,8 @@ class PaperPositionManager:
                 "decision_reason": reason,
                 "close_executable": False,
                 "releasable_native": {},
+                "exit_margin_actionable": False,
+                "close_blocker": reason,
             }
         )
         self._persist_snapshot(trade, failed, occurred, audit=True, extra_detail=reason)
@@ -597,6 +604,8 @@ class PaperPositionManager:
                 "decision_reason": reason,
                 "close_executable": False,
                 "releasable_native": {},
+                "exit_margin_actionable": False,
+                "close_blocker": reason,
             }
         )
         self._persist_snapshot(trade, snapshot, occurred, audit=True, extra_detail=reason)
@@ -794,6 +803,11 @@ def snapshot_from_decision(
         pending_confirmation=pending_confirmation,
         auto_unwind_enabled=auto_unwind_enabled,
         auto_close_allowed=auto_close_allowed,
+        exit_margin_gbp=decision.exit_margin_gbp,
+        exit_threshold_gbp=decision.exit_threshold_gbp,
+        exit_margin_basis=decision.exit_margin_basis,
+        exit_margin_actionable=decision.exit_margin_actionable,
+        close_blocker=decision.close_blocker,
         data_kind="modelled_paper_position_management",
     )
 
@@ -970,4 +984,7 @@ def _empty_snapshot(
         evaluated_at=occurred,
         auto_unwind_enabled=auto_unwind_enabled,
         auto_close_allowed=False,
+        exit_margin_basis=ExitMarginBasis.UNAVAILABLE,
+        exit_margin_actionable=False,
+        close_blocker=reason,
     )
