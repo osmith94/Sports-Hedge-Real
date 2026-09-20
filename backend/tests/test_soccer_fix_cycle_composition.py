@@ -240,5 +240,6 @@ def test_composed_sources_stay_paper_only() -> None:
     assert result_resolution.__doc__ is not None
     assert "elapsed kickoff time" in result_resolution.__doc__
     live_src = inspect.getsource(LiveRefreshCoordinator._maybe_run_paper_settlement)
-    assert "create_task" not in live_src
+    assert "asyncio.create_task" not in live_src
+    assert "Does not add a fifth create_task" in live_src
     assert "paper_settlement_interval_seconds" in live_src

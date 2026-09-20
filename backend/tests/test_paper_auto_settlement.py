@@ -35,7 +35,11 @@ from test_paper_trade_lifecycle import (
     assert_settlement_arithmetic,
     independent_realised_pnl_gbp,
 )
-from test_step8c_bankroll_allocator import _demo_request
+from test_step8c_bankroll_allocator import (
+    _assert_not_open_count_rejection,
+    _demo_request,
+    _fill_high,
+)
 
 NOW = datetime(2026, 9, 20, 18, 0, tzinfo=UTC)
 KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
@@ -562,12 +566,20 @@ def test_closed_trade_no_longer_counts_toward_open_positions(tmp_path: Path) -> 
         )
         after = exposures_from_trades(ops.list_active_trades())
         assert after == []
-        policy = BankrollAllocationPolicy(max_concurrent_open_opportunities=1)
-        rejected = allocate(_demo_request(open_positions=before, policy=policy))
-        assert rejected.accepted is False
-        assert rejected.limiting_constraint_detail == "maximum concurrent open opportunities"
-        accepted = allocate(_demo_request(open_positions=after, policy=policy))
+        # #403 retired the open-count cap. Closed trades still drop from
+        # open-position capital accounting (#404); leftover count kwargs
+        # must not restore a rejection while the trade is open.
+        leftover = BankrollAllocationPolicy(max_concurrent_open_opportunities=1)
+        still_open = allocate(
+            _demo_request(open_positions=before, policy=leftover, fill=_fill_high())
+        )
+        assert still_open.accepted is True
+        _assert_not_open_count_rejection(still_open)
+        accepted = allocate(
+            _demo_request(open_positions=after, policy=leftover, fill=_fill_high())
+        )
         assert accepted.accepted is True
+        _assert_not_open_count_rejection(accepted)
     finally:
         repository.close()
         ledger.close()
