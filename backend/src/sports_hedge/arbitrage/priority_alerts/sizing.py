@@ -103,7 +103,6 @@ def allocate_priority_legs(
         max_pool_fraction_per_opportunity=Decimal("1"),
         max_open_capital_fraction=Decimal("1"),
         max_same_fixture_capital_fraction=Decimal("1"),
-        max_concurrent_open_opportunities=None,
         safety_haircut=thresholds.safety_haircut,
         operator_recommended_cap_reporting=thresholds.operator_manual_cap,
         risk_limit_reporting=thresholds.risk_limit,

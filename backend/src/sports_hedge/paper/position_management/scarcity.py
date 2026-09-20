@@ -23,7 +23,6 @@ _CAPITAL_CONSTRAINTS = frozenset(
         AllocationConstraintKind.MAX_POOL_FRACTION,
         AllocationConstraintKind.MIN_FREE_RESERVE,
         AllocationConstraintKind.PORTFOLIO_CAP,
-        AllocationConstraintKind.CONCURRENCY,
     }
 )
 

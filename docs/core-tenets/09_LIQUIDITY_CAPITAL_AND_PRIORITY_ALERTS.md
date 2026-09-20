@@ -118,7 +118,7 @@ Priority Alerts should support provider-neutral routing such as in-app, email, p
 - Are available, locked and conditionally releasable capital distinguished without double counting?
 - Is manual override explicitly distinguishable from auto-pool capital?
 - Is recommended size based on limiting Tenet-18 taker executable depth rather than headline, displayed, or passive/maker quotes?
-- Does sizing preserve reserve/concurrency constraints rather than blindly consuming the full pool?
+- Does sizing preserve reserve, open-capital-fraction and concentration constraints rather than blindly consuming the full pool? The standard PAPER allocator must not reject solely because N opportunities are already open.
 - Are expected lock duration and capital opportunity cost considered where relevant?
 - Does an early unwind use executable reverse-side economics after costs rather than spread convergence alone?
 - Is fill confidence described as an estimate, not a guarantee?

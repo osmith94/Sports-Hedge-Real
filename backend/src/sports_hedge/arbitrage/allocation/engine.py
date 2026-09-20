@@ -293,7 +293,6 @@ def _constraint_priority(kind: AllocationConstraintKind) -> int:
         AllocationConstraintKind.PER_OPPORTUNITY_LIMIT,
         AllocationConstraintKind.FIXTURE_CONCENTRATION,
         AllocationConstraintKind.PORTFOLIO_CAP,
-        AllocationConstraintKind.CONCURRENCY,
         AllocationConstraintKind.EXTERNAL_LEG_CAP,
         AllocationConstraintKind.SOLVER_CAPITAL,
     ]
@@ -460,24 +459,6 @@ def _hard_constraints(request: AllocationRequest) -> list[ConstraintBinding]:
                 detail="total open-paper reporting cap",
             )
         )
-    if policy.max_concurrent_open_opportunities is not None:
-        open_count = len(request.open_positions)
-        if open_count >= policy.max_concurrent_open_opportunities:
-            bindings.append(
-                ConstraintBinding(
-                    kind=AllocationConstraintKind.CONCURRENCY,
-                    scale=Decimal("0"),
-                    detail="maximum concurrent open opportunities",
-                )
-            )
-        else:
-            bindings.append(
-                ConstraintBinding(
-                    kind=AllocationConstraintKind.CONCURRENCY,
-                    scale=Decimal("1"),
-                    detail="concurrent open opportunities within cap",
-                )
-            )
 
     external_need = _native_need_external(request.legs)
     if policy.external_leg_cap_native is not None:
