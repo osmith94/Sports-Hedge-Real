@@ -44,6 +44,7 @@ HEALTH_CAPACITY_SATURATED = "provider_capacity_saturated"
 DEFAULT_STARVATION_HOT_GRANTS = 8
 PRICE_ENGINE_BACKGROUND_LANE = "background"
 PRICE_ENGINE_ACTIVE_TRADE_LANE = "active_trade"
+PRICE_ENGINE_SETTLEMENT_LANE = "settlement"
 
 
 class ProviderPriority(IntEnum):
@@ -60,7 +61,7 @@ def priority_for_lane(lane: ScanLane | str | None) -> ProviderPriority:
         return ProviderPriority.ACTIVE_TRADE
     if text == ScanLane.HOT.value:
         return ProviderPriority.HOT
-    if text == PRICE_ENGINE_BACKGROUND_LANE:
+    if text in {PRICE_ENGINE_BACKGROUND_LANE, PRICE_ENGINE_SETTLEMENT_LANE}:
         return ProviderPriority.BACKGROUND
     return ProviderPriority.UNIVERSE
 

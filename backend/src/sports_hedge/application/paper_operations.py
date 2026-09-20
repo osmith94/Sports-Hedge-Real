@@ -2555,6 +2555,12 @@ class PaperOperationsService:
             )
         )
         self.trades.save(trade)
+        try:
+            from sports_hedge.application.active_trade_lane import get_active_trade_registry
+
+            get_active_trade_registry().drop(trade.trade_id)
+        except Exception:
+            pass
         self.record_active_lifecycle_event(
             trade,
             event_type=ActiveTradeEventType.SETTLED,

@@ -42,6 +42,8 @@ class ActiveTradeEventType(StrEnum):
     NO_ACTION = "no_action"
     UNWIND_DECISION = "unwind_decision"
     SETTLED = "settled"
+    SETTLEMENT_BLOCKED = "settlement_blocked"
+    SETTLEMENT_INCOMPLETE = "settlement_incomplete"
     CLOSED = "closed"
     JOURNAL_WRITE_FAILED = "journal_write_failed"
 
@@ -80,6 +82,8 @@ class ActiveTradeReasonCode(StrEnum):
     RECOVERY_RESIDUAL = "recovery_residual"
     UNWIND_LOGGED = "unwind_logged"
     SETTLED = "settled"
+    SETTLEMENT_BLOCKED = "settlement_blocked"
+    SETTLEMENT_INCOMPLETE = "settlement_incomplete"
     CLOSED = "closed"
     JOURNAL_PERSIST_FAILED = "journal_persist_failed"
 

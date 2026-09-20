@@ -615,6 +615,28 @@ class MatchbookClient(ReadOnlyVenue):
                 raise MatchbookMarketGoneError(event_id, market_id, status_code) from exc
             raise
 
+    async def get_event(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+        """Read-only GET of one known Matchbook event, including scores/status.
+
+        Official path: ``GET /edge/rest/events/{event_id}``. Used by PAPER
+        settlement to read graded/finished results. Never infers completion
+        from elapsed kickoff time. Phase 1 remains market-data only.
+        """
+
+        params = {
+            **self._market_data_params(),
+            "include-prices": "false",
+            **filters,
+        }
+        path = f"/edge/rest/events/{event_id}"
+        try:
+            return await self._get(path, params=params)
+        except httpx.HTTPStatusError as exc:
+            status_code = int(exc.response.status_code)
+            if status_code in {404, 410}:
+                raise MatchbookMarketGoneError(event_id, event_id, status_code) from exc
+            raise
+
     async def get_order_book(
         self,
         event_id: int | str,

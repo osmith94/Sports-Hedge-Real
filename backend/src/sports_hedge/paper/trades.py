@@ -101,6 +101,7 @@ class PaperTradeAuditEventType(StrEnum):
     ENTRY_RISK_RECORDED = "entry_risk_recorded"
     SETTLED = "settled"
     SETTLEMENT_IDEMPOTENT = "settlement_idempotent"
+    SETTLEMENT_BLOCKED = "settlement_blocked"
     CLOSE_PLAN_EVALUATED = "close_plan_evaluated"
     CLOSE_FILLS_RECORDED = "close_fills_recorded"
     UNWIND_COMPLETED = "unwind_completed"

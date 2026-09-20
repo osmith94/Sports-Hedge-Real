@@ -293,12 +293,13 @@ class KalshiClient(ReadOnlyVenue):
             max_pages=self.settings.kalshi_event_max_pages,
         )
 
-    async def get_market(self, ticker: str) -> dict[str, Any]:
+    async def get_market(self, ticker: str, *, use_cache: bool = True) -> dict[str, Any]:
         """Documented read-only Get Market. Source of `rules_primary` / `rules_secondary`.
 
         Nested `/events?with_nested_markets=true` and `/markets` list pages may
         omit contract-rule text. Do not infer settlement from GAME/Opta names.
-        Cached per ticker for the life of this client instance.
+        Cached per ticker for the life of this client instance unless
+        ``use_cache=False`` (PAPER settlement reads live result/status).
         """
 
         key = str(ticker or "").strip()
@@ -313,6 +314,8 @@ class KalshiClient(ReadOnlyVenue):
                 raise KalshiDiscoveryError(f"Kalshi get_market {key} returned no market object")
             return resolved
 
+        if not use_cache:
+            return await _fetch()
         return await _single_flight_cached(self._market_cache, self._market_inflight, key, _fetch)
 
     async def get_contract_terms_document(self, url: str) -> dict[str, Any]:
