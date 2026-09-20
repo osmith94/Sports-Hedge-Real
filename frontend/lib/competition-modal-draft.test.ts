@@ -57,12 +57,9 @@ function catalog(): OperatorCompetitionOption[] {
 }
 
 function scope(overrides: Partial<OperatorUniverseScope> = {}): OperatorUniverseScope {
-  const rows = overrides.catalog ?? catalog();
   const selected = overrides.selected_competition_codes ?? ["premier_league", UEFA.champions];
   return {
     sport: "football",
-    selected_competition_codes: selected,
-    selected_count: selected.length,
     saved_default_competition_codes: ["premier_league", UEFA.champions],
     saved_default_count: 2,
     is_session_override: false,
@@ -72,7 +69,7 @@ function scope(overrides: Partial<OperatorUniverseScope> = {}): OperatorUniverse
     updated_at: "2026-09-20T12:00:00Z",
     needs_first_run_confirmation: false,
     new_competitions_available: false,
-    catalog: rows,
+    catalog: catalog(),
     ...overrides,
     selected_competition_codes: selected,
     selected_count: overrides.selected_count ?? selected.length,
