@@ -36,6 +36,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 import pytest
+from test_issue277_club_name_variants import _collect_sibling_fixture
 
 from sports_hedge.application.collector import CollectionReport, DiscoveredFixture
 from sports_hedge.application.fixture_clusters import (
@@ -57,8 +58,6 @@ from sports_hedge.facts.aliases import SAFE_TEAM_AFFIX_TOKENS, resolve_team_name
 from sports_hedge.facts.identity import canonical_team_id
 from sports_hedge.matching.events import EventMatcher
 from sports_hedge.normalization.text import normalize_text
-from test_issue277_club_name_variants import _collect_sibling_fixture
-
 
 KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
 FTTS_KICKOFF = KICKOFF + timedelta(minutes=3)
