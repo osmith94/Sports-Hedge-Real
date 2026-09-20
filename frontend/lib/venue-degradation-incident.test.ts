@@ -39,31 +39,6 @@ describe("degraded-venue Why? download layer", () => {
     );
   });
 
-  it("preserves ACTIVE TRADE context in the Why? JSON download", () => {
-    const result = downloadVenueWhyIncident(
-      {
-        affected_venue: "kalshi",
-        captured_at: "2026-09-20T14:00:05Z",
-        incident_id: "inc-active",
-        data_kind: "in_memory_transition_snapshot",
-        active_trade: { worker_state: "waiting", degraded: true },
-        active_trade_context: {
-          provider_calls: 0,
-          trade_ids: ["ptrade-1"],
-          event_ids: ["refresh-result:ptrade-1"],
-        },
-      },
-      {
-        createObjectURL: () => "blob:why-active",
-        revokeObjectURL: () => undefined,
-        click: () => undefined,
-      },
-    );
-    assert.match(result.json, /"active_trade_context"/);
-    assert.match(result.json, /"provider_calls": 0/);
-    assert.match(result.json, /ptrade-1/);
-  });
-
   it("keeps frontend thin: Why? fetches the backend snapshot, not a local store", () => {
     const helper = readFileSync(join(frontendRoot, "lib/venue-degradation-incident.ts"), "utf8");
     const bar = readFileSync(join(frontendRoot, "components/venue-health-bar.tsx"), "utf8");

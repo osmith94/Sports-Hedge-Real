@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { getActiveTradeEvents, getPaperTrade } from "../../../lib/api";
-import { activeTradeTimelineLines } from "../../../lib/active-trade-timeline-display";
+import { ActiveTradeLog } from "../../../components/active-trade-log";
 import { money } from "../../../lib/format";
 import { HydratedRelativeTime } from "../../../components/hydrated-relative-time";
 
@@ -16,13 +16,12 @@ export default async function PaperTradeDetailPage({
   const { tradeId: rawId } = await params;
   const tradeId = decodeURIComponent(rawId);
   let trade;
-  let timeline: string[] = [];
+  let events = [];
   try {
     trade = await getPaperTrade(tradeId);
-    const events = await getActiveTradeEvents(
-      `trade_id=${encodeURIComponent(tradeId)}&limit=20`,
+    events = await getActiveTradeEvents(
+      `trade_id=${encodeURIComponent(tradeId)}&limit=200`,
     );
-    timeline = activeTradeTimelineLines(events);
   } catch {
     notFound();
   }
@@ -41,16 +40,7 @@ export default async function PaperTradeDetailPage({
         </div>
         <Link href="/paper" className="demo-label">Back to trade book</Link>
       </div>
-      <section className="panel">
-        <div className="panel-header">
-          <div className="panel-title">ACTIVE TRADE journal</div>
-        </div>
-        <div className="scan-note" aria-label="ACTIVE TRADE event journal">
-          {timeline.map((line) => (
-            <div key={line}>{line}</div>
-          ))}
-        </div>
-      </section>
+      <ActiveTradeLog presetTradeId={tradeId} initialEvents={events} />
       <div style={{ height: 14 }} />
       <section className="metric-grid">
         <div className="metric-card">

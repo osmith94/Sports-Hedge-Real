@@ -3772,59 +3772,12 @@ class LiveRefreshCoordinator:
         except Exception:
             return list(self.status.active_trade_timeline)
 
-    def _active_trade_degradation_context(self) -> dict[str, Any]:
-        """Local journal/status only. Zero provider calls."""
-
-        try:
-            from sports_hedge.api.paper import get_paper_operations_service
-            from sports_hedge.api.priority_alerts import get_priority_alert_service
-            from sports_hedge.api.watchlist import get_watchlist_service
-
-            operations = get_paper_operations_service(
-                get_watchlist_service(), get_priority_alert_service()
-            )
-            events = operations.query_active_trade_events(limit=20)
-        except Exception:
-            events = []
-        recent = events[-8:]
-        lane = self.status.active_trade
-        return {
-            "data_kind": "persisted_active_trade_journal",
-            "provider_calls": 0,
-            "trade_ids": sorted({item.trade_id for item in events}),
-            "event_ids": [item.event_id for item in recent],
-            "cycle_ids": [item.cycle_id for item in recent if item.cycle_id],
-            "lane": {
-                "venue_health": dict(getattr(lane, "venue_health", None) or {}),
-                "operation_health": dict(getattr(lane, "operation_health", None) or {}),
-                "worker_state": getattr(lane, "worker_state", None),
-                "last_error": getattr(lane, "last_error", None),
-                "degraded": bool(getattr(lane, "degraded", False)),
-                "last_persist_error": getattr(lane, "last_persist_error", None),
-            },
-            "recent_events": [
-                {
-                    "event_id": item.event_id,
-                    "event_type": item.event_type.value,
-                    "reason_code": item.reason_code.value,
-                    "operator_copy": item.operator_copy,
-                    "trade_id": item.trade_id,
-                    "occurred_at": item.occurred_at.isoformat(),
-                    "cycle_id": item.cycle_id,
-                }
-                for item in recent
-            ],
-        }
-
     def observe_degradation_incidents(
         self, status: LiveRefreshStatus
     ) -> dict[str, VenueDegradationIncidentRef]:
         """Bounded OK→degraded capture. Returns compact refs for the poll payload."""
 
-        context = self._active_trade_degradation_context()
-        refs = self._degradation_incidents.observe(
-            status, captured_at=self.now(), active_trade_context=context
-        )
+        refs = self._degradation_incidents.observe(status, captured_at=self.now())
         return {
             venue: VenueDegradationIncidentRef.model_validate(ref) for venue, ref in refs.items()
         }

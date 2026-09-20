@@ -1,7 +1,7 @@
-"""Issue #372 — ACTIVE TRADE event journal, Why? correlation, partial-fill recovery.
+"""Issue #372 — ACTIVE TRADE event journal and partial-fill recovery.
 
 PAPER / fixture clocks only. Logging never performs provider I/O. Unwind
-metric/policy is not changed.
+metric/policy is not changed. Venue-degradation Why? is a separate concern.
 """
 
 from __future__ import annotations
@@ -28,9 +28,6 @@ from sports_hedge.application.active_trade_recovery import (
 from sports_hedge.application.live_refresh import DualCadencePlan, LiveRefreshCoordinator
 from sports_hedge.application.paper_operations import PaperOperationsService
 from sports_hedge.application.price_engine import PriceEngineItemStatus
-from sports_hedge.application.provider_access import HEALTH_MARKET_TIMEOUT
-from sports_hedge.application.venue_degradation_incident import build_venue_degradation_incident
-from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.active_trade_journal import ActiveTradeEventType, ActiveTradeReasonCode
 from sports_hedge.paper.trades import (
     PaperActiveTradePhase,
@@ -502,80 +499,21 @@ def test_settlement_writes_terminal_event_with_final_economics(tmp_path: Path) -
         reset_active_trade_registry()
 
 
-def test_venue_degradation_why_captures_active_context_with_zero_provider_calls(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
-    try:
-        trade = ops.list_active_trades()[0]
-        ops.record_active_lifecycle_event(
-            trade,
-            event_type=ActiveTradeEventType.ACTIVE_REFRESH_RESULT,
-            reason_code=ActiveTradeReasonCode.REFRESH_RETRY_WAIT,
-            operator_copy="ACTIVE refresh retry-wait",
-            occurred_at=OBSERVED,
-            dedupe_key=f"refresh-result:{trade.trade_id}:why",
-            cycle_id=f"{trade.trade_id}:why",
-            venue=VenueName.KALSHI.value,
-        )
-        provider_calls = {"n": 0}
+def test_venue_degradation_why_is_untouched_by_active_journal() -> None:
+    from sports_hedge.application import venue_degradation_incident as why_mod
 
-        def _forbidden(*_args, **_kwargs):
-            provider_calls["n"] += 1
-            raise AssertionError("provider I/O during Why?")
-
-        monkeypatch.setattr(
-            "sports_hedge.api.paper.get_paper_operations_service",
-            lambda *_args, **_kwargs: ops,
-        )
-        monkeypatch.setattr("sports_hedge.venues.kalshi.KalshiClient.get_market", _forbidden)
-        monkeypatch.setattr("sports_hedge.venues.kalshi.KalshiClient.get_order_book", _forbidden)
-        monkeypatch.setattr("sports_hedge.venues.matchbook.MatchbookClient.get_market", _forbidden)
-        coordinator = LiveRefreshCoordinator(clock=lambda: OBSERVED)
-        coordinator.status = coordinator.status.model_copy(
-            update={
-                "venue_health": {"matchbook": "ok", "kalshi": HEALTH_MARKET_TIMEOUT, "polymarket": "ok"},
-                "active_trade": coordinator.status.active_trade.model_copy(
-                    update={
-                        "venue_health": {"kalshi": HEALTH_MARKET_TIMEOUT, "matchbook": "ok"},
-                        "operation_health": {"kalshi": {"order_book": HEALTH_MARKET_TIMEOUT}},
-                        "worker_state": "degraded",
-                        "degraded": True,
-                    }
-                ),
-            }
-        )
-        refs = coordinator.observe_degradation_incidents(coordinator.status)
-        assert "kalshi" in refs
-        incident = coordinator.degradation_incident("kalshi")
-        assert incident is not None
-        assert "active_trade" in incident
-        context = incident["active_trade_context"]
-        assert context["provider_calls"] == 0
-        assert trade.trade_id in context["trade_ids"]
-        assert any(trade.trade_id in str(event_id) for event_id in context["event_ids"])
-        assert provider_calls["n"] == 0
-        why_src = inspect.getsource(LiveRefreshCoordinator._active_trade_degradation_context)
-        assert ".list_events(" not in why_src
-        assert ".list_markets(" not in why_src
-        assert ".get_market(" not in why_src
-        snapshot = build_venue_degradation_incident(
-            coordinator.status,
-            "kalshi",
-            previous_health="ok",
-            new_health=HEALTH_MARKET_TIMEOUT,
-            active_trade_context=context,
-        )
-        assert snapshot["active_trade_context"]["provider_calls"] == 0
-        observe_src = inspect.getsource(LiveRefreshCoordinator.observe_degradation_incidents)
-        assert "list_events" not in observe_src
-        assert "get_order_book" not in observe_src
-    finally:
-        repository.close()
-        ledger.close()
-        reset_active_trade_registry()
+    why_src = inspect.getsource(why_mod)
+    observe_src = inspect.getsource(LiveRefreshCoordinator.observe_degradation_incidents)
+    coordinator_src = inspect.getsource(LiveRefreshCoordinator)
+    assert "active_trade_context" not in why_src
+    assert "query_active_trade_events" not in why_src
+    assert '"active_trade"' not in why_src
+    assert "active_trade_context" not in observe_src
+    assert "query_active_trade_events" not in observe_src
+    assert "recent_active_trade_timeline" not in observe_src
+    assert "_active_trade_degradation_context" not in coordinator_src
+    assert "list_events" not in observe_src
+    assert "get_order_book" not in observe_src
 
 
 def test_query_endpoint_filters_and_is_read_only(tmp_path: Path) -> None:

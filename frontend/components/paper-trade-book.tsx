@@ -10,8 +10,9 @@ import {
   getPaperTrade,
   settlePaperTrade,
 } from "../lib/api";
-import { money, percent } from "../lib/format";
+import { money } from "../lib/format";
 import { formatPositionManagementCell } from "../lib/paper-position-management-display";
+import { ActiveTradeLog } from "./active-trade-log";
 import { HydratedRelativeTime } from "./hydrated-relative-time";
 
 type Props = {
@@ -298,6 +299,13 @@ function TradeTable({
                       <Link href={`/paper/${encodeURIComponent(trade.trade_id)}`} className="panel-meta">
                         Open detail
                       </Link>
+                      {" · "}
+                      <Link
+                        href={`/paper/${encodeURIComponent(trade.trade_id)}#trade-log`}
+                        className="panel-meta"
+                      >
+                        Trade log
+                      </Link>
                     </td>
                     <td>
                       <HydratedRelativeTime iso={trade.opened_at} />
@@ -351,6 +359,7 @@ function AuditBlock({
           ? ` · settled ${trade.settlement_outcome} via ${trade.settlement_source}:${trade.settlement_source_id}`
           : ""}
       </div>
+      <ActiveTradeLog presetTradeId={trade.trade_id} compact />
       <ol>
         {trade.audit.map((event) => (
           <li key={event.event_id}>

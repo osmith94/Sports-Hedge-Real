@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { activeTradeTimelineLines } from "./active-trade-timeline-display";
+import {
+  ACTIVE_TRADE_LOG_EMPTY,
+  activeTradeEventQuestion,
+  activeTradePayloadBits,
+  activeTradeTimelineLines,
+} from "./active-trade-timeline-display";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 describe("ACTIVE TRADE timeline display", () => {
   it("keeps an honest empty journal state", () => {
-    assert.deepEqual(activeTradeTimelineLines([]), [
-      "ACTIVE TRADE journal · no persisted events yet",
-    ]);
+    assert.deepEqual(activeTradeTimelineLines([]), [ACTIVE_TRADE_LOG_EMPTY]);
   });
 
   it("renders persisted event type and reason without inventing fills", () => {
@@ -31,9 +34,40 @@ describe("ACTIVE TRADE timeline display", () => {
     assert.match(lines[0], /kalshi/);
   });
 
-  it("operator console reads the compact timeline from live-refresh", () => {
+  it("labels operator questions for buy, no top-up, partial, recovery, and finish", () => {
+    assert.equal(activeTradeEventQuestion("entry_fill"), "Why did we buy?");
+    assert.equal(activeTradeEventQuestion("no_action"), "Why didn't we top up?");
+    assert.equal(activeTradeEventQuestion("active_refresh_result"), "What happened on this 5s cycle?");
+    assert.equal(activeTradeEventQuestion("entry_partial_fill"), "Where did a partial fill occur?");
+    assert.equal(activeTradeEventQuestion("entry_recovery_fill"), "What recovery was attempted?");
+    assert.equal(activeTradeEventQuestion("settled"), "How did the trade finish?");
+    assert.match(
+      activeTradePayloadBits({
+        net_edge: "0.012",
+        residual_gbp: "1.25",
+        native_ids: [{ venue: "kalshi" }],
+      }) ?? "",
+      /net edge 0.012/,
+    );
+  });
+
+  it("operator console has a Trade log affordance separate from Why?", () => {
     const scan = readFileSync(join(process.cwd(), "components/run-paper-scan.tsx"), "utf8");
+    const log = readFileSync(join(process.cwd(), "components/active-trade-log.tsx"), "utf8");
+    const book = readFileSync(join(process.cwd(), "components/paper-trade-book.tsx"), "utf8");
+    const detail = readFileSync(join(process.cwd(), "app/paper/[tradeId]/page.tsx"), "utf8");
+    const why = readFileSync(join(process.cwd(), "components/venue-health-bar.tsx"), "utf8");
+    const whyHelper = readFileSync(join(process.cwd(), "lib/venue-degradation-incident.ts"), "utf8");
+    assert.match(scan, /<ActiveTradeLog/);
     assert.match(scan, /active_trade_timeline/);
-    assert.match(scan, /activeTradeTimelineLines/);
+    assert.doesNotMatch(scan, /downloadVenueWhyIncident|getVenueDegradationIncident/);
+    assert.match(log, /getActiveTradeEvents/);
+    assert.match(log, /Trade log · ACTIVE TRADE history/);
+    assert.doesNotMatch(log, /downloadVenueWhyIncident|venue-degradation|Why\?/);
+    assert.match(book, /#trade-log/);
+    assert.match(book, /<ActiveTradeLog/);
+    assert.match(detail, /<ActiveTradeLog/);
+    assert.match(why, /downloadVenueWhyIncident/);
+    assert.doesNotMatch(whyHelper, /active_trade_context|query_active_trade_events/);
   });
 });

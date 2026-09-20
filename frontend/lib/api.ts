@@ -87,6 +87,22 @@ export type ActiveTradeTimelineItem = {
   data_kind?: string;
 };
 
+export type ActiveTradeJournalEvent = ActiveTradeTimelineItem & {
+  sequence?: number;
+  schema_version?: string;
+  serving_git_sha?: string | null;
+  opportunity_id?: string | null;
+  canonical_event_id?: string | null;
+  canonical_market_id?: string | null;
+  competition?: string | null;
+  market_family?: string | null;
+  line?: string | null;
+  active_phase?: string | null;
+  tranche_id?: string | null;
+  fill_id?: string | null;
+  payload?: Record<string, unknown>;
+};
+
 export type PaperScanCycleRecord = {
   cycle_id: string;
   started_at: string;
@@ -669,8 +685,6 @@ export type VenueDegradationIncident = {
   hot?: Record<string, unknown>;
   background?: Record<string, unknown>;
   universe?: Record<string, unknown>;
-  active_trade?: Record<string, unknown>;
-  active_trade_context?: Record<string, unknown>;
   price_engine?: Record<string, unknown>;
   provider_access?: Record<string, unknown>;
   recent_scan_cycles?: Array<Record<string, unknown>>;
@@ -1842,7 +1856,7 @@ export function getPaperTrade(tradeId: string): Promise<PaperTradeDetail> {
   return request(`/paper/trades/${encodeURIComponent(tradeId)}`);
 }
 
-export function getActiveTradeEvents(query = ""): Promise<ActiveTradeTimelineItem[]> {
+export function getActiveTradeEvents(query = ""): Promise<ActiveTradeJournalEvent[]> {
   const suffix = query ? `?${query}` : "";
   return request(`/paper/active-trade-events${suffix}`);
 }

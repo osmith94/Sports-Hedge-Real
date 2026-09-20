@@ -304,6 +304,17 @@ tr:last-child td { border-bottom: none; }
 .scan-advanced { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel-raised); }
 .scan-advanced summary { cursor: pointer; font-size: 10px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .scan-advanced .scan-field { margin-top: 10px; max-width: 280px; }
+.trade-log-list { margin: 8px 0 0; padding-left: 18px; max-height: 360px; overflow: auto; }
+.trade-log-item { margin: 0 0 8px; font-size: 11px; line-height: 1.45; color: var(--text); }
+.trade-log-question {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+.trade-log select { width: 100%; min-width: 0; border: 1px solid var(--line); background: var(--panel-raised); color: var(--text); border-radius: 8px; padding: 9px 10px; font-size: 11px; }
 .matchbook-fee-editor { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-top: 10px; }
 .matchbook-fee-editor .scan-field { margin-top: 0; max-width: 180px; }
 .matchbook-fee-actions { display: flex; flex-wrap: wrap; gap: 8px; }
