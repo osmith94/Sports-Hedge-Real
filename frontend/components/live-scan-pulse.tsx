@@ -47,7 +47,7 @@ function statusCopy(
     return { title: "Auto refresh off", detail: "Run scan or resume status refresh" };
   }
   if (phase === "stopped") {
-    return { title: "Scanner stopped", detail: "HOT / UNIVERSE / BACKGROUND paused" };
+    return { title: "Scanner stopped", detail: "ACTIVE TRADE / HOT / UNIVERSE / BACKGROUND paused" };
   }
   return {
     title: "Live scan",

@@ -327,6 +327,11 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /useState\(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP\)/);
     assert.match(scan, /max_allocated_per_trade_gbp: allocated/);
     assert.match(scan, /ACTIVE TRADE\/HOT\/UNIVERSE\/BACKGROUND paused/);
+    const pulse = readFileSync(join(frontendRoot, "components/live-scan-pulse.tsx"), "utf8");
+    assert.match(
+      pulse,
+      /ACTIVE TRADE \/ HOT \/ UNIVERSE \/ BACKGROUND paused/,
+    );
     assert.match(scan, /stopPaperScanner/);
     assert.match(scan, /resumePaperScanner/);
     assert.doesNotMatch(scan, /Refresh interval/);
