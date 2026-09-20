@@ -8,7 +8,7 @@ PAPER / read-only. Clock-injected. Deterministic fixture/demo providers.
 from __future__ import annotations
 
 import inspect
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +18,7 @@ from sports_hedge.api import paper as paper_api
 from sports_hedge.api import watchlist as watchlist_api
 from sports_hedge.application.collector import CollectionReport
 from sports_hedge.application.live_refresh import DualCadencePlan, get_live_refresh_coordinator
-from sports_hedge.application.price_engine import PriceEnginePriority, PriceEngineSliceResult
+from sports_hedge.application.price_engine import PriceEngineSliceResult
 from sports_hedge.application.provider_access import ProviderAccessLayer
 from sports_hedge.application.provider_runtime import (
     SharedProviderRuntime,
