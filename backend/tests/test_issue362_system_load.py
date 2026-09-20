@@ -58,7 +58,7 @@ def _status(**overrides: Any) -> LiveRefreshStatus:
             last_duration_ms=3800,
         ),
         "universe": LaneRefreshStatus(
-            cadence_seconds=180,
+            cadence_seconds=600,
             generation_budget_seconds=150,
             generation_work_used_s=42,
             canonical_evaluated=24,
@@ -66,6 +66,7 @@ def _status(**overrides: Any) -> LiveRefreshStatus:
             canonical_remaining=6,
             fixture_count=12,
         ),
+        "background": LaneRefreshStatus(cadence_seconds=90),
         "price_engine": PriceEnginePublicStatus(
             hot=PriceEngineTierStatus(
                 working_set=18,
@@ -107,6 +108,9 @@ def test_system_load_uses_existing_public_status_fields_only() -> None:
     assert load.universe.remaining == 6
     assert load.universe.generation_work_used_s == 42
     assert load.universe.generation_budget_seconds == 150
+    assert load.universe.cadence_seconds == 600
+    assert load.background.cadence_seconds == 90
+    assert load.background.working_set == 31
     assert load.catalogue_items == 49
     dumped = json.dumps(load.model_dump(mode="json"))
     assert "p50" not in dumped
@@ -256,7 +260,7 @@ def test_live_refresh_status_endpoint_includes_compact_system_load() -> None:
     assert status.status_code == 200
     payload = status.json()
     load = payload["system_load"]
-    assert set(load) == {"hot", "matchbook", "kalshi", "universe", "catalogue_items"}
+    assert set(load) == {"hot", "matchbook", "kalshi", "universe", "background", "catalogue_items"}
     assert set(load["hot"]) == {
         "fixtures",
         "working_set",
@@ -268,6 +272,15 @@ def test_live_refresh_status_endpoint_includes_compact_system_load() -> None:
         "cadence_seconds",
         "cadence_utilisation",
     }
+    assert set(load["universe"]) == {
+        "evaluated",
+        "total",
+        "remaining",
+        "generation_work_used_s",
+        "generation_budget_seconds",
+        "cadence_seconds",
+    }
+    assert set(load["background"]) == {"cadence_seconds", "working_set", "due"}
     assert "discovered_fixtures" not in load
     assert "recent_scan_cycles" not in load
     assert "execution_enabled" not in payload

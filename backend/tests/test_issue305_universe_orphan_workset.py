@@ -632,7 +632,7 @@ def test_retry_backoff_caps_remain_2_5_10_and_hot_stays_independent(tmp_path: Pa
     assert universe_work_retry_backoff_seconds(2) == 5.0
     assert universe_work_retry_backoff_seconds(3) == 10.0
     assert universe_work_retry_backoff_seconds(9) == 10.0
-    assert get_settings().paper_universe_worker_cooldown_seconds == 8
+    assert get_settings().paper_universe_discovery_interval_seconds == 600
 
     store = SqliteUniverseCheckpointStore(tmp_path / "issue305-hot.sqlite")
     _seed_owner_live_generation_26(store)

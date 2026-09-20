@@ -261,7 +261,7 @@ class LiveRefreshStatus(BaseModel):
     )
     universe: LaneRefreshStatus = Field(
         default_factory=lambda: LaneRefreshStatus(
-            cadence_seconds=8,
+            cadence_seconds=600,
             # Per-chunk watchdog, not a generation lifetime. UNIVERSE generations
             # remain resumable/unbounded (Tenet 19 / Issue #328).
             cycle_timeout_seconds=150,
@@ -270,7 +270,7 @@ class LiveRefreshStatus(BaseModel):
     )
     background: LaneRefreshStatus = Field(
         default_factory=lambda: LaneRefreshStatus(
-            cadence_seconds=180,
+            cadence_seconds=90,
             cycle_timeout_seconds=None,
         )
     )
@@ -528,7 +528,7 @@ class LiveRefreshCoordinator:
                     ),
                     "universe": self.status.universe.model_copy(
                         update={
-                            "cadence_seconds": resolved.paper_universe_worker_cooldown_seconds,
+                            "cadence_seconds": resolved.paper_universe_discovery_interval_seconds,
                             "cycle_timeout_seconds": self._universe_chunk_collector_timeout(
                                 now=self.now(), settings=resolved
                             ),
@@ -539,7 +539,7 @@ class LiveRefreshCoordinator:
                     ),
                     "background": self.status.background.model_copy(
                         update={
-                            "cadence_seconds": resolved.paper_live_refresh_universe_interval_seconds,
+                            "cadence_seconds": resolved.paper_background_price_interval_seconds,
                         }
                     ),
                 }
@@ -883,14 +883,36 @@ class LiveRefreshCoordinator:
                 ),
                 "universe": self.status.universe.model_copy(
                     update={
-                        "next_due_at": self._next_universe_due,
-                        "cadence_seconds": resolved.paper_universe_worker_cooldown_seconds,
+                        "next_due_at": self._status_universe_next_due_unlocked(evaluated=now),
+                        "cadence_seconds": resolved.paper_universe_discovery_interval_seconds,
                         "resume_cursor": self._status_universe_cursor(),
                         "generation_work_used_s": round(self._status_universe_work_used(), 3),
                     }
                 ),
+                "background": self.status.background.model_copy(
+                    update={
+                        "next_due_at": self._next_background_due,
+                        "cadence_seconds": resolved.paper_background_price_interval_seconds,
+                    }
+                ),
             }
         )
+
+    def _status_universe_next_due_unlocked(self, *, evaluated: datetime) -> datetime | None:
+        """Operator-visible UNIVERSE next due.
+
+        Incomplete generations stay immediately resumable (retry/backoff may be
+        sooner). Only a terminal-complete close uses the discovery interval.
+        """
+
+        if self._universe_retry_at is not None and self._universe_retry_at > evaluated:
+            return self._universe_retry_at
+        work_retry = self._earliest_retry_wait_unlocked(evaluated)
+        if work_retry is not None and work_retry > evaluated:
+            return work_retry
+        if self._universe_generation_started_at is not None:
+            return evaluated
+        return self._next_universe_due
 
     def plan_tick(
         self,
@@ -1013,13 +1035,13 @@ class LiveRefreshCoordinator:
             engine.fx_snapshots = list(fx_snapshots)
         engine.fixture_state = self._fixture_state
         result = await engine.run_slice(priority, slice_wall_seconds=slice_wall_seconds)
-        self._apply_price_engine_slice_status(priority, result)
         if priority is PriceEnginePriority.BACKGROUND:
             with self._state_lock:
                 settings = get_settings()
                 self._next_background_due = self.now() + timedelta(
-                    seconds=settings.paper_live_refresh_universe_interval_seconds
+                    seconds=settings.paper_background_price_interval_seconds
                 )
+        self._apply_price_engine_slice_status(priority, result)
         return result
 
     def _apply_price_engine_slice_status(self, priority: PriceEnginePriority, result: Any) -> None:
@@ -1073,6 +1095,11 @@ class LiveRefreshCoordinator:
             )
             else WORKER_IDLE,
         }
+        if priority is PriceEnginePriority.BACKGROUND:
+            lane_update["next_due_at"] = self._next_background_due
+            lane_update["cadence_seconds"] = int(
+                get_settings().paper_background_price_interval_seconds
+            )
         with self._state_lock:
             if priority is PriceEnginePriority.HOT:
                 hot = self.status.hot.model_copy(update=lane_update)
@@ -3016,9 +3043,9 @@ class LiveRefreshCoordinator:
     def _pause_universe_generation(self, finished: datetime) -> None:
         if self._universe_generation_started_at is None:
             return
-        settings = get_settings()
-        interval = timedelta(seconds=settings.paper_universe_worker_cooldown_seconds)
-        self._next_universe_due = finished + interval
+        # Incomplete generation remains live. Do not apply the post-completion
+        # discovery interval between chunks or retries.
+        self._next_universe_due = finished
         self._universe_budget_paused = True
 
     def _refresh_paused_universe_window_unlocked(self) -> None:
@@ -3032,7 +3059,7 @@ class LiveRefreshCoordinator:
         if self._universe_generation_started_at is None:
             return
         settings = get_settings()
-        cooldown = timedelta(seconds=settings.paper_universe_worker_cooldown_seconds)
+        cooldown = timedelta(seconds=settings.paper_universe_discovery_interval_seconds)
         self._next_universe_due = finished + cooldown
         self._fixture_state.close_universe_generation(
             self._universe_generation_id, closed_at=finished
@@ -3431,6 +3458,9 @@ class LiveRefreshCoordinator:
             background_update = {
                 "cycle_in_progress": self._background_in_progress,
                 "next_due_at": self._next_background_due,
+                "cadence_seconds": int(
+                    get_settings().paper_background_price_interval_seconds
+                ),
                 "evaluated_count": engine_status.background.evaluated,
                 "not_evaluated_count": (
                     engine_status.background.not_started_this_cadence
@@ -3454,7 +3484,15 @@ class LiveRefreshCoordinator:
                     "background": background,
                     "price_engine": engine_status,
                     "universe": self.status.universe.model_copy(
-                        update={"fixture_count": universe_count}
+                        update={
+                            "fixture_count": universe_count,
+                            "next_due_at": self._status_universe_next_due_unlocked(
+                                evaluated=now
+                            ),
+                            "cadence_seconds": int(
+                                get_settings().paper_universe_discovery_interval_seconds
+                            ),
+                        }
                     ),
                     "venue_health": _merge_top_level_venue_health(
                         hot.venue_health,
@@ -3713,7 +3751,7 @@ class LiveRefreshCoordinator:
                     with self._state_lock:
                         settings = get_settings()
                         self._next_background_due = self.now() + timedelta(
-                            seconds=settings.paper_live_refresh_universe_interval_seconds
+                            seconds=settings.paper_background_price_interval_seconds
                         )
                 finally:
                     with self._state_lock:

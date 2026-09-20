@@ -36,7 +36,7 @@ function status(
       ...hot,
     },
     universe: {
-      cadence_seconds: 180,
+      cadence_seconds: 600,
       generation_budget_seconds: 150,
       generation_work_used_s: 41,
       chunk_last_duration_ms: 8000,
@@ -63,10 +63,15 @@ describe("dual cadence operator copy", () => {
     assert.match(fastScanCopy(status(), now).detail, /partial \(2 not evaluated\)/);
     assert.doesNotMatch(fastScanCopy(status(), now).detail, /scan_cycle_timeout/);
     assert.match(fullSweepCopy(status(), now).detail, /104 universe/);
+    assert.match(fullSweepCopy(status(), now).detail, /cadence 600s/);
     assert.doesNotMatch(fullSweepCopy(status(), now).detail, /chunk/i);
     assert.doesNotMatch(fullSweepCopy(status(), now).detail, /HOT next due/);
     assert.doesNotMatch(fullSweepCopy(status(), now).detail, /until HOT/i);
     const withBackground = status({
+      background: {
+        cadence_seconds: 90,
+        next_due_at: "2026-09-14T12:01:42Z",
+      },
       price_engine: {
         background: {
           working_set: 12,
@@ -83,6 +88,17 @@ describe("dual cadence operator copy", () => {
     assert.match(backgroundLines[2], /Background price engine/);
     assert.match(backgroundLines[2], /12 ACTIVE/);
     assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /4 evaluated/);
+    assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /cadence 90s/);
+    assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /next due in 90s/);
+    const completedUniverse = status({
+      universe: {
+        cadence_seconds: 600,
+        worker_state: "complete",
+        next_due_at: "2026-09-14T12:10:12Z",
+      },
+    });
+    assert.match(fullSweepCopy(completedUniverse, now).detail, /next due in 600s/);
+    assert.match(fullSweepCopy(completedUniverse, now).detail, /cadence 600s/);
     const persistFailed = status({
       last_error: null,
       hot: {
@@ -267,7 +283,7 @@ describe("dual cadence operator copy", () => {
   it("does not label UNIVERSE retry_wait as in progress", () => {
     const waiting = status({
       universe: {
-        cadence_seconds: 8,
+        cadence_seconds: 600,
         generation_budget_seconds: 150,
         cycle_in_progress: false,
         worker_state: "waiting",
@@ -290,7 +306,7 @@ describe("dual cadence operator copy", () => {
     const lines = dualScanStatusLines(
       status({
         scanner_stopped: true,
-        background: { cadence_seconds: 180, cycle_timeout_seconds: null },
+        background: { cadence_seconds: 90, cycle_timeout_seconds: null },
       }),
     );
     assert.equal(lines.length, 3);

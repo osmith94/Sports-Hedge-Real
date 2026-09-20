@@ -15,15 +15,22 @@ export function systemLoadLines(
   const mb = load.matchbook ?? {};
   const kalshi = load.kalshi ?? {};
   const universe = load.universe ?? {};
+  const background = load.background ?? {};
   const uniProgress = `${asCount(universe.evaluated)}/${asCount(universe.total)} evaluated`;
   const uniBudget = formatBudget(
     universe.generation_work_used_s,
     universe.generation_budget_seconds,
   );
+  const uniCadence = formatCadence(universe.cadence_seconds);
+  const uniDetail = [uniProgress, uniBudget, uniCadence].filter(Boolean).join(" · ");
   return [
     {
       key: "HOT",
       detail: `${asCount(hot.fixtures)} fixtures · ${asCount(hot.working_set)} items · ${asCount(hot.due)} due · ${formatCycle(hot)}`,
+    },
+    {
+      key: "BG",
+      detail: `${asCount(background.working_set)} items · ${asCount(background.due)} due · ${formatCadence(background.cadence_seconds) || "cadence —"}`,
     },
     {
       key: "MB",
@@ -35,7 +42,7 @@ export function systemLoadLines(
     },
     {
       key: "UNI",
-      detail: uniBudget ? `${uniProgress} · ${uniBudget}` : uniProgress,
+      detail: uniDetail,
     },
     {
       key: "ALL",
@@ -59,6 +66,12 @@ function formatBudget(used: number | null | undefined, budget: number | null | u
   const usedLabel = used == null || !Number.isFinite(used) ? "—" : `${Math.round(used)}s`;
   const budgetLabel = budget == null || !Number.isFinite(budget) ? "—" : `${Math.round(budget)}s`;
   return `${usedLabel} / ${budgetLabel}`;
+}
+
+function formatCadence(seconds: unknown): string | null {
+  const cadence = asCount(seconds);
+  if (cadence <= 0) return null;
+  return `${cadence}s cadence`;
 }
 
 function asCount(value: unknown): number {

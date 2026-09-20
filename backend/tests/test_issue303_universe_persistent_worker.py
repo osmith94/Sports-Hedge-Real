@@ -89,7 +89,7 @@ def _approved_mb_kalshi_btts_row(*, edge: Decimal) -> FixtureMarketInventoryRow:
 
 
 def _cooldown_seconds() -> int:
-    return int(get_settings().paper_universe_worker_cooldown_seconds)
+    return int(get_settings().paper_universe_discovery_interval_seconds)
 
 
 def _owner_live_complete_report(*, when, resume_cursor: str = OWNER_CURSOR) -> CollectionReport:
@@ -672,10 +672,13 @@ async def test_collector_resume_cursor_without_skip_does_not_empty_the_sweep() -
         repository.close()
 
 
-def test_universe_status_cadence_is_worker_cooldown_not_180s_cron() -> None:
+def test_universe_status_cadence_is_discovery_interval_not_radar_or_background() -> None:
     settings = Settings()
-    assert settings.paper_universe_worker_cooldown_seconds == 8
+    assert settings.paper_universe_discovery_interval_seconds == 600
+    assert settings.paper_background_price_interval_seconds == 90
+    assert settings.paper_live_refresh_universe_interval_seconds == 180
     coordinator = LiveRefreshCoordinator()
     coordinator.configure_from_settings()
-    assert coordinator.status.universe.cadence_seconds == 8
+    assert coordinator.status.universe.cadence_seconds == 600
+    assert coordinator.status.background.cadence_seconds == 90
     assert coordinator.status.hot.cadence_seconds == 30

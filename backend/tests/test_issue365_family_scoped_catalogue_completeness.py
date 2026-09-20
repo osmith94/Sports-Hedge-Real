@@ -738,6 +738,8 @@ def test_wave2_does_not_change_scanner_architecture() -> None:
     assert settings.sports_hedge_mode == "paper"
     assert settings.sports_hedge_execution_enabled is False
     assert settings.paper_live_refresh_hot_interval_seconds == 30
+    assert settings.paper_background_price_interval_seconds == 90
+    assert settings.paper_universe_discovery_interval_seconds == 600
     assert settings.paper_live_refresh_universe_interval_seconds == 180
     assert settings.paper_scan_provider_timeout_seconds == 8
     assert settings.paper_scan_venue_timeout_seconds == 15

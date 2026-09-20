@@ -90,9 +90,11 @@ export function fullSweepCopy(
   }
   const elapsed = durationLabel(universe.chunk_last_duration_ms ?? universe.last_duration_ms);
   const state = universe.worker_state && universe.worker_state !== "idle" ? ` · ${universe.worker_state}` : "";
+  const cadence = universe.cadence_seconds ? ` · cadence ${universe.cadence_seconds}s` : "";
+  const due = universe.next_due_at ? ` · ${nextDueClock(universe.next_due_at, now)}` : "";
   return {
     label: "Full sweep",
-    detail: `elapsed ${elapsed}${state} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${remaining} not evaluated${venueSuffix}${persist}`,
+    detail: `elapsed ${elapsed}${state} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${remaining} not evaluated${due}${cadence}${venueSuffix}${persist}`,
   };
 }
 
@@ -134,8 +136,10 @@ export function backgroundPriceCopy(
   const working = engine?.working_set ?? 0;
   const inFlight = engine?.in_flight ?? 0;
   const suffix = lane?.cycle_in_progress ? " · in progress" : "";
+  const cadence = lane?.cadence_seconds ? ` · cadence ${lane.cadence_seconds}s` : "";
+  const due = lane?.next_due_at ? ` · ${nextDueClock(lane.next_due_at, _now)}` : "";
   return {
     label: "Background price engine",
-    detail: `${working} ACTIVE · ${evaluated} evaluated · ${inFlight} in flight · ${retry} retry · ${deferred} deferred · ${notStarted} not started${suffix}`,
+    detail: `${working} ACTIVE · ${evaluated} evaluated · ${inFlight} in flight · ${retry} retry · ${deferred} deferred · ${notStarted} not started${cadence}${due}${suffix}`,
   };
 }

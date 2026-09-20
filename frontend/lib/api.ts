@@ -583,6 +583,13 @@ export type UniverseLoad = {
   remaining?: number;
   generation_work_used_s?: number | null;
   generation_budget_seconds?: number | null;
+  cadence_seconds?: number;
+};
+
+export type BackgroundLoad = {
+  cadence_seconds?: number;
+  working_set?: number;
+  due?: number;
 };
 
 export type SystemLoadSummary = {
@@ -590,6 +597,7 @@ export type SystemLoadSummary = {
   matchbook?: ProviderSlotLoad;
   kalshi?: ProviderSlotLoad;
   universe?: UniverseLoad;
+  background?: BackgroundLoad;
   catalogue_items?: number;
 };
 

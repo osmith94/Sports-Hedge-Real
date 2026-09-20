@@ -143,7 +143,7 @@ def test_live_refresh_status_is_matchbook_primary_and_server_loop_off_by_default
     assert "unavailable_unless_matchbook_payload_includes_scores" in payload["live_scores"]
     assert payload["discovered_fixtures"] == []
     assert payload["hot"]["cadence_seconds"] == 30
-    assert payload["universe"]["cadence_seconds"] == 8
+    assert payload["universe"]["cadence_seconds"] == 600
 
 
 def test_tracked_rows_expose_source_freshness_and_narrative() -> None:

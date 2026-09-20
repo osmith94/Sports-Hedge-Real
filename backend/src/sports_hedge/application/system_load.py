@@ -50,6 +50,15 @@ class UniverseLoad(BaseModel):
     remaining: int = Field(default=0, ge=0)
     generation_work_used_s: float | None = Field(default=None, ge=0)
     generation_budget_seconds: float | None = Field(default=None, ge=0)
+    cadence_seconds: int = Field(default=0, ge=0)
+
+
+class BackgroundLoad(BaseModel):
+    """BACKGROUND price-engine cadence. Independent of UNIVERSE discovery."""
+
+    cadence_seconds: int = Field(default=0, ge=0)
+    working_set: int = Field(default=0, ge=0)
+    due: int = Field(default=0, ge=0)
 
 
 class SystemLoadSummary(BaseModel):
@@ -59,6 +68,7 @@ class SystemLoadSummary(BaseModel):
     matchbook: ProviderSlotLoad = Field(default_factory=ProviderSlotLoad)
     kalshi: ProviderSlotLoad = Field(default_factory=ProviderSlotLoad)
     universe: UniverseLoad = Field(default_factory=UniverseLoad)
+    background: BackgroundLoad = Field(default_factory=BackgroundLoad)
     catalogue_items: int = Field(default=0, ge=0)
 
 
@@ -119,6 +129,9 @@ def system_load_from_status(
         remaining = max(0, total - evaluated)
     else:
         remaining = _count(remaining)
+    background_lane = _attr(status, "background")
+    if isinstance(status, dict):
+        background_lane = status.get("background", background_lane)
     return SystemLoadSummary(
         hot=HotLoad(
             fixtures=_count(_attr(hot, "fixture_count")),
@@ -141,6 +154,12 @@ def system_load_from_status(
             generation_budget_seconds=_optional_float(
                 _attr(universe, "generation_budget_seconds")
             ),
+            cadence_seconds=_count(_attr(universe, "cadence_seconds")),
+        ),
+        background=BackgroundLoad(
+            cadence_seconds=_count(_attr(background_lane, "cadence_seconds")),
+            working_set=background_working,
+            due=_count(_attr(background_engine, "due")),
         ),
         catalogue_items=hot_working + background_working,
     )

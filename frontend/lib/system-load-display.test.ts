@@ -31,6 +31,12 @@ function load(overrides: SystemLoadSummary = {}): SystemLoadSummary {
       remaining: 6,
       generation_work_used_s: 42,
       generation_budget_seconds: 150,
+      cadence_seconds: 600,
+    },
+    background: {
+      cadence_seconds: 90,
+      working_set: 31,
+      due: 8,
     },
     catalogue_items: 49,
     ...overrides,
@@ -57,9 +63,10 @@ describe("system load display", () => {
       lines.map((line) => `${line.key}  ${line.detail}`),
       [
         "HOT  8 fixtures · 18 items · 4 due · cycle 3.8s / 30s (13%)",
+        "BG  31 items · 8 due · 90s cadence",
         "MB  2/4 in use · queue 0",
         "K  1/4 in use · queue 0",
-        "UNI  24/30 evaluated · 42s / 150s",
+        "UNI  24/30 evaluated · 42s / 150s · 600s cadence",
         "ALL  49 catalogue items",
       ],
     );
@@ -73,7 +80,7 @@ describe("system load display", () => {
       }),
     );
     assert.match(lines[0].detail, /1 fixtures · 3 items/);
-    assert.equal(lines[4].detail, "3 catalogue items");
+    assert.equal(lines[5].detail, "3 catalogue items");
   });
 
   it("displays backend missing cycle duration without computing utilisation", () => {
