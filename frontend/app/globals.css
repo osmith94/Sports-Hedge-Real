@@ -43,22 +43,23 @@ button, input, select { font: inherit; }
 
 .content { min-width: 0; }
 .topbar { min-height: 44px; padding: 6px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; background: rgba(8, 16, 15, .88); backdrop-filter: blur(12px); position: sticky; top: 0; z-index: 20; }
-.status-cluster { display: grid; grid-template-columns: minmax(280px, auto) minmax(0, 1fr); gap: 8px 18px; color: var(--muted); font-size: 10px; flex: 1; min-width: 0; align-items: start; }
-.status-side { display: grid; gap: 4px; min-width: 0; }
+.status-cluster { display: grid; grid-template-columns: minmax(240px, 0.85fr) minmax(0, 1.4fr); gap: 8px 16px; color: var(--muted); font-size: 10px; flex: 1; min-width: 0; align-items: start; }
+.status-side { display: grid; gap: 4px; min-width: 0; overflow: hidden; }
 .status-venues { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
 .status-item { display: inline-flex; gap: 6px; align-items: center; }
 .status-item-capture { color: var(--accent); font-weight: 750; letter-spacing: .04em; }
 .status-item-error { color: var(--red); }
-.status-lanes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px 12px; min-width: 0; }
-.status-lane { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px; min-width: 0; align-items: baseline; }
-.status-lane-key { font-weight: 750; color: var(--text); white-space: nowrap; }
-.status-lane-detail { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted-2); }
+.status-lanes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px 14px; min-width: 0; }
+.status-lane { display: flex; gap: 8px; min-width: 0; align-items: baseline; overflow: hidden; }
+.status-lane-key { flex: 0 1 auto; font-weight: 750; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status-lane-detail { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted-2); }
 .system-load {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1.5fr) max-content minmax(0, 1fr);
+  grid-template-columns: max-content minmax(0, 1fr);
   column-gap: 10px;
   row-gap: 1px;
   min-width: 0;
+  max-width: 560px;
   font-variant-numeric: tabular-nums;
   line-height: 1.25;
   color: var(--muted);
