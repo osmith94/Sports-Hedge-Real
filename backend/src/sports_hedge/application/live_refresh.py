@@ -473,6 +473,8 @@ class LiveRefreshCoordinator:
         self._next_universe_due: datetime | None = None
         self._next_background_due: datetime | None = None
         self._next_active_trade_due: datetime | None = None
+        self._next_settlement_due: datetime | None = None
+        self._settlement_in_progress = False
         self._active_trades = get_active_trade_registry()
         self._catalogue_store = catalogue_store
         self._price_engine = price_engine
@@ -1187,6 +1189,8 @@ class LiveRefreshCoordinator:
             self._next_universe_due = None
             self._next_background_due = None
             self._next_active_trade_due = None
+            self._next_settlement_due = None
+            self._settlement_in_progress = False
             self._hot_due_started = None
             self._universe_generation_id = 0
             self._universe_generation_started_at = None
@@ -4359,6 +4363,7 @@ class LiveRefreshCoordinator:
                     )
                 await self._sleep_interruptible(2.0)
                 continue
+            await self._maybe_run_paper_settlement()
             plan = self.plan_active_trade_tick()
             snapshot = self._active_trade_status_snapshot(include_summary=True)
             with self._state_lock:
@@ -4390,6 +4395,47 @@ class LiveRefreshCoordinator:
                         self._active_trade_in_progress = False
             delay = min(self._seconds_until_active_trade(), float(active_trade_cadence_seconds()))
             await self._sleep_interruptible(delay)
+
+    async def _maybe_run_paper_settlement(self) -> None:
+        """Reconcile persisted OPEN PAPER trades from exact-ID provider results.
+
+        Runs inside the ACTIVE TRADE worker. Does not add a fifth create_task
+        and does not raise provider concurrency. Cadence is independent of
+        HOT/BACKGROUND/UNIVERSE pricing.
+        """
+
+        from sports_hedge.api.paper import get_paper_operations_service
+        from sports_hedge.api.priority_alerts import get_priority_alert_service
+        from sports_hedge.api.watchlist import get_watchlist_service
+        from sports_hedge.application.paper_settlement_agent import PaperSettlementAgent
+
+        now = self.now()
+        cadence = int(get_settings().paper_settlement_interval_seconds)
+        with self._state_lock:
+            if self._settlement_in_progress:
+                return
+            due = self._next_settlement_due
+            if due is not None and now < due:
+                return
+            self._settlement_in_progress = True
+        try:
+            operations = get_paper_operations_service(
+                get_watchlist_service(), get_priority_alert_service()
+            )
+            engine = self._price_engine
+            agent = PaperSettlementAgent(
+                operations=operations,
+                matchbook=None if engine is None else engine.matchbook,
+                kalshi=None if engine is None else engine.kalshi,
+                clock=self.now,
+            )
+            await agent.run_cycle(now=now)
+        except Exception:
+            pass
+        finally:
+            with self._state_lock:
+                self._settlement_in_progress = False
+                self._next_settlement_due = self.now() + timedelta(seconds=cadence)
 
     def _seconds_until_active_trade(self) -> float:
         now = self.now()

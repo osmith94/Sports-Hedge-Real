@@ -1,0 +1,365 @@
+"""PAPER-only settlement/reconciliation over open trades.
+
+Exact-ID read-only Matchbook/Kalshi result evidence. Reuses
+``PaperOperationsService.settle()`` / ``compute_paper_settlement()`` / treasury 8E.
+Does not discover markets, place orders, or infer results from kickoff time.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any, Callable
+
+from sports_hedge.accounting.paper_journal import DataProvenance
+from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
+from sports_hedge.application.provider_access import (
+    PRICE_ENGINE_SETTLEMENT_LANE,
+    ProviderAccessLayer,
+    get_shared_provider_access,
+)
+from sports_hedge.config import Settings, get_settings
+from sports_hedge.domain.models import VenueName
+from sports_hedge.paper.active_trade_journal import ActiveTradeEventType, ActiveTradeReasonCode
+from sports_hedge.paper.result_resolution import (
+    PAPER_AUTO_SETTLEMENT_SOURCE,
+    SettlementResolution,
+    resolve_paper_trade_settlement,
+)
+from sports_hedge.paper.trades import (
+    PaperSettlementRequest,
+    PaperTrade,
+    PaperTradeAuditEvent,
+    PaperTradeAuditEventType,
+    PaperTradeState,
+)
+from sports_hedge.venues.matchbook import MatchbookMarketGoneError
+
+LOGGER = logging.getLogger(__name__)
+
+SETTLEABLE_STATES = frozenset({PaperTradeState.OPEN, PaperTradeState.PARTIAL})
+
+
+@dataclass
+class PaperSettlementTradeResult:
+    trade_id: str
+    settled: bool = False
+    blocker: str | None = None
+    winning_outcome: str | None = None
+    source_id: str | None = None
+
+
+@dataclass
+class PaperSettlementCycleResult:
+    examined: int = 0
+    settled_trade_ids: list[str] = field(default_factory=list)
+    blocked: list[PaperSettlementTradeResult] = field(default_factory=list)
+    skipped: int = 0
+
+
+class PaperSettlementAgent:
+    """Narrow reconciliation worker for persisted OPEN/PARTIAL PAPER trades."""
+
+    def __init__(
+        self,
+        *,
+        operations: PaperOperationsService,
+        matchbook: Any | None = None,
+        kalshi: Any | None = None,
+        provider_access: ProviderAccessLayer | None = None,
+        clock: Callable[[], datetime] | None = None,
+        settings: Settings | None = None,
+        provider_timeout_seconds: float | None = None,
+    ) -> None:
+        self.operations = operations
+        self.matchbook = matchbook
+        self.kalshi = kalshi
+        self.provider_access = (
+            provider_access if provider_access is not None else get_shared_provider_access()
+        )
+        self._clock = clock or (lambda: datetime.now(UTC))
+        resolved = settings or get_settings()
+        self._timeout = float(
+            resolved.paper_scan_provider_timeout_seconds
+            if provider_timeout_seconds is None
+            else provider_timeout_seconds
+        )
+
+    def now(self) -> datetime:
+        current = self._clock()
+        if current.tzinfo is None:
+            return current.replace(tzinfo=UTC)
+        return current
+
+    async def run_cycle(self, *, now: datetime | None = None) -> PaperSettlementCycleResult:
+        when = now or self.now()
+        result = PaperSettlementCycleResult()
+        trades = [
+            trade
+            for trade in self.operations.list_active_trades()
+            if trade.state in SETTLEABLE_STATES
+        ]
+        result.examined = len(trades)
+        for trade in trades:
+            try:
+                item = await self.reconcile_trade(trade, now=when)
+            except Exception:
+                LOGGER.exception("paper settlement cycle failed for %s", trade.trade_id)
+                item = PaperSettlementTradeResult(
+                    trade_id=trade.trade_id, blocker="settlement_cycle_error"
+                )
+            if item.settled:
+                result.settled_trade_ids.append(item.trade_id)
+            elif item.blocker:
+                result.blocked.append(item)
+            else:
+                result.skipped += 1
+        return result
+
+    async def reconcile_trade(
+        self,
+        trade: PaperTrade,
+        *,
+        now: datetime | None = None,
+    ) -> PaperSettlementTradeResult:
+        when = now or self.now()
+        if trade.state is PaperTradeState.CLOSED:
+            return PaperSettlementTradeResult(trade_id=trade.trade_id)
+        matchbook_market, matchbook_event, kalshi_markets, fetch_blocker = await self._fetch_evidence(
+            trade
+        )
+        resolution = resolve_paper_trade_settlement(
+            trade,
+            matchbook_market=matchbook_market,
+            matchbook_event=matchbook_event,
+            kalshi_markets=kalshi_markets,
+        )
+        if fetch_blocker and not resolution.is_ready:
+            if resolution.blocker in {
+                None,
+                "incomplete_provider_result",
+                "missing_durable_provider_identity",
+            }:
+                resolution = SettlementResolution(
+                    winning_outcome=None,
+                    blocker=fetch_blocker,
+                    source_id=resolution.source_id,
+                    detail=resolution.detail,
+                    evidence={**resolution.evidence, "blocker": fetch_blocker},
+                )
+        if resolution.is_ready:
+            return self._settle(trade, resolution, when)
+        if resolution.blocker:
+            self._record_blocker(trade, resolution.blocker, resolution, when)
+            return PaperSettlementTradeResult(
+                trade_id=trade.trade_id,
+                blocker=resolution.blocker,
+                source_id=resolution.source_id,
+            )
+        return PaperSettlementTradeResult(trade_id=trade.trade_id)
+
+    def _settle(
+        self,
+        trade: PaperTrade,
+        resolution: SettlementResolution,
+        when: datetime,
+    ) -> PaperSettlementTradeResult:
+        request = PaperSettlementRequest(
+            winning_outcome=str(resolution.winning_outcome),
+            source=PAPER_AUTO_SETTLEMENT_SOURCE,
+            source_id=resolution.source_id,
+            settled_at=when,
+            detail=resolution.detail,
+            provenance=DataProvenance.LIVE_PAPER,
+        )
+        try:
+            settled = self.operations.settle(trade.trade_id, request, now=when)
+        except PaperOperationsError as exc:
+            reason = str(exc)
+            if reason == "conflicting_settlement":
+                self._record_blocker(trade, "conflicting_settlement", resolution, when)
+                return PaperSettlementTradeResult(
+                    trade_id=trade.trade_id, blocker="conflicting_settlement"
+                )
+            if reason in {"already_unwound", "unknown_trade"}:
+                return PaperSettlementTradeResult(trade_id=trade.trade_id, blocker=reason)
+            self._record_blocker(trade, reason, resolution, when)
+            return PaperSettlementTradeResult(trade_id=trade.trade_id, blocker=reason)
+        try:
+            from sports_hedge.application.active_trade_lane import get_active_trade_registry
+
+            get_active_trade_registry().drop(settled.trade_id)
+        except Exception:
+            pass
+        return PaperSettlementTradeResult(
+            trade_id=settled.trade_id,
+            settled=True,
+            winning_outcome=settled.settlement_outcome,
+            source_id=settled.settlement_source_id,
+        )
+
+    async def _fetch_evidence(
+        self,
+        trade: PaperTrade,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, dict[str, Any]], str | None]:
+        matchbook_market = None
+        matchbook_event = None
+        kalshi_markets: dict[str, dict[str, Any]] = {}
+        mb_event, mb_market = _matchbook_ids(trade)
+        if mb_event and mb_market and self.matchbook is not None:
+            getter = getattr(self.matchbook, "get_market", None)
+            if callable(getter):
+                payload, status = await self._provider_call(
+                    VenueName.MATCHBOOK,
+                    stage="get_market",
+                    source_id=str(mb_market),
+                    factory=lambda: getter(mb_event, mb_market),
+                )
+                if status == "timeout":
+                    return None, None, {}, "incomplete_provider_result"
+                if payload is not None:
+                    matchbook_market = payload
+            event_getter = getattr(self.matchbook, "get_event", None)
+            if callable(event_getter):
+                payload, status = await self._provider_call(
+                    VenueName.MATCHBOOK,
+                    stage="get_event",
+                    source_id=str(mb_event),
+                    factory=lambda: event_getter(mb_event),
+                )
+                if status == "timeout":
+                    return matchbook_market, None, {}, "incomplete_provider_result"
+                if payload is not None:
+                    matchbook_event = payload
+        for ticker in _kalshi_tickers(trade):
+            if self.kalshi is None:
+                break
+            getter = getattr(self.kalshi, "get_market", None)
+            if not callable(getter):
+                break
+            payload, status = await self._provider_call(
+                VenueName.KALSHI,
+                stage="get_market",
+                source_id=ticker,
+                factory=lambda ticker=ticker: _kalshi_get_market(getter, ticker),
+            )
+            if status == "timeout":
+                return matchbook_market, matchbook_event, kalshi_markets, "incomplete_provider_result"
+            if payload is not None:
+                kalshi_markets[ticker] = payload
+        return matchbook_market, matchbook_event, kalshi_markets, None
+
+    async def _provider_call(
+        self,
+        venue: VenueName,
+        *,
+        stage: str,
+        source_id: str,
+        factory: Callable[[], Any],
+    ) -> tuple[Any, str | None]:
+        del source_id
+        access = self.provider_access
+        timeout = self._timeout
+        try:
+            if access is None:
+                payload = await asyncio.wait_for(factory(), timeout=timeout)
+                return payload, None
+            async with access.acquire(
+                venue, lane=PRICE_ENGINE_SETTLEMENT_LANE, stage=stage
+            ):
+                payload = await asyncio.wait_for(factory(), timeout=timeout)
+                return payload, None
+        except TimeoutError:
+            return None, "timeout"
+        except MatchbookMarketGoneError:
+            return None, None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.debug("paper settlement %s %s failed: %s", venue.value, stage, exc)
+            return None, None
+
+    def _record_blocker(
+        self,
+        trade: PaperTrade,
+        reason: str,
+        resolution: SettlementResolution,
+        when: datetime,
+    ) -> None:
+        last = _last_blocker(trade)
+        if last == reason:
+            return
+        trade.audit.append(
+            PaperTradeAuditEvent(
+                occurred_at=when,
+                event_type=PaperTradeAuditEventType.SETTLEMENT_BLOCKED,
+                detail=f"{reason}: {resolution.detail}",
+            )
+        )
+        if self.operations.trades is not None:
+            try:
+                self.operations.trades.save(trade)
+            except Exception:
+                LOGGER.exception("failed to persist settlement blocker for %s", trade.trade_id)
+        event_type = (
+            ActiveTradeEventType.SETTLEMENT_INCOMPLETE
+            if reason == "incomplete_provider_result"
+            else ActiveTradeEventType.SETTLEMENT_BLOCKED
+        )
+        reason_code = (
+            ActiveTradeReasonCode.SETTLEMENT_INCOMPLETE
+            if reason == "incomplete_provider_result"
+            else ActiveTradeReasonCode.SETTLEMENT_BLOCKED
+        )
+        self.operations.record_active_lifecycle_event(
+            trade,
+            event_type=event_type,
+            reason_code=reason_code,
+            operator_copy=f"PAPER settlement blocked: {reason}",
+            occurred_at=when,
+            dedupe_key=f"settlement-block:{trade.trade_id}:{reason}",
+            payload={
+                "blocker": reason,
+                "source_id": resolution.source_id,
+                "evidence": resolution.evidence,
+            },
+        )
+
+
+def _last_blocker(trade: PaperTrade) -> str | None:
+    for event in reversed(trade.audit):
+        if event.event_type is PaperTradeAuditEventType.SETTLEMENT_BLOCKED:
+            detail = event.detail or ""
+            return detail.split(":", 1)[0]
+    return None
+
+
+def _matchbook_ids(trade: PaperTrade) -> tuple[str | None, str | None]:
+    event_id = None
+    market_id = None
+    for leg in trade.legs:
+        if leg.venue is not VenueName.MATCHBOOK:
+            continue
+        event_id = event_id or (str(leg.source_event_id).strip() if leg.source_event_id else None)
+        market_id = market_id or (str(leg.source_market_id).strip() if leg.source_market_id else None)
+    return event_id or None, market_id or None
+
+
+def _kalshi_tickers(trade: PaperTrade) -> list[str]:
+    tickers: list[str] = []
+    for leg in trade.legs:
+        if leg.venue is not VenueName.KALSHI:
+            continue
+        ticker = str(leg.source_contract_id or leg.source_market_id or "").strip()
+        if ticker and ticker not in tickers:
+            tickers.append(ticker)
+    return tickers
+
+
+def _kalshi_get_market(getter: Callable[..., Any], ticker: str) -> Any:
+    try:
+        return getter(ticker, use_cache=False)
+    except TypeError:
+        return getter(ticker)

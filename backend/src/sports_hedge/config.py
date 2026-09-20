@@ -300,6 +300,10 @@ class Settings(BaseSettings):
     # Config-authoritative ACTIVE TRADE exact-ID cadence. Not an operator field
     # in this first pass. Do not discover/rematch on this lane.
     paper_active_trade_interval_seconds: int = Field(default=5, ge=1, le=15)
+    # Narrow PAPER settlement/reconciliation cadence over persisted OPEN trades.
+    # Sub-cycle of the ACTIVE TRADE worker: no extra create_task, no extra
+    # provider concurrency. Never infers results from elapsed kickoff time.
+    paper_settlement_interval_seconds: int = Field(default=30, ge=5, le=300)
     # Intra-generation pause only (incomplete chunk yield). Not UNIVERSE
     # discovery cadence and not BACKGROUND pricing.
     paper_universe_worker_cooldown_seconds: int = Field(default=8, ge=5, le=15)

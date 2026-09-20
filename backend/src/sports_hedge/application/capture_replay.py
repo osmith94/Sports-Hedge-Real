@@ -345,7 +345,8 @@ class ReplayKalshi:
             return {"markets": list(by_event)}
         return {"markets": list(self.side.markets or [])}
 
-    async def get_market(self, ticker: str) -> dict[str, Any]:
+    async def get_market(self, ticker: str, **kwargs: Any) -> dict[str, Any]:
+        del kwargs
         self.get_market_calls.append(ticker)
         for market in _kalshi_markets(self.side):
             if str(market.get("ticker") or "") == str(ticker):
@@ -1166,8 +1167,8 @@ class RecordingKalshi:
         self.markets_by_event[str(event_id)] = [sanitize_payload(item) for item in markets]
         return payload
 
-    async def get_market(self, ticker: str) -> dict[str, Any]:
-        payload = await self.inner.get_market(ticker)
+    async def get_market(self, ticker: str, **kwargs: Any) -> dict[str, Any]:
+        payload = await self.inner.get_market(ticker, **kwargs)
         if isinstance(payload, dict):
             self.get_market_payloads[str(ticker)] = sanitize_payload(payload)
         return payload
