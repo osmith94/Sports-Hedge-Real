@@ -1152,6 +1152,7 @@ export type NearOpportunity = {
   away_team?: string | null;
   market_family?: MarketFamily | null;
   period?: FootballPeriod | null;
+  line?: string | number | null;
   venues: Venue[];
   legs: WatchLeg[];
   status: WatchlistOpportunityStatus;
@@ -1883,6 +1884,7 @@ export type PaperTrade = {
   away_team?: string | null;
   fixture_label?: string | null;
   market_label?: string | null;
+  line?: string | number | null;
   state: PaperTradeState;
   opened_at: string;
   last_updated_at: string;

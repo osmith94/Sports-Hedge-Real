@@ -198,6 +198,7 @@ class SqliteWatchlistRepository:
             "mapping_reasons_json": "TEXT",
             "mapping_provenance_json": "TEXT",
             "mapping_review_candidate_json": "TEXT",
+            "line": "TEXT",
         }
         for name, ddl in extras.items():
             if name not in columns:
@@ -227,7 +228,7 @@ class SqliteWatchlistRepository:
             f"""
             INSERT INTO watchlist_opportunities (
                 opportunity_id, canonical_event_id, canonical_market_id, settlement_key,
-                competition, home_team, away_team, market_family, period, venues_json,
+                competition, home_team, away_team, market_family, period, line, venues_json,
                 legs_json, status, classification, is_arbitrage, trigger_net_edge,
                 current_net_edge, gross_edge, distance_to_trigger_pp, implied_probability_sum,
                 quote_age_ms, limiting_depth_gbp, limiting_leg_outcome,
@@ -243,7 +244,7 @@ class SqliteWatchlistRepository:
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?
+                ?, ?, ?
             )
             ON CONFLICT(opportunity_id) DO UPDATE SET
                 canonical_event_id = excluded.canonical_event_id,
@@ -254,6 +255,7 @@ class SqliteWatchlistRepository:
                 away_team = excluded.away_team,
                 market_family = excluded.market_family,
                 period = excluded.period,
+                line = excluded.line,
                 venues_json = excluded.venues_json,
                 legs_json = excluded.legs_json,
                 status = CASE
@@ -315,6 +317,7 @@ class SqliteWatchlistRepository:
                 opportunity.away_team,
                 opportunity.market_family.value if opportunity.market_family else None,
                 opportunity.period.value if opportunity.period else None,
+                _stringify(opportunity.line),
                 json.dumps([venue.value for venue in opportunity.venues]),
                 json.dumps([leg.model_dump(mode="json") for leg in opportunity.legs]),
                 opportunity.status.value,
@@ -539,6 +542,7 @@ def _opportunity_from_row(row: sqlite3.Row) -> NearOpportunity:
         away_team=row["away_team"],
         market_family=MarketFamily(row["market_family"]) if row["market_family"] else None,
         period=FootballPeriod(row["period"]) if row["period"] else None,
+        line=_decimal(_row_get(row, "line")),
         venues=[VenueName(value) for value in json.loads(row["venues_json"])],
         legs=[WatchLeg.model_validate(item) for item in json.loads(row["legs_json"])],
         status=OpportunityStatus(row["status"]),

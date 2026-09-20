@@ -228,6 +228,7 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             trade.solver_model,
             trade.market_family.value if trade.market_family else None,
             trade.period.value if trade.period else None,
+            _dec(trade.line),
             trade.competition,
             trade.home_team,
             trade.away_team,
@@ -265,14 +266,14 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             """
             INSERT INTO paper_trades (
                 trade_id, opportunity_id, canonical_event_id, canonical_market_id,
-                settlement_key, solver_model, market_family, period, competition, home_team, away_team,
+                settlement_key, solver_model, market_family, period, line, competition, home_team, away_team,
                 fixture_label, market_label, state, opened_at, last_updated_at, settled_at,
                 guaranteed_profit_gbp_at_open, realised_pnl_gbp, capital_locked_native_json,
                 capital_locked_gbp, settlement_outcome, settlement_source, settlement_source_id,
                 settlement_detail, provenance, fx_snapshots_json, venue_costs_json,
                 entry_risk_json, close_risks_json, close_fills_json, position_management_json,
                 tranches_json, active_trade_phase, residual_exposure_gbp, unresolved_recovery
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(trade_id) DO UPDATE SET
                 opportunity_id = excluded.opportunity_id,
                 canonical_event_id = excluded.canonical_event_id,
@@ -281,6 +282,7 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 solver_model = excluded.solver_model,
                 market_family = excluded.market_family,
                 period = excluded.period,
+                line = excluded.line,
                 competition = excluded.competition,
                 home_team = excluded.home_team,
                 away_team = excluded.away_team,
@@ -434,6 +436,7 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             solver_model=_row_value(row, "solver_model"),
             market_family=MarketFamily(row["market_family"]) if row["market_family"] else None,
             period=FootballPeriod(row["period"]) if row["period"] else None,
+            line=_decimal(_row_value(row, "line")),
             competition=_row_value(row, "competition"),
             home_team=_row_value(row, "home_team"),
             away_team=_row_value(row, "away_team"),
@@ -574,6 +577,7 @@ class SqlitePaperLedger:
                 solver_model TEXT,
                 market_family TEXT,
                 period TEXT,
+                line TEXT,
                 competition TEXT,
                 home_team TEXT,
                 away_team TEXT,
@@ -715,6 +719,7 @@ class SqlitePaperLedger:
         self._ensure_treasury_pool_fx_columns()
         self._ensure_trade_tranche_columns()
         self._ensure_active_trade_recovery_columns()
+        self._ensure_trade_line_column()
         from sports_hedge.persistence.active_trade_event_journal import (
             ensure_active_trade_event_schema,
         )
@@ -839,6 +844,16 @@ class SqlitePaperLedger:
             self._connection.execute(
                 "ALTER TABLE paper_trades ADD COLUMN unresolved_recovery INTEGER NOT NULL DEFAULT 0"
             )
+        self._connection.commit()
+
+    def _ensure_trade_line_column(self) -> None:
+        """Canonical matched-market line. Historical rows stay NULL; never inferred."""
+
+        if "paper_trades" not in _table_names(self._connection):
+            return
+        trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
+        if "line" not in trade_cols:
+            self._connection.execute("ALTER TABLE paper_trades ADD COLUMN line TEXT")
         self._connection.commit()
 
     def _ensure_treasury_pool_fx_columns(self) -> None:

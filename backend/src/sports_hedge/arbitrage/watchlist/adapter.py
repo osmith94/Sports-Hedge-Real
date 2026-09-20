@@ -152,6 +152,7 @@ def observation_from_paper_decision(
         away_team=snapshot.away_team if snapshot is not None else None,
         market_family=snapshot.market_family if snapshot is not None else MarketFamily.UNKNOWN,
         period=snapshot.period if snapshot is not None else None,
+        line=snapshot.market_line if snapshot is not None else None,
         venues=venues,
         legs=legs,
         trigger_net_edge=decision.minimum_net_edge,

@@ -64,6 +64,7 @@ from sports_hedge.arbitrage.watchlist.service import (
     _presentation_stale_only,
 )
 from sports_hedge.config import Settings, get_settings
+from sports_hedge.domain.football import format_stored_line
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import MarketAction
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
@@ -360,7 +361,7 @@ class PaperOperationsService:
                     canonical_market_id=trade.canonical_market_id,
                     competition=trade.competition,
                     market_family=None if trade.market_family is None else trade.market_family.value,
-                    line=trade.market_label,
+                    line=format_stored_line(trade.line),
                     active_phase=None if trade.active_trade_phase is None else trade.active_trade_phase.value,
                     event_type=event_type,
                     reason_code=reason_code,
@@ -3459,6 +3460,7 @@ class PaperOperationsService:
             solver_model=plan.decision.solver_model,
             market_family=opportunity.market_family,
             period=opportunity.period,
+            line=opportunity.line,
             competition=opportunity.competition,
             home_team=home,
             away_team=away,
