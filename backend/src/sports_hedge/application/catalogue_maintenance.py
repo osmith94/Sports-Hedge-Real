@@ -32,6 +32,7 @@ from sports_hedge.application.approved_market_catalogue import (
     semantic_kalshi_fee_snapshot_id,
 )
 from sports_hedge.application.target_competitions import (
+    resolve_catalogue_competition_code,
     resolve_target_competition_from_kalshi_ticker,
 )
 from sports_hedge.domain.football import CanonicalMarket
@@ -190,6 +191,8 @@ def persist_universe_catalogue_pass(
     generation_id: str | None,
     family_discovery: FamilyDiscoveryCompleteness | None,
     terminal: bool,
+    generation_selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None = None,
+    allow_disappearance: bool = True,
 ) -> list[ApprovedMarketCatalogueRow]:
     """Upsert ACTIVE rows for registered pairs and invalidate missing families.
 
@@ -198,6 +201,7 @@ def persist_universe_catalogue_pass(
     TOTAL/FTTS discovery leaves existing rows ACTIVE/unconfirmed/retryable.
     Catalogue completion does not require executable books or solver output.
     The complete read/modify/write runs in one SQLite transaction.
+    An old-scope generation must not disappear rows outside its selected codes.
     """
 
     evidence = family_discovery or FamilyDiscoveryCompleteness()
@@ -214,6 +218,8 @@ def persist_universe_catalogue_pass(
             generation_id=generation_id,
             family_discovery=evidence,
             terminal=terminal,
+            generation_selected_codes=generation_selected_codes,
+            allow_disappearance=allow_disappearance,
         )
     )
 
@@ -231,6 +237,8 @@ async def persist_universe_catalogue_pass_offloop(
     generation_id: str | None,
     family_discovery: FamilyDiscoveryCompleteness | None,
     terminal: bool,
+    generation_selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None = None,
+    allow_disappearance: bool = True,
 ) -> list[ApprovedMarketCatalogueRow]:
     """Bounded off-loop wrapper so SQLite catalogue I/O cannot stall HOT."""
 
@@ -247,6 +255,8 @@ async def persist_universe_catalogue_pass_offloop(
         generation_id=generation_id,
         family_discovery=family_discovery,
         terminal=terminal,
+        generation_selected_codes=generation_selected_codes,
+        allow_disappearance=allow_disappearance,
     )
 
 
@@ -263,6 +273,8 @@ def _persist_universe_catalogue_pass_tx(
     generation_id: str | None,
     family_discovery: FamilyDiscoveryCompleteness,
     terminal: bool,
+    generation_selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None = None,
+    allow_disappearance: bool = True,
 ) -> list[ApprovedMarketCatalogueRow]:
     if terminal:
         return tx.mark_fixture_terminal(
@@ -295,10 +307,23 @@ def _persist_universe_catalogue_pass_tx(
         )
 
     complete = complete_family_keys(family_discovery)
+    selected = (
+        None
+        if generation_selected_codes is None
+        else frozenset(str(code).strip() for code in generation_selected_codes if str(code).strip())
+    )
     for existing in tx.list_rows_for_event(canonical_event_id):
+        if not allow_disappearance:
+            continue
         if existing.register_canonical_key in found_keys:
             continue
         if existing.row_state is not CatalogueRowState.ACTIVE:
+            continue
+        row_code = resolve_catalogue_competition_code(
+            competition=existing.competition or competition,
+            kalshi_series_ticker=existing.kalshi_series_ticker,
+        )
+        if selected is not None and (row_code is None or row_code not in selected):
             continue
         if catalogue_family_key(existing.register_canonical_key) not in complete:
             continue

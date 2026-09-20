@@ -123,6 +123,9 @@ class UniverseGenerationCheckpoint(BaseModel):
     work_units: dict[str, SweepWorkUnit] = Field(default_factory=dict)
     series_work: dict[str, SeriesWorkUnit] = Field(default_factory=dict)
     semantics_version: int = Field(default=LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION)
+    selected_competition_codes: list[str] = Field(default_factory=list)
+    scope_version: int = Field(default=0, ge=0)
+    superseded: bool = False
 
 
 _VENUE_SNAPSHOT_KEYS = frozenset({"matchbook", "polymarket", "kalshi"})

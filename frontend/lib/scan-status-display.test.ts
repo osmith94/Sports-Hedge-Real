@@ -331,9 +331,13 @@ describe("dual cadence operator copy", () => {
   it("routes primary Manual HOT refresh to HOT and labels full discovery as advanced Full diagnostic", () => {
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
     const api = readFileSync(join(frontendRoot, "lib/api.ts"), "utf8");
+    const modal = readFileSync(join(frontendRoot, "components/football-competitions-modal.tsx"), "utf8");
     assert.match(scan, /await collect\("hot"\)/);
     assert.match(scan, /runPaperHotRefresh\(payload\)/);
     assert.match(scan, /Manual HOT refresh/);
+    assert.match(scan, /Manual BACKGROUND refresh/);
+    assert.match(scan, /Run UNIVERSE now/);
+    assert.match(scan, /Football competitions/);
     assert.match(scan, /Run full diagnostic/);
     assert.doesNotMatch(scan, /Run scan/);
     assert.doesNotMatch(scan, /Fast [Ss]can|Full [Ss]weep/);
@@ -369,7 +373,15 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /resumePaperScanner/);
     assert.doesNotMatch(scan, /Refresh interval/);
     assert.match(api, /\/paper\/collect\/hot/);
+    assert.match(api, /\/paper\/collect\/background/);
+    assert.match(api, /\/paper\/collect\/universe/);
+    assert.match(api, /\/paper\/universe-scope/);
     assert.match(api, /PAPER_HOT_REFRESH_TIMEOUT_MS = 35_000/);
     assert.match(api, /\/paper\/collect`/);
+    assert.match(modal, /Football competitions/);
+    assert.match(modal, /Apply & Run UNIVERSE now/);
+    assert.match(modal, /Select defaults/);
+    assert.match(modal, /Select all supported/);
+    assert.doesNotMatch(modal, /KXUCL|KXEPLGAME|series_ticker/);
   });
 });

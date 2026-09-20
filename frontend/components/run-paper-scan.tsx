@@ -13,10 +13,13 @@ import {
   getLiveRefreshStatus,
   resetMatchbookFee,
   resumePaperScanner,
+  runPaperBackgroundRefresh,
   runPaperCollection,
   runPaperHotRefresh,
+  runPaperUniverseNow,
   saveMatchbookFee,
   saveOperatorScannerSettings,
+  saveUniverseScope,
   stopPaperScanner,
 } from "../lib/api";
 import { dualScanStatusLines } from "../lib/scan-status-display";
@@ -24,6 +27,7 @@ import { CONFIG_WARNING_BANNER_CLASS } from "../lib/config-warning-display";
 import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-refresh-poll-guard";
 import { venueHealthIsDegraded } from "../lib/venue-health-display";
 import { ActiveTradeLog } from "./active-trade-log";
+import { FootballCompetitionsModal } from "./football-competitions-modal";
 import { LiveScanPulse, LiveScanPulsePhase } from "./live-scan-pulse";
 import { VenueLaneControls } from "./venue-lane-controls";
 
@@ -32,7 +36,7 @@ type ScanState =
   | { kind: "success"; report: PaperCollectionReport }
   | { kind: "error"; message: string };
 
-type ScanMode = "hot" | "diagnostic";
+type ScanMode = "hot" | "diagnostic" | "background";
 
 type StripChip = {
   key: string;
@@ -229,6 +233,10 @@ export function RunPaperScan() {
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [scannerControlBusy, setScannerControlBusy] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
+  const [competitionsOpen, setCompetitionsOpen] = useState(false);
+  const [competitionsSaving, setCompetitionsSaving] = useState(false);
+  const [competitionsError, setCompetitionsError] = useState<string | null>(null);
+  const firstRunPromptedRef = useRef(false);
   const [lastCompletedAt, setLastCompletedAt] = useState<string | null>(null);
   const [lastDurationMs, setLastDurationMs] = useState<number | null>(null);
   const [liveRefresh, setLiveRefresh] = useState<LiveRefreshStatus | null>(null);
@@ -323,6 +331,13 @@ export function RunPaperScan() {
     },
     [router, settingsDirty],
   );
+
+  useEffect(() => {
+    const scope = liveRefresh?.universe_scope;
+    if (!scope?.needs_first_run_confirmation || firstRunPromptedRef.current) return;
+    firstRunPromptedRef.current = true;
+    setCompetitionsOpen(true);
+  }, [liveRefresh?.universe_scope]);
 
   const collect = useCallback(async (mode: ScanMode) => {
     if (liveRefresh?.scanner_stopped) return;
@@ -493,6 +508,73 @@ export function RunPaperScan() {
       );
     } finally {
       setScannerControlBusy(false);
+    }
+  }
+
+  async function applyCompetitionScope(codes: string[], runUniverseNow: boolean) {
+    setCompetitionsSaving(true);
+    setCompetitionsError(null);
+    try {
+      const status = await saveUniverseScope({
+        selected_competition_codes: codes,
+        sport: "football",
+        run_universe_now: runUniverseNow,
+      });
+      applyLiveRefresh(status, { forceSettings: true });
+      setCompetitionsOpen(false);
+      setSettingsMessage(
+        runUniverseNow
+          ? "Saved football competition scope and requested UNIVERSE now."
+          : "Saved football competition scope. UNIVERSE discovery will use it on the next generation.",
+      );
+    } catch (error) {
+      setCompetitionsError(
+        error instanceof Error ? error.message : "Could not save football competition scope.",
+      );
+    } finally {
+      setCompetitionsSaving(false);
+    }
+  }
+
+  async function runManualBackground() {
+    if (liveRefresh?.scanner_stopped) return;
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    liveRefreshPollGuardRef.current.begin();
+    setLoadingMode("background");
+    setState({ kind: "idle" });
+    try {
+      const status = await runPaperBackgroundRefresh();
+      applyLiveRefresh(status);
+      setCompleteFlash(true);
+      setNowMs(Date.now());
+    } catch (error) {
+      setState({
+        kind: "error",
+        message: error instanceof Error ? error.message : "BACKGROUND pricing failed.",
+      });
+    } finally {
+      inFlightRef.current = false;
+      setLoadingMode(null);
+      router.refresh();
+    }
+  }
+
+  async function runUniverseNow() {
+    if (liveRefresh?.scanner_stopped) return;
+    try {
+      const status = await runPaperUniverseNow();
+      applyLiveRefresh(status);
+      const pending = status.universe_scope?.manual_universe_state === "pending";
+      setSettingsMessage(
+        pending
+          ? "UNIVERSE already running · queued one fresh selected-scope generation."
+          : "UNIVERSE generation requested for the current selected scope.",
+      );
+    } catch (error) {
+      setSettingsMessage(
+        error instanceof Error ? error.message : "Could not request UNIVERSE now.",
+      );
     }
   }
 
@@ -674,12 +756,53 @@ export function RunPaperScan() {
               className="scan-button"
               type="submit"
               disabled={loading || scannerStopped}
-              aria-busy={loading}
+              aria-busy={loadingMode === "hot"}
               title={scannerStopped ? "Scanner stopped by operator" : undefined}
             >
               {loadingMode === "hot" ? "Scanning… Refreshing HOT…" : "Manual HOT refresh"}
             </button>
           </div>
+        </div>
+        <div className="scan-lane-actions">
+          <div className="scan-competitions-summary">
+            <button
+              className="scan-button-secondary"
+              type="button"
+              onClick={() => {
+                setCompetitionsError(null);
+                setCompetitionsOpen(true);
+              }}
+              aria-label="Football competitions"
+            >
+              Football competitions · {liveRefresh?.universe_scope?.selected_count ?? 8} selected
+            </button>
+            {liveRefresh?.universe_scope?.new_competitions_available ? (
+              <span className="scan-competitions-badge">New competitions available</span>
+            ) : null}
+          </div>
+          <button
+            className="scan-button-secondary"
+            type="button"
+            disabled={loading || scannerStopped}
+            aria-busy={loadingMode === "background"}
+            title={scannerStopped ? "Scanner stopped by operator" : undefined}
+            onClick={() => void runManualBackground()}
+          >
+            {loadingMode === "background" ? "Refreshing BACKGROUND…" : "Manual BACKGROUND refresh"}
+          </button>
+          <button
+            className="scan-button-secondary"
+            type="button"
+            disabled={loading || scannerStopped}
+            title={scannerStopped ? "Scanner stopped by operator" : undefined}
+            onClick={() => void runUniverseNow()}
+          >
+            {liveRefresh?.universe_scope?.manual_universe_state === "pending"
+              ? "UNIVERSE queued"
+              : liveRefresh?.universe_scope?.manual_universe_state === "running"
+                ? "UNIVERSE running"
+                : "Run UNIVERSE now"}
+          </button>
         </div>
         <div className="scan-ops-actions">
           <button
@@ -718,13 +841,16 @@ export function RunPaperScan() {
         ) : null}
         <div className="scan-note">
           Manual HOT refresh performs a HOT pricing refresh of current known fixtures.
-          It does not rediscover the catalogue or advance scheduled ACTIVE TRADE, HOT pricing,
-          BACKGROUND pricing or UNIVERSE discovery. Update saves Min Net Arb, Max Risk, HOT cadence and BACKGROUND cadence
+          It does not rediscover the catalogue. Manual BACKGROUND refresh reprices currently due ACTIVE catalogue rows from exact known IDs.
+          Neither HOT nor BACKGROUND rediscover the catalogue or advance UNIVERSE generation state.
+          Run UNIVERSE now bypasses only the 10-minute wait and uses the real selected-scope generation worker.
+          Update saves Min Net Arb, Max Risk, HOT cadence and BACKGROUND cadence
           and max allocated per trade for subsequent server-owned work and does not trigger a scan.
+          Football competitions Apply persists canonical codes only and does not itself call providers.
           HOT cadence is how often HOT pricing is due; BACKGROUND cadence is how often the
           rest of the known ACTIVE catalogue is repriced. ACTIVE TRADE reprices open paper
           trades every 5s from exact known IDs. Auto refresh view only polls status.
-          UNIVERSE discovery stays on the architecture 10-minute post-completion schedule.
+          UNIVERSE discovery stays on the architecture 10-minute post-completion schedule unless Run UNIVERSE now is used.
         </div>
         <div className="scan-note" aria-label="ACTIVE TRADE, HOT pricing, BACKGROUND pricing and UNIVERSE discovery status">
           {dualScanStatusLines(liveRefresh, nowMs).map((line) => (
@@ -761,8 +887,8 @@ export function RunPaperScan() {
           </div>
           <p className="scan-advanced-copy">
             Full diagnostic performs bounded broad venue discovery for operator diagnosis.
-            It is not UNIVERSE discovery and does not advance the scheduled UNIVERSE discovery
-            generation. It is read-only and remains bounded by the diagnostic scan envelope.
+            It is not UNIVERSE discovery and does not advance UNIVERSE generation state.
+            It is read-only and remains bounded by the diagnostic scan envelope.
           </p>
           <div className="econ-strip" aria-label="Backend-resolved FX and venue costs">
             {chips.map((chip) => (
@@ -852,6 +978,15 @@ export function RunPaperScan() {
             {state.message}
           </div>
         ) : null}
+        <FootballCompetitionsModal
+          open={competitionsOpen}
+          scope={liveRefresh?.universe_scope ?? null}
+          scannerStopped={scannerStopped}
+          saving={competitionsSaving}
+          errorMessage={competitionsError}
+          onClose={() => setCompetitionsOpen(false)}
+          onApply={applyCompetitionScope}
+        />
       </form>
     </section>
   );

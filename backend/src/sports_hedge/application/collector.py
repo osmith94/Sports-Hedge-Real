@@ -114,17 +114,20 @@ from sports_hedge.catalogue.registry import (
 from sports_hedge.catalogue.states import CatalogueApprovalState
 from sports_hedge.application.target_competitions import (
     EVENT_IDENTITY_MISMATCH,
+    KALSHI_SERIES_TICKERS_BY_CODE,
     SERIES_NOT_QUERIED,
     TARGET_COMPETITIONS,
     UNMATCHED_POLYMARKET_COVERAGE,
     TargetCompetition,
     TargetCompetitionCode,
+    default_operator_competition_code_values,
     filter_in_scope_events,
+    kalshi_series_tickers_for_codes,
+    polymarket_series_ids_for_codes,
     resolve_target_competition,
     resolve_target_competition_from_kalshi_ticker,
     scope_matchbook_event,
 )
-from sports_hedge.config import Settings
 from sports_hedge.arbitrage.watchlist.economics import (
     distance_to_trigger_pp,
     net_edge_from_implied_sum,
@@ -719,6 +722,9 @@ class ReadOnlyCrossVenueCollector:
         resume_cursor: str | None = None,
         skip_event_ids: list[str] | None = None,
         universe_generation_id: int | None = None,
+        selected_competition_codes: list[str] | tuple[str, ...] | None = None,
+        generation_scope_version: int | None = None,
+        generation_superseded: bool = False,
         generation_resume: bool = False,
         known_source_events: dict[str, list[dict[str, Any]]] | None = None,
         enabled_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
@@ -744,6 +750,13 @@ class ReadOnlyCrossVenueCollector:
         self._op_enabled_venues = enabled
         self._op_request_lane = (scan_lane or "").strip().casefold() or None
         self._op_universe_generation_id = universe_generation_id
+        self._op_selected_competition_codes = tuple(
+            selected_competition_codes
+            if selected_competition_codes is not None
+            else default_operator_competition_code_values()
+        )
+        self._op_generation_scope_version = generation_scope_version
+        self._op_generation_superseded = bool(generation_superseded)
         self._op_operation_health = {}
         self._on_discovery_complete = on_discovery_complete
         self._on_fixture_evaluated = on_fixture_evaluated
@@ -914,11 +927,23 @@ class ReadOnlyCrossVenueCollector:
                         issues=issues,
                         venue_health=venue_health,
                     )
+                    selected_pm_ids = polymarket_series_ids_for_codes(
+                        self._op_selected_competition_codes
+                    )
+                    selected_k_tickers = kalshi_series_tickers_for_codes(
+                        self._op_selected_competition_codes
+                    )
+                    pm_filters = dict(polymarket_event_filters or {})
+                    if selected_pm_ids and "series_id" not in pm_filters:
+                        pm_filters["series_ids"] = selected_pm_ids
+                    k_filters: dict[str, Any] = {}
+                    if selected_k_tickers:
+                        k_filters["series_tickers"] = selected_k_tickers
                     pm_task = self._discovery_task(
                         self.polymarket,
                         venue=VenueName.POLYMARKET,
                         enabled=enabled,
-                        filters=polymarket_event_filters or {},
+                        filters=pm_filters,
                         issues=issues,
                         venue_health=venue_health,
                     )
@@ -926,7 +951,7 @@ class ReadOnlyCrossVenueCollector:
                         self.kalshi,
                         venue=VenueName.KALSHI,
                         enabled=enabled,
-                        filters={},
+                        filters=k_filters,
                         issues=issues,
                         venue_health=venue_health,
                     )
@@ -952,12 +977,20 @@ class ReadOnlyCrossVenueCollector:
 
             with self._stage("normalize_match"):
                 mb_scope = filter_in_scope_events(
-                    raw_matchbook_events, venue=VenueName.MATCHBOOK
+                    raw_matchbook_events,
+                    venue=VenueName.MATCHBOOK,
+                    selected_codes=self._op_selected_competition_codes,
                 )
                 pm_scope = filter_in_scope_events(
-                    raw_polymarket_events, venue=VenueName.POLYMARKET
+                    raw_polymarket_events,
+                    venue=VenueName.POLYMARKET,
+                    selected_codes=self._op_selected_competition_codes,
                 )
-                k_scope = filter_in_scope_events(raw_kalshi_events, venue=VenueName.KALSHI)
+                k_scope = filter_in_scope_events(
+                    raw_kalshi_events,
+                    venue=VenueName.KALSHI,
+                    selected_codes=self._op_selected_competition_codes,
+                )
                 skipped_by_reason = _merge_counts(
                     mb_scope.skipped_by_reason,
                     pm_scope.skipped_by_reason,
@@ -979,7 +1012,9 @@ class ReadOnlyCrossVenueCollector:
                 )
                 queried_series_ids = _resolved_queried_series_ids(
                     polymarket_event_filters,
-                    polymarket_queried_series_ids,
+                    polymarket_series_ids_for_codes(self._op_selected_competition_codes)
+                    if polymarket_queried_series_ids is None
+                    else polymarket_queried_series_ids,
                 )
                 mb_items = [
                     to_venue_event(event, VenueName.MATCHBOOK) for event in matchbook_events
@@ -2913,6 +2948,8 @@ class ReadOnlyCrossVenueCollector:
                 generation_id=None if generation is None else str(generation),
                 family_discovery=FamilyDiscoveryCompleteness(),
                 terminal=True,
+                generation_selected_codes=self._op_selected_competition_codes,
+                allow_disappearance=not self._op_generation_superseded,
             )
 
     async def _persist_universe_catalogue_from_pairs(
@@ -2978,6 +3015,8 @@ class ReadOnlyCrossVenueCollector:
                 generation_id=None if generation is None else str(generation),
                 family_discovery=family_discovery,
                 terminal=False,
+                generation_selected_codes=self._op_selected_competition_codes,
+                allow_disappearance=not self._op_generation_superseded,
             )
 
     async def _refresh_hot_cluster(
@@ -5481,27 +5520,28 @@ def _combined_kalshi_series_ok_rows(events: list[dict[str, Any]]) -> list[dict[s
     if not seen_codes:
         return []
     rows: list[dict[str, Any]] = []
-    for ticker in Settings().kalshi_series_tickers:
-        series = str(ticker).strip()
-        if not series:
+    for item in TARGET_COMPETITIONS:
+        if item.code.value not in seen_codes:
             continue
-        competition = resolve_target_competition_from_kalshi_ticker(series)
-        if competition is None or competition.code.value not in seen_codes:
-            continue
-        count = sum(
-            1
-            for item in events
-            if isinstance(item, dict) and str(item.get("series_ticker") or "").strip() == series
-        )
-        rows.append(
-            {
-                "series": series,
-                "status": "ok",
-                "retryable": False,
-                "event_count": count,
-                "reason": None,
-            }
-        )
+        for ticker in KALSHI_SERIES_TICKERS_BY_CODE.get(item.code, ()):
+            series = str(ticker).strip()
+            if not series:
+                continue
+            count = sum(
+                1
+                for event in events
+                if isinstance(event, dict)
+                and str(event.get("series_ticker") or "").strip() == series
+            )
+            rows.append(
+                {
+                    "series": series,
+                    "status": "ok",
+                    "retryable": False,
+                    "event_count": count,
+                    "reason": None,
+                }
+            )
     return rows
 
 
@@ -5529,9 +5569,17 @@ def _discovery_series_ids(venue: VenueName, client: Any, filters: dict[str, Any]
     if venue is VenueName.POLYMARKET:
         if filters.get("series_id") is not None:
             return []
-        settings = getattr(client, "settings", None)
-        resolver = getattr(settings, "resolved_polymarket_series_ids", None)
-        ids = [str(item).strip() for item in (resolver() if callable(resolver) else []) if str(item).strip()]
+        explicit = filters.get("series_ids")
+        if explicit:
+            ids = [str(item).strip() for item in explicit if str(item).strip()]
+        else:
+            settings = getattr(client, "settings", None)
+            resolver = getattr(settings, "resolved_polymarket_series_ids", None)
+            ids = [
+                str(item).strip()
+                for item in (resolver() if callable(resolver) else [])
+                if str(item).strip()
+            ]
         return ids if len(ids) > 1 else []
     return []
 

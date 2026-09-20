@@ -129,6 +129,19 @@ from sports_hedge.persistence.operator_scanner_settings import (
     get_operator_scanner_settings_store,
     resolve_operator_scanner_settings,
 )
+from sports_hedge.persistence.operator_universe_scope import (
+    UNIVERSE_MANUAL_IDLE,
+    UNIVERSE_MANUAL_PENDING,
+    UNIVERSE_MANUAL_RUNNING,
+    OperatorUniverseScope,
+    SqliteOperatorUniverseScopeStore,
+    bind_runtime_operator_universe_scope_store,
+    get_operator_universe_scope_store,
+    resolve_operator_universe_scope,
+)
+from sports_hedge.application.target_competitions import (
+    default_operator_competition_code_values,
+)
 from sports_hedge.persistence.universe_checkpoint import SqliteUniverseCheckpointStore
 from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookDiscoveryError
 
@@ -309,6 +322,7 @@ class LiveRefreshStatus(BaseModel):
     )
     active_trade_timeline: list[ActiveTradeTimelineItem] = Field(default_factory=list)
     system_load: SystemLoadSummary = Field(default_factory=SystemLoadSummary)
+    universe_scope: OperatorUniverseScope | None = None
 
 
 class DualCadencePlan(BaseModel):
@@ -333,6 +347,9 @@ class DualCadencePlan(BaseModel):
         default_factory=lambda: list(default_operator_venues())
     )
     reason: str = ""
+    selected_competition_codes: list[str] = Field(default_factory=list)
+    generation_scope_version: int | None = None
+    generation_superseded: bool = False
 
 
 def _schedule_capped_retry(
@@ -412,6 +429,7 @@ class LiveRefreshCoordinator:
         clock: Callable[[], datetime] | None = None,
         venue_settings_store: SqliteLaneVenueSettingsStore | None = None,
         operator_settings_store: SqliteOperatorScannerSettingsStore | None = None,
+        universe_scope_store: SqliteOperatorUniverseScopeStore | None = None,
         universe_checkpoint_store: SqliteUniverseCheckpointStore | None = None,
         catalogue_store: Any | None = None,
         price_engine: CataloguePriceEngine | None = None,
@@ -439,6 +457,13 @@ class LiveRefreshCoordinator:
         self._background_in_progress = False
         self._active_trade_in_progress = False
         self._manual_hot_in_progress = False
+        self._manual_background_in_progress = False
+        self._universe_run_now_pending = False
+        self._universe_generation_superseded = False
+        self._universe_generation_scope_version = 0
+        self._universe_generation_selected_codes: tuple[str, ...] = (
+            default_operator_competition_code_values()
+        )
         self._next_hot_due: datetime | None = None
         self._next_universe_due: datetime | None = None
         self._next_background_due: datetime | None = None
@@ -498,6 +523,9 @@ class LiveRefreshCoordinator:
         self._operator_store = operator_settings_store
         if operator_settings_store is not None:
             bind_runtime_operator_scanner_settings_store(operator_settings_store)
+        self._universe_scope_store = universe_scope_store
+        if universe_scope_store is not None:
+            bind_runtime_operator_universe_scope_store(universe_scope_store)
         self._pending_participation = participation_from_lists(
             default_operator_venues(),
             default_operator_venues(),
@@ -617,6 +645,136 @@ class LiveRefreshCoordinator:
         with self._state_lock:
             self._operator_store = store
             self._apply_operator_settings_unlocked(operator, cadence_changed=False)
+
+    def _resolved_universe_scope_store(self) -> SqliteOperatorUniverseScopeStore:
+        if self._universe_scope_store is None:
+            self._universe_scope_store = get_operator_universe_scope_store()
+            bind_runtime_operator_universe_scope_store(self._universe_scope_store)
+        return self._universe_scope_store
+
+    def bind_universe_scope_store(self, store: SqliteOperatorUniverseScopeStore) -> None:
+        bind_runtime_operator_universe_scope_store(store)
+        with self._state_lock:
+            self._universe_scope_store = store
+
+    def effective_universe_scope(self) -> OperatorUniverseScope:
+        scope = resolve_operator_universe_scope(self._resolved_universe_scope_store())
+        return self._decorate_universe_scope(scope)
+
+    def _decorate_universe_scope(self, scope: OperatorUniverseScope) -> OperatorUniverseScope:
+        with self._state_lock:
+            pending = self._universe_run_now_pending
+            running = (
+                self._universe_in_progress or self.status.universe.cycle_in_progress
+            )
+            generation_codes = list(self._universe_generation_selected_codes)
+            generation_version = self._universe_generation_scope_version
+            background_busy = (
+                self._manual_background_in_progress or self._background_in_progress
+            )
+        if running:
+            state = UNIVERSE_MANUAL_RUNNING
+        elif pending:
+            state = UNIVERSE_MANUAL_PENDING
+        else:
+            state = UNIVERSE_MANUAL_IDLE
+        return scope.model_copy(
+            update={
+                "generation_scope_version": generation_version or None,
+                "generation_selected_competition_codes": generation_codes,
+                "manual_universe_state": state,
+                "manual_background_busy": background_busy,
+            }
+        )
+
+    def apply_universe_scope(
+        self,
+        selected_competition_codes: list[str] | tuple[str, ...],
+        *,
+        run_universe_now: bool = False,
+        sport: str = "football",
+    ) -> OperatorUniverseScope:
+        """Persist canonical competition scope. Apply never calls providers."""
+
+        store = self._resolved_universe_scope_store()
+        saved = store.save_scope(selected_competition_codes, sport=sport)
+        with self._state_lock:
+            previous = tuple(self._universe_generation_selected_codes)
+            current = tuple(saved.selected_competition_codes)
+            if (
+                self._universe_generation_started_at is not None
+                and previous != current
+            ):
+                self._universe_generation_superseded = True
+        self._reconstruct_price_engine_for_scope()
+        if run_universe_now and not self._operator_scanner_stopped:
+            self.request_universe_run_now()
+        else:
+            self._pulse_control()
+        return self._decorate_universe_scope(saved)
+
+    def request_universe_run_now(self) -> str:
+        """Make a fresh selected-scope generation due now, or coalesce if busy."""
+
+        if self._operator_scanner_stopped:
+            raise ExplicitCollectBusy(SCANNER_STOPPED_BY_OPERATOR)
+        with self._state_lock:
+            if (
+                self._universe_in_progress
+                or self.status.universe.cycle_in_progress
+                or self._universe_lock.locked()
+            ):
+                self._universe_run_now_pending = True
+                state = UNIVERSE_MANUAL_PENDING
+            else:
+                self._next_universe_due = self.now()
+                self._universe_budget_paused = False
+                self._universe_run_now_pending = False
+                state = UNIVERSE_MANUAL_RUNNING if self._universe_in_progress else "due"
+        self._pulse_control()
+        return state
+
+    def generation_discovery_codes(self) -> tuple[str, ...]:
+        with self._state_lock:
+            if self._universe_generation_started_at is not None:
+                return tuple(self._universe_generation_selected_codes)
+            return tuple(self.effective_universe_scope().selected_competition_codes)
+
+    def generation_superseded(self) -> bool:
+        return bool(self._universe_generation_superseded)
+
+    def _open_paper_event_ids(self) -> frozenset[str]:
+        try:
+            from sports_hedge.api.paper import get_paper_operations_service
+        except Exception:
+            return frozenset()
+        try:
+            operations = get_paper_operations_service()
+            trades = operations.list_active_trades()
+        except Exception:
+            return frozenset()
+        ids: set[str] = set()
+        for trade in trades:
+            if getattr(trade, "state", None) is not PaperTradeState.OPEN:
+                continue
+            event_id = str(getattr(trade, "canonical_event_id", "") or "").strip()
+            if event_id:
+                ids.add(event_id)
+        return frozenset(ids)
+
+    def _reconstruct_price_engine_for_scope(self) -> None:
+        engine = self._price_engine
+        if engine is None:
+            return
+        store = engine.catalogue_store or self._catalogue_store
+        if store is None:
+            engine.reconstruct([])
+            return
+        selected = self.effective_universe_scope().selected_set()
+        exempt = self._open_paper_event_ids()
+        engine = self.price_engine()
+        engine.set_operator_scope(selected, exempt_event_ids=exempt)
+        engine.reconstruct()
 
     def apply_operator_scan_settings(
         self,
@@ -931,6 +1089,11 @@ class LiveRefreshCoordinator:
             self._background_in_progress = False
             self._active_trade_in_progress = False
             self._manual_hot_in_progress = False
+            self._manual_background_in_progress = False
+            self._universe_run_now_pending = False
+            self._universe_generation_superseded = False
+            self._universe_generation_scope_version = 0
+            self._universe_generation_selected_codes = default_operator_competition_code_values()
             self._next_hot_due = None
             self._next_universe_due = None
             self._next_background_due = None
@@ -1211,6 +1374,8 @@ class LiveRefreshCoordinator:
         if fx_snapshots is not None:
             engine.fx_snapshots = list(fx_snapshots)
         engine.fixture_state = self._fixture_state
+        selected = self.effective_universe_scope().selected_set()
+        engine.set_operator_scope(selected, exempt_event_ids=self._open_paper_event_ids())
         result = await engine.run_slice(priority, slice_wall_seconds=slice_wall_seconds)
         if priority is PriceEnginePriority.BACKGROUND:
             with self._state_lock:
@@ -1335,6 +1500,10 @@ class LiveRefreshCoordinator:
             sweep_id = self._universe_sweep_id
             universe_venues = list(self._pending_participation.venues_for(ScanLane.UNIVERSE))
             retry_series = self._due_retry_series_unlocked(evaluated)
+            run_now_pending = self._universe_run_now_pending
+            generation_codes = list(self._universe_generation_selected_codes)
+            generation_scope_version = self._universe_generation_scope_version
+            generation_superseded = self._universe_generation_superseded
         work_retry_at = self._earliest_retry_wait_unlocked(evaluated)
         if work_retry_at is not None and evaluated < work_retry_at:
             return DualCadencePlan(lane="idle", reason="universe_retry_wait")
@@ -1342,12 +1511,15 @@ class LiveRefreshCoordinator:
             return DualCadencePlan(lane="idle", reason="universe_provider_backoff")
         if (
             universe_budget_paused
+            and not run_now_pending
             and next_universe_due is not None
             and evaluated < next_universe_due
         ):
             return DualCadencePlan(lane="idle", reason="universe_cooldown")
-        universe_due = universe_generation_started_at is not None or (
-            next_universe_due is not None and evaluated >= next_universe_due
+        universe_due = (
+            run_now_pending
+            or universe_generation_started_at is not None
+            or (next_universe_due is not None and evaluated >= next_universe_due)
         )
         if not universe_due:
             if universe_generation_started_at is None and next_universe_due is not None:
@@ -1372,6 +1544,9 @@ class LiveRefreshCoordinator:
             sweep_id=sweep_id,
             enabled_venues=universe_venues,
             reason="universe_sweep",
+            selected_competition_codes=generation_codes,
+            generation_scope_version=generation_scope_version,
+            generation_superseded=generation_superseded,
         )
 
     def _universe_chunk_timeouts(
@@ -1662,6 +1837,32 @@ class LiveRefreshCoordinator:
                 self._cycle_enabled_venues = None
                 self._sync_venue_status_unlocked()
 
+    async def run_manual_background(
+        self,
+        *,
+        matchbook: Any = None,
+        kalshi: Any = None,
+        paper_scan: Any = None,
+    ) -> Any:
+        """Run exact-ID BACKGROUND pricing now. No discovery/UNIVERSE advance."""
+
+        if self._operator_scanner_stopped:
+            raise ExplicitCollectBusy(SCANNER_STOPPED_BY_OPERATOR)
+        if self._manual_background_in_progress or self._background_in_progress:
+            raise ExplicitCollectBusy("BACKGROUND pricing in progress")
+        with self._state_lock:
+            self._manual_background_in_progress = True
+        try:
+            return await self.run_price_engine_slice(
+                PriceEnginePriority.BACKGROUND,
+                matchbook=matchbook,
+                kalshi=kalshi,
+                paper_scan=paper_scan,
+            )
+        finally:
+            with self._state_lock:
+                self._manual_background_in_progress = False
+
     async def run_explicit_collect(self, runner) -> CollectionReport:
         """Manual diagnostic collect. Does not own HOT/UNIVERSE generation progress."""
 
@@ -1925,7 +2126,8 @@ class LiveRefreshCoordinator:
                         or self._universe_in_progress
                         or self._background_in_progress
                         or self._active_trade_in_progress
-                        or self._manual_hot_in_progress,
+                        or self._manual_hot_in_progress
+                        or self._manual_background_in_progress,
                     }
                 )
             self._sync_venue_status_unlocked()
@@ -2900,6 +3102,9 @@ class LiveRefreshCoordinator:
             work_units=dict(self._universe_work),
             series_work=dict(self._universe_series_work),
             semantics_version=UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
+            selected_competition_codes=list(self._universe_generation_selected_codes),
+            scope_version=int(self._universe_generation_scope_version),
+            superseded=bool(self._universe_generation_superseded),
         )
         return _UniverseCheckpointWrite(
             token=token,
@@ -3097,6 +3302,12 @@ class LiveRefreshCoordinator:
         with self._state_lock:
             self._universe_generation_id = checkpoint.generation_id
             self._universe_generation_started_at = checkpoint.generation_started_at
+            if checkpoint.selected_competition_codes:
+                self._universe_generation_selected_codes = tuple(
+                    checkpoint.selected_competition_codes
+                )
+            self._universe_generation_scope_version = int(checkpoint.scope_version or 0)
+            self._universe_generation_superseded = bool(checkpoint.superseded)
             self._universe_work_used = checkpoint.successful_work_used_s
             self._universe_cursor = checkpoint.resume_cursor
             self._universe_evaluated_ids = set(checkpoint.evaluated_ids)
@@ -3197,8 +3408,13 @@ class LiveRefreshCoordinator:
     def _ensure_universe_generation(self, started: datetime) -> None:
         if self._universe_generation_started_at is not None:
             return
+        scope = resolve_operator_universe_scope(self._resolved_universe_scope_store())
         self._universe_generation_id += 1
         self._universe_generation_started_at = started
+        self._universe_generation_selected_codes = tuple(scope.selected_competition_codes)
+        self._universe_generation_scope_version = int(scope.scope_version)
+        self._universe_generation_superseded = False
+        self._universe_run_now_pending = False
         self._universe_work_used = 0.0
         self._universe_evaluated_ids = set()
         self._universe_needs_rehydration = set()
@@ -3274,12 +3490,17 @@ class LiveRefreshCoordinator:
         self._fixture_state.close_universe_generation(
             self._universe_generation_id, closed_at=finished
         )
+        pending = self._universe_run_now_pending
         self._clear_universe_generation_local_state()
         self._universe_generation_started_at = None
         self._universe_budget_paused = False
         self._universe_retry_at = None
         self._universe_provider_failures = 0
         self._universe_last_report_snapshot = None
+        self._universe_generation_superseded = False
+        if pending:
+            self._next_universe_due = finished
+            self._universe_run_now_pending = False
         self._mark_universe_checkpoint_dirty_unlocked()
 
     def _advance_hot_due(self, now: datetime) -> None:
@@ -3732,10 +3953,14 @@ class LiveRefreshCoordinator:
                     or self._universe_in_progress
                     or self._background_in_progress
                     or self._active_trade_in_progress
-                    or self._manual_hot_in_progress,
+                    or self._manual_hot_in_progress
+                    or self._manual_background_in_progress,
                     "scanner_stopped": self._operator_scanner_stopped,
                     "operator_settings": self.status.operator_settings
                     or env_operator_scanner_settings(),
+                    "universe_scope": self._decorate_universe_scope(
+                        resolve_operator_universe_scope(self._resolved_universe_scope_store())
+                    ),
                     "interval_seconds": int(self.status.interval_seconds),
                 }
             )
@@ -3753,7 +3978,8 @@ class LiveRefreshCoordinator:
                     or self._universe_in_progress
                     or self._background_in_progress
                     or self._active_trade_in_progress
-                    or self._manual_hot_in_progress,
+                    or self._manual_hot_in_progress
+                    or self._manual_background_in_progress,
                     "system_load": system_load_from_status(
                         self.status,
                         universe_work_used_s=self._status_universe_work_used(),
@@ -4400,6 +4626,8 @@ class LiveRefreshCoordinator:
 
     def _seconds_until_universe(self) -> float:
         now = self.now()
+        if self._universe_run_now_pending:
+            return 0.05
         if self._universe_in_progress:
             return 1.0
         if self._universe_retry_at is not None and self._universe_retry_at > now:

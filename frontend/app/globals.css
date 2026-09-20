@@ -104,6 +104,26 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 .scan-control-grid { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)) auto; gap: 10px; align-items: end; }
 .scan-ops-row { display: grid; grid-template-columns: minmax(140px, 1.4fr) minmax(88px, .7fr) minmax(110px, .8fr) minmax(128px, .9fr) auto minmax(168px, auto) auto; gap: 10px; align-items: end; }
 .scan-ops-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.scan-lane-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.scan-competitions-summary { display: inline-flex; align-items: center; gap: 6px; }
+.scan-competitions-badge { border: 1px solid rgba(241, 191, 105, .45); color: var(--amber); border-radius: 999px; padding: 2px 7px; font-size: 8px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.competition-modal-backdrop { position: fixed; inset: 0; z-index: 40; background: rgba(4, 10, 8, .72); display: grid; place-items: center; padding: 18px; }
+.competition-modal { width: min(720px, 100%); max-height: min(86vh, 820px); overflow: auto; border: 1px solid var(--line-strong); background: var(--panel); border-radius: 14px; padding: 16px 17px 14px; box-shadow: 0 18px 48px rgba(0, 0, 0, .35); }
+.competition-modal-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.competition-modal-kicker { color: var(--muted-2); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.competition-modal h2 { margin: 4px 0 0; font-size: 16px; }
+.competition-modal-header p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; max-width: 46ch; }
+.competition-modal-search { margin-top: 12px; }
+.competition-modal-shortcuts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+.competition-modal-count { color: var(--muted-2); font-size: 10px; font-weight: 750; }
+.competition-modal-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+.competition-modal-group { border: 1px solid var(--line); border-radius: 10px; padding: 10px 11px; background: var(--panel-raised); }
+.competition-modal-group h3 { margin: 0 0 8px; font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted-2); }
+.competition-modal-row { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; align-items: start; margin: 0 0 7px; font-size: 12px; cursor: pointer; }
+.competition-modal-row strong { font-weight: 650; }
+.competition-modal-row em { display: block; color: var(--amber); font-style: normal; font-size: 10px; margin-top: 2px; }
+.competition-modal-row-disabled { opacity: .62; cursor: not-allowed; }
+.competition-modal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .scan-button-secondary { border: 1px solid var(--line-strong); background: transparent; color: var(--muted); border-radius: 8px; padding: 9px 13px; min-height: 35px; font-size: 10px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; cursor: pointer; }
 .scan-button-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .scan-button-danger { border: 1px solid rgba(240, 130, 130, .45); background: rgba(240, 130, 130, .08); color: var(--red); border-radius: 8px; padding: 9px 13px; min-height: 35px; font-size: 10px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; cursor: pointer; }

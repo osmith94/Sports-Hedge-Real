@@ -97,6 +97,30 @@ VARIANT_LABELS = {
         "Serie A Enilive",
         "Serie A 2026/27",
     ),
+    TargetCompetitionCode.CHAMPIONS_LEAGUE: (
+        "Champions League",
+        "UEFA Champions League",
+        "UCL",
+    ),
+    TargetCompetitionCode.EUROPA_LEAGUE: (
+        "Europa League",
+        "UEFA Europa League",
+        "UEL",
+    ),
+    TargetCompetitionCode.CONFERENCE_LEAGUE: (
+        "Conference League",
+        "UEFA Conference League",
+        "UEFA Europa Conference League",
+    ),
+    TargetCompetitionCode.SUPER_LIG: (
+        "Süper Lig",
+        "Turkish Süper Lig",
+        "Super Lig",
+    ),
+    TargetCompetitionCode.MLS: (
+        "MLS",
+        "Major League Soccer",
+    ),
 }
 
 REJECTED_LABELS = (
@@ -106,7 +130,6 @@ REJECTED_LABELS = (
     "Germany 3. Liga",
     "USL Championship",
     "LaLiga2",
-    "Champions League",
     "",
     "EFL Trophy",
     "Vertu Trophy",
@@ -238,6 +261,11 @@ def test_matchbook_scope_rejects_out_of_scope_and_near_neighbors(label: str) -> 
         ("10238", TargetCompetitionCode.INTERNATIONAL_FRIENDLIES),
         ("10194", TargetCompetitionCode.BUNDESLIGA),
         ("10203", TargetCompetitionCode.SERIE_A),
+        ("10204", TargetCompetitionCode.CHAMPIONS_LEAGUE),
+        ("10209", TargetCompetitionCode.EUROPA_LEAGUE),
+        ("10437", TargetCompetitionCode.CONFERENCE_LEAGUE),
+        ("10292", TargetCompetitionCode.SUPER_LIG),
+        ("10189", TargetCompetitionCode.MLS),
     ],
 )
 def test_verified_polymarket_series_ids_resolve(
@@ -302,6 +330,11 @@ def test_polymarket_scope_uses_verified_series_coverage() -> None:
         ("KXBUNDESLIGABTTS", TargetCompetitionCode.BUNDESLIGA),
         ("KXSERIEAGAME", TargetCompetitionCode.SERIE_A),
         ("KXSERIEATOTAL", TargetCompetitionCode.SERIE_A),
+        ("KXUCLGAME", TargetCompetitionCode.CHAMPIONS_LEAGUE),
+        ("KXUELGAME", TargetCompetitionCode.EUROPA_LEAGUE),
+        ("KXUECLGAME", TargetCompetitionCode.CONFERENCE_LEAGUE),
+        ("KXSUPERLIGGAME", TargetCompetitionCode.SUPER_LIG),
+        ("KXMLSGAME", TargetCompetitionCode.MLS),
     ],
 )
 def test_verified_kalshi_tickers_resolve(ticker: str, code: TargetCompetitionCode) -> None:
@@ -321,6 +354,9 @@ def test_verified_kalshi_tickers_resolve(ticker: str, code: TargetCompetitionCod
         "KXCLUBFGAME",
         "KXEFLTROPHYGAME",
         "KXFIFAWGAME",
+        "KXUCLWGAME",
+        "KXMLSASTGAME",
+        "KXDENSUPERLIGAGAME",
     ),
 )
 def test_kalshi_near_neighbor_tickers_are_not_claimed(ticker: str) -> None:
@@ -601,6 +637,11 @@ def test_target_set_excludes_league_one_two_and_efl_trophy() -> None:
         TargetCompetitionCode.INTERNATIONAL_FRIENDLIES,
         TargetCompetitionCode.BUNDESLIGA,
         TargetCompetitionCode.SERIE_A,
+        TargetCompetitionCode.CHAMPIONS_LEAGUE,
+        TargetCompetitionCode.EUROPA_LEAGUE,
+        TargetCompetitionCode.CONFERENCE_LEAGUE,
+        TargetCompetitionCode.SUPER_LIG,
+        TargetCompetitionCode.MLS,
     }
     for label in ("League One", "League Two", "EFL Trophy", "Vertu Trophy"):
         assert resolve_target_competition(label) is None

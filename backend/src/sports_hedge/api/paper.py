@@ -110,6 +110,11 @@ from sports_hedge.persistence.operator_scanner_settings import (
     OperatorScannerSettingsUpdate,
     effective_operator_scanner_settings,
 )
+from sports_hedge.persistence.operator_universe_scope import (
+    UNIVERSE_SCOPE_EMPTY_SELECTION,
+    OperatorUniverseScope,
+    OperatorUniverseScopeUpdate,
+)
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.treasury.models import (
@@ -899,6 +904,38 @@ def get_operator_scanner_settings() -> OperatorScannerSettings:
     return coordinator.effective_scanner_settings()
 
 
+@router.get("/universe-scope", response_model=OperatorUniverseScope)
+def get_universe_scope() -> OperatorUniverseScope:
+    """Read backend-authoritative football UNIVERSE scope. No scan or provider I/O."""
+
+    coordinator = get_live_refresh_coordinator()
+    return coordinator.effective_universe_scope()
+
+
+@router.put("/universe-scope", response_model=LiveRefreshStatus)
+def put_universe_scope(
+    update: OperatorUniverseScopeUpdate,
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Persist canonical competition codes. Apply itself never calls providers."""
+
+    coordinator = get_live_refresh_coordinator()
+    try:
+        coordinator.apply_universe_scope(
+            update.selected_competition_codes,
+            run_universe_now=update.run_universe_now,
+            sport=update.sport,
+        )
+    except ValueError as exc:
+        if str(exc) == UNIVERSE_SCOPE_EMPTY_SELECTION:
+            raise HTTPException(
+                status_code=422,
+                detail="Select at least one supported football competition.",
+            ) from exc
+        raise
+    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+
+
 @router.put("/operator-scanner-settings", response_model=LiveRefreshStatus)
 def put_operator_scanner_settings(
     update: OperatorScannerSettingsUpdate,
@@ -1009,6 +1046,46 @@ async def refresh_hot_read_only_market_data(
     return report.model_copy(update={"fixture_markets": {}})
 
 
+@router.post("/collect/background", response_model=LiveRefreshStatus)
+async def refresh_background_read_only_market_data(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+    service: PaperScanService = Depends(get_paper_scan_service),
+) -> LiveRefreshStatus:
+    """Run exact-ID BACKGROUND pricing now. No discovery and no UNIVERSE advance."""
+
+    coordinator = get_live_refresh_coordinator()
+    if coordinator.operator_scanner_stopped:
+        raise HTTPException(status_code=409, detail=SCANNER_STOPPED_BY_OPERATOR)
+    settings = get_settings()
+    runtime = get_shared_provider_runtime(settings)
+    try:
+        await coordinator.run_manual_background(
+            matchbook=runtime.matchbook,
+            kalshi=runtime.kalshi,
+            paper_scan=service,
+        )
+    except ExplicitCollectBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await coordinator.price_engine().drain_item_captures()
+    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+
+
+@router.post("/collect/universe", response_model=LiveRefreshStatus)
+def run_universe_now(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Make a fresh selected-scope UNIVERSE generation due now, coalescing if busy."""
+
+    coordinator = get_live_refresh_coordinator()
+    if coordinator.operator_scanner_stopped:
+        raise HTTPException(status_code=409, detail=SCANNER_STOPPED_BY_OPERATOR)
+    try:
+        coordinator.request_universe_run_now()
+    except ExplicitCollectBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+
+
 @router.post(
     "/collect",
     response_model=CollectionReport,
@@ -1098,6 +1175,9 @@ async def _collect_report(
     on_canonical_work_set=None,
     retry_series: dict[str, list[str]] | None = None,
     hot_market_relationships=None,
+    selected_competition_codes: list[str] | tuple[str, ...] | None = None,
+    generation_scope_version: int | None = None,
+    generation_superseded: bool = False,
 ) -> CollectionReport:
     settings = get_settings()
     runtime = get_shared_provider_runtime(settings)
@@ -1150,6 +1230,9 @@ async def _collect_report(
             on_canonical_work_set=on_canonical_work_set,
             retry_series=retry_series,
             hot_market_relationships=hot_market_relationships,
+            selected_competition_codes=selected_competition_codes,
+            generation_scope_version=generation_scope_version,
+            generation_superseded=generation_superseded,
         )
     finally:
         acknowledge_task_cancellation()
@@ -1501,8 +1584,14 @@ async def server_owned_refresh_tick(plan=None) -> None:
 
     async def runner() -> CollectionReport:
         on_discovery = on_fixture = on_work_set = None
+        selected_codes = None
+        superseded = False
+        scope_version = None
         if resolved.lane == ScanLane.UNIVERSE.value:
             on_discovery, on_fixture, on_work_set = coordinator.universe_collect_callbacks()
+            selected_codes = list(coordinator.generation_discovery_codes())
+            superseded = coordinator.generation_superseded()
+            scope_version = coordinator._universe_generation_scope_version
         return await _collect_report(
             kwargs,
             service=service,
@@ -1524,6 +1613,9 @@ async def server_owned_refresh_tick(plan=None) -> None:
             on_canonical_work_set=on_work_set,
             retry_series=resolved.retry_series,
             hot_market_relationships=getattr(resolved, "hot_market_relationships", None),
+            selected_competition_codes=selected_codes,
+            generation_scope_version=scope_version,
+            generation_superseded=superseded,
         )
 
     try:

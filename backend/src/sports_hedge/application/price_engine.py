@@ -38,6 +38,7 @@ from sports_hedge.application.approved_market_catalogue import (
     derived_price_engine_working_set,
     required_outcomes_for_key,
 )
+from sports_hedge.application.target_competitions import resolve_catalogue_competition_code
 from sports_hedge.application.collector import (
     CollectionReport,
     CollectorIssue,
@@ -312,6 +313,8 @@ class CataloguePriceEngine:
             PriceEnginePriority.HOT.value: 0,
             PriceEnginePriority.BACKGROUND.value: 0,
         }
+        self._selected_competition_codes: frozenset[str] | None = None
+        self._exempt_event_ids: frozenset[str] = frozenset()
 
     def now(self) -> datetime:
         return self._clock()
@@ -320,6 +323,17 @@ class CataloguePriceEngine:
         """Apply the operator/env BACKGROUND cadence without reconstructing work."""
 
         self._background_interval = int(seconds)
+
+    def set_operator_scope(
+        self,
+        selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
+        *,
+        exempt_event_ids: list[str] | tuple[str, ...] | frozenset[str] | None = None,
+    ) -> None:
+        self._selected_competition_codes = (
+            None if selected_codes is None else frozenset(str(code) for code in selected_codes)
+        )
+        self._exempt_event_ids = frozenset(str(item) for item in (exempt_event_ids or ()))
 
     def items(self) -> list[PriceEngineRuntimeItem]:
         return list(self._items.values())
@@ -338,6 +352,19 @@ class CataloguePriceEngine:
                 rows = []
             else:
                 rows = self.catalogue_store.list_active()
+        if self._selected_competition_codes is not None:
+            scoped: list[ApprovedMarketCatalogueRow] = []
+            for row in rows:
+                if row.canonical_event_id in self._exempt_event_ids:
+                    scoped.append(row)
+                    continue
+                code = resolve_catalogue_competition_code(
+                    competition=row.competition,
+                    kalshi_series_ticker=row.kalshi_series_ticker,
+                )
+                if code is not None and code in self._selected_competition_codes:
+                    scoped.append(row)
+            rows = scoped
         derived = derived_price_engine_working_set(list(rows))
         live_keys = {f"{item.catalogue_row_id}:{item.content_version}" for item in derived}
         for key in list(self._items):

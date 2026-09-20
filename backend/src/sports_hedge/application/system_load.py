@@ -59,6 +59,9 @@ class UniverseLoad(BaseModel):
     generation_work_used_s: float | None = Field(default=None, ge=0)
     generation_budget_seconds: float | None = Field(default=None, ge=0)
     cadence_seconds: int = Field(default=0, ge=0)
+    selected_competition_count: int = Field(default=0, ge=0)
+    scope_version: int | None = Field(default=None, ge=0)
+    generation_scope_version: int | None = Field(default=None, ge=0)
 
 
 class ActiveTradeLoad(BaseModel):
@@ -112,6 +115,7 @@ def system_load_from_status(
     active_trade = getattr(status, "active_trade", None)
     engine = getattr(status, "price_engine", None)
     access = getattr(status, "provider_access", None)
+    universe_scope = getattr(status, "universe_scope", None)
     if isinstance(status, dict):
         hot = status.get("hot", hot)
         background = status.get("background", background)
@@ -119,6 +123,7 @@ def system_load_from_status(
         active_trade = status.get("active_trade", active_trade)
         engine = status.get("price_engine", engine)
         access = status.get("provider_access", access)
+        universe_scope = status.get("universe_scope", universe_scope)
     hot_engine = _attr(engine, "hot")
     background_engine = _attr(engine, "background")
     hot_working = _count(_attr(hot_engine, "working_set"))
@@ -179,6 +184,11 @@ def system_load_from_status(
                 _attr(universe, "generation_budget_seconds")
             ),
             cadence_seconds=_count(_attr(universe, "cadence_seconds")),
+            selected_competition_count=_count(_attr(universe_scope, "selected_count")),
+            scope_version=_optional_int(_attr(universe_scope, "scope_version")),
+            generation_scope_version=_optional_int(
+                _attr(universe_scope, "generation_scope_version")
+            ),
         ),
         catalogue_items=hot_working + background_working,
     )

@@ -18,6 +18,11 @@ class TargetCompetitionCode(StrEnum):
     INTERNATIONAL_FRIENDLIES = "international_friendlies"
     BUNDESLIGA = "bundesliga"
     SERIE_A = "serie_a"
+    CHAMPIONS_LEAGUE = "champions_league"
+    EUROPA_LEAGUE = "europa_league"
+    CONFERENCE_LEAGUE = "conference_league"
+    SUPER_LIG = "super_lig"
+    MLS = "mls"
 
 
 class TargetCompetition(BaseModel):
@@ -35,16 +40,26 @@ class TargetCompetition(BaseModel):
 # Public Gamma GET /sports (retrieved 2026-09-16):
 #   epl=10188, elc=10355, lal=10193, efl=10329 (EFL CUP), efa=10307 (FA Cup),
 #   fif=10238 (FIFA Friendlies), bun=10194 (Bundesliga), sea=10203 (Serie A).
+# Public Gamma GET /sports (retrieved 2026-09-20) additional football series:
+#   ucl=10204 (UEFA Champions League), uel=10209 (UEFA Europa League),
+#   col=10437 (UEFA Conference League), tur=10292 (Süper Lig), mls=10189 (MLS).
 # Near-neighbor Gamma series left unmatched: bl2=10670 (2. Bundesliga),
-# itsb=10676 (Serie B), clf=12410 (Club Friendlies), ecu1=11863 (LigaPro Serie A).
+# itsb=10676 (Serie B), clf=12410 (Club Friendlies), ecu1=11863 (LigaPro Serie A),
+# uwcl=11240 (UEFA Women's Champions League), tur2=12362 (Turkey 1. Lig).
 #
 # Public Kalshi GET /series (retrieved 2026-09-16): KXEFLCUP*, KXFACUP*,
 # KXINTLFRIENDLY*, plus match-level Bundesliga/Serie A GAME/BTTS/TOTAL/FTTS.
+# Public Kalshi GET /series (retrieved 2026-09-20) additional match-level
+# GAME/BTTS/TOTAL/(FTTS where present): KXUCL*, KXUEL*, KXUECL*, KXSUPERLIG*,
+# KXMLS*. Short KXUCL/KXMLS prefixes are not used: they would also match
+# KXUCLW* (women's UCL) and KXMLSAST* (MLS All-Star).
 # Short KXBUNDESLIGA/KXSERIEA prefixes are not used: they would also match
 # KXBUNDESLIGA2GAME (2. Bundesliga) and KXSERIEAWGAME (Serie A Femminile).
 #
 # Aliases include observed Matchbook / Gamma / Kalshi label shapes. Matching is
 # exact after normalize_text; unknown labels fail closed.
+# Europa League / Conference League / Super Lig FTTS series were not present on
+# public GET /series 2026-09-20 and are not invented.
 TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
     TargetCompetition(
         code=TargetCompetitionCode.PREMIER_LEAGUE,
@@ -221,6 +236,112 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
             "KXSERIEAFTTS",
         ),
     ),
+    TargetCompetition(
+        code=TargetCompetitionCode.CHAMPIONS_LEAGUE,
+        display_name="UEFA Champions League",
+        aliases=(
+            "champions league",
+            "uefa champions league",
+            "ucl",
+            "european cup",
+            "champions league 2025/26",
+            "champions league 2026/27",
+            "uefa champions league 2026/27",
+        ),
+        polymarket_gamma_series_id="10204",
+        polymarket_gamma_sport="ucl",
+        # Match-level only. Short KXUCL also matches KXUCLW* women's series.
+        kalshi_series_prefixes=(
+            "KXUCLGAME",
+            "KXUCLBTTS",
+            "KXUCLTOTAL",
+            "KXUCLFTTS",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.EUROPA_LEAGUE,
+        display_name="UEFA Europa League",
+        aliases=(
+            "europa league",
+            "uefa europa league",
+            "uel",
+            "europa league 2025/26",
+            "europa league 2026/27",
+            "uefa europa league 2026/27",
+        ),
+        polymarket_gamma_series_id="10209",
+        polymarket_gamma_sport="uel",
+        kalshi_series_prefixes=(
+            "KXUELGAME",
+            "KXUELBTTS",
+            "KXUELTOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.CONFERENCE_LEAGUE,
+        display_name="UEFA Conference League",
+        aliases=(
+            "conference league",
+            "uefa conference league",
+            "uefa europa conference league",
+            "europa conference league",
+            "uecl",
+            "conference league 2025/26",
+            "conference league 2026/27",
+        ),
+        polymarket_gamma_series_id="10437",
+        polymarket_gamma_sport="col",
+        kalshi_series_prefixes=(
+            "KXUECLGAME",
+            "KXUECLBTTS",
+            "KXUECLTOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.SUPER_LIG,
+        display_name="Turkish Süper Lig",
+        aliases=(
+            "super lig",
+            "süper lig",
+            "superlig",
+            "turkish super lig",
+            "turkish süper lig",
+            "turkey super lig",
+            "turkey süper lig",
+            "super lig turkey",
+            "süper lig 2025/26",
+            "süper lig 2026/27",
+        ),
+        polymarket_gamma_series_id="10292",
+        polymarket_gamma_sport="tur",
+        kalshi_series_prefixes=(
+            "KXSUPERLIGGAME",
+            "KXSUPERLIGBTTS",
+            "KXSUPERLIGTOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.MLS,
+        display_name="Major League Soccer",
+        aliases=(
+            "mls",
+            "major league soccer",
+            "mls soccer",
+            "american mls",
+            "usa mls",
+            "mls 2026",
+            "major league soccer 2026",
+        ),
+        polymarket_gamma_series_id="10189",
+        polymarket_gamma_sport="mls",
+        # Match-level only. Short KXMLS also matches KXMLSAST* All-Star series.
+        kalshi_series_prefixes=(
+            "KXMLSGAME",
+            "KXMLSBTTS",
+            "KXMLSTOTAL",
+            "KXMLSFTTS",
+        ),
+    ),
 )
 
 _ALIAS_INDEX: dict[str, TargetCompetition] = {}
@@ -267,6 +388,127 @@ SERIES_NOT_QUERIED = "series_not_queried"
 UNKNOWN_COMPETITION = "unknown_or_ambiguous_competition"
 NON_FOOTBALL_SPORT = "non_football_sport"
 OUT_OF_SCOPE_COMPETITION = "out_of_scope_competition"
+NO_VERIFIED_CROSS_VENUE_MAPPING = "No verified cross-venue mapping"
+
+# Operator selector grouping. Canonical codes are the operator model; venue
+# tickers stay backend-only.
+OPERATOR_COMPETITION_REGISTRY_VERSION = 2
+OPERATOR_UNIVERSE_SPORT = "football"
+OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
+    ("uefa", "UEFA"),
+    ("england", "England"),
+    ("spain", "Spain"),
+    ("germany", "Germany"),
+    ("italy", "Italy"),
+    ("turkey", "Turkey"),
+    ("usa_canada", "USA / Canada"),
+    ("international", "International"),
+)
+OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
+    TargetCompetitionCode.CHAMPIONS_LEAGUE: ("uefa", "UEFA", "Champions League"),
+    TargetCompetitionCode.EUROPA_LEAGUE: ("uefa", "UEFA", "Europa League"),
+    TargetCompetitionCode.CONFERENCE_LEAGUE: ("uefa", "UEFA", "Conference League"),
+    TargetCompetitionCode.PREMIER_LEAGUE: ("england", "England", "Premier League"),
+    TargetCompetitionCode.CHAMPIONSHIP: ("england", "England", "Championship"),
+    TargetCompetitionCode.FA_CUP: ("england", "England", "FA Cup"),
+    TargetCompetitionCode.CARABAO_CUP: ("england", "England", "Carabao Cup"),
+    TargetCompetitionCode.LA_LIGA: ("spain", "Spain", "La Liga"),
+    TargetCompetitionCode.BUNDESLIGA: ("germany", "Germany", "Bundesliga"),
+    TargetCompetitionCode.SERIE_A: ("italy", "Italy", "Serie A"),
+    TargetCompetitionCode.SUPER_LIG: ("turkey", "Turkey", "Süper Lig"),
+    TargetCompetitionCode.MLS: ("usa_canada", "USA / Canada", "MLS"),
+    TargetCompetitionCode.INTERNATIONAL_FRIENDLIES: (
+        "international",
+        "International",
+        "International Friendlies",
+    ),
+}
+DEFAULT_OPERATOR_COMPETITION_CODES: tuple[TargetCompetitionCode, ...] = (
+    TargetCompetitionCode.PREMIER_LEAGUE,
+    TargetCompetitionCode.CHAMPIONSHIP,
+    TargetCompetitionCode.LA_LIGA,
+    TargetCompetitionCode.CARABAO_CUP,
+    TargetCompetitionCode.FA_CUP,
+    TargetCompetitionCode.INTERNATIONAL_FRIENDLIES,
+    TargetCompetitionCode.BUNDESLIGA,
+    TargetCompetitionCode.SERIE_A,
+)
+# Verified match-level Kalshi series from public GET /series. Not guessed.
+KALSHI_SERIES_TICKERS_BY_CODE: dict[TargetCompetitionCode, tuple[str, ...]] = {
+    TargetCompetitionCode.PREMIER_LEAGUE: (
+        "KXEPLGAME",
+        "KXEPLBTTS",
+        "KXEPLTOTAL",
+        "KXEPLFTTS",
+    ),
+    TargetCompetitionCode.CHAMPIONSHIP: (
+        "KXEFLCHAMPIONSHIPGAME",
+        "KXEFLCHAMPIONSHIPBTTS",
+        "KXEFLCHAMPIONSHIPTOTAL",
+    ),
+    TargetCompetitionCode.LA_LIGA: (
+        "KXLALIGAGAME",
+        "KXLALIGABTTS",
+        "KXLALIGATOTAL",
+        "KXLALIGAFTTS",
+    ),
+    TargetCompetitionCode.CARABAO_CUP: (
+        "KXEFLCUPGAME",
+        "KXEFLCUPBTTS",
+        "KXEFLCUPTOTAL",
+        "KXEFLCUPFTTS",
+    ),
+    TargetCompetitionCode.FA_CUP: (
+        "KXFACUPGAME",
+        "KXFACUPBTTS",
+        "KXFACUPTOTAL",
+        "KXFACUPFTTS",
+    ),
+    TargetCompetitionCode.INTERNATIONAL_FRIENDLIES: (
+        "KXINTLFRIENDLYGAME",
+        "KXINTLFRIENDLYBTTS",
+        "KXINTLFRIENDLYTOTAL",
+    ),
+    TargetCompetitionCode.BUNDESLIGA: (
+        "KXBUNDESLIGAGAME",
+        "KXBUNDESLIGABTTS",
+        "KXBUNDESLIGATOTAL",
+        "KXBUNDESLIGAFTTS",
+    ),
+    TargetCompetitionCode.SERIE_A: (
+        "KXSERIEAGAME",
+        "KXSERIEABTTS",
+        "KXSERIEATOTAL",
+        "KXSERIEAFTTS",
+    ),
+    TargetCompetitionCode.CHAMPIONS_LEAGUE: (
+        "KXUCLGAME",
+        "KXUCLBTTS",
+        "KXUCLTOTAL",
+        "KXUCLFTTS",
+    ),
+    TargetCompetitionCode.EUROPA_LEAGUE: (
+        "KXUELGAME",
+        "KXUELBTTS",
+        "KXUELTOTAL",
+    ),
+    TargetCompetitionCode.CONFERENCE_LEAGUE: (
+        "KXUECLGAME",
+        "KXUECLBTTS",
+        "KXUECLTOTAL",
+    ),
+    TargetCompetitionCode.SUPER_LIG: (
+        "KXSUPERLIGGAME",
+        "KXSUPERLIGBTTS",
+        "KXSUPERLIGTOTAL",
+    ),
+    TargetCompetitionCode.MLS: (
+        "KXMLSGAME",
+        "KXMLSBTTS",
+        "KXMLSTOTAL",
+        "KXMLSFTTS",
+    ),
+}
 
 
 class ScopeDecision(BaseModel):
@@ -324,11 +566,125 @@ def resolve_target_competition_from_kalshi_ticker(series_ticker: str | None) -> 
 
 
 def polymarket_series_ids_for_targets() -> list[str]:
-    return [
-        item.polymarket_gamma_series_id
-        for item in TARGET_COMPETITIONS
-        if item.polymarket_gamma_series_id
-    ]
+    """Env/settings default discovery IDs. Operator scope may add more at runtime."""
+
+    return polymarket_series_ids_for_codes(default_operator_competition_code_values())
+
+
+def default_operator_competition_code_values() -> tuple[str, ...]:
+    return tuple(code.value for code in DEFAULT_OPERATOR_COMPETITION_CODES)
+
+
+def competition_by_code(code: str | TargetCompetitionCode | None) -> TargetCompetition | None:
+    if code is None:
+        return None
+    wanted = code.value if isinstance(code, TargetCompetitionCode) else str(code).strip()
+    if not wanted:
+        return None
+    for item in TARGET_COMPETITIONS:
+        if item.code.value == wanted:
+            return item
+    return None
+
+
+def competition_has_verified_cross_venue_mapping(item: TargetCompetition) -> bool:
+    """Selectable when Matchbook aliases and Kalshi match-level series both exist."""
+
+    return bool(item.aliases) and bool(KALSHI_SERIES_TICKERS_BY_CODE.get(item.code))
+
+
+def kalshi_series_tickers_for_codes(codes: list[str] | tuple[str, ...] | None) -> list[str]:
+    tickers: list[str] = []
+    seen: set[str] = set()
+    for raw in codes or ():
+        item = competition_by_code(raw)
+        if item is None:
+            continue
+        for ticker in KALSHI_SERIES_TICKERS_BY_CODE.get(item.code, ()):
+            if ticker not in seen:
+                seen.add(ticker)
+                tickers.append(ticker)
+    return tickers
+
+
+def polymarket_series_ids_for_codes(codes: list[str] | tuple[str, ...] | None) -> list[str]:
+    series_ids: list[str] = []
+    seen: set[str] = set()
+    for raw in codes or ():
+        item = competition_by_code(raw)
+        if item is None or not item.polymarket_gamma_series_id:
+            continue
+        series_id = item.polymarket_gamma_series_id
+        if series_id not in seen:
+            seen.add(series_id)
+            series_ids.append(series_id)
+    return series_ids
+
+
+def normalize_selected_competition_codes(
+    codes: list[str] | tuple[str, ...] | None,
+    *,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
+    """Keep selectable canonical codes only. Unknown/disabled codes are dropped."""
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    for raw in codes or ():
+        item = competition_by_code(raw)
+        if item is None or not competition_has_verified_cross_venue_mapping(item):
+            continue
+        if item.code.value in seen:
+            continue
+        seen.add(item.code.value)
+        selected.append(item.code.value)
+    if not selected and not allow_empty:
+        raise ValueError("universe_scope_empty_selection")
+    return tuple(selected)
+
+
+def resolve_catalogue_competition_code(
+    *,
+    competition: str | None = None,
+    kalshi_series_ticker: str | None = None,
+) -> str | None:
+    resolved = resolve_target_competition(competition)
+    if resolved is not None:
+        return resolved.code.value
+    ticker_resolved = resolve_target_competition_from_kalshi_ticker(kalshi_series_ticker)
+    if ticker_resolved is not None:
+        return ticker_resolved.code.value
+    return None
+
+
+def operator_competition_catalog() -> list[dict[str, Any]]:
+    """UI catalog keyed by canonical codes. No raw venue tickers."""
+
+    rows: list[dict[str, Any]] = []
+    for item in TARGET_COMPETITIONS:
+        group_id, group_label, selector_label = OPERATOR_SELECTOR_META[item.code]
+        selectable = competition_has_verified_cross_venue_mapping(item)
+        rows.append(
+            {
+                "code": item.code.value,
+                "display_name": item.display_name,
+                "selector_label": selector_label,
+                "group_id": group_id,
+                "group_label": group_label,
+                "default_selected": item.code in DEFAULT_OPERATOR_COMPETITION_CODES,
+                "selectable": selectable,
+                "unavailable_reason": None if selectable else NO_VERIFIED_CROSS_VENUE_MAPPING,
+            }
+        )
+    return rows
+
+
+def _selected_code_set(
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
+) -> frozenset[str]:
+    if selected_codes is None:
+        return frozenset(default_operator_competition_code_values())
+    return frozenset(str(code).strip() for code in selected_codes if str(code).strip())
 
 
 def matchbook_competition_label(payload: dict[str, Any]) -> str | None:
@@ -359,7 +715,11 @@ def matchbook_sport_label(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def scope_matchbook_event(payload: dict[str, Any]) -> ScopeDecision:
+def scope_matchbook_event(
+    payload: dict[str, Any],
+    *,
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None = None,
+) -> ScopeDecision:
     """Collector-boundary gate. Provider filters must not be the only check."""
 
     sport = matchbook_sport_label(payload)
@@ -389,24 +749,31 @@ def scope_matchbook_event(payload: dict[str, Any]) -> ScopeDecision:
             label=label,
             sport=sport,
         )
+    if resolved.code.value not in _selected_code_set(selected_codes):
+        return ScopeDecision(
+            allowed=False,
+            reason=OUT_OF_SCOPE_COMPETITION,
+            competition=resolved,
+            label=label,
+            sport=sport,
+        )
     return ScopeDecision(allowed=True, competition=resolved, label=label, sport=sport)
 
 
-def scope_polymarket_event(payload: dict[str, Any]) -> ScopeDecision:
+def scope_polymarket_event(
+    payload: dict[str, Any],
+    *,
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None = None,
+) -> ScopeDecision:
     series_target = _polymarket_series_target(payload)
     label = _first_str(payload, "competition", "league", "seriesTitle", "series_title")
-    if series_target is not None:
-        return ScopeDecision(
-            allowed=True,
-            competition=series_target,
-            label=label or series_target.display_name,
-            sport="football",
-        )
-    resolved = resolve_target_competition(label)
+    resolved = series_target
     if resolved is None:
-        series_title = _polymarket_series_title(payload)
-        resolved = resolve_target_competition(series_title)
-        label = label or series_title
+        resolved = resolve_target_competition(label)
+        if resolved is None:
+            series_title = _polymarket_series_title(payload)
+            resolved = resolve_target_competition(series_title)
+            label = label or series_title
     if resolved is None:
         return ScopeDecision(
             allowed=False,
@@ -414,10 +781,27 @@ def scope_polymarket_event(payload: dict[str, Any]) -> ScopeDecision:
             label=label,
             sport="football",
         )
-    return ScopeDecision(allowed=True, competition=resolved, label=label, sport="football")
+    if resolved.code.value not in _selected_code_set(selected_codes):
+        return ScopeDecision(
+            allowed=False,
+            reason=OUT_OF_SCOPE_COMPETITION,
+            competition=resolved,
+            label=label or resolved.display_name,
+            sport="football",
+        )
+    return ScopeDecision(
+        allowed=True,
+        competition=resolved,
+        label=label or resolved.display_name,
+        sport="football",
+    )
 
 
-def scope_kalshi_event(payload: dict[str, Any]) -> ScopeDecision:
+def scope_kalshi_event(
+    payload: dict[str, Any],
+    *,
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None = None,
+) -> ScopeDecision:
     ticker = str(payload.get("series_ticker") or payload.get("ticker") or "").strip()
     series_target = resolve_target_competition_from_kalshi_ticker(ticker)
     if series_target is None:
@@ -427,14 +811,9 @@ def scope_kalshi_event(payload: dict[str, Any]) -> ScopeDecision:
                 str(nested.get("ticker") or "")
             )
     label = _first_str(payload, "competition", "league", "title")
-    if series_target is not None:
-        return ScopeDecision(
-            allowed=True,
-            competition=series_target,
-            label=label or series_target.display_name,
-            sport="football",
-        )
-    resolved = resolve_target_competition(label)
+    resolved = series_target
+    if resolved is None:
+        resolved = resolve_target_competition(label)
     if resolved is None:
         return ScopeDecision(
             allowed=False,
@@ -442,15 +821,29 @@ def scope_kalshi_event(payload: dict[str, Any]) -> ScopeDecision:
             label=label or ticker or None,
             sport="football",
         )
-    return ScopeDecision(allowed=True, competition=resolved, label=label, sport="football")
+    if resolved.code.value not in _selected_code_set(selected_codes):
+        return ScopeDecision(
+            allowed=False,
+            reason=OUT_OF_SCOPE_COMPETITION,
+            competition=resolved,
+            label=label or resolved.display_name,
+            sport="football",
+        )
+    return ScopeDecision(
+        allowed=True,
+        competition=resolved,
+        label=label or resolved.display_name,
+        sport="football",
+    )
 
 
 def filter_in_scope_events(
     payloads: list[dict[str, Any]],
     *,
     venue: VenueName,
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None = None,
 ) -> ScopeFilterResult:
-    """Keep target-competition football only. Out-of-scope is skipped, not an issue."""
+    """Keep selected-competition football only. Out-of-scope is skipped, not an issue."""
 
     allowed: list[dict[str, Any]] = []
     skipped_by_reason: dict[str, int] = {}
@@ -458,7 +851,7 @@ def filter_in_scope_events(
     seen_labels: set[str] = set()
     skipped = 0
     for payload in payloads:
-        decision = _scope_for_venue(payload, venue)
+        decision = _scope_for_venue(payload, venue, selected_codes=selected_codes)
         if decision.allowed:
             allowed.append(payload)
             continue
@@ -477,13 +870,18 @@ def filter_in_scope_events(
     )
 
 
-def _scope_for_venue(payload: dict[str, Any], venue: VenueName) -> ScopeDecision:
+def _scope_for_venue(
+    payload: dict[str, Any],
+    venue: VenueName,
+    *,
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None = None,
+) -> ScopeDecision:
     if venue is VenueName.MATCHBOOK:
-        return scope_matchbook_event(payload)
+        return scope_matchbook_event(payload, selected_codes=selected_codes)
     if venue is VenueName.POLYMARKET:
-        return scope_polymarket_event(payload)
+        return scope_polymarket_event(payload, selected_codes=selected_codes)
     if venue is VenueName.KALSHI:
-        return scope_kalshi_event(payload)
+        return scope_kalshi_event(payload, selected_codes=selected_codes)
     return ScopeDecision(allowed=False, reason=UNKNOWN_COMPETITION)
 
 

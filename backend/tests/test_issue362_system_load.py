@@ -288,6 +288,9 @@ def test_live_refresh_status_endpoint_includes_compact_system_load() -> None:
         "generation_work_used_s",
         "generation_budget_seconds",
         "cadence_seconds",
+        "selected_competition_count",
+        "scope_version",
+        "generation_scope_version",
     }
     assert "discovered_fixtures" not in load
     assert "recent_scan_cycles" not in load

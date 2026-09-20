@@ -24,6 +24,14 @@ export function systemLoadLines(
     universe.generation_work_used_s,
     universe.generation_budget_seconds,
   );
+  const selectedCount = asCount(universe.selected_competition_count);
+  const generationScope = universe.generation_scope_version;
+  const scopeBits = [
+    selectedCount > 0 ? `${selectedCount} selected` : null,
+    generationScope != null && Number.isFinite(generationScope)
+      ? `gen v${Math.trunc(Number(generationScope))}`
+      : null,
+  ].filter(Boolean);
   return [
     {
       key: "ACTIVE TRADE",
@@ -39,9 +47,14 @@ export function systemLoadLines(
     },
     {
       key: "UNIVERSE discovery",
-      detail: uniBudget
-        ? `${uniProgress} · cadence ${formatCadence(universe.cadence_seconds)} · ${uniBudget}`
-        : `${uniProgress} · cadence ${formatCadence(universe.cadence_seconds)}`,
+      detail: [
+        uniProgress,
+        `cadence ${formatCadence(universe.cadence_seconds)}`,
+        uniBudget,
+        ...scopeBits,
+      ]
+        .filter(Boolean)
+        .join(" · "),
     },
     {
       key: "MB",

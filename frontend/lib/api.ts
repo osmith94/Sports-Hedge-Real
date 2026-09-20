@@ -618,6 +618,9 @@ export type UniverseLoad = {
   cadence_seconds?: number;
   generation_work_used_s?: number | null;
   generation_budget_seconds?: number | null;
+  selected_competition_count?: number;
+  scope_version?: number | null;
+  generation_scope_version?: number | null;
 };
 
 export type ActiveTradeLoad = {
@@ -713,6 +716,40 @@ export type OperatorScannerSettingsUpdate = {
   max_allocated_per_trade_gbp?: string;
 };
 
+export type OperatorCompetitionOption = {
+  code: string;
+  display_name: string;
+  selector_label: string;
+  group_id: string;
+  group_label: string;
+  default_selected: boolean;
+  selectable: boolean;
+  unavailable_reason?: string | null;
+};
+
+export type OperatorUniverseScope = {
+  sport: string;
+  selected_competition_codes: string[];
+  selected_count: number;
+  scope_version: number;
+  registry_version: number;
+  source: "operator" | "env_default";
+  updated_at?: string | null;
+  needs_first_run_confirmation: boolean;
+  new_competitions_available: boolean;
+  catalog: OperatorCompetitionOption[];
+  generation_scope_version?: number | null;
+  generation_selected_competition_codes?: string[];
+  manual_universe_state?: "idle" | "running" | "pending";
+  manual_background_busy?: boolean;
+};
+
+export type OperatorUniverseScopeUpdate = {
+  selected_competition_codes: string[];
+  sport?: string;
+  run_universe_now?: boolean;
+};
+
 export type LiveRefreshStatus = {
   discovery_source: Venue;
   discovery_mode?: string;
@@ -722,6 +759,7 @@ export type LiveRefreshStatus = {
   paper_autofill_enabled?: boolean;
   scanner_stopped?: boolean;
   operator_settings?: OperatorScannerSettings | null;
+  universe_scope?: OperatorUniverseScope | null;
   interval_seconds: number;
   cycle_in_progress: boolean;
   last_started_at?: string | null;
@@ -1206,6 +1244,56 @@ export async function runPaperHotRefresh(
     throw new Error(await errorDetail(response));
   }
   return response.json() as Promise<PaperCollectionReport>;
+}
+
+export async function runPaperBackgroundRefresh(): Promise<LiveRefreshStatus> {
+  const response = await fetchWithTimeout(
+    `${API_BASE}/paper/collect/background`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      cache: "no-store",
+    },
+    PAPER_HOT_REFRESH_TIMEOUT_MS,
+    `BACKGROUND pricing timed out after ${Math.round(PAPER_HOT_REFRESH_TIMEOUT_MS / 1000)}s. Check venue health and retry.`,
+  );
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function runPaperUniverseNow(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/collect/universe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export function getUniverseScope(): Promise<OperatorUniverseScope> {
+  return request("/paper/universe-scope");
+}
+
+export async function saveUniverseScope(
+  update: OperatorUniverseScopeUpdate,
+): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/universe-scope`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
 }
 
 export async function simulatePaperFill(payload: {
