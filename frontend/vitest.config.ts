@@ -22,6 +22,7 @@ export default defineConfig({
       "lib/catalogue-coverage-display.test.ts",
       "lib/venue-degradation-incident.test.ts",
       "lib/system-load-display.test.ts",
+      "lib/active-trade-timeline-display.test.ts",
     ],
   },
 });

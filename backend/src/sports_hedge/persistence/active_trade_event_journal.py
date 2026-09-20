@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any
 
 from sports_hedge.paper.active_trade_journal import (
     ACTIVE_TRADE_EVENT_SCHEMA,
