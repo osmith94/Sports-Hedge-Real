@@ -21,15 +21,21 @@ Kalshi public Trade API v2 sibling events, same suffix ``26SEP20MIASD``:
 Polymarket Gamma series 10189:
 - id ``983347`` title ``Inter Miami CF vs. San Diego FC`` start ``2026-09-20T23:00:00Z``
 
-Root causes (not a matcher-threshold change):
+Root causes (not a pagination/concurrency change):
 1. MLS was a verified target competition with no senior-club registry, so
-   ``Miami`` vs ``Inter Miami CF`` stayed at raw/weighted fuzzy ~0.834 < 0.92.
+   ``Miami`` vs ``Inter Miami CF`` stayed at raw/weighted fuzzy ~0.834.
 2. Matchbook list_events returned the event, then collector competition-scope
    dropped it because ``US Major League Soccer`` was not an MLS alias.
+3. Generic aliases were globally flattened, so ``Miami`` resolved to Inter Miami
+   without competition context.
 
-Fix is curated MLS identity plus the observed Matchbook competition alias.
-EventMatcher threshold stays 0.92. Pagination and provider concurrency stay
-bounded/sequential. No capture/economics/settlement change.
+Fix is curated MLS identity plus the observed Matchbook competition alias, with
+competition-aware generic aliases. Structural aliases remain the preferred exact
+identity fix. The generic/default EventMatcher stays 0.92. PAPER injects a
+runtime-configurable event-match threshold of 0.80 for this owner-approved
+experiment and persists the actual confidence. Deprecated
+``minimum_mapping_confidence`` stays unused. Pagination and provider concurrency
+stay bounded/sequential. No capture/economics/settlement change.
 
 Data class: deterministic fixture/demo providers. Not live venue quotes.
 Paper-only; execution stays disabled.
@@ -64,13 +70,13 @@ from sports_hedge.catalogue.corpus import GAMEWIN_TEMPLATE, REGULATION
 from sports_hedge.config import Settings
 from sports_hedge.domain.football import CanonicalEvent
 from sports_hedge.domain.models import VenueName
-from sports_hedge.facts.aliases import resolve_team_name
+from sports_hedge.facts.aliases import resolve_team_name, resolve_team_name_for_competition
 from sports_hedge.facts.identity import canonical_team_id
 from sports_hedge.facts.team_registry import MLS, MLS_CLUBS, clubs_for
 from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
-from sports_hedge.matching.events import EventMatcher
+from sports_hedge.matching.events import EventMatcher, paper_event_matcher
 from sports_hedge.normalization.text import normalize_text
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.application.capture_replay import DEFAULT_KALSHI_BOOK
@@ -412,13 +418,24 @@ def test_paper_execution_boundary_and_matcher_threshold_stay_unchanged() -> None
     assert matcher.threshold == 0.92
     assert matcher.kickoff_tolerance.total_seconds() == 300
     assert "threshold: float = 0.92" in inspect.getsource(EventMatcher.__init__)
+    assert settings.paper_event_match_threshold == 0.80
+    paper_matcher = paper_event_matcher(settings)
+    assert paper_matcher.threshold == 0.80
+    assert paper_matcher.kickoff_tolerance.total_seconds() == 300
+    overridden = paper_event_matcher(Settings(paper_event_match_threshold=0.85))
+    assert overridden.threshold == 0.85
+    scan_source = inspect.getsource(PaperScanService.scan_pair)
+    assert "del minimum_mapping_confidence" in scan_source
+    assert "self.market_matcher.match" in scan_source
 
 
-def test_observed_raw_similarity_is_below_event_matcher_threshold() -> None:
+def test_observed_raw_similarity_is_below_default_event_matcher_threshold() -> None:
     assert _raw_ratio("Miami", "Inter Miami CF") < 0.92
     assert _weighted_exact_away_competition("Miami", "Inter Miami CF") < 0.92
     assert round(_weighted_exact_away_competition("Miami", "Inter Miami CF"), 3) == 0.834
     assert EventMatcher().threshold == 0.92
+    assert _weighted_exact_away_competition("Miami", "Inter Miami CF") >= 0.80
+    assert Settings().paper_event_match_threshold == 0.80
 
 
 def test_mls_registry_covers_2026_universe_and_observed_miami_sandiego_forms() -> None:
@@ -426,10 +443,13 @@ def test_mls_registry_covers_2026_universe_and_observed_miami_sandiego_forms() -
     assert "Inter Miami" in names
     assert "San Diego" in names
     assert len(MLS_CLUBS) == 30
-    assert resolve_team_name("Miami") == resolve_team_name("Inter Miami CF") == "inter miami"
+    assert resolve_team_name("Inter Miami CF") == "inter miami"
     assert resolve_team_name("Inter Miami") == "inter miami"
     assert resolve_team_name("San Diego FC") == resolve_team_name("San Diego") == "san diego"
-    assert canonical_team_id("Miami") == canonical_team_id("Inter Miami CF")
+    assert resolve_team_name("Miami") == "miami"
+    assert resolve_team_name_for_competition("Miami", MLS) == "inter miami"
+    assert resolve_team_name_for_competition("Inter Miami CF", MLS) == "inter miami"
+    assert canonical_team_id("Miami", MLS) == canonical_team_id("Inter Miami CF", MLS)
     assert canonical_team_id("San Diego FC") == canonical_team_id("San Diego")
 
 
@@ -438,6 +458,10 @@ def test_unrelated_miami_and_san_diego_clubs_stay_fail_closed() -> None:
     assert resolve_team_name("Inter") != resolve_team_name("Miami")
     assert resolve_team_name("AC Milan") != resolve_team_name("Inter Miami")
     assert resolve_team_name("Miami FC") == "miami fc"
+    assert resolve_team_name_for_competition("Miami FC", MLS) == "miami fc"
+    assert resolve_team_name_for_competition("Miami", "premier_league") == "miami"
+    assert resolve_team_name_for_competition("Miami", "serie_a") == "miami"
+    assert resolve_team_name_for_competition("Miami", None) == "miami"
     assert resolve_team_name("San Jose") != resolve_team_name("San Diego")
     assert resolve_team_name("New York City") != resolve_team_name("New York Red Bulls")
     assert resolve_team_name("Los Angeles FC") != resolve_team_name("LA Galaxy")
@@ -469,6 +493,23 @@ def test_soccer_identity_outside_mls_is_unchanged() -> None:
     )
     assert result.matched is False
     assert result.reasons == ["curated_team_mismatch"]
+    outside = EventMatcher().match(
+        _canonical(
+            VenueName.MATCHBOOK,
+            "Miami",
+            "San Diego FC",
+            competition="Premier League",
+            source_event_id="mb-pl",
+        ),
+        _canonical(
+            VenueName.KALSHI,
+            "Inter Miami CF",
+            "San Diego FC",
+            competition="Premier League",
+            source_event_id="k-pl",
+        ),
+    )
+    assert outside.matched is False
 
 
 def test_matchbook_us_major_league_soccer_is_retained_only_when_mls_is_selected() -> None:
@@ -516,6 +557,27 @@ def test_miami_and_inter_miami_cf_cluster_once_in_mls() -> None:
     assert result.matched is True
     assert result.confidence >= 0.92
     assert "home_team_fuzzy" not in result.reasons
+    paper = paper_event_matcher(Settings())
+    paper_result = paper.match(
+        _canonical(
+            VenueName.MATCHBOOK,
+            "Inter Miami CF",
+            "San Diego FC",
+            competition="US Major League Soccer",
+            source_event_id=MB_EVENT_ID,
+        ),
+        _canonical(
+            VenueName.KALSHI,
+            "Miami",
+            "San Diego FC",
+            competition="MLS",
+            source_event_id=GAME,
+        ),
+    )
+    assert paper.threshold == 0.80
+    assert paper_result.matched is True
+    assert paper_result.confidence >= 0.80
+    assert paper_result.confidence == result.confidence
 
     clusters, counts = cluster_venue_events(
         matchbook=[
@@ -670,4 +732,14 @@ async def test_collector_collapses_kalshi_siblings_and_attaches_matchbook_market
     # Kalshi FTTS still belongs on the same clustered fixture.
     assert comparable["first_team_to_score"] is InventoryComparisonStatus.VENUE_ONLY
     assert EventMatcher().threshold == 0.92
+    assert Settings().paper_event_match_threshold == 0.80
     assert Settings().paper_scan_matchbook_concurrency == 4
+    assert fixture.event_match_threshold == 0.80
+    assert fixture.event_match_confidence is not None
+    assert fixture.event_match_confidence >= 0.80
+    assert report.scan_diagnostics["event_match_threshold"] == 0.80
+    assert report.scan_diagnostics["event_match_confidences"][fixture.canonical_event_id] == (
+        fixture.event_match_confidence
+    )
+    assert report.scan_diagnostics["provider_concurrency"]["matchbook"] == 4
+    assert report.scan_diagnostics["provider_concurrency"]["kalshi"] == 4

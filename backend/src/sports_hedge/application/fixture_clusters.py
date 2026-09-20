@@ -32,6 +32,8 @@ class FixtureCluster:
     polymarket_events: list[VenueEvent] = field(default_factory=list)
     kalshi_events: list[VenueEvent] = field(default_factory=list)
     pair_kinds: set[str] = field(default_factory=set)
+    event_match_confidence: float | None = None
+    event_match_threshold: float | None = None
 
     @property
     def matchbook(self) -> VenueEvent | None:
@@ -129,6 +131,7 @@ class ClusterPass:
         snapshot_for_bulk = getattr(matcher, "bulk_snapshot", None)
         self.bulk_matcher = snapshot_for_bulk() if callable(snapshot_for_bulk) else matcher
         self.could_match = getattr(self.bulk_matcher, "could_match", None)
+        self.match_confidence: dict[tuple[VenueName, str], float] = {}
 
     def pairs(self) -> Iterator[tuple[VenueEvent, VenueEvent]]:
         for left_index, left in enumerate(self.items):
@@ -155,6 +158,11 @@ class ClusterPass:
         match = self.bulk_matcher.match(left.canonical, right.canonical)
         if not match.matched:
             return
+        for item in (left, right):
+            key = _key(item.venue, item.source_event_id)
+            previous = self.match_confidence.get(key)
+            if previous is None or match.confidence < previous:
+                self.match_confidence[key] = match.confidence
         if left.venue is right.venue:
             self._union(left, right)
             return
@@ -179,11 +187,19 @@ class ClusterPass:
                 cluster.kalshi_events.append(item)
             cluster.pair_kinds.update(self.pair_kinds.get(key, set()))
 
+        threshold = float(getattr(self.bulk_matcher, "threshold", 0.92))
         clusters: list[FixtureCluster] = []
         for cluster in grouped.values():
             cluster.matchbook_events = _sort_events(cluster.matchbook_events)
             cluster.polymarket_events = _sort_events(cluster.polymarket_events)
             cluster.kalshi_events = _sort_events(cluster.kalshi_events)
+            confidences = [
+                self.match_confidence[_key(item.venue, item.source_event_id)]
+                for item in cluster_member_events(cluster)
+                if _key(item.venue, item.source_event_id) in self.match_confidence
+            ]
+            cluster.event_match_threshold = threshold
+            cluster.event_match_confidence = min(confidences) if confidences else None
             clusters.append(cluster)
 
         clusters.sort(key=lambda item: -item.venue_count)

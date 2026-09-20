@@ -483,6 +483,8 @@ class DiscoveredFixture(BaseModel):
     next_due_at: datetime | None = None
     hot_reasons: list[str] = Field(default_factory=list)
     catalogue_coverage: FixtureCatalogueCoverage | None = None
+    event_match_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    event_match_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class FixturePaperEntry(BaseModel):
@@ -635,7 +637,7 @@ class ReadOnlyCrossVenueCollector:
         self.polymarket = polymarket
         self.kalshi = kalshi
         self.paper_scan = paper_scan
-        self.event_matcher = event_matcher or EventMatcher()
+        self.event_matcher = event_matcher or paper_scan.market_matcher.event_matcher
         self.market_matcher = market_matcher or MarketMatcher(self.event_matcher)
         self.matchbook_normalizer = matchbook_normalizer or MatchbookNormalizer()
         self.polymarket_normalizer = polymarket_normalizer or PolymarketNormalizer()
@@ -2170,6 +2172,12 @@ class ReadOnlyCrossVenueCollector:
                 VenueName.MATCHBOOK.value: len(raw_matchbook_events),
                 VenueName.POLYMARKET.value: len(raw_polymarket_events),
                 VenueName.KALSHI.value: len(raw_kalshi_events),
+            },
+            "event_match_threshold": self.event_matcher.threshold,
+            "event_match_confidences": {
+                item.canonical_event_id: item.event_match_confidence
+                for item in discovered_fixtures
+                if item.event_match_confidence is not None
             },
         }
         LOGGER.info("scan_diagnostics %s", diagnostics)
@@ -5018,6 +5026,8 @@ def _fixture_from_cluster(
         opportunity_state=opportunity_state,
         market_evaluation_state=evaluation_state.value,
         market_evaluation_reason=evaluation_reason,
+        event_match_confidence=cluster.event_match_confidence,
+        event_match_threshold=cluster.event_match_threshold,
     )
 
 

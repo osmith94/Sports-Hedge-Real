@@ -1,12 +1,12 @@
-"""Competition-keyed senior-club identity registry (Issue #316, MLS #413).
+"""Competition-keyed senior-club identity registry (Issue #316, MLS/Liga MX #413).
 
 Fixture identity, HOT scheduling, and historical seeds consume this table.
-Aliases are explicit. Unknown remainders stay unchanged (fail-closed FC strip
-only when the remainder is already a curated canonical).
+Unique aliases are explicit and global. Generic city tokens such as Miami or
+Leon are competition-scoped and fail closed outside that competition.
 
 Cups reuse the English senior-club set. International friendlies use senior
 national teams for identity only — that does not invent Kalshi market
-availability. MLS aliases are provider-observed senior-club forms only.
+availability. MLS and Liga MX aliases are provider-observed senior-club forms.
 
 Data class: maintained identity registry. Not live quotes.
 """
@@ -27,6 +27,7 @@ INTERNATIONAL_FRIENDLIES = "international_friendlies"
 BUNDESLIGA = "bundesliga"
 SERIE_A = "serie_a"
 MLS = "mls"
+LIGA_MX = "liga_mx"
 
 TEAM_REGISTRY_VERSION = "v1"
 TEAM_REGISTRY_ISSUE = 316
@@ -35,12 +36,20 @@ TEAM_REGISTRY_ISSUE = 316
 class SeniorClub(BaseModel):
     canonical_name: str
     aliases: tuple[str, ...] = Field(default_factory=tuple)
+    generic_aliases: tuple[str, ...] = Field(default_factory=tuple)
 
 
-def _club(canonical: str, *aliases: str) -> SeniorClub:
+def _club(canonical: str, *aliases: str, generic: tuple[str, ...] = ()) -> SeniorClub:
     unique = tuple(dict.fromkeys([canonical, *aliases]))
     extra = tuple(item for item in unique if item != canonical)
-    return SeniorClub(canonical_name=canonical, aliases=extra)
+    generic_unique = tuple(
+        dict.fromkeys(item for item in generic if item and item != canonical)
+    )
+    return SeniorClub(
+        canonical_name=canonical,
+        aliases=extra,
+        generic_aliases=generic_unique,
+    )
 
 
 PREMIER_LEAGUE_CLUBS: tuple[SeniorClub, ...] = (
@@ -215,7 +224,7 @@ MLS_CLUBS: tuple[SeniorClub, ...] = (
     _club("Cincinnati", "FC Cincinnati"),
     _club("Dallas", "FC Dallas"),
     _club("Houston Dynamo", "Houston"),
-    _club("Inter Miami", "Inter Miami CF", "Miami"),
+    _club("Inter Miami", "Inter Miami CF", generic=("Miami",)),
     _club(
         "LA Galaxy",
         "Los Angeles Galaxy",
@@ -242,6 +251,42 @@ MLS_CLUBS: tuple[SeniorClub, ...] = (
     _club("St. Louis City", "Saint Louis", "St. Louis City SC"),
     _club("Toronto", "Toronto FC"),
     _club("Vancouver Whitecaps", "Vancouver", "Vancouver Whitecaps FC"),
+)
+
+# 2026 Liga MX senior clubs. Unique legal names stay globally resolvable.
+# City-only tokens such as Leon / Queretaro / America are competition-scoped
+# generics so they cannot silently rewrite clubs outside Liga MX.
+LIGA_MX_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Club América", "CF América", "Club America", "CF America", generic=("América", "America")),
+    _club("Atlas"),
+    _club("Atlético San Luis", "Atletico San Luis", "San Luis"),
+    _club("Cruz Azul"),
+    _club("Guadalajara", "Chivas", "CD Guadalajara"),
+    _club("Juárez", "FC Juárez", "FC Juarez", generic=("Juarez",)),
+    _club(
+        "Club León",
+        "Club Leon",
+        "Club León FC",
+        "Club Leon FC",
+        generic=("León", "Leon"),
+    ),
+    _club("Mazatlán", "Mazatlan", "Mazatlán FC", "Mazatlan FC"),
+    _club("Monterrey", "CF Monterrey"),
+    _club("Necaxa"),
+    _club("Pachuca", "CF Pachuca"),
+    _club("Puebla"),
+    _club(
+        "Querétaro FC",
+        "Queretaro FC",
+        generic=("Querétaro", "Queretaro"),
+    ),
+    _club("Santos Laguna", "Club Santos Laguna"),
+    _club("Club Tijuana", "Tijuana", "Tijuana de Caliente"),
+    _club("Toluca", "Deportivo Toluca", "Deportivo Toluca FC"),
+    _club("Tigres", "Tigres UANL"),
+    _club("Pumas UNAM", "Pumas", "UNAM"),
+    # Observed on public Kalshi KXLIGAMXGAME 2026-09-20 (Atlante vs Monterrey).
+    _club("Atlante", "Atlante FC"),
 )
 
 NATIONAL_TEAMS: tuple[SeniorClub, ...] = (
@@ -293,6 +338,7 @@ CLUBS_BY_COMPETITION: dict[str, tuple[SeniorClub, ...]] = {
     BUNDESLIGA: BUNDESLIGA_CLUBS,
     SERIE_A: SERIE_A_CLUBS,
     MLS: MLS_CLUBS,
+    LIGA_MX: LIGA_MX_CLUBS,
     # Cups reuse English senior clubs. Do not invent a separate lower-league universe.
     CARABAO_CUP: PREMIER_LEAGUE_CLUBS + CHAMPIONSHIP_CLUBS,
     FA_CUP: PREMIER_LEAGUE_CLUBS + CHAMPIONSHIP_CLUBS,
@@ -315,13 +361,20 @@ def all_senior_clubs() -> tuple[SeniorClub, ...]:
             if existing is None:
                 by_key[key] = club
                 continue
-            merged = tuple(dict.fromkeys((*existing.aliases, *club.aliases)))
-            by_key[key] = SeniorClub(canonical_name=existing.canonical_name, aliases=merged)
+            merged_aliases = tuple(dict.fromkeys((*existing.aliases, *club.aliases)))
+            merged_generic = tuple(
+                dict.fromkeys((*existing.generic_aliases, *club.generic_aliases))
+            )
+            by_key[key] = SeniorClub(
+                canonical_name=existing.canonical_name,
+                aliases=merged_aliases,
+                generic_aliases=merged_generic,
+            )
     return tuple(by_key[key] for key in sorted(by_key))
 
 
 def alias_pairs() -> tuple[tuple[str, str], ...]:
-    """Every explicit alias including self-aliases, keyed to canonical names."""
+    """Unique aliases including self-aliases. Generic city tokens are excluded."""
 
     pairs: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -333,6 +386,22 @@ def alias_pairs() -> tuple[tuple[str, str], ...]:
                 continue
             seen.add(key)
             pairs.append(item)
+    return tuple(pairs)
+
+
+def generic_aliases_for(competition: str) -> tuple[tuple[str, str], ...]:
+    """Competition-scoped generic aliases such as Miami or Leon."""
+
+    clubs = CLUBS_BY_COMPETITION.get(str(competition), ())
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for club in clubs:
+        for alias in club.generic_aliases:
+            key = (normalize_text(alias), normalize_text(club.canonical_name))
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append((alias, club.canonical_name))
     return tuple(pairs)
 
 

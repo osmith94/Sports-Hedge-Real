@@ -10,7 +10,7 @@ from sports_hedge.domain.football import CanonicalEvent, CanonicalMarket
 from sports_hedge.facts.aliases import (
     curated_team_names_conflict,
     is_curated_canonical_team,
-    resolve_team_name,
+    resolve_team_name_for_competition,
 )
 from sports_hedge.matching.learned_rules import (
     AppliedLearnedRule,
@@ -20,12 +20,48 @@ from sports_hedge.matching.learned_rules import (
     squad_categories_compatible,
 )
 
+# Class/default production identity stays conservative. PAPER injects a separate
+# runtime threshold via ``paper_event_matcher``; do not reuse deprecated
+# ``minimum_mapping_confidence``.
+DEFAULT_EVENT_MATCH_THRESHOLD = 0.92
+PAPER_EVENT_MATCH_THRESHOLD = 0.80
 
-@lru_cache(maxsize=4096)
-def _resolve_static_team_name(value: str) -> str:
+
+@lru_cache(maxsize=8192)
+def _resolve_static_team_name(value: str, competition: str | None) -> str:
     """Cache immutable curated aliases used repeatedly during bulk clustering."""
 
-    return resolve_team_name(value)
+    return resolve_team_name_for_competition(value, competition)
+
+
+def target_competition_code(label: str | None) -> str | None:
+    """Registry key such as ``mls`` / ``liga_mx``, or None when unknown."""
+
+    if not label:
+        return None
+    from sports_hedge.application.target_competitions import resolve_target_competition
+
+    target = resolve_target_competition(label)
+    return None if target is None else target.code.value
+
+
+def paper_event_matcher(
+    settings: object | None = None,
+    *,
+    learned_applicator: LearnedMappingApplicator | None = None,
+    kickoff_tolerance: timedelta = timedelta(minutes=5),
+) -> "EventMatcher":
+    """PAPER collector/scanner EventMatcher using the configurable experiment threshold."""
+
+    if settings is None:
+        from sports_hedge.config import get_settings
+
+        settings = get_settings()
+    return EventMatcher(
+        kickoff_tolerance=kickoff_tolerance,
+        threshold=float(getattr(settings, "paper_event_match_threshold")),
+        learned_applicator=learned_applicator,
+    )
 
 
 class EventMatchResult(BaseModel):
@@ -233,10 +269,11 @@ class EventMatcher:
         market: CanonicalMarket | None,
         counterpart_market: CanonicalMarket | None,
     ) -> tuple[str, str, list[AppliedLearnedRule]]:
+        competition = target_competition_code(event.competition)
         if self.learned_applicator is None:
             return (
-                _resolve_static_team_name(event.home_team),
-                _resolve_static_team_name(event.away_team),
+                _resolve_static_team_name(event.home_team, competition),
+                _resolve_static_team_name(event.away_team, competition),
                 [],
             )
         return self.learned_applicator.resolve_teams(
@@ -259,7 +296,7 @@ class EventMatcher:
         """True only for exact curated seniors in the same target competition.
 
         Unknown, youth, women, and reserve labels stay fail-closed. Fuzzy club
-        strings keep the weighted kickoff penalty and the 0.92 threshold.
+        strings keep the weighted kickoff penalty and this matcher's threshold.
         """
 
         if left_home != right_home or left_away != right_away:
@@ -270,22 +307,14 @@ class EventMatcher:
 
     @staticmethod
     def _same_target_competition(left: str, right: str) -> bool:
-        from sports_hedge.application.target_competitions import resolve_target_competition
-
-        left_target = resolve_target_competition(left)
-        right_target = resolve_target_competition(right)
-        return (
-            left_target is not None
-            and right_target is not None
-            and left_target.code == right_target.code
-        )
+        left_code = target_competition_code(left)
+        right_code = target_competition_code(right)
+        return left_code is not None and left_code == right_code
 
     @staticmethod
     def _competition_score(left: str, right: str) -> float:
-        from sports_hedge.application.target_competitions import resolve_target_competition
-
-        left_target = resolve_target_competition(left)
-        right_target = resolve_target_competition(right)
-        if left_target is not None and right_target is not None:
-            return 1.0 if left_target.code == right_target.code else 0.0
+        left_code = target_competition_code(left)
+        right_code = target_competition_code(right)
+        if left_code is not None and right_code is not None:
+            return 1.0 if left_code == right_code else 0.0
         return EventMatcher._similarity(left, right)

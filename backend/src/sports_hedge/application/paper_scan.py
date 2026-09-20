@@ -42,7 +42,7 @@ from sports_hedge.fx.models import FxRateUnavailable
 from sports_hedge.fx.service import FxRateService
 from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
-from sports_hedge.matching.events import EventMatcher
+from sports_hedge.matching.events import paper_event_matcher
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
 from sports_hedge.normalization.identity import (
@@ -75,7 +75,10 @@ class PaperScanService:
     Runtime PAPER market equivalence is the Approved Match Register after
     fixture identity. Mapping confidence, learned market labels, and mapping
     review are not admission gates. ``minimum_mapping_confidence`` is a
-    deprecated API field with zero runtime effect.
+    deprecated API field with zero runtime effect. Fixture identity uses the
+    PAPER EventMatcher threshold (``paper_event_match_threshold``, default
+    0.80) and persists the actual match confidence; it does not reuse mapping
+    confidence.
     """
 
     def __init__(
@@ -97,13 +100,13 @@ class PaperScanService:
     ) -> None:
         del mapping_rule_store
         self.market_intelligence = market_intelligence
+        self.settings = settings or get_settings()
         if market_matcher is None:
-            market_matcher = MarketMatcher(EventMatcher())
+            market_matcher = MarketMatcher(paper_event_matcher(self.settings))
         self.market_matcher = market_matcher
         self.depth_scanner = depth_scanner or DepthAwareCompleteSetScanner()
         self.payoff_scanner = payoff_scanner or DepthAwarePayoffScanner()
         self.risk_scorer = risk_scorer or ExecutionRiskScorer()
-        self.settings = settings or get_settings()
         self.fx_service = fx_service
         self.cost_resolver = cost_resolver
         self.liquidity = liquidity
