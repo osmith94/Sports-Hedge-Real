@@ -361,6 +361,9 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
             "mls soccer",
             "american mls",
             "usa mls",
+            # Live Matchbook meta-tag type=COMPETITION on
+            # Inter Miami CF vs San Diego FC (id 34333851245100081, 2026-09-20).
+            "us major league soccer",
             "mls 2026",
             "major league soccer 2026",
         ),

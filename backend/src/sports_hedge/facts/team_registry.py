@@ -1,4 +1,4 @@
-"""Competition-keyed senior-club identity registry (Issue #316).
+"""Competition-keyed senior-club identity registry (Issue #316, MLS #413).
 
 Fixture identity, HOT scheduling, and historical seeds consume this table.
 Aliases are explicit. Unknown remainders stay unchanged (fail-closed FC strip
@@ -6,7 +6,7 @@ only when the remainder is already a curated canonical).
 
 Cups reuse the English senior-club set. International friendlies use senior
 national teams for identity only — that does not invent Kalshi market
-availability.
+availability. MLS aliases are provider-observed senior-club forms only.
 
 Data class: maintained identity registry. Not live quotes.
 """
@@ -26,6 +26,7 @@ FA_CUP = "fa_cup"
 INTERNATIONAL_FRIENDLIES = "international_friendlies"
 BUNDESLIGA = "bundesliga"
 SERIE_A = "serie_a"
+MLS = "mls"
 
 TEAM_REGISTRY_VERSION = "v1"
 TEAM_REGISTRY_ISSUE = 316
@@ -197,6 +198,52 @@ SERIE_A_CLUBS: tuple[SeniorClub, ...] = (
     _club("Frosinone", "Frosinone Calcio"),
 )
 
+# 2026 MLS senior clubs. Aliases are live provider-observed forms from
+# Matchbook / Kalshi / Polymarket read-only metadata (2026-09-20), not
+# guessed shorthands. "Miami" is Inter Miami only because Kalshi GAME/BTTS/
+# TOTAL titles used Miami while FTTS/Matchbook/Polymarket used Inter Miami CF
+# on the same 26SEP20MIASD fixture. Do not treat USL Miami FC as this club.
+MLS_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Atlanta United", "Atlanta", "Atlanta United FC"),
+    _club("Austin", "Austin FC"),
+    _club("Montreal", "CF Montreal", "CF Montréal"),
+    _club("Charlotte", "Charlotte FC"),
+    _club("Chicago Fire", "Chicago Fire FC"),
+    _club("Colorado Rapids", "Colorado", "Colorado Rapids SC"),
+    _club("Columbus Crew", "Columbus"),
+    _club("DC United", "D.C. United", "D.C. United SC"),
+    _club("Cincinnati", "FC Cincinnati"),
+    _club("Dallas", "FC Dallas"),
+    _club("Houston Dynamo", "Houston"),
+    _club("Inter Miami", "Inter Miami CF", "Miami"),
+    _club(
+        "LA Galaxy",
+        "Los Angeles Galaxy",
+        "Los Angeles G",
+    ),
+    _club(
+        "Los Angeles FC",
+        "LAFC",
+        "Los Angeles F",
+    ),
+    _club("Minnesota United", "Minnesota", "Minnesota United FC"),
+    _club("Nashville", "Nashville SC"),
+    _club("New England Revolution", "New England"),
+    _club("New York City", "New York City FC", "NYCFC"),
+    _club("New York Red Bulls", "New York RB"),
+    _club("Orlando City", "Orlando", "Orlando City SC"),
+    _club("Philadelphia Union", "Philadelphia"),
+    _club("Portland Timbers", "Portland"),
+    _club("Real Salt Lake", "Salt Lake"),
+    _club("San Diego", "San Diego FC"),
+    _club("San Jose Earthquakes", "San Jose"),
+    _club("Seattle Sounders", "Seattle", "Seattle Sounders FC"),
+    _club("Sporting Kansas City", "Kansas City"),
+    _club("St. Louis City", "Saint Louis", "St. Louis City SC"),
+    _club("Toronto", "Toronto FC"),
+    _club("Vancouver Whitecaps", "Vancouver", "Vancouver Whitecaps FC"),
+)
+
 NATIONAL_TEAMS: tuple[SeniorClub, ...] = (
     _club("England"),
     _club("France"),
@@ -245,6 +292,7 @@ CLUBS_BY_COMPETITION: dict[str, tuple[SeniorClub, ...]] = {
     LA_LIGA: LA_LIGA_CLUBS,
     BUNDESLIGA: BUNDESLIGA_CLUBS,
     SERIE_A: SERIE_A_CLUBS,
+    MLS: MLS_CLUBS,
     # Cups reuse English senior clubs. Do not invent a separate lower-league universe.
     CARABAO_CUP: PREMIER_LEAGUE_CLUBS + CHAMPIONSHIP_CLUBS,
     FA_CUP: PREMIER_LEAGUE_CLUBS + CHAMPIONSHIP_CLUBS,

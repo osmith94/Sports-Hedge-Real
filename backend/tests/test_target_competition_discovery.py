@@ -120,6 +120,8 @@ VARIANT_LABELS = {
     TargetCompetitionCode.MLS: (
         "MLS",
         "Major League Soccer",
+        "US Major League Soccer",
+        "USA MLS",
     ),
     TargetCompetitionCode.LEAGUE_ONE: (
         "League One",
@@ -316,7 +318,10 @@ def test_matchbook_scope_rejects_out_of_scope_and_near_neighbors(label: str) -> 
     assert decision.reason == "unknown_or_ambiguous_competition"
 
 
-@pytest.mark.parametrize("label", ("League One", "League Two", "EFL League One", "Ligue 1"))
+@pytest.mark.parametrize(
+    "label",
+    ("League One", "League Two", "EFL League One", "Ligue 1", "MLS", "US Major League Soccer"),
+)
 def test_unselected_registered_competitions_are_out_of_scope(label: str) -> None:
     decision = scope_matchbook_event(
         {
