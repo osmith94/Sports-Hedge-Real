@@ -577,16 +577,24 @@ export type HotLoad = {
   cadence_utilisation?: number | null;
 };
 
+export type BackgroundLoad = {
+  working_set?: number;
+  due?: number;
+  cadence_seconds?: number;
+};
+
 export type UniverseLoad = {
   evaluated?: number;
   total?: number;
   remaining?: number;
+  cadence_seconds?: number;
   generation_work_used_s?: number | null;
   generation_budget_seconds?: number | null;
 };
 
 export type SystemLoadSummary = {
   hot?: HotLoad;
+  background?: BackgroundLoad;
   matchbook?: ProviderSlotLoad;
   kalshi?: ProviderSlotLoad;
   universe?: UniverseLoad;
@@ -890,7 +898,7 @@ export type EventReaction = {
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_SPORTS_HEDGE_API_URL ?? "http://localhost:8000";
-/** Browser abort for the bounded manual diagnostic. Do not raise this to wait out Full Sweep. */
+/** Browser abort for the bounded manual diagnostic. Do not raise this to wait out UNIVERSE discovery. */
 export const PAPER_COLLECTION_TIMEOUT_MS = 60_000;
 /** Slightly above the shared 25s HOT collector + 5s coordinator envelope. */
 export const PAPER_HOT_REFRESH_TIMEOUT_MS = 35_000;
@@ -1129,7 +1137,7 @@ export async function runPaperCollection(
       cache: "no-store",
     },
     PAPER_COLLECTION_TIMEOUT_MS,
-    `Manual diagnostic timed out after ${Math.round(PAPER_COLLECTION_TIMEOUT_MS / 1000)}s. Fast Scan and Full Sweep are separate server-owned lanes; check those timings before retrying the diagnostic.`,
+    `Manual diagnostic timed out after ${Math.round(PAPER_COLLECTION_TIMEOUT_MS / 1000)}s. HOT pricing, BACKGROUND pricing and UNIVERSE discovery are separate server-owned lanes; check those timings before retrying the diagnostic.`,
   );
   if (!response.ok) {
     throw new Error(await errorDetail(response));
@@ -1149,7 +1157,7 @@ export async function runPaperHotRefresh(
       cache: "no-store",
     },
     PAPER_HOT_REFRESH_TIMEOUT_MS,
-    `Fast Scan timed out after ${Math.round(PAPER_HOT_REFRESH_TIMEOUT_MS / 1000)}s. Check venue health and retry.`,
+    `HOT pricing timed out after ${Math.round(PAPER_HOT_REFRESH_TIMEOUT_MS / 1000)}s. Check venue health and retry.`,
   );
   if (!response.ok) {
     throw new Error(await errorDetail(response));

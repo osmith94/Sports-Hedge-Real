@@ -73,6 +73,9 @@ from sports_hedge.application.provider_access import (
 )
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
+    OPERATOR_BACKGROUND_PRICING_LABEL,
+    OPERATOR_HOT_PRICING_LABEL,
+    OPERATOR_UNIVERSE_DISCOVERY_LABEL,
     UNIVERSE_MIN_CHUNK_SECONDS,
     WORKER_COMPLETE,
     WORKER_DEGRADED,
@@ -261,7 +264,7 @@ class LiveRefreshStatus(BaseModel):
     )
     universe: LaneRefreshStatus = Field(
         default_factory=lambda: LaneRefreshStatus(
-            cadence_seconds=8,
+            cadence_seconds=600,
             # Per-chunk watchdog, not a generation lifetime. UNIVERSE generations
             # remain resumable/unbounded (Tenet 19 / Issue #328).
             cycle_timeout_seconds=150,
@@ -270,7 +273,7 @@ class LiveRefreshStatus(BaseModel):
     )
     background: LaneRefreshStatus = Field(
         default_factory=lambda: LaneRefreshStatus(
-            cadence_seconds=180,
+            cadence_seconds=90,
             cycle_timeout_seconds=None,
         )
     )
@@ -518,7 +521,7 @@ class LiveRefreshCoordinator:
                                     "last_plan_reason": "operator_stopped",
                                     "worker_state": WORKER_WAITING,
                                     "operator_summary": (
-                                        "Fast scan · stopped by operator · no provider call"
+                                        f"{OPERATOR_HOT_PRICING_LABEL} · stopped by operator · no provider call"
                                     ),
                                 }
                                 if operator.scanner_stopped
@@ -528,7 +531,7 @@ class LiveRefreshCoordinator:
                     ),
                     "universe": self.status.universe.model_copy(
                         update={
-                            "cadence_seconds": resolved.paper_universe_worker_cooldown_seconds,
+                            "cadence_seconds": resolved.paper_universe_discovery_interval_seconds,
                             "cycle_timeout_seconds": self._universe_chunk_collector_timeout(
                                 now=self.now(), settings=resolved
                             ),
@@ -539,7 +542,7 @@ class LiveRefreshCoordinator:
                     ),
                     "background": self.status.background.model_copy(
                         update={
-                            "cadence_seconds": resolved.paper_live_refresh_universe_interval_seconds,
+                            "cadence_seconds": resolved.paper_background_price_interval_seconds,
                         }
                     ),
                 }
@@ -631,14 +634,37 @@ class LiveRefreshCoordinator:
             hot_update["last_plan_reason"] = "operator_stopped"
             hot_update["worker_state"] = WORKER_WAITING
             hot_update["operator_summary"] = (
-                "Fast scan · stopped by operator · no provider call"
+                f"{OPERATOR_HOT_PRICING_LABEL} · stopped by operator · no provider call"
             )
+            universe_update: dict[str, Any] = {
+                "last_plan_reason": "operator_stopped",
+                "worker_state": WORKER_WAITING,
+                "operator_summary": (
+                    f"{OPERATOR_UNIVERSE_DISCOVERY_LABEL} · stopped by operator · no provider call"
+                ),
+            }
+            background_update: dict[str, Any] = {
+                "last_plan_reason": "operator_stopped",
+                "worker_state": WORKER_WAITING,
+                "operator_summary": (
+                    f"{OPERATOR_BACKGROUND_PRICING_LABEL} · stopped by operator · no provider call"
+                ),
+            }
+        else:
+            universe_update = {}
+            background_update = {}
         self.status = self.status.model_copy(
             update={
                 "scanner_stopped": operator.scanner_stopped,
                 "operator_settings": operator,
                 "interval_seconds": operator.hot_cadence_seconds,
                 "hot": self.status.hot.model_copy(update=hot_update),
+                "universe": self.status.universe.model_copy(update=universe_update)
+                if universe_update
+                else self.status.universe,
+                "background": self.status.background.model_copy(update=background_update)
+                if background_update
+                else self.status.background,
             }
         )
 
@@ -884,9 +910,15 @@ class LiveRefreshCoordinator:
                 "universe": self.status.universe.model_copy(
                     update={
                         "next_due_at": self._next_universe_due,
-                        "cadence_seconds": resolved.paper_universe_worker_cooldown_seconds,
+                        "cadence_seconds": resolved.paper_universe_discovery_interval_seconds,
                         "resume_cursor": self._status_universe_cursor(),
                         "generation_work_used_s": round(self._status_universe_work_used(), 3),
+                    }
+                ),
+                "background": self.status.background.model_copy(
+                    update={
+                        "next_due_at": self._next_background_due,
+                        "cadence_seconds": resolved.paper_background_price_interval_seconds,
                     }
                 ),
             }
@@ -1013,13 +1045,13 @@ class LiveRefreshCoordinator:
             engine.fx_snapshots = list(fx_snapshots)
         engine.fixture_state = self._fixture_state
         result = await engine.run_slice(priority, slice_wall_seconds=slice_wall_seconds)
-        self._apply_price_engine_slice_status(priority, result)
         if priority is PriceEnginePriority.BACKGROUND:
             with self._state_lock:
                 settings = get_settings()
                 self._next_background_due = self.now() + timedelta(
-                    seconds=settings.paper_live_refresh_universe_interval_seconds
+                    seconds=settings.paper_background_price_interval_seconds
                 )
+        self._apply_price_engine_slice_status(priority, result)
         return result
 
     def _apply_price_engine_slice_status(self, priority: PriceEnginePriority, result: Any) -> None:
@@ -1072,7 +1104,21 @@ class LiveRefreshCoordinator:
                 )
             )
             else WORKER_IDLE,
+            "cadence_seconds": (
+                int(self.status.interval_seconds)
+                if priority is PriceEnginePriority.HOT
+                else int(get_settings().paper_background_price_interval_seconds)
+            ),
         }
+        if priority is PriceEnginePriority.BACKGROUND:
+            lane_update["next_due_at"] = self._next_background_due
+            lane_update["operator_summary"] = _background_operator_summary(
+                next_due=self._next_background_due,
+                working_set=tier.working_set,
+                evaluated=tier.evaluated,
+                leftover=tier.not_started_this_cadence,
+                in_progress=self._background_in_progress,
+            )
         with self._state_lock:
             if priority is PriceEnginePriority.HOT:
                 hot = self.status.hot.model_copy(update=lane_update)
@@ -1532,7 +1578,7 @@ class LiveRefreshCoordinator:
                     "last_issue_count": len(report.issues),
                     "skipped_out_of_scope": report.skipped_out_of_scope,
                     "operator_summary": _combined_operator_summary(
-                        hot, universe, universe_count
+                        hot, universe, universe_count, self.status.background
                     ),
                     "config_warnings": report.config_warnings,
                     "venue_health": _merge_top_level_venue_health(
@@ -1669,7 +1715,7 @@ class LiveRefreshCoordinator:
                     "last_issue_count": len(report.issues),
                     "skipped_out_of_scope": report.skipped_out_of_scope,
                     "operator_summary": _combined_operator_summary(
-                        self.status.hot, self.status.universe, universe_count
+                        self.status.hot, self.status.universe, universe_count, self.status.background
                     ),
                     "config_warnings": report.config_warnings,
                     "venue_health": _merge_top_level_venue_health(
@@ -1688,7 +1734,7 @@ class LiveRefreshCoordinator:
                 self.status = self.status.model_copy(
                     update={
                         "operator_summary": _combined_operator_summary(
-                            self.status.hot, self.status.universe, universe_count
+                            self.status.hot, self.status.universe, universe_count, self.status.background
                         ),
                         "cycle_in_progress": self._hot_in_progress
                         or self._universe_in_progress
@@ -1747,7 +1793,7 @@ class LiveRefreshCoordinator:
             self.status = self.status.model_copy(
                 update={
                     "operator_summary": _combined_operator_summary(
-                        self.status.hot, self.status.universe, self.status.universe.fixture_count
+                        self.status.hot, self.status.universe, self.status.universe.fixture_count, self.status.background
                     )
                 }
             )
@@ -3032,7 +3078,7 @@ class LiveRefreshCoordinator:
         if self._universe_generation_started_at is None:
             return
         settings = get_settings()
-        cooldown = timedelta(seconds=settings.paper_universe_worker_cooldown_seconds)
+        cooldown = timedelta(seconds=settings.paper_universe_discovery_interval_seconds)
         self._next_universe_due = finished + cooldown
         self._fixture_state.close_universe_generation(
             self._universe_generation_id, closed_at=finished
@@ -3342,13 +3388,12 @@ class LiveRefreshCoordinator:
         if remaining is None:
             remaining = max(0, int(discovered or 0) - int(evaluated or 0))
         budget = float(get_settings().paper_scan_universe_generation_budget_seconds)
-        update = {
-            "cycle_in_progress": bool(self._universe_in_progress),
-            "worker_state": worker_state,
-            "sweep_id": self._universe_sweep_id or current.sweep_id,
-            "generation_id": self._universe_generation_id or current.generation_id,
-            "last_diagnostics": diagnostics,
-            "operator_summary": _universe_operator_summary(
+        if self._operator_scanner_stopped or current.last_plan_reason == "operator_stopped":
+            summary = (
+                f"{OPERATOR_UNIVERSE_DISCOVERY_LABEL} · stopped by operator · no provider call"
+            )
+        else:
+            summary = _universe_operator_summary(
                 current.last_duration_ms or 0,
                 self._status_universe_work_used(),
                 budget,
@@ -3361,7 +3406,14 @@ class LiveRefreshCoordinator:
                 venue_health=current.venue_health,
                 active_venues=current.active_venues,
                 plan_reason=current.last_plan_reason,
-            ),
+            )
+        update = {
+            "cycle_in_progress": bool(self._universe_in_progress),
+            "worker_state": worker_state,
+            "sweep_id": self._universe_sweep_id or current.sweep_id,
+            "generation_id": self._universe_generation_id or current.generation_id,
+            "last_diagnostics": diagnostics,
+            "operator_summary": summary,
         }
         if counts:
             update.update(counts)
@@ -3431,6 +3483,7 @@ class LiveRefreshCoordinator:
             background_update = {
                 "cycle_in_progress": self._background_in_progress,
                 "next_due_at": self._next_background_due,
+                "cadence_seconds": get_settings().paper_background_price_interval_seconds,
                 "evaluated_count": engine_status.background.evaluated,
                 "not_evaluated_count": (
                     engine_status.background.not_started_this_cadence
@@ -3454,7 +3507,11 @@ class LiveRefreshCoordinator:
                     "background": background,
                     "price_engine": engine_status,
                     "universe": self.status.universe.model_copy(
-                        update={"fixture_count": universe_count}
+                        update={
+                            "fixture_count": universe_count,
+                            "cadence_seconds": get_settings().paper_universe_discovery_interval_seconds,
+                            "next_due_at": self._next_universe_due,
+                        }
                     ),
                     "venue_health": _merge_top_level_venue_health(
                         hot.venue_health,
@@ -3476,7 +3533,7 @@ class LiveRefreshCoordinator:
             self.status = self.status.model_copy(
                 update={
                     "operator_summary": _combined_operator_summary(
-                        self.status.hot, self.status.universe, universe_count
+                        self.status.hot, self.status.universe, universe_count, self.status.background
                     ),
                     "cycle_in_progress": self._hot_in_progress
                     or self._universe_in_progress
@@ -3619,18 +3676,18 @@ class LiveRefreshCoordinator:
                     hot_update["worker_state"] = WORKER_WAITING
                     hot_update["cycle_in_progress"] = False
                     hot_update["operator_summary"] = (
-                        "Fast scan · stopped by operator · no provider call"
+                        f"{OPERATOR_HOT_PRICING_LABEL} · stopped by operator · no provider call"
                     )
                 elif plan.reason == "hot_scope_empty":
                     hot_update["worker_state"] = WORKER_WAITING
                     hot_update["cycle_in_progress"] = False
                     hot_update["operator_summary"] = (
-                        "Fast scan · worker alive · scope empty · polling · no provider call"
+                        f"{OPERATOR_HOT_PRICING_LABEL} · worker alive · scope empty · polling · no provider call"
                     )
                 elif plan.reason == "waiting" and self.status.hot.last_started_at is None:
                     hot_update["worker_state"] = WORKER_WAITING
                     hot_update["operator_summary"] = (
-                        "Fast scan · worker alive · waiting · no provider call"
+                        f"{OPERATOR_HOT_PRICING_LABEL} · worker alive · waiting · no provider call"
                     )
             self.status = self.status.model_copy(
                 update={"hot": self.status.hot.model_copy(update=hot_update)}
@@ -3673,7 +3730,7 @@ class LiveRefreshCoordinator:
                 if plan.reason == "operator_stopped":
                     universe_update["worker_state"] = WORKER_WAITING
                     universe_update["operator_summary"] = (
-                        "Full sweep · stopped by operator · no provider call"
+                        f"{OPERATOR_UNIVERSE_DISCOVERY_LABEL} · stopped by operator · no provider call"
                     )
             self.status = self.status.model_copy(
                 update={"universe": self.status.universe.model_copy(update=universe_update)}
@@ -3693,7 +3750,7 @@ class LiveRefreshCoordinator:
                                     "worker_state": WORKER_WAITING,
                                     "cycle_in_progress": False,
                                     "operator_summary": (
-                                        "Background · stopped by operator · no provider call"
+                                        f"{OPERATOR_BACKGROUND_PRICING_LABEL} · stopped by operator · no provider call"
                                     ),
                                 }
                             )
@@ -3713,7 +3770,7 @@ class LiveRefreshCoordinator:
                     with self._state_lock:
                         settings = get_settings()
                         self._next_background_due = self.now() + timedelta(
-                            seconds=settings.paper_live_refresh_universe_interval_seconds
+                            seconds=settings.paper_background_price_interval_seconds
                         )
                 finally:
                     with self._state_lock:
@@ -3926,7 +3983,7 @@ def _hot_operator_summary(
     duration_s = round(duration_ms / 1000, 1)
     venue_clause = last_scan_venue_clause(venue_health, configured=active_venues)
     summary = (
-        f"Fast scan · completed at {_iso_stamp(completed_at)} · ran {duration_s}s · "
+        f"{OPERATOR_HOT_PRICING_LABEL} · completed at {_iso_stamp(completed_at)} · ran {duration_s}s · "
         f"next due {_iso_stamp(next_due)} · {fixture_count} hot · {venue_clause}"
     )
     if leftover_n:
@@ -3963,9 +4020,28 @@ def _universe_operator_summary(
     elif reason == "universe_cooldown" and state in {WORKER_IDLE, WORKER_WAITING, WORKER_COMPLETE}:
         state = "waiting"
     return (
-        f"Full sweep · {state} · elapsed {elapsed_s}s · "
+        f"{OPERATOR_UNIVERSE_DISCOVERY_LABEL} · {state} · elapsed {elapsed_s}s · "
         f"{evaluated_n}/{discovered} evaluated · {computed_remaining} remaining · "
         f"{fixture_count} universe · {leftover_n} leftover · {venue_clause}"
+    )
+
+
+def _background_operator_summary(
+    *,
+    next_due: datetime | None,
+    working_set: int,
+    evaluated: int,
+    leftover: int,
+    in_progress: bool = False,
+) -> str:
+    if in_progress:
+        return (
+            f"{OPERATOR_BACKGROUND_PRICING_LABEL} · in progress · "
+            f"{working_set} ACTIVE · {evaluated} evaluated"
+        )
+    return (
+        f"{OPERATOR_BACKGROUND_PRICING_LABEL} · next due {_iso_stamp(next_due)} · "
+        f"{working_set} ACTIVE · {evaluated} evaluated · {leftover} not started"
     )
 
 
@@ -3973,18 +4049,28 @@ def _combined_operator_summary(
     hot: LaneRefreshStatus,
     universe: LaneRefreshStatus,
     universe_count: int,
+    background: LaneRefreshStatus | None = None,
 ) -> str:
     fast = hot.operator_summary or (
-        f"Fast scan · never · ran — · next due — · {hot.fixture_count} hot"
+        f"{OPERATOR_HOT_PRICING_LABEL} · never · ran — · next due — · {hot.fixture_count} hot"
+    )
+    bg = background.operator_summary if background and background.operator_summary else (
+        f"{OPERATOR_BACKGROUND_PRICING_LABEL} · never"
     )
     full = universe.operator_summary or (
-        f"Full sweep · {universe.worker_state or WORKER_IDLE} · "
+        f"{OPERATOR_UNIVERSE_DISCOVERY_LABEL} · {universe.worker_state or WORKER_IDLE} · "
         f"{universe.evaluated_count}/{universe.discovered_total or universe_count} evaluated · "
         f"{universe_count} universe"
     )
-    if hot.last_plan_reason == "operator_stopped" or universe.last_plan_reason == "operator_stopped":
-        return f"Scanner stopped by operator · {fast} · {full}"
-    return f"{fast} · {full}"
+    stopped = (
+        hot.last_plan_reason == "operator_stopped"
+        or (background is not None and background.last_plan_reason == "operator_stopped")
+        or universe.last_plan_reason == "operator_stopped"
+    )
+    body = f"{fast} · {bg} · {full}"
+    if stopped:
+        return f"Scanner stopped by operator · {body}"
+    return body
 
 
 def _honest_universe_venue_health(

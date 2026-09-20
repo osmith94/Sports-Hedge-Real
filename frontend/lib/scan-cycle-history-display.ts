@@ -4,9 +4,9 @@ import { formatObservationAge } from "./observation-age";
 export const SCAN_CYCLE_TITLE = "Scan cycle history";
 
 export const SCAN_CYCLE_COPY =
-  "Latest 100 completed HOT / UNIVERSE refresh cycles, newest first. One row per cycle, including cycles with zero paper decisions. Not market-decision audit.";
+  "Latest 100 completed HOT pricing / BACKGROUND pricing / UNIVERSE discovery cycles, newest first. One row per cycle, including cycles with zero paper decisions. Not market-decision audit.";
 
-export const SCAN_CYCLE_EMPTY = "No completed scan cycles yet. Zero-decision cycles still appear here once a Fast Scan or Full Sweep finishes.";
+export const SCAN_CYCLE_EMPTY = "No completed scan cycles yet. Zero-decision cycles still appear here once HOT pricing, BACKGROUND pricing or UNIVERSE discovery finishes.";
 
 export const SCAN_CYCLE_UNAVAILABLE =
   "Scan cycle history unavailable. No fabricated cycles.";
@@ -39,8 +39,9 @@ export type ScanCycleRow = {
 
 export function scanCycleLaneLabel(lane: string | null | undefined): string {
   const value = String(lane || "").trim().toLowerCase();
-  if (value === "hot") return "HOT";
-  if (value === "universe") return "UNIVERSE";
+  if (value === "hot") return "HOT pricing";
+  if (value === "background") return "BACKGROUND pricing";
+  if (value === "universe") return "UNIVERSE discovery";
   return lane ? String(lane).toUpperCase() : "—";
 }
 

@@ -43,7 +43,7 @@ function cycle(overrides: Partial<PaperScanCycleRecord> = {}): PaperScanCycleRec
 describe("scan cycle history presentation", () => {
   it("renders a zero-decision completed cycle without synthesizing market rows", () => {
     const row = scanCycleRow(cycle({ paper_decision_count: 0, qualifying_arb_count: 0, not_evaluated_count: 0 }));
-    assert.equal(row.laneLabel, "HOT");
+    assert.equal(row.laneLabel, "HOT pricing");
     assert.equal(row.paperDecisionLabel, "0");
     assert.equal(row.qualifyingLabel, "0");
     assert.equal(row.healthLabel, "venues ok");
@@ -54,8 +54,10 @@ describe("scan cycle history presentation", () => {
       cycle({ cycle_id: "universe-1", scan_lane: "universe", completed_at: "2026-09-16T18:01:00Z" }),
       cycle({ cycle_id: "hot-1", scan_lane: "hot" }),
     ]);
-    assert.deepEqual(rows.map((item) => item.laneLabel), ["UNIVERSE", "HOT"]);
-    assert.equal(scanCycleLaneLabel("hot"), "HOT");
+    assert.deepEqual(rows.map((item) => item.laneLabel), ["UNIVERSE discovery", "HOT pricing"]);
+    assert.equal(scanCycleLaneLabel("hot"), "HOT pricing");
+    assert.equal(scanCycleLaneLabel("background"), "BACKGROUND pricing");
+    assert.equal(scanCycleLaneLabel("universe"), "UNIVERSE discovery");
   });
 
   it("labels provider unavailability as health, not scanner failure", () => {
@@ -85,7 +87,7 @@ describe("scan cycle history presentation", () => {
           last_error: null,
           not_evaluated_count: 12,
           degraded: true,
-          operator_summary: "Full sweep · partial · 12 not evaluated",
+          operator_summary: "UNIVERSE discovery · partial · 12 not evaluated",
         }),
       ),
       "partial · 12 not evaluated",
@@ -109,7 +111,7 @@ describe("scan cycle history presentation", () => {
           not_evaluated_count: 0,
           matched_event_pairs: 37,
           matched_market_pairs: 0,
-          operator_summary: "Full sweep",
+          operator_summary: "UNIVERSE discovery",
         }),
       ),
       "evaluated · 0 equivalent markets",

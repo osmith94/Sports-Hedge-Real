@@ -93,8 +93,8 @@ from sports_hedge.application.quote_freshness import (
     retrieval_quote_age,
 )
 from sports_hedge.application.scan_lanes import (
+    DEFAULT_BACKGROUND_INTERVAL_SECONDS,
     DEFAULT_HOT_INTERVAL_SECONDS,
-    DEFAULT_UNIVERSE_INTERVAL_SECONDS,
     ScanLane,
     classify_scan_lane,
 )
@@ -283,7 +283,7 @@ class CataloguePriceEngine:
             else hot_interval_seconds
         )
         self._background_interval = int(
-            resolved.paper_live_refresh_universe_interval_seconds
+            resolved.paper_background_price_interval_seconds
             if background_interval_seconds is None
             else background_interval_seconds
         )
@@ -1498,5 +1498,5 @@ def _decision_inventory_row(
 
 # Imported for tests that assert these constants stay honest.
 DEFAULT_HOT_CADENCE_SECONDS = DEFAULT_HOT_INTERVAL_SECONDS
-DEFAULT_BACKGROUND_CADENCE_SECONDS = DEFAULT_UNIVERSE_INTERVAL_SECONDS
+DEFAULT_BACKGROUND_CADENCE_SECONDS = DEFAULT_BACKGROUND_INTERVAL_SECONDS
 _ = (InvalidOperation, SCAN_BUDGET_EXHAUSTED_REASON, DEFERRED_STATUS)

@@ -419,11 +419,15 @@ def test_live_refresh_exposes_distinct_hot_and_universe_status() -> None:
         payload = client.get("/paper/live-refresh").json()
         assert payload["hot"]["cadence_seconds"] == 30
         assert payload["hot"]["cycle_timeout_seconds"] == 25
-        assert payload["universe"]["cadence_seconds"] == 8
+        assert payload["universe"]["cadence_seconds"] == 600
+        assert payload["background"]["cadence_seconds"] == 90
         assert payload["universe"]["generation_budget_seconds"] == 150
         assert payload["interval_seconds"] == payload["hot"]["cadence_seconds"]
-        assert "Fast scan" in (payload["operator_summary"] or "")
-        assert "Full sweep" in (payload["operator_summary"] or "")
+        assert "HOT pricing" in (payload["operator_summary"] or "")
+        assert "BACKGROUND pricing" in (payload["operator_summary"] or "")
+        assert "UNIVERSE discovery" in (payload["operator_summary"] or "")
+        assert "Fast scan" not in (payload["operator_summary"] or "")
+        assert "Full sweep" not in (payload["operator_summary"] or "")
         discovered = payload["discovered_fixtures"]
         assert discovered
         assert discovered[0]["scan_lane"] == "universe"

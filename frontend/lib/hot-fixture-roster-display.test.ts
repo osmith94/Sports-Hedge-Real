@@ -107,7 +107,7 @@ describe("HOT fixture roster membership", () => {
     assert.equal(hotRosterBadgeLabel(true, status()), "EMPTY");
     assert.equal(hotFixtureRows(status()).length, 0);
     assert.equal(hotRosterBadgeLabel(false, null), "UNAVAILABLE");
-    assert.match(HOT_ROSTER_EMPTY, /Fast Scan roster is empty/i);
+    assert.match(HOT_ROSTER_EMPTY, /HOT pricing roster is empty/i);
     assert.match(HOT_ROSTER_UNAVAILABLE, /No fabricated fixtures/);
   });
 });
@@ -219,7 +219,7 @@ describe("HOT roster honesty for missing venue, equivalent and edge", () => {
 });
 
 describe("HOT roster console placement", () => {
-  it("places HOT Fixtures / Fast Scan after discovery and before Opportunity Monitor", () => {
+  it("places HOT pricing fixtures after discovery and before Opportunity Monitor", () => {
     const page = readFileSync(join(frontendRoot, "app/page.tsx"), "utf8");
     const panel = readFileSync(join(frontendRoot, "components/hot-fixtures-panel.tsx"), "utf8");
     const css = readFileSync(join(frontendRoot, "app/globals.css"), "utf8");
@@ -230,7 +230,7 @@ describe("HOT roster console placement", () => {
     assert.ok(hotIndex > discoveryIndex);
     assert.ok(monitorIndex > hotIndex);
     assert.match(page, /from "\.\.\/components\/hot-fixtures-panel"/);
-    assert.equal(HOT_ROSTER_TITLE, "HOT Fixtures / Fast Scan");
+    assert.equal(HOT_ROSTER_TITLE, "HOT pricing fixtures");
     assert.equal(HOT_ZONE_KICKER, "HOT Zone");
     assert.match(panel, /HOT_ZONE_KICKER/);
     assert.match(panel, /HOT_ROSTER_TITLE/);
@@ -251,7 +251,7 @@ describe("HOT roster console placement", () => {
   });
 });
 
-describe("HOT Zone evaluation state and Fast Scan summary", () => {
+describe("HOT Zone evaluation state and HOT pricing summary", () => {
   it("shows current evaluation state and reason on HOT rows with no opportunity", () => {
     const evaluated = hotFixtureRow(
       fixture({
@@ -293,7 +293,7 @@ describe("HOT Zone evaluation state and Fast Scan summary", () => {
     );
   });
 
-  it("summarizes Fast Scan from truthful HOT lane fields", () => {
+  it("summarizes HOT pricing from truthful HOT lane fields", () => {
     const live = status({
       last_paper_decisions: 99,
       last_completed_at: "2026-09-16T18:05:00Z",

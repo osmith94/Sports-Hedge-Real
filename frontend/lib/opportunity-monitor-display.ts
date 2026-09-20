@@ -155,8 +155,9 @@ export function venueLegsLabel(item: NearOpportunity): string {
 export function scanLaneLabel(scanLane: string | null | undefined): string {
   if (!scanLane) return "—";
   const lane = scanLane.trim().toLowerCase();
-  if (lane === "hot") return "Fast Scan / HOT";
-  if (lane === "universe") return "Full Sweep / UNIVERSE";
+  if (lane === "hot") return "HOT pricing";
+  if (lane === "background") return "BACKGROUND pricing";
+  if (lane === "universe") return "UNIVERSE discovery";
   return scanLane;
 }
 

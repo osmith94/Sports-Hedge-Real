@@ -173,7 +173,7 @@ describe("fixture discovery collapsed-by-default disclosure", () => {
     assert.match(source, /<DiscoveredFixturesPanel status=\{status\} available=\{available\} \/>/);
   });
 
-  it("places HOT Fixtures / Fast Scan after discovery and keeps Opportunity Monitor as the current-opportunity table", () => {
+  it("places HOT pricing fixtures after discovery and keeps Opportunity Monitor as the current-opportunity table", () => {
     const page = readFileSync(join(frontendRoot, "app/page.tsx"), "utf8");
     const discoveryIndex = page.indexOf("<FixtureDiscoverySection");
     const hotIndex = page.indexOf("<HotFixturesPanel");
