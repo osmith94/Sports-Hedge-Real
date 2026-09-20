@@ -68,8 +68,9 @@ class TargetCompetition(BaseModel):
 # Kalshi match-level series + Polymarket Gamma series. Partial rows stay visible
 # and disabled.
 #
-# Public Gamma GET /sports (retrieved 2026-09-16):
-#   epl=10188, elc=10355, lal=10193, efl=10329 (EFL CUP), efa=10307 (FA Cup),
+# Public Gamma GET /sports (retrieved 2026-09-16, FA Cup re-checked 2026-09-20):
+#   epl=10188, elc=10355, lal=10193, efl=10329 (EFL CUP), efa=10314 (FA Cup;
+#   2026-09-16 snapshot was 10307, which is no longer listed),
 #   fif=10238 (FIFA Friendlies), bun=10194 (Bundesliga), sea=10203 (Serie A).
 # Public Gamma GET /sports (retrieved 2026-09-20) additional football series:
 #   ucl=10204, uel=10209, col=10437, tur=10292, mls=10189,
@@ -195,7 +196,7 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
             "fa cup 2026/27",
             "emirates fa cup 2026/27",
         ),
-        polymarket_gamma_series_id="10307",
+        polymarket_gamma_series_id="10314",
         polymarket_gamma_sport="efa",
         kalshi_series_prefixes=("KXFACUP",),
     ),

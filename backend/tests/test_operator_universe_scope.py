@@ -557,6 +557,19 @@ def test_saved_default_survives_restart_and_first_universe_uses_it(tmp_path: Pat
             "champions_league",
             "mls",
         ]
+        coordinator._next_universe_due = NOW
+        plan = coordinator.plan_universe_tick(now=NOW)
+        assert plan.lane == "universe"
+        assert plan.selected_competition_codes == [
+            "premier_league",
+            "champions_league",
+            "mls",
+        ]
+        assert coordinator.generation_discovery_codes() == (
+            "premier_league",
+            "champions_league",
+            "mls",
+        )
         coordinator._ensure_universe_generation(NOW)
         assert list(coordinator._universe_generation_selected_codes) == [
             "premier_league",

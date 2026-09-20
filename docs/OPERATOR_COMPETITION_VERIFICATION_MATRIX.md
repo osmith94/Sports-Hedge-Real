@@ -6,7 +6,8 @@ Principal visible catalogue: **30** rows.
 Operator UI/state uses canonical codes only. Venue identifiers below are backend evidence, not operator-selectable tickers.
 
 Retrieved 2026-09-20 from read-only public metadata:
-- Polymarket Gamma `GET /sports`
+- Polymarket Gamma `GET /sports` (469 sports). FA Cup sport `efa` series is **10314**;
+  the 2026-09-16 snapshot `10307` is no longer listed and is not claimed.
 - Kalshi `GET /series?category=Sports`
 - Matchbook: label-alias matching only (no competition IDs)
 
@@ -19,7 +20,7 @@ Partial rows remain visible and disabled. Identifiers were not guessed.
 | `championship` | EFL Championship | England | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXEFLCHAMPIONSHIPGAME,KXEFLCHAMPIONSHIPBTTS,KXEFLCHAMPIONSHIPTOTAL; Gamma elc/10355 |
 | `la_liga` | Spain La Liga | Spain | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXLALIGAGAME,KXLALIGABTTS,KXLALIGATOTAL,KXLALIGAFTTS; Gamma lal/10193 |
 | `carabao_cup` | Carabao Cup | England | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXEFLCUPGAME,KXEFLCUPBTTS,KXEFLCUPTOTAL,KXEFLCUPFTTS; Gamma efl/10329 |
-| `fa_cup` | FA Cup | England | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXFACUPGAME,KXFACUPBTTS,KXFACUPTOTAL,KXFACUPFTTS; Gamma efa/10307 |
+| `fa_cup` | FA Cup | England | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXFACUPGAME,KXFACUPBTTS,KXFACUPTOTAL,KXFACUPFTTS; Gamma efa/10314 (live 2026-09-20; 2026-09-16 snapshot 10307 is no longer listed) |
 | `international_friendlies` | International Friendlies | International | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXINTLFRIENDLYGAME,KXINTLFRIENDLYBTTS,KXINTLFRIENDLYTOTAL; Gamma fif/10238 |
 | `bundesliga` | Bundesliga | Germany | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXBUNDESLIGAGAME,KXBUNDESLIGABTTS,KXBUNDESLIGATOTAL,KXBUNDESLIGAFTTS; Gamma bun/10194 |
 | `serie_a` | Serie A | Italy | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXSERIEAGAME,KXSERIEABTTS,KXSERIEATOTAL,KXSERIEAFTTS; Gamma sea/10203 |

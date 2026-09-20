@@ -337,7 +337,7 @@ def test_unselected_registered_competitions_are_out_of_scope(label: str) -> None
         ("10355", TargetCompetitionCode.CHAMPIONSHIP),
         ("10193", TargetCompetitionCode.LA_LIGA),
         ("10329", TargetCompetitionCode.CARABAO_CUP),
-        ("10307", TargetCompetitionCode.FA_CUP),
+        ("10314", TargetCompetitionCode.FA_CUP),
         ("10238", TargetCompetitionCode.INTERNATIONAL_FRIENDLIES),
         ("10194", TargetCompetitionCode.BUNDESLIGA),
         ("10203", TargetCompetitionCode.SERIE_A),
@@ -381,6 +381,7 @@ def test_verified_polymarket_series_ids_resolve(
         "10676",  # Gamma itsb = Serie B
         "12410",  # Gamma clf = Club Friendlies
         "11863",  # Gamma ecu1 = LigaPro Serie A
+        "10307",  # Stale 2026-09-16 FA Cup snapshot; live efa series is 10314
         "99999",
     ),
 )

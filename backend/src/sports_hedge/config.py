@@ -202,9 +202,10 @@ class Settings(BaseSettings):
 
     polymarket_gamma_base_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_base_url: str = "https://clob.polymarket.com"
-    # Public Gamma GET /sports (2026-09-16): epl=10188, elc=10355, lal=10193,
-    # efl=10329 (EFL CUP), efa=10307 (FA Cup), fif=10238 (FIFA Friendlies),
-    # bun=10194 (Bundesliga), sea=10203 (Serie A).
+    # Public Gamma GET /sports (2026-09-16, FA Cup re-checked 2026-09-20):
+    # epl=10188, elc=10355, lal=10193, efl=10329 (EFL CUP), efa=10314 (FA Cup;
+    # 2026-09-16 snapshot was 10307, which is no longer listed),
+    # fif=10238 (FIFA Friendlies), bun=10194 (Bundesliga), sea=10203 (Serie A).
     # Empty single-id override disables series filtering.
     polymarket_gamma_series_id: str | None = None
     polymarket_gamma_series_ids: Annotated[list[str], NoDecode] = Field(
@@ -213,7 +214,7 @@ class Settings(BaseSettings):
             "10355",
             "10193",
             "10329",
-            "10307",
+            "10314",
             "10238",
             "10194",
             "10203",

@@ -1548,6 +1548,13 @@ class LiveRefreshCoordinator:
             generation_codes = list(self._universe_generation_selected_codes)
             generation_scope_version = self._universe_generation_scope_version
             generation_superseded = self._universe_generation_superseded
+        if universe_generation_started_at is None:
+            # Hydrate saved/session scope before the first generation starts so
+            # the automatic UNIVERSE plan does not advertise env defaults.
+            effective = self.effective_universe_scope()
+            generation_codes = list(effective.selected_competition_codes)
+            if not generation_scope_version:
+                generation_scope_version = int(effective.scope_version)
         work_retry_at = self._earliest_retry_wait_unlocked(evaluated)
         if work_retry_at is not None and evaluated < work_retry_at:
             return DualCadencePlan(lane="idle", reason="universe_retry_wait")
