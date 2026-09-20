@@ -797,7 +797,10 @@ class LiveRefreshCoordinator:
             return frozenset()
         ids: set[str] = set()
         for trade in trades:
-            if getattr(trade, "state", None) is not PaperTradeState.OPEN:
+            if getattr(trade, "state", None) not in {
+                PaperTradeState.OPEN,
+                PaperTradeState.PARTIAL,
+            }:
                 continue
             event_id = str(getattr(trade, "canonical_event_id", "") or "").strip()
             if event_id:

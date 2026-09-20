@@ -50,6 +50,7 @@ from sports_hedge.application.target_competitions import (
 )
 from sports_hedge.config import Settings
 from sports_hedge.matching.approved_register import CANONICAL_MATCH_RESULT_FT
+from sports_hedge.paper.trades import PaperTradeState
 from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
 from sports_hedge.persistence.operator_scanner_settings import (
     SqliteOperatorScannerSettingsStore,
@@ -351,6 +352,36 @@ def test_open_paper_trade_remains_in_price_engine_after_deselect(monkeypatch: py
     ids = {item.identity.canonical_event_id for item in engine.items()}
     assert "evt-epl" in ids
     assert "evt-ucl" not in ids
+    store.close()
+
+
+def test_partial_paper_trade_is_exempt_from_scope_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#379 PARTIAL buy-in recovery stays ACTIVE TRADE-managed after deselect."""
+
+    class _PartialTrade:
+        state = PaperTradeState.PARTIAL
+        canonical_event_id = "evt-ucl"
+
+    class _Ops:
+        def list_active_trades(self) -> list[_PartialTrade]:
+            return [_PartialTrade()]
+
+    monkeypatch.setattr(paper_api, "get_paper_operations_service", lambda *args, **kwargs: _Ops())
+    store = SqliteApprovedMarketCatalogueStore(":memory:")
+    epl = _catalogue_row(suffix="epl", competition="Premier League", event_id="evt-epl")
+    ucl = _catalogue_row(suffix="ucl", competition="UEFA Champions League", event_id="evt-ucl")
+    store.upsert_catalogue_row(epl)
+    store.upsert_catalogue_row(ucl)
+    engine = CataloguePriceEngine(catalogue_store=store)
+    coordinator = LiveRefreshCoordinator(catalogue_store=store, price_engine=engine)
+    coordinator.bind_universe_scope_store(SqliteOperatorUniverseScopeStore(":memory:"))
+    assert coordinator._open_paper_event_ids() == frozenset({"evt-ucl"})
+    coordinator.apply_universe_scope(["premier_league"])
+    ids = {item.identity.canonical_event_id for item in engine.items()}
+    assert "evt-epl" in ids
+    assert "evt-ucl" in ids
     store.close()
 
 
