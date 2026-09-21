@@ -66,6 +66,8 @@ from sports_hedge.facts.identity import canonical_team_id
 from sports_hedge.facts.team_registry import (
     BUNDESLIGA,
     LA_LIGA,
+    LIGA_MX,
+    MLS,
     PREMIER_LEAGUE,
     SERIE_A,
     clubs_for,
@@ -252,6 +254,10 @@ def test_team_registry_covers_target_competitions_and_collapses_fc_suffix() -> N
     assert any(club.canonical_name == "Athletic Club" for club in clubs_for(LA_LIGA))
     assert any(club.canonical_name == "Bayern Munich" for club in clubs_for(BUNDESLIGA))
     assert any(club.canonical_name == "AC Milan" for club in clubs_for(SERIE_A))
+    assert any(club.canonical_name == "Inter Miami" for club in clubs_for(MLS))
+    assert any(club.canonical_name == "San Diego" for club in clubs_for(MLS))
+    assert any(club.canonical_name == "Querétaro FC" for club in clubs_for(LIGA_MX))
+    assert any(club.canonical_name == "Club León" for club in clubs_for(LIGA_MX))
     assert resolve_team_name("FC Bayern München") == "bayern munich"
     assert resolve_team_name("AC Monza") == "monza"
     assert resolve_team_name("Chelsea Women") == "chelsea women"

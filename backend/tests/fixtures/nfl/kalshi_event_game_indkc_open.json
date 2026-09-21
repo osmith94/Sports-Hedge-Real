@@ -1,0 +1,78 @@
+{
+  "fixture_id": "nfl-kalshi-game-indkc-open-2026-09-20",
+  "identified_as": "CAPTURED public Kalshi nested KXNFLGAME event for IND Colts vs KC Chiefs (upcoming SNF). Two binary team-win contracts, no Tie strike. Prices omitted. Settlement wording retained.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events?series_ticker=KXNFLGAME&status=open&with_nested_markets=true&with_milestones=true",
+  "also_proven_by": "GET /events/KXNFLGAME-26SEP20INDKC and GET /markets/KXNFLGAME-26SEP20INDKC-KC",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "event_ticker": "KXNFLGAME-26SEP20INDKC",
+    "series_ticker": "KXNFLGAME",
+    "title": "IND Colts vs KC Chiefs",
+    "sub_title": "IND vs KC (Sep 20)",
+    "category": "Sports",
+    "mutually_exclusive": true,
+    "product_metadata": {
+      "competition": "Pro Football",
+      "competition_scope": "Game"
+    },
+    "collateral_return_type": "MECNET",
+    "settlement_sources": [
+      {
+        "name": "the Governing League",
+        "url": "https://www.nfl.com/"
+      }
+    ],
+    "strike_period": "",
+    "markets": [
+      {
+        "ticker": "KXNFLGAME-26SEP20INDKC-KC",
+        "event_ticker": "KXNFLGAME-26SEP20INDKC",
+        "title": "Kansas City wins",
+        "yes_sub_title": "Kansas City",
+        "no_sub_title": "Kansas City",
+        "status": "active",
+        "result": "",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "football_team": "64f72720-2e4a-4cc8-a39b-ca148aecb389"
+        },
+        "rules_primary": "If Kansas City wins the IND Colts vs KC Chiefs Pro Football game originally scheduled for Sep 20, 2026, then the market resolves to Yes.",
+        "rules_secondary": "The following market refers to the team who wins the IND Colts vs KC Chiefs Pro Football game originally scheduled for Sep 20, 2026. If the game ends in a tie, the market will resolve to $0.50 for each team. If the game is postponed but begins within 48 hours from its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is not started within 48 hours, the market will resolve to a fair price.\n\nKalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+        "occurrence_datetime": "2026-09-21T03:20:00Z",
+        "expected_expiration_time": "2026-09-21T03:20:00Z",
+        "expiration_time": "2026-09-23T00:20:00Z",
+        "close_time": "2026-09-23T00:20:00Z",
+        "open_time": "2026-08-25T15:33:00Z",
+        "can_close_early": true,
+        "early_close_condition": "This market will close and expire after a winner is declared.",
+        "expiration_value": ""
+      },
+      {
+        "ticker": "KXNFLGAME-26SEP20INDKC-IND",
+        "event_ticker": "KXNFLGAME-26SEP20INDKC",
+        "title": "Indianapolis wins",
+        "yes_sub_title": "Indianapolis",
+        "no_sub_title": "Indianapolis",
+        "status": "active",
+        "result": "",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "football_team": "fe5f8219-fef4-4498-83d5-f6cc6f2cb7bf"
+        },
+        "rules_primary": "If Indianapolis wins the IND Colts vs KC Chiefs Pro Football game originally scheduled for Sep 20, 2026, then the market resolves to Yes.",
+        "rules_secondary": "The following market refers to the team who wins the IND Colts vs KC Chiefs Pro Football game originally scheduled for Sep 20, 2026. If the game ends in a tie, the market will resolve to $0.50 for each team. If the game is postponed but begins within 48 hours from its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is not started within 48 hours, the market will resolve to a fair price.\n\nKalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+        "occurrence_datetime": "2026-09-21T03:20:00Z",
+        "expected_expiration_time": "2026-09-21T03:20:00Z",
+        "expiration_time": "2026-09-23T00:20:00Z",
+        "close_time": "2026-09-23T00:20:00Z",
+        "open_time": "2026-08-25T15:33:00Z",
+        "can_close_early": true,
+        "early_close_condition": "This market will close and expire after a winner is declared.",
+        "expiration_value": ""
+      }
+    ]
+  }
+}

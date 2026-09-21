@@ -1,0 +1,245 @@
+{
+  "fixture_id": "nfl-matchbook-event-33306877354500023",
+  "identified_as": "CAPTURED unauthenticated Matchbook GET /edge/rest/events/33306877354500023 plus GET .../markets. upcoming SNF Indianapolis at Kansas City. Prices stripped. No session token.",
+  "source": "https://api.matchbook.com/edge/rest/events/33306877354500023",
+  "markets_source": "https://api.matchbook.com/edge/rest/events/33306877354500023/markets?per-page=100&include-prices=false&states=open,suspended,closed,graded",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "provider_market_total": 67,
+  "payload": {
+    "id": 33306877354500023,
+    "name": "Indianapolis Colts at Kansas City Chiefs",
+    "start": "2026-09-21T00:20:00.000Z",
+    "status": "open",
+    "sport-id": 1,
+    "in-running-flag": false,
+    "allow-live-betting": true,
+    "category-id": [
+      1,
+      410468520880009,
+      491503123380010,
+      1904152202480016,
+      33306877350900047
+    ],
+    "meta-tags": [
+      {
+        "id": 1,
+        "name": "American Football",
+        "type": "SPORT",
+        "url-name": "american-football"
+      },
+      {
+        "id": 410468520880009,
+        "name": "Live Betting",
+        "type": "OTHER",
+        "url-name": "live-betting"
+      },
+      {
+        "id": 491503123380010,
+        "name": "NFL",
+        "type": "COMPETITION",
+        "url-name": "nfl"
+      },
+      {
+        "id": 1904152202480016,
+        "name": "United States of America",
+        "type": "COUNTRY",
+        "url-name": "united-states-of-america"
+      },
+      {
+        "id": 33306877350900047,
+        "name": "September 21st 2026",
+        "type": "DATE",
+        "url-name": "september-21st-2026"
+      }
+    ],
+    "markets": [
+      {
+        "id": 33306877358600023,
+        "name": "Moneyline",
+        "status": "open",
+        "type": "binary",
+        "market-type": "money_line",
+        "number-of-winners": 1,
+        "handicap": null,
+        "in-running-flag": false,
+        "allow-live-betting": true,
+        "start": "2026-09-21T00:20:00.000Z",
+        "event-id": 33306877354500023,
+        "runners": [
+          {
+            "id": 33306877359300023,
+            "name": "Indianapolis Colts",
+            "status": "open",
+            "handicap": null,
+            "event-participant-id": 33306877358100023,
+            "withdrawn": false
+          },
+          {
+            "id": 33306877359000023,
+            "name": "Kansas City Chiefs",
+            "status": "open",
+            "handicap": null,
+            "event-participant-id": 33306877357700023,
+            "withdrawn": false
+          }
+        ]
+      },
+      {
+        "id": 34351477970400081,
+        "name": "1st Half Moneyline",
+        "status": "open",
+        "type": "binary",
+        "market-type": "money_line",
+        "number-of-winners": 1,
+        "handicap": null,
+        "in-running-flag": false,
+        "allow-live-betting": true,
+        "start": "2026-09-21T00:20:00.000Z",
+        "event-id": 33306877354500023,
+        "runners": [
+          {
+            "id": 34351477971300081,
+            "name": "Indianapolis Colts",
+            "status": "open",
+            "handicap": null,
+            "event-participant-id": 33306877358100023,
+            "withdrawn": false
+          },
+          {
+            "id": 34351477970900081,
+            "name": "Kansas City Chiefs",
+            "status": "open",
+            "handicap": null,
+            "event-participant-id": 33306877357700023,
+            "withdrawn": false
+          }
+        ]
+      },
+      {
+        "id": 33306877853100023,
+        "name": "Total",
+        "status": "open",
+        "type": "binary",
+        "market-type": "total",
+        "number-of-winners": 1,
+        "handicap": 45.5,
+        "in-running-flag": false,
+        "allow-live-betting": true,
+        "start": "2026-09-21T00:20:00.000Z",
+        "event-id": 33306877354500023,
+        "runners": [
+          {
+            "id": 33306877854201023,
+            "name": "OVER 45.5",
+            "status": "open",
+            "handicap": 45.5,
+            "event-participant-id": null,
+            "withdrawn": false
+          },
+          {
+            "id": 33306877854401023,
+            "name": "UNDER 45.5",
+            "status": "open",
+            "handicap": 45.5,
+            "event-participant-id": null,
+            "withdrawn": false
+          }
+        ]
+      },
+      {
+        "id": 33306877853500023,
+        "name": "Total",
+        "status": "open",
+        "type": "binary",
+        "market-type": "total",
+        "number-of-winners": 1,
+        "handicap": 46,
+        "in-running-flag": false,
+        "allow-live-betting": true,
+        "start": "2026-09-21T00:20:00.000Z",
+        "event-id": 33306877354500023,
+        "runners": [
+          {
+            "id": 33306877854700023,
+            "name": "OVER 46.0",
+            "status": "open",
+            "handicap": 46,
+            "event-participant-id": null,
+            "withdrawn": false
+          },
+          {
+            "id": 33306877854900023,
+            "name": "UNDER 46.0",
+            "status": "open",
+            "handicap": 46,
+            "event-participant-id": null,
+            "withdrawn": false
+          }
+        ]
+      },
+      {
+        "id": 33306878118900023,
+        "name": "Handicap",
+        "status": "open",
+        "type": "binary",
+        "market-type": "handicap",
+        "number-of-winners": 1,
+        "handicap": 4.5,
+        "in-running-flag": false,
+        "allow-live-betting": true,
+        "start": "2026-09-21T00:20:00.000Z",
+        "event-id": 33306877354500023,
+        "runners": [
+          {
+            "id": 33306878120401023,
+            "name": "Indianapolis Colts +4.5",
+            "status": "open",
+            "handicap": 4.5,
+            "event-participant-id": 33306877358100023,
+            "withdrawn": false
+          },
+          {
+            "id": 33306878120200023,
+            "name": "Kansas City Chiefs -4.5",
+            "status": "open",
+            "handicap": -4.5,
+            "event-participant-id": 33306877357700023,
+            "withdrawn": false
+          }
+        ]
+      },
+      {
+        "id": 33306878119200023,
+        "name": "Handicap",
+        "status": "open",
+        "type": "binary",
+        "market-type": "handicap",
+        "number-of-winners": 1,
+        "handicap": 5,
+        "in-running-flag": false,
+        "allow-live-betting": true,
+        "start": "2026-09-21T00:20:00.000Z",
+        "event-id": 33306877354500023,
+        "runners": [
+          {
+            "id": 33306878120901023,
+            "name": "Indianapolis Colts +5.0",
+            "status": "open",
+            "handicap": 5,
+            "event-participant-id": 33306877358100023,
+            "withdrawn": false
+          },
+          {
+            "id": 33306878120700023,
+            "name": "Kansas City Chiefs -5.0",
+            "status": "open",
+            "handicap": -5,
+            "event-participant-id": 33306877357700023,
+            "withdrawn": false
+          }
+        ]
+      }
+    ]
+  }
+}

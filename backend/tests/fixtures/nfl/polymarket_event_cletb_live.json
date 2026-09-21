@@ -1,0 +1,109 @@
+{
+  "fixture_id": "nfl-polymarket-nfl-cle-tb-2026-09-20",
+  "identified_as": "CAPTURED public Gamma NFL event nfl-cle-tb-2026-09-20 (live Q4). Identity + one market per family. Prices/CLOB books omitted. Description/rules retained.",
+  "source": "https://gamma-api.polymarket.com/events/827198",
+  "discovery": "GET /events?series_id=12185",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": "827198",
+    "ticker": "nfl-cle-tb-2026-09-20",
+    "slug": "nfl-cle-tb-2026-09-20",
+    "title": "Browns vs. Buccaneers",
+    "startTime": "2026-09-20T17:00:00Z",
+    "eventDate": "2026-09-20",
+    "endDate": "2026-09-20T17:00:00Z",
+    "period": "Q4",
+    "score": "23-19",
+    "live": true,
+    "ended": false,
+    "closed": false,
+    "active": true,
+    "gameId": 19477,
+    "finishedTimestamp": null,
+    "seriesSlug": "nfl-2026",
+    "sport": {
+      "id": 10,
+      "sport": "nfl",
+      "name": "NFL",
+      "ordering": "away",
+      "series": "12185"
+    },
+    "teams": [
+      {
+        "id": 100025,
+        "name": "Cleveland Browns",
+        "abbreviation": "cle",
+        "alias": "Browns",
+        "ordering": "away",
+        "league": "nfl"
+      },
+      {
+        "id": 100051,
+        "name": "Tampa Bay Buccaneers",
+        "abbreviation": "tb",
+        "alias": "Buccaneers",
+        "ordering": "home",
+        "league": "nfl"
+      }
+    ],
+    "markets": [
+      {
+        "id": "3482681",
+        "question": "Browns vs. Buccaneers",
+        "slug": "nfl-cle-tb-2026-09-20",
+        "sportsMarketType": "moneyline",
+        "groupItemTitle": null,
+        "conditionId": "0xfc1dcbe45ec6aaff52ffcc6072c59f5a376eb8d5f919c112e7924acc950f693e",
+        "outcomes": "[\"Browns\", \"Buccaneers\"]",
+        "line": null,
+        "active": true,
+        "closed": false,
+        "umaResolutionStatus": null,
+        "description": "In the upcoming NFL game, scheduled for September 20 at 1:00PM ET:\nIf Browns wins, the market will resolve to \"Browns\".\nIf Buccaneers wins, the market will resolve to \"Buccaneers\".\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely or ends in a tie, with no make-up game, this market will resolve 50-50."
+      },
+      {
+        "id": "3517106",
+        "question": "Spread: Buccaneers (-6.5)",
+        "slug": "nfl-cle-tb-2026-09-20-spread-home-6pt5",
+        "sportsMarketType": "spreads",
+        "groupItemTitle": "Spread -6.5",
+        "conditionId": "0x59e978ab42e1d98edca74868ac70617be58b20bc603b3b74638b619ce70a70e4",
+        "outcomes": "[\"Buccaneers\", \"Browns\"]",
+        "line": -6.5,
+        "active": true,
+        "closed": false,
+        "umaResolutionStatus": null,
+        "description": "In the upcoming NFL game, scheduled for September 20 at 1:00 PM ET:\n\nThis market will resolve to \"Buccaneers\" if the Buccaneers win the game by 7 or more points.\n\nOtherwise, this market will resolve to \"Browns\". If the game ends in a tie, this market will resolve to \"Browns\".\n\nIf the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50."
+      },
+      {
+        "id": "3920161",
+        "question": "Browns vs. Buccaneers: O/U 47.5",
+        "slug": "nfl-cle-tb-2026-09-20-total-47pt5",
+        "sportsMarketType": "totals",
+        "groupItemTitle": "O/U 47.5",
+        "conditionId": "0x33da99e743df8ff24a1cbb6fe8b9ae5844d35046065c94154a3fd2fba77a76ae",
+        "outcomes": "[\"Over\", \"Under\"]",
+        "line": 47.5,
+        "active": true,
+        "closed": false,
+        "umaResolutionStatus": null,
+        "description": "In the upcoming NFL game, scheduled for September 20 at 1:00 PM ET:\n\nThis market will resolve to \"Over\" if the Browns and Buccaneers combine to score 48 or more points in this game.\n\nIf the combined total is less than 48, this market will resolve to \"Under\".\n\nIf the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50."
+      },
+      {
+        "id": "4454138",
+        "question": "Browns Team Total: O/U 10.5",
+        "slug": "nfl-cle-tb-2026-09-20-team-total-cle-10pt5",
+        "sportsMarketType": "team_totals",
+        "groupItemTitle": "Browns O/U 10.5",
+        "conditionId": "0x5cf21c38892de46753ac5e324553560bb81e5cfd75e51489d95174b4e1ba42de",
+        "outcomes": "[\"Over\", \"Under\"]",
+        "line": 10.5,
+        "active": true,
+        "closed": true,
+        "umaResolutionStatus": "resolved",
+        "description": "In the upcoming NFL game between Browns and Buccaneers, scheduled for September 20 at 1:00 PM ET:\n\nThis market will resolve to \"Over\" if the Browns score 11 or more points in this game.\n\nIf the Browns score less than 11 points, this market will resolve to \"Under\".\n\nThis market is based solely on the Browns's score, not the combined score of both teams.\n\nIf the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50."
+      }
+    ]
+  }
+}

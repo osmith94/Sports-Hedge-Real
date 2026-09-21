@@ -124,6 +124,7 @@ class UniverseGenerationCheckpoint(BaseModel):
     series_work: dict[str, SeriesWorkUnit] = Field(default_factory=dict)
     semantics_version: int = Field(default=LEGACY_UNVERSIONED_CHECKPOINT_SEMANTICS_VERSION)
     selected_competition_codes: list[str] = Field(default_factory=list)
+    selected_season_scope_codes: list[str] = Field(default_factory=list)
     scope_version: int = Field(default=0, ge=0)
     superseded: bool = False
 

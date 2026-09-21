@@ -1472,46 +1472,57 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
                     assert quote.net_decimal_odds > 1
 
         coordinator = get_live_refresh_coordinator()
-        coordinator.record_report(report)
-        client = TestClient(app)
-        health = client.get("/health")
-        assert health.json()["execution_enabled"] is False
-        detail = client.get(f"/operations/fixtures/{fixture.canonical_event_id}")
-        assert detail.status_code == 200
-        body = detail.json()
-        assert body["execution_enabled"] is False
-        assert body["paper_mode"] == "paper"
-        families = {row["family"] for row in body["markets"] if row.get("family")}
-        assert families >= {
-            "match_result",
-            "both_teams_to_score",
-            "total_goals",
-            "draw_no_bet",
-            "asian_handicap",
-            "to_qualify",
-            "correct_score",
-            "next_goal",
-            "first_team_to_score",
-        }
-        assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "match_result")
-        assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "both_teams_to_score")
-        assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "draw_no_bet")
-        assert all(not row["solver_is_arbitrage"] for row in body["markets"] if row["family"] == "draw_no_bet")
-        assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "asian_handicap")
-        assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "to_qualify")
-        assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "correct_score")
-        assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "next_goal")
-        assert any(
-            row["entered_solver"] and row.get("solver_model") == "generalized_payoff"
-            for row in body["markets"]
-            if row["family"] == "first_team_to_score"
+        original_clock = coordinator._clock
+        # Bind radar `now` and the report instant to the collected observation so
+        # wall-clock drift cannot DROP a still-current fixture. Production 4h
+        # ceiling is unchanged.
+        coordinator._clock = lambda: OBSERVED
+        timed_report = report.model_copy(
+            update={"started_at": OBSERVED, "completed_at": OBSERVED}
         )
-        assert any(
-            not row["entered_solver"] and row.get("reason") == INCOMPLETE_OUTCOME_REASON
-            for row in body["markets"]
-            if row["family"] == "first_team_to_score"
-        )
-        coordinator.reset()
+        try:
+            coordinator.record_report(timed_report)
+            client = TestClient(app)
+            health = client.get("/health")
+            assert health.json()["execution_enabled"] is False
+            detail = client.get(f"/operations/fixtures/{fixture.canonical_event_id}")
+            assert detail.status_code == 200
+            body = detail.json()
+            assert body["execution_enabled"] is False
+            assert body["paper_mode"] == "paper"
+            families = {row["family"] for row in body["markets"] if row.get("family")}
+            assert families >= {
+                "match_result",
+                "both_teams_to_score",
+                "total_goals",
+                "draw_no_bet",
+                "asian_handicap",
+                "to_qualify",
+                "correct_score",
+                "next_goal",
+                "first_team_to_score",
+            }
+            assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "match_result")
+            assert any(row["entered_solver"] for row in body["markets"] if row["family"] == "both_teams_to_score")
+            assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "draw_no_bet")
+            assert all(not row["solver_is_arbitrage"] for row in body["markets"] if row["family"] == "draw_no_bet")
+            assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "asian_handicap")
+            assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "to_qualify")
+            assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "correct_score")
+            assert all(not row["entered_solver"] for row in body["markets"] if row["family"] == "next_goal")
+            assert any(
+                row["entered_solver"] and row.get("solver_model") == "generalized_payoff"
+                for row in body["markets"]
+                if row["family"] == "first_team_to_score"
+            )
+            assert any(
+                not row["entered_solver"] and row.get("reason") == INCOMPLETE_OUTCOME_REASON
+                for row in body["markets"]
+                if row["family"] == "first_team_to_score"
+            )
+            coordinator.reset()
+        finally:
+            coordinator._clock = original_clock
     finally:
         repository.close()
 

@@ -111,6 +111,7 @@ class PaperTradeAuditEventType(StrEnum):
     SETTLED = "settled"
     SETTLEMENT_IDEMPOTENT = "settlement_idempotent"
     SETTLEMENT_BLOCKED = "settlement_blocked"
+    NFL_LIFECYCLE_OBSERVED = "nfl_lifecycle_observed"
     CLOSE_PLAN_EVALUATED = "close_plan_evaluated"
     CLOSE_FILLS_RECORDED = "close_fills_recorded"
     UNWIND_COMPLETED = "unwind_completed"

@@ -120,6 +120,8 @@ VARIANT_LABELS = {
     TargetCompetitionCode.MLS: (
         "MLS",
         "Major League Soccer",
+        "US Major League Soccer",
+        "USA MLS",
     ),
     TargetCompetitionCode.LEAGUE_ONE: (
         "League One",
@@ -316,7 +318,10 @@ def test_matchbook_scope_rejects_out_of_scope_and_near_neighbors(label: str) -> 
     assert decision.reason == "unknown_or_ambiguous_competition"
 
 
-@pytest.mark.parametrize("label", ("League One", "League Two", "EFL League One", "Ligue 1"))
+@pytest.mark.parametrize(
+    "label",
+    ("League One", "League Two", "EFL League One", "Ligue 1", "MLS", "US Major League Soccer"),
+)
 def test_unselected_registered_competitions_are_out_of_scope(label: str) -> None:
     decision = scope_matchbook_event(
         {
@@ -742,8 +747,9 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
 
 def test_principal_register_has_thirty_rows_and_still_excludes_efl_trophy() -> None:
     codes = {item.code for item in TARGET_COMPETITIONS}
-    assert len(TARGET_COMPETITIONS) == 30
-    assert len(codes) == 30
+    assert len(TARGET_COMPETITIONS) == 31
+    assert len(codes) == 31
+    assert TargetCompetitionCode.NFL in codes
     assert TargetCompetitionCode.LEAGUE_ONE in codes
     assert TargetCompetitionCode.LEAGUE_TWO in codes
     assert TargetCompetitionCode.LIGUE_1 in codes
@@ -769,3 +775,5 @@ def test_default_settings_query_verified_coverage_without_inventing_tickers() ->
     assert "KXBUNDESLIGA2GAME" not in tickers
     assert "KXSERIEAWGAME" not in tickers
     assert "KXCLUBFGAME" not in tickers
+    assert "KXNFLGAME" not in tickers
+    assert "12185" not in settings.resolved_polymarket_series_ids()

@@ -10,7 +10,7 @@ from sports_hedge.domain.football import CanonicalEvent, CanonicalMarket
 from sports_hedge.facts.aliases import (
     curated_team_names_conflict,
     is_curated_canonical_team,
-    resolve_team_name,
+    resolve_team_name_for_competition,
 )
 from sports_hedge.matching.learned_rules import (
     AppliedLearnedRule,
@@ -20,12 +20,56 @@ from sports_hedge.matching.learned_rules import (
     squad_categories_compatible,
 )
 
+# Class/default production identity stays conservative. PAPER injects a separate
+# runtime threshold via ``paper_event_matcher``; do not reuse deprecated
+# ``minimum_mapping_confidence``.
+DEFAULT_EVENT_MATCH_THRESHOLD = 0.92
+PAPER_EVENT_MATCH_THRESHOLD = 0.80
 
-@lru_cache(maxsize=4096)
-def _resolve_static_team_name(value: str) -> str:
+
+@lru_cache(maxsize=8192)
+def _resolve_static_team_name(value: str, competition: str | None) -> str:
     """Cache immutable curated aliases used repeatedly during bulk clustering."""
 
-    return resolve_team_name(value)
+    return resolve_team_name_for_competition(value, competition)
+
+
+def target_competition_code(label: str | None) -> str | None:
+    """Registry key such as ``mls`` / ``liga_mx``, or None when unknown."""
+
+    if not label:
+        return None
+    from sports_hedge.application.target_competitions import resolve_target_competition
+
+    target = resolve_target_competition(label)
+    return None if target is None else target.code.value
+
+
+def known_target_competition_mismatch(left: str | None, right: str | None) -> bool:
+    """True when both labels resolve to different TargetCompetitionCode values."""
+
+    left_code = target_competition_code(left)
+    right_code = target_competition_code(right)
+    return left_code is not None and right_code is not None and left_code != right_code
+
+
+def paper_event_matcher(
+    settings: object | None = None,
+    *,
+    learned_applicator: LearnedMappingApplicator | None = None,
+    kickoff_tolerance: timedelta = timedelta(minutes=5),
+) -> "EventMatcher":
+    """PAPER collector/scanner EventMatcher using the configurable experiment threshold."""
+
+    if settings is None:
+        from sports_hedge.config import get_settings
+
+        settings = get_settings()
+    return EventMatcher(
+        kickoff_tolerance=kickoff_tolerance,
+        threshold=float(getattr(settings, "paper_event_match_threshold")),
+        learned_applicator=learned_applicator,
+    )
 
 
 class EventMatchResult(BaseModel):
@@ -43,6 +87,11 @@ class EventMatcher:
         threshold: float = 0.92,
         learned_applicator: LearnedMappingApplicator | None = None,
     ) -> None:
+        # Default 0.92 is the soccer UNIVERSE/HOT matcher default.
+        # PAPER soccer 0.80 injection (#415) is a constructor argument at
+        # composition time. NFL Stage 1B must not hardcode 0.92 at call sites
+        # or overwrite that injection. Competition-aware aliases stay on
+        # learned_applicator.resolve_teams for soccer.
         self.kickoff_tolerance = kickoff_tolerance
         self.threshold = threshold
         self.learned_applicator = learned_applicator
@@ -79,17 +128,32 @@ class EventMatcher:
 
         ``SequenceMatcher.quick_ratio`` is an upper bound on ``ratio``. Using
         the maximum possible competition score means ``False`` cannot exclude
-        a pair that could reach this matcher's unchanged confidence threshold.
+        a pair that could reach this matcher's threshold, except for a known
+        target-competition mismatch, which is a hard veto.
         """
 
         if left.sport != right.sport:
             return False
-        if not squad_categories_compatible(left.home_team, right.home_team) or not squad_categories_compatible(
+        from sports_hedge.nfl.constants import NFL_SPORT
+        from sports_hedge.nfl.teams import nfl_teams_conflict
+
+        if left.sport == NFL_SPORT:
+            left_home, left_away, _ = self._resolved_teams(
+                left, right, market=left_market, counterpart_market=right_market
+            )
+            right_home, right_away, _ = self._resolved_teams(
+                right, left, market=right_market, counterpart_market=left_market
+            )
+            if nfl_teams_conflict(left_home, right_home) or nfl_teams_conflict(left_away, right_away):
+                return False
+        elif not squad_categories_compatible(left.home_team, right.home_team) or not squad_categories_compatible(
             left.away_team, right.away_team
         ):
             return False
         kickoff_delta = abs(left.kickoff_utc - right.kickoff_utc)
         if kickoff_delta > self.kickoff_tolerance:
+            return False
+        if known_target_competition_mismatch(left.competition, right.competition):
             return False
         left_home, left_away, _ = self._resolved_teams(
             left, right, market=left_market, counterpart_market=right_market
@@ -142,7 +206,25 @@ class EventMatcher:
         if left.sport != right.sport:
             return EventMatchResult(matched=False, confidence=0.0, reasons=["sport_mismatch"])
 
-        if not squad_categories_compatible(left.home_team, right.home_team) or not squad_categories_compatible(
+        from sports_hedge.nfl.constants import NFL_SPORT
+        from sports_hedge.nfl.teams import nfl_teams_conflict, resolve_nfl_team
+
+        if left.sport == NFL_SPORT:
+            for label in (left.home_team, left.away_team, right.home_team, right.away_team):
+                resolved = resolve_nfl_team(label)
+                if resolved.ambiguous:
+                    return EventMatchResult(
+                        matched=False,
+                        confidence=0.0,
+                        reasons=["nfl_team_identity_ambiguous"],
+                    )
+                if resolved.rejected:
+                    return EventMatchResult(
+                        matched=False,
+                        confidence=0.0,
+                        reasons=[resolved.reason or "nfl_team_identity_rejected"],
+                    )
+        elif not squad_categories_compatible(left.home_team, right.home_team) or not squad_categories_compatible(
             left.away_team, right.away_team
         ):
             return EventMatchResult(
@@ -158,6 +240,12 @@ class EventMatcher:
                 confidence=0.0,
                 reasons=["kickoff_outside_tolerance"],
             )
+        if known_target_competition_mismatch(left.competition, right.competition):
+            return EventMatchResult(
+                matched=False,
+                confidence=0.0,
+                reasons=["competition_mismatch"],
+            )
 
         left_home, left_away, left_applied = self._resolved_teams(
             left, right, market=left_market, counterpart_market=right_market
@@ -169,6 +257,15 @@ class EventMatcher:
         provenance = provenance_from_applied(applied)
         if curated_team_names_conflict(left_home, right_home) or curated_team_names_conflict(
             left_away, right_away
+        ):
+            return EventMatchResult(
+                matched=False,
+                confidence=0.0,
+                reasons=["curated_team_mismatch"],
+                provenance=provenance,
+            )
+        if left.sport == NFL_SPORT and (
+            nfl_teams_conflict(left_home, right_home) or nfl_teams_conflict(left_away, right_away)
         ):
             return EventMatchResult(
                 matched=False,
@@ -233,10 +330,23 @@ class EventMatcher:
         market: CanonicalMarket | None,
         counterpart_market: CanonicalMarket | None,
     ) -> tuple[str, str, list[AppliedLearnedRule]]:
+        from sports_hedge.nfl.constants import NFL_SPORT
+        from sports_hedge.nfl.teams import resolve_nfl_team
+
+        if event.sport == NFL_SPORT:
+            home = resolve_nfl_team(event.home_team)
+            away = resolve_nfl_team(event.away_team)
+            competition = target_competition_code(event.competition)
+            return (
+                home.canonical or _resolve_static_team_name(event.home_team, competition),
+                away.canonical or _resolve_static_team_name(event.away_team, competition),
+                [],
+            )
+        competition = target_competition_code(event.competition)
         if self.learned_applicator is None:
             return (
-                _resolve_static_team_name(event.home_team),
-                _resolve_static_team_name(event.away_team),
+                _resolve_static_team_name(event.home_team, competition),
+                _resolve_static_team_name(event.away_team, competition),
                 [],
             )
         return self.learned_applicator.resolve_teams(
@@ -259,33 +369,33 @@ class EventMatcher:
         """True only for exact curated seniors in the same target competition.
 
         Unknown, youth, women, and reserve labels stay fail-closed. Fuzzy club
-        strings keep the weighted kickoff penalty and the 0.92 threshold.
+        strings keep the weighted kickoff penalty and this matcher's threshold.
         """
 
         if left_home != right_home or left_away != right_away:
             return False
+        from sports_hedge.nfl.teams import is_canonical_nfl_team
+
+        if is_canonical_nfl_team(left_home) and is_canonical_nfl_team(left_away):
+            return EventMatcher._same_target_competition(left_competition, right_competition)
         if not is_curated_canonical_team(left_home) or not is_curated_canonical_team(left_away):
             return False
         return EventMatcher._same_target_competition(left_competition, right_competition)
 
     @staticmethod
     def _same_target_competition(left: str, right: str) -> bool:
-        from sports_hedge.application.target_competitions import resolve_target_competition
-
-        left_target = resolve_target_competition(left)
-        right_target = resolve_target_competition(right)
-        return (
-            left_target is not None
-            and right_target is not None
-            and left_target.code == right_target.code
-        )
+        left_code = target_competition_code(left)
+        right_code = target_competition_code(right)
+        return left_code is not None and left_code == right_code
 
     @staticmethod
     def _competition_score(left: str, right: str) -> float:
-        from sports_hedge.application.target_competitions import resolve_target_competition
-
-        left_target = resolve_target_competition(left)
-        right_target = resolve_target_competition(right)
-        if left_target is not None and right_target is not None:
-            return 1.0 if left_target.code == right_target.code else 0.0
+        left_code = target_competition_code(left)
+        right_code = target_competition_code(right)
+        if left_code is not None and right_code is not None:
+            # Score only. Soccer known-competition mismatch veto (#415) is a
+            # hard fail earlier in match()/possible_match and must not be
+            # replaced by this 0.0 score when NFL is composed onto that matcher.
+            return 1.0 if left_code == right_code else 0.0
+        # Fuzzy labels only when one or both competitions are unresolved.
         return EventMatcher._similarity(left, right)

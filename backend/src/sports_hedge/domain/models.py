@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from sports_hedge.domain.market_scope import MarketScope as MarketScope
+
 
 class VenueName(StrEnum):
     MATCHBOOK = "matchbook"

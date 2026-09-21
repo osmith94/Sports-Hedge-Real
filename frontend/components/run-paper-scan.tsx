@@ -11,8 +11,10 @@ import {
   PaperCollectionRequest,
   getEconomicsStatus,
   getLiveRefreshStatus,
+  pauseUniverseSchedule,
   resetMatchbookFee,
   resumePaperScanner,
+  resumeUniverseSchedule,
   runPaperBackgroundRefresh,
   runPaperCollection,
   runPaperHotRefresh,
@@ -28,6 +30,7 @@ import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-
 import { venueHealthIsDegraded } from "../lib/venue-health-display";
 import { ActiveTradeLog } from "./active-trade-log";
 import { FootballCompetitionsModal } from "./football-competitions-modal";
+import { splitUniverseDraft } from "../lib/competition-modal-draft";
 import { LiveScanPulse, LiveScanPulsePhase } from "./live-scan-pulse";
 import { VenueLaneControls } from "./venue-lane-controls";
 
@@ -226,6 +229,7 @@ export function RunPaperScan() {
   const router = useRouter();
   const [capitalLimit, setCapitalLimit] = useState("");
   const [minNetArbPercent, setMinNetArbPercent] = useState(DEFAULT_MIN_NET_ARB_PERCENT);
+  const [outrightMinNetArbPercent, setOutrightMinNetArbPercent] = useState("");
   const [maxRisk, setMaxRisk] = useState(DEFAULT_MAX_RISK);
   const [maxAllocatedPerTrade, setMaxAllocatedPerTrade] = useState(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP);
   const [loadingMode, setLoadingMode] = useState<ScanMode | null>(null);
@@ -244,6 +248,7 @@ export function RunPaperScan() {
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [scannerControlBusy, setScannerControlBusy] = useState(false);
+  const [universeScheduleBusy, setUniverseScheduleBusy] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [competitionsOpen, setCompetitionsOpen] = useState(false);
   const [competitionsSaving, setCompetitionsSaving] = useState(false);
@@ -322,6 +327,11 @@ export function RunPaperScan() {
       }
       if (saved && (!settingsDirty || options?.forceSettings)) {
         setMinNetArbPercent(minNetPercentFromRate(saved.min_net_edge));
+        if (saved.outright_min_net_edge == null || saved.outright_min_net_edge === "") {
+          setOutrightMinNetArbPercent("");
+        } else {
+          setOutrightMinNetArbPercent(minNetPercentFromRate(saved.outright_min_net_edge));
+        }
         setMaxRisk(String(saved.max_execution_risk ?? DEFAULT_MAX_RISK));
         if (saved.max_allocated_per_trade_gbp != null && saved.max_allocated_per_trade_gbp !== "") {
           setMaxAllocatedPerTrade(String(saved.max_allocated_per_trade_gbp));
@@ -488,6 +498,10 @@ export function RunPaperScan() {
       if (!minNet) {
         throw new Error("Minimum net arb is required.");
       }
+      const outrightMinNet = optionalPercentRate(
+        outrightMinNetArbPercent,
+        "Outright minimum net arb",
+      );
       const risk = Number(maxRisk);
       if (!Number.isInteger(risk) || risk < 0 || risk > 100) {
         throw new Error("Maximum execution risk must be a whole number from 0 to 100.");
@@ -501,6 +515,7 @@ export function RunPaperScan() {
       }
       const status = await saveOperatorScannerSettings({
         min_net_edge: minNet,
+        outright_min_net_edge: outrightMinNet ?? null,
         max_execution_risk: risk,
         hot_cadence_seconds: cadence,
         background_cadence_seconds: backgroundCadence,
@@ -534,6 +549,25 @@ export function RunPaperScan() {
     }
   }
 
+  async function toggleUniverseSchedulePaused() {
+    setUniverseScheduleBusy(true);
+    setSettingsMessage(null);
+    try {
+      const status = liveRefresh?.universe_scans_paused
+        ? await resumeUniverseSchedule()
+        : await pauseUniverseSchedule();
+      applyLiveRefresh(status, { forceSettings: true });
+    } catch (error) {
+      setSettingsMessage(
+        error instanceof Error
+          ? error.message
+          : "Could not change scheduled UNIVERSE scan pause.",
+      );
+    } finally {
+      setUniverseScheduleBusy(false);
+    }
+  }
+
   async function applyCompetitionScope(
     codes: string[],
     runUniverseNow: boolean,
@@ -542,8 +576,11 @@ export function RunPaperScan() {
     setCompetitionsSaving(true);
     setCompetitionsError(null);
     try {
+      const catalog = liveRefresh?.universe_scope?.catalog ?? [];
+      const split = splitUniverseDraft(codes, catalog);
       const status = await saveUniverseScope({
-        selected_competition_codes: codes,
+        selected_competition_codes: split.selected_competition_codes,
+        selected_season_scope_codes: split.selected_season_scope_codes,
         sport: "football",
         run_universe_now: runUniverseNow,
         save_as_default: saveAsDefault,
@@ -652,6 +689,7 @@ export function RunPaperScan() {
   const loading = loadingMode !== null;
   const serverOwned = Boolean(liveRefresh?.server_loop_enabled);
   const scannerStopped = Boolean(liveRefresh?.scanner_stopped);
+  const universeScansPaused = Boolean(liveRefresh?.universe_scans_paused);
   const nextHotMs = liveRefresh?.hot?.next_due_at
     ? Date.parse(liveRefresh.hot.next_due_at)
     : Number.NaN;
@@ -704,6 +742,20 @@ export function RunPaperScan() {
               }}
               placeholder="1.00"
               aria-label="Minimum net arbitrage trigger percent"
+            />
+          </label>
+          <label className="scan-field scan-field-outright">
+            <span>Outright Min net arb %</span>
+            <input
+              inputMode="decimal"
+              value={outrightMinNetArbPercent}
+              onChange={(event) => {
+                setOutrightMinNetArbPercent(event.target.value);
+                setSettingsDirty(true);
+              }}
+              placeholder="not set"
+              aria-label="Outright or season minimum net arbitrage trigger percent"
+              title="COMPETITION_SEASON / outright markets only. Leave empty until the owner sets a value. Unconfigured fails closed and never inherits fixture Min Net Arb."
             />
           </label>
           <label className="scan-field scan-field-compact">
@@ -824,7 +876,7 @@ export function RunPaperScan() {
               }}
               aria-label="Football competitions"
             >
-              Football competitions · {liveRefresh?.universe_scope?.selected_count ?? 8} selected
+              UNIVERSE scope · {liveRefresh?.universe_scope?.selected_count ?? 8} selected
             </button>
             {liveRefresh?.universe_scope?.new_competitions_available ? (
               <span className="scan-competitions-badge">New competitions available</span>
@@ -852,6 +904,32 @@ export function RunPaperScan() {
               : liveRefresh?.universe_scope?.manual_universe_state === "running"
                 ? "UNIVERSE running"
                 : "Run UNIVERSE now"}
+          </button>
+          <button
+            className={universeScansPaused ? "scan-button" : "scan-button-secondary"}
+            type="button"
+            disabled={universeScheduleBusy || loading || scannerStopped}
+            onClick={() => void toggleUniverseSchedulePaused()}
+            aria-label={
+              universeScansPaused
+                ? "Resume scheduled UNIVERSE scans"
+                : "Pause scheduled UNIVERSE scans"
+            }
+            title={
+              scannerStopped
+                ? "Scanner stopped by operator"
+                : universeScansPaused
+                  ? "Resume the persisted UNIVERSE cadence. Does not catch up missed intervals."
+                  : "Pause periodic UNIVERSE rediscovery. BACKGROUND, HOT and ACTIVE TRADE continue. Run UNIVERSE now still works."
+            }
+          >
+            {universeScheduleBusy
+              ? universeScansPaused
+                ? "Resuming UNIVERSE…"
+                : "Pausing UNIVERSE…"
+              : universeScansPaused
+                ? "Resume scheduled UNIVERSE"
+                : "Pause scheduled UNIVERSE"}
           </button>
         </div>
         <div className="scan-ops-actions">
@@ -882,6 +960,10 @@ export function RunPaperScan() {
             <span className="status-badge status-badge-stopped" role="status">
               SCANNER STOPPED · ACTIVE TRADE / HOT pricing / BACKGROUND pricing / UNIVERSE discovery paused
             </span>
+          ) : universeScansPaused ? (
+            <span className="status-badge" role="status">
+              UNIVERSE SCHEDULE PAUSED · BACKGROUND / HOT / ACTIVE TRADE continue
+            </span>
           ) : null}
         </div>
         {settingsMessage ? (
@@ -896,9 +978,12 @@ export function RunPaperScan() {
             It does not rediscover the catalogue. Manual BACKGROUND refresh reprices currently due ACTIVE catalogue rows from exact known IDs.
             Neither HOT nor BACKGROUND rediscover the catalogue or advance UNIVERSE generation state.
             Run UNIVERSE now bypasses only the UNIVERSE cadence wait and uses the real selected-scope generation worker.
-            Update saves Min Net Arb, Max Risk, HOT cadence, BACKGROUND cadence and UNIVERSE cadence
+            Pause scheduled UNIVERSE stops the periodic timer only; it does not fake a huge cadence, and the stored cadence stays editable for resume.
+            Update saves Min Net Arb, Outright Min Net Arb, Max Risk, HOT cadence, BACKGROUND cadence and UNIVERSE cadence
             and max allocated per trade for subsequent server-owned work and does not trigger a scan.
-            Football competitions Apply changes the current session scope and does not itself call providers.
+            Football competitions Apply changes the current session scope, including season
+            markets, and does not itself call providers.
+            A material competition-scope change while UNIVERSE is paused coalesces one fresh generation, then remains paused.
             Save this selection as my default is required to persist startup scope across restart.
             HOT cadence is how often HOT pricing is due; BACKGROUND cadence is how often the
             rest of the known ACTIVE catalogue is repriced. UNIVERSE cadence is how often a fresh

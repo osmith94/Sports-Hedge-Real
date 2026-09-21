@@ -141,6 +141,7 @@ def tracked_markets(
 def recent_lifecycle_activity(
     limit: int = Query(default=100, ge=1, le=1000),
     opportunity_id: str | None = None,
+    canonical_event_id: str | None = None,
     since: datetime | None = None,
     operator_signal: bool = Query(
         default=False,
@@ -151,6 +152,7 @@ def recent_lifecycle_activity(
     return service.activity(
         limit=limit,
         opportunity_id=opportunity_id,
+        canonical_event_id=canonical_event_id,
         since=since,
         operator_signal=operator_signal,
     )

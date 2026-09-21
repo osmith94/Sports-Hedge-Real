@@ -9,7 +9,10 @@ import {
   competitionDraftChecked,
   competitionModalDraftFromScope,
   defaultCompetitionCodes,
+  savedDefaultScopeCodes,
+  selectedScopeCodes,
   shouldInitializeCompetitionModalDraft,
+  splitUniverseDraft,
   toggleCompetitionDraft,
   type CompetitionModalLocalState,
 } from "./competition-modal-draft";
@@ -216,5 +219,102 @@ describe("FootballCompetitionsModal wiring contract", () => {
     expect(modalSource).toContain("void onApply(draft, true, saveAsDefault)");
     expect(modalSource).toContain('void onApply(savedDefault, false, false)');
     expect(modalSource).toContain('"uefa"');
+    expect(modalSource).toContain('"outrights"');
+    expect(modalSource).toContain("Discovery scope");
+  });
+});
+
+describe("COMPETITION_SEASON picker rows in the same UNIVERSE draft", () => {
+  const seasonCatalog: OperatorCompetitionOption[] = [
+    ...catalog(),
+    option("epl_2026_27_champion", "outrights", "Outrights / season markets", {
+      selector_label: "Premier League 2026-27 · Champion",
+      market_scope: "COMPETITION_SEASON",
+      observation_only: true,
+      paper_executable: false,
+    }),
+    option("nfl_2026_super_bowl_champion", "outrights", "Outrights / season markets", {
+      selector_label: "NFL 2026 · Super Bowl Champion",
+      market_scope: "COMPETITION_SEASON",
+      observation_only: true,
+      paper_executable: false,
+    }),
+    option("epl_2026_27_top_scorer", "outrights", "Outrights / season markets", {
+      selector_label: "Premier League 2026-27 · Top Scorer",
+      market_scope: "COMPETITION_SEASON",
+      observation_only: true,
+      paper_executable: false,
+      unavailable_reason: "Observation-only · not executable while cross-venue equivalence remains blocked",
+    }),
+  ];
+
+  function seasonScope(overrides: Partial<OperatorUniverseScope> = {}): OperatorUniverseScope {
+    return scope({
+      catalog: seasonCatalog,
+      selected_season_scope_codes: [],
+      saved_default_season_scope_codes: [],
+      ...overrides,
+    });
+  }
+
+  it("keeps season codes out of fixture defaults and splits current vs saved lists", () => {
+    expect(defaultCompetitionCodes(seasonCatalog)).toEqual(["premier_league", UEFA.champions]);
+    const split = splitUniverseDraft(
+      ["premier_league", "epl_2026_27_champion", "epl_2026_27_top_scorer"],
+      seasonCatalog,
+    );
+    expect(split.selected_competition_codes).toEqual(["premier_league"]);
+    expect(split.selected_season_scope_codes).toEqual([
+      "epl_2026_27_champion",
+      "epl_2026_27_top_scorer",
+    ]);
+    const current = seasonScope({
+      selected_competition_codes: ["premier_league"],
+      selected_season_scope_codes: ["epl_2026_27_champion"],
+      saved_default_competition_codes: ["premier_league", UEFA.champions],
+      saved_default_season_scope_codes: [],
+    });
+    expect(selectedScopeCodes(current)).toEqual(["premier_league", "epl_2026_27_champion"]);
+    expect(savedDefaultScopeCodes(current, seasonCatalog)).toEqual(["premier_league", UEFA.champions]);
+    expect(competitionModalDraftFromScope(current).draft).toEqual([
+      "premier_league",
+      "epl_2026_27_champion",
+    ]);
+  });
+
+  it("reloads season session selection after cancel and reopen without dropping unsaved fixture checks while open", () => {
+    const opened = seasonScope({
+      selected_competition_codes: ["premier_league"],
+      selected_season_scope_codes: ["nfl_2026_super_bowl_champion"],
+    });
+    let local = rerender(closedState(), true, opened);
+    expect(local.draft).toEqual(["premier_league", "nfl_2026_super_bowl_champion"]);
+    local = {
+      ...local,
+      draft: toggleCompetitionDraft(local.draft, "epl_2026_27_top_scorer"),
+    };
+    local = rerender(
+      local,
+      true,
+      seasonScope({
+        selected_competition_codes: ["premier_league"],
+        selected_season_scope_codes: ["nfl_2026_super_bowl_champion"],
+        updated_at: "2026-09-21T08:01:00Z",
+      }),
+    );
+    expect(local.draft).toEqual([
+      "premier_league",
+      "nfl_2026_super_bowl_champion",
+      "epl_2026_27_top_scorer",
+    ]);
+    local = rerender(local, false, opened);
+    const later = seasonScope({
+      selected_competition_codes: ["premier_league"],
+      selected_season_scope_codes: ["epl_2026_27_top_scorer"],
+      is_session_override: true,
+    });
+    local = rerender(local, true, later);
+    expect(local.draft).toEqual(["premier_league", "epl_2026_27_top_scorer"]);
+    expect(competitionDraftChecked(local.draft, "epl_2026_27_top_scorer")).toBe(true);
   });
 });

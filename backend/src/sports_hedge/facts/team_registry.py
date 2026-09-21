@@ -1,12 +1,16 @@
-"""Competition-keyed senior-club identity registry (Issue #316).
+"""Competition-keyed senior-club identity registry (Issue #316, MLS/Liga MX #413, census #434).
 
 Fixture identity, HOT scheduling, and historical seeds consume this table.
-Aliases are explicit. Unknown remainders stay unchanged (fail-closed FC strip
-only when the remainder is already a curated canonical).
+Unique aliases are explicit and global. Generic city tokens such as Miami or
+Leon stay on #415's competition-scoped `generic_aliases` and fail closed
+outside that competition. Paris, Sporting, Istanbul, Nacional, and similar
+ambiguous tokens are not globalised and are not added as generics here.
 
-Cups reuse the English senior-club set. International friendlies use senior
-national teams for identity only — that does not invent Kalshi market
-availability.
+Cups reuse the relevant domestic senior-club set. Continental competitions
+reuse the union of those domestic tables so the same club keeps one canonical
+id. MLS / Liga MX stay on their own competition keys so UCL does not inherit
+Miami / Leon / America generics. International friendlies use senior national
+teams for identity only — that does not invent Kalshi market availability.
 
 Data class: maintained identity registry. Not live quotes.
 """
@@ -26,6 +30,26 @@ FA_CUP = "fa_cup"
 INTERNATIONAL_FRIENDLIES = "international_friendlies"
 BUNDESLIGA = "bundesliga"
 SERIE_A = "serie_a"
+MLS = "mls"
+LIGA_MX = "liga_mx"
+LEAGUE_ONE = "league_one"
+LIGUE_1 = "ligue_1"
+EREDIVISIE = "eredivisie"
+PRIMEIRA_LIGA = "primeira_liga"
+SCOTTISH_PREMIERSHIP = "scottish_premiership"
+BELGIAN_PRO_LEAGUE = "belgian_pro_league"
+SUPER_LIG = "super_lig"
+BRASILEIRAO = "brasileirao"
+ARGENTINA_PRIMERA = "argentina_primera"
+SAUDI_PRO_LEAGUE = "saudi_pro_league"
+J1_LEAGUE = "j1_league"
+CHAMPIONS_LEAGUE = "champions_league"
+EUROPA_LEAGUE = "europa_league"
+CONFERENCE_LEAGUE = "conference_league"
+COPA_DEL_REY = "copa_del_rey"
+DFB_POKAL = "dfb_pokal"
+COPPA_ITALIA = "coppa_italia"
+COPA_LIBERTADORES = "copa_libertadores"
 
 TEAM_REGISTRY_VERSION = "v1"
 TEAM_REGISTRY_ISSUE = 316
@@ -34,12 +58,20 @@ TEAM_REGISTRY_ISSUE = 316
 class SeniorClub(BaseModel):
     canonical_name: str
     aliases: tuple[str, ...] = Field(default_factory=tuple)
+    generic_aliases: tuple[str, ...] = Field(default_factory=tuple)
 
 
-def _club(canonical: str, *aliases: str) -> SeniorClub:
+def _club(canonical: str, *aliases: str, generic: tuple[str, ...] = ()) -> SeniorClub:
     unique = tuple(dict.fromkeys([canonical, *aliases]))
     extra = tuple(item for item in unique if item != canonical)
-    return SeniorClub(canonical_name=canonical, aliases=extra)
+    generic_unique = tuple(
+        dict.fromkeys(item for item in generic if item and item != canonical)
+    )
+    return SeniorClub(
+        canonical_name=canonical,
+        aliases=extra,
+        generic_aliases=generic_unique,
+    )
 
 
 PREMIER_LEAGUE_CLUBS: tuple[SeniorClub, ...] = (
@@ -197,6 +229,386 @@ SERIE_A_CLUBS: tuple[SeniorClub, ...] = (
     _club("Frosinone", "Frosinone Calcio"),
 )
 
+# 2026 MLS senior clubs. Aliases are live provider-observed forms from
+# Matchbook / Kalshi / Polymarket read-only metadata (2026-09-20), not
+# guessed shorthands. "Miami" is Inter Miami only because Kalshi GAME/BTTS/
+# TOTAL titles used Miami while FTTS/Matchbook/Polymarket used Inter Miami CF
+# on the same 26SEP20MIASD fixture. Do not treat USL Miami FC as this club.
+MLS_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Atlanta United", "Atlanta", "Atlanta United FC"),
+    _club("Austin", "Austin FC"),
+    _club("Montreal", "CF Montreal", "CF Montréal"),
+    _club("Charlotte", "Charlotte FC"),
+    _club("Chicago Fire", "Chicago Fire FC"),
+    _club("Colorado Rapids", "Colorado", "Colorado Rapids SC"),
+    _club("Columbus Crew", "Columbus"),
+    _club("DC United", "D.C. United", "D.C. United SC"),
+    _club("Cincinnati", "FC Cincinnati"),
+    _club("Dallas", "FC Dallas"),
+    _club("Houston Dynamo", "Houston"),
+    _club("Inter Miami", "Inter Miami CF", generic=("Miami",)),
+    _club(
+        "LA Galaxy",
+        "Los Angeles Galaxy",
+        "Los Angeles G",
+    ),
+    _club(
+        "Los Angeles FC",
+        "LAFC",
+        "Los Angeles F",
+    ),
+    _club("Minnesota United", "Minnesota", "Minnesota United FC"),
+    _club("Nashville", "Nashville SC"),
+    _club("New England Revolution", "New England"),
+    _club("New York City", "New York City FC", "NYCFC"),
+    _club("New York Red Bulls", "New York RB"),
+    _club("Orlando City", "Orlando", "Orlando City SC"),
+    _club("Philadelphia Union", "Philadelphia"),
+    _club("Portland Timbers", "Portland"),
+    _club("Real Salt Lake", "Salt Lake"),
+    _club("San Diego", "San Diego FC"),
+    _club("San Jose Earthquakes", "San Jose"),
+    _club("Seattle Sounders", "Seattle", "Seattle Sounders FC"),
+    _club("Sporting Kansas City", "Kansas City"),
+    _club("St. Louis City", "Saint Louis", "St. Louis City SC"),
+    _club("Toronto", "Toronto FC"),
+    _club("Vancouver Whitecaps", "Vancouver", "Vancouver Whitecaps FC"),
+)
+
+# 2026 Liga MX senior clubs. Unique legal names stay globally resolvable.
+# City-only tokens such as Leon / Queretaro / America are competition-scoped
+# generics so they cannot silently rewrite clubs outside Liga MX.
+LIGA_MX_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Club América", "CF América", "Club America", "CF America", generic=("América", "America")),
+    _club("Atlas"),
+    _club("Atlético San Luis", "Atletico San Luis", "San Luis"),
+    _club("Cruz Azul"),
+    _club("Guadalajara", "Chivas", "CD Guadalajara"),
+    _club("Juárez", "FC Juárez", "FC Juarez", generic=("Juarez",)),
+    _club(
+        "Club León",
+        "Club Leon",
+        "Club León FC",
+        "Club Leon FC",
+        generic=("León", "Leon"),
+    ),
+    _club("Mazatlán", "Mazatlan", "Mazatlán FC", "Mazatlan FC"),
+    _club("Monterrey", "CF Monterrey"),
+    _club("Necaxa"),
+    _club("Pachuca", "CF Pachuca"),
+    _club("Puebla"),
+    _club(
+        "Querétaro FC",
+        "Queretaro FC",
+        generic=("Querétaro", "Queretaro"),
+    ),
+    _club("Santos Laguna", "Club Santos Laguna"),
+    _club("Club Tijuana", "Tijuana", "Tijuana de Caliente"),
+    _club("Toluca", "Deportivo Toluca", "Deportivo Toluca FC"),
+    _club("Tigres", "Tigres UANL"),
+    _club("Pumas UNAM", "Pumas", "UNAM"),
+    # Observed on public Kalshi KXLIGAMXGAME 2026-09-20 (Atlante vs Monterrey).
+    _club("Atlante", "Atlante FC"),
+)
+
+# 2026/27 Süper Lig. Unique aliases are TFF legal names plus Kalshi/Polymarket
+# labels captured 2026-09-21. Istanbul/Izmir/Rams remain fail-closed.
+SUPER_LIG_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Alanyaspor", "Corendon Alanyaspor", "CORENDON Alanyaspor"),
+    _club("Amed", "Amed Sportif", "Amed Sportif Faaliyetler", "Amed SFK"),
+    _club(
+        "Istanbul Basaksehir",
+        "Basaksehir",
+        "Başakşehir",
+        "Istanbul Basaksehir FK",
+        "İstanbul Başakşehir FK",
+        "Rams Başakşehir FK",
+        "Rams Basaksehir FK",
+    ),
+    _club("Besiktas", "Beşiktaş", "Beşiktaş A.Ş.", "Besiktas Istanbul"),
+    _club("Corum", "Çorum FK", "Corum FK", "Arca Çorum FK", "Arca Corum FK"),
+    _club("Erzurumspor", "Erzurumspor FK", "Erzurum"),
+    _club("Eyupspor", "Eyüpspor"),
+    _club("Fenerbahce", "Fenerbahçe", "Fenerbahçe A.Ş.", "Fenerbahce Istanbul"),
+    _club("Galatasaray", "Galatasaray A.Ş.", "Galatasaray Istanbul"),
+    _club("Gaziantep", "Gaziantep FK", "Gaziantep Futbol Kulübü A.Ş."),
+    _club("Genclerbirligi", "Gençlerbirliği", "Genclerbirligi SK", "Gençlerbirliği SK"),
+    _club("Goztepe", "Göztepe", "Göztepe A.Ş.", "Goztepe Izmir"),
+    _club("Kasimpasa", "Kasımpaşa", "Kasımpaşa A.Ş.", "Kasimpasa Istanbul"),
+    _club("Kocaelispor", "Kocaeli"),
+    _club("Konyaspor", "Tümosan Konyaspor", "TÜMOSAN Konyaspor"),
+    _club("Rizespor", "Caykur Rizespor", "Çaykur Rizespor", "Çaykur Rizespor A.Ş."),
+    _club("Samsunspor", "Samsunspor A.Ş."),
+    _club("Trabzonspor", "Trabzonspor A.Ş."),
+)
+
+# 2026/27 Primeira Liga. Sporting/Nacional/Lisbon/Vitoria stay fail-closed.
+PRIMEIRA_LIGA_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Academico Viseu", "Académico de Viseu", "Académico de Viseu FC", "Viseu"),
+    _club("Alverca", "FC Alverca", "FC Alverca SAD"),
+    _club("Arouca", "FC Arouca"),
+    _club("Benfica", "SL Benfica", "Sport Lisboa e Benfica"),
+    _club("Casa Pia", "Casa Pia AC", "Casa Pia Lisbon"),
+    _club("Estoril", "Estoril Praia", "GD Estoril Praia"),
+    _club("Estrela Amadora", "CF Estrela da Amadora", "Estrela da Amadora"),
+    _club("Famalicao", "Famalicão", "FC Famalicão", "FC Famalicao"),
+    _club("Porto", "FC Porto"),
+    _club("Gil Vicente", "Gil Vicente FC", "Gil Vicente Barcelos", "Vicente Barcelos"),
+    _club("Maritimo", "Marítimo", "CS Marítimo"),
+    _club("Moreirense", "Moreirense FC"),
+    _club("Nacional Madeira", "CD Nacional", "Nacional da Madeira"),
+    _club("Rio Ave", "Rio Ave FC"),
+    _club("Santa Clara", "CD Santa Clara", "Santa Clara Azores"),
+    _club("Sporting CP", "Sporting Lisbon"),
+    _club("Braga", "SC Braga"),
+    _club(
+        "Guimaraes",
+        "Vitória SC",
+        "Vitoria SC",
+        "Vitoria SC Guimaraes",
+        "Vitória de Guimarães",
+        "Vitória Guimarães",
+    ),
+)
+
+# 2026/27 Ligue 1. Paris stays fail-closed (PSG vs Paris FC).
+LIGUE_1_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Angers", "Angers SCO"),
+    _club("Auxerre", "AJ Auxerre"),
+    _club("Brest", "Stade Brest", "Stade Brest 29", "Stade Brestois 29"),
+    _club("Le Havre", "Le Havre AC"),
+    _club("Le Mans", "Le Mans FC"),
+    _club("Lens", "RC Lens", "Racing Club De Lens"),
+    _club("Lille", "Lille OSC", "LOSC Lille"),
+    _club("Lorient", "FC Lorient"),
+    _club("Lyon", "Olympique Lyonnais", "Olympique Lyon"),
+    _club("Marseille", "Olympique Marseille", "Olympique de Marseille"),
+    _club("Monaco", "AS Monaco", "AS Monaco FC"),
+    _club("Nice", "OGC Nice"),
+    _club("Paris FC"),
+    _club("Paris Saint-Germain", "PSG"),
+    _club("Rennes", "Stade Rennais", "Stade Rennais FC", "Stade Rennes"),
+    _club("Strasbourg", "Strasbourg Alsace", "RC Strasbourg", "RC Strasbourg Alsace"),
+    _club("Toulouse", "Toulouse FC"),
+    _club("Troyes", "ESTAC Troyes", "ES Troyes AC"),
+)
+
+# 2026/27 Eredivisie. Sparta stays fail-closed (Sparta Prague).
+EREDIVISIE_CLUBS: tuple[SeniorClub, ...] = (
+    _club("ADO Den Haag", "Den Haag"),
+    _club("Ajax", "Ajax Amsterdam", "AFC Ajax"),
+    _club("AZ Alkmaar", "AZ", "Alkmaar"),
+    _club("Cambuur", "SC Cambuur", "SC Cambuur-Leeuwarden"),
+    _club("Excelsior", "Excelsior Rotterdam"),
+    _club("Feyenoord", "Feyenoord Rotterdam"),
+    _club("Fortuna Sittard", "Sittard"),
+    _club("Go Ahead Eagles", "GA Eagles"),
+    _club("Groningen", "FC Groningen"),
+    _club("Heerenveen", "SC Heerenveen"),
+    _club("NEC Nijmegen", "NEC", "Nijmegen"),
+    _club("PEC Zwolle", "Zwolle"),
+    _club("PSV Eindhoven", "PSV"),
+    _club("Sparta Rotterdam"),
+    _club("Telstar", "SC Telstar", "Telstar 1963"),
+    _club("Twente", "FC Twente", "FC Twente Enschede", "Enschede"),
+    _club("Utrecht", "FC Utrecht"),
+    _club("Willem II", "Willem II Tilburg"),
+)
+
+# 2026/27 Scottish Premiership. Dundee and Dundee United stay distinct.
+SCOTTISH_PREMIERSHIP_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Aberdeen", "Aberdeen FC"),
+    _club("Celtic", "Celtic FC"),
+    _club("Dundee", "Dundee FC"),
+    _club("Dundee United", "Dundee United FC"),
+    _club("Falkirk", "Falkirk FC"),
+    _club("Heart of Midlothian", "Hearts", "Heart of Midlothian FC"),
+    _club("Hibernian", "Hibernian FC", "Hibs"),
+    _club("Kilmarnock", "Kilmarnock FC"),
+    _club("Motherwell", "Motherwell FC"),
+    _club("Rangers", "Rangers FC"),
+    _club("St Johnstone", "St. Johnstone", "St Johnstone FC"),
+    _club("St Mirren", "St. Mirren", "St Mirren FC"),
+)
+
+# 2026/27 Belgian Pro League. Brugge/Bruges/Standard stay fail-closed.
+BELGIAN_PRO_LEAGUE_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Anderlecht", "RSC Anderlecht"),
+    _club("Royal Antwerp", "Royal Antwerp FC", "Antwerp"),
+    _club("Beveren"),
+    _club("Cercle Brugge"),
+    _club("Charleroi", "Royal Charleroi", "Royal Charleroi SC"),
+    _club("Club Brugge"),
+    _club("Genk", "KRC Genk"),
+    _club("Gent", "KAA Gent"),
+    _club("Kortrijk"),
+    _club("La Louviere", "La Louvière", "RAAL La Louviere"),
+    _club("Lommel", "Lommel SK"),
+    _club("Mechelen", "Yellow-Red KV Mechelen"),
+    _club("OH Leuven", "Leuven", "Oud-Heverlee Leuven"),
+    _club("Sint-Truiden", "St. Truidense", "St. Truidense VV"),
+    _club("Standard Liege", "Standard Liège"),
+    _club("Union Saint-Gilloise", "Union Gilloise", "Union SG"),
+    _club("Westerlo", "KVC Westerlo"),
+    _club("Zulte Waregem", "SV Zulte Waregem"),
+)
+
+# 2026/27 EFL League One. Overlapping Championship canonicals are reused.
+LEAGUE_ONE_CLUBS: tuple[SeniorClub, ...] = (
+    _club("AFC Wimbledon", "Wimbledon"),
+    _club("Barnsley"),
+    _club("Blackpool"),
+    _club("Bradford City", "Bradford", "Bradford City AFC"),
+    _club("Bromley", "Bromley FC"),
+    _club("Burton Albion", "Burton"),
+    _club("Cambridge United", "Cambridge"),
+    _club("Doncaster Rovers", "Doncaster"),
+    _club("Huddersfield Town", "Huddersfield"),
+    _club("Leicester City", "Leicester"),
+    _club("Leyton Orient"),
+    _club("Luton Town", "Luton"),
+    _club("Mansfield Town", "Mansfield"),
+    _club("Milton Keynes Dons", "Milton Keynes", "MK Dons"),
+    _club("Notts County", "Notts"),
+    _club("Oxford United", "Oxford"),
+    _club("Peterborough United", "Peterborough"),
+    _club("Plymouth Argyle", "Plymouth"),
+    _club("Reading"),
+    _club("Sheffield Wednesday", "Sheffield Weds"),
+    _club("Stevenage", "Stevenage FC"),
+    _club("Stockport County", "Stockport"),
+    _club("Wigan Athletic", "Wigan"),
+    _club("Wycombe Wanderers", "Wycombe"),
+)
+
+# 2026 Brazilian Série A. Bare Vitoria stays fail-closed (Vitória SC).
+BRASILEIRAO_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Athletico Paranaense", "Paranaense", "CA Paranaense"),
+    _club("Atletico Mineiro", "Atlético Mineiro", "Atletico Mineiro MG", "CA Mineiro"),
+    _club("Bahia", "EC Bahia", "EC Bahia BA"),
+    _club("Botafogo", "Botafogo FR", "Botafogo FR RJ"),
+    _club("Chapecoense", "Chapecoense SC"),
+    _club("Corinthians", "SC Corinthians", "SC Corinthians SP"),
+    _club("Coritiba", "Coritiba FBC"),
+    _club("Cruzeiro", "Cruzeiro EC", "Cruzeiro EC MG"),
+    _club("Flamengo", "CR Flamengo", "CR Flamengo RJ"),
+    _club("Fluminense", "Fluminense FC", "Fluminense FC RJ"),
+    _club("Gremio", "Grêmio", "Gremio FB Porto Alegrense RS", "Grêmio FBPA"),
+    _club("Internacional", "SC Internacional", "SC Internacional RS"),
+    _club("Mirassol", "Mirassol FC", "Mirassol FC SP"),
+    _club("Palmeiras", "SE Palmeiras", "SE Palmeiras SP"),
+    _club("Red Bull Bragantino", "Bragantino", "Red Bull Bragantino SP"),
+    _club("Remo", "Clube do Remo"),
+    _club("Santos", "Santos FC", "Santos FC SP"),
+    _club("Sao Paulo", "São Paulo", "Sao Paulo FC", "São Paulo FC", "Sao Paulo FC SP"),
+    _club("Vasco da Gama", "CR Vasco da Gama", "CR Vasco da Gama RJ"),
+    _club("EC Vitoria", "EC Vitória", "EC Vitoria BA", "EC Vitória BA"),
+)
+
+# 2026 Argentine Primera. Same-token clubs stay fully qualified.
+ARGENTINA_PRIMERA_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Aldosivi", "CA Aldosivi"),
+    _club("Argentinos Juniors", "AA Argentinos Juniors"),
+    _club("Atletico Tucuman", "Atlético Tucumán", "CA Tucumán", "CA Tucuman"),
+    _club("Banfield"),
+    _club("Barracas Central", "Barracas", "CA Barracas Central"),
+    _club("Belgrano", "Belgrano de Cordoba"),
+    _club("Boca Juniors"),
+    _club("Central Cordoba", "Central Córdoba"),
+    _club("Defensa y Justicia", "CSyD Defensa y Justicia"),
+    _club("Deportivo Riestra", "Riestra"),
+    _club("Estudiantes La Plata", "Estudiantes de La Plata"),
+    _club("Estudiantes Rio Cuarto", "Estudiantes RC", "Rio Cuarto"),
+    _club("Gimnasia La Plata", "Gimnasia y Esgrima de La Plata"),
+    _club("Gimnasia Mendoza", "Gimnasia y Esgrima (M)"),
+    _club("Huracan", "Huracán", "CA Huracán"),
+    _club("Independiente Avellaneda", "CA Independiente"),
+    _club("Independiente Rivadavia", "Rivadavia", "CS Independiente Rivadavia"),
+    _club("Instituto", "Instituto AC Córdoba", "Instituto Cordoba"),
+    _club("Lanus", "Lanús", "CA Lanús"),
+    _club("Newells Old Boys", "Newell's Old Boys", "CA Newell's Old Boys"),
+    _club("Platense"),
+    _club("Racing Avellaneda", "Racing"),
+    _club("River Plate", "CA River Plate"),
+    _club("Rosario Central"),
+    _club("San Lorenzo", "San Lorenzo de Almagro", "CA San Lorenzo de Almagro"),
+    _club("Sarmiento Junin", "Sarmiento"),
+    _club("Talleres Cordoba", "Talleres", "CA Talleres"),
+    _club("Tigre", "CA Tigre"),
+    _club("Union Santa Fe", "CA Unión"),
+    _club("Velez Sarsfield", "Vélez Sarsfield"),
+)
+
+# 2026/27 Saudi Pro League. AL Suqoor stays UNKNOWN.
+SAUDI_PRO_LEAGUE_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Abha", "Abha Club"),
+    _club("Al Ahli", "Al-Ahli", "Al Ahli Saudi", "Al Ahli Saudi FC"),
+    _club("Al Diriyah", "Al-Diriyah", "Al-Diraiyah FC", "Diriyah Club"),
+    _club("Al Ettifaq", "Al-Ettifaq", "Al-Ittifaq", "Al-Ittifaq FC", "Al Ettifaq Saudi Club"),
+    _club("Al Faisaly", "Al-Faisaly", "Al-Faisaly FC"),
+    _club("Al Fateh", "Al-Fateh", "Al Fateh Saudi Club"),
+    _club("Al Fayha", "Al-Fayha"),
+    _club("Al Hazem", "Al-Hazem"),
+    _club("Al Hilal", "Al-Hilal", "Al-Hilal SFC"),
+    _club("Al Ittihad", "Al-Ittihad", "Al-Ittihad Club"),
+    _club("Al Khaleej", "Al-Khaleej"),
+    _club("Al Kholood", "Al-Kholood"),
+    _club("Al Nassr", "Al-Nassr", "Al Nassr Club"),
+    _club("Al Qadsiah", "Al-Qadsiah", "Al Qadsiah"),
+    _club("Al Riyadh", "Al-Riyadh", "Al-Riyadh SC", "Al Riyadh Saudi Club"),
+    _club("Al Shabab", "Al-Shabab", "Al-Shabab FC (SA)"),
+    _club("Al Taawoun", "Al-Taawoun"),
+    _club("Neom", "Neom SC", "NEOM SC"),
+)
+
+# 2026 J1. Tokyo/Yokohama/Osaka city tokens stay fail-closed.
+J1_LEAGUE_CLUBS: tuple[SeniorClub, ...] = (
+    _club("Albirex Niigata", "Albirex"),
+    _club("Avispa Fukuoka", "Avispa"),
+    _club("Cerezo Osaka", "Cerezo", "Cerezo Ōsaka"),
+    _club("Fagiano Okayama", "Fagiano O", "Fagiano Okayama"),
+    _club("FC Tokyo", "FC Tōkyō"),
+    _club("Gamba Osaka", "Gamba", "Gamba Ōsaka"),
+    _club("Kashima Antlers", "Kashima"),
+    _club("Kashiwa Reysol", "Kashiwa"),
+    _club("Kawasaki Frontale", "Frontale"),
+    _club("Kyoto Sanga", "Kyoto Sanga FC", "Kyōto Sanga FC"),
+    _club("Machida Zelvia", "Machida Z", "FC Machida Zelvia"),
+    _club("Mito Hollyhock", "Mito H", "FC Mito Holly Hock"),
+    _club("Nagoya Grampus", "Nagoya"),
+    _club("Sanfrecce Hiroshima", "Hiroshima"),
+    _club("Shimizu S-Pulse", "Shimizu"),
+    _club("Shonan Bellmare", "Shonan"),
+    _club("Tokyo Verdy", "Tokyo V"),
+    _club("Urawa Red Diamonds", "Urawa"),
+    _club("Vissel Kobe", "Kobe", "Vissel Kōbe"),
+    _club("Yokohama F Marinos", "Marinos", "Yokohama F. Marinos"),
+    _club("Yokohama FC"),
+    _club("JEF United Chiba", "United Chiba", "JEF United Ichihara Chiba"),
+    _club("V-Varen Nagasaki", "V-Varen"),
+)
+
+# Continental reuse of curated domestic tables. MLS / Liga MX stay off this
+# union so Champions League does not inherit Miami / Leon / America generics.
+_DOMESTIC_CLUBS: tuple[SeniorClub, ...] = (
+    *PREMIER_LEAGUE_CLUBS,
+    *CHAMPIONSHIP_CLUBS,
+    *LEAGUE_ONE_CLUBS,
+    *LA_LIGA_CLUBS,
+    *BUNDESLIGA_CLUBS,
+    *SERIE_A_CLUBS,
+    *LIGUE_1_CLUBS,
+    *EREDIVISIE_CLUBS,
+    *PRIMEIRA_LIGA_CLUBS,
+    *SCOTTISH_PREMIERSHIP_CLUBS,
+    *BELGIAN_PRO_LEAGUE_CLUBS,
+    *SUPER_LIG_CLUBS,
+    *BRASILEIRAO_CLUBS,
+    *ARGENTINA_PRIMERA_CLUBS,
+    *SAUDI_PRO_LEAGUE_CLUBS,
+    *J1_LEAGUE_CLUBS,
+)
+
 NATIONAL_TEAMS: tuple[SeniorClub, ...] = (
     _club("England"),
     _club("France"),
@@ -242,12 +654,33 @@ NATIONAL_TEAMS: tuple[SeniorClub, ...] = (
 CLUBS_BY_COMPETITION: dict[str, tuple[SeniorClub, ...]] = {
     PREMIER_LEAGUE: PREMIER_LEAGUE_CLUBS,
     CHAMPIONSHIP: CHAMPIONSHIP_CLUBS,
+    LEAGUE_ONE: LEAGUE_ONE_CLUBS,
     LA_LIGA: LA_LIGA_CLUBS,
     BUNDESLIGA: BUNDESLIGA_CLUBS,
     SERIE_A: SERIE_A_CLUBS,
-    # Cups reuse English senior clubs. Do not invent a separate lower-league universe.
+    LIGUE_1: LIGUE_1_CLUBS,
+    EREDIVISIE: EREDIVISIE_CLUBS,
+    PRIMEIRA_LIGA: PRIMEIRA_LIGA_CLUBS,
+    SCOTTISH_PREMIERSHIP: SCOTTISH_PREMIERSHIP_CLUBS,
+    BELGIAN_PRO_LEAGUE: BELGIAN_PRO_LEAGUE_CLUBS,
+    SUPER_LIG: SUPER_LIG_CLUBS,
+    BRASILEIRAO: BRASILEIRAO_CLUBS,
+    ARGENTINA_PRIMERA: ARGENTINA_PRIMERA_CLUBS,
+    SAUDI_PRO_LEAGUE: SAUDI_PRO_LEAGUE_CLUBS,
+    J1_LEAGUE: J1_LEAGUE_CLUBS,
+    MLS: MLS_CLUBS,
+    LIGA_MX: LIGA_MX_CLUBS,
+    # Cups reuse the relevant domestic senior set. Lower-division cup sides
+    # stay uncurated rather than inventing a second club universe.
     CARABAO_CUP: PREMIER_LEAGUE_CLUBS + CHAMPIONSHIP_CLUBS,
     FA_CUP: PREMIER_LEAGUE_CLUBS + CHAMPIONSHIP_CLUBS,
+    COPA_DEL_REY: LA_LIGA_CLUBS,
+    DFB_POKAL: BUNDESLIGA_CLUBS,
+    COPPA_ITALIA: SERIE_A_CLUBS,
+    CHAMPIONS_LEAGUE: _DOMESTIC_CLUBS,
+    EUROPA_LEAGUE: _DOMESTIC_CLUBS,
+    CONFERENCE_LEAGUE: _DOMESTIC_CLUBS,
+    COPA_LIBERTADORES: BRASILEIRAO_CLUBS + ARGENTINA_PRIMERA_CLUBS,
     INTERNATIONAL_FRIENDLIES: NATIONAL_TEAMS,
 }
 
@@ -267,13 +700,20 @@ def all_senior_clubs() -> tuple[SeniorClub, ...]:
             if existing is None:
                 by_key[key] = club
                 continue
-            merged = tuple(dict.fromkeys((*existing.aliases, *club.aliases)))
-            by_key[key] = SeniorClub(canonical_name=existing.canonical_name, aliases=merged)
+            merged_aliases = tuple(dict.fromkeys((*existing.aliases, *club.aliases)))
+            merged_generic = tuple(
+                dict.fromkeys((*existing.generic_aliases, *club.generic_aliases))
+            )
+            by_key[key] = SeniorClub(
+                canonical_name=existing.canonical_name,
+                aliases=merged_aliases,
+                generic_aliases=merged_generic,
+            )
     return tuple(by_key[key] for key in sorted(by_key))
 
 
 def alias_pairs() -> tuple[tuple[str, str], ...]:
-    """Every explicit alias including self-aliases, keyed to canonical names."""
+    """Unique aliases including self-aliases. Generic city tokens are excluded."""
 
     pairs: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -285,6 +725,22 @@ def alias_pairs() -> tuple[tuple[str, str], ...]:
                 continue
             seen.add(key)
             pairs.append(item)
+    return tuple(pairs)
+
+
+def generic_aliases_for(competition: str) -> tuple[tuple[str, str], ...]:
+    """Competition-scoped generic aliases such as Miami or Leon."""
+
+    clubs = CLUBS_BY_COMPETITION.get(str(competition), ())
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for club in clubs:
+        for alias in club.generic_aliases:
+            key = (normalize_text(alias), normalize_text(club.canonical_name))
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append((alias, club.canonical_name))
     return tuple(pairs)
 
 

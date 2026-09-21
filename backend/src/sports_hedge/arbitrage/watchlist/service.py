@@ -30,6 +30,7 @@ from sports_hedge.arbitrage.watchlist.models import (
     PaperFillAttempt,
     PaperFillAttemptStatus,
     WatchObservation,
+    canonical_event_id_from_hot_opportunity_id,
     format_hot_promotion_detail,
     hot_promotion_lifecycle_event_id,
     hot_promotion_opportunity_id,
@@ -110,7 +111,10 @@ class WatchlistService:
         ):
             status = previous.status
         distance = None
-        if observation.current_net_edge is not None:
+        if (
+            observation.current_net_edge is not None
+            and observation.trigger_net_edge is not None
+        ):
             distance = distance_to_trigger_pp(
                 observation.current_net_edge,
                 observation.trigger_net_edge,
@@ -138,6 +142,9 @@ class WatchlistService:
             classification=classification_for(status),
             is_arbitrage=is_arbitrage,
             trigger_net_edge=observation.trigger_net_edge,
+            min_net_edge_scope=observation.min_net_edge_scope,
+            min_net_edge_source=observation.min_net_edge_source,
+            min_net_edge_configured=observation.min_net_edge_configured,
             current_net_edge=observation.current_net_edge,
             gross_edge=observation.gross_edge,
             distance_to_trigger_pp=distance,
@@ -291,6 +298,7 @@ class WatchlistService:
                 current_net_edge=updated.current_net_edge,
                 distance_to_trigger_pp=updated.distance_to_trigger_pp,
                 detail=event_detail,
+                attempt_id=attempt.attempt_id,
                 **lifecycle_identity_from_opportunity(updated),
             )
         )
@@ -419,6 +427,7 @@ class WatchlistService:
                     current_net_edge=updated.current_net_edge,
                     distance_to_trigger_pp=updated.distance_to_trigger_pp,
                     detail=event_detail,
+                    attempt_id=None if attempt is None else attempt.attempt_id,
                     **lifecycle_identity_from_opportunity(updated),
                 )
             )
@@ -557,6 +566,7 @@ class WatchlistService:
                     current_net_edge=current.current_net_edge,
                     distance_to_trigger_pp=current.distance_to_trigger_pp,
                     detail=event_detail,
+                    attempt_id=attempt_id,
                     **lifecycle_identity_from_opportunity(current),
                 )
             )
@@ -712,18 +722,26 @@ class WatchlistService:
         *,
         limit: int = 100,
         opportunity_id: str | None = None,
+        canonical_event_id: str | None = None,
         since=None,
         operator_signal: bool = False,
         event_types: Sequence[LifecycleEventType] | None = None,
     ) -> list[OpportunityLifecycleEvent]:
+        """Persisted lifecycle. HOT opportunity ids also join the same canonical event."""
+
+        resolved_canonical = canonical_event_id
+        if resolved_canonical is None and opportunity_id is not None:
+            resolved_canonical = canonical_event_id_from_hot_opportunity_id(opportunity_id)
+        identity_query = opportunity_id is not None or resolved_canonical is not None
         events = self.repository.list_events(
-            limit=limit if opportunity_id else limit * 2,
+            limit=limit if identity_query else limit * 2,
             opportunity_id=opportunity_id,
+            canonical_event_id=resolved_canonical,
             since=since,
             event_types=None if operator_signal else event_types,
             operator_signal=operator_signal,
         )
-        if opportunity_id is not None:
+        if identity_query:
             return events
         demo_ids = {
             item.opportunity_id
@@ -926,6 +944,16 @@ class WatchlistService:
                         )
                     )
 
+        if _entered_capture_eligible_triggered_episode(previous, current):
+            events.append(
+                self._event(
+                    current,
+                    LifecycleEventType.PAPER_ELIGIBLE,
+                    detail="capture_eligible_triggered",
+                    capture_eligible=True,
+                )
+            )
+
         events.extend(self._rejection_events(previous, current, observation))
         for event in events:
             self.repository.append_event(event)
@@ -1075,6 +1103,19 @@ def _episode_capture_eligible(
         and previous.capture_eligible
     )
     return sticky or observation.eligible_for_paper_simulation
+
+
+def _entered_capture_eligible_triggered_episode(
+    previous: NearOpportunity | None,
+    current: NearOpportunity,
+) -> bool:
+    """Emit Paper eligible once when a TRIGGERED stay first becomes capture-eligible."""
+
+    if current.status != OpportunityStatus.TRIGGERED or not current.capture_eligible:
+        return False
+    if previous is None:
+        return True
+    return not (previous.status == OpportunityStatus.TRIGGERED and previous.capture_eligible)
 
 
 def _presentation_stale_only(reasons: list[str]) -> bool:

@@ -85,7 +85,7 @@ def test_watchlist_persists_canonical_line_and_capture_eligibility_together() ->
     assert '"line": "TEXT"' in extras_src
     assert '"capture_eligible": "INTEGER"' in extras_src
     upsert_src = inspect.getsource(SqliteWatchlistRepository._upsert_opportunity_locked)
-    assert upsert_src.count("?") == 49
+    assert upsert_src.count("?") == 52
 
     service = WatchlistService(SqliteWatchlistRepository())
     stored = service.observe(

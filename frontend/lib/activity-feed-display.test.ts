@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { OpportunityLifecycleEvent } from "./api";
 import {
   activityFromWatchlist,
+  activityHistoryPath,
   activitySubjectFromEvent,
   isOperatorActivityEvent,
   isVisibleOperatorActivityEvent,
@@ -35,7 +36,7 @@ function event(
 }
 
 describe("signal-only Activity feed", () => {
-  it("renders only the four operator-significant titles", () => {
+  it("renders only the five operator-significant titles", () => {
     const items = activityFromWatchlist([
       event({
         event_id: "noise-1",
@@ -74,6 +75,14 @@ describe("signal-only Activity feed", () => {
         detail: "Brentford v Chelsea · BACKGROUND → HOT",
       }),
       event({
+        event_id: "eligible-1",
+        event_type: "paper_eligible",
+        occurred_at: "2026-09-20T13:00:06Z",
+        status: "TRIGGERED",
+        capture_eligible: true,
+        detail: "capture_eligible_triggered",
+      }),
+      event({
         event_id: "lost-1",
         event_type: "trigger_lost_before_fill",
         occurred_at: "2026-09-20T13:00:07Z",
@@ -92,18 +101,31 @@ describe("signal-only Activity feed", () => {
     ]);
     assert.deepEqual(
       items.map((item) => item.title),
-      ["Promoted to HOT", "Trigger lost before fill", "Trade entered", "Trade exited"],
+      [
+        "Promoted to HOT",
+        "Paper eligible",
+        "Trigger lost before fill",
+        "Trade entered",
+        "Trade exited",
+      ],
     );
     assert.deepEqual(
       items.map((item) => item.kind),
-      ["PROMOTED_TO_HOT", "TRIGGER_LOST_BEFORE_FILL", "TRADE_ENTERED", "TRADE_EXITED"],
+      [
+        "PROMOTED_TO_HOT",
+        "PAPER_ELIGIBLE",
+        "TRIGGER_LOST_BEFORE_FILL",
+        "TRADE_ENTERED",
+        "TRADE_EXITED",
+      ],
     );
-    assert.equal(items[1]?.missedTriggerEventId, "lost-1");
-    assert.equal(items[2]?.missedTriggerEventId, null);
+    assert.equal(items[2]?.missedTriggerEventId, "lost-1");
+    assert.equal(items[3]?.missedTriggerEventId, null);
     assert.equal(items.find((item) => item.title === "Trigger lost before fill")?.title.includes("Trade"), false);
     assert.ok(items.every((item) => item.subject === "Brentford v Chelsea · both teams to score"));
     assert.ok(items.every((item) => item.fixtureLabel === "Brentford v Chelsea"));
     assert.ok(items.every((item) => item.marketFamily === "both_teams_to_score"));
+    assert.ok(items.every((item) => item.opportunityId === "watch:mkt-1"));
   });
 
   it("keeps one trade-entered card for a completed multi-leg paper fill", () => {
@@ -156,20 +178,39 @@ describe("signal-only Activity feed", () => {
     const api = readFileSync(join(frontendRoot, "lib/api.ts"), "utf8");
     assert.match(page, /operator_signal=true/);
     assert.match(feed, /Promoted to HOT/);
+    assert.match(
+      feed,
+      /Promoted to HOT, paper eligible, trigger lost, trade entered, trade exited/,
+    );
     assert.match(feed, /data-missed-trigger-event-id/);
     assert.match(feed, /feed-subject/);
     assert.match(feed, /data-fixture-label/);
+    assert.match(feed, /data-history-opportunity-id/);
+    assert.match(feed, /activityHistoryPath/);
     assert.doesNotMatch(feed, /Paper watchlist, threshold, fill and rejection events/);
     assert.match(api, /promoted_to_hot/);
+    assert.match(api, /paper_eligible/);
     assert.deepEqual([...OPERATOR_ACTIVITY_EVENT_TYPES], [
       "promoted_to_hot",
+      "paper_eligible",
       "trigger_lost_before_fill",
       "paper_fill_complete",
       "closed",
     ]);
     assert.equal(isOperatorActivityEvent("rejected_semantics"), false);
     assert.equal(isOperatorActivityEvent("paper_fill_attempted"), false);
+    assert.equal(isOperatorActivityEvent("trigger_crossed"), false);
     assert.equal(isOperatorActivityEvent("promoted_to_hot"), true);
+    assert.equal(isOperatorActivityEvent("paper_eligible"), true);
+    assert.equal(activityHistoryPath("watch:mkt-1"), "/activity/watch%3Amkt-1");
+    assert.equal(
+      activityHistoryPath("watch:mkt-1", "evt-signal"),
+      "/activity/watch%3Amkt-1?canonical_event_id=evt-signal",
+    );
+    assert.equal(
+      activityHistoryPath("hot:evt-signal"),
+      "/activity/hot%3Aevt-signal?canonical_event_id=evt-signal",
+    );
   });
 
   it("shows fixture and market at a glance from durable event metadata", () => {
@@ -243,6 +284,18 @@ describe("signal-only Activity feed", () => {
         }),
       ),
       false,
+    );
+    assert.equal(
+      isVisibleOperatorActivityEvent(
+        event({
+          event_id: "eligible-1",
+          event_type: "paper_eligible",
+          occurred_at: "2026-09-20T13:00:03Z",
+          status: "TRIGGERED",
+          capture_eligible: true,
+        }),
+      ),
+      true,
     );
   });
 });

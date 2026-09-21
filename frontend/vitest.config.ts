@@ -25,6 +25,7 @@ export default defineConfig({
       "lib/system-load-display.test.ts",
       "lib/active-trade-timeline-display.test.ts",
       "lib/activity-feed-display.test.ts",
+      "lib/opportunity-history-display.test.ts",
     ],
   },
 });

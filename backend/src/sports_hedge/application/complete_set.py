@@ -25,6 +25,9 @@ STEP7_COMPLETE_SET_FAMILIES: frozenset[MarketFamily] = frozenset(
         MarketFamily.MATCH_RESULT,
         MarketFamily.BOTH_TEAMS_TO_SCORE,
         MarketFamily.TOTAL_GOALS,
+        MarketFamily.GAME_WINNER,
+        MarketFamily.POINT_SPREAD,
+        MarketFamily.TOTAL_POINTS,
     }
 )
 
@@ -54,10 +57,13 @@ COMPLETE_OUTCOME_SPACE: dict[MarketFamily, frozenset[CanonicalOutcome]] = {
     MarketFamily.BOTH_TEAMS_TO_SCORE: frozenset({CanonicalOutcome.YES, CanonicalOutcome.NO}),
     MarketFamily.TOTAL_GOALS: frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER}),
     MarketFamily.ASIAN_HANDICAP: frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY}),
+    MarketFamily.GAME_WINNER: frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY}),
+    MarketFamily.POINT_SPREAD: frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY}),
+    MarketFamily.TOTAL_POINTS: frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER}),
 }
 
 LINE_FAMILIES: frozenset[MarketFamily] = frozenset(
-    {MarketFamily.TOTAL_GOALS, MarketFamily.ASIAN_HANDICAP}
+    {MarketFamily.TOTAL_GOALS, MarketFamily.ASIAN_HANDICAP, MarketFamily.POINT_SPREAD, MarketFamily.TOTAL_POINTS}
 )
 
 SOLVER_INELIGIBLE_REASON = "unsupported_outcome_model"

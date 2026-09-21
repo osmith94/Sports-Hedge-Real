@@ -1283,7 +1283,7 @@ class PaperOperationsService:
             plan = plan or self._plans.get(trade.opportunity_id)
         operator = effective_operator_scanner_settings(self.settings)
         cap = operator.max_allocated_per_trade_gbp
-        trigger = operator.min_net_edge
+        trigger = plan.decision.minimum_net_edge if plan is not None else None
         if plan is None:
             return None
         recovering = bool(
@@ -1319,7 +1319,12 @@ class PaperOperationsService:
                 operator_copy="Current post-cost net is below Min Net Arb; no new risk added",
                 occurred_at=when,
                 dedupe_key=f"below-min:{trade.trade_id}:{when.isoformat()}",
-                payload={"current_net": current_net, "trigger": trigger},
+                payload={
+                    "current_net": current_net,
+                    "trigger": trigger,
+                    "min_net_edge_scope": plan.decision.min_net_edge_scope,
+                    "min_net_edge_source": plan.decision.min_net_edge_source,
+                },
             )
             return self._result_from_existing_trade(trade, when)
         room = remaining_trade_room_gbp(trade, cap)
@@ -1371,6 +1376,8 @@ class PaperOperationsService:
                 "requested_gbp": incremental_gbp,
                 "net_edge": current_net,
                 "min_net": trigger,
+                "min_net_edge_scope": plan.decision.min_net_edge_scope,
+                "min_net_edge_source": plan.decision.min_net_edge_source,
                 "books": compact_executable_books(mapped_legs),
             },
         )
@@ -1786,7 +1793,7 @@ class PaperOperationsService:
             recovery_id = f"recovery:{origin_tranche_id}:{sequence}"
         current_net = plan.net_edge if plan.net_edge is not None else decision_net_edge(plan.decision)
         below_min = current_net is None or not qualifies_min_net_arb(
-            current_net, operator.min_net_edge
+            current_net, plan.decision.minimum_net_edge
         )
         reason_code = (
             ActiveTradeReasonCode.RECOVERY_BELOW_MIN_NET
@@ -1806,6 +1813,9 @@ class PaperOperationsService:
                 "residual_before": residual,
                 "below_min_net": below_min,
                 "net_edge": current_net,
+                "trigger": plan.decision.minimum_net_edge,
+                "min_net_edge_scope": str(plan.decision.min_net_edge_scope),
+                "min_net_edge_source": plan.decision.min_net_edge_source,
                 "books": compact_executable_books(remaining_legs),
             },
             raise_on_error=True,
@@ -3175,7 +3185,9 @@ class PaperOperationsService:
             "pricing_lane": plan.pricing_lane,
             "scan_lane": plan.pricing_lane,
             "net_edge": plan.net_edge,
-            "min_net": Decimal(str(self.settings.min_net_edge)),
+            "min_net": plan.decision.minimum_net_edge,
+            "min_net_edge_scope": plan.decision.min_net_edge_scope,
+            "min_net_edge_source": plan.decision.min_net_edge_source,
             "books": compact_executable_books(plan.legs),
         }
 
@@ -3582,10 +3594,51 @@ class PaperOperationsService:
     ) -> PaperTrade:
         home = opportunity.home_team
         away = opportunity.away_team
-        fixture = f"{home} v {away}" if home and away else None
+        from sports_hedge.nfl.detect import is_nfl_market_family
+        from sports_hedge.nfl.labels import nfl_fixture_label
+
+        if (
+            is_nfl_market_family(opportunity.market_family)
+            or str(opportunity.competition or "").upper() == "NFL"
+        ) and home and away:
+            fixture = nfl_fixture_label(home_team=home, away_team=away)
+        else:
+            fixture = f"{home} v {away}" if home and away else None
         market_label = None
         if opportunity.market_family is not None:
-            market_label = opportunity.market_family.value.replace("_", " ")
+            family_value = opportunity.market_family.value
+            if family_value == "game_winner":
+                market_label = "Game winner"
+            elif family_value == "point_spread":
+                market_label = "Point spread"
+            elif family_value == "total_points":
+                market_label = "Total points"
+            else:
+                market_label = opportunity.market_family.value.replace("_", " ")
+        audit = [
+            PaperTradeAuditEvent(
+                event_id=f"{paper_trade_id(plan.opportunity_id)}:{PaperTradeAuditEventType.TRADE_OPENED.value}",
+                occurred_at=occurred_at,
+                event_type=PaperTradeAuditEventType.TRADE_OPENED,
+                detail="paper trade opened; guaranteed opening profit is recorded only after the complete hedge validates",
+            )
+        ]
+        from sports_hedge.nfl.detect import is_nfl_market_family as _nfl_family
+        from sports_hedge.nfl.constants import NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT
+        from sports_hedge.nfl.labels import NFL_SETTLEMENT_CAVEAT_OPERATOR_TEXT
+
+        if (
+            _nfl_family(opportunity.market_family)
+            or str(opportunity.competition or "").upper() == "NFL"
+        ):
+            audit.append(
+                PaperTradeAuditEvent(
+                    event_id=f"{paper_trade_id(plan.opportunity_id)}:{NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT}",
+                    occurred_at=occurred_at,
+                    event_type=PaperTradeAuditEventType.TRADE_OPENED,
+                    detail=f"{NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT}: {NFL_SETTLEMENT_CAVEAT_OPERATOR_TEXT}",
+                )
+            )
         return PaperTrade(
             trade_id=paper_trade_id(plan.opportunity_id),
             opportunity_id=plan.opportunity_id,
@@ -3608,14 +3661,7 @@ class PaperOperationsService:
             provenance=provenance,
             fx_snapshots=list(plan.fx_snapshots),
             venue_costs=list(plan.venue_costs),
-            audit=[
-                PaperTradeAuditEvent(
-                    event_id=f"{paper_trade_id(plan.opportunity_id)}:{PaperTradeAuditEventType.TRADE_OPENED.value}",
-                    occurred_at=occurred_at,
-                    event_type=PaperTradeAuditEventType.TRADE_OPENED,
-                    detail="paper trade opened; guaranteed opening profit is recorded only after the complete hedge validates",
-                )
-            ],
+            audit=audit,
         )
 
     def _revalidate_remaining_hedge(
@@ -3993,6 +4039,12 @@ def _humanize_token(value: object | None) -> str | None:
     if value is None:
         return None
     text = value.value if hasattr(value, "value") else str(value)
+    if text == "game_winner":
+        return "Game winner"
+    if text == "point_spread":
+        return "Point spread"
+    if text == "total_points":
+        return "Total points"
     text = text.replace("_", " ").strip()
     return text or None
 
@@ -4041,10 +4093,13 @@ def _post_trigger_min_net_rejection(
         arrival = _arrival_net_edge_from_fills(plan, fills)
     if arrival is None:
         return None
+    trigger = plan.decision.minimum_net_edge
+    if trigger is None:
+        return MOVED_BELOW_MIN_NET_ARB
     return evaluate_post_trigger_min_net_arb(
         bound_net_edge=bound,
         arrival_net_edge=arrival,
-        trigger_net_edge=plan.decision.minimum_net_edge,
+        trigger_net_edge=trigger,
     )
 
 

@@ -1337,11 +1337,11 @@ def cluster_live_matchbook_kalshi_events(
 
 
 def catalogue_relevant_kalshi_series(settings: Settings | None = None) -> list[str]:
-    """Bounded configured football series for owner-live attempt-live discovery.
+    """Bounded configured series for owner-live attempt-live discovery.
 
-    Uses Settings.kalshi_series_tickers (GAME/BTTS/TOTAL/FTTS for target
-    competitions), not GAME-only. Tickers outside the target-competition
-    prefixes are dropped so arbitrary Kalshi sports are not listed.
+    Uses Settings.kalshi_series_tickers (soccer GAME/BTTS/TOTAL/FTTS plus
+    NFL GAME/SPREAD/TOTAL when configured). Tickers outside the
+    target-competition prefixes, including KXNFLGAMEFG, are dropped.
     """
 
     configured = [

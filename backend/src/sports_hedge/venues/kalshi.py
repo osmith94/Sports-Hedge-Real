@@ -600,7 +600,7 @@ def _milestone_event_tickers(milestone: dict[str, Any]) -> list[str]:
         main = str(details.get("main_game_event_ticker") or "").strip()
         if main:
             tickers.append(main)
-    for key in ("primary_event_tickers", "related_event_tickers"):
+    for key in ("primary_event_tickers", "related_event_tickers", "related_event_tickers_head"):
         values = milestone.get(key) or []
         if isinstance(values, list):
             tickers.extend(str(item).strip() for item in values if str(item).strip())
@@ -616,9 +616,9 @@ def _milestone_event_tickers(milestone: dict[str, Any]) -> list[str]:
 
 def _milestone_kickoff_rank(milestone: dict[str, Any]) -> tuple[int, int]:
     milestone_type = str(milestone.get("type") or "").casefold()
-    soccer = 0 if "soccer" in milestone_type else 1
+    sport_match = 0 if ("soccer" in milestone_type or "football_game" in milestone_type) else 1
     has_start = 0 if milestone.get("start_date") else 1
-    return soccer, has_start
+    return sport_match, has_start
 
 
 def _dedupe_by_id(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

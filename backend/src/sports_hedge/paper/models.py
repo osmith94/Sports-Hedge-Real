@@ -7,9 +7,12 @@ from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.arbitrage.depth import DepthScanResult
+from sports_hedge.arbitrage.min_net_threshold import (
+    FIXTURE_MIN_NET_EDGE_SOURCE,
+)
 from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
 from sports_hedge.paper.fills import PaperOpportunityLeg
-from sports_hedge.domain.models import VenueName
+from sports_hedge.domain.models import MarketScope, VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.models import FeeSnapshot
 from sports_hedge.matching.learned_rules import MappingReviewCandidate
@@ -96,7 +99,10 @@ class PaperScanDecision(BaseModel):
     fill_legs: list[PaperOpportunityLeg] = Field(default_factory=list)
     execution_modes: dict[VenueName, str] = Field(default_factory=dict)
     allocation: AllocationResult | None = None
-    minimum_net_edge: Decimal = Field(default=Decimal("0"), ge=0)
+    minimum_net_edge: Decimal | None = Field(default=Decimal("0"), ge=0)
+    min_net_edge_scope: MarketScope = MarketScope.FIXTURE_MATCH
+    min_net_edge_source: str = FIXTURE_MIN_NET_EDGE_SOURCE
+    min_net_edge_configured: bool = True
     maximum_execution_risk: int = Field(default=100, ge=0, le=100)
     quote_age_ms: int | None = Field(default=None, ge=0)
     quote_age_basis: str | None = None

@@ -21,9 +21,10 @@ from sports_hedge.arbitrage.watchlist.models import (
     PaperFillAttempt,
     PaperFillAttemptStatus,
     WatchLeg,
+    attempt_id_from_lifecycle_event,
 )
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
-from sports_hedge.domain.models import VenueName
+from sports_hedge.domain.models import MarketScope, VenueName
 
 _PROTECTED_LIFECYCLE_STATUSES = (
     "PAPER_FILLING",
@@ -114,7 +115,7 @@ class SqliteWatchlistRepository:
                 status TEXT NOT NULL,
                 classification TEXT NOT NULL,
                 is_arbitrage INTEGER NOT NULL,
-                trigger_net_edge TEXT NOT NULL,
+                trigger_net_edge TEXT,
                 current_net_edge TEXT,
                 distance_to_trigger_pp TEXT,
                 implied_probability_sum TEXT,
@@ -202,6 +203,9 @@ class SqliteWatchlistRepository:
             "mapping_review_candidate_json": "TEXT",
             "line": "TEXT",
             "capture_eligible": "INTEGER",
+            "min_net_edge_scope": "TEXT",
+            "min_net_edge_source": "TEXT",
+            "min_net_edge_configured": "INTEGER",
         }
         for name, ddl in extras.items():
             if name not in columns:
@@ -218,12 +222,22 @@ class SqliteWatchlistRepository:
             "canonical_event_id": "TEXT",
             "canonical_market_id": "TEXT",
             "capture_eligible": "INTEGER",
+            "attempt_id": "TEXT",
+            "trigger_net_edge": "TEXT",
+            "min_net_edge_scope": "TEXT",
+            "min_net_edge_source": "TEXT",
         }
         for name, ddl in event_extras.items():
             if name not in event_columns:
                 self._connection.execute(
                     f"ALTER TABLE watchlist_lifecycle_events ADD COLUMN {name} {ddl}"
                 )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_watchlist_events_canonical_event
+                ON watchlist_lifecycle_events(canonical_event_id, occurred_at)
+            """
+        )
         self._commit()
 
     def get(self, opportunity_id: str) -> NearOpportunity | None:
@@ -259,12 +273,12 @@ class SqliteWatchlistRepository:
                 previous_net_edge, previous_distance_to_trigger_pp, observation_count,
                 quote_age_basis, data_kind, mapping_confidence, mapping_matched,
                 mapping_reasons_json, mapping_provenance_json, mapping_review_candidate_json,
-                capture_eligible
+                capture_eligible, min_net_edge_scope, min_net_edge_source, min_net_edge_configured
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(opportunity_id) DO UPDATE SET
                 canonical_event_id = excluded.canonical_event_id,
@@ -326,7 +340,10 @@ class SqliteWatchlistRepository:
                 mapping_reasons_json = excluded.mapping_reasons_json,
                 mapping_provenance_json = excluded.mapping_provenance_json,
                 mapping_review_candidate_json = excluded.mapping_review_candidate_json,
-                capture_eligible = excluded.capture_eligible
+                capture_eligible = excluded.capture_eligible,
+                min_net_edge_scope = excluded.min_net_edge_scope,
+                min_net_edge_source = excluded.min_net_edge_source,
+                min_net_edge_configured = excluded.min_net_edge_configured
             """,
             (
                 opportunity.opportunity_id,
@@ -384,6 +401,13 @@ class SqliteWatchlistRepository:
                 if opportunity.mapping_review_candidate is not None
                 else None,
                 int(opportunity.capture_eligible),
+                opportunity.min_net_edge_scope.value
+                if opportunity.min_net_edge_scope is not None
+                else None,
+                opportunity.min_net_edge_source,
+                None
+                if opportunity.min_net_edge_configured is None
+                else int(opportunity.min_net_edge_configured),
             ),
         )
 
@@ -395,8 +419,9 @@ class SqliteWatchlistRepository:
                     event_id, opportunity_id, occurred_at, event_type, status,
                     current_net_edge, distance_to_trigger_pp, detail,
                     fixture_label, market_family, canonical_event_id,
-                    canonical_market_id, capture_eligible
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    canonical_market_id, capture_eligible, attempt_id,
+                    trigger_net_edge, min_net_edge_scope, min_net_edge_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
@@ -412,6 +437,10 @@ class SqliteWatchlistRepository:
                     event.canonical_event_id,
                     event.canonical_market_id,
                     None if event.capture_eligible is None else int(event.capture_eligible),
+                    event.attempt_id,
+                    _stringify(event.trigger_net_edge),
+                    event.min_net_edge_scope,
+                    event.min_net_edge_source,
                 ),
             )
             self._commit()
@@ -470,6 +499,7 @@ class SqliteWatchlistRepository:
         *,
         limit: int = 100,
         opportunity_id: str | None = None,
+        canonical_event_id: str | None = None,
         since: datetime | None = None,
         event_types: Collection[LifecycleEventType] | None = None,
         operator_signal: bool = False,
@@ -478,9 +508,15 @@ class SqliteWatchlistRepository:
             raise ValueError("limit must be positive")
         clauses: list[str] = []
         parameters: list[Any] = []
-        if opportunity_id is not None:
+        if opportunity_id is not None and canonical_event_id is not None:
+            clauses.append("(opportunity_id = ? OR canonical_event_id = ?)")
+            parameters.extend([opportunity_id, canonical_event_id])
+        elif opportunity_id is not None:
             clauses.append("opportunity_id = ?")
             parameters.append(opportunity_id)
+        elif canonical_event_id is not None:
+            clauses.append("canonical_event_id = ?")
+            parameters.append(canonical_event_id)
         if since is not None:
             clauses.append("occurred_at >= ?")
             parameters.append(since.isoformat())
@@ -504,8 +540,10 @@ class SqliteWatchlistRepository:
         parameters.append(limit)
         with self.exclusive():
             rows = self._connection.execute(
-                f"SELECT * FROM watchlist_lifecycle_events{where} "  # noqa: S608
-                "ORDER BY occurred_at DESC, event_id DESC LIMIT ?",
+                f"SELECT watchlist_lifecycle_events.*, "  # noqa: S608
+                "watchlist_lifecycle_events.rowid AS append_seq "
+                f"FROM watchlist_lifecycle_events{where} "
+                "ORDER BY occurred_at DESC, append_seq DESC LIMIT ?",
                 parameters,
             ).fetchall()
             return [_event_from_row(row) for row in rows]
@@ -595,7 +633,7 @@ def _opportunity_from_row(row: sqlite3.Row) -> NearOpportunity:
         status=OpportunityStatus(row["status"]),
         classification=OpportunityClassification(row["classification"]),
         is_arbitrage=bool(row["is_arbitrage"]),
-        trigger_net_edge=Decimal(row["trigger_net_edge"]),
+        trigger_net_edge=_decimal(row["trigger_net_edge"]),
         current_net_edge=_decimal(row["current_net_edge"]),
         gross_edge=_decimal(row["gross_edge"]) if "gross_edge" in row.keys() else None,
         distance_to_trigger_pp=_decimal(row["distance_to_trigger_pp"]),
@@ -631,6 +669,9 @@ def _opportunity_from_row(row: sqlite3.Row) -> NearOpportunity:
         mapping_provenance=_mapping_provenance(_row_get(row, "mapping_provenance_json")),
         mapping_review_candidate=_mapping_candidate(_row_get(row, "mapping_review_candidate_json")),
         capture_eligible=bool(_row_get(row, "capture_eligible") or 0),
+        min_net_edge_scope=_market_scope(_row_get(row, "min_net_edge_scope")),
+        min_net_edge_source=_row_get(row, "min_net_edge_source"),
+        min_net_edge_configured=_optional_bool(_row_get(row, "min_net_edge_configured")),
     )
 
 
@@ -652,11 +693,14 @@ def _paper_fill_attempt_from_row(row: sqlite3.Row) -> PaperFillAttempt:
 
 
 def _event_from_row(row: sqlite3.Row) -> OpportunityLifecycleEvent:
+    event_type = LifecycleEventType(row["event_type"])
+    stored_attempt_id = _row_get(row, "attempt_id")
+    append_seq = _row_get(row, "append_seq")
     return OpportunityLifecycleEvent(
         event_id=row["event_id"],
         opportunity_id=row["opportunity_id"],
         occurred_at=datetime.fromisoformat(row["occurred_at"]),
-        event_type=LifecycleEventType(row["event_type"]),
+        event_type=event_type,
         status=OpportunityStatus(row["status"]),
         current_net_edge=_decimal(row["current_net_edge"]),
         distance_to_trigger_pp=_decimal(row["distance_to_trigger_pp"]),
@@ -666,6 +710,16 @@ def _event_from_row(row: sqlite3.Row) -> OpportunityLifecycleEvent:
         canonical_event_id=_row_get(row, "canonical_event_id"),
         canonical_market_id=_row_get(row, "canonical_market_id"),
         capture_eligible=_optional_bool(_row_get(row, "capture_eligible")),
+        attempt_id=attempt_id_from_lifecycle_event(
+            opportunity_id=row["opportunity_id"],
+            event_type=event_type,
+            event_id=row["event_id"],
+            stored_attempt_id=None if stored_attempt_id in (None, "") else str(stored_attempt_id),
+        ),
+        append_seq=None if append_seq is None else int(append_seq),
+        trigger_net_edge=_decimal(_row_get(row, "trigger_net_edge")),
+        min_net_edge_scope=_row_get(row, "min_net_edge_scope"),
+        min_net_edge_source=_row_get(row, "min_net_edge_source"),
     )
 
 
@@ -708,6 +762,15 @@ def _venue(value: str | None) -> VenueName | None:
     if not value:
         return None
     return VenueName(value)
+
+
+def _market_scope(value: str | None) -> MarketScope | None:
+    if not value:
+        return None
+    try:
+        return MarketScope(value)
+    except ValueError:
+        return None
 
 
 def _optional_bool(value: Any) -> bool | None:

@@ -73,6 +73,13 @@ PAPER_NONBLOCKING_REJECTION_REASONS = frozenset(
     {
         PAPER_ASSUMED_REASON,
         "paper_assumed_not_live_execution_eligible",
+        "paper_mode_only_not_live_execution_eligible",
+        "paper_assumed_equivalent_not_settlement_proven",
+        "owner_approved_nfl_paper_normal_completion",
+        "exceptional_settlement_mismatch_possible",
+        "nfl_paper_not_live_execution_equivalent",
+        "settlement_assumption=normal_full_game_completion",
+        "settlement_assumption=regulation_time",
     }
 )
 
@@ -205,6 +212,10 @@ def kalshi_has_proven_settlement_contradiction(market: CanonicalMarket) -> bool:
 
 
 def both_independently_proven_regulation(left: CanonicalMarket, right: CanonicalMarket) -> bool:
+    from sports_hedge.nfl.settlement import nfl_market_uses_paper_caveat
+
+    if nfl_market_uses_paper_caveat(left) or nfl_market_uses_paper_caveat(right):
+        return False
     return (
         left.settlement.is_economically_complete()
         and right.settlement.is_economically_complete()

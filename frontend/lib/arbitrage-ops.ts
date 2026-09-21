@@ -84,6 +84,9 @@ export type ActivityEvent = {
   missedTriggerEventId?: string | null;
   fixtureLabel?: string | null;
   marketFamily?: string | null;
+  canonicalEventId?: string | null;
+  canonicalMarketId?: string | null;
+  attemptId?: string | null;
 };
 
 export type CapitalSnapshot = {

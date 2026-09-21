@@ -936,6 +936,7 @@ def put_universe_scope(
     try:
         coordinator.apply_universe_scope(
             update.selected_competition_codes,
+            selected_season_scope_codes=update.selected_season_scope_codes,
             run_universe_now=update.run_universe_now,
             save_as_default=update.save_as_default,
             restore_saved_default=update.restore_saved_default,
@@ -945,7 +946,7 @@ def put_universe_scope(
         if str(exc) == UNIVERSE_SCOPE_EMPTY_SELECTION:
             raise HTTPException(
                 status_code=422,
-                detail="Select at least one supported football competition.",
+                detail="Select at least one supported football competition or season market.",
             ) from exc
         raise
     return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
@@ -956,7 +957,7 @@ def put_operator_scanner_settings(
     update: OperatorScannerSettingsUpdate,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
 ) -> LiveRefreshStatus:
-    """Persist Min Net Arb, Max Risk, HOT/BACKGROUND/UNIVERSE cadence and max allocated per trade. Does not scan or call providers."""
+    """Persist Min Net Arb, Outright Min Net Arb, Max Risk, HOT/BACKGROUND/UNIVERSE cadence and max allocated per trade. Does not scan or call providers."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_operator_scan_settings(
@@ -966,6 +967,11 @@ def put_operator_scanner_settings(
         background_cadence_seconds=update.background_cadence_seconds,
         universe_cadence_seconds=update.universe_cadence_seconds,
         max_allocated_per_trade_gbp=update.max_allocated_per_trade_gbp,
+        **(
+            {"outright_min_net_edge": update.outright_min_net_edge}
+            if "outright_min_net_edge" in update.model_fields_set
+            else {}
+        ),
     )
     return _status_with_scan_cycles(coordinator.public_status(), repository)
 
@@ -989,6 +995,28 @@ def resume_paper_scanner(
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_operator_scanner_stopped(False)
+    return _status_with_scan_cycles(coordinator.public_status(), repository)
+
+
+@router.post("/scanner/universe-schedule/pause", response_model=LiveRefreshStatus)
+def pause_universe_schedule(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Pause periodic UNIVERSE fresh-generation scheduling. One-shots still work."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_universe_scans_paused(True)
+    return _status_with_scan_cycles(coordinator.public_status(), repository)
+
+
+@router.post("/scanner/universe-schedule/resume", response_model=LiveRefreshStatus)
+def resume_universe_schedule(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Resume periodic UNIVERSE scheduling from the persisted cadence. No catch-up burst."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_universe_scans_paused(False)
     return _status_with_scan_cycles(coordinator.public_status(), repository)
 
 
@@ -1192,6 +1220,7 @@ async def _collect_report(
     retry_series: dict[str, list[str]] | None = None,
     hot_market_relationships=None,
     selected_competition_codes: list[str] | tuple[str, ...] | None = None,
+    selected_season_scope_codes: list[str] | tuple[str, ...] | None = None,
     generation_scope_version: int | None = None,
     generation_superseded: bool = False,
 ) -> CollectionReport:
@@ -1247,6 +1276,7 @@ async def _collect_report(
             retry_series=retry_series,
             hot_market_relationships=hot_market_relationships,
             selected_competition_codes=selected_competition_codes,
+            selected_season_scope_codes=selected_season_scope_codes,
             generation_scope_version=generation_scope_version,
             generation_superseded=generation_superseded,
         )
@@ -1553,6 +1583,7 @@ async def server_owned_refresh_tick(plan=None) -> None:
             PriceEnginePriority.BACKGROUND,
             matchbook=runtime.matchbook,
             kalshi=runtime.kalshi,
+            polymarket=runtime.polymarket,
             paper_scan=service,
         )
         finished = coordinator.now()
@@ -1579,6 +1610,7 @@ async def server_owned_refresh_tick(plan=None) -> None:
                 slice_wall_seconds=hot_wall,
                 matchbook=runtime.matchbook,
                 kalshi=runtime.kalshi,
+                polymarket=runtime.polymarket,
                 paper_scan=service,
             )
             finished = coordinator.now()
@@ -1631,11 +1663,13 @@ async def server_owned_refresh_tick(plan=None) -> None:
     async def runner() -> CollectionReport:
         on_discovery = on_fixture = on_work_set = None
         selected_codes = None
+        selected_season_codes = None
         superseded = False
         scope_version = None
         if resolved.lane == ScanLane.UNIVERSE.value:
             on_discovery, on_fixture, on_work_set = coordinator.universe_collect_callbacks()
             selected_codes = list(coordinator.generation_discovery_codes())
+            selected_season_codes = list(coordinator.generation_season_scope_codes())
             superseded = coordinator.generation_superseded()
             scope_version = coordinator._universe_generation_scope_version
         return await _collect_report(
@@ -1660,6 +1694,7 @@ async def server_owned_refresh_tick(plan=None) -> None:
             retry_series=resolved.retry_series,
             hot_market_relationships=getattr(resolved, "hot_market_relationships", None),
             selected_competition_codes=selected_codes,
+            selected_season_scope_codes=selected_season_codes,
             generation_scope_version=scope_version,
             generation_superseded=superseded,
         )

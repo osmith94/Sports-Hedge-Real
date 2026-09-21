@@ -119,6 +119,77 @@ def resolve_paper_trade_settlement(
     kalshi = _kalshi_market_evidence(trade, kalshi_markets or {})
     event_status = _payload_status(matchbook_event)
 
+    from sports_hedge.nfl.settlement import (
+        collect_nfl_lifecycle_tokens,
+        is_nfl_paper_trade,
+        nfl_automatic_settlement_lifecycle_blocker,
+        nfl_exceptional_status_blocker,
+        nfl_tied_score_blocker,
+        NFL_SETTLEMENT_FAIL_CLOSED_REASON,
+    )
+
+    if is_nfl_paper_trade(trade):
+        nfl_exception = nfl_exceptional_status_blocker(
+            matchbook.status,
+            kalshi.status,
+            event_status,
+            None if scores is None else scores.status,
+            matchbook.winning_outcome,
+            kalshi.winning_outcome,
+            matchbook.blocker,
+            kalshi.blocker,
+        )
+        if nfl_exception is not None:
+            return _blocked(
+                trade,
+                nfl_exception,
+                matchbook_market,
+                matchbook_event,
+                kalshi_markets,
+                scores,
+            )
+        if scores is not None:
+            tied = nfl_tied_score_blocker(scores.home_score, scores.away_score)
+            if tied is not None:
+                return _blocked(
+                    trade,
+                    tied,
+                    matchbook_market,
+                    matchbook_event,
+                    kalshi_markets,
+                    scores,
+                )
+        if trade.market_family is MarketFamily.GAME_WINNER and score_outcome == "draw":
+            return _blocked(
+                trade,
+                NFL_SETTLEMENT_FAIL_CLOSED_REASON,
+                matchbook_market,
+                matchbook_event,
+                kalshi_markets,
+                scores,
+            )
+        lifecycle_blocker = nfl_automatic_settlement_lifecycle_blocker(
+            trade,
+            *collect_nfl_lifecycle_tokens(
+                matchbook_market,
+                matchbook_event,
+                *list((kalshi_markets or {}).values()),
+            ),
+            matchbook.status,
+            kalshi.status,
+            event_status,
+            None if scores is None else scores.status,
+        )
+        if lifecycle_blocker is not None:
+            return _blocked(
+                trade,
+                lifecycle_blocker,
+                matchbook_market,
+                matchbook_event,
+                kalshi_markets,
+                scores,
+            )
+
     exception = _exception_blocker(matchbook, kalshi, scores, event_status=event_status)
     if exception is not None:
         return _blocked(trade, exception, matchbook_market, matchbook_event, kalshi_markets, scores)
@@ -262,7 +333,25 @@ def _kalshi_tickers(trade: PaperTrade) -> list[str]:
 
 
 def _family_blocker(trade: PaperTrade) -> str | None:
+    from sports_hedge.nfl.detect import is_nfl_market_family
+    from sports_hedge.nfl.markets import is_exact_half_line
+    from sports_hedge.nfl.settlement import is_nfl_paper_trade
+
     family = trade.market_family
+    if is_nfl_paper_trade(trade) or is_nfl_market_family(family):
+        if family not in {
+            MarketFamily.GAME_WINNER,
+            MarketFamily.POINT_SPREAD,
+            MarketFamily.TOTAL_POINTS,
+        }:
+            return "unsupported_market_family"
+        if trade.period not in SUPPORTED_PERIODS and trade.period is not FootballPeriod.FULL_TIME:
+            return "unsupported_settlement_period"
+        if family in {MarketFamily.POINT_SPREAD, MarketFamily.TOTAL_POINTS}:
+            line = _line_from_trade(trade)
+            if line is None or not is_exact_half_line(line):
+                return "unsupported_nfl_line"
+        return None
     if family is None or family not in LOCKED_PAPER_FAMILIES:
         return "unsupported_market_family"
     if trade.period not in SUPPORTED_PERIODS and trade.period is not FootballPeriod.FULL_TIME:
@@ -634,6 +723,42 @@ def _outcome_from_scores(
         if away > home:
             return CanonicalOutcome.AWAY.value, None
         return CanonicalOutcome.DRAW.value, None
+    if family is MarketFamily.GAME_WINNER:
+        from sports_hedge.nfl.constants import NFL_SETTLEMENT_FAIL_CLOSED_REASON
+
+        if home > away:
+            return CanonicalOutcome.HOME.value, None
+        if away > home:
+            return CanonicalOutcome.AWAY.value, None
+        return None, NFL_SETTLEMENT_FAIL_CLOSED_REASON
+    if family is MarketFamily.POINT_SPREAD:
+        from sports_hedge.nfl.markets import is_exact_half_line
+
+        line = _line_from_trade(trade)
+        if line is None or not is_exact_half_line(line):
+            return None, "unsupported_nfl_line"
+        margin = Decimal(home - away)
+        if margin + line > 0:
+            return CanonicalOutcome.HOME.value, None
+        if margin + line < 0:
+            return CanonicalOutcome.AWAY.value, None
+        from sports_hedge.nfl.constants import NFL_SETTLEMENT_FAIL_CLOSED_REASON
+
+        return None, NFL_SETTLEMENT_FAIL_CLOSED_REASON
+    if family is MarketFamily.TOTAL_POINTS:
+        from sports_hedge.nfl.markets import is_exact_half_line
+
+        line = _line_from_trade(trade)
+        if line is None or not is_exact_half_line(line):
+            return None, "unsupported_nfl_line"
+        total = Decimal(home + away)
+        if total > line:
+            return CanonicalOutcome.OVER.value, None
+        if total < line:
+            return CanonicalOutcome.UNDER.value, None
+        from sports_hedge.nfl.constants import NFL_SETTLEMENT_FAIL_CLOSED_REASON
+
+        return None, NFL_SETTLEMENT_FAIL_CLOSED_REASON
     if family is MarketFamily.BOTH_TEAMS_TO_SCORE:
         if home > 0 and away > 0:
             return CanonicalOutcome.YES.value, None

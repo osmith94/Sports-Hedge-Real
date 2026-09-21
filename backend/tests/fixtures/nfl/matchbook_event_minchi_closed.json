@@ -1,0 +1,58 @@
+{
+  "fixture_id": "nfl-matchbook-event-33306682639200023",
+  "identified_as": "CAPTURED unauthenticated Matchbook GET /edge/rest/events/33306682639200023 plus GET .../markets. closed Minnesota at Chicago — moneyline/handicap/total absent from market list after close. Prices stripped. No session token.",
+  "source": "https://api.matchbook.com/edge/rest/events/33306682639200023",
+  "markets_source": "https://api.matchbook.com/edge/rest/events/33306682639200023/markets?per-page=100&include-prices=false&states=open,suspended,closed,graded",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "provider_market_total": 41,
+  "payload": {
+    "id": 33306682639200023,
+    "name": "Minnesota Vikings at Chicago Bears",
+    "start": "2026-09-20T17:02:00.000Z",
+    "status": "closed",
+    "sport-id": 1,
+    "in-running-flag": true,
+    "allow-live-betting": true,
+    "category-id": [
+      1,
+      410468520880009,
+      491503123380010,
+      1904152202480016,
+      33287044037300047
+    ],
+    "meta-tags": [
+      {
+        "id": 1,
+        "name": "American Football",
+        "type": "SPORT",
+        "url-name": "american-football"
+      },
+      {
+        "id": 410468520880009,
+        "name": "Live Betting",
+        "type": "OTHER",
+        "url-name": "live-betting"
+      },
+      {
+        "id": 491503123380010,
+        "name": "NFL",
+        "type": "COMPETITION",
+        "url-name": "nfl"
+      },
+      {
+        "id": 1904152202480016,
+        "name": "United States of America",
+        "type": "COUNTRY",
+        "url-name": "united-states-of-america"
+      },
+      {
+        "id": 33287044037300047,
+        "name": "September 20th 2026",
+        "type": "DATE",
+        "url-name": "september-20th-2026"
+      }
+    ],
+    "markets": []
+  }
+}

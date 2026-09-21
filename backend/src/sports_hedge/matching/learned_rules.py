@@ -20,7 +20,7 @@ from sports_hedge.domain.football import CanonicalEvent, CanonicalMarket
 from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.ordinary_1x2 import settlement_fingerprints_contradict
 from sports_hedge.matching.paper_assumed import allow_unknown_settlement_for_paper_assumed
-from sports_hedge.facts.aliases import resolve_team_name
+from sports_hedge.facts.aliases import resolve_team_name, resolve_team_name_for_competition
 from sports_hedge.normalization.identity import kickoff_bucket
 from sports_hedge.normalization.text import normalize_text
 
@@ -677,7 +677,15 @@ class LearnedMappingApplicator:
                     )
                 )
                 home, away = new_home, new_away
-        return resolve_team_name(home), resolve_team_name(away), applied
+        code = None
+        target = resolve_target_competition(event.competition)
+        if target is not None:
+            code = target.code.value
+        return (
+            resolve_team_name_for_competition(home, code),
+            resolve_team_name_for_competition(away, code),
+            applied,
+        )
 
     def _apply_team(self, rule: MappingRule, event: CanonicalEvent, side: str, current: str) -> str:
         if rule.rule_type is MappingRuleType.FIXTURE_SPECIFIC_ALIAS:

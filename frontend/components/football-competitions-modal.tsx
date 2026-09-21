@@ -6,12 +6,15 @@ import { OperatorCompetitionOption, OperatorUniverseScope } from "../lib/api";
 import {
   competitionModalDraftFromScope,
   defaultCompetitionCodes,
+  savedDefaultScopeCodes,
+  selectedScopeCodes,
   shouldInitializeCompetitionModalDraft,
   supportedCompetitionCodes,
   toggleCompetitionDraft,
 } from "../lib/competition-modal-draft";
 
 const GROUP_ORDER = [
+  "outrights",
   "uefa",
   "england",
   "spain",
@@ -32,6 +35,7 @@ const GROUP_ORDER = [
   "japan",
   "south_africa",
   "international",
+  "nfl",
 ];
 
 type FootballCompetitionsModalProps = {
@@ -62,7 +66,7 @@ export function FootballCompetitionsModal({
 }: FootballCompetitionsModalProps) {
   const catalog = scope?.catalog ?? [];
   const [query, setQuery] = useState("");
-  const [draft, setDraft] = useState<string[]>(scope?.selected_competition_codes ?? []);
+  const [draft, setDraft] = useState<string[]>(selectedScopeCodes(scope));
   const [saveAsDefault, setSaveAsDefault] = useState(false);
   const wasOpenRef = useRef(false);
 
@@ -103,8 +107,9 @@ export function FootballCompetitionsModal({
   const selectedSet = new Set(draft);
   const selectedCount = draft.length;
   const firstRun = Boolean(scope?.needs_first_run_confirmation);
-  const savedDefault = scope?.saved_default_competition_codes ?? defaultCompetitionCodes(catalog);
+  const savedDefault = savedDefaultScopeCodes(scope, catalog);
   const savedCount = savedDefault.length;
+  const activeCodes = selectedScopeCodes(scope).length ? selectedScopeCodes(scope) : draft;
 
   function toggle(row: OperatorCompetitionOption) {
     if (!row.selectable) return;
@@ -122,15 +127,15 @@ export function FootballCompetitionsModal({
       >
         <div className="competition-modal-header">
           <div>
-            <div className="competition-modal-kicker">Football</div>
-            <h2 id="football-competitions-title">Football competitions</h2>
+            <div className="competition-modal-kicker">UNIVERSE</div>
+            <h2 id="football-competitions-title">Discovery scope</h2>
             <p>
               {firstRun
                 ? "Confirm the default UNIVERSE discovery scope. Checking Save this selection as my default stores it for restart."
-                : "Canonical competition codes control UNIVERSE discovery. Venue tickers stay backend-only."}
+                : "Fixture competitions and season markets control UNIVERSE discovery. Venue tickers stay backend-only."}
             </p>
             <p className="competition-modal-scope-meta">
-              Active: {namesFor(scope?.selected_competition_codes ?? draft, catalog)} ({scope?.selected_count ?? selectedCount})
+              Active: {namesFor(activeCodes, catalog)} ({scope?.selected_count ?? selectedCount})
               {" · "}
               Saved default: {namesFor(savedDefault, catalog)} ({savedCount})
               {scope?.is_session_override ? " · session override" : ""}
@@ -145,8 +150,8 @@ export function FootballCompetitionsModal({
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Premier League, UEFA, MLS…"
-            aria-label="Search football competitions"
+            placeholder="Premier League, Super Bowl, MLS…"
+            aria-label="Search UNIVERSE discovery scopes"
           />
         </label>
         <div className="competition-modal-shortcuts">

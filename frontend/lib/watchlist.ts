@@ -118,6 +118,7 @@ const ACTIVITY_TITLES: Record<WatchlistLifecycleEventType, string> = {
   trigger_crossed: "Threshold crossed",
   trigger_lost_before_fill: "Trigger lost before fill",
   promoted_to_hot: "Promoted to HOT",
+  paper_eligible: "Paper eligible",
   paper_fill_attempted: "Paper fill attempted",
   paper_fill_partial: "Partial paper fill",
   paper_fill_complete: "Trade entered",
@@ -133,6 +134,7 @@ const ACTIVITY_TITLES: Record<WatchlistLifecycleEventType, string> = {
 
 export const OPERATOR_ACTIVITY_EVENT_TYPES = [
   "promoted_to_hot",
+  "paper_eligible",
   "trigger_lost_before_fill",
   "paper_fill_complete",
   "closed",
@@ -169,6 +171,7 @@ function activityDetail(event: OpportunityLifecycleEvent, subject: string | null
 
 function activityKind(eventType: WatchlistLifecycleEventType): string {
   if (eventType === "promoted_to_hot") return "PROMOTED_TO_HOT";
+  if (eventType === "paper_eligible") return "PAPER_ELIGIBLE";
   if (eventType === "trigger_lost_before_fill") return "TRIGGER_LOST_BEFORE_FILL";
   if (eventType === "paper_fill_complete") return "TRADE_ENTERED";
   if (eventType === "closed") return "TRADE_EXITED";
@@ -182,6 +185,40 @@ function activityKind(eventType: WatchlistLifecycleEventType): string {
   return eventType.toUpperCase();
 }
 
+export function lifecycleEventTitle(eventType: string): string {
+  return ACTIVITY_TITLES[eventType as WatchlistLifecycleEventType] ?? eventType.replaceAll("_", " ");
+}
+
+export function canonicalEventIdFromHotOpportunityId(opportunityId: string): string | null {
+  return opportunityId.startsWith("hot:") ? opportunityId.slice(4) || null : null;
+}
+
+export function activityHistoryPath(
+  opportunityId: string,
+  canonicalEventId?: string | null,
+): string {
+  const path = `/activity/${encodeURIComponent(opportunityId)}`;
+  const canonical = canonicalEventId?.trim() || canonicalEventIdFromHotOpportunityId(opportunityId);
+  if (!canonical) return path;
+  return `${path}?canonical_event_id=${encodeURIComponent(canonical)}`;
+}
+
+const PAPER_FILL_EVENT_TYPES = new Set([
+  "paper_fill_attempted",
+  "paper_fill_partial",
+  "paper_fill_complete",
+  "paper_fill_rejected",
+]);
+
+export function attemptIdFromLifecycleEvent(event: OpportunityLifecycleEvent): string | null {
+  const stored = event.attempt_id?.trim();
+  if (stored) return stored;
+  if (!PAPER_FILL_EVENT_TYPES.has(event.event_type)) return null;
+  const prefix = `${event.opportunity_id}:${event.event_type}:`;
+  if (!event.event_id.startsWith(prefix)) return null;
+  return event.event_id.slice(prefix.length).trim() || null;
+}
+
 export function activityFromWatchlist(events: OpportunityLifecycleEvent[]): ActivityEvent[] {
   return events.filter(isVisibleOperatorActivityEvent).map((item) => {
     const subject = activitySubjectFromEvent(item);
@@ -190,7 +227,7 @@ export function activityFromWatchlist(events: OpportunityLifecycleEvent[]): Acti
       provenance: "LIVE_PAPER",
       at: item.occurred_at,
       kind: activityKind(item.event_type),
-      title: ACTIVITY_TITLES[item.event_type] ?? item.event_type.replaceAll("_", " "),
+      title: lifecycleEventTitle(item.event_type),
       subject,
       detail: activityDetail(item, subject),
       opportunityId: item.opportunity_id,
@@ -199,6 +236,9 @@ export function activityFromWatchlist(events: OpportunityLifecycleEvent[]): Acti
         item.event_type === "trigger_lost_before_fill" ? item.event_id : null,
       fixtureLabel: item.fixture_label ?? null,
       marketFamily: item.market_family ?? null,
+      canonicalEventId: item.canonical_event_id ?? null,
+      canonicalMarketId: item.canonical_market_id ?? null,
+      attemptId: attemptIdFromLifecycleEvent(item),
     };
   });
 }

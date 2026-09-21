@@ -126,6 +126,13 @@ from sports_hedge.application.target_competitions import (
     resolve_target_competition,
     resolve_target_competition_from_kalshi_ticker,
     scope_matchbook_event,
+    selected_includes_nfl,
+    selected_includes_soccer,
+)
+from sports_hedge.outrights.universe_scopes import (
+    kalshi_series_tickers_for_season_scopes,
+    observe_selected_season_kalshi_events,
+    partition_kalshi_season_events,
 )
 from sports_hedge.arbitrage.watchlist.economics import (
     distance_to_trigger_pp,
@@ -483,6 +490,8 @@ class DiscoveredFixture(BaseModel):
     next_due_at: datetime | None = None
     hot_reasons: list[str] = Field(default_factory=list)
     catalogue_coverage: FixtureCatalogueCoverage | None = None
+    event_match_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    event_match_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class FixturePaperEntry(BaseModel):
@@ -635,7 +644,7 @@ class ReadOnlyCrossVenueCollector:
         self.polymarket = polymarket
         self.kalshi = kalshi
         self.paper_scan = paper_scan
-        self.event_matcher = event_matcher or EventMatcher()
+        self.event_matcher = event_matcher or paper_scan.market_matcher.event_matcher
         self.market_matcher = market_matcher or MarketMatcher(self.event_matcher)
         self.matchbook_normalizer = matchbook_normalizer or MatchbookNormalizer()
         self.polymarket_normalizer = polymarket_normalizer or PolymarketNormalizer()
@@ -655,6 +664,7 @@ class ReadOnlyCrossVenueCollector:
         self._provider_access = provider_access
         self.catalogue_store = catalogue_store
         self._catalogue_persist_sema = asyncio.Semaphore(1)
+        self._op_selected_season_scope_codes: tuple[str, ...] | None = None
         self._op_universe_generation_id: int | None = None
         self._cluster_sema: asyncio.Semaphore | None = None
         self._provider_semaphores: dict[VenueName, asyncio.Semaphore] = {}
@@ -722,6 +732,7 @@ class ReadOnlyCrossVenueCollector:
         skip_event_ids: list[str] | None = None,
         universe_generation_id: int | None = None,
         selected_competition_codes: list[str] | tuple[str, ...] | None = None,
+        selected_season_scope_codes: list[str] | tuple[str, ...] | None = None,
         generation_scope_version: int | None = None,
         generation_superseded: bool = False,
         generation_resume: bool = False,
@@ -752,6 +763,11 @@ class ReadOnlyCrossVenueCollector:
         self._op_selected_competition_codes = (
             tuple(selected_competition_codes)
             if selected_competition_codes is not None
+            else None
+        )
+        self._op_selected_season_scope_codes = (
+            tuple(selected_season_scope_codes)
+            if selected_season_scope_codes is not None
             else None
         )
         self._op_generation_scope_version = generation_scope_version
@@ -932,10 +948,19 @@ class ReadOnlyCrossVenueCollector:
                         selected_pm_ids = polymarket_series_ids_for_codes(
                             self._op_selected_competition_codes
                         )
-                        selected_k_tickers = kalshi_series_tickers_for_codes(
-                            self._op_selected_competition_codes
+                        selected_k_tickers = list(
+                            dict.fromkeys(
+                                [
+                                    *kalshi_series_tickers_for_codes(
+                                        self._op_selected_competition_codes
+                                    ),
+                                    *kalshi_series_tickers_for_season_scopes(
+                                        self._op_selected_season_scope_codes
+                                    ),
+                                ]
+                            )
                         )
-                        if selected_pm_ids and "series_id" not in pm_filters:
+                        if "series_id" not in pm_filters:
                             pm_filters["series_ids"] = selected_pm_ids
                         if selected_k_tickers:
                             k_filters["series_tickers"] = selected_k_tickers
@@ -976,6 +1001,25 @@ class ReadOnlyCrossVenueCollector:
                 )
 
             with self._stage("normalize_match"):
+                raw_kalshi_events, season_kalshi_events = partition_kalshi_season_events(
+                    raw_kalshi_events,
+                    selected_season_scope_codes=self._op_selected_season_scope_codes,
+                )
+                if (
+                    resolved_lane == ScanLane.UNIVERSE.value
+                    and season_kalshi_events
+                    and self.catalogue_store is not None
+                ):
+                    observe_selected_season_kalshi_events(
+                        self.catalogue_store,
+                        season_kalshi_events,
+                        now=started_at,
+                        generation_id=(
+                            None
+                            if self._op_universe_generation_id is None
+                            else str(self._op_universe_generation_id)
+                        ),
+                    )
                 mb_scope = filter_in_scope_events(
                     raw_matchbook_events,
                     venue=VenueName.MATCHBOOK,
@@ -1666,6 +1710,30 @@ class ReadOnlyCrossVenueCollector:
                 self._op_venue_health[venue.value] = "degraded"
             return default, True
 
+    async def _matchbook_sport_ids_for_scope(self) -> str | None:
+        """Extra Matchbook sport-ids only when NFL is in operator scope.
+
+        Soccer-only discovery keeps the historical unfiltered list_events path
+        so login/429 handling stays inside that call. NFL adds American Football
+        (and soccer when both are selected) without raising provider concurrency.
+        """
+
+        client = self.matchbook
+        if client is None:
+            return None
+        codes = self._op_selected_competition_codes
+        if not selected_includes_nfl(codes):
+            return None
+        ids: list[str] = []
+        if selected_includes_soccer(codes):
+            resolver = getattr(client, "resolve_football_sport_id", None)
+            if callable(resolver):
+                ids.append(str(await resolver()))
+        resolver = getattr(client, "resolve_american_football_sport_id", None)
+        if callable(resolver):
+            ids.append(str(await resolver()))
+        return ",".join(ids) if ids else None
+
     async def _discovery_task(
         self,
         client: Any,
@@ -1721,10 +1789,22 @@ class ReadOnlyCrossVenueCollector:
             )
             return [], {}
 
+        list_filters = dict(filters)
+        if venue is VenueName.MATCHBOOK and "sport-ids" not in list_filters:
+            try:
+                sport_ids = await self._matchbook_sport_ids_for_scope()
+            except Exception as exc:
+                issues.append(CollectorIssue(stage="list_events", venue=venue, detail=str(exc)))
+                if venue_health.get(venue.value) != VENUE_HEALTH_DISABLED:
+                    venue_health[venue.value] = "unavailable"
+                return [], {}
+            if sport_ids:
+                list_filters["sport-ids"] = sport_ids
+
         try:
             async with self._provider_capacity(venue, stage="list_events") as lease:
                 payload, timed_out = await self._await_bounded_with_capacity(
-                    client.list_events(**filters),
+                    client.list_events(**list_filters),
                     timeout,
                     venue=venue,
                     lease=lease,
@@ -2170,6 +2250,12 @@ class ReadOnlyCrossVenueCollector:
                 VenueName.MATCHBOOK.value: len(raw_matchbook_events),
                 VenueName.POLYMARKET.value: len(raw_polymarket_events),
                 VenueName.KALSHI.value: len(raw_kalshi_events),
+            },
+            "event_match_threshold": self.event_matcher.threshold,
+            "event_match_confidences": {
+                item.canonical_event_id: item.event_match_confidence
+                for item in discovered_fixtures
+                if item.event_match_confidence is not None
             },
         }
         LOGGER.info("scan_diagnostics %s", diagnostics)
@@ -2974,30 +3060,30 @@ class ReadOnlyCrossVenueCollector:
         identities = []
         series_by_event: dict[str, dict[str, Any] | None] = {}
         for left_venue, right_venue, left_market, right_market, _match in eligible_pairs:
-            if {left_venue, right_venue} != {VenueName.MATCHBOOK, VenueName.KALSHI}:
-                continue
-            if left_venue is VenueName.MATCHBOOK:
-                matchbook_market, kalshi_market = left_market, right_market
+            venues = {left_venue, right_venue}
+            if VenueName.KALSHI in venues:
+                kalshi_market = left_market if left_venue is VenueName.KALSHI else right_market
+                k_event = _event_for_source(k_events, kalshi_market.canonical.event.source_event_id)
+                event_payload = k_event.raw if k_event is not None and isinstance(k_event.raw, dict) else {}
+                source_event_id = str(kalshi_market.canonical.event.source_event_id)
+                if source_event_id not in series_by_event:
+                    series = None
+                    if isinstance(kalshi_market.raw, dict) and isinstance(kalshi_market.raw.get("series"), dict):
+                        series = kalshi_market.raw.get("series")
+                    elif k_event is not None:
+                        series = await self._fetch_kalshi_series_metadata(
+                            k_event,
+                            issues=issues,
+                            attach_contract_family=False,
+                        )
+                    series_by_event[source_event_id] = series if isinstance(series, dict) else None
+                series_payload = series_by_event.get(source_event_id)
             else:
-                matchbook_market, kalshi_market = right_market, left_market
-            k_event = _event_for_source(k_events, kalshi_market.canonical.event.source_event_id)
-            event_payload = k_event.raw if k_event is not None and isinstance(k_event.raw, dict) else {}
-            source_event_id = str(kalshi_market.canonical.event.source_event_id)
-            if source_event_id not in series_by_event:
-                series = None
-                if isinstance(kalshi_market.raw, dict) and isinstance(kalshi_market.raw.get("series"), dict):
-                    series = kalshi_market.raw.get("series")
-                elif k_event is not None:
-                    series = await self._fetch_kalshi_series_metadata(
-                        k_event,
-                        issues=issues,
-                        attach_contract_family=False,
-                    )
-                series_by_event[source_event_id] = series if isinstance(series, dict) else None
-            series_payload = series_by_event.get(source_event_id)
+                event_payload = {}
+                series_payload = None
             identity = pair_identity_from_markets(
-                matchbook_market.canonical,
-                kalshi_market.canonical,
+                left_market.canonical,
+                right_market.canonical,
                 kalshi_event_payload=event_payload,
                 kalshi_series_payload=series_payload,
                 fee_source=FEE_SOURCE_GET_SERIES,
@@ -5018,6 +5104,8 @@ def _fixture_from_cluster(
         opportunity_state=opportunity_state,
         market_evaluation_state=evaluation_state.value,
         market_evaluation_reason=evaluation_reason,
+        event_match_confidence=cluster.event_match_confidence,
+        event_match_threshold=cluster.event_match_threshold,
     )
 
 

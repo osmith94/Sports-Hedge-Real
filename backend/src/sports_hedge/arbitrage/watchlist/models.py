@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
-from sports_hedge.domain.models import VenueName
+from sports_hedge.domain.models import MarketScope, VenueName
 from sports_hedge.matching.learned_rules import MappingProvenance, MappingReviewCandidate
 
 
@@ -75,6 +75,7 @@ class LifecycleEventType(StrEnum):
     TRIGGER_CROSSED = "trigger_crossed"
     TRIGGER_LOST_BEFORE_FILL = "trigger_lost_before_fill"
     PROMOTED_TO_HOT = "promoted_to_hot"
+    PAPER_ELIGIBLE = "paper_eligible"
     PAPER_FILL_ATTEMPTED = "paper_fill_attempted"
     PAPER_FILL_PARTIAL = "paper_fill_partial"
     PAPER_FILL_COMPLETE = "paper_fill_complete"
@@ -91,6 +92,7 @@ class LifecycleEventType(StrEnum):
 OPERATOR_ACTIVITY_UNCONDITIONAL_EVENT_TYPES = frozenset(
     {
         LifecycleEventType.PROMOTED_TO_HOT,
+        LifecycleEventType.PAPER_ELIGIBLE,
         LifecycleEventType.PAPER_FILL_COMPLETE,
         LifecycleEventType.CLOSED,
     }
@@ -138,7 +140,10 @@ class WatchObservation(BaseModel):
     line: Decimal | None = None
     venues: list[VenueName] = Field(default_factory=list)
     legs: list[WatchLeg] = Field(default_factory=list)
-    trigger_net_edge: Decimal = Field(ge=0)
+    trigger_net_edge: Decimal | None = Field(default=None, ge=0)
+    min_net_edge_scope: MarketScope | None = None
+    min_net_edge_source: str | None = None
+    min_net_edge_configured: bool | None = None
     current_net_edge: Decimal | None = None
     gross_edge: Decimal | None = None
     implied_probability_sum: Decimal | None = Field(default=None, gt=0)
@@ -194,7 +199,10 @@ class NearOpportunity(BaseModel):
     status: OpportunityStatus
     classification: OpportunityClassification
     is_arbitrage: bool = False
-    trigger_net_edge: Decimal
+    trigger_net_edge: Decimal | None = None
+    min_net_edge_scope: MarketScope | None = None
+    min_net_edge_source: str | None = None
+    min_net_edge_configured: bool | None = None
     current_net_edge: Decimal | None = None
     gross_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
@@ -253,12 +261,17 @@ class OpportunityLifecycleEvent(BaseModel):
     status: OpportunityStatus
     current_net_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
+    trigger_net_edge: Decimal | None = None
+    min_net_edge_scope: str | None = None
+    min_net_edge_source: str | None = None
     detail: str | None = None
     fixture_label: str | None = None
     market_family: str | None = None
     canonical_event_id: str | None = None
     canonical_market_id: str | None = None
     capture_eligible: bool | None = None
+    attempt_id: str | None = None
+    append_seq: int | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> OpportunityLifecycleEvent:
@@ -268,6 +281,11 @@ class OpportunityLifecycleEvent(BaseModel):
 
 def fixture_label_from_teams(home_team: str | None, away_team: str | None) -> str | None:
     if home_team and away_team:
+        from sports_hedge.nfl.teams import is_canonical_nfl_team
+        from sports_hedge.nfl.labels import nfl_fixture_label
+
+        if is_canonical_nfl_team(home_team) and is_canonical_nfl_team(away_team):
+            return nfl_fixture_label(home_team=home_team, away_team=away_team)
         return f"{home_team} v {away_team}"
     return home_team or away_team
 
@@ -276,6 +294,12 @@ def market_label_from_family(market_family: MarketFamily | str | None) -> str | 
     if market_family is None:
         return None
     value = market_family.value if isinstance(market_family, MarketFamily) else str(market_family)
+    if value == "game_winner":
+        return "Game winner"
+    if value == "point_spread":
+        return "Point spread"
+    if value == "total_points":
+        return "Total points"
     label = value.replace("_", " ").strip()
     return label or None
 
@@ -293,18 +317,32 @@ def lifecycle_identity_from_opportunity(
     opportunity: NearOpportunity,
     *,
     capture_eligible: bool | None = None,
-) -> dict[str, str | bool | None]:
+) -> dict[str, str | bool | Decimal | None]:
     """Immutable glance fields copied onto append-only lifecycle events."""
 
     family = opportunity.market_family.value if opportunity.market_family is not None else None
     eligible = opportunity.capture_eligible if capture_eligible is None else capture_eligible
+    scope = opportunity.min_net_edge_scope
     return {
         "fixture_label": fixture_label_from_teams(opportunity.home_team, opportunity.away_team),
         "market_family": family,
         "canonical_event_id": opportunity.canonical_event_id,
         "canonical_market_id": opportunity.canonical_market_id,
         "capture_eligible": eligible,
+        "trigger_net_edge": opportunity.trigger_net_edge,
+        "min_net_edge_scope": scope.value if isinstance(scope, MarketScope) else scope,
+        "min_net_edge_source": opportunity.min_net_edge_source,
     }
+
+
+PAPER_FILL_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        LifecycleEventType.PAPER_FILL_ATTEMPTED,
+        LifecycleEventType.PAPER_FILL_PARTIAL,
+        LifecycleEventType.PAPER_FILL_COMPLETE,
+        LifecycleEventType.PAPER_FILL_REJECTED,
+    }
+)
 
 
 def paper_fill_lifecycle_event_id(
@@ -317,6 +355,36 @@ def paper_fill_lifecycle_event_id(
     if attempt_id:
         return f"{opportunity_id}:{event_type.value}:{attempt_id}"
     return f"{opportunity_id}:{event_type.value}"
+
+
+def attempt_id_from_lifecycle_event(
+    *,
+    opportunity_id: str,
+    event_type: LifecycleEventType,
+    event_id: str,
+    stored_attempt_id: str | None = None,
+) -> str | None:
+    """Durable attempt identity. Prefer the stored column, else the stable event_id."""
+
+    if stored_attempt_id:
+        return stored_attempt_id
+    if event_type not in PAPER_FILL_LIFECYCLE_EVENT_TYPES:
+        return None
+    prefix = f"{opportunity_id}:{event_type.value}:"
+    if event_id.startswith(prefix):
+        rest = event_id[len(prefix) :].strip()
+        return rest or None
+    return None
+
+
+def canonical_event_id_from_hot_opportunity_id(opportunity_id: str) -> str | None:
+    """Inverse of hot_promotion_opportunity_id. Not a guessed market mapping."""
+
+    prefix = "hot:"
+    if opportunity_id.startswith(prefix):
+        rest = opportunity_id[len(prefix) :].strip()
+        return rest or None
+    return None
 
 
 def hot_promotion_opportunity_id(canonical_event_id: str) -> str:

@@ -95,9 +95,18 @@ export function universeDiscoveryCopy(
       detail: `in progress · ${progress}${venueSuffix}${persist}`,
     };
   }
+  const cadence = universe.cadence_seconds ? ` · cadence ${universe.cadence_seconds}s` : "";
+  if (
+    status?.universe_scans_paused &&
+    (universe.last_plan_reason === "universe_scheduled_paused" || universe.next_due_at == null)
+  ) {
+    return {
+      label: UNIVERSE_DISCOVERY_LABEL,
+      detail: `Paused${cadence}${venueSuffix}${persist}`,
+    };
+  }
   const elapsed = durationLabel(universe.chunk_last_duration_ms ?? universe.last_duration_ms);
   const state = universe.worker_state && universe.worker_state !== "idle" ? ` · ${universe.worker_state}` : "";
-  const cadence = universe.cadence_seconds ? ` · cadence ${universe.cadence_seconds}s` : "";
   const due = universe.next_due_at ? ` · ${nextDueClock(universe.next_due_at, now)}` : "";
   return {
     label: UNIVERSE_DISCOVERY_LABEL,

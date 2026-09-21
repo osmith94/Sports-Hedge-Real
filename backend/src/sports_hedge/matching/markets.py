@@ -74,7 +74,23 @@ class MarketMatcher:
                 ],
                 provenance=event_result.provenance,
             )
-        if not (
+        from sports_hedge.nfl.detect import is_nfl_canonical_event
+        from sports_hedge.nfl.teams import is_canonical_nfl_team
+
+        if is_nfl_canonical_event(left.event) or is_nfl_canonical_event(right.event):
+            if not (
+                is_canonical_nfl_team(left.event.home_team)
+                and is_canonical_nfl_team(left.event.away_team)
+                and left.event.home_team == right.event.home_team
+                and left.event.away_team == right.event.away_team
+            ):
+                return MarketMatchResult(
+                    matched=False,
+                    confidence=event_result.confidence,
+                    reasons=["event_mismatch", "participant_identity_unproven", *event_result.reasons],
+                    provenance=event_result.provenance,
+                )
+        elif not (
             participant_identity_preserved(left.event.home_team, right.event.home_team)
             and participant_identity_preserved(left.event.away_team, right.event.away_team)
         ):
@@ -98,6 +114,12 @@ class MarketMatcher:
                 match_reasons.append(PAPER_ASSUMED_REASON)
             if OWNER_APPROVED_PAPER_EQUIVALENCE_REASON not in match_reasons:
                 match_reasons.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
+            from sports_hedge.nfl.settlement import nfl_market_uses_paper_caveat, nfl_paper_audit_reasons
+
+            if nfl_market_uses_paper_caveat(left) or nfl_market_uses_paper_caveat(right):
+                for reason in nfl_paper_audit_reasons():
+                    if reason not in match_reasons:
+                        match_reasons.append(reason)
             if allow_unknown_settlement_for_ordinary_1x2(left, right):
                 for reason in ordinary_1x2_match_reasons():
                     if reason not in match_reasons:

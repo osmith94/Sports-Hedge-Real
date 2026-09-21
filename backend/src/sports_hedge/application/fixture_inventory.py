@@ -160,6 +160,12 @@ def market_display_name(
 ) -> str:
     if not family:
         return fallback
+    if family == "game_winner":
+        return "Game winner"
+    if family == "point_spread":
+        return "Point spread"
+    if family == "total_points":
+        return "Total points"
     label = family.replace("_", " ").title()
     if line is not None:
         line_text = format(line, "f").rstrip("0").rstrip(".") if "." in format(line, "f") else format(line, "f")

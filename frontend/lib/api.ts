@@ -701,12 +701,14 @@ export type VenueDegradationIncident = {
 
 export type OperatorScannerSettings = {
   min_net_edge: string;
+  outright_min_net_edge?: string | null;
   max_execution_risk: number;
   hot_cadence_seconds: number;
   background_cadence_seconds: number;
   universe_cadence_seconds?: number;
   max_allocated_per_trade_gbp?: string;
   scanner_stopped: boolean;
+  universe_scans_paused?: boolean;
   source?: "operator" | "env_default";
   updated_at?: string | null;
   restart_semantics?: string;
@@ -714,6 +716,7 @@ export type OperatorScannerSettings = {
 
 export type OperatorScannerSettingsUpdate = {
   min_net_edge: string;
+  outright_min_net_edge?: string | null;
   max_execution_risk: number;
   hot_cadence_seconds: number;
   background_cadence_seconds: number;
@@ -731,14 +734,21 @@ export type OperatorCompetitionOption = {
   selectable: boolean;
   verification_status?: string;
   unavailable_reason?: string | null;
+  market_scope?: "FIXTURE_MATCH" | "COMPETITION_SEASON";
+  observation_only?: boolean;
+  paper_executable?: boolean;
 };
 
 export type OperatorUniverseScope = {
   sport: string;
   selected_competition_codes: string[];
+  selected_season_scope_codes?: string[];
   selected_count: number;
+  selected_season_scope_count?: number;
   saved_default_competition_codes?: string[];
+  saved_default_season_scope_codes?: string[];
   saved_default_count?: number;
+  saved_default_season_scope_count?: number;
   is_session_override?: boolean;
   scope_version: number;
   registry_version: number;
@@ -749,12 +759,14 @@ export type OperatorUniverseScope = {
   catalog: OperatorCompetitionOption[];
   generation_scope_version?: number | null;
   generation_selected_competition_codes?: string[];
+  generation_selected_season_scope_codes?: string[];
   manual_universe_state?: "idle" | "running" | "pending";
   manual_background_busy?: boolean;
 };
 
 export type OperatorUniverseScopeUpdate = {
   selected_competition_codes: string[];
+  selected_season_scope_codes?: string[];
   sport?: string;
   run_universe_now?: boolean;
   save_as_default?: boolean;
@@ -769,6 +781,7 @@ export type LiveRefreshStatus = {
   server_loop_enabled: boolean;
   paper_autofill_enabled?: boolean;
   scanner_stopped?: boolean;
+  universe_scans_paused?: boolean;
   operator_settings?: OperatorScannerSettings | null;
   universe_scope?: OperatorUniverseScope | null;
   interval_seconds: number;
@@ -1121,6 +1134,7 @@ export type WatchlistLifecycleEventType =
   | "trigger_crossed"
   | "trigger_lost_before_fill"
   | "promoted_to_hot"
+  | "paper_eligible"
   | "paper_fill_attempted"
   | "paper_fill_partial"
   | "paper_fill_complete"
@@ -1162,7 +1176,10 @@ export type NearOpportunity = {
   status: WatchlistOpportunityStatus;
   classification: WatchlistClassification;
   is_arbitrage?: boolean;
-  trigger_net_edge: string | number;
+  trigger_net_edge?: string | number | null;
+  min_net_edge_scope?: string | null;
+  min_net_edge_source?: string | null;
+  min_net_edge_configured?: boolean | null;
   current_net_edge?: string | number | null;
   gross_edge?: string | number | null;
   distance_to_trigger_pp?: string | number | null;
@@ -1216,12 +1233,17 @@ export type OpportunityLifecycleEvent = {
   status: WatchlistOpportunityStatus;
   current_net_edge?: string | number | null;
   distance_to_trigger_pp?: string | number | null;
+  trigger_net_edge?: string | number | null;
+  min_net_edge_scope?: string | null;
+  min_net_edge_source?: string | null;
   detail?: string | null;
   fixture_label?: string | null;
   market_family?: string | null;
   canonical_event_id?: string | null;
   canonical_market_id?: string | null;
   capture_eligible?: boolean | null;
+  attempt_id?: string | null;
+  append_seq?: number | null;
 };
 
 export async function runPaperCollection(
@@ -1431,6 +1453,32 @@ export async function stopPaperScanner(): Promise<LiveRefreshStatus> {
 
 export async function resumePaperScanner(): Promise<LiveRefreshStatus> {
   const response = await fetch(`${API_BASE}/paper/scanner/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function pauseUniverseSchedule(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/universe-schedule/pause`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function resumeUniverseSchedule(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/universe-schedule/resume`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
