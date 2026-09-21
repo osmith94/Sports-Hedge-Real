@@ -1473,11 +1473,15 @@ async def test_one_fixture_scans_every_supported_equivalent_pair() -> None:
 
         coordinator = get_live_refresh_coordinator()
         original_clock = coordinator._clock
-        # Bind radar `now` to the collected observation so wall-clock drift cannot
-        # DROP a still-current fixture. Production 4h ceiling is unchanged.
-        coordinator._clock = lambda: fixture.last_seen_at
+        # Bind radar `now` and the report instant to the collected observation so
+        # wall-clock drift cannot DROP a still-current fixture. Production 4h
+        # ceiling is unchanged.
+        coordinator._clock = lambda: OBSERVED
+        timed_report = report.model_copy(
+            update={"started_at": OBSERVED, "completed_at": OBSERVED}
+        )
         try:
-            coordinator.record_report(report)
+            coordinator.record_report(timed_report)
             client = TestClient(app)
             health = client.get("/health")
             assert health.json()["execution_enabled"] is False
