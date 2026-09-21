@@ -185,6 +185,48 @@ def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_se
 
 
 INDEX_COOP_YIELD_EVERY = 1024
+# Node-local then kickoff-local candidate order. Completing one source event's
+# incident pairs lets truncated finalize assign that fixture instead of waiting
+# for the global cross-venue prefix to finish.
+CANDIDATE_ORDER_VERSION = 2
+
+
+def _node_sort_tuple(item: VenueEvent) -> tuple[str, str]:
+    return (item.venue.value, item.source_event_id)
+
+
+def _event_locality(item: VenueEvent) -> tuple[float, str, str]:
+    """Cheap same-kickoff / same-label group used only to order candidate work.
+
+    Completing every incident pair of the earliest locality lets truncated
+    finalize assign that fixture. This is not a second identity system.
+    """
+
+    home = str(getattr(item.canonical, "home_team", "") or "").casefold()
+    away = str(getattr(item.canonical, "away_team", "") or "").casefold()
+    kickoff = item.canonical.kickoff_utc.timestamp()
+    return (kickoff, min(home, away), max(home, away))
+
+
+def _candidate_progress_key(pair: tuple[VenueEvent, VenueEvent]) -> tuple:
+    left, right = pair
+    loc_left = _event_locality(left)
+    loc_right = _event_locality(right)
+    first_loc, second_loc = (
+        (loc_left, loc_right) if loc_left <= loc_right else (loc_right, loc_left)
+    )
+    left_node = _node_sort_tuple(left)
+    right_node = _node_sort_tuple(right)
+    first_node, second_node = (
+        (left_node, right_node) if left_node <= right_node else (right_node, left_node)
+    )
+    return (
+        first_loc,
+        0 if left.venue is not right.venue else 1,
+        second_loc,
+        first_node,
+        second_node,
+    )
 
 
 @dataclass
@@ -194,6 +236,7 @@ class _IndexedCandidateBuilder:
     items: list[VenueEvent]
     kickoff_tolerance: timedelta
     cache: Any | None = None
+    matcher: Any | None = None
 
     def __post_init__(self) -> None:
         window = float(self.kickoff_tolerance.total_seconds())
@@ -212,9 +255,92 @@ class _IndexedCandidateBuilder:
         self.seen: set[tuple[int, int]] = set()
         self.generated: list[tuple[VenueEvent, VenueEvent]] = []
         self.cache_skipped = 0
+        self.could_match_rejected = 0
+        self.unresolved_competition_events = sum(
+            1 for record in self.records if record.competition_code is None
+        )
+        self.max_sport_bucket_size = max(
+            (len(group) for group in self.by_sport_bucket.values()),
+            default=0,
+        )
+        self.sport_bucket_count = len(self.by_sport_bucket)
+        self.could_match = getattr(self.matcher, "could_match", None)
+
+    def _cache_skip(self, left: _IndexRecord, right: _IndexRecord) -> bool:
+        cache = self.cache
+        if cache is None or left.item.venue is right.item.venue:
+            return False
+        return bool(
+            cache.skip_cross_venue_against(left.item, right.item)
+            or cache.skip_cross_venue_against(right.item, left.item)
+        )
+
+    def _could_match_pair(self, left: _IndexRecord, right: _IndexRecord) -> bool:
+        could_match = self.could_match
+        if not callable(could_match):
+            return True
+        return bool(could_match(left.item.canonical, right.item.canonical))
+
+    def _iter_compatible_pairs(self) -> Iterator[tuple[_IndexRecord, _IndexRecord]]:
+        for record in self.records:
+            for other in self.neighbour_records(record):
+                if record.index >= other.index:
+                    continue
+                key = (record.index, other.index)
+                if key in self.seen:
+                    continue
+                if not _compatible_index_pair(record, other, window_seconds=self.window):
+                    continue
+                self.seen.add(key)
+                yield record, other
+
+    def _new_component_parent(self) -> dict[int, int]:
+        return {record.index: record.index for record in self.records}
+
+    def _find_component(self, parent: dict[int, int], index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def _union_component(self, parent: dict[int, int], left: int, right: int) -> None:
+        root_left = self._find_component(parent, left)
+        root_right = self._find_component(parent, right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    def _emit_component_pairs(
+        self,
+        compatible: list[tuple[_IndexRecord, _IndexRecord]],
+        parent: dict[int, int] | None = None,
+    ) -> None:
+        """Keep every compatible pair inside a could-match component.
+
+        Dropping a could_match-False pair that sits on a matching path would
+        hide veto/miss evidence and can false-cluster through a third venue.
+        Isolated events (no could_match edge) generate no candidates.
+        """
+
+        if parent is None:
+            parent = self._new_component_parent()
+            for left, right in compatible:
+                if self._could_match_pair(left, right):
+                    self._union_component(parent, left.index, right.index)
+        sizes: dict[int, int] = defaultdict(int)
+        for record in self.records:
+            sizes[self._find_component(parent, record.index)] += 1
+        for left, right in compatible:
+            if self._cache_skip(left, right):
+                self.cache_skipped += 1
+                continue
+            root = self._find_component(parent, left.index)
+            if root != self._find_component(parent, right.index) or sizes[root] < 2:
+                self.could_match_rejected += 1
+                continue
+            self.generated.append((left.item, right.item))
 
     def consider_pair(self, left: _IndexRecord, right: _IndexRecord) -> bool:
-        """Return True when a new pair was generated or cache-skipped (a unit of work)."""
+        """Compatibility helper used by tests that walk the builder directly."""
 
         if left.index >= right.index:
             return False
@@ -224,13 +350,12 @@ class _IndexedCandidateBuilder:
         if not _compatible_index_pair(left, right, window_seconds=self.window):
             return False
         self.seen.add(key)
-        cache = self.cache
-        if cache is not None and left.item.venue is not right.item.venue:
-            skip_left = cache.skip_cross_venue_against(left.item, right.item)
-            skip_right = cache.skip_cross_venue_against(right.item, left.item)
-            if skip_left or skip_right:
-                self.cache_skipped += 1
-                return True
+        if self._cache_skip(left, right):
+            self.cache_skipped += 1
+            return True
+        if not self._could_match_pair(left, right):
+            self.could_match_rejected += 1
+            return True
         self.generated.append((left.item, right.item))
         return True
 
@@ -247,42 +372,52 @@ class _IndexedCandidateBuilder:
             )
             yield from self.by_sport_bucket_comp.get((record.sport, neighbour, None), ())
 
-    def finish(self) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, int]]:
-        self.generated.sort(
-            key=lambda pair: (
-                0 if pair[0].venue is not pair[1].venue else 1,
-                pair[0].venue.value,
-                pair[0].source_event_id,
-                pair[1].venue.value,
-                pair[1].source_event_id,
-            )
-        )
+    def finish(self) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
+        self.generated.sort(key=_candidate_progress_key)
         naive = naive_pair_space(len(self.items))
         diagnostics = {
             "naive_pair_space": naive,
             "candidate_pairs_generated": len(self.generated),
-            "pairs_pruned_by_index": max(0, naive - len(self.generated) - self.cache_skipped),
+            "pairs_pruned_by_index": max(
+                0,
+                naive
+                - len(self.generated)
+                - self.cache_skipped
+                - self.could_match_rejected,
+            ),
             "pairs_skipped_by_generation_cache": self.cache_skipped,
+            "pairs_rejected_by_could_match": self.could_match_rejected,
+            "unresolved_competition_events": self.unresolved_competition_events,
+            "max_sport_bucket_size": self.max_sport_bucket_size,
+            "sport_bucket_count": self.sport_bucket_count,
+            "candidate_order_version": CANDIDATE_ORDER_VERSION,
         }
         return self.generated, diagnostics
 
-    def run_sync(self) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, int]]:
-        for record in self.records:
-            for other in self.neighbour_records(record):
-                self.consider_pair(record, other)
+    def run_sync(self) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
+        compatible = list(self._iter_compatible_pairs())
+        self._emit_component_pairs(compatible)
         return self.finish()
 
     async def run_cooperative(
         self, *, yield_every: int = INDEX_COOP_YIELD_EVERY
-    ) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, int]]:
-        ticks = 0
+    ) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
         pause_every = max(1, int(yield_every))
-        for record in self.records:
-            for other in self.neighbour_records(record):
-                self.consider_pair(record, other)
-                ticks += 1
+        compatible: list[tuple[_IndexRecord, _IndexRecord]] = []
+        parent = self._new_component_parent()
+        try:
+            for ticks, pair in enumerate(self._iter_compatible_pairs(), start=1):
+                compatible.append(pair)
+                if self._could_match_pair(*pair):
+                    self._union_component(parent, pair[0].index, pair[1].index)
                 if ticks % pause_every == 0:
                     await asyncio.sleep(0)
+            self._emit_component_pairs(compatible, parent)
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            if compatible and not self.generated:
+                self._emit_component_pairs(compatible, parent)
+            raise
         return self.finish()
 
 
@@ -291,7 +426,8 @@ def build_indexed_candidates(
     *,
     kickoff_tolerance: timedelta,
     cache: Any | None = None,
-) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, int]]:
+    matcher: Any | None = None,
+) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
     """Correctness-preserving superset of EventMatcher-eligible pairs.
 
     Blocks on sport, known target competition, overlapping kickoff windows,
@@ -299,10 +435,17 @@ def build_indexed_candidates(
     fallback path that pairs against every same-sport window neighbour so
     they are never dropped for speed. Kickoff buckets overlap by ±1 window
     so a pair on a 5-minute boundary is not a false negative.
+
+    When ``matcher`` exposes ``could_match``, index generation first builds
+    the could-match graph and then keeps every compatible pair inside a
+    connected component. That preserves veto/miss evidence on matching
+    paths (no false clusters) while dropping pairs that cannot share a
+    component. ``False`` from ``could_match`` still cannot hide a pair that
+    sits on a matching path.
     """
 
     return _IndexedCandidateBuilder(
-        items=items, kickoff_tolerance=kickoff_tolerance, cache=cache
+        items=items, kickoff_tolerance=kickoff_tolerance, cache=cache, matcher=matcher
     ).run_sync()
 
 
@@ -311,12 +454,13 @@ async def build_indexed_candidates_cooperative(
     *,
     kickoff_tolerance: timedelta,
     cache: Any | None = None,
+    matcher: Any | None = None,
     yield_every: int = INDEX_COOP_YIELD_EVERY,
-) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, int]]:
+) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
     """Same candidate set as ``build_indexed_candidates``, yielding to the event loop."""
 
     return await _IndexedCandidateBuilder(
-        items=items, kickoff_tolerance=kickoff_tolerance, cache=cache
+        items=items, kickoff_tolerance=kickoff_tolerance, cache=cache, matcher=matcher
     ).run_cooperative(yield_every=yield_every)
 
 
@@ -380,11 +524,28 @@ class ClusterPass:
         )
         self._kickoff_tolerance = kickoff_tolerance
         self._candidates: list[tuple[VenueEvent, VenueEvent]] = []
-        self.index_diagnostics: dict[str, int] = {}
+        self.index_diagnostics: dict[str, Any] = {}
         self.candidate_pairs_considered = 0
         self._resume_cursor = 0
+        self.last_unscored_nodes: set[tuple[VenueName, str]] = set()
+        self.resume_diagnostics: dict[str, Any] = {
+            "clustering_resume_applied": False,
+            "clustering_resume_signature_mismatch": False,
+            "clustering_resume_candidates_reused": False,
+            "clustering_resume_cursor_before": 0,
+            "clustering_resume_cursor_after": 0,
+        }
         if not defer_candidate_build:
             self._load_candidates_sync()
+
+    def _candidate_keys(self) -> list[tuple[tuple[str, str], tuple[str, str]]]:
+        return [
+            (
+                (left.venue.value, left.source_event_id),
+                (right.venue.value, right.source_event_id),
+            )
+            for left, right in self._candidates
+        ]
 
     def _restore_resume_state(self, resume) -> None:
         self.parent = dict(resume.parent)
@@ -393,31 +554,81 @@ class ClusterPass:
         self.scored_pairs = list(getattr(resume, "scored_pairs", ()) or ())
         self._resume_cursor = min(resume.cursor, len(self._candidates))
         self.candidate_pairs_considered = self._resume_cursor
+        self.resume_diagnostics["clustering_resume_applied"] = True
+        self.resume_diagnostics["clustering_resume_cursor_before"] = int(resume.cursor)
+        self.resume_diagnostics["clustering_resume_cursor_after"] = self._resume_cursor
 
     def _apply_resume_cursor(self) -> None:
         cache = self.identity_cache
         if cache is None:
             return
+        snapshot = cache.clustering_resume
+        if snapshot is not None and snapshot.items_signature != cache.items_signature(
+            self.items
+        ):
+            self.resume_diagnostics["clustering_resume_signature_mismatch"] = True
         resume = cache.take_clustering_resume(self.items)
         if resume is None:
             return
+        stored_version = int(getattr(resume, "candidate_order_version", 1) or 1)
+        if stored_version != CANDIDATE_ORDER_VERSION:
+            cache.clustering_resume = None
+            return
         self._restore_resume_state(resume)
 
+    def _try_restore_candidates(self) -> bool:
+        cache = self.identity_cache
+        if cache is None:
+            return False
+        snapshot = cache.clustering_resume
+        if snapshot is None:
+            return False
+        if snapshot.items_signature != cache.items_signature(self.items):
+            self.resume_diagnostics["clustering_resume_signature_mismatch"] = True
+            return False
+        stored_version = int(getattr(snapshot, "candidate_order_version", 1) or 1)
+        if stored_version != CANDIDATE_ORDER_VERSION:
+            return False
+        keys = list(getattr(snapshot, "candidate_keys", ()) or ())
+        if not keys:
+            return False
+        nodes = {
+            (item.venue.value, item.source_event_id): item for item in self.items
+        }
+        restored: list[tuple[VenueEvent, VenueEvent]] = []
+        for left_key, right_key in keys:
+            left = nodes.get((str(left_key[0]), str(left_key[1])))
+            right = nodes.get((str(right_key[0]), str(right_key[1])))
+            if left is None or right is None:
+                return False
+            restored.append((left, right))
+        self._candidates = restored
+        self.index_diagnostics = dict(getattr(snapshot, "index_diagnostics", {}) or {})
+        self.resume_diagnostics["clustering_resume_candidates_reused"] = True
+        self._apply_resume_cursor()
+        return True
+
     def _load_candidates_sync(self) -> None:
+        if self._try_restore_candidates():
+            return
         self._candidates, self.index_diagnostics = build_indexed_candidates(
             self.items,
             kickoff_tolerance=self._kickoff_tolerance,
             cache=self.identity_cache,
+            matcher=self.bulk_matcher,
         )
         self._apply_resume_cursor()
 
     async def load_candidates_cooperative(
         self, *, yield_every: int = INDEX_COOP_YIELD_EVERY
     ) -> None:
+        if self._try_restore_candidates():
+            return
         builder = _IndexedCandidateBuilder(
             items=self.items,
             kickoff_tolerance=self._kickoff_tolerance,
             cache=self.identity_cache,
+            matcher=self.bulk_matcher,
         )
         try:
             self._candidates, self.index_diagnostics = await builder.run_cooperative(
@@ -455,6 +666,8 @@ class ClusterPass:
             ),
             "clustering_truncated": bool(truncated),
             "clustering_duration_ms": max(0, int(duration_ms)),
+            "unscored_identity_nodes": len(self.last_unscored_nodes),
+            **self.resume_diagnostics,
             **self.graph_diagnostics,
             **self.incremental_diagnostics.as_dict(),
         }
@@ -479,6 +692,9 @@ class ClusterPass:
             match_confidence=self.match_confidence,
             pair_kinds=self.pair_kinds,
             scored_pairs=list(self.scored_pairs),
+            candidate_keys=self._candidate_keys(),
+            candidate_order_version=CANDIDATE_ORDER_VERSION,
+            index_diagnostics=dict(self.index_diagnostics),
         )
 
     def record_generation_negatives(self, clusters: list[FixtureCluster]) -> None:
@@ -586,12 +802,14 @@ class ClusterPass:
         *,
         unscored_nodes: set[tuple[VenueName, str]] | None = None,
     ) -> dict[tuple[VenueName, str], IdentityAssignmentProvenance]:
+        pending = (
+            self._unscored_identity_nodes() if unscored_nodes is None else unscored_nodes
+        )
+        self.last_unscored_nodes = set(pending)
         result = assign_identity_components(
             list(self.nodes.keys()),
             self.scored_pairs,
-            unscored_nodes=(
-                self._unscored_identity_nodes() if unscored_nodes is None else unscored_nodes
-            ),
+            unscored_nodes=pending,
             threshold=threshold,
         )
         self.graph_diagnostics = result.diagnostics.as_dict()

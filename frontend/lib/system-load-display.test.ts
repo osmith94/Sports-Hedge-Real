@@ -73,6 +73,23 @@ describe("system load display", () => {
     );
   });
 
+  it("labels generation work above the chunk wall as cumulative, not a blown budget", () => {
+    const lines = systemLoadLines(
+      load({
+        universe: {
+          evaluated: 16,
+          total: 761,
+          remaining: 745,
+          cadence_seconds: 1800,
+          generation_work_used_s: 946,
+          generation_budget_seconds: 150,
+        },
+      }),
+    );
+    const universe = lines.find((line) => line.key === "UNIVERSE discovery");
+    assert.match(universe?.detail ?? "", /946s cumulative \/ 150s chunk/);
+  });
+
     it("appends wait, service latency, deadline misses and saturation without p50 language", () => {
     const lines = systemLoadLines(
       load({

@@ -733,6 +733,8 @@ class ReadOnlyCrossVenueCollector:
         self._identity_cache: GenerationIdentityCache | None = None
         self._incremental_cache: CrossGenerationIdentityCache | None = None
         self._op_partial_clusters: list[FixtureCluster] = []
+        self._op_clustering_truncated = False
+        self._op_unscored_identity_nodes: set[tuple[Any, str]] = set()
 
     async def collect_and_scan(
         self,
@@ -816,6 +818,8 @@ class ReadOnlyCrossVenueCollector:
         self._op_generation_scope_version = generation_scope_version
         self._op_generation_superseded = bool(generation_superseded)
         self._op_operation_health = {}
+        self._op_clustering_truncated = False
+        self._op_unscored_identity_nodes = set()
         self._on_discovery_complete = on_discovery_complete
         self._on_fixture_evaluated = on_fixture_evaluated
         self._on_canonical_work_set = on_canonical_work_set
@@ -2361,6 +2365,36 @@ class ReadOnlyCrossVenueCollector:
             "pairs_skipped_by_generation_cache": int(
                 (clustering_diagnostics or {}).get("pairs_skipped_by_generation_cache") or 0
             ),
+            "pairs_rejected_by_could_match": int(
+                (clustering_diagnostics or {}).get("pairs_rejected_by_could_match") or 0
+            ),
+            "unresolved_competition_events": int(
+                (clustering_diagnostics or {}).get("unresolved_competition_events") or 0
+            ),
+            "max_sport_bucket_size": int(
+                (clustering_diagnostics or {}).get("max_sport_bucket_size") or 0
+            ),
+            "sport_bucket_count": int(
+                (clustering_diagnostics or {}).get("sport_bucket_count") or 0
+            ),
+            "clustering_resume_applied": bool(
+                (clustering_diagnostics or {}).get("clustering_resume_applied")
+            ),
+            "clustering_resume_signature_mismatch": bool(
+                (clustering_diagnostics or {}).get("clustering_resume_signature_mismatch")
+            ),
+            "clustering_resume_candidates_reused": bool(
+                (clustering_diagnostics or {}).get("clustering_resume_candidates_reused")
+            ),
+            "clustering_resume_cursor_before": int(
+                (clustering_diagnostics or {}).get("clustering_resume_cursor_before") or 0
+            ),
+            "clustering_resume_cursor_after": int(
+                (clustering_diagnostics or {}).get("clustering_resume_cursor_after") or 0
+            ),
+            "unscored_identity_nodes": int(
+                (clustering_diagnostics or {}).get("unscored_identity_nodes") or 0
+            ),
             "candidate_reduction_pct": float(
                 (clustering_diagnostics or {}).get("candidate_reduction_pct") or 0.0
             ),
@@ -2520,6 +2554,19 @@ class ReadOnlyCrossVenueCollector:
             series_results=dict(self._op_series_results),
             scan_lane=scan_lane,
             resume_cursor=resume_cursor,
+        )
+
+    def _cluster_identity_incomplete(self, cluster: FixtureCluster) -> bool:
+        """True when truncated clustering still has unscored pairs for this fixture."""
+
+        if not self._op_clustering_truncated:
+            return False
+        unscored = self._op_unscored_identity_nodes
+        if not unscored:
+            return False
+        return any(
+            (item.venue, item.source_event_id) in unscored
+            for item in cluster_member_events(cluster)
         )
 
     def _single_venue_cluster_result(
@@ -2781,12 +2828,21 @@ class ReadOnlyCrossVenueCollector:
                 accept(
                     index,
                     cluster,
-                    self._single_venue_cluster_result(
-                        cluster,
-                        seen_at=seen_at,
-                        polymarket_events=polymarket_events,
-                        queried_series_ids=queried_series_ids,
-                        reason=NO_CROSS_VENUE_CANDIDATE,
+                    (
+                        self._leftover_cluster_result(
+                            cluster,
+                            seen_at=seen_at,
+                            polymarket_events=polymarket_events,
+                            queried_series_ids=queried_series_ids,
+                        )
+                        if self._cluster_identity_incomplete(cluster)
+                        else self._single_venue_cluster_result(
+                            cluster,
+                            seen_at=seen_at,
+                            polymarket_events=polymarket_events,
+                            queried_series_ids=queried_series_ids,
+                            reason=NO_CROSS_VENUE_CANDIDATE,
+                        )
                     ),
                 )
                 self._bump_hot_stat("skipped_not_viable")
@@ -2969,6 +3025,15 @@ class ReadOnlyCrossVenueCollector:
             and cluster.venue_count < 2
             and not cluster_needs_one_sided_catalogue_markets(cluster)
         ):
+            if self._cluster_identity_incomplete(cluster):
+                leftover = _fixture_from_cluster(
+                    cluster,
+                    seen_at=seen_at,
+                    polymarket_events=polymarket_events,
+                    queried_series_ids=queried_series_ids,
+                    leftover=True,
+                )
+                return leftover, [], [], {}, 0, 0
             return self._single_venue_cluster_result(
                 cluster,
                 seen_at=seen_at,
@@ -4437,6 +4502,8 @@ class ReadOnlyCrossVenueCollector:
         diagnostics["cluster_index_ms"] = init_ms
         diagnostics["cluster_consider_ms"] = consider_ms
         diagnostics["cluster_finalize_ms"] = finalize_ms
+        self._op_clustering_truncated = bool(truncated)
+        self._op_unscored_identity_nodes = set(cluster_pass.last_unscored_nodes)
         return clusters, counts, truncated, diagnostics
 
     def _normalizer_for_venue(self, venue: VenueName):
