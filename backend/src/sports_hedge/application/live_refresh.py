@@ -89,7 +89,6 @@ from sports_hedge.lifecycle.universe import (
     decide_series_transition,
     decide_stale_chunk_callback,
     decide_sweep_transition,
-    decide_worker_transition,
     generation_phase,
     map_evaluation_to_sweep_state,
     map_series_status_to_state,
@@ -2582,23 +2581,7 @@ class LiveRefreshCoordinator:
         closed = self._universe_generation_started_at is None
         retry_wait = None if closed else self._earliest_retry_wait_unlocked(report.completed_at)
         if closed:
-            worker_decision = decide_worker_transition(
-                self.status.universe.worker_state or WORKER_RUNNING,
-                WORKER_COMPLETE,
-                action="complete",
-                unfinished=leftover_n > 0
-                or completeness
-                in {
-                    UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE,
-                    UNIVERSE_COMPLETENESS_DEADLINE_LEFTOVER,
-                },
-                generation_id=self._universe_generation_id,
-            )
-            if worker_decision.accepted:
-                worker_state = WORKER_COMPLETE
-            else:
-                self._audit_universe_lifecycle(worker_decision)
-                worker_state = WORKER_IDLE
+            worker_state = WORKER_COMPLETE
         elif retry_wait is not None:
             worker_state = WORKER_WAITING
         elif degraded:
