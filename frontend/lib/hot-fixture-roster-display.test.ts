@@ -236,6 +236,8 @@ describe("HOT roster console placement", () => {
     assert.match(panel, /HOT_ROSTER_TITLE/);
     assert.match(panel, /fastScanRosterSummary/);
     assert.match(panel, /hotFixtureRows/);
+    assert.match(panel, /kickoffLocalLabel\(row\.kickoffUtc, nowMs\)/);
+    assert.doesNotMatch(panel, /kickoffLocalLabel\(row\.kickoffUtc\)/);
     assert.match(css, /hot-zone-panel/);
     assert.doesNotMatch(panel, /getTrackedWatchlist/);
     assert.doesNotMatch(panel, /DEMO_/);

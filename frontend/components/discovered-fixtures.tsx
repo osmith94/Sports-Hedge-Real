@@ -80,7 +80,7 @@ function FixtureRow({ item, nowMs }: { item: DiscoveredFixture; nowMs: number | 
           </div>
         </td>
         <td className="wrap">
-          {kickoffLocalLabel(item.kickoff_utc)}
+          {kickoffLocalLabel(item.kickoff_utc, nowMs)}
           {context.map((line) => (
             <div className="muted" key={line}>
               {line}
