@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -183,6 +184,108 @@ def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_se
     return True
 
 
+INDEX_COOP_YIELD_EVERY = 1024
+
+
+@dataclass
+class _IndexedCandidateBuilder:
+    """Deterministic indexed pair generation, with an optional cooperative yield."""
+
+    items: list[VenueEvent]
+    kickoff_tolerance: timedelta
+    cache: Any | None = None
+
+    def __post_init__(self) -> None:
+        window = float(self.kickoff_tolerance.total_seconds())
+        if window <= 0:
+            window = 1.0
+        self.window = window
+        self.records = [_index_record(index, item) for index, item in enumerate(self.items)]
+        self.by_sport_bucket_comp: dict[tuple[str, int, str | None], list[_IndexRecord]] = defaultdict(
+            list
+        )
+        self.by_sport_bucket: dict[tuple[str, int], list[_IndexRecord]] = defaultdict(list)
+        for record in self.records:
+            bucket = _kickoff_bucket(record.kickoff_ts, window)
+            self.by_sport_bucket_comp[(record.sport, bucket, record.competition_code)].append(record)
+            self.by_sport_bucket[(record.sport, bucket)].append(record)
+        self.seen: set[tuple[int, int]] = set()
+        self.generated: list[tuple[VenueEvent, VenueEvent]] = []
+        self.cache_skipped = 0
+
+    def consider_pair(self, left: _IndexRecord, right: _IndexRecord) -> bool:
+        """Return True when a new pair was generated or cache-skipped (a unit of work)."""
+
+        if left.index >= right.index:
+            return False
+        key = (left.index, right.index)
+        if key in self.seen:
+            return False
+        if not _compatible_index_pair(left, right, window_seconds=self.window):
+            return False
+        self.seen.add(key)
+        cache = self.cache
+        if cache is not None and left.item.venue is not right.item.venue:
+            skip_left = cache.skip_cross_venue_against(left.item, right.item)
+            skip_right = cache.skip_cross_venue_against(right.item, left.item)
+            if skip_left or skip_right:
+                self.cache_skipped += 1
+                return True
+        self.generated.append((left.item, right.item))
+        return True
+
+    def neighbour_records(self, record: _IndexRecord) -> Iterator[_IndexRecord]:
+        bucket = _kickoff_bucket(record.kickoff_ts, self.window)
+        neighbour_buckets = (bucket - 1, bucket, bucket + 1)
+        if record.competition_code is None:
+            for neighbour in neighbour_buckets:
+                yield from self.by_sport_bucket.get((record.sport, neighbour), ())
+            return
+        for neighbour in neighbour_buckets:
+            yield from self.by_sport_bucket_comp.get(
+                (record.sport, neighbour, record.competition_code), ()
+            )
+            yield from self.by_sport_bucket_comp.get((record.sport, neighbour, None), ())
+
+    def finish(self) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, int]]:
+        self.generated.sort(
+            key=lambda pair: (
+                0 if pair[0].venue is not pair[1].venue else 1,
+                pair[0].venue.value,
+                pair[0].source_event_id,
+                pair[1].venue.value,
+                pair[1].source_event_id,
+            )
+        )
+        naive = naive_pair_space(len(self.items))
+        diagnostics = {
+            "naive_pair_space": naive,
+            "candidate_pairs_generated": len(self.generated),
+            "pairs_pruned_by_index": max(0, naive - len(self.generated) - self.cache_skipped),
+            "pairs_skipped_by_generation_cache": self.cache_skipped,
+        }
+        return self.generated, diagnostics
+
+    def run_sync(self) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, int]]:
+        for record in self.records:
+            for other in self.neighbour_records(record):
+                self.consider_pair(record, other)
+        return self.finish()
+
+    async def run_cooperative(
+        self, *, yield_every: int = INDEX_COOP_YIELD_EVERY
+    ) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, int]]:
+        ticks = 0
+        pause_every = max(1, int(yield_every))
+        for record in self.records:
+            for other in self.neighbour_records(record):
+                self.consider_pair(record, other)
+                ticks += 1
+                if ticks % pause_every == 0:
+                    await asyncio.sleep(0)
+        return self.finish()
+
+
 def build_indexed_candidates(
     items: list[VenueEvent],
     *,
@@ -198,72 +301,23 @@ def build_indexed_candidates(
     so a pair on a 5-minute boundary is not a false negative.
     """
 
-    naive = naive_pair_space(len(items))
-    window = float(kickoff_tolerance.total_seconds())
-    if window <= 0:
-        window = 1.0
-    records = [_index_record(index, item) for index, item in enumerate(items)]
-    by_sport_bucket_comp: dict[tuple[str, int, str | None], list[_IndexRecord]] = defaultdict(list)
-    by_sport_bucket: dict[tuple[str, int], list[_IndexRecord]] = defaultdict(list)
-    for record in records:
-        bucket = _kickoff_bucket(record.kickoff_ts, window)
-        by_sport_bucket_comp[(record.sport, bucket, record.competition_code)].append(record)
-        by_sport_bucket[(record.sport, bucket)].append(record)
+    return _IndexedCandidateBuilder(
+        items=items, kickoff_tolerance=kickoff_tolerance, cache=cache
+    ).run_sync()
 
-    seen: set[tuple[int, int]] = set()
-    generated: list[tuple[VenueEvent, VenueEvent]] = []
-    cache_skipped = 0
 
-    def consider_pair(left: _IndexRecord, right: _IndexRecord) -> None:
-        nonlocal cache_skipped
-        if left.index >= right.index:
-            return
-        key = (left.index, right.index)
-        if key in seen:
-            return
-        if not _compatible_index_pair(left, right, window_seconds=window):
-            return
-        seen.add(key)
-        if cache is not None and left.item.venue is not right.item.venue:
-            skip_left = cache.skip_cross_venue_against(left.item, right.item)
-            skip_right = cache.skip_cross_venue_against(right.item, left.item)
-            if skip_left or skip_right:
-                cache_skipped += 1
-                return
-        generated.append((left.item, right.item))
+async def build_indexed_candidates_cooperative(
+    items: list[VenueEvent],
+    *,
+    kickoff_tolerance: timedelta,
+    cache: Any | None = None,
+    yield_every: int = INDEX_COOP_YIELD_EVERY,
+) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, int]]:
+    """Same candidate set as ``build_indexed_candidates``, yielding to the event loop."""
 
-    for record in records:
-        bucket = _kickoff_bucket(record.kickoff_ts, window)
-        neighbour_buckets = (bucket - 1, bucket, bucket + 1)
-        if record.competition_code is None:
-            for neighbour in neighbour_buckets:
-                for other in by_sport_bucket.get((record.sport, neighbour), ()):
-                    consider_pair(record, other)
-            continue
-        for neighbour in neighbour_buckets:
-            for other in by_sport_bucket_comp.get(
-                (record.sport, neighbour, record.competition_code), ()
-            ):
-                consider_pair(record, other)
-            for other in by_sport_bucket_comp.get((record.sport, neighbour, None), ()):
-                consider_pair(record, other)
-
-    generated.sort(
-        key=lambda pair: (
-            0 if pair[0].venue is not pair[1].venue else 1,
-            pair[0].venue.value,
-            pair[0].source_event_id,
-            pair[1].venue.value,
-            pair[1].source_event_id,
-        )
-    )
-    diagnostics = {
-        "naive_pair_space": naive,
-        "candidate_pairs_generated": len(generated),
-        "pairs_pruned_by_index": max(0, naive - len(generated) - cache_skipped),
-        "pairs_skipped_by_generation_cache": cache_skipped,
-    }
-    return generated, diagnostics
+    return await _IndexedCandidateBuilder(
+        items=items, kickoff_tolerance=kickoff_tolerance, cache=cache
+    ).run_cooperative(yield_every=yield_every)
 
 
 def universe_cluster_sort_key(cluster: FixtureCluster) -> tuple[int, str]:
@@ -286,6 +340,7 @@ class ClusterPass:
         identity_cache: Any | None = None,
         extra: list[VenueEvent] | None = None,
         incremental_cache: CrossGenerationIdentityCache | None = None,
+        defer_candidate_build: bool = False,
     ) -> None:
         if max_event_pairs <= 0:
             raise ValueError("max_event_pairs must be positive")
@@ -322,22 +377,46 @@ class ClusterPass:
         kickoff_tolerance = getattr(
             self.bulk_matcher, "kickoff_tolerance", timedelta(minutes=5)
         )
-        self._candidates, self.index_diagnostics = build_indexed_candidates(
-            self.items,
-            kickoff_tolerance=kickoff_tolerance,
-            cache=identity_cache,
-        )
+        self._kickoff_tolerance = kickoff_tolerance
+        self._candidates: list[tuple[VenueEvent, VenueEvent]] = []
+        self.index_diagnostics: dict[str, int] = {}
         self.candidate_pairs_considered = 0
         self._resume_cursor = 0
-        if identity_cache is not None:
-            resume = identity_cache.take_clustering_resume(self.items)
-            if resume is not None:
-                self.parent = dict(resume.parent)
-                self.match_confidence = dict(resume.match_confidence)
-                self.pair_kinds = {key: set(value) for key, value in resume.pair_kinds.items()}
-                self.scored_pairs = list(getattr(resume, "scored_pairs", ()) or ())
-                self._resume_cursor = min(resume.cursor, len(self._candidates))
-                self.candidate_pairs_considered = self._resume_cursor
+        if not defer_candidate_build:
+            self._load_candidates_sync()
+
+    def _apply_resume_cursor(self) -> None:
+        cache = self.identity_cache
+        if cache is None:
+            return
+        resume = cache.take_clustering_resume(self.items)
+        if resume is None:
+            return
+        self.parent = dict(resume.parent)
+        self.match_confidence = dict(resume.match_confidence)
+        self.pair_kinds = {key: set(value) for key, value in resume.pair_kinds.items()}
+        self.scored_pairs = list(getattr(resume, "scored_pairs", ()) or ())
+        self._resume_cursor = min(resume.cursor, len(self._candidates))
+        self.candidate_pairs_considered = self._resume_cursor
+
+    def _load_candidates_sync(self) -> None:
+        self._candidates, self.index_diagnostics = build_indexed_candidates(
+            self.items,
+            kickoff_tolerance=self._kickoff_tolerance,
+            cache=self.identity_cache,
+        )
+        self._apply_resume_cursor()
+
+    async def load_candidates_cooperative(
+        self, *, yield_every: int = INDEX_COOP_YIELD_EVERY
+    ) -> None:
+        self._candidates, self.index_diagnostics = await build_indexed_candidates_cooperative(
+            self.items,
+            kickoff_tolerance=self._kickoff_tolerance,
+            cache=self.identity_cache,
+            yield_every=yield_every,
+        )
+        self._apply_resume_cursor()
 
     def pairs(self) -> Iterator[tuple[VenueEvent, VenueEvent]]:
         for pair in self._candidates[self._resume_cursor :]:
@@ -468,21 +547,30 @@ class ClusterPass:
             )
         )
 
-    def _apply_identity_graph(self, threshold: float) -> dict[tuple[VenueName, str], IdentityAssignmentProvenance]:
-        candidate_keys = {
-            frozenset(
-                (
-                    _key(left.venue, left.source_event_id),
-                    _key(right.venue, right.source_event_id),
-                )
-            )
-            for left, right in self._candidates
-        }
-        scored_keys = {pair.undirected_key() for pair in self.scored_pairs}
+    def _unscored_identity_nodes(self) -> set[tuple[VenueName, str]]:
+        """Endpoints of indexed candidates that have not been scored yet."""
+
+        nodes: set[tuple[VenueName, str]] = set()
+        remaining = self._candidates[self.candidate_pairs_considered :]
+        for left, right in remaining:
+            nodes.add(_key(left.venue, left.source_event_id))
+            nodes.add(_key(right.venue, right.source_event_id))
+            if len(nodes) >= len(self.nodes):
+                break
+        return nodes
+
+    def _apply_identity_graph(
+        self,
+        threshold: float,
+        *,
+        unscored_nodes: set[tuple[VenueName, str]] | None = None,
+    ) -> dict[tuple[VenueName, str], IdentityAssignmentProvenance]:
         result = assign_identity_components(
             list(self.nodes.keys()),
             self.scored_pairs,
-            unscored_candidate_keys=candidate_keys - scored_keys,
+            unscored_nodes=(
+                self._unscored_identity_nodes() if unscored_nodes is None else unscored_nodes
+            ),
             threshold=threshold,
         )
         self.graph_diagnostics = result.diagnostics.as_dict()
@@ -511,6 +599,50 @@ class ClusterPass:
     def finalize(self) -> tuple[list[FixtureCluster], dict[str, int]]:
         threshold = float(getattr(self.bulk_matcher, "threshold", 0.92))
         provenance_by_member = self._apply_identity_graph(threshold)
+        return self._assemble_clusters(threshold, provenance_by_member)
+
+    async def _unscored_identity_nodes_cooperative(
+        self, *, yield_every: int = INDEX_COOP_YIELD_EVERY
+    ) -> set[tuple[VenueName, str]]:
+        nodes: set[tuple[VenueName, str]] = set()
+        remaining = self._candidates[self.candidate_pairs_considered :]
+        pause_every = max(1, int(yield_every))
+        for index, (left, right) in enumerate(remaining):
+            if index % pause_every == 0:
+                await asyncio.sleep(0)
+            nodes.add(_key(left.venue, left.source_event_id))
+            nodes.add(_key(right.venue, right.source_event_id))
+            if len(nodes) >= len(self.nodes):
+                break
+        return nodes
+
+    async def finalize_cooperative(
+        self, *, yield_every: int = 64
+    ) -> tuple[list[FixtureCluster], dict[str, int]]:
+        threshold = float(getattr(self.bulk_matcher, "threshold", 0.92))
+        unscored_nodes = await self._unscored_identity_nodes_cooperative()
+        provenance_by_member = self._apply_identity_graph(
+            threshold, unscored_nodes=unscored_nodes
+        )
+        await asyncio.sleep(0)
+        pause_every = max(1, int(yield_every))
+        grouped: dict[tuple[VenueName, str], FixtureCluster] = {}
+        for index, (key, item) in enumerate(self.nodes.items()):
+            if index % pause_every == 0:
+                await asyncio.sleep(0)
+            root = self._find(key)
+            cluster = grouped.setdefault(root, FixtureCluster())
+            _append_cluster_event(cluster, item)
+            cluster.pair_kinds.update(self.pair_kinds.get(key, set()))
+            if cluster.identity_provenance is None:
+                cluster.identity_provenance = provenance_by_member.get(key)
+        return self._finish_grouped_clusters(threshold, grouped)
+
+    def _assemble_clusters(
+        self,
+        threshold: float,
+        provenance_by_member: dict[tuple[VenueName, str], IdentityAssignmentProvenance],
+    ) -> tuple[list[FixtureCluster], dict[str, int]]:
         grouped: dict[tuple[VenueName, str], FixtureCluster] = {}
         for key, item in self.nodes.items():
             root = self._find(key)
@@ -519,7 +651,13 @@ class ClusterPass:
             cluster.pair_kinds.update(self.pair_kinds.get(key, set()))
             if cluster.identity_provenance is None:
                 cluster.identity_provenance = provenance_by_member.get(key)
+        return self._finish_grouped_clusters(threshold, grouped)
 
+    def _finish_grouped_clusters(
+        self,
+        threshold: float,
+        grouped: dict[tuple[VenueName, str], FixtureCluster],
+    ) -> tuple[list[FixtureCluster], dict[str, int]]:
         clusters: list[FixtureCluster] = []
         for cluster in grouped.values():
             cluster.matchbook_events = _sort_events(cluster.matchbook_events)

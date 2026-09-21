@@ -25,7 +25,6 @@ from sports_hedge.application.fixture_clusters import (
     cluster_canonical_event_id,
     cluster_identity_aliases,
     cluster_member_events,
-    cluster_venue_events,
     to_venue_event,
     universe_cluster_sort_key,
 )
@@ -1237,7 +1236,8 @@ class ReadOnlyCrossVenueCollector:
                 # cancel can land before the tuple unpack assigns `clusters`, so
                 # leftover assembly would otherwise drop the already-known HOT
                 # roster. Recover identity without widening matcher thresholds.
-                clusters = self._recover_clusters_for_cancelled_scan(
+                recover_started = monotonic()
+                clusters = await self._recover_clusters_for_cancelled_scan(
                     known_source_events=filtered_known,
                     identity_scope=None if identity_scope is None else hot_scope,
                     matchbook_events=matchbook_events,
@@ -1249,12 +1249,17 @@ class ReadOnlyCrossVenueCollector:
                     max_event_pairs=max_event_pairs,
                     issues=issues,
                 )
+                LOGGER.info(
+                    "scan_cancelled_cluster_recover_ms=%s clusters=%s",
+                    max(0, int((monotonic() - recover_started) * 1000)),
+                    len(clusters),
+                )
             LOGGER.warning(
                 "scan_cancelled_assembling_partial fixtures=%s inflight=%s",
                 len(discovered_fixtures),
                 len(self._inflight),
             )
-            _append_deadline_leftovers(
+            await self._append_deadline_leftovers_cooperative(
                 clusters,
                 discovered_fixtures=discovered_fixtures,
                 issues=issues,
@@ -2363,6 +2368,13 @@ class ReadOnlyCrossVenueCollector:
             "single_venue_clusters": int(matching_coverage.get("single_venue_clusters") or 0),
             "clustering_duration_ms": int(
                 (clustering_diagnostics or {}).get("clustering_duration_ms") or 0
+            ),
+            "cluster_index_ms": int((clustering_diagnostics or {}).get("cluster_index_ms") or 0),
+            "cluster_consider_ms": int(
+                (clustering_diagnostics or {}).get("cluster_consider_ms") or 0
+            ),
+            "cluster_finalize_ms": int(
+                (clustering_diagnostics or {}).get("cluster_finalize_ms") or 0
             ),
             "clustering_truncated": bool(
                 clustering_truncated
@@ -4337,6 +4349,7 @@ class ReadOnlyCrossVenueCollector:
             max_event_pairs=max_event_pairs,
             identity_cache=self._identity_cache,
             incremental_cache=self._incremental_cache,
+            defer_candidate_build=True,
         )
         truncated = False
         started = monotonic()
@@ -4345,13 +4358,36 @@ class ReadOnlyCrossVenueCollector:
             hard_deadline=self._op_deadline,
         )
         absolute_index = cluster_pass._resume_cursor
+        init_ms = 0
+        consider_ms = 0
+        finalize_ms = 0
 
-        def _snapshot_partial() -> tuple[list[FixtureCluster], dict[str, int]]:
-            snapshot, snapshot_counts = cluster_pass.finalize()
+        async def _snapshot_partial() -> tuple[list[FixtureCluster], dict[str, int]]:
+            snapshot_started = monotonic()
+            snapshot, snapshot_counts = await cluster_pass.finalize_cooperative()
+            nonlocal finalize_ms
+            finalize_ms = max(0, int((monotonic() - snapshot_started) * 1000))
             self._op_partial_clusters = snapshot
+            LOGGER.info(
+                "cluster_pass_finalize_ms=%s clusters=%s candidates=%s scored=%s",
+                finalize_ms,
+                len(snapshot),
+                len(cluster_pass._candidates),
+                len(cluster_pass.scored_pairs),
+            )
             return snapshot, snapshot_counts
 
         try:
+            init_started = monotonic()
+            await cluster_pass.load_candidates_cooperative()
+            init_ms = max(0, int((monotonic() - init_started) * 1000))
+            LOGGER.info(
+                "cluster_pass_index_ms=%s candidates=%s",
+                init_ms,
+                len(cluster_pass._candidates),
+            )
+            absolute_index = cluster_pass._resume_cursor
+            consider_started = monotonic()
             for index, (left, right) in enumerate(cluster_pass.pairs()):
                 if index % CLUSTER_COMPARISON_YIELD_EVERY == 0:
                     await asyncio.sleep(0)
@@ -4363,22 +4399,27 @@ class ReadOnlyCrossVenueCollector:
                         break
                 cluster_pass.consider(left, right)
                 absolute_index = cluster_pass._resume_cursor + index + 1
+            consider_ms = max(0, int((monotonic() - consider_started) * 1000))
         except asyncio.CancelledError:
             cluster_pass.checkpoint(absolute_index)
-            _snapshot_partial()
+            acknowledge_task_cancellation()
+            await _snapshot_partial()
             raise
         duration_ms = max(0, int((monotonic() - started) * 1000))
         if truncated:
             cluster_pass.checkpoint(absolute_index)
         else:
             cluster_pass.checkpoint(len(cluster_pass._candidates))
-        clusters, counts = _snapshot_partial()
+        clusters, counts = await _snapshot_partial()
         if not truncated:
             cluster_pass.record_generation_negatives(clusters)
             cluster_pass.commit_incremental_snapshot()
         diagnostics = cluster_pass.clustering_diagnostics(
             truncated=truncated, duration_ms=duration_ms
         )
+        diagnostics["cluster_index_ms"] = init_ms
+        diagnostics["cluster_consider_ms"] = consider_ms
+        diagnostics["cluster_finalize_ms"] = finalize_ms
         return clusters, counts, truncated, diagnostics
 
     def _normalizer_for_venue(self, venue: VenueName):
@@ -4413,7 +4454,7 @@ class ReadOnlyCrossVenueCollector:
             )
             return None
 
-    def _clusters_from_known_source_events(
+    async def _clusters_from_known_source_events(
         self,
         known_source_events: dict[str, list[dict[str, Any]]],
         *,
@@ -4427,9 +4468,11 @@ class ReadOnlyCrossVenueCollector:
         stored canonical ids does not widen matching thresholds.
         """
 
-        def _build(rows_by_id: dict[str, list[dict[str, Any]]]) -> list[FixtureCluster]:
+        async def _build(rows_by_id: dict[str, list[dict[str, Any]]]) -> list[FixtureCluster]:
             built: list[FixtureCluster] = []
-            for rows in rows_by_id.values():
+            for index, rows in enumerate(rows_by_id.values()):
+                if index % NORMALIZE_EVENT_YIELD_EVERY == 0:
+                    await asyncio.sleep(0)
                 cluster = FixtureCluster()
                 for row in rows:
                     if not isinstance(row, dict):
@@ -4461,12 +4504,12 @@ class ReadOnlyCrossVenueCollector:
             for canonical_id, rows in known_source_events.items()
             if identity_scope is None or canonical_id in identity_scope
         }
-        recovered = _build(scoped)
+        recovered = await _build(scoped)
         if recovered or identity_scope is None:
             return recovered
-        return _build(known_source_events)
+        return await _build(known_source_events)
 
-    def _recover_clusters_for_cancelled_scan(
+    async def _recover_clusters_for_cancelled_scan(
         self,
         *,
         known_source_events: dict[str, list[dict[str, Any]]],
@@ -4481,7 +4524,7 @@ class ReadOnlyCrossVenueCollector:
         issues: list[CollectorIssue],
     ) -> list[FixtureCluster]:
         if known_source_events:
-            recovered = self._clusters_from_known_source_events(
+            recovered = await self._clusters_from_known_source_events(
                 known_source_events,
                 identity_scope=identity_scope,
                 issues=issues,
@@ -4502,42 +4545,40 @@ class ReadOnlyCrossVenueCollector:
         pm_events = list(polymarket_events)
         k_events = list(kalshi_events)
         if not (mb_events or pm_events or k_events):
-            mb_events = [
-                item
-                for item in (
-                    self._try_normalize_event(payload, venue=VenueName.MATCHBOOK, issues=issues)
-                    for payload in raw_matchbook_events
-                    if isinstance(payload, dict)
-                )
-                if item is not None
-            ]
-            pm_events = [
-                item
-                for item in (
-                    self._try_normalize_event(payload, venue=VenueName.POLYMARKET, issues=issues)
-                    for payload in raw_polymarket_events
-                    if isinstance(payload, dict)
-                )
-                if item is not None
-            ]
-            k_events = [
-                item
-                for item in (
-                    self._try_normalize_event(payload, venue=VenueName.KALSHI, issues=issues)
-                    for payload in raw_kalshi_events
-                    if isinstance(payload, dict)
-                )
-                if item is not None
-            ]
+            mb_events = []
+            for index, payload in enumerate(raw_matchbook_events):
+                if index % NORMALIZE_EVENT_YIELD_EVERY == 0:
+                    await asyncio.sleep(0)
+                if not isinstance(payload, dict):
+                    continue
+                item = self._try_normalize_event(payload, venue=VenueName.MATCHBOOK, issues=issues)
+                if item is not None:
+                    mb_events.append(item)
+            pm_events = []
+            for index, payload in enumerate(raw_polymarket_events):
+                if index % NORMALIZE_EVENT_YIELD_EVERY == 0:
+                    await asyncio.sleep(0)
+                if not isinstance(payload, dict):
+                    continue
+                item = self._try_normalize_event(payload, venue=VenueName.POLYMARKET, issues=issues)
+                if item is not None:
+                    pm_events.append(item)
+            k_events = []
+            for index, payload in enumerate(raw_kalshi_events):
+                if index % NORMALIZE_EVENT_YIELD_EVERY == 0:
+                    await asyncio.sleep(0)
+                if not isinstance(payload, dict):
+                    continue
+                item = self._try_normalize_event(payload, venue=VenueName.KALSHI, issues=issues)
+                if item is not None:
+                    k_events.append(item)
         if not (mb_events or pm_events or k_events):
             return []
-        recovered, _counts = cluster_venue_events(
+        recovered, _counts, _truncated, _diagnostics = await self._cluster_venue_events_cooperative(
             matchbook=[to_venue_event(event, VenueName.MATCHBOOK) for event in mb_events],
             polymarket=[to_venue_event(event, VenueName.POLYMARKET) for event in pm_events],
             kalshi=[to_venue_event(event, VenueName.KALSHI) for event in k_events],
-            matcher=self.event_matcher,
             max_event_pairs=max(1, int(max_event_pairs)),
-            identity_cache=self._identity_cache,
         )
         if identity_scope is None:
             return recovered
@@ -4547,6 +4588,38 @@ class ReadOnlyCrossVenueCollector:
             if cluster_canonical_event_id(cluster) in identity_scope
         ]
         return scoped or recovered
+
+    async def _append_deadline_leftovers_cooperative(
+        self,
+        leftover_clusters: list[FixtureCluster],
+        *,
+        discovered_fixtures: list[DiscoveredFixture],
+        issues: list[CollectorIssue],
+        started_at: datetime,
+        polymarket_events: list[_NormalizedEvent],
+        queried_series_ids: list[str] | None,
+    ) -> None:
+        if leftover_clusters and not any(
+            issue.detail == "scan_cycle_deadline_reached" for issue in issues
+        ):
+            issues.append(CollectorIssue(stage="collect", detail="scan_cycle_deadline_reached"))
+        seen = {item.canonical_event_id for item in discovered_fixtures}
+        for index, cluster in enumerate(leftover_clusters):
+            if index % NORMALIZE_EVENT_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+            canonical_id = cluster_canonical_event_id(cluster)
+            if canonical_id in seen:
+                continue
+            discovered_fixtures.append(
+                _fixture_from_cluster(
+                    cluster,
+                    seen_at=started_at,
+                    polymarket_events=polymarket_events,
+                    queried_series_ids=queried_series_ids,
+                    leftover=True,
+                )
+            )
+            seen.add(canonical_id)
 
     async def _normalize_events(
         self,
