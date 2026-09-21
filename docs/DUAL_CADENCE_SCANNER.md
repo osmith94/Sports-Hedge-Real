@@ -192,7 +192,7 @@ Normal hot cohorts should finish well under 25s. The 25s timeout exists so a slo
 
 | Parameter | Accepted default |
 | --- | --- |
-| Generation cadence | Persistent worker. After a **terminal-complete** generation, wait `paper_universe_discovery_interval_seconds` / operator `universe_cadence_seconds` (default **1800s**). Then start a **new generation id**. Incomplete generations resume/chunk/retry without this wait. Fixture radar membership still uses `paper_live_refresh_universe_interval_seconds` (180s). BACKGROUND pricing uses `paper_background_price_interval_seconds` (90s) independently. |
+| Generation cadence | Persistent worker. After a **terminal-complete** generation, wait `paper_universe_discovery_interval_seconds` / operator `universe_cadence_seconds` (default **1800s**). Then start a **new generation id**. Incomplete generations resume/chunk/retry without this wait. Operators may pause this periodic timer (`universe_scans_paused`) without changing cadence or creating a second worker; BACKGROUND/HOT/ACTIVE TRADE continue. Fixture radar membership still uses `paper_live_refresh_universe_interval_seconds` (180s). BACKGROUND pricing uses `paper_background_price_interval_seconds` (90s) independently. |
 | Generation work budget | **150 seconds** (`paper_scan_universe_generation_budget_seconds`). Accumulated collector time across chunks in one generation. **Not** one continuous 150s `collect_and_scan`. |
 | Per-run chunk | Bound by `min(remaining_generation_budget, next_hot_due - now - safety_margin)`. Persist cursor, yield, let HOT run, resume. |
 | Safety margin | `paper_universe_hot_yield_safety_margin_seconds` default **2s**. Chunk wall time must also leave #157 coordinator grace inside that bound (§5.2.1). |

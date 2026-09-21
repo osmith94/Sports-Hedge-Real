@@ -707,6 +707,7 @@ export type OperatorScannerSettings = {
   universe_cadence_seconds?: number;
   max_allocated_per_trade_gbp?: string;
   scanner_stopped: boolean;
+  universe_scans_paused?: boolean;
   source?: "operator" | "env_default";
   updated_at?: string | null;
   restart_semantics?: string;
@@ -769,6 +770,7 @@ export type LiveRefreshStatus = {
   server_loop_enabled: boolean;
   paper_autofill_enabled?: boolean;
   scanner_stopped?: boolean;
+  universe_scans_paused?: boolean;
   operator_settings?: OperatorScannerSettings | null;
   universe_scope?: OperatorUniverseScope | null;
   interval_seconds: number;
@@ -1434,6 +1436,32 @@ export async function stopPaperScanner(): Promise<LiveRefreshStatus> {
 
 export async function resumePaperScanner(): Promise<LiveRefreshStatus> {
   const response = await fetch(`${API_BASE}/paper/scanner/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function pauseUniverseSchedule(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/universe-schedule/pause`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function resumeUniverseSchedule(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/universe-schedule/resume`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),

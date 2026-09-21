@@ -328,6 +328,36 @@ describe("dual cadence operator copy", () => {
     assert.doesNotMatch(lines.join(" "), /Fast scan|Full sweep|Fast Scan|Full Sweep/);
   });
 
+  it("says Paused for UNIVERSE instead of a ticking next-due countdown", () => {
+    const now = Date.parse("2026-09-21T12:00:10Z");
+    const paused = status({
+      universe_scans_paused: true,
+      universe: {
+        cadence_seconds: 1800,
+        next_due_at: null,
+        last_plan_reason: "universe_scheduled_paused",
+        worker_state: "waiting",
+        fixture_count: 104,
+        evaluated_count: 60,
+        not_evaluated_count: 44,
+      },
+      background: {
+        cadence_seconds: 90,
+        next_due_at: "2026-09-21T12:01:40Z",
+      },
+    });
+    assert.match(fullSweepCopy(paused, now).detail, /^Paused/);
+    assert.match(fullSweepCopy(paused, now).detail, /cadence 1800s/);
+    assert.doesNotMatch(fullSweepCopy(paused, now).detail, /next due in/);
+    const lines = dualScanStatusLines(paused, now);
+    assert.match(lines[1], /HOT pricing/);
+    assert.doesNotMatch(lines[1], /Paused/);
+    assert.match(lines[1], /next due in/);
+    assert.match(lines[2], /BACKGROUND pricing/);
+    assert.match(lines[2], /next due in/);
+    assert.match(lines[3], /UNIVERSE discovery · Paused/);
+  });
+
   it("routes primary Manual HOT refresh to HOT and labels full discovery as advanced Full diagnostic", () => {
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
     const api = readFileSync(join(frontendRoot, "lib/api.ts"), "utf8");
@@ -373,11 +403,18 @@ describe("dual cadence operator copy", () => {
       pulse,
       /ACTIVE TRADE \/ HOT pricing \/ BACKGROUND pricing \/ UNIVERSE discovery paused/,
     );
+    assert.match(scan, /Pause scheduled UNIVERSE/);
+    assert.match(scan, /Resume scheduled UNIVERSE/);
+    assert.match(scan, /pauseUniverseSchedule/);
+    assert.match(scan, /resumeUniverseSchedule/);
+    assert.match(scan, /UNIVERSE SCHEDULE PAUSED/);
     assert.match(scan, /stopPaperScanner/);
     assert.match(scan, /resumePaperScanner/);
     assert.match(scan, /How scanning works/);
     assert.match(scan, /<details className="scan-help">/);
     assert.match(scan, /status-badge status-badge-stopped/);
+    assert.match(api, /\/paper\/scanner\/universe-schedule\/pause/);
+    assert.match(api, /\/paper\/scanner\/universe-schedule\/resume/);
     assert.doesNotMatch(scan, /Refresh interval/);
     assert.match(api, /\/paper\/collect\/hot/);
     assert.match(api, /\/paper\/collect\/background/);

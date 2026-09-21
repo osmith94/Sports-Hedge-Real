@@ -11,8 +11,10 @@ import {
   PaperCollectionRequest,
   getEconomicsStatus,
   getLiveRefreshStatus,
+  pauseUniverseSchedule,
   resetMatchbookFee,
   resumePaperScanner,
+  resumeUniverseSchedule,
   runPaperBackgroundRefresh,
   runPaperCollection,
   runPaperHotRefresh,
@@ -244,6 +246,7 @@ export function RunPaperScan() {
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [scannerControlBusy, setScannerControlBusy] = useState(false);
+  const [universeScheduleBusy, setUniverseScheduleBusy] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [competitionsOpen, setCompetitionsOpen] = useState(false);
   const [competitionsSaving, setCompetitionsSaving] = useState(false);
@@ -534,6 +537,25 @@ export function RunPaperScan() {
     }
   }
 
+  async function toggleUniverseSchedulePaused() {
+    setUniverseScheduleBusy(true);
+    setSettingsMessage(null);
+    try {
+      const status = liveRefresh?.universe_scans_paused
+        ? await resumeUniverseSchedule()
+        : await pauseUniverseSchedule();
+      applyLiveRefresh(status, { forceSettings: true });
+    } catch (error) {
+      setSettingsMessage(
+        error instanceof Error
+          ? error.message
+          : "Could not change scheduled UNIVERSE scan pause.",
+      );
+    } finally {
+      setUniverseScheduleBusy(false);
+    }
+  }
+
   async function applyCompetitionScope(
     codes: string[],
     runUniverseNow: boolean,
@@ -652,6 +674,7 @@ export function RunPaperScan() {
   const loading = loadingMode !== null;
   const serverOwned = Boolean(liveRefresh?.server_loop_enabled);
   const scannerStopped = Boolean(liveRefresh?.scanner_stopped);
+  const universeScansPaused = Boolean(liveRefresh?.universe_scans_paused);
   const nextHotMs = liveRefresh?.hot?.next_due_at
     ? Date.parse(liveRefresh.hot.next_due_at)
     : Number.NaN;
@@ -853,6 +876,32 @@ export function RunPaperScan() {
                 ? "UNIVERSE running"
                 : "Run UNIVERSE now"}
           </button>
+          <button
+            className={universeScansPaused ? "scan-button" : "scan-button-secondary"}
+            type="button"
+            disabled={universeScheduleBusy || loading || scannerStopped}
+            onClick={() => void toggleUniverseSchedulePaused()}
+            aria-label={
+              universeScansPaused
+                ? "Resume scheduled UNIVERSE scans"
+                : "Pause scheduled UNIVERSE scans"
+            }
+            title={
+              scannerStopped
+                ? "Scanner stopped by operator"
+                : universeScansPaused
+                  ? "Resume the persisted UNIVERSE cadence. Does not catch up missed intervals."
+                  : "Pause periodic UNIVERSE rediscovery. BACKGROUND, HOT and ACTIVE TRADE continue. Run UNIVERSE now still works."
+            }
+          >
+            {universeScheduleBusy
+              ? universeScansPaused
+                ? "Resuming UNIVERSE…"
+                : "Pausing UNIVERSE…"
+              : universeScansPaused
+                ? "Resume scheduled UNIVERSE"
+                : "Pause scheduled UNIVERSE"}
+          </button>
         </div>
         <div className="scan-ops-actions">
           <button
@@ -882,6 +931,10 @@ export function RunPaperScan() {
             <span className="status-badge status-badge-stopped" role="status">
               SCANNER STOPPED · ACTIVE TRADE / HOT pricing / BACKGROUND pricing / UNIVERSE discovery paused
             </span>
+          ) : universeScansPaused ? (
+            <span className="status-badge" role="status">
+              UNIVERSE SCHEDULE PAUSED · BACKGROUND / HOT / ACTIVE TRADE continue
+            </span>
           ) : null}
         </div>
         {settingsMessage ? (
@@ -896,9 +949,11 @@ export function RunPaperScan() {
             It does not rediscover the catalogue. Manual BACKGROUND refresh reprices currently due ACTIVE catalogue rows from exact known IDs.
             Neither HOT nor BACKGROUND rediscover the catalogue or advance UNIVERSE generation state.
             Run UNIVERSE now bypasses only the UNIVERSE cadence wait and uses the real selected-scope generation worker.
+            Pause scheduled UNIVERSE stops the periodic timer only; it does not fake a huge cadence, and the stored cadence stays editable for resume.
             Update saves Min Net Arb, Max Risk, HOT cadence, BACKGROUND cadence and UNIVERSE cadence
             and max allocated per trade for subsequent server-owned work and does not trigger a scan.
             Football competitions Apply changes the current session scope and does not itself call providers.
+            A material competition-scope change while UNIVERSE is paused coalesces one fresh generation, then remains paused.
             Save this selection as my default is required to persist startup scope across restart.
             HOT cadence is how often HOT pricing is due; BACKGROUND cadence is how often the
             rest of the known ACTIVE catalogue is repriced. UNIVERSE cadence is how often a fresh

@@ -992,6 +992,28 @@ def resume_paper_scanner(
     return _status_with_scan_cycles(coordinator.public_status(), repository)
 
 
+@router.post("/scanner/universe-schedule/pause", response_model=LiveRefreshStatus)
+def pause_universe_schedule(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Pause periodic UNIVERSE fresh-generation scheduling. One-shots still work."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_universe_scans_paused(True)
+    return _status_with_scan_cycles(coordinator.public_status(), repository)
+
+
+@router.post("/scanner/universe-schedule/resume", response_model=LiveRefreshStatus)
+def resume_universe_schedule(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Resume periodic UNIVERSE scheduling from the persisted cadence. No catch-up burst."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_universe_scans_paused(False)
+    return _status_with_scan_cycles(coordinator.public_status(), repository)
+
+
 @router.post(
     "/collect/hot",
     response_model=CollectionReport,
