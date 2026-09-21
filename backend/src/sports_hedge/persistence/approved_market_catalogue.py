@@ -133,9 +133,6 @@ ON approved_market_catalogue (row_state);
 
 CREATE INDEX IF NOT EXISTS idx_approved_catalogue_history_row
 ON approved_market_catalogue_history (catalogue_row_id, history_id);
-
-CREATE INDEX IF NOT EXISTS idx_approved_catalogue_market_scope
-ON approved_market_catalogue (market_scope, row_state);
 """
 
 _CATALOGUE_ADDITIVE_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -155,6 +152,14 @@ _CATALOGUE_ADDITIVE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("polymarket_event_slug", "TEXT"),
     ("polymarket_event_ticker", "TEXT"),
 )
+
+# Indexes that reference additive columns. CREATE TABLE IF NOT EXISTS is a no-op
+# on an existing local catalogue, so these must run after the ALTER loop or
+# SQLite raises "no such column" and never migrates the user's rows.
+_CATALOGUE_POST_MIGRATION_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_approved_catalogue_market_scope
+ON approved_market_catalogue (market_scope, row_state);
+"""
 
 
 class ApprovedMarketCatalogueTransaction:
@@ -290,12 +295,7 @@ class SqliteApprovedMarketCatalogueStore:
                 connection.execute(
                     f"ALTER TABLE approved_market_catalogue ADD COLUMN {name} {spec}"
                 )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_approved_catalogue_market_scope
-            ON approved_market_catalogue (market_scope, row_state)
-            """
-        )
+        connection.executescript(_CATALOGUE_POST_MIGRATION_INDEX_SQL)
         self._assert_no_forbidden_columns(connection)
 
     def _assert_no_forbidden_columns(self, connection: sqlite3.Connection) -> None:
