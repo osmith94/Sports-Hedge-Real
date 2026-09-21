@@ -8,7 +8,7 @@ from functools import lru_cache
 from logging import getLogger
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import httpx
@@ -37,6 +37,10 @@ from sports_hedge.application.lane_venues import (
 )
 from sports_hedge.application.live_refresh import (
     SCAN_CYCLE_RETURN_GRACE_SECONDS,
+    UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY,
+    UNIVERSE_OPERATOR_CLEAR_COMPLETENESS,
+    UNIVERSE_RUN_MODE_CLEAR_UPDATE,
+    UNIVERSE_RUN_MODE_UPDATE,
     ExplicitCollectBusy,
     LiveRefreshStatus,
     ScanCycleTimeout,
@@ -197,6 +201,12 @@ class PaperCollectionRequest(BaseModel):
                     )
                 value.pop(key, None)
         return value
+
+
+class UniverseRunRequest(BaseModel):
+    """Operator UNIVERSE run mode. `update` preserves current live working set."""
+
+    mode: Literal["update", "clear_update"] = "update"
 
 
 class EconomicsStatus(BaseModel):
@@ -494,6 +504,44 @@ def paper_ledger_reconciliation(
     payload["paper_only"] = True
     payload["places_orders"] = False
     payload["execution_enabled"] = False
+    return payload
+
+
+@router.get("/accounting/events")
+def paper_accounting_events(
+    ledger: SqlitePaperLedger = Depends(get_paper_ledger),
+    limit: int = Query(default=200, ge=1, le=2000),
+):
+    """Read-only accounting domain events. Not on the scanner critical path."""
+
+    from sports_hedge.accounting.events import EVENT_SCHEMA_VERSION
+
+    rows = ledger.list_accounting_events(limit=limit)
+    return {
+        "paper_only": True,
+        "places_orders": False,
+        "execution_enabled": False,
+        "data_kind": "paper_accounting_domain_events",
+        "event_schema_version": EVENT_SCHEMA_VERSION,
+        "count": len(rows),
+        "events": [item.model_dump(mode="json") for item in rows],
+        "note": (
+            "PAPER MODE. Immutable operational facts for on-demand accounting "
+            "projections. Not live venue cash."
+        ),
+    }
+
+
+@router.get("/accounting/projections")
+def paper_accounting_projections(
+    ledger: SqlitePaperLedger = Depends(get_paper_ledger),
+    rebuild: bool = Query(default=True),
+):
+    """On-demand statutory GL, balance sheet, reconciliation and management reporting."""
+
+    bundle = ledger.refresh_accounting_projections(rebuild=rebuild)
+    payload = bundle.model_dump(mode="json")
+    payload["ok"] = bundle.reconciliation.ok and not bundle.stale
     return payload
 
 
@@ -1130,6 +1178,97 @@ def run_universe_now(
     return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
 
 
+def _audit_universe_operator_clear(
+    repository: SqlitePaperScanRepository, audit: dict[str, Any]
+) -> None:
+    """Persist operator clear/clear-update as scan-cycle history, not current-state."""
+
+    raw_when = str(audit.get("cleared_at") or "")
+    try:
+        when = datetime.fromisoformat(raw_when)
+    except ValueError:
+        when = datetime.now(UTC)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    prior_generation = audit.get("prior_generation_id")
+    try:
+        generation_id = int(prior_generation) if prior_generation is not None else None
+    except (TypeError, ValueError):
+        generation_id = None
+    prior_count = audit.get("prior_fixture_count") or 0
+    try:
+        fixture_count = int(prior_count)
+    except (TypeError, ValueError):
+        fixture_count = 0
+    prior_evaluated = audit.get("prior_evaluated_count") or 0
+    try:
+        evaluated_count = int(prior_evaluated)
+    except (TypeError, ValueError):
+        evaluated_count = 0
+    mode = str(audit.get("mode") or "clear")
+    summary = str(
+        audit.get("operator_summary")
+        or f"UNIVERSE live working set cleared by operator ({mode}). {UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY}"
+    )
+    record = PaperScanCycleRecord(
+        cycle_id=f"universe-operator-{mode}:{uuid4()}",
+        started_at=when,
+        completed_at=when,
+        scan_lane="universe",
+        duration_ms=0,
+        fixture_count=fixture_count,
+        evaluated_count=evaluated_count,
+        not_evaluated_count=0,
+        matched_event_pairs=0,
+        matched_market_pairs=0,
+        paper_decision_count=0,
+        qualifying_arb_count=0,
+        universe_generation_id=generation_id,
+        resume_cursor=None,
+        completeness=UNIVERSE_OPERATOR_CLEAR_COMPLETENESS,
+        generation_resume=False,
+        generation_work_used_s=0,
+        operator_summary=summary,
+    )
+    repository.append_cycle(record)
+
+
+@router.post("/universe/clear", response_model=LiveRefreshStatus)
+def clear_universe_working_set(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Clear live UNIVERSE working state only. No provider I/O.
+
+    Clears the live UNIVERSE working set only. History, catalogue, PAPER trades and Treasury are preserved.
+    """
+
+    coordinator = get_live_refresh_coordinator()
+    audit = coordinator.clear_universe_working_set(run_after=False)
+    _audit_universe_operator_clear(repository, audit)
+    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+
+
+@router.post("/universe/run", response_model=LiveRefreshStatus)
+def run_universe_with_mode(
+    request: UniverseRunRequest,
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Run UNIVERSE now as Update existing or Clear & update."""
+
+    coordinator = get_live_refresh_coordinator()
+    if coordinator.operator_scanner_stopped:
+        raise HTTPException(status_code=409, detail=SCANNER_STOPPED_BY_OPERATOR)
+    try:
+        if request.mode == UNIVERSE_RUN_MODE_CLEAR_UPDATE:
+            audit = coordinator.clear_universe_working_set(run_after=True)
+            _audit_universe_operator_clear(repository, audit)
+        elif request.mode == UNIVERSE_RUN_MODE_UPDATE:
+            coordinator.request_universe_run_now()
+    except ExplicitCollectBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+
+
 @router.post(
     "/collect",
     response_model=CollectionReport,
@@ -1197,6 +1336,15 @@ async def collect_read_only_market_data(
     return report.model_copy(update={"fixture_markets": {}})
 
 
+def _open_paper_event_ids_for_collect() -> frozenset[str]:
+    """ACTIVE PAPER trades must keep collector market work even if arb-HOT would prune."""
+
+    try:
+        return get_live_refresh_coordinator()._open_paper_event_ids()
+    except Exception:
+        return frozenset()
+
+
 async def _collect_report(
     kwargs: dict[str, Any],
     *,
@@ -1223,6 +1371,7 @@ async def _collect_report(
     selected_season_scope_codes: list[str] | tuple[str, ...] | None = None,
     generation_scope_version: int | None = None,
     generation_superseded: bool = False,
+    active_event_ids: list[str] | tuple[str, ...] | frozenset[str] | None = None,
 ) -> CollectionReport:
     settings = get_settings()
     runtime = get_shared_provider_runtime(settings)
@@ -1279,6 +1428,9 @@ async def _collect_report(
             selected_season_scope_codes=selected_season_scope_codes,
             generation_scope_version=generation_scope_version,
             generation_superseded=generation_superseded,
+            active_event_ids=active_event_ids
+            if active_event_ids is not None
+            else _open_paper_event_ids_for_collect(),
         )
     finally:
         acknowledge_task_cancellation()
@@ -1633,6 +1785,11 @@ async def server_owned_refresh_tick(plan=None) -> None:
                     "legacy_hot_collector": False,
                     PRICE_ENGINE_ITEM_COMPLETION_CAPTURE: True,
                     "persist_failures": list(result.persist_failures),
+                    **(
+                        result.viability_diagnostics()
+                        if hasattr(result, "viability_diagnostics")
+                        else {}
+                    ),
                 },
             )
 

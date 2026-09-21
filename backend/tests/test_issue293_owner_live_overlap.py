@@ -353,7 +353,7 @@ async def test_both_venues_reachable_without_identity_overlap_is_reported_truthf
 
 
 @pytest.mark.asyncio
-async def test_title_equality_is_not_used_for_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_title_equality_is_not_used_for_overlap() -> None:
     bundle = scenario3_safe_90m_bundle()
     mb_event = deepcopy(bundle.matchbook.event or {})
     kalshi_event = deepcopy(bundle.kalshi.event or {})
@@ -366,21 +366,15 @@ async def test_title_equality_is_not_used_for_overlap(monkeypatch: pytest.Monkey
         series=deepcopy(bundle.kalshi.series or {}),
         books=deepcopy(bundle.kalshi.order_books),
     )
-    original_could = EventMatcher.could_match
-    prefilter_calls = {"n": 0}
-
-    def _counting_could(self: EventMatcher, left: Any, right: Any, **kwargs: Any) -> Any:
-        prefilter_calls["n"] += 1
-        return original_could(self, left, right, **kwargs)
-
-    monkeypatch.setattr(EventMatcher, "could_match", _counting_could)
     report = await attempt_live_read_only_capture(
         matchbook_client=matchbook,
         kalshi_client=kalshi,
         fx_snapshots=_fx(),
         venue_costs=replay_venue_costs(bundle),
     )
-    assert prefilter_calls["n"] > 0
+    # Kickoff is days apart, so indexed candidate generation correctly omits
+    # this pair before EventMatcher. Title equality must still not create
+    # overlap or trigger market fetches.
     assert report.same_event_overlap_found is False
     assert report.block_reason == "no_same_event_overlap"
     assert matchbook.list_markets_calls == []

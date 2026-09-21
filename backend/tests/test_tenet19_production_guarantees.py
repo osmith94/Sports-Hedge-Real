@@ -1205,12 +1205,13 @@ async def test_hot_overlap_while_universe_retries_series() -> None:
     generation = coordinator._universe_generation_started_at
     sweep_id = coordinator._universe_sweep_id
     evaluated = set(coordinator._universe_evaluated_ids)
+    processed = set(coordinator._universe_work)
     assert generation is not None
-    assert evaluated
+    assert processed
 
     async def hot_runner() -> Any:
         return _report(
-            [_universe_fixture(next(iter(evaluated)))],
+            [_universe_fixture(next(iter(evaluated or processed)))],
             when=clock.now,
             scan_lane=ScanLane.HOT.value,
         )
@@ -1219,6 +1220,7 @@ async def test_hot_overlap_while_universe_retries_series() -> None:
     assert coordinator._universe_generation_started_at == generation
     assert coordinator._universe_sweep_id == sweep_id
     assert coordinator._universe_evaluated_ids == evaluated
+    assert set(coordinator._universe_work) == processed
     assert _series_unit(coordinator, "kalshi", "KXBAD").state == SWEEP_RETRY_WAIT
     assert coordinator.status.universe.worker_state != "complete"
     clock.advance(20)

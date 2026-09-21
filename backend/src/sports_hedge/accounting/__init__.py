@@ -1,8 +1,9 @@
-"""Accounting dimensions and profit-centre reporting.
+"""Accounting dimensions, profit-centre reporting, and CQRS event projections.
 
-This package is intentionally a tagging and reporting layer over a single
-append-only ledger. It does not store mutable balances and is designed so the
-FX ledger foundation can attach `PostingDimensions` to journals later.
+Operational scanner/trading/Treasury paths emit small immutable domain events.
+GL, balance-sheet, reconciliation and management-reporting projections are
+rebuilt on demand from that stream. This package does not store mutable
+balances and never writes to venue providers.
 """
 
 from sports_hedge.accounting.dimensions import (
@@ -21,6 +22,17 @@ from sports_hedge.accounting.dimensions import (
     parse_strategy_book,
     product_module_for,
 )
+from sports_hedge.accounting.events import (
+    EVENT_SCHEMA_VERSION,
+    AccountingDomainEvent,
+    AccountingEventType,
+    DuplicateAccountingEventError,
+)
+from sports_hedge.accounting.projections import (
+    PROJECTION_VERSION,
+    AccountingProjectionBundle,
+    AccountingProjectionService,
+)
 from sports_hedge.accounting.reconciliation import (
     LedgerReconciliationError,
     PaperLedgerReconciliation,
@@ -38,11 +50,18 @@ from sports_hedge.accounting.strategy_books import (
 )
 
 __all__ = [
+    "EVENT_SCHEMA_VERSION",
+    "PROJECTION_VERSION",
+    "AccountingDomainEvent",
+    "AccountingEventType",
+    "AccountingProjectionBundle",
+    "AccountingProjectionService",
     "AttributionScope",
     "CapitalBucketTotals",
     "CapitalSource",
     "CashState",
     "DimensionedPosting",
+    "DuplicateAccountingEventError",
     "EconomicAccount",
     "LedgerReconciliationError",
     "NativeCurrencyMixError",

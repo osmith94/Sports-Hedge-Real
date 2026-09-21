@@ -74,15 +74,38 @@ from sports_hedge.application.market_observation import (
     VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.opportunity_viability import (
+    CROSS_VENUE_UNAVAILABLE,
+    NO_CROSS_VENUE_CANDIDATE,
+    UPPER_BOUND_BELOW_MIN_NET,
+    VenueViability,
+    assess_identity_viability,
+    catalogue_ready_venues,
+    get_opportunity_viability_cache,
+    reset_opportunity_viability_cache,
+)
+from sports_hedge.application.adaptive_scheduler import (
+    SchedulerWork,
+    order_scheduler_work,
+)
 from sports_hedge.application.provider_access import (
     HEALTH_CAPACITY_SATURATED,
     HEALTH_DEFERRED,
     HEALTH_MARKET_TIMEOUT,
     HEALTH_OK,
+    HEALTH_RATE_LIMITED,
+    PRICE_ENGINE_ACTIVE_TRADE_LANE,
     PRICE_ENGINE_BACKGROUND_LANE,
     ProviderAccessLayer,
     ProviderLease,
     get_shared_provider_access,
+)
+from sports_hedge.arbitrage.arb_upper_bound import (
+    implied_from_kalshi_book,
+    implied_from_matchbook_market,
+    implied_from_observation,
+    merge_known_implied,
+    optimistic_net_edge_upper_bound,
 )
 from sports_hedge.application.scanner_observability import (
     PRICE_ENGINE_EVALUATED_DEFINITION,
@@ -129,6 +152,7 @@ from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
 from sports_hedge.venues.matchbook import MatchbookMarketGoneError
+from sports_hedge.venues.rate_limit import ProviderRateLimitedError
 
 PRICE_ENGINE_RETRY_BACKOFF_SECONDS = (2.0, 5.0, 10.0)
 PRICE_ENGINE_ITEM_TIMEOUT_REASON = "order_book_timeout after 8s"
@@ -155,6 +179,7 @@ class PriceEngineItemStatus(StrEnum):
     DEFERRED = "deferred"
     NOT_STARTED = "not_started_this_cadence"
     REVALIDATION_NEEDED = "revalidation_needed"
+    SKIPPED = "skipped_not_viable"
     FAILED = "failed"
 
 
@@ -183,6 +208,12 @@ class PriceEngineRuntimeItem:
     list_events_calls: int = 0
     list_markets_calls: int = 0
     pricing_slice_priority: PriceEnginePriority | None = None
+    viable_venue_count: int = 0
+    skip_expensive_work: bool = False
+    viability_reason: str | None = None
+    near_threshold: bool = False
+    qualifying: bool = False
+    last_priority_decision: dict[str, Any] | None = None
 
     @property
     def item_key(self) -> str:
@@ -241,6 +272,13 @@ class PriceEngineSliceResult:
     persist_failures: list[str] = field(default_factory=list)
     operation_health: dict[str, Any] = field(default_factory=dict)
     venue_health: dict[str, str] = field(default_factory=dict)
+    skipped: list[str] = field(default_factory=list)
+    skipped_provider_calls: int = 0
+    saved_provider_calls: int = 0
+    saved_time_ms: int = 0
+    skip_reasons: dict[str, str] = field(default_factory=dict)
+    upper_bound_net_edge: str | None = None
+    viable_venue_count: int | None = None
 
     def statuses(self) -> dict[str, str]:
         payload: dict[str, str] = {}
@@ -256,7 +294,23 @@ class PriceEngineSliceResult:
             payload[key] = PriceEngineItemStatus.RETRY_WAIT.value
         for key in self.revalidation:
             payload[key] = CATALOGUE_REVALIDATION_REASON
+        for key in self.skipped:
+            payload[key] = self.skip_reasons.get(key) or PriceEngineItemStatus.SKIPPED.value
         return payload
+
+    def viability_diagnostics(self) -> dict[str, Any]:
+        reason = None
+        if self.skip_reasons:
+            reason = next(iter(self.skip_reasons.values()))
+        return {
+            "skipped_provider_calls": int(self.skipped_provider_calls),
+            "saved_provider_calls": int(self.saved_provider_calls),
+            "saved_time_ms": int(self.saved_time_ms),
+            "skip_reason": reason,
+            "upper_bound_net_edge": self.upper_bound_net_edge,
+            "viable_venue_count": self.viable_venue_count,
+            "skipped_items": len(self.skipped),
+        }
 
 
 def price_engine_retry_backoff_seconds(attempt_count: int) -> float:
@@ -346,6 +400,7 @@ class CataloguePriceEngine:
         }
         self._selected_competition_codes: frozenset[str] | None = None
         self._exempt_event_ids: frozenset[str] = frozenset()
+        self.viability_cache = get_opportunity_viability_cache()
 
     def now(self) -> datetime:
         return self._clock()
@@ -425,6 +480,8 @@ class CataloguePriceEngine:
         self._promoted_hot_ids.clear()
         self._hot_promotion_episodes.clear()
         self.revalidation_requests.clear()
+        reset_opportunity_viability_cache()
+        self.viability_cache = get_opportunity_viability_cache()
         self._operation_health = {
             PriceEnginePriority.HOT.value: {},
             PriceEnginePriority.BACKGROUND.value: {},
@@ -474,8 +531,136 @@ class CataloguePriceEngine:
                 if evaluated < runtime.last_priced_at + timedelta(seconds=interval):
                     continue
             runtime.status = PriceEngineItemStatus.DUE
+            self._refresh_scheduler_signals(runtime)
             due.append(runtime)
-        return due
+        return self._order_due_items(due, now=evaluated)
+
+    def _refresh_scheduler_signals(self, runtime: PriceEngineRuntimeItem) -> None:
+        identity = runtime.identity
+        viability = assess_identity_viability(
+            identity,
+            cache=self.viability_cache,
+            active_event_ids=self._exempt_event_ids,
+        )
+        runtime.viable_venue_count = viability.viable_venue_count
+        runtime.skip_expensive_work = bool(viability.skip_expensive_work)
+        runtime.viability_reason = viability.reason
+
+    def _interval_for(self, runtime: PriceEngineRuntimeItem) -> int:
+        if runtime.priority is PriceEnginePriority.HOT:
+            return self._hot_interval
+        return self._background_interval
+
+    def _required_venues(self, runtime: PriceEngineRuntimeItem) -> tuple[VenueName, ...]:
+        ready = catalogue_ready_venues(runtime.identity)
+        return tuple(
+            venue
+            for venue in ready
+            if not self.viability_cache.is_blocked(
+                runtime.identity.canonical_event_id, venue
+            )
+        )
+
+    def scheduler_work_for(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        *,
+        lane: str | None = None,
+        seq: int = 0,
+        now: datetime | None = None,
+    ) -> SchedulerWork:
+        evaluated = now or self.now()
+        interval = max(0, int(self._interval_for(runtime)))
+        last = runtime.last_priced_at
+        due_at = evaluated if last is None else last + timedelta(seconds=interval)
+        deadline_at = due_at + timedelta(seconds=interval if interval > 0 else 0)
+        now_ts = evaluated.timestamp()
+        resolved_lane = lane or (
+            ScanLane.HOT.value
+            if runtime.priority is PriceEnginePriority.HOT
+            else PRICE_ENGINE_BACKGROUND_LANE
+        )
+        kickoff = runtime.identity.kickoff_utc
+        post_kickoff_hot = (
+            runtime.priority is PriceEnginePriority.HOT
+            and kickoff is not None
+            and kickoff <= evaluated
+        )
+        return SchedulerWork(
+            lane=resolved_lane,
+            work_id=runtime.identity.catalogue_row_id,
+            viable_venue_count=runtime.viable_venue_count,
+            skip_expensive_work=runtime.skip_expensive_work,
+            viability_reason=runtime.viability_reason,
+            viability_assessed=True,
+            near_threshold=runtime.near_threshold,
+            qualifying=runtime.qualifying,
+            in_play=post_kickoff_hot,
+            required_venues=self._required_venues(runtime),
+            due_mono=due_at.timestamp(),
+            deadline_mono=deadline_at.timestamp(),
+            cadence_seconds=float(interval),
+            seq=seq,
+            wait_age_ms=max(0, int((evaluated - due_at).total_seconds() * 1000))
+            if evaluated >= due_at
+            else 0,
+            now_mono=now_ts,
+        )
+
+    def _order_due_items(
+        self,
+        due: list[PriceEngineRuntimeItem],
+        *,
+        now: datetime,
+    ) -> list[PriceEngineRuntimeItem]:
+        if len(due) <= 1:
+            return due
+        access = self.provider_access
+        pressure = access.pressure_by_venue() if access is not None else None
+        work_items = [
+            self.scheduler_work_for(runtime, seq=index, now=now)
+            for index, runtime in enumerate(due)
+        ]
+        ordered = order_scheduler_work(work_items, pressure_by_venue=pressure)
+        by_id = {runtime.identity.catalogue_row_id: runtime for runtime in due}
+        ranked: list[PriceEngineRuntimeItem] = []
+        for work, decision in ordered:
+            runtime = by_id.get(work.work_id)
+            if runtime is None:
+                continue
+            runtime.last_priority_decision = decision.as_dict()
+            ranked.append(runtime)
+        return ranked
+
+    def _saved_calls_for(self, runtime: PriceEngineRuntimeItem) -> int:
+        identity = runtime.identity
+        matchbook_ready = bool(identity.matchbook_event_id and identity.matchbook_market_id)
+        kalshi_ready = bool(identity.kalshi_event_ticker and _kalshi_tickers(identity))
+        pm_tokens = executable_polymarket_token_ids(
+            list(identity.polymarket_token_ids),
+            event_id=identity.polymarket_event_id,
+            market_id=identity.polymarket_market_id,
+            condition_id=identity.polymarket_condition_id,
+            required_outcomes=list(identity.required_outcomes)
+            or required_outcomes_for_key(identity.register_canonical_key),
+        )
+        return _expected_provider_calls(
+            matchbook_ready=matchbook_ready,
+            kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
+            polymarket_tokens=pm_tokens if pm_tokens else [],
+        )
+
+    def _record_item_deadline_miss(self, runtime: PriceEngineRuntimeItem) -> None:
+        access = self.provider_access
+        if access is None:
+            return
+        venues = self._required_venues(runtime) or (VenueName.MATCHBOOK,)
+        lane = (
+            ScanLane.HOT.value
+            if runtime.priority is PriceEnginePriority.HOT
+            else PRICE_ENGINE_BACKGROUND_LANE
+        )
+        access.record_deadline_miss(venues[0], lane=lane)
 
     def _slice_worker_limit(self) -> int:
         """Bound in-slice item workers to provider caps without raising them.
@@ -534,13 +719,29 @@ class CataloguePriceEngine:
                 return None
             return deadline - monotonic()
 
+        expensive: list[PriceEngineRuntimeItem] = []
+        for runtime in due:
+            if runtime.skip_expensive_work and len(catalogue_ready_venues(runtime.identity)) >= 2:
+                saved = self._saved_calls_for(runtime)
+                outcome = self._skip_item(
+                    runtime,
+                    result,
+                    reason=runtime.viability_reason or CROSS_VENUE_UNAVAILABLE,
+                    saved_calls=saved,
+                    viable_count=runtime.viable_venue_count,
+                )
+                self._record_outcome(runtime, outcome, result)
+            else:
+                expensive.append(runtime)
+
         if remaining() is not None and float(remaining() or 0) <= 0:
-            for runtime in due:
+            for runtime in expensive:
                 runtime.status = PriceEngineItemStatus.NOT_STARTED
                 result.not_started.append(runtime.identity.catalogue_row_id)
+                self._record_item_deadline_miss(runtime)
             return result
 
-        pending = deque(due)
+        pending = deque(expensive)
         self._slice_remaining = remaining
         try:
             async def _worker() -> None:
@@ -556,11 +757,12 @@ class CataloguePriceEngine:
                     if rem is not None and rem <= 0:
                         runtime.status = PriceEngineItemStatus.NOT_STARTED
                         self._record_outcome(runtime, PriceEngineItemStatus.NOT_STARTED, result)
+                        self._record_item_deadline_miss(runtime)
                         continue
                     outcome = await self._price_item(runtime, result)
                     self._record_outcome(runtime, outcome, result)
 
-            worker_n = min(self._slice_worker_limit(), len(due))
+            worker_n = min(self._slice_worker_limit(), len(expensive))
             if worker_n > 0:
                 await asyncio.gather(
                     *(asyncio.create_task(_worker()) for _ in range(worker_n)),
@@ -570,6 +772,7 @@ class CataloguePriceEngine:
                 runtime = pending.popleft()
                 runtime.status = PriceEngineItemStatus.NOT_STARTED
                 result.not_started.append(runtime.identity.catalogue_row_id)
+                self._record_item_deadline_miss(runtime)
         finally:
             self._slice_remaining = None
         self._last_slice_not_started[priority.value] = len(result.not_started)
@@ -616,19 +819,88 @@ class CataloguePriceEngine:
             if not polymarket_ready and not (matchbook_ready and kalshi_ready):
                 return self._request_revalidation(runtime, "missing_polymarket_identity")
 
+            active_lane = str(lane).strip().casefold() == PRICE_ENGINE_ACTIVE_TRADE_LANE
+            viability = assess_identity_viability(
+                identity,
+                cache=self.viability_cache,
+                active_event_ids=self._exempt_event_ids,
+                active_trade_lane=active_lane,
+            )
+            result.viable_venue_count = viability.viable_venue_count
+            if viability.skip_expensive_work:
+                saved = _expected_provider_calls(
+                    matchbook_ready=matchbook_ready,
+                    kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
+                    polymarket_tokens=pm_tokens if polymarket_ready else [],
+                )
+                return self._skip_item(
+                    runtime,
+                    result,
+                    reason=viability.reason or CROSS_VENUE_UNAVAILABLE,
+                    saved_calls=saved,
+                    viable_count=viability.viable_venue_count,
+                )
+
             matchbook_payload: RetrievedVenuePayload | None = None
+            known_implied: dict[str, Decimal] = {}
             if matchbook_ready:
                 matchbook_payload = await self._refresh_matchbook(runtime, lane=lane)
                 if isinstance(matchbook_payload, PriceEngineItemStatus):
+                    if runtime.last_error_detail and ":gone" in str(runtime.last_error_detail):
+                        remaining = _expected_provider_calls(
+                            matchbook_ready=False,
+                            kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
+                            polymarket_tokens=pm_tokens if polymarket_ready else [],
+                        )
+                        result.skipped_provider_calls += remaining
+                        result.saved_provider_calls += remaining
+                        result.viable_venue_count = assess_identity_viability(
+                            identity,
+                            cache=self.viability_cache,
+                            active_event_ids=self._exempt_event_ids,
+                            active_trade_lane=active_lane,
+                        ).viable_venue_count
                     return self._finalize_provider_status(runtime, matchbook_payload)
+                known_implied = merge_known_implied(
+                    self._implied_from_matchbook(identity, matchbook_payload)
+                )
+                if not active_lane and not viability.active_trade_override:
+                    post_mb = assess_identity_viability(
+                        identity,
+                        cache=self.viability_cache,
+                        active_event_ids=self._exempt_event_ids,
+                        active_trade_lane=False,
+                    )
+                    result.viable_venue_count = post_mb.viable_venue_count
+                    if post_mb.skip_expensive_work:
+                        saved = _expected_provider_calls(
+                            matchbook_ready=False,
+                            kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
+                            polymarket_tokens=pm_tokens if polymarket_ready else [],
+                        )
+                        return self._skip_item(
+                            runtime,
+                            result,
+                            reason=post_mb.reason or CROSS_VENUE_UNAVAILABLE,
+                            saved_calls=saved,
+                            viable_count=post_mb.viable_venue_count,
+                        )
 
             kalshi_books: dict[str, RetrievedVenuePayload] | None = None
             if kalshi_ready:
-                kalshi_books = await self._refresh_kalshi_constituents(runtime, lane=lane)
+                kalshi_books = await self._refresh_kalshi_constituents(
+                    runtime,
+                    lane=lane,
+                    result=result,
+                    known_implied=known_implied,
+                    skip_bound=active_lane or viability.active_trade_override,
+                )
                 if isinstance(kalshi_books, PriceEngineItemStatus):
                     return self._finalize_provider_status(runtime, kalshi_books)
                 required = _required_tickers(identity)
                 if any(ticker not in kalshi_books for ticker in required):
+                    if runtime.status is PriceEngineItemStatus.SKIPPED:
+                        return PriceEngineItemStatus.SKIPPED
                     return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
 
             polymarket_books: dict[str, RetrievedVenuePayload] | None = None
@@ -687,8 +959,12 @@ class CataloguePriceEngine:
                 stage="get_market",
                 source_id=str(identity.matchbook_market_id),
                 coro=getter(identity.matchbook_event_id, identity.matchbook_market_id),
+                runtime=runtime,
             )
         except MatchbookMarketGoneError:
+            self.viability_cache.mark_unavailable(
+                identity.canonical_event_id, VenueName.MATCHBOOK
+            )
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:gone")
         if status is not None:
             if status is PriceEngineItemStatus.RETRY_WAIT:
@@ -697,9 +973,16 @@ class CataloguePriceEngine:
             return status
         market = extract_matchbook_market_payload(payload)
         if market is None or matchbook_payload_is_terminal(market):
+            state = (
+                VenueViability.TERMINAL
+                if market is not None and matchbook_payload_is_terminal(market)
+                else VenueViability.UNAVAILABLE
+            )
+            self.viability_cache.mark(identity.canonical_event_id, VenueName.MATCHBOOK, state)
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:gone")
         if str(market.get("id") or "") != str(identity.matchbook_market_id):
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:identity")
+        self.viability_cache.mark_viable(identity.canonical_event_id, VenueName.MATCHBOOK)
         return RetrievedVenuePayload(payload=market, retrieved_at=self.now())
 
     async def _refresh_kalshi_constituents(
@@ -707,6 +990,9 @@ class CataloguePriceEngine:
         runtime: PriceEngineRuntimeItem,
         *,
         lane: str,
+        result: PriceEngineSliceResult | None = None,
+        known_implied: Mapping[str, Decimal] | None = None,
+        skip_bound: bool = False,
     ) -> dict[str, RetrievedVenuePayload] | PriceEngineItemStatus:
         identity = runtime.identity
         client = self.kalshi
@@ -714,13 +1000,46 @@ class CataloguePriceEngine:
         if not callable(getter):
             return self._request_revalidation(runtime, "kalshi_order_book_unavailable")
         books: dict[str, RetrievedVenuePayload] = {}
-        for ticker in _kalshi_tickers(identity):
+        tickers = _kalshi_tickers(identity)
+        required_outcomes = list(identity.required_outcomes) or required_outcomes_for_key(
+            identity.register_canonical_key
+        )
+        accumulated = dict(known_implied or {})
+        min_net = self._minimum_net_edge(identity)
+        for index, ticker in enumerate(tickers):
+            if not skip_bound and min_net is not None and required_outcomes:
+                remaining = [
+                    outcome
+                    for outcome in (
+                        _ticker_outcome(identity, item) for item in tickers[index:]
+                    )
+                    if outcome
+                ]
+                bound = optimistic_net_edge_upper_bound(
+                    required_outcomes=required_outcomes,
+                    known_implied=accumulated,
+                    unknown_outcomes=remaining,
+                    minimum_net_edge=min_net,
+                )
+                if result is not None and bound.upper_bound_net_edge is not None:
+                    result.upper_bound_net_edge = str(bound.upper_bound_net_edge)
+                if bound.prune:
+                    saved = len(tickers) - index
+                    return self._skip_item(
+                        runtime,
+                        result or PriceEngineSliceResult(),
+                        reason=UPPER_BOUND_BELOW_MIN_NET,
+                        saved_calls=saved,
+                        viable_count=result.viable_venue_count if result is not None else None,
+                        upper_bound=bound.upper_bound_net_edge,
+                    )
             payload, status = await self._provider_call(
                 VenueName.KALSHI,
                 lane=lane,
                 stage="order_book",
                 source_id=ticker,
                 coro=getter(identity.kalshi_event_ticker, ticker),
+                runtime=runtime,
             )
             if status is not None:
                 if status is PriceEngineItemStatus.RETRY_WAIT:
@@ -732,6 +1051,11 @@ class CataloguePriceEngine:
                 runtime.last_error_detail = PRICE_ENGINE_ITEM_TIMEOUT_REASON
                 return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
             books[ticker] = RetrievedVenuePayload(payload=payload, retrieved_at=self.now())
+            self.viability_cache.mark_viable(identity.canonical_event_id, VenueName.KALSHI)
+            outcome = _ticker_outcome(identity, ticker)
+            implied = implied_from_kalshi_book(payload)
+            if outcome and implied is not None:
+                accumulated = merge_known_implied(accumulated, {outcome: implied})
         return books
 
     async def _refresh_polymarket(
@@ -760,6 +1084,7 @@ class CataloguePriceEngine:
                     identity.polymarket_market_id,
                     token,
                 ),
+                runtime=runtime,
             )
             if status is not None:
                 if status is PriceEngineItemStatus.RETRY_WAIT:
@@ -1101,6 +1426,15 @@ class CataloguePriceEngine:
                 or runtime.priority is PriceEnginePriority.HOT
                 or runtime.pricing_slice_priority is PriceEnginePriority.HOT
             )
+            runtime.near_threshold = True
+            runtime.qualifying = bool(
+                decision is not None
+                and decision_net_edge(decision) is not None
+                and decision.minimum_net_edge is not None
+                and qualifies_min_net_arb(
+                    decision_net_edge(decision), decision.minimum_net_edge
+                )
+            )
             self._promoted_hot_rows[row_id] = version
             self._promoted_hot_ids.add(canonical_id)
             if not already_fixture:
@@ -1108,6 +1442,8 @@ class CataloguePriceEngine:
                 if not was_scheduler_hot:
                     self._emit_operator_hot_promotion(runtime, decision, result)
         else:
+            runtime.near_threshold = False
+            runtime.qualifying = False
             self._promoted_hot_rows.pop(row_id, None)
             self._refresh_promoted_hot_ids()
         self._reclassify_fixture(canonical_id)
@@ -1387,6 +1723,7 @@ class CataloguePriceEngine:
         stage: str,
         source_id: str,
         coro: Any,
+        runtime: PriceEngineRuntimeItem | None = None,
     ) -> tuple[Any, PriceEngineItemStatus | None]:
         access = self.provider_access
         timeout = self._provider_timeout
@@ -1395,6 +1732,9 @@ class CataloguePriceEngine:
                 payload = await asyncio.wait_for(coro, timeout=timeout)
                 self._record_lane_operation(lane, venue, stage, HEALTH_OK)
                 return payload, None
+            except ProviderRateLimitedError:
+                self._record_lane_operation(lane, venue, stage, HEALTH_RATE_LIMITED)
+                return None, PriceEngineItemStatus.RETRY_WAIT
             except TimeoutError:
                 self._record_lane_operation(lane, venue, stage, HEALTH_MARKET_TIMEOUT)
                 return None, PriceEngineItemStatus.RETRY_WAIT
@@ -1408,6 +1748,29 @@ class CataloguePriceEngine:
                     pass
 
         slot_wait = self._slot_wait_seconds()
+        work = None
+        if runtime is not None:
+            work = self.scheduler_work_for(runtime, lane=lane)
+            if work.deadline_mono is not None:
+                remaining_deadline = max(0.0, float(work.deadline_mono) - self.now().timestamp())
+                work = SchedulerWork(
+                    lane=work.lane,
+                    work_id=work.work_id,
+                    viable_venue_count=work.viable_venue_count,
+                    skip_expensive_work=work.skip_expensive_work,
+                    viability_reason=work.viability_reason,
+                    viability_assessed=work.viability_assessed,
+                    near_threshold=work.near_threshold,
+                    qualifying=work.qualifying,
+                    in_play=work.in_play,
+                    required_venues=work.required_venues,
+                    due_mono=access._clock(),
+                    deadline_mono=access._clock() + remaining_deadline,
+                    cadence_seconds=work.cadence_seconds,
+                    seq=work.seq,
+                    wait_age_ms=work.wait_age_ms,
+                    now_mono=access._clock(),
+                )
         if slot_wait <= 0:
             await _close_unused()
             if access.venue_saturated(venue):
@@ -1415,7 +1778,7 @@ class CataloguePriceEngine:
                 return None, PriceEngineItemStatus.DEFERRED
             return None, PriceEngineItemStatus.NOT_STARTED
         async with access.acquire_wait(
-            venue, lane=lane, stage=stage, timeout=slot_wait
+            venue, lane=lane, stage=stage, timeout=slot_wait, work=work
         ) as lease:
             if lease is None:
                 await _close_unused()
@@ -1436,6 +1799,10 @@ class CataloguePriceEngine:
                     return payload, None
                 except MatchbookMarketGoneError:
                     raise
+                except ProviderRateLimitedError as exc:
+                    access.observe_rate_limit(venue, exc.retry_after_seconds)
+                    self._record_lane_operation(lane, venue, stage, HEALTH_RATE_LIMITED)
+                    return None, PriceEngineItemStatus.RETRY_WAIT
                 except Exception:
                     self._record_lane_operation(lane, venue, stage, HEALTH_MARKET_TIMEOUT)
                     return None, PriceEngineItemStatus.RETRY_WAIT
@@ -1480,6 +1847,115 @@ class CataloguePriceEngine:
         )
         return PriceEngineItemStatus.REVALIDATION_NEEDED
 
+    def _skip_item(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        result: PriceEngineSliceResult,
+        *,
+        reason: str,
+        saved_calls: int,
+        viable_count: int | None,
+        upper_bound: Decimal | None = None,
+    ) -> PriceEngineItemStatus:
+        runtime.status = PriceEngineItemStatus.SKIPPED
+        runtime.last_priced_at = self.now()
+        runtime.last_error_stage = "opportunity_viability"
+        runtime.last_error_detail = reason
+        runtime.retry_attempt = 0
+        runtime.next_retry_at = None
+        result.skipped_provider_calls += max(0, int(saved_calls))
+        result.saved_provider_calls += max(0, int(saved_calls))
+        if viable_count is not None:
+            result.viable_venue_count = viable_count
+        if upper_bound is not None:
+            result.upper_bound_net_edge = str(upper_bound)
+        result.skip_reasons[runtime.identity.catalogue_row_id] = reason
+        self._project_skipped_state(runtime, reason=reason)
+        return PriceEngineItemStatus.SKIPPED
+
+    def _project_skipped_state(self, runtime: PriceEngineRuntimeItem, *, reason: str) -> None:
+        if self.fixture_state is None:
+            return
+        identity = runtime.identity
+        observed_at = self.now()
+        if reason == NO_CROSS_VENUE_CANDIDATE:
+            evaluation_state = MarketEvaluationState.SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE.value
+        elif reason == UPPER_BOUND_BELOW_MIN_NET:
+            evaluation_state = MarketEvaluationState.UPPER_BOUND_BELOW_MIN_NET.value
+        else:
+            evaluation_state = MarketEvaluationState.CROSS_VENUE_UNAVAILABLE.value
+        fixture = DiscoveredFixture(
+            source=VenueName.MATCHBOOK,
+            source_event_id=str(identity.matchbook_event_id or identity.canonical_event_id),
+            canonical_event_id=identity.canonical_event_id,
+            home_team=identity.home_canonical or "Home",
+            away_team=identity.away_canonical or "Away",
+            competition=identity.competition or "Premier League",
+            kickoff_utc=identity.kickoff_utc or observed_at,
+            last_seen_at=observed_at,
+            last_scanned_at=observed_at,
+            matchbook_matched=bool(identity.matchbook_event_id),
+            kalshi_matched=bool(identity.kalshi_event_ticker),
+            polymarket_matched=bool(identity.polymarket_event_id),
+            market_evaluation_state=evaluation_state,
+            market_evaluation_reason=reason,
+            no_comparison_reason=reason,
+            opportunity_state="not_evaluated",
+            solver_is_arbitrage=False,
+            scan_lane=(
+                ScanLane.HOT.value
+                if runtime.priority is PriceEnginePriority.HOT
+                else ScanLane.UNIVERSE.value
+            ),
+        )
+        self.fixture_state.upsert_evaluated_fixture(
+            fixture,
+            scan_lane=ScanLane.UNIVERSE
+            if runtime.priority is PriceEnginePriority.BACKGROUND
+            else ScanLane.HOT,
+            now=observed_at,
+        )
+
+    def _implied_from_matchbook(
+        self,
+        identity: DerivedPriceEngineItem,
+        matchbook: RetrievedVenuePayload,
+    ) -> dict[str, Decimal]:
+        parsed = implied_from_matchbook_market(matchbook.payload)
+        required = {str(item) for item in identity.required_outcomes or []}
+        if required:
+            parsed = {key: value for key, value in parsed.items() if key in required}
+        if parsed:
+            return parsed
+        try:
+            observation = self._build_matchbook_obs(identity, matchbook, self.now())
+        except Exception:
+            return {}
+        from_obs = implied_from_observation(observation)
+        if required:
+            return {key: value for key, value in from_obs.items() if key in required}
+        return from_obs
+
+    def _minimum_net_edge(self, identity: DerivedPriceEngineItem) -> Decimal | None:
+        del identity
+        resolved = getattr(self.paper_scan, "settings", None) if self.paper_scan is not None else None
+        if resolved is None:
+            try:
+                resolved = get_settings()
+            except Exception:
+                resolved = None
+        try:
+            operator = effective_operator_scanner_settings(resolved)
+            return Decimal(str(operator.min_net_edge))
+        except Exception:
+            pass
+        if resolved is None:
+            return None
+        try:
+            return Decimal(str(resolved.min_net_edge))
+        except (InvalidOperation, ValueError, TypeError, AttributeError):
+            return None
+
     def _record_outcome(
         self,
         runtime: PriceEngineRuntimeItem,
@@ -1523,6 +1999,17 @@ class CataloguePriceEngine:
                     stage="catalogue_revalidation",
                     source_id=row_id,
                     detail=runtime.last_error_detail or CATALOGUE_REVALIDATION_REASON,
+                )
+            )
+            return
+        if outcome is PriceEngineItemStatus.SKIPPED:
+            result.skipped.append(row_id)
+            result.skip_reasons[row_id] = runtime.last_error_detail or CROSS_VENUE_UNAVAILABLE
+            result.issues.append(
+                CollectorIssue(
+                    stage="opportunity_viability",
+                    source_id=row_id,
+                    detail=runtime.last_error_detail or CROSS_VENUE_UNAVAILABLE,
                 )
             )
             return
@@ -1618,6 +2105,13 @@ class CataloguePriceEngine:
             if runtime.status is PriceEngineItemStatus.REVALIDATION_NEEDED:
                 revalidation += 1
                 continue
+            if runtime.status is PriceEngineItemStatus.SKIPPED:
+                if runtime.last_priced_at is None:
+                    continue
+                if interval <= 0 or now <= runtime.last_priced_at + timedelta(seconds=interval):
+                    continue
+                due += 1
+                continue
             if runtime.status is PriceEngineItemStatus.EVALUATED:
                 if runtime.last_priced_at is None:
                     evaluated += 1
@@ -1693,6 +2187,30 @@ def _kalshi_tickers(identity: DerivedPriceEngineItem) -> list[str]:
         if ticker and ticker not in derived:
             derived.append(ticker)
     return derived
+
+
+def _ticker_outcome(identity: DerivedPriceEngineItem, ticker: str) -> str | None:
+    needle = str(ticker or "").strip()
+    if not needle:
+        return None
+    for item in identity.kalshi_outcome_ids:
+        native = str(item.native_id or "")
+        if native == needle or native.startswith(f"{needle}:"):
+            return str(item.outcome)
+    return None
+
+
+def _expected_provider_calls(
+    *,
+    matchbook_ready: bool,
+    kalshi_tickers: list[str],
+    polymarket_tokens: list[Any],
+) -> int:
+    return (
+        (1 if matchbook_ready else 0)
+        + len(kalshi_tickers)
+        + len(polymarket_tokens)
+    )
 
 
 def _required_tickers(identity: DerivedPriceEngineItem) -> list[str]:

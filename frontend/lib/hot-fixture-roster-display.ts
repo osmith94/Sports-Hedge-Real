@@ -2,6 +2,9 @@ import { DiscoveredFixture, LiveRefreshStatus } from "./api";
 import {
   NOT_EVALUATED_MARKET_FETCH_LABEL,
   NOT_EVALUATED_SCAN_BUDGET_LABEL,
+  NOT_EVALUATED_SINGLE_VENUE_LABEL,
+  NOT_EVALUATED_CROSS_VENUE_UNAVAILABLE_LABEL,
+  NOT_EVALUATED_UPPER_BOUND_BELOW_MIN_NET_LABEL,
   HOT_RELATIONSHIP_MISSING_LABEL,
   HOT_REVALIDATION_NEEDED_LABEL,
   fixtureHref,
@@ -158,6 +161,21 @@ export function hotEvaluationLabel(item: DiscoveredFixture): string {
     return item.market_evaluation_reason
       ? `${HOT_RELATIONSHIP_MISSING_LABEL} · ${item.market_evaluation_reason}`
       : HOT_RELATIONSHIP_MISSING_LABEL;
+  }
+  if (item.market_evaluation_state === "single_venue_no_cross_venue_candidate") {
+    return item.market_evaluation_reason
+      ? `${NOT_EVALUATED_SINGLE_VENUE_LABEL} · ${item.market_evaluation_reason}`
+      : NOT_EVALUATED_SINGLE_VENUE_LABEL;
+  }
+  if (item.market_evaluation_state === "cross_venue_unavailable") {
+    return item.market_evaluation_reason
+      ? `${NOT_EVALUATED_CROSS_VENUE_UNAVAILABLE_LABEL} · ${item.market_evaluation_reason}`
+      : NOT_EVALUATED_CROSS_VENUE_UNAVAILABLE_LABEL;
+  }
+  if (item.market_evaluation_state === "upper_bound_below_min_net") {
+    return item.market_evaluation_reason
+      ? `${NOT_EVALUATED_UPPER_BOUND_BELOW_MIN_NET_LABEL} · ${item.market_evaluation_reason}`
+      : NOT_EVALUATED_UPPER_BOUND_BELOW_MIN_NET_LABEL;
   }
   const reason = item.market_evaluation_reason || item.no_comparison_reason;
   if (reason === "hot_revalidation_needed") {
