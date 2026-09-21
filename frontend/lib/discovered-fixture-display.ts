@@ -1,5 +1,11 @@
 import { DiscoveredFixture, LiveRefreshStatus } from "./api";
-import { kickoffLocalLabel, kickoffRelativeLabel, percent, percentPoints } from "./format";
+import {
+  formatKickoffInLocalTimezone,
+  kickoffLocalLabel,
+  kickoffRelativeLabel,
+  percent,
+  percentPoints,
+} from "./format";
 import {
   VENUE_SHORT,
   discoveryFailedVenues,
@@ -117,7 +123,10 @@ export function liveScoreLabel(item: DiscoveredFixture): string | null {
 }
 
 export function kickoffClockLabel(kickoffUtc: string): string {
-  return kickoffLocalLabel(kickoffUtc);
+  if (!kickoffUtc) return "—";
+  // Fixture inventory is a server component, so this heading is not hydrated.
+  // Keep a local-looking clock without going through the hydration-gated helper.
+  return formatKickoffInLocalTimezone(kickoffUtc);
 }
 
 export function inventorySummaryLabel(item: DiscoveredFixture): string {

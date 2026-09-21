@@ -68,7 +68,7 @@ export function HotFixturesPanel({
                     <div className="muted">{row.competition}</div>
                   </td>
                   <td className="wrap">
-                    {kickoffLocalLabel(row.kickoffUtc)}
+                    {kickoffLocalLabel(row.kickoffUtc, nowMs)}
                     {row.kickoffLines.map((line) => (
                       <div className="muted" key={line}>
                         {line}

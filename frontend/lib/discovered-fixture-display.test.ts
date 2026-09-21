@@ -10,6 +10,7 @@ import {
   discoveryEmptyMatchNote,
   discoveryCompactSummaryLabel,
   discoveryStatusBadgeLabel,
+  kickoffClockLabel,
 } from "./discovered-fixture-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -201,6 +202,18 @@ describe("fixture discovery collapsed-by-default disclosure", () => {
     assert.doesNotMatch(panel, /scan-message scan-message-error/);
     assert.match(panel, /table className="discovery-compact"/);
     assert.match(panel, /Discovery status unavailable\. No fabricated fixtures\./);
+  });
+
+  it("gates FixtureRow kickoff on hydrated nowMs so SSR and first client render match", () => {
+    const panel = readFileSync(join(frontendRoot, "components/discovered-fixtures.tsx"), "utf8");
+    const hydrated = readFileSync(join(frontendRoot, "components/hydrated-relative-time.tsx"), "utf8");
+    const format = readFileSync(join(frontendRoot, "lib/format.ts"), "utf8");
+    assert.match(panel, /useHydratedNowMs/);
+    assert.match(panel, /kickoffLocalLabel\(item\.kickoff_utc, nowMs\)/);
+    assert.doesNotMatch(panel, /kickoffLocalLabel\(item\.kickoff_utc\)/);
+    assert.match(hydrated, /useState<number \| null>\(null\)/);
+    assert.match(format, /if \(now == null \|\| !Number\.isFinite\(now\)\) return iso;/);
+    assert.notEqual(kickoffClockLabel("2026-09-21T15:00:00.000Z"), "2026-09-21T15:00:00.000Z");
   });
 
   it("styles the disclosure consistently and keeps visible keyboard focus", () => {
