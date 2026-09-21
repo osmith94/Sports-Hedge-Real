@@ -83,7 +83,10 @@ Top scorer Kalshi vs Polymarket remains fail-closed on joint-winner policy
 ## UNIVERSE operator picker
 
 COMPETITION_SEASON scopes participate in the existing #381 Universe scope
-picker. Selecting a season row makes it eligible for the **existing** UNIVERSE
+picker **already present on owner-live**. This PR extends that interface; it
+does not vendor, cherry-pick, or re-implement the #381/#389/Vanilla stack.
+
+Selecting a season row makes it eligible for the **existing** UNIVERSE
 worker via extra Kalshi series tickers on that generation. Deselecting stops
 new discovery/admission for that scope and does not delete catalogue history
 or abandon OPEN/PARTIAL/ACTIVE PAPER positions.
@@ -92,3 +95,20 @@ Scope Apply remains provider-I/O-free unless the operator chooses Run UNIVERSE
 now. There is no second outright scanner. Cross-venue outright equivalence and
 PAPER admission stay closed. Top scorer remains observation-only / not
 executable while joint-winner policy is fail-closed.
+
+### Integration dependency
+
+Compose this slice onto exact owner-live `588c8b41802690c226ce338e871ba17fcd367eab`
+(GitHub branch `owner-live`), which already carries the #381 picker
+(`OperatorUniverseScope`, `/paper/universe-scope`,
+`FootballCompetitionsModal`). Final Vanilla + NFL + Outrights integration
+must use that same picker contract:
+
+- FIXTURE_MATCH rows stay `selected_competition_codes`
+- COMPETITION_SEASON rows stay `selected_season_scope_codes`
+- catalog options carry `market_scope`
+- NFL game fixtures (#429) must enter as FIXTURE_MATCH picker rows, not by
+  copying `KXNFLGAME` logic into the outright layer
+
+Do not open or review this PR against stale `main`; that comparison embeds
+unrelated owner-live history and is not the Outrights lane.
