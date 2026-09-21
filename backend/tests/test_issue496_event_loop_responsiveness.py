@@ -291,6 +291,8 @@ def test_cancel_recovery_does_not_call_sync_cluster_venue_events() -> None:
     )
     assert "cluster_venue_events(" not in recover_src
     assert "_cluster_venue_events_cooperative(" in recover_src
+    assert "allow_incremental=False" in recover_src
+    assert "if index_ready:" in cooperative_src
     assert "defer_candidate_build=True" in cooperative_src
     assert "finalize_cooperative" in cooperative_src
     assert "load_candidates_cooperative" in cooperative_src
@@ -469,6 +471,68 @@ async def test_cancelled_index_keeps_partial_candidates_not_empty_singletons() -
 
 
 @pytest.mark.asyncio
+async def test_cancel_during_index_does_not_wipe_generation_resume() -> None:
+    from sports_hedge.application.universe_identity_cache import GenerationIdentityCache
+
+    matchbook, polymarket, kalshi = _dense_universe(80, stagger=True)
+    cache = GenerationIdentityCache()
+    seed = ClusterPass(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=EventMatcher(),
+        max_event_pairs=10_000_000,
+        identity_cache=cache,
+    )
+    for index, (left, right) in enumerate(seed.pairs()):
+        seed.consider(left, right)
+        if index >= 40:
+            break
+    seed.checkpoint(seed.candidate_pairs_considered)
+    resume = cache.clustering_resume
+    assert resume is not None
+    saved_cursor = resume.cursor
+    saved_scored = list(resume.scored_pairs)
+    assert saved_cursor == 41
+    assert saved_scored
+
+    cluster_pass = ClusterPass(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=EventMatcher(),
+        max_event_pairs=10_000_000,
+        identity_cache=cache,
+        defer_candidate_build=True,
+    )
+    task = asyncio.create_task(cluster_pass.load_candidates_cooperative(yield_every=16))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    kept = cache.clustering_resume
+    assert kept is not None
+    assert kept.cursor == saved_cursor
+    assert list(kept.scored_pairs) == saved_scored
+    assert cluster_pass.scored_pairs == []
+    replay = GenerationIdentityCache()
+    replay.store_clustering_resume(
+        items=[*matchbook, *polymarket, *kalshi],
+        cursor=saved_cursor,
+        parent=dict(kept.parent),
+        match_confidence=dict(kept.match_confidence),
+        pair_kinds={key: set(value) for key, value in kept.pair_kinds.items()},
+        scored_pairs=list(saved_scored),
+    )
+    sync_pass, _sync_clusters_out, _sync_counts = _sync_clusters(
+        matchbook, polymarket, kalshi, cache=replay
+    )
+    assert sync_pass._resume_cursor == saved_cursor
+    assert sync_pass.scored_pairs[: len(saved_scored)] == saved_scored
+
+
+@pytest.mark.asyncio
 async def test_cancel_finalize_does_not_commit_incremental_or_negatives() -> None:
     from sports_hedge.application.universe_identity_cache import CrossGenerationIdentityCache
 
@@ -559,6 +623,51 @@ async def test_universe_cancel_after_index_finalizes_once_uses_partial(
         reset_universe_identity_cache()
 
 
+@pytest.mark.asyncio
+async def test_last_resort_cancel_recovery_does_not_commit_incremental(
+    monkeypatch,
+) -> None:
+    from sports_hedge.application.universe_identity_cache import (
+        get_cross_generation_identity_cache,
+        reset_universe_identity_cache,
+    )
+
+    reset_universe_identity_cache()
+    original = ReadOnlyCrossVenueCollector._cluster_venue_events_cooperative
+    calls: list[bool] = []
+
+    async def first_raises(self, *args, **kwargs):
+        calls.append(bool(kwargs.get("allow_incremental", True)))
+        if len(calls) == 1:
+            raise asyncio.CancelledError
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        ReadOnlyCrossVenueCollector,
+        "_cluster_venue_events_cooperative",
+        first_raises,
+    )
+    universe = SyntheticUniverse(8, latency_s=0)
+    collector, repository = _collector(universe)
+    try:
+        report = await _scan(
+            collector,
+            max_event_pairs=8,
+            scan_lane=ScanLane.UNIVERSE.value,
+            universe_generation_id=11,
+        )
+        assert report.scan_diagnostics["cancelled"] is True
+        assert report.discovered_fixtures
+        assert calls == [True, False]
+        assert get_cross_generation_identity_cache().events == {}
+        assert get_cross_generation_identity_cache().pairs == {}
+        assert collector._identity_cache is not None
+        assert collector._identity_cache.generation_id == 11
+    finally:
+        repository.close()
+        reset_universe_identity_cache()
+
+
 def test_thresholds_concurrency_and_paper_boundary_unchanged() -> None:
     from sports_hedge.application.collector import DEFAULT_PROVIDER_CONCURRENCY
     from sports_hedge.config import Settings
@@ -580,3 +689,31 @@ def test_thresholds_concurrency_and_paper_boundary_unchanged() -> None:
     from sports_hedge.matching.identity_graph import DEFAULT_ASSIGNMENT_MARGIN
 
     assert DEFAULT_ASSIGNMENT_MARGIN == 0.03
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_and_negatives_ignore_rebound_generation() -> None:
+    from sports_hedge.application.universe_identity_cache import GenerationIdentityCache
+
+    matchbook, polymarket, kalshi = _dense_universe(12, stagger=True)
+    cache = GenerationIdentityCache()
+    cache.bind(9)
+    cluster_pass = ClusterPass(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=EventMatcher(),
+        max_event_pairs=10_000_000,
+        identity_cache=cache,
+    )
+    for index, (left, right) in enumerate(cluster_pass.pairs()):
+        cluster_pass.consider(left, right)
+        if index >= 4:
+            break
+    cache.bind(10)
+    cluster_pass.checkpoint(cluster_pass.candidate_pairs_considered)
+    clusters, _counts = cluster_pass.finalize()
+    cluster_pass.record_generation_negatives(clusters)
+    assert cache.generation_id == 10
+    assert cache.clustering_resume is None
+    assert cache.no_cross_venue == {}

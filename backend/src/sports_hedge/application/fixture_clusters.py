@@ -362,6 +362,7 @@ class ClusterPass:
         self.identity_cache = identity_cache
         self.incremental_cache = incremental_cache
         self.semantic_version = identity_cache_semantic_version(self.bulk_matcher)
+        self._bound_generation_id = getattr(identity_cache, "generation_id", None)
         self._fingerprints = {
             event_cache_key(item): event_identity_fingerprint(item) for item in self.items
         }
@@ -385,6 +386,14 @@ class ClusterPass:
         if not defer_candidate_build:
             self._load_candidates_sync()
 
+    def _restore_resume_state(self, resume) -> None:
+        self.parent = dict(resume.parent)
+        self.match_confidence = dict(resume.match_confidence)
+        self.pair_kinds = {key: set(value) for key, value in resume.pair_kinds.items()}
+        self.scored_pairs = list(getattr(resume, "scored_pairs", ()) or ())
+        self._resume_cursor = min(resume.cursor, len(self._candidates))
+        self.candidate_pairs_considered = self._resume_cursor
+
     def _apply_resume_cursor(self) -> None:
         cache = self.identity_cache
         if cache is None:
@@ -392,12 +401,7 @@ class ClusterPass:
         resume = cache.take_clustering_resume(self.items)
         if resume is None:
             return
-        self.parent = dict(resume.parent)
-        self.match_confidence = dict(resume.match_confidence)
-        self.pair_kinds = {key: set(value) for key, value in resume.pair_kinds.items()}
-        self.scored_pairs = list(getattr(resume, "scored_pairs", ()) or ())
-        self._resume_cursor = min(resume.cursor, len(self._candidates))
-        self.candidate_pairs_considered = self._resume_cursor
+        self._restore_resume_state(resume)
 
     def _load_candidates_sync(self) -> None:
         self._candidates, self.index_diagnostics = build_indexed_candidates(
@@ -420,9 +424,8 @@ class ClusterPass:
                 yield_every=yield_every
             )
         except asyncio.CancelledError:
-            # Keep the pairs generated before the cancel. Applying a previous
-            # generation resume onto an incomplete candidate list would mix
-            # cursors; leftover assembly still finalizes this partial index.
+            # Keep generated pairs for leftover finalize. Do not apply resume
+            # onto an incomplete index, and do not consume the stored checkpoint.
             self._candidates, self.index_diagnostics = builder.finish()
             raise
         self._apply_resume_cursor()
@@ -456,9 +459,18 @@ class ClusterPass:
             **self.incremental_diagnostics.as_dict(),
         }
 
-    def checkpoint(self, cursor: int) -> None:
+    def _cache_generation_matches(self) -> bool:
         cache = self.identity_cache
         if cache is None:
+            return False
+        bound = self._bound_generation_id
+        if bound is None:
+            return True
+        return getattr(cache, "generation_id", None) == bound
+
+    def checkpoint(self, cursor: int) -> None:
+        cache = self.identity_cache
+        if cache is None or not self._cache_generation_matches():
             return
         cache.store_clustering_resume(
             items=self.items,
@@ -471,7 +483,7 @@ class ClusterPass:
 
     def record_generation_negatives(self, clusters: list[FixtureCluster]) -> None:
         cache = self.identity_cache
-        if cache is None:
+        if cache is None or not self._cache_generation_matches():
             return
         venues = {item.venue for item in self.items}
         other_keys_by_venue = {

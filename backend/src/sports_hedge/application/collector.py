@@ -4340,6 +4340,7 @@ class ReadOnlyCrossVenueCollector:
         polymarket: list[Any],
         kalshi: list[Any],
         max_event_pairs: int,
+        allow_incremental: bool = True,
     ) -> tuple[list[FixtureCluster], dict[str, int], bool, dict[str, Any]]:
         cluster_pass = ClusterPass(
             matchbook=matchbook,
@@ -4348,7 +4349,9 @@ class ReadOnlyCrossVenueCollector:
             matcher=self.event_matcher,
             max_event_pairs=max_event_pairs,
             identity_cache=self._identity_cache,
-            incremental_cache=self._incremental_cache,
+            incremental_cache=(
+                self._incremental_cache if allow_incremental else None
+            ),
             defer_candidate_build=True,
         )
         truncated = False
@@ -4361,6 +4364,7 @@ class ReadOnlyCrossVenueCollector:
         init_ms = 0
         consider_ms = 0
         finalize_ms = 0
+        index_ready = False
 
         async def _snapshot_partial() -> tuple[list[FixtureCluster], dict[str, int]]:
             snapshot_started = monotonic()
@@ -4380,6 +4384,7 @@ class ReadOnlyCrossVenueCollector:
         try:
             init_started = monotonic()
             await cluster_pass.load_candidates_cooperative()
+            index_ready = True
             init_ms = max(0, int((monotonic() - init_started) * 1000))
             LOGGER.info(
                 "cluster_pass_index_ms=%s candidates=%s",
@@ -4401,7 +4406,11 @@ class ReadOnlyCrossVenueCollector:
                 absolute_index = cluster_pass._resume_cursor + index + 1
             consider_ms = max(0, int((monotonic() - consider_started) * 1000))
         except asyncio.CancelledError:
-            cluster_pass.checkpoint(absolute_index)
+            # Cancel during cooperative index must not overwrite a previous
+            # generation resume with cursor 0 / empty scores. Leftover
+            # finalize may still use restored in-memory scores.
+            if index_ready:
+                cluster_pass.checkpoint(absolute_index)
             acknowledge_task_cancellation()
             await _snapshot_partial()
             raise
@@ -4413,7 +4422,8 @@ class ReadOnlyCrossVenueCollector:
         clusters, counts = await _snapshot_partial()
         if not truncated:
             cluster_pass.record_generation_negatives(clusters)
-            cluster_pass.commit_incremental_snapshot()
+            if allow_incremental:
+                cluster_pass.commit_incremental_snapshot()
         diagnostics = cluster_pass.clustering_diagnostics(
             truncated=truncated, duration_ms=duration_ms
         )
@@ -4574,12 +4584,23 @@ class ReadOnlyCrossVenueCollector:
                     k_events.append(item)
         if not (mb_events or pm_events or k_events):
             return []
-        recovered, _counts, _truncated, _diagnostics = await self._cluster_venue_events_cooperative(
-            matchbook=[to_venue_event(event, VenueName.MATCHBOOK) for event in mb_events],
-            polymarket=[to_venue_event(event, VenueName.POLYMARKET) for event in pm_events],
-            kalshi=[to_venue_event(event, VenueName.KALSHI) for event in k_events],
-            max_event_pairs=max(1, int(max_event_pairs)),
-        )
+        try:
+            recovered, _counts, _truncated, _diagnostics = await self._cluster_venue_events_cooperative(
+                matchbook=[to_venue_event(event, VenueName.MATCHBOOK) for event in mb_events],
+                polymarket=[to_venue_event(event, VenueName.POLYMARKET) for event in pm_events],
+                kalshi=[to_venue_event(event, VenueName.KALSHI) for event in k_events],
+                max_event_pairs=max(1, int(max_event_pairs)),
+                # Owner-live last-resort clustered without the cross-generation
+                # cache. A cancelled scan must not commit incremental scores
+                # or reuse them as a successful generation.
+                allow_incremental=False,
+            )
+        except asyncio.CancelledError:
+            # Outer collect() already uncancelled so leftover assembly can
+            # await. A second cancel during last-resort must still return
+            # the partial snapshot instead of aborting the leftover report.
+            acknowledge_task_cancellation()
+            recovered = list(getattr(self, "_op_partial_clusters", None) or [])
         if identity_scope is None:
             return recovered
         scoped = [
