@@ -14,8 +14,10 @@ the provider-pricing worker and HOT ``run_cycle`` envelope. This module does
 not own capture. Quote age uses each exact provider response's retrieval
 instant; a multi-constituent item is as old as its oldest required quote.
 
-PAPER / read-only. Exact persisted Matchbook/Kalshi IDs only — never
-``list_events`` / ``list_markets`` rediscovery on this path.
+PAPER / read-only. Exact persisted Matchbook/Kalshi/Polymarket IDs only — never
+``list_events`` / ``list_markets`` rediscovery on this path. Polymarket CLOB
+books use real token IDs from the catalogue; missing or synthetic tokens are
+not executable.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from sports_hedge.application.approved_market_catalogue import (
     ApprovedMarketCatalogueRow,
     DerivedPriceEngineItem,
     derived_price_engine_working_set,
+    executable_polymarket_token_ids,
     required_outcomes_for_key,
 )
 from sports_hedge.application.target_competitions import resolve_catalogue_competition_code
@@ -67,6 +70,7 @@ from sports_hedge.application.hot_market_relationships import (
 from sports_hedge.application.market_observation import (
     KalshiObservationBuilder,
     MatchbookObservationBuilder,
+    PolymarketObservationBuilder,
     VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
@@ -272,6 +276,7 @@ class CataloguePriceEngine:
         catalogue_store: SqliteApprovedMarketCatalogueStore | None = None,
         matchbook: Any = None,
         kalshi: Any = None,
+        polymarket: Any = None,
         paper_scan: PaperScanService | None = None,
         fixture_state: FixtureCurrentStateStore | None = None,
         provider_access: ProviderAccessLayer | None = None,
@@ -290,6 +295,7 @@ class CataloguePriceEngine:
         self.catalogue_store = catalogue_store
         self.matchbook = matchbook
         self.kalshi = kalshi
+        self.polymarket = polymarket
         self.paper_scan = paper_scan
         self.fixture_state = fixture_state
         self.provider_access = provider_access if provider_access is not None else get_shared_provider_access()
@@ -325,9 +331,11 @@ class CataloguePriceEngine:
         self.revalidation_requests: list[dict[str, str]] = []
         self.matchbook_builder = MatchbookObservationBuilder()
         self.kalshi_builder = KalshiObservationBuilder()
+        self.polymarket_builder = PolymarketObservationBuilder()
         self._peak_held_slots: dict[str, int] = {
             VenueName.MATCHBOOK.value: 0,
             VenueName.KALSHI.value: 0,
+            VenueName.POLYMARKET.value: 0,
         }
         self._slice_remaining: Callable[[], float | None] | None = None
         self._pending_item_captures: set[asyncio.Task[Any]] = set()
@@ -589,27 +597,73 @@ class CataloguePriceEngine:
                 else PRICE_ENGINE_BACKGROUND_LANE
             )
         try:
-            if not identity.matchbook_event_id or not identity.matchbook_market_id:
+            matchbook_ready = bool(identity.matchbook_event_id and identity.matchbook_market_id)
+            kalshi_ready = bool(identity.kalshi_event_ticker and _kalshi_tickers(identity))
+            pm_tokens = executable_polymarket_token_ids(
+                list(identity.polymarket_token_ids),
+                event_id=identity.polymarket_event_id,
+                market_id=identity.polymarket_market_id,
+                condition_id=identity.polymarket_condition_id,
+                required_outcomes=list(identity.required_outcomes)
+                or required_outcomes_for_key(identity.register_canonical_key),
+            )
+            polymarket_ready = bool(pm_tokens)
+            if not matchbook_ready and not (kalshi_ready and polymarket_ready):
                 return self._request_revalidation(runtime, "missing_matchbook_identity")
-            if not identity.kalshi_event_ticker or not _kalshi_tickers(identity):
+            if not kalshi_ready and not (matchbook_ready and polymarket_ready):
                 return self._request_revalidation(runtime, "missing_kalshi_identity")
+            if not polymarket_ready and not (matchbook_ready and kalshi_ready):
+                return self._request_revalidation(runtime, "missing_polymarket_identity")
 
-            matchbook_payload = await self._refresh_matchbook(runtime, lane=lane)
-            if isinstance(matchbook_payload, PriceEngineItemStatus):
-                return self._finalize_provider_status(runtime, matchbook_payload)
+            matchbook_payload: RetrievedVenuePayload | None = None
+            if matchbook_ready:
+                matchbook_payload = await self._refresh_matchbook(runtime, lane=lane)
+                if isinstance(matchbook_payload, PriceEngineItemStatus):
+                    return self._finalize_provider_status(runtime, matchbook_payload)
 
-            kalshi_books = await self._refresh_kalshi_constituents(runtime, lane=lane)
-            if isinstance(kalshi_books, PriceEngineItemStatus):
-                return self._finalize_provider_status(runtime, kalshi_books)
+            kalshi_books: dict[str, RetrievedVenuePayload] | None = None
+            if kalshi_ready:
+                kalshi_books = await self._refresh_kalshi_constituents(runtime, lane=lane)
+                if isinstance(kalshi_books, PriceEngineItemStatus):
+                    return self._finalize_provider_status(runtime, kalshi_books)
+                required = _required_tickers(identity)
+                if any(ticker not in kalshi_books for ticker in required):
+                    return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
 
-            required = _required_tickers(identity)
-            if any(ticker not in kalshi_books for ticker in required):
-                return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
+            polymarket_books: dict[str, RetrievedVenuePayload] | None = None
+            if polymarket_ready:
+                polymarket_books = await self._refresh_polymarket(runtime, lane=lane, tokens=pm_tokens)
+                if isinstance(polymarket_books, PriceEngineItemStatus):
+                    if matchbook_payload is not None and kalshi_books is not None:
+                        polymarket_books = None
+                    else:
+                        return self._finalize_provider_status(runtime, polymarket_books)
 
-            return await self._evaluate_complete_item(
+            if matchbook_payload is not None and kalshi_books is not None:
+                status = await self._evaluate_complete_item(
+                    runtime,
+                    matchbook=matchbook_payload,
+                    kalshi_books=kalshi_books,
+                    result=result,
+                )
+                if (
+                    status is PriceEngineItemStatus.EVALUATED
+                    and polymarket_books
+                    and self.paper_scan is not None
+                ):
+                    await self._evaluate_extra_polymarket_pairs(
+                        runtime,
+                        matchbook=matchbook_payload,
+                        kalshi_books=kalshi_books,
+                        polymarket_books=polymarket_books,
+                        result=result,
+                    )
+                return status
+            return await self._evaluate_flexible_pairs(
                 runtime,
                 matchbook=matchbook_payload,
                 kalshi_books=kalshi_books,
+                polymarket_books=polymarket_books,
                 result=result,
             )
         finally:
@@ -677,6 +731,45 @@ class CataloguePriceEngine:
                 runtime.last_error_detail = PRICE_ENGINE_ITEM_TIMEOUT_REASON
                 return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
             books[ticker] = RetrievedVenuePayload(payload=payload, retrieved_at=self.now())
+        return books
+
+    async def _refresh_polymarket(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        *,
+        lane: str,
+        tokens: list[Any],
+    ) -> dict[str, RetrievedVenuePayload] | PriceEngineItemStatus:
+        identity = runtime.identity
+        getter = getattr(self.polymarket, "get_order_book", None) if self.polymarket is not None else None
+        if not callable(getter):
+            return self._request_revalidation(runtime, "polymarket_order_book_unavailable")
+        books: dict[str, RetrievedVenuePayload] = {}
+        for item in tokens:
+            token = str(getattr(item, "native_id", item) or "").strip()
+            if not token:
+                return self._request_revalidation(runtime, "missing_polymarket_clob_token")
+            payload, status = await self._provider_call(
+                VenueName.POLYMARKET,
+                lane=lane,
+                stage="order_book",
+                source_id=token,
+                coro=getter(
+                    identity.polymarket_event_id,
+                    identity.polymarket_market_id,
+                    token,
+                ),
+            )
+            if status is not None:
+                if status is PriceEngineItemStatus.RETRY_WAIT:
+                    runtime.last_error_stage = "order_book"
+                    runtime.last_error_detail = PRICE_ENGINE_ITEM_TIMEOUT_REASON
+                return status
+            if payload is None:
+                runtime.last_error_stage = "order_book"
+                runtime.last_error_detail = PRICE_ENGINE_ITEM_TIMEOUT_REASON
+                return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
+            books[token] = RetrievedVenuePayload(payload=payload, retrieved_at=self.now())
         return books
 
     async def _evaluate_complete_item(
@@ -767,6 +860,192 @@ class CataloguePriceEngine:
         runtime.last_error_detail = None
         runtime.status = PriceEngineItemStatus.EVALUATED
         return PriceEngineItemStatus.EVALUATED
+
+    async def _evaluate_extra_polymarket_pairs(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        *,
+        matchbook: RetrievedVenuePayload,
+        kalshi_books: Mapping[str, RetrievedVenuePayload],
+        polymarket_books: Mapping[str, RetrievedVenuePayload],
+        result: PriceEngineSliceResult,
+    ) -> None:
+        """Scheduled-reprice Polymarket against already-refreshed MB/Kalshi legs."""
+
+        if self.paper_scan is None:
+            return
+        identity = runtime.identity
+        evaluated_at = self.now()
+        try:
+            matchbook_obs = self._build_matchbook_obs(identity, matchbook, evaluated_at)
+            kalshi_obs = self._build_kalshi_obs(identity, kalshi_books, evaluated_at)
+            polymarket_obs = self._build_polymarket_obs(identity, polymarket_books, evaluated_at)
+        except Exception:
+            return
+        scan_kwargs = self._scan_kwargs(identity)
+        for left, right in (
+            (matchbook_obs, polymarket_obs),
+            (polymarket_obs, kalshi_obs),
+        ):
+            try:
+                decision = self.paper_scan.scan_pair(left, right, **scan_kwargs)
+            except Exception:
+                continue
+            result.decisions.append(decision)
+            if _decision_is_interesting(decision):
+                self._maybe_promote(runtime, decision, result)
+            await self._handoff_item_decision(runtime, decision, result)
+
+    async def _evaluate_flexible_pairs(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        *,
+        matchbook: RetrievedVenuePayload | None,
+        kalshi_books: Mapping[str, RetrievedVenuePayload] | None,
+        polymarket_books: Mapping[str, RetrievedVenuePayload] | None,
+        result: PriceEngineSliceResult,
+    ) -> PriceEngineItemStatus:
+        identity = runtime.identity
+        evaluated_at = self.now()
+        observations: dict[VenueName, VenueMarketObservation] = {}
+        try:
+            if matchbook is not None:
+                observations[VenueName.MATCHBOOK] = self._build_matchbook_obs(
+                    identity, matchbook, evaluated_at
+                )
+            if kalshi_books is not None:
+                observations[VenueName.KALSHI] = self._build_kalshi_obs(
+                    identity, kalshi_books, evaluated_at
+                )
+            if polymarket_books is not None:
+                observations[VenueName.POLYMARKET] = self._build_polymarket_obs(
+                    identity, polymarket_books, evaluated_at
+                )
+        except Exception as exc:
+            return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:{exc}")
+        if len(observations) < 2 or self.paper_scan is None:
+            return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:incomplete_pair")
+        scan_kwargs = self._scan_kwargs(identity)
+        venues = list(observations)
+        decision = None
+        for index, left_venue in enumerate(venues):
+            for right_venue in venues[index + 1 :]:
+                try:
+                    decision = self.paper_scan.scan_pair(
+                        observations[left_venue],
+                        observations[right_venue],
+                        **scan_kwargs,
+                    )
+                except Exception as exc:
+                    runtime.last_error_stage = "build_observation"
+                    runtime.last_error_detail = str(exc)
+                    continue
+                result.decisions.append(decision)
+                await self._handoff_item_decision(runtime, decision, result)
+        if not result.decisions:
+            return self._schedule_retry(runtime, runtime.last_error_detail or "order_book_unavailable")
+        if runtime.pricing_slice_priority is None:
+            runtime.pricing_slice_priority = runtime.priority
+        self._maybe_promote(runtime, decision, result)
+        runtime.last_priced_at = evaluated_at
+        runtime.retry_attempt = 0
+        runtime.next_retry_at = None
+        runtime.last_error_stage = None
+        runtime.last_error_detail = None
+        runtime.status = PriceEngineItemStatus.EVALUATED
+        return PriceEngineItemStatus.EVALUATED
+
+    def _scan_kwargs(self, identity: DerivedPriceEngineItem) -> dict[str, Any]:
+        scan_kwargs: dict[str, Any] = {
+            "venue_costs": self.venue_costs or None,
+            "fx_snapshots": self.fx_snapshots or None,
+            "fixture_canonical_event_id": identity.canonical_event_id,
+        }
+        settings = getattr(self.paper_scan, "settings", None)
+        if settings is not None:
+            operator = effective_operator_scanner_settings(settings)
+            scan_kwargs["minimum_net_edge"] = operator.min_net_edge
+            scan_kwargs["maximum_execution_risk"] = operator.max_execution_risk
+            scan_kwargs["assumed_latency_ms"] = int(settings.simulated_latency_ms)
+        return scan_kwargs
+
+    def _build_matchbook_obs(
+        self,
+        identity: DerivedPriceEngineItem,
+        matchbook: RetrievedVenuePayload,
+        evaluated_at: datetime,
+    ) -> VenueMarketObservation:
+        matchbook_age = matchbook_market_quote_age(
+            matchbook.payload,
+            retrieved_at=matchbook.retrieved_at,
+            evaluated_at=evaluated_at,
+        )
+        return self.matchbook_builder.build(
+            _synthetic_matchbook_event(identity),
+            matchbook.payload,
+            observed_at=evaluated_at,
+            quote_age_ms=matchbook_age.quote_age_ms,
+            quote_age_basis=matchbook_age.basis or "retrieval",
+            quote_age_reason=matchbook_age.reason,
+        )
+
+    def _build_kalshi_obs(
+        self,
+        identity: DerivedPriceEngineItem,
+        kalshi_books: Mapping[str, RetrievedVenuePayload],
+        evaluated_at: datetime,
+    ) -> VenueMarketObservation:
+        required_tickers = _required_tickers(identity)
+        kalshi_age = _oldest_retrieval_age(
+            [
+                kalshi_books[ticker].retrieved_at
+                for ticker in required_tickers
+                if ticker in kalshi_books
+            ],
+            evaluated_at=evaluated_at,
+            required=len(required_tickers),
+        )
+        kalshi_market = _canonical_kalshi_market(identity)
+        if kalshi_market is None:
+            raise ValueError("kalshi_identity")
+        return self.kalshi_builder.build_from_canonical(
+            kalshi_market,
+            {ticker: item.payload for ticker, item in kalshi_books.items()},
+            observed_at=evaluated_at,
+            quote_age_ms=kalshi_age.quote_age_ms,
+            quote_age_basis=kalshi_age.basis,
+            quote_age_reason=kalshi_age.reason,
+            fee_snapshot=self._fee_snapshot_payload(identity),
+        )
+
+    def _build_polymarket_obs(
+        self,
+        identity: DerivedPriceEngineItem,
+        polymarket_books: Mapping[str, RetrievedVenuePayload],
+        evaluated_at: datetime,
+    ) -> VenueMarketObservation:
+        market = _canonical_polymarket_market(identity)
+        if market is None:
+            raise ValueError("polymarket_identity")
+        age = _oldest_retrieval_age(
+            [item.retrieved_at for item in polymarket_books.values()],
+            evaluated_at=evaluated_at,
+            required=len(identity.polymarket_token_ids) or 1,
+        )
+        return self.polymarket_builder.build(
+            {"id": identity.polymarket_event_id, "title": f"{identity.home_canonical} vs {identity.away_canonical}"},
+            {
+                "id": identity.polymarket_market_id,
+                "conditionId": identity.polymarket_condition_id,
+                "clobTokenIds": [item.native_id for item in identity.polymarket_token_ids],
+            },
+            {token: item.payload for token, item in polymarket_books.items()},
+            canonical=market,
+            observed_at=evaluated_at,
+            quote_age_ms=age.quote_age_ms,
+            quote_age_basis=age.basis,
+            quote_age_reason=age.reason,
+        )
 
     def _refresh_promoted_hot_ids(self) -> None:
         """Derive fixture HOT from any live interesting catalogue row.
@@ -1143,7 +1422,7 @@ class CataloguePriceEngine:
                 return None, PriceEngineItemStatus.NOT_STARTED
             inflight = access.snapshot().inflight.get(venue.value, 0)
             self._peak_held_slots[venue.value] = max(
-                self._peak_held_slots[venue.value], inflight
+                self._peak_held_slots.get(venue.value, 0), inflight
             )
             task = asyncio.create_task(coro)
             done, _pending = await asyncio.wait({task}, timeout=timeout)
@@ -1436,8 +1715,14 @@ def _synthetic_matchbook_event(identity: DerivedPriceEngineItem) -> dict[str, An
         "id": identity.matchbook_event_id,
         "name": f"{identity.home_canonical or 'Home'} vs {identity.away_canonical or 'Away'}",
         "start": kickoff.isoformat(),
-        "sport-name": "Football",
-        "competition-name": identity.competition or "Premier League",
+        "sport-name": (
+            "American Football"
+            if str(identity.register_canonical_key or "").startswith("NFL_")
+            or str(identity.competition or "").upper() == "NFL"
+            else "Football"
+        ),
+        "competition-name": identity.competition
+        or ("NFL" if str(identity.register_canonical_key or "").startswith("NFL_") else "Premier League"),
         "status": "open",
     }
 
@@ -1460,6 +1745,7 @@ def _canonical_kalshi_market(identity: DerivedPriceEngineItem) -> CanonicalMarke
     if not runners:
         return None
     event = CanonicalEvent(
+        sport=_sport_for_identity(identity),
         competition=identity.competition or "Premier League",
         home_team=identity.home_canonical or "Home",
         away_team=identity.away_canonical or "Away",
@@ -1486,6 +1772,71 @@ def _canonical_kalshi_market(identity: DerivedPriceEngineItem) -> CanonicalMarke
     )
 
 
+def _canonical_polymarket_market(identity: DerivedPriceEngineItem) -> CanonicalMarket | None:
+    if identity.kickoff_utc is None or not identity.polymarket_event_id or not identity.polymarket_market_id:
+        return None
+    family = _family_from_key(identity)
+    if family is None:
+        return None
+    tokens = executable_polymarket_token_ids(
+        list(identity.polymarket_token_ids),
+        event_id=identity.polymarket_event_id,
+        market_id=identity.polymarket_market_id,
+        condition_id=identity.polymarket_condition_id,
+        required_outcomes=list(identity.required_outcomes)
+        or required_outcomes_for_key(identity.register_canonical_key),
+    )
+    if not tokens:
+        return None
+    line = None if not identity.line else Decimal(str(identity.line))
+    runners = [
+        CanonicalRunner(
+            source_runner_id=item.native_id,
+            outcome=CanonicalOutcome(item.outcome),
+            label=item.outcome,
+        )
+        for item in tokens
+    ]
+    event = CanonicalEvent(
+        sport=_sport_for_identity(identity),
+        competition=identity.competition or "Premier League",
+        home_team=identity.home_canonical or "Home",
+        away_team=identity.away_canonical or "Away",
+        kickoff_utc=identity.kickoff_utc,
+        source_venue=VenueName.POLYMARKET,
+        source_event_id=identity.polymarket_event_id,
+    )
+    return CanonicalMarket(
+        event=event,
+        source_venue=VenueName.POLYMARKET,
+        source_market_id=identity.polymarket_market_id,
+        family=family,
+        period=FootballPeriod.FULL_TIME,
+        line=line,
+        settlement=SettlementFingerprint(
+            scope=SettlementScope.UNKNOWN,
+            period=FootballPeriod.FULL_TIME,
+            line=line,
+            push_possible=False,
+            penalties_included=False,
+            extra_time_included=None,
+        ),
+        runners=runners,
+    )
+
+
+def _sport_for_identity(identity: DerivedPriceEngineItem) -> str:
+    if str(identity.register_canonical_key or "").startswith("NFL_"):
+        from sports_hedge.nfl.constants import NFL_SPORT
+
+        return NFL_SPORT
+    if str(identity.competition or "").upper() == "NFL":
+        from sports_hedge.nfl.constants import NFL_SPORT
+
+        return NFL_SPORT
+    return "football"
+
+
 def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
     key = identity.register_canonical_key
     if key == "MATCH_RESULT_FT":
@@ -1496,6 +1847,12 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
         return MarketFamily.FIRST_TEAM_TO_SCORE
     if key.startswith("TOTAL_GOALS_FT:"):
         return MarketFamily.TOTAL_GOALS
+    if key == "NFL_GAME_WINNER_FT":
+        return MarketFamily.GAME_WINNER
+    if key.startswith("NFL_POINT_SPREAD_FT:"):
+        return MarketFamily.POINT_SPREAD
+    if key.startswith("NFL_TOTAL_POINTS_FT:"):
+        return MarketFamily.TOTAL_POINTS
     if identity.family:
         try:
             return MarketFamily(identity.family)

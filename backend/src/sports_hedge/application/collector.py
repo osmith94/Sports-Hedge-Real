@@ -3020,30 +3020,30 @@ class ReadOnlyCrossVenueCollector:
         identities = []
         series_by_event: dict[str, dict[str, Any] | None] = {}
         for left_venue, right_venue, left_market, right_market, _match in eligible_pairs:
-            if {left_venue, right_venue} != {VenueName.MATCHBOOK, VenueName.KALSHI}:
-                continue
-            if left_venue is VenueName.MATCHBOOK:
-                matchbook_market, kalshi_market = left_market, right_market
+            venues = {left_venue, right_venue}
+            if VenueName.KALSHI in venues:
+                kalshi_market = left_market if left_venue is VenueName.KALSHI else right_market
+                k_event = _event_for_source(k_events, kalshi_market.canonical.event.source_event_id)
+                event_payload = k_event.raw if k_event is not None and isinstance(k_event.raw, dict) else {}
+                source_event_id = str(kalshi_market.canonical.event.source_event_id)
+                if source_event_id not in series_by_event:
+                    series = None
+                    if isinstance(kalshi_market.raw, dict) and isinstance(kalshi_market.raw.get("series"), dict):
+                        series = kalshi_market.raw.get("series")
+                    elif k_event is not None:
+                        series = await self._fetch_kalshi_series_metadata(
+                            k_event,
+                            issues=issues,
+                            attach_contract_family=False,
+                        )
+                    series_by_event[source_event_id] = series if isinstance(series, dict) else None
+                series_payload = series_by_event.get(source_event_id)
             else:
-                matchbook_market, kalshi_market = right_market, left_market
-            k_event = _event_for_source(k_events, kalshi_market.canonical.event.source_event_id)
-            event_payload = k_event.raw if k_event is not None and isinstance(k_event.raw, dict) else {}
-            source_event_id = str(kalshi_market.canonical.event.source_event_id)
-            if source_event_id not in series_by_event:
-                series = None
-                if isinstance(kalshi_market.raw, dict) and isinstance(kalshi_market.raw.get("series"), dict):
-                    series = kalshi_market.raw.get("series")
-                elif k_event is not None:
-                    series = await self._fetch_kalshi_series_metadata(
-                        k_event,
-                        issues=issues,
-                        attach_contract_family=False,
-                    )
-                series_by_event[source_event_id] = series if isinstance(series, dict) else None
-            series_payload = series_by_event.get(source_event_id)
+                event_payload = {}
+                series_payload = None
             identity = pair_identity_from_markets(
-                matchbook_market.canonical,
-                kalshi_market.canonical,
+                left_market.canonical,
+                right_market.canonical,
                 kalshi_event_payload=event_payload,
                 kalshi_series_payload=series_payload,
                 fee_source=FEE_SOURCE_GET_SERIES,

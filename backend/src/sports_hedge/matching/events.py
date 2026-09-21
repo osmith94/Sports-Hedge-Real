@@ -87,6 +87,11 @@ class EventMatcher:
         threshold: float = 0.92,
         learned_applicator: LearnedMappingApplicator | None = None,
     ) -> None:
+        # Default 0.92 is the soccer UNIVERSE/HOT matcher default.
+        # PAPER soccer 0.80 injection (#415) is a constructor argument at
+        # composition time. NFL Stage 1B must not hardcode 0.92 at call sites
+        # or overwrite that injection. Competition-aware aliases stay on
+        # learned_applicator.resolve_teams for soccer.
         self.kickoff_tolerance = kickoff_tolerance
         self.threshold = threshold
         self.learned_applicator = learned_applicator
@@ -259,7 +264,9 @@ class EventMatcher:
                 reasons=["curated_team_mismatch"],
                 provenance=provenance,
             )
-        if nfl_teams_conflict(left_home, right_home) or nfl_teams_conflict(left_away, right_away):
+        if left.sport == NFL_SPORT and (
+            nfl_teams_conflict(left_home, right_home) or nfl_teams_conflict(left_away, right_away)
+        ):
             return EventMatchResult(
                 matched=False,
                 confidence=0.0,
@@ -386,6 +393,9 @@ class EventMatcher:
         left_code = target_competition_code(left)
         right_code = target_competition_code(right)
         if left_code is not None and right_code is not None:
+            # Score only. Soccer known-competition mismatch veto (#415) is a
+            # hard fail earlier in match()/possible_match and must not be
+            # replaced by this 0.0 score when NFL is composed onto that matcher.
             return 1.0 if left_code == right_code else 0.0
         # Fuzzy labels only when one or both competitions are unresolved.
         return EventMatcher._similarity(left, right)

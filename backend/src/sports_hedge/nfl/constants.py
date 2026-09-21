@@ -6,6 +6,8 @@ NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT = "exceptional_settlement_mismatch_possible"
 NFL_PAPER_NORMAL_COMPLETION_REASON = "owner_approved_nfl_paper_normal_completion"
 NFL_NOT_LIVE_EXECUTION_REASON = "nfl_paper_not_live_execution_equivalent"
 NFL_SETTLEMENT_FAIL_CLOSED_REASON = "nfl_exceptional_settlement_fail_closed"
+NFL_NORMAL_COMPLETION_NOT_PROVEN = "nfl_normal_completion_not_proven"
+NFL_LIFECYCLE_AUDIT_KIND = "nfl_lifecycle"
 
 # Owner-approved Stage 1B PAPER families only.
 NFL_KALSHI_GAME_SERIES = "KXNFLGAME"

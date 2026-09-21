@@ -29,14 +29,22 @@ Normal completed-game payoff is owner-approved for PAPER comparison when canonic
 
 Audit marker: `exceptional_settlement_mismatch_possible`.
 
-This is **not** live-execution-grade settlement equivalence. Cancellation, suspension, and final-tie handling can differ across venues. Automatic settlement fail-closes on those exceptional cases.
+This is **not** live-execution-grade settlement equivalence. Cancellation, suspension, and final-tie handling can differ across venues.
+
+Automatic NFL settlement requires **durable exceptional-lifecycle evidence**:
+- append-only provider-status observations on the PAPER trade;
+- at least one pre-result normal observation (scheduled / in-play / open);
+- no postpone / suspend / cancel / reschedule / tie / 50-50 token in that history;
+- a later graded, non-tied completed-game payload.
+
+A lone final score plus current closed/settled state is **not** proof of normal completion. Without that history, automatic settlement stays fail-closed (`nfl_normal_completion_not_proven`).
 
 ## Provider identity retained for refresh
 
 | Venue | Event | Market / runner |
 |---|---|---|
 | Kalshi | `event_ticker` + milestone `start_date` (never `occurrence_datetime`) | GAME: two YES tickers as runners; SPREAD/TOTAL: market ticker + YES/NO |
-| Polymarket | Gamma event id; `gameId` on the captured payload | market id, `conditionId`, CLOB token IDs when present |
+| Polymarket | Gamma event id; `gameId` on the captured payload | market id plus **exact CLOB token IDs**. Missing tokens, or invented `condition_id:0/1` placeholders, fail closed and never enter the durable UNIVERSE/PAPER identity. |
 | Matchbook | event id | market id, runner ids, participant ids on runners |
 
 ## Operator copy

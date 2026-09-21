@@ -1,8 +1,10 @@
 """Durable approved-market catalogue identity (Issue #341 Phase 2).
 
-UNIVERSE persists exact Matchbook↔Kalshi native IDs and Kalshi fee metadata
-for the four registered families. This module is identity / lifecycle truth,
-not a second matcher and not a price engine.
+UNIVERSE persists exact Matchbook / Kalshi / Polymarket native IDs and Kalshi
+fee metadata for registered families. Polymarket identity is the Gamma market
+id plus real CLOB token IDs — never invented ``condition_id:0/1`` placeholders.
+This module is identity / lifecycle truth, not a second matcher and not a
+price engine.
 
 Admission (`paper_admission`, `settlement_assumption`, live-execution
 eligibility) is derived at use time from the live Approved Match Register and
@@ -185,6 +187,10 @@ class ApprovedMarketCatalogueRow(BaseModel):
     kalshi_market_tickers: list[str] = Field(default_factory=list)
     kalshi_outcome_ids: list[OutcomeNativeId] = Field(default_factory=list)
     kalshi_series_ticker: str | None = None
+    polymarket_event_id: str | None = None
+    polymarket_market_id: str | None = None
+    polymarket_condition_id: str | None = None
+    polymarket_token_ids: list[OutcomeNativeId] = Field(default_factory=list)
     family: str | None = None
     period: str | None = None
     line: str | None = None
@@ -206,6 +212,10 @@ class ApprovedMarketCatalogueRow(BaseModel):
             tuple(self.kalshi_market_tickers),
             tuple((item.outcome, item.native_id) for item in self.kalshi_outcome_ids),
             self.kalshi_series_ticker,
+            self.polymarket_event_id,
+            self.polymarket_market_id,
+            self.polymarket_condition_id,
+            tuple((item.outcome, item.native_id) for item in self.polymarket_token_ids),
         )
 
     def native_identity_payload(self) -> dict[str, Any]:
@@ -217,6 +227,10 @@ class ApprovedMarketCatalogueRow(BaseModel):
             "kalshi_market_tickers": list(self.kalshi_market_tickers),
             "kalshi_outcome_ids": [item.model_dump() for item in self.kalshi_outcome_ids],
             "kalshi_series_ticker": self.kalshi_series_ticker,
+            "polymarket_event_id": self.polymarket_event_id,
+            "polymarket_market_id": self.polymarket_market_id,
+            "polymarket_condition_id": self.polymarket_condition_id,
+            "polymarket_token_ids": [item.model_dump() for item in self.polymarket_token_ids],
         }
 
     def native_identity_json(self) -> str:
@@ -246,6 +260,10 @@ class DerivedPriceEngineItem(BaseModel):
     kalshi_market_tickers: list[str] = Field(default_factory=list)
     kalshi_outcome_ids: list[OutcomeNativeId] = Field(default_factory=list)
     kalshi_fee_snapshot_id: str | None = None
+    polymarket_event_id: str | None = None
+    polymarket_market_id: str | None = None
+    polymarket_condition_id: str | None = None
+    polymarket_token_ids: list[OutcomeNativeId] = Field(default_factory=list)
     family: str | None = None
     period: str | None = None
     line: str | None = None
@@ -397,6 +415,10 @@ def derived_price_engine_working_set(
                 kalshi_market_tickers=list(row.kalshi_market_tickers),
                 kalshi_outcome_ids=list(row.kalshi_outcome_ids),
                 kalshi_fee_snapshot_id=row.kalshi_fee_snapshot_id,
+                polymarket_event_id=row.polymarket_event_id,
+                polymarket_market_id=row.polymarket_market_id,
+                polymarket_condition_id=row.polymarket_condition_id,
+                polymarket_token_ids=list(row.polymarket_token_ids),
                 family=row.family,
                 period=row.period,
                 line=row.line,
@@ -473,3 +495,36 @@ def _canonical_fee_token(value: Any) -> str:
         return format(Decimal(str(value)), "f")
     except (InvalidOperation, ValueError, TypeError):
         return str(value).strip()
+
+
+def executable_polymarket_token_ids(
+    token_ids: list[OutcomeNativeId],
+    *,
+    event_id: str | None,
+    market_id: str | None,
+    condition_id: str | None = None,
+    required_outcomes: list[str] | None = None,
+) -> list[OutcomeNativeId]:
+    """Return real CLOB token IDs, or empty when identity is not executable."""
+
+    from sports_hedge.nfl.normalize import is_fabricated_polymarket_clob_token
+
+    event = str(event_id or "").strip()
+    market = str(market_id or "").strip()
+    condition = str(condition_id or "").strip()
+    if not event or not market:
+        return []
+    cleaned: list[OutcomeNativeId] = []
+    for item in token_ids:
+        native = str(item.native_id or "").strip()
+        if not native or is_fabricated_polymarket_clob_token(
+            native, condition_id=condition, market_id=market
+        ):
+            return []
+        cleaned.append(OutcomeNativeId(outcome=item.outcome, native_id=native))
+    if not cleaned:
+        return []
+    required = [str(item).strip() for item in (required_outcomes or []) if str(item).strip()]
+    if required and {item.outcome for item in cleaned} < set(required):
+        return []
+    return cleaned

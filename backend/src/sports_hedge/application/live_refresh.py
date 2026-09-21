@@ -1548,6 +1548,7 @@ class LiveRefreshCoordinator:
         slice_wall_seconds: float | None = None,
         matchbook: Any = None,
         kalshi: Any = None,
+        polymarket: Any = None,
         paper_scan: Any = None,
         venue_costs: list[Any] | None = None,
         fx_snapshots: list[Any] | None = None,
@@ -1559,6 +1560,8 @@ class LiveRefreshCoordinator:
             engine.matchbook = matchbook
         if kalshi is not None:
             engine.kalshi = kalshi
+        if polymarket is not None:
+            engine.polymarket = polymarket
         if paper_scan is not None:
             engine.paper_scan = paper_scan
         if venue_costs is not None:

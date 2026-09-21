@@ -33,6 +33,7 @@ from sports_hedge.nfl.constants import (
     CANONICAL_NFL_POINT_SPREAD,
     CANONICAL_NFL_TOTAL_POINTS,
     NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT,
+    NFL_NORMAL_COMPLETION_NOT_PROVEN,
     NFL_SETTLEMENT_FAIL_CLOSED_REASON,
     NFL_SPORT,
 )
@@ -43,7 +44,12 @@ from sports_hedge.nfl.labels import (
     nfl_operator_side_label,
     total_explanation,
 )
-from sports_hedge.nfl.settlement import nfl_exceptional_status_blocker, nfl_tied_score_blocker
+from sports_hedge.nfl.settlement import (
+    nfl_exceptional_status_blocker,
+    nfl_lifecycle_audit_detail,
+    nfl_lifecycle_observation,
+    nfl_tied_score_blocker,
+)
 from sports_hedge.nfl.teams import NFL_ABBREVIATIONS, resolve_nfl_team
 from sports_hedge.normalization.venues import (
     KalshiNormalizer,
@@ -55,7 +61,14 @@ from sports_hedge.normalization.venues import (
     _polymarket_market_family,
 )
 from sports_hedge.paper.result_resolution import resolve_paper_trade_settlement
-from sports_hedge.paper.trades import PaperLegFillKind, PaperTrade, PaperTradeLeg, PaperTradeState
+from sports_hedge.paper.trades import (
+    PaperLegFillKind,
+    PaperTrade,
+    PaperTradeAuditEvent,
+    PaperTradeAuditEventType,
+    PaperTradeLeg,
+    PaperTradeState,
+)
 from sports_hedge.venues.matchbook import (
     MatchbookDiscoveryError,
     select_american_football_sport_id,
@@ -165,10 +178,21 @@ def _normalize_kalshi_total():
     return event, markets[0]
 
 
-def _normalize_pm_family(sports_type: str):
+def _pm_clob_tokens(prefix: str) -> list[str]:
+    # Captured Gamma fixtures omit CLOB books. Tests that prove executable
+    # PAPER identity inject real-looking token IDs rather than condition_id:0/1.
+    return [
+        f"101{prefix}000111222333444555666777888999000111222333",
+        f"202{prefix}000111222333444555666777888999000111222333",
+    ]
+
+
+def _normalize_pm_family(sports_type: str, *, inject_clob_tokens: bool = True):
     payload = _pm_indkc()
     event = PolymarketNormalizer().normalize_event(payload)
     market_payload = next(item for item in payload["markets"] if item["sportsMarketType"] == sports_type)
+    if inject_clob_tokens:
+        market_payload["clobTokenIds"] = _pm_clob_tokens(sports_type[:3])
     market = PolymarketNormalizer().normalize_market(event, market_payload)
     return event, market, market_payload
 
@@ -244,8 +268,9 @@ def test_game_winner_attaches_and_native_ids_are_retained() -> None:
     assert pm.event.source_event_id == "827222"
     assert pm.source_market_id == "3482783"
     assert _pm_indkc()["gameId"] == 19484
-    assert any(
-        "0x0ad30faec3cd25a8ee81a919c4241ef9ec076882435a0b23205cd2b31bf32e70" in runner.source_runner_id
+    assert {runner.source_runner_id for runner in pm.runners} == set(_pm_clob_tokens("mon"))
+    assert all(
+        "0x0ad30faec3cd25a8ee81a919c4241ef9ec076882435a0b23205cd2b31bf32e70" not in runner.source_runner_id
         for runner in pm.runners
     )
     assert mb.event.source_event_id == "33306877354500023"
@@ -494,6 +519,134 @@ def test_automatic_settlement_fails_closed_on_tie_and_cancel() -> None:
     )
     assert cancelled.winning_outcome is None
     assert cancelled.blocker == NFL_SETTLEMENT_FAIL_CLOSED_REASON
+
+
+def test_missing_and_synthetic_polymarket_tokens_cannot_become_executable_paper() -> None:
+    with pytest.raises(VenueNormalizationError, match="exact CLOB token"):
+        _normalize_pm_family("moneyline", inject_clob_tokens=False)
+    payload = _pm_indkc()
+    event = PolymarketNormalizer().normalize_event(payload)
+    market_payload = next(item for item in payload["markets"] if item["sportsMarketType"] == "moneyline")
+    condition = str(market_payload["conditionId"])
+    market_payload["clobTokenIds"] = [f"{condition}:0", f"{condition}:1"]
+    with pytest.raises(VenueNormalizationError, match="not executable"):
+        PolymarketNormalizer().normalize_market(event, market_payload)
+
+
+def test_graded_final_payload_alone_cannot_auto_settle_nfl() -> None:
+    trade = PaperTrade(
+        trade_id="nfl-2",
+        opportunity_id="opp-nfl-2",
+        canonical_event_id="33306877354500023",
+        competition="NFL",
+        home_team="Kansas City Chiefs",
+        away_team="Indianapolis Colts",
+        market_family=MarketFamily.GAME_WINNER,
+        period=FootballPeriod.FULL_TIME,
+        state=PaperTradeState.OPEN,
+        opened_at=NOW,
+        last_updated_at=NOW,
+        legs=[
+            PaperTradeLeg(
+                venue=VenueName.MATCHBOOK,
+                outcome="home",
+                currency="GBP",
+                requested_stake=Decimal("1"),
+                filled_stake=Decimal("1"),
+                displayed_odds=Decimal("1.9"),
+                filled_odds=Decimal("1.9"),
+                source_market_id="33306877358600023",
+                source_event_id="33306877354500023",
+                source_runner_id="33306877359000023",
+                fill_kind=PaperLegFillKind.INTERNAL_SIMULATED,
+            ),
+            PaperTradeLeg(
+                venue=VenueName.KALSHI,
+                outcome="away",
+                currency="USD",
+                requested_stake=Decimal("1"),
+                filled_stake=Decimal("1"),
+                displayed_odds=Decimal("2.1"),
+                filled_odds=Decimal("2.1"),
+                source_market_id="KXNFLGAME-26SEP20INDKC-IND",
+                source_event_id="KXNFLGAME-26SEP20INDKC",
+                source_contract_id="KXNFLGAME-26SEP20INDKC-IND",
+                fill_kind=PaperLegFillKind.INTERNAL_SIMULATED,
+            ),
+        ],
+    )
+    graded = {
+        "id": "33306877354500023",
+        "status": "graded",
+        "home-score": 24,
+        "away-score": 17,
+    }
+    blocked = resolve_paper_trade_settlement(
+        trade,
+        matchbook_event=graded,
+        matchbook_market={"id": "33306877358600023", "status": "graded"},
+        kalshi_markets={
+            "KXNFLGAME-26SEP20INDKC-IND": {
+                "ticker": "KXNFLGAME-26SEP20INDKC-IND",
+                "status": "finalized",
+                "result": "no",
+            }
+        },
+    )
+    assert blocked.winning_outcome is None
+    assert blocked.blocker == NFL_NORMAL_COMPLETION_NOT_PROVEN
+
+    postponed = nfl_lifecycle_observation(["postponed"], observed_at=NOW)
+    trade.audit.append(
+        PaperTradeAuditEvent(
+            occurred_at=NOW,
+            event_type=PaperTradeAuditEventType.NFL_LIFECYCLE_OBSERVED,
+            detail=nfl_lifecycle_audit_detail(postponed),
+        )
+    )
+    later = resolve_paper_trade_settlement(
+        trade,
+        matchbook_event=graded,
+        matchbook_market={"id": "33306877358600023", "status": "graded"},
+        kalshi_markets={
+            "KXNFLGAME-26SEP20INDKC-IND": {
+                "ticker": "KXNFLGAME-26SEP20INDKC-IND",
+                "status": "finalized",
+                "result": "no",
+            }
+        },
+    )
+    assert later.winning_outcome is None
+    assert later.blocker == NFL_SETTLEMENT_FAIL_CLOSED_REASON
+
+    proven = trade.model_copy(update={"audit": []})
+    in_play = nfl_lifecycle_observation(["in_play"], observed_at=NOW)
+    proven.audit.append(
+        PaperTradeAuditEvent(
+            occurred_at=NOW,
+            event_type=PaperTradeAuditEventType.NFL_LIFECYCLE_OBSERVED,
+            detail=nfl_lifecycle_audit_detail(in_play),
+        )
+    )
+    ready = resolve_paper_trade_settlement(
+        proven,
+        matchbook_event=graded,
+        matchbook_market={"id": "33306877358600023", "status": "graded"},
+        kalshi_markets={
+            "KXNFLGAME-26SEP20INDKC-IND": {
+                "ticker": "KXNFLGAME-26SEP20INDKC-IND",
+                "status": "finalized",
+                "result": "no",
+            }
+        },
+    )
+    assert ready.blocker is None
+    assert ready.winning_outcome == "home"
+
+
+def test_event_matcher_threshold_stays_constructor_injected() -> None:
+    assert EventMatcher().threshold == 0.92
+    assert EventMatcher(threshold=0.80).threshold == 0.80
 
 
 def test_matchbook_american_football_sport_id_is_not_soccer() -> None:

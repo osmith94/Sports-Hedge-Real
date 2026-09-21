@@ -26,6 +26,7 @@ from sports_hedge.application.approved_market_catalogue import (
     ApprovedMarketCatalogueRow,
     CatalogueRowState,
     OutcomeNativeId,
+    executable_polymarket_token_ids,
     family_period_line_from_key,
     kalshi_fee_snapshot_from_payloads,
     required_outcomes_for_key,
@@ -36,6 +37,7 @@ from sports_hedge.application.target_competitions import (
     resolve_target_competition_from_kalshi_ticker,
 )
 from sports_hedge.domain.football import CanonicalMarket
+from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.approved_register import (
     CANONICAL_BTTS_FT,
     CANONICAL_FTTS_FT,
@@ -154,21 +156,31 @@ def complete_family_keys(evidence: FamilyDiscoveryCompleteness) -> frozenset[str
 
 
 class CataloguePairIdentity:
-    """Exact MB↔Kalshi identity for one registered canonical key."""
+    """Exact registered venue identity for one canonical key.
+
+    Soccer PAPER remains Matchbook↔Kalshi. NFL PAPER may attach Matchbook,
+    Kalshi, and Polymarket exact IDs onto the same catalogue row. Polymarket
+    legs require real CLOB token IDs.
+    """
 
     def __init__(
         self,
         *,
         register_canonical_key: str,
-        matchbook: CanonicalMarket,
-        kalshi: CanonicalMarket,
-        kalshi_event_payload: dict[str, Any] | None,
-        kalshi_series_payload: dict[str, Any] | None,
-        fee_source: str,
+        matchbook: CanonicalMarket | None = None,
+        kalshi: CanonicalMarket | None = None,
+        polymarket: CanonicalMarket | None = None,
+        kalshi_event_payload: dict[str, Any] | None = None,
+        kalshi_series_payload: dict[str, Any] | None = None,
+        fee_source: str = FEE_SOURCE_GET_SERIES,
     ) -> None:
+        present = [item for item in (matchbook, kalshi, polymarket) if item is not None]
+        if len(present) < 2:
+            raise ValueError("catalogue identity requires at least two venue markets")
         self.register_canonical_key = register_canonical_key
         self.matchbook = matchbook
         self.kalshi = kalshi
+        self.polymarket = polymarket
         self.kalshi_event_payload = kalshi_event_payload or {}
         self.kalshi_series_payload = kalshi_series_payload or {}
         self.fee_source = fee_source
@@ -310,8 +322,8 @@ def _persist_universe_catalogue_pass_tx(
     found_keys: set[str] = set()
     rows: list[ApprovedMarketCatalogueRow] = []
     for pair in pairs:
-        key = pair.register_canonical_key or registered_canonical_key(pair.matchbook, pair.kalshi)
-        if key is None:
+        key = str(pair.register_canonical_key or "").strip()
+        if not key:
             continue
         found_keys.add(key)
         rows.append(
@@ -374,36 +386,42 @@ def _upsert_active_pair(
     generation_id: str | None,
 ) -> ApprovedMarketCatalogueRow:
     family, period, line = family_period_line_from_key(register_canonical_key)
-    mb_runners = ordered_native_ids(pair.matchbook, register_canonical_key)
-    kalshi_outcomes = ordered_native_ids(pair.kalshi, register_canonical_key)
-    tickers = kalshi_constituent_tickers(pair.kalshi)
+    row_id = catalogue_row_id_for(canonical_event_id, register_canonical_key)
+    existing = tx.get_row(row_id) or tx.get_row_for_identity(
+        canonical_event_id, register_canonical_key
+    )
+    mb_event, mb_market, mb_runners = _venue_ids(pair.matchbook, register_canonical_key)
+    kalshi_event, _kalshi_source, kalshi_outcomes = _venue_ids(pair.kalshi, register_canonical_key)
+    tickers = kalshi_constituent_tickers(pair.kalshi) if pair.kalshi is not None else []
     series_ticker = str(
         pair.kalshi_series_payload.get("ticker")
         or pair.kalshi_event_payload.get("series_ticker")
         or ""
     ).strip()
     event_ticker = str(
-        pair.kalshi_event_payload.get("event_ticker") or pair.kalshi.event.source_event_id or ""
+        pair.kalshi_event_payload.get("event_ticker")
+        or (kalshi_event or "")
+        or ""
     ).strip() or None
-    market_ticker = tickers[0] if tickers else None
-    snapshot = kalshi_fee_snapshot_from_payloads(
-        series=pair.kalshi_series_payload,
-        event=pair.kalshi_event_payload,
-        market_ticker=market_ticker,
-        captured_at=now,
-        source=pair.fee_source or FEE_SOURCE_EVENT_PAYLOAD,
-        confirmed_at=now,
-    )
-    if series_ticker and snapshot.series_ticker != series_ticker:
-        snapshot = snapshot.model_copy(update={"series_ticker": series_ticker})
-        snapshot = snapshot.model_copy(
-            update={"snapshot_id": semantic_kalshi_fee_snapshot_id(snapshot)}
+    snapshot_id = None if existing is None else existing.kalshi_fee_snapshot_id
+    if pair.kalshi is not None:
+        market_ticker = tickers[0] if tickers else None
+        snapshot = kalshi_fee_snapshot_from_payloads(
+            series=pair.kalshi_series_payload,
+            event=pair.kalshi_event_payload,
+            market_ticker=market_ticker,
+            captured_at=now,
+            source=pair.fee_source or FEE_SOURCE_EVENT_PAYLOAD,
+            confirmed_at=now,
         )
-    tx.insert_fee_snapshot(snapshot)
-    row_id = catalogue_row_id_for(canonical_event_id, register_canonical_key)
-    existing = tx.get_row(row_id) or tx.get_row_for_identity(
-        canonical_event_id, register_canonical_key
-    )
+        if series_ticker and snapshot.series_ticker != series_ticker:
+            snapshot = snapshot.model_copy(update={"series_ticker": series_ticker})
+            snapshot = snapshot.model_copy(
+                update={"snapshot_id": semantic_kalshi_fee_snapshot_id(snapshot)}
+            )
+        tx.insert_fee_snapshot(snapshot)
+        snapshot_id = snapshot.snapshot_id
+    pm_event, pm_market, pm_tokens = _polymarket_ids(pair.polymarket, register_canonical_key)
     incoming = ApprovedMarketCatalogueRow(
         catalogue_row_id=row_id if existing is None else existing.catalogue_row_id,
         schema_version=CATALOGUE_SCHEMA_VERSION,
@@ -414,18 +432,43 @@ def _upsert_active_pair(
         home_canonical=home_canonical,
         away_canonical=away_canonical,
         kickoff_utc=kickoff_utc,
-        matchbook_event_id=str(pair.matchbook.event.source_event_id),
-        matchbook_market_id=str(pair.matchbook.source_market_id),
-        matchbook_runner_ids=mb_runners,
-        kalshi_event_ticker=event_ticker or str(pair.kalshi.event.source_event_id),
-        kalshi_market_tickers=tickers,
-        kalshi_outcome_ids=kalshi_outcomes,
-        kalshi_series_ticker=series_ticker or None,
+        matchbook_event_id=_prefer(mb_event, None if existing is None else existing.matchbook_event_id),
+        matchbook_market_id=_prefer(mb_market, None if existing is None else existing.matchbook_market_id),
+        matchbook_runner_ids=_prefer_list(
+            mb_runners, [] if existing is None else existing.matchbook_runner_ids
+        ),
+        kalshi_event_ticker=_prefer(
+            event_ticker or kalshi_event,
+            None if existing is None else existing.kalshi_event_ticker,
+        ),
+        kalshi_market_tickers=_prefer_list(
+            tickers, [] if existing is None else existing.kalshi_market_tickers
+        ),
+        kalshi_outcome_ids=_prefer_list(
+            kalshi_outcomes, [] if existing is None else existing.kalshi_outcome_ids
+        ),
+        kalshi_series_ticker=_prefer(
+            series_ticker or None,
+            None if existing is None else existing.kalshi_series_ticker,
+        ),
+        polymarket_event_id=_prefer(
+            pm_event, None if existing is None else existing.polymarket_event_id
+        ),
+        polymarket_market_id=_prefer(
+            pm_market, None if existing is None else existing.polymarket_market_id
+        ),
+        polymarket_condition_id=_prefer(
+            _polymarket_condition_id(pair.polymarket),
+            None if existing is None else existing.polymarket_condition_id,
+        ),
+        polymarket_token_ids=_prefer_list(
+            pm_tokens, [] if existing is None else existing.polymarket_token_ids
+        ),
         family=family,
         period=period,
         line=line,
         required_outcomes=required_outcomes_for_key(register_canonical_key),
-        kalshi_fee_snapshot_id=snapshot.snapshot_id,
+        kalshi_fee_snapshot_id=snapshot_id,
         row_state=CatalogueRowState.ACTIVE,
         invalidation_reason=None,
         first_catalogued_at=now if existing is None else existing.first_catalogued_at,
@@ -439,21 +482,83 @@ def _upsert_active_pair(
 
 
 def pair_identity_from_markets(
-    matchbook: CanonicalMarket,
-    kalshi: CanonicalMarket,
+    left: CanonicalMarket,
+    right: CanonicalMarket,
     *,
     kalshi_event_payload: dict[str, Any] | None = None,
     kalshi_series_payload: dict[str, Any] | None = None,
     fee_source: str = FEE_SOURCE_GET_SERIES,
 ) -> CataloguePairIdentity | None:
-    key = registered_canonical_key(matchbook, kalshi)
+    key = registered_canonical_key(left, right)
     if key is None:
         return None
+    by_venue = {left.source_venue: left, right.source_venue: right}
+    polymarket = by_venue.get(VenueName.POLYMARKET)
+    if polymarket is not None:
+        tokens = executable_polymarket_token_ids(
+            ordered_native_ids(polymarket, key),
+            event_id=str(polymarket.event.source_event_id),
+            market_id=str(polymarket.source_market_id),
+            required_outcomes=required_outcomes_for_key(key),
+        )
+        if not tokens:
+            polymarket = None
+            by_venue.pop(VenueName.POLYMARKET, None)
+            if len(by_venue) < 2:
+                return None
     return CataloguePairIdentity(
         register_canonical_key=key,
-        matchbook=matchbook,
-        kalshi=kalshi,
+        matchbook=by_venue.get(VenueName.MATCHBOOK),
+        kalshi=by_venue.get(VenueName.KALSHI),
+        polymarket=polymarket,
         kalshi_event_payload=kalshi_event_payload,
         kalshi_series_payload=kalshi_series_payload,
         fee_source=fee_source,
     )
+
+
+def _venue_ids(
+    market: CanonicalMarket | None, register_canonical_key: str
+) -> tuple[str | None, str | None, list[OutcomeNativeId]]:
+    if market is None:
+        return None, None, []
+    event_id = str(market.event.source_event_id or "").strip() or None
+    market_id = str(market.source_market_id or "").strip() or None
+    return event_id, market_id, ordered_native_ids(market, register_canonical_key)
+
+
+def _polymarket_ids(
+    market: CanonicalMarket | None, register_canonical_key: str
+) -> tuple[str | None, str | None, list[OutcomeNativeId]]:
+    event_id, market_id, runners = _venue_ids(market, register_canonical_key)
+    tokens = executable_polymarket_token_ids(
+        runners,
+        event_id=event_id,
+        market_id=market_id,
+        required_outcomes=required_outcomes_for_key(register_canonical_key),
+    )
+    if not tokens:
+        return None, None, []
+    return event_id, market_id, tokens
+
+
+def _polymarket_condition_id(market: CanonicalMarket | None) -> str | None:
+    if market is None:
+        return None
+    extra = getattr(market, "source_condition_id", None)
+    text = str(extra or "").strip()
+    return text or None
+
+
+def _prefer(new: str | None, existing: str | None) -> str | None:
+    incoming = str(new or "").strip()
+    if incoming:
+        return incoming
+    held = str(existing or "").strip()
+    return held or None
+
+
+def _prefer_list(new: list[Any], existing: list[Any]) -> list[Any]:
+    if new:
+        return list(new)
+    return list(existing)

@@ -74,6 +74,10 @@ CREATE TABLE IF NOT EXISTS approved_market_catalogue (
     kalshi_market_tickers_json TEXT NOT NULL,
     kalshi_outcome_ids_json TEXT NOT NULL,
     kalshi_series_ticker TEXT,
+    polymarket_event_id TEXT,
+    polymarket_market_id TEXT,
+    polymarket_condition_id TEXT,
+    polymarket_token_ids_json TEXT,
     family TEXT,
     period TEXT,
     line TEXT,
@@ -117,6 +121,13 @@ ON approved_market_catalogue (row_state);
 CREATE INDEX IF NOT EXISTS idx_approved_catalogue_history_row
 ON approved_market_catalogue_history (catalogue_row_id, history_id);
 """
+
+_POLYMARKET_CATALOGUE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("polymarket_event_id", "TEXT"),
+    ("polymarket_market_id", "TEXT"),
+    ("polymarket_condition_id", "TEXT"),
+    ("polymarket_token_ids_json", "TEXT"),
+)
 
 
 class ApprovedMarketCatalogueTransaction:
@@ -243,6 +254,15 @@ class SqliteApprovedMarketCatalogueStore:
 
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         connection.executescript(_CREATE_SCHEMA_SQL)
+        existing = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(approved_market_catalogue)")
+        }
+        for name, sql_type in _POLYMARKET_CATALOGUE_COLUMNS:
+            if name not in existing:
+                connection.execute(
+                    f"ALTER TABLE approved_market_catalogue ADD COLUMN {name} {sql_type}"
+                )
         self._assert_no_forbidden_columns(connection)
 
     def _assert_no_forbidden_columns(self, connection: sqlite3.Connection) -> None:
@@ -455,13 +475,14 @@ class SqliteApprovedMarketCatalogueStore:
                 canonical_event_id, competition, home_canonical, away_canonical, kickoff_utc,
                 matchbook_event_id, matchbook_market_id, matchbook_runner_ids_json,
                 kalshi_event_ticker, kalshi_market_tickers_json, kalshi_outcome_ids_json,
-                kalshi_series_ticker, family, period, line, required_outcomes_json,
-                kalshi_fee_snapshot_id, row_state, invalidation_reason,
+                kalshi_series_ticker, polymarket_event_id, polymarket_market_id,
+                polymarket_condition_id, polymarket_token_ids_json, family, period, line,
+                required_outcomes_json, kalshi_fee_snapshot_id, row_state, invalidation_reason,
                 first_catalogued_at, last_confirmed_at, last_seen_generation_id,
                 content_version
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(catalogue_row_id) DO UPDATE SET
                 schema_version = excluded.schema_version,
@@ -479,6 +500,10 @@ class SqliteApprovedMarketCatalogueStore:
                 kalshi_market_tickers_json = excluded.kalshi_market_tickers_json,
                 kalshi_outcome_ids_json = excluded.kalshi_outcome_ids_json,
                 kalshi_series_ticker = excluded.kalshi_series_ticker,
+                polymarket_event_id = excluded.polymarket_event_id,
+                polymarket_market_id = excluded.polymarket_market_id,
+                polymarket_condition_id = excluded.polymarket_condition_id,
+                polymarket_token_ids_json = excluded.polymarket_token_ids_json,
                 family = excluded.family,
                 period = excluded.period,
                 line = excluded.line,
@@ -673,6 +698,10 @@ def _catalogue_to_sql(row: ApprovedMarketCatalogueRow) -> tuple[Any, ...]:
         json.dumps(list(row.kalshi_market_tickers), separators=(",", ":")),
         json.dumps([item.model_dump() for item in row.kalshi_outcome_ids], separators=(",", ":")),
         row.kalshi_series_ticker,
+        row.polymarket_event_id,
+        row.polymarket_market_id,
+        row.polymarket_condition_id,
+        json.dumps([item.model_dump() for item in row.polymarket_token_ids], separators=(",", ":")),
         row.family,
         row.period,
         row.line,
@@ -719,6 +748,13 @@ def _catalogue_from_row(row: sqlite3.Row) -> ApprovedMarketCatalogueRow:
         OutcomeNativeId.model_validate(item)
         for item in json.loads(row["kalshi_outcome_ids_json"] or "[]")
     ]
+    keys = set(row.keys())
+    polymarket_tokens = [
+        OutcomeNativeId.model_validate(item)
+        for item in json.loads(
+            (row["polymarket_token_ids_json"] if "polymarket_token_ids_json" in keys else None) or "[]"
+        )
+    ]
     return ApprovedMarketCatalogueRow(
         catalogue_row_id=row["catalogue_row_id"],
         schema_version=int(row["schema_version"]),
@@ -738,6 +774,10 @@ def _catalogue_from_row(row: sqlite3.Row) -> ApprovedMarketCatalogueRow:
         kalshi_market_tickers=list(json.loads(row["kalshi_market_tickers_json"] or "[]")),
         kalshi_outcome_ids=kalshi_outcomes,
         kalshi_series_ticker=row["kalshi_series_ticker"],
+        polymarket_event_id=_row_optional(row, keys, "polymarket_event_id"),
+        polymarket_market_id=_row_optional(row, keys, "polymarket_market_id"),
+        polymarket_condition_id=_row_optional(row, keys, "polymarket_condition_id"),
+        polymarket_token_ids=polymarket_tokens,
         family=row["family"],
         period=row["period"],
         line=row["line"],
@@ -788,3 +828,13 @@ def _decode_maybe_json(value: Any) -> Any:
         except json.JSONDecodeError:
             return value
     return value
+
+
+def _row_optional(row: sqlite3.Row, keys: set[str], name: str) -> str | None:
+    if name not in keys:
+        return None
+    value = row[name]
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

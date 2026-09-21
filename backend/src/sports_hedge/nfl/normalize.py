@@ -168,6 +168,74 @@ def polymarket_nfl_event(payload: dict[str, Any]) -> CanonicalEvent:
     )
 
 
+def is_fabricated_polymarket_clob_token(
+    token: str,
+    *,
+    condition_id: str = "",
+    market_id: str = "",
+) -> bool:
+    """True for invented ``condition_id:0/1`` (or market-id) placeholders.
+
+    Real CLOB token IDs are provider-native strings, typically long decimals.
+    Missing or synthetic tokens must never become executable/durable PAPER identity.
+    """
+
+    text = str(token or "").strip()
+    if not text:
+        return True
+    condition = str(condition_id or "").strip()
+    market = str(market_id or "").strip()
+    fabricated = set()
+    for prefix in (condition, market):
+        if not prefix:
+            continue
+        fabricated.update({f"{prefix}:0", f"{prefix}:1", f"{prefix}:YES", f"{prefix}:NO"})
+    if text in fabricated:
+        return True
+    if ":" in text:
+        head, tail = text.rsplit(":", 1)
+        if tail in {"0", "1", "YES", "NO"} and (
+            head == condition or head == market or head.startswith("0x")
+        ):
+            return True
+    return False
+
+
+def exact_polymarket_clob_token_ids(
+    payload: dict[str, Any],
+    *,
+    market_id: str = "",
+    required: int | None = None,
+) -> list[str]:
+    """Return exact CLOB token IDs or raise. Never invent ``condition_id:0/1``."""
+
+    tokens = [
+        str(item).strip()
+        for item in _list_field(
+            _first(payload, "clobTokenIds", "clob_token_ids", "tokenIds", "token_ids")
+        )
+        if str(item).strip()
+    ]
+    condition_id = str(_first(payload, "conditionId", "condition_id") or "").strip()
+    source_market_id = str(market_id or _first(payload, "id") or "").strip()
+    if required is not None and len(tokens) != required:
+        raise VenueNormalizationError(
+            "Polymarket NFL market is missing exact CLOB token IDs"
+        )
+    if not tokens:
+        raise VenueNormalizationError(
+            "Polymarket NFL market is missing exact CLOB token IDs"
+        )
+    for token in tokens:
+        if is_fabricated_polymarket_clob_token(
+            token, condition_id=condition_id, market_id=source_market_id
+        ):
+            raise VenueNormalizationError(
+                "Polymarket NFL CLOB token IDs are not executable provider-native IDs"
+            )
+    return tokens
+
+
 def polymarket_nfl_market(event: CanonicalEvent, payload: dict[str, Any]) -> CanonicalMarket:
     source_market_id = str(_first(payload, "id", "conditionId", "condition_id") or "").strip()
     if not source_market_id:
@@ -178,15 +246,9 @@ def polymarket_nfl_market(event: CanonicalEvent, payload: dict[str, Any]) -> Can
         raise VenueNormalizationError(f"unsupported Polymarket NFL market type: {sports_type or question}")
     _reject_period_or_prop(f"{sports_type} {question} {payload.get('slug') or ''}")
     outcomes = [str(item) for item in _list_field(payload.get("outcomes"))]
-    token_ids = [
-        str(item)
-        for item in _list_field(
-            _first(payload, "clobTokenIds", "clob_token_ids", "tokenIds", "token_ids")
-        )
-    ]
-    condition_id = str(_first(payload, "conditionId", "condition_id") or "").strip()
-    if not token_ids and condition_id:
-        token_ids = [f"{condition_id}:0", f"{condition_id}:1"]
+    token_ids = exact_polymarket_clob_token_ids(
+        payload, market_id=source_market_id, required=len(outcomes) if outcomes else 2
+    )
     if sports_type == "moneyline":
         family = MarketFamily.GAME_WINNER
         line = None
@@ -470,10 +532,9 @@ def _team_runners(
         raise VenueNormalizationError("NFL game winner must have exactly two outcomes")
     runners: list[CanonicalRunner] = []
     for index, label in enumerate(outcomes):
-        runner_id = token_ids[index] if index < len(token_ids) else f"{source_market_id}:{index}"
         runners.append(
             CanonicalRunner(
-                source_runner_id=str(runner_id),
+                source_runner_id=_required_clob_token(token_ids, index, source_market_id),
                 outcome=_team_outcome(event, label),
                 label=str(label),
             )
@@ -493,10 +554,9 @@ def _spread_runners_from_named_outcomes(
         raise VenueNormalizationError("NFL spread must have exactly two outcomes")
     runners: list[CanonicalRunner] = []
     for index, label in enumerate(outcomes):
-        runner_id = token_ids[index] if index < len(token_ids) else f"{source_market_id}:{index}"
         runners.append(
             CanonicalRunner(
-                source_runner_id=str(runner_id),
+                source_runner_id=_required_clob_token(token_ids, index, source_market_id),
                 outcome=_team_outcome(event, label),
                 label=str(label),
             )
@@ -511,7 +571,6 @@ def _over_under_runners(
 ) -> list[CanonicalRunner]:
     runners: list[CanonicalRunner] = []
     for index, label in enumerate(outcomes):
-        runner_id = token_ids[index] if index < len(token_ids) else f"{source_market_id}:{index}"
         text = normalize_text(str(label))
         if text.startswith("over"):
             outcome = CanonicalOutcome.OVER
@@ -520,11 +579,26 @@ def _over_under_runners(
         else:
             raise VenueNormalizationError(f"NFL total outcome is not Over/Under: {label}")
         runners.append(
-            CanonicalRunner(source_runner_id=str(runner_id), outcome=outcome, label=str(label))
+            CanonicalRunner(
+                source_runner_id=_required_clob_token(token_ids, index, source_market_id),
+                outcome=outcome,
+                label=str(label),
+            )
         )
     if {runner.outcome for runner in runners} != {CanonicalOutcome.OVER, CanonicalOutcome.UNDER}:
         raise VenueNormalizationError("NFL total is not a complete Over/Under book")
     return runners
+
+
+def _required_clob_token(token_ids: list[str], index: int, source_market_id: str) -> str:
+    if index >= len(token_ids):
+        raise VenueNormalizationError("Polymarket NFL market is missing exact CLOB token IDs")
+    token = str(token_ids[index]).strip()
+    if is_fabricated_polymarket_clob_token(token, market_id=source_market_id):
+        raise VenueNormalizationError(
+            "Polymarket NFL CLOB token IDs are not executable provider-native IDs"
+        )
+    return token
 
 
 def _matchbook_spread(

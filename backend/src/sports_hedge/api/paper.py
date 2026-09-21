@@ -1575,6 +1575,7 @@ async def server_owned_refresh_tick(plan=None) -> None:
             PriceEnginePriority.BACKGROUND,
             matchbook=runtime.matchbook,
             kalshi=runtime.kalshi,
+            polymarket=runtime.polymarket,
             paper_scan=service,
         )
         finished = coordinator.now()
@@ -1601,6 +1602,7 @@ async def server_owned_refresh_tick(plan=None) -> None:
                 slice_wall_seconds=hot_wall,
                 matchbook=runtime.matchbook,
                 kalshi=runtime.kalshi,
+                polymarket=runtime.polymarket,
                 paper_scan=service,
             )
             finished = coordinator.now()

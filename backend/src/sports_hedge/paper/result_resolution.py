@@ -120,7 +120,9 @@ def resolve_paper_trade_settlement(
     event_status = _payload_status(matchbook_event)
 
     from sports_hedge.nfl.settlement import (
+        collect_nfl_lifecycle_tokens,
         is_nfl_paper_trade,
+        nfl_automatic_settlement_lifecycle_blocker,
         nfl_exceptional_status_blocker,
         nfl_tied_score_blocker,
         NFL_SETTLEMENT_FAIL_CLOSED_REASON,
@@ -146,12 +148,6 @@ def resolve_paper_trade_settlement(
                 kalshi_markets,
                 scores,
             )
-
-    exception = _exception_blocker(matchbook, kalshi, scores, event_status=event_status)
-    if exception is not None:
-        return _blocked(trade, exception, matchbook_market, matchbook_event, kalshi_markets, scores)
-
-    if is_nfl_paper_trade(trade):
         if scores is not None:
             tied = nfl_tied_score_blocker(scores.home_score, scores.away_score)
             if tied is not None:
@@ -172,6 +168,31 @@ def resolve_paper_trade_settlement(
                 kalshi_markets,
                 scores,
             )
+        lifecycle_blocker = nfl_automatic_settlement_lifecycle_blocker(
+            trade,
+            *collect_nfl_lifecycle_tokens(
+                matchbook_market,
+                matchbook_event,
+                *list((kalshi_markets or {}).values()),
+            ),
+            matchbook.status,
+            kalshi.status,
+            event_status,
+            None if scores is None else scores.status,
+        )
+        if lifecycle_blocker is not None:
+            return _blocked(
+                trade,
+                lifecycle_blocker,
+                matchbook_market,
+                matchbook_event,
+                kalshi_markets,
+                scores,
+            )
+
+    exception = _exception_blocker(matchbook, kalshi, scores, event_status=event_status)
+    if exception is not None:
+        return _blocked(trade, exception, matchbook_market, matchbook_event, kalshi_markets, scores)
 
     derived: list[tuple[str, str]] = []
     if matchbook.winning_outcome:
