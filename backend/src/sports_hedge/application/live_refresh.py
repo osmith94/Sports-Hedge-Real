@@ -47,6 +47,7 @@ from sports_hedge.application.universe_checkpoint import (
     SWEEP_SKIPPED_UNSUPPORTED,
     SWEEP_STALE_ORPHAN,
     SWEEP_SINGLE_VENUE,
+    SWEEP_CROSS_VENUE_UNAVAILABLE,
     SWEEP_TERMINAL_STATES,
     UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
     SeriesWorkUnit,
@@ -79,6 +80,7 @@ from sports_hedge.application.universe_identity_cache import (
     bind_universe_identity_cache,
     reset_universe_identity_cache,
 )
+from sports_hedge.application.opportunity_viability import reset_opportunity_viability_cache
 from sports_hedge.application.provider_access import (
     HEALTH_AUTH_FAILURE,
     HEALTH_DISCOVERY_TIMEOUT,
@@ -1324,6 +1326,7 @@ class LiveRefreshCoordinator:
         self._observability.reset()
         self._fixture_state.clear()
         reset_universe_identity_cache()
+        reset_opportunity_viability_cache()
         orphans: list[asyncio.Task[Any]] = []
         with self._state_lock:
             self._last_request = {}
@@ -1682,6 +1685,11 @@ class LiveRefreshCoordinator:
                 "not_started_this_cadence": tier.not_started_this_cadence,
                 "revalidation_needed": tier.revalidation_needed,
                 "persist_failures": list(getattr(result, "persist_failures", []) or []),
+                **(
+                    result.viability_diagnostics()
+                    if hasattr(result, "viability_diagnostics")
+                    else {}
+                ),
             },
             "last_error": last_error,
             "worker_state": WORKER_RUNNING
@@ -2935,6 +2943,11 @@ class LiveRefreshCoordinator:
             unit.state = SWEEP_SINGLE_VENUE
             unit.retryable = False
             unit.reason = reason or SWEEP_SINGLE_VENUE
+            unit.next_retry_at = None
+        elif state == "cross_venue_unavailable":
+            unit.state = SWEEP_CROSS_VENUE_UNAVAILABLE
+            unit.retryable = False
+            unit.reason = reason or SWEEP_CROSS_VENUE_UNAVAILABLE
             unit.next_retry_at = None
         elif state == "market_fetch_unavailable":
             _schedule_capped_retry(

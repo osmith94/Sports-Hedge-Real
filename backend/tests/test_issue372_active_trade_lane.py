@@ -568,7 +568,8 @@ async def test_native_matchbook_event_id_reaches_exact_get_market(tmp_path: Path
         assert str(identity.matchbook_event_id).isdigit()
         refresh_src = inspect.getsource(CataloguePriceEngine._refresh_matchbook)
         assert "identity.matchbook_event_id, identity.matchbook_market_id" in refresh_src
-        assert "canonical_event_id" not in refresh_src
+        assert "getter(identity.canonical_event_id" not in refresh_src
+        assert "get_market(identity.canonical_event_id" not in refresh_src
 
         class _Matchbook:
             async def get_market(self, event_id, market_id):

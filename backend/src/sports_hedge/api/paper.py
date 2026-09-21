@@ -1197,6 +1197,15 @@ async def collect_read_only_market_data(
     return report.model_copy(update={"fixture_markets": {}})
 
 
+def _open_paper_event_ids_for_collect() -> frozenset[str]:
+    """ACTIVE PAPER trades must keep collector market work even if arb-HOT would prune."""
+
+    try:
+        return get_live_refresh_coordinator()._open_paper_event_ids()
+    except Exception:
+        return frozenset()
+
+
 async def _collect_report(
     kwargs: dict[str, Any],
     *,
@@ -1223,6 +1232,7 @@ async def _collect_report(
     selected_season_scope_codes: list[str] | tuple[str, ...] | None = None,
     generation_scope_version: int | None = None,
     generation_superseded: bool = False,
+    active_event_ids: list[str] | tuple[str, ...] | frozenset[str] | None = None,
 ) -> CollectionReport:
     settings = get_settings()
     runtime = get_shared_provider_runtime(settings)
@@ -1279,6 +1289,9 @@ async def _collect_report(
             selected_season_scope_codes=selected_season_scope_codes,
             generation_scope_version=generation_scope_version,
             generation_superseded=generation_superseded,
+            active_event_ids=active_event_ids
+            if active_event_ids is not None
+            else _open_paper_event_ids_for_collect(),
         )
     finally:
         acknowledge_task_cancellation()
@@ -1633,6 +1646,11 @@ async def server_owned_refresh_tick(plan=None) -> None:
                     "legacy_hot_collector": False,
                     PRICE_ENGINE_ITEM_COMPLETION_CAPTURE: True,
                     "persist_failures": list(result.persist_failures),
+                    **(
+                        result.viability_diagnostics()
+                        if hasattr(result, "viability_diagnostics")
+                        else {}
+                    ),
                 },
             )
 

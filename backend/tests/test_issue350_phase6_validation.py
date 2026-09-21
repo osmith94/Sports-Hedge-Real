@@ -88,6 +88,8 @@ from test_issue344_price_engine import (
     _engine,
     _hda_row,
     _hold_slot,
+    _mb_btts as _price_engine_mb_btts,
+    _mb_match_odds as _price_engine_mb_match_odds,
     _row,
 )
 from test_issue293_owner_live_overlap import OverlapKalshi, OverlapMatchbook
@@ -494,8 +496,16 @@ async def test_background_to_hot_promotion_and_multi_market_aggregate() -> None:
     )
     match = _hda_row("promo2", kickoff=DISTANT_KICKOFF)
     fixture_state = FixtureCurrentStateStore()
+    matchbook = FakeMatchbook()
+    matchbook.payloads[str(btts.matchbook_market_id)] = _price_engine_mb_btts(
+        int(btts.matchbook_market_id)
+    )
+    matchbook.payloads[str(match.matchbook_market_id)] = _price_engine_mb_match_odds(
+        int(match.matchbook_market_id)
+    )
     engine, _mb, _ks, _layer = _engine(
         [btts, match],
+        matchbook=matchbook,
         paper_scan=StubPaperScan(),
         fixture_state=fixture_state,
     )

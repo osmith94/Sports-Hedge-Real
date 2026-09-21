@@ -74,15 +74,32 @@ from sports_hedge.application.market_observation import (
     VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.opportunity_viability import (
+    CROSS_VENUE_UNAVAILABLE,
+    NO_CROSS_VENUE_CANDIDATE,
+    UPPER_BOUND_BELOW_MIN_NET,
+    VenueViability,
+    assess_identity_viability,
+    get_opportunity_viability_cache,
+    reset_opportunity_viability_cache,
+)
 from sports_hedge.application.provider_access import (
     HEALTH_CAPACITY_SATURATED,
     HEALTH_DEFERRED,
     HEALTH_MARKET_TIMEOUT,
     HEALTH_OK,
+    PRICE_ENGINE_ACTIVE_TRADE_LANE,
     PRICE_ENGINE_BACKGROUND_LANE,
     ProviderAccessLayer,
     ProviderLease,
     get_shared_provider_access,
+)
+from sports_hedge.arbitrage.arb_upper_bound import (
+    implied_from_kalshi_book,
+    implied_from_matchbook_market,
+    implied_from_observation,
+    merge_known_implied,
+    optimistic_net_edge_upper_bound,
 )
 from sports_hedge.application.scanner_observability import (
     PRICE_ENGINE_EVALUATED_DEFINITION,
@@ -155,6 +172,7 @@ class PriceEngineItemStatus(StrEnum):
     DEFERRED = "deferred"
     NOT_STARTED = "not_started_this_cadence"
     REVALIDATION_NEEDED = "revalidation_needed"
+    SKIPPED = "skipped_not_viable"
     FAILED = "failed"
 
 
@@ -241,6 +259,13 @@ class PriceEngineSliceResult:
     persist_failures: list[str] = field(default_factory=list)
     operation_health: dict[str, Any] = field(default_factory=dict)
     venue_health: dict[str, str] = field(default_factory=dict)
+    skipped: list[str] = field(default_factory=list)
+    skipped_provider_calls: int = 0
+    saved_provider_calls: int = 0
+    saved_time_ms: int = 0
+    skip_reasons: dict[str, str] = field(default_factory=dict)
+    upper_bound_net_edge: str | None = None
+    viable_venue_count: int | None = None
 
     def statuses(self) -> dict[str, str]:
         payload: dict[str, str] = {}
@@ -256,7 +281,23 @@ class PriceEngineSliceResult:
             payload[key] = PriceEngineItemStatus.RETRY_WAIT.value
         for key in self.revalidation:
             payload[key] = CATALOGUE_REVALIDATION_REASON
+        for key in self.skipped:
+            payload[key] = self.skip_reasons.get(key) or PriceEngineItemStatus.SKIPPED.value
         return payload
+
+    def viability_diagnostics(self) -> dict[str, Any]:
+        reason = None
+        if self.skip_reasons:
+            reason = next(iter(self.skip_reasons.values()))
+        return {
+            "skipped_provider_calls": int(self.skipped_provider_calls),
+            "saved_provider_calls": int(self.saved_provider_calls),
+            "saved_time_ms": int(self.saved_time_ms),
+            "skip_reason": reason,
+            "upper_bound_net_edge": self.upper_bound_net_edge,
+            "viable_venue_count": self.viable_venue_count,
+            "skipped_items": len(self.skipped),
+        }
 
 
 def price_engine_retry_backoff_seconds(attempt_count: int) -> float:
@@ -346,6 +387,7 @@ class CataloguePriceEngine:
         }
         self._selected_competition_codes: frozenset[str] | None = None
         self._exempt_event_ids: frozenset[str] = frozenset()
+        self.viability_cache = get_opportunity_viability_cache()
 
     def now(self) -> datetime:
         return self._clock()
@@ -425,6 +467,8 @@ class CataloguePriceEngine:
         self._promoted_hot_ids.clear()
         self._hot_promotion_episodes.clear()
         self.revalidation_requests.clear()
+        reset_opportunity_viability_cache()
+        self.viability_cache = get_opportunity_viability_cache()
         self._operation_health = {
             PriceEnginePriority.HOT.value: {},
             PriceEnginePriority.BACKGROUND.value: {},
@@ -616,19 +660,88 @@ class CataloguePriceEngine:
             if not polymarket_ready and not (matchbook_ready and kalshi_ready):
                 return self._request_revalidation(runtime, "missing_polymarket_identity")
 
+            active_lane = str(lane).strip().casefold() == PRICE_ENGINE_ACTIVE_TRADE_LANE
+            viability = assess_identity_viability(
+                identity,
+                cache=self.viability_cache,
+                active_event_ids=self._exempt_event_ids,
+                active_trade_lane=active_lane,
+            )
+            result.viable_venue_count = viability.viable_venue_count
+            if viability.skip_expensive_work:
+                saved = _expected_provider_calls(
+                    matchbook_ready=matchbook_ready,
+                    kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
+                    polymarket_tokens=pm_tokens if polymarket_ready else [],
+                )
+                return self._skip_item(
+                    runtime,
+                    result,
+                    reason=viability.reason or CROSS_VENUE_UNAVAILABLE,
+                    saved_calls=saved,
+                    viable_count=viability.viable_venue_count,
+                )
+
             matchbook_payload: RetrievedVenuePayload | None = None
+            known_implied: dict[str, Decimal] = {}
             if matchbook_ready:
                 matchbook_payload = await self._refresh_matchbook(runtime, lane=lane)
                 if isinstance(matchbook_payload, PriceEngineItemStatus):
+                    if runtime.last_error_detail and ":gone" in str(runtime.last_error_detail):
+                        remaining = _expected_provider_calls(
+                            matchbook_ready=False,
+                            kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
+                            polymarket_tokens=pm_tokens if polymarket_ready else [],
+                        )
+                        result.skipped_provider_calls += remaining
+                        result.saved_provider_calls += remaining
+                        result.viable_venue_count = assess_identity_viability(
+                            identity,
+                            cache=self.viability_cache,
+                            active_event_ids=self._exempt_event_ids,
+                            active_trade_lane=active_lane,
+                        ).viable_venue_count
                     return self._finalize_provider_status(runtime, matchbook_payload)
+                known_implied = merge_known_implied(
+                    self._implied_from_matchbook(identity, matchbook_payload)
+                )
+                if not active_lane and not viability.active_trade_override:
+                    post_mb = assess_identity_viability(
+                        identity,
+                        cache=self.viability_cache,
+                        active_event_ids=self._exempt_event_ids,
+                        active_trade_lane=False,
+                    )
+                    result.viable_venue_count = post_mb.viable_venue_count
+                    if post_mb.skip_expensive_work:
+                        saved = _expected_provider_calls(
+                            matchbook_ready=False,
+                            kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
+                            polymarket_tokens=pm_tokens if polymarket_ready else [],
+                        )
+                        return self._skip_item(
+                            runtime,
+                            result,
+                            reason=post_mb.reason or CROSS_VENUE_UNAVAILABLE,
+                            saved_calls=saved,
+                            viable_count=post_mb.viable_venue_count,
+                        )
 
             kalshi_books: dict[str, RetrievedVenuePayload] | None = None
             if kalshi_ready:
-                kalshi_books = await self._refresh_kalshi_constituents(runtime, lane=lane)
+                kalshi_books = await self._refresh_kalshi_constituents(
+                    runtime,
+                    lane=lane,
+                    result=result,
+                    known_implied=known_implied,
+                    skip_bound=active_lane or viability.active_trade_override,
+                )
                 if isinstance(kalshi_books, PriceEngineItemStatus):
                     return self._finalize_provider_status(runtime, kalshi_books)
                 required = _required_tickers(identity)
                 if any(ticker not in kalshi_books for ticker in required):
+                    if runtime.status is PriceEngineItemStatus.SKIPPED:
+                        return PriceEngineItemStatus.SKIPPED
                     return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
 
             polymarket_books: dict[str, RetrievedVenuePayload] | None = None
@@ -689,6 +802,9 @@ class CataloguePriceEngine:
                 coro=getter(identity.matchbook_event_id, identity.matchbook_market_id),
             )
         except MatchbookMarketGoneError:
+            self.viability_cache.mark_unavailable(
+                identity.canonical_event_id, VenueName.MATCHBOOK
+            )
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:gone")
         if status is not None:
             if status is PriceEngineItemStatus.RETRY_WAIT:
@@ -697,9 +813,16 @@ class CataloguePriceEngine:
             return status
         market = extract_matchbook_market_payload(payload)
         if market is None or matchbook_payload_is_terminal(market):
+            state = (
+                VenueViability.TERMINAL
+                if market is not None and matchbook_payload_is_terminal(market)
+                else VenueViability.UNAVAILABLE
+            )
+            self.viability_cache.mark(identity.canonical_event_id, VenueName.MATCHBOOK, state)
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:gone")
         if str(market.get("id") or "") != str(identity.matchbook_market_id):
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:identity")
+        self.viability_cache.mark_viable(identity.canonical_event_id, VenueName.MATCHBOOK)
         return RetrievedVenuePayload(payload=market, retrieved_at=self.now())
 
     async def _refresh_kalshi_constituents(
@@ -707,6 +830,9 @@ class CataloguePriceEngine:
         runtime: PriceEngineRuntimeItem,
         *,
         lane: str,
+        result: PriceEngineSliceResult | None = None,
+        known_implied: Mapping[str, Decimal] | None = None,
+        skip_bound: bool = False,
     ) -> dict[str, RetrievedVenuePayload] | PriceEngineItemStatus:
         identity = runtime.identity
         client = self.kalshi
@@ -714,7 +840,39 @@ class CataloguePriceEngine:
         if not callable(getter):
             return self._request_revalidation(runtime, "kalshi_order_book_unavailable")
         books: dict[str, RetrievedVenuePayload] = {}
-        for ticker in _kalshi_tickers(identity):
+        tickers = _kalshi_tickers(identity)
+        required_outcomes = list(identity.required_outcomes) or required_outcomes_for_key(
+            identity.register_canonical_key
+        )
+        accumulated = dict(known_implied or {})
+        min_net = self._minimum_net_edge(identity)
+        for index, ticker in enumerate(tickers):
+            if not skip_bound and min_net is not None and required_outcomes:
+                remaining = [
+                    outcome
+                    for outcome in (
+                        _ticker_outcome(identity, item) for item in tickers[index:]
+                    )
+                    if outcome
+                ]
+                bound = optimistic_net_edge_upper_bound(
+                    required_outcomes=required_outcomes,
+                    known_implied=accumulated,
+                    unknown_outcomes=remaining,
+                    minimum_net_edge=min_net,
+                )
+                if result is not None and bound.upper_bound_net_edge is not None:
+                    result.upper_bound_net_edge = str(bound.upper_bound_net_edge)
+                if bound.prune:
+                    saved = len(tickers) - index
+                    return self._skip_item(
+                        runtime,
+                        result or PriceEngineSliceResult(),
+                        reason=UPPER_BOUND_BELOW_MIN_NET,
+                        saved_calls=saved,
+                        viable_count=result.viable_venue_count if result is not None else None,
+                        upper_bound=bound.upper_bound_net_edge,
+                    )
             payload, status = await self._provider_call(
                 VenueName.KALSHI,
                 lane=lane,
@@ -732,6 +890,11 @@ class CataloguePriceEngine:
                 runtime.last_error_detail = PRICE_ENGINE_ITEM_TIMEOUT_REASON
                 return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
             books[ticker] = RetrievedVenuePayload(payload=payload, retrieved_at=self.now())
+            self.viability_cache.mark_viable(identity.canonical_event_id, VenueName.KALSHI)
+            outcome = _ticker_outcome(identity, ticker)
+            implied = implied_from_kalshi_book(payload)
+            if outcome and implied is not None:
+                accumulated = merge_known_implied(accumulated, {outcome: implied})
         return books
 
     async def _refresh_polymarket(
@@ -1480,6 +1643,115 @@ class CataloguePriceEngine:
         )
         return PriceEngineItemStatus.REVALIDATION_NEEDED
 
+    def _skip_item(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        result: PriceEngineSliceResult,
+        *,
+        reason: str,
+        saved_calls: int,
+        viable_count: int | None,
+        upper_bound: Decimal | None = None,
+    ) -> PriceEngineItemStatus:
+        runtime.status = PriceEngineItemStatus.SKIPPED
+        runtime.last_priced_at = self.now()
+        runtime.last_error_stage = "opportunity_viability"
+        runtime.last_error_detail = reason
+        runtime.retry_attempt = 0
+        runtime.next_retry_at = None
+        result.skipped_provider_calls += max(0, int(saved_calls))
+        result.saved_provider_calls += max(0, int(saved_calls))
+        if viable_count is not None:
+            result.viable_venue_count = viable_count
+        if upper_bound is not None:
+            result.upper_bound_net_edge = str(upper_bound)
+        result.skip_reasons[runtime.identity.catalogue_row_id] = reason
+        self._project_skipped_state(runtime, reason=reason)
+        return PriceEngineItemStatus.SKIPPED
+
+    def _project_skipped_state(self, runtime: PriceEngineRuntimeItem, *, reason: str) -> None:
+        if self.fixture_state is None:
+            return
+        identity = runtime.identity
+        observed_at = self.now()
+        if reason == NO_CROSS_VENUE_CANDIDATE:
+            evaluation_state = MarketEvaluationState.SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE.value
+        elif reason == UPPER_BOUND_BELOW_MIN_NET:
+            evaluation_state = MarketEvaluationState.UPPER_BOUND_BELOW_MIN_NET.value
+        else:
+            evaluation_state = MarketEvaluationState.CROSS_VENUE_UNAVAILABLE.value
+        fixture = DiscoveredFixture(
+            source=VenueName.MATCHBOOK,
+            source_event_id=str(identity.matchbook_event_id or identity.canonical_event_id),
+            canonical_event_id=identity.canonical_event_id,
+            home_team=identity.home_canonical or "Home",
+            away_team=identity.away_canonical or "Away",
+            competition=identity.competition or "Premier League",
+            kickoff_utc=identity.kickoff_utc or observed_at,
+            last_seen_at=observed_at,
+            last_scanned_at=observed_at,
+            matchbook_matched=bool(identity.matchbook_event_id),
+            kalshi_matched=bool(identity.kalshi_event_ticker),
+            polymarket_matched=bool(identity.polymarket_event_id),
+            market_evaluation_state=evaluation_state,
+            market_evaluation_reason=reason,
+            no_comparison_reason=reason,
+            opportunity_state="not_evaluated",
+            solver_is_arbitrage=False,
+            scan_lane=(
+                ScanLane.HOT.value
+                if runtime.priority is PriceEnginePriority.HOT
+                else ScanLane.UNIVERSE.value
+            ),
+        )
+        self.fixture_state.upsert_evaluated_fixture(
+            fixture,
+            scan_lane=ScanLane.UNIVERSE
+            if runtime.priority is PriceEnginePriority.BACKGROUND
+            else ScanLane.HOT,
+            now=observed_at,
+        )
+
+    def _implied_from_matchbook(
+        self,
+        identity: DerivedPriceEngineItem,
+        matchbook: RetrievedVenuePayload,
+    ) -> dict[str, Decimal]:
+        parsed = implied_from_matchbook_market(matchbook.payload)
+        required = {str(item) for item in identity.required_outcomes or []}
+        if required:
+            parsed = {key: value for key, value in parsed.items() if key in required}
+        if parsed:
+            return parsed
+        try:
+            observation = self._build_matchbook_obs(identity, matchbook, self.now())
+        except Exception:
+            return {}
+        from_obs = implied_from_observation(observation)
+        if required:
+            return {key: value for key, value in from_obs.items() if key in required}
+        return from_obs
+
+    def _minimum_net_edge(self, identity: DerivedPriceEngineItem) -> Decimal | None:
+        del identity
+        resolved = getattr(self.paper_scan, "settings", None) if self.paper_scan is not None else None
+        if resolved is None:
+            try:
+                resolved = get_settings()
+            except Exception:
+                resolved = None
+        try:
+            operator = effective_operator_scanner_settings(resolved)
+            return Decimal(str(operator.min_net_edge))
+        except Exception:
+            pass
+        if resolved is None:
+            return None
+        try:
+            return Decimal(str(resolved.min_net_edge))
+        except (InvalidOperation, ValueError, TypeError, AttributeError):
+            return None
+
     def _record_outcome(
         self,
         runtime: PriceEngineRuntimeItem,
@@ -1523,6 +1795,17 @@ class CataloguePriceEngine:
                     stage="catalogue_revalidation",
                     source_id=row_id,
                     detail=runtime.last_error_detail or CATALOGUE_REVALIDATION_REASON,
+                )
+            )
+            return
+        if outcome is PriceEngineItemStatus.SKIPPED:
+            result.skipped.append(row_id)
+            result.skip_reasons[row_id] = runtime.last_error_detail or CROSS_VENUE_UNAVAILABLE
+            result.issues.append(
+                CollectorIssue(
+                    stage="opportunity_viability",
+                    source_id=row_id,
+                    detail=runtime.last_error_detail or CROSS_VENUE_UNAVAILABLE,
                 )
             )
             return
@@ -1618,6 +1901,13 @@ class CataloguePriceEngine:
             if runtime.status is PriceEngineItemStatus.REVALIDATION_NEEDED:
                 revalidation += 1
                 continue
+            if runtime.status is PriceEngineItemStatus.SKIPPED:
+                if runtime.last_priced_at is None:
+                    continue
+                if interval <= 0 or now <= runtime.last_priced_at + timedelta(seconds=interval):
+                    continue
+                due += 1
+                continue
             if runtime.status is PriceEngineItemStatus.EVALUATED:
                 if runtime.last_priced_at is None:
                     evaluated += 1
@@ -1693,6 +1983,30 @@ def _kalshi_tickers(identity: DerivedPriceEngineItem) -> list[str]:
         if ticker and ticker not in derived:
             derived.append(ticker)
     return derived
+
+
+def _ticker_outcome(identity: DerivedPriceEngineItem, ticker: str) -> str | None:
+    needle = str(ticker or "").strip()
+    if not needle:
+        return None
+    for item in identity.kalshi_outcome_ids:
+        native = str(item.native_id or "")
+        if native == needle or native.startswith(f"{needle}:"):
+            return str(item.outcome)
+    return None
+
+
+def _expected_provider_calls(
+    *,
+    matchbook_ready: bool,
+    kalshi_tickers: list[str],
+    polymarket_tokens: list[Any],
+) -> int:
+    return (
+        (1 if matchbook_ready else 0)
+        + len(kalshi_tickers)
+        + len(polymarket_tokens)
+    )
 
 
 def _required_tickers(identity: DerivedPriceEngineItem) -> list[str]:

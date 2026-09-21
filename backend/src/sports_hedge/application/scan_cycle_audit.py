@@ -99,6 +99,11 @@ def build_background_price_engine_cycle_report(
             "legacy_hot_collector": False,
             PRICE_ENGINE_ITEM_COMPLETION_CAPTURE: True,
             "persist_failures": list(getattr(result, "persist_failures", []) or []),
+            **(
+                result.viability_diagnostics()
+                if hasattr(result, "viability_diagnostics")
+                else {}
+            ),
         },
     )
 
