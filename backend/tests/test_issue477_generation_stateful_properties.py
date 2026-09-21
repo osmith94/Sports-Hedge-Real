@@ -453,6 +453,9 @@ def action_clear(trace: GenerationTrace) -> None:
         trace.last_closed_generation_id = coordinator._universe_generation_id
     coordinator.reset()
     reset_universe_identity_cache()
+    trace.last_closed_generation_id = None
+    trace.last_chunk_epoch = None
+    trace.historical_epochs.clear()
     assert get_universe_identity_cache().generation_id is None
     assert get_universe_identity_cache().no_cross_venue == {}
     assert coordinator._universe_generation_started_at is None
@@ -473,13 +476,16 @@ def action_stale(trace: GenerationTrace) -> None:
     stale_targets = list(trace.historical_epochs)
     if trace.last_chunk_epoch is not None:
         stale_targets.append((generation_before, trace.last_chunk_epoch))
-    if trace.generation_open:
-        coordinator._invalidate_universe_chunk_epoch_unlocked()
-        live_epoch = coordinator._open_universe_chunk_epoch_unlocked()
-        trace.last_chunk_epoch = live_epoch
-        trace.historical_epochs.append((coordinator._universe_generation_id, live_epoch))
-    for generation_id, epoch in stale_targets:
-        coordinator.record_universe_discovery_snapshot(
+        live_epoch = None
+        if trace.generation_open:
+            coordinator._invalidate_universe_chunk_epoch_unlocked()
+            live_epoch = coordinator._open_universe_chunk_epoch_unlocked()
+            trace.last_chunk_epoch = live_epoch
+            trace.historical_epochs.append((coordinator._universe_generation_id, live_epoch))
+        for generation_id, epoch in stale_targets:
+            if live_epoch is not None and epoch == live_epoch:
+                continue
+            coordinator.record_universe_discovery_snapshot(
             {"matchbook": [{"id": f"zombie-stale-{generation_id}-{epoch}"}]},
             chunk_epoch=epoch,
         )
@@ -519,12 +525,15 @@ def action_fresh(trace: GenerationTrace) -> None:
         if trace.generation_open:
             coordinator._close_universe_generation(trace.clock.now)
         trace.last_closed_generation_id = coordinator._universe_closed_generation_id
-    previous = coordinator._universe_generation_id
-    action_start(trace)
-    assert coordinator._universe_generation_id != previous or previous == 0
-    assert trace.cache.no_cross_venue == {} or trace.cache.generation_id == coordinator._universe_generation_id
-    if trace.last_closed_generation_id:
-        assert coordinator._universe_generation_id != trace.last_closed_generation_id
+        previous = coordinator._universe_generation_id
+        previous_sweep = coordinator._universe_sweep_id
+        action_start(trace)
+        if previous != 0:
+            assert coordinator._universe_generation_id != previous
+        assert coordinator._universe_sweep_id != previous_sweep
+        assert trace.cache.generation_id == coordinator._universe_generation_id
+        if trace.last_closed_generation_id:
+            assert coordinator._universe_generation_id != trace.last_closed_generation_id
 
 
 def action_restart(trace: GenerationTrace) -> None:
@@ -541,6 +550,8 @@ def action_restart(trace: GenerationTrace) -> None:
     restarted.configure_from_settings()
     restarted._clock = trace.clock
     trace.coordinator = restarted
+    trace.last_chunk_epoch = None
+    trace.historical_epochs.clear()
     if open_before:
         assert restarted._universe_generation_started_at is not None
         assert restarted._universe_generation_id == generation_before
@@ -602,7 +613,9 @@ def test_generated_generation_traces_preserve_invariants(tmp_path: Path, seed: i
     extra = ["timeout", "resume", "stale", "restart", "timeout", "fresh", "clear", "restart"]
     rng.shuffle(extra)
     sequence = ("start", *tuple(extra[:6]), "restart")
-    trace = _new_trace(tmp_path / f"seed-{seed}")
+    root = tmp_path / f"seed-{seed}"
+    root.mkdir()
+    trace = _new_trace(root)
     try:
         for name in sequence:
             ACTIONS[name](trace)

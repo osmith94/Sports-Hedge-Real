@@ -482,12 +482,16 @@ def test_indexed_clustering_unions_match_exhaustive_for_production_venues(
         }
         for member in members:
             clustered[member] = members
-    expected = _union_groups(items, exhaustive)
+    expected_groups = _union_groups(items, exhaustive)
+    expected_lookup: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    for group in expected_groups.values():
+        for member in group:
+            expected_lookup[member] = group
     for item in items:
         key = _event_key(item)
         if key[0] not in {venue.value for venue in PRODUCTION_CLUSTER_VENUES}:
             continue
-        assert clustered[key] == expected[key]
+        assert clustered[key] == expected_lookup[key]
 
 
 def test_same_venue_siblings_remain_indexed_and_clusterable() -> None:
