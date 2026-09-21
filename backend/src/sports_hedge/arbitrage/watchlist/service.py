@@ -111,7 +111,10 @@ class WatchlistService:
         ):
             status = previous.status
         distance = None
-        if observation.current_net_edge is not None:
+        if (
+            observation.current_net_edge is not None
+            and observation.trigger_net_edge is not None
+        ):
             distance = distance_to_trigger_pp(
                 observation.current_net_edge,
                 observation.trigger_net_edge,
@@ -139,6 +142,9 @@ class WatchlistService:
             classification=classification_for(status),
             is_arbitrage=is_arbitrage,
             trigger_net_edge=observation.trigger_net_edge,
+            min_net_edge_scope=observation.min_net_edge_scope,
+            min_net_edge_source=observation.min_net_edge_source,
+            min_net_edge_configured=observation.min_net_edge_configured,
             current_net_edge=observation.current_net_edge,
             gross_edge=observation.gross_edge,
             distance_to_trigger_pp=distance,

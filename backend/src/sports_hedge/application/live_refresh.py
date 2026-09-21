@@ -125,6 +125,7 @@ from sports_hedge.persistence.operator_scanner_settings import (
     UNIVERSE_SCHEDULED_PAUSED,
     OperatorScannerSettings,
     SqliteOperatorScannerSettingsStore,
+    _UNSET,
     bind_runtime_operator_scanner_settings_store,
     clamp_background_cadence_seconds,
     clamp_universe_cadence_seconds,
@@ -914,6 +915,7 @@ class LiveRefreshCoordinator:
         background_cadence_seconds: int,
         universe_cadence_seconds: int | None = None,
         max_allocated_per_trade_gbp: Decimal | None = None,
+        outright_min_net_edge: Any = _UNSET,
     ) -> OperatorScannerSettings:
         store = self._resolved_operator_store()
         saved = store.save_settings(
@@ -923,6 +925,7 @@ class LiveRefreshCoordinator:
             background_cadence_seconds=background_cadence_seconds,
             universe_cadence_seconds=universe_cadence_seconds,
             max_allocated_per_trade_gbp=max_allocated_per_trade_gbp,
+            outright_min_net_edge=outright_min_net_edge,
         )
         with self._state_lock:
             previous_hot = (

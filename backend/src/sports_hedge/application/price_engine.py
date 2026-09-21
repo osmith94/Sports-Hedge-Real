@@ -108,6 +108,7 @@ from sports_hedge.arbitrage.watchlist.economics import (
     is_net_proximity_hot,
     qualifies_min_net_arb,
 )
+from sports_hedge.arbitrage.min_net_threshold import catalogue_market_scope
 from sports_hedge.arbitrage.watchlist.models import hot_promotion_opportunity_id
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.persistence.operator_scanner_settings import (
@@ -839,6 +840,8 @@ class CataloguePriceEngine:
             if settings is not None:
                 operator = effective_operator_scanner_settings(settings)
                 scan_kwargs["minimum_net_edge"] = operator.min_net_edge
+                scan_kwargs["market_scope"] = catalogue_market_scope(identity)
+                scan_kwargs["outright_min_net_edge"] = operator.outright_min_net_edge
                 scan_kwargs["maximum_execution_risk"] = operator.max_execution_risk
                 scan_kwargs["assumed_latency_ms"] = int(settings.simulated_latency_ms)
             decision = self.paper_scan.scan_pair(matchbook_obs, kalshi_obs, **scan_kwargs)
@@ -1872,7 +1875,7 @@ def _decision_is_interesting(decision: PaperScanDecision | None) -> bool:
         return False
     edge = decision_net_edge(decision)
     trigger = decision.minimum_net_edge
-    if edge is None:
+    if edge is None or trigger is None:
         return False
     if qualifies_min_net_arb(edge, trigger):
         return True

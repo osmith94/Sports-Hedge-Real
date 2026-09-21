@@ -448,6 +448,7 @@ def test_operator_console_keeps_steps_1_to_3_console_contract() -> None:
     assert "per-market CLOB metadata" in scan
     assert "fx_snapshots" not in collect_type
     assert "Min net arb %" in scan
+    assert "Outright Min net arb %" in scan
     assert "Max risk" in scan
     assert "Optional capital limit" in scan
     assert "Advanced · FX / fees / provenance" in scan

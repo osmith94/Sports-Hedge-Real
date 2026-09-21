@@ -229,6 +229,7 @@ export function RunPaperScan() {
   const router = useRouter();
   const [capitalLimit, setCapitalLimit] = useState("");
   const [minNetArbPercent, setMinNetArbPercent] = useState(DEFAULT_MIN_NET_ARB_PERCENT);
+  const [outrightMinNetArbPercent, setOutrightMinNetArbPercent] = useState("");
   const [maxRisk, setMaxRisk] = useState(DEFAULT_MAX_RISK);
   const [maxAllocatedPerTrade, setMaxAllocatedPerTrade] = useState(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP);
   const [loadingMode, setLoadingMode] = useState<ScanMode | null>(null);
@@ -326,6 +327,11 @@ export function RunPaperScan() {
       }
       if (saved && (!settingsDirty || options?.forceSettings)) {
         setMinNetArbPercent(minNetPercentFromRate(saved.min_net_edge));
+        if (saved.outright_min_net_edge == null || saved.outright_min_net_edge === "") {
+          setOutrightMinNetArbPercent("");
+        } else {
+          setOutrightMinNetArbPercent(minNetPercentFromRate(saved.outright_min_net_edge));
+        }
         setMaxRisk(String(saved.max_execution_risk ?? DEFAULT_MAX_RISK));
         if (saved.max_allocated_per_trade_gbp != null && saved.max_allocated_per_trade_gbp !== "") {
           setMaxAllocatedPerTrade(String(saved.max_allocated_per_trade_gbp));
@@ -492,6 +498,10 @@ export function RunPaperScan() {
       if (!minNet) {
         throw new Error("Minimum net arb is required.");
       }
+      const outrightMinNet = optionalPercentRate(
+        outrightMinNetArbPercent,
+        "Outright minimum net arb",
+      );
       const risk = Number(maxRisk);
       if (!Number.isInteger(risk) || risk < 0 || risk > 100) {
         throw new Error("Maximum execution risk must be a whole number from 0 to 100.");
@@ -505,6 +515,7 @@ export function RunPaperScan() {
       }
       const status = await saveOperatorScannerSettings({
         min_net_edge: minNet,
+        outright_min_net_edge: outrightMinNet ?? null,
         max_execution_risk: risk,
         hot_cadence_seconds: cadence,
         background_cadence_seconds: backgroundCadence,
@@ -733,6 +744,20 @@ export function RunPaperScan() {
               aria-label="Minimum net arbitrage trigger percent"
             />
           </label>
+          <label className="scan-field scan-field-outright">
+            <span>Outright Min net arb %</span>
+            <input
+              inputMode="decimal"
+              value={outrightMinNetArbPercent}
+              onChange={(event) => {
+                setOutrightMinNetArbPercent(event.target.value);
+                setSettingsDirty(true);
+              }}
+              placeholder="not set"
+              aria-label="Outright or season minimum net arbitrage trigger percent"
+              title="COMPETITION_SEASON / outright markets only. Leave empty until the owner sets a value. Unconfigured fails closed and never inherits fixture Min Net Arb."
+            />
+          </label>
           <label className="scan-field scan-field-compact">
             <span>Max risk</span>
             <input
@@ -954,7 +979,7 @@ export function RunPaperScan() {
             Neither HOT nor BACKGROUND rediscover the catalogue or advance UNIVERSE generation state.
             Run UNIVERSE now bypasses only the UNIVERSE cadence wait and uses the real selected-scope generation worker.
             Pause scheduled UNIVERSE stops the periodic timer only; it does not fake a huge cadence, and the stored cadence stays editable for resume.
-            Update saves Min Net Arb, Max Risk, HOT cadence, BACKGROUND cadence and UNIVERSE cadence
+            Update saves Min Net Arb, Outright Min Net Arb, Max Risk, HOT cadence, BACKGROUND cadence and UNIVERSE cadence
             and max allocated per trade for subsequent server-owned work and does not trigger a scan.
             Football competitions Apply changes the current session scope, including season
             markets, and does not itself call providers.

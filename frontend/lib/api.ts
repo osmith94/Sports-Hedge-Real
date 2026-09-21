@@ -701,6 +701,7 @@ export type VenueDegradationIncident = {
 
 export type OperatorScannerSettings = {
   min_net_edge: string;
+  outright_min_net_edge?: string | null;
   max_execution_risk: number;
   hot_cadence_seconds: number;
   background_cadence_seconds: number;
@@ -715,6 +716,7 @@ export type OperatorScannerSettings = {
 
 export type OperatorScannerSettingsUpdate = {
   min_net_edge: string;
+  outright_min_net_edge?: string | null;
   max_execution_risk: number;
   hot_cadence_seconds: number;
   background_cadence_seconds: number;
@@ -1174,7 +1176,10 @@ export type NearOpportunity = {
   status: WatchlistOpportunityStatus;
   classification: WatchlistClassification;
   is_arbitrage?: boolean;
-  trigger_net_edge: string | number;
+  trigger_net_edge?: string | number | null;
+  min_net_edge_scope?: string | null;
+  min_net_edge_source?: string | null;
+  min_net_edge_configured?: boolean | null;
   current_net_edge?: string | number | null;
   gross_edge?: string | number | null;
   distance_to_trigger_pp?: string | number | null;
@@ -1228,6 +1233,9 @@ export type OpportunityLifecycleEvent = {
   status: WatchlistOpportunityStatus;
   current_net_edge?: string | number | null;
   distance_to_trigger_pp?: string | number | null;
+  trigger_net_edge?: string | number | null;
+  min_net_edge_scope?: string | null;
+  min_net_edge_source?: string | null;
   detail?: string | null;
   fixture_label?: string | null;
   market_family?: string | null;

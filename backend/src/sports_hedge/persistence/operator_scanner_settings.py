@@ -2,7 +2,9 @@
 
 One singleton SQLite row is the operator override for:
 
-- Min Net Arb / ``minimum_net_edge``
+- Min Net Arb / ``minimum_net_edge`` (FIXTURE_MATCH only)
+- Outright Min Net Arb / ``outright_min_net_edge`` (COMPETITION_SEASON only;
+  None is unconfigured and fails closed; never falls back to fixture)
 - Max Risk / ``maximum_execution_risk`` (scan/watchlist threshold only)
 - HOT cadence seconds
 - BACKGROUND pricing cadence seconds
@@ -41,11 +43,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from sports_hedge.config import Settings, get_settings
 
 LOGGER = logging.getLogger(__name__)
+
+_UNSET: Any = object()
 
 HOT_CADENCE_MIN_SECONDS = 15
 HOT_CADENCE_MAX_SECONDS = 60
@@ -67,6 +71,7 @@ class OperatorScannerSettings(BaseModel):
     """Authoritative operator scanner settings as returned by the backend."""
 
     min_net_edge: Decimal = Field(ge=0, lt=1)
+    outright_min_net_edge: Decimal | None = Field(default=None, ge=0, lt=1)
     max_execution_risk: int = Field(ge=0, le=100)
     hot_cadence_seconds: int = Field(ge=HOT_CADENCE_MIN_SECONDS, le=HOT_CADENCE_MAX_SECONDS)
     background_cadence_seconds: int = Field(
@@ -93,6 +98,7 @@ class OperatorScannerSettings(BaseModel):
 
 class OperatorScannerSettingsUpdate(BaseModel):
     min_net_edge: Decimal = Field(ge=0, lt=1)
+    outright_min_net_edge: Decimal | None = Field(default=None, ge=0, lt=1)
     max_execution_risk: int = Field(ge=0, le=100)
     hot_cadence_seconds: int = Field(ge=HOT_CADENCE_MIN_SECONDS, le=HOT_CADENCE_MAX_SECONDS)
     background_cadence_seconds: int = Field(
@@ -109,6 +115,13 @@ class OperatorScannerSettingsUpdate(BaseModel):
         ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
         le=MAX_ALLOCATED_PER_TRADE_MAX_GBP,
     )
+
+    @field_validator("outright_min_net_edge", mode="before")
+    @classmethod
+    def blank_outright_is_unconfigured(cls, value: Any) -> Any:
+        if value == "":
+            return None
+        return value
 
 
 def clamp_hot_cadence_seconds(value: int) -> int:
@@ -145,6 +158,13 @@ def _env_max_allocated_per_trade_gbp(settings: Settings) -> Decimal:
     return clamp_max_allocated_per_trade_gbp(configured)
 
 
+def _env_outright_min_net_edge(settings: Settings) -> Decimal | None:
+    configured = settings.outright_min_net_edge
+    if configured is None:
+        return None
+    return Decimal(str(configured))
+
+
 def env_operator_scanner_settings(
     settings: Settings | None = None,
     *,
@@ -155,6 +175,7 @@ def env_operator_scanner_settings(
     resolved = settings or get_settings()
     return OperatorScannerSettings(
         min_net_edge=Decimal(str(resolved.min_net_edge)),
+        outright_min_net_edge=_env_outright_min_net_edge(resolved),
         max_execution_risk=int(resolved.max_execution_risk),
         hot_cadence_seconds=clamp_hot_cadence_seconds(
             resolved.paper_live_refresh_hot_interval_seconds
@@ -230,6 +251,7 @@ class SqliteOperatorScannerSettingsStore:
             CREATE TABLE IF NOT EXISTS operator_scanner_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 min_net_edge TEXT NOT NULL,
+                outright_min_net_edge TEXT,
                 max_execution_risk INTEGER NOT NULL,
                 hot_cadence_seconds INTEGER NOT NULL,
                 background_cadence_seconds INTEGER NOT NULL DEFAULT 90,
@@ -266,6 +288,11 @@ class SqliteOperatorScannerSettingsStore:
                 "ALTER TABLE operator_scanner_settings "
                 "ADD COLUMN universe_scans_paused INTEGER NOT NULL DEFAULT 0"
             )
+        if "outright_min_net_edge" not in columns:
+            connection.execute(
+                "ALTER TABLE operator_scanner_settings "
+                "ADD COLUMN outright_min_net_edge TEXT"
+            )
 
     def load(self) -> OperatorScannerSettings | None:
         with self._connect() as connection:
@@ -289,6 +316,7 @@ class SqliteOperatorScannerSettingsStore:
         background_cadence_seconds: int | None = None,
         universe_cadence_seconds: int | None = None,
         max_allocated_per_trade_gbp: Decimal | None = None,
+        outright_min_net_edge: Any = _UNSET,
         scanner_stopped: bool | None = None,
         universe_scans_paused: bool | None = None,
     ) -> OperatorScannerSettings:
@@ -326,8 +354,20 @@ class SqliteOperatorScannerSettingsStore:
                 allocated = _env_max_allocated_per_trade_gbp(get_settings())
         else:
             allocated = clamp_max_allocated_per_trade_gbp(max_allocated_per_trade_gbp)
+        if outright_min_net_edge is _UNSET:
+            if current is not None:
+                outright = current.outright_min_net_edge
+            else:
+                outright = _env_outright_min_net_edge(get_settings())
+        else:
+            outright = outright_min_net_edge
+            if outright is not None:
+                outright = Decimal(str(outright))
+                if outright < 0 or outright >= 1:
+                    raise ValueError("outright_min_net_edge must be >= 0 and < 1")
         payload = OperatorScannerSettings(
             min_net_edge=min_net_edge,
+            outright_min_net_edge=outright,
             max_execution_risk=int(max_execution_risk),
             hot_cadence_seconds=clamp_hot_cadence_seconds(hot_cadence_seconds),
             background_cadence_seconds=background,
@@ -418,14 +458,15 @@ class SqliteOperatorScannerSettingsStore:
             connection.execute(
                 """
                 INSERT INTO operator_scanner_settings (
-                    id, min_net_edge, max_execution_risk, hot_cadence_seconds,
+                    id, min_net_edge, outright_min_net_edge, max_execution_risk, hot_cadence_seconds,
                     background_cadence_seconds, universe_cadence_seconds,
                     max_allocated_per_trade_gbp, scanner_stopped,
                     universe_scans_paused, source, updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     min_net_edge = excluded.min_net_edge,
+                    outright_min_net_edge = excluded.outright_min_net_edge,
                     max_execution_risk = excluded.max_execution_risk,
                     hot_cadence_seconds = excluded.hot_cadence_seconds,
                     background_cadence_seconds = excluded.background_cadence_seconds,
@@ -438,6 +479,9 @@ class SqliteOperatorScannerSettingsStore:
                 """,
                 (
                     str(payload.min_net_edge),
+                    None
+                    if payload.outright_min_net_edge is None
+                    else str(payload.outright_min_net_edge),
                     int(payload.max_execution_risk),
                     int(payload.hot_cadence_seconds),
                     int(payload.background_cadence_seconds),
@@ -534,6 +578,21 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         LOGGER.warning("malformed operator scanner min_net_edge; using env default")
         min_net_edge = Decimal(str(get_settings().min_net_edge))
         source = "env_default"
+    outright_min_net_edge: Decimal | None
+    try:
+        raw_outright = _row_optional(row, "outright_min_net_edge")
+        if raw_outright is None or str(raw_outright).strip() == "":
+            outright_min_net_edge = None
+        else:
+            outright_min_net_edge = Decimal(str(raw_outright))
+            if outright_min_net_edge < 0 or outright_min_net_edge >= 1:
+                raise InvalidOperation
+    except (InvalidOperation, ArithmeticError, TypeError, ValueError):
+        LOGGER.warning(
+            "malformed operator scanner outright_min_net_edge; leaving unconfigured"
+        )
+        # Fail closed for COMPETITION_SEASON. Never substitute fixture min_net_edge.
+        outright_min_net_edge = None
     try:
         max_execution_risk = int(row["max_execution_risk"])
         if not 0 <= max_execution_risk <= 100:
@@ -589,6 +648,7 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         source = "env_default"
     return OperatorScannerSettings(
         min_net_edge=min_net_edge,
+        outright_min_net_edge=outright_min_net_edge,
         max_execution_risk=max_execution_risk,
         hot_cadence_seconds=hot_cadence_seconds,
         background_cadence_seconds=background_cadence_seconds,

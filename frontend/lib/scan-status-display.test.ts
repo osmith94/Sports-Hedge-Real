@@ -384,6 +384,13 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /universe_cadence_seconds/);
     assert.match(scan, /clampBackgroundCadenceSeconds/);
     assert.match(scan, /clampUniverseCadenceSeconds/);
+    assert.match(scan, /Min net arb %/);
+    assert.match(scan, /Outright Min net arb %/);
+    assert.match(scan, /placeholder="not set"/);
+    assert.match(scan, /outright_min_net_edge: outrightMinNet \?\? null/);
+    assert.match(scan, /scan-field-outright/);
+    assert.doesNotMatch(scan, /DEFAULT_OUTRIGHT/);
+    assert.match(scan, /const \[outrightMinNetArbPercent, setOutrightMinNetArbPercent\] = useState\(""\)/);
     assert.match(scan, /HOT cadence, BACKGROUND cadence and UNIVERSE cadence/);
     assert.match(scan, /DEFAULT_UNIVERSE_CADENCE_SECONDS = 1800/);
     assert.match(scan, /Update/);

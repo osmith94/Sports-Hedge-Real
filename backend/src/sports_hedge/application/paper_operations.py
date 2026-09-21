@@ -1283,7 +1283,7 @@ class PaperOperationsService:
             plan = plan or self._plans.get(trade.opportunity_id)
         operator = effective_operator_scanner_settings(self.settings)
         cap = operator.max_allocated_per_trade_gbp
-        trigger = operator.min_net_edge
+        trigger = plan.decision.minimum_net_edge if plan is not None else None
         if plan is None:
             return None
         recovering = bool(
@@ -1319,7 +1319,12 @@ class PaperOperationsService:
                 operator_copy="Current post-cost net is below Min Net Arb; no new risk added",
                 occurred_at=when,
                 dedupe_key=f"below-min:{trade.trade_id}:{when.isoformat()}",
-                payload={"current_net": current_net, "trigger": trigger},
+                payload={
+                    "current_net": current_net,
+                    "trigger": trigger,
+                    "min_net_edge_scope": plan.decision.min_net_edge_scope,
+                    "min_net_edge_source": plan.decision.min_net_edge_source,
+                },
             )
             return self._result_from_existing_trade(trade, when)
         room = remaining_trade_room_gbp(trade, cap)
@@ -1371,6 +1376,8 @@ class PaperOperationsService:
                 "requested_gbp": incremental_gbp,
                 "net_edge": current_net,
                 "min_net": trigger,
+                "min_net_edge_scope": plan.decision.min_net_edge_scope,
+                "min_net_edge_source": plan.decision.min_net_edge_source,
                 "books": compact_executable_books(mapped_legs),
             },
         )
@@ -1786,7 +1793,7 @@ class PaperOperationsService:
             recovery_id = f"recovery:{origin_tranche_id}:{sequence}"
         current_net = plan.net_edge if plan.net_edge is not None else decision_net_edge(plan.decision)
         below_min = current_net is None or not qualifies_min_net_arb(
-            current_net, operator.min_net_edge
+            current_net, plan.decision.minimum_net_edge
         )
         reason_code = (
             ActiveTradeReasonCode.RECOVERY_BELOW_MIN_NET
@@ -1806,6 +1813,9 @@ class PaperOperationsService:
                 "residual_before": residual,
                 "below_min_net": below_min,
                 "net_edge": current_net,
+                "trigger": plan.decision.minimum_net_edge,
+                "min_net_edge_scope": str(plan.decision.min_net_edge_scope),
+                "min_net_edge_source": plan.decision.min_net_edge_source,
                 "books": compact_executable_books(remaining_legs),
             },
             raise_on_error=True,
@@ -3175,7 +3185,9 @@ class PaperOperationsService:
             "pricing_lane": plan.pricing_lane,
             "scan_lane": plan.pricing_lane,
             "net_edge": plan.net_edge,
-            "min_net": Decimal(str(self.settings.min_net_edge)),
+            "min_net": plan.decision.minimum_net_edge,
+            "min_net_edge_scope": plan.decision.min_net_edge_scope,
+            "min_net_edge_source": plan.decision.min_net_edge_source,
             "books": compact_executable_books(plan.legs),
         }
 
@@ -4081,10 +4093,13 @@ def _post_trigger_min_net_rejection(
         arrival = _arrival_net_edge_from_fills(plan, fills)
     if arrival is None:
         return None
+    trigger = plan.decision.minimum_net_edge
+    if trigger is None:
+        return MOVED_BELOW_MIN_NET_ARB
     return evaluate_post_trigger_min_net_arb(
         bound_net_edge=bound,
         arrival_net_edge=arrival,
-        trigger_net_edge=plan.decision.minimum_net_edge,
+        trigger_net_edge=trigger,
     )
 
 

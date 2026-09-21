@@ -380,6 +380,10 @@ class Settings(BaseSettings):
     paper_treasury_demo_fx_source: str = "paper_demo_fx_snapshot"
     paper_treasury_include_kalshi: bool = True
     min_net_edge: float = Field(default=0.01, ge=0)
+    # Owner-configurable outright/season Min Net Arb. None is unconfigured:
+    # COMPETITION_SEASON qualification fails closed and never inherits fixture
+    # min_net_edge. Do not invent a numeric default here.
+    outright_min_net_edge: float | None = Field(default=None, ge=0, lt=1)
     max_allocated_per_trade_gbp: float = Field(default=1000.0, gt=0)
     max_slippage_bps: int = Field(default=25, ge=0)
     max_event_exposure_gbp: float = Field(default=1000.0, gt=0)

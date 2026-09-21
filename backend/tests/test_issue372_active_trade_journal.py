@@ -34,6 +34,7 @@ from sports_hedge.application.paper_operations import (
     paper_trade_id,
 )
 from sports_hedge.application.price_engine import PriceEngineItemStatus
+from sports_hedge.domain.models import MarketScope
 from sports_hedge.paper.active_trade_journal import ActiveTradeEventType, ActiveTradeReasonCode
 from sports_hedge.paper.trades import (
     PaperActiveTradePhase,
@@ -713,7 +714,7 @@ def test_partial_entry_recovers_even_below_min_net_arb(tmp_path: Path) -> None:
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
     store = _raise_trade_cap(tmp_path, Decimal("2000"))
     store.save_settings(
-        min_net_edge=Decimal("0.99"),
+        min_net_edge=Decimal("0.01"),
         max_execution_risk=60,
         hot_cadence_seconds=30,
         max_allocated_per_trade_gbp=Decimal("2000"),
@@ -721,6 +722,10 @@ def test_partial_entry_recovers_even_below_min_net_arb(tmp_path: Path) -> None:
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=False)
     try:
         opportunity_id = next(iter(ops._plans))
+        plan = ops._plans[opportunity_id]
+        plan.decision.minimum_net_edge = Decimal("0.99")
+        plan.decision.min_net_edge_scope = MarketScope.FIXTURE_MATCH
+        plan.decision.min_net_edge_source = "min_net_edge"
         real = ops.simulator
         one_sided, calls = _one_sided_simulator(real)
         ops.simulator = one_sided

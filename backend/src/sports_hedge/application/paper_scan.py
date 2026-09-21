@@ -25,6 +25,10 @@ from sports_hedge.application.quote_freshness import (
     require_aware_instant,
 )
 from sports_hedge.arbitrage.depth import DepthAwareCompleteSetScanner, DepthQuoteSource
+from sports_hedge.arbitrage.min_net_threshold import (
+    OUTRIGHT_MIN_NET_EDGE_UNCONFIGURED,
+    resolve_min_net_threshold,
+)
 from sports_hedge.arbitrage.payoff_scan import (
     DepthAwarePayoffScanner,
     PayoffScanResult,
@@ -33,7 +37,7 @@ from sports_hedge.arbitrage.payoff_scan import (
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.football import CanonicalOutcome
 from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
-from sports_hedge.domain.models import VenueName
+from sports_hedge.domain.models import MarketScope, VenueName
 from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.fees.models import FeeSnapshot
@@ -158,8 +162,11 @@ class PaperScanService:
         open_trades: list[PaperTrade] | None = None,
         conditionally_releasable: dict | None = None,
         fixture_canonical_event_id: str | None = None,
+        market_scope: MarketScope | str = MarketScope.FIXTURE_MATCH,
+        outright_min_net_edge: Decimal | None = None,
     ) -> PaperScanDecision:
-        if minimum_net_edge < 0:
+        scope = MarketScope(market_scope)
+        if scope is MarketScope.FIXTURE_MATCH and minimum_net_edge < 0:
             raise ValueError("minimum_net_edge must be non-negative")
         if not 0 <= maximum_execution_risk <= 100:
             raise ValueError("maximum_execution_risk must be between 0 and 100")
@@ -168,6 +175,14 @@ class PaperScanService:
         # Deprecated API field. Runtime PAPER equivalence is the register only.
         del minimum_mapping_confidence
 
+        threshold = resolve_min_net_threshold(
+            scope,
+            fixture_min_net_edge=minimum_net_edge,
+            outright_min_net_edge=outright_min_net_edge,
+        )
+        stamp = threshold.as_decision_fields()
+        applied_threshold = threshold.applied_threshold
+
         map_started = monotonic()
         match = self.market_matcher.match(left.market, right.market)
         mapping_ms = max(0, int((monotonic() - map_started) * 1000))
@@ -175,6 +190,8 @@ class PaperScanService:
         solver_started: float | None = None
         fees = list(fee_snapshots or [])
         rejections: list[str] = []
+        if not threshold.configured and threshold.fail_closed_reason:
+            rejections.append(threshold.fail_closed_reason)
         assumption_labels: list[str] = []
         evaluated_at = self._clock()
         costs, cost_resolve_reasons = self._resolve_costs(
@@ -229,7 +246,7 @@ class PaperScanService:
                 venue_costs=costs,
                 fx_snapshots=fx,
                 cost_assumption_labels=assumption_labels,
-                minimum_net_edge=minimum_net_edge,
+                **stamp,
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
@@ -265,7 +282,7 @@ class PaperScanService:
                 venue_costs=costs,
                 fx_snapshots=fx,
                 cost_assumption_labels=assumption_labels,
-                minimum_net_edge=minimum_net_edge,
+                **stamp,
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
@@ -293,7 +310,7 @@ class PaperScanService:
                 venue_costs=costs,
                 fx_snapshots=fx,
                 cost_assumption_labels=assumption_labels,
-                minimum_net_edge=minimum_net_edge,
+                **stamp,
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
@@ -373,7 +390,7 @@ class PaperScanService:
                 venue_costs=list(scan_costs.values()) or costs,
                 fx_snapshots=fx,
                 cost_assumption_labels=assumption_labels,
-                minimum_net_edge=minimum_net_edge,
+                **stamp,
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
@@ -451,7 +468,9 @@ class PaperScanService:
             solution = depth_scan.solution
             if not solution.is_arbitrage:
                 rejections.append(solution.rejection_reason or "no_arbitrage")
-            elif solution.roi < minimum_net_edge:
+            elif not threshold.configured:
+                rejections.append(OUTRIGHT_MIN_NET_EDGE_UNCONFIGURED)
+            elif applied_threshold is not None and solution.roi < applied_threshold:
                 rejections.append("net_edge_below_threshold")
         else:
             state_model = generalized_state_model_for_pair(left.market, right.market)
@@ -467,7 +486,9 @@ class PaperScanService:
             payoff = payoff_scan.solution
             if not payoff.is_arbitrage:
                 rejections.append(payoff.rejection_reason or "no_arbitrage")
-            elif payoff.roi < minimum_net_edge:
+            elif not threshold.configured:
+                rejections.append(OUTRIGHT_MIN_NET_EDGE_UNCONFIGURED)
+            elif applied_threshold is not None and payoff.roi < applied_threshold:
                 rejections.append("net_edge_below_threshold")
 
         liquidity_rejections = opening_liquidity_rejection_reasons(
@@ -531,7 +552,7 @@ class PaperScanService:
             venue_costs=list(scan_costs.values()),
             fx_snapshots=fx,
             cost_assumption_labels=_dedupe(assumption_labels),
-            minimum_net_edge=minimum_net_edge,
+            **stamp,
             maximum_execution_risk=maximum_execution_risk,
             quote_age_ms=quote_age_ms,
             quote_age_basis=quote_age_basis,

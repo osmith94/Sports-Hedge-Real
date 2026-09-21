@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import ROUND_HALF_EVEN, Decimal
 
 from sports_hedge.application.complete_set import SOLVER_MODEL_GENERALIZED
+from sports_hedge.arbitrage.min_net_threshold import OUTRIGHT_MIN_NET_EDGE_UNCONFIGURED
 from sports_hedge.arbitrage.watchlist.models import (
     OpportunityClassification,
     OpportunityStatus,
@@ -105,19 +106,26 @@ def distance_to_trigger_pp(current_net_edge: Decimal, trigger_net_edge: Decimal)
     return quantized_pp((trigger_net_edge - current_net_edge) * PERCENTAGE_POINTS)
 
 
-def qualifies_min_net_arb(current_net_edge: Decimal, trigger_net_edge: Decimal) -> bool:
-    """True when post-cost net ROI meets the configured Min Net Arb trigger."""
+def qualifies_min_net_arb(current_net_edge: Decimal, trigger_net_edge: Decimal | None) -> bool:
+    """True when post-cost net ROI meets the configured Min Net Arb trigger.
 
+    An unconfigured trigger fails closed and never qualifies.
+    """
+
+    if trigger_net_edge is None:
+        return False
     return current_net_edge >= trigger_net_edge
 
 
-def is_net_proximity_hot(current_net_edge: Decimal, trigger_net_edge: Decimal) -> bool:
+def is_net_proximity_hot(current_net_edge: Decimal, trigger_net_edge: Decimal | None) -> bool:
     """Economically HOT, not yet a fill: below trigger but within 0.50pp.
 
     Uses existing `distance_to_trigger_pp`. Never treats gross edge or a hard-coded
-    zero as the trigger.
+    zero as the trigger. Unconfigured trigger is not proximity.
     """
 
+    if trigger_net_edge is None:
+        return False
     if qualifies_min_net_arb(current_net_edge, trigger_net_edge):
         return False
     distance = distance_to_trigger_pp(current_net_edge, trigger_net_edge)
@@ -343,6 +351,13 @@ def classify_status(
     ]
     if leftover:
         return OpportunityStatus.REJECTED, _dedupe(reasons)
+    if (
+        observation.trigger_net_edge is None
+        or OUTRIGHT_MIN_NET_EDGE_UNCONFIGURED in reasons
+    ):
+        return OpportunityStatus.REJECTED, _dedupe(
+            [*reasons, OUTRIGHT_MIN_NET_EDGE_UNCONFIGURED]
+        )
 
     # Economic trigger crossing is independent of whether the exact quote is
     # currently execution-fresh. Paper fill still fail-closes on freshness.

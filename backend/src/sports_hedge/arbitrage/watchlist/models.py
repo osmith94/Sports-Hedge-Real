@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
-from sports_hedge.domain.models import VenueName
+from sports_hedge.domain.models import MarketScope, VenueName
 from sports_hedge.matching.learned_rules import MappingProvenance, MappingReviewCandidate
 
 
@@ -140,7 +140,10 @@ class WatchObservation(BaseModel):
     line: Decimal | None = None
     venues: list[VenueName] = Field(default_factory=list)
     legs: list[WatchLeg] = Field(default_factory=list)
-    trigger_net_edge: Decimal = Field(ge=0)
+    trigger_net_edge: Decimal | None = Field(default=None, ge=0)
+    min_net_edge_scope: MarketScope | None = None
+    min_net_edge_source: str | None = None
+    min_net_edge_configured: bool | None = None
     current_net_edge: Decimal | None = None
     gross_edge: Decimal | None = None
     implied_probability_sum: Decimal | None = Field(default=None, gt=0)
@@ -196,7 +199,10 @@ class NearOpportunity(BaseModel):
     status: OpportunityStatus
     classification: OpportunityClassification
     is_arbitrage: bool = False
-    trigger_net_edge: Decimal
+    trigger_net_edge: Decimal | None = None
+    min_net_edge_scope: MarketScope | None = None
+    min_net_edge_source: str | None = None
+    min_net_edge_configured: bool | None = None
     current_net_edge: Decimal | None = None
     gross_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
@@ -255,6 +261,9 @@ class OpportunityLifecycleEvent(BaseModel):
     status: OpportunityStatus
     current_net_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
+    trigger_net_edge: Decimal | None = None
+    min_net_edge_scope: str | None = None
+    min_net_edge_source: str | None = None
     detail: str | None = None
     fixture_label: str | None = None
     market_family: str | None = None
@@ -308,17 +317,21 @@ def lifecycle_identity_from_opportunity(
     opportunity: NearOpportunity,
     *,
     capture_eligible: bool | None = None,
-) -> dict[str, str | bool | None]:
+) -> dict[str, str | bool | Decimal | None]:
     """Immutable glance fields copied onto append-only lifecycle events."""
 
     family = opportunity.market_family.value if opportunity.market_family is not None else None
     eligible = opportunity.capture_eligible if capture_eligible is None else capture_eligible
+    scope = opportunity.min_net_edge_scope
     return {
         "fixture_label": fixture_label_from_teams(opportunity.home_team, opportunity.away_team),
         "market_family": family,
         "canonical_event_id": opportunity.canonical_event_id,
         "canonical_market_id": opportunity.canonical_market_id,
         "capture_eligible": eligible,
+        "trigger_net_edge": opportunity.trigger_net_edge,
+        "min_net_edge_scope": scope.value if isinstance(scope, MarketScope) else scope,
+        "min_net_edge_source": opportunity.min_net_edge_source,
     }
 
 
