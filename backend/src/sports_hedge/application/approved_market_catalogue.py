@@ -1,8 +1,11 @@
-"""Durable approved-market catalogue identity (Issue #341 Phase 2).
+"""Durable approved-market catalogue identity (Issue #341 Phase 2 / #437 Phase 1A).
 
 UNIVERSE persists exact Matchbook / Kalshi / Polymarket native IDs and Kalshi
-fee metadata for registered families. Polymarket identity is the Gamma market
-id plus real CLOB token IDs — never invented ``condition_id:0/1`` placeholders.
+fee metadata for registered FIXTURE_MATCH families. Polymarket identity is the
+Gamma market id plus real CLOB token IDs — never invented ``condition_id:0/1``
+placeholders. COMPETITION_SEASON observation listings may persist exact
+provider IDs with a sibling MarketScope; they stay out of the fixture
+derived-price working set unless season logic processes them.
 This module is identity / lifecycle truth, not a second matcher and not a
 price engine.
 
@@ -11,6 +14,9 @@ eligibility) is derived at use time from the live Approved Match Register and
 PAPER mode. Those policy fields must never be stored on catalogue rows.
 Quotes, solver output, mapping confidence, and work-queue state are also
 forbidden.
+
+COMPETITION_SEASON rows are observation-only in Phase 1A: missing native IDs
+fail closed, and they are not register-admitted.
 
 Data class: durable identity/fee-metadata. Not live quotes.
 PAPER / read-only.
@@ -25,9 +31,11 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from sports_hedge.domain.football import CanonicalOutcome, FootballPeriod, MarketFamily
+from sports_hedge.domain.market_scope import MarketScope
+from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.kalshi import resolve_kalshi_fee_metadata
 from sports_hedge.matching.approved_register import REGISTER_VERSION
 
@@ -202,6 +210,44 @@ class ApprovedMarketCatalogueRow(BaseModel):
     last_confirmed_at: datetime | None = None
     last_seen_generation_id: str | None = None
     content_version: int = 1
+    market_scope: MarketScope = MarketScope.FIXTURE_MATCH
+    source_venue: VenueName | None = None
+    season_id: str | None = None
+    competition_code: str | None = None
+    participant_type: str | None = None
+    participant_canonical_id: str | None = None
+    settlement_fingerprint_version: str | None = None
+    expected_settlement_horizon: str | None = None
+    polymarket_clob_token_ids: list[str] = Field(default_factory=list)
+    polymarket_event_slug: str | None = None
+    polymarket_event_ticker: str | None = None
+
+    @model_validator(mode="after")
+    def validate_market_scope_identity(self) -> "ApprovedMarketCatalogueRow":
+        if self.market_scope is MarketScope.FIXTURE_MATCH:
+            return self
+        if self.market_scope is not MarketScope.COMPETITION_SEASON:
+            raise ValueError("unsupported_market_scope")
+        if self.home_canonical or self.away_canonical or self.kickoff_utc is not None:
+            raise ValueError("fixture_fields_forbidden_on_competition_season")
+        required = (
+            self.season_id,
+            self.competition_code,
+            self.participant_type,
+            self.participant_canonical_id,
+            self.settlement_fingerprint_version,
+        )
+        if any(not str(value or "").strip() for value in required):
+            raise ValueError("competition_season_identity_incomplete")
+        if self.source_venue is None:
+            raise ValueError("competition_season_source_venue_required")
+        if self.source_venue is VenueName.POLYMARKET:
+            tokens = [str(token).strip() for token in self.polymarket_clob_token_ids]
+            if len(tokens) != 2 or any(not token for token in tokens):
+                raise ValueError("missing_polymarket_clob_token_ids")
+            if not self.polymarket_event_id or not self.polymarket_market_id:
+                raise ValueError("missing_polymarket_native_ids")
+        return self
 
     def native_identity_tuple(self) -> tuple[Any, ...]:
         return (
@@ -212,10 +258,18 @@ class ApprovedMarketCatalogueRow(BaseModel):
             tuple(self.kalshi_market_tickers),
             tuple((item.outcome, item.native_id) for item in self.kalshi_outcome_ids),
             self.kalshi_series_ticker,
+            None if self.source_venue is None else self.source_venue.value,
+            self.market_scope.value,
+            self.season_id,
+            self.competition_code,
+            self.participant_canonical_id,
             self.polymarket_event_id,
             self.polymarket_market_id,
             self.polymarket_condition_id,
             tuple((item.outcome, item.native_id) for item in self.polymarket_token_ids),
+            tuple(self.polymarket_clob_token_ids),
+            self.polymarket_event_slug,
+            self.polymarket_event_ticker,
         )
 
     def native_identity_payload(self) -> dict[str, Any]:
@@ -227,10 +281,18 @@ class ApprovedMarketCatalogueRow(BaseModel):
             "kalshi_market_tickers": list(self.kalshi_market_tickers),
             "kalshi_outcome_ids": [item.model_dump() for item in self.kalshi_outcome_ids],
             "kalshi_series_ticker": self.kalshi_series_ticker,
+            "source_venue": None if self.source_venue is None else self.source_venue.value,
+            "market_scope": self.market_scope.value,
+            "season_id": self.season_id,
+            "competition_code": self.competition_code,
+            "participant_canonical_id": self.participant_canonical_id,
             "polymarket_event_id": self.polymarket_event_id,
             "polymarket_market_id": self.polymarket_market_id,
             "polymarket_condition_id": self.polymarket_condition_id,
             "polymarket_token_ids": [item.model_dump() for item in self.polymarket_token_ids],
+            "polymarket_clob_token_ids": list(self.polymarket_clob_token_ids),
+            "polymarket_event_slug": self.polymarket_event_slug,
+            "polymarket_event_ticker": self.polymarket_event_ticker,
         }
 
     def native_identity_json(self) -> str:
@@ -374,6 +436,10 @@ def catalogue_row_supports_paper_eligibility(
 
     if row.row_state is not CatalogueRowState.ACTIVE:
         return False
+    if row.market_scope is MarketScope.COMPETITION_SEASON:
+        return False
+    if str(row.register_canonical_key or "").startswith("OBSERVATION:"):
+        return False
     if not row.kalshi_fee_snapshot_id:
         return False
     if snapshot is None:
@@ -401,6 +467,11 @@ def derived_price_engine_working_set(
     items: list[DerivedPriceEngineItem] = []
     for row in rows:
         if row.row_state is not CatalogueRowState.ACTIVE:
+            continue
+        if row.market_scope is MarketScope.COMPETITION_SEASON:
+            # Phase 1A persists exact IDs; BACKGROUND/HOT exact-ID pricing is later.
+            continue
+        if str(row.register_canonical_key or "").startswith("OBSERVATION:"):
             continue
         items.append(
             DerivedPriceEngineItem(
