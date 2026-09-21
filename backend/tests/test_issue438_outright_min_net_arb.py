@@ -155,11 +155,23 @@ def test_no_duration_heuristic_selects_min_net_threshold() -> None:
     assert "expected_lock_hours" not in signature.parameters
 
 
-def test_catalogue_rows_remain_fixture_match() -> None:
+def test_catalogue_scope_reads_identity_and_does_not_invent_season() -> None:
     assert catalogue_market_scope() is MarketScope.FIXTURE_MATCH
     assert catalogue_market_scope(object()) is MarketScope.FIXTURE_MATCH
+
+    class _FixtureIdentity:
+        market_scope = MarketScope.FIXTURE_MATCH
+
+    class _SeasonIdentity:
+        market_scope = MarketScope.COMPETITION_SEASON
+
+    assert catalogue_market_scope(_FixtureIdentity()) is MarketScope.FIXTURE_MATCH
+    assert catalogue_market_scope(_SeasonIdentity()) is MarketScope.COMPETITION_SEASON
     engine_src = inspect.getsource(CataloguePriceEngine)
     assert "catalogue_market_scope" in engine_src
+    helper_src = inspect.getsource(catalogue_market_scope)
+    assert "return MarketScope.FIXTURE_MATCH" in helper_src
+    assert "MarketScope(raw)" in helper_src
 
 
 def test_operator_store_persists_outright_without_numeric_default(tmp_path: Path) -> None:

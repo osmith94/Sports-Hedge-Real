@@ -38,14 +38,19 @@ class MinNetThresholdDecision(BaseModel):
         }
 
 
-def catalogue_market_scope(_identity: object | None = None) -> MarketScope:
-    """Every current catalogue row remains FIXTURE_MATCH.
+def catalogue_market_scope(identity: object | None = None) -> MarketScope:
+    """Read canonical MarketScope from a catalogue/runtime identity.
 
-    This lane does not admit COMPETITION_SEASON rows or invent outright
-    equivalence. Tests may still pass that scope into the resolver.
+    Missing or unknown scope stays FIXTURE_MATCH. COMPETITION_SEASON is never
+    invented and never coerced onto the fixture threshold.
     """
 
-    return MarketScope.FIXTURE_MATCH
+    if identity is None:
+        return MarketScope.FIXTURE_MATCH
+    raw = getattr(identity, "market_scope", None)
+    if raw is None:
+        return MarketScope.FIXTURE_MATCH
+    return MarketScope(raw)
 
 
 def resolve_min_net_threshold(

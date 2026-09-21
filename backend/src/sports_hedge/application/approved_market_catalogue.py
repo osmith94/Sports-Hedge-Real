@@ -334,6 +334,7 @@ class DerivedPriceEngineItem(BaseModel):
     home_canonical: str | None = None
     away_canonical: str | None = None
     kickoff_utc: datetime | None = None
+    market_scope: MarketScope = MarketScope.FIXTURE_MATCH
 
 
 def classify_kalshi_fee_resolution(metadata: dict[str, Any]) -> tuple[str, str | None]:
@@ -498,6 +499,7 @@ def derived_price_engine_working_set(
                 home_canonical=row.home_canonical,
                 away_canonical=row.away_canonical,
                 kickoff_utc=row.kickoff_utc,
+                market_scope=row.market_scope,
             )
         )
     return items

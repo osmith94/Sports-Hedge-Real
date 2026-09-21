@@ -7,23 +7,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from sports_hedge.domain.market_scope import MarketScope as MarketScope
+
 
 class VenueName(StrEnum):
     MATCHBOOK = "matchbook"
     POLYMARKET = "polymarket"
     SMARKETS = "smarkets"
     KALSHI = "kalshi"
-
-
-class MarketScope(StrEnum):
-    """Canonical economic horizon used to select Min Net Arb.
-
-    FIXTURE_MATCH is a single-match market. COMPETITION_SEASON is a
-    competition/season outright. Scope is never inferred from lock duration.
-    """
-
-    FIXTURE_MATCH = "FIXTURE_MATCH"
-    COMPETITION_SEASON = "COMPETITION_SEASON"
 
 
 class MarketSide(StrEnum):
