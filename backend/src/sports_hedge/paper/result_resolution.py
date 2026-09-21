@@ -889,6 +889,8 @@ def _detail(evidence: dict[str, Any]) -> str:
 
 
 def _line_from_trade(trade: PaperTrade) -> Decimal | None:
+    if trade.line is not None:
+        return trade.line
     parts = (trade.settlement_key or "").split("|")
     if len(parts) >= 3 and parts[2]:
         try:

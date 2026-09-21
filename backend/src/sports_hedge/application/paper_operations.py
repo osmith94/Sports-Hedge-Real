@@ -124,6 +124,10 @@ from sports_hedge.paper.canonical_results import (
     manual_settlement_source_id,
     validate_manual_settlement_outcome,
 )
+from sports_hedge.paper.provider_identity import (
+    catalogue_rows_for_trade,
+    recover_persisted_catalogue_identity,
+)
 from sports_hedge.paper.settlement import PaperSettlementError, compute_paper_settlement
 from sports_hedge.paper.simulator import PaperFillSimulator
 from sports_hedge.paper.trades import (
@@ -283,11 +287,13 @@ class PaperOperationsService:
         settings: Settings | None = None,
         ledger: SqlitePaperLedger | None = None,
         trades: SqlitePaperTradeRepository | None = None,
+        catalogue: Any | None = None,
     ) -> None:
         self.watchlist = watchlist
         self.alerts = alerts or PriorityAlertService()
         self.simulator = simulator or PaperFillSimulator()
         self.settings = settings or get_settings()
+        self.catalogue = catalogue
         self.ledger = ledger
         if ledger is not None:
             self.journal = journal or ledger.journal
@@ -2472,12 +2478,34 @@ class PaperOperationsService:
         if persist and self.trades is not None:
             self.trades.save(trade)
 
+    def _recover_catalogue_identity(
+        self,
+        trade: PaperTrade,
+        *,
+        now: datetime | None = None,
+    ) -> PaperTrade:
+        """Exact catalogue native-identity recovery before manual settlement.
+
+        Does not infer a line from scores, labels, or elapsed time. Fail closed
+        when the catalogue cannot prove one unique safe line.
+        """
+
+        rows = catalogue_rows_for_trade(self.catalogue, trade)
+        recovered, changed = recover_persisted_catalogue_identity(
+            trade, catalogue_rows=rows, now=now
+        )
+        if changed and self.trades is not None:
+            self.trades.save(recovered)
+            return recovered
+        return recovered if changed else trade
+
     def settlement_options(self, trade_id: str) -> PaperSettlementOptions:
         if self.trades is None:
             raise PaperOperationsError("paper_trade_repository_unavailable")
         trade = self.trades.get(trade_id)
         if trade is None:
             raise PaperOperationsError("unknown_trade")
+        trade = self._recover_catalogue_identity(trade)
         space = canonical_result_space(trade)
         choices: list[CanonicalResultChoice] = []
         for choice in space.choices:
@@ -2540,6 +2568,7 @@ class PaperOperationsService:
         trade = self.trades.get(trade_id)
         if trade is None:
             raise PaperOperationsError("unknown_trade")
+        trade = self._recover_catalogue_identity(trade, now=request.settled_at or now)
         blocker = validate_manual_settlement_outcome(trade, request.winning_outcome)
         if blocker is not None:
             raise PaperOperationsError(blocker)
