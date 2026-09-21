@@ -410,12 +410,21 @@ class ClusterPass:
     async def load_candidates_cooperative(
         self, *, yield_every: int = INDEX_COOP_YIELD_EVERY
     ) -> None:
-        self._candidates, self.index_diagnostics = await build_indexed_candidates_cooperative(
-            self.items,
+        builder = _IndexedCandidateBuilder(
+            items=self.items,
             kickoff_tolerance=self._kickoff_tolerance,
             cache=self.identity_cache,
-            yield_every=yield_every,
         )
+        try:
+            self._candidates, self.index_diagnostics = await builder.run_cooperative(
+                yield_every=yield_every
+            )
+        except asyncio.CancelledError:
+            # Keep the pairs generated before the cancel. Applying a previous
+            # generation resume onto an incomplete candidate list would mix
+            # cursors; leftover assembly still finalizes this partial index.
+            self._candidates, self.index_diagnostics = builder.finish()
+            raise
         self._apply_resume_cursor()
 
     def pairs(self) -> Iterator[tuple[VenueEvent, VenueEvent]]:

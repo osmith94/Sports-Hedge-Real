@@ -326,3 +326,257 @@ async def test_cooperative_cluster_pass_matches_sync_oracle_on_staggered_univers
         if cluster.venue_count >= 2
     }
     assert expected_cross <= found
+
+
+def _membership(clusters) -> frozenset[frozenset[tuple[str, str]]]:
+    from sports_hedge.application.fixture_clusters import cluster_member_keyset
+
+    return frozenset(cluster_member_keyset(cluster) for cluster in clusters)
+
+
+def _graph_diag(cluster_pass: ClusterPass) -> dict[str, int]:
+    return dict(cluster_pass.graph_diagnostics)
+
+
+async def _cooperative_clusters(matchbook, polymarket, kalshi, *, limit: int | None = None, cache=None):
+    cluster_pass = ClusterPass(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=EventMatcher(),
+        max_event_pairs=10_000_000,
+        identity_cache=cache,
+        defer_candidate_build=True,
+    )
+    await cluster_pass.load_candidates_cooperative()
+    for index, (left, right) in enumerate(cluster_pass.pairs()):
+        cluster_pass.consider(left, right)
+        if limit is not None and index + 1 >= limit:
+            break
+    clusters, counts = await cluster_pass.finalize_cooperative()
+    return cluster_pass, clusters, counts
+
+
+def _sync_clusters(matchbook, polymarket, kalshi, *, limit: int | None = None, cache=None):
+    cluster_pass = ClusterPass(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=EventMatcher(),
+        max_event_pairs=10_000_000,
+        identity_cache=cache,
+    )
+    for index, (left, right) in enumerate(cluster_pass.pairs()):
+        cluster_pass.consider(left, right)
+        if limit is not None and index + 1 >= limit:
+            break
+    clusters, counts = cluster_pass.finalize()
+    return cluster_pass, clusters, counts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "label,factory,limit",
+    [
+        ("staggered_full", lambda: _dense_universe(80, stagger=True), None),
+        ("dense_full", lambda: _dense_universe(80), None),
+        ("unresolved_full", lambda: _dense_universe(60, unresolved_pm=True), None),
+        ("dense_partial", lambda: _dense_universe(80), 250),
+        ("unresolved_partial", lambda: _dense_universe(60, unresolved_pm=True), 180),
+    ],
+)
+async def test_cooperative_identity_matches_sync_across_shapes(label, factory, limit) -> None:
+    matchbook, polymarket, kalshi = factory()
+    sync_pass, sync_clusters, sync_counts = _sync_clusters(
+        matchbook, polymarket, kalshi, limit=limit
+    )
+    coop_pass, coop_clusters, coop_counts = await _cooperative_clusters(
+        matchbook, polymarket, kalshi, limit=limit
+    )
+    assert coop_counts == sync_counts, label
+    assert _membership(coop_clusters) == _membership(sync_clusters), label
+    assert _graph_diag(coop_pass) == _graph_diag(sync_pass), label
+    assert coop_pass.candidate_pairs_considered == sync_pass.candidate_pairs_considered, label
+
+
+@pytest.mark.asyncio
+async def test_resume_cooperative_identity_matches_sync() -> None:
+    from sports_hedge.application.universe_identity_cache import GenerationIdentityCache
+
+    matchbook, polymarket, kalshi = _dense_universe(80, stagger=True)
+    items = [*matchbook, *polymarket, *kalshi]
+    seed_cache = GenerationIdentityCache()
+    seed = ClusterPass(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=EventMatcher(),
+        max_event_pairs=10_000_000,
+        identity_cache=seed_cache,
+    )
+    for index, (left, right) in enumerate(seed.pairs()):
+        seed.consider(left, right)
+        if index >= 40:
+            break
+    seed.checkpoint(seed.candidate_pairs_considered)
+    resume = seed_cache.clustering_resume
+    assert resume is not None
+    assert resume.cursor == 41
+
+    def _fork() -> GenerationIdentityCache:
+        forked = GenerationIdentityCache()
+        forked.store_clustering_resume(
+            items=items,
+            cursor=resume.cursor,
+            parent=dict(resume.parent),
+            match_confidence=dict(resume.match_confidence),
+            pair_kinds={key: set(value) for key, value in resume.pair_kinds.items()},
+            scored_pairs=list(resume.scored_pairs),
+        )
+        return forked
+
+    sync_pass, sync_clusters, sync_counts = _sync_clusters(
+        matchbook, polymarket, kalshi, cache=_fork()
+    )
+    coop_pass, coop_clusters, coop_counts = await _cooperative_clusters(
+        matchbook, polymarket, kalshi, cache=_fork()
+    )
+    assert coop_pass._resume_cursor == sync_pass._resume_cursor == 41
+    assert coop_counts == sync_counts
+    assert _membership(coop_clusters) == _membership(sync_clusters)
+    assert _graph_diag(coop_pass) == _graph_diag(sync_pass)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_index_keeps_partial_candidates_not_empty_singletons() -> None:
+    matchbook, polymarket, kalshi = _dense_universe(200, unresolved_pm=True)
+    cluster_pass = ClusterPass(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=EventMatcher(),
+        max_event_pairs=10_000_000,
+        defer_candidate_build=True,
+    )
+    task = asyncio.create_task(cluster_pass.load_candidates_cooperative(yield_every=16))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cluster_pass._candidates, "cancel during index dropped generated pairs"
+    assert cluster_pass.index_diagnostics["candidate_pairs_generated"] == len(cluster_pass._candidates)
+
+
+@pytest.mark.asyncio
+async def test_cancel_finalize_does_not_commit_incremental_or_negatives() -> None:
+    from sports_hedge.application.universe_identity_cache import CrossGenerationIdentityCache
+
+    matchbook, polymarket, kalshi = _dense_universe(40, stagger=True)
+    incremental = CrossGenerationIdentityCache()
+    cluster_venue_events(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=EventMatcher(),
+        max_event_pairs=10_000_000,
+        incremental_cache=incremental,
+    )
+    before_events = dict(incremental.events)
+    before_pairs = dict(incremental.pairs)
+    cluster_pass = ClusterPass(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=EventMatcher(),
+        max_event_pairs=10_000_000,
+        incremental_cache=incremental,
+        defer_candidate_build=True,
+    )
+    await cluster_pass.load_candidates_cooperative()
+    for index, (left, right) in enumerate(cluster_pass.pairs()):
+        cluster_pass.consider(left, right)
+        if index >= 8:
+            break
+    cluster_pass.checkpoint(cluster_pass.candidate_pairs_considered)
+    await cluster_pass.finalize_cooperative()
+    assert incremental.events == before_events
+    assert incremental.pairs == before_pairs
+
+
+@pytest.mark.asyncio
+async def test_universe_cancel_after_index_finalizes_once_uses_partial(
+    monkeypatch,
+) -> None:
+    from sports_hedge.application.universe_identity_cache import (
+        get_cross_generation_identity_cache,
+        reset_universe_identity_cache,
+    )
+
+    reset_universe_identity_cache()
+    finalize_calls = {"n": 0}
+    original = ClusterPass.finalize_cooperative
+
+    async def counted(self, *args, **kwargs):
+        finalize_calls["n"] += 1
+        return await original(self, *args, **kwargs)
+
+    hang = asyncio.Event()
+    ready = asyncio.Event()
+    original_load = ClusterPass.load_candidates_cooperative
+
+    async def load_then_hang(self, *args, **kwargs):
+        await original_load(self, *args, **kwargs)
+        ready.set()
+        await hang.wait()
+
+    monkeypatch.setattr(ClusterPass, "finalize_cooperative", counted)
+    monkeypatch.setattr(ClusterPass, "load_candidates_cooperative", load_then_hang)
+
+    universe = SyntheticUniverse(8, latency_s=0)
+    collector, repository = _collector(universe)
+    try:
+        task = asyncio.create_task(
+            _scan(
+                collector,
+                max_event_pairs=8,
+                scan_lane=ScanLane.UNIVERSE.value,
+                universe_generation_id=9,
+            )
+        )
+        await asyncio.wait_for(ready.wait(), timeout=5)
+        task.cancel()
+        report = await task
+        assert report.scan_diagnostics["cancelled"] is True
+        assert finalize_calls["n"] == 1
+        assert report.discovered_fixtures
+        assert get_cross_generation_identity_cache().events == {}
+        assert collector._identity_cache is not None
+        assert collector._identity_cache.generation_id == 9
+    finally:
+        hang.set()
+        repository.close()
+        reset_universe_identity_cache()
+
+
+def test_thresholds_concurrency_and_paper_boundary_unchanged() -> None:
+    from sports_hedge.application.collector import DEFAULT_PROVIDER_CONCURRENCY
+    from sports_hedge.config import Settings
+    from sports_hedge.matching.events import (
+        DEFAULT_EVENT_MATCH_THRESHOLD,
+        PAPER_EVENT_MATCH_THRESHOLD,
+    )
+
+    assert DEFAULT_EVENT_MATCH_THRESHOLD == 0.92
+    assert PAPER_EVENT_MATCH_THRESHOLD == 0.80
+    assert Settings().paper_event_match_threshold == 0.80
+    assert DEFAULT_PROVIDER_CONCURRENCY[VenueName.MATCHBOOK] == 4
+    assert DEFAULT_PROVIDER_CONCURRENCY[VenueName.KALSHI] == 4
+    assert Settings().sports_hedge_mode == "paper"
+    assert Settings().sports_hedge_execution_enabled is False
+    collector_src = inspect.getsource(ReadOnlyCrossVenueCollector)
+    assert "place_order" not in collector_src
+    assert "cancel_order" not in collector_src
+    from sports_hedge.matching.identity_graph import DEFAULT_ASSIGNMENT_MARGIN
+
+    assert DEFAULT_ASSIGNMENT_MARGIN == 0.03
