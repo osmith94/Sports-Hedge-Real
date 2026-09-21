@@ -332,8 +332,9 @@ def test_manual_result_spaces_for_approved_families() -> None:
     spread.line = Decimal("-3.5")
     assert [choice.label for choice in canonical_result_space(spread).choices] == [
         "Newcastle covers -3.5",
-        "Arsenal covers -3.5",
+        "Arsenal covers +3.5",
     ]
+    assert spread.line == Decimal("-3.5")
     nfl_total = _filled_trade(family=MarketFamily.TOTAL_POINTS)
     nfl_total.line = Decimal("47.5")
     assert [choice.label for choice in canonical_result_space(nfl_total).choices] == [
@@ -342,6 +343,57 @@ def test_manual_result_spaces_for_approved_families() -> None:
     ]
     corners = _filled_trade(family=MarketFamily.CORNERS)
     assert canonical_result_space(corners).unsupported_reason == "unsupported_manual_result_family"
+
+
+def test_point_spread_manual_labels_negate_away_side_home_line() -> None:
+    """#429 stores the home signed line; away display is the negated Decimal."""
+
+    extra_legs = [
+        _leg(
+            venue=VenueName.MATCHBOOK,
+            outcome="home",
+            source_event_id="1001",
+            source_market_id="spread",
+        ),
+        _leg(
+            venue=VenueName.MATCHBOOK,
+            outcome="away",
+            source_event_id="1001",
+            source_market_id="spread",
+        ),
+    ]
+    favorite = _filled_trade(family=MarketFamily.POINT_SPREAD, extra_legs=extra_legs)
+    favorite.line = Decimal("-3.5")
+    favorite_space = canonical_result_space(favorite)
+    assert [choice.value for choice in favorite_space.choices] == ["home", "away"]
+    assert [choice.label for choice in favorite_space.choices] == [
+        "Newcastle covers -3.5",
+        "Arsenal covers +3.5",
+    ]
+    assert favorite.line == Decimal("-3.5")
+    home_win = compute_paper_settlement(favorite, winning_outcome="home")
+    away_win = compute_paper_settlement(favorite, winning_outcome="away")
+    assert all(item.won is (item.outcome == "home") for item in home_win.legs)
+    assert all(item.won is (item.outcome == "away") for item in away_win.legs)
+    assert home_win.realised_pnl_gbp == independent_realised_pnl_gbp(favorite, "home")
+    assert away_win.realised_pnl_gbp == independent_realised_pnl_gbp(favorite, "away")
+    assert favorite.line == Decimal("-3.5")
+
+    dog = _filled_trade(family=MarketFamily.POINT_SPREAD, extra_legs=extra_legs)
+    dog.line = Decimal("6.5")
+    dog_space = canonical_result_space(dog)
+    assert [choice.label for choice in dog_space.choices] == [
+        "Newcastle covers +6.5",
+        "Arsenal covers -6.5",
+    ]
+    assert dog.line == Decimal("6.5")
+    dog_home = compute_paper_settlement(dog, winning_outcome="home")
+    dog_away = compute_paper_settlement(dog, winning_outcome="away")
+    assert all(item.won is (item.outcome == "home") for item in dog_home.legs)
+    assert all(item.won is (item.outcome == "away") for item in dog_away.legs)
+    assert dog.line == Decimal("6.5")
+    assert dog_home.realised_pnl_gbp == independent_realised_pnl_gbp(dog, "home")
+    assert dog_away.realised_pnl_gbp == independent_realised_pnl_gbp(dog, "away")
 
 
 def test_back_buy_normalization_is_settlement_correct() -> None:

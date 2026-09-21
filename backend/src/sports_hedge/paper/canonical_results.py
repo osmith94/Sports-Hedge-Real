@@ -103,11 +103,10 @@ def canonical_result_space(trade: PaperTrade) -> CanonicalResultSpace:
         return CanonicalResultSpace(family=family, unsupported_reason=UNSUPPORTED_MANUAL_FAMILY)
     home = (trade.home_team or "Home").strip() or "Home"
     away = (trade.away_team or "Away").strip() or "Away"
-    line_label = format_stored_line(trade.line)
     choices = [
         CanonicalResultChoice(
             value=outcome.value,
-            label=_label_for_outcome(family, outcome, home=home, away=away, line=line_label),
+            label=_label_for_outcome(family, outcome, home=home, away=away, line=trade.line),
         )
         for outcome in outcomes
     ]
@@ -175,13 +174,24 @@ def _outcomes_for_family(family: MarketFamily) -> tuple[CanonicalOutcome, ...]:
     return ()
 
 
+def _signed_line_label(line: Decimal | None) -> str:
+    """Display a signed spread line. Does not mutate the stored canonical home line."""
+
+    text = format_stored_line(line)
+    if text is None or line is None:
+        return "n.a."
+    if line > 0 and not text.startswith("+"):
+        return f"+{text}"
+    return text
+
+
 def _label_for_outcome(
     family: MarketFamily,
     outcome: CanonicalOutcome,
     *,
     home: str,
     away: str,
-    line: str | None,
+    line: Decimal | None,
 ) -> str:
     if family is MarketFamily.MATCH_RESULT:
         if outcome is CanonicalOutcome.HOME:
@@ -192,7 +202,7 @@ def _label_for_outcome(
     if family is MarketFamily.BOTH_TEAMS_TO_SCORE:
         return "Yes" if outcome is CanonicalOutcome.YES else "No"
     if family in {MarketFamily.TOTAL_GOALS, MarketFamily.TOTAL_POINTS}:
-        line_text = line or "n.a."
+        line_text = format_stored_line(line) or "n.a."
         if outcome is CanonicalOutcome.OVER:
             return f"Over {line_text}"
         return f"Under {line_text}"
@@ -207,10 +217,12 @@ def _label_for_outcome(
             return f"{home} win"
         return f"{away} win"
     if family is MarketFamily.POINT_SPREAD:
-        line_text = line or "n.a."
+        # Stored canonical line is the home signed line (#429). Away display
+        # negates that Decimal for the operator label only.
         if outcome is CanonicalOutcome.HOME:
-            return f"{home} covers {line_text}"
-        return f"{away} covers {line_text}"
+            return f"{home} covers {_signed_line_label(line)}"
+        away_line = None if line is None else -line
+        return f"{away} covers {_signed_line_label(away_line)}"
     return outcome.value
 
 
