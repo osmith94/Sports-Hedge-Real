@@ -30,6 +30,7 @@ from sports_hedge.arbitrage.watchlist.models import (
     PaperFillAttempt,
     PaperFillAttemptStatus,
     WatchObservation,
+    canonical_event_id_from_hot_opportunity_id,
     format_hot_promotion_detail,
     hot_promotion_lifecycle_event_id,
     hot_promotion_opportunity_id,
@@ -291,6 +292,7 @@ class WatchlistService:
                 current_net_edge=updated.current_net_edge,
                 distance_to_trigger_pp=updated.distance_to_trigger_pp,
                 detail=event_detail,
+                attempt_id=attempt.attempt_id,
                 **lifecycle_identity_from_opportunity(updated),
             )
         )
@@ -419,6 +421,7 @@ class WatchlistService:
                     current_net_edge=updated.current_net_edge,
                     distance_to_trigger_pp=updated.distance_to_trigger_pp,
                     detail=event_detail,
+                    attempt_id=None if attempt is None else attempt.attempt_id,
                     **lifecycle_identity_from_opportunity(updated),
                 )
             )
@@ -557,6 +560,7 @@ class WatchlistService:
                     current_net_edge=current.current_net_edge,
                     distance_to_trigger_pp=current.distance_to_trigger_pp,
                     detail=event_detail,
+                    attempt_id=attempt_id,
                     **lifecycle_identity_from_opportunity(current),
                 )
             )
@@ -712,18 +716,26 @@ class WatchlistService:
         *,
         limit: int = 100,
         opportunity_id: str | None = None,
+        canonical_event_id: str | None = None,
         since=None,
         operator_signal: bool = False,
         event_types: Sequence[LifecycleEventType] | None = None,
     ) -> list[OpportunityLifecycleEvent]:
+        """Persisted lifecycle. HOT opportunity ids also join the same canonical event."""
+
+        resolved_canonical = canonical_event_id
+        if resolved_canonical is None and opportunity_id is not None:
+            resolved_canonical = canonical_event_id_from_hot_opportunity_id(opportunity_id)
+        identity_query = opportunity_id is not None or resolved_canonical is not None
         events = self.repository.list_events(
-            limit=limit if opportunity_id else limit * 2,
+            limit=limit if identity_query else limit * 2,
             opportunity_id=opportunity_id,
+            canonical_event_id=resolved_canonical,
             since=since,
             event_types=None if operator_signal else event_types,
             operator_signal=operator_signal,
         )
-        if opportunity_id is not None:
+        if identity_query:
             return events
         demo_ids = {
             item.opportunity_id

@@ -11,7 +11,7 @@ import {
   noFillHistorySummary,
   sortLifecycleChronological,
 } from "./opportunity-history-display";
-import { activityHistoryPath, lifecycleEventTitle } from "./watchlist";
+import { activityHistoryPath, attemptIdFromLifecycleEvent, lifecycleEventTitle } from "./watchlist";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = join(here, "..");
@@ -39,13 +39,20 @@ describe("per-opportunity activity history", () => {
   it("uses the exact opportunity ID in the History path", () => {
     assert.equal(activityHistoryPath("watch:mkt-1"), "/activity/watch%3Amkt-1");
     const feed = readFileSync(join(frontendRoot, "components/activity-feed.tsx"), "utf8");
-    assert.match(feed, /activityHistoryPath\(item\.opportunityId\)/);
+    assert.match(feed, /activityHistoryPath\(item\.opportunityId, item\.canonicalEventId\)/);
+    assert.match(feed, /data-history-canonical-event-id/);
     assert.match(feed, /data-history-opportunity-id=\{item\.opportunityId\}/);
     const page = readFileSync(
       join(frontendRoot, "app/activity/[opportunityId]/page.tsx"),
       "utf8",
     );
-    assert.match(page, /opportunity_id=\$\{encodeURIComponent\(opportunityId\)\}/);
+    assert.match(page, /canonical_event_id=\$\{encodeURIComponent\(canonicalEventId\)\}/);
+    assert.match(page, /canonicalEventIdFromHotOpportunityId/);
+    assert.match(page, /data-canonical-event-id/);
+    assert.match(page, /data-canonical-market-id/);
+    assert.match(page, /data-attempt-id/);
+    assert.match(page, /attemptIdFromLifecycleEvent/);
+    assert.match(page, /noFillHistorySummary\(chronological, opportunityId\)/);
     assert.doesNotMatch(page, /operator_signal/);
   });
 
@@ -146,6 +153,146 @@ describe("per-opportunity activity history", () => {
           capture_eligible: true,
         }),
       ]),
+      null,
+    );
+  });
+
+  it("scopes no-fill summary to the latest paper_eligible episode", () => {
+    const eligible1 = event({
+      event_id: "eligible-1",
+      event_type: "paper_eligible",
+      occurred_at: "2026-09-20T13:00:01Z",
+    });
+    const rejected1 = event({
+      event_id: "watch:mkt-1:paper_fill_rejected:attempt-old",
+      event_type: "paper_fill_rejected",
+      occurred_at: "2026-09-20T13:00:02Z",
+      status: "REJECTED",
+      detail: "opening_leg_failed:kalshi",
+      attempt_id: "attempt-old",
+    });
+    const lost1 = event({
+      event_id: "lost-1",
+      event_type: "trigger_lost_before_fill",
+      occurred_at: "2026-09-20T13:00:03Z",
+      status: "WATCHING",
+    });
+    const eligible2 = event({
+      event_id: "eligible-2",
+      event_type: "paper_eligible",
+      occurred_at: "2026-09-20T13:00:10Z",
+    });
+    const filled1 = event({
+      event_id: "watch:mkt-1:paper_fill_complete:attempt-old",
+      event_type: "paper_fill_complete",
+      occurred_at: "2026-09-20T13:00:02Z",
+      status: "FILLED",
+      attempt_id: "attempt-old",
+    });
+    assert.equal(
+      noFillHistorySummary([eligible1, rejected1, lost1, eligible2], "watch:mkt-1"),
+      NO_LATER_FILL_REJECTION_RECORDED,
+    );
+    assert.equal(
+      noFillHistorySummary([eligible1, filled1, eligible2], "watch:mkt-1"),
+      NO_LATER_FILL_REJECTION_RECORDED,
+    );
+    assert.equal(
+      noFillHistorySummary(
+        [
+          eligible1,
+          rejected1,
+          eligible2,
+          event({
+            event_id: "lost-2",
+            event_type: "trigger_lost_before_fill",
+            occurred_at: "2026-09-20T13:00:12Z",
+            status: "WATCHING",
+          }),
+        ],
+        "watch:mkt-1",
+      ),
+      TRIGGER_LOST_WITHOUT_FILL_ATTEMPT,
+    );
+    assert.equal(noFillHistorySummary([eligible1, filled1], "watch:mkt-1"), null);
+    assert.equal(
+      noFillHistorySummary(
+        [
+          eligible1,
+          rejected1,
+          event({
+            event_id: "eligible-other",
+            opportunity_id: "watch:mkt-other",
+            event_type: "paper_eligible",
+            occurred_at: "2026-09-20T13:00:20Z",
+            canonical_market_id: "mkt-other",
+          }),
+        ],
+        "watch:mkt-1",
+      ),
+      "opening_leg_failed:kalshi",
+    );
+  });
+
+  it("orders same-timestamp rows by append_seq instead of event_id", () => {
+    const chronological = sortLifecycleChronological([
+      event({
+        event_id: "zzz-last-lexically",
+        event_type: "paper_eligible",
+        occurred_at: "2026-09-20T13:00:00Z",
+        append_seq: 3,
+      }),
+      event({
+        event_id: "aaa-first-lexically",
+        event_type: "trigger_crossed",
+        occurred_at: "2026-09-20T13:00:00Z",
+        append_seq: 2,
+      }),
+      event({
+        event_id: "mmm-mid-lexically",
+        event_type: "candidate_first_seen",
+        occurred_at: "2026-09-20T13:00:00Z",
+        append_seq: 1,
+      }),
+    ]);
+    assert.deepEqual(
+      chronological.map((item) => item.event_type),
+      ["candidate_first_seen", "trigger_crossed", "paper_eligible"],
+    );
+  });
+
+  it("exposes attempt_id from the durable fill event identity", () => {
+    assert.equal(
+      attemptIdFromLifecycleEvent(
+        event({
+          event_id: "watch:mkt-1:paper_fill_attempted:attempt-9",
+          event_type: "paper_fill_attempted",
+          occurred_at: "2026-09-20T13:00:02Z",
+          status: "PAPER_FILLING",
+        }),
+      ),
+      "attempt-9",
+    );
+    assert.equal(
+      attemptIdFromLifecycleEvent(
+        event({
+          event_id: "watch:mkt-1:paper_fill_complete:attempt-9",
+          event_type: "paper_fill_complete",
+          occurred_at: "2026-09-20T13:00:03Z",
+          status: "FILLED",
+          attempt_id: "attempt-9",
+        }),
+      ),
+      "attempt-9",
+    );
+    assert.equal(
+      attemptIdFromLifecycleEvent(
+        event({
+          event_id: "uuid-eligible",
+          event_type: "paper_eligible",
+          occurred_at: "2026-09-20T13:00:01Z",
+        }),
+      ),
       null,
     );
   });

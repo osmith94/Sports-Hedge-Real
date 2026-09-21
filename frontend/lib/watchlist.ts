@@ -189,8 +189,34 @@ export function lifecycleEventTitle(eventType: string): string {
   return ACTIVITY_TITLES[eventType as WatchlistLifecycleEventType] ?? eventType.replaceAll("_", " ");
 }
 
-export function activityHistoryPath(opportunityId: string): string {
-  return `/activity/${encodeURIComponent(opportunityId)}`;
+export function canonicalEventIdFromHotOpportunityId(opportunityId: string): string | null {
+  return opportunityId.startsWith("hot:") ? opportunityId.slice(4) || null : null;
+}
+
+export function activityHistoryPath(
+  opportunityId: string,
+  canonicalEventId?: string | null,
+): string {
+  const path = `/activity/${encodeURIComponent(opportunityId)}`;
+  const canonical = canonicalEventId?.trim() || canonicalEventIdFromHotOpportunityId(opportunityId);
+  if (!canonical) return path;
+  return `${path}?canonical_event_id=${encodeURIComponent(canonical)}`;
+}
+
+const PAPER_FILL_EVENT_TYPES = new Set([
+  "paper_fill_attempted",
+  "paper_fill_partial",
+  "paper_fill_complete",
+  "paper_fill_rejected",
+]);
+
+export function attemptIdFromLifecycleEvent(event: OpportunityLifecycleEvent): string | null {
+  const stored = event.attempt_id?.trim();
+  if (stored) return stored;
+  if (!PAPER_FILL_EVENT_TYPES.has(event.event_type)) return null;
+  const prefix = `${event.opportunity_id}:${event.event_type}:`;
+  if (!event.event_id.startsWith(prefix)) return null;
+  return event.event_id.slice(prefix.length).trim() || null;
 }
 
 export function activityFromWatchlist(events: OpportunityLifecycleEvent[]): ActivityEvent[] {
@@ -210,6 +236,9 @@ export function activityFromWatchlist(events: OpportunityLifecycleEvent[]): Acti
         item.event_type === "trigger_lost_before_fill" ? item.event_id : null,
       fixtureLabel: item.fixture_label ?? null,
       marketFamily: item.market_family ?? null,
+      canonicalEventId: item.canonical_event_id ?? null,
+      canonicalMarketId: item.canonical_market_id ?? null,
+      attemptId: attemptIdFromLifecycleEvent(item),
     };
   });
 }

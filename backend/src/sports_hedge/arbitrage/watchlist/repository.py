@@ -21,6 +21,7 @@ from sports_hedge.arbitrage.watchlist.models import (
     PaperFillAttempt,
     PaperFillAttemptStatus,
     WatchLeg,
+    attempt_id_from_lifecycle_event,
 )
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import VenueName
@@ -218,12 +219,19 @@ class SqliteWatchlistRepository:
             "canonical_event_id": "TEXT",
             "canonical_market_id": "TEXT",
             "capture_eligible": "INTEGER",
+            "attempt_id": "TEXT",
         }
         for name, ddl in event_extras.items():
             if name not in event_columns:
                 self._connection.execute(
                     f"ALTER TABLE watchlist_lifecycle_events ADD COLUMN {name} {ddl}"
                 )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_watchlist_events_canonical_event
+                ON watchlist_lifecycle_events(canonical_event_id, occurred_at)
+            """
+        )
         self._commit()
 
     def get(self, opportunity_id: str) -> NearOpportunity | None:
@@ -395,8 +403,8 @@ class SqliteWatchlistRepository:
                     event_id, opportunity_id, occurred_at, event_type, status,
                     current_net_edge, distance_to_trigger_pp, detail,
                     fixture_label, market_family, canonical_event_id,
-                    canonical_market_id, capture_eligible
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    canonical_market_id, capture_eligible, attempt_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
@@ -412,6 +420,7 @@ class SqliteWatchlistRepository:
                     event.canonical_event_id,
                     event.canonical_market_id,
                     None if event.capture_eligible is None else int(event.capture_eligible),
+                    event.attempt_id,
                 ),
             )
             self._commit()
@@ -470,6 +479,7 @@ class SqliteWatchlistRepository:
         *,
         limit: int = 100,
         opportunity_id: str | None = None,
+        canonical_event_id: str | None = None,
         since: datetime | None = None,
         event_types: Collection[LifecycleEventType] | None = None,
         operator_signal: bool = False,
@@ -478,9 +488,15 @@ class SqliteWatchlistRepository:
             raise ValueError("limit must be positive")
         clauses: list[str] = []
         parameters: list[Any] = []
-        if opportunity_id is not None:
+        if opportunity_id is not None and canonical_event_id is not None:
+            clauses.append("(opportunity_id = ? OR canonical_event_id = ?)")
+            parameters.extend([opportunity_id, canonical_event_id])
+        elif opportunity_id is not None:
             clauses.append("opportunity_id = ?")
             parameters.append(opportunity_id)
+        elif canonical_event_id is not None:
+            clauses.append("canonical_event_id = ?")
+            parameters.append(canonical_event_id)
         if since is not None:
             clauses.append("occurred_at >= ?")
             parameters.append(since.isoformat())
@@ -504,8 +520,10 @@ class SqliteWatchlistRepository:
         parameters.append(limit)
         with self.exclusive():
             rows = self._connection.execute(
-                f"SELECT * FROM watchlist_lifecycle_events{where} "  # noqa: S608
-                "ORDER BY occurred_at DESC, event_id DESC LIMIT ?",
+                f"SELECT watchlist_lifecycle_events.*, "  # noqa: S608
+                "watchlist_lifecycle_events.rowid AS append_seq "
+                f"FROM watchlist_lifecycle_events{where} "
+                "ORDER BY occurred_at DESC, append_seq DESC LIMIT ?",
                 parameters,
             ).fetchall()
             return [_event_from_row(row) for row in rows]
@@ -652,11 +670,14 @@ def _paper_fill_attempt_from_row(row: sqlite3.Row) -> PaperFillAttempt:
 
 
 def _event_from_row(row: sqlite3.Row) -> OpportunityLifecycleEvent:
+    event_type = LifecycleEventType(row["event_type"])
+    stored_attempt_id = _row_get(row, "attempt_id")
+    append_seq = _row_get(row, "append_seq")
     return OpportunityLifecycleEvent(
         event_id=row["event_id"],
         opportunity_id=row["opportunity_id"],
         occurred_at=datetime.fromisoformat(row["occurred_at"]),
-        event_type=LifecycleEventType(row["event_type"]),
+        event_type=event_type,
         status=OpportunityStatus(row["status"]),
         current_net_edge=_decimal(row["current_net_edge"]),
         distance_to_trigger_pp=_decimal(row["distance_to_trigger_pp"]),
@@ -666,6 +687,13 @@ def _event_from_row(row: sqlite3.Row) -> OpportunityLifecycleEvent:
         canonical_event_id=_row_get(row, "canonical_event_id"),
         canonical_market_id=_row_get(row, "canonical_market_id"),
         capture_eligible=_optional_bool(_row_get(row, "capture_eligible")),
+        attempt_id=attempt_id_from_lifecycle_event(
+            opportunity_id=row["opportunity_id"],
+            event_type=event_type,
+            event_id=row["event_id"],
+            stored_attempt_id=None if stored_attempt_id in (None, "") else str(stored_attempt_id),
+        ),
+        append_seq=None if append_seq is None else int(append_seq),
     )
 
 

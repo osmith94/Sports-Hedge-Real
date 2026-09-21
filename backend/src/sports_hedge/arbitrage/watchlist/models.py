@@ -261,6 +261,8 @@ class OpportunityLifecycleEvent(BaseModel):
     canonical_event_id: str | None = None
     canonical_market_id: str | None = None
     capture_eligible: bool | None = None
+    attempt_id: str | None = None
+    append_seq: int | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> OpportunityLifecycleEvent:
@@ -309,6 +311,16 @@ def lifecycle_identity_from_opportunity(
     }
 
 
+PAPER_FILL_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        LifecycleEventType.PAPER_FILL_ATTEMPTED,
+        LifecycleEventType.PAPER_FILL_PARTIAL,
+        LifecycleEventType.PAPER_FILL_COMPLETE,
+        LifecycleEventType.PAPER_FILL_REJECTED,
+    }
+)
+
+
 def paper_fill_lifecycle_event_id(
     opportunity_id: str,
     event_type: LifecycleEventType,
@@ -319,6 +331,36 @@ def paper_fill_lifecycle_event_id(
     if attempt_id:
         return f"{opportunity_id}:{event_type.value}:{attempt_id}"
     return f"{opportunity_id}:{event_type.value}"
+
+
+def attempt_id_from_lifecycle_event(
+    *,
+    opportunity_id: str,
+    event_type: LifecycleEventType,
+    event_id: str,
+    stored_attempt_id: str | None = None,
+) -> str | None:
+    """Durable attempt identity. Prefer the stored column, else the stable event_id."""
+
+    if stored_attempt_id:
+        return stored_attempt_id
+    if event_type not in PAPER_FILL_LIFECYCLE_EVENT_TYPES:
+        return None
+    prefix = f"{opportunity_id}:{event_type.value}:"
+    if event_id.startswith(prefix):
+        rest = event_id[len(prefix) :].strip()
+        return rest or None
+    return None
+
+
+def canonical_event_id_from_hot_opportunity_id(opportunity_id: str) -> str | None:
+    """Inverse of hot_promotion_opportunity_id. Not a guessed market mapping."""
+
+    prefix = "hot:"
+    if opportunity_id.startswith(prefix):
+        rest = opportunity_id[len(prefix) :].strip()
+        return rest or None
+    return None
 
 
 def hot_promotion_opportunity_id(canonical_event_id: str) -> str:

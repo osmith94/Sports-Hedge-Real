@@ -203,6 +203,14 @@ describe("signal-only Activity feed", () => {
     assert.equal(isOperatorActivityEvent("promoted_to_hot"), true);
     assert.equal(isOperatorActivityEvent("paper_eligible"), true);
     assert.equal(activityHistoryPath("watch:mkt-1"), "/activity/watch%3Amkt-1");
+    assert.equal(
+      activityHistoryPath("watch:mkt-1", "evt-signal"),
+      "/activity/watch%3Amkt-1?canonical_event_id=evt-signal",
+    );
+    assert.equal(
+      activityHistoryPath("hot:evt-signal"),
+      "/activity/hot%3Aevt-signal?canonical_event_id=evt-signal",
+    );
   });
 
   it("shows fixture and market at a glance from durable event metadata", () => {

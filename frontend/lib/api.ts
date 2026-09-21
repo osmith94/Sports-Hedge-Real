@@ -1223,6 +1223,8 @@ export type OpportunityLifecycleEvent = {
   canonical_event_id?: string | null;
   canonical_market_id?: string | null;
   capture_eligible?: boolean | null;
+  attempt_id?: string | null;
+  append_seq?: number | null;
 };
 
 export async function runPaperCollection(

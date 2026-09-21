@@ -17,7 +17,10 @@ from sports_hedge.api.watchlist import get_watchlist_service
 from sports_hedge.arbitrage.watchlist.models import (
     OPERATOR_ACTIVITY_EVENT_TYPES,
     LifecycleEventType,
+    OpportunityLifecycleEvent,
     OpportunityStatus,
+    attempt_id_from_lifecycle_event,
+    canonical_event_id_from_hot_opportunity_id,
 )
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import (
@@ -220,3 +223,214 @@ def test_capture_eligibility_and_observe_path_are_unchanged() -> None:
     assert "capture_eligible_triggered" in append_src
     assert "_entered_capture_eligible_triggered_episode" in append_src
     assert "PAPER_ELIGIBLE" not in classify_src
+
+
+def test_same_timestamp_first_triggered_eligible_history_is_append_order() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    first = service.observe(_observation(edge=EDGE_120, eligible=True, observed_at=OBSERVED))
+    events = service.activity(opportunity_id=first.opportunity_id)
+    same_ts = [event for event in events if event.occurred_at == OBSERVED]
+    assert [event.event_type for event in same_ts[:3]] == [
+        LifecycleEventType.PAPER_ELIGIBLE,
+        LifecycleEventType.TRIGGER_CROSSED,
+        LifecycleEventType.CANDIDATE_FIRST_SEEN,
+    ]
+    seqs = [event.append_seq for event in same_ts[:3]]
+    assert all(seq is not None for seq in seqs)
+    assert seqs == sorted(seqs, reverse=True)
+    chronological = list(reversed(same_ts[:3]))
+    assert [event.event_type for event in chronological] == [
+        LifecycleEventType.CANDIDATE_FIRST_SEEN,
+        LifecycleEventType.TRIGGER_CROSSED,
+        LifecycleEventType.PAPER_ELIGIBLE,
+    ]
+
+
+def test_list_events_same_timestamp_uses_append_seq_not_event_id() -> None:
+    repository = SqliteWatchlistRepository()
+    try:
+        for event_id, event_type in (
+            ("zzz-first-appended", LifecycleEventType.CANDIDATE_FIRST_SEEN),
+            ("mmm-second-appended", LifecycleEventType.TRIGGER_CROSSED),
+            ("aaa-third-appended", LifecycleEventType.PAPER_ELIGIBLE),
+        ):
+            repository.append_event(
+                OpportunityLifecycleEvent(
+                    event_id=event_id,
+                    opportunity_id="watch:mkt-1",
+                    occurred_at=OBSERVED,
+                    event_type=event_type,
+                    status=OpportunityStatus.TRIGGERED,
+                    canonical_event_id="evt-signal",
+                    canonical_market_id="mkt-1",
+                    capture_eligible=True,
+                )
+            )
+        events = repository.list_events(opportunity_id="watch:mkt-1")
+        assert [event.event_id for event in events] == [
+            "aaa-third-appended",
+            "mmm-second-appended",
+            "zzz-first-appended",
+        ]
+        lexical_desc = sorted((event.event_id for event in events), reverse=True)
+        assert lexical_desc == [
+            "zzz-first-appended",
+            "mmm-second-appended",
+            "aaa-third-appended",
+        ]
+        assert [event.event_id for event in events] != lexical_desc
+        assert [event.append_seq for event in events] == sorted(
+            (event.append_seq for event in events), reverse=True
+        )
+    finally:
+        repository.close()
+
+
+def test_hot_promotion_history_joins_later_market_paper_lifecycle() -> None:
+    repository = SqliteWatchlistRepository()
+    service = WatchlistService(repository, clock=lambda: OBSERVED)
+    app.dependency_overrides[get_watchlist_service] = lambda: service
+    client = TestClient(app)
+    try:
+        hot = service.record_hot_promotion(
+            canonical_event_id="evt-signal",
+            occurred_at=OBSERVED,
+            episode=1,
+            fixture_label="Brentford v Chelsea",
+            market_family="both_teams_to_score",
+            pricing_lane="background",
+            current_net_edge=EDGE_080,
+            distance_to_trigger_pp=Decimal("0.2000"),
+        )
+        market = service.observe(
+            _observation(edge=EDGE_120, eligible=True, observed_at=OBSERVED + timedelta(seconds=2))
+        )
+        service.record_paper_fill(
+            market.opportunity_id,
+            stage=OpportunityStatus.PAPER_FILLING,
+            occurred_at=OBSERVED + timedelta(seconds=3),
+        )
+        service.record_paper_fill_rejection(
+            market.opportunity_id,
+            occurred_at=OBSERVED + timedelta(seconds=4),
+            detail="opening_leg_failed:kalshi",
+            reject_triggered=True,
+        )
+        hot_id = hot.opportunity_id
+        assert hot_id == "hot:evt-signal"
+        assert canonical_event_id_from_hot_opportunity_id(hot_id) == "evt-signal"
+        fixture_only = repository.list_events(opportunity_id=hot_id, limit=50)
+        assert {event.event_type for event in fixture_only} == {
+            LifecycleEventType.PROMOTED_TO_HOT
+        }
+        joined = service.activity(opportunity_id=hot_id)
+        types = {event.event_type for event in joined}
+        assert LifecycleEventType.PROMOTED_TO_HOT in types
+        assert LifecycleEventType.PAPER_ELIGIBLE in types
+        assert LifecycleEventType.TRIGGER_CROSSED in types
+        assert LifecycleEventType.PAPER_FILL_ATTEMPTED in types
+        assert LifecycleEventType.PAPER_FILL_REJECTED in types
+        eligible = next(
+            event for event in joined if event.event_type is LifecycleEventType.PAPER_ELIGIBLE
+        )
+        assert eligible.opportunity_id == market.opportunity_id
+        assert eligible.canonical_event_id == "evt-signal"
+        assert eligible.canonical_market_id == "mkt-signal"
+        market_history = service.activity(
+            opportunity_id=market.opportunity_id,
+            canonical_event_id="evt-signal",
+        )
+        market_types = {event.event_type for event in market_history}
+        assert LifecycleEventType.PROMOTED_TO_HOT in market_types
+        assert LifecycleEventType.PAPER_ELIGIBLE in market_types
+        response = client.get(
+            "/paper/watchlist/activity",
+            params={
+                "limit": 50,
+                "opportunity_id": hot_id,
+                "canonical_event_id": "evt-signal",
+            },
+        )
+        assert response.status_code == 200
+        payload_types = {item["event_type"] for item in response.json()}
+        assert "promoted_to_hot" in payload_types
+        assert "paper_eligible" in payload_types
+        assert "paper_fill_rejected" in payload_types
+        rejected = next(
+            item for item in response.json() if item["event_type"] == "paper_fill_rejected"
+        )
+        assert rejected["canonical_event_id"] == "evt-signal"
+        assert rejected["canonical_market_id"] == "mkt-signal"
+        assert rejected["attempt_id"]
+        assert rejected["opportunity_id"] == market.opportunity_id
+    finally:
+        app.dependency_overrides.clear()
+        repository.close()
+
+
+def test_paper_fill_lifecycle_exposes_attempt_id() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    triggered = service.observe(_observation(edge=EDGE_120, eligible=True, observed_at=OBSERVED))
+    service.record_paper_fill(
+        triggered.opportunity_id,
+        stage=OpportunityStatus.PAPER_FILLING,
+        occurred_at=OBSERVED + timedelta(seconds=1),
+        detail="paper_fill_attempted_bound_snapshot",
+    )
+    service.record_paper_fill(
+        triggered.opportunity_id,
+        stage=OpportunityStatus.FILLED,
+        occurred_at=OBSERVED + timedelta(seconds=2),
+        detail="paper_mode_only",
+    )
+    events = service.activity(opportunity_id=triggered.opportunity_id)
+    attempted = next(
+        event for event in events if event.event_type is LifecycleEventType.PAPER_FILL_ATTEMPTED
+    )
+    complete = next(
+        event for event in events if event.event_type is LifecycleEventType.PAPER_FILL_COMPLETE
+    )
+    assert attempted.attempt_id
+    assert complete.attempt_id == attempted.attempt_id
+    assert attempted.event_id == (
+        f"{triggered.opportunity_id}:paper_fill_attempted:{attempted.attempt_id}"
+    )
+    assert complete.event_id == (
+        f"{triggered.opportunity_id}:paper_fill_complete:{complete.attempt_id}"
+    )
+    assert attempted.attempt_id in (attempted.detail or "")
+    parsed = attempt_id_from_lifecycle_event(
+        opportunity_id=attempted.opportunity_id,
+        event_type=attempted.event_type,
+        event_id=attempted.event_id,
+        stored_attempt_id=None,
+    )
+    assert parsed == attempted.attempt_id
+    other = service.observe(
+        _observation(market_id="mkt-reject", edge=EDGE_120, eligible=True, observed_at=OBSERVED)
+    )
+    service.record_paper_fill(
+        other.opportunity_id,
+        stage=OpportunityStatus.PAPER_FILLING,
+        occurred_at=OBSERVED + timedelta(seconds=1),
+    )
+    service.record_paper_fill_rejection(
+        other.opportunity_id,
+        occurred_at=OBSERVED + timedelta(seconds=2),
+        detail="opening_leg_failed:kalshi",
+        reject_triggered=True,
+    )
+    rejected = next(
+        event
+        for event in service.activity(opportunity_id=other.opportunity_id)
+        if event.event_type is LifecycleEventType.PAPER_FILL_REJECTED
+    )
+    assert rejected.attempt_id
+    assert rejected.event_id.endswith(f":{rejected.attempt_id}")
+    assert attempt_id_from_lifecycle_event(
+        opportunity_id="watch:mkt-1",
+        event_type=LifecycleEventType.PAPER_ELIGIBLE,
+        event_id="uuid-eligible",
+        stored_attempt_id=None,
+    ) is None
+    assert canonical_event_id_from_hot_opportunity_id("watch:mkt-1") is None

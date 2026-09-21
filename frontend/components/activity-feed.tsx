@@ -36,6 +36,7 @@ export function ActivityFeed({
             data-missed-trigger-event-id={item.missedTriggerEventId ?? undefined}
             data-fixture-label={item.fixtureLabel ?? undefined}
             data-market-family={item.marketFamily ?? undefined}
+            data-canonical-event-id={item.canonicalEventId ?? undefined}
           >
             <div className="feed-kind">{item.kind.replaceAll("_", " ")}</div>
             <div className="feed-body">
@@ -45,8 +46,9 @@ export function ActivityFeed({
                 {item.opportunityId ? (
                   <Link
                     className="feed-history"
-                    href={activityHistoryPath(item.opportunityId)}
+                    href={activityHistoryPath(item.opportunityId, item.canonicalEventId)}
                     data-history-opportunity-id={item.opportunityId}
+                    data-history-canonical-event-id={item.canonicalEventId ?? undefined}
                   >
                     History
                   </Link>

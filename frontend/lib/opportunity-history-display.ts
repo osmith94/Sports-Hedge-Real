@@ -12,21 +12,38 @@ export function sortLifecycleChronological(
   return [...events].sort((left, right) => {
     const byTime = left.occurred_at.localeCompare(right.occurred_at);
     if (byTime !== 0) return byTime;
-    return left.event_id.localeCompare(right.event_id);
+    const leftSeq = left.append_seq;
+    const rightSeq = right.append_seq;
+    if (leftSeq != null && rightSeq != null && leftSeq !== rightSeq) {
+      return leftSeq - rightSeq;
+    }
+    return 0;
   });
 }
 
 export function noFillHistorySummary(
   events: OpportunityLifecycleEvent[],
+  opportunityId?: string | null,
 ): string | null {
   const chronological = sortLifecycleChronological(events);
-  const paperEligible = chronological.some((event) => event.event_type === "paper_eligible");
-  const tradeEntered = chronological.some((event) => event.event_type === "paper_fill_complete");
-  if (!paperEligible || tradeEntered) {
+  const scoped = opportunityId
+    ? chronological.filter((event) => event.opportunity_id === opportunityId)
+    : chronological;
+  let lastEligible = -1;
+  for (let index = 0; index < scoped.length; index += 1) {
+    if (scoped[index]?.event_type === "paper_eligible") {
+      lastEligible = index;
+    }
+  }
+  if (lastEligible < 0) {
+    return null;
+  }
+  const episode = scoped.slice(lastEligible + 1);
+  if (episode.some((event) => event.event_type === "paper_fill_complete")) {
     return null;
   }
 
-  const rejected = [...chronological]
+  const rejected = [...episode]
     .reverse()
     .find((event) => event.event_type === "paper_fill_rejected");
   if (rejected) {
@@ -34,8 +51,8 @@ export function noFillHistorySummary(
     return detail || "Paper fill was attempted and later rejected.";
   }
 
-  const attempted = chronological.some((event) => event.event_type === "paper_fill_attempted");
-  const triggerLost = chronological.some(
+  const attempted = episode.some((event) => event.event_type === "paper_fill_attempted");
+  const triggerLost = episode.some(
     (event) => event.event_type === "trigger_lost_before_fill",
   );
   if (!attempted && triggerLost) {
