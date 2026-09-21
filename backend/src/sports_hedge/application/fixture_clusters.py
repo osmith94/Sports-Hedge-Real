@@ -429,7 +429,6 @@ class ClusterPass:
             cluster.event_match_confidence = min(confidences) if confidences else None
             clusters.append(cluster)
 
-        clusters.sort(key=universe_cluster_sort_key)
         counts = {
             "matchbook_polymarket": sum(
                 1 for item in clusters if item.matchbook_events and item.polymarket_events

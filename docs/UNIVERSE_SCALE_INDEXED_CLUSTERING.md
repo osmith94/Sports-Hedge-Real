@@ -57,7 +57,8 @@ does not drop a multi-venue cluster.
 
 ## Phase 2 — cross-venue-first market evaluation
 
-UNIVERSE clusters are ordered multi-venue first. Single-venue rows stay in
+UNIVERSE clusters are ordered multi-venue first (`_select_lane_clusters` only;
+HOT and unlaned collection keep discovery order). Single-venue rows stay in
 the inventory/current-state with
 
 `market_evaluation_state = single_venue_no_cross_venue_candidate`

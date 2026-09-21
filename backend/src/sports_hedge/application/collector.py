@@ -6211,7 +6211,8 @@ def _select_lane_clusters(
             decorated.append((hot_sort_key(fixture), cluster))
         decorated.sort(key=lambda item: item[0])
         return [cluster for _key, cluster in decorated]
-    selected.sort(key=universe_cluster_sort_key)
+    if scan_lane == ScanLane.UNIVERSE.value:
+        selected.sort(key=universe_cluster_sort_key)
     # Skip IDs are the source of truth for already-finished work. An empty skip
     # means remaining clusters are still work — do not treat resume_cursor as
     # "already evaluated" or a complete leftover-0 cycle will skip the universe.
