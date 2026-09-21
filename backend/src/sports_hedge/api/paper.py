@@ -411,6 +411,7 @@ def get_paper_journal_holder() -> PaperOperationsService:
         watchlist=get_watchlist_service(get_watchlist_repository()),
         alerts=get_priority_alert_service(),
         ledger=get_paper_ledger(),
+        catalogue=get_approved_market_catalogue_store(),
     )
 
 
