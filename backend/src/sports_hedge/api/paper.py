@@ -497,6 +497,44 @@ def paper_ledger_reconciliation(
     return payload
 
 
+@router.get("/accounting/events")
+def paper_accounting_events(
+    ledger: SqlitePaperLedger = Depends(get_paper_ledger),
+    limit: int = Query(default=200, ge=1, le=2000),
+):
+    """Read-only accounting domain events. Not on the scanner critical path."""
+
+    from sports_hedge.accounting.events import EVENT_SCHEMA_VERSION
+
+    rows = ledger.list_accounting_events(limit=limit)
+    return {
+        "paper_only": True,
+        "places_orders": False,
+        "execution_enabled": False,
+        "data_kind": "paper_accounting_domain_events",
+        "event_schema_version": EVENT_SCHEMA_VERSION,
+        "count": len(rows),
+        "events": [item.model_dump(mode="json") for item in rows],
+        "note": (
+            "PAPER MODE. Immutable operational facts for on-demand accounting "
+            "projections. Not live venue cash."
+        ),
+    }
+
+
+@router.get("/accounting/projections")
+def paper_accounting_projections(
+    ledger: SqlitePaperLedger = Depends(get_paper_ledger),
+    rebuild: bool = Query(default=True),
+):
+    """On-demand statutory GL, balance sheet, reconciliation and management reporting."""
+
+    bundle = ledger.refresh_accounting_projections(rebuild=rebuild)
+    payload = bundle.model_dump(mode="json")
+    payload["ok"] = bundle.reconciliation.ok and not bundle.stale
+    return payload
+
+
 @router.post("/treasury/pools", response_model=PaperTreasurySnapshot)
 def adjust_paper_treasury_pools(
     request: PaperTreasuryAdjustRequest,

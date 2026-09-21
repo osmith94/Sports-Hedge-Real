@@ -107,6 +107,9 @@ class SqlitePaperJournal(SerializedLedgerBound):
             raise DuplicateJournalError(
                 f"duplicate journal {entry.source}:{entry.source_id}"
             ) from exc
+        emitter = getattr(self._ledger, "accounting_emitter", None)
+        if emitter is not None:
+            emitter.emit_journal(posted)
         return posted
 
     def get(self, source: str, source_id: str) -> PaperJournalEntry | None:
@@ -385,6 +388,9 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 if self._same_trade_event(event, trade.trade_id):
                     continue
                 raise
+            emitter = getattr(self._ledger, "accounting_emitter", None)
+            if emitter is not None:
+                emitter.emit_trade_audit(trade, event)
         self._ledger._commit()
         return trade
 
@@ -520,6 +526,13 @@ class SqlitePaperLedger:
 
         self.active_trade_events = SqliteActiveTradeEventJournal(self)
         self.treasury = PaperTreasuryService(self)
+        from sports_hedge.accounting.emission import AccountingEventEmitter
+        from sports_hedge.accounting.event_store import SqliteAccountingEventStore
+
+        self.accounting_events = SqliteAccountingEventStore(
+            self._connection, commit=self._commit
+        )
+        self.accounting_emitter = AccountingEventEmitter(self.accounting_events)
         if auto_seed:
             self.treasury.ensure_demo_session(
                 seed_gbp=seed_gbp,
@@ -560,6 +573,9 @@ class SqlitePaperLedger:
         with self.exclusive():
             self.journal._memory = PaperJournal()
             self.journal._hydrate_memory()
+            events = getattr(self, "accounting_events", None)
+            if events is not None:
+                events.reload()
 
     def reconcile(self):
         """Prove native treasury pools reconstruct from append-only journal facts."""
@@ -568,6 +584,38 @@ class SqlitePaperLedger:
 
         with self.exclusive():
             return reconcile_paper_ledger(self)
+
+    def refresh_accounting_projections(self, *, rebuild: bool = True):
+        """On-demand GL/reporting projections. Never called from the scan path."""
+
+        from sports_hedge.accounting.adapters import hydrate_event_store
+        from sports_hedge.accounting.projections import (
+            AccountingProjectionBundle,
+            AccountingProjectionService,
+            reconcile_projection_to_treasury,
+        )
+
+        with self.exclusive():
+            try:
+                hydrate_event_store(self)
+                service = AccountingProjectionService(self.accounting_events)
+                bundle = service.rebuild() if rebuild else service.refresh()
+                return reconcile_projection_to_treasury(bundle, self)
+            except Exception as exc:  # noqa: BLE001 — reporting failure is a stale read model
+                LOGGER.warning("accounting projection unavailable: %s", exc)
+                return AccountingProjectionBundle.unavailable(str(exc))
+
+    def list_accounting_events(self, *, limit: int = 200):
+        from sports_hedge.accounting.adapters import hydrate_event_store
+
+        with self.exclusive():
+            try:
+                events = hydrate_event_store(self)
+            except Exception:
+                events = self.accounting_events.list_in_order()
+            if limit <= 0:
+                return events
+            return events[-limit:]
 
     def _create_schema(self) -> None:
         self._connection.executescript(
@@ -742,6 +790,7 @@ class SqlitePaperLedger:
         )
 
         ensure_active_trade_event_schema(self._connection)
+        self._ensure_accounting_event_tables()
 
     def _ensure_risk_snapshot_columns(self) -> None:
         trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
@@ -899,6 +948,12 @@ class SqlitePaperLedger:
         for name, spec in additions.items():
             if name not in columns:
                 self._connection.execute(f"ALTER TABLE paper_treasury_pools ADD COLUMN {name} {spec}")
+        self._connection.commit()
+
+    def _ensure_accounting_event_tables(self) -> None:
+        from sports_hedge.accounting.event_store import ACCOUNTING_EVENTS_TABLE_SQL
+
+        self._connection.executescript(ACCOUNTING_EVENTS_TABLE_SQL)
         self._connection.commit()
 
     def close(self) -> None:

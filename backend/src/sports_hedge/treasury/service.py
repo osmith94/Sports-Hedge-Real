@@ -1273,6 +1273,17 @@ class PaperTreasuryService(SerializedLedgerBound):
             )
         except Exception as exc:
             raise PaperTreasuryError(f"duplicate_treasury_event:{event.source}:{event.source_id}") from exc
+        emitter = getattr(self._ledger, "accounting_emitter", None)
+        if emitter is not None:
+            journal = None
+            if event.journal_id:
+                for entry in self._ledger.journal.list_entries():
+                    if entry.journal_id == event.journal_id:
+                        journal = entry
+                        break
+            if journal is None:
+                journal = self._ledger.journal.get(event.source, event.source_id)
+            emitter.emit_treasury(event, journal=journal)
 
 
 def _pool_id(session_id: str, venue: VenueName, currency: str) -> str:
