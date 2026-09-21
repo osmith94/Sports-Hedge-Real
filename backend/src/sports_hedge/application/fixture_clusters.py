@@ -8,6 +8,14 @@ from typing import Any
 
 from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.events import EventMatcher, target_competition_code
+from sports_hedge.matching.identity_graph import (
+    IdentityAssignmentProvenance,
+    ScoredIdentityPair,
+    assign_identity_components,
+    is_hard_identity_veto,
+    node_sort_key,
+    pair_kind,
+)
 from sports_hedge.matching.learned_rules import squad_category_fingerprint
 from sports_hedge.normalization.identity import (
     canonical_matched_event_id,
@@ -35,9 +43,11 @@ class FixtureCluster:
     matchbook_events: list[VenueEvent] = field(default_factory=list)
     polymarket_events: list[VenueEvent] = field(default_factory=list)
     kalshi_events: list[VenueEvent] = field(default_factory=list)
+    other_venue_events: dict[VenueName, list[VenueEvent]] = field(default_factory=dict)
     pair_kinds: set[str] = field(default_factory=set)
     event_match_confidence: float | None = None
     event_match_threshold: float | None = None
+    identity_provenance: IdentityAssignmentProvenance | None = None
 
     @property
     def matchbook(self) -> VenueEvent | None:
@@ -60,6 +70,9 @@ class FixtureCluster:
             present.append(VenueName.POLYMARKET)
         if self.kalshi_events:
             present.append(VenueName.KALSHI)
+        for venue in sorted(self.other_venue_events, key=lambda item: item.value):
+            if self.other_venue_events[venue]:
+                present.append(venue)
         return present
 
     @property
@@ -71,16 +84,15 @@ class FixtureCluster:
         for item in (self.matchbook, self.polymarket, self.kalshi):
             if item is not None:
                 return item
+        for venue in sorted(self.other_venue_events, key=lambda item: item.value):
+            events = self.other_venue_events.get(venue) or []
+            if events:
+                return events[0]
         raise ValueError("empty fixture cluster")
 
     def event_for(self, venue: VenueName) -> VenueEvent | None:
-        if venue is VenueName.MATCHBOOK:
-            return self.matchbook
-        if venue is VenueName.POLYMARKET:
-            return self.polymarket
-        if venue is VenueName.KALSHI:
-            return self.kalshi
-        return None
+        events = self.events_for(venue)
+        return events[0] if events else None
 
     def events_for(self, venue: VenueName) -> list[VenueEvent]:
         if venue is VenueName.MATCHBOOK:
@@ -89,7 +101,7 @@ class FixtureCluster:
             return list(self.polymarket_events)
         if venue is VenueName.KALSHI:
             return list(self.kalshi_events)
-        return []
+        return list(self.other_venue_events.get(venue, []))
 
 
 def _key(venue: VenueName, source_event_id: str) -> tuple[VenueName, str]:
@@ -98,16 +110,6 @@ def _key(venue: VenueName, source_event_id: str) -> tuple[VenueName, str]:
 
 def _sort_events(items: list[VenueEvent]) -> list[VenueEvent]:
     return sorted(items, key=lambda item: item.source_event_id)
-
-
-_PAIR_KIND = {
-    (VenueName.MATCHBOOK, VenueName.POLYMARKET): "matchbook_polymarket",
-    (VenueName.POLYMARKET, VenueName.MATCHBOOK): "matchbook_polymarket",
-    (VenueName.MATCHBOOK, VenueName.KALSHI): "matchbook_kalshi",
-    (VenueName.KALSHI, VenueName.MATCHBOOK): "matchbook_kalshi",
-    (VenueName.POLYMARKET, VenueName.KALSHI): "polymarket_kalshi",
-    (VenueName.KALSHI, VenueName.POLYMARKET): "polymarket_kalshi",
-}
 
 
 def naive_pair_space(item_count: int) -> int:
@@ -275,14 +277,17 @@ class ClusterPass:
         matcher: EventMatcher,
         max_event_pairs: int,
         identity_cache: Any | None = None,
+        extra: list[VenueEvent] | None = None,
     ) -> None:
         if max_event_pairs <= 0:
             raise ValueError("max_event_pairs must be positive")
         self.max_event_pairs = max_event_pairs
-        self.items = [*matchbook, *polymarket, *kalshi]
+        self.items = [*matchbook, *polymarket, *kalshi, *(extra or [])]
         self.parent: dict[tuple[VenueName, str], tuple[VenueName, str]] = {}
         self.nodes: dict[tuple[VenueName, str], VenueEvent] = {}
         self.pair_kinds: dict[tuple[VenueName, str], set[str]] = {}
+        self.scored_pairs: list[ScoredIdentityPair] = []
+        self.graph_diagnostics: dict[str, int] = {}
         for item in self.items:
             key = _key(item.venue, item.source_event_id)
             self.nodes[key] = item
@@ -308,6 +313,7 @@ class ClusterPass:
                 self.parent = dict(resume.parent)
                 self.match_confidence = dict(resume.match_confidence)
                 self.pair_kinds = {key: set(value) for key, value in resume.pair_kinds.items()}
+                self.scored_pairs = list(getattr(resume, "scored_pairs", ()) or ())
                 self._resume_cursor = min(resume.cursor, len(self._candidates))
                 self.candidate_pairs_considered = self._resume_cursor
 
@@ -329,6 +335,7 @@ class ClusterPass:
             ),
             "clustering_truncated": bool(truncated),
             "clustering_duration_ms": max(0, int(duration_ms)),
+            **self.graph_diagnostics,
         }
 
     def checkpoint(self, cursor: int) -> None:
@@ -341,19 +348,21 @@ class ClusterPass:
             parent=self.parent,
             match_confidence=self.match_confidence,
             pair_kinds=self.pair_kinds,
+            scored_pairs=list(self.scored_pairs),
         )
 
     def record_generation_negatives(self, clusters: list[FixtureCluster]) -> None:
         cache = self.identity_cache
         if cache is None:
             return
+        venues = {item.venue for item in self.items}
         other_keys_by_venue = {
             venue: frozenset(
                 (item.venue.value, item.source_event_id)
                 for item in self.items
                 if item.venue is not venue
             )
-            for venue in (VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI)
+            for venue in venues
         }
         for cluster in clusters:
             if cluster.venue_count >= 2:
@@ -371,55 +380,109 @@ class ClusterPass:
             key = parent[key]
         return key
 
-    def _union(self, left: VenueEvent, right: VenueEvent) -> None:
-        a = self._find(_key(left.venue, left.source_event_id))
-        b = self._find(_key(right.venue, right.source_event_id))
+    def _union_keys(self, left: tuple[VenueName, str], right: tuple[VenueName, str]) -> None:
+        a = self._find(left)
+        b = self._find(right)
         if a != b:
             self.parent[b] = a
 
     def consider(self, left: VenueEvent, right: VenueEvent) -> None:
+        """Score one indexed candidate. Clustering happens in ``finalize``."""
+
         self.candidate_pairs_considered += 1
+        left_key = _key(left.venue, left.source_event_id)
+        right_key = _key(right.venue, right.source_event_id)
         could_match = self.could_match
         if callable(could_match) and not could_match(left.canonical, right.canonical):
+            self.scored_pairs.append(
+                ScoredIdentityPair.from_endpoints(
+                    left_key,
+                    right_key,
+                    confidence=0.0,
+                    reasons=["prefilter_rejected"],
+                    matched=False,
+                    veto=True,
+                )
+            )
             return
         match = self.bulk_matcher.match(left.canonical, right.canonical)
-        if not match.matched:
-            return
-        for item in (left, right):
-            key = _key(item.venue, item.source_event_id)
-            previous = self.match_confidence.get(key)
-            if previous is None or match.confidence < previous:
-                self.match_confidence[key] = match.confidence
-        if left.venue is right.venue:
-            self._union(left, right)
-            return
-        kind = _PAIR_KIND.get((left.venue, right.venue))
-        if kind is None:
-            self._union(left, right)
-            return
-        self._union(left, right)
-        for item in (left, right):
-            self.pair_kinds.setdefault(_key(item.venue, item.source_event_id), set()).add(kind)
+        veto = is_hard_identity_veto(
+            match.reasons, matched=match.matched, confidence=match.confidence
+        )
+        self.scored_pairs.append(
+            ScoredIdentityPair.from_endpoints(
+                left_key,
+                right_key,
+                confidence=match.confidence,
+                reasons=match.reasons,
+                matched=match.matched,
+                veto=veto,
+            )
+        )
+
+    def _apply_identity_graph(self, threshold: float) -> dict[tuple[VenueName, str], IdentityAssignmentProvenance]:
+        candidate_keys = {
+            frozenset(
+                (
+                    _key(left.venue, left.source_event_id),
+                    _key(right.venue, right.source_event_id),
+                )
+            )
+            for left, right in self._candidates
+        }
+        scored_keys = {pair.undirected_key() for pair in self.scored_pairs}
+        result = assign_identity_components(
+            list(self.nodes.keys()),
+            self.scored_pairs,
+            unscored_candidate_keys=candidate_keys - scored_keys,
+            threshold=threshold,
+        )
+        self.graph_diagnostics = result.diagnostics.as_dict()
+        self.parent = {key: key for key in self.nodes}
+        self.match_confidence = {}
+        self.pair_kinds = {}
+        provenance_by_member: dict[tuple[VenueName, str], IdentityAssignmentProvenance] = {}
+        for assigned in result.clusters:
+            members = sorted(assigned.member_keys, key=node_sort_key)
+            for member in members:
+                provenance_by_member[member] = assigned.provenance
+            for member in members[1:]:
+                self._union_keys(members[0], member)
+            for edge in assigned.provenance.chosen_edges:
+                for key in (edge.left, edge.right):
+                    previous = self.match_confidence.get(key)
+                    if previous is None or edge.confidence < previous:
+                        self.match_confidence[key] = edge.confidence
+                if edge.left[0] is edge.right[0]:
+                    continue
+                kind = pair_kind(edge.left[0], edge.right[0])
+                self.pair_kinds.setdefault(edge.left, set()).add(kind)
+                self.pair_kinds.setdefault(edge.right, set()).add(kind)
+        return provenance_by_member
 
     def finalize(self) -> tuple[list[FixtureCluster], dict[str, int]]:
+        threshold = float(getattr(self.bulk_matcher, "threshold", 0.92))
+        provenance_by_member = self._apply_identity_graph(threshold)
         grouped: dict[tuple[VenueName, str], FixtureCluster] = {}
         for key, item in self.nodes.items():
             root = self._find(key)
             cluster = grouped.setdefault(root, FixtureCluster())
-            if item.venue is VenueName.MATCHBOOK:
-                cluster.matchbook_events.append(item)
-            elif item.venue is VenueName.POLYMARKET:
-                cluster.polymarket_events.append(item)
-            elif item.venue is VenueName.KALSHI:
-                cluster.kalshi_events.append(item)
+            _append_cluster_event(cluster, item)
             cluster.pair_kinds.update(self.pair_kinds.get(key, set()))
+            if cluster.identity_provenance is None:
+                cluster.identity_provenance = provenance_by_member.get(key)
 
-        threshold = float(getattr(self.bulk_matcher, "threshold", 0.92))
         clusters: list[FixtureCluster] = []
         for cluster in grouped.values():
             cluster.matchbook_events = _sort_events(cluster.matchbook_events)
             cluster.polymarket_events = _sort_events(cluster.polymarket_events)
             cluster.kalshi_events = _sort_events(cluster.kalshi_events)
+            cluster.other_venue_events = {
+                venue: _sort_events(events)
+                for venue, events in sorted(
+                    cluster.other_venue_events.items(), key=lambda item: item[0].value
+                )
+            }
             confidences = [
                 self.match_confidence[_key(item.venue, item.source_event_id)]
                 for item in cluster_member_events(cluster)
@@ -443,6 +506,19 @@ class ClusterPass:
         return clusters, counts
 
 
+def _append_cluster_event(cluster: FixtureCluster, item: VenueEvent) -> None:
+    if item.venue is VenueName.MATCHBOOK:
+        cluster.matchbook_events.append(item)
+        return
+    if item.venue is VenueName.POLYMARKET:
+        cluster.polymarket_events.append(item)
+        return
+    if item.venue is VenueName.KALSHI:
+        cluster.kalshi_events.append(item)
+        return
+    cluster.other_venue_events.setdefault(item.venue, []).append(item)
+
+
 def cluster_venue_events(
     *,
     matchbook: list[VenueEvent],
@@ -451,18 +527,19 @@ def cluster_venue_events(
     matcher: EventMatcher,
     max_event_pairs: int,
     identity_cache: Any | None = None,
+    extra: list[VenueEvent] | None = None,
 ) -> tuple[list[FixtureCluster], dict[str, int]]:
     """Cluster independently discovered venue events by canonical fixture identity.
 
-    Pairwise EventMatcher still decides whether two source events are the same
-    fixture. Unlike greedy one-to-one pairing, every matching source event for
-    the same fixture is unioned — including multiple Polymarket or Kalshi
-    events — so a PM↔Kalshi match does not require Matchbook and does not
-    consume a sibling BTTS/totals event as if it were a different fixture.
+    Indexed candidate generation is the fast first stage. EventMatcher hard
+    vetoes and thresholds remain the only pairwise identity evidence. Obvious
+    connected components still union, including same-venue sibling market-family
+    events. Ambiguous components use constrained maximum-weight assignment
+    instead of greedy local pair choice. Contradictory or low-margin components
+    fail closed with provenance rather than forcing a match.
 
-    Candidate generation is an indexed superset of matcher-eligible pairs.
-    ``max_event_pairs`` never drops a multi-venue cluster. Unmatched single-venue
-    leftovers remain visible so unmatched coverage is not silently dropped.
+    The graph is generic over 2+ venues. Matchbook is not required. Unmatched
+    single-venue leftovers remain visible.
     """
 
     cluster_pass = ClusterPass(
@@ -472,6 +549,7 @@ def cluster_venue_events(
         matcher=matcher,
         max_event_pairs=max_event_pairs,
         identity_cache=identity_cache,
+        extra=extra,
     )
     for left, right in cluster_pass.pairs():
         cluster_pass.consider(left, right)
@@ -496,10 +574,16 @@ def cluster_canonical_event_id(cluster: FixtureCluster) -> str:
 
 
 def cluster_member_events(cluster: FixtureCluster) -> list[VenueEvent]:
+    extras = [
+        event
+        for venue in sorted(cluster.other_venue_events, key=lambda item: item.value)
+        for event in cluster.other_venue_events[venue]
+    ]
     return [
         *cluster.matchbook_events,
         *cluster.polymarket_events,
         *cluster.kalshi_events,
+        *extras,
     ]
 
 

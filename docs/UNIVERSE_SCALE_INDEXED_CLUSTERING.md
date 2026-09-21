@@ -23,6 +23,10 @@ Matchbook + Kalshi + Polymarket stay enabled. Provider concurrency is unchanged.
 competition veto, squad-category safety, NFL strict identity, aliases/learned
 mappings, and market-family equivalence are not widened.
 
+Ambiguous connected components are solved by the identity graph in
+`docs/FIXTURE_IDENTITY_GRAPH.md` (#472). Indexed candidate generation stays
+the fast first stage; global assignment is not used for obvious cliques.
+
 ## Phase 1 — indexed candidate generation
 
 `build_indexed_candidates()` replaces N² enumeration with a correctness-preserving

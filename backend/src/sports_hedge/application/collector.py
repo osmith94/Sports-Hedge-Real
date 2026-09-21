@@ -2312,6 +2312,24 @@ class ReadOnlyCrossVenueCollector:
                 clustering_truncated
                 or (clustering_diagnostics or {}).get("clustering_truncated")
             ),
+            "identity_graph_components": int(
+                (clustering_diagnostics or {}).get("identity_graph_components") or 0
+            ),
+            "identity_graph_obvious_components": int(
+                (clustering_diagnostics or {}).get("identity_graph_obvious_components") or 0
+            ),
+            "identity_graph_ambiguous_components": int(
+                (clustering_diagnostics or {}).get("identity_graph_ambiguous_components") or 0
+            ),
+            "identity_graph_contradictory_components": int(
+                (clustering_diagnostics or {}).get("identity_graph_contradictory_components") or 0
+            ),
+            "identity_graph_fail_closed_components": int(
+                (clustering_diagnostics or {}).get("identity_graph_fail_closed_components") or 0
+            ),
+            "identity_graph_global_assignments": int(
+                (clustering_diagnostics or {}).get("identity_graph_global_assignments") or 0
+            ),
             "single_venue_deferred_count": sum(
                 1
                 for item in discovered_fixtures

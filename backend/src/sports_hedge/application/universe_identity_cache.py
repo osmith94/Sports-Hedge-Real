@@ -40,13 +40,14 @@ def event_cache_key(item: Any) -> tuple[str, str]:
 
 @dataclass
 class ClusteringResumeState:
-    """In-memory union-find checkpoint for one generation's clustering pass."""
+    """In-memory clustering checkpoint for one generation's identity pass."""
 
     items_signature: str
     cursor: int
     parent: dict[tuple[VenueName, str], tuple[VenueName, str]]
     match_confidence: dict[tuple[VenueName, str], float]
     pair_kinds: dict[tuple[VenueName, str], set[str]]
+    scored_pairs: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -111,6 +112,7 @@ class GenerationIdentityCache:
         parent: dict[tuple[VenueName, str], tuple[VenueName, str]],
         match_confidence: dict[tuple[VenueName, str], float],
         pair_kinds: dict[tuple[VenueName, str], set[str]],
+        scored_pairs: list[Any] | None = None,
     ) -> None:
         self.clustering_resume = ClusteringResumeState(
             items_signature=self.items_signature(items),
@@ -118,6 +120,7 @@ class GenerationIdentityCache:
             parent=dict(parent),
             match_confidence=dict(match_confidence),
             pair_kinds={key: set(value) for key, value in pair_kinds.items()},
+            scored_pairs=list(scored_pairs or ()),
         )
 
     def take_clustering_resume(self, items: list[Any]) -> ClusteringResumeState | None:
