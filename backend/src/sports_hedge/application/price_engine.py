@@ -721,7 +721,7 @@ class CataloguePriceEngine:
 
         expensive: list[PriceEngineRuntimeItem] = []
         for runtime in due:
-            if runtime.skip_expensive_work:
+            if runtime.skip_expensive_work and len(catalogue_ready_venues(runtime.identity)) >= 2:
                 saved = self._saved_calls_for(runtime)
                 outcome = self._skip_item(
                     runtime,
