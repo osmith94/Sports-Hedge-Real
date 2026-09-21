@@ -17,10 +17,10 @@ from sports_hedge.application.approved_market_catalogue import (
 )
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
+from sports_hedge.lifecycle.paper import decide_active_trade_membership
 from sports_hedge.paper.trades import (
     PaperActiveTradePhase,
     PaperTrade,
-    PaperTradeState,
 )
 
 ACTIVE_TRADE_LANE = "active_trade"
@@ -185,7 +185,7 @@ def active_trade_cadence_seconds(settings: Settings | None = None) -> int:
 def identity_from_open_trade(trade: PaperTrade) -> DerivedPriceEngineItem | None:
     """Exact native IDs already on the OPEN trade. Never rediscovers markets."""
 
-    if trade.state not in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
+    if decide_active_trade_membership(trade.state).accepted is False:
         return None
     matchbook_event = None
     matchbook_market = None

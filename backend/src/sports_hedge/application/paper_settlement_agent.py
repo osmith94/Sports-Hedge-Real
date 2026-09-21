@@ -29,6 +29,7 @@ from sports_hedge.paper.result_resolution import (
     SettlementResolution,
     resolve_paper_trade_settlement,
 )
+from sports_hedge.lifecycle.paper import SETTLEABLE_TRADE_STATES, auto_settle_eligible
 from sports_hedge.paper.trades import (
     PaperSettlementRequest,
     PaperTrade,
@@ -41,7 +42,7 @@ from sports_hedge.venues.matchbook import MatchbookMarketGoneError
 
 LOGGER = logging.getLogger(__name__)
 
-SETTLEABLE_STATES = frozenset({PaperTradeState.OPEN, PaperTradeState.PARTIAL})
+SETTLEABLE_STATES = SETTLEABLE_TRADE_STATES
 
 
 @dataclass
@@ -103,7 +104,7 @@ class PaperSettlementAgent:
         trades = [
             trade
             for trade in self.operations.list_active_trades()
-            if trade.state in SETTLEABLE_STATES
+            if auto_settle_eligible(trade.state)
         ]
         result.examined = len(trades)
         for trade in trades:
@@ -140,6 +141,10 @@ class PaperSettlementAgent:
         now: datetime | None = None,
     ) -> PaperSettlementTradeResult:
         when = now or self.now()
+        if not auto_settle_eligible(trade.state) and trade.state is not PaperTradeState.CLOSED:
+            return PaperSettlementTradeResult(
+                trade_id=trade.trade_id, blocker="illegal_auto_settle_state"
+            )
         if trade.state is PaperTradeState.CLOSED:
             self.operations.record_settlement_reconciliation(
                 trade,

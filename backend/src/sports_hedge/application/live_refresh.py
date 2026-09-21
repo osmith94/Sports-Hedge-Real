@@ -82,6 +82,25 @@ from sports_hedge.application.universe_identity_cache import (
     reset_universe_identity_cache,
 )
 from sports_hedge.application.opportunity_viability import reset_opportunity_viability_cache
+from sports_hedge.lifecycle.decisions import (
+    LifecycleAuditLog,
+    LifecycleDecision,
+    rejected_decision,
+)
+from sports_hedge.lifecycle.universe import (
+    UniverseChunkPhase,
+    UniverseGenerationPhase,
+    chunk_phase,
+    decide_chunk_transition,
+    decide_generation_transition,
+    decide_series_transition,
+    decide_stale_chunk_callback,
+    decide_sweep_transition,
+    generation_phase,
+    map_evaluation_to_sweep_state,
+    map_series_status_to_state,
+    sweep_units_unfinished,
+)
 from sports_hedge.application.provider_access import (
     HEALTH_AUTH_FAILURE,
     HEALTH_DISCOVERY_TIMEOUT,
@@ -552,6 +571,7 @@ class LiveRefreshCoordinator:
         self._universe_stale_callback_count = 0
         self._universe_apply_epoch = 0
         self._universe_cycle_apply_epoch: int | None = None
+        self._universe_lifecycle_audit = LifecycleAuditLog()
         self._universe_checkpoint_store = universe_checkpoint_store
         self._universe_checkpoint_restored = False
         self._universe_checkpoint_dirty = False
@@ -886,6 +906,9 @@ class LiveRefreshCoordinator:
         scope = self.effective_universe_scope()
         _, prior_live_universe_count = self._fixture_state.membership_counts(now)
         self._fixture_state.drop_universe_working_set(now, keep_canonical_ids=keep_ids)
+        # Operator Clear / Clear & update must drop both identity cache scopes.
+        # Generation close keeps cross-generation fingerprints; this path does not.
+        reset_universe_identity_cache()
         with self._state_lock:
             prior_generation_id = self._universe_generation_id or None
             prior_evaluated = self._status_universe_evaluated_count()
@@ -987,6 +1010,20 @@ class LiveRefreshCoordinator:
     ) -> None:
         """Drop active generation/resume state. Does not copy counts into closed summary."""
 
+        previous_generation_phase = generation_phase(
+            generation_id=int(self._universe_generation_id),
+            started=self._universe_generation_started_at is not None,
+            closed_generation_id=int(self._universe_closed_generation_id),
+        )
+        self._audit_universe_lifecycle(
+            decide_generation_transition(
+                previous_generation_phase,
+                UniverseGenerationPhase.IDLE,
+                action="clear",
+                unfinished=True,
+                generation_id=int(self._universe_generation_id or 0),
+            )
+        )
         self._universe_generation_started_at = None
         self._universe_progress_generation_id = None
         self._universe_closed_generation_id = self._universe_generation_id
@@ -1497,6 +1534,11 @@ class LiveRefreshCoordinator:
         reset_opportunity_viability_cache()
         orphans: list[asyncio.Task[Any]] = []
         with self._state_lock:
+            previous_generation_phase = generation_phase(
+                generation_id=int(self._universe_generation_id),
+                started=self._universe_generation_started_at is not None,
+                closed_generation_id=int(self._universe_closed_generation_id),
+            )
             self._last_request = {}
             self._last_report = None
             self._hot_in_progress = False
@@ -1564,6 +1606,15 @@ class LiveRefreshCoordinator:
             self._universe_stale_callback_count = 0
             self._universe_apply_epoch = 0
             self._universe_cycle_apply_epoch = None
+            self._audit_universe_lifecycle(
+                decide_generation_transition(
+                    previous_generation_phase,
+                    UniverseGenerationPhase.IDLE,
+                    action="clear",
+                    unfinished=True,
+                    generation_id=0,
+                )
+            )
             self._universe_checkpoint_dirty = True
             self._universe_checkpoint_unpersisted_fixtures = 0
             self._universe_checkpoint_restored = False
@@ -3102,9 +3153,30 @@ class LiveRefreshCoordinator:
         scanned: datetime,
     ) -> None:
         unit = self._universe_work.get(canonical_id) or SweepWorkUnit(canonical_id=canonical_id)
+        target = map_evaluation_to_sweep_state(state)
         if unit.state == SWEEP_EVALUATED:
+            if target is not None and target != SWEEP_EVALUATED:
+                decision = decide_sweep_transition(
+                    unit.state,
+                    target,
+                    action="apply_result",
+                    generation_id=self._universe_generation_id,
+                )
+                if not decision.accepted:
+                    self._audit_universe_lifecycle(decision)
             self._universe_work[canonical_id] = unit
             return
+        if target is not None:
+            decision = decide_sweep_transition(
+                unit.state,
+                target,
+                action="apply_result",
+                generation_id=self._universe_generation_id,
+            )
+            if not decision.accepted:
+                self._audit_universe_lifecycle(decision)
+                self._universe_work[canonical_id] = unit
+                return
         if unit.state in {
             SWEEP_FINAL_FAILED,
             SWEEP_SKIPPED_UNSUPPORTED,
@@ -3177,6 +3249,18 @@ class LiveRefreshCoordinator:
         retryable_flag = bool(row.get("retryable"))
         reason = str(row.get("reason") or status or "")
         event_count = int(row.get("event_count") or 0)
+        target = map_series_status_to_state(status, retryable=retryable_flag)
+        if target is not None:
+            series_decision = decide_series_transition(
+                unit.state,
+                target,
+                action="apply_result",
+                generation_id=self._universe_generation_id,
+            )
+            if not series_decision.accepted:
+                self._audit_universe_lifecycle(series_decision)
+                self._universe_series_work[key] = unit
+                return
         if key in self._universe_series_applied_this_cycle:
             if status == "ok" and unit.state != SWEEP_OK:
                 unit.state = SWEEP_OK
@@ -3248,13 +3332,46 @@ class LiveRefreshCoordinator:
             retry.setdefault(unit.venue, []).append(unit.series)
         return {key: value for key, value in retry.items() if value}
 
+    def _audit_universe_lifecycle(self, decision: LifecycleDecision) -> LifecycleDecision:
+        return self._universe_lifecycle_audit.append(decision)
+
+    def _generation_phase_unlocked(self) -> str:
+        return generation_phase(
+            generation_id=int(self._universe_generation_id),
+            started=self._universe_generation_started_at is not None,
+            closed_generation_id=int(self._universe_closed_generation_id),
+        )
+
     def _open_universe_chunk_epoch_unlocked(self) -> int:
+        from_phase = chunk_phase(self._universe_active_chunk_epoch)
         self._universe_chunk_seq += 1
         self._universe_active_chunk_epoch = self._universe_chunk_seq
+        self._audit_universe_lifecycle(
+            decide_chunk_transition(
+                from_phase,
+                UniverseChunkPhase.RUNNING,
+                action="open",
+                generation_id=self._universe_generation_id,
+                chunk_epoch=self._universe_active_chunk_epoch,
+                generation_open=True,
+            )
+        )
         return self._universe_chunk_seq
 
     def _invalidate_universe_chunk_epoch_unlocked(self) -> None:
+        from_phase = chunk_phase(self._universe_active_chunk_epoch)
+        previous_epoch = self._universe_active_chunk_epoch
         self._universe_active_chunk_epoch = None
+        if from_phase == UniverseChunkPhase.RUNNING:
+            self._audit_universe_lifecycle(
+                decide_chunk_transition(
+                    from_phase,
+                    UniverseChunkPhase.INACTIVE,
+                    action="invalidate",
+                    generation_id=self._universe_generation_id,
+                    chunk_epoch=previous_epoch,
+                )
+            )
 
     def _universe_cycle_fenced_unlocked(self) -> bool:
         if self._universe_cycle_apply_epoch is None:
@@ -3268,6 +3385,21 @@ class LiveRefreshCoordinator:
         inventory = self._fixture_state.inventory(finished)
         with self._state_lock:
             self._universe_stale_callback_count += 1
+            self._audit_universe_lifecycle(
+                rejected_decision(
+                    from_state=chunk_phase(self._universe_active_chunk_epoch),
+                    to_state=chunk_phase(self._universe_active_chunk_epoch),
+                    action="stale_callback",
+                    machine="universe_chunk",
+                    reason="stale_apply_epoch_callback_quarantined",
+                    generation_id=self._universe_generation_id,
+                    chunk_epoch=self._universe_active_chunk_epoch,
+                    extra={
+                        "apply_epoch": self._universe_apply_epoch,
+                        "cycle_apply_epoch": self._universe_cycle_apply_epoch,
+                    },
+                )
+            )
             LOGGER.info(
                 "quarantined stale UNIVERSE cycle callback apply_epoch=%s cycle_epoch=%s total=%s",
                 self._universe_apply_epoch,
@@ -3299,7 +3431,23 @@ class LiveRefreshCoordinator:
         chunk_epoch: int | None,
         apply_epoch: int | None = None,
     ) -> bool:
+        """Reject callbacks from a superseded Clear & update apply-epoch or stale chunk."""
+
         if apply_epoch is not None and apply_epoch != self._universe_apply_epoch:
+            decision = rejected_decision(
+                from_state=chunk_phase(self._universe_active_chunk_epoch),
+                to_state=chunk_phase(self._universe_active_chunk_epoch),
+                action="stale_callback",
+                machine="universe_chunk",
+                reason="stale_apply_epoch_callback_quarantined",
+                generation_id=self._universe_generation_id,
+                chunk_epoch=chunk_epoch,
+                extra={
+                    "apply_epoch": apply_epoch,
+                    "active_apply_epoch": self._universe_apply_epoch,
+                },
+            )
+            self._audit_universe_lifecycle(decision)
             self._universe_stale_callback_count += 1
             LOGGER.info(
                 "quarantined stale UNIVERSE apply-epoch callback apply=%s active=%s total=%s",
@@ -3308,16 +3456,21 @@ class LiveRefreshCoordinator:
                 self._universe_stale_callback_count,
             )
             return True
-        if chunk_epoch is None:
+        decision = decide_stale_chunk_callback(
+            callback_epoch=chunk_epoch,
+            active_epoch=self._universe_active_chunk_epoch,
+            generation_id=self._universe_generation_id,
+        )
+        if decision.accepted:
             return False
-        if chunk_epoch == self._universe_active_chunk_epoch:
-            return False
+        self._audit_universe_lifecycle(decision)
         self._universe_stale_callback_count += 1
         LOGGER.info(
-            "quarantined stale UNIVERSE chunk callback epoch=%s active=%s total=%s",
+            "quarantined stale UNIVERSE chunk callback epoch=%s active=%s total=%s reason=%s",
             chunk_epoch,
             self._universe_active_chunk_epoch,
             self._universe_stale_callback_count,
+            decision.reason,
         )
         return True
 
@@ -3947,6 +4100,7 @@ class LiveRefreshCoordinator:
     def _ensure_universe_generation(self, started: datetime) -> None:
         if self._universe_generation_started_at is not None:
             return
+        from_phase = self._generation_phase_unlocked()
         scope = self.effective_universe_scope()
         self._universe_generation_id += 1
         self._universe_generation_started_at = started
@@ -3984,6 +4138,14 @@ class LiveRefreshCoordinator:
         self._universe_series_results = {}
         self._universe_series_work = {}
         self._universe_series_applied_this_cycle = set()
+        self._audit_universe_lifecycle(
+            decide_generation_transition(
+                from_phase,
+                UniverseGenerationPhase.OPEN,
+                action="start",
+                generation_id=self._universe_generation_id,
+            )
+        )
         self._mark_universe_checkpoint_dirty_unlocked()
 
     def _charge_successful_universe_work(
@@ -4008,8 +4170,28 @@ class LiveRefreshCoordinator:
             UNIVERSE_COMPLETENESS_DEADLINE_LEFTOVER,
         }:
             complete = False
+        unfinished = (not complete) or sweep_units_unfinished(
+            unit.state for unit in self._universe_work.values()
+        )
+        decision = decide_generation_transition(
+            UniverseGenerationPhase.OPEN,
+            UniverseGenerationPhase.COMPLETE,
+            action="complete",
+            unfinished=unfinished,
+            completeness=completeness,
+            leftover_n=leftover_n,
+            generation_id=self._universe_generation_id,
+        )
         if complete:
-            self._close_universe_generation(finished)
+            if decision.accepted:
+                self._close_universe_generation(finished, lifecycle_action="complete")
+            else:
+                self._audit_universe_lifecycle(decision)
+        elif completeness in {
+            UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE,
+            UNIVERSE_COMPLETENESS_DEADLINE_LEFTOVER,
+        }:
+            self._audit_universe_lifecycle(decision)
         return budget
 
     def _pause_universe_generation(self, finished: datetime) -> None:
@@ -4027,9 +4209,35 @@ class LiveRefreshCoordinator:
         self._universe_budget_paused = False
         self._mark_universe_checkpoint_dirty_unlocked()
 
-    def _close_universe_generation(self, finished: datetime) -> None:
+    def _close_universe_generation(
+        self,
+        finished: datetime,
+        *,
+        lifecycle_action: str = "supersede",
+    ) -> None:
         if self._universe_generation_started_at is None:
             return
+        unfinished = bool(self._universe_work) and sweep_units_unfinished(
+            unit.state for unit in self._universe_work.values()
+        )
+        to_phase = (
+            UniverseGenerationPhase.COMPLETE
+            if lifecycle_action == "complete" and not unfinished
+            else UniverseGenerationPhase.IDLE
+        )
+        action = lifecycle_action if lifecycle_action in {"complete", "clear", "reset"} else "supersede"
+        if action == "complete" and unfinished:
+            action = "supersede"
+            to_phase = UniverseGenerationPhase.IDLE
+        self._audit_universe_lifecycle(
+            decide_generation_transition(
+                UniverseGenerationPhase.OPEN,
+                to_phase,
+                action=action,
+                unfinished=unfinished,
+                generation_id=self._universe_generation_id,
+            )
+        )
         settings = get_settings()
         cooldown = timedelta(seconds=self._effective_universe_cadence_seconds(settings))
         self._next_universe_due = finished + cooldown
@@ -4230,6 +4438,16 @@ class LiveRefreshCoordinator:
                     return
                 self._ensure_universe_generation(started)
                 self._invalidate_universe_chunk_epoch_unlocked()
+                timeout_like = "timeout" in message.casefold() or "cancelled" in message.casefold()
+                self._audit_universe_lifecycle(
+                    decide_generation_transition(
+                        UniverseGenerationPhase.OPEN,
+                        UniverseGenerationPhase.OPEN,
+                        action="timeout" if timeout_like else "provider_degraded",
+                        generation_id=self._universe_generation_id,
+                        detail=message,
+                    )
+                )
                 self._universe_provider_failures += 1
                 delay = universe_provider_backoff_seconds(self._universe_provider_failures)
                 self._universe_retry_at = finished + timedelta(seconds=delay)

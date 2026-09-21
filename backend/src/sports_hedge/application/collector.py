@@ -25,6 +25,7 @@ from sports_hedge.application.fixture_clusters import (
     cluster_canonical_event_id,
     cluster_identity_aliases,
     cluster_member_events,
+    cluster_venue_events,
     to_venue_event,
     universe_cluster_sort_key,
 )
@@ -732,6 +733,7 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_get_market_failed_tickers: set[str] = set()
         self._identity_cache: GenerationIdentityCache | None = None
         self._incremental_cache: CrossGenerationIdentityCache | None = None
+        self._op_partial_clusters: list[FixtureCluster] = []
 
     async def collect_and_scan(
         self,
@@ -902,6 +904,7 @@ class ReadOnlyCrossVenueCollector:
         cancelled = False
         clustering_truncated = False
         clustering_diagnostics: dict[str, Any] = {}
+        self._op_partial_clusters = []
         resolved_lane = (scan_lane or "").strip().casefold() or None
         hot_scope = {item.strip() for item in (identity_scope or []) if item and item.strip()}
         skip_ids = {item.strip() for item in (skip_event_ids or []) if item and item.strip()}
@@ -938,9 +941,9 @@ class ReadOnlyCrossVenueCollector:
             or (reuse_discovery and bool(known_source_events))
         )
         discovery_reused = skip_discovery
+        filtered_known = _filter_known_source_events(known_source_events or {}, enabled)
         try:
             with self._stage("event_discovery"):
-                filtered_known = _filter_known_source_events(known_source_events or {}, enabled)
                 if skip_discovery:
                     matchbook_payload: dict[str, Any] = {}
                     if reuse_snapshot:
@@ -1229,6 +1232,23 @@ class ReadOnlyCrossVenueCollector:
             cancelled = True
             acknowledge_task_cancellation()
             await self._cancel_inflight()
+            if not clusters:
+                # Cooperative normalize/clustering yields. On a loaded runner the
+                # cancel can land before the tuple unpack assigns `clusters`, so
+                # leftover assembly would otherwise drop the already-known HOT
+                # roster. Recover identity without widening matcher thresholds.
+                clusters = self._recover_clusters_for_cancelled_scan(
+                    known_source_events=filtered_known,
+                    identity_scope=None if identity_scope is None else hot_scope,
+                    matchbook_events=matchbook_events,
+                    polymarket_events=polymarket_events,
+                    kalshi_events=kalshi_events,
+                    raw_matchbook_events=raw_matchbook_events,
+                    raw_polymarket_events=raw_polymarket_events,
+                    raw_kalshi_events=raw_kalshi_events,
+                    max_event_pairs=max_event_pairs,
+                    issues=issues,
+                )
             LOGGER.warning(
                 "scan_cancelled_assembling_partial fixtures=%s inflight=%s",
                 len(discovered_fixtures),
@@ -1241,6 +1261,10 @@ class ReadOnlyCrossVenueCollector:
                 started_at=started_at,
                 polymarket_events=polymarket_events,
                 queried_series_ids=queried_series_ids,
+            )
+            LOGGER.warning(
+                "scan_cancelled_partial_identity fixtures=%s",
+                len(discovered_fixtures),
             )
 
         return self._finish_report(
@@ -4321,23 +4345,34 @@ class ReadOnlyCrossVenueCollector:
             hard_deadline=self._op_deadline,
         )
         absolute_index = cluster_pass._resume_cursor
-        for index, (left, right) in enumerate(cluster_pass.pairs()):
-            if index % CLUSTER_COMPARISON_YIELD_EVERY == 0:
-                await asyncio.sleep(0)
-                if self._hard_deadline_reached():
-                    truncated = True
-                    break
-                if stage_deadline is not None and monotonic() >= stage_deadline:
-                    truncated = True
-                    break
-            cluster_pass.consider(left, right)
-            absolute_index = cluster_pass._resume_cursor + index + 1
+
+        def _snapshot_partial() -> tuple[list[FixtureCluster], dict[str, int]]:
+            snapshot, snapshot_counts = cluster_pass.finalize()
+            self._op_partial_clusters = snapshot
+            return snapshot, snapshot_counts
+
+        try:
+            for index, (left, right) in enumerate(cluster_pass.pairs()):
+                if index % CLUSTER_COMPARISON_YIELD_EVERY == 0:
+                    await asyncio.sleep(0)
+                    if self._hard_deadline_reached():
+                        truncated = True
+                        break
+                    if stage_deadline is not None and monotonic() >= stage_deadline:
+                        truncated = True
+                        break
+                cluster_pass.consider(left, right)
+                absolute_index = cluster_pass._resume_cursor + index + 1
+        except asyncio.CancelledError:
+            cluster_pass.checkpoint(absolute_index)
+            _snapshot_partial()
+            raise
         duration_ms = max(0, int((monotonic() - started) * 1000))
         if truncated:
             cluster_pass.checkpoint(absolute_index)
         else:
             cluster_pass.checkpoint(len(cluster_pass._candidates))
-        clusters, counts = cluster_pass.finalize()
+        clusters, counts = _snapshot_partial()
         if not truncated:
             cluster_pass.record_generation_negatives(clusters)
             cluster_pass.commit_incremental_snapshot()
@@ -4345,6 +4380,173 @@ class ReadOnlyCrossVenueCollector:
             truncated=truncated, duration_ms=duration_ms
         )
         return clusters, counts, truncated, diagnostics
+
+    def _normalizer_for_venue(self, venue: VenueName):
+        if venue is VenueName.MATCHBOOK:
+            return self.matchbook_normalizer
+        if venue is VenueName.POLYMARKET:
+            return self.polymarket_normalizer
+        return self.kalshi_normalizer
+
+    def _try_normalize_event(
+        self,
+        payload: dict[str, Any],
+        *,
+        venue: VenueName,
+        issues: list[CollectorIssue],
+    ) -> _NormalizedEvent | None:
+        source_id = str(
+            payload.get("id") or payload.get("event_ticker") or payload.get("ticker") or ""
+        ) or None
+        try:
+            return _NormalizedEvent(
+                payload, self._normalizer_for_venue(venue).normalize_event(payload)
+            )
+        except (VenueNormalizationError, ValueError) as exc:
+            issues.append(
+                CollectorIssue(
+                    stage="normalize_event",
+                    venue=venue,
+                    source_id=source_id,
+                    detail=str(exc),
+                )
+            )
+            return None
+
+    def _clusters_from_known_source_events(
+        self,
+        known_source_events: dict[str, list[dict[str, Any]]],
+        *,
+        identity_scope: set[str] | None,
+        issues: list[CollectorIssue],
+    ) -> list[FixtureCluster]:
+        """Rebuild already-known fixture identity without re-running EventMatcher.
+
+        HOT leftover assembly must keep the previous roster visible when a
+        cancel lands during cooperative normalize/clustering. Grouping by the
+        stored canonical ids does not widen matching thresholds.
+        """
+
+        def _build(rows_by_id: dict[str, list[dict[str, Any]]]) -> list[FixtureCluster]:
+            built: list[FixtureCluster] = []
+            for rows in rows_by_id.values():
+                cluster = FixtureCluster()
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    venue_text = str(row.get("venue") or "").strip().casefold()
+                    raw = row.get("raw")
+                    if not isinstance(raw, dict):
+                        continue
+                    try:
+                        venue = VenueName(venue_text)
+                    except ValueError:
+                        continue
+                    normalized = self._try_normalize_event(raw, venue=venue, issues=issues)
+                    if normalized is None:
+                        continue
+                    item = to_venue_event(normalized, venue)
+                    if venue is VenueName.MATCHBOOK:
+                        cluster.matchbook_events.append(item)
+                    elif venue is VenueName.POLYMARKET:
+                        cluster.polymarket_events.append(item)
+                    elif venue is VenueName.KALSHI:
+                        cluster.kalshi_events.append(item)
+                if cluster.venues_present:
+                    built.append(cluster)
+            return built
+
+        scoped = {
+            canonical_id: rows
+            for canonical_id, rows in known_source_events.items()
+            if identity_scope is None or canonical_id in identity_scope
+        }
+        recovered = _build(scoped)
+        if recovered or identity_scope is None:
+            return recovered
+        return _build(known_source_events)
+
+    def _recover_clusters_for_cancelled_scan(
+        self,
+        *,
+        known_source_events: dict[str, list[dict[str, Any]]],
+        identity_scope: set[str] | None,
+        matchbook_events: list[_NormalizedEvent],
+        polymarket_events: list[_NormalizedEvent],
+        kalshi_events: list[_NormalizedEvent],
+        raw_matchbook_events: list[dict[str, Any]],
+        raw_polymarket_events: list[dict[str, Any]],
+        raw_kalshi_events: list[dict[str, Any]],
+        max_event_pairs: int,
+        issues: list[CollectorIssue],
+    ) -> list[FixtureCluster]:
+        if known_source_events:
+            recovered = self._clusters_from_known_source_events(
+                known_source_events,
+                identity_scope=identity_scope,
+                issues=issues,
+            )
+            if recovered:
+                return recovered
+        partial = list(getattr(self, "_op_partial_clusters", None) or [])
+        if partial:
+            if identity_scope is None:
+                return partial
+            scoped = [
+                cluster
+                for cluster in partial
+                if cluster_canonical_event_id(cluster) in identity_scope
+            ]
+            return scoped or partial
+        mb_events = list(matchbook_events)
+        pm_events = list(polymarket_events)
+        k_events = list(kalshi_events)
+        if not (mb_events or pm_events or k_events):
+            mb_events = [
+                item
+                for item in (
+                    self._try_normalize_event(payload, venue=VenueName.MATCHBOOK, issues=issues)
+                    for payload in raw_matchbook_events
+                    if isinstance(payload, dict)
+                )
+                if item is not None
+            ]
+            pm_events = [
+                item
+                for item in (
+                    self._try_normalize_event(payload, venue=VenueName.POLYMARKET, issues=issues)
+                    for payload in raw_polymarket_events
+                    if isinstance(payload, dict)
+                )
+                if item is not None
+            ]
+            k_events = [
+                item
+                for item in (
+                    self._try_normalize_event(payload, venue=VenueName.KALSHI, issues=issues)
+                    for payload in raw_kalshi_events
+                    if isinstance(payload, dict)
+                )
+                if item is not None
+            ]
+        if not (mb_events or pm_events or k_events):
+            return []
+        recovered, _counts = cluster_venue_events(
+            matchbook=[to_venue_event(event, VenueName.MATCHBOOK) for event in mb_events],
+            polymarket=[to_venue_event(event, VenueName.POLYMARKET) for event in pm_events],
+            kalshi=[to_venue_event(event, VenueName.KALSHI) for event in k_events],
+            matcher=self.event_matcher,
+            max_event_pairs=max(1, int(max_event_pairs)),
+            identity_cache=self._identity_cache,
+        )
+        if identity_scope is None:
+            return recovered
+        scoped = [
+            cluster
+            for cluster in recovered
+            if cluster_canonical_event_id(cluster) in identity_scope
+        ]
+        return scoped or recovered
 
     async def _normalize_events(
         self,
@@ -4354,30 +4556,12 @@ class ReadOnlyCrossVenueCollector:
         issues: list[CollectorIssue],
     ) -> list[_NormalizedEvent]:
         result: list[_NormalizedEvent] = []
-        normalizer = (
-            self.matchbook_normalizer
-            if venue == VenueName.MATCHBOOK
-            else self.polymarket_normalizer
-            if venue == VenueName.POLYMARKET
-            else self.kalshi_normalizer
-        )
         for index, payload in enumerate(payloads):
             if index % NORMALIZE_EVENT_YIELD_EVERY == 0:
                 await asyncio.sleep(0)
-            source_id = str(
-                payload.get("id") or payload.get("event_ticker") or payload.get("ticker") or ""
-            ) or None
-            try:
-                result.append(_NormalizedEvent(payload, normalizer.normalize_event(payload)))
-            except (VenueNormalizationError, ValueError) as exc:
-                issues.append(
-                    CollectorIssue(
-                        stage="normalize_event",
-                        venue=venue,
-                        source_id=source_id,
-                        detail=str(exc),
-                    )
-                )
+            normalized = self._try_normalize_event(payload, venue=venue, issues=issues)
+            if normalized is not None:
+                result.append(normalized)
         return result
 
     def _inventory_markets(

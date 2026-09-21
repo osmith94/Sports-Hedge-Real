@@ -373,6 +373,24 @@ def test_clear_and_update_invalidates_cross_generation_cache() -> None:
     assert get_universe_identity_cache().generation_id is None
 
 
+def test_operator_clear_invalidates_generation_and_cross_generation_caches() -> None:
+    """#467 Clear & update must drop both #486 identity cache scopes."""
+
+    items = _generation_one()
+    _cluster(items, incremental=get_cross_generation_identity_cache())
+    generation = get_universe_identity_cache()
+    generation.bind(7)
+    generation.no_cross_venue[("matchbook", "mb-ars-che")] = "stale"
+    assert get_cross_generation_identity_cache().events
+    coordinator = LiveRefreshCoordinator()
+    coordinator.clear_universe_working_set()
+    assert get_universe_identity_cache().no_cross_venue == {}
+    assert get_universe_identity_cache().generation_id is None
+    assert get_cross_generation_identity_cache().events == {}
+    assert get_cross_generation_identity_cache().pairs == {}
+    assert get_cross_generation_identity_cache().semantic_version is None
+
+
 def test_generation_close_keeps_cross_generation_fingerprints() -> None:
     items = _generation_one()
     cache = get_cross_generation_identity_cache()
