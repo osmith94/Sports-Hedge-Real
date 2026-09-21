@@ -26,6 +26,13 @@ from sports_hedge.application.fixture_clusters import (
     cluster_identity_aliases,
     cluster_member_events,
     to_venue_event,
+    universe_cluster_sort_key,
+)
+from sports_hedge.application.universe_identity_cache import (
+    CrossGenerationIdentityCache,
+    GenerationIdentityCache,
+    bind_universe_identity_cache,
+    get_cross_generation_identity_cache,
 )
 from sports_hedge.application.equivalence_diagnostics import (
     zero_equivalent_reason_counts,
@@ -295,10 +302,12 @@ class MarketEvaluationState(StrEnum):
     NOT_EVALUATED_SCAN_DEADLINE = "not_evaluated_scan_deadline"
     MARKET_FETCH_UNAVAILABLE = "market_fetch_unavailable"
     HOT_RELATIONSHIP_MISSING = "hot_relationship_missing"
+    SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE = "single_venue_no_cross_venue_candidate"
 
 
 NOT_EVALUATED_SCAN_DEADLINE_REASON = "not_evaluated_scan_deadline"
 SCAN_BUDGET_EXHAUSTED_REASON = "scan_budget_exhausted"
+SINGLE_VENUE_NO_CROSS_VENUE_REASON = "single_venue_no_cross_venue_candidate"
 MARKET_FETCH_UNAVAILABLE_REASON = "list_markets_unavailable"
 UNIVERSE_COMPLETENESS_COMPLETE = "complete"
 UNIVERSE_COMPLETENESS_DEADLINE_LEFTOVER = "deadline_leftover"
@@ -370,6 +379,14 @@ _PROVIDER_CALL_STAGE = {
 DEFAULT_CLUSTER_CONCURRENCY = 8
 CLUSTER_COMPARISON_YIELD_EVERY = 8
 NORMALIZE_EVENT_YIELD_EVERY = 8
+# Hold back a meaningful slice of a 150s UNIVERSE chunk for market evaluation
+# once identity candidates exist. Tiny cycle budgets (tests / leftover seconds)
+# keep clustering unbounded up to the existing soft deadline so indexed
+# identity work still finishes.
+CLUSTERING_MARKET_EVAL_RESERVE_SECONDS = 45.0
+CLUSTERING_MARKET_EVAL_RESERVE_FRACTION = 0.30
+MIN_CLUSTERING_STAGE_SECONDS = 0.05
+TINY_CYCLE_FOR_CLUSTERING_RESERVE_SECONDS = 5.0
 DEFAULT_PROVIDER_CONCURRENCY = {
     VenueName.MATCHBOOK: 4,
     VenueName.POLYMARKET: 8,
@@ -702,6 +719,8 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_books_eligible = 0
         self._kalshi_books_skipped_unapproved = 0
         self._kalshi_get_market_failed_tickers: set[str] = set()
+        self._identity_cache: GenerationIdentityCache | None = None
+        self._incremental_cache: CrossGenerationIdentityCache | None = None
 
     async def collect_and_scan(
         self,
@@ -760,6 +779,17 @@ class ReadOnlyCrossVenueCollector:
         self._op_enabled_venues = enabled
         self._op_request_lane = (scan_lane or "").strip().casefold() or None
         self._op_universe_generation_id = universe_generation_id
+        if universe_generation_id is not None:
+            self._identity_cache = bind_universe_identity_cache(universe_generation_id)
+        else:
+            self._identity_cache = GenerationIdentityCache()
+        if (
+            universe_generation_id is not None
+            and self._op_request_lane == ScanLane.UNIVERSE.value
+        ):
+            self._incremental_cache = get_cross_generation_identity_cache()
+        else:
+            self._incremental_cache = None
         self._op_selected_competition_codes = (
             tuple(selected_competition_codes)
             if selected_competition_codes is not None
@@ -859,6 +889,7 @@ class ReadOnlyCrossVenueCollector:
         discovered_fixtures: list[DiscoveredFixture] = []
         cancelled = False
         clustering_truncated = False
+        clustering_diagnostics: dict[str, Any] = {}
         resolved_lane = (scan_lane or "").strip().casefold() or None
         hot_scope = {item.strip() for item in (identity_scope or []) if item and item.strip()}
         skip_ids = {item.strip() for item in (skip_event_ids or []) if item and item.strip()}
@@ -1070,13 +1101,15 @@ class ReadOnlyCrossVenueCollector:
                     to_venue_event(event, VenueName.POLYMARKET) for event in polymarket_events
                 ]
                 k_items = [to_venue_event(event, VenueName.KALSHI) for event in kalshi_events]
-                clusters, pair_counts, clustering_truncated = await self._cluster_venue_events_cooperative(
-                    matchbook=mb_items,
-                    polymarket=pm_items,
-                    kalshi=k_items,
-                    max_event_pairs=max_event_pairs,
+                clusters, pair_counts, clustering_truncated, clustering_diagnostics = (
+                    await self._cluster_venue_events_cooperative(
+                        matchbook=mb_items,
+                        polymarket=pm_items,
+                        kalshi=k_items,
+                        max_event_pairs=max_event_pairs,
+                    )
                 )
-                if clustering_truncated and not any(
+                if clustering_truncated and self._hard_deadline_reached() and not any(
                     issue.detail == "scan_cycle_deadline_reached" for issue in issues
                 ):
                     issues.append(
@@ -1228,6 +1261,8 @@ class ReadOnlyCrossVenueCollector:
             stale_generation_state_ignored=stale_generation_state_ignored,
             discovery_reused=discovery_reused,
             sweep_id=sweep_id,
+            clustering_truncated=clustering_truncated,
+            clustering_diagnostics=clustering_diagnostics,
         )
 
     def _deadline_reached(self) -> bool:
@@ -2061,6 +2096,8 @@ class ReadOnlyCrossVenueCollector:
         stale_generation_state_ignored: bool = False,
         discovery_reused: bool = False,
         sweep_id: str | None = None,
+        clustering_truncated: bool = False,
+        clustering_diagnostics: dict[str, Any] | None = None,
     ) -> CollectionReport:
         assembly_started = monotonic()
         completed_at = datetime.now(UTC)
@@ -2110,7 +2147,7 @@ class ReadOnlyCrossVenueCollector:
         coverage = _target_coverage(clusters)
         deadline_hit = leftover_n > 0 or cancelled or any(
             issue.detail == "scan_cycle_deadline_reached" for issue in issues
-        ) or self._provider_cancels > 0
+        ) or self._provider_cancels > 0 or clustering_truncated
         universe_lane = (scan_lane or "").strip().casefold() != ScanLane.HOT.value
         completeness = (
             universe_sweep_completeness(
@@ -2120,6 +2157,7 @@ class ReadOnlyCrossVenueCollector:
                 skipped_by_resume=skipped_by_resume,
                 deadline_hit=deadline_hit,
                 generation_resume=generation_resume,
+                clustering_truncated=clustering_truncated,
             )
             if universe_lane
             else None
@@ -2228,7 +2266,9 @@ class ReadOnlyCrossVenueCollector:
             "stale_generation_state_ignored": stale_generation_state_ignored,
             "completeness": completeness,
             "partial": bool(
-                deadline_hit or completeness == UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE
+                deadline_hit
+                or clustering_truncated
+                or completeness == UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE
             ),
             "enabled_venues": [item.value for item in self._op_enabled_venues],
             "kalshi_match_result_rule_enrichment": dict(self._kalshi_rule_enrichment),
@@ -2257,6 +2297,85 @@ class ReadOnlyCrossVenueCollector:
                 for item in discovered_fixtures
                 if item.event_match_confidence is not None
             },
+            "naive_pair_space": int((clustering_diagnostics or {}).get("naive_pair_space") or 0),
+            "candidate_pairs_generated": int(
+                (clustering_diagnostics or {}).get("candidate_pairs_generated") or 0
+            ),
+            "candidate_pairs_considered": int(
+                (clustering_diagnostics or {}).get("candidate_pairs_considered") or 0
+            ),
+            "pairs_pruned_by_index": int(
+                (clustering_diagnostics or {}).get("pairs_pruned_by_index") or 0
+            ),
+            "pairs_skipped_by_generation_cache": int(
+                (clustering_diagnostics or {}).get("pairs_skipped_by_generation_cache") or 0
+            ),
+            "candidate_reduction_pct": float(
+                (clustering_diagnostics or {}).get("candidate_reduction_pct") or 0.0
+            ),
+            "cross_venue_clusters": int(matching_coverage.get("cross_venue_clusters") or 0),
+            "single_venue_clusters": int(matching_coverage.get("single_venue_clusters") or 0),
+            "clustering_duration_ms": int(
+                (clustering_diagnostics or {}).get("clustering_duration_ms") or 0
+            ),
+            "clustering_truncated": bool(
+                clustering_truncated
+                or (clustering_diagnostics or {}).get("clustering_truncated")
+            ),
+            "identity_graph_components": int(
+                (clustering_diagnostics or {}).get("identity_graph_components") or 0
+            ),
+            "identity_graph_obvious_components": int(
+                (clustering_diagnostics or {}).get("identity_graph_obvious_components") or 0
+            ),
+            "identity_graph_ambiguous_components": int(
+                (clustering_diagnostics or {}).get("identity_graph_ambiguous_components") or 0
+            ),
+            "identity_graph_contradictory_components": int(
+                (clustering_diagnostics or {}).get("identity_graph_contradictory_components") or 0
+            ),
+            "identity_graph_fail_closed_components": int(
+                (clustering_diagnostics or {}).get("identity_graph_fail_closed_components") or 0
+            ),
+            "identity_graph_global_assignments": int(
+                (clustering_diagnostics or {}).get("identity_graph_global_assignments") or 0
+            ),
+            "identity_events_discovered": int(
+                (clustering_diagnostics or {}).get("identity_events_discovered") or 0
+            ),
+            "identity_unchanged_reused": int(
+                (clustering_diagnostics or {}).get("identity_unchanged_reused") or 0
+            ),
+            "identity_changed_recomputed": int(
+                (clustering_diagnostics or {}).get("identity_changed_recomputed") or 0
+            ),
+            "identity_events_new": int(
+                (clustering_diagnostics or {}).get("identity_events_new") or 0
+            ),
+            "identity_events_removed": int(
+                (clustering_diagnostics or {}).get("identity_events_removed") or 0
+            ),
+            "identity_cache_hit_pct": float(
+                (clustering_diagnostics or {}).get("identity_cache_hit_pct") or 0.0
+            ),
+            "identity_saved_candidate_comparisons": int(
+                (clustering_diagnostics or {}).get("identity_saved_candidate_comparisons")
+                or 0
+            ),
+            "identity_cache_semantic_version": str(
+                (clustering_diagnostics or {}).get("identity_cache_semantic_version") or ""
+            ),
+            "identity_cache_semantic_version_mismatch": bool(
+                (clustering_diagnostics or {}).get(
+                    "identity_cache_semantic_version_mismatch"
+                )
+            ),
+            "single_venue_deferred_count": sum(
+                1
+                for item in discovered_fixtures
+                if item.market_evaluation_state
+                == MarketEvaluationState.SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE.value
+            ),
         }
         LOGGER.info("scan_diagnostics %s", diagnostics)
         return CollectionReport(
@@ -2313,6 +2432,30 @@ class ReadOnlyCrossVenueCollector:
             scan_lane=scan_lane,
             resume_cursor=resume_cursor,
         )
+
+    def _single_venue_cluster_result(
+        self,
+        cluster: FixtureCluster,
+        *,
+        seen_at: datetime,
+        polymarket_events: list[_NormalizedEvent],
+        queried_series_ids: list[str] | None,
+    ) -> tuple[
+        DiscoveredFixture,
+        list[PaperScanDecision],
+        list[FixtureMarketInventoryRow],
+        dict[VenueName, int],
+        int,
+        int,
+    ]:
+        fixture = _fixture_from_cluster(
+            cluster,
+            seen_at=seen_at,
+            polymarket_events=polymarket_events,
+            queried_series_ids=queried_series_ids,
+            single_venue_deferred=True,
+        )
+        return fixture, [], [], {}, 0, 0
 
     def _leftover_cluster_result(
         self,
@@ -2421,6 +2564,7 @@ class ReadOnlyCrossVenueCollector:
         if fixture.market_evaluation_state not in {
             MarketEvaluationState.EVALUATED.value,
             MarketEvaluationState.MARKET_FETCH_UNAVAILABLE.value,
+            MarketEvaluationState.SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE.value,
         }:
             return
         try:
@@ -2532,8 +2676,26 @@ class ReadOnlyCrossVenueCollector:
                 )
 
         pending: dict[int, asyncio.Task[None]] = {}
-        next_index = 0
+        next_work = 0
         concurrency = self._cluster_concurrency_limit
+        universe_lane = self._op_request_lane == ScanLane.UNIVERSE.value
+        work_indexes = [
+            index
+            for index, cluster in enumerate(clusters)
+            if not (universe_lane and cluster.venue_count < 2)
+        ]
+        for index, cluster in enumerate(clusters):
+            if universe_lane and cluster.venue_count < 2:
+                accept(
+                    index,
+                    cluster,
+                    self._single_venue_cluster_result(
+                        cluster,
+                        seen_at=seen_at,
+                        polymarket_events=polymarket_events,
+                        queried_series_ids=queried_series_ids,
+                    ),
+                )
 
         async def cancel_pending() -> None:
             await self._cancel_inflight()
@@ -2545,13 +2707,14 @@ class ReadOnlyCrossVenueCollector:
                 await asyncio.wait(set(pending.values()), timeout=drain)
 
         try:
-            while next_index < len(clusters) or pending:
-                while next_index < len(clusters) and len(pending) < concurrency:
+            while next_work < len(work_indexes) or pending:
+                while next_work < len(work_indexes) and len(pending) < concurrency:
                     if self._deadline_reached() or self._hard_deadline_reached():
                         break
-                    cluster = clusters[next_index]
-                    pending[next_index] = asyncio.create_task(run(next_index, cluster))
-                    next_index += 1
+                    index = work_indexes[next_work]
+                    cluster = clusters[index]
+                    pending[index] = asyncio.create_task(run(index, cluster))
+                    next_work += 1
                     await asyncio.sleep(0)
                 if not pending:
                     break
@@ -2678,6 +2841,17 @@ class ReadOnlyCrossVenueCollector:
                 leftover=True,
             )
             return leftover, [], [], {}, 0, 0
+        if (
+            self._op_request_lane == ScanLane.UNIVERSE.value
+            and cluster.venue_count < 2
+            and not cluster_needs_one_sided_catalogue_markets(cluster)
+        ):
+            return self._single_venue_cluster_result(
+                cluster,
+                seen_at=seen_at,
+                polymarket_events=polymarket_events,
+                queried_series_ids=queried_series_ids,
+            )
         fixture = _fixture_from_cluster(
             cluster,
             seen_at=seen_at,
@@ -4014,27 +4188,47 @@ class ReadOnlyCrossVenueCollector:
         polymarket: list[Any],
         kalshi: list[Any],
         max_event_pairs: int,
-    ) -> tuple[list[FixtureCluster], dict[str, int], bool]:
+    ) -> tuple[list[FixtureCluster], dict[str, int], bool, dict[str, Any]]:
         cluster_pass = ClusterPass(
             matchbook=matchbook,
             polymarket=polymarket,
             kalshi=kalshi,
             matcher=self.event_matcher,
             max_event_pairs=max_event_pairs,
+            identity_cache=self._identity_cache,
+            incremental_cache=self._incremental_cache,
         )
         truncated = False
+        started = monotonic()
+        stage_deadline = clustering_stage_deadline_mono(
+            remaining_soft=self._remaining_soft(),
+            hard_deadline=self._op_deadline,
+        )
+        absolute_index = cluster_pass._resume_cursor
         for index, (left, right) in enumerate(cluster_pass.pairs()):
             if index % CLUSTER_COMPARISON_YIELD_EVERY == 0:
                 await asyncio.sleep(0)
-                # Identity clustering is in-process. Abort only on the hard
-                # deadline so a just-elapsed soft budget cannot freeze splits
-                # before any consider() runs.
                 if self._hard_deadline_reached():
                     truncated = True
                     break
+                if stage_deadline is not None and monotonic() >= stage_deadline:
+                    truncated = True
+                    break
             cluster_pass.consider(left, right)
+            absolute_index = cluster_pass._resume_cursor + index + 1
+        duration_ms = max(0, int((monotonic() - started) * 1000))
+        if truncated:
+            cluster_pass.checkpoint(absolute_index)
+        else:
+            cluster_pass.checkpoint(len(cluster_pass._candidates))
         clusters, counts = cluster_pass.finalize()
-        return clusters, counts, truncated
+        if not truncated:
+            cluster_pass.record_generation_negatives(clusters)
+            cluster_pass.commit_incremental_snapshot()
+        diagnostics = cluster_pass.clustering_diagnostics(
+            truncated=truncated, duration_ms=duration_ms
+        )
+        return clusters, counts, truncated, diagnostics
 
     async def _normalize_events(
         self,
@@ -5037,6 +5231,18 @@ def _promote_polymarket_cluster_markets(
     return rebuilt, rebuilt_inventory
 
 
+def cluster_needs_one_sided_catalogue_markets(cluster: FixtureCluster) -> bool:
+    """Whether UNIVERSE must fetch markets for a single-venue cluster.
+
+    Approved Match Register rows are cross-venue. One-sided metadata is not a
+    global UNIVERSE requirement. Opt in here only for an explicit approved
+    workflow; do not use this to re-enable fetching every single-venue book.
+    """
+
+    del cluster
+    return False
+
+
 def _fixture_from_cluster(
     cluster: FixtureCluster,
     *,
@@ -5044,6 +5250,7 @@ def _fixture_from_cluster(
     polymarket_events: list[_NormalizedEvent],
     queried_series_ids: list[str] | None,
     leftover: bool = False,
+    single_venue_deferred: bool = False,
 ) -> DiscoveredFixture:
     anchor = cluster.anchor
     canonical = anchor.canonical
@@ -5071,6 +5278,12 @@ def _fixture_from_cluster(
         evaluation_state = MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE
         evaluation_reason = SCAN_BUDGET_EXHAUSTED_REASON
         no_comparison = NOT_EVALUATED_SCAN_DEADLINE_REASON if two_plus else unmatched_reason
+        opportunity_state = "not_evaluated"
+        equivalent_count = None
+    elif single_venue_deferred:
+        evaluation_state = MarketEvaluationState.SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE
+        evaluation_reason = SINGLE_VENUE_NO_CROSS_VENUE_REASON
+        no_comparison = unmatched_reason or SINGLE_VENUE_NO_CROSS_VENUE_REASON
         opportunity_state = "not_evaluated"
         equivalent_count = None
     else:
@@ -5752,6 +5965,39 @@ def finalisation_reserve_seconds(cycle_budget: float) -> float:
     return min(SCAN_FINALISATION_RESERVE_SECONDS, cycle_budget * 0.2)
 
 
+def clustering_market_eval_reserve_seconds(remaining_soft: float | None) -> float:
+    """Seconds reserved for market evaluation after identity clustering.
+
+    Adaptive: a 150s UNIVERSE chunk keeps a meaningful evaluation slice when
+    cross-venue candidates can exist. Sub-5s remaining budgets (tests and
+    leftover seconds) do not starve clustering.
+    """
+
+    if remaining_soft is None or remaining_soft <= 0:
+        return 0.0
+    if remaining_soft <= TINY_CYCLE_FOR_CLUSTERING_RESERVE_SECONDS:
+        return 0.0
+    reserve = min(
+        CLUSTERING_MARKET_EVAL_RESERVE_SECONDS,
+        remaining_soft * CLUSTERING_MARKET_EVAL_RESERVE_FRACTION,
+    )
+    return min(reserve, max(0.0, remaining_soft - MIN_CLUSTERING_STAGE_SECONDS))
+
+
+def clustering_stage_deadline_mono(
+    *,
+    remaining_soft: float | None,
+    hard_deadline: float | None,
+) -> float | None:
+    """Monotonic timestamp when clustering must yield to market evaluation."""
+
+    now = monotonic()
+    reserve = clustering_market_eval_reserve_seconds(remaining_soft)
+    stage_deadline = None if remaining_soft is None else now + max(0.0, remaining_soft - reserve)
+    candidates = [item for item in (stage_deadline, hard_deadline) if item is not None]
+    return min(candidates) if candidates else None
+
+
 def _append_deadline_leftovers(
     leftover_clusters: list[FixtureCluster],
     *,
@@ -5911,12 +6157,16 @@ def universe_sweep_completeness(
     skipped_by_resume: int,
     deadline_hit: bool,
     generation_resume: bool,
+    clustering_truncated: bool = False,
 ) -> str:
     """Distinguish deadline leftovers, a genuine empty universe, and skip leaks.
 
     A closed generation's skip/cursor must never make a new sweep look complete.
+    Incomplete clustering is not a completed generation even when leftover_n is 0.
     """
 
+    if clustering_truncated:
+        return UNIVERSE_COMPLETENESS_DEADLINE_LEFTOVER
     if (
         not generation_resume
         and skipped_by_resume > 0
@@ -6021,7 +6271,8 @@ def _select_lane_clusters(
             decorated.append((hot_sort_key(fixture), cluster))
         decorated.sort(key=lambda item: item[0])
         return [cluster for _key, cluster in decorated]
-    selected.sort(key=cluster_canonical_event_id)
+    if scan_lane == ScanLane.UNIVERSE.value:
+        selected.sort(key=universe_cluster_sort_key)
     # Skip IDs are the source of truth for already-finished work. An empty skip
     # means remaining clusters are still work — do not treat resume_cursor as
     # "already evaluated" or a complete leftover-0 cycle will skip the universe.
