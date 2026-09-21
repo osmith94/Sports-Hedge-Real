@@ -1,0 +1,77 @@
+{
+  "fixture_id": "nfl-kalshi-game-caratl-settled-2026-09-20",
+  "identified_as": "CAPTURED public Kalshi status=settled KXNFLGAME event after CAR beat ATL. Market status=finalized, result yes/no, expiration_value=winner. Prices omitted.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events?series_ticker=KXNFLGAME&status=settled&with_nested_markets=true",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "event_ticker": "KXNFLGAME-26SEP20CARATL",
+    "series_ticker": "KXNFLGAME",
+    "title": "CAR Panthers vs ATL Falcons",
+    "sub_title": "CAR vs ATL (Sep 20)",
+    "category": "Sports",
+    "mutually_exclusive": true,
+    "product_metadata": {
+      "competition": "Pro Football",
+      "competition_scope": "Game"
+    },
+    "collateral_return_type": "MECNET",
+    "settlement_sources": [
+      {
+        "name": "the Governing League",
+        "url": "https://www.nfl.com/"
+      }
+    ],
+    "strike_period": "",
+    "markets": [
+      {
+        "ticker": "KXNFLGAME-26SEP20CARATL-ATL",
+        "event_ticker": "KXNFLGAME-26SEP20CARATL",
+        "title": "Atlanta wins",
+        "yes_sub_title": "Atlanta",
+        "no_sub_title": "Atlanta",
+        "status": "finalized",
+        "result": "no",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "football_team": "75685be6-4388-4bba-8bcb-d0b0c24feb50"
+        },
+        "rules_primary": "If Atlanta wins the CAR Panthers vs ATL Falcons Pro Football game originally scheduled for Sep 20, 2026, then the market resolves to Yes.",
+        "rules_secondary": "The following market refers to the team who wins the CAR Panthers vs ATL Falcons Pro Football game originally scheduled for Sep 20, 2026. If the game ends in a tie, the market will resolve to $0.50 for each team. If the game is postponed but begins within 48 hours from its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is not started within 48 hours, the market will resolve to a fair price.\n\nKalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+        "occurrence_datetime": "2026-09-20T20:00:00Z",
+        "expected_expiration_time": "2026-09-20T20:00:00Z",
+        "expiration_time": "2026-09-22T17:00:00Z",
+        "close_time": "2026-09-20T20:07:47Z",
+        "open_time": "2026-08-25T15:33:00Z",
+        "can_close_early": true,
+        "early_close_condition": "This market will close and expire after a winner is declared.",
+        "expiration_value": "winner"
+      },
+      {
+        "ticker": "KXNFLGAME-26SEP20CARATL-CAR",
+        "event_ticker": "KXNFLGAME-26SEP20CARATL",
+        "title": "Carolina wins",
+        "yes_sub_title": "Carolina",
+        "no_sub_title": "Carolina",
+        "status": "finalized",
+        "result": "yes",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "football_team": "e37050ce-354f-4dd0-b2d8-0bd1e9650eb7"
+        },
+        "rules_primary": "If Carolina wins the CAR Panthers vs ATL Falcons Pro Football game originally scheduled for Sep 20, 2026, then the market resolves to Yes.",
+        "rules_secondary": "The following market refers to the team who wins the CAR Panthers vs ATL Falcons Pro Football game originally scheduled for Sep 20, 2026. If the game ends in a tie, the market will resolve to $0.50 for each team. If the game is postponed but begins within 48 hours from its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is not started within 48 hours, the market will resolve to a fair price.\n\nKalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+        "occurrence_datetime": "2026-09-20T20:00:00Z",
+        "expected_expiration_time": "2026-09-20T20:00:00Z",
+        "expiration_time": "2026-09-22T17:00:00Z",
+        "close_time": "2026-09-20T20:07:47Z",
+        "open_time": "2026-08-25T15:33:00Z",
+        "can_close_early": true,
+        "early_close_condition": "This market will close and expire after a winner is declared.",
+        "expiration_value": "winner"
+      }
+    ]
+  }
+}

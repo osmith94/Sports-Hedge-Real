@@ -1,0 +1,27 @@
+{
+  "fixture_id": "nfl-kalshi-series-kxnflgame-2026-09-20",
+  "identified_as": "CAPTURED public Kalshi GET /series/KXNFLGAME. Series metadata only. Not live quotes. Not soccer. NFL GAMEWIN contract-terms URL retained.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/series/KXNFLGAME",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "ticker": "KXNFLGAME",
+    "title": "Professional Football Game",
+    "category": "Sports",
+    "frequency": "custom",
+    "tags": [
+      "Football"
+    ],
+    "contract_terms_url": "https://assets.kalshi.com/contract_terms/FOOTBALLGAMEWIN.pdf",
+    "settlement_sources": [
+      {
+        "name": "the Governing League",
+        "url": "https://www.nfl.com/"
+      }
+    ],
+    "product_metadata": {
+      "scope": "Game"
+    },
+    "fee_type": "quadratic_with_maker_fees"
+  }
+}

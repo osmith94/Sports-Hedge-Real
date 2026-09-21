@@ -1,0 +1,42 @@
+{
+  "fixture_id": "nfl-kalshi-milestone-indkc-kickoff-2026-09-20",
+  "identified_as": "CAPTURED Kalshi football_game milestone for IND at KC. start_date is scheduled kickoff. player_id_mapping stripped. occurrence_datetime on nested markets is NOT this kickoff.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events?series_ticker=KXNFLGAME&status=open&with_milestones=true",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": "8b80ca1a-953f-4ea1-8593-a649d9f62dbc",
+    "type": "football_game",
+    "title": "IND Colts at KC Chiefs",
+    "start_date": "2026-09-21T00:20:00Z",
+    "category": "Sports",
+    "primary_event_tickers": [
+      "KXNFLGAME-26SEP20INDKC",
+      "KXNFLSPREAD-26SEP20INDKC",
+      "KXNFLTOTAL-26SEP20INDKC",
+      "KXNFLTEAMTOTAL-26SEP20INDKC"
+    ],
+    "related_event_tickers_head": [
+      "KXNFLGAME-26SEP20INDKC",
+      "KXNFLSPREAD-26SEP20INDKC",
+      "KXNFLTOTAL-26SEP20INDKC",
+      "KXNFLTEAMTOTAL-26SEP20INDKC",
+      "KXNFL1HTEAMTOTAL-26SEP20INDKC",
+      "KXNFL1Q-26SEP20INDKC",
+      "KXNFL1QSPREAD-26SEP20INDKC",
+      "KXNFL1QTOTAL-26SEP20INDKC"
+    ],
+    "details": {
+      "away_team_id": "fe5f8219-fef4-4498-83d5-f6cc6f2cb7bf",
+      "home_team_id": "64f72720-2e4a-4cc8-a39b-ca148aecb389",
+      "league": "NFL",
+      "main_game_event_ticker": "KXNFLGAME-26SEP20INDKC",
+      "season": {
+        "type": "REG",
+        "week": 2,
+        "year": 2026
+      },
+      "status": "created"
+    }
+  }
+}

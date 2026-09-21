@@ -1,0 +1,77 @@
+{
+  "fixture_id": "nfl-kalshi-game-cletb-open-2026-09-20",
+  "identified_as": "CAPTURED public Kalshi nested KXNFLGAME event for CLE vs TB while the NFL game was still in progress on Polymarket/Matchbook. Market status remained active. Prices omitted.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events?series_ticker=KXNFLGAME&status=open&with_nested_markets=true",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "event_ticker": "KXNFLGAME-26SEP20CLETB",
+    "series_ticker": "KXNFLGAME",
+    "title": "CLE Browns vs TB Buccaneers",
+    "sub_title": "CLE vs TB (Sep 20)",
+    "category": "Sports",
+    "mutually_exclusive": true,
+    "product_metadata": {
+      "competition": "Pro Football",
+      "competition_scope": "Game"
+    },
+    "collateral_return_type": "MECNET",
+    "settlement_sources": [
+      {
+        "name": "the Governing League",
+        "url": "https://www.nfl.com/"
+      }
+    ],
+    "strike_period": "",
+    "markets": [
+      {
+        "ticker": "KXNFLGAME-26SEP20CLETB-TB",
+        "event_ticker": "KXNFLGAME-26SEP20CLETB",
+        "title": "Tampa Bay wins",
+        "yes_sub_title": "Tampa Bay",
+        "no_sub_title": "Tampa Bay",
+        "status": "active",
+        "result": "",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "football_team": "1105fa0d-c798-4020-9e24-f377a334b3d9"
+        },
+        "rules_primary": "If Tampa Bay wins the CLE Browns vs TB Buccaneers Pro Football game originally scheduled for Sep 20, 2026, then the market resolves to Yes.",
+        "rules_secondary": "The following market refers to the team who wins the CLE Browns vs TB Buccaneers Pro Football game originally scheduled for Sep 20, 2026. If the game ends in a tie, the market will resolve to $0.50 for each team. If the game is postponed but begins within 48 hours from its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is not started within 48 hours, the market will resolve to a fair price.\n\nKalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+        "occurrence_datetime": "2026-09-20T20:00:00Z",
+        "expected_expiration_time": "2026-09-20T20:00:00Z",
+        "expiration_time": "2026-09-22T17:00:00Z",
+        "close_time": "2026-09-22T17:00:00Z",
+        "open_time": "2026-08-25T15:33:00Z",
+        "can_close_early": true,
+        "early_close_condition": "This market will close and expire after a winner is declared.",
+        "expiration_value": ""
+      },
+      {
+        "ticker": "KXNFLGAME-26SEP20CLETB-CLE",
+        "event_ticker": "KXNFLGAME-26SEP20CLETB",
+        "title": "Cleveland wins",
+        "yes_sub_title": "Cleveland",
+        "no_sub_title": "Cleveland",
+        "status": "active",
+        "result": "",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "football_team": "05cc62a4-bd74-4b2c-ab7b-1b177b9f6790"
+        },
+        "rules_primary": "If Cleveland wins the CLE Browns vs TB Buccaneers Pro Football game originally scheduled for Sep 20, 2026, then the market resolves to Yes.",
+        "rules_secondary": "The following market refers to the team who wins the CLE Browns vs TB Buccaneers Pro Football game originally scheduled for Sep 20, 2026. If the game ends in a tie, the market will resolve to $0.50 for each team. If the game is postponed but begins within 48 hours from its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is not started within 48 hours, the market will resolve to a fair price.\n\nKalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+        "occurrence_datetime": "2026-09-20T20:00:00Z",
+        "expected_expiration_time": "2026-09-20T20:00:00Z",
+        "expiration_time": "2026-09-22T17:00:00Z",
+        "close_time": "2026-09-22T17:00:00Z",
+        "open_time": "2026-08-25T15:33:00Z",
+        "can_close_early": true,
+        "early_close_condition": "This market will close and expire after a winner is declared.",
+        "expiration_value": ""
+      }
+    ]
+  }
+}

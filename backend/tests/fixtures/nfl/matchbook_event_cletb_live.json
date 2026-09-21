@@ -1,0 +1,197 @@
+{
+  "fixture_id": "nfl-matchbook-event-33306750563500023",
+  "identified_as": "CAPTURED unauthenticated Matchbook GET /edge/rest/events/33306750563500023 plus GET .../markets. live in-running Cleveland at Tampa Bay. Prices stripped. No session token.",
+  "source": "https://api.matchbook.com/edge/rest/events/33306750563500023",
+  "markets_source": "https://api.matchbook.com/edge/rest/events/33306750563500023/markets?per-page=100&include-prices=false&states=open,suspended,closed,graded",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "provider_market_total": 20,
+  "payload": {
+    "id": 33306750563500023,
+    "name": "Cleveland Browns at Tampa Bay Buccaneers",
+    "start": "2026-09-20T17:02:00.000Z",
+    "status": "open",
+    "sport-id": 1,
+    "in-running-flag": true,
+    "allow-live-betting": true,
+    "category-id": [
+      1,
+      410468520880009,
+      491503123380010,
+      1904152202480016,
+      33287044037300047
+    ],
+    "meta-tags": [
+      {
+        "id": 1,
+        "name": "American Football",
+        "type": "SPORT",
+        "url-name": "american-football"
+      },
+      {
+        "id": 410468520880009,
+        "name": "Live Betting",
+        "type": "OTHER",
+        "url-name": "live-betting"
+      },
+      {
+        "id": 491503123380010,
+        "name": "NFL",
+        "type": "COMPETITION",
+        "url-name": "nfl"
+      },
+      {
+        "id": 1904152202480016,
+        "name": "United States of America",
+        "type": "COUNTRY",
+        "url-name": "united-states-of-america"
+      },
+      {
+        "id": 33287044037300047,
+        "name": "September 20th 2026",
+        "type": "DATE",
+        "url-name": "september-20th-2026"
+      }
+    ],
+    "markets": [
+      {
+        "id": 33306750567600023,
+        "name": "Moneyline",
+        "status": "open",
+        "type": "binary",
+        "market-type": "money_line",
+        "number-of-winners": 1,
+        "handicap": null,
+        "in-running-flag": true,
+        "allow-live-betting": true,
+        "start": "2026-09-20T17:02:00.000Z",
+        "event-id": 33306750563500023,
+        "runners": [
+          {
+            "id": 33306750568301023,
+            "name": "Cleveland Browns",
+            "status": "open",
+            "handicap": null,
+            "event-participant-id": 33306750567101023,
+            "withdrawn": false
+          },
+          {
+            "id": 33306750568001023,
+            "name": "Tampa Bay Buccaneers",
+            "status": "open",
+            "handicap": null,
+            "event-participant-id": 33306750566900023,
+            "withdrawn": false
+          }
+        ]
+      },
+      {
+        "id": 34349496057100081,
+        "name": "Total",
+        "status": "open",
+        "type": "binary",
+        "market-type": "total",
+        "number-of-winners": 1,
+        "handicap": 42,
+        "in-running-flag": true,
+        "allow-live-betting": true,
+        "start": "2026-09-20T17:02:00.000Z",
+        "event-id": 33306750563500023,
+        "runners": [
+          {
+            "id": 34349496059201081,
+            "name": "OVER 42.0",
+            "status": "open",
+            "handicap": 42,
+            "event-participant-id": null,
+            "withdrawn": false
+          },
+          {
+            "id": 34349496059401081,
+            "name": "UNDER 42.0",
+            "status": "open",
+            "handicap": 42,
+            "event-participant-id": null,
+            "withdrawn": false
+          }
+        ]
+      },
+      {
+        "id": 34351506942400081,
+        "name": "Total",
+        "status": "open",
+        "type": "binary",
+        "market-type": "total",
+        "number-of-winners": 1,
+        "handicap": 42.5,
+        "in-running-flag": true,
+        "allow-live-betting": true,
+        "start": "2026-09-20T17:02:00.000Z",
+        "event-id": 33306750563500023,
+        "runners": [
+          {
+            "id": 34351506942900081,
+            "name": "OVER 42.5",
+            "status": "open",
+            "handicap": 42.5,
+            "event-participant-id": null,
+            "withdrawn": false
+          },
+          {
+            "id": 34351506943300081,
+            "name": "UNDER 42.5",
+            "status": "open",
+            "handicap": 42.5,
+            "event-participant-id": null,
+            "withdrawn": false
+          }
+        ]
+      },
+      {
+        "id": 33306751102200023,
+        "name": "Handicap",
+        "status": "closed",
+        "type": "binary",
+        "market-type": "handicap",
+        "number-of-winners": 1,
+        "handicap": 4.5,
+        "in-running-flag": true,
+        "allow-live-betting": true,
+        "start": "2026-09-20T17:02:00.000Z",
+        "event-id": 33306750563500023,
+        "runners": []
+      },
+      {
+        "id": 33306751102500023,
+        "name": "Handicap",
+        "status": "open",
+        "type": "binary",
+        "market-type": "handicap",
+        "number-of-winners": 1,
+        "handicap": 5,
+        "in-running-flag": true,
+        "allow-live-betting": true,
+        "start": "2026-09-20T17:02:00.000Z",
+        "event-id": 33306750563500023,
+        "runners": [
+          {
+            "id": 33306751104001023,
+            "name": "Cleveland Browns +5.0",
+            "status": "open",
+            "handicap": 5,
+            "event-participant-id": 33306750567101023,
+            "withdrawn": false
+          },
+          {
+            "id": 33306751103800023,
+            "name": "Tampa Bay Buccaneers -5.0",
+            "status": "open",
+            "handicap": -5,
+            "event-participant-id": 33306750566900023,
+            "withdrawn": false
+          }
+        ]
+      }
+    ]
+  }
+}

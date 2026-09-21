@@ -1,0 +1,13 @@
+{
+  "fixture_id": "nfl-matchbook-lookups-sports-american-football-2026-09-20",
+  "identified_as": "CAPTURED unauthenticated GET /edge/rest/lookups/sports. American Football sport-id=1. Association football is a different sport id. No credentials used.",
+  "source": "https://api.matchbook.com/edge/rest/lookups/sports?per-page=20",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "name": "American Football",
+    "id": 1,
+    "type": "SPORT",
+    "url-name": "american-football"
+  }
+}
