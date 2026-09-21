@@ -600,8 +600,10 @@ def test_cluster_pass_consider_unions_future_provider_pairs_without_finalize_lis
     """Indexed matching stays venue-agnostic; FixtureCluster lists stay 3-venue.
 
     A fifth synthetic venue must still be a candidate and union in ClusterPass
-    parent pointers. Production finalize() only materialises Matchbook /
-    Polymarket / Kalshi members — that bound is not widened here.
+    parent pointers after identity-graph finalize. Production cluster lists
+    still materialise Matchbook / Polymarket / Kalshi members first; extra
+    venues land on ``other_venue_events`` and are not dropped from the graph.
+    ``consider()`` scores candidates only (#486); clustering is ``finalize()``.
     """
 
     matcher = EventMatcher()
@@ -646,6 +648,7 @@ def test_cluster_pass_consider_unions_future_provider_pairs_without_finalize_lis
     )
     for left, right in cluster_pass.pairs():
         cluster_pass.consider(left, right)
+    cluster_pass.finalize()
     mb_key = (VenueName.MATCHBOOK, "mb-1")
     bf_key = (future.venue, "bf-1")
     assert cluster_pass._find(mb_key) == cluster_pass._find(bf_key)
