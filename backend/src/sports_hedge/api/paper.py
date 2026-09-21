@@ -1201,8 +1201,7 @@ def clear_universe_working_set(
 ) -> LiveRefreshStatus:
     """Clear live UNIVERSE working state only. No provider I/O.
 
-    History, Approved Market Catalogue, PAPER trades, Treasury, saved scope,
-    cadence, HOT/BACKGROUND/ACTIVE position management are preserved.
+    Clears the live UNIVERSE working set only. History, catalogue, PAPER trades and Treasury are preserved.
     """
 
     coordinator = get_live_refresh_coordinator()

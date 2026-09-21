@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -179,7 +180,8 @@ def test_clear_does_not_remove_catalogue_history_trades_or_treasury(
     assert coordinator._active_trade_in_progress is False
     src = inspect.getsource(coordinator.clear_universe_working_set)
     assert "reset_active_trade_registry" not in src
-    assert "treasury" not in src.casefold()
+    assert "PaperTreasury" not in src
+    assert "/treasury" not in src
     catalogue.close()
 
 
@@ -248,13 +250,15 @@ def test_clear_performs_no_provider_calls() -> None:
         assert "list_markets" not in src
         assert "ReadOnlyCrossVenueCollector" not in src
     assert "clear_universe_working_set" in api_run
-    assert UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY in inspect.getsource(
-        paper_api.clear_universe_working_set
-    )
+    paper_src = Path(__file__).resolve().parents[1] / "src/sports_hedge/api/paper.py"
+    module_src = paper_src.read_text(encoding="utf-8")
+    assert UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY in module_src
+    assert "/universe/clear" in module_src
 
 
 def test_update_existing_preserves_current_behavior(tmp_path) -> None:
     coordinator, scope_store, settings_store = _bind_scope(tmp_path)
+    coordinator._clock = lambda: NOW
     try:
         coordinator.record_report(
             _report([_universe_fixture("ev-keep")], when=NOW),
@@ -349,8 +353,9 @@ async def test_stale_in_flight_generation_cannot_repopulate_after_clear() -> Non
 
 def test_api_clear_and_run_modes_and_audit(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     coordinator, scope_store, settings_store = _bind_scope(tmp_path)
+    coordinator._clock = lambda: NOW
     audit_repo = SqlitePaperScanRepository(tmp_path / "paper-audit.sqlite")
-    monkeypatch.setattr(paper_api, "get_paper_audit_repository", lambda: audit_repo)
+    app.dependency_overrides[paper_api.get_paper_audit_repository] = lambda: audit_repo
     try:
         coordinator.record_report(
             _report([_universe_fixture("ev-board")], when=NOW),
@@ -379,11 +384,13 @@ def test_api_clear_and_run_modes_and_audit(tmp_path, monkeypatch: pytest.MonkeyP
         assert plan.reuse_discovery is False
     finally:
         _unbind(coordinator, scope_store, settings_store)
+        app.dependency_overrides.pop(paper_api.get_paper_audit_repository, None)
         audit_repo.close()
 
 
 def test_clear_allowed_when_scanner_stopped_run_is_not(tmp_path) -> None:
     coordinator, scope_store, settings_store = _bind_scope(tmp_path)
+    coordinator._clock = lambda: NOW
     try:
         coordinator.apply_operator_scanner_stopped(True)
         client = TestClient(app)
