@@ -1,7 +1,12 @@
 # Fixture-identity census for newly selectable football competitions
 
 Issue #434. Follow-up to draft PR #415 (MLS / Liga MX competition-aware aliases).
-This census does **not** modify #415.
+
+Composition: this branch stacks **after** #415 (`cursor/mls-fixture-identity-dc36`).
+It keeps #415's PAPER 0.80 matcher injection, `generic_aliases`, and hard
+`competition_mismatch` veto. Unique-alias registries from the census land on top.
+Ambiguous tokens stay fail-closed; they are not globalised. The overlapping
+Step 7 calendar-clock repair is owned by #414 and is not duplicated here.
 
 Data class: **live read-only provider metadata** plus **authoritative league/federation
 participant lists**. Tests that consume this census are deterministic fixture/demo
@@ -34,15 +39,20 @@ Sanitized label extract: `backend/tests/fixtures/fixture_identity_census/provide
 - no fuzzy alias creation from similarity alone.
 
 Owner-live (`588c8b4`) already has unique-alias `SeniorClub.aliases` and a
-fail-closed FC/CF/AFC/SC/Calcio/BC remainder strip. It does **not** yet have
-`SeniorClub.generic_aliases` or `resolve_team_name_for_competition`.
+fail-closed FC/CF/AFC/SC/Calcio/BC remainder strip. #415 adds
+`SeniorClub.generic_aliases` and `resolve_team_name_for_competition`.
 
-This follow-up therefore:
+This follow-up, stacked after #415:
 
-- adds **unique aliases only** to the owner-live registry;
-- leaves generic city / same-token labels unresolved until #415 lands;
-- does not change PAPER EventMatcher 0.80, scanner, capture, economics,
-  settlement, or provider concurrency.
+- adds **unique aliases only** for the newly selectable domestic leagues;
+- keeps generic city / same-token labels fail-closed unless #415's
+  competition-scoped mechanism has provider evidence (Paris / Sporting /
+  Istanbul stay unresolved);
+- preserves PAPER EventMatcher 0.80 injection and the hard
+  `competition_mismatch` veto;
+- does not change scanner, capture, economics, settlement, or provider
+  concurrency;
+- does not duplicate #414's Step 7 deterministic-clock repair.
 
 ## 2. Coverage matrix
 
@@ -387,8 +397,10 @@ Those must not collapse onto senior canonicals.
 ## 6. Recommended registry architecture
 
 **Domestic leagues:** keep competition-keyed `SeniorClub` tables, as #316/#415
-already do. Unique aliases are global. Generic aliases wait for #415's
-`generic_aliases` + `resolve_team_name_for_competition`.
+already do. Unique aliases are global. Generic aliases use #415's
+`generic_aliases` + `resolve_team_name_for_competition` only where provider
+evidence supports a competition-scoped token. Paris / Sporting / Istanbul stay
+fail-closed even after that mechanism is present.
 
 **Cups / continental:** do **not** duplicate domestic club rows. Reuse:
 
@@ -396,7 +408,8 @@ already do. Unique aliases are global. Generic aliases wait for #415's
 - DFB-Pokal → Bundesliga senior set
 - Coppa Italia → Serie A senior set
 - UCL / UEL / UECL → union of curated domestic tables (same canonical club ID
-  across Super Lig and UCL for Galatasaray)
+  across Super Lig and UCL for Galatasaray). MLS / Liga MX stay off this union
+  so UCL does not inherit Miami / Leon / America generics.
 - Copa Libertadores → Brazil + Argentina union, **without** copying La Liga
   `Barcelona` onto Barcelona SC
 
@@ -405,20 +418,23 @@ playoff losers), but it churns every round and is not required for unique-alias
 collapse of clubs already in a domestic table. Unknown cup participants fail
 closed. That is cleaner than inventing a second club table.
 
-Do **not** lower EventMatcher 0.92 on owner-live. PAPER 0.80 stays #415.
+Do **not** lower the EventMatcher class default of 0.92. PAPER 0.80 injection
+and the hard `competition_mismatch` veto stay #415's.
 
 ## 7. Tests required
 
 For every implemented domestic competition:
 
 1. Exact provider aliases collapse to one fixture / one canonical team.
-2. Generic aliases stay unresolved (fail closed) without #415.
+2. Generic aliases stay unresolved (fail closed) unless #415 competition-scoped
+   evidence exists. Paris / Sporting / Istanbul stay unresolved.
 3. Same-city / similar-name clubs remain distinct.
 4. Youth / women / reserves fail closed.
-5. Super Lig vs UCL with the same clubs + kickoff must not match *solely*
-   because labels look similar (`competition_score=0` → 0.90 < 0.92).
+5. Super Lig vs UCL with the same clubs + kickoff fail closed under PAPER 0.80
+   because of `competition_mismatch` (not because 0.90 is below class 0.92).
 6. Inclusive 5-minute kickoff tolerance unchanged (300s; 5:00 matches, 5:01 does not).
 7. EPL / La Liga / Bundesliga / Serie A identity tests stay green.
+8. #415 MLS Miami / Liga MX Leon competition-scoped aliases still resolve.
 
 ## 8. Implementation boundary
 
