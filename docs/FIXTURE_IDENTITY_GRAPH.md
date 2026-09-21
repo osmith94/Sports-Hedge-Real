@@ -111,3 +111,7 @@ telemetry system):
 - HOT / BACKGROUND / ACTIVE independent of this path
 - settlement worker untouched
 - approved catalogue / market-family equivalence unchanged
+- cross-generation incremental identity (#471) reuses EventMatcher scores
+  only when fingerprints and the semantic version match; Clear & update
+  still invalidates
+

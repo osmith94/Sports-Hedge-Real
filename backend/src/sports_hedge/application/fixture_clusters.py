@@ -6,6 +6,13 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
+from sports_hedge.application.universe_identity_cache import (
+    CrossGenerationIdentityCache,
+    IncrementalIdentityDiagnostics,
+    event_cache_key,
+    event_identity_fingerprint,
+    identity_cache_semantic_version,
+)
 from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.events import EventMatcher, target_competition_code
 from sports_hedge.matching.identity_graph import (
@@ -278,6 +285,7 @@ class ClusterPass:
         max_event_pairs: int,
         identity_cache: Any | None = None,
         extra: list[VenueEvent] | None = None,
+        incremental_cache: CrossGenerationIdentityCache | None = None,
     ) -> None:
         if max_event_pairs <= 0:
             raise ValueError("max_event_pairs must be positive")
@@ -297,6 +305,20 @@ class ClusterPass:
         self.could_match = getattr(self.bulk_matcher, "could_match", None)
         self.match_confidence: dict[tuple[VenueName, str], float] = {}
         self.identity_cache = identity_cache
+        self.incremental_cache = incremental_cache
+        self.semantic_version = identity_cache_semantic_version(self.bulk_matcher)
+        self._fingerprints = {
+            event_cache_key(item): event_identity_fingerprint(item) for item in self.items
+        }
+        self.incremental_diagnostics = (
+            incremental_cache.classify(self.items, self.semantic_version)
+            if incremental_cache is not None
+            else IncrementalIdentityDiagnostics(
+                discovered=len(self.items),
+                new=len(self.items),
+                semantic_version=self.semantic_version,
+            )
+        )
         kickoff_tolerance = getattr(
             self.bulk_matcher, "kickoff_tolerance", timedelta(minutes=5)
         )
@@ -326,6 +348,13 @@ class ClusterPass:
         generated = int(self.index_diagnostics.get("candidate_pairs_generated") or 0)
         considered = int(self.candidate_pairs_considered)
         pruned = int(self.index_diagnostics.get("pairs_pruned_by_index") or 0)
+        saved = int(self.incremental_diagnostics.saved_candidate_comparisons)
+        if generated > 0:
+            self.incremental_diagnostics.cache_hit_pct = round(
+                100.0 * saved / generated, 4
+            )
+        else:
+            self.incremental_diagnostics.cache_hit_pct = 0.0
         return {
             **self.index_diagnostics,
             "candidate_pairs_considered": considered,
@@ -336,6 +365,7 @@ class ClusterPass:
             "clustering_truncated": bool(truncated),
             "clustering_duration_ms": max(0, int(duration_ms)),
             **self.graph_diagnostics,
+            **self.incremental_diagnostics.as_dict(),
         }
 
     def checkpoint(self, cursor: int) -> None:
@@ -386,10 +416,28 @@ class ClusterPass:
         if a != b:
             self.parent[b] = a
 
+    def commit_incremental_snapshot(self) -> None:
+        cache = self.incremental_cache
+        if cache is None:
+            return
+        cache.commit_snapshot(self.items, self.scored_pairs, self.semantic_version)
+
     def consider(self, left: VenueEvent, right: VenueEvent) -> None:
         """Score one indexed candidate. Clustering happens in ``finalize``."""
 
         self.candidate_pairs_considered += 1
+        cache = self.incremental_cache
+        if cache is not None:
+            reused = cache.reuse_pair(
+                left,
+                right,
+                self._fingerprints,
+                self.semantic_version,
+            )
+            if reused is not None:
+                self.scored_pairs.append(reused)
+                self.incremental_diagnostics.saved_candidate_comparisons += 1
+                return
         left_key = _key(left.venue, left.source_event_id)
         right_key = _key(right.venue, right.source_event_id)
         could_match = self.could_match
@@ -528,6 +576,7 @@ def cluster_venue_events(
     max_event_pairs: int,
     identity_cache: Any | None = None,
     extra: list[VenueEvent] | None = None,
+    incremental_cache: CrossGenerationIdentityCache | None = None,
 ) -> tuple[list[FixtureCluster], dict[str, int]]:
     """Cluster independently discovered venue events by canonical fixture identity.
 
@@ -540,6 +589,11 @@ def cluster_venue_events(
 
     The graph is generic over 2+ venues. Matchbook is not required. Unmatched
     single-venue leftovers remain visible.
+
+    When ``incremental_cache`` is supplied, unchanged source events may reuse
+    prior EventMatcher scores if fingerprints and the semantic version match.
+    Clean full recomputation (this function without the cache) remains the
+    correctness oracle.
     """
 
     cluster_pass = ClusterPass(
@@ -550,12 +604,14 @@ def cluster_venue_events(
         max_event_pairs=max_event_pairs,
         identity_cache=identity_cache,
         extra=extra,
+        incremental_cache=incremental_cache,
     )
     for left, right in cluster_pass.pairs():
         cluster_pass.consider(left, right)
     clusters, counts = cluster_pass.finalize()
     cluster_pass.checkpoint(len(cluster_pass._candidates))
     cluster_pass.record_generation_negatives(clusters)
+    cluster_pass.commit_incremental_snapshot()
     return clusters, counts
 
 
@@ -571,6 +627,15 @@ def to_venue_event(normalized: object, venue: VenueName) -> VenueEvent:
 
 def cluster_canonical_event_id(cluster: FixtureCluster) -> str:
     return canonical_source_event_id(cluster.anchor.canonical)
+
+
+def cluster_member_keyset(cluster: FixtureCluster) -> frozenset[tuple[str, str]]:
+    """Stable membership signature used to compare incremental vs full recompute."""
+
+    return frozenset(
+        (item.venue.value, str(item.source_event_id))
+        for item in cluster_member_events(cluster)
+    )
 
 
 def cluster_member_events(cluster: FixtureCluster) -> list[VenueEvent]:

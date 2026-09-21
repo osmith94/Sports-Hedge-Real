@@ -106,11 +106,15 @@ Clustering resume (union-find + cursor) is kept only in memory for the live
 process. Durable SQLite checkpoints stay compact and do not store venue
 bodies.
 
-Invalidation:
+Invalidation (generation-scoped resume/negatives only):
 
 - new generation id (`bind`)
 - generation close
 - operator Clear & update (`LiveRefreshCoordinator.reset`)
+
+Cross-generation fingerprints (#471) survive generation close and bind.
+They are discarded on Clear & update, semantic-version mismatch, or process
+restart (process-local; restart correctly re-checks).
 
 A process restart correctly re-checks identity.
 
@@ -130,6 +134,15 @@ second scanner, not a coverage reduction, and not a silent time-horizon gate
 on discovery. Any cutoff needs an explicit owner decision and a documented
 data-class label so long-dated cheap rows are not mistaken for evaluated
 markets.
+
+## Phase 6 — cross-generation incremental identity (#471)
+
+Implemented in `docs/FIXTURE_IDENTITY_INCREMENTAL.md`. Clean full
+recomputation remains the correctness oracle. Pairwise EventMatcher evidence
+is reused across UNIVERSE generations only when the identity-relevant
+fingerprint and the matcher/alias/competition-registry semantic version are
+unchanged. Operator Clear & update invalidates the cache; generation close
+does not. Truncated clustering does not commit a snapshot.
 
 ## Invariants preserved
 

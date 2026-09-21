@@ -25,7 +25,9 @@ from sports_hedge.application.fixture_clusters import (
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.application.universe_identity_cache import (
+    CachedEventIdentity,
     GenerationIdentityCache,
+    get_cross_generation_identity_cache,
     get_universe_identity_cache,
     reset_universe_identity_cache,
 )
@@ -352,10 +354,19 @@ def test_clear_and_update_invalidates_generation_identity_cache() -> None:
     cache = get_universe_identity_cache()
     cache.bind(3)
     cache.no_cross_venue[("polymarket", "pm-1")] = "stale"
+    incremental = get_cross_generation_identity_cache()
+    incremental.semantic_version = "stale-version"
+    incremental.events[("matchbook", "mb-1")] = CachedEventIdentity(
+        venue="matchbook",
+        source_event_id="mb-1",
+        fingerprint="stale",
+    )
     coordinator = LiveRefreshCoordinator()
     coordinator.reset()
     assert get_universe_identity_cache().no_cross_venue == {}
     assert get_universe_identity_cache().generation_id is None
+    assert get_cross_generation_identity_cache().events == {}
+    assert get_cross_generation_identity_cache().semantic_version is None
 
 
 def test_clustering_reserve_holds_market_eval_slice_on_150s_chunk() -> None:

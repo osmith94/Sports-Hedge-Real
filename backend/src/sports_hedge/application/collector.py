@@ -29,8 +29,10 @@ from sports_hedge.application.fixture_clusters import (
     universe_cluster_sort_key,
 )
 from sports_hedge.application.universe_identity_cache import (
+    CrossGenerationIdentityCache,
     GenerationIdentityCache,
     bind_universe_identity_cache,
+    get_cross_generation_identity_cache,
 )
 from sports_hedge.application.equivalence_diagnostics import (
     zero_equivalent_reason_counts,
@@ -718,6 +720,7 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_books_skipped_unapproved = 0
         self._kalshi_get_market_failed_tickers: set[str] = set()
         self._identity_cache: GenerationIdentityCache | None = None
+        self._incremental_cache: CrossGenerationIdentityCache | None = None
 
     async def collect_and_scan(
         self,
@@ -780,6 +783,13 @@ class ReadOnlyCrossVenueCollector:
             self._identity_cache = bind_universe_identity_cache(universe_generation_id)
         else:
             self._identity_cache = GenerationIdentityCache()
+        if (
+            universe_generation_id is not None
+            and self._op_request_lane == ScanLane.UNIVERSE.value
+        ):
+            self._incremental_cache = get_cross_generation_identity_cache()
+        else:
+            self._incremental_cache = None
         self._op_selected_competition_codes = (
             tuple(selected_competition_codes)
             if selected_competition_codes is not None
@@ -2329,6 +2339,36 @@ class ReadOnlyCrossVenueCollector:
             ),
             "identity_graph_global_assignments": int(
                 (clustering_diagnostics or {}).get("identity_graph_global_assignments") or 0
+            ),
+            "identity_events_discovered": int(
+                (clustering_diagnostics or {}).get("identity_events_discovered") or 0
+            ),
+            "identity_unchanged_reused": int(
+                (clustering_diagnostics or {}).get("identity_unchanged_reused") or 0
+            ),
+            "identity_changed_recomputed": int(
+                (clustering_diagnostics or {}).get("identity_changed_recomputed") or 0
+            ),
+            "identity_events_new": int(
+                (clustering_diagnostics or {}).get("identity_events_new") or 0
+            ),
+            "identity_events_removed": int(
+                (clustering_diagnostics or {}).get("identity_events_removed") or 0
+            ),
+            "identity_cache_hit_pct": float(
+                (clustering_diagnostics or {}).get("identity_cache_hit_pct") or 0.0
+            ),
+            "identity_saved_candidate_comparisons": int(
+                (clustering_diagnostics or {}).get("identity_saved_candidate_comparisons")
+                or 0
+            ),
+            "identity_cache_semantic_version": str(
+                (clustering_diagnostics or {}).get("identity_cache_semantic_version") or ""
+            ),
+            "identity_cache_semantic_version_mismatch": bool(
+                (clustering_diagnostics or {}).get(
+                    "identity_cache_semantic_version_mismatch"
+                )
             ),
             "single_venue_deferred_count": sum(
                 1
@@ -4156,6 +4196,7 @@ class ReadOnlyCrossVenueCollector:
             matcher=self.event_matcher,
             max_event_pairs=max_event_pairs,
             identity_cache=self._identity_cache,
+            incremental_cache=self._incremental_cache,
         )
         truncated = False
         started = monotonic()
@@ -4183,6 +4224,7 @@ class ReadOnlyCrossVenueCollector:
         clusters, counts = cluster_pass.finalize()
         if not truncated:
             cluster_pass.record_generation_negatives(clusters)
+            cluster_pass.commit_incremental_snapshot()
         diagnostics = cluster_pass.clustering_diagnostics(
             truncated=truncated, duration_ms=duration_ms
         )

@@ -77,6 +77,7 @@ from sports_hedge.application.fixture_clusters import (
 )
 from sports_hedge.application.universe_identity_cache import (
     bind_universe_identity_cache,
+    reset_generation_scoped_identity_cache,
     reset_universe_identity_cache,
 )
 from sports_hedge.application.provider_access import (
@@ -3790,7 +3791,7 @@ class LiveRefreshCoordinator:
         )
         pending = self._universe_run_now_pending
         self._clear_universe_generation_local_state()
-        reset_universe_identity_cache()
+        reset_generation_scoped_identity_cache()
         self._universe_generation_started_at = None
         self._universe_budget_paused = False
         self._universe_retry_at = None
