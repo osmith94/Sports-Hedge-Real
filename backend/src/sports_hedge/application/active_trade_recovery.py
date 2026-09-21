@@ -8,6 +8,7 @@ from typing import Any
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.liquidity.book import BookLevel
+from sports_hedge.paper.canonical_results import canonical_result_space
 from sports_hedge.paper.fills import PaperOpportunityLeg
 from sports_hedge.paper.settlement import PaperSettlementError, compute_paper_settlement
 from sports_hedge.paper.trades import PaperTrade, PaperTradeLeg
@@ -40,6 +41,7 @@ def worst_case_settlement_pnl_gbp(trade: PaperTrade) -> Decimal:
     """
 
     outcomes = {leg.outcome for leg in trade.legs if leg.outcome}
+    outcomes.update(canonical_result_space(trade).values)
     filled = [leg for leg in trade.legs if leg.filled_stake > 0]
     if not outcomes or not filled:
         return ZERO

@@ -117,6 +117,13 @@ from sports_hedge.paper.risk_snapshot import (
     snapshot_from_execution_risk,
     snapshot_from_scan_decision,
 )
+from sports_hedge.paper.canonical_results import (
+    PAPER_MANUAL_SETTLEMENT_SOURCE,
+    CanonicalResultChoice,
+    canonical_result_space,
+    manual_settlement_source_id,
+    validate_manual_settlement_outcome,
+)
 from sports_hedge.paper.settlement import PaperSettlementError, compute_paper_settlement
 from sports_hedge.paper.simulator import PaperFillSimulator
 from sports_hedge.paper.trades import (
@@ -125,6 +132,10 @@ from sports_hedge.paper.trades import (
     PAPER_UNWIND_SOURCE,
     PaperActiveTradePhase,
     PaperLegFillKind,
+    PaperManualSettlementRequest,
+    PaperSettlementLegView,
+    PaperSettlementOptions,
+    PaperSettlementReconciliation,
     PaperSettlementRequest,
     PaperTrade,
     PaperTradeAuditEvent,
@@ -135,6 +146,7 @@ from sports_hedge.paper.trades import (
     PaperTradeState,
     PaperTradeTranche,
     PaperTradeTrancheKind,
+    SettlementReconciliationStatus,
     paper_unwind_source_id,
 )
 from sports_hedge.persistence.operator_scanner_settings import (
@@ -2431,6 +2443,119 @@ class PaperOperationsService:
         result.trade_id = trade.trade_id if trade is not None else None
         return result
 
+    def record_settlement_reconciliation(
+        self,
+        trade: PaperTrade,
+        *,
+        status: SettlementReconciliationStatus,
+        blocker: str | None,
+        detail: str | None,
+        now: datetime,
+        persist: bool = True,
+    ) -> None:
+        """Update last-check diagnostics without appending duplicate blockers."""
+
+        trade.last_settlement_check_at = now
+        trade.settlement_reconciliation_status = status
+        trade.settlement_blocker = blocker
+        trade.settlement_blocker_detail = detail
+        if persist and self.trades is not None:
+            self.trades.save(trade)
+
+    def settlement_options(self, trade_id: str) -> PaperSettlementOptions:
+        if self.trades is None:
+            raise PaperOperationsError("paper_trade_repository_unavailable")
+        trade = self.trades.get(trade_id)
+        if trade is None:
+            raise PaperOperationsError("unknown_trade")
+        space = canonical_result_space(trade)
+        choices: list[CanonicalResultChoice] = []
+        for choice in space.choices:
+            preview = None
+            try:
+                preview = compute_paper_settlement(
+                    trade, winning_outcome=choice.value
+                ).realised_pnl_gbp
+            except PaperSettlementError:
+                preview = None
+            choices.append(choice.model_copy(update={"realised_pnl_gbp": preview}))
+        return PaperSettlementOptions(
+            trade_id=trade.trade_id,
+            fixture_label=trade.fixture_label
+            or f"{trade.home_team or 'Unknown'} v {trade.away_team or 'Unknown'}",
+            market_label=trade.market_label,
+            market_family=None if trade.market_family is None else trade.market_family.value,
+            line=trade.line,
+            home_team=trade.home_team,
+            away_team=trade.away_team,
+            paper_only=True,
+            places_orders=False,
+            provenance=trade.provenance,
+            state=trade.state,
+            legs=[
+                PaperSettlementLegView(
+                    venue=leg.venue.value,
+                    outcome=leg.outcome,
+                    currency=leg.currency,
+                    filled_stake=leg.filled_stake,
+                    filled_odds=leg.filled_odds,
+                    displayed_odds=leg.displayed_odds,
+                    fill_kind=leg.fill_kind.value,
+                    opening_action=None if leg.opening_action is None else leg.opening_action.value,
+                    canonical_state=leg.canonical_state,
+                )
+                for leg in trade.legs
+            ],
+            choices=choices,
+            unsupported_reason=space.unsupported_reason,
+            reconciliation=PaperSettlementReconciliation(
+                status=trade.settlement_reconciliation_status,
+                last_checked_at=trade.last_settlement_check_at,
+                blocker=trade.settlement_blocker,
+                detail=trade.settlement_blocker_detail,
+            ),
+        )
+
+    def settle_manual_result(
+        self,
+        trade_id: str,
+        request: PaperManualSettlementRequest,
+        *,
+        now: datetime | None = None,
+    ) -> PaperTradeDetail:
+        """Operator failsafe over the existing settle() / 8E path. PAPER only."""
+
+        if self.trades is None:
+            raise PaperOperationsError("paper_trade_repository_unavailable")
+        trade = self.trades.get(trade_id)
+        if trade is None:
+            raise PaperOperationsError("unknown_trade")
+        blocker = validate_manual_settlement_outcome(trade, request.winning_outcome)
+        if blocker is not None:
+            raise PaperOperationsError(blocker)
+        settled_at = request.settled_at or now or datetime.now(UTC)
+        note = (request.operator_note or "").strip()
+        detail = "Operator-recorded canonical market result; not inferred from kickoff"
+        if note:
+            detail = f"{detail}. {note}"
+        provenance = (
+            DataProvenance.LIVE_PAPER
+            if trade.provenance is DataProvenance.LIVE_PAPER
+            else trade.provenance
+        )
+        return self.settle(
+            trade_id,
+            PaperSettlementRequest(
+                winning_outcome=request.winning_outcome.strip(),
+                source=PAPER_MANUAL_SETTLEMENT_SOURCE,
+                source_id=manual_settlement_source_id(trade.trade_id),
+                settled_at=settled_at,
+                detail=detail,
+                provenance=provenance,
+            ),
+            now=settled_at,
+        )
+
     def settle(
         self,
         trade_id: str,
@@ -2544,6 +2669,10 @@ class PaperOperationsService:
         trade.settlement_detail = request.detail
         trade.capital_locked_native = {}
         trade.capital_locked_gbp = Decimal(0)
+        trade.settlement_reconciliation_status = SettlementReconciliationStatus.SETTLED
+        trade.last_settlement_check_at = settled_at
+        trade.settlement_blocker = None
+        trade.settlement_blocker_detail = None
         trade.audit.append(
             PaperTradeAuditEvent(
                 occurred_at=settled_at,

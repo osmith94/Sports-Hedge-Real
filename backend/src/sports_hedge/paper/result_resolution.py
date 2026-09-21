@@ -18,6 +18,7 @@ from sports_hedge.domain.football import (
 )
 from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.paper_assumed import LOCKED_PAPER_FAMILIES
+from sports_hedge.paper.canonical_results import is_valid_canonical_settlement_outcome
 from sports_hedge.paper.trades import PaperTrade, PaperTradeState
 
 PAPER_AUTO_SETTLEMENT_SOURCE = "paper_auto_settlement"
@@ -154,8 +155,7 @@ def resolve_paper_trade_settlement(
         )
 
     winner = next(iter(winners))
-    trade_outcomes = {leg.outcome for leg in trade.legs}
-    if winner not in trade_outcomes:
+    if not is_valid_canonical_settlement_outcome(trade, winner):
         return _blocked(
             trade,
             "settlement_outcome_not_on_trade",
@@ -206,31 +206,59 @@ def _identity_blocker(trade: PaperTrade) -> str | None:
     if not any(leg.filled_stake > 0 for leg in trade.legs):
         return "cannot_settle_unfilled_trade"
     has_matchbook = any(
-        leg.venue is VenueName.MATCHBOOK and str(leg.source_market_id or "").strip()
+        leg.venue is VenueName.MATCHBOOK and _usable_id(leg.source_market_id)
         for leg in trade.legs
+        if leg.filled_stake > 0
     )
     has_kalshi = any(
         leg.venue is VenueName.KALSHI
-        and str(leg.source_contract_id or leg.source_market_id or "").strip()
+        and _usable_id(leg.source_contract_id or leg.source_market_id)
         for leg in trade.legs
+        if leg.filled_stake > 0
     )
-    missing_event = any(
-        leg.filled_stake > 0 and not str(leg.source_event_id or "").strip()
-        for leg in trade.legs
-        if leg.venue in {VenueName.MATCHBOOK, VenueName.KALSHI}
-    )
-    if missing_event or (not has_matchbook and not has_kalshi):
+    if not has_matchbook and not has_kalshi:
         return "missing_durable_provider_identity"
-    mb_event = _first_source_event(trade, VenueName.MATCHBOOK)
-    canonical = str(trade.canonical_event_id or "").strip()
-    if (
-        mb_event
-        and canonical
-        and mb_event == canonical
-        and not mb_event.isdigit()
-    ):
+    if has_matchbook and _matchbook_identity_missing(trade):
+        return "missing_durable_provider_identity"
+    if has_kalshi and not _kalshi_tickers(trade):
         return "missing_durable_provider_identity"
     return None
+
+
+def _matchbook_identity_missing(trade: PaperTrade) -> bool:
+    event_id = _first_source_event(trade, VenueName.MATCHBOOK)
+    market_id = next(
+        (
+            _usable_id(leg.source_market_id)
+            for leg in trade.legs
+            if leg.venue is VenueName.MATCHBOOK and leg.filled_stake > 0
+        ),
+        None,
+    )
+    if not event_id or not market_id:
+        return True
+    canonical = str(trade.canonical_event_id or "").strip()
+    if event_id == canonical and not event_id.isdigit():
+        return True
+    return False
+
+
+def _usable_id(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text or text.casefold() in {"unknown", "none", "null"}:
+        return None
+    return text
+
+
+def _kalshi_tickers(trade: PaperTrade) -> list[str]:
+    tickers: list[str] = []
+    for leg in trade.legs:
+        if leg.venue is not VenueName.KALSHI:
+            continue
+        ticker = _usable_id(leg.source_contract_id or leg.source_market_id)
+        if ticker and ticker not in tickers:
+            tickers.append(ticker)
+    return tickers
 
 
 def _family_blocker(trade: PaperTrade) -> str | None:
@@ -782,17 +810,6 @@ def _first_source_market(trade: PaperTrade, venue: VenueName) -> str | None:
         if leg.venue is venue and str(leg.source_market_id or "").strip():
             return str(leg.source_market_id)
     return None
-
-
-def _kalshi_tickers(trade: PaperTrade) -> list[str]:
-    tickers: list[str] = []
-    for leg in trade.legs:
-        if leg.venue is not VenueName.KALSHI:
-            continue
-        ticker = str(leg.source_contract_id or leg.source_market_id or "").strip()
-        if ticker and ticker not in tickers:
-            tickers.append(ticker)
-    return tickers
 
 
 def _payload_status(payload: Mapping[str, Any] | None) -> str | None:

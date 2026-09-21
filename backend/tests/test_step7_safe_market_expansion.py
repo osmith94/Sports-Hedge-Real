@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -49,8 +49,8 @@ from venue_cost_helpers import matchbook_kalshi_costs
 from test_fixture_inventory import _inventory, _market
 
 
-KICKOFF = datetime(2026, 9, 20, 18, 45, tzinfo=UTC)
-OBSERVED = datetime(2026, 9, 20, 16, 45, tzinfo=UTC)
+KICKOFF = datetime.now(UTC) + timedelta(days=3)
+OBSERVED = datetime.now(UTC) - timedelta(minutes=5)
 
 MB_EVENT = {
     "id": 7001,

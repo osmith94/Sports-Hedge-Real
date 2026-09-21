@@ -6,6 +6,8 @@ export const LINE_PARAMETER_FAMILIES = new Set<MarketFamily>([
   "total_goals",
   "asian_handicap",
   "team_total",
+  "point_spread",
+  "total_points",
 ]);
 
 const FAMILY_LABELS: Record<string, string> = {
@@ -16,6 +18,9 @@ const FAMILY_LABELS: Record<string, string> = {
   draw_no_bet: "Draw No Bet",
   asian_handicap: "Asian Handicap",
   team_total: "Team Total",
+  game_winner: "Game Winner",
+  point_spread: "Spread",
+  total_points: "Total Points",
 };
 
 export function formatStoredLine(line: string | number | null | undefined): string | null {

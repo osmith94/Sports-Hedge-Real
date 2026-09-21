@@ -145,6 +145,9 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 .competition-modal-scope-meta { margin: 8px 0 0; color: var(--muted-2); font-size: 10px; line-height: 1.45; max-width: 58ch; }
 .competition-modal-save-default { display: flex; gap: 8px; align-items: center; margin: 12px 0 0; font-size: 12px; font-weight: 650; }
 .competition-modal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.settlement-modal { width: min(640px, 100%); }
+.settlement-modal .scan-field { display: grid; gap: 6px; margin-top: 12px; font-size: 12px; font-weight: 650; }
+.settlement-modal select, .settlement-modal input { width: 100%; }
 .scan-button-secondary { border: 1px solid var(--line-strong); background: transparent; color: var(--muted); border-radius: 8px; padding: 9px 13px; min-height: 35px; font-size: 10px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; cursor: pointer; }
 .scan-button-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .scan-button-danger { border: 1px solid rgba(240, 130, 130, .45); background: rgba(240, 130, 130, .08); color: var(--red); border-radius: 8px; padding: 9px 13px; min-height: 35px; font-size: 10px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; cursor: pointer; }

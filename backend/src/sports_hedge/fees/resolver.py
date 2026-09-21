@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field, model_validator
 
-from sports_hedge.domain.football import MarketFamily
+from sports_hedge.domain.football import MarketFamily, NFL_PAPER_MARKET_FAMILIES
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import (
     CostKnownStatus,
@@ -266,7 +266,11 @@ def phase1_seed_rules() -> list[VenueCostRule]:
 
     effective = datetime(2024, 1, 1, tzinfo=UTC)
     version = "phase1-2026-09-13"
-    football = [family for family in MarketFamily if family is not MarketFamily.UNKNOWN]
+    football = [
+        family
+        for family in MarketFamily
+        if family is not MarketFamily.UNKNOWN and family not in NFL_PAPER_MARKET_FAMILIES
+    ]
     rules: list[VenueCostRule] = []
     for family in football:
         rules.append(

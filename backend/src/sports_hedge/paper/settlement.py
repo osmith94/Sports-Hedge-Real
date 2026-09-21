@@ -1,6 +1,15 @@
 """Paper settlement payoffs from recorded fills, venue costs and FX.
 
-Does not invent a football result. Winning outcome must be supplied by a labelled source.
+Does not invent a football result. Winning outcome must be supplied by a labelled
+source (auto-settlement evidence or operator-selected canonical market result).
+
+Phase-1 openings are normalized at fill time:
+Matchbook/Smarkets → BACK, Kalshi/Polymarket → BUY, with ``canonical_state``
+equal to the paying runner. Settlement therefore matches ``leg.outcome`` to the
+canonical winner and does not invert complement/negative states. LAY/SELL
+openings are rejected rather than booked as simple winners. A valid family
+result that no filled leg covers (e.g. 1X2 DRAW on a home/away-only trade)
+settles every filled leg as a loss from stored entry odds.
 """
 
 from __future__ import annotations
@@ -9,8 +18,9 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
-from sports_hedge.fees.cost import VenueCostSnapshot
+from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
 from sports_hedge.fees.effective import apply_venue_costs
+from sports_hedge.paper.canonical_results import is_valid_canonical_settlement_outcome
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.paper.trades import PaperLegFillKind, PaperTrade, PaperTradeLeg
 
@@ -47,12 +57,19 @@ def compute_paper_settlement(
     *,
     winning_outcome: str,
 ) -> PaperSettlementComputation:
-    """Settle from a labelled outcome over the trade's canonical legs.
+    """Settle from a labelled canonical outcome over the trade's filled legs.
 
     UNFILLED PARTIAL outcomes are valid winners; P&L uses filled legs only.
+    Current quotes are never used. Stored filled/entry odds, stakes and fees
+    are the sole economics.
+
+    ``opening_action`` / ``canonical_state``: current paper fills persist BACK
+    (exchanges) or BUY (Kalshi/Polymarket) with ``canonical_state == outcome``.
+    Winner matching is therefore the paying canonical state, not an exchange
+    complement. LAY/SELL openings fail closed so a future lay is not treated
+    as a simple back winner.
     """
-    outcomes = {leg.outcome for leg in trade.legs}
-    if winning_outcome not in outcomes:
+    if not is_valid_canonical_settlement_outcome(trade, winning_outcome):
         raise PaperSettlementError("settlement_outcome_not_on_trade")
     fx = {item.currency: item for item in trade.fx_snapshots}
     results: list[LegSettlement] = []
@@ -60,8 +77,10 @@ def compute_paper_settlement(
     for leg in trade.legs:
         if leg.filled_stake <= 0 or leg.fill_kind is PaperLegFillKind.UNFILLED:
             continue
+        if leg.opening_action in {MarketAction.LAY, MarketAction.SELL}:
+            raise PaperSettlementError("opening_lay_sell_not_supported")
         rate = _fx_rate(leg.currency, fx)
-        won = leg.outcome == winning_outcome
+        won = (leg.canonical_state or leg.outcome) == winning_outcome
         filled_odds = leg.filled_odds or leg.displayed_odds
         if won:
             if filled_odds is None:
