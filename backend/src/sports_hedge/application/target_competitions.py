@@ -48,7 +48,7 @@ class VenueMappingStatus(StrEnum):
     UNVERIFIED = "unverified"
 
 
-PRINCIPAL_OPERATOR_COMPETITION_COUNT = 31
+PRINCIPAL_OPERATOR_COMPETITION_COUNT = 32
 VERIFIED_ALL_3 = "VERIFIED_ALL_3"
 PARTIAL_PROVIDER_MAPPING = "PARTIAL"
 PROVIDER_MATRIX_RETRIEVED_AT = "2026-09-20"
@@ -1088,6 +1088,10 @@ def resolve_target_competition_from_kalshi_ticker(series_ticker: str | None) -> 
     ticker = str(series_ticker or "").strip().upper()
     if not ticker:
         return None
+    from sports_hedge.outrights.universe_scopes import kalshi_ticker_is_season_series
+
+    if kalshi_ticker_is_season_series(ticker):
+        return None
     matches: list[tuple[int, TargetCompetition]] = []
     for item in TARGET_COMPETITIONS:
         for prefix in item.kalshi_series_prefixes:
@@ -1314,6 +1318,9 @@ def operator_competition_catalog() -> list[dict[str, Any]]:
                 "selectable": selectable,
                 "verification_status": competition_verification_status(item),
                 "unavailable_reason": competition_unavailable_reason(item),
+                "market_scope": "FIXTURE_MATCH",
+                "observation_only": False,
+                "paper_executable": selectable,
             }
         )
     return rows

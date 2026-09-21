@@ -936,6 +936,7 @@ def put_universe_scope(
     try:
         coordinator.apply_universe_scope(
             update.selected_competition_codes,
+            selected_season_scope_codes=update.selected_season_scope_codes,
             run_universe_now=update.run_universe_now,
             save_as_default=update.save_as_default,
             restore_saved_default=update.restore_saved_default,
@@ -945,7 +946,7 @@ def put_universe_scope(
         if str(exc) == UNIVERSE_SCOPE_EMPTY_SELECTION:
             raise HTTPException(
                 status_code=422,
-                detail="Select at least one supported football competition.",
+                detail="Select at least one supported football competition or season market.",
             ) from exc
         raise
     return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
@@ -1214,6 +1215,7 @@ async def _collect_report(
     retry_series: dict[str, list[str]] | None = None,
     hot_market_relationships=None,
     selected_competition_codes: list[str] | tuple[str, ...] | None = None,
+    selected_season_scope_codes: list[str] | tuple[str, ...] | None = None,
     generation_scope_version: int | None = None,
     generation_superseded: bool = False,
 ) -> CollectionReport:
@@ -1269,6 +1271,7 @@ async def _collect_report(
             retry_series=retry_series,
             hot_market_relationships=hot_market_relationships,
             selected_competition_codes=selected_competition_codes,
+            selected_season_scope_codes=selected_season_scope_codes,
             generation_scope_version=generation_scope_version,
             generation_superseded=generation_superseded,
         )
@@ -1655,11 +1658,13 @@ async def server_owned_refresh_tick(plan=None) -> None:
     async def runner() -> CollectionReport:
         on_discovery = on_fixture = on_work_set = None
         selected_codes = None
+        selected_season_codes = None
         superseded = False
         scope_version = None
         if resolved.lane == ScanLane.UNIVERSE.value:
             on_discovery, on_fixture, on_work_set = coordinator.universe_collect_callbacks()
             selected_codes = list(coordinator.generation_discovery_codes())
+            selected_season_codes = list(coordinator.generation_season_scope_codes())
             superseded = coordinator.generation_superseded()
             scope_version = coordinator._universe_generation_scope_version
         return await _collect_report(
@@ -1684,6 +1689,7 @@ async def server_owned_refresh_tick(plan=None) -> None:
             retry_series=resolved.retry_series,
             hot_market_relationships=getattr(resolved, "hot_market_relationships", None),
             selected_competition_codes=selected_codes,
+            selected_season_scope_codes=selected_season_codes,
             generation_scope_version=scope_version,
             generation_superseded=superseded,
         )

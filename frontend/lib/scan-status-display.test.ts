@@ -422,7 +422,7 @@ describe("dual cadence operator copy", () => {
     assert.match(api, /\/paper\/universe-scope/);
     assert.match(api, /PAPER_HOT_REFRESH_TIMEOUT_MS = 35_000/);
     assert.match(api, /\/paper\/collect`/);
-    assert.match(modal, /Football competitions/);
+    assert.match(modal, /Discovery scope/);
     assert.match(modal, /Apply & Run UNIVERSE now/);
     assert.match(modal, /Select defaults/);
     assert.match(modal, /Select all supported/);

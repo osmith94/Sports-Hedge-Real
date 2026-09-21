@@ -732,14 +732,21 @@ export type OperatorCompetitionOption = {
   selectable: boolean;
   verification_status?: string;
   unavailable_reason?: string | null;
+  market_scope?: "FIXTURE_MATCH" | "COMPETITION_SEASON";
+  observation_only?: boolean;
+  paper_executable?: boolean;
 };
 
 export type OperatorUniverseScope = {
   sport: string;
   selected_competition_codes: string[];
+  selected_season_scope_codes?: string[];
   selected_count: number;
+  selected_season_scope_count?: number;
   saved_default_competition_codes?: string[];
+  saved_default_season_scope_codes?: string[];
   saved_default_count?: number;
+  saved_default_season_scope_count?: number;
   is_session_override?: boolean;
   scope_version: number;
   registry_version: number;
@@ -750,12 +757,14 @@ export type OperatorUniverseScope = {
   catalog: OperatorCompetitionOption[];
   generation_scope_version?: number | null;
   generation_selected_competition_codes?: string[];
+  generation_selected_season_scope_codes?: string[];
   manual_universe_state?: "idle" | "running" | "pending";
   manual_background_busy?: boolean;
 };
 
 export type OperatorUniverseScopeUpdate = {
   selected_competition_codes: string[];
+  selected_season_scope_codes?: string[];
   sport?: string;
   run_universe_now?: boolean;
   save_as_default?: boolean;

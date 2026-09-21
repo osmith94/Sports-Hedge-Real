@@ -74,8 +74,21 @@ Top scorer Kalshi vs Polymarket remains fail-closed on joint-winner policy
 
 ## Explicitly out of this slice
 
-- UNIVERSE discovery-loop series expansion (would add GETs on soccer workers)
 - dual Min Net Arb / treasury caps (#428 / later)
 - Approved Match Register onboarding / Phase 1C equivalence
 - provider concurrency changes
 - venue writes, merge, owner-live movement
+- Polymarket exact-ID season fetches (composition-ready for #429; not NFL fixture GETs)
+
+## UNIVERSE operator picker
+
+COMPETITION_SEASON scopes participate in the existing #381 Universe scope
+picker. Selecting a season row makes it eligible for the **existing** UNIVERSE
+worker via extra Kalshi series tickers on that generation. Deselecting stops
+new discovery/admission for that scope and does not delete catalogue history
+or abandon OPEN/PARTIAL/ACTIVE PAPER positions.
+
+Scope Apply remains provider-I/O-free unless the operator chooses Run UNIVERSE
+now. There is no second outright scanner. Cross-venue outright equivalence and
+PAPER admission stay closed. Top scorer remains observation-only / not
+executable while joint-winner policy is fail-closed.

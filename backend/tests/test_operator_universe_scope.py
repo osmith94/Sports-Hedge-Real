@@ -144,7 +144,16 @@ def test_clean_install_defaults_to_current_eight_competitions(tmp_path: Path) ->
         assert resolved.scope_version == 0
         catalog_codes = {row.code for row in resolved.catalog}
         assert catalog_codes >= set(DEFAULT_EIGHT)
-        assert len(resolved.catalog) == 31
+        fixture_rows = [row for row in resolved.catalog if row.market_scope == "FIXTURE_MATCH"]
+        season_rows = [row for row in resolved.catalog if row.market_scope == "COMPETITION_SEASON"]
+        assert len(fixture_rows) == PRINCIPAL_OPERATOR_COMPETITION_COUNT
+        assert len(season_rows) == 3
+        assert resolved.selected_season_scope_codes == []
+        assert {row.code for row in season_rows} == {
+            "epl_2026_27_champion",
+            "nfl_2026_super_bowl_champion",
+            "epl_2026_27_top_scorer",
+        }
         assert resolved.saved_default_competition_codes == list(DEFAULT_EIGHT)
         assert resolved.is_session_override is False
         assert "champions_league" in catalog_codes
@@ -524,6 +533,10 @@ def test_verified_new_competition_mappings_and_no_guessed_tickers() -> None:
     modal = (frontend / "components" / "football-competitions-modal.tsx").read_text(encoding="utf-8")
     api = (frontend / "lib" / "api.ts").read_text(encoding="utf-8")
     assert "Football competitions" in scan
+    assert "UNIVERSE scope" in scan
+    assert "selected_season_scope_codes" in api
+    assert "outrights" in modal
+    assert "Discovery scope" in modal
     assert "Manual BACKGROUND refresh" in scan
     assert "Run UNIVERSE now" in scan
     assert "needs_first_run_confirmation" in scan
@@ -675,4 +688,142 @@ def test_thirty_row_matrix_only_verified_all_three_are_selectable() -> None:
     for row in matrix:
         assert row.code in text
         assert row.display_name in text
+
+
+def test_season_scopes_are_in_picker_unchecked_and_not_nfl_fixtures(tmp_path: Path) -> None:
+    coordinator, scope_store, settings_store = _bind_scope(tmp_path)
+    client = TestClient(app)
+    ticks: list[str] = []
+
+    async def boom(_plan=None) -> None:
+        ticks.append("tick")
+        raise AssertionError("Apply must not trigger scanner work")
+
+    original = paper_api.server_owned_refresh_tick
+    paper_api.server_owned_refresh_tick = boom  # type: ignore[method-assign]
+    try:
+        body = client.get("/paper/universe-scope").json()
+        season = {
+            row["code"]: row
+            for row in body["catalog"]
+            if row["market_scope"] == "COMPETITION_SEASON"
+        }
+        assert body["selected_season_scope_codes"] == []
+        assert "epl_2026_27_champion" in season
+        assert season["epl_2026_27_champion"]["selector_label"] == "Premier League 2026-27 · Champion"
+        assert season["nfl_2026_super_bowl_champion"]["selector_label"] == "NFL 2026 · Super Bowl Champion"
+        assert season["epl_2026_27_top_scorer"]["selector_label"] == "Premier League 2026-27 · Top Scorer"
+        assert season["epl_2026_27_top_scorer"]["observation_only"] is True
+        assert season["epl_2026_27_top_scorer"]["paper_executable"] is False
+        assert "not executable" in (season["epl_2026_27_top_scorer"]["unavailable_reason"] or "").lower()
+        assert all(row["selectable"] is True for row in season.values())
+        assert all(row["default_selected"] is False for row in season.values())
+        assert all(row["paper_executable"] is False for row in season.values())
+        applied = client.put(
+            "/paper/universe-scope",
+            json={
+                "selected_competition_codes": ["premier_league"],
+                "selected_season_scope_codes": [
+                    "epl_2026_27_champion",
+                    "nfl_2026_super_bowl_champion",
+                    "epl_2026_27_top_scorer",
+                ],
+                "run_universe_now": False,
+            },
+        )
+        assert applied.status_code == 200
+        saved = applied.json()["universe_scope"]
+        assert saved["selected_competition_codes"] == ["premier_league"]
+        assert saved["selected_season_scope_codes"] == [
+            "epl_2026_27_champion",
+            "nfl_2026_super_bowl_champion",
+            "epl_2026_27_top_scorer",
+        ]
+        assert saved["saved_default_season_scope_codes"] == []
+        assert saved["is_session_override"] is True
+        assert ticks == []
+        persist = scope_store.load()
+        assert persist is not None
+        assert persist.saved_default_season_scope_codes == []
+        seasons_only = client.put(
+            "/paper/universe-scope",
+            json={
+                "selected_competition_codes": [],
+                "selected_season_scope_codes": ["epl_2026_27_champion"],
+            },
+        )
+        assert seasons_only.status_code == 200
+        empty = client.put(
+            "/paper/universe-scope",
+            json={"selected_competition_codes": [], "selected_season_scope_codes": []},
+        )
+        assert empty.status_code == 422
+    finally:
+        paper_api.server_owned_refresh_tick = original
+        _unbind(coordinator, scope_store, settings_store)
+
+
+def test_season_scope_discovery_filters_and_session_vs_saved_default(tmp_path: Path) -> None:
+    coordinator, scope_store, settings_store = _bind_scope(tmp_path)
+    try:
+        default_filters = discovery_filters_for_codes(DEFAULT_EIGHT)
+        assert "KXPREMIERLEAGUE" not in default_filters["kalshi_series_tickers"]
+        assert "KXSB" not in default_filters["kalshi_series_tickers"]
+        assert "KXEPLLEADER" not in default_filters["kalshi_series_tickers"]
+        assert "KXNFLGAME" not in default_filters["kalshi_series_tickers"]
+        selected = discovery_filters_for_codes(
+            ["premier_league"],
+            season_scope_codes=[
+                "epl_2026_27_champion",
+                "nfl_2026_super_bowl_champion",
+                "epl_2026_27_top_scorer",
+            ],
+        )
+        assert "KXEPLGAME" in selected["kalshi_series_tickers"]
+        assert "KXPREMIERLEAGUE" in selected["kalshi_series_tickers"]
+        assert "KXSB" in selected["kalshi_series_tickers"]
+        assert "KXEPLLEADER" in selected["kalshi_series_tickers"]
+        assert "KXNFLGAME" not in selected["kalshi_series_tickers"]
+        applied = coordinator.apply_universe_scope(
+            ["premier_league"],
+            selected_season_scope_codes=["epl_2026_27_champion"],
+            save_as_default=False,
+        )
+        assert applied.selected_season_scope_codes == ["epl_2026_27_champion"]
+        assert applied.saved_default_season_scope_codes == []
+        assert applied.is_session_override is True
+        persisted = scope_store.load()
+        assert persisted is not None
+        assert persisted.saved_default_season_scope_codes == []
+        saved = coordinator.apply_universe_scope(
+            ["premier_league"],
+            selected_season_scope_codes=["nfl_2026_super_bowl_champion"],
+            save_as_default=True,
+        )
+        assert saved.saved_default_season_scope_codes == ["nfl_2026_super_bowl_champion"]
+        assert saved.is_session_override is False
+        coordinator.reset()
+        coordinator.bind_universe_scope_store(scope_store)
+        restarted = coordinator.effective_universe_scope()
+        assert restarted.selected_competition_codes == ["premier_league"]
+        assert restarted.selected_season_scope_codes == ["nfl_2026_super_bowl_champion"]
+        assert restarted.is_session_override is False
+        coordinator.apply_universe_scope(
+            ["premier_league"],
+            selected_season_scope_codes=["epl_2026_27_top_scorer"],
+        )
+        restored = coordinator.apply_universe_scope(
+            [],
+            restore_saved_default=True,
+        )
+        assert restored.selected_season_scope_codes == ["nfl_2026_super_bowl_champion"]
+        assert restored.is_session_override is False
+        collect_src = inspect.getsource(ReadOnlyCrossVenueCollector.collect_and_scan)
+        assert "kalshi_series_tickers_for_season_scopes" in collect_src
+        assert "partition_kalshi_season_events" in collect_src
+        assert "ReadOnlyCrossVenueCollector" not in inspect.getsource(
+            paper_api.put_universe_scope
+        )
+    finally:
+        _unbind(coordinator, scope_store, settings_store)
 

@@ -129,6 +129,11 @@ from sports_hedge.application.target_competitions import (
     selected_includes_nfl,
     selected_includes_soccer,
 )
+from sports_hedge.outrights.universe_scopes import (
+    kalshi_series_tickers_for_season_scopes,
+    observe_selected_season_kalshi_events,
+    partition_kalshi_season_events,
+)
 from sports_hedge.arbitrage.watchlist.economics import (
     distance_to_trigger_pp,
     net_edge_from_implied_sum,
@@ -659,6 +664,7 @@ class ReadOnlyCrossVenueCollector:
         self._provider_access = provider_access
         self.catalogue_store = catalogue_store
         self._catalogue_persist_sema = asyncio.Semaphore(1)
+        self._op_selected_season_scope_codes: tuple[str, ...] | None = None
         self._op_universe_generation_id: int | None = None
         self._cluster_sema: asyncio.Semaphore | None = None
         self._provider_semaphores: dict[VenueName, asyncio.Semaphore] = {}
@@ -726,6 +732,7 @@ class ReadOnlyCrossVenueCollector:
         skip_event_ids: list[str] | None = None,
         universe_generation_id: int | None = None,
         selected_competition_codes: list[str] | tuple[str, ...] | None = None,
+        selected_season_scope_codes: list[str] | tuple[str, ...] | None = None,
         generation_scope_version: int | None = None,
         generation_superseded: bool = False,
         generation_resume: bool = False,
@@ -756,6 +763,11 @@ class ReadOnlyCrossVenueCollector:
         self._op_selected_competition_codes = (
             tuple(selected_competition_codes)
             if selected_competition_codes is not None
+            else None
+        )
+        self._op_selected_season_scope_codes = (
+            tuple(selected_season_scope_codes)
+            if selected_season_scope_codes is not None
             else None
         )
         self._op_generation_scope_version = generation_scope_version
@@ -936,10 +948,19 @@ class ReadOnlyCrossVenueCollector:
                         selected_pm_ids = polymarket_series_ids_for_codes(
                             self._op_selected_competition_codes
                         )
-                        selected_k_tickers = kalshi_series_tickers_for_codes(
-                            self._op_selected_competition_codes
+                        selected_k_tickers = list(
+                            dict.fromkeys(
+                                [
+                                    *kalshi_series_tickers_for_codes(
+                                        self._op_selected_competition_codes
+                                    ),
+                                    *kalshi_series_tickers_for_season_scopes(
+                                        self._op_selected_season_scope_codes
+                                    ),
+                                ]
+                            )
                         )
-                        if selected_pm_ids and "series_id" not in pm_filters:
+                        if "series_id" not in pm_filters:
                             pm_filters["series_ids"] = selected_pm_ids
                         if selected_k_tickers:
                             k_filters["series_tickers"] = selected_k_tickers
@@ -980,6 +1001,25 @@ class ReadOnlyCrossVenueCollector:
                 )
 
             with self._stage("normalize_match"):
+                raw_kalshi_events, season_kalshi_events = partition_kalshi_season_events(
+                    raw_kalshi_events,
+                    selected_season_scope_codes=self._op_selected_season_scope_codes,
+                )
+                if (
+                    resolved_lane == ScanLane.UNIVERSE.value
+                    and season_kalshi_events
+                    and self.catalogue_store is not None
+                ):
+                    observe_selected_season_kalshi_events(
+                        self.catalogue_store,
+                        season_kalshi_events,
+                        now=started_at,
+                        generation_id=(
+                            None
+                            if self._op_universe_generation_id is None
+                            else str(self._op_universe_generation_id)
+                        ),
+                    )
                 mb_scope = filter_in_scope_events(
                     raw_matchbook_events,
                     venue=VenueName.MATCHBOOK,

@@ -136,6 +136,7 @@ from sports_hedge.persistence.operator_universe_scope import (
     UNIVERSE_MANUAL_IDLE,
     UNIVERSE_MANUAL_PENDING,
     UNIVERSE_MANUAL_RUNNING,
+    UNIVERSE_SCOPE_EMPTY_SELECTION,
     OperatorUniverseScope,
     SqliteOperatorUniverseScopeStore,
     bind_runtime_operator_universe_scope_store,
@@ -145,6 +146,10 @@ from sports_hedge.persistence.operator_universe_scope import (
 from sports_hedge.application.target_competitions import (
     default_operator_competition_code_values,
     normalize_selected_competition_codes,
+)
+from sports_hedge.outrights.universe_scopes import (
+    default_season_scope_code_values,
+    normalize_selected_season_scope_codes,
 )
 from sports_hedge.persistence.universe_checkpoint import SqliteUniverseCheckpointStore
 from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookDiscoveryError
@@ -353,6 +358,7 @@ class DualCadencePlan(BaseModel):
     )
     reason: str = ""
     selected_competition_codes: list[str] = Field(default_factory=list)
+    selected_season_scope_codes: list[str] = Field(default_factory=list)
     generation_scope_version: int | None = None
     generation_superseded: bool = False
 
@@ -469,9 +475,13 @@ class LiveRefreshCoordinator:
         self._universe_generation_superseded = False
         self._universe_generation_scope_version = 0
         self._session_selected_codes: tuple[str, ...] | None = None
+        self._session_selected_season_codes: tuple[str, ...] | None = None
         self._session_scope_version = 0
         self._universe_generation_selected_codes: tuple[str, ...] = (
             default_operator_competition_code_values()
+        )
+        self._universe_generation_selected_season_codes: tuple[str, ...] = (
+            default_season_scope_code_values()
         )
         self._next_hot_due: datetime | None = None
         self._next_universe_due: datetime | None = None
@@ -697,19 +707,26 @@ class LiveRefreshCoordinator:
                 self._universe_in_progress or self.status.universe.cycle_in_progress
             )
             generation_codes = list(self._universe_generation_selected_codes)
+            generation_season_codes = list(self._universe_generation_selected_season_codes)
             generation_version = self._universe_generation_scope_version
             background_busy = (
                 self._manual_background_in_progress or self._background_in_progress
             )
             session_codes = self._session_selected_codes
+            session_season_codes = self._session_selected_season_codes
             session_version = self._session_scope_version
         saved_default = list(scope.saved_default_competition_codes)
-        if session_codes is not None:
-            current = list(session_codes)
-            is_override = current != saved_default
+        saved_season_default = list(scope.saved_default_season_scope_codes)
+        if session_codes is not None or session_season_codes is not None:
+            current = list(session_codes if session_codes is not None else saved_default)
+            current_seasons = list(
+                session_season_codes if session_season_codes is not None else saved_season_default
+            )
+            is_override = current != saved_default or current_seasons != saved_season_default
             scope_version = max(int(scope.scope_version), int(session_version))
         else:
             current = list(scope.selected_competition_codes)
+            current_seasons = list(scope.selected_season_scope_codes)
             is_override = False
             scope_version = int(scope.scope_version)
         if running:
@@ -721,13 +738,18 @@ class LiveRefreshCoordinator:
         return scope.model_copy(
             update={
                 "selected_competition_codes": current,
-                "selected_count": len(current),
+                "selected_season_scope_codes": current_seasons,
+                "selected_count": len(current) + len(current_seasons),
+                "selected_season_scope_count": len(current_seasons),
                 "saved_default_competition_codes": saved_default,
-                "saved_default_count": len(saved_default),
+                "saved_default_season_scope_codes": saved_season_default,
+                "saved_default_count": len(saved_default) + len(saved_season_default),
+                "saved_default_season_scope_count": len(saved_season_default),
                 "is_session_override": is_override,
                 "scope_version": scope_version,
                 "generation_scope_version": generation_version or None,
                 "generation_selected_competition_codes": generation_codes,
+                "generation_selected_season_scope_codes": generation_season_codes,
                 "manual_universe_state": state,
                 "manual_background_busy": background_busy,
             }
@@ -737,6 +759,7 @@ class LiveRefreshCoordinator:
         self,
         selected_competition_codes: list[str] | tuple[str, ...],
         *,
+        selected_season_scope_codes: list[str] | tuple[str, ...] | None = None,
         run_universe_now: bool = False,
         save_as_default: bool = False,
         restore_saved_default: bool = False,
@@ -753,34 +776,57 @@ class LiveRefreshCoordinator:
         store = self._resolved_universe_scope_store()
         previous_scope = self.effective_universe_scope()
         previous = tuple(previous_scope.selected_competition_codes)
+        previous_seasons = tuple(previous_scope.selected_season_scope_codes)
         saved = resolve_operator_universe_scope(store)
         if restore_saved_default:
             codes = list(
-                normalize_selected_competition_codes(saved.saved_default_competition_codes)
+                normalize_selected_competition_codes(
+                    saved.saved_default_competition_codes, allow_empty=True
+                )
+            )
+            seasons = list(
+                normalize_selected_season_scope_codes(
+                    saved.saved_default_season_scope_codes, allow_empty=True
+                )
             )
             save_as_default = False
         else:
-            codes = list(normalize_selected_competition_codes(selected_competition_codes))
+            codes = list(
+                normalize_selected_competition_codes(selected_competition_codes, allow_empty=True)
+            )
+            if selected_season_scope_codes is None:
+                seasons = list(previous_seasons)
+            else:
+                seasons = list(
+                    normalize_selected_season_scope_codes(
+                        selected_season_scope_codes, allow_empty=True
+                    )
+                )
+        if not codes and not seasons:
+            raise ValueError(UNIVERSE_SCOPE_EMPTY_SELECTION)
         if save_as_default:
-            store.save_scope(codes, sport=sport, source="operator")
+            store.save_scope(
+                codes,
+                selected_season_scope_codes=seasons,
+                sport=sport,
+                source="operator",
+            )
         else:
             store.confirm_first_run(sport=sport)
-        material_change = previous != tuple(codes)
+        changed = previous != tuple(codes) or previous_seasons != tuple(seasons)
         with self._state_lock:
             self._session_selected_codes = tuple(codes)
-            if material_change:
+            self._session_selected_season_codes = tuple(seasons)
+            if changed:
                 self._session_scope_version = max(
                     int(self._session_scope_version), int(previous_scope.scope_version)
                 ) + 1
-            if (
-                self._universe_generation_started_at is not None
-                and material_change
-            ):
+            if self._universe_generation_started_at is not None and changed:
                 self._universe_generation_superseded = True
         self._reconstruct_price_engine_for_scope()
         if self._operator_scanner_stopped:
             self._pulse_control()
-        elif run_universe_now or (material_change and self._universe_scans_paused):
+        elif run_universe_now or (changed and self._universe_scans_paused):
             self.request_universe_run_now()
         else:
             self._pulse_control()
@@ -813,6 +859,12 @@ class LiveRefreshCoordinator:
             if self._universe_generation_started_at is not None:
                 return tuple(self._universe_generation_selected_codes)
             return tuple(self.effective_universe_scope().selected_competition_codes)
+
+    def generation_season_scope_codes(self) -> tuple[str, ...]:
+        with self._state_lock:
+            if self._universe_generation_started_at is not None:
+                return tuple(self._universe_generation_selected_season_codes)
+            return tuple(self.effective_universe_scope().selected_season_scope_codes)
 
     def generation_superseded(self) -> bool:
         return bool(self._universe_generation_superseded)
@@ -1277,8 +1329,10 @@ class LiveRefreshCoordinator:
             self._universe_generation_superseded = False
             self._universe_generation_scope_version = 0
             self._session_selected_codes = None
+            self._session_selected_season_codes = None
             self._session_scope_version = 0
             self._universe_generation_selected_codes = default_operator_competition_code_values()
+            self._universe_generation_selected_season_codes = default_season_scope_code_values()
             self._next_hot_due = None
             self._next_universe_due = None
             self._next_background_due = None
@@ -1699,6 +1753,7 @@ class LiveRefreshCoordinator:
             retry_series = self._due_retry_series_unlocked(evaluated)
             run_now_pending = self._universe_run_now_pending
             generation_codes = list(self._universe_generation_selected_codes)
+            generation_season_codes = list(self._universe_generation_selected_season_codes)
             generation_scope_version = self._universe_generation_scope_version
             generation_superseded = self._universe_generation_superseded
         if universe_generation_started_at is None:
@@ -1706,6 +1761,7 @@ class LiveRefreshCoordinator:
             # the automatic UNIVERSE plan does not advertise env defaults.
             effective = self.effective_universe_scope()
             generation_codes = list(effective.selected_competition_codes)
+            generation_season_codes = list(effective.selected_season_scope_codes)
             if not generation_scope_version:
                 generation_scope_version = int(effective.scope_version)
         work_retry_at = self._earliest_retry_wait_unlocked(evaluated)
@@ -1749,6 +1805,7 @@ class LiveRefreshCoordinator:
             enabled_venues=universe_venues,
             reason="universe_sweep",
             selected_competition_codes=generation_codes,
+            selected_season_scope_codes=generation_season_codes,
             generation_scope_version=generation_scope_version,
             generation_superseded=generation_superseded,
         )
@@ -3311,6 +3368,7 @@ class LiveRefreshCoordinator:
             series_work=dict(self._universe_series_work),
             semantics_version=UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
             selected_competition_codes=list(self._universe_generation_selected_codes),
+            selected_season_scope_codes=list(self._universe_generation_selected_season_codes),
             scope_version=int(self._universe_generation_scope_version),
             superseded=bool(self._universe_generation_superseded),
         )
@@ -3515,6 +3573,10 @@ class LiveRefreshCoordinator:
                 self._universe_generation_selected_codes = tuple(
                     checkpoint.selected_competition_codes
                 )
+            if getattr(checkpoint, "selected_season_scope_codes", None):
+                self._universe_generation_selected_season_codes = tuple(
+                    checkpoint.selected_season_scope_codes
+                )
             self._universe_generation_scope_version = int(checkpoint.scope_version or 0)
             self._universe_generation_superseded = bool(checkpoint.superseded)
             self._universe_work_used = checkpoint.successful_work_used_s
@@ -3621,6 +3683,7 @@ class LiveRefreshCoordinator:
         self._universe_generation_id += 1
         self._universe_generation_started_at = started
         self._universe_generation_selected_codes = tuple(scope.selected_competition_codes)
+        self._universe_generation_selected_season_codes = tuple(scope.selected_season_scope_codes)
         self._universe_generation_scope_version = int(scope.scope_version)
         self._universe_generation_superseded = False
         self._universe_run_now_pending = False

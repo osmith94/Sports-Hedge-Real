@@ -30,6 +30,7 @@ import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-
 import { venueHealthIsDegraded } from "../lib/venue-health-display";
 import { ActiveTradeLog } from "./active-trade-log";
 import { FootballCompetitionsModal } from "./football-competitions-modal";
+import { splitUniverseDraft } from "../lib/competition-modal-draft";
 import { LiveScanPulse, LiveScanPulsePhase } from "./live-scan-pulse";
 import { VenueLaneControls } from "./venue-lane-controls";
 
@@ -564,8 +565,11 @@ export function RunPaperScan() {
     setCompetitionsSaving(true);
     setCompetitionsError(null);
     try {
+      const catalog = liveRefresh?.universe_scope?.catalog ?? [];
+      const split = splitUniverseDraft(codes, catalog);
       const status = await saveUniverseScope({
-        selected_competition_codes: codes,
+        selected_competition_codes: split.selected_competition_codes,
+        selected_season_scope_codes: split.selected_season_scope_codes,
         sport: "football",
         run_universe_now: runUniverseNow,
         save_as_default: saveAsDefault,
@@ -847,7 +851,7 @@ export function RunPaperScan() {
               }}
               aria-label="Football competitions"
             >
-              Football competitions · {liveRefresh?.universe_scope?.selected_count ?? 8} selected
+              UNIVERSE scope · {liveRefresh?.universe_scope?.selected_count ?? 8} selected
             </button>
             {liveRefresh?.universe_scope?.new_competitions_available ? (
               <span className="scan-competitions-badge">New competitions available</span>
@@ -952,7 +956,8 @@ export function RunPaperScan() {
             Pause scheduled UNIVERSE stops the periodic timer only; it does not fake a huge cadence, and the stored cadence stays editable for resume.
             Update saves Min Net Arb, Max Risk, HOT cadence, BACKGROUND cadence and UNIVERSE cadence
             and max allocated per trade for subsequent server-owned work and does not trigger a scan.
-            Football competitions Apply changes the current session scope and does not itself call providers.
+            Football competitions Apply changes the current session scope, including season
+            markets, and does not itself call providers.
             A material competition-scope change while UNIVERSE is paused coalesces one fresh generation, then remains paused.
             Save this selection as my default is required to persist startup scope across restart.
             HOT cadence is how often HOT pricing is due; BACKGROUND cadence is how often the

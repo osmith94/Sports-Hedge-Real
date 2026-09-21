@@ -747,8 +747,8 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
 
 def test_principal_register_has_thirty_rows_and_still_excludes_efl_trophy() -> None:
     codes = {item.code for item in TARGET_COMPETITIONS}
-    assert len(TARGET_COMPETITIONS) == 31
-    assert len(codes) == 31
+    assert len(TARGET_COMPETITIONS) == 32
+    assert len(codes) == 32
     assert TargetCompetitionCode.NFL in codes
     assert TargetCompetitionCode.LEAGUE_ONE in codes
     assert TargetCompetitionCode.LEAGUE_TWO in codes
