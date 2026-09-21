@@ -9,6 +9,9 @@ import {
   LiveRefreshStatus,
   PaperCollectionReport,
   PaperCollectionRequest,
+  UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY,
+  UniverseRunMode,
+  clearPaperUniverse,
   getEconomicsStatus,
   getLiveRefreshStatus,
   pauseUniverseSchedule,
@@ -18,7 +21,7 @@ import {
   runPaperBackgroundRefresh,
   runPaperCollection,
   runPaperHotRefresh,
-  runPaperUniverseNow,
+  runPaperUniverse,
   saveMatchbookFee,
   saveOperatorScannerSettings,
   saveUniverseScope,
@@ -249,6 +252,8 @@ export function RunPaperScan() {
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [scannerControlBusy, setScannerControlBusy] = useState(false);
   const [universeScheduleBusy, setUniverseScheduleBusy] = useState(false);
+  const [universeRunMode, setUniverseRunMode] = useState<UniverseRunMode>("update");
+  const [universeActionBusy, setUniverseActionBusy] = useState<"run" | "clear" | null>(null);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [competitionsOpen, setCompetitionsOpen] = useState(false);
   const [competitionsSaving, setCompetitionsSaving] = useState(false);
@@ -631,19 +636,57 @@ export function RunPaperScan() {
 
   async function runUniverseNow() {
     if (liveRefresh?.scanner_stopped) return;
+    if (universeActionBusy) return;
+    if (universeRunMode === "clear_update") {
+      const confirmed =
+        typeof window === "undefined"
+          ? true
+          : window.confirm(
+              `${UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY} Then starts a fresh selected-scope generation.`,
+            );
+      if (!confirmed) return;
+    }
+    setUniverseActionBusy("run");
     try {
-      const status = await runPaperUniverseNow();
+      const status = await runPaperUniverse({ mode: universeRunMode });
       applyLiveRefresh(status);
       const pending = status.universe_scope?.manual_universe_state === "pending";
       setSettingsMessage(
-        pending
-          ? "UNIVERSE already running · queued one fresh selected-scope generation."
-          : "UNIVERSE generation requested for the current selected scope.",
+        universeRunMode === "clear_update"
+          ? pending
+            ? "Cleared live UNIVERSE working set · queued one fresh selected-scope generation."
+            : "Cleared live UNIVERSE working set and requested a fresh selected-scope generation."
+          : pending
+            ? "UNIVERSE already running · queued one fresh selected-scope generation."
+            : "UNIVERSE generation requested for the current selected scope.",
       );
     } catch (error) {
       setSettingsMessage(
         error instanceof Error ? error.message : "Could not request UNIVERSE now.",
       );
+    } finally {
+      setUniverseActionBusy(null);
+    }
+  }
+
+  async function clearUniverseWorkingSet() {
+    if (universeActionBusy) return;
+    const confirmed =
+      typeof window === "undefined"
+        ? true
+        : window.confirm(UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY);
+    if (!confirmed) return;
+    setUniverseActionBusy("clear");
+    try {
+      const status = await clearPaperUniverse();
+      applyLiveRefresh(status);
+      setSettingsMessage("Cleared live UNIVERSE working set. History, catalogue, PAPER trades and Treasury are preserved.");
+    } catch (error) {
+      setSettingsMessage(
+        error instanceof Error ? error.message : "Could not clear UNIVERSE.",
+      );
+    } finally {
+      setUniverseActionBusy(null);
     }
   }
 
@@ -892,18 +935,56 @@ export function RunPaperScan() {
           >
             {loadingMode === "background" ? "Refreshing BACKGROUND…" : "Manual BACKGROUND refresh"}
           </button>
+          <label className="scan-field scan-field-compact scan-universe-run-mode">
+            <span>UNIVERSE run mode</span>
+            <select
+              aria-label="UNIVERSE run mode"
+              value={universeRunMode}
+              disabled={loading || scannerStopped || universeActionBusy !== null}
+              onChange={(event) =>
+                setUniverseRunMode(event.target.value === "clear_update" ? "clear_update" : "update")
+              }
+            >
+              <option value="update">Update existing</option>
+              <option value="clear_update">Clear & update</option>
+            </select>
+          </label>
           <button
             className="scan-button-secondary"
             type="button"
-            disabled={loading || scannerStopped}
-            title={scannerStopped ? "Scanner stopped by operator" : undefined}
+            disabled={loading || scannerStopped || universeActionBusy !== null}
+            aria-busy={universeActionBusy === "run"}
+            title={
+              scannerStopped
+                ? "Scanner stopped by operator"
+                : universeRunMode === "clear_update"
+                  ? UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY
+                  : "Update the current UNIVERSE working set. Does not clear live state."
+            }
             onClick={() => void runUniverseNow()}
           >
-            {liveRefresh?.universe_scope?.manual_universe_state === "pending"
-              ? "UNIVERSE queued"
-              : liveRefresh?.universe_scope?.manual_universe_state === "running"
-                ? "UNIVERSE running"
-                : "Run UNIVERSE now"}
+            {universeActionBusy === "run"
+              ? universeRunMode === "clear_update"
+                ? "Clearing & updating UNIVERSE…"
+                : "Requesting UNIVERSE…"
+              : liveRefresh?.universe_scope?.manual_universe_state === "pending"
+                ? "UNIVERSE queued"
+                : liveRefresh?.universe_scope?.manual_universe_state === "running"
+                  ? "UNIVERSE running"
+                  : universeRunMode === "clear_update"
+                    ? "Clear & update"
+                    : "Run UNIVERSE now"}
+          </button>
+          <button
+            className="scan-button-danger"
+            type="button"
+            disabled={loading || universeActionBusy !== null}
+            aria-busy={universeActionBusy === "clear"}
+            aria-label="Clear universe"
+            title={UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY}
+            onClick={() => void clearUniverseWorkingSet()}
+          >
+            {universeActionBusy === "clear" ? "Clearing UNIVERSE…" : "Clear universe"}
           </button>
           <button
             className={universeScansPaused ? "scan-button" : "scan-button-secondary"}
@@ -978,6 +1059,10 @@ export function RunPaperScan() {
             It does not rediscover the catalogue. Manual BACKGROUND refresh reprices currently due ACTIVE catalogue rows from exact known IDs.
             Neither HOT nor BACKGROUND rediscover the catalogue or advance UNIVERSE generation state.
             Run UNIVERSE now bypasses only the UNIVERSE cadence wait and uses the real selected-scope generation worker.
+            Update existing keeps the current live UNIVERSE working set and coalesces if a chunk is already running.
+            Clear & update clears the live UNIVERSE working set only, then starts a fresh selected-scope generation with no reused snapshot, cursor or skip IDs.
+            Clear universe clears live UNIVERSE current-state, active generation and checkpoint only.
+            Clears the live UNIVERSE working set only. History, catalogue, PAPER trades and Treasury are preserved.
             Pause scheduled UNIVERSE stops the periodic timer only; it does not fake a huge cadence, and the stored cadence stays editable for resume.
             Update saves Min Net Arb, Outright Min Net Arb, Max Risk, HOT cadence, BACKGROUND cadence and UNIVERSE cadence
             and max allocated per trade for subsequent server-owned work and does not trigger a scan.
@@ -991,6 +1076,7 @@ export function RunPaperScan() {
             ACTIVE TRADE reprices open paper
             trades every 5s from exact known IDs. Auto refresh view only polls status.
             Run UNIVERSE now is the explicit manual bypass of the cadence wait.
+            Clear universe does not call providers and does not cancel HOT, BACKGROUND or ACTIVE TRADE.
           </div>
         </details>
         <div className="scan-note scan-status-lines" aria-label="ACTIVE TRADE, HOT pricing, BACKGROUND pricing and UNIVERSE discovery status">

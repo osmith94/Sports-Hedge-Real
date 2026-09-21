@@ -192,6 +192,55 @@ class FixtureCurrentStateStore:
                 self._open_universe_generation_id = None
                 self._universe_generation_closed_at_by_id = {}
 
+    def drop_universe_working_set(
+        self,
+        now: datetime,
+        *,
+        keep_canonical_ids: set[str] | frozenset[str] | None = None,
+    ) -> None:
+        """Drop live UNIVERSE current-state rows without wiping HOT/ACTIVE identity.
+
+        Does not increment ``reset_generation`` (HOT/BACKGROUND/ACTIVE
+        projections must still commit). Tombstones, aliases of retained HOT
+        rows, and audit/history stored elsewhere are untouched. Open PAPER
+        trades may disappear from the UNIVERSE board while remaining
+        ACTIVE-managed via catalogue/native IDs.
+        """
+
+        keep = {item for item in (keep_canonical_ids or set()) if item}
+        evaluated = require_aware_instant(now, "now")
+        classify_kwargs = {
+            "hot_horizon": DEFAULT_HOT_HORIZON,
+            "post_kickoff_unknown_horizon": DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON,
+            "post_kickoff_current_radar_ceiling": DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING,
+        }
+        with self._lock:
+            self._open_universe_generation_id = None
+            self._universe_generation_closed_at_by_id = {}
+            for canonical_id, record in list(self._rows.items()):
+                aliases = self._identity_membership_keys(canonical_id)
+                # Open PAPER / keep IDs stay ACTIVE-managed even when the UNIVERSE
+                # radar row is dropped. Lifecycle HOT and HOT-lane observations stay.
+                _open_paper = canonical_id in keep or bool(keep & aliases)
+                fixture = record.status_fixture(evaluated)
+                lifecycle_hot = False
+                if fixture is not None:
+                    lifecycle_hot = (
+                        classify_scan_lane(fixture, evaluated, **classify_kwargs) is ScanLane.HOT
+                    )
+                if record.hot is not None:
+                    record.universe = None
+                    if record.markets:
+                        record.markets = {
+                            key: slot
+                            for key, slot in record.markets.items()
+                            if slot.scan_lane is not ScanLane.UNIVERSE
+                        }
+                    continue
+                if lifecycle_hot or _open_paper:
+                    continue
+                self._drop_identity(canonical_id)
+
     @property
     def generation(self) -> int:
         with self._lock:

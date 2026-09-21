@@ -1304,8 +1304,46 @@ export async function runPaperBackgroundRefresh(): Promise<LiveRefreshStatus> {
   return response.json() as Promise<LiveRefreshStatus>;
 }
 
+export type UniverseRunMode = "update" | "clear_update";
+
+export const UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY =
+  "Clears the live UNIVERSE working set only. History, catalogue, PAPER trades and Treasury are preserved.";
+
 export async function runPaperUniverseNow(): Promise<LiveRefreshStatus> {
+  return runPaperUniverse({ mode: "update" });
+}
+
+/** Backward-compatible Update existing path. Prefer runPaperUniverse. */
+export async function runPaperUniverseCollectNow(): Promise<LiveRefreshStatus> {
   const response = await fetch(`${API_BASE}/paper/collect/universe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function runPaperUniverse(payload: {
+  mode: UniverseRunMode;
+}): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/universe/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function clearPaperUniverse(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/universe/clear`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),

@@ -195,6 +195,12 @@ SCAN_CYCLE_RETURN_GRACE_SECONDS = 5.0
 SCAN_CYCLE_PARTIAL_HARVEST_SECONDS = 0.8
 UNIVERSE_ORPHAN_TASK_WARN_LIMIT = 3
 UNIVERSE_CHECKPOINT_FLUSH_FIXTURE_THRESHOLD = 20
+UNIVERSE_RUN_MODE_UPDATE = "update"
+UNIVERSE_RUN_MODE_CLEAR_UPDATE = "clear_update"
+UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY = (
+    "Clears the live UNIVERSE working set only. History, catalogue, PAPER trades and Treasury are preserved."
+)
+UNIVERSE_OPERATOR_CLEAR_COMPLETENESS = "operator_clear"
 
 
 class LaneRefreshStatus(BaseModel):
@@ -535,6 +541,8 @@ class LiveRefreshCoordinator:
         self._universe_orphaned_tasks: list[asyncio.Task[Any]] = []
         self._universe_orphaned_chunk_count = 0
         self._universe_stale_callback_count = 0
+        self._universe_apply_epoch = 0
+        self._universe_cycle_apply_epoch: int | None = None
         self._universe_checkpoint_store = universe_checkpoint_store
         self._universe_checkpoint_restored = False
         self._universe_checkpoint_dirty = False
@@ -854,6 +862,165 @@ class LiveRefreshCoordinator:
                 state = UNIVERSE_MANUAL_RUNNING if self._universe_in_progress else "due"
         self._pulse_control()
         return state
+
+    def clear_universe_working_set(self, *, run_after: bool = False) -> dict[str, Any]:
+        """Clear live UNIVERSE current-state + active generation/checkpoint only.
+
+        No provider I/O. Does not cancel HOT/BACKGROUND/ACTIVE, mutate
+        catalogue, PAPER trades, Treasury, saved scope/settings, or cadence.
+        In-flight UNIVERSE callbacks are generation-fenced so they cannot
+        repopulate the cleared board.
+        """
+
+        keep_ids = set(self._open_paper_event_ids())
+        now = self.now()
+        scope = self.effective_universe_scope()
+        _, prior_live_universe_count = self._fixture_state.membership_counts(now)
+        self._fixture_state.drop_universe_working_set(now, keep_canonical_ids=keep_ids)
+        with self._state_lock:
+            prior_generation_id = self._universe_generation_id or None
+            prior_evaluated = self._status_universe_evaluated_count()
+            prior_fixture_count = prior_live_universe_count or int(
+                self.status.universe.fixture_count or 0
+            )
+            prior_cursor = self._status_universe_cursor()
+            self._universe_apply_epoch += 1
+            self._invalidate_universe_chunk_epoch_unlocked()
+            self._reset_live_universe_generation_unlocked(now=now, run_after=run_after)
+            self._mark_universe_checkpoint_dirty_unlocked()
+        inventory = self._fixture_state.inventory(now)
+        _hot_count, universe_count = self._fixture_state.membership_counts(now)
+        diagnostics = {
+            "operator_action": "clear_universe",
+            "mode": UNIVERSE_RUN_MODE_CLEAR_UPDATE if run_after else "clear",
+            "cleared_at": now.isoformat(),
+            "prior_generation_id": prior_generation_id,
+            "prior_evaluated_count": prior_evaluated,
+            "prior_fixture_count": prior_fixture_count,
+            "prior_resume_cursor": prior_cursor,
+            "selected_competition_codes": list(scope.selected_competition_codes),
+            "selected_season_scope_codes": list(scope.selected_season_scope_codes),
+            "generation_resume": False,
+            "reuse_discovery": False,
+            "completeness": UNIVERSE_OPERATOR_CLEAR_COMPLETENESS,
+        }
+        with self._state_lock:
+            self.status = self.status.model_copy(
+                update={
+                    "discovered_fixtures": inventory,
+                    "universe": self.status.universe.model_copy(
+                        update={
+                            "cycle_in_progress": bool(self._universe_in_progress),
+                            "worker_state": (
+                                WORKER_RUNNING if self._universe_in_progress else WORKER_IDLE
+                            ),
+                            "fixture_count": universe_count,
+                            "evaluated_count": 0,
+                            "not_evaluated_count": 0,
+                            "discovered_total": 0,
+                            "remaining": 0,
+                            "matched_fixtures": 0,
+                            "equivalent_markets": 0,
+                            "near_count": 0,
+                            "positive_count": 0,
+                            "qualifying_count": 0,
+                            "hot_promotions": 0,
+                            "generation_work_used_s": 0,
+                            "chunk_last_duration_ms": None,
+                            "resume_cursor": None,
+                            "sweep_id": None,
+                            "generation_id": self._universe_generation_id or None,
+                            "current_fixture": None,
+                            "last_successful_fixture": None,
+                            "last_error": None,
+                            "last_persist_error": None,
+                            "persist_ok": None,
+                            "degraded": False,
+                            "last_diagnostics": diagnostics,
+                            "next_due_at": self._next_universe_due,
+                            "canonical_work_total": 0,
+                            "canonical_evaluated": 0,
+                            "canonical_retryable": 0,
+                            "canonical_final_failed": 0,
+                            "canonical_stale_orphan": 0,
+                            "canonical_remaining": 0,
+                            "series_work_total": 0,
+                            "series_ok": 0,
+                            "series_retryable": 0,
+                            "series_final_failed": 0,
+                            "series_skipped": 0,
+                            "raw_events_discovered_by_venue": {},
+                            "operator_summary": (
+                                f"{OPERATOR_UNIVERSE_DISCOVERY_LABEL} · idle · "
+                                f"{UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY}"
+                            ),
+                        }
+                    ),
+                }
+            )
+            self._apply_universe_honesty_unlocked()
+        self.flush_universe_checkpoint()
+        if run_after:
+            self.request_universe_run_now()
+        else:
+            self._pulse_control()
+        return {
+            **diagnostics,
+            "operator_summary": (
+                f"{OPERATOR_UNIVERSE_DISCOVERY_LABEL} · operator clear · "
+                f"{UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY}"
+            ),
+            "cleared_universe_count": universe_count,
+        }
+
+    def _reset_live_universe_generation_unlocked(
+        self, *, now: datetime, run_after: bool
+    ) -> None:
+        """Drop active generation/resume state. Does not copy counts into closed summary."""
+
+        self._universe_generation_started_at = None
+        self._universe_progress_generation_id = None
+        self._universe_closed_generation_id = self._universe_generation_id
+        self._universe_closed_work_used = 0.0
+        self._universe_closed_cursor = None
+        self._universe_closed_evaluated_count = 0
+        self._universe_evaluated_ids = set()
+        self._universe_needs_rehydration = set()
+        self._universe_rehydration_retry_at = {}
+        self._universe_rehydration_attempts = {}
+        self._universe_work = {}
+        self._universe_series_work = {}
+        self._universe_series_results = {}
+        self._universe_series_applied_this_cycle = set()
+        self._universe_cursor = None
+        self._universe_work_used = 0.0
+        self._universe_budget_paused = False
+        self._universe_retry_at = None
+        self._universe_provider_failures = 0
+        self._universe_last_report_snapshot = None
+        self._universe_sweep_id = None
+        self._universe_discovery_snapshot = None
+        self._universe_discovered_total = 0
+        self._universe_failed_ids = {}
+        self._universe_skipped_ids = {}
+        self._universe_last_successful = None
+        self._universe_current_fixture = None
+        self._universe_matched_fixtures = 0
+        self._universe_equivalent_markets = 0
+        self._universe_near_count = 0
+        self._universe_positive_count = 0
+        self._universe_qualifying_count = 0
+        self._universe_hot_promotions = 0
+        self._universe_raw_events = {}
+        self._universe_generation_superseded = False
+        if run_after:
+            self._universe_oneshot_pending = True
+            self._next_universe_due = now
+        else:
+            self._universe_oneshot_pending = False
+            self._universe_run_now_pending = False
+            cadence = self._effective_universe_cadence_seconds()
+            self._next_universe_due = now + timedelta(seconds=cadence)
 
     def generation_discovery_codes(self) -> tuple[str, ...]:
         with self._state_lock:
@@ -1384,6 +1551,8 @@ class LiveRefreshCoordinator:
             self._universe_chunk_seq = 0
             self._universe_orphaned_chunk_count = 0
             self._universe_stale_callback_count = 0
+            self._universe_apply_epoch = 0
+            self._universe_cycle_apply_epoch = None
             self._universe_checkpoint_dirty = True
             self._universe_checkpoint_unpersisted_fixtures = 0
             self._universe_checkpoint_restored = False
@@ -2244,6 +2413,12 @@ class LiveRefreshCoordinator:
         advance_hot_due: bool = True,
     ) -> None:
         lane = _coerce_lane(scan_lane or report.scan_lane)
+        if lane is ScanLane.UNIVERSE:
+            with self._state_lock:
+                fenced = self._universe_cycle_fenced_unlocked()
+            if fenced:
+                self._finish_fenced_universe_cycle(report)
+                return
         self._last_report = report
         generation_id = (
             self._universe_generation_id_for_upsert() if lane is ScanLane.UNIVERSE else None
@@ -2612,9 +2787,10 @@ class LiveRefreshCoordinator:
         snapshot: dict[str, list[dict[str, Any]]],
         *,
         chunk_epoch: int | None = None,
+        apply_epoch: int | None = None,
     ) -> None:
         with self._state_lock:
-            if self._reject_stale_universe_chunk_unlocked(chunk_epoch):
+            if self._reject_stale_universe_chunk_unlocked(chunk_epoch, apply_epoch):
                 return
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(self.now())
@@ -2652,9 +2828,10 @@ class LiveRefreshCoordinator:
         authoritative: bool = False,
         partial_reason: str | None = None,
         chunk_epoch: int | None = None,
+        apply_epoch: int | None = None,
     ) -> None:
         with self._state_lock:
-            if self._reject_stale_universe_chunk_unlocked(chunk_epoch):
+            if self._reject_stale_universe_chunk_unlocked(chunk_epoch, apply_epoch):
                 return
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(self.now())
@@ -2768,6 +2945,7 @@ class LiveRefreshCoordinator:
         inventory: list[Any],
         *,
         chunk_epoch: int | None = None,
+        apply_epoch: int | None = None,
     ) -> None:
         canonical_id = str(getattr(fixture, "canonical_event_id", "") or "")
         if not canonical_id:
@@ -2785,7 +2963,7 @@ class LiveRefreshCoordinator:
             ]
         scanned = getattr(fixture, "last_scanned_at", None) or self.now()
         with self._state_lock:
-            if self._reject_stale_universe_chunk_unlocked(chunk_epoch):
+            if self._reject_stale_universe_chunk_unlocked(chunk_epoch, apply_epoch):
                 return
             state = str(getattr(fixture, "market_evaluation_state", "") or "")
             rehydrating = canonical_id in self._universe_needs_rehydration
@@ -3052,7 +3230,58 @@ class LiveRefreshCoordinator:
     def _invalidate_universe_chunk_epoch_unlocked(self) -> None:
         self._universe_active_chunk_epoch = None
 
-    def _reject_stale_universe_chunk_unlocked(self, chunk_epoch: int | None) -> bool:
+    def _universe_cycle_fenced_unlocked(self) -> bool:
+        if self._universe_cycle_apply_epoch is None:
+            return False
+        return self._universe_cycle_apply_epoch != self._universe_apply_epoch
+
+    def _finish_fenced_universe_cycle(self, report: CollectionReport | None = None) -> None:
+        """Mark a stale in-flight UNIVERSE chunk idle without restoring cleared state."""
+
+        finished = report.completed_at if report is not None else self.now()
+        inventory = self._fixture_state.inventory(finished)
+        with self._state_lock:
+            self._universe_stale_callback_count += 1
+            LOGGER.info(
+                "quarantined stale UNIVERSE cycle callback apply_epoch=%s cycle_epoch=%s total=%s",
+                self._universe_apply_epoch,
+                self._universe_cycle_apply_epoch,
+                self._universe_stale_callback_count,
+            )
+            self._universe_in_progress = False
+            self._cycle_universe_venues = None
+            self._cycle_enabled_venues = None
+            self.status = self.status.model_copy(
+                update={
+                    "discovered_fixtures": inventory,
+                    "cycle_in_progress": self._hot_in_progress
+                    or self._universe_in_progress
+                    or self._background_in_progress
+                    or self._active_trade_in_progress
+                    or self._manual_hot_in_progress
+                    or self._manual_background_in_progress,
+                    "universe": self.status.universe.model_copy(
+                        update={"cycle_in_progress": False}
+                    ),
+                }
+            )
+            self._sync_venue_status_unlocked()
+            self._apply_universe_honesty_unlocked()
+
+    def _reject_stale_universe_chunk_unlocked(
+        self,
+        chunk_epoch: int | None,
+        apply_epoch: int | None = None,
+    ) -> bool:
+        if apply_epoch is not None and apply_epoch != self._universe_apply_epoch:
+            self._universe_stale_callback_count += 1
+            LOGGER.info(
+                "quarantined stale UNIVERSE apply-epoch callback apply=%s active=%s total=%s",
+                apply_epoch,
+                self._universe_apply_epoch,
+                self._universe_stale_callback_count,
+            )
+            return True
         if chunk_epoch is None:
             return False
         if chunk_epoch == self._universe_active_chunk_epoch:
@@ -3123,9 +3352,12 @@ class LiveRefreshCoordinator:
     ) -> tuple[Callable[..., None], Callable[..., None], Callable[..., None]]:
         with self._state_lock:
             epoch = self._universe_active_chunk_epoch
+            apply_epoch = self._universe_apply_epoch
 
         def on_discovery(snapshot: dict[str, list[dict[str, Any]]]) -> None:
-            self.record_universe_discovery_snapshot(snapshot, chunk_epoch=epoch)
+            self.record_universe_discovery_snapshot(
+                snapshot, chunk_epoch=epoch, apply_epoch=apply_epoch
+            )
 
         def on_fixture(
             cluster: Any,
@@ -3139,6 +3371,7 @@ class LiveRefreshCoordinator:
                 decisions,
                 inventory,
                 chunk_epoch=epoch,
+                apply_epoch=apply_epoch,
             )
 
         def on_work(
@@ -3152,6 +3385,7 @@ class LiveRefreshCoordinator:
                 authoritative=authoritative,
                 partial_reason=partial_reason,
                 chunk_epoch=epoch,
+                apply_epoch=apply_epoch,
             )
 
         return on_discovery, on_fixture, on_work
@@ -3806,6 +4040,7 @@ class LiveRefreshCoordinator:
             else:
                 self._universe_in_progress = True
                 self._universe_series_applied_this_cycle = set()
+                self._universe_cycle_apply_epoch = self._universe_apply_epoch
                 self._cycle_universe_venues = self._pending_participation.venues_for(
                     ScanLane.UNIVERSE
                 )
@@ -3940,6 +4175,21 @@ class LiveRefreshCoordinator:
                 )
                 update["last_completed_at"] = finished
             else:
+                if self._universe_cycle_fenced_unlocked():
+                    self._universe_stale_callback_count += 1
+                    self._cycle_enabled_venues = None
+                    self.status = self.status.model_copy(
+                        update={
+                            "cycle_in_progress": self._hot_in_progress
+                            or self._universe_in_progress,
+                            "universe": self.status.universe.model_copy(
+                                update={"cycle_in_progress": False}
+                            ),
+                        }
+                    )
+                    self._sync_venue_status_unlocked()
+                    self._apply_universe_honesty_unlocked()
+                    return
                 self._ensure_universe_generation(started)
                 self._invalidate_universe_chunk_epoch_unlocked()
                 self._universe_provider_failures += 1

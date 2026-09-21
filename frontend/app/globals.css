@@ -124,6 +124,8 @@ h1 { font-size: 25px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
 .scan-ops-row { display: grid; grid-template-columns: minmax(140px, 1.2fr) minmax(150px, 1.3fr) minmax(88px, .7fr) minmax(110px, .8fr) minmax(128px, .9fr) auto minmax(168px, auto) auto; gap: 10px; align-items: end; }
 .scan-ops-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
 .scan-lane-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.scan-universe-run-mode { min-width: 148px; }
+.scan-universe-run-mode select { font-size: 10px; font-weight: 750; padding: 8px 9px; min-height: 35px; }
 .scan-competitions-summary { display: inline-flex; align-items: center; gap: 6px; }
 .scan-competitions-badge { border: 1px solid rgba(241, 191, 105, .45); color: var(--amber); border-radius: 999px; padding: 2px 7px; font-size: 8px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
 .competition-modal-backdrop { position: fixed; inset: 0; z-index: 40; background: rgba(4, 10, 8, .72); display: grid; place-items: center; padding: 18px; }
