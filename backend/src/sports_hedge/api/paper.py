@@ -8,7 +8,7 @@ from functools import lru_cache
 from logging import getLogger
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import httpx
@@ -37,6 +37,10 @@ from sports_hedge.application.lane_venues import (
 )
 from sports_hedge.application.live_refresh import (
     SCAN_CYCLE_RETURN_GRACE_SECONDS,
+    UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY,
+    UNIVERSE_OPERATOR_CLEAR_COMPLETENESS,
+    UNIVERSE_RUN_MODE_CLEAR_UPDATE,
+    UNIVERSE_RUN_MODE_UPDATE,
     ExplicitCollectBusy,
     LiveRefreshStatus,
     ScanCycleTimeout,
@@ -197,6 +201,12 @@ class PaperCollectionRequest(BaseModel):
                     )
                 value.pop(key, None)
         return value
+
+
+class UniverseRunRequest(BaseModel):
+    """Operator UNIVERSE run mode. `update` preserves current live working set."""
+
+    mode: Literal["update", "clear_update"] = "update"
 
 
 class EconomicsStatus(BaseModel):
@@ -1163,6 +1173,97 @@ def run_universe_now(
         raise HTTPException(status_code=409, detail=SCANNER_STOPPED_BY_OPERATOR)
     try:
         coordinator.request_universe_run_now()
+    except ExplicitCollectBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+
+
+def _audit_universe_operator_clear(
+    repository: SqlitePaperScanRepository, audit: dict[str, Any]
+) -> None:
+    """Persist operator clear/clear-update as scan-cycle history, not current-state."""
+
+    raw_when = str(audit.get("cleared_at") or "")
+    try:
+        when = datetime.fromisoformat(raw_when)
+    except ValueError:
+        when = datetime.now(UTC)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    prior_generation = audit.get("prior_generation_id")
+    try:
+        generation_id = int(prior_generation) if prior_generation is not None else None
+    except (TypeError, ValueError):
+        generation_id = None
+    prior_count = audit.get("prior_fixture_count") or 0
+    try:
+        fixture_count = int(prior_count)
+    except (TypeError, ValueError):
+        fixture_count = 0
+    prior_evaluated = audit.get("prior_evaluated_count") or 0
+    try:
+        evaluated_count = int(prior_evaluated)
+    except (TypeError, ValueError):
+        evaluated_count = 0
+    mode = str(audit.get("mode") or "clear")
+    summary = str(
+        audit.get("operator_summary")
+        or f"UNIVERSE live working set cleared by operator ({mode}). {UNIVERSE_LIVE_WORKING_SET_CLEAR_COPY}"
+    )
+    record = PaperScanCycleRecord(
+        cycle_id=f"universe-operator-{mode}:{uuid4()}",
+        started_at=when,
+        completed_at=when,
+        scan_lane="universe",
+        duration_ms=0,
+        fixture_count=fixture_count,
+        evaluated_count=evaluated_count,
+        not_evaluated_count=0,
+        matched_event_pairs=0,
+        matched_market_pairs=0,
+        paper_decision_count=0,
+        qualifying_arb_count=0,
+        universe_generation_id=generation_id,
+        resume_cursor=None,
+        completeness=UNIVERSE_OPERATOR_CLEAR_COMPLETENESS,
+        generation_resume=False,
+        generation_work_used_s=0,
+        operator_summary=summary,
+    )
+    repository.append_cycle(record)
+
+
+@router.post("/universe/clear", response_model=LiveRefreshStatus)
+def clear_universe_working_set(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Clear live UNIVERSE working state only. No provider I/O.
+
+    Clears the live UNIVERSE working set only. History, catalogue, PAPER trades and Treasury are preserved.
+    """
+
+    coordinator = get_live_refresh_coordinator()
+    audit = coordinator.clear_universe_working_set(run_after=False)
+    _audit_universe_operator_clear(repository, audit)
+    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+
+
+@router.post("/universe/run", response_model=LiveRefreshStatus)
+def run_universe_with_mode(
+    request: UniverseRunRequest,
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Run UNIVERSE now as Update existing or Clear & update."""
+
+    coordinator = get_live_refresh_coordinator()
+    if coordinator.operator_scanner_stopped:
+        raise HTTPException(status_code=409, detail=SCANNER_STOPPED_BY_OPERATOR)
+    try:
+        if request.mode == UNIVERSE_RUN_MODE_CLEAR_UPDATE:
+            audit = coordinator.clear_universe_working_set(run_after=True)
+            _audit_universe_operator_clear(repository, audit)
+        elif request.mode == UNIVERSE_RUN_MODE_UPDATE:
+            coordinator.request_universe_run_now()
     except ExplicitCollectBusy as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
