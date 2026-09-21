@@ -1,9 +1,10 @@
 """Durable approved-market catalogue identity (Issue #341 Phase 2 / #437 Phase 1A).
 
-UNIVERSE persists exact Matchbook / Kalshi / Polymarket native IDs and Kalshi
-fee metadata for registered FIXTURE_MATCH families. Polymarket identity is the
-Gamma market id plus real CLOB token IDs — never invented ``condition_id:0/1``
-placeholders. COMPETITION_SEASON observation listings may persist exact
+UNIVERSE persists exact Matchbook / Kalshi / Polymarket native IDs plus Kalshi
+and Polymarket fee metadata for registered FIXTURE_MATCH families. Polymarket
+identity is the Gamma market id plus real CLOB token IDs — never invented
+``condition_id:0/1`` placeholders. Polymarket fee truth is the per-market
+CLOB/Gamma snapshot, not a sport-specific table. COMPETITION_SEASON observation listings may persist exact
 provider IDs with a sibling MarketScope; they stay out of the fixture
 derived-price working set unless season logic processes them.
 This module is identity / lifecycle truth, not a second matcher and not a
@@ -51,6 +52,7 @@ FEE_STATUS_UNSUPPORTED = "unsupported"
 FEE_SOURCE_NESTED_LIST_EVENTS = "nested_list_events"
 FEE_SOURCE_GET_SERIES = "get_series"
 FEE_SOURCE_EVENT_PAYLOAD = "event_payload"
+FEE_SOURCE_GAMMA_MARKET = "gamma_market_payload"
 
 CATALOGUE_FORBIDDEN_COLUMNS = frozenset(
     {
@@ -153,6 +155,54 @@ class KalshiFeeSnapshotRecord(BaseModel):
             (self.fee_provenance or "").strip(),
         )
 
+    def observation_metadata(self) -> dict[str, Any]:
+        return {
+            "fee_type": self.fee_type,
+            "fee_multiplier": self.fee_multiplier,
+            "fee_provenance": self.fee_provenance,
+            "fee_resolution_status": self.fee_resolution_status,
+            "fee_resolution_error": self.fee_resolution_error,
+            "snapshot_id": self.snapshot_id,
+        }
+
+
+class PolymarketFeeSnapshotRecord(BaseModel):
+    """Compact Polymarket per-market fee metadata. Never quotes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str
+    source_market_id: str | None = None
+    fees_enabled: bool | None = None
+    fee_schedule: dict[str, Any] | None = None
+    legacy_fee_rate: str | None = None
+    fee_resolution_status: str
+    fee_resolution_error: str | None = None
+    captured_at: datetime
+    confirmed_at: datetime | None = None
+    source: str | None = None
+
+    def is_known(self) -> bool:
+        return self.fee_resolution_status == FEE_STATUS_KNOWN
+
+    def semantic_identity_parts(self) -> tuple[str, ...]:
+        return (
+            (self.source_market_id or "").strip(),
+            "" if self.fees_enabled is None else ("1" if self.fees_enabled else "0"),
+            _canonical_fee_token(self.fee_schedule),
+            (self.legacy_fee_rate or "").strip(),
+            (self.fee_resolution_status or "").strip(),
+            (self.fee_resolution_error or "").strip(),
+        )
+
+    def observation_metadata(self) -> dict[str, Any]:
+        return {
+            "fees_enabled": self.fees_enabled,
+            "fee_schedule": None if self.fee_schedule is None else dict(self.fee_schedule),
+            "legacy_fee_rate": self.legacy_fee_rate,
+            "source_market_id": self.source_market_id,
+        }
+
 
 class CatalogueHistoryRecord(BaseModel):
     """Append-only lifecycle/version history. Not scheduler truth."""
@@ -204,6 +254,7 @@ class ApprovedMarketCatalogueRow(BaseModel):
     line: str | None = None
     required_outcomes: list[str] = Field(default_factory=list)
     kalshi_fee_snapshot_id: str | None = None
+    polymarket_fee_snapshot_id: str | None = None
     row_state: CatalogueRowState = CatalogueRowState.ACTIVE
     invalidation_reason: str | None = None
     first_catalogued_at: datetime
@@ -302,6 +353,7 @@ class ApprovedMarketCatalogueRow(BaseModel):
         return (
             self.native_identity_tuple() != other.native_identity_tuple()
             or self.kalshi_fee_snapshot_id != other.kalshi_fee_snapshot_id
+            or self.polymarket_fee_snapshot_id != other.polymarket_fee_snapshot_id
         )
 
 
@@ -322,6 +374,7 @@ class DerivedPriceEngineItem(BaseModel):
     kalshi_market_tickers: list[str] = Field(default_factory=list)
     kalshi_outcome_ids: list[OutcomeNativeId] = Field(default_factory=list)
     kalshi_fee_snapshot_id: str | None = None
+    polymarket_fee_snapshot_id: str | None = None
     polymarket_event_id: str | None = None
     polymarket_market_id: str | None = None
     polymarket_condition_id: str | None = None
@@ -425,6 +478,61 @@ def kalshi_fee_snapshot_from_payloads(
     return record
 
 
+def classify_polymarket_fee_resolution(metadata: dict[str, Any]) -> tuple[str, str | None]:
+    """Map extracted Polymarket fee metadata onto snapshot status.
+
+    feesEnabled=false is known zero. Enabled schedules require rate/exponent.
+    Missing applicability never becomes 0%.
+    """
+
+    from sports_hedge.fees.polymarket import polymarket_cost_from_market
+
+    snapshot = polymarket_cost_from_market(metadata)
+    if snapshot.is_economically_known():
+        return FEE_STATUS_KNOWN, None
+    detail = str(snapshot.detail or "").strip()
+    return FEE_STATUS_UNKNOWN, detail or "unknown_polymarket_fee"
+
+
+def semantic_polymarket_fee_snapshot_id(record: PolymarketFeeSnapshotRecord) -> str:
+    payload = "|".join(record.semantic_identity_parts())
+    digest = sha256(payload.encode()).hexdigest()[:24]
+    return f"pfee:{digest}"
+
+
+def polymarket_fee_snapshot_from_payload(
+    payload: dict[str, Any] | None,
+    *,
+    captured_at: datetime,
+    source: str,
+    snapshot_id: str | None = None,
+    confirmed_at: datetime | None = None,
+    source_market_id: str | None = None,
+) -> PolymarketFeeSnapshotRecord:
+    from sports_hedge.fees.polymarket import extract_polymarket_fee_metadata
+
+    metadata = extract_polymarket_fee_metadata(payload)
+    if source_market_id and not metadata.get("source_market_id"):
+        metadata["source_market_id"] = source_market_id
+    status, error = classify_polymarket_fee_resolution(metadata)
+    schedule = metadata.get("fee_schedule")
+    record = PolymarketFeeSnapshotRecord(
+        snapshot_id=snapshot_id or "provisional",
+        source_market_id=_optional_text(metadata.get("source_market_id") or source_market_id),
+        fees_enabled=metadata.get("fees_enabled") if isinstance(metadata.get("fees_enabled"), bool) else None,
+        fee_schedule=dict(schedule) if isinstance(schedule, dict) else None,
+        legacy_fee_rate=_optional_text(metadata.get("legacy_fee_rate")),
+        fee_resolution_status=status,
+        fee_resolution_error=error,
+        captured_at=captured_at,
+        confirmed_at=confirmed_at,
+        source=source,
+    )
+    if not snapshot_id:
+        record = record.model_copy(update={"snapshot_id": semantic_polymarket_fee_snapshot_id(record)})
+    return record
+
+
 def catalogue_row_supports_paper_eligibility(
     row: ApprovedMarketCatalogueRow,
     snapshot: KalshiFeeSnapshotRecord | None,
@@ -487,6 +595,7 @@ def derived_price_engine_working_set(
                 kalshi_market_tickers=list(row.kalshi_market_tickers),
                 kalshi_outcome_ids=list(row.kalshi_outcome_ids),
                 kalshi_fee_snapshot_id=row.kalshi_fee_snapshot_id,
+                polymarket_fee_snapshot_id=row.polymarket_fee_snapshot_id,
                 polymarket_event_id=row.polymarket_event_id,
                 polymarket_market_id=row.polymarket_market_id,
                 polymarket_condition_id=row.polymarket_condition_id,

@@ -1373,6 +1373,7 @@ class CataloguePriceEngine:
             quote_age_ms=age.quote_age_ms,
             quote_age_basis=age.basis,
             quote_age_reason=age.reason,
+            fee_snapshot=self._polymarket_fee_snapshot_payload(identity),
         )
 
     def _refresh_promoted_hot_ids(self) -> None:
@@ -2021,13 +2022,19 @@ class CataloguePriceEngine:
         snapshot = self.catalogue_store.get_fee_snapshot(identity.kalshi_fee_snapshot_id)
         if snapshot is None or not snapshot.is_known():
             return None
-        return {
-            "fee_type": snapshot.fee_type,
-            "fee_multiplier": snapshot.fee_multiplier,
-            "fee_provenance": snapshot.fee_provenance,
-            "fee_resolution_status": snapshot.fee_resolution_status,
-            "snapshot_id": snapshot.snapshot_id,
-        }
+        return snapshot.observation_metadata()
+
+    def _polymarket_fee_snapshot_payload(
+        self, identity: DerivedPriceEngineItem
+    ) -> dict[str, Any] | None:
+        if self.catalogue_store is None or not identity.polymarket_fee_snapshot_id:
+            return None
+        snapshot = self.catalogue_store.get_polymarket_fee_snapshot(
+            identity.polymarket_fee_snapshot_id
+        )
+        if snapshot is None:
+            return None
+        return snapshot.observation_metadata()
 
     def snapshot(self) -> dict[str, Any]:
         public = self.public_status()

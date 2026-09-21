@@ -33,6 +33,7 @@ from sports_hedge.application.approved_market_catalogue import (
     CatalogueRowState,
     KalshiFeeSnapshotRecord,
     OutcomeNativeId,
+    PolymarketFeeSnapshotRecord,
     derived_price_engine_working_set,
 )
 from sports_hedge.config import get_settings
@@ -52,6 +53,19 @@ CREATE TABLE IF NOT EXISTS kalshi_fee_snapshot (
     series_fee_type TEXT,
     series_fee_multiplier TEXT,
     fee_provenance TEXT,
+    fee_resolution_status TEXT NOT NULL,
+    fee_resolution_error TEXT,
+    captured_at TEXT NOT NULL,
+    confirmed_at TEXT,
+    source TEXT
+);
+
+CREATE TABLE IF NOT EXISTS polymarket_fee_snapshot (
+    snapshot_id TEXT PRIMARY KEY,
+    source_market_id TEXT,
+    fees_enabled TEXT,
+    fee_schedule_json TEXT,
+    legacy_fee_rate TEXT,
     fee_resolution_status TEXT NOT NULL,
     fee_resolution_error TEXT,
     captured_at TEXT NOT NULL,
@@ -85,6 +99,7 @@ CREATE TABLE IF NOT EXISTS approved_market_catalogue (
     line TEXT,
     required_outcomes_json TEXT NOT NULL,
     kalshi_fee_snapshot_id TEXT,
+    polymarket_fee_snapshot_id TEXT,
     row_state TEXT NOT NULL,
     invalidation_reason TEXT,
     first_catalogued_at TEXT NOT NULL,
@@ -151,6 +166,7 @@ _CATALOGUE_ADDITIVE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("polymarket_clob_token_ids_json", "TEXT NOT NULL DEFAULT '[]'"),
     ("polymarket_event_slug", "TEXT"),
     ("polymarket_event_ticker", "TEXT"),
+    ("polymarket_fee_snapshot_id", "TEXT"),
 )
 
 # Indexes that reference additive columns. CREATE TABLE IF NOT EXISTS is a no-op
@@ -188,6 +204,9 @@ class ApprovedMarketCatalogueTransaction:
 
     def insert_fee_snapshot(self, snapshot: KalshiFeeSnapshotRecord) -> str:
         return self._store._insert_fee_snapshot_on(self._connection, snapshot)
+
+    def insert_polymarket_fee_snapshot(self, snapshot: PolymarketFeeSnapshotRecord) -> str:
+        return self._store._insert_polymarket_fee_snapshot_on(self._connection, snapshot)
 
     def upsert_catalogue_row(self, row: ApprovedMarketCatalogueRow) -> ApprovedMarketCatalogueRow:
         return self._store._upsert_catalogue_row_on(self._connection, row)
@@ -307,17 +326,25 @@ class SqliteApprovedMarketCatalogueStore:
             str(row["name"]).casefold()
             for row in connection.execute("PRAGMA table_info(kalshi_fee_snapshot)")
         }
+        polymarket_fee_cols = {
+            str(row["name"]).casefold()
+            for row in connection.execute("PRAGMA table_info(polymarket_fee_snapshot)")
+        }
         history_cols = {
             str(row["name"]).casefold()
             for row in connection.execute("PRAGMA table_info(approved_market_catalogue_history)")
         }
         forbidden_catalogue = catalogue_cols & {item.casefold() for item in CATALOGUE_FORBIDDEN_COLUMNS}
         forbidden_fees = fee_cols & {item.casefold() for item in FEE_SNAPSHOT_FORBIDDEN_COLUMNS}
+        forbidden_polymarket_fees = polymarket_fee_cols & {
+            item.casefold() for item in FEE_SNAPSHOT_FORBIDDEN_COLUMNS
+        }
         forbidden_history = history_cols & {item.casefold() for item in HISTORY_FORBIDDEN_COLUMNS}
-        if forbidden_catalogue or forbidden_fees or forbidden_history:
+        if forbidden_catalogue or forbidden_fees or forbidden_polymarket_fees or forbidden_history:
             raise RuntimeError(
                 "approved-market catalogue schema contains forbidden policy/quote columns: "
                 f"catalogue={sorted(forbidden_catalogue)} fees={sorted(forbidden_fees)} "
+                f"polymarket_fees={sorted(forbidden_polymarket_fees)} "
                 f"history={sorted(forbidden_history)}"
             )
 
@@ -382,6 +409,50 @@ class SqliteApprovedMarketCatalogueStore:
         if row is None:
             return None
         return _fee_from_row(row)
+
+    def get_polymarket_fee_snapshot(self, snapshot_id: str) -> PolymarketFeeSnapshotRecord | None:
+        with self._connect() as connection:
+            return self._get_polymarket_fee_snapshot_on(connection, snapshot_id)
+
+    def _insert_polymarket_fee_snapshot_on(
+        self, connection: sqlite3.Connection, snapshot: PolymarketFeeSnapshotRecord
+    ) -> str:
+        fees_enabled = None if snapshot.fees_enabled is None else ("true" if snapshot.fees_enabled else "false")
+        payload = (
+            snapshot.snapshot_id,
+            snapshot.source_market_id,
+            fees_enabled,
+            _json_or_text(snapshot.fee_schedule),
+            snapshot.legacy_fee_rate,
+            snapshot.fee_resolution_status,
+            snapshot.fee_resolution_error,
+            snapshot.captured_at.isoformat(),
+            None if snapshot.confirmed_at is None else snapshot.confirmed_at.isoformat(),
+            snapshot.source,
+        )
+        connection.execute(
+            """
+            INSERT INTO polymarket_fee_snapshot (
+                snapshot_id, source_market_id, fees_enabled, fee_schedule_json,
+                legacy_fee_rate, fee_resolution_status, fee_resolution_error,
+                captured_at, confirmed_at, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_id) DO NOTHING
+            """,
+            payload,
+        )
+        return snapshot.snapshot_id
+
+    def _get_polymarket_fee_snapshot_on(
+        self, connection: sqlite3.Connection, snapshot_id: str
+    ) -> PolymarketFeeSnapshotRecord | None:
+        row = connection.execute(
+            "SELECT * FROM polymarket_fee_snapshot WHERE snapshot_id = ?",
+            (snapshot_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _polymarket_fee_from_row(row)
 
     def list_fee_snapshots(self) -> list[KalshiFeeSnapshotRecord]:
         with self._connect() as connection:
@@ -510,7 +581,8 @@ class SqliteApprovedMarketCatalogueStore:
                 kalshi_event_ticker, kalshi_market_tickers_json, kalshi_outcome_ids_json,
                 kalshi_series_ticker, polymarket_event_id, polymarket_market_id,
                 polymarket_condition_id, polymarket_token_ids_json, family, period, line,
-                required_outcomes_json, kalshi_fee_snapshot_id, row_state, invalidation_reason,
+                required_outcomes_json, kalshi_fee_snapshot_id, polymarket_fee_snapshot_id,
+                row_state, invalidation_reason,
                 first_catalogued_at, last_confirmed_at, last_seen_generation_id,
                 content_version, market_scope, source_venue, season_id, competition_code,
                 participant_type, participant_canonical_id, settlement_fingerprint_version,
@@ -519,7 +591,7 @@ class SqliteApprovedMarketCatalogueStore:
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?
+                ?, ?, ?
             )
             ON CONFLICT(catalogue_row_id) DO UPDATE SET
                 schema_version = excluded.schema_version,
@@ -546,6 +618,7 @@ class SqliteApprovedMarketCatalogueStore:
                 line = excluded.line,
                 required_outcomes_json = excluded.required_outcomes_json,
                 kalshi_fee_snapshot_id = excluded.kalshi_fee_snapshot_id,
+                polymarket_fee_snapshot_id = excluded.polymarket_fee_snapshot_id,
                 row_state = excluded.row_state,
                 invalidation_reason = excluded.invalidation_reason,
                 last_confirmed_at = excluded.last_confirmed_at,
@@ -716,6 +789,7 @@ def _history_worthy(
         or prior.content_version != new.content_version
         or prior.native_identity_tuple() != new.native_identity_tuple()
         or prior.kalshi_fee_snapshot_id != new.kalshi_fee_snapshot_id
+        or prior.polymarket_fee_snapshot_id != new.polymarket_fee_snapshot_id
         or prior.invalidation_reason != new.invalidation_reason
     )
 
@@ -755,6 +829,7 @@ def _catalogue_to_sql(row: ApprovedMarketCatalogueRow) -> tuple[Any, ...]:
         row.line,
         json.dumps(list(row.required_outcomes), separators=(",", ":")),
         row.kalshi_fee_snapshot_id,
+        row.polymarket_fee_snapshot_id,
         row.row_state.value,
         row.invalidation_reason,
         row.first_catalogued_at.isoformat(),
@@ -788,6 +863,24 @@ def _fee_from_row(row: sqlite3.Row) -> KalshiFeeSnapshotRecord:
         series_fee_type=_decode_maybe_json(row["series_fee_type"]),
         series_fee_multiplier=_decode_maybe_json(row["series_fee_multiplier"]),
         fee_provenance=row["fee_provenance"],
+        fee_resolution_status=row["fee_resolution_status"],
+        fee_resolution_error=row["fee_resolution_error"],
+        captured_at=datetime.fromisoformat(row["captured_at"]),
+        confirmed_at=(
+            None if not row["confirmed_at"] else datetime.fromisoformat(row["confirmed_at"])
+        ),
+        source=row["source"],
+    )
+
+
+def _polymarket_fee_from_row(row: sqlite3.Row) -> PolymarketFeeSnapshotRecord:
+    schedule = _decode_maybe_json(row["fee_schedule_json"])
+    return PolymarketFeeSnapshotRecord(
+        snapshot_id=row["snapshot_id"],
+        source_market_id=row["source_market_id"],
+        fees_enabled=_optional_bool(row["fees_enabled"]),
+        fee_schedule=dict(schedule) if isinstance(schedule, dict) else None,
+        legacy_fee_rate=row["legacy_fee_rate"],
         fee_resolution_status=row["fee_resolution_status"],
         fee_resolution_error=row["fee_resolution_error"],
         captured_at=datetime.fromisoformat(row["captured_at"]),
@@ -852,6 +945,7 @@ def _catalogue_from_row(row: sqlite3.Row) -> ApprovedMarketCatalogueRow:
         line=row["line"],
         required_outcomes=list(json.loads(row["required_outcomes_json"] or "[]")),
         kalshi_fee_snapshot_id=row["kalshi_fee_snapshot_id"],
+        polymarket_fee_snapshot_id=_row_optional(row, keys, "polymarket_fee_snapshot_id"),
         row_state=CatalogueRowState(row["row_state"]),
         invalidation_reason=row["invalidation_reason"],
         first_catalogued_at=datetime.fromisoformat(row["first_catalogued_at"]),
@@ -920,3 +1014,16 @@ def _row_optional(row: sqlite3.Row, keys: set[str], name: str) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    folded = str(value).strip().casefold()
+    if folded in {"true", "1", "yes"}:
+        return True
+    if folded in {"false", "0", "no"}:
+        return False
+    return None
