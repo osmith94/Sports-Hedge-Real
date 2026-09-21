@@ -264,6 +264,7 @@ class PolymarketObservationBuilder:
         quote_age_ms: int | None = None,
         quote_age_basis: str | None = None,
         quote_age_reason: str | None = None,
+        fee_snapshot: dict[str, Any] | None = None,
     ) -> VenueMarketObservation:
         event = (
             canonical.event
@@ -290,9 +291,11 @@ class PolymarketObservationBuilder:
             basis=quote_age_basis,
             reason=quote_age_reason,
         )
-        from sports_hedge.fees.polymarket import extract_polymarket_fee_metadata
+        from sports_hedge.fees.polymarket import resolve_polymarket_fee_metadata
 
-        metadata["polymarket_fee"] = extract_polymarket_fee_metadata(market_payload)
+        metadata["polymarket_fee"] = resolve_polymarket_fee_metadata(
+            market_payload, captured=fee_snapshot
+        )
         return VenueMarketObservation(
             market=market,
             observed_at=observed_at or datetime.now(UTC),

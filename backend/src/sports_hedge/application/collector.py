@@ -3401,11 +3401,17 @@ class ReadOnlyCrossVenueCollector:
             else:
                 event_payload = {}
                 series_payload = None
+            polymarket_payload = None
+            if VenueName.POLYMARKET in venues:
+                pm_market = left_market if left_venue is VenueName.POLYMARKET else right_market
+                if isinstance(pm_market.raw, dict):
+                    polymarket_payload = pm_market.raw
             identity = pair_identity_from_markets(
                 left_market.canonical,
                 right_market.canonical,
                 kalshi_event_payload=event_payload,
                 kalshi_series_payload=series_payload,
+                polymarket_market_payload=polymarket_payload,
                 fee_source=FEE_SOURCE_GET_SERIES,
             )
             if identity is not None:
@@ -4052,6 +4058,7 @@ class ReadOnlyCrossVenueCollector:
             books_by_token,
             latency_ms=latency_ms,
             issues=issues,
+            fee_snapshot=leg.fee_snapshot if isinstance(leg.fee_snapshot, dict) else None,
         )
         if observation is None:
             result.unavailable = True
@@ -4862,6 +4869,7 @@ class ReadOnlyCrossVenueCollector:
         *,
         latency_ms: int,
         issues: list[CollectorIssue],
+        fee_snapshot: dict[str, Any] | None = None,
     ) -> VenueMarketObservation | None:
         evaluated_at = datetime.now(UTC)
         required_tokens = [runner.source_runner_id for runner in market.canonical.runners]
@@ -4890,6 +4898,7 @@ class ReadOnlyCrossVenueCollector:
                 quote_age_ms=age.quote_age_ms,
                 quote_age_basis=age.basis,
                 quote_age_reason=age.reason,
+                fee_snapshot=fee_snapshot,
             )
         except (VenueNormalizationError, ValueError) as exc:
             issues.append(

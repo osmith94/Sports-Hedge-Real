@@ -34,10 +34,63 @@ POLYMARKET_FEE_INCREMENT = Decimal("0.00001")
 _BACK_BUY = {MarketAction.BUY, MarketAction.SELL}
 
 
+_FEE_EVIDENCE_KEYS = (
+    "feesEnabled",
+    "fees_enabled",
+    "feeSchedule",
+    "fee_schedule",
+    "feeRate",
+    "fee_rate",
+)
+
+
+def market_payload_has_fee_evidence(payload: Mapping[str, Any] | None) -> bool:
+    """True when the payload carries venue fee fields, not just id/question identity."""
+
+    if not isinstance(payload, Mapping):
+        return False
+    if _mapping_has_fee_keys(payload):
+        return True
+    trading = payload.get("trading")
+    if isinstance(trading, Mapping) and _mapping_has_fee_keys(trading):
+        return True
+    grouped = payload.get("grouped_payloads")
+    if isinstance(grouped, list):
+        return any(
+            market_payload_has_fee_evidence(item) for item in grouped if isinstance(item, Mapping)
+        )
+    return False
+
+
+def resolve_polymarket_fee_metadata(
+    payload: Mapping[str, Any] | None,
+    *,
+    captured: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Prefer live Gamma/CLOB fee fields; reuse captured truth for identity stubs."""
+
+    if market_payload_has_fee_evidence(payload):
+        return extract_polymarket_fee_metadata(payload)
+    if isinstance(captured, Mapping) and captured:
+        reused = dict(captured)
+        if "fees_enabled" not in reused and "fee_schedule" not in reused:
+            return extract_polymarket_fee_metadata(reused)
+        market_id = reused.get("source_market_id") or _market_id(payload or {})
+        if market_id and not reused.get("source_market_id"):
+            reused["source_market_id"] = market_id
+        return reused
+    return extract_polymarket_fee_metadata(payload)
+
+
 def extract_polymarket_fee_metadata(payload: Mapping[str, Any] | None) -> dict[str, Any]:
     """Normalize Gamma/CLOB/SDK fee fields without guessing applicability."""
 
     raw = dict(payload or {})
+    if not market_payload_has_fee_evidence(raw) and isinstance(raw.get("grouped_payloads"), list):
+        for item in raw["grouped_payloads"]:
+            if market_payload_has_fee_evidence(item):
+                raw = dict(item)
+                break
     trading = raw.get("trading") if isinstance(raw.get("trading"), dict) else {}
     fees_enabled = _bool_or_none(
         _first_value(trading, "feesEnabled", "fees_enabled", default=_first_value(raw, "feesEnabled", "fees_enabled"))
@@ -51,7 +104,7 @@ def extract_polymarket_fee_metadata(payload: Mapping[str, Any] | None) -> dict[s
         "fees_enabled": fees_enabled,
         "fee_schedule": schedule,
         "legacy_fee_rate": str(legacy_rate) if legacy_rate is not None else None,
-        "source_market_id": _market_id(raw),
+        "source_market_id": _market_id(raw) or _market_id(payload or {}),
     }
 
 
@@ -238,6 +291,10 @@ def _unknown(
         snapshot_id=f"polymarket:market:unknown:{source_market_id or 'unknown'}",
         detail=detail,
     )
+
+
+def _mapping_has_fee_keys(payload: Mapping[str, Any]) -> bool:
+    return any(key in payload and payload[key] not in (None, "") for key in _FEE_EVIDENCE_KEYS)
 
 
 def _market_id(payload: Mapping[str, Any]) -> str | None:

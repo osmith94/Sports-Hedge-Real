@@ -1,8 +1,8 @@
 """UNIVERSE catalogue maintenance for Issue #341 Phase 2.
 
 Uses the Approved Match Register as the only runtime equivalence function.
-Persists exact native IDs and compact Kalshi fee snapshots. Does not fetch
-order books, run the solver, or create a durable price-engine queue.
+Persists exact native IDs and compact Kalshi / Polymarket fee snapshots. Does not
+fetch order books, run the solver, or create a durable price-engine queue.
 
 Catalogue disappearance is family-scoped. Fixture-wide listed_ok is not an
 authority: GAME/BTTS discovery success must not imply TOTAL/FTTS completeness.
@@ -22,6 +22,7 @@ from typing import Any
 from sports_hedge.application.approved_market_catalogue import (
     CATALOGUE_SCHEMA_VERSION,
     FEE_SOURCE_EVENT_PAYLOAD,
+    FEE_SOURCE_GAMMA_MARKET,
     FEE_SOURCE_GET_SERIES,
     ApprovedMarketCatalogueRow,
     CatalogueRowState,
@@ -29,6 +30,7 @@ from sports_hedge.application.approved_market_catalogue import (
     executable_polymarket_token_ids,
     family_period_line_from_key,
     kalshi_fee_snapshot_from_payloads,
+    polymarket_fee_snapshot_from_payload,
     required_outcomes_for_key,
     semantic_kalshi_fee_snapshot_id,
 )
@@ -172,6 +174,7 @@ class CataloguePairIdentity:
         polymarket: CanonicalMarket | None = None,
         kalshi_event_payload: dict[str, Any] | None = None,
         kalshi_series_payload: dict[str, Any] | None = None,
+        polymarket_market_payload: dict[str, Any] | None = None,
         fee_source: str = FEE_SOURCE_GET_SERIES,
     ) -> None:
         present = [item for item in (matchbook, kalshi, polymarket) if item is not None]
@@ -183,6 +186,7 @@ class CataloguePairIdentity:
         self.polymarket = polymarket
         self.kalshi_event_payload = kalshi_event_payload or {}
         self.kalshi_series_payload = kalshi_series_payload or {}
+        self.polymarket_market_payload = polymarket_market_payload or {}
         self.fee_source = fee_source
 
 
@@ -404,7 +408,10 @@ def _upsert_active_pair(
         or ""
     ).strip() or None
     snapshot_id = None if existing is None else existing.kalshi_fee_snapshot_id
-    if pair.kalshi is not None:
+    if pair.kalshi is not None and (
+        _kalshi_payloads_have_fee_evidence(pair.kalshi_event_payload, pair.kalshi_series_payload)
+        or not snapshot_id
+    ):
         market_ticker = tickers[0] if tickers else None
         snapshot = kalshi_fee_snapshot_from_payloads(
             series=pair.kalshi_series_payload,
@@ -422,6 +429,21 @@ def _upsert_active_pair(
         tx.insert_fee_snapshot(snapshot)
         snapshot_id = snapshot.snapshot_id
     pm_event, pm_market, pm_tokens = _polymarket_ids(pair.polymarket, register_canonical_key)
+    pm_snapshot_id = None if existing is None else existing.polymarket_fee_snapshot_id
+    if pair.polymarket is not None:
+        from sports_hedge.fees.polymarket import market_payload_has_fee_evidence
+
+        pm_payload = pair.polymarket_market_payload
+        if market_payload_has_fee_evidence(pm_payload) or not pm_snapshot_id:
+            pm_snapshot = polymarket_fee_snapshot_from_payload(
+                pm_payload,
+                captured_at=now,
+                source=FEE_SOURCE_GAMMA_MARKET,
+                confirmed_at=now,
+                source_market_id=pm_market,
+            )
+            tx.insert_polymarket_fee_snapshot(pm_snapshot)
+            pm_snapshot_id = pm_snapshot.snapshot_id
     incoming = ApprovedMarketCatalogueRow(
         catalogue_row_id=row_id if existing is None else existing.catalogue_row_id,
         schema_version=CATALOGUE_SCHEMA_VERSION,
@@ -469,6 +491,7 @@ def _upsert_active_pair(
         line=line,
         required_outcomes=required_outcomes_for_key(register_canonical_key),
         kalshi_fee_snapshot_id=snapshot_id,
+        polymarket_fee_snapshot_id=pm_snapshot_id,
         row_state=CatalogueRowState.ACTIVE,
         invalidation_reason=None,
         first_catalogued_at=now if existing is None else existing.first_catalogued_at,
@@ -487,6 +510,7 @@ def pair_identity_from_markets(
     *,
     kalshi_event_payload: dict[str, Any] | None = None,
     kalshi_series_payload: dict[str, Any] | None = None,
+    polymarket_market_payload: dict[str, Any] | None = None,
     fee_source: str = FEE_SOURCE_GET_SERIES,
 ) -> CataloguePairIdentity | None:
     key = registered_canonical_key(left, right)
@@ -513,6 +537,7 @@ def pair_identity_from_markets(
         polymarket=polymarket,
         kalshi_event_payload=kalshi_event_payload,
         kalshi_series_payload=kalshi_series_payload,
+        polymarket_market_payload=polymarket_market_payload,
         fee_source=fee_source,
     )
 
@@ -562,3 +587,22 @@ def _prefer_list(new: list[Any], existing: list[Any]) -> list[Any]:
     if new:
         return list(new)
     return list(existing)
+
+
+def _kalshi_payloads_have_fee_evidence(
+    event: dict[str, Any] | None, series: dict[str, Any] | None
+) -> bool:
+    """True when event/series carry fee fields, not just ticker identity."""
+
+    event_payload = event or {}
+    series_payload = series or {}
+    keys = (
+        "fee_type",
+        "fee_multiplier",
+        "fee_type_override",
+        "fee_multiplier_override",
+    )
+    return any(
+        event_payload.get(key) not in (None, "") or series_payload.get(key) not in (None, "")
+        for key in keys
+    )
