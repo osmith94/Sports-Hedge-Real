@@ -1,10 +1,9 @@
-import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
 
-import { PaperTrade } from "./api";
+import type { PaperTrade } from "./api";
 import { blockerLabel, settlementReconciliationLabel } from "./settlement-reconciliation-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -37,21 +36,20 @@ describe("settlement reconciliation display", () => {
       settlement_blocker: "incomplete_provider_result",
       last_settlement_check_at: "2026-09-21T07:00:00.000Z",
     });
-    assert.equal(
-      settlementReconciliationLabel(row),
+    expect(settlementReconciliationLabel(row)).toBe(
       "Auto-settlement blocked · Incomplete provider result",
     );
-    assert.equal(blockerLabel("provider_status_postponed"), "Exceptional lifecycle · postponed");
-    assert.equal(blockerLabel("provider_unavailable"), "Provider unavailable");
+    expect(blockerLabel("provider_status_postponed")).toBe("Exceptional lifecycle · postponed");
+    expect(blockerLabel("provider_unavailable")).toBe("Provider unavailable");
   });
 
   it("operator failsafe asks for a canonical result, not source/source id", () => {
     const book = readFileSync(join(frontendRoot, "components/paper-trade-book.tsx"), "utf8");
-    assert.match(book, /Manual close \/ settle result/);
-    assert.match(book, /Confirm result & close trade/);
-    assert.match(book, /Actual canonical market result/);
-    assert.doesNotMatch(book, /name="source_id"/);
-    assert.doesNotMatch(book, /provenance: "fixture_demo"/);
-    assert.match(book, /manualSettlePaperTrade/);
+    expect(book).toMatch(/Manual close \/ settle result/);
+    expect(book).toMatch(/Confirm result & close trade/);
+    expect(book).toMatch(/Actual canonical market result/);
+    expect(book).not.toMatch(/name="source_id"/);
+    expect(book).not.toMatch(/provenance: "fixture_demo"/);
+    expect(book).toMatch(/manualSettlePaperTrade/);
   });
 });
