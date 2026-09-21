@@ -40,9 +40,18 @@ superset blocked on:
 - soccer squad-category fingerprints
 - `(venue, source_event_id)` identity (no self-pairs)
 
-`EventMatcher.could_match()` / `match()` run only on those candidates.
-Same-venue sibling events (PM/Kalshi family splits) still union when they
-fall in the kickoff window.
+`EventMatcher.could_match()` is the official conservative prefilter. Index
+generation builds the could-match graph and then keeps every compatible pair
+inside a connected component so veto/miss evidence on a matching path is
+never dropped. Pairs that cannot share a component are not materialised.
+``match()`` still runs only on the remaining candidates. Same-venue sibling
+events (PM/Kalshi family splits) still union when they fall in the kickoff
+window.
+
+Candidates are ordered by kickoff/name locality so a truncated chunk can
+finish every incident pair of the earliest fixtures and assign them. Global
+cross-venue-first order is not used: it left almost every node unscored until
+the entire list finished.
 
 Diagnostics (existing `scan_diagnostics`, not a new telemetry system):
 
@@ -51,6 +60,10 @@ Diagnostics (existing `scan_diagnostics`, not a new telemetry system):
 - `candidate_pairs_considered`
 - `pairs_pruned_by_index`
 - `pairs_skipped_by_generation_cache`
+- `pairs_rejected_by_could_match`
+- `unresolved_competition_events` / `max_sport_bucket_size`
+- `clustering_resume_applied` / `clustering_resume_candidates_reused`
+- `clustering_resume_cursor_before` / `clustering_resume_cursor_after`
 - `candidate_reduction_pct`
 - `cross_venue_clusters` / `single_venue_clusters`
 - `clustering_duration_ms`

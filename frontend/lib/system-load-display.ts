@@ -110,6 +110,15 @@ function formatBudget(used: number | null | undefined, budget: number | null | u
   if (used == null && budget == null) return null;
   const usedLabel = used == null || !Number.isFinite(used) ? "—" : `${Math.round(used)}s`;
   const budgetLabel = budget == null || !Number.isFinite(budget) ? "—" : `${Math.round(budget)}s`;
+  if (
+    used != null &&
+    budget != null &&
+    Number.isFinite(used) &&
+    Number.isFinite(budget) &&
+    used > budget
+  ) {
+    return `${usedLabel} cumulative / ${budgetLabel} chunk`;
+  }
   return `${usedLabel} / ${budgetLabel}`;
 }
 

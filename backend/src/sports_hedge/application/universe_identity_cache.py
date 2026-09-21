@@ -264,6 +264,11 @@ class ClusteringResumeState:
     match_confidence: dict[tuple[VenueName, str], float]
     pair_kinds: dict[tuple[VenueName, str], set[str]]
     scored_pairs: list[Any] = field(default_factory=list)
+    candidate_keys: list[tuple[tuple[str, str], tuple[str, str]]] = field(
+        default_factory=list
+    )
+    candidate_order_version: int = 2
+    index_diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -318,7 +323,9 @@ class GenerationIdentityCache:
         self.known_other_keys[key] = other_venue_keys
 
     def items_signature(self, items: list[Any]) -> str:
-        return "\n".join(event_identity_fingerprint(item) for item in items)
+        """Order-independent snapshot of the current source-event set."""
+
+        return "\n".join(sorted(event_identity_fingerprint(item) for item in items))
 
     def store_clustering_resume(
         self,
@@ -329,6 +336,9 @@ class GenerationIdentityCache:
         match_confidence: dict[tuple[VenueName, str], float],
         pair_kinds: dict[tuple[VenueName, str], set[str]],
         scored_pairs: list[Any] | None = None,
+        candidate_keys: list[tuple[tuple[str, str], tuple[str, str]]] | None = None,
+        candidate_order_version: int = 2,
+        index_diagnostics: dict[str, Any] | None = None,
     ) -> None:
         self.clustering_resume = ClusteringResumeState(
             items_signature=self.items_signature(items),
@@ -337,6 +347,9 @@ class GenerationIdentityCache:
             match_confidence=dict(match_confidence),
             pair_kinds={key: set(value) for key, value in pair_kinds.items()},
             scored_pairs=list(scored_pairs or ()),
+            candidate_keys=list(candidate_keys or ()),
+            candidate_order_version=int(candidate_order_version),
+            index_diagnostics=dict(index_diagnostics or {}),
         )
 
     def take_clustering_resume(self, items: list[Any]) -> ClusteringResumeState | None:
