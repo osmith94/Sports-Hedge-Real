@@ -80,14 +80,20 @@ from sports_hedge.application.opportunity_viability import (
     UPPER_BOUND_BELOW_MIN_NET,
     VenueViability,
     assess_identity_viability,
+    catalogue_ready_venues,
     get_opportunity_viability_cache,
     reset_opportunity_viability_cache,
+)
+from sports_hedge.application.adaptive_scheduler import (
+    SchedulerWork,
+    order_scheduler_work,
 )
 from sports_hedge.application.provider_access import (
     HEALTH_CAPACITY_SATURATED,
     HEALTH_DEFERRED,
     HEALTH_MARKET_TIMEOUT,
     HEALTH_OK,
+    HEALTH_RATE_LIMITED,
     PRICE_ENGINE_ACTIVE_TRADE_LANE,
     PRICE_ENGINE_BACKGROUND_LANE,
     ProviderAccessLayer,
@@ -146,6 +152,7 @@ from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
 from sports_hedge.venues.matchbook import MatchbookMarketGoneError
+from sports_hedge.venues.rate_limit import ProviderRateLimitedError
 
 PRICE_ENGINE_RETRY_BACKOFF_SECONDS = (2.0, 5.0, 10.0)
 PRICE_ENGINE_ITEM_TIMEOUT_REASON = "order_book_timeout after 8s"
@@ -201,6 +208,12 @@ class PriceEngineRuntimeItem:
     list_events_calls: int = 0
     list_markets_calls: int = 0
     pricing_slice_priority: PriceEnginePriority | None = None
+    viable_venue_count: int = 0
+    skip_expensive_work: bool = False
+    viability_reason: str | None = None
+    near_threshold: bool = False
+    qualifying: bool = False
+    last_priority_decision: dict[str, Any] | None = None
 
     @property
     def item_key(self) -> str:
@@ -518,8 +531,136 @@ class CataloguePriceEngine:
                 if evaluated < runtime.last_priced_at + timedelta(seconds=interval):
                     continue
             runtime.status = PriceEngineItemStatus.DUE
+            self._refresh_scheduler_signals(runtime)
             due.append(runtime)
-        return due
+        return self._order_due_items(due, now=evaluated)
+
+    def _refresh_scheduler_signals(self, runtime: PriceEngineRuntimeItem) -> None:
+        identity = runtime.identity
+        viability = assess_identity_viability(
+            identity,
+            cache=self.viability_cache,
+            active_event_ids=self._exempt_event_ids,
+        )
+        runtime.viable_venue_count = viability.viable_venue_count
+        runtime.skip_expensive_work = bool(viability.skip_expensive_work)
+        runtime.viability_reason = viability.reason
+
+    def _interval_for(self, runtime: PriceEngineRuntimeItem) -> int:
+        if runtime.priority is PriceEnginePriority.HOT:
+            return self._hot_interval
+        return self._background_interval
+
+    def _required_venues(self, runtime: PriceEngineRuntimeItem) -> tuple[VenueName, ...]:
+        ready = catalogue_ready_venues(runtime.identity)
+        return tuple(
+            venue
+            for venue in ready
+            if not self.viability_cache.is_blocked(
+                runtime.identity.canonical_event_id, venue
+            )
+        )
+
+    def scheduler_work_for(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        *,
+        lane: str | None = None,
+        seq: int = 0,
+        now: datetime | None = None,
+    ) -> SchedulerWork:
+        evaluated = now or self.now()
+        interval = max(0, int(self._interval_for(runtime)))
+        last = runtime.last_priced_at
+        due_at = evaluated if last is None else last + timedelta(seconds=interval)
+        deadline_at = due_at + timedelta(seconds=interval if interval > 0 else 0)
+        now_ts = evaluated.timestamp()
+        resolved_lane = lane or (
+            ScanLane.HOT.value
+            if runtime.priority is PriceEnginePriority.HOT
+            else PRICE_ENGINE_BACKGROUND_LANE
+        )
+        kickoff = runtime.identity.kickoff_utc
+        post_kickoff_hot = (
+            runtime.priority is PriceEnginePriority.HOT
+            and kickoff is not None
+            and kickoff <= evaluated
+        )
+        return SchedulerWork(
+            lane=resolved_lane,
+            work_id=runtime.identity.catalogue_row_id,
+            viable_venue_count=runtime.viable_venue_count,
+            skip_expensive_work=runtime.skip_expensive_work,
+            viability_reason=runtime.viability_reason,
+            viability_assessed=True,
+            near_threshold=runtime.near_threshold,
+            qualifying=runtime.qualifying,
+            in_play=post_kickoff_hot,
+            required_venues=self._required_venues(runtime),
+            due_mono=due_at.timestamp(),
+            deadline_mono=deadline_at.timestamp(),
+            cadence_seconds=float(interval),
+            seq=seq,
+            wait_age_ms=max(0, int((evaluated - due_at).total_seconds() * 1000))
+            if evaluated >= due_at
+            else 0,
+            now_mono=now_ts,
+        )
+
+    def _order_due_items(
+        self,
+        due: list[PriceEngineRuntimeItem],
+        *,
+        now: datetime,
+    ) -> list[PriceEngineRuntimeItem]:
+        if len(due) <= 1:
+            return due
+        access = self.provider_access
+        pressure = access.pressure_by_venue() if access is not None else None
+        work_items = [
+            self.scheduler_work_for(runtime, seq=index, now=now)
+            for index, runtime in enumerate(due)
+        ]
+        ordered = order_scheduler_work(work_items, pressure_by_venue=pressure)
+        by_id = {runtime.identity.catalogue_row_id: runtime for runtime in due}
+        ranked: list[PriceEngineRuntimeItem] = []
+        for work, decision in ordered:
+            runtime = by_id.get(work.work_id)
+            if runtime is None:
+                continue
+            runtime.last_priority_decision = decision.as_dict()
+            ranked.append(runtime)
+        return ranked
+
+    def _saved_calls_for(self, runtime: PriceEngineRuntimeItem) -> int:
+        identity = runtime.identity
+        matchbook_ready = bool(identity.matchbook_event_id and identity.matchbook_market_id)
+        kalshi_ready = bool(identity.kalshi_event_ticker and _kalshi_tickers(identity))
+        pm_tokens = executable_polymarket_token_ids(
+            list(identity.polymarket_token_ids),
+            event_id=identity.polymarket_event_id,
+            market_id=identity.polymarket_market_id,
+            condition_id=identity.polymarket_condition_id,
+            required_outcomes=list(identity.required_outcomes)
+            or required_outcomes_for_key(identity.register_canonical_key),
+        )
+        return _expected_provider_calls(
+            matchbook_ready=matchbook_ready,
+            kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
+            polymarket_tokens=pm_tokens if pm_tokens else [],
+        )
+
+    def _record_item_deadline_miss(self, runtime: PriceEngineRuntimeItem) -> None:
+        access = self.provider_access
+        if access is None:
+            return
+        venues = self._required_venues(runtime) or (VenueName.MATCHBOOK,)
+        lane = (
+            ScanLane.HOT.value
+            if runtime.priority is PriceEnginePriority.HOT
+            else PRICE_ENGINE_BACKGROUND_LANE
+        )
+        access.record_deadline_miss(venues[0], lane=lane)
 
     def _slice_worker_limit(self) -> int:
         """Bound in-slice item workers to provider caps without raising them.
@@ -578,13 +719,29 @@ class CataloguePriceEngine:
                 return None
             return deadline - monotonic()
 
+        expensive: list[PriceEngineRuntimeItem] = []
+        for runtime in due:
+            if runtime.skip_expensive_work:
+                saved = self._saved_calls_for(runtime)
+                outcome = self._skip_item(
+                    runtime,
+                    result,
+                    reason=runtime.viability_reason or CROSS_VENUE_UNAVAILABLE,
+                    saved_calls=saved,
+                    viable_count=runtime.viable_venue_count,
+                )
+                self._record_outcome(runtime, outcome, result)
+            else:
+                expensive.append(runtime)
+
         if remaining() is not None and float(remaining() or 0) <= 0:
-            for runtime in due:
+            for runtime in expensive:
                 runtime.status = PriceEngineItemStatus.NOT_STARTED
                 result.not_started.append(runtime.identity.catalogue_row_id)
+                self._record_item_deadline_miss(runtime)
             return result
 
-        pending = deque(due)
+        pending = deque(expensive)
         self._slice_remaining = remaining
         try:
             async def _worker() -> None:
@@ -600,11 +757,12 @@ class CataloguePriceEngine:
                     if rem is not None and rem <= 0:
                         runtime.status = PriceEngineItemStatus.NOT_STARTED
                         self._record_outcome(runtime, PriceEngineItemStatus.NOT_STARTED, result)
+                        self._record_item_deadline_miss(runtime)
                         continue
                     outcome = await self._price_item(runtime, result)
                     self._record_outcome(runtime, outcome, result)
 
-            worker_n = min(self._slice_worker_limit(), len(due))
+            worker_n = min(self._slice_worker_limit(), len(expensive))
             if worker_n > 0:
                 await asyncio.gather(
                     *(asyncio.create_task(_worker()) for _ in range(worker_n)),
@@ -614,6 +772,7 @@ class CataloguePriceEngine:
                 runtime = pending.popleft()
                 runtime.status = PriceEngineItemStatus.NOT_STARTED
                 result.not_started.append(runtime.identity.catalogue_row_id)
+                self._record_item_deadline_miss(runtime)
         finally:
             self._slice_remaining = None
         self._last_slice_not_started[priority.value] = len(result.not_started)
@@ -800,6 +959,7 @@ class CataloguePriceEngine:
                 stage="get_market",
                 source_id=str(identity.matchbook_market_id),
                 coro=getter(identity.matchbook_event_id, identity.matchbook_market_id),
+                runtime=runtime,
             )
         except MatchbookMarketGoneError:
             self.viability_cache.mark_unavailable(
@@ -879,6 +1039,7 @@ class CataloguePriceEngine:
                 stage="order_book",
                 source_id=ticker,
                 coro=getter(identity.kalshi_event_ticker, ticker),
+                runtime=runtime,
             )
             if status is not None:
                 if status is PriceEngineItemStatus.RETRY_WAIT:
@@ -923,6 +1084,7 @@ class CataloguePriceEngine:
                     identity.polymarket_market_id,
                     token,
                 ),
+                runtime=runtime,
             )
             if status is not None:
                 if status is PriceEngineItemStatus.RETRY_WAIT:
@@ -1264,6 +1426,15 @@ class CataloguePriceEngine:
                 or runtime.priority is PriceEnginePriority.HOT
                 or runtime.pricing_slice_priority is PriceEnginePriority.HOT
             )
+            runtime.near_threshold = True
+            runtime.qualifying = bool(
+                decision is not None
+                and decision_net_edge(decision) is not None
+                and decision.minimum_net_edge is not None
+                and qualifies_min_net_arb(
+                    decision_net_edge(decision), decision.minimum_net_edge
+                )
+            )
             self._promoted_hot_rows[row_id] = version
             self._promoted_hot_ids.add(canonical_id)
             if not already_fixture:
@@ -1271,6 +1442,8 @@ class CataloguePriceEngine:
                 if not was_scheduler_hot:
                     self._emit_operator_hot_promotion(runtime, decision, result)
         else:
+            runtime.near_threshold = False
+            runtime.qualifying = False
             self._promoted_hot_rows.pop(row_id, None)
             self._refresh_promoted_hot_ids()
         self._reclassify_fixture(canonical_id)
@@ -1550,6 +1723,7 @@ class CataloguePriceEngine:
         stage: str,
         source_id: str,
         coro: Any,
+        runtime: PriceEngineRuntimeItem | None = None,
     ) -> tuple[Any, PriceEngineItemStatus | None]:
         access = self.provider_access
         timeout = self._provider_timeout
@@ -1558,6 +1732,9 @@ class CataloguePriceEngine:
                 payload = await asyncio.wait_for(coro, timeout=timeout)
                 self._record_lane_operation(lane, venue, stage, HEALTH_OK)
                 return payload, None
+            except ProviderRateLimitedError:
+                self._record_lane_operation(lane, venue, stage, HEALTH_RATE_LIMITED)
+                return None, PriceEngineItemStatus.RETRY_WAIT
             except TimeoutError:
                 self._record_lane_operation(lane, venue, stage, HEALTH_MARKET_TIMEOUT)
                 return None, PriceEngineItemStatus.RETRY_WAIT
@@ -1571,6 +1748,29 @@ class CataloguePriceEngine:
                     pass
 
         slot_wait = self._slot_wait_seconds()
+        work = None
+        if runtime is not None:
+            work = self.scheduler_work_for(runtime, lane=lane)
+            if work.deadline_mono is not None:
+                remaining_deadline = max(0.0, float(work.deadline_mono) - self.now().timestamp())
+                work = SchedulerWork(
+                    lane=work.lane,
+                    work_id=work.work_id,
+                    viable_venue_count=work.viable_venue_count,
+                    skip_expensive_work=work.skip_expensive_work,
+                    viability_reason=work.viability_reason,
+                    viability_assessed=work.viability_assessed,
+                    near_threshold=work.near_threshold,
+                    qualifying=work.qualifying,
+                    in_play=work.in_play,
+                    required_venues=work.required_venues,
+                    due_mono=access._clock(),
+                    deadline_mono=access._clock() + remaining_deadline,
+                    cadence_seconds=work.cadence_seconds,
+                    seq=work.seq,
+                    wait_age_ms=work.wait_age_ms,
+                    now_mono=access._clock(),
+                )
         if slot_wait <= 0:
             await _close_unused()
             if access.venue_saturated(venue):
@@ -1578,7 +1778,7 @@ class CataloguePriceEngine:
                 return None, PriceEngineItemStatus.DEFERRED
             return None, PriceEngineItemStatus.NOT_STARTED
         async with access.acquire_wait(
-            venue, lane=lane, stage=stage, timeout=slot_wait
+            venue, lane=lane, stage=stage, timeout=slot_wait, work=work
         ) as lease:
             if lease is None:
                 await _close_unused()
@@ -1599,6 +1799,10 @@ class CataloguePriceEngine:
                     return payload, None
                 except MatchbookMarketGoneError:
                     raise
+                except ProviderRateLimitedError as exc:
+                    access.observe_rate_limit(venue, exc.retry_after_seconds)
+                    self._record_lane_operation(lane, venue, stage, HEALTH_RATE_LIMITED)
+                    return None, PriceEngineItemStatus.RETRY_WAIT
                 except Exception:
                     self._record_lane_operation(lane, venue, stage, HEALTH_MARKET_TIMEOUT)
                     return None, PriceEngineItemStatus.RETRY_WAIT

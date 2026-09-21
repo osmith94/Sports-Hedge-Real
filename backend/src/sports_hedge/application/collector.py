@@ -79,6 +79,7 @@ from sports_hedge.application.market_observation import (
     VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.adaptive_scheduler import work_from_lane
 from sports_hedge.application.provider_access import (
     HEALTH_AUTH_FAILURE,
     HEALTH_DISCOVERY_TIMEOUT,
@@ -1427,7 +1428,10 @@ class ReadOnlyCrossVenueCollector:
         access = self._provider_access
         if access is not None:
             async with access.acquire(
-                venue, lane=self._op_request_lane, stage=stage
+                venue,
+                lane=self._op_request_lane,
+                stage=stage,
+                work=work_from_lane(self._op_request_lane),
             ) as lease:
                 yield lease
             return

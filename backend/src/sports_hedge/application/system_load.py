@@ -26,6 +26,10 @@ class ProviderSlotLoad(BaseModel):
     inflight: int = Field(default=0, ge=0)
     limit: int = Field(default=0, ge=0)
     waiting: int = Field(default=0, ge=0)
+    wait_ms: int = Field(default=0, ge=0)
+    latency_ms: int = Field(default=0, ge=0)
+    deadline_misses: int = Field(default=0, ge=0)
+    saturated: bool = False
 
 
 class HotLoad(BaseModel):
@@ -203,15 +207,22 @@ def _provider_slot(access: Any, venue: str) -> ProviderSlotLoad:
     inflight_map = payload.get("inflight") if isinstance(payload.get("inflight"), dict) else {}
     waiting_map = payload.get("waiting") if isinstance(payload.get("waiting"), dict) else {}
     limits_map = payload.get("limits") if isinstance(payload.get("limits"), dict) else {}
+    queue_map = payload.get("queue") if isinstance(payload.get("queue"), dict) else {}
     default_limit = DEFAULT_PROVIDER_CONCURRENCY.get(VenueName(venue), 0)
     if venue in limits_map:
         limit = _count(limits_map.get(venue))
     else:
         limit = int(default_limit)
+    venue_queue = queue_map.get(venue) if isinstance(queue_map.get(venue), dict) else {}
+    waiting = _count(waiting_map.get(venue))
     return ProviderSlotLoad(
         inflight=_count(inflight_map.get(venue)),
         limit=limit,
-        waiting=_count(waiting_map.get(venue)),
+        waiting=waiting,
+        wait_ms=_count(venue_queue.get("wait_age_ms")),
+        latency_ms=_count(venue_queue.get("service_latency_ms")),
+        deadline_misses=_count(venue_queue.get("deadline_misses")),
+        saturated=bool(venue_queue.get("saturated")) if venue_queue else waiting > 0 and _count(inflight_map.get(venue)) >= limit and limit > 0,
     )
 
 

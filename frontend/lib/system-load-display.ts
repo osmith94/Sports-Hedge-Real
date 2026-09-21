@@ -58,11 +58,11 @@ export function systemLoadLines(
     },
     {
       key: "MB",
-      detail: `${asCount(mb.inflight)}/${asCount(mb.limit)} in use · queue ${asCount(mb.waiting)}`,
+      detail: providerDetail(mb),
     },
     {
       key: "K",
-      detail: `${asCount(kalshi.inflight)}/${asCount(kalshi.limit)} in use · queue ${asCount(kalshi.waiting)}`,
+      detail: providerDetail(kalshi),
     },
     {
       key: "ALL",
@@ -84,6 +84,26 @@ function formatCycle(hot: NonNullable<SystemLoadSummary["hot"]>): string {
 function formatCadence(seconds: unknown, fallback = "—"): string {
   const cadence = asCount(seconds);
   return cadence > 0 ? `${cadence}s` : fallback;
+}
+
+function providerDetail(slot: NonNullable<SystemLoadSummary["matchbook"]>): string {
+  const bits = [
+    `${asCount(slot?.inflight)}/${asCount(slot?.limit)} in use`,
+    `queue ${asCount(slot?.waiting)}`,
+  ];
+  const waitMs = asCount(slot?.wait_ms);
+  if (waitMs > 0) bits.push(`wait ${formatMs(waitMs)}`);
+  const latencyMs = asCount(slot?.latency_ms);
+  if (latencyMs > 0) bits.push(`svc ${formatMs(latencyMs)}`);
+  const misses = asCount(slot?.deadline_misses);
+  if (misses > 0) bits.push(`${misses} deadline miss${misses === 1 ? "" : "es"}`);
+  if (slot?.saturated) bits.push("saturated");
+  return bits.join(" · ");
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${Math.round(ms / 100) / 10}s`;
 }
 
 function formatBudget(used: number | null | undefined, budget: number | null | undefined): string | null {
