@@ -15,9 +15,9 @@ from sports_hedge.domain.market_scope import MarketScope
 from sports_hedge.domain.outrights import (
     FORBIDDEN_FIXTURE_FIELDS,
     FORBIDDEN_PRICE_FIELDS,
+    NAME_ONLY_PARTICIPANT_PREFIXES,
     CanonicalCompetitionSeasonRef,
     CanonicalSeasonMarketIdentity,
-    NAME_ONLY_PARTICIPANT_PREFIXES,
     OutrightMarketFamily,
     OutrightSettlementFingerprint,
     ParticipantType,

@@ -50,14 +50,16 @@ def compare_season_identities(
         reasons.append("fixture_scope_not_an_outright")
     if left_settlement is not None and right_settlement is not None:
         reasons.extend(settlement_mismatch_reasons(left_settlement, right_settlement))
-        if left_settlement.joint_winner_policy == "sole_winner_alpha_tiebreak" and (
-            right_settlement.joint_winner_policy
-            in {"dead_heat_equal_share", "official_shared_award"}
-            or right_settlement.joint_winner_policy != left_settlement.joint_winner_policy
+        policies = {left_settlement.joint_winner_policy, right_settlement.joint_winner_policy}
+        if (
+            "sole_winner_alpha_tiebreak" in policies
+            and policies & {"dead_heat_equal_share", "official_shared_award"}
+            and (
+                left.market_family.value == "top_scorer"
+                or right.market_family.value == "top_scorer"
+            )
         ):
-            if "top_scorer_alpha_tiebreak_vs_shared_or_dead_heat" not in reasons:
-                if left.market_family.value == "top_scorer":
-                    reasons.append("top_scorer_alpha_tiebreak_vs_shared_or_dead_heat")
+            reasons.append("top_scorer_alpha_tiebreak_vs_shared_or_dead_heat")
         if "matchbook_outright_ded_fact_unproven" in {
             left_settlement.joint_winner_policy,
             right_settlement.joint_winner_policy,

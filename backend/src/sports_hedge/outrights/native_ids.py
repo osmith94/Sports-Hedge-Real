@@ -113,18 +113,12 @@ def extract_matchbook_listing(payload: dict[str, Any]) -> OutrightNativeListing:
         or runner.get("event_participant_id")
         or payload.get("event_participant_id")
     )
-    market_type = _text(market.get("market-type") or market.get("market_type")).casefold()
-    shape = (
-        OutrightListingShape.EXCHANGE_BACK_LAY
-        if market_type in {"outright", "outright_ded_fact", ""}
-        else OutrightListingShape.EXCHANGE_BACK_LAY
-    )
     return OutrightNativeListing(
         venue=VenueName.MATCHBOOK.value,
         native_event_id=str(event_id),
         native_market_id=str(market_id),
         native_runner_or_contract_id=str(runner_id),
-        listing_shape=shape,
+        listing_shape=OutrightListingShape.EXCHANGE_BACK_LAY,
         matchbook_participant_id=participant or None,
     )
 

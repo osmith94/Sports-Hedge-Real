@@ -223,7 +223,7 @@ class ApprovedMarketCatalogueRow(BaseModel):
     polymarket_event_ticker: str | None = None
 
     @model_validator(mode="after")
-    def validate_market_scope_identity(self) -> "ApprovedMarketCatalogueRow":
+    def validate_market_scope_identity(self) -> ApprovedMarketCatalogueRow:
         if self.market_scope is MarketScope.FIXTURE_MATCH:
             return self
         if self.market_scope is not MarketScope.COMPETITION_SEASON:

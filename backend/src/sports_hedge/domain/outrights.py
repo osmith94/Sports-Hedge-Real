@@ -168,7 +168,7 @@ class CanonicalSeasonMarketIdentity(BaseModel):
         return text
 
     @model_validator(mode="after")
-    def reject_name_only_participant(self) -> "CanonicalSeasonMarketIdentity":
+    def reject_name_only_participant(self) -> CanonicalSeasonMarketIdentity:
         token = self.participant_canonical_id.strip().casefold()
         if token.startswith(NAME_ONLY_PARTICIPANT_PREFIXES):
             raise ValueError("name_only_participant_id_forbidden")
