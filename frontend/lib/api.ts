@@ -594,6 +594,10 @@ export type ProviderSlotLoad = {
   inflight?: number;
   limit?: number;
   waiting?: number;
+  wait_ms?: number;
+  latency_ms?: number;
+  deadline_misses?: number;
+  saturated?: boolean;
 };
 
 export type HotLoad = {

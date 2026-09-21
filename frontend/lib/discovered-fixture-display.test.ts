@@ -11,6 +11,7 @@ import {
   discoveryCompactSummaryLabel,
   discoveryStatusBadgeLabel,
   marketEvaluationLabel,
+  opportunityStateLabel,
 } from "./discovered-fixture-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -228,5 +229,38 @@ describe("single-venue UNIVERSE evaluation honesty", () => {
       marketEvaluationLabel(row),
       "Not evaluated — single-venue (no cross-venue candidate)",
     );
+  });
+
+  it("labels a currently-one-viable-venue row as cross-venue unavailable, not finished", () => {
+    const row = fixture({
+      matchbook_matched: true,
+      kalshi_matched: true,
+      matched_equivalent_count: null,
+      market_evaluation_state: "cross_venue_unavailable",
+      market_evaluation_reason: "cross_venue_unavailable",
+      opportunity_state: "not_evaluated",
+      fixture_status: null,
+      in_running: null,
+    });
+    assert.equal(marketEvaluationLabel(row), "Not evaluated — cross-venue unavailable");
+    assert.equal(opportunityStateLabel(row), "not evaluated");
+  });
+
+  it("labels a conservative upper-bound prune without calling the fixture finished", () => {
+    const row = fixture({
+      matchbook_matched: true,
+      kalshi_matched: true,
+      matched_equivalent_count: null,
+      market_evaluation_state: "upper_bound_below_min_net",
+      market_evaluation_reason: "upper_bound_below_min_net",
+      opportunity_state: "not_evaluated",
+      fixture_status: null,
+      in_running: null,
+    });
+    assert.equal(
+      marketEvaluationLabel(row),
+      "Not evaluated — remaining books cannot reach Min Net Arb",
+    );
+    assert.equal(opportunityStateLabel(row), "not evaluated");
   });
 });

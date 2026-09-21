@@ -27,6 +27,10 @@ export const NOT_EVALUATED_SCAN_BUDGET_LABEL = "Not evaluated — scan budget ex
 export const NOT_EVALUATED_MARKET_FETCH_LABEL = "Not evaluated — market fetch unavailable";
 export const NOT_EVALUATED_SINGLE_VENUE_LABEL =
   "Not evaluated — single-venue (no cross-venue candidate)";
+export const NOT_EVALUATED_CROSS_VENUE_UNAVAILABLE_LABEL =
+  "Not evaluated — cross-venue unavailable";
+export const NOT_EVALUATED_UPPER_BOUND_BELOW_MIN_NET_LABEL =
+  "Not evaluated — remaining books cannot reach Min Net Arb";
 export const HOT_RELATIONSHIP_MISSING_LABEL = "Not evaluated — HOT relationship missing";
 export const HOT_REVALIDATION_NEEDED_LABEL = "HOT revalidation needed";
 export const FIXTURE_FOUND_LABEL = "fixture found";
@@ -139,6 +143,8 @@ export function marketEvaluationUnevaluated(item: DiscoveredFixture): boolean {
     state === "market_fetch_unavailable" ||
     state === "hot_relationship_missing" ||
     state === "single_venue_no_cross_venue_candidate" ||
+    state === "cross_venue_unavailable" ||
+    state === "upper_bound_below_min_net" ||
     item.opportunity_state === "not_evaluated"
   ) {
     return true;
@@ -158,6 +164,12 @@ export function marketEvaluationLabel(item: DiscoveredFixture): string {
   }
   if (item.market_evaluation_state === "single_venue_no_cross_venue_candidate") {
     return NOT_EVALUATED_SINGLE_VENUE_LABEL;
+  }
+  if (item.market_evaluation_state === "cross_venue_unavailable") {
+    return NOT_EVALUATED_CROSS_VENUE_UNAVAILABLE_LABEL;
+  }
+  if (item.market_evaluation_state === "upper_bound_below_min_net") {
+    return NOT_EVALUATED_UPPER_BOUND_BELOW_MIN_NET_LABEL;
   }
   if (item.market_evaluation_reason === "hot_revalidation_needed") {
     return HOT_REVALIDATION_NEEDED_LABEL;

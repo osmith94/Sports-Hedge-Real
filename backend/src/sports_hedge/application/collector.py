@@ -81,6 +81,7 @@ from sports_hedge.application.market_observation import (
     VenueMarketObservation,
 )
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.adaptive_scheduler import work_from_lane
 from sports_hedge.application.provider_access import (
     HEALTH_AUTH_FAILURE,
     HEALTH_DISCOVERY_TIMEOUT,
@@ -106,6 +107,13 @@ from sports_hedge.application.catalogue_maintenance import (
     persist_universe_catalogue_pass_offloop,
 )
 from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key, should_skip_market_work
+from sports_hedge.application.opportunity_viability import (
+    CROSS_VENUE_UNAVAILABLE,
+    NO_CROSS_VENUE_CANDIDATE,
+    UPPER_BOUND_BELOW_MIN_NET,
+    assess_cluster_viability,
+    get_opportunity_viability_cache,
+)
 from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
 from sports_hedge.venues.matchbook import MatchbookMarketGoneError
 from sports_hedge.catalogue.classify import classify_pair
@@ -303,11 +311,14 @@ class MarketEvaluationState(StrEnum):
     MARKET_FETCH_UNAVAILABLE = "market_fetch_unavailable"
     HOT_RELATIONSHIP_MISSING = "hot_relationship_missing"
     SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE = "single_venue_no_cross_venue_candidate"
+    CROSS_VENUE_UNAVAILABLE = "cross_venue_unavailable"
+    UPPER_BOUND_BELOW_MIN_NET = "upper_bound_below_min_net"
 
 
 NOT_EVALUATED_SCAN_DEADLINE_REASON = "not_evaluated_scan_deadline"
 SCAN_BUDGET_EXHAUSTED_REASON = "scan_budget_exhausted"
 SINGLE_VENUE_NO_CROSS_VENUE_REASON = "single_venue_no_cross_venue_candidate"
+CROSS_VENUE_UNAVAILABLE_REASON = "cross_venue_unavailable"
 MARKET_FETCH_UNAVAILABLE_REASON = "list_markets_unavailable"
 UNIVERSE_COMPLETENESS_COMPLETE = "complete"
 UNIVERSE_COMPLETENESS_DEADLINE_LEFTOVER = "deadline_leftover"
@@ -766,6 +777,7 @@ class ReadOnlyCrossVenueCollector:
         on_canonical_work_set: Callable[..., Any] | None = None,
         retry_series: dict[str, list[str]] | None = None,
         hot_market_relationships: dict[str, list[HotMarketRelationship]] | None = None,
+        active_event_ids: list[str] | tuple[str, ...] | frozenset[str] | None = None,
     ) -> CollectionReport:
         if max_event_pairs <= 0 or max_market_pairs_per_event <= 0:
             raise ValueError("collector pair limits must be positive")
@@ -907,7 +919,14 @@ class ReadOnlyCrossVenueCollector:
             "revalidation": 0,
             "matchbook_get_market": 0,
             "kalshi_order_books": 0,
+            "skipped_not_viable": 0,
+            "skipped_provider_calls": 0,
+            "saved_provider_calls": 0,
         }
+        self._op_active_event_ids = frozenset(
+            str(item).strip() for item in (active_event_ids or ()) if str(item).strip()
+        )
+        self._op_viability_cache = get_opportunity_viability_cache()
         # HOT skips list_events and reuses stored source-event payloads.
         # UNIVERSE reuses the sweep discovery snapshot after the first success.
         # HOT market work is a quote/depth refresh of persisted ApprovedEquivalent
@@ -1419,7 +1438,10 @@ class ReadOnlyCrossVenueCollector:
         access = self._provider_access
         if access is not None:
             async with access.acquire(
-                venue, lane=self._op_request_lane, stage=stage
+                venue,
+                lane=self._op_request_lane,
+                stage=stage,
+                work=work_from_lane(self._op_request_lane),
             ) as lease:
                 yield lease
             return
@@ -2376,6 +2398,37 @@ class ReadOnlyCrossVenueCollector:
                 if item.market_evaluation_state
                 == MarketEvaluationState.SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE.value
             ),
+            "cross_venue_unavailable_count": sum(
+                1
+                for item in discovered_fixtures
+                if item.market_evaluation_state
+                == MarketEvaluationState.CROSS_VENUE_UNAVAILABLE.value
+            ),
+            "skipped_provider_calls": int(
+                (getattr(self, "_op_hot_stats", {}) or {}).get("skipped_provider_calls") or 0
+            ),
+            "saved_provider_calls": int(
+                (getattr(self, "_op_hot_stats", {}) or {}).get("saved_provider_calls") or 0
+            ),
+            "saved_time_ms": 0,
+            "skip_reason": (
+                CROSS_VENUE_UNAVAILABLE
+                if any(
+                    item.market_evaluation_state
+                    == MarketEvaluationState.CROSS_VENUE_UNAVAILABLE.value
+                    for item in discovered_fixtures
+                )
+                else (
+                    NO_CROSS_VENUE_CANDIDATE
+                    if any(
+                        item.market_evaluation_state
+                        == MarketEvaluationState.SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE.value
+                        for item in discovered_fixtures
+                    )
+                    else None
+                )
+            ),
+            "viable_venue_count": None,
         }
         LOGGER.info("scan_diagnostics %s", diagnostics)
         return CollectionReport(
@@ -2440,6 +2493,7 @@ class ReadOnlyCrossVenueCollector:
         seen_at: datetime,
         polymarket_events: list[_NormalizedEvent],
         queried_series_ids: list[str] | None,
+        reason: str | None = None,
     ) -> tuple[
         DiscoveredFixture,
         list[PaperScanDecision],
@@ -2454,6 +2508,7 @@ class ReadOnlyCrossVenueCollector:
             polymarket_events=polymarket_events,
             queried_series_ids=queried_series_ids,
             single_venue_deferred=True,
+            viability_reason=reason,
         )
         return fixture, [], [], {}, 0, 0
 
@@ -2565,6 +2620,8 @@ class ReadOnlyCrossVenueCollector:
             MarketEvaluationState.EVALUATED.value,
             MarketEvaluationState.MARKET_FETCH_UNAVAILABLE.value,
             MarketEvaluationState.SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE.value,
+            MarketEvaluationState.CROSS_VENUE_UNAVAILABLE.value,
+            MarketEvaluationState.UPPER_BOUND_BELOW_MIN_NET.value,
         }:
             return
         try:
@@ -2679,13 +2736,12 @@ class ReadOnlyCrossVenueCollector:
         next_work = 0
         concurrency = self._cluster_concurrency_limit
         universe_lane = self._op_request_lane == ScanLane.UNIVERSE.value
-        work_indexes = [
-            index
-            for index, cluster in enumerate(clusters)
-            if not (universe_lane and cluster.venue_count < 2)
-        ]
+        hot_lane = self._op_request_lane == ScanLane.HOT.value
+        work_indexes: list[int] = []
         for index, cluster in enumerate(clusters):
-            if universe_lane and cluster.venue_count < 2:
+            canonical_id = cluster_canonical_event_id(cluster)
+            one_sided = cluster_needs_one_sided_catalogue_markets(cluster)
+            if universe_lane and cluster.venue_count < 2 and not one_sided:
                 accept(
                     index,
                     cluster,
@@ -2694,8 +2750,39 @@ class ReadOnlyCrossVenueCollector:
                         seen_at=seen_at,
                         polymarket_events=polymarket_events,
                         queried_series_ids=queried_series_ids,
+                        reason=NO_CROSS_VENUE_CANDIDATE,
                     ),
                 )
+                self._bump_hot_stat("skipped_not_viable")
+                self._bump_hot_stat("skipped_provider_calls")
+                self._bump_hot_stat("saved_provider_calls")
+                continue
+            if hot_lane:
+                viability = assess_cluster_viability(
+                    cluster,
+                    canonical_event_id=canonical_id,
+                    cache=getattr(self, "_op_viability_cache", None),
+                    enabled_venues=self._op_enabled_venues,
+                    active_event_ids=getattr(self, "_op_active_event_ids", frozenset()),
+                    allow_one_sided=False,
+                )
+                if viability.skip_expensive_work:
+                    accept(
+                        index,
+                        cluster,
+                        self._single_venue_cluster_result(
+                            cluster,
+                            seen_at=seen_at,
+                            polymarket_events=polymarket_events,
+                            queried_series_ids=queried_series_ids,
+                            reason=viability.reason,
+                        ),
+                    )
+                    self._bump_hot_stat("skipped_not_viable")
+                    self._bump_hot_stat("skipped_provider_calls")
+                    self._bump_hot_stat("saved_provider_calls")
+                    continue
+            work_indexes.append(index)
 
         async def cancel_pending() -> None:
             await self._cancel_inflight()
@@ -2861,6 +2948,29 @@ class ReadOnlyCrossVenueCollector:
         if should_skip_market_work(fixture, seen_at):
             await self._mark_universe_catalogue_terminal(fixture)
             return fixture, [], [], {}, 0, 0
+        if self._op_request_lane in {ScanLane.HOT.value, ScanLane.UNIVERSE.value}:
+            viability = assess_cluster_viability(
+                cluster,
+                canonical_event_id=cluster_canonical_event_id(cluster),
+                cache=getattr(self, "_op_viability_cache", None),
+                enabled_venues=self._op_enabled_venues,
+                active_event_ids=getattr(self, "_op_active_event_ids", frozenset()),
+                allow_one_sided=(
+                    self._op_request_lane == ScanLane.UNIVERSE.value
+                    and cluster_needs_one_sided_catalogue_markets(cluster)
+                ),
+            )
+            if viability.skip_expensive_work:
+                self._bump_hot_stat("skipped_not_viable")
+                self._bump_hot_stat("skipped_provider_calls")
+                self._bump_hot_stat("saved_provider_calls")
+                return self._single_venue_cluster_result(
+                    cluster,
+                    seen_at=seen_at,
+                    polymarket_events=polymarket_events,
+                    queried_series_ids=queried_series_ids,
+                    reason=viability.reason,
+                )
         if self._op_request_lane == ScanLane.HOT.value:
             return await self._refresh_hot_cluster(
                 cluster,
@@ -3710,6 +3820,9 @@ class ReadOnlyCrossVenueCollector:
             )
         except MatchbookMarketGoneError:
             result.gone = True
+            cache = getattr(self, "_op_viability_cache", None)
+            if cache is not None:
+                cache.mark_unavailable(relationship.canonical_event_id, VenueName.MATCHBOOK)
             self._bump_hot_stat("matchbook_get_market")
             return result
         self._bump_hot_stat("matchbook_get_market")
@@ -3722,6 +3835,9 @@ class ReadOnlyCrossVenueCollector:
             return result
         if matchbook_payload_is_terminal(market_payload):
             result.gone = True
+            cache = getattr(self, "_op_viability_cache", None)
+            if cache is not None:
+                cache.mark_terminal(relationship.canonical_event_id, VenueName.MATCHBOOK)
             return result
         markets, inventory = self._inventory_markets(
             event, [market_payload], venue=VenueName.MATCHBOOK, issues=issues
@@ -5251,6 +5367,7 @@ def _fixture_from_cluster(
     queried_series_ids: list[str] | None,
     leftover: bool = False,
     single_venue_deferred: bool = False,
+    viability_reason: str | None = None,
 ) -> DiscoveredFixture:
     anchor = cluster.anchor
     canonical = anchor.canonical
@@ -5281,9 +5398,18 @@ def _fixture_from_cluster(
         opportunity_state = "not_evaluated"
         equivalent_count = None
     elif single_venue_deferred:
-        evaluation_state = MarketEvaluationState.SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE
-        evaluation_reason = SINGLE_VENUE_NO_CROSS_VENUE_REASON
-        no_comparison = unmatched_reason or SINGLE_VENUE_NO_CROSS_VENUE_REASON
+        if viability_reason == CROSS_VENUE_UNAVAILABLE:
+            evaluation_state = MarketEvaluationState.CROSS_VENUE_UNAVAILABLE
+            evaluation_reason = CROSS_VENUE_UNAVAILABLE_REASON
+            no_comparison = unmatched_reason or CROSS_VENUE_UNAVAILABLE_REASON
+        elif viability_reason == UPPER_BOUND_BELOW_MIN_NET:
+            evaluation_state = MarketEvaluationState.UPPER_BOUND_BELOW_MIN_NET
+            evaluation_reason = UPPER_BOUND_BELOW_MIN_NET
+            no_comparison = unmatched_reason or UPPER_BOUND_BELOW_MIN_NET
+        else:
+            evaluation_state = MarketEvaluationState.SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE
+            evaluation_reason = viability_reason or SINGLE_VENUE_NO_CROSS_VENUE_REASON
+            no_comparison = unmatched_reason or evaluation_reason
         opportunity_state = "not_evaluated"
         equivalent_count = None
     else:
