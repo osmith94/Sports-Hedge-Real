@@ -378,19 +378,83 @@ def _matching_pairs_in_component(
     return pairs
 
 
-def _component_incomplete(
-    component: Sequence[_Supernode],
-    *,
-    unscored: set[frozenset[NodeKey]],
-) -> bool:
-    member_nodes = {node for item in component for node in item.members}
+def _unscored_endpoint_nodes(unscored: Iterable[frozenset[NodeKey]]) -> set[NodeKey]:
+    """Nodes incident to at least one indexed candidate that was not scored."""
+
+    nodes: set[NodeKey] = set()
     for pair in unscored:
         if len(pair) != 2:
             continue
         left, right = tuple(pair)
-        if left in member_nodes or right in member_nodes:
-            return True
-    return False
+        nodes.add(left)
+        nodes.add(right)
+    return nodes
+
+
+def _component_incomplete(
+    component: Sequence[_Supernode],
+    *,
+    unscored_nodes: set[NodeKey],
+) -> bool:
+    if not unscored_nodes:
+        return False
+    return any(
+        node in unscored_nodes
+        for item in component
+        for node in item.members
+    )
+
+
+def _matching_supernode_adjacency(
+    supernodes: Sequence[_Supernode],
+    *,
+    pair_index: Mapping[frozenset[NodeKey], ScoredIdentityPair],
+) -> dict[NodeKey, list[NodeKey]]:
+    """Connected matching supernodes. Equivalent to all-pairs ``_supernode_relation``.
+
+    All-pairs enumeration is O(N²) in source events and starves the FastAPI
+    loop on a ~1,600-fixture UNIVERSE. Matching edges are sparse, so walk the
+    scored pair index instead. Veto or miss between supernodes still suppresses
+    the edge, matching ``_supernode_relation``.
+    """
+
+    node_to_root: dict[NodeKey, NodeKey] = {}
+    for item in supernodes:
+        for member in item.members:
+            node_to_root[member] = item.root
+
+    matched_weights: dict[tuple[NodeKey, NodeKey], list[float]] = defaultdict(list)
+    veto_pairs: set[tuple[NodeKey, NodeKey]] = set()
+    miss_pairs: set[tuple[NodeKey, NodeKey]] = set()
+
+    for pair in pair_index.values():
+        left_root = node_to_root.get(pair.left)
+        right_root = node_to_root.get(pair.right)
+        if left_root is None or right_root is None or left_root == right_root:
+            continue
+        key = (
+            (left_root, right_root)
+            if node_sort_key(left_root) <= node_sort_key(right_root)
+            else (right_root, left_root)
+        )
+        if pair.veto:
+            veto_pairs.add(key)
+            continue
+        if pair.matched:
+            matched_weights[key].append(pair.confidence)
+        else:
+            miss_pairs.add(key)
+
+    adjacency: dict[NodeKey, list[NodeKey]] = {item.root: [] for item in supernodes}
+    for key, weights in matched_weights.items():
+        if key in veto_pairs or key in miss_pairs or not weights:
+            continue
+        left_root, right_root = key
+        adjacency[left_root].append(right_root)
+        adjacency[right_root].append(left_root)
+    for neighbours in adjacency.values():
+        neighbours.sort(key=node_sort_key)
+    return adjacency
 
 
 def _venues_compete(component: Sequence[_Supernode]) -> bool:
@@ -669,6 +733,7 @@ def assign_identity_components(
     scored_pairs: Sequence[ScoredIdentityPair],
     *,
     unscored_candidate_keys: Iterable[frozenset[NodeKey]] = (),
+    unscored_nodes: Iterable[NodeKey] | None = None,
     threshold: float,
     margin: float = DEFAULT_ASSIGNMENT_MARGIN,
 ) -> IdentityGraphResult:
@@ -681,7 +746,12 @@ def assign_identity_components(
 
     unique_nodes = sorted(set(nodes), key=node_sort_key)
     pair_index = _index_pairs(scored_pairs)
-    unscored = {key for key in unscored_candidate_keys if len(key) == 2}
+    unscored_keys = {key for key in unscored_candidate_keys if len(key) == 2}
+    incomplete_nodes = (
+        set(unscored_nodes)
+        if unscored_nodes is not None
+        else _unscored_endpoint_nodes(unscored_keys)
+    )
     diagnostics = IdentityGraphDiagnostics()
     if not unique_nodes:
         return IdentityGraphResult(clusters=[], diagnostics=diagnostics)
@@ -689,18 +759,7 @@ def assign_identity_components(
     supernodes = _sibling_supernodes(unique_nodes, scored_pairs)
     diagnostics.sibling_groups = sum(1 for item in supernodes if len(item.members) > 1)
 
-    adjacency: dict[NodeKey, list[NodeKey]] = {item.root: [] for item in supernodes}
-    for left_index, left in enumerate(supernodes):
-        for right in supernodes[left_index + 1 :]:
-            _weight, has_match, _veto = _supernode_relation(
-                left, right, pair_index=pair_index
-            )
-            if not has_match:
-                continue
-            adjacency[left.root].append(right.root)
-            adjacency[right.root].append(left.root)
-    for neighbours in adjacency.values():
-        neighbours.sort(key=node_sort_key)
+    adjacency = _matching_supernode_adjacency(supernodes, pair_index=pair_index)
 
     components = _connected_components(supernodes, adjacency)
     diagnostics.components = len(components)
@@ -714,7 +773,13 @@ def assign_identity_components(
     )
 
     for component in components:
-        incomplete = _component_incomplete(component, unscored=unscored)
+        # Singletons cannot be incomplete-ambiguous; skip the O(unscored)
+        # scan that previously walked every leftover candidate per component.
+        incomplete = (
+            False
+            if len(component) <= 1
+            else _component_incomplete(component, unscored_nodes=incomplete_nodes)
+        )
         competing = _venues_compete(component)
         obvious = _is_obvious_clique(component, pair_index=pair_index)
         contradictory = _has_cross_venue_veto_path(component, pair_index=pair_index)

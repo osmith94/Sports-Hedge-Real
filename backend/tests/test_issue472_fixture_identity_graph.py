@@ -501,6 +501,60 @@ def test_three_venue_plus_fourth_generic_assignment_trap() -> None:
         assert provenance.global_weight > provenance.greedy_weight
 
 
+def test_matching_adjacency_equals_all_pairs_supernode_relation() -> None:
+    """O(E) adjacency must match the previous all-pairs ``_supernode_relation`` walk."""
+
+    from sports_hedge.matching.identity_graph import (
+        _index_pairs,
+        _matching_supernode_adjacency,
+        _sibling_supernodes,
+        _supernode_relation,
+        node_sort_key,
+    )
+
+    nodes = [
+        _key(VenueName.MATCHBOOK, f"mb-{index}")
+        for index in range(12)
+    ] + [
+        _key(VenueName.POLYMARKET, f"pm-{index}")
+        for index in range(12)
+    ] + [
+        _key(VenueName.KALSHI, f"k-{index}")
+        for index in range(12)
+    ]
+    edges = [
+        _pair(_key(VenueName.MATCHBOOK, "mb-0"), _key(VenueName.POLYMARKET, "pm-0"), 0.96),
+        _pair(_key(VenueName.MATCHBOOK, "mb-0"), _key(VenueName.KALSHI, "k-0"), 0.95),
+        _pair(_key(VenueName.POLYMARKET, "pm-0"), _key(VenueName.KALSHI, "k-0"), 0.94),
+        _pair(_key(VenueName.MATCHBOOK, "mb-3"), _key(VenueName.POLYMARKET, "pm-4"), 0.91),
+        _pair(
+            _key(VenueName.MATCHBOOK, "mb-5"),
+            _key(VenueName.POLYMARKET, "pm-5"),
+            0.0,
+            matched=False,
+            veto=True,
+            reasons=("sport_mismatch",),
+        ),
+        _pair(_key(VenueName.POLYMARKET, "pm-7"), _key(VenueName.POLYMARKET, "pm-8"), 0.97),
+    ]
+    pair_index = _index_pairs(edges)
+    supernodes = _sibling_supernodes(nodes, edges)
+    expected: dict[tuple, list] = {item.root: [] for item in supernodes}
+    for left_index, left in enumerate(supernodes):
+        for right in supernodes[left_index + 1 :]:
+            _weight, has_match, _veto = _supernode_relation(
+                left, right, pair_index=pair_index
+            )
+            if not has_match:
+                continue
+            expected[left.root].append(right.root)
+            expected[right.root].append(left.root)
+    for neighbours in expected.values():
+        neighbours.sort(key=node_sort_key)
+    actual = _matching_supernode_adjacency(supernodes, pair_index=pair_index)
+    assert actual == expected
+
+
 def _members(cluster) -> list[VenueEvent]:
     from sports_hedge.application.fixture_clusters import cluster_member_events
 
