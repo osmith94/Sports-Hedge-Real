@@ -87,6 +87,7 @@ class LifecycleEventType(StrEnum):
     REJECTED_EXECUTION_RISK = "rejected_execution_risk"
     CLOSED = "closed"
     EXPIRED = "expired"
+    LIFECYCLE_REJECTED = "lifecycle_rejected"
 
 
 OPERATOR_ACTIVITY_UNCONDITIONAL_EVENT_TYPES = frozenset(

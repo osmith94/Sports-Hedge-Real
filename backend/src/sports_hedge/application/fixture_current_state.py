@@ -1120,6 +1120,8 @@ class FixtureCurrentStateStore:
             record.leftover_this_pass = False
 
     def _evict_non_current(self, now: datetime, **kwargs: Any) -> None:
+        """Drop radar inventory only. Must not mutate paper trades, Treasury, or ACTIVE TRADE."""
+
         kwargs = self._store_market_kwargs(kwargs)
         classify_kwargs = _classify_kwargs(kwargs)
         market_kwargs = _market_ttl_kwargs(kwargs)

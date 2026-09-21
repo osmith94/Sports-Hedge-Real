@@ -121,6 +121,7 @@ class PaperTradeAuditEventType(StrEnum):
     UNWIND_ATTEMPTED = "unwind_attempted"
     UNWIND_ABORTED = "unwind_aborted"
     DEMO_STORE_REINITIALIZED = "demo_store_reinitialized"
+    LIFECYCLE_REJECTED = "lifecycle_rejected"
 
 
 PAPER_UNWIND_SOURCE = "paper_unwind"
