@@ -4423,15 +4423,20 @@ class LiveRefreshCoordinator:
                 get_watchlist_service(), get_priority_alert_service()
             )
             engine = self._price_engine
+            from sports_hedge.persistence.approved_market_catalogue import (
+                get_approved_market_catalogue_store,
+            )
+
             agent = PaperSettlementAgent(
                 operations=operations,
                 matchbook=None if engine is None else engine.matchbook,
                 kalshi=None if engine is None else engine.kalshi,
                 clock=self.now,
+                catalogue=get_approved_market_catalogue_store(),
             )
             await agent.run_cycle(now=now)
         except Exception:
-            pass
+            LOGGER.exception("paper settlement cycle failed")
         finally:
             with self._state_lock:
                 self._settlement_in_progress = False

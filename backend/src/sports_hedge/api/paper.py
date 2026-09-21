@@ -97,6 +97,8 @@ from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.preparation import PreparedPaperDeployment, PreparePaperDeploymentRequest
 from sports_hedge.paper.trades import (
+    PaperManualSettlementRequest,
+    PaperSettlementOptions,
     PaperSettlementRequest,
     PaperTrade,
     PaperTradeBookSummary,
@@ -1816,6 +1818,19 @@ def complete_paper_unwind(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.get("/trades/{trade_id}/settlement-options", response_model=PaperSettlementOptions)
+def paper_trade_settlement_options(
+    trade_id: str,
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> PaperSettlementOptions:
+    """Canonical market-result choices for the operator failsafe. PAPER only."""
+
+    try:
+        return operations.settlement_options(trade_id)
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/trades/{trade_id}/settle", response_model=PaperTradeDetail)
 def settle_paper_trade(
     trade_id: str,
@@ -1826,6 +1841,26 @@ def settle_paper_trade(
 
     try:
         return operations.settle(trade_id, request)
+    except PaperOperationsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/trades/{trade_id}/manual-settle", response_model=PaperTradeDetail)
+def manual_settle_paper_trade(
+    trade_id: str,
+    request: PaperManualSettlementRequest,
+    operations: PaperOperationsService = Depends(get_paper_operations_service),
+) -> PaperTradeDetail:
+    """Operator failsafe: record the actual canonical result and close PAPER.
+
+    Source/source_id are generated server-side as manual_operator_settlement.
+    Reuses settle() / compute_paper_settlement() / treasury 8E. No venue writes.
+    """
+
+    try:
+        return operations.settle_manual_result(trade_id, request)
     except PaperOperationsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:

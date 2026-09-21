@@ -31,6 +31,7 @@ from sports_hedge.paper.trades import (
     PaperTradeLeg,
     PaperTradeState,
     PaperTradeTranche,
+    SettlementReconciliationStatus,
 )
 from sports_hedge.paper.position_management.models import PositionManagementSnapshot
 from sports_hedge.paper.risk_snapshot import PaperExecutionRiskSnapshot
@@ -261,6 +262,18 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             None if trade.active_trade_phase is None else trade.active_trade_phase.value,
             _dec(trade.residual_exposure_gbp),
             1 if trade.unresolved_recovery else 0,
+            json.dumps(
+                {
+                    "status": trade.settlement_reconciliation_status.value,
+                    "last_checked_at": (
+                        trade.last_settlement_check_at.isoformat()
+                        if trade.last_settlement_check_at is not None
+                        else None
+                    ),
+                    "blocker": trade.settlement_blocker,
+                    "detail": trade.settlement_blocker_detail,
+                }
+            ),
         )
         self._connection.execute(
             """
@@ -272,8 +285,9 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 capital_locked_gbp, settlement_outcome, settlement_source, settlement_source_id,
                 settlement_detail, provenance, fx_snapshots_json, venue_costs_json,
                 entry_risk_json, close_risks_json, close_fills_json, position_management_json,
-                tranches_json, active_trade_phase, residual_exposure_gbp, unresolved_recovery
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tranches_json, active_trade_phase, residual_exposure_gbp, unresolved_recovery,
+                settlement_reconciliation_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(trade_id) DO UPDATE SET
                 opportunity_id = excluded.opportunity_id,
                 canonical_event_id = excluded.canonical_event_id,
@@ -310,7 +324,8 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 tranches_json = excluded.tranches_json,
                 active_trade_phase = excluded.active_trade_phase,
                 residual_exposure_gbp = excluded.residual_exposure_gbp,
-                unresolved_recovery = excluded.unresolved_recovery
+                unresolved_recovery = excluded.unresolved_recovery,
+                settlement_reconciliation_json = excluded.settlement_reconciliation_json
             """,
             payload,
         )
@@ -467,6 +482,7 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             residual_exposure_gbp=_decimal(_row_value(row, "residual_exposure_gbp")),
             unresolved_recovery=bool(int(_row_value(row, "unresolved_recovery", 0) or 0)),
             audit=audit,
+            **_settlement_reconciliation_fields(row),
         )
 
 
@@ -720,6 +736,7 @@ class SqlitePaperLedger:
         self._ensure_trade_tranche_columns()
         self._ensure_active_trade_recovery_columns()
         self._ensure_trade_line_column()
+        self._ensure_settlement_reconciliation_column()
         from sports_hedge.persistence.active_trade_event_journal import (
             ensure_active_trade_event_schema,
         )
@@ -856,6 +873,16 @@ class SqlitePaperLedger:
             self._connection.execute("ALTER TABLE paper_trades ADD COLUMN line TEXT")
         self._connection.commit()
 
+    def _ensure_settlement_reconciliation_column(self) -> None:
+        """Per-trade auto-settlement last-check diagnostics. Does not append history."""
+
+        if "paper_trades" not in _table_names(self._connection):
+            return
+        trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
+        if "settlement_reconciliation_json" not in trade_cols:
+            self._connection.execute("ALTER TABLE paper_trades ADD COLUMN settlement_reconciliation_json TEXT")
+        self._connection.commit()
+
     def _ensure_treasury_pool_fx_columns(self) -> None:
         """Owner DBs may predate GBP carrying-value columns on native pools."""
 
@@ -904,6 +931,36 @@ def _optional_odds(value: Any) -> Decimal | None:
     except Exception:
         return None
     return odds if odds > 1 else None
+
+
+def _settlement_reconciliation_fields(row: sqlite3.Row) -> dict[str, Any]:
+    raw = _row_value(row, "settlement_reconciliation_json")
+    payload: dict[str, Any] = {}
+    if raw:
+        try:
+            loaded = json.loads(raw)
+        except json.JSONDecodeError:
+            loaded = {}
+        if isinstance(loaded, dict):
+            payload = loaded
+    status_raw = payload.get("status") or SettlementReconciliationStatus.UNCHECKED.value
+    try:
+        status = SettlementReconciliationStatus(str(status_raw))
+    except ValueError:
+        status = SettlementReconciliationStatus.UNCHECKED
+    checked = payload.get("last_checked_at")
+    checked_at = None
+    if isinstance(checked, str) and checked.strip():
+        try:
+            checked_at = datetime.fromisoformat(checked)
+        except ValueError:
+            checked_at = None
+    return {
+        "last_settlement_check_at": checked_at,
+        "settlement_reconciliation_status": status,
+        "settlement_blocker": payload.get("blocker"),
+        "settlement_blocker_detail": payload.get("detail"),
+    }
 
 
 def _leg_from_row(item: sqlite3.Row) -> PaperTradeLeg:

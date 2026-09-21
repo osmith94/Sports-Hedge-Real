@@ -33,6 +33,9 @@ class MarketFamily(StrEnum):
     CORNERS = "corners"
     CARDS = "cards"
     PLAYER_PROPS = "player_props"
+    GAME_WINNER = "game_winner"
+    POINT_SPREAD = "point_spread"
+    TOTAL_POINTS = "total_points"
     UNKNOWN = "unknown"
 
 
@@ -130,6 +133,16 @@ LINE_PARAMETER_FAMILIES: frozenset[MarketFamily] = frozenset(
         MarketFamily.TOTAL_GOALS,
         MarketFamily.ASIAN_HANDICAP,
         MarketFamily.TEAM_TOTAL,
+        MarketFamily.POINT_SPREAD,
+        MarketFamily.TOTAL_POINTS,
+    }
+)
+
+NFL_PAPER_MARKET_FAMILIES: frozenset[MarketFamily] = frozenset(
+    {
+        MarketFamily.GAME_WINNER,
+        MarketFamily.POINT_SPREAD,
+        MarketFamily.TOTAL_POINTS,
     }
 )
 

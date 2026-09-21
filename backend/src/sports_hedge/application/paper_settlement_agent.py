@@ -23,6 +23,7 @@ from sports_hedge.application.provider_access import (
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.active_trade_journal import ActiveTradeEventType, ActiveTradeReasonCode
+from sports_hedge.paper.provider_identity import recover_persisted_provider_identity
 from sports_hedge.paper.result_resolution import (
     PAPER_AUTO_SETTLEMENT_SOURCE,
     SettlementResolution,
@@ -34,6 +35,7 @@ from sports_hedge.paper.trades import (
     PaperTradeAuditEvent,
     PaperTradeAuditEventType,
     PaperTradeState,
+    SettlementReconciliationStatus,
 )
 from sports_hedge.venues.matchbook import MatchbookMarketGoneError
 
@@ -72,10 +74,12 @@ class PaperSettlementAgent:
         clock: Callable[[], datetime] | None = None,
         settings: Settings | None = None,
         provider_timeout_seconds: float | None = None,
+        catalogue: Any | None = None,
     ) -> None:
         self.operations = operations
         self.matchbook = matchbook
         self.kalshi = kalshi
+        self.catalogue = catalogue
         self.provider_access = (
             provider_access if provider_access is not None else get_shared_provider_access()
         )
@@ -110,6 +114,17 @@ class PaperSettlementAgent:
                 item = PaperSettlementTradeResult(
                     trade_id=trade.trade_id, blocker="settlement_cycle_error"
                 )
+                self._record_blocker(
+                    trade,
+                    "settlement_cycle_error",
+                    SettlementResolution(
+                        winning_outcome=None,
+                        blocker="settlement_cycle_error",
+                        source_id=f"cycle-error:{trade.trade_id}",
+                        detail="settlement cycle exception",
+                    ),
+                    when,
+                )
             if item.settled:
                 result.settled_trade_ids.append(item.trade_id)
             elif item.blocker:
@@ -126,7 +141,22 @@ class PaperSettlementAgent:
     ) -> PaperSettlementTradeResult:
         when = now or self.now()
         if trade.state is PaperTradeState.CLOSED:
+            self.operations.record_settlement_reconciliation(
+                trade,
+                status=SettlementReconciliationStatus.SETTLED,
+                blocker=None,
+                detail=None,
+                now=when,
+            )
             return PaperSettlementTradeResult(trade_id=trade.trade_id)
+        trade, recovered = recover_persisted_provider_identity(
+            trade, catalogue_rows=self._catalogue_rows(trade)
+        )
+        if recovered and self.operations.trades is not None:
+            try:
+                self.operations.trades.save(trade)
+            except Exception:
+                LOGGER.exception("failed to persist recovered provider identity for %s", trade.trade_id)
         matchbook_market, matchbook_event, kalshi_markets, fetch_blocker = await self._fetch_evidence(
             trade
         )
@@ -150,6 +180,13 @@ class PaperSettlementAgent:
                     evidence={**resolution.evidence, "blocker": fetch_blocker},
                 )
         if resolution.is_ready:
+            self.operations.record_settlement_reconciliation(
+                trade,
+                status=SettlementReconciliationStatus.READY,
+                blocker=None,
+                detail=resolution.detail,
+                now=when,
+            )
             return self._settle(trade, resolution, when)
         if resolution.blocker:
             self._record_blocker(trade, resolution.blocker, resolution, when)
@@ -158,6 +195,13 @@ class PaperSettlementAgent:
                 blocker=resolution.blocker,
                 source_id=resolution.source_id,
             )
+        self.operations.record_settlement_reconciliation(
+            trade,
+            status=SettlementReconciliationStatus.BLOCKED,
+            blocker="incomplete_provider_result",
+            detail=resolution.detail,
+            now=when,
+        )
         return PaperSettlementTradeResult(trade_id=trade.trade_id)
 
     def _settle(
@@ -208,6 +252,12 @@ class PaperSettlementAgent:
         matchbook_event = None
         kalshi_markets: dict[str, dict[str, Any]] = {}
         mb_event, mb_market = _matchbook_ids(trade)
+        needed_matchbook = bool(mb_event and mb_market)
+        needed_kalshi = bool(_kalshi_tickers(trade))
+        if needed_matchbook and self.matchbook is None:
+            return None, None, {}, "provider_unavailable"
+        if needed_kalshi and self.kalshi is None:
+            return None, None, {}, "provider_unavailable"
         if mb_event and mb_market and self.matchbook is not None:
             getter = getattr(self.matchbook, "get_market", None)
             if callable(getter):
@@ -219,6 +269,8 @@ class PaperSettlementAgent:
                 )
                 if status == "timeout":
                     return None, None, {}, "incomplete_provider_result"
+                if status == "unavailable":
+                    return None, None, {}, "provider_unavailable"
                 if payload is not None:
                     matchbook_market = payload
             event_getter = getattr(self.matchbook, "get_event", None)
@@ -231,6 +283,8 @@ class PaperSettlementAgent:
                 )
                 if status == "timeout":
                     return matchbook_market, None, {}, "incomplete_provider_result"
+                if status == "unavailable":
+                    return matchbook_market, None, {}, "provider_unavailable"
                 if payload is not None:
                     matchbook_event = payload
         for ticker in _kalshi_tickers(trade):
@@ -247,6 +301,8 @@ class PaperSettlementAgent:
             )
             if status == "timeout":
                 return matchbook_market, matchbook_event, kalshi_markets, "incomplete_provider_result"
+            if status == "unavailable":
+                return matchbook_market, matchbook_event, kalshi_markets, "provider_unavailable"
             if payload is not None:
                 kalshi_markets[ticker] = payload
         return matchbook_market, matchbook_event, kalshi_markets, None
@@ -278,8 +334,8 @@ class PaperSettlementAgent:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            LOGGER.debug("paper settlement %s %s failed: %s", venue.value, stage, exc)
-            return None, None
+            LOGGER.warning("paper settlement %s %s unavailable: %s", venue.value, stage, exc)
+            return None, "unavailable"
 
     def _record_blocker(
         self,
@@ -288,8 +344,21 @@ class PaperSettlementAgent:
         resolution: SettlementResolution,
         when: datetime,
     ) -> None:
+        self.operations.record_settlement_reconciliation(
+            trade,
+            status=SettlementReconciliationStatus.BLOCKED,
+            blocker=reason,
+            detail=resolution.detail,
+            now=when,
+            persist=False,
+        )
         last = _last_blocker(trade)
         if last == reason:
+            if self.operations.trades is not None:
+                try:
+                    self.operations.trades.save(trade)
+                except Exception:
+                    LOGGER.exception("failed to persist settlement check for %s", trade.trade_id)
             return
         trade.audit.append(
             PaperTradeAuditEvent(
@@ -326,6 +395,21 @@ class PaperSettlementAgent:
                 "evidence": resolution.evidence,
             },
         )
+
+    def _catalogue_rows(self, trade: PaperTrade) -> list[Any]:
+        catalogue = self.catalogue
+        event_id = str(trade.canonical_event_id or "").strip()
+        if catalogue is None or not event_id:
+            return []
+        getter = getattr(catalogue, "list_rows_for_event", None)
+        if not callable(getter):
+            return []
+        try:
+            rows = getter(event_id)
+        except Exception:
+            LOGGER.debug("catalogue identity lookup failed for %s", trade.trade_id)
+            return []
+        return list(rows or [])
 
 
 def _last_blocker(trade: PaperTrade) -> str | None:

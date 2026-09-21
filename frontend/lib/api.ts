@@ -16,6 +16,9 @@ export type MarketFamily =
   | "corners"
   | "cards"
   | "player_props"
+  | "game_winner"
+  | "point_spread"
+  | "total_points"
   | "unknown";
 
 export type FootballPeriod = "full_time" | "first_half" | "second_half" | "extra_time" | "unknown";
@@ -1903,6 +1906,10 @@ export type PaperTrade = {
   settlement_source?: string | null;
   settlement_source_id?: string | null;
   settlement_detail?: string | null;
+  last_settlement_check_at?: string | null;
+  settlement_reconciliation_status?: "unchecked" | "ready" | "blocked" | "settled" | string | null;
+  settlement_blocker?: string | null;
+  settlement_blocker_detail?: string | null;
   provenance: "live_paper" | "fixture_demo" | "unavailable" | string;
   paper_only?: boolean;
   places_orders?: boolean;
@@ -1999,6 +2006,68 @@ export async function settlePaperTrade(
     }),
     cache: "no-store",
   });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<PaperTradeDetail>;
+}
+
+export type CanonicalSettlementChoice = {
+  value: string;
+  label: string;
+  realised_pnl_gbp?: string | number | null;
+};
+
+export type PaperSettlementOptions = {
+  trade_id: string;
+  fixture_label?: string | null;
+  market_label?: string | null;
+  market_family?: string | null;
+  line?: string | number | null;
+  home_team?: string | null;
+  away_team?: string | null;
+  paper_only?: boolean;
+  places_orders?: boolean;
+  provenance: string;
+  state: PaperTradeState;
+  legs: Array<{
+    venue: string;
+    outcome: string;
+    currency: string;
+    filled_stake: string | number;
+    filled_odds?: string | number | null;
+    displayed_odds?: string | number | null;
+    fill_kind: string;
+    opening_action?: string | null;
+    canonical_state?: string | null;
+  }>;
+  choices: CanonicalSettlementChoice[];
+  unsupported_reason?: string | null;
+  reconciliation: {
+    status: string;
+    last_checked_at?: string | null;
+    blocker?: string | null;
+    detail?: string | null;
+  };
+};
+
+export function getPaperSettlementOptions(tradeId: string): Promise<PaperSettlementOptions> {
+  return request(`/paper/trades/${encodeURIComponent(tradeId)}/settlement-options`);
+}
+
+export async function manualSettlePaperTrade(
+  tradeId: string,
+  payload: { winning_outcome: string; operator_note?: string },
+): Promise<PaperTradeDetail> {
+  const response = await fetch(
+    `${API_BASE}/paper/trades/${encodeURIComponent(tradeId)}/manual-settle`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    },
+  );
   if (!response.ok) {
     throw new Error(await errorDetail(response));
   }

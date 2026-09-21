@@ -1,18 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 import {
+  PaperSettlementOptions,
   PaperTrade,
   PaperTradeBookSummary,
   PaperTradeDetail,
+  getPaperSettlementOptions,
   getPaperTrade,
-  settlePaperTrade,
+  manualSettlePaperTrade,
 } from "../lib/api";
 import { money } from "../lib/format";
 import { formatPositionManagementCell } from "../lib/paper-position-management-display";
 import { compactLegLines, compactMarketHeading } from "../lib/paper-trade-display";
+import { settlementReconciliationLabel } from "../lib/settlement-reconciliation-display";
 import { ActiveTradeLog } from "./active-trade-log";
 import { HydratedRelativeTime } from "./hydrated-relative-time";
 
@@ -121,6 +124,7 @@ export function PaperTradeBook({ summary, active, closed, apiAvailable, compact 
   const [detail, setDetail] = useState<PaperTradeDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [manualTrade, setManualTrade] = useState<PaperTrade | null>(null);
 
   const headline = useMemo(() => {
     if (!summary) return null;
@@ -141,30 +145,24 @@ export function PaperTradeBook({ summary, active, closed, apiAvailable, compact 
     }
   }
 
-  async function onSettle(event: FormEvent<HTMLFormElement>, trade: PaperTrade) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const winning = String(form.get("winning_outcome") || "").trim();
-    const source = String(form.get("source") || "").trim();
-    const sourceId = String(form.get("source_id") || "").trim();
-    if (!winning || !source || !sourceId) {
-      setError("Settlement requires an explicit outcome, source and source id.");
-      return;
-    }
+  async function onManualClose(trade: PaperTrade) {
+    setError(null);
+    setManualTrade(trade);
+  }
+
+  async function onConfirmManual(winning: string, note: string) {
+    if (!manualTrade) return;
     setBusy(true);
     setError(null);
     try {
-      const settled = await settlePaperTrade(trade.trade_id, {
+      await manualSettlePaperTrade(manualTrade.trade_id, {
         winning_outcome: winning,
-        source,
-        source_id: sourceId,
-        detail: "Operator-recorded paper settlement; not inferred from kickoff",
-        provenance: "fixture_demo",
+        operator_note: note || undefined,
       });
-      setDetail(settled);
+      setManualTrade(null);
       window.location.reload();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Settlement failed");
+      setError(err instanceof Error ? err.message : "Manual settlement failed");
     } finally {
       setBusy(false);
     }
@@ -227,7 +225,7 @@ export function PaperTradeBook({ summary, active, closed, apiAvailable, compact 
         detail={detail}
         busy={busy}
         onToggle={toggle}
-        onSettle={onSettle}
+        onManualClose={onManualClose}
         empty="No persisted active paper trades."
         compact={compact}
       />
@@ -247,6 +245,14 @@ export function PaperTradeBook({ summary, active, closed, apiAvailable, compact 
           />
         </>
       )}
+      {manualTrade ? (
+        <ManualSettleDialog
+          trade={manualTrade}
+          busy={busy}
+          onClose={() => setManualTrade(null)}
+          onConfirm={onConfirmManual}
+        />
+      ) : null}
     </>
   );
 }
@@ -259,7 +265,7 @@ function TradeTable({
   detail,
   busy,
   onToggle,
-  onSettle,
+  onManualClose,
   empty,
   compact = false,
 }: {
@@ -270,7 +276,7 @@ function TradeTable({
   detail: PaperTradeDetail | null;
   busy?: boolean;
   onToggle: (id: string) => void;
-  onSettle?: (event: FormEvent<HTMLFormElement>, trade: PaperTrade) => void;
+  onManualClose?: (trade: PaperTrade) => void;
   empty: string;
   compact?: boolean;
 }) {
@@ -322,6 +328,18 @@ function TradeTable({
                         <Link href={`/paper/${encodeURIComponent(trade.trade_id)}#trade-log`}>
                           Trade log
                         </Link>
+                        {onManualClose && trade.state !== "CLOSED" && trade.state !== "AWAITING_MANUAL_EXTERNAL" ? (
+                          <>
+                            {" · "}
+                            <button
+                              type="button"
+                              className="text-link"
+                              onClick={() => onManualClose(trade)}
+                            >
+                              Manual close / settle result
+                            </button>
+                          </>
+                        ) : null}
                       </div>
                     </td>
                     <td>
@@ -340,12 +358,22 @@ function TradeTable({
                     <ManagementCell trade={trade} />
                     <td>
                       <span className={tradeStateBadgeClass(trade.state)}>{trade.state}</span>
+                      {settlementReconciliationLabel(trade) ? (
+                        <div className="panel-meta" title={trade.settlement_blocker_detail ?? undefined}>
+                          {settlementReconciliationLabel(trade)}
+                        </div>
+                      ) : null}
+                      {trade.last_settlement_check_at ? (
+                        <div className="panel-meta">
+                          Settlement check <HydratedRelativeTime iso={trade.last_settlement_check_at} />
+                        </div>
+                      ) : null}
                     </td>
                   </tr>
                   {openId === trade.trade_id && detail?.trade_id === trade.trade_id ? (
                     <tr>
                       <td colSpan={9}>
-                        <AuditBlock trade={detail} busy={busy} onSettle={onSettle} />
+                        <AuditBlock trade={detail} busy={busy} onManualClose={onManualClose} />
                       </td>
                     </tr>
                   ) : null}
@@ -362,12 +390,13 @@ function TradeTable({
 function AuditBlock({
   trade,
   busy,
-  onSettle,
+  onManualClose,
 }: {
   trade: PaperTradeDetail;
   busy?: boolean;
-  onSettle?: (event: FormEvent<HTMLFormElement>, trade: PaperTrade) => void;
+  onManualClose?: (trade: PaperTrade) => void;
 }) {
+  const recon = settlementReconciliationLabel(trade);
   return (
     <div className="paper-audit">
       <div className="panel-meta">
@@ -376,10 +405,17 @@ function AuditBlock({
           ? ` · settled ${trade.settlement_outcome} via ${trade.settlement_source}:${trade.settlement_source_id}`
           : ""}
       </div>
+      {recon ? <div className="panel-meta">{recon}</div> : null}
+      {trade.last_settlement_check_at ? (
+        <div className="panel-meta">
+          Last auto-settlement check <HydratedRelativeTime iso={trade.last_settlement_check_at} />
+        </div>
+      ) : null}
       <ul>
         {trade.legs.map((leg) => (
           <li key={`${leg.venue}-${leg.outcome}-${leg.source_market_id}`}>
             {leg.venue} · {leg.outcome} · {leg.fill_kind} · odds {leg.filled_odds ?? leg.displayed_odds ?? "—"}
+            {leg.filled_stake != null ? ` · stake ${leg.filled_stake}` : ""}
           </li>
         ))}
       </ul>
@@ -403,34 +439,131 @@ function AuditBlock({
           </ul>
         </div>
       ) : null}
-      {onSettle && trade.state !== "CLOSED" && trade.state !== "AWAITING_MANUAL_EXTERNAL" ? (
-        <form className="scan-form" onSubmit={(event) => onSettle(event, trade)}>
-          <div className="panel-meta">Explicit paper settlement. Do not invent a result from elapsed kickoff.</div>
-          <div className="scan-control-grid" style={{ marginTop: 8 }}>
-            <label>
-              Winning outcome
-              <select name="winning_outcome" defaultValue={trade.legs[0]?.outcome ?? ""}>
-                {trade.legs.map((leg) => (
-                  <option key={`${leg.venue}-${leg.outcome}`} value={leg.outcome}>
-                    {leg.outcome}
+      {onManualClose && trade.state !== "CLOSED" && trade.state !== "AWAITING_MANUAL_EXTERNAL" ? (
+        <div className="scan-control-grid" style={{ marginTop: 8 }}>
+          <button className="scan-button" type="button" disabled={busy} onClick={() => onManualClose(trade)}>
+            Manual close / settle result
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ManualSettleDialog({
+  trade,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  trade: PaperTrade;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: (winning: string, note: string) => Promise<void>;
+}) {
+  const [options, setOptions] = useState<PaperSettlementOptions | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [winning, setWinning] = useState("");
+  const [note, setNote] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadError(null);
+    setOptions(null);
+    getPaperSettlementOptions(trade.trade_id)
+      .then((payload) => {
+        if (cancelled) return;
+        setOptions(payload);
+        setWinning(payload.choices[0]?.value ?? "");
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setLoadError(err instanceof Error ? err.message : "Unable to load settlement choices");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [trade.trade_id]);
+
+  const selected = options?.choices.find((choice) => choice.value === winning) ?? null;
+
+  return (
+    <div className="competition-modal-backdrop" role="presentation" onClick={onClose}>
+      <div
+        className="competition-modal settlement-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="manual-settle-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="competition-modal-header">
+          <div>
+            <div className="competition-modal-kicker">PAPER MODE · FAILSAFE</div>
+            <h2 id="manual-settle-title">Manual close / settle result</h2>
+            <p>
+              Record the actual canonical market result. Sports Hedge will close this PAPER
+              trade using stored filled odds, stakes and fees — never the current quote.
+              Settlement is not inferred from elapsed kickoff.
+            </p>
+          </div>
+          <button type="button" className="scan-button" onClick={onClose}>
+            Cancel
+          </button>
+        </div>
+        <div className="panel-meta" style={{ marginTop: 10 }}>
+          {options?.fixture_label || fixture(trade)} · {compactMarketHeading(trade)}
+        </div>
+        <ul>
+          {(options?.legs ?? trade.legs).map((leg) => (
+            <li key={`${leg.venue}-${leg.outcome}`}>
+              {leg.venue} · {leg.outcome} · stake {leg.filled_stake} {leg.currency} · odds{" "}
+              {"filled_odds" in leg ? (leg.filled_odds ?? leg.displayed_odds ?? "—") : "—"}
+            </li>
+          ))}
+        </ul>
+        {loadError ? <div className="empty-live">{loadError}</div> : null}
+        {options?.unsupported_reason ? (
+          <div className="empty-live">
+            This market family cannot be manually settled ({options.unsupported_reason}).
+          </div>
+        ) : null}
+        {options && !options.unsupported_reason ? (
+          <>
+            <label className="scan-field">
+              Actual canonical market result
+              <select value={winning} onChange={(event) => setWinning(event.target.value)}>
+                {options.choices.map((choice) => (
+                  <option key={choice.value} value={choice.value}>
+                    {choice.label}
                   </option>
                 ))}
               </select>
             </label>
-            <label>
-              Source
-              <input name="source" placeholder="fixture_test" defaultValue="fixture_test" />
+            {selected?.realised_pnl_gbp != null ? (
+              <div className="panel-meta" style={{ marginTop: 8 }}>
+                Preview realised P&amp;L from stored fills: {money(selected.realised_pnl_gbp)}
+              </div>
+            ) : null}
+            <label className="scan-field" style={{ marginTop: 10 }}>
+              Operator note (optional)
+              <input value={note} onChange={(event) => setNote(event.target.value)} />
             </label>
-            <label>
-              Source id
-              <input name="source_id" placeholder="unique-result-id" required />
-            </label>
-            <button className="scan-button" type="submit" disabled={busy}>
-              {busy ? "Settling…" : "Settle paper trade"}
-            </button>
-          </div>
-        </form>
-      ) : null}
+            <div className="competition-modal-actions">
+              <button type="button" className="scan-button" onClick={onClose} disabled={busy}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="scan-button"
+                disabled={busy || !winning}
+                onClick={() => onConfirm(winning, note)}
+              >
+                {busy ? "Closing…" : "Confirm result & close trade"}
+              </button>
+            </div>
+          </>
+        ) : null}
+      </div>
     </div>
   );
 }

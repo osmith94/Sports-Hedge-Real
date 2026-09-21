@@ -30,6 +30,15 @@ class PaperTradeState(StrEnum):
     CLOSED = "CLOSED"
 
 
+class SettlementReconciliationStatus(StrEnum):
+    """Operator-visible auto-settlement check, distinct from trade state."""
+
+    UNCHECKED = "unchecked"
+    READY = "ready"
+    BLOCKED = "blocked"
+    SETTLED = "settled"
+
+
 class PaperLegFillKind(StrEnum):
     """How a persisted paper leg was recorded.
 
@@ -235,6 +244,12 @@ class PaperTrade(BaseModel):
     active_trade_phase: PaperActiveTradePhase | None = None
     residual_exposure_gbp: Decimal | None = None
     unresolved_recovery: bool = False
+    last_settlement_check_at: datetime | None = None
+    settlement_reconciliation_status: SettlementReconciliationStatus = (
+        SettlementReconciliationStatus.UNCHECKED
+    )
+    settlement_blocker: str | None = None
+    settlement_blocker_detail: str | None = None
     audit: list[PaperTradeAuditEvent] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -245,6 +260,8 @@ class PaperTrade(BaseModel):
             self.last_updated_at = self.last_updated_at.replace(tzinfo=UTC)
         if self.settled_at is not None and self.settled_at.tzinfo is None:
             self.settled_at = self.settled_at.replace(tzinfo=UTC)
+        if self.last_settlement_check_at is not None and self.last_settlement_check_at.tzinfo is None:
+            self.last_settlement_check_at = self.last_settlement_check_at.replace(tzinfo=UTC)
         return self
 
     @property
@@ -285,3 +302,58 @@ class PaperSettlementRequest(BaseModel):
         if self.settled_at is not None and self.settled_at.tzinfo is None:
             self.settled_at = self.settled_at.replace(tzinfo=UTC)
         return self
+
+
+class PaperManualSettlementRequest(BaseModel):
+    """Operator failsafe: canonical market result only. Source/id are server-generated."""
+
+    winning_outcome: str = Field(min_length=1)
+    operator_note: str | None = None
+    settled_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def ensure_timezone(self) -> PaperManualSettlementRequest:
+        if self.settled_at is not None and self.settled_at.tzinfo is None:
+            self.settled_at = self.settled_at.replace(tzinfo=UTC)
+        return self
+
+
+class PaperSettlementReconciliation(BaseModel):
+    status: SettlementReconciliationStatus = SettlementReconciliationStatus.UNCHECKED
+    last_checked_at: datetime | None = None
+    blocker: str | None = None
+    detail: str | None = None
+
+
+class PaperSettlementLegView(BaseModel):
+    venue: str
+    outcome: str
+    currency: str
+    filled_stake: Decimal
+    filled_odds: Decimal | None = None
+    displayed_odds: Decimal | None = None
+    fill_kind: str
+    opening_action: str | None = None
+    canonical_state: str | None = None
+
+
+class PaperSettlementOptions(BaseModel):
+    """Canonical result choices plus stored-fill preview. PAPER only."""
+
+    trade_id: str
+    fixture_label: str | None = None
+    market_label: str | None = None
+    market_family: str | None = None
+    line: Decimal | None = None
+    home_team: str | None = None
+    away_team: str | None = None
+    paper_only: bool = True
+    places_orders: bool = False
+    provenance: DataProvenance = DataProvenance.LIVE_PAPER
+    state: PaperTradeState
+    legs: list[PaperSettlementLegView] = Field(default_factory=list)
+    choices: list[Any] = Field(default_factory=list)
+    unsupported_reason: str | None = None
+    reconciliation: PaperSettlementReconciliation = Field(
+        default_factory=PaperSettlementReconciliation
+    )
