@@ -25,6 +25,7 @@ from sports_hedge.application.hot_market_relationships import HotMarketRelations
 from sports_hedge.application.collector import (
     DIAGNOSTIC_PROVIDERS,
     DIAGNOSTIC_STAGES,
+    UNIVERSE_COMPLETENESS_DEADLINE_LEFTOVER,
     UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE,
     CollectionReport,
     DiscoveredFixture,
@@ -45,6 +46,7 @@ from sports_hedge.application.universe_checkpoint import (
     SWEEP_RETRY_WAIT,
     SWEEP_SKIPPED_UNSUPPORTED,
     SWEEP_STALE_ORPHAN,
+    SWEEP_SINGLE_VENUE,
     SWEEP_TERMINAL_STATES,
     UNIVERSE_CHECKPOINT_SEMANTICS_VERSION,
     SeriesWorkUnit,
@@ -72,6 +74,10 @@ from sports_hedge.application.lane_venues import (
 from sports_hedge.application.fixture_clusters import (
     cluster_identity_aliases,
     cluster_member_events,
+)
+from sports_hedge.application.universe_identity_cache import (
+    bind_universe_identity_cache,
+    reset_universe_identity_cache,
 )
 from sports_hedge.application.provider_access import (
     HEALTH_AUTH_FAILURE,
@@ -1317,6 +1323,7 @@ class LiveRefreshCoordinator:
         # operator reset. Commit is generation-guarded instead.
         self._observability.reset()
         self._fixture_state.clear()
+        reset_universe_identity_cache()
         orphans: list[asyncio.Task[Any]] = []
         with self._state_lock:
             self._last_request = {}
@@ -2924,6 +2931,11 @@ class LiveRefreshCoordinator:
             unit.retryable = False
             unit.reason = None
             unit.next_retry_at = None
+        elif state == "single_venue_no_cross_venue_candidate":
+            unit.state = SWEEP_SINGLE_VENUE
+            unit.retryable = False
+            unit.reason = reason or SWEEP_SINGLE_VENUE
+            unit.next_retry_at = None
         elif state == "market_fetch_unavailable":
             _schedule_capped_retry(
                 unit,
@@ -3187,7 +3199,7 @@ class LiveRefreshCoordinator:
                     if retry_at is not None and now < retry_at:
                         skip.append(canonical_id)
                     continue
-                if unit.state in SWEEP_TERMINAL_STATES:
+                if unit.state in SWEEP_TERMINAL_STATES and unit.state != SWEEP_SINGLE_VENUE:
                     skip.append(canonical_id)
                 elif (
                     unit.state == SWEEP_RETRY_WAIT
@@ -3239,14 +3251,18 @@ class LiveRefreshCoordinator:
         final_failed = sum(1 for unit in work.values() if unit.state == SWEEP_FINAL_FAILED)
         skipped = sum(1 for unit in work.values() if unit.state == SWEEP_SKIPPED_UNSUPPORTED)
         stale_orphan = sum(1 for unit in work.values() if unit.state == SWEEP_STALE_ORPHAN)
+        single_venue = sum(1 for unit in work.values() if unit.state == SWEEP_SINGLE_VENUE)
         total = len(work) or self._universe_discovered_total
-        remaining = max(0, total - evaluated - final_failed - skipped - stale_orphan)
+        remaining = max(
+            0, total - evaluated - final_failed - skipped - stale_orphan - single_venue
+        )
         return {
             "canonical_work_total": total,
             "canonical_evaluated": evaluated,
             "canonical_retryable": retryable,
             "canonical_final_failed": final_failed,
             "canonical_stale_orphan": stale_orphan,
+            "canonical_single_venue": single_venue,
             "canonical_remaining": remaining,
             "discovered_total": total,
             "evaluated_count": evaluated,
@@ -3571,6 +3587,7 @@ class LiveRefreshCoordinator:
         _hot_count, universe_count = self._fixture_state.membership_counts(self.now())
         with self._state_lock:
             self._universe_generation_id = checkpoint.generation_id
+            bind_universe_identity_cache(checkpoint.generation_id)
             self._universe_generation_started_at = checkpoint.generation_started_at
             if checkpoint.selected_competition_codes:
                 self._universe_generation_selected_codes = tuple(
@@ -3698,6 +3715,7 @@ class LiveRefreshCoordinator:
         self._universe_cursor = None
         self._universe_progress_generation_id = self._universe_generation_id
         self._universe_sweep_id = f"sweep-{self._universe_generation_id}-{started.isoformat()}"
+        bind_universe_identity_cache(self._universe_generation_id)
         self._fixture_state.open_universe_generation(
             self._universe_generation_id, started_at=started
         )
@@ -3737,7 +3755,12 @@ class LiveRefreshCoordinator:
             complete = self._universe_sweep_is_complete_unlocked()
         else:
             complete = leftover_n == 0
-        if complete and completeness != UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE:
+        if completeness in {
+            UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE,
+            UNIVERSE_COMPLETENESS_DEADLINE_LEFTOVER,
+        }:
+            complete = False
+        if complete:
             self._close_universe_generation(finished)
         return budget
 
@@ -3767,6 +3790,7 @@ class LiveRefreshCoordinator:
         )
         pending = self._universe_run_now_pending
         self._clear_universe_generation_local_state()
+        reset_universe_identity_cache()
         self._universe_generation_started_at = None
         self._universe_budget_paused = False
         self._universe_retry_at = None

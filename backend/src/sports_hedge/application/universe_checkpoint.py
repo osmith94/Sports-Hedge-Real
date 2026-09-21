@@ -47,6 +47,7 @@ SWEEP_RETRY_WAIT = "retry_wait"
 SWEEP_FINAL_FAILED = "final_failed"
 SWEEP_SKIPPED_UNSUPPORTED = "skipped_unsupported"
 SWEEP_STALE_ORPHAN = "stale_orphan"
+SWEEP_SINGLE_VENUE = "single_venue_no_cross_venue_candidate"
 STALE_ORPHAN_REASON = "absent_from_authoritative_cluster_set"
 SWEEP_TERMINAL_STATES = frozenset(
     {
@@ -54,6 +55,7 @@ SWEEP_TERMINAL_STATES = frozenset(
         SWEEP_FINAL_FAILED,
         SWEEP_SKIPPED_UNSUPPORTED,
         SWEEP_STALE_ORPHAN,
+        SWEEP_SINGLE_VENUE,
     }
 )
 SERIES_TERMINAL_STATES = frozenset(

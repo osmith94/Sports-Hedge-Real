@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import Any
 
 from sports_hedge.domain.models import VenueName
-from sports_hedge.matching.events import EventMatcher
+from sports_hedge.matching.events import EventMatcher, target_competition_code
+from sports_hedge.matching.learned_rules import squad_category_fingerprint
 from sports_hedge.normalization.identity import (
     canonical_matched_event_id,
     canonical_source_event_id,
@@ -106,8 +110,161 @@ _PAIR_KIND = {
 }
 
 
+def naive_pair_space(item_count: int) -> int:
+    if item_count <= 1:
+        return 0
+    return item_count * (item_count - 1) // 2
+
+
+def candidate_reduction_pct(*, naive: int, candidates: int) -> float:
+    if naive <= 0:
+        return 0.0
+    pruned = max(0, naive - max(0, candidates))
+    return round(100.0 * pruned / naive, 4)
+
+
+@dataclass(frozen=True)
+class _IndexRecord:
+    index: int
+    item: VenueEvent
+    sport: str
+    competition_code: str | None
+    kickoff_ts: float
+    squad_home: frozenset[str]
+    squad_away: frozenset[str]
+
+
+def _kickoff_bucket(timestamp: float, window_seconds: float) -> int:
+    return int(timestamp // window_seconds)
+
+
+def _index_record(index: int, item: VenueEvent) -> _IndexRecord:
+    canonical = item.canonical
+    kickoff = canonical.kickoff_utc
+    timestamp = kickoff.timestamp()
+    sport = str(getattr(canonical, "sport", "") or "")
+    return _IndexRecord(
+        index=index,
+        item=item,
+        sport=sport,
+        competition_code=target_competition_code(canonical.competition),
+        kickoff_ts=timestamp,
+        squad_home=squad_category_fingerprint(canonical.home_team),
+        squad_away=squad_category_fingerprint(canonical.away_team),
+    )
+
+
+def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_seconds: float) -> bool:
+    if left.sport != right.sport:
+        return False
+    if abs(left.kickoff_ts - right.kickoff_ts) > window_seconds:
+        return False
+    if (
+        left.competition_code is not None
+        and right.competition_code is not None
+        and left.competition_code != right.competition_code
+    ):
+        return False
+    from sports_hedge.nfl.constants import NFL_SPORT
+
+    if left.sport != NFL_SPORT and (
+        left.squad_home != right.squad_home or left.squad_away != right.squad_away
+    ):
+        return False
+    return True
+
+
+def build_indexed_candidates(
+    items: list[VenueEvent],
+    *,
+    kickoff_tolerance: timedelta,
+    cache: Any | None = None,
+) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, int]]:
+    """Correctness-preserving superset of EventMatcher-eligible pairs.
+
+    Blocks on sport, known target competition, overlapping kickoff windows,
+    and squad-category compatibility. Unresolved competitions stay in a
+    fallback path that pairs against every same-sport window neighbour so
+    they are never dropped for speed. Kickoff buckets overlap by ±1 window
+    so a pair on a 5-minute boundary is not a false negative.
+    """
+
+    naive = naive_pair_space(len(items))
+    window = float(kickoff_tolerance.total_seconds())
+    if window <= 0:
+        window = 1.0
+    records = [_index_record(index, item) for index, item in enumerate(items)]
+    by_sport_bucket_comp: dict[tuple[str, int, str | None], list[_IndexRecord]] = defaultdict(list)
+    by_sport_bucket: dict[tuple[str, int], list[_IndexRecord]] = defaultdict(list)
+    for record in records:
+        bucket = _kickoff_bucket(record.kickoff_ts, window)
+        by_sport_bucket_comp[(record.sport, bucket, record.competition_code)].append(record)
+        by_sport_bucket[(record.sport, bucket)].append(record)
+
+    seen: set[tuple[int, int]] = set()
+    generated: list[tuple[VenueEvent, VenueEvent]] = []
+    cache_skipped = 0
+
+    def consider_pair(left: _IndexRecord, right: _IndexRecord) -> None:
+        nonlocal cache_skipped
+        if left.index >= right.index:
+            return
+        key = (left.index, right.index)
+        if key in seen:
+            return
+        if not _compatible_index_pair(left, right, window_seconds=window):
+            return
+        seen.add(key)
+        if cache is not None and left.item.venue is not right.item.venue:
+            skip_left = cache.skip_cross_venue_against(left.item, right.item)
+            skip_right = cache.skip_cross_venue_against(right.item, left.item)
+            if skip_left or skip_right:
+                cache_skipped += 1
+                return
+        generated.append((left.item, right.item))
+
+    for record in records:
+        bucket = _kickoff_bucket(record.kickoff_ts, window)
+        neighbour_buckets = (bucket - 1, bucket, bucket + 1)
+        if record.competition_code is None:
+            for neighbour in neighbour_buckets:
+                for other in by_sport_bucket.get((record.sport, neighbour), ()):
+                    consider_pair(record, other)
+            continue
+        for neighbour in neighbour_buckets:
+            for other in by_sport_bucket_comp.get(
+                (record.sport, neighbour, record.competition_code), ()
+            ):
+                consider_pair(record, other)
+            for other in by_sport_bucket_comp.get((record.sport, neighbour, None), ()):
+                consider_pair(record, other)
+
+    generated.sort(
+        key=lambda pair: (
+            0 if pair[0].venue is not pair[1].venue else 1,
+            pair[0].venue.value,
+            pair[0].source_event_id,
+            pair[1].venue.value,
+            pair[1].source_event_id,
+        )
+    )
+    diagnostics = {
+        "naive_pair_space": naive,
+        "candidate_pairs_generated": len(generated),
+        "pairs_pruned_by_index": max(0, naive - len(generated) - cache_skipped),
+        "pairs_skipped_by_generation_cache": cache_skipped,
+    }
+    return generated, diagnostics
+
+
+def universe_cluster_sort_key(cluster: FixtureCluster) -> tuple[int, str]:
+    """Multi-venue clusters first, then stable canonical id."""
+
+    return (-cluster.venue_count, cluster_canonical_event_id(cluster))
+
+
 class ClusterPass:
-    """Deterministic union-find clustering that can yield between comparisons."""
+    """Deterministic union-find clustering over an indexed candidate set."""
 
     def __init__(
         self,
@@ -117,9 +274,11 @@ class ClusterPass:
         kalshi: list[VenueEvent],
         matcher: EventMatcher,
         max_event_pairs: int,
+        identity_cache: Any | None = None,
     ) -> None:
         if max_event_pairs <= 0:
             raise ValueError("max_event_pairs must be positive")
+        self.max_event_pairs = max_event_pairs
         self.items = [*matchbook, *polymarket, *kalshi]
         self.parent: dict[tuple[VenueName, str], tuple[VenueName, str]] = {}
         self.nodes: dict[tuple[VenueName, str], VenueEvent] = {}
@@ -132,11 +291,78 @@ class ClusterPass:
         self.bulk_matcher = snapshot_for_bulk() if callable(snapshot_for_bulk) else matcher
         self.could_match = getattr(self.bulk_matcher, "could_match", None)
         self.match_confidence: dict[tuple[VenueName, str], float] = {}
+        self.identity_cache = identity_cache
+        kickoff_tolerance = getattr(
+            self.bulk_matcher, "kickoff_tolerance", timedelta(minutes=5)
+        )
+        self._candidates, self.index_diagnostics = build_indexed_candidates(
+            self.items,
+            kickoff_tolerance=kickoff_tolerance,
+            cache=identity_cache,
+        )
+        self.candidate_pairs_considered = 0
+        self._resume_cursor = 0
+        if identity_cache is not None:
+            resume = identity_cache.take_clustering_resume(self.items)
+            if resume is not None:
+                self.parent = dict(resume.parent)
+                self.match_confidence = dict(resume.match_confidence)
+                self.pair_kinds = {key: set(value) for key, value in resume.pair_kinds.items()}
+                self._resume_cursor = min(resume.cursor, len(self._candidates))
+                self.candidate_pairs_considered = self._resume_cursor
 
     def pairs(self) -> Iterator[tuple[VenueEvent, VenueEvent]]:
-        for left_index, left in enumerate(self.items):
-            for right in self.items[left_index + 1 :]:
-                yield left, right
+        for pair in self._candidates[self._resume_cursor :]:
+            yield pair
+
+    def clustering_diagnostics(self, *, truncated: bool, duration_ms: int = 0) -> dict[str, Any]:
+        naive = int(self.index_diagnostics.get("naive_pair_space") or 0)
+        generated = int(self.index_diagnostics.get("candidate_pairs_generated") or 0)
+        considered = int(self.candidate_pairs_considered)
+        pruned = int(self.index_diagnostics.get("pairs_pruned_by_index") or 0)
+        return {
+            **self.index_diagnostics,
+            "candidate_pairs_considered": considered,
+            "pairs_pruned_by_index": pruned,
+            "candidate_reduction_pct": candidate_reduction_pct(
+                naive=naive, candidates=generated
+            ),
+            "clustering_truncated": bool(truncated),
+            "clustering_duration_ms": max(0, int(duration_ms)),
+        }
+
+    def checkpoint(self, cursor: int) -> None:
+        cache = self.identity_cache
+        if cache is None:
+            return
+        cache.store_clustering_resume(
+            items=self.items,
+            cursor=cursor,
+            parent=self.parent,
+            match_confidence=self.match_confidence,
+            pair_kinds=self.pair_kinds,
+        )
+
+    def record_generation_negatives(self, clusters: list[FixtureCluster]) -> None:
+        cache = self.identity_cache
+        if cache is None:
+            return
+        other_keys_by_venue = {
+            venue: frozenset(
+                (item.venue.value, item.source_event_id)
+                for item in self.items
+                if item.venue is not venue
+            )
+            for venue in (VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI)
+        }
+        for cluster in clusters:
+            if cluster.venue_count >= 2:
+                continue
+            for item in cluster_member_events(cluster):
+                cache.record_single_venue(
+                    item,
+                    other_venue_keys=other_keys_by_venue.get(item.venue, frozenset()),
+                )
 
     def _find(self, key: tuple[VenueName, str]) -> tuple[VenueName, str]:
         parent = self.parent
@@ -152,6 +378,7 @@ class ClusterPass:
             self.parent[b] = a
 
     def consider(self, left: VenueEvent, right: VenueEvent) -> None:
+        self.candidate_pairs_considered += 1
         could_match = self.could_match
         if callable(could_match) and not could_match(left.canonical, right.canonical):
             return
@@ -202,7 +429,7 @@ class ClusterPass:
             cluster.event_match_confidence = min(confidences) if confidences else None
             clusters.append(cluster)
 
-        clusters.sort(key=lambda item: -item.venue_count)
+        clusters.sort(key=universe_cluster_sort_key)
         counts = {
             "matchbook_polymarket": sum(
                 1 for item in clusters if item.matchbook_events and item.polymarket_events
@@ -224,6 +451,7 @@ def cluster_venue_events(
     kalshi: list[VenueEvent],
     matcher: EventMatcher,
     max_event_pairs: int,
+    identity_cache: Any | None = None,
 ) -> tuple[list[FixtureCluster], dict[str, int]]:
     """Cluster independently discovered venue events by canonical fixture identity.
 
@@ -233,6 +461,7 @@ def cluster_venue_events(
     events — so a PM↔Kalshi match does not require Matchbook and does not
     consume a sibling BTTS/totals event as if it were a different fixture.
 
+    Candidate generation is an indexed superset of matcher-eligible pairs.
     ``max_event_pairs`` never drops a multi-venue cluster. Unmatched single-venue
     leftovers remain visible so unmatched coverage is not silently dropped.
     """
@@ -243,10 +472,14 @@ def cluster_venue_events(
         kalshi=kalshi,
         matcher=matcher,
         max_event_pairs=max_event_pairs,
+        identity_cache=identity_cache,
     )
     for left, right in cluster_pass.pairs():
         cluster_pass.consider(left, right)
-    return cluster_pass.finalize()
+    clusters, counts = cluster_pass.finalize()
+    cluster_pass.checkpoint(len(cluster_pass._candidates))
+    cluster_pass.record_generation_negatives(clusters)
+    return clusters, counts
 
 
 def to_venue_event(normalized: object, venue: VenueName) -> VenueEvent:

@@ -10,6 +10,7 @@ import {
   discoveryEmptyMatchNote,
   discoveryCompactSummaryLabel,
   discoveryStatusBadgeLabel,
+  marketEvaluationLabel,
 } from "./discovered-fixture-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -210,5 +211,22 @@ describe("fixture discovery collapsed-by-default disclosure", () => {
     assert.match(css, /\.discovery-disclosure\[open\] \.discovery-toggle-show \{ display: none; \}/);
     assert.match(css, /\.discovery-disclosure\[open\] \.discovery-toggle-hide \{ display: inline; \}/);
     assert.match(css, /\.discovery-summary::-webkit-details-marker \{ display: none; \}/);
+  });
+});
+
+describe("single-venue UNIVERSE evaluation honesty", () => {
+  it("does not present a cheap single-venue row as evaluated or scan-budget leftover", () => {
+    const row = fixture({
+      polymarket_matched: false,
+      matched_market_count: 0,
+      matched_equivalent_count: null,
+      market_evaluation_state: "single_venue_no_cross_venue_candidate",
+      market_evaluation_reason: "single_venue_no_cross_venue_candidate",
+      opportunity_state: "not_evaluated",
+    });
+    assert.equal(
+      marketEvaluationLabel(row),
+      "Not evaluated — single-venue (no cross-venue candidate)",
+    );
   });
 });

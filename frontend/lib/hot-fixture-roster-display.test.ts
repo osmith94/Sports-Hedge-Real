@@ -285,6 +285,15 @@ describe("HOT Zone evaluation state and HOT pricing summary", () => {
     assert.equal(
       hotEvaluationLabel(
         fixture({
+          market_evaluation_state: "single_venue_no_cross_venue_candidate",
+          market_evaluation_reason: "single_venue_no_cross_venue_candidate",
+        }),
+      ),
+      "Not evaluated — single-venue (no cross-venue candidate) · single_venue_no_cross_venue_candidate",
+    );
+    assert.equal(
+      hotEvaluationLabel(
+        fixture({
           market_evaluation_state: "evaluated",
           market_evaluation_reason: "hot_revalidation_needed",
         }),
