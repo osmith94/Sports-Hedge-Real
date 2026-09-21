@@ -743,3 +743,126 @@ async def test_collector_collapses_kalshi_siblings_and_attaches_matchbook_market
     )
     assert report.scan_diagnostics["provider_concurrency"]["matchbook"] == 4
     assert report.scan_diagnostics["provider_concurrency"]["kalshi"] == 4
+
+
+@pytest.mark.parametrize(
+    ("left_competition", "right_competition"),
+    [
+        ("Premier League", "FA Cup"),
+        ("English Premier League", "Emirates FA Cup"),
+        ("Turkish Süper Lig", "Serie A"),
+        ("Süper Lig", "MLS"),
+        ("Super Lig", "Liga MX"),
+    ],
+)
+def test_paper_threshold_does_not_join_known_competition_mismatches(
+    left_competition: str,
+    right_competition: str,
+) -> None:
+    left = _canonical(
+        VenueName.MATCHBOOK,
+        "Arsenal",
+        "Chelsea",
+        competition=left_competition,
+        source_event_id="mb-known-comp",
+    )
+    right = _canonical(
+        VenueName.KALSHI,
+        "Arsenal",
+        "Chelsea",
+        competition=right_competition,
+        source_event_id="k-known-comp",
+    )
+    paper = paper_event_matcher(Settings())
+    assert paper.threshold == 0.80
+    # Identical teams + kickoff with competition_score 0.0 is 0.90, which clears
+    # PAPER 0.80 unless known target-code disagreement is a hard veto.
+    assert round(0.35 + 0.35 + 0.10 * 0.0 + 0.20, 2) == 0.90
+    result = paper.match(left, right)
+    assert result.matched is False
+    assert result.confidence == 0.0
+    assert result.reasons == ["competition_mismatch"]
+    assert paper.could_match(left, right) is False
+    assert EventMatcher().match(left, right).matched is False
+    assert EventMatcher().could_match(left, right) is False
+
+
+def test_unresolved_competition_labels_still_use_fuzzy_scoring() -> None:
+    paper = paper_event_matcher(Settings())
+    left = _canonical(
+        VenueName.MATCHBOOK,
+        "Arsenal",
+        "Chelsea",
+        competition="Premier League",
+        source_event_id="mb-resolved",
+    )
+    right = _canonical(
+        VenueName.KALSHI,
+        "Arsenal",
+        "Chelsea",
+        competition="Unknown Invitational",
+        source_event_id="k-unresolved",
+    )
+    result = paper.match(left, right)
+    assert "competition_mismatch" not in result.reasons
+    assert "competition_fuzzy" in result.reasons
+    same_unknown = paper.match(
+        _canonical(
+            VenueName.MATCHBOOK,
+            "Arsenal",
+            "Chelsea",
+            competition="Club Friendly",
+            source_event_id="mb-unknown",
+        ),
+        _canonical(
+            VenueName.KALSHI,
+            "Arsenal",
+            "Chelsea",
+            competition="Club Friendly",
+            source_event_id="k-unknown",
+        ),
+    )
+    assert same_unknown.matched is True
+    assert "competition_mismatch" not in same_unknown.reasons
+
+
+def test_mls_and_liga_mx_same_target_code_still_matches_at_paper_threshold() -> None:
+    paper = paper_event_matcher(Settings())
+    mls = paper.match(
+        _canonical(
+            VenueName.MATCHBOOK,
+            "Inter Miami CF",
+            "San Diego FC",
+            competition="US Major League Soccer",
+            source_event_id=MB_EVENT_ID,
+        ),
+        _canonical(
+            VenueName.KALSHI,
+            "Miami",
+            "San Diego FC",
+            competition="MLS",
+            source_event_id=GAME,
+        ),
+    )
+    assert mls.matched is True
+    assert mls.confidence >= 0.80
+    assert "competition_mismatch" not in mls.reasons
+    liga = paper.match(
+        _canonical(
+            VenueName.MATCHBOOK,
+            "Querétaro",
+            "Club León",
+            competition="Mexico Liga MX",
+            source_event_id="mb-liga",
+        ),
+        _canonical(
+            VenueName.KALSHI,
+            "Queretaro",
+            "Leon",
+            competition="Liga MX",
+            source_event_id="k-liga",
+        ),
+    )
+    assert liga.matched is True
+    assert "competition_mismatch" not in liga.reasons
+

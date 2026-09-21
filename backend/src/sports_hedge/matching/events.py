@@ -45,6 +45,14 @@ def target_competition_code(label: str | None) -> str | None:
     return None if target is None else target.code.value
 
 
+def known_target_competition_mismatch(left: str | None, right: str | None) -> bool:
+    """True when both labels resolve to different TargetCompetitionCode values."""
+
+    left_code = target_competition_code(left)
+    right_code = target_competition_code(right)
+    return left_code is not None and right_code is not None and left_code != right_code
+
+
 def paper_event_matcher(
     settings: object | None = None,
     *,
@@ -115,7 +123,8 @@ class EventMatcher:
 
         ``SequenceMatcher.quick_ratio`` is an upper bound on ``ratio``. Using
         the maximum possible competition score means ``False`` cannot exclude
-        a pair that could reach this matcher's unchanged confidence threshold.
+        a pair that could reach this matcher's threshold, except for a known
+        target-competition mismatch, which is a hard veto.
         """
 
         if left.sport != right.sport:
@@ -126,6 +135,8 @@ class EventMatcher:
             return False
         kickoff_delta = abs(left.kickoff_utc - right.kickoff_utc)
         if kickoff_delta > self.kickoff_tolerance:
+            return False
+        if known_target_competition_mismatch(left.competition, right.competition):
             return False
         left_home, left_away, _ = self._resolved_teams(
             left, right, market=left_market, counterpart_market=right_market
@@ -193,6 +204,12 @@ class EventMatcher:
                 matched=False,
                 confidence=0.0,
                 reasons=["kickoff_outside_tolerance"],
+            )
+        if known_target_competition_mismatch(left.competition, right.competition):
+            return EventMatchResult(
+                matched=False,
+                confidence=0.0,
+                reasons=["competition_mismatch"],
             )
 
         left_home, left_away, left_applied = self._resolved_teams(
@@ -317,4 +334,5 @@ class EventMatcher:
         right_code = target_competition_code(right)
         if left_code is not None and right_code is not None:
             return 1.0 if left_code == right_code else 0.0
+        # Fuzzy labels only when one or both competitions are unresolved.
         return EventMatcher._similarity(left, right)
