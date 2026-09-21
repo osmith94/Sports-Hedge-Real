@@ -1,0 +1,3379 @@
+{
+  "retrieved_at_utc": "2026-09-21T06:20:20Z",
+  "method": "Unauthenticated GET only. No venue writes. No credentials.",
+  "kalshi": {
+    "super_lig": {
+      "event_count": 378,
+      "game_team_labels": {
+        "Alanyaspor": 30,
+        "Eyupspor": 30,
+        "Goztepe Izmir": 30,
+        "Konyaspor": 30,
+        "Samsunspor": 30,
+        "Trabzonspor": 30,
+        "Basaksehir": 27,
+        "Besiktas": 27,
+        "Fenerbahce": 27,
+        "Galatasaray": 27,
+        "Gaziantep": 27,
+        "Genclerbirligi": 27,
+        "Kasimpasa": 27,
+        "Kocaeli": 27,
+        "Rizespor": 27,
+        "Antalyaspor": 24,
+        "Kayserispor": 24,
+        "Karagumruk": 21,
+        "Amed": 6,
+        "Corum": 6,
+        "Erzurum": 6,
+        "Besiktas Istanbul": 3,
+        "Caykur Rizespor": 3,
+        "Fatih Karagumruk Istanbul": 3,
+        "Fenerbahce Istanbul": 3,
+        "Galatasaray Istanbul": 3,
+        "Gaziantep FK": 3,
+        "Genclerbirligi SK": 3,
+        "Istanbul Basaksehir": 3,
+        "Kasimpasa Istanbul": 3,
+        "Kocaelispor": 3
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXSUPERLIGGAME-26SEP20GOZRIZ",
+          "title": "Goztepe Izmir vs Rizespor",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSUPERLIGGAME-26SEP20AMSBES",
+          "title": "Amed vs Besiktas",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSUPERLIGGAME-26SEP20FENEYU",
+          "title": "Fenerbahce vs Eyupspor",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSUPERLIGGAME-26SEP20ERZSAM",
+          "title": "Erzurum vs Samsunspor",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSUPERLIGGAME-26SEP19TRAGAL",
+          "title": "Trabzonspor vs Galatasaray",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSUPERLIGGAME-26SEP19BASGEN",
+          "title": "Basaksehir vs Genclerbirligi",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSUPERLIGGAME-26SEP19KOCGAZ",
+          "title": "Kocaeli vs Gaziantep",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSUPERLIGGAME-26SEP19CORALA",
+          "title": "Corum vs Alanyaspor",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "primeira_liga": {
+      "event_count": 420,
+      "game_team_labels": {
+        "Casa Pia": 33,
+        "Estrela Amadora": 33,
+        "SL Benfica": 33,
+        "Santa Clara Azores": 32,
+        "Braga": 31,
+        "Moreirense": 31,
+        "Nacional": 31,
+        "Vicente Barcelos": 31,
+        "Alverca": 30,
+        "Arouca": 30,
+        "Estoril": 30,
+        "Famalicao": 30,
+        "Guimaraes": 30,
+        "Porto": 30,
+        "Rio Ave": 30,
+        "Sporting CP": 27,
+        "AVS Futebol SAD": 25,
+        "Tondela": 24,
+        "Madeira": 7,
+        "Viseu": 7,
+        "Sporting Lisbon": 5,
+        "CD Tondela": 2,
+        "Casa Pia Lisbon": 2,
+        "Estoril Praia": 2,
+        "FC Alverca SAD": 2,
+        "FC Arouca": 2,
+        "FC Famalicao": 2,
+        "FC Porto": 2,
+        "Gil Vicente Barcelos": 2,
+        "Moreirense FC": 2,
+        "Nacional da Madeira": 2,
+        "Rio Ave FC": 2,
+        "SC Braga": 2,
+        "Torreense": 2,
+        "Vitoria SC Guimaraes": 2
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXLIGAPORTUGALGAME-26SEP20FCPBEN",
+          "title": "Porto vs SL Benfica",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGAPORTUGALGAME-26SEP20SCLBRA",
+          "title": "Santa Clara Azores vs Braga",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGAPORTUGALGAME-26SEP20ESTCAS",
+          "title": "Estoril vs Casa Pia",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGAPORTUGALGAME-26SEP20VITMOR",
+          "title": "Guimaraes vs Moreirense",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGAPORTUGALGAME-26SEP20ESAACV",
+          "title": "Estrela Amadora vs Viseu",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGAPORTUGALGAME-26SEP19SPOARO",
+          "title": "Sporting CP vs Arouca",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGAPORTUGALGAME-26SEP19ALVRAV",
+          "title": "Alverca vs Rio Ave",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGAPORTUGALGAME-26SEP19GILCSM",
+          "title": "Vicente Barcelos vs Madeira",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "ligue_1": {
+      "event_count": 890,
+      "game_team_labels": {
+        "Nice": 41,
+        "PSG": 40,
+        "Angers": 39,
+        "Auxerre": 39,
+        "Le Havre": 39,
+        "Lens": 39,
+        "Lille": 39,
+        "Lorient": 39,
+        "Lyon": 39,
+        "Marseille": 39,
+        "Monaco": 39,
+        "Strasbourg Alsace": 39,
+        "Toulouse": 39,
+        "Paris": 35,
+        "Metz": 34,
+        "Nantes": 34,
+        "Stade Rennais": 32,
+        "Stade Brest 29": 27,
+        "Stade Brest": 12,
+        "Stade Rennes": 8,
+        "Le Mans": 5,
+        "Troyes": 5,
+        "Paris FC": 4,
+        "Saint-Etienne": 2
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXLIGUE1GAME-26SEP20OLMPSG",
+          "title": "Marseille vs PSG",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGUE1GAME-26SEP20NICLIL",
+          "title": "Nice vs Lille",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGUE1GAME-26SEP20AUXSTB",
+          "title": "Auxerre vs Stade Brest 29",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGUE1GAME-26SEP19TFCHAC",
+          "title": "Toulouse vs Le Havre",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGUE1GAME-26SEP19OLREN",
+          "title": "Lyon vs Stade Rennais",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGUE1GAME-26SEP19MANFCL",
+          "title": "Le Mans vs Lorient",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGUE1GAME-26SEP19ANGEST",
+          "title": "Angers vs Troyes",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXLIGUE1GAME-26SEP19PARRCS",
+          "title": "Paris FC vs Strasbourg Alsace",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "eredivisie": {
+      "event_count": 452,
+      "game_team_labels": {
+        "Ajax": 30,
+        "Utrecht": 30,
+        "Excelsior": 29,
+        "Groningen": 29,
+        "Heerenveen": 29,
+        "Nijmegen": 29,
+        "Alkmaar": 28,
+        "Eindhoven": 28,
+        "Enschede": 28,
+        "Feyenoord": 28,
+        "GA Eagles": 28,
+        "Sittard": 28,
+        "Sparta": 28,
+        "Telstar": 28,
+        "Zwolle": 28,
+        "Heracles Almelo": 24,
+        "Breda": 21,
+        "Volendam": 21,
+        "Cambuur": 7,
+        "Den Haag": 7,
+        "Willem II": 7,
+        "AZ Alkmaar": 3,
+        "Ajax Amsterdam": 3,
+        "Excelsior Rotterdam": 3,
+        "FC Groningen": 3,
+        "FC Twente Enschede": 3,
+        "FC Utrecht": 3,
+        "FC Volendam": 3,
+        "Feyenoord Rotterdam": 3,
+        "Fortuna Sittard": 3,
+        "Go Ahead Eagles": 3,
+        "NAC Breda": 3,
+        "NEC Nijmegen": 3,
+        "PEC Zwolle": 3,
+        "PSV Eindhoven": 3,
+        "SC Heerenveen": 3,
+        "SC Telstar": 3,
+        "Sparta Rotterdam": 3,
+        "Almere": 2,
+        "Den Bosch": 2
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXEREDIVISIEGAME-26SEP20NIJGAE",
+          "title": "Nijmegen vs GA Eagles",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEREDIVISIEGAME-26SEP20TWEPSV",
+          "title": "Enschede vs Eindhoven",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEREDIVISIEGAME-26SEP20AZATEL",
+          "title": "Alkmaar vs Telstar",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEREDIVISIEGAME-26SEP20FEYFCU",
+          "title": "Feyenoord vs Utrecht",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEREDIVISIEGAME-26SEP19WILFOR",
+          "title": "Willem II vs Sittard",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEREDIVISIEGAME-26SEP19AJAEXC",
+          "title": "Ajax vs Excelsior",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEREDIVISIEGAME-26SEP19SPAHEE",
+          "title": "Sparta vs Heerenveen",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEREDIVISIEGAME-26SEP19ADOCAM",
+          "title": "Den Haag vs Cambuur",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "scottish_premiership": {
+      "event_count": 285,
+      "game_team_labels": {
+        "St. Mirren": 35,
+        "Aberdeen": 34,
+        "Celtic": 34,
+        "Dundee United": 34,
+        "Motherwell": 34,
+        "Rangers": 34,
+        "Dundee FC": 33,
+        "Falkirk": 33,
+        "Heart of Midlothian": 33,
+        "Kilmarnock": 33,
+        "Hibernian": 32,
+        "Livingston": 25,
+        "St. Johnstone": 8
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXSCOTTISHPREMGAME-26SEP20CELRFC",
+          "title": "Celtic vs Rangers",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSCOTTISHPREMGAME-26SEP19KILHOM",
+          "title": "Kilmarnock vs Heart of Midlothian",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSCOTTISHPREMGAME-26SEP19MIRDUU",
+          "title": "St. Mirren vs Dundee United",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSCOTTISHPREMGAME-26SEP19JOHFAL",
+          "title": "St. Johnstone vs Falkirk",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSCOTTISHPREMGAME-26SEP19HIBABE",
+          "title": "Hibernian vs Aberdeen",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSCOTTISHPREMGAME-26SEP19DUNMOT",
+          "title": "Dundee FC vs Motherwell",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSCOTTISHPREMGAME-26SEP15MOTABE",
+          "title": "Motherwell vs Aberdeen",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSCOTTISHPREMGAME-26SEP15HIBKIL",
+          "title": "Hibernian vs Kilmarnock",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "belgian_pro_league": {
+      "event_count": 407,
+      "game_team_labels": {
+        "Club Brugge": 35,
+        "Gent": 34,
+        "Genk": 33,
+        "Leuven": 33,
+        "Anderlecht": 32,
+        "Mechelen": 32,
+        "Royal Antwerp": 32,
+        "Royal Charleroi": 32,
+        "St. Truidense": 32,
+        "Standard": 32,
+        "Union Gilloise": 32,
+        "Westerlo": 32,
+        "Cercle Brugge": 31,
+        "La Louviere": 28,
+        "Zulte Waregem": 28,
+        "Dender": 21,
+        "Beveren": 7,
+        "Kortrijk": 7,
+        "Lommel": 7,
+        "FCV Dender EH": 3,
+        "KAA Gent": 3,
+        "KRC Genk": 3,
+        "KVC Westerlo": 3,
+        "Oud-Heverlee Leuven": 3,
+        "RAAL La Louviere": 3,
+        "RSC Anderlecht": 3,
+        "Royal Antwerp FC": 3,
+        "Royal Charleroi SC": 3,
+        "SV Zulte Waregem": 3,
+        "St. Truidense VV": 3,
+        "Standard Liege": 3,
+        "Union Saint-Gilloise": 3,
+        "Yellow-Red KV Mechelen": 3
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXBELGIANPLGAME-26SEP20KORBEV",
+          "title": "Kortrijk vs Beveren",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBELGIANPLGAME-26SEP20BRUGEN",
+          "title": "Club Brugge vs Genk",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBELGIANPLGAME-26SEP20STTWES",
+          "title": "St. Truidense vs Westerlo",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBELGIANPLGAME-26SEP20RAFCUSG",
+          "title": "Royal Antwerp vs Union Gilloise",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBELGIANPLGAME-26SEP19RSCZUL",
+          "title": "Anderlecht vs Zulte Waregem",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBELGIANPLGAME-26SEP19LOMYRM",
+          "title": "Lommel vs Mechelen",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBELGIANPLGAME-26SEP19RCHCER",
+          "title": "Royal Charleroi vs Cercle Brugge",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBELGIANPLGAME-26SEP19OHLRAAL",
+          "title": "Leuven vs La Louviere",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "league_one": {
+      "event_count": 313,
+      "game_team_labels": {
+        "Stockport": 17,
+        "Bradford": 14,
+        "Stevenage": 14,
+        "Barnsley": 13,
+        "Mansfield": 13,
+        "Peterborough": 13,
+        "Luton": 12,
+        "Plymouth": 12,
+        "Wimbledon": 12,
+        "Blackpool": 11,
+        "Burton": 11,
+        "Doncaster": 11,
+        "Leyton Orient": 11,
+        "Reading": 11,
+        "Wigan": 11,
+        "Wycombe": 11,
+        "Huddersfield": 10,
+        "Bromley": 8,
+        "Cambridge": 8,
+        "Leicester": 8,
+        "Milton Keynes": 8,
+        "Notts": 8,
+        "Sheffield Wednesday": 8,
+        "Oxford United": 7,
+        "Bolton": 6,
+        "Port Vale": 6,
+        "Northampton": 5,
+        "Cardiff": 4,
+        "Lincoln": 4,
+        "Rotherham": 4,
+        "Exeter": 3
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXEFLL1GAME-26SEP26WYWREA",
+          "title": "Wycombe vs Reading",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEFLL1GAME-26SEP26STOPET",
+          "title": "Stockport vs Peterborough",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEFLL1GAME-26SEP26STESHW",
+          "title": "Stevenage vs Sheffield Wednesday",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEFLL1GAME-26SEP26PABURA",
+          "title": "Plymouth vs Burton",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEFLL1GAME-26SEP26NOCBLP",
+          "title": "Notts vs Blackpool",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEFLL1GAME-26SEP26MKDBRO",
+          "title": "Milton Keynes vs Bromley",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEFLL1GAME-26SEP26MATLEY",
+          "title": "Mansfield vs Leyton Orient",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXEFLL1GAME-26SEP26LEIWIG",
+          "title": "Leicester vs Wigan",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "brasileirao": {
+      "event_count": 840,
+      "game_team_labels": {
+        "Botafogo": 33,
+        "Atletico Mineiro": 32,
+        "Bahia": 32,
+        "Mirassol": 32,
+        "Santos": 32,
+        "Corinthians": 31,
+        "Cruzeiro": 31,
+        "Flamengo": 31,
+        "Gremio": 31,
+        "Internacional": 31,
+        "Sao Paulo": 31,
+        "Vasco da Gama": 31,
+        "Vitoria": 31,
+        "Bragantino": 30,
+        "Fluminense": 30,
+        "Palmeiras": 30,
+        "Chapecoense": 29,
+        "Coritiba": 28,
+        "Paranaense": 28,
+        "Remo": 28,
+        "SE Palmeiras SP": 8,
+        "Atletico Mineiro MG": 7,
+        "CR Flamengo RJ": 7,
+        "Red Bull Bragantino SP": 7,
+        "EC Vitoria BA": 6,
+        "Fluminense FC RJ": 6,
+        "Fortaleza EC CE": 6,
+        "Gremio FB Porto Alegrense RS": 6,
+        "SC Recife PE": 6,
+        "Santos FC SP": 6,
+        "Sao Paulo FC SP": 6,
+        "Botafogo FR RJ": 5,
+        "CR Vasco da Gama RJ": 5,
+        "Ceara SC CE": 5,
+        "Cruzeiro EC MG": 5,
+        "EC Bahia BA": 5,
+        "EC Juventude RS": 5,
+        "Mirassol FC SP": 5,
+        "SC Corinthians SP": 5,
+        "SC Internacional RS": 5,
+        "Ceara": 3,
+        "Fortaleza": 3,
+        "Juventude RS": 3,
+        "Sport Recife": 3
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXBRASILEIROGAME-26OCT03ATLRBB",
+          "title": "Atletico Mineiro vs Bragantino",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBRASILEIROGAME-26OCT02SPASAN",
+          "title": "Sao Paulo vs Santos",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBRASILEIROGAME-26SEP20CAPBAH",
+          "title": "Paranaense vs Bahia",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBRASILEIROGAME-26SEP20FLARBB",
+          "title": "Flamengo vs Bragantino",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBRASILEIROGAME-26SEP20VITCRU",
+          "title": "Vitoria vs Cruzeiro",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBRASILEIROGAME-26SEP20CORFLU",
+          "title": "Corinthians vs Fluminense",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBRASILEIROGAME-26SEP20GPAPAL",
+          "title": "Gremio vs Palmeiras",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXBRASILEIROGAME-26SEP19SPAINT",
+          "title": "Sao Paulo vs Internacional",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "argentina_primera": {
+      "event_count": 733,
+      "game_team_labels": {
+        "Argentinos Juniors": 32,
+        "Estudiantes La Plata": 31,
+        "Racing Avellaneda": 31,
+        "Belgrano de Cordoba": 30,
+        "Gimnasia La Plata": 30,
+        "River Plate": 30,
+        "Rosario": 29,
+        "Union Santa Fe": 29,
+        "Barracas": 28,
+        "Boca Juniors": 28,
+        "Huracan": 28,
+        "Lanus": 28,
+        "Rio Cuarto": 28,
+        "San Lorenzo de Almagro": 28,
+        "Talleres Cordoba": 28,
+        "Aldosivi": 27,
+        "Banfield": 27,
+        "Central Cordoba": 27,
+        "Defensa y Justicia": 27,
+        "Independiente Avellaneda": 27,
+        "Newell's Old Boys": 27,
+        "Platense": 27,
+        "Rivadavia": 27,
+        "Tigre": 27,
+        "Velez Sarsfield": 27,
+        "Instituto Cordoba": 26,
+        "Junin": 26,
+        "Mendoza": 26,
+        "Riestra": 26,
+        "Tucuman": 26
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXARGPREMDIVGAME-26SEP21LANELP",
+          "title": "Lanus vs Estudiantes La Plata",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXARGPREMDIVGAME-26SEP21BARIRM",
+          "title": "Barracas vs Rivadavia",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXARGPREMDIVGAME-26SEP21CAATUC",
+          "title": "Aldosivi vs Tucuman",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXARGPREMDIVGAME-26SEP20VELTIG",
+          "title": "Velez Sarsfield vs Tigre",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXARGPREMDIVGAME-26SEP20CABRCU",
+          "title": "Belgrano de Cordoba vs Rio Cuarto",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXARGPREMDIVGAME-26SEP20PLANOB",
+          "title": "Platense vs Newell's Old Boys",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXARGPREMDIVGAME-26SEP20CARCARG",
+          "title": "Rosario vs Argentinos Juniors",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXARGPREMDIVGAME-26SEP20SLABOC",
+          "title": "San Lorenzo de Almagro vs Boca Juniors",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "saudi_pro_league": {
+      "event_count": 552,
+      "game_team_labels": {
+        "AL Suqoor": 33,
+        "Al Hilal": 33,
+        "Al Nassr": 33,
+        "Al Qadsiah": 33,
+        "Al-Fateh": 33,
+        "Al-Fayha": 33,
+        "Al-Hazm": 33,
+        "Al-Ittifaq": 33,
+        "Al-Khaleej": 33,
+        "Al-Kholood": 33,
+        "Al-Shabab": 33,
+        "Al-Taawoun": 33,
+        "Al Ahli Saudi": 32,
+        "Al-Ittihad": 32,
+        "Al-Riyadh": 32,
+        "Al-Akhdoud": 26,
+        "Al-Najma": 26,
+        "Damac": 26,
+        "Abha": 7,
+        "Al-Faisaly": 7,
+        "Diriyah Club": 7,
+        "Al Ahli Saudi FC": 2,
+        "Al-Ittihad Club": 2,
+        "Al Nassr Club": 1,
+        "Al-Ittifaq FC": 1,
+        "Al-Riyadh SC": 1,
+        "Al-Shabab FC (SA)": 1,
+        "Neom SC": 1
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXSAUDIPLGAME-26SEP13RIYAKH",
+          "title": "Al-Riyadh vs Al-Kholood",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSAUDIPLGAME-26SEP13DIRABH",
+          "title": "Diriyah Club vs Abha",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSAUDIPLGAME-26SEP13NEOFAT",
+          "title": "AL Suqoor vs Al-Fateh",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSAUDIPLGAME-26SEP12SHAFAY",
+          "title": "Al-Shabab vs Al-Fayha",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSAUDIPLGAME-26SEP12KHAALN",
+          "title": "Al-Khaleej vs Al Nassr",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSAUDIPLGAME-26SEP12ALTHIL",
+          "title": "Al-Taawoun vs Al Hilal",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSAUDIPLGAME-26SEP11AASHAZ",
+          "title": "Al Ahli Saudi vs Al-Hazm",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXSAUDIPLGAME-26SEP11FAIITJ",
+          "title": "Al-Faisaly vs Al-Ittihad",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "j1_league": {
+      "event_count": 470,
+      "game_team_labels": {
+        "Avispa": 30,
+        "Cerezo": 30,
+        "Fagiano O": 30,
+        "Frontale": 30,
+        "Gamba": 30,
+        "Hiroshima": 30,
+        "Kashima": 30,
+        "Kashiwa": 30,
+        "Kobe": 30,
+        "Kyoto Sanga": 30,
+        "Machida Z": 30,
+        "Marinos": 30,
+        "Nagoya": 30,
+        "Shimizu": 30,
+        "Tokyo": 30,
+        "Tokyo V": 30,
+        "Urawa": 30,
+        "Mito H": 28,
+        "United Chiba": 28,
+        "V-Varen": 28,
+        "Albirex": 2,
+        "Shonan": 2,
+        "Yokohama": 2,
+        "Albirex Niigata": 1,
+        "Avispa Fukuoka": 1,
+        "Cerezo Osaka": 1,
+        "FC Tokyo": 1,
+        "Fagiano Okayama": 1,
+        "Gamba Osaka": 1,
+        "Kashima Antlers": 1,
+        "Kashiwa Reysol": 1,
+        "Kawasaki Frontale": 1,
+        "Kyoto Sanga FC": 1,
+        "Machida Zelvia": 1,
+        "Nagoya Grampus": 1,
+        "Sanfrecce Hiroshima": 1,
+        "Shimizu S-Pulse": 1,
+        "Shonan Bellmare": 1,
+        "Tokyo Verdy": 1,
+        "Urawa Red Diamonds": 1,
+        "Vissel Kobe": 1,
+        "Yokohama F Marinos": 1,
+        "Yokohama FC": 1
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXJLEAGUEGAME-26SEP20MACREY",
+          "title": "Machida Z vs Kashiwa",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXJLEAGUEGAME-26SEP20GAMVIK",
+          "title": "Gamba vs Kobe",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXJLEAGUEGAME-26SEP19MARMIT",
+          "title": "Marinos vs Mito H",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXJLEAGUEGAME-26SEP19TOKNGE",
+          "title": "Tokyo vs Nagoya",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXJLEAGUEGAME-26SEP19FAGKYO",
+          "title": "Fagiano O vs Kyoto Sanga",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXJLEAGUEGAME-26SEP19VVNCER",
+          "title": "V-Varen vs Cerezo",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXJLEAGUEGAME-26SEP19URDVER",
+          "title": "Urawa vs Tokyo V",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXJLEAGUEGAME-26SEP19SHIJEF",
+          "title": "Shimizu vs United Chiba",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "champions_league": {
+      "event_count": 805,
+      "game_team_labels": {
+        "PSG": 18,
+        "Arsenal": 17,
+        "Atletico": 17,
+        "Bodoe/Glimt": 17,
+        "Bayern Munich": 15,
+        "Real Madrid": 15,
+        "Barcelona": 14,
+        "Kairat": 14,
+        "Galatasaray": 13,
+        "Liverpool": 13,
+        "Atalanta": 12,
+        "Inter": 12,
+        "Leverkusen": 12,
+        "Newcastle": 12,
+        "Olympiacos": 12,
+        "Club Brugge": 11,
+        "Dortmund": 11,
+        "Manchester City": 11,
+        "Chelsea": 10,
+        "Juventus": 10,
+        "Monaco": 10,
+        "Qarabag": 10,
+        "SL Benfica": 10,
+        "Tottenham": 10,
+        "Union Gilloise": 10,
+        "Eindhoven": 9,
+        "Napoli": 9,
+        "Sabah Masazir": 9,
+        "Slavia Prague": 9,
+        "Villarreal": 9,
+        "Ajax": 8,
+        "Bilbao": 8,
+        "Copenhagen": 8,
+        "Frankfurt": 8,
+        "Levski Sofia": 8,
+        "Marseille": 8,
+        "Pafos": 8,
+        "Fenerbahce": 7,
+        "Slovan Bratislava": 7,
+        "Sporting CP": 7,
+        "Ararat-Armenia": 6,
+        "Be`er Sheva": 6,
+        "Dinamo Zagreb": 6,
+        "Kauno": 6,
+        "NK Celje": 6,
+        "Sporting Lisbon": 6,
+        "Aarhus": 4,
+        "Crvena Zvezda": 4,
+        "Egnatia Rrogozhine": 4,
+        "Iberia": 4,
+        "Klaksvik": 4,
+        "Kuopion Palloseura": 4,
+        "Larne": 4,
+        "Lincoln Red Imps": 4,
+        "Lyon": 4,
+        "Mjallby": 4,
+        "Nijmegen": 4,
+        "Shamrock": 4,
+        "Sturm Graz": 4,
+        "Uni Craiova": 4,
+        "Vikingur Reykjavik": 4,
+        "AEK Athens": 3,
+        "LASK": 3,
+        "Viking": 3,
+        "Banja Luka": 2,
+        "Bissen": 2,
+        "Celtic": 2,
+        "ETO Gyor": 2,
+        "FK Vardar Skopje": 2,
+        "Floriana": 2,
+        "Gornik Zabrze": 2,
+        "Heart of Midlothian": 2,
+        "IC Escaldes": 2,
+        "KF Drita": 2,
+        "Lech Poznan": 2,
+        "Maxline Vitebsk": 2,
+        "New Saints": 2,
+        "Omonia Nicosia": 2,
+        "Petrocub Hincesti": 2,
+        "Riga FC": 2,
+        "Sparta Prague": 2,
+        "Sutjeska Niksic": 2,
+        "Tallinna": 2,
+        "Thun": 2,
+        "Tre Fiori": 2,
+        "Arsenal: Game 2 Winner?": 1,
+        "Aston Villa": 1,
+        "Barcelona: Game 2 Winner?": 1,
+        "Como": 1,
+        "Feyenoord": 1,
+        "Inter: Game Winner?": 1,
+        "Leipzig": 1,
+        "Lens": 1,
+        "Lille": 1,
+        "Manchester United": 1,
+        "PSG: Game Winner?": 1,
+        "Porto": 1,
+        "Real Betis": 1,
+        "Reg Time: PSG": 1,
+        "Roma": 1,
+        "Shakhtar": 1,
+        "Stuttgart": 1
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXUCLGAME-26SEP10SLARCL",
+          "title": "Slavia Prague vs Lens",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUCLGAME-26SEP10MUNSBH",
+          "title": "Manchester United vs Sabah Masazir",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUCLGAME-26SEP10COMRBL",
+          "title": "Como vs Leipzig",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUCLGAME-26SEP10BMUBOG",
+          "title": "Bayern Munich vs Bodoe/Glimt",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUCLGAME-26SEP10PSVSHA",
+          "title": "Eindhoven vs Shakhtar",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUCLGAME-26SEP10FENROM",
+          "title": "Fenerbahce vs Roma",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUCLGAME-26SEP09SPOGAL",
+          "title": "Sporting CP vs Galatasaray",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUCLGAME-26SEP09PSGSLO",
+          "title": "PSG vs Slovan Bratislava",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "europa_league": {
+      "event_count": 484,
+      "game_team_labels": {
+        "Ferencvarosi": 16,
+        "Aston Villa": 12,
+        "Nottingham": 11,
+        "Celta Vigo": 10,
+        "Bologna": 9,
+        "Braga": 9,
+        "Freiburg": 9,
+        "PAOK": 9,
+        "Salzburg": 9,
+        "CSKA Sofia": 8,
+        "Plzen": 8,
+        "Anderlecht": 7,
+        "Besiktas": 7,
+        "Crvena Zvezda": 7,
+        "Genk": 7,
+        "Lille": 7,
+        "Maccabi Tel Aviv": 7,
+        "Midtjylland": 7,
+        "Panathinaikos": 7,
+        "Porto": 7,
+        "Real Betis": 7,
+        "SL Benfica": 7,
+        "Stuttgart": 7,
+        "Celtic": 6,
+        "Dinamo Zagreb": 6,
+        "Lyon": 6,
+        "Brann": 5,
+        "Fenerbahce": 5,
+        "Jagiellonia": 5,
+        "Lech Poznan": 5,
+        "Ludogorets": 5,
+        "Omonia Nicosia": 5,
+        "Pafos": 5,
+        "Rangers": 5,
+        "Roma": 5,
+        "Dynamo Kyiv": 4,
+        "Egnatia Rrogozhine": 4,
+        "Hajduk": 4,
+        "Hradec Kralove": 4,
+        "Iberia": 4,
+        "Qarabag": 4,
+        "Sturm Graz": 4,
+        "Thun": 4,
+        "Tiraspol": 4,
+        "Uni Craiova": 4,
+        "Ararat-Armenia": 3,
+        "Basel": 3,
+        "FCSB": 3,
+        "Feyenoord": 3,
+        "GA Eagles": 3,
+        "Lillestroem": 3,
+        "Malmo": 3,
+        "Nice": 3,
+        "OFI Crete": 3,
+        "Utrecht": 3,
+        "Young Boys": 3,
+        "AS Roma": 2,
+        "Aarhus": 2,
+        "Aluminij Kidricevo": 2,
+        "Bologna FC": 2,
+        "Celtic Glasgow": 2,
+        "Derry City": 2,
+        "Enschede": 2,
+        "FC Basel 1893": 2,
+        "FC Midtjylland": 2,
+        "FC Porto": 2,
+        "FC Salzburg": 2,
+        "FC Utrecht": 2,
+        "FC Viktoria Plzen": 2,
+        "FK Crvena Zvezda Belgrade": 2,
+        "Fenerbahce Istanbul": 2,
+        "Ferencvarosi Budapest": 2,
+        "Feyenoord Rotterdam": 2,
+        "Fotbal Club FCSB": 2,
+        "GNK Dinamo Zagreb": 2,
+        "Glasgow Rangers": 2,
+        "Go Ahead Eagles": 2,
+        "Gornik Zabrze": 2,
+        "Hammarby": 2,
+        "Heart of Midlothian": 2,
+        "IF Vestri": 2,
+        "KRC Genk": 2,
+        "Kairat": 2,
+        "Kauno": 2,
+        "Klaksvik": 2,
+        "Kuopion Palloseura": 2,
+        "Larne": 2,
+        "Lille OSC": 2,
+        "Lincoln Red Imps": 2,
+        "Maccabi Tel Aviv FC": 2,
+        "Malmo FF": 2,
+        "Mjallby": 2,
+        "Nottingham Forest": 2,
+        "OGC Nice": 2,
+        "Olympique Lyon": 2,
+        "PAOK Thessaloniki": 2,
+        "PFC Ludogorets 1945 Razgrad": 2,
+        "Panathinaikos Athens": 2,
+        "RC Celta de Vigo": 2,
+        "Real Betis Seville": 2,
+        "SC Braga": 2,
+        "SC Freiburg": 2,
+        "SK Brann": 2,
+        "SK Sturm Graz": 2,
+        "Shamrock": 2,
+        "St. Gallen": 2,
+        "St. Truidense": 2,
+        "Trabzonspor": 2,
+        "Tromsoe": 2,
+        "Uni Cluj": 2,
+        "VfB Stuttgart": 2,
+        "Vikingur Reykjavik": 2,
+        "Vojvodina Novi Sad": 2,
+        "Young Boys Bern": 2,
+        "Zilina": 2,
+        "Alkmaar": 1,
+        "Be`er Sheva": 1,
+        "Bilbao: Game Winner?": 1,
+        "Bodoe/Glimt": 1,
+        "Bournemouth": 1,
+        "Crystal Palace": 1,
+        "Hoffenheim": 1,
+        "Juventus": 1,
+        "Leverkusen": 1,
+        "Levski Sofia": 1,
+        "Man Utd": 1,
+        "Marseille": 1,
+        "Milan": 1,
+        "NK Celje": 1,
+        "Nijmegen": 1,
+        "Olympiacos": 1,
+        "Real Sociedad": 1,
+        "Reg Time: Freiburg": 1,
+        "Sparta Prague": 1,
+        "Stade Rennais": 1,
+        "Sunderland": 1,
+        "Torreense": 1,
+        "Tottenham: Game Winner?": 1,
+        "Union Gilloise": 1
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXUELGAME-26SEP17VIKUSG",
+          "title": "Plzen vs Union Gilloise",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUELGAME-26SEP17RSOBOU",
+          "title": "Real Sociedad vs Bournemouth",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUELGAME-26SEP17LSKTOR",
+          "title": "Lillestroem vs Torreense",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUELGAME-26SEP17JUVNIJ",
+          "title": "Juventus vs Nijmegen",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUELGAME-26SEP17CRYLPO",
+          "title": "Crystal Palace vs Lech Poznan",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUELGAME-26SEP17CELFTC",
+          "title": "Celtic vs Ferencvarosi",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUELGAME-26SEP17BESOLM",
+          "title": "Besiktas vs Marseille",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUELGAME-26SEP17OFITSG",
+          "title": "OFI Crete vs Hoffenheim",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "conference_league": {
+      "event_count": 900,
+      "game_team_labels": {
+        "Crystal Palace": 13,
+        "KF Drita": 12,
+        "Rijeka": 12,
+        "Shkendija Tetovo": 12,
+        "Czestochowa": 10,
+        "SK Rapid": 10,
+        "Strasbourg Alsace": 10,
+        "Vallecano": 9,
+        "AEK Athens": 8,
+        "Alkmaar": 8,
+        "Dinamo City": 8,
+        "Fiorentina": 8,
+        "Inter Turku": 8,
+        "Kuopion Palloseura": 8,
+        "NK Celje": 8,
+        "Noah Yerevan": 8,
+        "Samsunspor": 8,
+        "Shakhtar": 8,
+        "Ajax": 6,
+        "Austria": 6,
+        "Banja Luka": 6,
+        "Bohemians D.": 6,
+        "Braga": 6,
+        "Brann": 6,
+        "Copenhagen": 6,
+        "Dinamo Minsk": 6,
+        "FC RFS": 6,
+        "Gent": 6,
+        "Hapoel Tel Aviv": 6,
+        "Hibernian": 6,
+        "Ilves": 6,
+        "Jablonec": 6,
+        "Larnaca": 6,
+        "Lausanne-Sport": 6,
+        "Lech Poznan": 6,
+        "Lincoln Red Imps": 6,
+        "Lugano": 6,
+        "Mainz": 6,
+        "Motherwell": 6,
+        "Nordsjaelland": 6,
+        "Olomouc": 6,
+        "Paide": 6,
+        "Panathinaikos": 6,
+        "Partizan Belgrade": 6,
+        "Riga FC": 6,
+        "Runavik": 6,
+        "Shelbourne": 6,
+        "Sion": 6,
+        "Sparta Prague": 6,
+        "Zalgiris Vilnius": 6,
+        "Zrinjski Mostar": 6,
+        "Alashkert Yerevan": 4,
+        "Apollon Limassol": 4,
+        "Atletic Club": 4,
+        "Auda": 4,
+        "Ballkani": 4,
+        "Bate Borisov": 4,
+        "Beitar Jerusalem": 4,
+        "CFR Cluj": 4,
+        "CSKA 1948": 4,
+        "Debreceni": 4,
+        "Dila Gori": 4,
+        "Dinamo Tbilisi": 4,
+        "Dunajska Streda": 4,
+        "Dynamo Kyiv": 4,
+        "ETO Gyor": 4,
+        "Enschede": 4,
+        "FC Coloma": 4,
+        "Goteborg": 4,
+        "HJK Helsinki": 4,
+        "Hacken Gothenburg": 4,
+        "Hajduk": 4,
+        "IC Escaldes": 4,
+        "Jagiellonia": 4,
+        "Katowice": 4,
+        "Legia Warszawa": 4,
+        "Levadia Tallinn": 4,
+        "Liepaja": 4,
+        "Malisheva": 4,
+        "Maxline Vitebsk": 4,
+        "Midtjylland": 4,
+        "Nomme": 4,
+        "Omonia Nicosia": 4,
+        "Pyunik Yerevan": 4,
+        "Qarabag": 4,
+        "Shamrock": 4,
+        "Spartans": 4,
+        "St. Gallen": 4,
+        "Stjarnan": 4,
+        "Tallinna": 4,
+        "Tobol": 4,
+        "Tromsoe": 4,
+        "Una Strassen": 4,
+        "Vaduz": 4,
+        "Valur Reykjavik": 4,
+        "Velez Mostar": 4,
+        "Zira": 4,
+        "AC Omonia Nicosia": 2,
+        "ACF Fiorentina": 2,
+        "AEK Larnaca": 2,
+        "AZ Alkmaar": 2,
+        "Aberdeen": 2,
+        "Aberdeen FC": 2,
+        "Af Elbasani": 2,
+        "Aluminij Kidricevo": 2,
+        "Astana": 2,
+        "Atalanta": 2,
+        "Baku": 2,
+        "Basaksehir": 2,
+        "Bissen": 2,
+        "Bravo Ljubljana": 2,
+        "Breidablik": 2,
+        "Breidablik Kopavogur": 2,
+        "Brighton": 2,
+        "CS Universitatea Craiova": 2,
+        "Caernarfon": 2,
+        "Cherkasy": 2,
+        "Coleraine": 2,
+        "Connah's Quay": 2,
+        "Derry City": 2,
+        "Differdange": 2,
+        "Europa": 2,
+        "FC Dynamo Kyiv": 2,
+        "FC Noah Yerevan": 2,
+        "FC Yelimai": 2,
+        "FCSB": 2,
+        "FK Decic": 2,
+        "FK Mornar": 2,
+        "FK Vardar Skopje": 2,
+        "FK Zeleznicar Pancevo": 2,
+        "FSV Mainz": 2,
+        "Floriana": 2,
+        "Freiburg": 2,
+        "GAIS": 2,
+        "Getafe": 2,
+        "Glentoran": 2,
+        "Gornik Zabrze": 2,
+        "HB Torshavn": 2,
+        "HNK Rijeka": 2,
+        "HSK Zrinjski Mostar": 2,
+        "Hammarby": 2,
+        "Hamrun Spartans FC": 2,
+        "Heart of Midlothian": 2,
+        "Hegelmann Kaunas": 2,
+        "Hradec Kralove": 2,
+        "IF Vestri": 2,
+        "Jagiellonia Bialystok": 2,
+        "KF Dukagjini": 2,
+        "KKS Lech Poznan": 2,
+        "Klaksvik": 2,
+        "Koper": 2,
+        "Kutaisi": 2,
+        "La Fiorita": 2,
+        "Larne": 2,
+        "Linfield": 2,
+        "Ludogorets": 2,
+        "Maccabi Tel Aviv": 2,
+        "Marsaxlokk": 2,
+        "Milsami": 2,
+        "Monaco": 2,
+        "Mondorf-Les-Bains": 2,
+        "New Saints": 2,
+        "PAOK": 2,
+        "Pafos": 2,
+        "Paksi": 2,
+        "Panevezys": 2,
+        "Pen-y-Bont": 2,
+        "Petrocub Hincesti": 2,
+        "Petrovac": 2,
+        "Polissya Zhytomyr": 2,
+        "RKS Rakow Czestochowa": 2,
+        "Rangers": 2,
+        "Rayo Vallecano": 2,
+        "SK Sigma Olomouc": 2,
+        "SK Slovan Bratislava": 2,
+        "Sarajevo": 2,
+        "Shelbourne FC": 2,
+        "Sileks Kratovo": 2,
+        "Slovan Bratislava": 2,
+        "St Josephs": 2,
+        "Sutjeska Niksic": 2,
+        "Tiraspol": 2,
+        "Tre Fiori": 2,
+        "Trnava": 2,
+        "Uni Cluj": 2,
+        "Uni Craiova": 2,
+        "Valletta": 2,
+        "Varazdin": 2,
+        "Vikingur": 2,
+        "Vikingur Reykjavik": 2,
+        "Virtus": 2,
+        "Vllaznia Shkoder": 2,
+        "Vojvodina Novi Sad": 2,
+        "Zilina": 2,
+        "Zimbru": 2,
+        "FC Shakhtar Donetsk": 1,
+        "Shamrock Rovers": 1
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXUECLGAME-26AUG27PARGET",
+          "title": "Partizan Belgrade vs Getafe: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUECLGAME-26AUG27LARLIN",
+          "title": "Larne vs Lincoln Red Imps: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUECLGAME-26AUG27HIBKAA",
+          "title": "Hibernian vs Gent: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUECLGAME-26AUG27RIJFCM",
+          "title": "Rijeka vs Midtjylland: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUECLGAME-26AUG27FAKBRA",
+          "title": "Austria vs Braga: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUECLGAME-26AUG27BRITIL",
+          "title": "Brighton vs Tromsoe: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUECLGAME-26AUG27BBLREY",
+          "title": "Banja Luka vs Vikingur Reykjavik: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXUECLGAME-26AUG27STGNJA",
+          "title": "St. Gallen vs Nordsjaelland: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "copa_del_rey": {
+      "event_count": 66,
+      "game_team_labels": {
+        "Atletico": 6,
+        "Real Sociedad": 6,
+        "Barcelona": 5,
+        "Bilbao": 5,
+        "Alaves": 3,
+        "Albacete": 3,
+        "Real Betis": 3,
+        "Valencia": 3,
+        "Burgos": 2,
+        "Cultural Leonesa": 2,
+        "Elche": 2,
+        "La Coruna": 2,
+        "Osasuna": 2,
+        "Real Madrid": 2,
+        "Santander": 2,
+        "Vallecano": 2,
+        "AD Sporting Hortaleza": 1,
+        "Atletico Baleares": 1,
+        "Atletico Calatayud": 1,
+        "Atletico Melilla CF": 1,
+        "Atletico Union Guimar": 1,
+        "Auriense Cented Academy": 1,
+        "CD Anaitasuna": 1,
+        "CD Baztan": 1,
+        "CD Ceuta 6 de Junio": 1,
+        "CD San Jose de Soria": 1,
+        "Celta Vigo": 1,
+        "Cp Talayuela": 1,
+        "Eibar": 1,
+        "Eldense": 1,
+        "Getafe": 1,
+        "Gijon": 1,
+        "Granada": 1,
+        "Guadalajara": 1,
+        "Huesca": 1,
+        "Ibiza Sant Rafel FC": 1,
+        "Levante": 1,
+        "Mallorca": 1,
+        "Murcia": 1,
+        "Noja": 1,
+        "Ourense": 1,
+        "Prat": 1,
+        "Ribadesella CF": 1,
+        "Sevilla": 1,
+        "Sporting de Alcazar CF": 1,
+        "Talavera": 1,
+        "Tedeon": 1,
+        "UB Lebrijana": 1,
+        "UD Maracena": 1,
+        "UE Tavernes": 1,
+        "Unico Atletico Pinatarense": 1,
+        "Villarreal": 1
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXCOPADELREYGAME-26SEP27MARTAV",
+          "title": "UD Maracena vs UE Tavernes",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPADELREYGAME-26SEP27TALSPO",
+          "title": "Cp Talayuela vs Sporting de Alcazar CF",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPADELREYGAME-26SEP27IBIAEP",
+          "title": "Ibiza Sant Rafel FC vs Prat",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPADELREYGAME-26SEP27SPOATL",
+          "title": "AD Sporting Hortaleza vs Atletico Union Guimar",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPADELREYGAME-26SEP27AURSJS",
+          "title": "Auriense Cented Academy vs CD San Jose de Soria",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPADELREYGAME-26SEP26UNIATL",
+          "title": "Unico Atletico Pinatarense vs Atletico Melilla CF",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPADELREYGAME-26SEP26RIBNOJ",
+          "title": "Ribadesella CF vs Noja",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPADELREYGAME-26SEP26LEBCEU",
+          "title": "UB Lebrijana vs CD Ceuta 6 de Junio",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "dfb_pokal": {
+      "event_count": 146,
+      "game_team_labels": {
+        "Bayern Munich": 5,
+        "Stuttgart": 5,
+        "Freiburg": 4,
+        "Leverkusen": 4,
+        "Hertha": 3,
+        "Kiel": 3,
+        "Leipzig": 3,
+        "St. Pauli": 3,
+        "Bochum": 2,
+        "Darmstadt": 2,
+        "Dortmund": 2,
+        "Hamburg": 2,
+        "Kaiserslautern": 2,
+        "Magdeburg": 2,
+        "M´gladbach": 2,
+        "Union Berlin": 2,
+        "1860 Munich": 1,
+        "Altglienicke": 1,
+        "Aue": 1,
+        "Augsburg": 1,
+        "Bahlinger SC": 1,
+        "Bielefeld": 1,
+        "Braunschweig": 1,
+        "Bremen": 1,
+        "Cottbus": 1,
+        "Dresden": 1,
+        "Duisburg": 1,
+        "Dusseldorf": 1,
+        "Elversberg": 1,
+        "FC Köln": 1,
+        "Frankfurt": 1,
+        "Greuther Furth": 1,
+        "Großaspach": 1,
+        "HEBC Hamburg": 1,
+        "Halle": 1,
+        "Hannover": 1,
+        "Heidenheim": 1,
+        "Hemelingen": 1,
+        "Hoffenheim": 1,
+        "Jeddeloh II": 1,
+        "Jena": 1,
+        "Karlsruhe": 1,
+        "Krieschow": 1,
+        "Luneburg": 1,
+        "Mainz": 1,
+        "Mannheim": 1,
+        "Munster": 1,
+        "Nuremberg": 1,
+        "Osnabruck": 1,
+        "Paderborn": 1,
+        "Phonix Lubeck": 1,
+        "Rhynern": 1,
+        "Rostock": 1,
+        "Rot-Weiss Essen": 1,
+        "Saarbrucken": 1,
+        "Schalke": 1,
+        "Schott Mainz": 1,
+        "St. Tonis": 1,
+        "Trier": 1,
+        "Verl": 1,
+        "Viktoria Cologne": 1,
+        "Wiesbaden": 1,
+        "Wolfsburg": 1,
+        "Wurzburg": 1
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXDFBPOKALGAME-26SEP02OSNBMU",
+          "title": "Osnabruck vs Bayern Munich: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXDFBPOKALGAME-26SEP01HEBCBVB",
+          "title": "HEBC Hamburg vs Dortmund: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXDFBPOKALGAME-26AUG24HFCSCH",
+          "title": "Halle vs Schalke: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXDFBPOKALGAME-26AUG24WURKOE",
+          "title": "Wurzburg vs FC Köln: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXDFBPOKALGAME-26AUG24SCVHSV",
+          "title": "Verl vs Hamburg: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXDFBPOKALGAME-26AUG24ALTWOB",
+          "title": "Altglienicke vs Wolfsburg: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXDFBPOKALGAME-26AUG23RWESTP",
+          "title": "Rot-Weiss Essen vs St. Pauli: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXDFBPOKALGAME-26AUG23PHOPAD",
+          "title": "Phonix Lubeck vs Paderborn: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "coppa_italia": {
+      "event_count": 135,
+      "game_team_labels": {
+        "Lazio": 6,
+        "Inter": 5,
+        "Atalanta": 4,
+        "Como": 4,
+        "Fiorentina": 4,
+        "Genoa": 4,
+        "Parma Calcio": 4,
+        "Torino": 4,
+        "Cagliari": 3,
+        "Cremonese": 3,
+        "Mantova": 3,
+        "Palermo": 3,
+        "Pisa": 3,
+        "Sudtirol Bolzano": 3,
+        "Udinese": 3,
+        "Venezia": 3,
+        "Arezzo": 2,
+        "Ascoli": 2,
+        "Benevento": 2,
+        "Bologna": 2,
+        "Catania": 2,
+        "Frosinone": 2,
+        "Hellas Verona": 2,
+        "Juventus": 2,
+        "Monza": 2,
+        "Napoli": 2,
+        "Sassuolo": 2,
+        "Avellino": 1,
+        "Carrarese": 1,
+        "Catanzaro": 1,
+        "Cesena": 1,
+        "Empoli": 1,
+        "Entella": 1,
+        "L.R. Vicenza": 1,
+        "Lecce": 1,
+        "Milan": 1,
+        "Modena": 1,
+        "Padova": 1,
+        "Potenza": 1,
+        "Ravenna": 1,
+        "Roma": 1,
+        "Sampdoria": 1,
+        "Stabia": 1,
+        "Union Brescia": 1
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXCOPPAITALIAGAME-26SEP15FIOPIS",
+          "title": "Fiorentina vs Pisa: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPPAITALIAGAME-26SEP15GENFCS",
+          "title": "Genoa vs Sudtirol Bolzano: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPPAITALIAGAME-26SEP03CAGVER",
+          "title": "Cagliari vs Hellas Verona: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPPAITALIAGAME-26SEP03PALMAN",
+          "title": "Palermo vs Mantova: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPPAITALIAGAME-26SEP03MANPAL",
+          "title": "Mantova vs Palermo: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPPAITALIAGAME-26SEP02UDIVEN",
+          "title": "Udinese vs Venezia: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPPAITALIAGAME-26SEP02SASFRO",
+          "title": "Sassuolo vs Frosinone: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCOPPAITALIAGAME-26SEP02PISFIO",
+          "title": "Pisa vs Fiorentina: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    },
+    "copa_libertadores": {
+      "event_count": 162,
+      "game_team_labels": {
+        "Corinthians": 10,
+        "Estudiantes La Plata": 10,
+        "Flamengo": 10,
+        "Ind. del Valle": 10,
+        "Palmeiras": 10,
+        "Platense": 10,
+        "Fluminense": 9,
+        "LDU Quito": 9,
+        "Cerro Porteno": 8,
+        "Coquimbo": 8,
+        "Mirassol": 8,
+        "Rosario": 8,
+        "Cruzeiro": 7,
+        "Rivadavia": 7,
+        "Tolima": 7,
+        "Universidad Catolica": 7,
+        "Cusco": 6,
+        "Ind. Medellin": 6,
+        "Independ. Santa Fe": 6,
+        "Junior": 6,
+        "Lanus": 6,
+        "Libertad": 6,
+        "Nacional": 6,
+        "Penarol": 6,
+        "Sporting Cristal": 6,
+        "UCV": 6,
+        "Always Ready": 5,
+        "Barcelona": 5,
+        "Boca Juniors": 5,
+        "Bolivar": 5,
+        "La Guaira": 5,
+        "Universitario": 5
+      },
+      "game_examples": [
+        {
+          "event_ticker": "KXCONMEBOLLIBGAME-26SEP17FLAIND",
+          "title": "Flamengo vs Ind. del Valle: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCONMEBOLLIBGAME-26SEP16CORELP",
+          "title": "Corinthians vs Estudiantes La Plata: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCONMEBOLLIBGAME-26SEP16LDUPAL",
+          "title": "LDU Quito vs Palmeiras: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCONMEBOLLIBGAME-26SEP15PLAFLU",
+          "title": "Platense vs Fluminense: Regulation Time Moneyline",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCONMEBOLLIBGAME-26SEP10INDFLA",
+          "title": "Ind. del Valle vs Flamengo",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCONMEBOLLIBGAME-26SEP09ELPCOR",
+          "title": "Estudiantes La Plata vs Corinthians",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCONMEBOLLIBGAME-26SEP09PALLDU",
+          "title": "Palmeiras vs LDU Quito",
+          "status": null,
+          "milestones": []
+        },
+        {
+          "event_ticker": "KXCONMEBOLLIBGAME-26SEP08FLUPLA",
+          "title": "Fluminense vs Platense",
+          "status": null,
+          "milestones": []
+        }
+      ]
+    }
+  },
+  "polymarket": {
+    "super_lig": {
+      "event_count": 4,
+      "team_labels": {
+        "Alanyaspor - Total Corners": 1,
+        "Amed Sportif": 1,
+        "Gaziantep FK - Total Corners": 1,
+        "Gençlerbirliği SK - Total Corners": 1,
+        "Kocaelispor": 1,
+        "Rams Başakşehir FK": 1,
+        "Rams Başakşehir FK - Total Corners": 1,
+        "Çorum FK": 1
+      },
+      "examples": [
+        {
+          "id": "954169",
+          "title": "Amed Sportif vs. Rams Başakşehir FK - Total Corners",
+          "slug": "tur-ame-iba-2026-09-13-total-corners",
+          "startDate": "2026-09-02T16:44:49Z"
+        },
+        {
+          "id": "970456",
+          "title": "Kocaelispor vs. Gaziantep FK - Total Corners",
+          "slug": "tur-koc-gfk-2026-09-19-total-corners",
+          "startDate": "2026-09-05T16:44:29Z"
+        },
+        {
+          "id": "970457",
+          "title": "Çorum FK vs. Alanyaspor - Total Corners",
+          "slug": "tur-cf-ala-2026-09-19-total-corners",
+          "startDate": "2026-09-05T16:44:39Z"
+        },
+        {
+          "id": "976902",
+          "title": "Rams Başakşehir FK vs. Gençlerbirliği SK - Total Corners",
+          "slug": "tur-iba-gen-2026-09-19-total-corners",
+          "startDate": "2026-09-06T16:46:38Z"
+        }
+      ]
+    },
+    "primeira_liga": {
+      "event_count": 17,
+      "team_labels": {
+        "SC Braga": 7,
+        "Académico de Viseu FC - Total Corners": 2,
+        "CF Estrela da Amadora": 2,
+        "Casa Pia AC - Total Corners": 2,
+        "Gil Vicente FC": 2,
+        "Rio Ave FC - Total Corners": 2,
+        "CD Nacional": 1,
+        "CF Estrela da Amadora - Total Corners": 1,
+        "CS Marítimo": 1,
+        "Estoril Praia": 1,
+        "FC Alverca": 1,
+        "FC Arouca - Total Corners": 1,
+        "FC Famalicão - Total Corners": 1,
+        "Gil Vicente FC - Exact Score": 1,
+        "Gil Vicente FC - First Team to Score": 1,
+        "Gil Vicente FC - Halftime Result": 1,
+        "Gil Vicente FC - More Markets": 1,
+        "Gil Vicente FC - Second Half Result": 1,
+        "Gil Vicente FC - Total Corners": 1,
+        "Rio Ave FC": 1,
+        "Sport Lisboa e Benfica": 1,
+        "Sporting CP - Total Corners": 1,
+        "Vitória SC": 1
+      },
+      "examples": [
+        {
+          "id": "748937",
+          "title": "Vitória SC vs. FC Arouca - Total Corners",
+          "slug": "por-gui-aro-2026-08-08-total-corners",
+          "startDate": "2026-07-25T21:15:48Z"
+        },
+        {
+          "id": "748944",
+          "title": "CS Marítimo vs. Casa Pia AC - Total Corners",
+          "slug": "por-csm-cas-2026-08-08-total-corners",
+          "startDate": "2026-07-25T21:15:57Z"
+        },
+        {
+          "id": "752763",
+          "title": "CF Estrela da Amadora vs. Sporting CP - Total Corners",
+          "slug": "por-ama-spo-2026-08-08-total-corners",
+          "startDate": "2026-07-26T19:16:46Z"
+        },
+        {
+          "id": "763528",
+          "title": "Gil Vicente FC vs. Rio Ave FC - Total Corners",
+          "slug": "por-gil-rio-2026-08-09-total-corners",
+          "startDate": "2026-07-28T18:15:37Z"
+        },
+        {
+          "id": "791997",
+          "title": "SC Braga vs. Gil Vicente FC",
+          "slug": "por-scb-gil-2026-08-16",
+          "startDate": "2026-08-03T17:45:24Z"
+        },
+        {
+          "id": "792012",
+          "title": "SC Braga vs. Gil Vicente FC - Halftime Result",
+          "slug": "por-scb-gil-2026-08-16-halftime-result",
+          "startDate": "2026-08-03T17:45:49Z"
+        }
+      ]
+    },
+    "ligue_1": {
+      "event_count": 2,
+      "team_labels": {
+        "Angers SCO": 1,
+        "ES Troyes AC - Total Corners": 1,
+        "FC Lorient - 1st Half Exact Score": 1,
+        "Le Mans FC": 1
+      },
+      "examples": [
+        {
+          "id": "973944",
+          "title": "Angers SCO vs. ES Troyes AC - Total Corners",
+          "slug": "fl1-ang-tro-2026-09-19-total-corners",
+          "startDate": "2026-09-06T04:45:20Z"
+        },
+        {
+          "id": "1006265",
+          "title": "Le Mans FC vs. FC Lorient - 1st Half Exact Score",
+          "slug": "fl1-lmf-lor-2026-09-19-first-half-exact-score",
+          "startDate": "2026-09-11T20:00:03Z"
+        }
+      ]
+    },
+    "eredivisie": {
+      "event_count": 4,
+      "team_labels": {
+        "ADO Den Haag": 1,
+        "AZ": 1,
+        "FC Twente - Total Corners": 1,
+        "NEC - Total Corners": 1,
+        "SC Cambuur-Leeuwarden - Total Corners": 1,
+        "SC Heerenveen": 1,
+        "Telstar 1963 - Total Corners": 1,
+        "Willem II Tilburg": 1
+      },
+      "examples": [
+        {
+          "id": "761689",
+          "title": "SC Heerenveen vs. FC Twente - Total Corners",
+          "slug": "ere-her1-twe-2026-08-09-total-corners",
+          "startDate": "2026-07-28T15:15:17Z"
+        },
+        {
+          "id": "781625",
+          "title": "Willem II Tilburg vs. NEC - Total Corners",
+          "slug": "ere-wii-nec-2026-08-15-total-corners",
+          "startDate": "2026-08-01T15:15:17Z"
+        },
+        {
+          "id": "970051",
+          "title": "ADO Den Haag vs. SC Cambuur-Leeuwarden - Total Corners",
+          "slug": "ere-ado-cam-2026-09-19-total-corners",
+          "startDate": "2026-09-05T14:44:58Z"
+        },
+        {
+          "id": "976354",
+          "title": "AZ vs. Telstar 1963 - Total Corners",
+          "slug": "ere-az-tel-2026-09-20-total-corners",
+          "startDate": "2026-09-06T14:44:18Z"
+        }
+      ]
+    },
+    "scottish_premiership": {
+      "event_count": 9,
+      "team_labels": {
+        "Hibernian FC": 2,
+        "Motherwell FC - Total Corners": 2,
+        "St Johnstone FC": 2,
+        "Aberdeen FC - Total Corners": 1,
+        "Celtic FC": 1,
+        "Dundee FC": 1,
+        "Dundee United FC - Total Corners": 1,
+        "Falkirk FC - Total Corners": 1,
+        "Heart of Midlothian FC - Total Corners": 1,
+        "Hibernian FC - Total Corners": 1,
+        "Kilmarnock FC": 1,
+        "Kilmarnock FC - Total Corners": 1,
+        "Rangers FC": 1,
+        "Rangers FC - Total Corners": 1,
+        "St Mirren FC": 1
+      },
+      "examples": [
+        {
+          "id": "734449",
+          "title": "Hibernian FC vs. Motherwell FC - Total Corners",
+          "slug": "scop-hib-mot-2026-08-02-total-corners",
+          "startDate": "2026-07-22T21:07:19.593141Z"
+        },
+        {
+          "id": "734452",
+          "title": "St Johnstone FC vs. Kilmarnock FC - Total Corners",
+          "slug": "scop-joh-kil-2026-08-02-total-corners",
+          "startDate": "2026-07-22T20:27:21.632799Z"
+        },
+        {
+          "id": "760503",
+          "title": "Rangers FC vs. Hibernian FC - Total Corners",
+          "slug": "scop-ran-hib-2026-08-09-total-corners",
+          "startDate": "2026-07-28T09:15:17Z"
+        },
+        {
+          "id": "975185",
+          "title": "Kilmarnock FC vs. Heart of Midlothian FC - Total Corners",
+          "slug": "scop-kil-hmi-2026-09-19-total-corners",
+          "startDate": "2026-09-06T09:44:22Z"
+        },
+        {
+          "id": "975186",
+          "title": "St Johnstone FC vs. Falkirk FC - Total Corners",
+          "slug": "scop-joh-fal-2026-09-19-total-corners",
+          "startDate": "2026-09-06T09:44:32Z"
+        },
+        {
+          "id": "975187",
+          "title": "St Mirren FC vs. Dundee United FC - Total Corners",
+          "slug": "scop-stm-dun-2026-09-19-total-corners",
+          "startDate": "2026-09-06T09:44:42Z"
+        }
+      ]
+    },
+    "belgian_pro_league": {
+      "event_count": 8,
+      "team_labels": {
+        "Club Brugge": 2,
+        "Royal Charleroi SC": 2,
+        "Union Saint-Gilloise - Total Corners": 2,
+        "Cercle Brugge - Total Corners": 1,
+        "KRC Genk - Total Corners": 1,
+        "KVC Westerlo": 1,
+        "Lommel SK - Total Corners": 1,
+        "Oud-Heverlee Leuven - Total Corners": 1,
+        "RSC Anderlecht": 1,
+        "Royal Antwerp FC - Total Corners": 1,
+        "SV Zulte Waregem": 1,
+        "SV Zulte Waregem - Total Corners": 1,
+        "St. Truidense VV": 1
+      },
+      "examples": [
+        {
+          "id": "791535",
+          "title": "SV Zulte Waregem vs. KRC Genk - Total Corners",
+          "slug": "bel1-zul-gen-2026-08-09-total-corners",
+          "startDate": "2026-08-03T16:24:55Z"
+        },
+        {
+          "id": "791536",
+          "title": "Royal Charleroi SC vs. Oud-Heverlee Leuven - Total Corners",
+          "slug": "bel1-rch-ohl-2026-08-09-total-corners",
+          "startDate": "2026-08-03T16:25:03Z"
+        },
+        {
+          "id": "791538",
+          "title": "St. Truidense VV vs. Lommel SK - Total Corners",
+          "slug": "bel1-stt-lom-2026-08-08-total-corners",
+          "startDate": "2026-08-03T16:25:38Z"
+        },
+        {
+          "id": "791539",
+          "title": "KVC Westerlo vs. Union Saint-Gilloise - Total Corners",
+          "slug": "bel1-wes-usg-2026-08-08-total-corners",
+          "startDate": "2026-08-03T16:25:54Z"
+        },
+        {
+          "id": "861300",
+          "title": "Club Brugge vs. Cercle Brugge - Total Corners",
+          "slug": "bel1-bru-cer-2026-08-23-total-corners",
+          "startDate": "2026-08-16T19:44:47Z"
+        },
+        {
+          "id": "948795",
+          "title": "Royal Charleroi SC vs. Union Saint-Gilloise - Total Corners",
+          "slug": "bel1-rch-usg-2026-09-05-total-corners",
+          "startDate": "2026-09-01T18:45:05Z"
+        }
+      ]
+    },
+    "league_one": {
+      "event_count": 177,
+      "team_labels": {
+        "Oxford United FC": 10,
+        "AFC Wimbledon": 9,
+        "Barnsley FC": 9,
+        "Blackpool FC": 9,
+        "Bromley FC": 9,
+        "Leyton Orient FC": 9,
+        "Luton Town FC": 9,
+        "Reading FC": 9,
+        "Stevenage FC": 9,
+        "Bradford City AFC": 8,
+        "Burton Albion FC": 8,
+        "Cambridge United FC": 8,
+        "Doncaster Rovers FC": 8,
+        "Huddersfield Town AFC": 8,
+        "Leicester City FC": 8,
+        "Mansfield Town FC": 8,
+        "Milton Keynes Dons FC": 8,
+        "Notts County FC": 8,
+        "Peterborough United FC": 8,
+        "Plymouth Argyle FC": 8,
+        "Sheffield Wednesday FC": 8,
+        "Wigan Athletic FC": 8,
+        "Wycombe Wanderers FC": 8,
+        "Stockport County FC": 7,
+        "Barnsley FC - Total Corners": 2,
+        "Bradford City AFC - Total Corners": 2,
+        "Cambridge United FC - Total Corners": 2,
+        "Huddersfield Town AFC - Total Corners": 2,
+        "Milton Keynes Dons FC - Total Corners": 2,
+        "Oxford United FC - Total Corners": 2,
+        "Plymouth Argyle FC - Total Corners": 2,
+        "Reading FC - Exact Score": 2,
+        "Reading FC - First Team to Score": 2,
+        "Reading FC - Halftime Result": 2,
+        "Reading FC - More Markets": 2,
+        "Reading FC - Second Half Result": 2,
+        "Reading FC - Total Corners": 2,
+        "Stevenage FC - Total Corners": 2,
+        "Wigan Athletic FC - Total Corners": 2,
+        "AFC Wimbledon - Exact Score": 1,
+        "AFC Wimbledon - First Team to Score": 1,
+        "AFC Wimbledon - Halftime Result": 1,
+        "AFC Wimbledon - More Markets": 1,
+        "AFC Wimbledon - Second Half Result": 1,
+        "AFC Wimbledon - Total Corners": 1,
+        "Barnsley FC - Exact Score": 1,
+        "Barnsley FC - First Team to Score": 1,
+        "Barnsley FC - Halftime Result": 1,
+        "Barnsley FC - More Markets": 1,
+        "Barnsley FC - Second Half Result": 1,
+        "Blackpool FC - Exact Score": 1,
+        "Blackpool FC - First Team to Score": 1,
+        "Blackpool FC - Halftime Result": 1,
+        "Blackpool FC - More Markets": 1,
+        "Blackpool FC - Second Half Result": 1,
+        "Blackpool FC - Total Corners": 1,
+        "Bradford City AFC - Exact Score": 1,
+        "Bradford City AFC - First Team to Score": 1,
+        "Bradford City AFC - Halftime Result": 1,
+        "Bradford City AFC - More Markets": 1,
+        "Bradford City AFC - Second Half Result": 1,
+        "Bromley FC - Exact Score": 1,
+        "Bromley FC - First Team to Score": 1,
+        "Bromley FC - Halftime Result": 1,
+        "Bromley FC - More Markets": 1,
+        "Bromley FC - Second Half Result": 1,
+        "Bromley FC - Total Corners": 1,
+        "Burton Albion FC - Exact Score": 1,
+        "Burton Albion FC - First Team to Score": 1,
+        "Burton Albion FC - Halftime Result": 1,
+        "Burton Albion FC - More Markets": 1,
+        "Burton Albion FC - Second Half Result": 1,
+        "Burton Albion FC - Total Corners": 1,
+        "Cambridge United FC - Exact Score": 1,
+        "Cambridge United FC - First Team to Score": 1,
+        "Cambridge United FC - Halftime Result": 1,
+        "Cambridge United FC - More Markets": 1,
+        "Cambridge United FC - Second Half Result": 1,
+        "Doncaster Rovers FC - Exact Score": 1,
+        "Doncaster Rovers FC - First Team to Score": 1,
+        "Doncaster Rovers FC - Halftime Result": 1,
+        "Doncaster Rovers FC - More Markets": 1,
+        "Doncaster Rovers FC - Second Half Result": 1,
+        "Doncaster Rovers FC - Total Corners": 1,
+        "Huddersfield Town AFC - Exact Score": 1,
+        "Huddersfield Town AFC - First Team to Score": 1,
+        "Huddersfield Town AFC - Halftime Result": 1,
+        "Huddersfield Town AFC - More Markets": 1,
+        "Huddersfield Town AFC - Second Half Result": 1,
+        "Leicester City FC - Exact Score": 1,
+        "Leicester City FC - First Team to Score": 1,
+        "Leicester City FC - Halftime Result": 1,
+        "Leicester City FC - More Markets": 1,
+        "Leicester City FC - Second Half Result": 1,
+        "Leicester City FC - Total Corners": 1,
+        "Leyton Orient FC - Exact Score": 1,
+        "Leyton Orient FC - First Team to Score": 1,
+        "Leyton Orient FC - Halftime Result": 1,
+        "Leyton Orient FC - More Markets": 1,
+        "Leyton Orient FC - Second Half Result": 1,
+        "Leyton Orient FC - Total Corners": 1,
+        "Luton Town FC - Exact Score": 1,
+        "Luton Town FC - First Team to Score": 1,
+        "Luton Town FC - Halftime Result": 1,
+        "Luton Town FC - More Markets": 1,
+        "Luton Town FC - Second Half Result": 1,
+        "Luton Town FC - Total Corners": 1,
+        "Mansfield Town FC - Exact Score": 1,
+        "Mansfield Town FC - First Team to Score": 1,
+        "Mansfield Town FC - Halftime Result": 1,
+        "Mansfield Town FC - More Markets": 1,
+        "Mansfield Town FC - Second Half Result": 1,
+        "Mansfield Town FC - Total Corners": 1,
+        "Milton Keynes Dons FC - Exact Score": 1,
+        "Milton Keynes Dons FC - First Team to Score": 1,
+        "Milton Keynes Dons FC - Halftime Result": 1,
+        "Milton Keynes Dons FC - More Markets": 1,
+        "Milton Keynes Dons FC - Second Half Result": 1,
+        "Notts County FC - Exact Score": 1,
+        "Notts County FC - First Team to Score": 1,
+        "Notts County FC - Halftime Result": 1,
+        "Notts County FC - More Markets": 1,
+        "Notts County FC - Second Half Result": 1,
+        "Notts County FC - Total Corners": 1,
+        "Oxford United FC - Exact Score": 1,
+        "Oxford United FC - First Team to Score": 1,
+        "Oxford United FC - Halftime Result": 1,
+        "Oxford United FC - More Markets": 1,
+        "Oxford United FC - Second Half Result": 1,
+        "Peterborough United FC - Exact Score": 1,
+        "Peterborough United FC - First Team to Score": 1,
+        "Peterborough United FC - Halftime Result": 1,
+        "Peterborough United FC - More Markets": 1,
+        "Peterborough United FC - Second Half Result": 1,
+        "Peterborough United FC - Total Corners": 1,
+        "Plymouth Argyle FC - Exact Score": 1,
+        "Plymouth Argyle FC - First Team to Score": 1,
+        "Plymouth Argyle FC - Halftime Result": 1,
+        "Plymouth Argyle FC - More Markets": 1,
+        "Plymouth Argyle FC - Second Half Result": 1,
+        "Sheffield Wednesday FC - Exact Score": 1,
+        "Sheffield Wednesday FC - First Team to Score": 1,
+        "Sheffield Wednesday FC - Halftime Result": 1,
+        "Sheffield Wednesday FC - More Markets": 1,
+        "Sheffield Wednesday FC - Second Half Result": 1,
+        "Sheffield Wednesday FC - Total Corners": 1,
+        "Stevenage FC - Exact Score": 1,
+        "Stevenage FC - First Team to Score": 1,
+        "Stevenage FC - Halftime Result": 1,
+        "Stevenage FC - More Markets": 1,
+        "Stevenage FC - Second Half Result": 1,
+        "Wigan Athletic FC - Exact Score": 1,
+        "Wigan Athletic FC - First Team to Score": 1,
+        "Wigan Athletic FC - Halftime Result": 1,
+        "Wigan Athletic FC - More Markets": 1,
+        "Wigan Athletic FC - Second Half Result": 1,
+        "Wycombe Wanderers FC - Exact Score": 1,
+        "Wycombe Wanderers FC - First Team to Score": 1,
+        "Wycombe Wanderers FC - Halftime Result": 1,
+        "Wycombe Wanderers FC - More Markets": 1,
+        "Wycombe Wanderers FC - Second Half Result": 1,
+        "Wycombe Wanderers FC - Total Corners": 1
+      },
+      "examples": [
+        {
+          "id": "785405",
+          "title": "Oxford United FC vs. Milton Keynes Dons FC - Total Corners",
+          "slug": "el1-oxf-mkd-2026-08-15-total-corners",
+          "startDate": "2026-08-02T08:15:51Z"
+        },
+        {
+          "id": "820039",
+          "title": "Stevenage FC vs. Oxford United FC - Total Corners",
+          "slug": "el1-ste-oxf-2026-08-22-total-corners",
+          "startDate": "2026-08-09T08:18:18Z"
+        },
+        {
+          "id": "858332",
+          "title": "Leyton Orient FC vs. Barnsley FC - Total Corners",
+          "slug": "el1-ley-bar-2026-08-29-total-corners",
+          "startDate": "2026-08-16T08:45:15Z"
+        },
+        {
+          "id": "864069",
+          "title": "AFC Wimbledon vs. Wigan Athletic FC - Total Corners",
+          "slug": "el1-wim-wig-2026-08-30-total-corners",
+          "startDate": "2026-08-17T08:44:59Z"
+        },
+        {
+          "id": "894322",
+          "title": "Barnsley FC vs. Stevenage FC - Total Corners",
+          "slug": "el1-bar-ste-2026-09-05-total-corners",
+          "startDate": "2026-08-23T08:45:15Z"
+        },
+        {
+          "id": "914842",
+          "title": "Oxford United FC vs. Reading FC",
+          "slug": "el1-oxf-rea-2026-09-08",
+          "startDate": "2026-08-26T08:15:13Z"
+        }
+      ]
+    },
+    "brasileirao": {
+      "event_count": 21,
+      "team_labels": {
+        "São Paulo FC": 7,
+        "CA Mineiro": 6,
+        "Clube do Remo": 3,
+        "CR Flamengo - Total Corners": 2,
+        "Coritiba FBC - Total Corners": 2,
+        "Grêmio FBPA": 2,
+        "Red Bull Bragantino - Total Corners": 2,
+        "Botafogo FR": 1,
+        "CR Vasco da Gama": 1,
+        "Cruzeiro EC": 1,
+        "EC Vitória - Total Corners": 1,
+        "Fluminense FC - Total Corners": 1,
+        "Red Bull Bragantino": 1,
+        "Red Bull Bragantino - Exact Score": 1,
+        "Red Bull Bragantino - First Team to Score": 1,
+        "Red Bull Bragantino - Halftime Result": 1,
+        "Red Bull Bragantino - Second Half Result": 1,
+        "SE Palmeiras - Total Corners": 1,
+        "Santos FC": 1,
+        "Santos FC - Exact Score": 1,
+        "Santos FC - First Team to Score": 1,
+        "Santos FC - Halftime Result": 1,
+        "Santos FC - More Markets": 1,
+        "Santos FC - Second Half Result": 1,
+        "Santos FC - Total Corners": 1
+      },
+      "examples": [
+        {
+          "id": "734405",
+          "title": "Clube do Remo vs. EC Vitória - Total Corners",
+          "slug": "bra-cre-vit-2026-07-26-total-corners",
+          "startDate": "2026-07-22T20:23:55.250744Z"
+        },
+        {
+          "id": "734407",
+          "title": "Grêmio FBPA vs. Fluminense FC - Total Corners",
+          "slug": "bra-gre-flu-2026-07-26-total-corners",
+          "startDate": "2026-07-22T20:44:49.396633Z"
+        },
+        {
+          "id": "823661",
+          "title": "Cruzeiro EC vs. CR Flamengo - Total Corners",
+          "slug": "bra-cru-fla-2026-08-22-total-corners",
+          "startDate": "2026-08-09T19:16:15Z"
+        },
+        {
+          "id": "872331",
+          "title": "Clube do Remo vs. Coritiba FBC - Total Corners",
+          "slug": "bra-cre-cor-2026-08-31-total-corners",
+          "startDate": "2026-08-18T19:44:23Z"
+        },
+        {
+          "id": "897590",
+          "title": "Clube do Remo vs. CR Flamengo - Total Corners",
+          "slug": "bra-cre-fla-2026-09-06-total-corners",
+          "startDate": "2026-08-23T19:44:23Z"
+        },
+        {
+          "id": "949321",
+          "title": "Botafogo FR vs. Red Bull Bragantino - Total Corners",
+          "slug": "bra-bot-bra-2026-09-12-total-corners",
+          "startDate": "2026-09-01T19:44:57Z"
+        }
+      ]
+    },
+    "argentina_primera": {
+      "event_count": 70,
+      "team_labels": {
+        "CA Aldosivi": 8,
+        "CA Barracas Central": 8,
+        "CA Lanús": 8,
+        "CA Tucumán": 8,
+        "CS Independiente Rivadavia": 8,
+        "CA Independiente": 7,
+        "AA Argentinos Juniors": 6,
+        "CA Huracán": 6,
+        "CA Newell's Old Boys": 6,
+        "CSyD Defensa y Justicia": 6,
+        "Instituto AC Córdoba": 3,
+        "CA San Lorenzo de Almagro - Total Corners": 2,
+        "Instituto AC Córdoba - Total Corners": 2,
+        "CA Aldosivi - Exact Score": 1,
+        "CA Aldosivi - First Team to Score": 1,
+        "CA Aldosivi - Halftime Result": 1,
+        "CA Aldosivi - Second Half Result": 1,
+        "CA Aldosivi - Total Corners": 1,
+        "CA Barracas Central - Exact Score": 1,
+        "CA Barracas Central - First Team to Score": 1,
+        "CA Barracas Central - Halftime Result": 1,
+        "CA Barracas Central - Second Half Result": 1,
+        "CA Barracas Central - Total Corners": 1,
+        "CA Huracán - Total Corners": 1,
+        "CA Lanús - Exact Score": 1,
+        "CA Lanús - First Team to Score": 1,
+        "CA Lanús - Halftime Result": 1,
+        "CA Lanús - Second Half Result": 1,
+        "CA Lanús - Total Corners": 1,
+        "CA River Plate": 1,
+        "CA San Lorenzo de Almagro": 1,
+        "CA San Lorenzo de Almagro - Exact Score": 1,
+        "CA San Lorenzo de Almagro - First Team to Score": 1,
+        "CA San Lorenzo de Almagro - Halftime Result": 1,
+        "CA San Lorenzo de Almagro - Second Half Result": 1,
+        "CA Talleres": 1,
+        "CA Talleres - Total Corners": 1,
+        "CA Tigre": 1,
+        "CA Tigre - Exact Score": 1,
+        "CA Tigre - First Team to Score": 1,
+        "CA Tigre - Halftime Result": 1,
+        "CA Tigre - Second Half Result": 1,
+        "CA Tigre - Total Corners": 1,
+        "CA Tucumán - Exact Score": 1,
+        "CA Tucumán - First Team to Score": 1,
+        "CA Tucumán - Halftime Result": 1,
+        "CA Tucumán - More Markets": 1,
+        "CA Tucumán - Second Half Result": 1,
+        "CA Tucumán - Total Corners": 1,
+        "CA Unión - Total Corners": 1,
+        "CS Independiente Rivadavia - Exact Score": 1,
+        "CS Independiente Rivadavia - First Team to Score": 1,
+        "CS Independiente Rivadavia - Halftime Result": 1,
+        "CS Independiente Rivadavia - More Markets": 1,
+        "CS Independiente Rivadavia - Second Half Result": 1,
+        "CS Independiente Rivadavia - Total Corners": 1,
+        "Estudiantes de La Plata": 1,
+        "Estudiantes de La Plata - Exact Score": 1,
+        "Estudiantes de La Plata - First Team to Score": 1,
+        "Estudiantes de La Plata - Halftime Result": 1,
+        "Estudiantes de La Plata - More Markets": 1,
+        "Estudiantes de La Plata - Second Half Result": 1,
+        "Estudiantes de La Plata - Total Corners": 1,
+        "Gimnasia y Esgrima de La Plata": 1,
+        "Gimnasia y Esgrima de La Plata - Exact Score": 1,
+        "Gimnasia y Esgrima de La Plata - First Team to Score": 1,
+        "Gimnasia y Esgrima de La Plata - Halftime Result": 1,
+        "Gimnasia y Esgrima de La Plata - More Markets": 1,
+        "Gimnasia y Esgrima de La Plata - Second Half Result": 1,
+        "Gimnasia y Esgrima de La Plata - Total Corners": 1,
+        "Instituto AC Córdoba - Exact Score": 1,
+        "Instituto AC Córdoba - First Team to Score": 1,
+        "Instituto AC Córdoba - Halftime Result": 1,
+        "Instituto AC Córdoba - More Markets": 1,
+        "Instituto AC Córdoba - Second Half Result": 1
+      },
+      "examples": [
+        {
+          "id": "822621",
+          "title": "CA Tucumán vs. Instituto AC Córdoba - Total Corners",
+          "slug": "arg-cat-iac-2026-08-22-total-corners",
+          "startDate": "2026-08-09T18:16:33Z"
+        },
+        {
+          "id": "871568",
+          "title": "Instituto AC Córdoba vs. CA San Lorenzo de Almagro - Total Corners",
+          "slug": "arg-iac-slo-2026-08-31-total-corners",
+          "startDate": "2026-08-18T17:44:41Z"
+        },
+        {
+          "id": "937392",
+          "title": "CA Talleres vs. CA Unión - Total Corners",
+          "slug": "arg-tal-uni-2026-09-12-total-corners",
+          "startDate": "2026-08-30T17:44:17Z"
+        },
+        {
+          "id": "977206",
+          "title": "Instituto AC Córdoba vs. CA Talleres - Total Corners",
+          "slug": "arg-iac-tal-2026-09-19-total-corners",
+          "startDate": "2026-09-06T17:44:15Z"
+        },
+        {
+          "id": "977207",
+          "title": "CA River Plate vs. CA Huracán - Total Corners",
+          "slug": "arg-riv-cah-2026-09-19-total-corners",
+          "startDate": "2026-09-06T17:44:20Z"
+        },
+        {
+          "id": "983834",
+          "title": "CA Aldosivi vs. CA Tucumán",
+          "slug": "arg-ald-cat-2026-09-21",
+          "startDate": "2026-09-07T17:30:33Z"
+        }
+      ]
+    },
+    "saudi_pro_league": {
+      "event_count": 2,
+      "team_labels": {
+        "Al Ettifaq Saudi Club": 1,
+        "Al Ettifaq Saudi Club - Total Corners": 1,
+        "Al Fateh Saudi Club": 1,
+        "Al Riyadh Saudi Club - Total Corners": 1
+      },
+      "examples": [
+        {
+          "id": "778480",
+          "title": "Al Ettifaq Saudi Club vs. Al Riyadh Saudi Club - Total Corners",
+          "slug": "spl-ett-riy-2026-08-14-total-corners",
+          "startDate": "2026-07-31T20:15:40Z"
+        },
+        {
+          "id": "817534",
+          "title": "Al Fateh Saudi Club vs. Al Ettifaq Saudi Club - Total Corners",
+          "slug": "spl-fat-ett-2026-08-22-total-corners",
+          "startDate": "2026-08-08T20:15:44Z"
+        }
+      ]
+    },
+    "j1_league": {
+      "event_count": 11,
+      "team_labels": {
+        "Cerezo Ōsaka": 2,
+        "FC Mito Holly Hock - Total Corners": 2,
+        "Shimizu S-Pulse - Total Corners": 2,
+        "Vissel Kōbe - Total Corners": 2,
+        "Avispa Fukuoka": 1,
+        "Avispa Fukuoka - Total Corners": 1,
+        "FC Machida Zelvia": 1,
+        "FC Machida Zelvia - Total Corners": 1,
+        "FC Tōkyō": 1,
+        "Fagiano Okayama - Total Corners": 1,
+        "Gamba Ōsaka": 1,
+        "JEF United Ichihara Chiba - Total Corners": 1,
+        "Kashima Antlers": 1,
+        "Kashiwa Reysol": 1,
+        "Kashiwa Reysol - Total Corners": 1,
+        "Kyōto Sanga FC": 1,
+        "Nagoya Grampus": 1,
+        "Sanfrecce Hiroshima": 1
+      },
+      "examples": [
+        {
+          "id": "752683",
+          "title": "Sanfrecce Hiroshima vs. JEF United Ichihara Chiba - Total Corners",
+          "slug": "jap-san-jef-2026-08-08-total-corners",
+          "startDate": "2026-07-26T19:16:01Z"
+        },
+        {
+          "id": "752697",
+          "title": "Kashiwa Reysol vs. FC Mito Holly Hock - Total Corners",
+          "slug": "jap-rey-hol-2026-08-08-total-corners",
+          "startDate": "2026-07-26T19:16:06Z"
+        },
+        {
+          "id": "752715",
+          "title": "Nagoya Grampus vs. Shimizu S-Pulse - Total Corners",
+          "slug": "jap-ngr-ssp-2026-08-08-total-corners",
+          "startDate": "2026-07-26T19:16:12Z"
+        },
+        {
+          "id": "752727",
+          "title": "FC Tōkyō vs. FC Machida Zelvia - Total Corners",
+          "slug": "jap-fct-zel-2026-08-08-total-corners",
+          "startDate": "2026-07-26T19:16:19Z"
+        },
+        {
+          "id": "752736",
+          "title": "Cerezo Ōsaka vs. Fagiano Okayama - Total Corners",
+          "slug": "jap-cer-fag-2026-08-08-total-corners",
+          "startDate": "2026-07-26T19:16:25Z"
+        },
+        {
+          "id": "752745",
+          "title": "Avispa Fukuoka vs. Vissel Kōbe - Total Corners",
+          "slug": "jap-avi-vis-2026-08-08-total-corners",
+          "startDate": "2026-07-26T19:16:31Z"
+        }
+      ]
+    },
+    "champions_league": {
+      "event_count": 2,
+      "team_labels": {
+        "Aarhus GF - Total Corners": 1,
+        "NEC - Total Corners": 1,
+        "Olympiakós SFP": 1,
+        "Sabah FK": 1
+      },
+      "examples": [
+        {
+          "id": "773513",
+          "title": "Sabah FK vs. Aarhus GF - Total Corners",
+          "slug": "ucl-sf-agf-2026-08-11-total-corners",
+          "startDate": "2026-07-30T18:15:59Z"
+        },
+        {
+          "id": "773520",
+          "title": "Olympiakós SFP vs. NEC - Total Corners",
+          "slug": "ucl-oly-nec-2026-08-04-total-corners",
+          "startDate": "2026-07-30T18:16:31Z"
+        }
+      ]
+    },
+    "europa_league": {
+      "event_count": 6,
+      "team_labels": {
+        "FC Red Bull Salzburg": 2,
+        "AS Omónoia Leukosías": 1,
+        "FC Sheriff Tiraspol - Total Corners": 1,
+        "Ferencvárosi TC - Total Corners": 1,
+        "Górnik Zabrze": 1,
+        "Jagiellonia Białystok - Total Corners": 1,
+        "MH Maccabi Tel Aviv": 1,
+        "Mjällby AIF - Total Corners": 1,
+        "Páfos FC - Total Corners": 1,
+        "RC Celta de Vigo - Total Corners": 1,
+        "SK Iberia 1999": 1
+      },
+      "examples": [
+        {
+          "id": "734359",
+          "title": "MH Maccabi Tel Aviv vs. FC Sheriff Tiraspol - Total Corners",
+          "slug": "uel-mta-she-2026-07-30-total-corners",
+          "startDate": "2026-07-22T20:20:15.07519Z"
+        },
+        {
+          "id": "777939",
+          "title": "FC Red Bull Salzburg vs. Páfos FC - Total Corners",
+          "slug": "uel-rbs-paf-2026-08-06-total-corners",
+          "startDate": "2026-07-31T19:15:26Z"
+        },
+        {
+          "id": "807905",
+          "title": "Górnik Zabrze vs. Ferencvárosi TC - Total Corners",
+          "slug": "uel-gor1-ftc-2026-08-13-total-corners",
+          "startDate": "2026-08-06T20:15:37Z"
+        },
+        {
+          "id": "866558",
+          "title": "FC Red Bull Salzburg vs. Mjällby AIF - Total Corners",
+          "slug": "uel-rbs-ma-2026-08-27-total-corners",
+          "startDate": "2026-08-17T18:51:58Z"
+        },
+        {
+          "id": "866561",
+          "title": "SK Iberia 1999 vs. Jagiellonia Białystok - Total Corners",
+          "slug": "uel-sab-jag-2026-08-27-total-corners",
+          "startDate": "2026-08-17T18:49:18Z"
+        },
+        {
+          "id": "954695",
+          "title": "AS Omónoia Leukosías vs. RC Celta de Vigo - Total Corners",
+          "slug": "uel-omo-cel1-2026-09-16-total-corners",
+          "startDate": "2026-09-02T18:34:32Z"
+        }
+      ]
+    },
+    "conference_league": {
+      "event_count": 7,
+      "team_labels": {
+        "AFC Ajax": 1,
+        "AS Monaco FC": 1,
+        "FC Sion - Total Corners": 1,
+        "FK Austria Wien": 1,
+        "Górnik Zabrze - Total Corners": 1,
+        "Hibernian FC - Total Corners": 1,
+        "KAA Gent": 1,
+        "KÍ - Total Corners": 1,
+        "Larne FC": 1,
+        "Lincoln Red Imps FC - Total Corners": 1,
+        "Motherwell FC": 1,
+        "Rīga FC": 1,
+        "SC Braga - Total Corners": 1,
+        "SC Freiburg - Total Corners": 1
+      },
+      "examples": [
+        {
+          "id": "855228",
+          "title": "Rīga FC vs. KÍ - Total Corners",
+          "slug": "col-rfc1-ki-2026-08-27-total-corners",
+          "startDate": "2026-08-15T19:45:39Z"
+        },
+        {
+          "id": "866609",
+          "title": "Larne FC vs. Lincoln Red Imps FC - Total Corners",
+          "slug": "col-lar-lin-2026-08-27-total-corners",
+          "startDate": "2026-08-17T18:55:51Z"
+        },
+        {
+          "id": "866614",
+          "title": "FK Austria Wien vs. SC Braga - Total Corners",
+          "slug": "col-aus-scb-2026-08-27-total-corners",
+          "startDate": "2026-08-17T18:55:20Z"
+        },
+        {
+          "id": "866617",
+          "title": "AFC Ajax vs. FC Sion - Total Corners",
+          "slug": "col-aja-sio-2026-08-27-total-corners",
+          "startDate": "2026-08-17T18:55:08Z"
+        },
+        {
+          "id": "866639",
+          "title": "AS Monaco FC vs. Górnik Zabrze - Total Corners",
+          "slug": "col-asm-gor-2026-08-27-total-corners",
+          "startDate": "2026-08-17T18:56:27Z"
+        },
+        {
+          "id": "866662",
+          "title": "KAA Gent vs. Hibernian FC - Total Corners",
+          "slug": "col-gen-hib1-2026-08-20-total-corners",
+          "startDate": "2026-08-17T18:58:58Z"
+        }
+      ]
+    },
+    "copa_del_rey": {
+      "event_count": 140,
+      "team_labels": {
+        "AD Sporting Hortaleza": 8,
+        "AE Prat": 8,
+        "AU Güímar": 8,
+        "Atlético Calatayud CF": 8,
+        "Atlético Melilla CF": 8,
+        "Auriense CA": 8,
+        "CD Anaitasuna": 8,
+        "CD Baztán": 8,
+        "CD Ceuta 6 de Junio": 8,
+        "CD San José de Soria": 8,
+        "CD Tedeón": 8,
+        "CF Sant Rafel": 8,
+        "CP Talayuela": 8,
+        "Ribadesella CF": 8,
+        "SD Noja": 8,
+        "Sporting de Alcázar CF": 8,
+        "UB Lebrijana": 8,
+        "UD Maracena": 8,
+        "UD Pinatar": 8,
+        "UE Tavernes": 8,
+        "AD Sporting Hortaleza - Exact Score": 1,
+        "AD Sporting Hortaleza - First Team to Score": 1,
+        "AD Sporting Hortaleza - Halftime Result": 1,
+        "AD Sporting Hortaleza - More Markets": 1,
+        "AD Sporting Hortaleza - Second Half Result": 1,
+        "AD Sporting Hortaleza - Total Corners": 1,
+        "AE Prat - Exact Score": 1,
+        "AE Prat - First Team to Score": 1,
+        "AE Prat - Halftime Result": 1,
+        "AE Prat - More Markets": 1,
+        "AE Prat - Second Half Result": 1,
+        "AE Prat - Total Corners": 1,
+        "AU Güímar - Exact Score": 1,
+        "AU Güímar - First Team to Score": 1,
+        "AU Güímar - Halftime Result": 1,
+        "AU Güímar - More Markets": 1,
+        "AU Güímar - Second Half Result": 1,
+        "AU Güímar - Total Corners": 1,
+        "Atlético Calatayud CF - Exact Score": 1,
+        "Atlético Calatayud CF - First Team to Score": 1,
+        "Atlético Calatayud CF - Halftime Result": 1,
+        "Atlético Calatayud CF - More Markets": 1,
+        "Atlético Calatayud CF - Second Half Result": 1,
+        "Atlético Calatayud CF - Total Corners": 1,
+        "Atlético Melilla CF - Exact Score": 1,
+        "Atlético Melilla CF - First Team to Score": 1,
+        "Atlético Melilla CF - Halftime Result": 1,
+        "Atlético Melilla CF - More Markets": 1,
+        "Atlético Melilla CF - Second Half Result": 1,
+        "Atlético Melilla CF - Total Corners": 1,
+        "Auriense CA - Exact Score": 1,
+        "Auriense CA - First Team to Score": 1,
+        "Auriense CA - Halftime Result": 1,
+        "Auriense CA - More Markets": 1,
+        "Auriense CA - Second Half Result": 1,
+        "Auriense CA - Total Corners": 1,
+        "CD Anaitasuna - Exact Score": 1,
+        "CD Anaitasuna - First Team to Score": 1,
+        "CD Anaitasuna - Halftime Result": 1,
+        "CD Anaitasuna - More Markets": 1,
+        "CD Anaitasuna - Second Half Result": 1,
+        "CD Anaitasuna - Total Corners": 1,
+        "CD Baztán - Exact Score": 1,
+        "CD Baztán - First Team to Score": 1,
+        "CD Baztán - Halftime Result": 1,
+        "CD Baztán - More Markets": 1,
+        "CD Baztán - Second Half Result": 1,
+        "CD Baztán - Total Corners": 1,
+        "CD Ceuta 6 de Junio - Exact Score": 1,
+        "CD Ceuta 6 de Junio - First Team to Score": 1,
+        "CD Ceuta 6 de Junio - Halftime Result": 1,
+        "CD Ceuta 6 de Junio - More Markets": 1,
+        "CD Ceuta 6 de Junio - Second Half Result": 1,
+        "CD Ceuta 6 de Junio - Total Corners": 1,
+        "CD San José de Soria - Exact Score": 1,
+        "CD San José de Soria - First Team to Score": 1,
+        "CD San José de Soria - Halftime Result": 1,
+        "CD San José de Soria - More Markets": 1,
+        "CD San José de Soria - Second Half Result": 1,
+        "CD San José de Soria - Total Corners": 1,
+        "CD Tedeón - Exact Score": 1,
+        "CD Tedeón - First Team to Score": 1,
+        "CD Tedeón - Halftime Result": 1,
+        "CD Tedeón - More Markets": 1,
+        "CD Tedeón - Second Half Result": 1,
+        "CD Tedeón - Total Corners": 1,
+        "CF Sant Rafel - Exact Score": 1,
+        "CF Sant Rafel - First Team to Score": 1,
+        "CF Sant Rafel - Halftime Result": 1,
+        "CF Sant Rafel - More Markets": 1,
+        "CF Sant Rafel - Second Half Result": 1,
+        "CF Sant Rafel - Total Corners": 1,
+        "CP Talayuela - Exact Score": 1,
+        "CP Talayuela - First Team to Score": 1,
+        "CP Talayuela - Halftime Result": 1,
+        "CP Talayuela - More Markets": 1,
+        "CP Talayuela - Second Half Result": 1,
+        "CP Talayuela - Total Corners": 1,
+        "Ribadesella CF - Exact Score": 1,
+        "Ribadesella CF - First Team to Score": 1,
+        "Ribadesella CF - Halftime Result": 1,
+        "Ribadesella CF - More Markets": 1,
+        "Ribadesella CF - Second Half Result": 1,
+        "Ribadesella CF - Total Corners": 1,
+        "SD Noja - Exact Score": 1,
+        "SD Noja - First Team to Score": 1,
+        "SD Noja - Halftime Result": 1,
+        "SD Noja - More Markets": 1,
+        "SD Noja - Second Half Result": 1,
+        "SD Noja - Total Corners": 1,
+        "Sporting de Alcázar CF - Exact Score": 1,
+        "Sporting de Alcázar CF - First Team to Score": 1,
+        "Sporting de Alcázar CF - Halftime Result": 1,
+        "Sporting de Alcázar CF - More Markets": 1,
+        "Sporting de Alcázar CF - Second Half Result": 1,
+        "Sporting de Alcázar CF - Total Corners": 1,
+        "UB Lebrijana - Exact Score": 1,
+        "UB Lebrijana - First Team to Score": 1,
+        "UB Lebrijana - Halftime Result": 1,
+        "UB Lebrijana - More Markets": 1,
+        "UB Lebrijana - Second Half Result": 1,
+        "UB Lebrijana - Total Corners": 1,
+        "UD Maracena - Exact Score": 1,
+        "UD Maracena - First Team to Score": 1,
+        "UD Maracena - Halftime Result": 1,
+        "UD Maracena - More Markets": 1,
+        "UD Maracena - Second Half Result": 1,
+        "UD Maracena - Total Corners": 1,
+        "UD Pinatar - Exact Score": 1,
+        "UD Pinatar - First Team to Score": 1,
+        "UD Pinatar - Halftime Result": 1,
+        "UD Pinatar - More Markets": 1,
+        "UD Pinatar - Second Half Result": 1,
+        "UD Pinatar - Total Corners": 1,
+        "UE Tavernes - Exact Score": 1,
+        "UE Tavernes - First Team to Score": 1,
+        "UE Tavernes - Halftime Result": 1,
+        "UE Tavernes - More Markets": 1,
+        "UE Tavernes - Second Half Result": 1,
+        "UE Tavernes - Total Corners": 1
+      },
+      "examples": [
+        {
+          "id": "1033949",
+          "title": "Atlético Calatayud CF vs. CD Baztán",
+          "slug": "cdr-atl-cd3-2026-09-26",
+          "startDate": "2026-09-16T17:00:13Z"
+        },
+        {
+          "id": "1033950",
+          "title": "UB Lebrijana vs. CD Ceuta 6 de Junio",
+          "slug": "cdr-leb-cd5-2026-09-26",
+          "startDate": "2026-09-16T17:00:15Z"
+        },
+        {
+          "id": "1033952",
+          "title": "CD Anaitasuna vs. CD Tedeón",
+          "slug": "cdr-ana-ted-2026-09-26",
+          "startDate": "2026-09-16T17:00:17Z"
+        },
+        {
+          "id": "1033954",
+          "title": "Ribadesella CF vs. SD Noja",
+          "slug": "cdr-rib-noj-2026-09-26",
+          "startDate": "2026-09-16T17:00:17Z"
+        },
+        {
+          "id": "1033956",
+          "title": "UD Pinatar vs. Atlético Melilla CF",
+          "slug": "cdr-pin-ame-2026-09-26",
+          "startDate": "2026-09-16T17:00:19Z"
+        },
+        {
+          "id": "1033957",
+          "title": "AD Sporting Hortaleza vs. AU Güímar",
+          "slug": "cdr-hor-au-2026-09-27",
+          "startDate": "2026-09-16T17:00:19Z"
+        }
+      ]
+    },
+    "dfb_pokal": {
+      "event_count": 1,
+      "team_labels": {
+        "Holstein Kiel - Total Corners": 1,
+        "TSV 1860 München": 1
+      },
+      "examples": [
+        {
+          "id": "816402",
+          "title": "TSV 1860 München vs. Holstein Kiel - Total Corners",
+          "slug": "dfb-60m-ksv-2026-08-22-total-corners",
+          "startDate": "2026-08-08T17:16:13Z"
+        }
+      ]
+    },
+    "coppa_italia": {
+      "event_count": 2,
+      "team_labels": {
+        "AC Monza - Total Corners": 1,
+        "Parma Calcio 1913": 1,
+        "Torino FC": 1,
+        "US Cremonese - Total Corners": 1
+      },
+      "examples": [
+        {
+          "id": "875756",
+          "title": "Torino FC vs. AC Monza - Total Corners",
+          "slug": "itc-tor-mon1-2026-09-01-total-corners",
+          "startDate": "2026-08-19T13:44:26Z"
+        },
+        {
+          "id": "875757",
+          "title": "Parma Calcio 1913 vs. US Cremonese - Total Corners",
+          "slug": "itc-par-cre-2026-09-01-total-corners",
+          "startDate": "2026-08-19T13:44:31Z"
+        }
+      ]
+    },
+    "copa_libertadores": {
+      "event_count": 1,
+      "team_labels": {
+        "CD Tolima - Exact Score": 1,
+        "Club Universitario de Deportes": 1
+      },
+      "examples": [
+        {
+          "id": "467251",
+          "title": "Club Universitario de Deportes vs. CD Tolima - Exact Score",
+          "slug": "lib-uni-tol-2026-05-26-exact-score",
+          "startDate": "2026-05-09T17:00:58.994972Z"
+        }
+      ]
+    }
+  },
+  "matchbook": {
+    "open_event_count": 68,
+    "closed_sample_count": 7,
+    "competitions": {
+      "UEFA Nations League A": {
+        "count": 12,
+        "examples": [
+          "Netherlands vs Germany",
+          "Norway vs Denmark",
+          "Portugal vs Wales",
+          "Serbia vs Greece",
+          "Italy vs Belgium",
+          "Turkey vs France",
+          "Czech Republic vs Croatia",
+          "England vs Spain",
+          "Denmark vs Wales",
+          "Serbia vs Netherlands",
+          "Germany vs Greece",
+          "Norway vs Portugal"
+        ]
+      },
+      "UEFA Nations League B": {
+        "count": 10,
+        "examples": [
+          "Austria vs Israel",
+          "Kosovo vs Republic of Ireland",
+          "Georgia vs Northern Ireland",
+          "Hungary vs Ukraine",
+          "Poland vs Bosnia-Herzegovina",
+          "Sweden vs Romania",
+          "Slovenia vs Scotland",
+          "North Macedonia vs Switzerland",
+          "Austria vs Kosovo",
+          "Israel vs Republic of Ireland"
+        ]
+      },
+      "England Premier League": {
+        "count": 9,
+        "examples": [
+          "English Premier League 2026/27 - Outright",
+          "English Premier League - Relegation 2026/27",
+          "English Premier League - Top Goalscorer 2026/27",
+          "English Premier League 2026/27 - Top 10 Finish",
+          "English Premier League 2026/27 - Top 2 Finish",
+          "English Premier League 2026/27 - Top 4 Finish",
+          "English Premier League 2026/27 - Top 5 Finish",
+          "English Premier League 2026/27 - Top 6 Finish",
+          "English Premier League 2026/27 - To Finish Bottom"
+        ]
+      },
+      "Bulgaria Second Division": {
+        "count": 4,
+        "examples": [
+          "Sportist Svoge vs Vihren Sandanski",
+          "PFC Dobrudzha Dobrich vs CSKA Sofia II",
+          "Spartak Pleven vs PFC Ludogorets Razgrad II",
+          "Montana vs Hebar Pazardzhik"
+        ]
+      },
+      "Argentina Liga Profesional de Fútbol": {
+        "count": 3,
+        "examples": [
+          "Aldosivi vs Atlético Tucumán",
+          "Barracas Central vs Independiente Rivadavia",
+          "Lanus vs Estudiantes de La Plata"
+        ]
+      },
+      "Greece Super League 2": {
+        "count": 3,
+        "examples": [
+          "Pyrgos AFC vs Athlitiki Enosi Larissa",
+          "Panthrakikos vs Niki Volos FC",
+          "PAOK B vs Nestos Chrysoupoli FC"
+        ]
+      },
+      "Mexico Liga MX": {
+        "count": 3,
+        "examples": [
+          "Atlante vs Monterrey",
+          "Club Tijuana vs Atlas",
+          "Liga MX Apertura - Winner 2026"
+        ]
+      },
+      "UNKNOWN": {
+        "count": 3,
+        "examples": [
+          "Test A vs Test B",
+          "Primeira Liga 2026/27 BT",
+          "English League 2 2026/2027 BT"
+        ]
+      },
+      "Argentina Primera Nacional": {
+        "count": 2,
+        "examples": [
+          "Tristán Suárez vs Atlanta",
+          "Nueva Chicago vs Patronato"
+        ]
+      },
+      "Bolivia Cup": {
+        "count": 2,
+        "examples": [
+          "Guabira vs San Antonio",
+          "Club Independiente Petrolero vs Real Tomayapo"
+        ]
+      },
+      "Brazil Serie B": {
+        "count": 2,
+        "examples": [
+          "Criciúma EC vs Operário Ferroviário",
+          "Cuiabá EC vs Clube Náutico Capibaribe"
+        ]
+      },
+      "England Championship": {
+        "count": 2,
+        "examples": [
+          "English Championship 2026/27 - Winner",
+          "English Championship 2026/27 - To Be Relegate BT "
+        ]
+      },
+      "International Friendlies": {
+        "count": 2,
+        "examples": [
+          "Fiji vs Vanuatu",
+          "Dominica vs Anguilla"
+        ]
+      },
+      "Romania Liga 1": {
+        "count": 2,
+        "examples": [
+          "Otelul Galati vs Corvinul 1921 Hunedoara",
+          "Petrolul Ploiesti vs FC Csikszereda Miercurea Ciuc"
+        ]
+      },
+      "Brazilian Serie A": {
+        "count": 1,
+        "examples": [
+          "Brazilian Serie A 2026  - Winner 2026"
+        ]
+      },
+      "Denmark 1.Division": {
+        "count": 1,
+        "examples": [
+          "HB Køge vs Hobro IK"
+        ]
+      },
+      "Ecuador Serie A": {
+        "count": 1,
+        "examples": [
+          "Manta FC vs Orense SC"
+        ]
+      },
+      "England League 1": {
+        "count": 1,
+        "examples": [
+          "English League 1 - Winner 2026/27"
+        ]
+      },
+      "England League 2": {
+        "count": 1,
+        "examples": [
+          "England League 2 - Winner 2026/27"
+        ]
+      },
+      "England Premier League 2": {
+        "count": 1,
+        "examples": [
+          "AFC Bournemouth U21 vs Stoke City U21"
+        ]
+      },
+      "England Professional Development League": {
+        "count": 1,
+        "examples": [
+          "Bolton Wanderers FC U21 vs Queens Park Rangers U21"
+        ]
+      },
+      "Estonia Esiliiga A": {
+        "count": 1,
+        "examples": [
+          "Nõmme Kalju FC U21 vs FC Nõmme United U21"
+        ]
+      },
+      "FIFA World Cup": {
+        "count": 1,
+        "examples": [
+          "FIFA World Cup 2026 Top Asian Team BT"
+        ]
+      },
+      "Italy Serie A": {
+        "count": 1,
+        "examples": [
+          "Italian Serie A - Winner 2026/27"
+        ]
+      },
+      "National League": {
+        "count": 1,
+        "examples": [
+          "English National League 2026/27 BT"
+        ]
+      },
+      "Scotland Premiership": {
+        "count": 1,
+        "examples": [
+          "Scottish Premiership 2026/27 - Winner"
+        ]
+      },
+      "Spain La Liga": {
+        "count": 1,
+        "examples": [
+          "Spanish La Liga 2026/27 - Winner"
+        ]
+      },
+      "Spain La Liga 2": {
+        "count": 1,
+        "examples": [
+          "Castellon SAD to be promoted by any means La Liga2 2025/2026 BT"
+        ]
+      },
+      "UEFA Champions League": {
+        "count": 1,
+        "examples": [
+          "UEFA Champions League 2026/27 - Winner"
+        ]
+      },
+      "Uruguay Primera División": {
+        "count": 1,
+        "examples": [
+          "Central Español vs Montevideo City Torque"
+        ]
+      }
+    }
+  },
+  "ligue1_ftts_sibling_example": {
+    "game": {
+      "event_ticker": "KXLIGUE1GAME-26SEP20OLMPSG",
+      "title": "Marseille vs PSG",
+      "sub_title": "OLM vs PSG (Sep 20)",
+      "series_ticker": "KXLIGUE1GAME",
+      "status": null,
+      "strike_date": null,
+      "target_datetime": null,
+      "market_titles": [
+        "Marseille wins",
+        "PSG wins",
+        "Tie is the result"
+      ],
+      "yes_sub_titles": [
+        "Marseille",
+        "PSG",
+        "Tie"
+      ],
+      "milestones": []
+    },
+    "ftts": {
+      "event_ticker": "KXLIGUE1FTTS-26SEP20OLMPSG",
+      "title": "Olympique Marseille vs Paris Saint-Germain: First Team to Score",
+      "sub_title": "OLM vs PSG (Sep 20)",
+      "series_ticker": "KXLIGUE1FTTS",
+      "status": null,
+      "strike_date": null,
+      "target_datetime": null,
+      "market_titles": [
+        "Will Olympique Marseille record the first goal of the game?",
+        "Will Paris Saint-Germain record the first goal of the game?",
+        "Will no goal be scored?"
+      ],
+      "yes_sub_titles": [
+        "Olympique Marseille",
+        "Paris Saint-Germain",
+        "No Goal"
+      ],
+      "milestones": []
+    }
+  }
+}
