@@ -588,8 +588,18 @@ async def test_evening_census_matches_ordinary_gamewin_unknown_1x2s() -> None:
     assert by_home[CONTROL_ET[1]].matched_equivalent_count == 0
     assert by_home[CONTROL_TWO_WAY[1]].matched_equivalent_count == 0
     assert by_home[CONTROL_FIRST_HALF[1]].matched_equivalent_count == 0
-    assert by_home[CONTROL_MB_ONLY[1]].matched_equivalent_count == 0
-    assert by_home[CONTROL_KALSHI_ONLY[0]].matched_equivalent_count == 0
+    mb_only = by_home[CONTROL_MB_ONLY[1]]
+    kalshi_only = by_home[CONTROL_KALSHI_ONLY[0]]
+    assert mb_only.matched_equivalent_count is None
+    assert kalshi_only.matched_equivalent_count is None
+    assert (
+        mb_only.market_evaluation_state
+        == MarketEvaluationState.SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE.value
+    )
+    assert (
+        kalshi_only.market_evaluation_state
+        == MarketEvaluationState.SINGLE_VENUE_NO_CROSS_VENUE_CANDIDATE.value
+    )
     for _event_id, home, _away, _suffix in ORDINARY_FIXTURES:
         assert by_home[home].matched_equivalent_count == 1
 

@@ -554,6 +554,50 @@ async def test_cancelled_concurrent_hot_scan_drains_cluster_and_provider_tasks()
         repository.close()
 
 
+@pytest.mark.asyncio
+async def test_cancelled_hot_scan_keeps_known_fixtures_if_clustering_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel during cooperative clustering must not wipe the known HOT roster."""
+
+    universe = SyntheticUniverse(16, latency_s=0)
+    collector, repository = _collector(universe)
+    try:
+        seed = await _scan(collector, max_event_pairs=16, scan_lane=ScanLane.UNIVERSE.value)
+        assert len(seed.discovered_fixtures) == 16
+        assert seed.fixture_source_events
+
+        async def _interrupt_clustering(self, *args, **kwargs):
+            del self, args, kwargs
+            await asyncio.sleep(0)
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(
+            ReadOnlyCrossVenueCollector,
+            "_cluster_venue_events_cooperative",
+            _interrupt_clustering,
+        )
+        report = await _scan(
+            collector,
+            max_event_pairs=16,
+            scan_lane=ScanLane.HOT.value,
+            identity_scope=[item.canonical_event_id for item in seed.discovered_fixtures],
+            known_source_events=seed.fixture_source_events,
+            hot_market_relationships=relationships_from_fixture_markets(seed.fixture_markets),
+        )
+        assert report.scan_diagnostics["cancelled"] is True
+        assert report.scan_diagnostics["inflight_live"] == 0
+        assert universe.live_provider_calls == 0
+        assert len(report.discovered_fixtures) == 16
+        assert all(
+            item.market_evaluation_state
+            == MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE.value
+            for item in report.discovered_fixtures
+        )
+    finally:
+        repository.close()
+
+
 def test_collector_keeps_mapping_prompt_and_openai_off_the_scan_path() -> None:
     collector_src = inspect.getsource(ReadOnlyCrossVenueCollector)
     scan_src = inspect.getsource(ReadOnlyCrossVenueCollector.collect_and_scan)

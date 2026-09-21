@@ -124,7 +124,17 @@ from sports_hedge.paper.canonical_results import (
     manual_settlement_source_id,
     validate_manual_settlement_outcome,
 )
+from sports_hedge.paper.provider_identity import (
+    catalogue_rows_for_trade,
+    recover_persisted_catalogue_identity,
+)
 from sports_hedge.paper.settlement import PaperSettlementError, compute_paper_settlement
+from sports_hedge.lifecycle.paper import (
+    decide_active_trade_membership,
+    decide_paper_settlement,
+    decide_paper_trade_transition,
+    decide_paper_unwind,
+)
 from sports_hedge.paper.simulator import PaperFillSimulator
 from sports_hedge.paper.trades import (
     OPENING_TRANCHE_ID,
@@ -283,11 +293,13 @@ class PaperOperationsService:
         settings: Settings | None = None,
         ledger: SqlitePaperLedger | None = None,
         trades: SqlitePaperTradeRepository | None = None,
+        catalogue: Any | None = None,
     ) -> None:
         self.watchlist = watchlist
         self.alerts = alerts or PriorityAlertService()
         self.simulator = simulator or PaperFillSimulator()
         self.settings = settings or get_settings()
+        self.catalogue = catalogue
         self.ledger = ledger
         if ledger is not None:
             self.journal = journal or ledger.journal
@@ -1927,7 +1939,8 @@ class PaperOperationsService:
             self.trades.save(trade)
 
     def _promote_active_trade(self, trade: PaperTrade, when: datetime) -> None:
-        if trade.state not in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
+        membership = decide_active_trade_membership(trade.state)
+        if not membership.accepted:
             return
         if trade.active_trade_phase is None:
             trade.active_trade_phase = (
@@ -2081,6 +2094,25 @@ class PaperOperationsService:
                 detail=detail,
             )
         )
+
+    def _record_lifecycle_rejection(
+        self,
+        trade: PaperTrade,
+        decision,
+        occurred_at: datetime,
+    ) -> None:
+        trade.audit.append(
+            PaperTradeAuditEvent(
+                occurred_at=occurred_at,
+                event_type=PaperTradeAuditEventType.LIFECYCLE_REJECTED,
+                detail=decision.reason,
+            )
+        )
+        if self.trades is not None:
+            try:
+                self.trades.save(trade)
+            except Exception:
+                pass
 
     def simulate_fill(
         self,
@@ -2472,12 +2504,34 @@ class PaperOperationsService:
         if persist and self.trades is not None:
             self.trades.save(trade)
 
+    def _recover_catalogue_identity(
+        self,
+        trade: PaperTrade,
+        *,
+        now: datetime | None = None,
+    ) -> PaperTrade:
+        """Exact catalogue native-identity recovery before manual settlement.
+
+        Does not infer a line from scores, labels, or elapsed time. Fail closed
+        when the catalogue cannot prove one unique safe line.
+        """
+
+        rows = catalogue_rows_for_trade(self.catalogue, trade)
+        recovered, changed = recover_persisted_catalogue_identity(
+            trade, catalogue_rows=rows, now=now
+        )
+        if changed and self.trades is not None:
+            self.trades.save(recovered)
+            return recovered
+        return recovered if changed else trade
+
     def settlement_options(self, trade_id: str) -> PaperSettlementOptions:
         if self.trades is None:
             raise PaperOperationsError("paper_trade_repository_unavailable")
         trade = self.trades.get(trade_id)
         if trade is None:
             raise PaperOperationsError("unknown_trade")
+        trade = self._recover_catalogue_identity(trade)
         space = canonical_result_space(trade)
         choices: list[CanonicalResultChoice] = []
         for choice in space.choices:
@@ -2540,6 +2594,7 @@ class PaperOperationsService:
         trade = self.trades.get(trade_id)
         if trade is None:
             raise PaperOperationsError("unknown_trade")
+        trade = self._recover_catalogue_identity(trade, now=request.settled_at or now)
         blocker = validate_manual_settlement_outcome(trade, request.winning_outcome)
         if blocker is not None:
             raise PaperOperationsError(blocker)
@@ -2579,28 +2634,32 @@ class PaperOperationsService:
         if trade is None:
             raise PaperOperationsError("unknown_trade")
         settled_at = request.settled_at or now or datetime.now(UTC)
-        if trade.state is PaperTradeState.CLOSED:
-            if trade.settlement_source == PAPER_UNWIND_SOURCE:
-                raise PaperOperationsError("already_unwound")
-            if (
-                trade.settlement_outcome == request.winning_outcome
-                and trade.settlement_source == request.source
-                and trade.settlement_source_id == request.source_id
-            ):
-                trade.audit.append(
-                    PaperTradeAuditEvent(
-                        occurred_at=settled_at,
-                        event_type=PaperTradeAuditEventType.SETTLEMENT_IDEMPOTENT,
-                        detail="identical settlement request ignored",
-                    )
+        identical = (
+            trade.settlement_outcome == request.winning_outcome
+            and trade.settlement_source == request.source
+            and trade.settlement_source_id == request.source_id
+        )
+        settlement_decision = decide_paper_settlement(
+            trade.state,
+            has_fills=any(leg.filled_stake > 0 for leg in trade.legs),
+            already_unwound=trade.settlement_source == PAPER_UNWIND_SOURCE,
+            identical_request=identical,
+            request_source=request.source,
+            request_source_id=request.source_id,
+        )
+        if not settlement_decision.accepted:
+            self._record_lifecycle_rejection(trade, settlement_decision, settled_at)
+            raise PaperOperationsError(settlement_decision.reason)
+        if settlement_decision.reason == "settlement_idempotent":
+            trade.audit.append(
+                PaperTradeAuditEvent(
+                    occurred_at=settled_at,
+                    event_type=PaperTradeAuditEventType.SETTLEMENT_IDEMPOTENT,
+                    detail="identical settlement request ignored",
                 )
-                self.trades.save(trade)
-                return self.trade_detail(trade_id)
-            raise PaperOperationsError("conflicting_settlement")
-        if trade.state is PaperTradeState.AWAITING_MANUAL_EXTERNAL:
-            raise PaperOperationsError("cannot_settle_unconfirmed_external")
-        if not any(leg.filled_stake > 0 for leg in trade.legs):
-            raise PaperOperationsError("cannot_settle_unfilled_trade")
+            )
+            self.trades.save(trade)
+            return self.trade_detail(trade_id)
         try:
             computation = compute_paper_settlement(trade, winning_outcome=request.winning_outcome)
         except PaperSettlementError as exc:
@@ -2828,23 +2887,29 @@ class PaperOperationsService:
         if trade is None:
             raise PaperOperationsError("unknown_trade")
         unwind_id = paper_unwind_source_id(trade.trade_id)
-        if trade.state is PaperTradeState.CLOSED:
-            if (
+        unwind_decision = decide_paper_unwind(
+            trade.state,
+            identical_unwind=(
                 trade.settlement_source == PAPER_UNWIND_SOURCE
                 and trade.settlement_source_id == unwind_id
-            ):
-                trade.audit.append(
-                    PaperTradeAuditEvent(
-                        occurred_at=occurred,
-                        event_type=PaperTradeAuditEventType.UNWIND_IDEMPOTENT,
-                        detail="identical unwind request ignored",
-                    )
+            ),
+            already_unwound=trade.settlement_source == PAPER_UNWIND_SOURCE,
+            already_settled=trade.state is PaperTradeState.CLOSED
+            and trade.settlement_source != PAPER_UNWIND_SOURCE,
+        )
+        if not unwind_decision.accepted:
+            self._record_lifecycle_rejection(trade, unwind_decision, occurred)
+            raise PaperOperationsError(unwind_decision.reason)
+        if unwind_decision.reason == "unwind_idempotent":
+            trade.audit.append(
+                PaperTradeAuditEvent(
+                    occurred_at=occurred,
+                    event_type=PaperTradeAuditEventType.UNWIND_IDEMPOTENT,
+                    detail="identical unwind request ignored",
                 )
-                self.trades.save(trade)
-                return self.trade_detail(trade_id)
-            if trade.settlement_source == PAPER_UNWIND_SOURCE:
-                raise PaperOperationsError("already_unwound")
-            raise PaperOperationsError("already_settled")
+            )
+            self.trades.save(trade)
+            return self.trade_detail(trade_id)
         decision = self.evaluate_unwind(
             trade_id,
             quotes=quotes,
@@ -3351,6 +3416,14 @@ class PaperOperationsService:
         if existing is not None:
             return existing
         trade = self._new_trade_shell(plan, opportunity, occurred_at, provenance)
+        awaiting = decide_paper_trade_transition(
+            trade.state,
+            PaperTradeState.AWAITING_MANUAL_EXTERNAL,
+            action="await_manual_external",
+        )
+        if not awaiting.accepted:
+            self._record_lifecycle_rejection(trade, awaiting, occurred_at)
+            raise PaperOperationsError(awaiting.reason)
         trade.state = PaperTradeState.AWAITING_MANUAL_EXTERNAL
         trade.legs = _unfilled_legs_from_plan(plan)
         trade.audit.append(
@@ -3461,6 +3534,19 @@ class PaperOperationsService:
         partial = any(leg.filled_stake > 0 for leg in legs) and not fully
         if require_complete and not fully:
             raise PaperOperationsError("incomplete_opening_hedge")
+        target_state = (
+            PaperTradeState.OPEN
+            if fully
+            else PaperTradeState.PARTIAL
+            if partial
+            else PaperTradeState.PENDING
+        )
+        trade_decision = decide_paper_trade_transition(
+            trade.state, target_state, action="record_fills"
+        )
+        if not trade_decision.accepted:
+            self._record_lifecycle_rejection(trade, trade_decision, occurred_at)
+            raise PaperOperationsError(trade_decision.reason)
         trade.legs = legs
         trade.capital_locked_native = native
         trade.capital_locked_gbp = gbp

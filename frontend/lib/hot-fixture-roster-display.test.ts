@@ -236,6 +236,8 @@ describe("HOT roster console placement", () => {
     assert.match(panel, /HOT_ROSTER_TITLE/);
     assert.match(panel, /fastScanRosterSummary/);
     assert.match(panel, /hotFixtureRows/);
+    assert.match(panel, /kickoffLocalLabel\(row\.kickoffUtc, nowMs\)/);
+    assert.doesNotMatch(panel, /kickoffLocalLabel\(row\.kickoffUtc\)/);
     assert.match(css, /hot-zone-panel/);
     assert.doesNotMatch(panel, /getTrackedWatchlist/);
     assert.doesNotMatch(panel, /DEMO_/);
@@ -281,6 +283,33 @@ describe("HOT Zone evaluation state and HOT pricing summary", () => {
         }),
       ),
       "Not evaluated — HOT relationship missing · hot_relationship_missing",
+    );
+    assert.equal(
+      hotEvaluationLabel(
+        fixture({
+          market_evaluation_state: "single_venue_no_cross_venue_candidate",
+          market_evaluation_reason: "single_venue_no_cross_venue_candidate",
+        }),
+      ),
+      "Not evaluated — single-venue (no cross-venue candidate) · single_venue_no_cross_venue_candidate",
+    );
+    assert.equal(
+      hotEvaluationLabel(
+        fixture({
+          market_evaluation_state: "cross_venue_unavailable",
+          market_evaluation_reason: "cross_venue_unavailable",
+        }),
+      ),
+      "Not evaluated — cross-venue unavailable · cross_venue_unavailable",
+    );
+    assert.equal(
+      hotEvaluationLabel(
+        fixture({
+          market_evaluation_state: "upper_bound_below_min_net",
+          market_evaluation_reason: "upper_bound_below_min_net",
+        }),
+      ),
+      "Not evaluated — remaining books cannot reach Min Net Arb · upper_bound_below_min_net",
     );
     assert.equal(
       hotEvaluationLabel(

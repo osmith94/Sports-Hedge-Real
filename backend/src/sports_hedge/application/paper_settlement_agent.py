@@ -23,12 +23,16 @@ from sports_hedge.application.provider_access import (
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.active_trade_journal import ActiveTradeEventType, ActiveTradeReasonCode
-from sports_hedge.paper.provider_identity import recover_persisted_provider_identity
+from sports_hedge.paper.provider_identity import (
+    catalogue_rows_for_trade,
+    recover_persisted_catalogue_identity,
+)
 from sports_hedge.paper.result_resolution import (
     PAPER_AUTO_SETTLEMENT_SOURCE,
     SettlementResolution,
     resolve_paper_trade_settlement,
 )
+from sports_hedge.lifecycle.paper import SETTLEABLE_TRADE_STATES, auto_settle_eligible
 from sports_hedge.paper.trades import (
     PaperSettlementRequest,
     PaperTrade,
@@ -41,7 +45,7 @@ from sports_hedge.venues.matchbook import MatchbookMarketGoneError
 
 LOGGER = logging.getLogger(__name__)
 
-SETTLEABLE_STATES = frozenset({PaperTradeState.OPEN, PaperTradeState.PARTIAL})
+SETTLEABLE_STATES = SETTLEABLE_TRADE_STATES
 
 
 @dataclass
@@ -103,7 +107,7 @@ class PaperSettlementAgent:
         trades = [
             trade
             for trade in self.operations.list_active_trades()
-            if trade.state in SETTLEABLE_STATES
+            if auto_settle_eligible(trade.state)
         ]
         result.examined = len(trades)
         for trade in trades:
@@ -140,6 +144,10 @@ class PaperSettlementAgent:
         now: datetime | None = None,
     ) -> PaperSettlementTradeResult:
         when = now or self.now()
+        if not auto_settle_eligible(trade.state) and trade.state is not PaperTradeState.CLOSED:
+            return PaperSettlementTradeResult(
+                trade_id=trade.trade_id, blocker="illegal_auto_settle_state"
+            )
         if trade.state is PaperTradeState.CLOSED:
             self.operations.record_settlement_reconciliation(
                 trade,
@@ -149,8 +157,8 @@ class PaperSettlementAgent:
                 now=when,
             )
             return PaperSettlementTradeResult(trade_id=trade.trade_id)
-        trade, recovered = recover_persisted_provider_identity(
-            trade, catalogue_rows=self._catalogue_rows(trade)
+        trade, recovered = recover_persisted_catalogue_identity(
+            trade, catalogue_rows=self._catalogue_rows(trade), now=when
         )
         if recovered and self.operations.trades is not None:
             try:
@@ -448,19 +456,7 @@ class PaperSettlementAgent:
         )
 
     def _catalogue_rows(self, trade: PaperTrade) -> list[Any]:
-        catalogue = self.catalogue
-        event_id = str(trade.canonical_event_id or "").strip()
-        if catalogue is None or not event_id:
-            return []
-        getter = getattr(catalogue, "list_rows_for_event", None)
-        if not callable(getter):
-            return []
-        try:
-            rows = getter(event_id)
-        except Exception:
-            LOGGER.debug("catalogue identity lookup failed for %s", trade.trade_id)
-            return []
-        return list(rows or [])
+        return catalogue_rows_for_trade(self.catalogue, trade)
 
 
 def _last_blocker(trade: PaperTrade) -> str | None:

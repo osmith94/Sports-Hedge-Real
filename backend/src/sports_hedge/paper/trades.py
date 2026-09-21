@@ -111,6 +111,7 @@ class PaperTradeAuditEventType(StrEnum):
     SETTLED = "settled"
     SETTLEMENT_IDEMPOTENT = "settlement_idempotent"
     SETTLEMENT_BLOCKED = "settlement_blocked"
+    LEGACY_MARKET_LINE_RECOVERED = "legacy_market_line_recovered_from_catalogue"
     NFL_LIFECYCLE_OBSERVED = "nfl_lifecycle_observed"
     CLOSE_PLAN_EVALUATED = "close_plan_evaluated"
     CLOSE_FILLS_RECORDED = "close_fills_recorded"
@@ -121,6 +122,7 @@ class PaperTradeAuditEventType(StrEnum):
     UNWIND_ATTEMPTED = "unwind_attempted"
     UNWIND_ABORTED = "unwind_aborted"
     DEMO_STORE_REINITIALIZED = "demo_store_reinitialized"
+    LIFECYCLE_REJECTED = "lifecycle_rejected"
 
 
 PAPER_UNWIND_SOURCE = "paper_unwind"

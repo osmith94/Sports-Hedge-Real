@@ -367,6 +367,14 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /Manual HOT refresh/);
     assert.match(scan, /Manual BACKGROUND refresh/);
     assert.match(scan, /Run UNIVERSE now/);
+    assert.match(scan, /Clear universe/);
+    assert.match(scan, /Update existing/);
+    assert.match(scan, /Clear & update/);
+    assert.match(scan, /Clears the live UNIVERSE working set only/);
+    assert.match(scan, /window\.confirm/);
+    assert.match(scan, /universeActionBusy/);
+    assert.match(scan, /clearPaperUniverse/);
+    assert.match(scan, /runPaperUniverse/);
     assert.match(scan, /Football competitions/);
     assert.match(scan, /Run full diagnostic/);
     assert.doesNotMatch(scan, /Run scan/);
@@ -426,6 +434,9 @@ describe("dual cadence operator copy", () => {
     assert.match(api, /\/paper\/collect\/hot/);
     assert.match(api, /\/paper\/collect\/background/);
     assert.match(api, /\/paper\/collect\/universe/);
+    assert.match(api, /\/paper\/universe\/clear/);
+    assert.match(api, /\/paper\/universe\/run/);
+    assert.match(api, /clear_update/);
     assert.match(api, /\/paper\/universe-scope/);
     assert.match(api, /PAPER_HOT_REFRESH_TIMEOUT_MS = 35_000/);
     assert.match(api, /\/paper\/collect`/);

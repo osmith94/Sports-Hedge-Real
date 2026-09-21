@@ -209,10 +209,14 @@ class WatchlistService:
         occurred_at,
         detail: str | None = None,
     ) -> NearOpportunity:
-        with self.repository.transaction():
-            return self._record_paper_fill_locked(
-                opportunity_id, stage=stage, occurred_at=occurred_at, detail=detail
-            )
+        try:
+            with self.repository.transaction():
+                return self._record_paper_fill_locked(
+                    opportunity_id, stage=stage, occurred_at=occurred_at, detail=detail
+                )
+        except ValueError as exc:
+            self._append_lifecycle_rejection(opportunity_id, occurred_at, str(exc))
+            raise
 
     def _record_paper_fill_locked(
         self,
@@ -229,7 +233,10 @@ class WatchlistService:
             OpportunityStatus.PARTIAL,
             OpportunityStatus.FILLED,
         }:
-            raise ValueError("paper fill stage must be PAPER_FILLING, PARTIAL, or FILLED")
+            from sports_hedge.lifecycle.paper import decide_paper_fill
+
+            fill_decision = decide_paper_fill(OpportunityStatus.WATCHING, stage)
+            raise ValueError(fill_decision.reason)
         current = self.repository.get(opportunity_id)
         if current is None:
             raise ValueError(f"unknown opportunity: {opportunity_id}")
@@ -249,6 +256,13 @@ class WatchlistService:
                 current = self._revive_presentation_stale_for_bound_entry(current)
             if current.status is OpportunityStatus.REJECTED:
                 raise ValueError("paper fill can only be recorded for a triggered paper opportunity")
+        from sports_hedge.lifecycle.paper import decide_paper_fill
+
+        fill_decision = decide_paper_fill(
+            current.status, stage, bound_snapshot=bind_snapshot
+        )
+        if not fill_decision.accepted:
+            raise ValueError(fill_decision.reason)
         if current.status not in {
             OpportunityStatus.TRIGGERED,
             OpportunityStatus.PAPER_FILLING,
@@ -320,31 +334,35 @@ class WatchlistService:
         Presentation-stale REJECTED rows are not revived to start a new attempt.
         """
 
-        with self.repository.transaction():
-            current = self.repository.get(opportunity_id)
-            if current is None:
-                raise ValueError(f"unknown opportunity: {opportunity_id}")
-            existing = self.repository.get_started_paper_fill_attempt(opportunity_id)
-            if bind_snapshot:
-                if existing is not None and existing.bound_snapshot:
-                    allowed = current.status in {
-                        OpportunityStatus.TRIGGERED,
-                        OpportunityStatus.PAPER_FILLING,
-                    }
-                else:
-                    allowed = current.status is OpportunityStatus.TRIGGERED
-                if not allowed:
-                    raise ValueError(
-                        "bound snapshot attempt requires a current TRIGGERED snapshot"
-                    )
-            return self._record_paper_fill_locked(
-                opportunity_id,
-                stage=OpportunityStatus.PAPER_FILLING,
-                occurred_at=occurred_at,
-                detail=detail or "paper_fill_attempted_bound_snapshot",
-                bind_snapshot=bind_snapshot,
-                decision_at=decision_at,
-            )
+        try:
+            with self.repository.transaction():
+                current = self.repository.get(opportunity_id)
+                if current is None:
+                    raise ValueError(f"unknown opportunity: {opportunity_id}")
+                existing = self.repository.get_started_paper_fill_attempt(opportunity_id)
+                if bind_snapshot:
+                    if existing is not None and existing.bound_snapshot:
+                        allowed = current.status in {
+                            OpportunityStatus.TRIGGERED,
+                            OpportunityStatus.PAPER_FILLING,
+                        }
+                    else:
+                        allowed = current.status is OpportunityStatus.TRIGGERED
+                    if not allowed:
+                        raise ValueError(
+                            "bound snapshot attempt requires a current TRIGGERED snapshot"
+                        )
+                return self._record_paper_fill_locked(
+                    opportunity_id,
+                    stage=OpportunityStatus.PAPER_FILLING,
+                    occurred_at=occurred_at,
+                    detail=detail or "paper_fill_attempted_bound_snapshot",
+                    bind_snapshot=bind_snapshot,
+                    decision_at=decision_at,
+                )
+        except ValueError as exc:
+            self._append_lifecycle_rejection(opportunity_id, occurred_at, str(exc))
+            raise
 
     def allows_bound_snapshot_entry(
         self, current: NearOpportunity, *, bound_autofill: bool = False
@@ -825,6 +843,25 @@ class WatchlistService:
         if market_family is not None:
             items = [item for item in items if item.market_family == market_family]
         return items
+
+    def _append_lifecycle_rejection(
+        self, opportunity_id: str, occurred_at, reason: str
+    ) -> None:
+        current = self.repository.get(opportunity_id)
+        if current is None:
+            return
+        self.repository.append_event(
+            OpportunityLifecycleEvent(
+                opportunity_id=opportunity_id,
+                occurred_at=occurred_at,
+                event_type=LifecycleEventType.LIFECYCLE_REJECTED,
+                status=current.status,
+                current_net_edge=current.current_net_edge,
+                distance_to_trigger_pp=current.distance_to_trigger_pp,
+                detail=reason,
+                **lifecycle_identity_from_opportunity(current),
+            )
+        )
 
     def _terminal(
         self,

@@ -38,18 +38,30 @@ export function relativeTime(iso: string | null | undefined, now?: number | null
   return new Date(then).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
 }
 
-export function kickoffLocalLabel(iso: string | null | undefined): string {
+const KICKOFF_LOCAL_FORMAT: Intl.DateTimeFormatOptions = {
+  weekday: "short",
+  day: "numeric",
+  month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  timeZoneName: "short",
+};
+
+export function formatKickoffInLocalTimezone(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return new Intl.DateTimeFormat(undefined, KICKOFF_LOCAL_FORMAT).format(date);
+}
+
+export function kickoffLocalLabel(iso: string | null | undefined, now?: number | null): string {
   if (!iso) return "—";
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
-  return new Intl.DateTimeFormat(undefined, {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZoneName: "short",
-  }).format(date);
+  // Locale / time-zone-name rendering is runtime-dependent. SSR and the first
+  // client render must match, so keep the canonical ISO until hydrated nowMs
+  // is available (same pattern as relativeTime / kickoffRelativeLabel).
+  if (now == null || !Number.isFinite(now)) return iso;
+  return formatKickoffInLocalTimezone(iso);
 }
 
 export function kickoffRelativeLabel(

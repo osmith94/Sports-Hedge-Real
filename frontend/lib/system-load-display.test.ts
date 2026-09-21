@@ -73,6 +73,28 @@ describe("system load display", () => {
     );
   });
 
+    it("appends wait, service latency, deadline misses and saturation without p50 language", () => {
+    const lines = systemLoadLines(
+      load({
+        matchbook: {
+          inflight: 4,
+          limit: 4,
+          waiting: 3,
+          wait_ms: 1800,
+          latency_ms: 220,
+          deadline_misses: 2,
+          saturated: true,
+        },
+      }),
+    );
+    assert.match(lines[4].detail, /4\/4 in use · queue 3 · wait 1.8s · svc 220ms · 2 deadline misses · saturated/);
+    const text = lines.map((line) => line.detail).join(" ");
+    assert.doesNotMatch(text, /p50/i);
+    assert.doesNotMatch(text, /p95/i);
+    assert.doesNotMatch(text, /safe/i);
+    assert.doesNotMatch(text, /unsafe/i);
+  });
+
   it("keeps fixture count distinct from catalogue items using backend fields", () => {
     const lines = systemLoadLines(
       load({

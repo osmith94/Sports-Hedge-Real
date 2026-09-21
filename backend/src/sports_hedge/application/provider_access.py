@@ -5,16 +5,20 @@ must not cancel or reset UNIVERSE. After a bounded run of HOT grants while
 UNIVERSE is waiting, the next slot goes to UNIVERSE so a busy HOT roster
 cannot starve discovery.
 
+Issue #473 adds deadline/value-aware ranking and queue metrics on top of
+those slot caps. Limits are never raised here.
+
 Local wait / HOT-priority deferral is not a venue outage.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import IntEnum
+from time import monotonic
 from typing import Any
 
 from sports_hedge.application.scan_lanes import ScanLane
@@ -76,6 +80,10 @@ class _Waiter:
     granted: bool = False
     cancelled: bool = False
     reason: str = HEALTH_WAITING
+    work: Any = None
+    enqueued_mono: float = 0.0
+    granted_mono: float | None = None
+    deadline_mono: float | None = None
 
 
 def _consume_task_result(task: asyncio.Task[Any]) -> None:
@@ -151,6 +159,8 @@ class ProviderAccessSnapshot:
     waiting_by_lane: dict[str, dict[str, int]]
     hot_grants_since_universe: dict[str, int]
     limits: dict[str, int]
+    queue: dict[str, dict[str, Any]] = field(default_factory=dict)
+    deadline_misses_by_lane: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -161,6 +171,8 @@ class ProviderAccessSnapshot:
             },
             "hot_grants_since_universe": dict(self.hot_grants_since_universe),
             "limits": dict(self.limits),
+            "queue": {venue: dict(metrics) for venue, metrics in self.queue.items()},
+            "deadline_misses_by_lane": dict(self.deadline_misses_by_lane),
         }
 
 
@@ -172,6 +184,7 @@ class ProviderAccessLayer:
         limits: Mapping[VenueName, int] | None = None,
         *,
         starvation_hot_grants: int = DEFAULT_STARVATION_HOT_GRANTS,
+        monotonic_clock: Callable[[], float] | None = None,
     ) -> None:
         resolved = limits or DEFAULT_PROVIDER_CONCURRENCY
         self._limits = {
@@ -186,6 +199,18 @@ class ProviderAccessLayer:
         self._seq = 0
         self._cond = asyncio.Condition()
         self._peak_inflight = {venue: 0 for venue in self._limits}
+        self._clock = monotonic_clock or monotonic
+        self._ewma_latency_ms = {venue: 0 for venue in self._limits}
+        self._last_service_ms = {venue: 0 for venue in self._limits}
+        self._deadline_misses = {venue: 0 for venue in self._limits}
+        self._deadline_misses_by_lane = {
+            PRICE_ENGINE_ACTIVE_TRADE_LANE: 0,
+            ScanLane.HOT.value: 0,
+            ScanLane.UNIVERSE.value: 0,
+            PRICE_ENGINE_BACKGROUND_LANE: 0,
+        }
+        self._rate_limited_until_mono = {venue: 0.0 for venue in self._limits}
+        self._backoff_until_mono = {venue: 0.0 for venue in self._limits}
 
     @property
     def limits(self) -> dict[VenueName, int]:
@@ -212,6 +237,42 @@ class ProviderAccessLayer:
                 else:
                     lane = "universe"
                 waiting_by_lane[lane][venue.value] += 1
+        now = self._clock()
+        queue: dict[str, dict[str, Any]] = {}
+        for venue in self._limits:
+            pending = [
+                item
+                for item in self._waiters[venue]
+                if not item.granted and not item.cancelled
+            ]
+            wait_ages = [
+                max(0, int((now - item.enqueued_mono) * 1000))
+                for item in pending
+                if item.enqueued_mono
+            ]
+            remaining = self._rate_limit_remaining(venue, now=now)
+            backoff = self._backoff_remaining(venue, now=now)
+            saturated = self.venue_saturated(venue)
+            backpressure = bool(
+                saturated
+                or remaining > 0
+                or backoff > 0
+                or self._ewma_latency_ms[venue] >= 1500
+                or (self._limits[venue] > 0 and len(pending) >= self._limits[venue])
+            )
+            queue[venue.value] = {
+                "depth": len(pending),
+                "wait_age_ms": max(wait_ages) if wait_ages else 0,
+                "mean_wait_age_ms": (sum(wait_ages) // len(wait_ages)) if wait_ages else 0,
+                "service_latency_ms": int(self._ewma_latency_ms[venue]),
+                "last_service_ms": int(self._last_service_ms[venue]),
+                "deadline_misses": int(self._deadline_misses[venue]),
+                "saturated": saturated,
+                "backpressure": backpressure,
+                "rate_limited": remaining > 0,
+                "rate_limit_remaining_s": remaining,
+                "backoff_remaining_s": backoff,
+            }
         return ProviderAccessSnapshot(
             inflight={venue.value: count for venue, count in self._in_use.items()},
             waiting=waiting,
@@ -220,6 +281,8 @@ class ProviderAccessLayer:
                 venue.value: count for venue, count in self._hot_grants_since_universe.items()
             },
             limits={venue.value: limit for venue, limit in self._limits.items()},
+            queue=queue,
+            deadline_misses_by_lane=dict(self._deadline_misses_by_lane),
         )
 
     def lane_wait_reason(self, lane: ScanLane | str | None) -> str | None:
@@ -251,11 +314,12 @@ class ProviderAccessLayer:
         *,
         lane: ScanLane | str | None = None,
         stage: str = "provider",
+        work: Any = None,
     ) -> AsyncIterator[ProviderLease]:
         if venue not in self._limits:
             yield ProviderLease.unbound()
             return
-        waiter = await self._enqueue(venue, lane=lane, stage=stage)
+        waiter = await self._enqueue(venue, lane=lane, stage=stage, work=work)
         lease = ProviderLease(
             _layer=self,
             _venue=venue,
@@ -276,9 +340,10 @@ class ProviderAccessLayer:
         *,
         lane: ScanLane | str | None,
         stage: str,
+        work: Any = None,
     ) -> _Waiter:
         async with self._cond:
-            waiter = self._make_waiter(venue, lane=lane, stage=stage)
+            waiter = self._make_waiter(venue, lane=lane, stage=stage, work=work)
             self._waiters[venue].append(waiter)
             self._pump(venue)
             return waiter
@@ -289,6 +354,7 @@ class ProviderAccessLayer:
         *,
         lane: ScanLane | str | None,
         stage: str,
+        work: Any = None,
     ) -> _Waiter:
         self._seq += 1
         priority = priority_for_lane(lane)
@@ -306,12 +372,21 @@ class ProviderAccessLayer:
             waiter_lane = PRICE_ENGINE_BACKGROUND_LANE
         else:
             waiter_lane = ScanLane.UNIVERSE.value
+        resolved_work = work
+        if resolved_work is None:
+            from sports_hedge.application.adaptive_scheduler import work_from_lane
+
+            resolved_work = work_from_lane(waiter_lane, seq=self._seq)
+        deadline = getattr(resolved_work, "deadline_mono", None)
         return _Waiter(
             priority=priority,
             seq=self._seq,
             lane=waiter_lane,
             stage=stage,
             reason=reason,
+            work=resolved_work,
+            enqueued_mono=self._clock(),
+            deadline_mono=None if deadline is None else float(deadline),
         )
 
     @asynccontextmanager
@@ -322,6 +397,7 @@ class ProviderAccessLayer:
         lane: ScanLane | str | None = None,
         stage: str = "provider",
         timeout: float | None = None,
+        work: Any = None,
     ) -> AsyncIterator[ProviderLease | None]:
         """Wait locally for a free slot, or return None when the wait expires.
 
@@ -337,7 +413,7 @@ class ProviderAccessLayer:
         if timeout is not None and timeout <= 0:
             yield None
             return
-        waiter = await self._enqueue(venue, lane=lane, stage=stage)
+        waiter = await self._enqueue(venue, lane=lane, stage=stage, work=work)
         lease = ProviderLease(
             _layer=self,
             _venue=venue,
@@ -366,6 +442,7 @@ class ProviderAccessLayer:
         *,
         lane: ScanLane | str | None = None,
         stage: str = "provider",
+        work: Any = None,
     ) -> AsyncIterator[ProviderLease | None]:
         """Grant a free slot immediately, or return None without queueing.
 
@@ -379,15 +456,11 @@ class ProviderAccessLayer:
             return
         lease: ProviderLease | None = None
         async with self._cond:
-            waiter = self._make_waiter(venue, lane=lane, stage=stage)
+            waiter = self._make_waiter(venue, lane=lane, stage=stage, work=work)
             self._waiters[venue].append(waiter)
             picked = self._pick(venue)
             if picked is waiter and self._in_use[venue] < self._limits[venue]:
-                waiter.granted = True
-                waiter.event.set()
-                self._in_use[venue] += 1
-                self._peak_inflight[venue] = max(self._peak_inflight[venue], self._in_use[venue])
-                self._count_high_priority_grant(venue, waiter.priority)
+                self._grant(venue, waiter)
                 lease = ProviderLease(
                     _layer=self,
                     _venue=venue,
@@ -409,9 +482,11 @@ class ProviderAccessLayer:
             if waiter in self._waiters[venue]:
                 self._waiters[venue].remove(waiter)
             if waiter.granted:
+                self._record_service(venue, waiter)
                 self._in_use[venue] = max(0, self._in_use[venue] - 1)
             else:
                 waiter.cancelled = True
+                self._record_unserved_deadline(venue, waiter)
             self._pump(venue)
             self._cond.notify_all()
 
@@ -456,6 +531,14 @@ class ProviderAccessLayer:
             for item in self._waiters[venue]
         )
 
+    def _background_waiting(self, venue: VenueName) -> bool:
+        return any(
+            item.priority is ProviderPriority.BACKGROUND
+            and not item.granted
+            and not item.cancelled
+            for item in self._waiters[venue]
+        )
+
     def _pick(self, venue: VenueName) -> _Waiter | None:
         pending = [item for item in self._waiters[venue] if not item.granted and not item.cancelled]
         if not pending:
@@ -468,14 +551,52 @@ class ProviderAccessLayer:
             self._hot_waiting(venue)
             and self._active_grants_since_hot[venue] >= self._starvation_hot_grants
         )
+        starve_background = (
+            self._background_waiting(venue)
+            and self._hot_grants_since_universe[venue] >= self._starvation_hot_grants
+        )
+        starve_lower = starve_universe or starve_background
+        now = self._clock()
+        pressure = self.pressure_by_venue(now=now)
 
-        def sort_key(item: _Waiter) -> tuple[int, int]:
-            effective = int(item.priority)
-            if starve_universe and item.priority is ProviderPriority.UNIVERSE:
-                effective = -2
-            elif starve_hot and item.priority is ProviderPriority.HOT:
-                effective = -1
-            return (effective, item.seq)
+        def sort_key(item: _Waiter) -> tuple[int, ...]:
+            from sports_hedge.application.adaptive_scheduler import (
+                SchedulerWork,
+                rank_scheduler_work,
+                work_from_lane,
+            )
+
+            work = item.work
+            wait_age_ms = 0
+            if item.enqueued_mono:
+                wait_age_ms = max(0, int((now - item.enqueued_mono) * 1000))
+            if not isinstance(work, SchedulerWork):
+                work = work_from_lane(item.lane, seq=item.seq)
+            work = SchedulerWork(
+                lane=work.lane,
+                work_id=work.work_id,
+                viable_venue_count=work.viable_venue_count,
+                skip_expensive_work=work.skip_expensive_work,
+                viability_reason=work.viability_reason,
+                viability_assessed=work.viability_assessed,
+                near_threshold=work.near_threshold,
+                qualifying=work.qualifying,
+                in_play=work.in_play,
+                required_venues=work.required_venues or (venue,),
+                due_mono=work.due_mono,
+                deadline_mono=item.deadline_mono if item.deadline_mono is not None else work.deadline_mono,
+                cadence_seconds=work.cadence_seconds,
+                seq=item.seq,
+                wait_age_ms=wait_age_ms,
+                now_mono=now,
+            )
+            decision = rank_scheduler_work(
+                work,
+                pressure_by_venue=pressure,
+                starve_lower=starve_lower,
+                starve_hot=starve_hot and item.priority is ProviderPriority.HOT,
+            )
+            return decision.rank_key
 
         return min(pending, key=sort_key)
 
@@ -484,11 +605,107 @@ class ProviderAccessLayer:
             nxt = self._pick(venue)
             if nxt is None:
                 return
-            nxt.granted = True
-            self._in_use[venue] += 1
-            self._peak_inflight[venue] = max(self._peak_inflight[venue], self._in_use[venue])
-            self._count_high_priority_grant(venue, nxt.priority)
-            nxt.event.set()
+            self._grant(venue, nxt)
+
+    def _grant(self, venue: VenueName, waiter: _Waiter) -> None:
+        waiter.granted = True
+        waiter.granted_mono = self._clock()
+        waiter.event.set()
+        self._in_use[venue] += 1
+        self._peak_inflight[venue] = max(self._peak_inflight[venue], self._in_use[venue])
+        self._count_high_priority_grant(venue, waiter.priority)
+        self._record_grant_deadline(venue, waiter)
+
+    def _record_service(self, venue: VenueName, waiter: _Waiter) -> None:
+        if waiter.granted_mono is None:
+            return
+        service_ms = max(0, int((self._clock() - waiter.granted_mono) * 1000))
+        self._last_service_ms[venue] = service_ms
+        previous = self._ewma_latency_ms[venue]
+        if previous <= 0:
+            self._ewma_latency_ms[venue] = service_ms
+        else:
+            self._ewma_latency_ms[venue] = int(0.7 * previous + 0.3 * service_ms)
+
+    def _record_grant_deadline(self, venue: VenueName, waiter: _Waiter) -> None:
+        if waiter.deadline_mono is None or waiter.granted_mono is None:
+            return
+        if waiter.granted_mono <= waiter.deadline_mono:
+            return
+        self.record_deadline_miss(venue, lane=waiter.lane)
+
+    def _record_unserved_deadline(self, venue: VenueName, waiter: _Waiter) -> None:
+        if waiter.deadline_mono is None:
+            return
+        if self._clock() <= waiter.deadline_mono:
+            return
+        self.record_deadline_miss(venue, lane=waiter.lane)
+
+    def record_deadline_miss(self, venue: VenueName, *, lane: str | None = None) -> None:
+        if venue in self._deadline_misses:
+            self._deadline_misses[venue] += 1
+        key = str(lane or ScanLane.UNIVERSE.value).strip().casefold()
+        if key not in self._deadline_misses_by_lane:
+            self._deadline_misses_by_lane[key] = 0
+        self._deadline_misses_by_lane[key] += 1
+
+    def observe_rate_limit(self, venue: VenueName, retry_after_seconds: float) -> None:
+        if venue not in self._limits:
+            return
+        wait = max(0.0, float(retry_after_seconds))
+        self._rate_limited_until_mono[venue] = self._clock() + wait
+
+    def observe_backoff(self, venue: VenueName, remaining_seconds: float) -> None:
+        if venue not in self._limits:
+            return
+        wait = max(0.0, float(remaining_seconds))
+        self._backoff_until_mono[venue] = self._clock() + wait
+
+    def observe_latency_ms(self, venue: VenueName, latency_ms: int) -> None:
+        if venue not in self._limits:
+            return
+        service_ms = max(0, int(latency_ms))
+        self._last_service_ms[venue] = service_ms
+        previous = self._ewma_latency_ms[venue]
+        if previous <= 0:
+            self._ewma_latency_ms[venue] = service_ms
+        else:
+            self._ewma_latency_ms[venue] = int(0.7 * previous + 0.3 * service_ms)
+
+    def _rate_limit_remaining(self, venue: VenueName, *, now: float | None = None) -> float:
+        until = self._rate_limited_until_mono.get(venue, 0.0)
+        remaining = until - (now if now is not None else self._clock())
+        return remaining if remaining > 0 else 0.0
+
+    def _backoff_remaining(self, venue: VenueName, *, now: float | None = None) -> float:
+        until = self._backoff_until_mono.get(venue, 0.0)
+        remaining = until - (now if now is not None else self._clock())
+        return remaining if remaining > 0 else 0.0
+
+    def pressure_by_venue(self, *, now: float | None = None) -> dict[VenueName, Any]:
+        from sports_hedge.application.adaptive_scheduler import ProviderPressure
+
+        evaluated = now if now is not None else self._clock()
+        payload: dict[VenueName, Any] = {}
+        for venue in self._limits:
+            remaining = self._rate_limit_remaining(venue, now=evaluated)
+            backoff = self._backoff_remaining(venue, now=evaluated)
+            waiting = sum(
+                1
+                for item in self._waiters[venue]
+                if not item.granted and not item.cancelled
+            )
+            payload[venue] = ProviderPressure(
+                venue=venue,
+                inflight=self._in_use[venue],
+                waiting=waiting,
+                limit=self._limits[venue],
+                ewma_latency_ms=int(self._ewma_latency_ms[venue]),
+                rate_limited=remaining > 0,
+                rate_limit_remaining_s=remaining,
+                backoff_remaining_s=backoff,
+            )
+        return payload
 
 
 def limits_from_settings(settings: Settings | None = None) -> dict[VenueName, int]:
