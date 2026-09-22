@@ -20,6 +20,7 @@ from sports_hedge.matching.identity_graph import (
     IdentityAssignmentProvenance,
     ScoredIdentityPair,
     assign_identity_components,
+    assign_identity_components_cooperative,
     is_hard_identity_veto,
     node_sort_key,
     pair_kind,
@@ -812,27 +813,69 @@ class ClusterPass:
             unscored_nodes=pending,
             threshold=threshold,
         )
+        return self._ingest_identity_result(result)
+
+    def _ingest_identity_result(
+        self, result: Any
+    ) -> dict[tuple[VenueName, str], IdentityAssignmentProvenance]:
         self.graph_diagnostics = result.diagnostics.as_dict()
         self.parent = {key: key for key in self.nodes}
         self.match_confidence = {}
         self.pair_kinds = {}
         provenance_by_member: dict[tuple[VenueName, str], IdentityAssignmentProvenance] = {}
         for assigned in result.clusters:
-            members = sorted(assigned.member_keys, key=node_sort_key)
-            for member in members:
-                provenance_by_member[member] = assigned.provenance
-            for member in members[1:]:
-                self._union_keys(members[0], member)
-            for edge in assigned.provenance.chosen_edges:
-                for key in (edge.left, edge.right):
-                    previous = self.match_confidence.get(key)
-                    if previous is None or edge.confidence < previous:
-                        self.match_confidence[key] = edge.confidence
-                if edge.left[0] is edge.right[0]:
-                    continue
-                kind = pair_kind(edge.left[0], edge.right[0])
-                self.pair_kinds.setdefault(edge.left, set()).add(kind)
-                self.pair_kinds.setdefault(edge.right, set()).add(kind)
+            self._record_assigned_identity_cluster(assigned, provenance_by_member)
+        return provenance_by_member
+
+    def _record_assigned_identity_cluster(
+        self,
+        assigned: Any,
+        provenance_by_member: dict[tuple[VenueName, str], IdentityAssignmentProvenance],
+    ) -> None:
+        members = sorted(assigned.member_keys, key=node_sort_key)
+        for member in members:
+            provenance_by_member[member] = assigned.provenance
+        for member in members[1:]:
+            self._union_keys(members[0], member)
+        for edge in assigned.provenance.chosen_edges:
+            for key in (edge.left, edge.right):
+                previous = self.match_confidence.get(key)
+                if previous is None or edge.confidence < previous:
+                    self.match_confidence[key] = edge.confidence
+            if edge.left[0] is edge.right[0]:
+                continue
+            kind = pair_kind(edge.left[0], edge.right[0])
+            self.pair_kinds.setdefault(edge.left, set()).add(kind)
+            self.pair_kinds.setdefault(edge.right, set()).add(kind)
+
+    async def _apply_identity_graph_cooperative(
+        self,
+        threshold: float,
+        *,
+        unscored_nodes: set[tuple[VenueName, str]] | None = None,
+        yield_every: int = 64,
+    ) -> dict[tuple[VenueName, str], IdentityAssignmentProvenance]:
+        pending = (
+            self._unscored_identity_nodes() if unscored_nodes is None else unscored_nodes
+        )
+        self.last_unscored_nodes = set(pending)
+        result = await assign_identity_components_cooperative(
+            list(self.nodes.keys()),
+            self.scored_pairs,
+            unscored_nodes=pending,
+            threshold=threshold,
+            yield_every=yield_every,
+        )
+        self.graph_diagnostics = result.diagnostics.as_dict()
+        self.parent = {key: key for key in self.nodes}
+        self.match_confidence = {}
+        self.pair_kinds = {}
+        provenance_by_member: dict[tuple[VenueName, str], IdentityAssignmentProvenance] = {}
+        pause_every = max(1, int(yield_every))
+        for index, assigned in enumerate(result.clusters):
+            if index % pause_every == 0:
+                await asyncio.sleep(0)
+            self._record_assigned_identity_cluster(assigned, provenance_by_member)
         return provenance_by_member
 
     def finalize(self) -> tuple[list[FixtureCluster], dict[str, int]]:
@@ -860,8 +903,8 @@ class ClusterPass:
     ) -> tuple[list[FixtureCluster], dict[str, int]]:
         threshold = float(getattr(self.bulk_matcher, "threshold", 0.92))
         unscored_nodes = await self._unscored_identity_nodes_cooperative()
-        provenance_by_member = self._apply_identity_graph(
-            threshold, unscored_nodes=unscored_nodes
+        provenance_by_member = await self._apply_identity_graph_cooperative(
+            threshold, unscored_nodes=unscored_nodes, yield_every=yield_every
         )
         await asyncio.sleep(0)
         pause_every = max(1, int(yield_every))
