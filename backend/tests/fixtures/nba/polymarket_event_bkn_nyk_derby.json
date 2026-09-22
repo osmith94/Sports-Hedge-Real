@@ -1,0 +1,99 @@
+{
+  "fixture_id": "nba-polymarket-nba-bkn-nyk-2026-01-21",
+  "identified_as": "CAPTURED public Gamma Nets vs Knicks (ended). Structured abbreviations bkn/nyk and aliases Nets/Knicks. Distinguishes New York clubs. Prices omitted.",
+  "source": "https://gamma-api.polymarket.com/events/165960",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": "165960",
+    "ticker": "nba-bkn-nyk-2026-01-21",
+    "slug": "nba-bkn-nyk-2026-01-21",
+    "title": "Nets vs. Knicks",
+    "startTime": "2026-01-22T00:30:00Z",
+    "eventDate": "2026-01-21",
+    "endDate": "2026-01-22T00:30:00Z",
+    "period": "VFT",
+    "score": "66-120",
+    "live": false,
+    "ended": true,
+    "closed": true,
+    "active": true,
+    "gameId": 20023087,
+    "finishedTimestamp": "2026-01-22T02:48:27.454443Z",
+    "seriesSlug": "nba-2026",
+    "sport": {
+      "id": null,
+      "sport": null,
+      "name": null,
+      "ordering": null,
+      "series": null
+    },
+    "teams": [
+      {
+        "id": 100512,
+        "name": "Nets",
+        "abbreviation": "bkn",
+        "alias": "Nets",
+        "ordering": "away",
+        "league": "nba",
+        "providerId": 8
+      },
+      {
+        "id": 100494,
+        "name": "Knicks",
+        "abbreviation": "nyk",
+        "alias": "Knicks",
+        "ordering": "home",
+        "league": "nba",
+        "providerId": 6
+      }
+    ],
+    "markets": [
+      {
+        "id": "1190430",
+        "question": "Nets vs. Knicks",
+        "slug": "nba-bkn-nyk-2026-01-21",
+        "sportsMarketType": "moneyline",
+        "groupItemTitle": null,
+        "conditionId": "0x9a4aea1cd4c8bd6b31c0cde39f46d5ace0fcf016e0ee3c31022782735f6a81ed",
+        "clobTokenIds": "[\"63526240852275029223165693845042802372894487730585852169513887977561568756930\", \"60767102283834316789428443004131967975207426911116781236614421260208054060531\"]",
+        "outcomes": "[\"Nets\", \"Knicks\"]",
+        "line": null,
+        "active": true,
+        "closed": true,
+        "umaResolutionStatus": "resolved",
+        "description": "In the upcoming NBA game, scheduled for January 21 at 7:30PM ET:\nIf the Nets win, the market will resolve to \"Nets\".\nIf the Knicks win, the market will resolve to \"Knicks\".\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely, with no make-up game, this market will resolve 50-50.\nThe result will be determined based on the final score including any overtime periods."
+      },
+      {
+        "id": "1231459",
+        "question": "Spread: Knicks (-12.5)",
+        "slug": "nba-bkn-nyk-2026-01-21-spread-home-12pt5",
+        "sportsMarketType": "spreads",
+        "groupItemTitle": "Spread -12.5",
+        "conditionId": "0x72c438d5220c33f2badec3a2d3e0f413d6932f8c1c6a123f9f4190da0fc631db",
+        "clobTokenIds": "[\"68994249471838029190284619051197148343925494386328936915941844074457385293280\", \"57435462866678842580004089556191467382537178819643523200369558298934866005222\"]",
+        "outcomes": "[\"Knicks\", \"Nets\"]",
+        "line": -12.5,
+        "active": true,
+        "closed": true,
+        "umaResolutionStatus": "resolved",
+        "description": "In the upcoming NBA game, scheduled for January 21 at 7:30 PM ET:\n\nThis market will resolve to \"Knicks\" if the Knicks win the game by 13 or more points.\n\nOtherwise, this market will resolve to \"Nets\". If the game ends in a tie, this market will resolve to \"Nets\".\n\nIf the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50."
+      },
+      {
+        "id": "1231460",
+        "question": "Nets vs. Knicks: O/U 224.5",
+        "slug": "nba-bkn-nyk-2026-01-21-total-224pt5",
+        "sportsMarketType": "totals",
+        "groupItemTitle": "O/U 224.5",
+        "conditionId": "0x11552ed7d99c12b25742721de42b79c8857ab47c55f58a0da6e233d42034f0cb",
+        "clobTokenIds": "[\"55321414868722525248230963420073879965829099994455067578340706949489210999103\", \"93396404235236519885412719854264551268792617883016221890334509662392338768287\"]",
+        "outcomes": "[\"Over\", \"Under\"]",
+        "line": 224.5,
+        "active": true,
+        "closed": true,
+        "umaResolutionStatus": "resolved",
+        "description": "In the upcoming NBA game, scheduled for January 21 at 7:30 PM ET:\n\nThis market will resolve to \"Over\" if the Nets and Knicks combine to score 225 or more points in this game.\n\nIf the combined total is less than 225, this market will resolve to \"Under\".\n\nIf the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50."
+      }
+    ]
+  }
+}

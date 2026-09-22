@@ -1,0 +1,28 @@
+{
+  "fixture_id": "kalshi-event-game-gswlac-settled",
+  "identified_as": "CAPTURED public Kalshi settled event Golden State at Los Angeles C (Clippers). Title uses 'Los Angeles C' / ticker LAC. Nested markets empty.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events/KXNBAGAME-26APR15GSWLAC",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "event_ticker": "KXNBAGAME-26APR15GSWLAC",
+    "series_ticker": "KXNBAGAME",
+    "title": "West Play-In: Golden State at Los Angeles C",
+    "sub_title": "GSW at LAC (Apr 15)",
+    "category": "Sports",
+    "mutually_exclusive": true,
+    "product_metadata": {
+      "competition": "Pro Basketball (M)",
+      "competition_scope": "Game"
+    },
+    "collateral_return_type": "MECNET",
+    "settlement_sources": [
+      {
+        "name": "the Governing League",
+        "url": "https://www.nba.com"
+      }
+    ],
+    "strike_period": "",
+    "markets": []
+  }
+}

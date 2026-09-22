@@ -41,6 +41,7 @@ class TargetCompetitionCode(StrEnum):
     J1_LEAGUE = "j1_league"
     SOUTH_AFRICAN_PREMIERSHIP = "south_african_premiership"
     NFL = "nfl"
+    NBA = "nba"
 
 
 class VenueMappingStatus(StrEnum):
@@ -48,7 +49,7 @@ class VenueMappingStatus(StrEnum):
     UNVERIFIED = "unverified"
 
 
-PRINCIPAL_OPERATOR_COMPETITION_COUNT = 31
+PRINCIPAL_OPERATOR_COMPETITION_COUNT = 32
 VERIFIED_ALL_3 = "VERIFIED_ALL_3"
 PARTIAL_PROVIDER_MAPPING = "PARTIAL"
 PROVIDER_MATRIX_RETRIEVED_AT = "2026-09-20"
@@ -731,6 +732,20 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
         polymarket_gamma_sport="nfl",
         kalshi_series_prefixes=("KXNFLGAME", "KXNFLSPREAD", "KXNFLTOTAL"),
     ),
+    TargetCompetition(
+        code=TargetCompetitionCode.NBA,
+        display_name="NBA",
+        aliases=(
+            "nba",
+            "national basketball association",
+            "pro basketball",
+            "pro basketball (m)",
+            "nba basketball",
+        ),
+        polymarket_gamma_series_id="10345",
+        polymarket_gamma_sport="nba",
+        kalshi_series_prefixes=("KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL"),
+    ),
 )
 
 _ALIAS_INDEX: dict[str, TargetCompetition] = {}
@@ -784,7 +799,7 @@ MATCHBOOK_ALIASES_NOT_VERIFIED = "Matchbook label aliases not verified"
 
 # Operator selector grouping. Canonical codes are the operator model; venue
 # tickers stay backend-only.
-OPERATOR_COMPETITION_REGISTRY_VERSION = 4
+OPERATOR_COMPETITION_REGISTRY_VERSION = 5
 OPERATOR_UNIVERSE_SPORT = "football"
 OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("uefa", "UEFA"),
@@ -808,6 +823,7 @@ OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("south_africa", "South Africa"),
     ("international", "International"),
     ("nfl", "NFL"),
+    ("nba", "NBA"),
 )
 OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
     TargetCompetitionCode.CHAMPIONS_LEAGUE: ("uefa", "UEFA", "Champions League"),
@@ -849,6 +865,7 @@ OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
         "International Friendlies",
     ),
     TargetCompetitionCode.NFL: ("nfl", "NFL", "NFL"),
+    TargetCompetitionCode.NBA: ("nba", "NBA", "NBA"),
 }
 DEFAULT_OPERATOR_COMPETITION_CODES: tuple[TargetCompetitionCode, ...] = (
     TargetCompetitionCode.PREMIER_LEAGUE,
@@ -1021,6 +1038,11 @@ KALSHI_SERIES_TICKERS_BY_CODE: dict[TargetCompetitionCode, tuple[str, ...]] = {
         "KXNFLSPREAD",
         "KXNFLTOTAL",
     ),
+    TargetCompetitionCode.NBA: (
+        "KXNBAGAME",
+        "KXNBASPREAD",
+        "KXNBATOTAL",
+    ),
 }
 
 
@@ -1037,6 +1059,12 @@ class ScopeFilterResult(BaseModel):
     skipped: int = 0
     skipped_by_reason: dict[str, int] = Field(default_factory=dict)
     rejected_labels: list[str] = Field(default_factory=list)
+
+
+def _scope_diagnostic_sport(competition: TargetCompetition | None) -> str:
+    if competition is not None and competition.code is TargetCompetitionCode.NBA:
+        return "basketball"
+    return "football"
 
 
 def resolve_target_competition(label: str | None) -> TargetCompetition | None:
@@ -1332,11 +1360,21 @@ def selected_includes_nfl(
     return TargetCompetitionCode.NFL.value in _selected_code_set(selected_codes)
 
 
+def selected_includes_nba(
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
+) -> bool:
+    return TargetCompetitionCode.NBA.value in _selected_code_set(selected_codes)
+
+
 def selected_includes_soccer(
     selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
 ) -> bool:
     codes = _selected_code_set(selected_codes)
-    return any(code != TargetCompetitionCode.NFL.value for code in codes)
+    non_soccer = {
+        TargetCompetitionCode.NFL.value,
+        TargetCompetitionCode.NBA.value,
+    }
+    return any(code not in non_soccer for code in codes)
 
 
 def _selected_code_set(
@@ -1385,9 +1423,19 @@ def scope_matchbook_event(
     sport = matchbook_sport_label(payload)
     if sport:
         sport_norm = normalize_text(sport)
-        nfl_selected = TargetCompetitionCode.NFL.value in _selected_code_set(selected_codes)
+        selected = _selected_code_set(selected_codes)
+        nfl_selected = TargetCompetitionCode.NFL.value in selected
+        nba_selected = TargetCompetitionCode.NBA.value in selected
         if sport_norm in {"american football", "nfl"}:
             if not nfl_selected:
+                return ScopeDecision(
+                    allowed=False,
+                    reason=NON_FOOTBALL_SPORT,
+                    label=matchbook_competition_label(payload),
+                    sport=sport,
+                )
+        elif sport_norm in {"basketball", "nba", "nba basketball"}:
+            if not nba_selected:
                 return ScopeDecision(
                     allowed=False,
                     reason=NON_FOOTBALL_SPORT,
@@ -1448,7 +1496,7 @@ def scope_polymarket_event(
             allowed=False,
             reason=UNKNOWN_COMPETITION,
             label=label,
-            sport="football",
+            sport=_scope_diagnostic_sport(resolved),
         )
     if resolved.code.value not in _selected_code_set(selected_codes):
         return ScopeDecision(
@@ -1456,13 +1504,13 @@ def scope_polymarket_event(
             reason=OUT_OF_SCOPE_COMPETITION,
             competition=resolved,
             label=label or resolved.display_name,
-            sport="football",
+            sport=_scope_diagnostic_sport(resolved),
         )
     return ScopeDecision(
         allowed=True,
         competition=resolved,
         label=label or resolved.display_name,
-        sport="football",
+        sport=_scope_diagnostic_sport(resolved),
     )
 
 
@@ -1488,7 +1536,7 @@ def scope_kalshi_event(
             allowed=False,
             reason=UNKNOWN_COMPETITION,
             label=label or ticker or None,
-            sport="football",
+            sport=_scope_diagnostic_sport(resolved),
         )
     if resolved.code.value not in _selected_code_set(selected_codes):
         return ScopeDecision(
@@ -1496,13 +1544,13 @@ def scope_kalshi_event(
             reason=OUT_OF_SCOPE_COMPETITION,
             competition=resolved,
             label=label or resolved.display_name,
-            sport="football",
+            sport=_scope_diagnostic_sport(resolved),
         )
     return ScopeDecision(
         allowed=True,
         competition=resolved,
         label=label or resolved.display_name,
-        sport="football",
+        sport=_scope_diagnostic_sport(resolved),
     )
 
 

@@ -1,0 +1,78 @@
+{
+  "fixture_id": "kalshi-event-game-okcsas-open",
+  "identified_as": "CAPTURED public Kalshi KXNBAGAME event Oklahoma City vs San Antonio (upcoming opening night). Two binary team-win contracts. Prices omitted.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events/KXNBAGAME-26OCT20OKCSAS?with_nested_markets=true",
+  "also_proven_by": "GET /events/KXNBAGAME-26OCT20OKCSAS and GET /markets/KXNBAGAME-26OCT20OKCSAS-*",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "event_ticker": "KXNBAGAME-26OCT20OKCSAS",
+    "series_ticker": "KXNBAGAME",
+    "title": "Oklahoma City vs San Antonio",
+    "sub_title": "OKC vs SAS (Oct 20)",
+    "category": "Sports",
+    "mutually_exclusive": true,
+    "product_metadata": {
+      "competition": "Pro Basketball (M)",
+      "competition_scope": "Game"
+    },
+    "collateral_return_type": "MECNET",
+    "settlement_sources": [
+      {
+        "name": "the Governing League",
+        "url": "https://www.nba.com"
+      }
+    ],
+    "strike_period": "",
+    "markets": [
+      {
+        "ticker": "KXNBAGAME-26OCT20OKCSAS-OKC",
+        "event_ticker": "KXNBAGAME-26OCT20OKCSAS",
+        "title": "Oklahoma City wins",
+        "yes_sub_title": "Oklahoma City",
+        "no_sub_title": "Oklahoma City",
+        "status": "active",
+        "result": "",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "basketball_team": "a85f6eca-2f3b-4f61-83ab-8d049f59ce2c"
+        },
+        "rules_primary": "If Oklahoma City wins the Oklahoma City vs San Antonio Pro Basketball game originally scheduled for Oct 20, 2026, then the market resolves to Yes.",
+        "rules_secondary": "If the game is postponed but begins within 48 hours of its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is cancelled or not started within 48 hours of its originally scheduled start, all markets will resolve to a fair price.\n\nKalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+        "occurrence_datetime": "2026-10-21T04:30:00Z",
+        "expected_expiration_time": "2026-10-21T04:30:00Z",
+        "expiration_time": "2026-10-23T01:30:00Z",
+        "close_time": "2026-10-23T01:30:00Z",
+        "open_time": "2026-08-20T15:28:00Z",
+        "can_close_early": true,
+        "early_close_condition": "This market will close and expire after a winner is declared.",
+        "expiration_value": ""
+      },
+      {
+        "ticker": "KXNBAGAME-26OCT20OKCSAS-SAS",
+        "event_ticker": "KXNBAGAME-26OCT20OKCSAS",
+        "title": "San Antonio wins",
+        "yes_sub_title": "San Antonio",
+        "no_sub_title": "San Antonio",
+        "status": "active",
+        "result": "",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "basketball_team": "ad36c3e8-4194-4e63-920f-7c50f46191a6"
+        },
+        "rules_primary": "If San Antonio wins the Oklahoma City vs San Antonio Pro Basketball game originally scheduled for Oct 20, 2026, then the market resolves to Yes.",
+        "rules_secondary": "If the game is postponed but begins within 48 hours of its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is cancelled or not started within 48 hours of its originally scheduled start, all markets will resolve to a fair price.\n\nKalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+        "occurrence_datetime": "2026-10-21T04:30:00Z",
+        "expected_expiration_time": "2026-10-21T04:30:00Z",
+        "expiration_time": "2026-10-23T01:30:00Z",
+        "close_time": "2026-10-23T01:30:00Z",
+        "open_time": "2026-08-20T15:28:00Z",
+        "can_close_early": true,
+        "early_close_condition": "This market will close and expire after a winner is declared.",
+        "expiration_value": ""
+      }
+    ]
+  }
+}

@@ -134,10 +134,12 @@ class EventMatcher:
 
         if left.sport != right.sport:
             return False
+        from sports_hedge.nba.constants import NBA_SPORT
         from sports_hedge.nfl.constants import NFL_SPORT
-        from sports_hedge.nfl.teams import nfl_teams_conflict
 
         if left.sport == NFL_SPORT:
+            from sports_hedge.nfl.teams import nfl_teams_conflict
+
             left_home, left_away, _ = self._resolved_teams(
                 left, right, market=left_market, counterpart_market=right_market
             )
@@ -145,6 +147,17 @@ class EventMatcher:
                 right, left, market=right_market, counterpart_market=left_market
             )
             if nfl_teams_conflict(left_home, right_home) or nfl_teams_conflict(left_away, right_away):
+                return False
+        elif left.sport == NBA_SPORT:
+            from sports_hedge.nba.teams import nba_teams_conflict
+
+            left_home, left_away, _ = self._resolved_teams(
+                left, right, market=left_market, counterpart_market=right_market
+            )
+            right_home, right_away, _ = self._resolved_teams(
+                right, left, market=right_market, counterpart_market=left_market
+            )
+            if nba_teams_conflict(left_home, right_home) or nba_teams_conflict(left_away, right_away):
                 return False
         elif not squad_categories_compatible(left.home_team, right.home_team) or not squad_categories_compatible(
             left.away_team, right.away_team
@@ -172,6 +185,7 @@ class EventMatcher:
             right_away=right_away,
             left_competition=left.competition,
             right_competition=right.competition,
+            sport=left.sport,
         ):
             # Exact curated identity inside the declared kickoff window must not
             # be excluded by the weighted kickoff penalty. Fuzzy pairs still use
@@ -206,10 +220,12 @@ class EventMatcher:
         if left.sport != right.sport:
             return EventMatchResult(matched=False, confidence=0.0, reasons=["sport_mismatch"])
 
+        from sports_hedge.nba.constants import NBA_SPORT
         from sports_hedge.nfl.constants import NFL_SPORT
-        from sports_hedge.nfl.teams import nfl_teams_conflict, resolve_nfl_team
 
         if left.sport == NFL_SPORT:
+            from sports_hedge.nfl.teams import nfl_teams_conflict, resolve_nfl_team
+
             for label in (left.home_team, left.away_team, right.home_team, right.away_team):
                 resolved = resolve_nfl_team(label)
                 if resolved.ambiguous:
@@ -223,6 +239,23 @@ class EventMatcher:
                         matched=False,
                         confidence=0.0,
                         reasons=[resolved.reason or "nfl_team_identity_rejected"],
+                    )
+        elif left.sport == NBA_SPORT:
+            from sports_hedge.nba.teams import nba_teams_conflict, resolve_nba_team
+
+            for label in (left.home_team, left.away_team, right.home_team, right.away_team):
+                resolved = resolve_nba_team(label)
+                if resolved.ambiguous:
+                    return EventMatchResult(
+                        matched=False,
+                        confidence=0.0,
+                        reasons=["nba_team_identity_ambiguous"],
+                    )
+                if resolved.rejected:
+                    return EventMatchResult(
+                        matched=False,
+                        confidence=0.0,
+                        reasons=[resolved.reason or "nba_team_identity_rejected"],
                     )
         elif not squad_categories_compatible(left.home_team, right.home_team) or not squad_categories_compatible(
             left.away_team, right.away_team
@@ -273,6 +306,15 @@ class EventMatcher:
                 reasons=["curated_team_mismatch"],
                 provenance=provenance,
             )
+        if left.sport == NBA_SPORT and (
+            nba_teams_conflict(left_home, right_home) or nba_teams_conflict(left_away, right_away)
+        ):
+            return EventMatchResult(
+                matched=False,
+                confidence=0.0,
+                reasons=["curated_team_mismatch"],
+                provenance=provenance,
+            )
 
         home_score = self._similarity(left_home, right_home)
         away_score = self._similarity(left_away, right_away)
@@ -284,6 +326,7 @@ class EventMatcher:
             right_away=right_away,
             left_competition=left.competition,
             right_competition=right.competition,
+            sport=left.sport,
         )
         if exact_identity:
             # Provider sibling events (GAME/BTTS/TOTAL/FTTS) often differ by a
@@ -330,12 +373,25 @@ class EventMatcher:
         market: CanonicalMarket | None,
         counterpart_market: CanonicalMarket | None,
     ) -> tuple[str, str, list[AppliedLearnedRule]]:
+        from sports_hedge.nba.constants import NBA_SPORT
         from sports_hedge.nfl.constants import NFL_SPORT
-        from sports_hedge.nfl.teams import resolve_nfl_team
 
         if event.sport == NFL_SPORT:
+            from sports_hedge.nfl.teams import resolve_nfl_team
+
             home = resolve_nfl_team(event.home_team)
             away = resolve_nfl_team(event.away_team)
+            competition = target_competition_code(event.competition)
+            return (
+                home.canonical or _resolve_static_team_name(event.home_team, competition),
+                away.canonical or _resolve_static_team_name(event.away_team, competition),
+                [],
+            )
+        if event.sport == NBA_SPORT:
+            from sports_hedge.nba.teams import resolve_nba_team
+
+            home = resolve_nba_team(event.home_team)
+            away = resolve_nba_team(event.away_team)
             competition = target_competition_code(event.competition)
             return (
                 home.canonical or _resolve_static_team_name(event.home_team, competition),
@@ -365,6 +421,7 @@ class EventMatcher:
         right_away: str,
         left_competition: str,
         right_competition: str,
+        sport: str | None = None,
     ) -> bool:
         """True only for exact curated seniors in the same target competition.
 
@@ -374,10 +431,21 @@ class EventMatcher:
 
         if left_home != right_home or left_away != right_away:
             return False
-        from sports_hedge.nfl.teams import is_canonical_nfl_team
+        from sports_hedge.nba.constants import NBA_SPORT
+        from sports_hedge.nfl.constants import NFL_SPORT
 
-        if is_canonical_nfl_team(left_home) and is_canonical_nfl_team(left_away):
-            return EventMatcher._same_target_competition(left_competition, right_competition)
+        if sport == NFL_SPORT:
+            from sports_hedge.nfl.teams import is_canonical_nfl_team
+
+            if is_canonical_nfl_team(left_home) and is_canonical_nfl_team(left_away):
+                return EventMatcher._same_target_competition(left_competition, right_competition)
+            return False
+        if sport == NBA_SPORT:
+            from sports_hedge.nba.teams import is_canonical_nba_team
+
+            if is_canonical_nba_team(left_home) and is_canonical_nba_team(left_away):
+                return EventMatcher._same_target_competition(left_competition, right_competition)
+            return False
         if not is_curated_canonical_team(left_home) or not is_curated_canonical_team(left_away):
             return False
         return EventMatcher._same_target_competition(left_competition, right_competition)

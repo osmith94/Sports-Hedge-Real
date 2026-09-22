@@ -1,6 +1,6 @@
 """PAPER-only settlement/reconciliation over open trades.
 
-Exact-ID read-only Matchbook/Kalshi result evidence. Reuses
+Exact-ID read-only Matchbook/Kalshi/Polymarket result evidence. Reuses
 ``PaperOperationsService.settle()`` / ``compute_paper_settlement()`` / treasury 8E.
 Does not discover markets, place orders, or infer results from kickoff time.
 """
@@ -65,6 +65,16 @@ class PaperSettlementCycleResult:
     skipped: int = 0
 
 
+@dataclass
+class _FetchedSettlementEvidence:
+    matchbook_market: dict[str, Any] | None = None
+    matchbook_event: dict[str, Any] | None = None
+    kalshi_markets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    polymarket_market: dict[str, Any] | None = None
+    polymarket_event: dict[str, Any] | None = None
+    fetch_blocker: str | None = None
+
+
 class PaperSettlementAgent:
     """Narrow reconciliation worker for persisted OPEN/PARTIAL PAPER trades."""
 
@@ -74,6 +84,7 @@ class PaperSettlementAgent:
         operations: PaperOperationsService,
         matchbook: Any | None = None,
         kalshi: Any | None = None,
+        polymarket: Any | None = None,
         provider_access: ProviderAccessLayer | None = None,
         clock: Callable[[], datetime] | None = None,
         settings: Settings | None = None,
@@ -83,6 +94,7 @@ class PaperSettlementAgent:
         self.operations = operations
         self.matchbook = matchbook
         self.kalshi = kalshi
+        self.polymarket = polymarket
         self.catalogue = catalogue
         self.provider_access = (
             provider_access if provider_access is not None else get_shared_provider_access()
@@ -165,9 +177,13 @@ class PaperSettlementAgent:
                 self.operations.trades.save(trade)
             except Exception:
                 LOGGER.exception("failed to persist recovered provider identity for %s", trade.trade_id)
-        matchbook_market, matchbook_event, kalshi_markets, fetch_blocker = await self._fetch_evidence(
-            trade
-        )
+        evidence = await self._fetch_evidence(trade)
+        matchbook_market = evidence.matchbook_market
+        matchbook_event = evidence.matchbook_event
+        kalshi_markets = evidence.kalshi_markets
+        polymarket_market = evidence.polymarket_market
+        polymarket_event = evidence.polymarket_event
+        fetch_blocker = evidence.fetch_blocker
         self._record_nfl_lifecycle(
             trade,
             matchbook_market=matchbook_market,
@@ -175,11 +191,22 @@ class PaperSettlementAgent:
             kalshi_markets=kalshi_markets,
             when=when,
         )
+        self._record_nba_lifecycle(
+            trade,
+            matchbook_market=matchbook_market,
+            matchbook_event=matchbook_event,
+            kalshi_markets=kalshi_markets,
+            polymarket_market=polymarket_market,
+            polymarket_event=polymarket_event,
+            when=when,
+        )
         resolution = resolve_paper_trade_settlement(
             trade,
             matchbook_market=matchbook_market,
             matchbook_event=matchbook_event,
             kalshi_markets=kalshi_markets,
+            polymarket_market=polymarket_market,
+            polymarket_event=polymarket_event,
         )
         if fetch_blocker and not resolution.is_ready:
             if resolution.blocker in {
@@ -263,6 +290,54 @@ class PaperSettlementAgent:
             except Exception:
                 LOGGER.exception("failed to persist NFL lifecycle evidence for %s", trade.trade_id)
 
+    def _record_nba_lifecycle(
+        self,
+        trade: PaperTrade,
+        *,
+        matchbook_market: dict[str, Any] | None,
+        matchbook_event: dict[str, Any] | None,
+        kalshi_markets: dict[str, dict[str, Any]],
+        polymarket_market: dict[str, Any] | None,
+        polymarket_event: dict[str, Any] | None,
+        when: datetime,
+    ) -> None:
+        from sports_hedge.nba.settlement import (
+            collect_nba_lifecycle_tokens,
+            is_nba_paper_trade,
+            nba_lifecycle_audit_detail,
+            nba_lifecycle_observation,
+        )
+
+        if not is_nba_paper_trade(trade):
+            return
+        tokens = collect_nba_lifecycle_tokens(
+            matchbook_market,
+            matchbook_event,
+            polymarket_market,
+            polymarket_event,
+            *list((kalshi_markets or {}).values()),
+        )
+        observation = nba_lifecycle_observation(tokens, observed_at=when)
+        detail = nba_lifecycle_audit_detail(observation)
+        if any(
+            event.event_type is PaperTradeAuditEventType.NBA_LIFECYCLE_OBSERVED
+            and event.detail == detail
+            for event in trade.audit
+        ):
+            return
+        trade.audit.append(
+            PaperTradeAuditEvent(
+                occurred_at=when,
+                event_type=PaperTradeAuditEventType.NBA_LIFECYCLE_OBSERVED,
+                detail=detail,
+            )
+        )
+        if self.operations.trades is not None:
+            try:
+                self.operations.trades.save(trade)
+            except Exception:
+                LOGGER.exception("failed to persist NBA lifecycle evidence for %s", trade.trade_id)
+
     def _settle(
         self,
         trade: PaperTrade,
@@ -303,20 +378,23 @@ class PaperSettlementAgent:
             source_id=settled.settlement_source_id,
         )
 
-    async def _fetch_evidence(
-        self,
-        trade: PaperTrade,
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, dict[str, Any]], str | None]:
+    async def _fetch_evidence(self, trade: PaperTrade) -> _FetchedSettlementEvidence:
         matchbook_market = None
         matchbook_event = None
         kalshi_markets: dict[str, dict[str, Any]] = {}
+        polymarket_market = None
+        polymarket_event = None
         mb_event, mb_market = _matchbook_ids(trade)
+        pm_event, pm_market = _polymarket_ids(trade)
         needed_matchbook = bool(mb_event and mb_market)
         needed_kalshi = bool(_kalshi_tickers(trade))
+        needed_polymarket = bool(pm_market)
         if needed_matchbook and self.matchbook is None:
-            return None, None, {}, "provider_unavailable"
+            return _FetchedSettlementEvidence(fetch_blocker="provider_unavailable")
         if needed_kalshi and self.kalshi is None:
-            return None, None, {}, "provider_unavailable"
+            return _FetchedSettlementEvidence(fetch_blocker="provider_unavailable")
+        if needed_polymarket and self.polymarket is None:
+            return _FetchedSettlementEvidence(fetch_blocker="provider_unavailable")
         if mb_event and mb_market and self.matchbook is not None:
             getter = getattr(self.matchbook, "get_market", None)
             if callable(getter):
@@ -327,9 +405,9 @@ class PaperSettlementAgent:
                     factory=lambda: getter(mb_event, mb_market),
                 )
                 if status == "timeout":
-                    return None, None, {}, "incomplete_provider_result"
+                    return _FetchedSettlementEvidence(fetch_blocker="incomplete_provider_result")
                 if status == "unavailable":
-                    return None, None, {}, "provider_unavailable"
+                    return _FetchedSettlementEvidence(fetch_blocker="provider_unavailable")
                 if payload is not None:
                     matchbook_market = payload
             event_getter = getattr(self.matchbook, "get_event", None)
@@ -341,9 +419,15 @@ class PaperSettlementAgent:
                     factory=lambda: event_getter(mb_event),
                 )
                 if status == "timeout":
-                    return matchbook_market, None, {}, "incomplete_provider_result"
+                    return _FetchedSettlementEvidence(
+                        matchbook_market=matchbook_market,
+                        fetch_blocker="incomplete_provider_result",
+                    )
                 if status == "unavailable":
-                    return matchbook_market, None, {}, "provider_unavailable"
+                    return _FetchedSettlementEvidence(
+                        matchbook_market=matchbook_market,
+                        fetch_blocker="provider_unavailable",
+                    )
                 if payload is not None:
                     matchbook_event = payload
         for ticker in _kalshi_tickers(trade):
@@ -359,12 +443,85 @@ class PaperSettlementAgent:
                 factory=lambda ticker=ticker: _kalshi_get_market(getter, ticker),
             )
             if status == "timeout":
-                return matchbook_market, matchbook_event, kalshi_markets, "incomplete_provider_result"
+                return _FetchedSettlementEvidence(
+                    matchbook_market=matchbook_market,
+                    matchbook_event=matchbook_event,
+                    kalshi_markets=kalshi_markets,
+                    fetch_blocker="incomplete_provider_result",
+                )
             if status == "unavailable":
-                return matchbook_market, matchbook_event, kalshi_markets, "provider_unavailable"
+                return _FetchedSettlementEvidence(
+                    matchbook_market=matchbook_market,
+                    matchbook_event=matchbook_event,
+                    kalshi_markets=kalshi_markets,
+                    fetch_blocker="provider_unavailable",
+                )
             if payload is not None:
                 kalshi_markets[ticker] = payload
-        return matchbook_market, matchbook_event, kalshi_markets, None
+        if pm_market and self.polymarket is not None:
+            getter = getattr(self.polymarket, "get_market", None)
+            if not callable(getter):
+                return _FetchedSettlementEvidence(
+                    matchbook_market=matchbook_market,
+                    matchbook_event=matchbook_event,
+                    kalshi_markets=kalshi_markets,
+                    fetch_blocker="provider_unavailable",
+                )
+            payload, status = await self._provider_call(
+                VenueName.POLYMARKET,
+                stage="get_market",
+                source_id=str(pm_market),
+                factory=lambda: getter(pm_market),
+            )
+            if status == "timeout":
+                return _FetchedSettlementEvidence(
+                    matchbook_market=matchbook_market,
+                    matchbook_event=matchbook_event,
+                    kalshi_markets=kalshi_markets,
+                    fetch_blocker="incomplete_provider_result",
+                )
+            if status == "unavailable":
+                return _FetchedSettlementEvidence(
+                    matchbook_market=matchbook_market,
+                    matchbook_event=matchbook_event,
+                    kalshi_markets=kalshi_markets,
+                    fetch_blocker="provider_unavailable",
+                )
+            if payload is not None:
+                polymarket_market = payload
+            event_getter = getattr(self.polymarket, "get_event", None)
+            if callable(event_getter) and pm_event:
+                payload, status = await self._provider_call(
+                    VenueName.POLYMARKET,
+                    stage="get_event",
+                    source_id=str(pm_event),
+                    factory=lambda: event_getter(pm_event),
+                )
+                if status == "timeout":
+                    return _FetchedSettlementEvidence(
+                        matchbook_market=matchbook_market,
+                        matchbook_event=matchbook_event,
+                        kalshi_markets=kalshi_markets,
+                        polymarket_market=polymarket_market,
+                        fetch_blocker="incomplete_provider_result",
+                    )
+                if status == "unavailable":
+                    return _FetchedSettlementEvidence(
+                        matchbook_market=matchbook_market,
+                        matchbook_event=matchbook_event,
+                        kalshi_markets=kalshi_markets,
+                        polymarket_market=polymarket_market,
+                        fetch_blocker="provider_unavailable",
+                    )
+                if payload is not None:
+                    polymarket_event = payload
+        return _FetchedSettlementEvidence(
+            matchbook_market=matchbook_market,
+            matchbook_event=matchbook_event,
+            kalshi_markets=kalshi_markets,
+            polymarket_market=polymarket_market,
+            polymarket_event=polymarket_event,
+        )
 
     async def _provider_call(
         self,
@@ -472,6 +629,17 @@ def _matchbook_ids(trade: PaperTrade) -> tuple[str | None, str | None]:
     market_id = None
     for leg in trade.legs:
         if leg.venue is not VenueName.MATCHBOOK:
+            continue
+        event_id = event_id or (str(leg.source_event_id).strip() if leg.source_event_id else None)
+        market_id = market_id or (str(leg.source_market_id).strip() if leg.source_market_id else None)
+    return event_id or None, market_id or None
+
+
+def _polymarket_ids(trade: PaperTrade) -> tuple[str | None, str | None]:
+    event_id = None
+    market_id = None
+    for leg in trade.legs:
+        if leg.venue is not VenueName.POLYMARKET:
             continue
         event_id = event_id or (str(leg.source_event_id).strip() if leg.source_event_id else None)
         market_id = market_id or (str(leg.source_market_id).strip() if leg.source_market_id else None)

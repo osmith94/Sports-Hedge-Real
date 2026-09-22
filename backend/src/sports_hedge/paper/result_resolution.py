@@ -6,6 +6,7 @@ postponed, abandoned, incomplete, ambiguous, or conflicting evidence.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
@@ -32,10 +33,12 @@ GRADED_RESULT_STATUSES = frozenset(
         "determined",
         "finished",
         "final",
+        "finalized",
         "completed",
         "complete",
         "paid",
         "settled-complete",
+        "resolved",
     }
 )
 VOID_OR_EXCEPTION_STATUSES = frozenset(
@@ -102,21 +105,40 @@ def resolve_paper_trade_settlement(
     matchbook_market: Mapping[str, Any] | None = None,
     matchbook_event: Mapping[str, Any] | None = None,
     kalshi_markets: Mapping[str, Mapping[str, Any]] | None = None,
+    polymarket_market: Mapping[str, Any] | None = None,
+    polymarket_event: Mapping[str, Any] | None = None,
 ) -> SettlementResolution:
     """Map exact-ID provider payloads onto the trade's canonical outcomes."""
 
     identity_blocker = _identity_blocker(trade)
     if identity_blocker is not None:
-        return _blocked(trade, identity_blocker, matchbook_market, matchbook_event, kalshi_markets)
+        return _blocked(
+            trade,
+            identity_blocker,
+            matchbook_market,
+            matchbook_event,
+            kalshi_markets,
+            polymarket_market=polymarket_market,
+            polymarket_event=polymarket_event,
+        )
 
     family_blocker = _family_blocker(trade)
     if family_blocker is not None:
-        return _blocked(trade, family_blocker, matchbook_market, matchbook_event, kalshi_markets)
+        return _blocked(
+            trade,
+            family_blocker,
+            matchbook_market,
+            matchbook_event,
+            kalshi_markets,
+            polymarket_market=polymarket_market,
+            polymarket_event=polymarket_event,
+        )
 
     scores = _score_evidence(matchbook_event, matchbook_market)
     score_outcome, score_blocker = _outcome_from_scores(trade, scores)
     matchbook = _matchbook_market_evidence(trade, matchbook_market)
     kalshi = _kalshi_market_evidence(trade, kalshi_markets or {})
+    polymarket = _polymarket_market_evidence(trade, polymarket_market, polymarket_event)
     event_status = _payload_status(matchbook_event)
 
     from sports_hedge.nfl.settlement import (
@@ -190,28 +212,151 @@ def resolve_paper_trade_settlement(
                 scores,
             )
 
+    from sports_hedge.nba.settlement import (
+        collect_nba_lifecycle_tokens,
+        is_nba_paper_trade,
+        nba_automatic_settlement_lifecycle_blocker,
+        nba_exceptional_status_blocker,
+        nba_tied_score_blocker,
+        NBA_SETTLEMENT_FAIL_CLOSED_REASON,
+    )
+
+    if is_nba_paper_trade(trade):
+        nba_exception = nba_exceptional_status_blocker(
+            matchbook.status,
+            kalshi.status,
+            polymarket.status,
+            event_status,
+            None if scores is None else scores.status,
+            matchbook.winning_outcome,
+            kalshi.winning_outcome,
+            polymarket.winning_outcome,
+            matchbook.blocker,
+            kalshi.blocker,
+            polymarket.blocker,
+        )
+        if nba_exception is not None:
+            return _blocked(
+                trade,
+                nba_exception,
+                matchbook_market,
+                matchbook_event,
+                kalshi_markets,
+                scores,
+                polymarket_market=polymarket_market,
+                polymarket_event=polymarket_event,
+            )
+        if scores is not None:
+            tied = nba_tied_score_blocker(scores.home_score, scores.away_score)
+            if tied is not None:
+                return _blocked(
+                    trade,
+                    tied,
+                    matchbook_market,
+                    matchbook_event,
+                    kalshi_markets,
+                    scores,
+                    polymarket_market=polymarket_market,
+                    polymarket_event=polymarket_event,
+                )
+        if trade.market_family is MarketFamily.GAME_WINNER and score_outcome == "draw":
+            return _blocked(
+                trade,
+                NBA_SETTLEMENT_FAIL_CLOSED_REASON,
+                matchbook_market,
+                matchbook_event,
+                kalshi_markets,
+                scores,
+                polymarket_market=polymarket_market,
+                polymarket_event=polymarket_event,
+            )
+        lifecycle_blocker = nba_automatic_settlement_lifecycle_blocker(
+            trade,
+            *collect_nba_lifecycle_tokens(
+                matchbook_market,
+                matchbook_event,
+                polymarket_market,
+                polymarket_event,
+                *list((kalshi_markets or {}).values()),
+            ),
+            matchbook.status,
+            kalshi.status,
+            polymarket.status,
+            event_status,
+            None if scores is None else scores.status,
+        )
+        if lifecycle_blocker is not None:
+            return _blocked(
+                trade,
+                lifecycle_blocker,
+                matchbook_market,
+                matchbook_event,
+                kalshi_markets,
+                scores,
+                polymarket_market=polymarket_market,
+                polymarket_event=polymarket_event,
+            )
+
     exception = _exception_blocker(matchbook, kalshi, scores, event_status=event_status)
     if exception is not None:
-        return _blocked(trade, exception, matchbook_market, matchbook_event, kalshi_markets, scores)
+        return _blocked(
+            trade,
+            exception,
+            matchbook_market,
+            matchbook_event,
+            kalshi_markets,
+            scores,
+            polymarket_market=polymarket_market,
+            polymarket_event=polymarket_event,
+        )
 
     derived: list[tuple[str, str]] = []
     if matchbook.winning_outcome:
         derived.append(("matchbook", matchbook.winning_outcome))
     if kalshi.winning_outcome:
         derived.append(("kalshi", kalshi.winning_outcome))
+    if polymarket.winning_outcome:
+        derived.append(("polymarket", polymarket.winning_outcome))
     if score_outcome:
         derived.append(("matchbook_scores", score_outcome))
+
+    nba_pair_blocker = _nba_cross_venue_result_blocker(trade, derived, polymarket)
+    if nba_pair_blocker is not None:
+        return _blocked(
+            trade,
+            nba_pair_blocker,
+            matchbook_market,
+            matchbook_event,
+            kalshi_markets,
+            scores,
+            polymarket_market=polymarket_market,
+            polymarket_event=polymarket_event,
+            extra={"derived": [{"source": source, "outcome": outcome} for source, outcome in derived]},
+        )
 
     if not derived:
         specific = [
             reason
-            for reason in (score_blocker, matchbook.blocker, kalshi.blocker)
+            for reason in (score_blocker, matchbook.blocker, kalshi.blocker, polymarket.blocker)
             if reason and reason != "incomplete_provider_result"
         ]
         reason = next(iter(specific), None) or (
-            matchbook.blocker or kalshi.blocker or score_blocker or "incomplete_provider_result"
+            matchbook.blocker
+            or kalshi.blocker
+            or polymarket.blocker
+            or score_blocker
+            or "incomplete_provider_result"
         )
-        return _blocked(trade, reason, matchbook_market, matchbook_event, kalshi_markets, scores)
+        return _blocked(
+            trade,
+            reason,
+            matchbook_market,
+            matchbook_event,
+            kalshi_markets,
+            scores,
+            polymarket_market=polymarket_market,
+            polymarket_event=polymarket_event,
+        )
 
     winners = {outcome for _source, outcome in derived}
     if len(winners) != 1:
@@ -223,6 +368,8 @@ def resolve_paper_trade_settlement(
             kalshi_markets,
             scores,
             extra={"derived": [{"source": source, "outcome": outcome} for source, outcome in derived]},
+            polymarket_market=polymarket_market,
+            polymarket_event=polymarket_event,
         )
 
     winner = next(iter(winners))
@@ -234,9 +381,17 @@ def resolve_paper_trade_settlement(
             matchbook_event,
             kalshi_markets,
             scores,
+            polymarket_market=polymarket_market,
+            polymarket_event=polymarket_event,
         )
 
-    if not _authoritative_completion(matchbook, kalshi, scores, score_outcome=score_outcome):
+    if not _authoritative_completion(
+        matchbook,
+        kalshi,
+        scores,
+        score_outcome=score_outcome,
+        polymarket=polymarket,
+    ):
         return _blocked(
             trade,
             "incomplete_provider_result",
@@ -244,6 +399,8 @@ def resolve_paper_trade_settlement(
             matchbook_event,
             kalshi_markets,
             scores,
+            polymarket_market=polymarket_market,
+            polymarket_event=polymarket_event,
         )
 
     evidence = _evidence_payload(
@@ -257,7 +414,10 @@ def resolve_paper_trade_settlement(
             "derived": [{"source": source, "outcome": outcome} for source, outcome in derived],
             "matchbook": matchbook.observed,
             "kalshi": kalshi.observed,
+            "polymarket": polymarket.observed,
         },
+        polymarket_market=polymarket_market,
+        polymarket_event=polymarket_event,
     )
     source_id = _source_id(trade, winner, matchbook, kalshi, scores)
     return SettlementResolution(
@@ -287,11 +447,18 @@ def _identity_blocker(trade: PaperTrade) -> str | None:
         for leg in trade.legs
         if leg.filled_stake > 0
     )
-    if not has_matchbook and not has_kalshi:
+    has_polymarket = any(
+        leg.venue is VenueName.POLYMARKET and _usable_id(leg.source_market_id)
+        for leg in trade.legs
+        if leg.filled_stake > 0
+    )
+    if not has_matchbook and not has_kalshi and not has_polymarket:
         return "missing_durable_provider_identity"
     if has_matchbook and _matchbook_identity_missing(trade):
         return "missing_durable_provider_identity"
     if has_kalshi and not _kalshi_tickers(trade):
+        return "missing_durable_provider_identity"
+    if _polymarket_identity_missing(trade):
         return "missing_durable_provider_identity"
     return None
 
@@ -314,6 +481,17 @@ def _matchbook_identity_missing(trade: PaperTrade) -> bool:
     return False
 
 
+def _polymarket_identity_missing(trade: PaperTrade) -> bool:
+    pm_legs = [
+        leg
+        for leg in trade.legs
+        if leg.venue is VenueName.POLYMARKET and leg.filled_stake > 0
+    ]
+    if not pm_legs:
+        return False
+    return not any(_usable_id(leg.source_market_id) for leg in pm_legs)
+
+
 def _usable_id(value: str | None) -> str | None:
     text = str(value or "").strip()
     if not text or text.casefold() in {"unknown", "none", "null"}:
@@ -333,12 +511,12 @@ def _kalshi_tickers(trade: PaperTrade) -> list[str]:
 
 
 def _family_blocker(trade: PaperTrade) -> str | None:
-    from sports_hedge.nfl.detect import is_nfl_market_family
+    from sports_hedge.nba.settlement import is_nba_paper_trade
     from sports_hedge.nfl.markets import is_exact_half_line
     from sports_hedge.nfl.settlement import is_nfl_paper_trade
 
     family = trade.market_family
-    if is_nfl_paper_trade(trade) or is_nfl_market_family(family):
+    if is_nfl_paper_trade(trade):
         if family not in {
             MarketFamily.GAME_WINNER,
             MarketFamily.POINT_SPREAD,
@@ -351,6 +529,14 @@ def _family_blocker(trade: PaperTrade) -> str | None:
             line = _line_from_trade(trade)
             if line is None or not is_exact_half_line(line):
                 return "unsupported_nfl_line"
+        return None
+    if is_nba_paper_trade(trade):
+        if family is not MarketFamily.GAME_WINNER:
+            from sports_hedge.nba.constants import NBA_UNSUPPORTED_FAMILY_REASON
+
+            return NBA_UNSUPPORTED_FAMILY_REASON
+        if trade.period not in SUPPORTED_PERIODS and trade.period is not FootballPeriod.FULL_TIME:
+            return "unsupported_settlement_period"
         return None
     if family is None or family not in LOCKED_PAPER_FAMILIES:
         return "unsupported_market_family"
@@ -403,16 +589,30 @@ def _authoritative_completion(
     scores: ScoreEvidence | None,
     *,
     score_outcome: str | None,
+    polymarket: ProviderOutcomeEvidence | None = None,
 ) -> bool:
     """Require a completed/graded/settled provider state, never elapsed time."""
 
+    matchbook_done = matchbook.winning_outcome is not None and _is_graded(matchbook.status)
+    kalshi_done = kalshi.winning_outcome is not None and _is_graded(kalshi.status)
+    polymarket_done = (
+        polymarket is not None
+        and polymarket.winning_outcome is not None
+        and _is_graded(polymarket.status)
+    )
+    if polymarket is not None and polymarket.source_market_id:
+        if not polymarket_done:
+            return False
+        if kalshi.source_market_id and not kalshi_done:
+            return False
+        if matchbook.source_market_id and not matchbook_done:
+            return False
+        return True
     scores_done = (
         scores is not None and _is_graded(scores.status) and score_outcome is not None
     )
     if scores_done:
         return True
-    matchbook_done = matchbook.winning_outcome is not None and _is_graded(matchbook.status)
-    kalshi_done = kalshi.winning_outcome is not None and _is_graded(kalshi.status)
     if matchbook_done and kalshi_done:
         return True
     if matchbook_done and not kalshi.source_market_id:
@@ -632,6 +832,203 @@ def _kalshi_ticker_winner(legs: list[Any], result: str | None) -> str | None:
     return None
 
 
+def _nba_cross_venue_result_blocker(
+    trade: PaperTrade,
+    derived: list[tuple[str, str]],
+    polymarket: ProviderOutcomeEvidence,
+) -> str | None:
+    from sports_hedge.nba.constants import NBA_POLYMARKET_EVIDENCE_REQUIRED
+    from sports_hedge.nba.settlement import is_nba_paper_trade
+
+    if not is_nba_paper_trade(trade):
+        return None
+    sources = {source for source, _outcome in derived}
+    has_pm = any(
+        leg.venue is VenueName.POLYMARKET and leg.filled_stake > 0 for leg in trade.legs
+    )
+    has_kalshi = any(
+        leg.venue is VenueName.KALSHI and leg.filled_stake > 0 for leg in trade.legs
+    )
+    if has_pm and "polymarket" not in sources:
+        if polymarket.blocker and polymarket.blocker != "incomplete_provider_result":
+            return polymarket.blocker
+        return NBA_POLYMARKET_EVIDENCE_REQUIRED
+    if has_kalshi and "kalshi" not in sources:
+        return "incomplete_provider_result"
+    return None
+
+
+def _polymarket_market_evidence(
+    trade: PaperTrade,
+    market_payload: Mapping[str, Any] | None,
+    event_payload: Mapping[str, Any] | None = None,
+) -> ProviderOutcomeEvidence:
+    from sports_hedge.nba.constants import NBA_SETTLEMENT_FAIL_CLOSED_REASON
+
+    pm_legs = [leg for leg in trade.legs if leg.venue is VenueName.POLYMARKET]
+    event_id = _first_source_event(trade, VenueName.POLYMARKET)
+    market_id = _first_source_market(trade, VenueName.POLYMARKET)
+    if not pm_legs:
+        return ProviderOutcomeEvidence(
+            venue=VenueName.POLYMARKET.value,
+            source_event_id=event_id,
+            source_market_id=None,
+            source_result_id=None,
+            status=None,
+            winning_outcome=None,
+            blocker=None,
+            observed={},
+        )
+    if not isinstance(market_payload, Mapping):
+        return ProviderOutcomeEvidence(
+            venue=VenueName.POLYMARKET.value,
+            source_event_id=event_id,
+            source_market_id=market_id,
+            source_result_id=None,
+            status=None,
+            winning_outcome=None,
+            blocker="incomplete_provider_result",
+            observed={},
+        )
+    uma = _norm(market_payload.get("umaResolutionStatus"))
+    closed = market_payload.get("closed")
+    status = uma or _payload_status(market_payload)
+    if status is None and closed is True:
+        status = "closed"
+    observed = {
+        "umaResolutionStatus": uma,
+        "closed": closed,
+        "ended": None if not isinstance(event_payload, Mapping) else event_payload.get("ended"),
+    }
+    outcomes = [str(item) for item in _json_list(market_payload.get("outcomes"))]
+    prices = _decimal_list(market_payload.get("outcomePrices"))
+    if _polymarket_prices_are_split(prices):
+        return ProviderOutcomeEvidence(
+            venue=VenueName.POLYMARKET.value,
+            source_event_id=event_id,
+            source_market_id=str(market_payload.get("id") or market_id or ""),
+            source_result_id=str(market_payload.get("id") or market_id or ""),
+            status="50-50",
+            winning_outcome=None,
+            blocker=NBA_SETTLEMENT_FAIL_CLOSED_REASON,
+            observed={**observed, "outcomePrices": [str(item) for item in prices]},
+        )
+    if uma and uma not in GRADED_RESULT_STATUSES and uma not in {
+        "open",
+        "active",
+        "proposed",
+    }:
+        return ProviderOutcomeEvidence(
+            venue=VenueName.POLYMARKET.value,
+            source_event_id=event_id,
+            source_market_id=str(market_payload.get("id") or market_id or ""),
+            source_result_id=str(market_payload.get("id") or market_id or ""),
+            status=uma,
+            winning_outcome=None,
+            blocker=NBA_SETTLEMENT_FAIL_CLOSED_REASON,
+            observed=observed,
+        )
+    if uma == "proposed":
+        return ProviderOutcomeEvidence(
+            venue=VenueName.POLYMARKET.value,
+            source_event_id=event_id,
+            source_market_id=str(market_payload.get("id") or market_id or ""),
+            source_result_id=str(market_payload.get("id") or market_id or ""),
+            status=uma,
+            winning_outcome=None,
+            blocker="incomplete_provider_result",
+            observed=observed,
+        )
+    winner_name = _polymarket_priced_winner_name(outcomes, prices)
+    winner = _polymarket_name_to_trade_outcome(trade, winner_name) if winner_name else None
+    graded = _is_graded(status)
+    if graded and winner is None:
+        return ProviderOutcomeEvidence(
+            venue=VenueName.POLYMARKET.value,
+            source_event_id=event_id,
+            source_market_id=str(market_payload.get("id") or market_id or ""),
+            source_result_id=str(market_payload.get("id") or market_id or ""),
+            status=status,
+            winning_outcome=None,
+            blocker="incomplete_provider_result",
+            observed={**observed, "outcomes": outcomes},
+        )
+    return ProviderOutcomeEvidence(
+        venue=VenueName.POLYMARKET.value,
+        source_event_id=event_id,
+        source_market_id=str(market_payload.get("id") or market_id or ""),
+        source_result_id=str(market_payload.get("id") or market_id or ""),
+        status=status,
+        winning_outcome=winner if graded else None,
+        blocker=None if (winner and graded) or not graded else "incomplete_provider_result",
+        observed={**observed, "winner_name": winner_name, "outcomes": outcomes},
+    )
+
+
+def _json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _decimal_list(value: Any) -> list[Decimal]:
+    prices: list[Decimal] = []
+    for item in _json_list(value):
+        try:
+            prices.append(Decimal(str(item)))
+        except (InvalidOperation, ValueError):
+            continue
+    return prices
+
+
+def _polymarket_prices_are_split(prices: list[Decimal]) -> bool:
+    if len(prices) < 2:
+        return False
+    return all(abs(price - Decimal("0.5")) <= Decimal("0.01") for price in prices)
+
+
+def _polymarket_priced_winner_name(outcomes: list[str], prices: list[Decimal]) -> str | None:
+    if len(outcomes) != len(prices) or not prices:
+        return None
+    winners = [
+        outcomes[index]
+        for index, price in enumerate(prices)
+        if price >= Decimal("0.99")
+    ]
+    if len(winners) != 1:
+        return None
+    return winners[0]
+
+
+def _polymarket_name_to_trade_outcome(trade: PaperTrade, name: str | None) -> str | None:
+    if not name:
+        return None
+    from sports_hedge.nba.teams import resolve_nba_team
+
+    resolved = resolve_nba_team(name)
+    home = resolve_nba_team(trade.home_team)
+    away = resolve_nba_team(trade.away_team)
+    if resolved.ok and home.ok and resolved.canonical == home.canonical:
+        return CanonicalOutcome.HOME.value
+    if resolved.ok and away.ok and resolved.canonical == away.canonical:
+        return CanonicalOutcome.AWAY.value
+    compact = _norm(name)
+    if compact and compact == _norm(trade.home_team):
+        return CanonicalOutcome.HOME.value
+    if compact and compact == _norm(trade.away_team):
+        return CanonicalOutcome.AWAY.value
+    return None
+
+
 def _score_evidence(
     event_payload: Mapping[str, Any] | None,
     market_payload: Mapping[str, Any] | None,
@@ -794,9 +1191,19 @@ def _blocked(
     kalshi_markets: Mapping[str, Mapping[str, Any]] | None,
     scores: ScoreEvidence | None = None,
     extra: dict[str, Any] | None = None,
+    *,
+    polymarket_market: Mapping[str, Any] | None = None,
+    polymarket_event: Mapping[str, Any] | None = None,
 ) -> SettlementResolution:
     evidence = _evidence_payload(
-        trade, matchbook_market, matchbook_event, kalshi_markets, scores, extra=extra
+        trade,
+        matchbook_market,
+        matchbook_event,
+        kalshi_markets,
+        scores,
+        extra=extra,
+        polymarket_market=polymarket_market,
+        polymarket_event=polymarket_event,
     )
     evidence["blocker"] = reason
     return SettlementResolution(
@@ -815,6 +1222,9 @@ def _evidence_payload(
     kalshi_markets: Mapping[str, Mapping[str, Any]] | None,
     scores: ScoreEvidence | None,
     extra: dict[str, Any] | None = None,
+    *,
+    polymarket_market: Mapping[str, Any] | None = None,
+    polymarket_event: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "trade_id": trade.trade_id,
@@ -826,6 +1236,8 @@ def _evidence_payload(
         "matchbook_market_id": _first_source_market(trade, VenueName.MATCHBOOK),
         "kalshi_event_id": _first_source_event(trade, VenueName.KALSHI),
         "kalshi_tickers": _kalshi_tickers(trade),
+        "polymarket_event_id": _first_source_event(trade, VenueName.POLYMARKET),
+        "polymarket_market_id": _first_source_market(trade, VenueName.POLYMARKET),
         "matchbook_market_status": _payload_status(extract_matchbook_market_payload(matchbook_market))
         if matchbook_market
         else None,
@@ -851,6 +1263,14 @@ def _evidence_payload(
             ticker: _norm((_kalshi_market_object(item) or {}).get("result"))
             for ticker, item in kalshi_markets.items()
         }
+    if isinstance(polymarket_market, Mapping):
+        payload["polymarket_uma_resolution_status"] = _norm(
+            polymarket_market.get("umaResolutionStatus")
+        )
+        payload["polymarket_closed"] = polymarket_market.get("closed")
+    if isinstance(polymarket_event, Mapping):
+        payload["polymarket_event_ended"] = polymarket_event.get("ended")
+        payload["polymarket_event_period"] = polymarket_event.get("period")
     return payload
 
 

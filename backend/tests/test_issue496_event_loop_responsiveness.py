@@ -296,6 +296,12 @@ def test_cancel_recovery_does_not_call_sync_cluster_venue_events() -> None:
     assert "defer_candidate_build=True" in cooperative_src
     assert "finalize_cooperative" in cooperative_src
     assert "load_candidates_cooperative" in cooperative_src
+    assert "_apply_identity_graph_cooperative" in inspect.getsource(
+        ClusterPass.finalize_cooperative
+    )
+    assert "assign_identity_components_cooperative" in inspect.getsource(
+        ClusterPass._apply_identity_graph_cooperative
+    )
 
 
 @pytest.mark.asyncio

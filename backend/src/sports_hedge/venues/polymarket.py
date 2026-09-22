@@ -184,6 +184,15 @@ class PolymarketClient(ReadOnlyVenue):
         response.raise_for_status()
         return response.json()
 
+    async def get_event(self, event_id: int | str) -> dict[str, Any]:
+        """Exact-ID Gamma event refresh. Read-only; used for settlement lifecycle."""
+
+        response = await self._client.get(
+            f"{self.settings.polymarket_gamma_base_url.rstrip('/')}/events/{event_id}"
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def get_order_book(
         self,
         event_id: int | str,

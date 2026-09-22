@@ -207,6 +207,8 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
         )
     settlement_assumption = None
     if paper_assumed:
+        from sports_hedge.nba.settlement import nba_market_uses_paper_caveat, NBA_PAPER_NORMAL_COMPLETION_REASON
+        from sports_hedge.nba.constants import NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT
         from sports_hedge.nfl.settlement import nfl_market_uses_paper_caveat, NFL_PAPER_NORMAL_COMPLETION_REASON
         from sports_hedge.nfl.constants import NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT
 
@@ -215,6 +217,11 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
             notes.append("settlement_assumption=normal_full_game_completion")
             notes.append(NFL_PAPER_NORMAL_COMPLETION_REASON)
             notes.append(NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT)
+        elif nba_market_uses_paper_caveat(left) or nba_market_uses_paper_caveat(right):
+            settlement_assumption = "normal_full_game_completion"
+            notes.append("settlement_assumption=normal_full_game_completion")
+            notes.append(NBA_PAPER_NORMAL_COMPLETION_REASON)
+            notes.append(NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT)
         else:
             settlement_assumption = "regulation_time"
             notes.append("settlement_assumption=regulation_time")
@@ -281,9 +288,10 @@ def _economic_state(
             notes,
         )
 
+    from sports_hedge.nba.detect import NBA_MARKET_FAMILIES
     from sports_hedge.nfl.detect import NFL_MARKET_FAMILIES
 
-    catalogue_families = target_market_families() | CENSUS_V1_FAMILIES | NFL_MARKET_FAMILIES
+    catalogue_families = target_market_families() | CENSUS_V1_FAMILIES | NFL_MARKET_FAMILIES | NBA_MARKET_FAMILIES
     left_in = left.family in catalogue_families
     right_in = right.family in catalogue_families
     if not left_in and not right_in:

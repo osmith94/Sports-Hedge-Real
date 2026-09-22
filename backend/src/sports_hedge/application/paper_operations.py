@@ -3680,14 +3680,14 @@ class PaperOperationsService:
     ) -> PaperTrade:
         home = opportunity.home_team
         away = opportunity.away_team
-        from sports_hedge.nfl.detect import is_nfl_market_family
+        from sports_hedge.nba.labels import nba_fixture_label
         from sports_hedge.nfl.labels import nfl_fixture_label
 
-        if (
-            is_nfl_market_family(opportunity.market_family)
-            or str(opportunity.competition or "").upper() == "NFL"
-        ) and home and away:
+        competition_name = str(opportunity.competition or "").upper()
+        if competition_name == "NFL" and home and away:
             fixture = nfl_fixture_label(home_team=home, away_team=away)
+        elif competition_name == "NBA" and home and away:
+            fixture = nba_fixture_label(home_team=home, away_team=away)
         else:
             fixture = f"{home} v {away}" if home and away else None
         market_label = None
@@ -3709,20 +3709,27 @@ class PaperOperationsService:
                 detail="paper trade opened; guaranteed opening profit is recorded only after the complete hedge validates",
             )
         ]
-        from sports_hedge.nfl.detect import is_nfl_market_family as _nfl_family
+        from sports_hedge.nba.constants import NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT
+        from sports_hedge.nba.labels import NBA_SETTLEMENT_CAVEAT_OPERATOR_TEXT
         from sports_hedge.nfl.constants import NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT
         from sports_hedge.nfl.labels import NFL_SETTLEMENT_CAVEAT_OPERATOR_TEXT
 
-        if (
-            _nfl_family(opportunity.market_family)
-            or str(opportunity.competition or "").upper() == "NFL"
-        ):
+        if competition_name == "NFL":
             audit.append(
                 PaperTradeAuditEvent(
                     event_id=f"{paper_trade_id(plan.opportunity_id)}:{NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT}",
                     occurred_at=occurred_at,
                     event_type=PaperTradeAuditEventType.TRADE_OPENED,
                     detail=f"{NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT}: {NFL_SETTLEMENT_CAVEAT_OPERATOR_TEXT}",
+                )
+            )
+        elif competition_name == "NBA":
+            audit.append(
+                PaperTradeAuditEvent(
+                    event_id=f"{paper_trade_id(plan.opportunity_id)}:{NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT}",
+                    occurred_at=occurred_at,
+                    event_type=PaperTradeAuditEventType.TRADE_OPENED,
+                    detail=f"{NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT}: {NBA_SETTLEMENT_CAVEAT_OPERATOR_TEXT}",
                 )
             )
         return PaperTrade(

@@ -17,6 +17,8 @@ Matchbook, Kalshi, or Polymarket.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -29,6 +31,7 @@ NodeKey = tuple[VenueName, str]
 # 0.80 are unchanged. A thinner global margin fails closed.
 DEFAULT_ASSIGNMENT_MARGIN = 0.03
 MAX_AMBIGUOUS_SUPERNODES = 8
+_ASSIGN_COOP_MAX_SLICE_SECONDS = 0.05
 
 HARD_VETO_REASONS = frozenset(
     {
@@ -38,6 +41,7 @@ HARD_VETO_REASONS = frozenset(
         "competition_mismatch",
         "curated_team_mismatch",
         "nfl_team_identity_ambiguous",
+        "nba_team_identity_ambiguous",
         "prefilter_rejected",
     }
 )
@@ -79,7 +83,12 @@ def pair_kind(left: VenueName, right: VenueName) -> str:
 def is_hard_identity_veto(reasons: Sequence[str], *, matched: bool, confidence: float) -> bool:
     if matched:
         return False
-    if any(reason in HARD_VETO_REASONS or reason.startswith("nfl_team_identity") for reason in reasons):
+    if any(
+        reason in HARD_VETO_REASONS
+        or reason.startswith("nfl_team_identity")
+        or reason.startswith("nba_team_identity")
+        for reason in reasons
+    ):
         return True
     return confidence <= 0.0 and "prefilter_rejected" in reasons
 
@@ -728,6 +737,200 @@ def _obvious_provenance(
     )
 
 
+@dataclass
+class _IdentityAssignmentPrep:
+    unique_nodes: list[NodeKey]
+    pair_index: dict[frozenset[NodeKey], ScoredIdentityPair]
+    incomplete_nodes: set[NodeKey]
+    diagnostics: IdentityGraphDiagnostics
+    components: list[list[_Supernode]]
+    base_constraints: tuple[str, ...]
+    margin: float
+
+
+def _prepare_identity_assignment(
+    nodes: Sequence[NodeKey],
+    scored_pairs: Sequence[ScoredIdentityPair],
+    *,
+    unscored_candidate_keys: Iterable[frozenset[NodeKey]] = (),
+    unscored_nodes: Iterable[NodeKey] | None = None,
+    threshold: float,
+    margin: float = DEFAULT_ASSIGNMENT_MARGIN,
+) -> _IdentityAssignmentPrep | None:
+    unique_nodes = sorted(set(nodes), key=node_sort_key)
+    pair_index = _index_pairs(scored_pairs)
+    unscored_keys = {key for key in unscored_candidate_keys if len(key) == 2}
+    incomplete_nodes = (
+        set(unscored_nodes)
+        if unscored_nodes is not None
+        else _unscored_endpoint_nodes(unscored_keys)
+    )
+    diagnostics = IdentityGraphDiagnostics()
+    if not unique_nodes:
+        return None
+    supernodes = _sibling_supernodes(unique_nodes, scored_pairs)
+    diagnostics.sibling_groups = sum(1 for item in supernodes if len(item.members) > 1)
+    adjacency = _matching_supernode_adjacency(supernodes, pair_index=pair_index)
+    components = _connected_components(supernodes, adjacency)
+    diagnostics.components = len(components)
+    return _IdentityAssignmentPrep(
+        unique_nodes=unique_nodes,
+        pair_index=pair_index,
+        incomplete_nodes=incomplete_nodes,
+        diagnostics=diagnostics,
+        components=components,
+        base_constraints=(
+            CONSTRAINT_ONE_SUPERNODE_PER_VENUE,
+            CONSTRAINT_SIBLINGS_PERMITTED,
+            f"event_matcher_threshold={threshold:.2f}",
+            f"{CONSTRAINT_MARGIN}={margin:.2f}",
+            CONSTRAINT_HARD_VETO,
+        ),
+        margin=margin,
+    )
+
+
+def _clusters_for_component(
+    component: Sequence[_Supernode],
+    *,
+    prep: _IdentityAssignmentPrep,
+) -> list[AssignedIdentityCluster]:
+    pair_index = prep.pair_index
+    diagnostics = prep.diagnostics
+    base_constraints = prep.base_constraints
+    # Singletons cannot be incomplete-ambiguous; skip the O(unscored)
+    # scan that previously walked every leftover candidate per component.
+    incomplete = (
+        False
+        if len(component) <= 1
+        else _component_incomplete(component, unscored_nodes=prep.incomplete_nodes)
+    )
+    competing = _venues_compete(component)
+    obvious = _is_obvious_clique(component, pair_index=pair_index)
+    contradictory = _has_cross_venue_veto_path(component, pair_index=pair_index)
+    matching_edges = _matching_pairs_in_component(component, pair_index=pair_index)
+    _, greedy_weight = greedy_local_pairwise_assignment(matching_edges)
+
+    if obvious and not competing and not contradictory:
+        if incomplete and len(component) > 1:
+            diagnostics.fail_closed_components += 1
+            provenance = _fail_closed_provenance(
+                component,
+                method="fail_closed",
+                reason="incomplete_candidate_evidence",
+                constraints=[*base_constraints, CONSTRAINT_INCOMPLETE],
+                pair_index=pair_index,
+                greedy_weight=greedy_weight,
+            )
+            return _singleton_clusters(component, provenance)
+        diagnostics.obvious_components += 1
+        provenance = _obvious_provenance(
+            component,
+            pair_index=pair_index,
+            constraints=[*base_constraints, CONSTRAINT_CLIQUE],
+        )
+        members = frozenset(node for item in component for node in item.members)
+        return [AssignedIdentityCluster(member_keys=members, provenance=provenance)]
+
+    diagnostics.ambiguous_components += 1
+    if contradictory:
+        diagnostics.contradictory_components += 1
+        diagnostics.fail_closed_components += 1
+        provenance = _fail_closed_provenance(
+            component,
+            method="fail_closed",
+            reason="contradictory_component",
+            constraints=[*base_constraints, "cross_venue_veto_on_matching_path"],
+            pair_index=pair_index,
+            greedy_weight=greedy_weight,
+        )
+        return _singleton_clusters(component, provenance)
+    if incomplete:
+        diagnostics.fail_closed_components += 1
+        provenance = _fail_closed_provenance(
+            component,
+            method="fail_closed",
+            reason="incomplete_candidate_evidence",
+            constraints=[*base_constraints, CONSTRAINT_INCOMPLETE],
+            pair_index=pair_index,
+            greedy_weight=greedy_weight,
+        )
+        return _singleton_clusters(component, provenance)
+    if len(component) > MAX_AMBIGUOUS_SUPERNODES:
+        diagnostics.fail_closed_components += 1
+        provenance = _fail_closed_provenance(
+            component,
+            method="fail_closed",
+            reason="ambiguous_component_too_large",
+            constraints=[*base_constraints, CONSTRAINT_ENUMERATION_CAP],
+            pair_index=pair_index,
+            greedy_weight=greedy_weight,
+        )
+        return _singleton_clusters(component, provenance)
+
+    best, second = _best_two_partitions(component, pair_index=pair_index)
+    if best is None or best[1] <= 0.0:
+        diagnostics.fail_closed_components += 1
+        provenance = _fail_closed_provenance(
+            component,
+            method="fail_closed",
+            reason="no_legal_global_assignment",
+            constraints=base_constraints,
+            pair_index=pair_index,
+            greedy_weight=greedy_weight,
+            global_weight=0.0,
+            margin=0.0,
+        )
+        return _singleton_clusters(component, provenance)
+
+    best_partition, best_weight = best
+    second_weight = 0.0 if second is None else float(second[1])
+    confidence_margin = round(best_weight - second_weight, 6)
+    if confidence_margin < prep.margin:
+        diagnostics.fail_closed_components += 1
+        provenance = _fail_closed_provenance(
+            component,
+            method="fail_closed",
+            reason="assignment_margin_too_small",
+            constraints=base_constraints,
+            pair_index=pair_index,
+            greedy_weight=greedy_weight,
+            global_weight=best_weight,
+            margin=confidence_margin,
+        )
+        return _singleton_clusters(component, provenance)
+
+    chosen, rejected = _pairs_for_clusters(
+        component, best_partition, pair_index=pair_index
+    )
+    diagnostics.global_assignments += 1
+    provenance = IdentityAssignmentProvenance(
+        method="global_max_weight",
+        component_id=_component_id(node for item in component for node in item.members),
+        chosen_edges=chosen,
+        rejected_competing_edges=rejected,
+        confidence_margin=confidence_margin,
+        constraints=(*base_constraints, CONSTRAINT_CLIQUE),
+        greedy_weight=greedy_weight,
+        global_weight=best_weight,
+    )
+    return _clusters_from_partition(component, best_partition, provenance)
+
+
+def _finish_identity_assignment(
+    prep: _IdentityAssignmentPrep,
+    assigned: list[AssignedIdentityCluster],
+) -> IdentityGraphResult:
+    assigned.sort(
+        key=lambda cluster: tuple(sorted(cluster.member_keys, key=node_sort_key))
+    )
+    covered = {node for cluster in assigned for node in cluster.member_keys}
+    if set(prep.unique_nodes) != covered:
+        missing = [node for node in prep.unique_nodes if node not in covered]
+        raise RuntimeError(f"identity graph dropped nodes: {missing!r}")
+    return IdentityGraphResult(clusters=assigned, diagnostics=prep.diagnostics)
+
+
 def assign_identity_components(
     nodes: Sequence[NodeKey],
     scored_pairs: Sequence[ScoredIdentityPair],
@@ -744,166 +947,57 @@ def assign_identity_components(
     ambiguous component fail closed rather than guess from partial evidence.
     """
 
-    unique_nodes = sorted(set(nodes), key=node_sort_key)
-    pair_index = _index_pairs(scored_pairs)
-    unscored_keys = {key for key in unscored_candidate_keys if len(key) == 2}
-    incomplete_nodes = (
-        set(unscored_nodes)
-        if unscored_nodes is not None
-        else _unscored_endpoint_nodes(unscored_keys)
+    prep = _prepare_identity_assignment(
+        nodes,
+        scored_pairs,
+        unscored_candidate_keys=unscored_candidate_keys,
+        unscored_nodes=unscored_nodes,
+        threshold=threshold,
+        margin=margin,
     )
-    diagnostics = IdentityGraphDiagnostics()
-    if not unique_nodes:
-        return IdentityGraphResult(clusters=[], diagnostics=diagnostics)
-
-    supernodes = _sibling_supernodes(unique_nodes, scored_pairs)
-    diagnostics.sibling_groups = sum(1 for item in supernodes if len(item.members) > 1)
-
-    adjacency = _matching_supernode_adjacency(supernodes, pair_index=pair_index)
-
-    components = _connected_components(supernodes, adjacency)
-    diagnostics.components = len(components)
+    if prep is None:
+        return IdentityGraphResult(clusters=[], diagnostics=IdentityGraphDiagnostics())
     assigned: list[AssignedIdentityCluster] = []
-    base_constraints = (
-        CONSTRAINT_ONE_SUPERNODE_PER_VENUE,
-        CONSTRAINT_SIBLINGS_PERMITTED,
-        f"event_matcher_threshold={threshold:.2f}",
-        f"{CONSTRAINT_MARGIN}={margin:.2f}",
-        CONSTRAINT_HARD_VETO,
+    for component in prep.components:
+        assigned.extend(_clusters_for_component(component, prep=prep))
+    return _finish_identity_assignment(prep, assigned)
+
+
+async def assign_identity_components_cooperative(
+    nodes: Sequence[NodeKey],
+    scored_pairs: Sequence[ScoredIdentityPair],
+    *,
+    unscored_candidate_keys: Iterable[frozenset[NodeKey]] = (),
+    unscored_nodes: Iterable[NodeKey] | None = None,
+    threshold: float,
+    margin: float = DEFAULT_ASSIGNMENT_MARGIN,
+    yield_every: int = 64,
+) -> IdentityGraphResult:
+    """Same assignment as ``assign_identity_components``, yielding to the loop.
+
+    Dense UNIVERSE finalize must not monopolise asyncio for the 0.25s liveness
+    bound. Prep stays sync; the per-component walk is the long tail.
+    """
+
+    prep = _prepare_identity_assignment(
+        nodes,
+        scored_pairs,
+        unscored_candidate_keys=unscored_candidate_keys,
+        unscored_nodes=unscored_nodes,
+        threshold=threshold,
+        margin=margin,
     )
-
-    for component in components:
-        # Singletons cannot be incomplete-ambiguous; skip the O(unscored)
-        # scan that previously walked every leftover candidate per component.
-        incomplete = (
-            False
-            if len(component) <= 1
-            else _component_incomplete(component, unscored_nodes=incomplete_nodes)
-        )
-        competing = _venues_compete(component)
-        obvious = _is_obvious_clique(component, pair_index=pair_index)
-        contradictory = _has_cross_venue_veto_path(component, pair_index=pair_index)
-        matching_edges = _matching_pairs_in_component(component, pair_index=pair_index)
-        _, greedy_weight = greedy_local_pairwise_assignment(matching_edges)
-
-        if obvious and not competing and not contradictory:
-            if incomplete and len(component) > 1:
-                diagnostics.fail_closed_components += 1
-                provenance = _fail_closed_provenance(
-                    component,
-                    method="fail_closed",
-                    reason="incomplete_candidate_evidence",
-                    constraints=[*base_constraints, CONSTRAINT_INCOMPLETE],
-                    pair_index=pair_index,
-                    greedy_weight=greedy_weight,
-                )
-                assigned.extend(_singleton_clusters(component, provenance))
-                continue
-            diagnostics.obvious_components += 1
-            provenance = _obvious_provenance(
-                component,
-                pair_index=pair_index,
-                constraints=[*base_constraints, CONSTRAINT_CLIQUE],
-            )
-            members = frozenset(node for item in component for node in item.members)
-            assigned.append(AssignedIdentityCluster(member_keys=members, provenance=provenance))
-            continue
-
-        diagnostics.ambiguous_components += 1
-        if contradictory:
-            diagnostics.contradictory_components += 1
-            diagnostics.fail_closed_components += 1
-            provenance = _fail_closed_provenance(
-                component,
-                method="fail_closed",
-                reason="contradictory_component",
-                constraints=[*base_constraints, "cross_venue_veto_on_matching_path"],
-                pair_index=pair_index,
-                greedy_weight=greedy_weight,
-            )
-            assigned.extend(_singleton_clusters(component, provenance))
-            continue
-        if incomplete:
-            diagnostics.fail_closed_components += 1
-            provenance = _fail_closed_provenance(
-                component,
-                method="fail_closed",
-                reason="incomplete_candidate_evidence",
-                constraints=[*base_constraints, CONSTRAINT_INCOMPLETE],
-                pair_index=pair_index,
-                greedy_weight=greedy_weight,
-            )
-            assigned.extend(_singleton_clusters(component, provenance))
-            continue
-        if len(component) > MAX_AMBIGUOUS_SUPERNODES:
-            diagnostics.fail_closed_components += 1
-            provenance = _fail_closed_provenance(
-                component,
-                method="fail_closed",
-                reason="ambiguous_component_too_large",
-                constraints=[*base_constraints, CONSTRAINT_ENUMERATION_CAP],
-                pair_index=pair_index,
-                greedy_weight=greedy_weight,
-            )
-            assigned.extend(_singleton_clusters(component, provenance))
-            continue
-
-        best, second = _best_two_partitions(component, pair_index=pair_index)
-        if best is None or best[1] <= 0.0:
-            diagnostics.fail_closed_components += 1
-            provenance = _fail_closed_provenance(
-                component,
-                method="fail_closed",
-                reason="no_legal_global_assignment",
-                constraints=base_constraints,
-                pair_index=pair_index,
-                greedy_weight=greedy_weight,
-                global_weight=0.0,
-                margin=0.0,
-            )
-            assigned.extend(_singleton_clusters(component, provenance))
-            continue
-
-        best_partition, best_weight = best
-        second_weight = 0.0 if second is None else float(second[1])
-        confidence_margin = round(best_weight - second_weight, 6)
-        if confidence_margin < margin:
-            diagnostics.fail_closed_components += 1
-            reason = "assignment_margin_too_small"
-            provenance = _fail_closed_provenance(
-                component,
-                method="fail_closed",
-                reason=reason,
-                constraints=base_constraints,
-                pair_index=pair_index,
-                greedy_weight=greedy_weight,
-                global_weight=best_weight,
-                margin=confidence_margin,
-            )
-            assigned.extend(_singleton_clusters(component, provenance))
-            continue
-
-        chosen, rejected = _pairs_for_clusters(
-            component, best_partition, pair_index=pair_index
-        )
-        diagnostics.global_assignments += 1
-        provenance = IdentityAssignmentProvenance(
-            method="global_max_weight",
-            component_id=_component_id(node for item in component for node in item.members),
-            chosen_edges=chosen,
-            rejected_competing_edges=rejected,
-            confidence_margin=confidence_margin,
-            constraints=(*base_constraints, CONSTRAINT_CLIQUE),
-            greedy_weight=greedy_weight,
-            global_weight=best_weight,
-        )
-        assigned.extend(_clusters_from_partition(component, best_partition, provenance))
-
-    assigned.sort(
-        key=lambda cluster: tuple(sorted(cluster.member_keys, key=node_sort_key))
-    )
-    covered = {node for cluster in assigned for node in cluster.member_keys}
-    if set(unique_nodes) != covered:
-        missing = [node for node in unique_nodes if node not in covered]
-        raise RuntimeError(f"identity graph dropped nodes: {missing!r}")
-    return IdentityGraphResult(clusters=assigned, diagnostics=diagnostics)
+    if prep is None:
+        return IdentityGraphResult(clusters=[], diagnostics=IdentityGraphDiagnostics())
+    assigned: list[AssignedIdentityCluster] = []
+    pause_every = max(1, int(yield_every))
+    await asyncio.sleep(0)
+    last_yield = time.perf_counter()
+    for index, component in enumerate(prep.components, start=1):
+        assigned.extend(_clusters_for_component(component, prep=prep))
+        if index % pause_every == 0 or (
+            time.perf_counter() - last_yield
+        ) >= _ASSIGN_COOP_MAX_SLICE_SECONDS:
+            await asyncio.sleep(0)
+            last_yield = time.perf_counter()
+    return _finish_identity_assignment(prep, assigned)

@@ -9,6 +9,8 @@ const BLOCKER_LABELS: Record<string, string> = {
   unsupported_market_family: "Unsupported market family",
   unsupported_manual_result_family: "Unsupported manual-result family",
   nfl_exceptional_tie_fail_closed: "NFL exceptional tie — fail closed",
+  nba_exceptional_settlement_fail_closed: "NBA exceptional lifecycle — fail closed",
+  nba_normal_completion_not_proven: "NBA normal completion not proven",
   void_matchbook_runner: "Voided Matchbook runner",
 };
 

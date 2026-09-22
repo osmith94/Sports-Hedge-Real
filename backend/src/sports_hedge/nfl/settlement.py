@@ -137,11 +137,13 @@ def nfl_paper_audit_reasons() -> list[str]:
 
 
 def is_nfl_paper_trade(trade) -> bool:
-    family = getattr(trade, "market_family", None)
-    if is_nfl_market_family(family):
+    from sports_hedge.nfl.constants import NFL_COMPETITION, NFL_SPORT
+
+    sport = str(getattr(trade, "sport", "") or "").strip()
+    if sport == NFL_SPORT:
         return True
     competition = str(getattr(trade, "competition", "") or "")
-    if competition.strip().upper() == "NFL":
+    if competition.strip().upper() == NFL_COMPETITION:
         return True
     return False
 
