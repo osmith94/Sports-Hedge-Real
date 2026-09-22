@@ -169,11 +169,14 @@ explicit `*unresolved*` shard.
 
 Each shard has its own candidate list, signature and resume cursor. A
 discovery change in one competition does not invalidate the others
-(`global_resume_invalidated_by_discovery` stays false). Scheduling is
-multi-venue, then single-venue, then hot/unresolved with a smaller pair
-slice. Completed shards are finalised and handed to market evaluation while a
-hot shard is still partial. Hot and unresolved shards also apply a fail-open
-name canopy before fuzzy scoring; EventMatcher remains the oracle.
+(`global_resume_invalidated_by_discovery` stays false). Shards keep first-seen
+order rather than shard-id sort. Scheduling is multi-venue, then single-venue,
+then hot/unresolved with a smaller pair slice, and market evaluation walks
+that same order. The soft scan deadline stops before the next fixture, so an
+alphabetically earlier competition cannot consume the only evaluation slot,
+and a partial hot shard cannot relabel a fixture already evaluated. Hot and
+unresolved shards also apply a fail-open name canopy before fuzzy scoring;
+EventMatcher remains the oracle.
 
 Diagnostics on `scan_diagnostics` include `blocking_shard_key`,
 `largest_shard_*`, per-shard timings, provenance counts, and whether a

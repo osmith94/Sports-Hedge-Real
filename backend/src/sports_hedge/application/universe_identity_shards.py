@@ -277,7 +277,11 @@ def partition_identity_shards(
                 competition_code=UNRESOLVED_COMPETITION,
                 events=events,
             )
-    shards = sorted(grouped.values(), key=lambda shard: shard.shard_id)
+    # First-seen order, not shard-id sort. The soft scan deadline evaluates
+    # clusters in this order and stops. Alphabetical order let a later
+    # competition (la_liga before premier_league) consume the only evaluation
+    # slot and mark the earlier fixture as a deadline leftover.
+    shards = list(grouped.values())
     return ShardPartition(
         shards=shards,
         provenance_counts=dict(provenance_counts),
@@ -418,6 +422,7 @@ async def cluster_events_sharded(
         identity_cache.discovery_signature = signature
 
     runs: list[_ShardRun] = []
+    evaluation_order: list[_ShardRun] = []
     for shard in partition.shards:
         if not shard.events:
             continue
@@ -442,7 +447,8 @@ async def cluster_events_sharded(
     def _publish(extra_clusters: list[FixtureCluster] | None = None) -> None:
         if on_partial is None:
             return
-        assembled = [cluster for run in runs for cluster in run.clusters]
+        ordered = evaluation_order or runs
+        assembled = [cluster for run in ordered for cluster in run.clusters]
         if extra_clusters:
             assembled.extend(extra_clusters)
         on_partial(assembled)
@@ -525,14 +531,18 @@ async def cluster_events_sharded(
 
     non_hot_multi = [run for run in runs if not run.shard.hot and run.shard.venue_count >= 2]
     non_hot_single = [run for run in runs if not run.shard.hot and run.shard.venue_count < 2]
+    seen_index = {run.shard.shard_id: index for index, run in enumerate(runs)}
     hot_runs = sorted(
         [run for run in runs if run.shard.hot],
         key=lambda run: (
             1 if run.shard.unresolved else 0,
             0 if run.shard.venue_count >= 2 else 1,
-            run.shard.shard_id,
+            seen_index[run.shard.shard_id],
         ),
     )
+    # Market evaluation walks this order and stops at the soft deadline.
+    # Completed non-hot shards stay ahead of a partial hot/unresolved shard.
+    evaluation_order.extend([*non_hot_multi, *non_hot_single, *hot_runs])
     try:
         await _run_phase(non_hot_multi, hot_phase=False)
         if not truncated and not should_stop():
@@ -576,7 +586,7 @@ async def cluster_events_sharded(
         _publish()
         raise
 
-    clusters = [cluster for run in runs for cluster in run.clusters]
+    clusters = [cluster for run in (evaluation_order or runs) for cluster in run.clusters]
     counts = _empty_counts()
     for run in runs:
         for key, value in run.counts.items():

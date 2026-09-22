@@ -14,11 +14,15 @@ import pytest
 
 from sports_hedge.application.collector import (
     DEFAULT_PROVIDER_CONCURRENCY,
+    MarketEvaluationState,
     ReadOnlyCrossVenueCollector,
+    _append_deadline_leftovers,
+    _fixture_from_cluster,
 )
 from sports_hedge.application.fixture_clusters import (
     VenueEvent,
     build_indexed_candidates,
+    cluster_member_events,
     cluster_member_keyset,
     cluster_venue_events,
 )
@@ -471,3 +475,137 @@ async def test_collector_reports_blocking_shard_diagnostics() -> None:
     assert collector._op_clustering_truncated is False
     assert collector._op_unscored_identity_nodes == set()
     assert len(_membership(clusters)) == 4
+
+
+def _competition(code: str):
+    return next(item for item in TARGET_COMPETITIONS if item.code.value == code)
+
+
+@pytest.mark.asyncio
+async def test_first_seen_competition_precedes_alphabetically_earlier_code() -> None:
+    assert "la_liga" < "premier_league"
+    matchbook, polymarket, kalshi = _competition_fixtures(
+        [_competition("premier_league"), _competition("la_liga")]
+    )
+    clusters, _counts, truncated, _diagnostics, unscored = await cluster_events_sharded(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=EventMatcher(),
+        max_event_pairs=10_000,
+    )
+    homes = [cluster.matchbook.canonical.home_team for cluster in clusters]
+    assert truncated is False
+    assert unscored == set()
+    assert homes[0].startswith("premier_league")
+    assert homes[1].startswith("la_liga")
+
+
+@pytest.mark.asyncio
+async def test_partial_hot_shard_does_not_relabel_completed_shards() -> None:
+    matchbook, polymarket, kalshi = _competition_fixtures(
+        [_competition("premier_league"), _competition("la_liga")]
+    )
+    dense_mb, dense_pm, dense_k = _dense_unresolved(40)
+    clusters, _counts, truncated, diagnostics, unscored = await cluster_events_sharded(
+        matchbook=[*matchbook, *dense_mb],
+        polymarket=[*polymarket, *dense_pm],
+        kalshi=[*kalshi, *dense_k],
+        matcher=EventMatcher(),
+        max_event_pairs=10_000_000,
+        hot_pair_budget=0,
+    )
+    assert truncated is True
+    assert diagnostics["identity_shards_completed"] >= 2
+    assert UNRESOLVED_COMPETITION in str(diagnostics["blocking_shard_key"])
+    homes = [cluster.matchbook.canonical.home_team for cluster in clusters if cluster.matchbook]
+    assert homes[0].startswith("premier_league")
+    assert homes[1].startswith("la_liga")
+    completed = clusters[:2]
+    for cluster in completed:
+        assert all(
+            (item.venue, item.source_event_id) not in unscored
+            for item in cluster_member_events(cluster)
+        )
+    unresolved_clusters = clusters[2:]
+    assert unresolved_clusters
+    collector = ReadOnlyCrossVenueCollector.__new__(ReadOnlyCrossVenueCollector)
+    collector._op_clustering_truncated = True
+    collector._op_unscored_identity_nodes = set(unscored)
+    for cluster in completed:
+        assert collector._cluster_identity_incomplete(cluster) is False
+    assert any(collector._cluster_identity_incomplete(cluster) for cluster in unresolved_clusters)
+    evaluated = _fixture_from_cluster(
+        completed[0],
+        seen_at=KICKOFF,
+        polymarket_events=[],
+        queried_series_ids=None,
+    )
+    evaluated.market_evaluation_state = MarketEvaluationState.EVALUATED.value
+    evaluated.matched_equivalent_count = 1
+    discovered = [evaluated]
+    _append_deadline_leftovers(
+        [*completed, unresolved_clusters[0]],
+        discovered_fixtures=discovered,
+        issues=[],
+        started_at=KICKOFF,
+        polymarket_events=[],
+        queried_series_ids=None,
+    )
+    assert discovered[0] is evaluated
+    assert discovered[0].market_evaluation_state == MarketEvaluationState.EVALUATED.value
+    assert discovered[0].matched_equivalent_count == 1
+    leftovers = [item for item in discovered if item is not evaluated]
+    assert leftovers
+    assert all(
+        item.market_evaluation_state == MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE.value
+        for item in leftovers
+    )
+
+
+@pytest.mark.asyncio
+async def test_soft_deadline_evaluates_first_seen_fixture_only() -> None:
+    from test_issue_147_market_evaluation_state import (
+        TwoFixtureKalshi,
+        TwoFixtureMatchbook,
+        TwoFixturePolymarket,
+        _costs,
+        _fx,
+    )
+
+    from sports_hedge.application.paper_scan import PaperScanService
+    from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
+    from sports_hedge.market_intelligence.service import MarketIntelligenceService
+
+    repository = SqliteMarketIntelligenceRepository()
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=TwoFixtureMatchbook(),
+        polymarket=TwoFixturePolymarket(),
+        kalshi=TwoFixtureKalshi(),
+        paper_scan=PaperScanService(MarketIntelligenceService(repository)),
+    )
+    scans = {"count": 0}
+    original = collector._scan_cluster
+
+    async def wrapped(*args, **kwargs):
+        scans["count"] += 1
+        return await original(*args, **kwargs)
+
+    collector._scan_cluster = wrapped  # type: ignore[method-assign]
+    collector._deadline_reached = lambda: scans["count"] >= 1  # type: ignore[method-assign]
+    try:
+        report = await collector.collect_and_scan(
+            venue_costs=_costs(),
+            fx_snapshots=_fx(),
+            maximum_execution_risk=100,
+        )
+    finally:
+        repository.close()
+    assert scans["count"] == 1
+    by_home = {item.home_team: item for item in report.discovered_fixtures}
+    newcastle = by_home["Newcastle United"]
+    elche = by_home["Elche CF"]
+    assert newcastle.market_evaluation_state == MarketEvaluationState.EVALUATED
+    assert elche.market_evaluation_state == MarketEvaluationState.NOT_EVALUATED_SCAN_DEADLINE
+    assert elche.no_comparison_reason == "not_evaluated_scan_deadline"
+    assert newcastle.matched_equivalent_count is not None
