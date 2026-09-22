@@ -1,15 +1,15 @@
 # Operator football competition verification matrix
 
-`OPERATOR_COMPETITION_REGISTRY_VERSION = 5`
+`OPERATOR_COMPETITION_REGISTRY_VERSION = 6`
 
-Principal visible catalogue: **32** rows.
+Principal visible catalogue: **33** rows.
 Operator UI/state uses canonical codes only. Venue identifiers below are backend evidence, not operator-selectable tickers.
 
-Retrieved 2026-09-20 from read-only public metadata:
-- Polymarket Gamma `GET /sports` (469 sports). FA Cup sport `efa` series is **10314**;
-  the 2026-09-16 snapshot `10307` is no longer listed and is not claimed.
+Retrieved 2026-09-22 from read-only public metadata:
+- Polymarket Gamma `GET /sports` (469 sports). UEFA Nations League sport `unl` series is **11446**.
+  FA Cup sport `efa` series is **10314**; the 2026-09-16 snapshot `10307` is no longer listed and is not claimed.
 - Kalshi `GET /series?category=Sports`
-- Matchbook: label-alias matching only (no competition IDs)
+- Matchbook: label-alias matching only (no competition IDs). Live soccer COMPETITION tags for Nations League were `UEFA Nations League A/B/D`. League C was not on the 2026-09-22 open snapshot and is not registered.
 
 Selectable rows require **VERIFIED_ALL_3** (Matchbook aliases + Kalshi match-level GAME/BTTS/TOTAL and FTTS where present + Polymarket Gamma series).
 Partial rows remain visible and disabled. Identifiers were not guessed.
@@ -27,6 +27,7 @@ Partial rows remain visible and disabled. Identifiers were not guessed.
 | `champions_league` | UEFA Champions League | UEFA | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXUCLGAME,KXUCLBTTS,KXUCLTOTAL,KXUCLFTTS; Gamma ucl/10204 |
 | `europa_league` | UEFA Europa League | UEFA | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXUELGAME,KXUELBTTS,KXUELTOTAL; Gamma uel/10209 |
 | `conference_league` | UEFA Conference League | UEFA | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXUECLGAME,KXUECLBTTS,KXUECLTOTAL; Gamma col/10437 |
+| `uefa_nations_league` | UEFA Nations League | UEFA | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi match-level KXUEFANLGAME,KXUEFANLBTTS,KXUEFANLTOTAL,KXUEFANLFTTS (GET /series 2026-09-22; GAME has live 24–26 Sep fixtures). Spread/1H/team-total/exact-score/advance/MOV observed but not admitted. Season series KXUEFANL is not a fixture. Gamma unl/11446 match events only; group/champion/relegation outrights have series=null and stay out of the fixture pipeline. Matchbook live COMPETITION tags UEFA Nations League A/B/D. Neighbor CONCACAF Nations League / KXCONCACAFNL / Gamma conl=10673 unmatched. Not in the default eight. |
 | `super_lig` | Turkish Süper Lig | Turkey | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXSUPERLIGGAME,KXSUPERLIGBTTS,KXSUPERLIGTOTAL; Gamma tur/10292 |
 | `mls` | Major League Soccer | USA / Canada | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXMLSGAME,KXMLSBTTS,KXMLSTOTAL,KXMLSFTTS; Gamma mls/10189 |
 | `league_one` | EFL League One | England | yes | VERIFIED_ALL_3 | verified | verified | verified | Kalshi KXEFLL1GAME,KXEFLL1BTTS,KXEFLL1TOTAL; Gamma el1/11435 |
@@ -53,9 +54,15 @@ Partial rows remain visible and disabled. Identifiers were not guessed.
 
 - Kalshi: `KXUCLW*` women's UCL, `KXMLSAST*` MLS All-Star, `KXDENSUPERLIGA*` Danish Superliga,
   `KXBUNDESLIGA2*`, `KXSERIEAW*`, `KXSERIEB*`, `KXBRASILEIROB*`/`C*`, `KXLIGUE2*`,
-  `KXEREDIVISIEW*`, `KXJ2LEAGUE*`, `KXCONMEBOLSUD*` Sudamericana.
+  `KXEREDIVISIEW*`, `KXJ2LEAGUE*`, `KXCONMEBOLSUD*` Sudamericana,
+  `KXCONCACAFNL` CONCACAF Nations League outrights, `KXUEFANL` UEFA Nations League
+  season series, `KXUEFANL1H*` / `KXUEFANLSPREAD` / `KXUEFANLSCORE` /
+  `KXUEFANLTEAMTOTAL` / `KXUEFANLADVANCE` / `KXUEFANLMOV`.
 - Polymarket: `bl2` 2. Bundesliga, `itsb` Serie B, `clf` Club Friendlies, `ja2` J2, `fr2` Ligue 2,
-  `uwcl` Women's Champions League, `tur2` Turkey 1. Lig.
-- Matchbook labels still unmatched: EFL Trophy / Vertu Trophy, club friendlies, women's/youth cups.
+  `uwcl` Women's Champions League, `tur2` Turkey 1. Lig, `conl` CONCACAF Nations League,
+  Nations League group/champion/relegation events with `series=null`.
+- Matchbook labels still unmatched: EFL Trophy / Vertu Trophy, club friendlies, women's/youth cups,
+  UEFA Women's Nations League, CONCACAF Nations League, UEFA Nations League C
+  (not on the 2026-09-22 open snapshot; do not invent from the A/B/D tag family).
 
 Default selected startup scope remains the original eight competitions. NFL and NBA are selectable and are not default.

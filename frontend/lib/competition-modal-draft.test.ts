@@ -56,6 +56,7 @@ function catalog(): OperatorCompetitionOption[] {
     }),
     option(UEFA.europa, "uefa", "UEFA", { selector_label: "UEFA Europa League" }),
     option(UEFA.conference, "uefa", "UEFA", { selector_label: "UEFA Conference League" }),
+    option("uefa_nations_league", "uefa", "UEFA", { selector_label: "Nations League" }),
   ];
 }
 
@@ -221,6 +222,11 @@ describe("FootballCompetitionsModal wiring contract", () => {
     expect(modalSource).toContain('"uefa"');
     expect(modalSource).toContain('"outrights"');
     expect(modalSource).toContain("Discovery scope");
+    const uefaCodes = catalog()
+      .filter((row) => row.group_id === "uefa")
+      .map((row) => row.code);
+    expect(uefaCodes).toContain("uefa_nations_league");
+    expect(uefaCodes[uefaCodes.indexOf("uefa_nations_league") - 1]).toBe(UEFA.conference);
   });
 });
 

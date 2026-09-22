@@ -112,6 +112,15 @@ VARIANT_LABELS = {
         "UEFA Conference League",
         "UEFA Europa Conference League",
     ),
+    TargetCompetitionCode.UEFA_NATIONS_LEAGUE: (
+        "UEFA Nations League",
+        "Nations League",
+        "UNL",
+        "UEFA Nations League 2026/27",
+        "UEFA Nations League A",
+        "UEFA Nations League B",
+        "UEFA Nations League D",
+    ),
     TargetCompetitionCode.SUPER_LIG: (
         "Süper Lig",
         "Turkish Süper Lig",
@@ -231,6 +240,12 @@ REJECTED_LABELS = (
     "Club Friendly",
     "Friendly",
     "Scottish League Cup",
+    "CONCACAF Nations League",
+    "UEFA Women's Nations League",
+    "UEFA Nations League C",
+    "Volleyball Nations League",
+    "UEFA Euro Qualification",
+    "Europe WC Qualifiers",
 )
 
 
@@ -349,6 +364,7 @@ def test_unselected_registered_competitions_are_out_of_scope(label: str) -> None
         ("10204", TargetCompetitionCode.CHAMPIONS_LEAGUE),
         ("10209", TargetCompetitionCode.EUROPA_LEAGUE),
         ("10437", TargetCompetitionCode.CONFERENCE_LEAGUE),
+        ("11446", TargetCompetitionCode.UEFA_NATIONS_LEAGUE),
         ("10292", TargetCompetitionCode.SUPER_LIG),
         ("10189", TargetCompetitionCode.MLS),
         ("11435", TargetCompetitionCode.LEAGUE_ONE),
@@ -436,6 +452,8 @@ def test_polymarket_scope_uses_verified_series_coverage() -> None:
         ("KXUCLGAME", TargetCompetitionCode.CHAMPIONS_LEAGUE),
         ("KXUELGAME", TargetCompetitionCode.EUROPA_LEAGUE),
         ("KXUECLGAME", TargetCompetitionCode.CONFERENCE_LEAGUE),
+        ("KXUEFANLGAME", TargetCompetitionCode.UEFA_NATIONS_LEAGUE),
+        ("KXUEFANLBTTS", TargetCompetitionCode.UEFA_NATIONS_LEAGUE),
         ("KXSUPERLIGGAME", TargetCompetitionCode.SUPER_LIG),
         ("KXMLSGAME", TargetCompetitionCode.MLS),
         ("KXEFLL1GAME", TargetCompetitionCode.LEAGUE_ONE),
@@ -479,6 +497,14 @@ def test_verified_kalshi_tickers_resolve(ticker: str, code: TargetCompetitionCod
         "KXUCLWGAME",
         "KXMLSASTGAME",
         "KXDENSUPERLIGAGAME",
+        "KXUEFANL",
+        "KXUEFANLSPREAD",
+        "KXUEFANLSCORE",
+        "KXUEFANL1H",
+        "KXUEFANLTEAMTOTAL",
+        "KXUEFANLADVANCE",
+        "KXUEFANLMOV",
+        "KXCONCACAFNL",
     ),
 )
 def test_kalshi_near_neighbor_tickers_are_not_claimed(ticker: str) -> None:
@@ -745,12 +771,13 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
         repository.close()
 
 
-def test_principal_register_has_thirty_two_rows_and_still_excludes_efl_trophy() -> None:
+def test_principal_register_has_thirty_three_rows_and_still_excludes_efl_trophy() -> None:
     codes = {item.code for item in TARGET_COMPETITIONS}
-    assert len(TARGET_COMPETITIONS) == 32
-    assert len(codes) == 32
+    assert len(TARGET_COMPETITIONS) == 33
+    assert len(codes) == 33
     assert TargetCompetitionCode.NFL in codes
     assert TargetCompetitionCode.NBA in codes
+    assert TargetCompetitionCode.UEFA_NATIONS_LEAGUE in codes
     assert TargetCompetitionCode.LEAGUE_ONE in codes
     assert TargetCompetitionCode.LEAGUE_TWO in codes
     assert TargetCompetitionCode.LIGUE_1 in codes

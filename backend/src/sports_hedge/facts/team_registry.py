@@ -9,8 +9,9 @@ ambiguous tokens are not globalised and are not added as generics here.
 Cups reuse the relevant domestic senior-club set. Continental competitions
 reuse the union of those domestic tables so the same club keeps one canonical
 id. MLS / Liga MX stay on their own competition keys so UCL does not inherit
-Miami / Leon / America generics. International friendlies use senior national
-teams for identity only — that does not invent Kalshi market availability.
+Miami / Leon / America generics. International friendlies and UEFA Nations
+League use senior national teams for identity only — that does not invent
+Kalshi market availability.
 
 Data class: maintained identity registry. Not live quotes.
 """
@@ -46,6 +47,7 @@ J1_LEAGUE = "j1_league"
 CHAMPIONS_LEAGUE = "champions_league"
 EUROPA_LEAGUE = "europa_league"
 CONFERENCE_LEAGUE = "conference_league"
+UEFA_NATIONS_LEAGUE = "uefa_nations_league"
 COPA_DEL_REY = "copa_del_rey"
 DFB_POKAL = "dfb_pokal"
 COPPA_ITALIA = "coppa_italia"
@@ -620,7 +622,7 @@ NATIONAL_TEAMS: tuple[SeniorClub, ...] = (
     _club("Belgium"),
     _club("Scotland"),
     _club("Wales"),
-    _club("Republic of Ireland"),
+    _club("Republic of Ireland", "Ireland"),
     _club("Northern Ireland"),
     _club("Brazil"),
     _club("Argentina"),
@@ -638,7 +640,7 @@ NATIONAL_TEAMS: tuple[SeniorClub, ...] = (
     _club("Croatia"),
     _club("Serbia"),
     _club("Ukraine"),
-    _club("Turkey"),
+    _club("Turkey", "Turkiye", "Türkiye"),
     _club("Greece"),
     _club("Czech Republic", "Czechia"),
     _club("Morocco"),
@@ -649,6 +651,42 @@ NATIONAL_TEAMS: tuple[SeniorClub, ...] = (
     _club("Colombia"),
     _club("Uruguay"),
     _club("Canada"),
+    # UEFA Nations League 24 Sep–6 Oct 2026 observed senior men's sides
+    # (Kalshi KXUEFANLGAME / Matchbook COMPETITION tags, retrieved 2026-09-22).
+    _club("Andorra"),
+    _club("Malta"),
+    _club("Israel"),
+    _club("Kosovo"),
+    _club("Liechtenstein"),
+    _club("Lithuania"),
+    _club("Armenia"),
+    _club("Latvia"),
+    _club("Georgia"),
+    _club("Hungary"),
+    _club("Montenegro"),
+    _club("Cyprus"),
+    _club(
+        "Bosnia and Herzegovina",
+        "Bosnia-Herzegovina",
+        "Bosnia",
+    ),
+    _club("Romania"),
+    _club("Slovenia"),
+    _club("Bulgaria"),
+    _club("Luxembourg"),
+    _club("Faroe Islands"),
+    _club("Kazakhstan"),
+    _club("Iceland"),
+    _club("Estonia"),
+    _club("San Marino"),
+    _club("Finland"),
+    _club("Albania"),
+    _club("Belarus"),
+    _club("North Macedonia"),
+    _club("Slovakia"),
+    _club("Moldova"),
+    _club("Azerbaijan"),
+    _club("Gibraltar"),
 )
 
 CLUBS_BY_COMPETITION: dict[str, tuple[SeniorClub, ...]] = {
@@ -682,6 +720,7 @@ CLUBS_BY_COMPETITION: dict[str, tuple[SeniorClub, ...]] = {
     CONFERENCE_LEAGUE: _DOMESTIC_CLUBS,
     COPA_LIBERTADORES: BRASILEIRAO_CLUBS + ARGENTINA_PRIMERA_CLUBS,
     INTERNATIONAL_FRIENDLIES: NATIONAL_TEAMS,
+    UEFA_NATIONS_LEAGUE: NATIONAL_TEAMS,
 }
 
 

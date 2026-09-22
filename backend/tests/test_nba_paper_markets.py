@@ -327,7 +327,7 @@ def test_nba_is_permanently_selectable_and_not_default() -> None:
     assert selected_includes_nfl(["nba"]) is False
     assert selected_includes_soccer(["nba"]) is False
     assert selected_includes_soccer(["premier_league", "nba"]) is True
-    assert PRINCIPAL_OPERATOR_COMPETITION_COUNT == 32
+    assert PRINCIPAL_OPERATOR_COMPETITION_COUNT == 33
     assert resolve_target_competition("NBA") is not None
     assert resolve_target_competition("WNBA") is None
     assert resolve_target_competition("NCAAB") is None
