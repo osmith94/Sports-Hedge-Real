@@ -25,6 +25,9 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from test_issue293_owner_live_overlap import OverlapKalshi, OverlapMatchbook
+from test_issue316_catalogue_registry import _DisabledPolymarket
+from venue_cost_helpers import matchbook_polymarket_costs
 
 from sports_hedge.application.approved_market_catalogue import (
     ApprovedMarketCatalogueRow,
@@ -35,6 +38,7 @@ from sports_hedge.application.approved_market_catalogue import (
 )
 from sports_hedge.application.capture_replay import DEFAULT_KALSHI_BOOK
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
+from sports_hedge.application.fixture_inventory import InventoryComparisonStatus
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.provider_access import DEFAULT_PROVIDER_CONCURRENCY
 from sports_hedge.application.target_competitions import (
@@ -43,8 +47,8 @@ from sports_hedge.application.target_competitions import (
     OPERATOR_COMPETITION_REGISTRY_VERSION,
     PRINCIPAL_OPERATOR_COMPETITION_COUNT,
     SEASON_PROPOSITION_NOT_FIXTURE,
-    TargetCompetitionCode,
     VERIFIED_ALL_3,
+    TargetCompetitionCode,
     competition_has_verified_cross_venue_mapping,
     kalshi_series_tickers_for_codes,
     operator_competition_catalog,
@@ -79,9 +83,6 @@ from sports_hedge.matching.approved_register import (
 from sports_hedge.matching.events import EventMatcher, known_target_competition_mismatch
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
-from test_issue293_owner_live_overlap import OverlapKalshi, OverlapMatchbook
-from test_issue316_catalogue_registry import _DisabledPolymarket
-from venue_cost_helpers import matchbook_polymarket_costs
 
 KICKOFF = datetime(2026, 9, 24, 18, 45, tzinfo=UTC)
 NORWAY_KICKOFF = datetime(2026, 9, 24, 18, 45, tzinfo=UTC)
@@ -142,8 +143,9 @@ def _mb_markets(*, home: str, away: str) -> list[dict[str, Any]]:
         },
         {
             "id": 103,
-            "name": "Total",
-            "runners": [_runner(21, "OVER 2.5", "1.85"), _runner(22, "UNDER 2.5", "2.05")],
+            "name": "Over/Under 2.5 Goals",
+            "line": "2.5",
+            "runners": [_runner(21, "Over 2.5", "1.85"), _runner(22, "Under 2.5", "2.05")],
         },
         {
             "id": 104,
@@ -239,24 +241,16 @@ def _kalshi_total(ticker: str, home: str, away: str) -> dict[str, Any]:
     return _kalshi_event(
         ticker,
         "KXUEFANLTOTAL",
-        f"{home} vs {away}: Total Goals",
+        f"{home} vs {away}",
         [
             {
-                "ticker": f"{ticker}-OVER",
+                "ticker": f"{ticker}-2.5",
                 "event_ticker": ticker,
-                "title": "Over 2.5",
-                "yes_sub_title": "Over",
-                "floor_strike": "2.5",
+                "title": f"{home} vs {away} Total Goals 2.5",
+                "yes_sub_title": "Over 2.5",
+                "strike": "2.5",
                 "rules_primary": REGULATION,
-            },
-            {
-                "ticker": f"{ticker}-UNDER",
-                "event_ticker": ticker,
-                "title": "Under 2.5",
-                "yes_sub_title": "Under",
-                "floor_strike": "2.5",
-                "rules_primary": REGULATION,
-            },
+            }
         ],
     )
 
@@ -265,26 +259,26 @@ def _kalshi_ftts(ticker: str, home: str, away: str, *, home_code: str, away_code
     return _kalshi_event(
         ticker,
         "KXUEFANLFTTS",
-        f"{home} vs {away}: First Team to Score",
+        f"{home} vs {away}",
         [
             {
                 "ticker": f"{ticker}-{home_code}",
                 "event_ticker": ticker,
-                "title": f"{home} to score first",
+                "title": "First team to score",
                 "yes_sub_title": home,
                 "rules_primary": REGULATION,
             },
             {
                 "ticker": f"{ticker}-{away_code}",
                 "event_ticker": ticker,
-                "title": f"{away} to score first",
+                "title": "First team to score",
                 "yes_sub_title": away,
                 "rules_primary": REGULATION,
             },
             {
-                "ticker": f"{ticker}-NONE",
+                "ticker": f"{ticker}-NG",
                 "event_ticker": ticker,
-                "title": "No goal",
+                "title": "First team to score",
                 "yes_sub_title": "No Goal",
                 "rules_primary": REGULATION,
             },
@@ -330,11 +324,10 @@ def _books() -> dict[str, dict[str, Any]]:
         f"{KALSHI_NL_GER}-TIE",
         f"{KALSHI_NL_GER}-GER",
         "KXUEFANLBTTS-26SEP24NEDGER-BTTS",
-        "KXUEFANLTOTAL-26SEP24NEDGER-OVER",
-        "KXUEFANLTOTAL-26SEP24NEDGER-UNDER",
+        "KXUEFANLTOTAL-26SEP24NEDGER-2.5",
         "KXUEFANLFTTS-26SEP24NEDGER-NED",
         "KXUEFANLFTTS-26SEP24NEDGER-GER",
-        "KXUEFANLFTTS-26SEP24NEDGER-NONE",
+        "KXUEFANLFTTS-26SEP24NEDGER-NG",
         f"{KALSHI_NOR_DEN}-NOR",
         f"{KALSHI_NOR_DEN}-TIE",
         f"{KALSHI_NOR_DEN}-DEN",
@@ -353,7 +346,7 @@ def _costs() -> list[Any]:
 def _fx() -> list[FxRateSnapshot]:
     return [
         FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="test_fx", captured_at=KICKOFF),
-        FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal("1"), source="functional_currency", captured_at=KICKOFF),
+        FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal(1), source="functional_currency", captured_at=KICKOFF),
     ]
 
 
@@ -808,17 +801,23 @@ async def test_current_fixtures_normalize_and_only_supported_families_attach() -
         netherlands = ids[MB_NL_GER]
         assert netherlands.target_competition_code == UNL
         assert netherlands.kalshi_matched is True
-        families = {
-            row.family
-            for row in report.fixture_markets.get(netherlands.canonical_event_id, [])
-            if row.family
+        rows = report.fixture_markets.get(netherlands.canonical_event_id, [])
+        paper_families = {row.family for row in rows if row.family and row.entered_solver}
+        assert paper_families >= {
+            "match_result",
+            "both_teams_to_score",
+            "total_goals",
+            "first_team_to_score",
         }
-        assert "match_result" in families
-        assert "both_teams_to_score" in families
-        assert "total_goals" in families
-        assert "first_team_to_score" in families
-        assert "correct_score" not in families
-        assert "exact_score" not in families
+        # Correct Score / HT remain visible as recognized inventory but must not
+        # enter PAPER/solver. Do not widen equivalence for extra derivatives.
+        for row in rows:
+            if row.family in {"correct_score", "exact_score", "half_time_full_time"}:
+                assert row.entered_solver is False
+                assert row.comparison_status is not InventoryComparisonStatus.MATCHED_EQUIVALENT
+            if row.period == "first_half":
+                assert row.entered_solver is False
+        assert "exact_score" not in {row.family for row in rows}
         norway = ids["34042288719400023"]
         assert norway.target_competition_code == UNL
         assert norway.kalshi_matched is True
