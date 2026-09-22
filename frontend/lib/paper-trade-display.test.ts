@@ -13,6 +13,8 @@ import {
   compactMarketHeading,
   formatCompactDecimalOdds,
   formatStoredLine,
+  isNcaabPaperTrade,
+  isNflPaperTrade,
 } from "./paper-trade-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -235,5 +237,16 @@ describe("active-trade canonical line and compact odds", () => {
     const detailSrc = readFileSync(join(frontendRoot, "app/paper/[tradeId]/page.tsx"), "utf8");
     assert.match(detailSrc, /NFL_SETTLEMENT_CAVEAT_TEXT/);
     assert.match(detailSrc, /NBA_SETTLEMENT_CAVEAT_TEXT/);
+  });
+
+  it("does not treat NCAAB game-winner trades as NFL", () => {
+    const ncaab = trade({
+      market_family: "game_winner",
+      competition: "NCAA Men's Basketball",
+      home_team: "Xavier Musketeers",
+      away_team: "Duke Blue Devils",
+    });
+    assert.equal(isNcaabPaperTrade(ncaab), true);
+    assert.equal(isNflPaperTrade(ncaab), false);
   });
 });

@@ -143,6 +143,7 @@ from sports_hedge.application.target_competitions import (
     scope_matchbook_event,
     selected_includes_nba,
     selected_includes_nfl,
+    selected_includes_ncaab,
     selected_includes_soccer,
 )
 from sports_hedge.outrights.universe_scopes import (
@@ -416,19 +417,22 @@ def matchbook_scope_discovery_params(
     """Matchbook list_events filters for the selected operator scope.
 
     NBA-only scopes add the captured NBA competition tag. Mixed soccer/NFL/NBA
-    scopes cannot apply that tag without dropping football events.
+    or NCAAB scopes cannot apply that tag without dropping football or NCAAB
+    events. NCAAB has no Matchbook competition tag.
     """
 
     from sports_hedge.nba.constants import MATCHBOOK_NBA_COMPETITION_TAG_ID
 
-    if not selected_includes_nfl(selected_codes) and not selected_includes_nba(selected_codes):
+    if not selected_includes_nfl(selected_codes) and not selected_includes_nba(
+        selected_codes
+    ) and not selected_includes_ncaab(selected_codes):
         return {}
     ids: list[str] = []
     if selected_includes_soccer(selected_codes) and football_sport_id:
         ids.append(str(football_sport_id))
     if selected_includes_nfl(selected_codes) and american_football_sport_id:
         ids.append(str(american_football_sport_id))
-    if selected_includes_nba(selected_codes) and basketball_sport_id:
+    if (selected_includes_nba(selected_codes) or selected_includes_ncaab(selected_codes)) and basketball_sport_id:
         ids.append(str(basketball_sport_id))
     params: dict[str, str] = {}
     if ids:
@@ -437,6 +441,7 @@ def matchbook_scope_discovery_params(
         selected_includes_nba(selected_codes)
         and not selected_includes_nfl(selected_codes)
         and not selected_includes_soccer(selected_codes)
+        and not selected_includes_ncaab(selected_codes)
     )
     if nba_only:
         params["tag-ids"] = MATCHBOOK_NBA_COMPETITION_TAG_ID
@@ -1839,16 +1844,16 @@ class ReadOnlyCrossVenueCollector:
             return default, True
 
     async def _matchbook_discovery_params_for_scope(self) -> dict[str, str]:
-        """Extra Matchbook query params when NFL or NBA is in operator scope.
+        """Extra Matchbook query params when NFL, NBA, or NCAAB is in operator scope.
 
         Soccer-only discovery keeps the historical unfiltered list_events path
-        so login/429 handling stays inside that call. NFL/NBA add American
+        so login/429 handling stays inside that call. NFL/NBA/NCAAB add American
         Football and Basketball (and soccer when also selected) without raising
         provider concurrency. NBA-only scopes also pass the captured NBA
         competition tag so discovery does not download the whole basketball
-        slate. Mixed soccer/NFL/NBA scopes cannot apply that tag without
-        dropping football events, so they keep sport-id 4 and reject
-        WNBA/NCAAB downstream.
+        slate. Mixed soccer/NFL/NBA/NCAAB scopes cannot apply that tag without
+        dropping football or NCAAB events, so they keep sport-id 4 and reject
+        WNBA/non-selected basketball downstream.
         """
 
         client = self.matchbook
@@ -1858,7 +1863,11 @@ class ReadOnlyCrossVenueCollector:
         # Soccer-only must not call sport-id resolvers. Those GETs sit outside
         # list_events timeout classification; a failed lookups/sports call would
         # report unavailable instead of discovery_timeout on a hanging book.
-        if not selected_includes_nfl(codes) and not selected_includes_nba(codes):
+        if (
+            not selected_includes_nfl(codes)
+            and not selected_includes_nba(codes)
+            and not selected_includes_ncaab(codes)
+        ):
             return {}
         football = None
         american = None
@@ -1871,7 +1880,7 @@ class ReadOnlyCrossVenueCollector:
             resolver = getattr(client, "resolve_american_football_sport_id", None)
             if callable(resolver):
                 american = str(await resolver())
-        if selected_includes_nba(codes):
+        if selected_includes_nba(codes) or selected_includes_ncaab(codes):
             resolver = getattr(client, "resolve_basketball_sport_id", None)
             if callable(resolver):
                 basketball = str(await resolver())

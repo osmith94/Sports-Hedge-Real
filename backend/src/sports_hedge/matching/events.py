@@ -135,7 +135,28 @@ class EventMatcher:
         if left.sport != right.sport:
             return False
         from sports_hedge.nba.constants import NBA_SPORT
+        from sports_hedge.ncaab.detect import is_ncaab_canonical_event
+        from sports_hedge.ncaab.teams import ncaab_teams_conflict, resolve_ncaab_team
         from sports_hedge.nfl.constants import NFL_SPORT
+
+        if is_ncaab_canonical_event(left) or is_ncaab_canonical_event(right):
+            if not (is_ncaab_canonical_event(left) and is_ncaab_canonical_event(right)):
+                return False
+            labels = (left.home_team, left.away_team, right.home_team, right.away_team)
+            resolved = [resolve_ncaab_team(label) for label in labels]
+            if any((item.ambiguous or item.rejected or not item.ok) for item in resolved):
+                return False
+            if ncaab_teams_conflict(resolved[0].canonical or "", resolved[2].canonical or "") or ncaab_teams_conflict(
+                resolved[1].canonical or "", resolved[3].canonical or ""
+            ):
+                return False
+            if (resolved[0].canonical, resolved[1].canonical) != (
+                resolved[2].canonical,
+                resolved[3].canonical,
+            ):
+                return False
+            kickoff_delta = abs(left.kickoff_utc - right.kickoff_utc)
+            return kickoff_delta <= self.kickoff_tolerance
 
         if left.sport == NFL_SPORT:
             from sports_hedge.nfl.teams import nfl_teams_conflict
@@ -221,9 +242,32 @@ class EventMatcher:
             return EventMatchResult(matched=False, confidence=0.0, reasons=["sport_mismatch"])
 
         from sports_hedge.nba.constants import NBA_SPORT
+        from sports_hedge.ncaab.detect import is_ncaab_canonical_event
+        from sports_hedge.ncaab.teams import ncaab_teams_conflict, resolve_ncaab_team
         from sports_hedge.nfl.constants import NFL_SPORT
 
-        if left.sport == NFL_SPORT:
+        if is_ncaab_canonical_event(left) or is_ncaab_canonical_event(right):
+            if not (is_ncaab_canonical_event(left) and is_ncaab_canonical_event(right)):
+                return EventMatchResult(
+                    matched=False,
+                    confidence=0.0,
+                    reasons=["sport_mismatch"],
+                )
+            for label in (left.home_team, left.away_team, right.home_team, right.away_team):
+                resolved = resolve_ncaab_team(label)
+                if resolved.ambiguous:
+                    return EventMatchResult(
+                        matched=False,
+                        confidence=0.0,
+                        reasons=["ncaab_team_identity_ambiguous"],
+                    )
+                if resolved.rejected or not resolved.ok:
+                    return EventMatchResult(
+                        matched=False,
+                        confidence=0.0,
+                        reasons=[resolved.reason or "ncaab_team_identity_unresolved"],
+                    )
+        elif left.sport == NFL_SPORT:
             from sports_hedge.nfl.teams import nfl_teams_conflict, resolve_nfl_team
 
             for label in (left.home_team, left.away_team, right.home_team, right.away_team):
@@ -315,6 +359,39 @@ class EventMatcher:
                 reasons=["curated_team_mismatch"],
                 provenance=provenance,
             )
+        if is_ncaab_canonical_event(left) and (
+            ncaab_teams_conflict(left_home, right_home) or ncaab_teams_conflict(left_away, right_away)
+        ):
+            return EventMatchResult(
+                matched=False,
+                confidence=0.0,
+                reasons=["curated_team_mismatch"],
+                provenance=provenance,
+            )
+        if is_ncaab_canonical_event(left):
+            exact = (
+                left_home == right_home
+                and left_away == right_away
+                and bool(left_home)
+                and bool(left_away)
+            )
+            kickoff_delta = abs(left.kickoff_utc - right.kickoff_utc)
+            if not exact:
+                return EventMatchResult(
+                    matched=False,
+                    confidence=0.0,
+                    reasons=["ncaab_team_identity_not_exact"],
+                    provenance=provenance,
+                )
+            reasons: list[str] = []
+            if kickoff_delta.total_seconds() > 0:
+                reasons.append("kickoff_offset")
+            return EventMatchResult(
+                matched=True,
+                confidence=1.0,
+                reasons=reasons,
+                provenance=provenance,
+            )
 
         home_score = self._similarity(left_home, right_home)
         away_score = self._similarity(left_away, right_away)
@@ -374,8 +451,18 @@ class EventMatcher:
         counterpart_market: CanonicalMarket | None,
     ) -> tuple[str, str, list[AppliedLearnedRule]]:
         from sports_hedge.nba.constants import NBA_SPORT
+        from sports_hedge.ncaab.detect import is_ncaab_canonical_event
+        from sports_hedge.ncaab.teams import resolve_ncaab_team
         from sports_hedge.nfl.constants import NFL_SPORT
 
+        if is_ncaab_canonical_event(event):
+            home = resolve_ncaab_team(event.home_team)
+            away = resolve_ncaab_team(event.away_team)
+            return (
+                home.canonical or event.home_team,
+                away.canonical or event.away_team,
+                [],
+            )
         if event.sport == NFL_SPORT:
             from sports_hedge.nfl.teams import resolve_nfl_team
 

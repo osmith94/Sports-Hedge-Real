@@ -519,6 +519,8 @@ def football_series_ticker(series: dict[str, Any]) -> bool:
         return False
     if "nba" in tokens or "basketball" in tokens:
         return False
+    if "ncaab" in tokens or "college basketball" in tokens or "ncaa men" in tokens:
+        return False
     return any(token in tokens for token in _FOOTBALL_SERIES_TOKENS)
 
 

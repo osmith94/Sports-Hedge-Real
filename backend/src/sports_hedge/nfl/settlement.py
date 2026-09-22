@@ -137,8 +137,11 @@ def nfl_paper_audit_reasons() -> list[str]:
 
 
 def is_nfl_paper_trade(trade) -> bool:
+    from sports_hedge.ncaab.settlement import is_ncaab_paper_trade
     from sports_hedge.nfl.constants import NFL_COMPETITION, NFL_SPORT
 
+    if is_ncaab_paper_trade(trade):
+        return False
     sport = str(getattr(trade, "sport", "") or "").strip()
     if sport == NFL_SPORT:
         return True

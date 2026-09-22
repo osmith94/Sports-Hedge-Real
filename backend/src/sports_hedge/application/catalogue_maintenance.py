@@ -90,6 +90,7 @@ def catalogue_family_key(register_canonical_key: str) -> str:
     if key.startswith(f"{CANONICAL_TOTAL_GOALS_FT}:"):
         return CANONICAL_TOTAL_GOALS_FT
     from sports_hedge.nba.constants import CANONICAL_NBA_POINT_SPREAD, CANONICAL_NBA_TOTAL_POINTS
+    from sports_hedge.ncaab.constants import CANONICAL_NCAAB_POINT_SPREAD, CANONICAL_NCAAB_TOTAL_POINTS
     from sports_hedge.nfl.constants import CANONICAL_NFL_POINT_SPREAD, CANONICAL_NFL_TOTAL_POINTS
 
     if key.startswith(f"{CANONICAL_NFL_POINT_SPREAD}:"):
@@ -100,6 +101,10 @@ def catalogue_family_key(register_canonical_key: str) -> str:
         return CANONICAL_NBA_POINT_SPREAD
     if key.startswith(f"{CANONICAL_NBA_TOTAL_POINTS}:"):
         return CANONICAL_NBA_TOTAL_POINTS
+    if key.startswith(f"{CANONICAL_NCAAB_POINT_SPREAD}:"):
+        return CANONICAL_NCAAB_POINT_SPREAD
+    if key.startswith(f"{CANONICAL_NCAAB_TOTAL_POINTS}:"):
+        return CANONICAL_NCAAB_TOTAL_POINTS
     return key
 
 
@@ -118,6 +123,18 @@ def family_key_from_kalshi_series(series_ticker: str | None) -> str | None:
         NBA_KALSHI_TOTAL_SERIES,
     )
     from sports_hedge.nba.detect import approved_kalshi_nba_series
+    from sports_hedge.ncaab.constants import (
+        CANONICAL_NCAAB_GAME_WINNER,
+        CANONICAL_NCAAB_POINT_SPREAD,
+        CANONICAL_NCAAB_TOTAL_POINTS,
+        NCAAB_KALSHI_GAME_SERIES,
+        NCAAB_KALSHI_SPREAD_SERIES,
+        NCAAB_KALSHI_TOTAL_SERIES,
+    )
+    from sports_hedge.ncaab.detect import (
+        approved_kalshi_ncaab_series,
+        rejected_kalshi_ncaab_series,
+    )
     from sports_hedge.nfl.constants import (
         CANONICAL_NFL_GAME_WINNER,
         CANONICAL_NFL_POINT_SPREAD,
@@ -128,6 +145,15 @@ def family_key_from_kalshi_series(series_ticker: str | None) -> str | None:
     )
     from sports_hedge.nfl.detect import approved_kalshi_nfl_series
 
+    ncaab_series = approved_kalshi_ncaab_series(ticker)
+    if ncaab_series == NCAAB_KALSHI_GAME_SERIES:
+        return CANONICAL_NCAAB_GAME_WINNER
+    if ncaab_series == NCAAB_KALSHI_SPREAD_SERIES:
+        return CANONICAL_NCAAB_POINT_SPREAD
+    if ncaab_series == NCAAB_KALSHI_TOTAL_SERIES:
+        return CANONICAL_NCAAB_TOTAL_POINTS
+    if rejected_kalshi_ncaab_series(ticker):
+        return None
     nfl_series = approved_kalshi_nfl_series(ticker)
     if nfl_series == NFL_KALSHI_GAME_SERIES:
         return CANONICAL_NFL_GAME_WINNER

@@ -177,8 +177,26 @@ def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_se
         and left.competition_code != right.competition_code
     ):
         return False
+    from sports_hedge.ncaab.detect import is_ncaab_canonical_event
+    from sports_hedge.ncaab.teams import resolve_ncaab_team
     from sports_hedge.nfl.constants import NFL_SPORT
 
+    if is_ncaab_canonical_event(left.item.canonical) or is_ncaab_canonical_event(right.item.canonical):
+        if not (
+            is_ncaab_canonical_event(left.item.canonical)
+            and is_ncaab_canonical_event(right.item.canonical)
+        ):
+            return False
+        left_home = resolve_ncaab_team(left.item.canonical.home_team)
+        left_away = resolve_ncaab_team(left.item.canonical.away_team)
+        right_home = resolve_ncaab_team(right.item.canonical.home_team)
+        right_away = resolve_ncaab_team(right.item.canonical.away_team)
+        if not (left_home.ok and left_away.ok and right_home.ok and right_away.ok):
+            return False
+        return (
+            left_home.canonical == right_home.canonical
+            and left_away.canonical == right_away.canonical
+        )
     if left.sport != NFL_SPORT and (
         left.squad_home != right.squad_home or left.squad_away != right.squad_away
     ):
