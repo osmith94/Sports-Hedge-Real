@@ -1855,6 +1855,11 @@ class ReadOnlyCrossVenueCollector:
         if client is None:
             return {}
         codes = self._op_selected_competition_codes
+        # Soccer-only must not call sport-id resolvers. Those GETs sit outside
+        # list_events timeout classification; a failed lookups/sports call would
+        # report unavailable instead of discovery_timeout on a hanging book.
+        if not selected_includes_nfl(codes) and not selected_includes_nba(codes):
+            return {}
         football = None
         american = None
         basketball = None
