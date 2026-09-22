@@ -24,13 +24,11 @@ from sports_hedge.ncaab.constants import (
     NCAAB_COMPETITION,
     NCAAB_EXCEPTIONAL_SETTLEMENT_CAVEAT,
     NCAAB_MISSING_VENUE_EVIDENCE_REASON,
-    NCAAB_NORMAL_COMPLETION_NOT_PROVEN,
     NCAAB_NOT_LIVE_EXECUTION_REASON,
     NCAAB_PAIR_UNAPPROVED_REASON,
     NCAAB_SETTLEMENT_FAIL_CLOSED_REASON,
 )
 from sports_hedge.ncaab.detect import is_ncaab_canonical_event, is_ncaab_competition_label
-from sports_hedge.normalization.text import normalize_text
 
 NCAAB_PAPER_AUDIT_REASONS: tuple[str, ...] = (
     NCAAB_PAIR_UNAPPROVED_REASON,

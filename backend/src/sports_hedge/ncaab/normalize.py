@@ -371,7 +371,8 @@ def _kalshi_home_away_kickoff(payload: dict[str, Any]) -> tuple[str, str, dateti
     away = uuid_names.get(away_id)
     if not home or not away:
         title = str(payload.get("title") or milestone.get("title") or "")
-        away_label, home_label = _split_away_vs_home(title)
+        # Kalshi NCAAB titles are "Away at Home" (census: Michigan at Arizona).
+        away_label, home_label = _split_away_at_home(title)
         home = home or home_label
         away = away or away_label
     return _required_ncaab_team(home), _required_ncaab_team(away), _kickoff(start)
