@@ -734,12 +734,22 @@ def test_matchbook_nba_only_scope_uses_competition_tag() -> None:
     assert "tag-ids" not in mixed
     soccer_only = matchbook_scope_discovery_params(["premier_league"], football_sport_id="15")
     assert soccer_only == {}
+    nba_and_ncaab = matchbook_scope_discovery_params(
+        ["nba", "ncaab"],
+        basketball_sport_id="4",
+    )
+    assert nba_and_ncaab["sport-ids"] == "4"
+    assert "tag-ids" not in nba_and_ncaab
     from inspect import getsource
 
     from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 
     discovery_src = getsource(ReadOnlyCrossVenueCollector._matchbook_discovery_params_for_scope)
-    soccer_only_gate = "if not selected_includes_nfl(codes) and not selected_includes_nba(codes):"
+    soccer_only_gate = (
+        "if (\n            not selected_includes_nfl(codes)\n"
+        "            and not selected_includes_nba(codes)\n"
+        "            and not selected_includes_ncaab(codes)\n        ):"
+    )
     assert soccer_only_gate in discovery_src
     assert discovery_src.index(soccer_only_gate) < discovery_src.index(
         "resolve_football_sport_id"
