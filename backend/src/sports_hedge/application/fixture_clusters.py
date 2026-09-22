@@ -144,6 +144,8 @@ class _IndexRecord:
     kickoff_ts: float
     squad_home: frozenset[str]
     squad_away: frozenset[str]
+    ncaab_home: str | None = None
+    ncaab_away: str | None = None
 
 
 def _kickoff_bucket(timestamp: float, window_seconds: float) -> int:
@@ -155,6 +157,7 @@ def _index_record(index: int, item: VenueEvent) -> _IndexRecord:
     kickoff = canonical.kickoff_utc
     timestamp = kickoff.timestamp()
     sport = str(getattr(canonical, "sport", "") or "")
+    ncaab_home, ncaab_away = _ncaab_index_teams(sport, canonical)
     return _IndexRecord(
         index=index,
         item=item,
@@ -163,7 +166,67 @@ def _index_record(index: int, item: VenueEvent) -> _IndexRecord:
         kickoff_ts=timestamp,
         squad_home=squad_category_fingerprint(canonical.home_team),
         squad_away=squad_category_fingerprint(canonical.away_team),
+        ncaab_home=ncaab_home,
+        ncaab_away=ncaab_away,
     )
+
+
+def _ncaab_index_teams(sport: str, canonical: object) -> tuple[str | None, str | None]:
+    """Resolve NCAAB identity once per event. Soccer/NFL never import the registry."""
+
+    if sport != "basketball":
+        return None, None
+    from sports_hedge.ncaab.detect import is_ncaab_canonical_event
+    from sports_hedge.ncaab.teams import resolve_ncaab_team
+
+    if not is_ncaab_canonical_event(canonical):
+        return None, None
+    home = resolve_ncaab_team(str(getattr(canonical, "home_team", "") or ""))
+    away = resolve_ncaab_team(str(getattr(canonical, "away_team", "") or ""))
+    if not (home.ok and away.ok and home.canonical and away.canonical):
+        return None, None
+    return home.canonical, away.canonical
+
+
+def identity_name_block_keys(item: VenueEvent) -> frozenset[str]:
+    """Conservative name canopy used only inside hot/unresolved shards.
+
+    Keys are 3-letter prefixes of tokens with at least four letters. Shorter
+    names fail open (``*short*``) so abbreviations such as ``PSG`` or ``Man Utd``
+    are still paired inside the kickoff window. This is not a second matcher.
+    """
+
+    from sports_hedge.normalization.text import normalize_text
+
+    keys: set[str] = set()
+    significant = False
+    for raw_name in (
+        getattr(item.canonical, "home_team", "") or "",
+        getattr(item.canonical, "away_team", "") or "",
+    ):
+        normalized = normalize_text(str(raw_name))
+        tokens = [token for token in normalized.split() if token]
+        if not tokens:
+            keys.add(_SHORT_BLOCK)
+            continue
+        for token in tokens:
+            letters = "".join(char for char in token if char.isalpha())
+            if len(letters) < 4:
+                keys.add(_SHORT_BLOCK)
+                continue
+            significant = True
+            keys.add(letters[:3])
+    if not significant:
+        keys.add(_SHORT_BLOCK)
+    return frozenset(keys)
+
+
+def identity_name_block_overlap(left: VenueEvent, right: VenueEvent) -> bool:
+    left_keys = identity_name_block_keys(left)
+    right_keys = identity_name_block_keys(right)
+    if _SHORT_BLOCK in left_keys or _SHORT_BLOCK in right_keys:
+        return True
+    return bool(left_keys & right_keys)
 
 
 def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_seconds: float) -> bool:
@@ -177,6 +240,15 @@ def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_se
         and left.competition_code != right.competition_code
     ):
         return False
+    left_ncaab = left.ncaab_home is not None and left.ncaab_away is not None
+    right_ncaab = right.ncaab_home is not None and right.ncaab_away is not None
+    if left_ncaab or right_ncaab:
+        return (
+            left_ncaab
+            and right_ncaab
+            and left.ncaab_home == right.ncaab_home
+            and left.ncaab_away == right.ncaab_away
+        )
     from sports_hedge.nfl.constants import NFL_SPORT
 
     if left.sport != NFL_SPORT and (
@@ -195,6 +267,13 @@ COOP_MAX_SLICE_SECONDS = 0.05
 # incident pairs lets truncated finalize assign that fixture instead of waiting
 # for the global cross-venue prefix to finish.
 CANDIDATE_ORDER_VERSION = 2
+# Secondary name blocking uses the next candidate-list version so a shard that
+# flips into the hot path does not reuse an unblocked candidate list.
+SECONDARY_BLOCK_ORDER_VERSION = CANDIDATE_ORDER_VERSION + 1
+# Intra-component veto pairs are restored up to this size. Larger components
+# stay on the secondary-block candidate set and are reported as hot.
+SECONDARY_CLIQUE_CAP = 24
+_SHORT_BLOCK = "*short*"
 
 
 def _coop_pause_due(ticks: int, pause_every: int, last_yield: float) -> bool:
@@ -249,6 +328,7 @@ class _IndexedCandidateBuilder:
     kickoff_tolerance: timedelta
     cache: Any | None = None
     matcher: Any | None = None
+    secondary_block: bool = False
 
     def __post_init__(self) -> None:
         window = float(self.kickoff_tolerance.total_seconds())
@@ -268,6 +348,9 @@ class _IndexedCandidateBuilder:
         self.generated: list[tuple[VenueEvent, VenueEvent]] = []
         self.cache_skipped = 0
         self.could_match_rejected = 0
+        self.secondary_blocked = 0
+        self.max_could_match_component = 0
+        self.secondary_clique_capped_components = 0
         self.unresolved_competition_events = sum(
             1 for record in self.records if record.competition_code is None
         )
@@ -293,18 +376,25 @@ class _IndexedCandidateBuilder:
             return True
         return bool(could_match(left.item.canonical, right.item.canonical))
 
+    def _accepted_compatible_pair(
+        self, record: _IndexRecord, other: _IndexRecord
+    ) -> tuple[_IndexRecord, _IndexRecord] | None:
+        if record.index >= other.index:
+            return None
+        key = (record.index, other.index)
+        if key in self.seen:
+            return None
+        if not _compatible_index_pair(record, other, window_seconds=self.window):
+            return None
+        self.seen.add(key)
+        return record, other
+
     def _iter_compatible_pairs(self) -> Iterator[tuple[_IndexRecord, _IndexRecord]]:
         for record in self.records:
             for other in self.neighbour_records(record):
-                if record.index >= other.index:
-                    continue
-                key = (record.index, other.index)
-                if key in self.seen:
-                    continue
-                if not _compatible_index_pair(record, other, window_seconds=self.window):
-                    continue
-                self.seen.add(key)
-                yield record, other
+                pair = self._accepted_compatible_pair(record, other)
+                if pair is not None:
+                    yield pair
 
     def _new_component_parent(self) -> dict[int, int]:
         return {record.index: record.index for record in self.records}
@@ -341,6 +431,10 @@ class _IndexedCandidateBuilder:
         sizes: dict[int, int] = defaultdict(int)
         for record in self.records:
             sizes[self._find_component(parent, record.index)] += 1
+        if sizes:
+            self.max_could_match_component = max(
+                self.max_could_match_component, max(sizes.values())
+            )
         for left, right in compatible:
             if self._cache_skip(left, right):
                 self.cache_skipped += 1
@@ -366,6 +460,10 @@ class _IndexedCandidateBuilder:
             if _coop_pause_due(ticks, pause_every, last_yield):
                 await asyncio.sleep(0)
                 last_yield = time.perf_counter()
+        if sizes:
+            self.max_could_match_component = max(
+                self.max_could_match_component, max(sizes.values())
+            )
         for ticks, (left, right) in enumerate(compatible, start=1):
             if self._cache_skip(left, right):
                 self.cache_skipped += 1
@@ -399,7 +497,7 @@ class _IndexedCandidateBuilder:
         self.generated.append((left.item, right.item))
         return True
 
-    def neighbour_records(self, record: _IndexRecord) -> Iterator[_IndexRecord]:
+    def _bucket_neighbours(self, record: _IndexRecord) -> Iterator[_IndexRecord]:
         bucket = _kickoff_bucket(record.kickoff_ts, self.window)
         neighbour_buckets = (bucket - 1, bucket, bucket + 1)
         if record.competition_code is None:
@@ -412,10 +510,66 @@ class _IndexedCandidateBuilder:
             )
             yield from self.by_sport_bucket_comp.get((record.sport, neighbour, None), ())
 
-    def finish(self) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
-        self.generated.sort(key=_candidate_progress_key)
+    def neighbour_records(self, record: _IndexRecord) -> Iterator[_IndexRecord]:
+        for other in self._bucket_neighbours(record):
+            if other.index == record.index:
+                continue
+            if self.secondary_block and not identity_name_block_overlap(record.item, other.item):
+                if record.index < other.index:
+                    self.secondary_blocked += 1
+                continue
+            yield other
+
+    def _augment_component_cliques(
+        self,
+        compatible: list[tuple[_IndexRecord, _IndexRecord]],
+        parent: dict[int, int],
+    ) -> list[tuple[_IndexRecord, _IndexRecord]]:
+        """Put veto pairs back inside small could-match components.
+
+        Secondary blocking can omit a name-dissimilar pair that still sits on a
+        matching path. Components up to ``SECONDARY_CLIQUE_CAP`` regain those
+        pairs. Larger components are reported and keep the blocked candidate set.
+        """
+
+        if not self.secondary_block:
+            return compatible
+        sizes: dict[int, int] = defaultdict(int)
+        members: dict[int, list[_IndexRecord]] = defaultdict(list)
+        for record in self.records:
+            root = self._find_component(parent, record.index)
+            sizes[root] += 1
+            members[root].append(record)
+        existing = {
+            (left.index, right.index) if left.index < right.index else (right.index, left.index)
+            for left, right in compatible
+        }
+        augmented = list(compatible)
+        for root, group in members.items():
+            if sizes[root] < 2:
+                continue
+            if sizes[root] > SECONDARY_CLIQUE_CAP:
+                self.secondary_clique_capped_components += 1
+                continue
+            for left_index, left in enumerate(group):
+                for right in group[left_index + 1 :]:
+                    key = (
+                        (left.index, right.index)
+                        if left.index < right.index
+                        else (right.index, left.index)
+                    )
+                    if key in existing:
+                        continue
+                    if not _compatible_index_pair(left, right, window_seconds=self.window):
+                        continue
+                    existing.add(key)
+                    self.secondary_blocked = max(0, self.secondary_blocked - 1)
+                    augmented.append((left, right) if left.index < right.index else (right, left))
+        return augmented
+
+    def _index_diagnostics(self) -> dict[str, Any]:
         naive = naive_pair_space(len(self.items))
-        diagnostics = {
+        return {
             "naive_pair_space": naive,
             "candidate_pairs_generated": len(self.generated),
             "pairs_pruned_by_index": max(
@@ -423,20 +577,53 @@ class _IndexedCandidateBuilder:
                 naive
                 - len(self.generated)
                 - self.cache_skipped
-                - self.could_match_rejected,
+                - self.could_match_rejected
+                - self.secondary_blocked,
             ),
             "pairs_skipped_by_generation_cache": self.cache_skipped,
             "pairs_rejected_by_could_match": self.could_match_rejected,
             "unresolved_competition_events": self.unresolved_competition_events,
             "max_sport_bucket_size": self.max_sport_bucket_size,
             "sport_bucket_count": self.sport_bucket_count,
-            "candidate_order_version": CANDIDATE_ORDER_VERSION,
+            "candidate_order_version": (
+                SECONDARY_BLOCK_ORDER_VERSION if self.secondary_block else CANDIDATE_ORDER_VERSION
+            ),
+            "secondary_block": bool(self.secondary_block),
+            "pairs_blocked_before_could_match": self.secondary_blocked,
+            "max_could_match_component": self.max_could_match_component,
+            "secondary_clique_capped_components": self.secondary_clique_capped_components,
         }
-        return self.generated, diagnostics
+
+    def finish(self) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
+        self.generated.sort(key=_candidate_progress_key)
+        return self.generated, self._index_diagnostics()
+
+    async def finish_cooperative(
+        self, *, yield_every: int = INDEX_COOP_YIELD_EVERY
+    ) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
+        """Same candidate order as ``finish``, yielding while decorating sort keys."""
+
+        pause_every = max(1, int(yield_every))
+        last_yield = time.perf_counter()
+        decorated: list[tuple[Any, tuple[VenueEvent, VenueEvent]]] = []
+        for ticks, pair in enumerate(self.generated, start=1):
+            decorated.append((_candidate_progress_key(pair), pair))
+            if _coop_pause_due(ticks, pause_every, last_yield):
+                await asyncio.sleep(0)
+                last_yield = time.perf_counter()
+        decorated.sort(key=lambda item: item[0])
+        await asyncio.sleep(0)
+        self.generated = [pair for _, pair in decorated]
+        return self.generated, self._index_diagnostics()
 
     def run_sync(self) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
         compatible = list(self._iter_compatible_pairs())
-        self._emit_component_pairs(compatible)
+        parent = self._new_component_parent()
+        for left, right in compatible:
+            if self._could_match_pair(left, right):
+                self._union_component(parent, left.index, right.index)
+        compatible = self._augment_component_cliques(compatible, parent)
+        self._emit_component_pairs(compatible, parent)
         return self.finish()
 
     async def run_cooperative(
@@ -446,23 +633,36 @@ class _IndexedCandidateBuilder:
         compatible: list[tuple[_IndexRecord, _IndexRecord]] = []
         parent = self._new_component_parent()
         last_yield = time.perf_counter()
+        ticks = 0
         try:
-            for ticks, pair in enumerate(self._iter_compatible_pairs(), start=1):
-                compatible.append(pair)
-                if self._could_match_pair(*pair):
-                    self._union_component(parent, pair[0].index, pair[1].index)
-                if _coop_pause_due(ticks, pause_every, last_yield):
-                    await asyncio.sleep(0)
-                    last_yield = time.perf_counter()
+            # Pause on neighbour visits, not only yielded pairs. Same-kickoff
+            # unresolved buckets spend most of the walk skipping the upper
+            # triangle; counting only emitted pairs lets that drain starve
+            # the 0.25s event-loop bound. Secondary name blocking still filters
+            # inside neighbour_records; clique augmentation restores veto pairs
+            # inside small could-match components afterwards.
+            for record in self.records:
+                for other in self.neighbour_records(record):
+                    ticks += 1
+                    pair = self._accepted_compatible_pair(record, other)
+                    if pair is not None:
+                        compatible.append(pair)
+                        if self._could_match_pair(*pair):
+                            self._union_component(parent, pair[0].index, pair[1].index)
+                    if _coop_pause_due(ticks, pause_every, last_yield):
+                        await asyncio.sleep(0)
+                        last_yield = time.perf_counter()
+            compatible = self._augment_component_cliques(compatible, parent)
             await self._emit_component_pairs_cooperative(
                 compatible, parent, yield_every=pause_every
             )
             await asyncio.sleep(0)
         except asyncio.CancelledError:
             if compatible and not self.generated:
+                compatible = self._augment_component_cliques(compatible, parent)
                 self._emit_component_pairs(compatible, parent)
             raise
-        return self.finish()
+        return await self.finish_cooperative(yield_every=pause_every)
 
 
 def build_indexed_candidates(
@@ -471,6 +671,7 @@ def build_indexed_candidates(
     kickoff_tolerance: timedelta,
     cache: Any | None = None,
     matcher: Any | None = None,
+    secondary_block: bool = False,
 ) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
     """Correctness-preserving superset of EventMatcher-eligible pairs.
 
@@ -489,7 +690,11 @@ def build_indexed_candidates(
     """
 
     return _IndexedCandidateBuilder(
-        items=items, kickoff_tolerance=kickoff_tolerance, cache=cache, matcher=matcher
+        items=items,
+        kickoff_tolerance=kickoff_tolerance,
+        cache=cache,
+        matcher=matcher,
+        secondary_block=secondary_block,
     ).run_sync()
 
 
@@ -500,11 +705,16 @@ async def build_indexed_candidates_cooperative(
     cache: Any | None = None,
     matcher: Any | None = None,
     yield_every: int = INDEX_COOP_YIELD_EVERY,
+    secondary_block: bool = False,
 ) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
     """Same candidate set as ``build_indexed_candidates``, yielding to the event loop."""
 
     return await _IndexedCandidateBuilder(
-        items=items, kickoff_tolerance=kickoff_tolerance, cache=cache, matcher=matcher
+        items=items,
+        kickoff_tolerance=kickoff_tolerance,
+        cache=cache,
+        matcher=matcher,
+        secondary_block=secondary_block,
     ).run_cooperative(yield_every=yield_every)
 
 
@@ -529,6 +739,7 @@ class ClusterPass:
         extra: list[VenueEvent] | None = None,
         incremental_cache: CrossGenerationIdentityCache | None = None,
         defer_candidate_build: bool = False,
+        secondary_block: bool = False,
     ) -> None:
         if max_event_pairs <= 0:
             raise ValueError("max_event_pairs must be positive")
@@ -571,6 +782,10 @@ class ClusterPass:
         self.index_diagnostics: dict[str, Any] = {}
         self.candidate_pairs_considered = 0
         self._resume_cursor = 0
+        self.secondary_block = bool(secondary_block)
+        self._candidate_order_version = (
+            SECONDARY_BLOCK_ORDER_VERSION if self.secondary_block else CANDIDATE_ORDER_VERSION
+        )
         self.last_unscored_nodes: set[tuple[VenueName, str]] = set()
         self.resume_diagnostics: dict[str, Any] = {
             "clustering_resume_applied": False,
@@ -615,7 +830,7 @@ class ClusterPass:
         if resume is None:
             return
         stored_version = int(getattr(resume, "candidate_order_version", 1) or 1)
-        if stored_version != CANDIDATE_ORDER_VERSION:
+        if stored_version != self._candidate_order_version:
             cache.clustering_resume = None
             return
         self._restore_resume_state(resume)
@@ -631,7 +846,7 @@ class ClusterPass:
             self.resume_diagnostics["clustering_resume_signature_mismatch"] = True
             return False
         stored_version = int(getattr(snapshot, "candidate_order_version", 1) or 1)
-        if stored_version != CANDIDATE_ORDER_VERSION:
+        if stored_version != self._candidate_order_version:
             return False
         keys = list(getattr(snapshot, "candidate_keys", ()) or ())
         if not keys:
@@ -660,6 +875,7 @@ class ClusterPass:
             kickoff_tolerance=self._kickoff_tolerance,
             cache=self.identity_cache,
             matcher=self.bulk_matcher,
+            secondary_block=self.secondary_block,
         )
         self._apply_resume_cursor()
 
@@ -673,6 +889,7 @@ class ClusterPass:
             kickoff_tolerance=self._kickoff_tolerance,
             cache=self.identity_cache,
             matcher=self.bulk_matcher,
+            secondary_block=self.secondary_block,
         )
         try:
             self._candidates, self.index_diagnostics = await builder.run_cooperative(
@@ -737,7 +954,7 @@ class ClusterPass:
             pair_kinds=self.pair_kinds,
             scored_pairs=list(self.scored_pairs),
             candidate_keys=self._candidate_keys(),
-            candidate_order_version=CANDIDATE_ORDER_VERSION,
+            candidate_order_version=self._candidate_order_version,
             index_diagnostics=dict(self.index_diagnostics),
         )
 
@@ -932,13 +1149,14 @@ class ClusterPass:
         self, *, yield_every: int = INDEX_COOP_YIELD_EVERY
     ) -> set[tuple[VenueName, str]]:
         nodes: set[tuple[VenueName, str]] = set()
-        remaining = self._candidates[self.candidate_pairs_considered :]
+        start = self.candidate_pairs_considered
         pause_every = max(1, int(yield_every))
         last_yield = time.perf_counter()
-        for index, (left, right) in enumerate(remaining, start=1):
-            if _coop_pause_due(index, pause_every, last_yield):
+        for ticks, index in enumerate(range(start, len(self._candidates)), start=1):
+            if _coop_pause_due(ticks, pause_every, last_yield):
                 await asyncio.sleep(0)
                 last_yield = time.perf_counter()
+            left, right = self._candidates[index]
             nodes.add(_key(left.venue, left.source_event_id))
             nodes.add(_key(right.venue, right.source_event_id))
             if len(nodes) >= len(self.nodes):
@@ -957,10 +1175,12 @@ class ClusterPass:
         )
         await asyncio.sleep(0)
         pause_every = max(1, int(yield_every))
+        last_yield = time.perf_counter()
         grouped: dict[tuple[VenueName, str], FixtureCluster] = {}
-        for index, (key, item) in enumerate(self.nodes.items()):
-            if index % pause_every == 0:
+        for index, (key, item) in enumerate(self.nodes.items(), start=1):
+            if _coop_pause_due(index, pause_every, last_yield):
                 await asyncio.sleep(0)
+                last_yield = time.perf_counter()
             root = self._find(key)
             cluster = grouped.setdefault(root, FixtureCluster())
             _append_cluster_event(cluster, item)
@@ -1034,6 +1254,34 @@ def _append_cluster_event(cluster: FixtureCluster, item: VenueEvent) -> None:
         cluster.kalshi_events.append(item)
         return
     cluster.other_venue_events.setdefault(item.venue, []).append(item)
+
+
+def cluster_events_from_pass(
+    *,
+    matchbook: list[VenueEvent],
+    polymarket: list[VenueEvent],
+    kalshi: list[VenueEvent],
+    matcher: EventMatcher,
+    max_event_pairs: int,
+    identity_cache: Any | None = None,
+    extra: list[VenueEvent] | None = None,
+    incremental_cache: CrossGenerationIdentityCache | None = None,
+    secondary_block: bool = False,
+) -> ClusterPass:
+    """Deferred ClusterPass used by competition-shard scheduling."""
+
+    return ClusterPass(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=matcher,
+        max_event_pairs=max_event_pairs,
+        identity_cache=identity_cache,
+        extra=extra,
+        incremental_cache=incremental_cache,
+        defer_candidate_build=True,
+        secondary_block=secondary_block,
+    )
 
 
 def cluster_venue_events(

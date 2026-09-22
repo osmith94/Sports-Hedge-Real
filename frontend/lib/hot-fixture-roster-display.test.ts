@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 
 import { DiscoveredFixture, LiveRefreshStatus } from "./api";
 import {
+  DEFERRED_CROSS_VENUE_HEADING,
+  DEFERRED_NOT_HOT_CAPACITY,
+  HOT_PRICING_HEADING,
   HOT_REASON_ARB_PROMOTION,
   HOT_REASON_IN_PLAY,
   HOT_REASON_KICKOFF_HORIZON,
@@ -14,6 +17,8 @@ import {
   HOT_ROSTER_TITLE,
   HOT_ROSTER_UNAVAILABLE,
   HOT_ZONE_KICKER,
+  deferredAwaitingFixtures,
+  deferredRosterSummary,
   fastScanRosterSummary,
   hotEquivalentLabel,
   hotEvaluationLabel,
@@ -21,9 +26,12 @@ import {
   hotFixtureRows,
   hotFixtures,
   hotNetEdgeLabel,
+  hotPricingCount,
+  hotPricingFixtures,
   hotReasonLabels,
   hotRosterBadgeLabel,
   hotVenuePresenceLabel,
+  postKickoffPendingFixtures,
 } from "./hot-fixture-roster-display";
 import { opportunityMonitorRows } from "./opportunity-monitor-display";
 
@@ -67,6 +75,7 @@ function status(overrides: Partial<LiveRefreshStatus> = {}): LiveRefreshStatus {
 describe("HOT fixture roster membership", () => {
   it("renders HOT rows when scan_lane is hot even with no arb and no watchlist row", () => {
     const live = status({
+      hot: { cadence_seconds: 30, fixture_count: 1, evaluated_count: 1 },
       discovered_fixtures: [
         fixture({
           solver_is_arbitrage: false,
@@ -104,7 +113,7 @@ describe("HOT fixture roster membership", () => {
   });
 
   it("keeps an honest empty HOT state without fabricating fixtures", () => {
-    assert.equal(hotRosterBadgeLabel(true, status()), "EMPTY");
+    assert.equal(hotRosterBadgeLabel(true, status()), "HOT PRICING 0");
     assert.equal(hotFixtureRows(status()).length, 0);
     assert.equal(hotRosterBadgeLabel(false, null), "UNAVAILABLE");
     assert.match(HOT_ROSTER_EMPTY, /HOT pricing roster is empty/i);
@@ -136,6 +145,7 @@ describe("HOT reason presentation", () => {
 
   it("labels qualifying-opportunity promotion without claiming every HOT fixture is an arb", () => {
     const live = status({
+      hot: { cadence_seconds: 30, fixture_count: 2, evaluated_count: 2 },
       discovered_fixtures: [
         fixture({
           canonical_event_id: "evt/in-play",
@@ -336,7 +346,55 @@ describe("HOT Zone evaluation state and HOT pricing summary", () => {
       },
       universe: { cadence_seconds: 180, last_completed_at: "2026-09-16T18:04:00Z" },
     });
-    assert.equal(fastScanRosterSummary(live), "4 HOT · 3 evaluated · 2 paper decisions");
-    assert.equal(fastScanRosterSummary(status()), "0 HOT · 0 evaluated · — paper decisions");
+    assert.equal(fastScanRosterSummary(live), "HOT PRICING 4 · 30s · 3 evaluated · 2 paper decisions");
+    assert.equal(fastScanRosterSummary(status()), "HOT PRICING 0 · 30s · 0 evaluated · — paper decisions");
+  });
+
+  it("does not count deferred single-venue fixtures as HOT pricing when the worker set is empty", () => {
+    const deferred = Array.from({ length: 12 }, (_, index) =>
+      fixture({
+        canonical_event_id: `evt/deferred-${index}`,
+        scan_lane: "hot",
+        market_evaluation_state: "single_venue_no_cross_venue_candidate",
+        market_evaluation_reason: "single_venue_no_cross_venue_candidate",
+        hot_reasons: [HOT_REASON_KICKOFF_HORIZON],
+      }),
+    );
+    const live = status({
+      hot: { cadence_seconds: 30, fixture_count: 0, evaluated_count: 0 },
+      price_engine: { hot: { pricing_fixtures: 0, working_set: 0 } },
+      discovered_fixtures: deferred,
+    });
+    assert.equal(hotPricingCount(live), 0);
+    assert.equal(hotPricingFixtures(live).length, 0);
+    assert.equal(hotFixtureRows(live).length, 0);
+    assert.equal(deferredAwaitingFixtures(live).length, 12);
+    assert.match(deferredRosterSummary(live), new RegExp(DEFERRED_CROSS_VENUE_HEADING));
+    assert.match(deferredRosterSummary(live), /12/);
+    assert.match(DEFERRED_NOT_HOT_CAPACITY, /Not consuming HOT pricing capacity/);
+    assert.equal(HOT_PRICING_HEADING, "HOT PRICING");
+    const panel = readFileSync(join(frontendRoot, "components/hot-fixtures-panel.tsx"), "utf8");
+    assert.match(panel, /HOT_PRICING_HEADING/);
+    assert.match(panel, /DEFERRED_CROSS_VENUE_HEADING/);
+    assert.match(panel, /deferredFixtureRows/);
+  });
+
+  it("keeps post-kickoff pending fixtures out of the HOT pricing count", () => {
+    const live = status({
+      hot: { cadence_seconds: 30, fixture_count: 1, evaluated_count: 0 },
+      discovered_fixtures: [
+        fixture({
+          canonical_event_id: "evt/pending",
+          hot_reasons: [HOT_REASON_POST_KICKOFF_STATUS_PENDING],
+        }),
+        fixture({
+          canonical_event_id: "evt/priced",
+          hot_reasons: [HOT_REASON_IN_PLAY],
+          market_evaluation_state: "evaluated",
+        }),
+      ],
+    });
+    assert.deepEqual(postKickoffPendingFixtures(live).map((item) => item.canonical_event_id), ["evt/pending"]);
+    assert.deepEqual(hotPricingFixtures(live).map((item) => item.canonical_event_id), ["evt/priced"]);
   });
 });

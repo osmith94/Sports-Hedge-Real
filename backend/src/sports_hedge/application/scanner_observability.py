@@ -49,6 +49,7 @@ class PriceEngineTierStatus(BaseModel):
     """HOT or BACKGROUND counters from current process-memory engine truth."""
 
     working_set: int = 0
+    pricing_fixtures: int = 0
     due: int = 0
     queued: int = 0
     in_flight: int = 0

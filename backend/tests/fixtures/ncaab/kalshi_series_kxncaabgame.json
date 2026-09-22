@@ -1,0 +1,32 @@
+{
+  "fixture_id": "ncaab-kalshi_series_kxncaabgame-2026-09-22",
+  "identified_as": "CAPTURED public Kalshi GET /series/KXNCAABGAME. Series metadata only.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/series/KXNCAABGAME",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "ticker": "KXNCAABGAME",
+    "title": "College Basketball Game",
+    "category": "Sports",
+    "frequency": "custom",
+    "tags": [
+      "Basketball"
+    ],
+    "contract_terms_url": "https://assets.kalshi.com/contract_terms/NCAABGAME.pdf",
+    "settlement_sources": [
+      {
+        "name": "Kalshi using information originating from the NCAA",
+        "url": "https://www.ncaa.com/sports/basketball-men/d1"
+      },
+      {
+        "name": "ESPN",
+        "url": "https://www.espn.com/"
+      }
+    ],
+    "product_metadata": {
+      "scope": "Game"
+    },
+    "fee_type": "quadratic",
+    "fee_multiplier": 1
+  }
+}

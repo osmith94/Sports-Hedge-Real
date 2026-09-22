@@ -1,0 +1,13 @@
+{
+  "fixture_id": "ncaab-matchbook_lookups_sports_basketball-2026-09-22",
+  "identified_as": "CAPTURED Matchbook GET /edge/rest/lookups/sports Basketball row. sport-id 4.",
+  "source": "https://api.matchbook.com/edge/rest/lookups/sports",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "name": "Basketball",
+    "id": 4,
+    "type": "SPORT",
+    "url-name": "basketball"
+  }
+}

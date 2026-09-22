@@ -1,0 +1,19 @@
+{
+  "fixture_id": "ncaab-polymarket_sports_cbb-2026-09-22",
+  "identified_as": "CAPTURED public Gamma GET /sports cbb row.",
+  "source": "https://gamma-api.polymarket.com/sports",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": 4,
+    "sport": "cbb",
+    "name": "College Basketball",
+    "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/league-icons/cbb-3ddd4bb7.png",
+    "resolution": "https://www.ncaa.com/",
+    "ordering": "away",
+    "tags": "1,101178,100639,101954",
+    "primaryTagId": 101178,
+    "series": "10470",
+    "createdAt": "2025-11-05T19:27:45.399303Z"
+  }
+}

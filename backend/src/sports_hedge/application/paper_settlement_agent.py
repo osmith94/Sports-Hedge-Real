@@ -184,6 +184,38 @@ class PaperSettlementAgent:
         polymarket_market = evidence.polymarket_market
         polymarket_event = evidence.polymarket_event
         fetch_blocker = evidence.fetch_blocker
+        from sports_hedge.ncaab.settlement import (
+            is_ncaab_paper_trade,
+            ncaab_automatic_settlement_blocker,
+            ncaab_missing_venue_evidence_blocker,
+        )
+
+        if is_ncaab_paper_trade(trade):
+            fetched: set[VenueName] = set()
+            if matchbook_market is not None or matchbook_event is not None:
+                fetched.add(VenueName.MATCHBOOK)
+            if kalshi_markets:
+                fetched.add(VenueName.KALSHI)
+            if polymarket_market is not None or polymarket_event is not None:
+                fetched.add(VenueName.POLYMARKET)
+            ncaab_blocker = ncaab_missing_venue_evidence_blocker(
+                trade, fetched
+            ) or ncaab_automatic_settlement_blocker(trade)
+            if ncaab_blocker:
+                self._record_blocker(
+                    trade,
+                    ncaab_blocker,
+                    SettlementResolution(
+                        winning_outcome=None,
+                        blocker=ncaab_blocker,
+                        source_id=f"ncaab-fail-closed:{trade.trade_id}",
+                        detail=ncaab_blocker,
+                    ),
+                    when,
+                )
+                return PaperSettlementTradeResult(
+                    trade_id=trade.trade_id, blocker=ncaab_blocker
+                )
         self._record_nfl_lifecycle(
             trade,
             matchbook_market=matchbook_market,

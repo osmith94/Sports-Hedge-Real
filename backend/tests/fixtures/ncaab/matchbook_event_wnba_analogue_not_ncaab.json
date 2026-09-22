@@ -1,0 +1,244 @@
+{
+  "fixture_id": "ncaab-matchbook_event_wnba_analogue_not_ncaab-2026-09-22",
+  "identified_as": "CAPTURED Matchbook WNBA game as basketball analogue ONLY. Not NCAAB proof. Competition tag WNBA 502879947700009.",
+  "source": "https://api.matchbook.com/edge/rest/events/34406649938500081",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": 34406649938500081,
+    "name": "Connecticut Sun at Washington Mystics",
+    "sport-id": 4,
+    "start": "2026-09-22T23:30:00.000Z",
+    "status": "open",
+    "in-running-flag": false,
+    "meta-tags": [
+      {
+        "id": 4,
+        "name": "Basketball",
+        "type": "SPORT"
+      },
+      {
+        "id": 410468520880009,
+        "name": "Live Betting",
+        "type": "OTHER"
+      },
+      {
+        "id": 502879947700009,
+        "name": "WNBA",
+        "type": "COMPETITION"
+      },
+      {
+        "id": 1904152202480016,
+        "name": "United States of America",
+        "type": "COUNTRY"
+      },
+      {
+        "id": 33287185272900047,
+        "name": "September 22nd 2026",
+        "type": "DATE"
+      }
+    ],
+    "markets": [
+      {
+        "id": 34406649943900081,
+        "name": "Moneyline",
+        "market-type": "money_line",
+        "type": "binary",
+        "status": "open",
+        "handicap": null,
+        "number-of-winners": 1,
+        "runners": [
+          {
+            "id": 34406649944901081,
+            "name": "Connecticut Sun",
+            "status": "open",
+            "handicap": null,
+            "event-participant-id": 34406649942701081
+          },
+          {
+            "id": 34406649944701081,
+            "name": "Washington Mystics",
+            "status": "open",
+            "handicap": null,
+            "event-participant-id": 34406649942300081
+          }
+        ]
+      },
+      {
+        "id": 34406650466000081,
+        "name": "Total",
+        "market-type": "total",
+        "type": "binary",
+        "status": "open",
+        "handicap": 156.5,
+        "number-of-winners": 1,
+        "runners": [
+          {
+            "id": 34406650469000081,
+            "name": "OVER 156.5",
+            "status": "open",
+            "handicap": 156.5,
+            "event-participant-id": null
+          },
+          {
+            "id": 34406650469200081,
+            "name": "UNDER 156.5",
+            "status": "open",
+            "handicap": 156.5,
+            "event-participant-id": null
+          }
+        ]
+      },
+      {
+        "id": 34406650466400081,
+        "name": "Total",
+        "market-type": "total",
+        "type": "binary",
+        "status": "open",
+        "handicap": 157.5,
+        "number-of-winners": 1,
+        "runners": [
+          {
+            "id": 34406650469801081,
+            "name": "OVER 157.5",
+            "status": "open",
+            "handicap": 157.5,
+            "event-participant-id": null
+          },
+          {
+            "id": 34406650470001081,
+            "name": "UNDER 157.5",
+            "status": "open",
+            "handicap": 157.5,
+            "event-participant-id": null
+          }
+        ]
+      },
+      {
+        "id": 34406650466700081,
+        "name": "Total",
+        "market-type": "total",
+        "type": "binary",
+        "status": "open",
+        "handicap": 158.5,
+        "number-of-winners": 1,
+        "runners": [
+          {
+            "id": 34406650470601081,
+            "name": "OVER 158.5",
+            "status": "open",
+            "handicap": 158.5,
+            "event-participant-id": null
+          },
+          {
+            "id": 34406650470801081,
+            "name": "UNDER 158.5",
+            "status": "open",
+            "handicap": 158.5,
+            "event-participant-id": null
+          }
+        ]
+      },
+      {
+        "id": 34406802367500081,
+        "name": "Total",
+        "market-type": "total",
+        "type": "binary",
+        "status": "open",
+        "handicap": 159.5,
+        "number-of-winners": 1,
+        "runners": [
+          {
+            "id": 34406802368501081,
+            "name": "OVER 159.5",
+            "status": "open",
+            "handicap": 159.5,
+            "event-participant-id": null
+          },
+          {
+            "id": 34406802368901081,
+            "name": "UNDER 159.5",
+            "status": "open",
+            "handicap": 159.5,
+            "event-participant-id": null
+          }
+        ]
+      },
+      {
+        "id": 34408786803600081,
+        "name": "1st Half Total",
+        "market-type": "total",
+        "type": "binary",
+        "status": "open",
+        "handicap": 78.5,
+        "number-of-winners": 1,
+        "runners": [
+          {
+            "id": 34408786804300081,
+            "name": "OVER 78.5",
+            "status": "open",
+            "handicap": 78.5,
+            "event-participant-id": null
+          },
+          {
+            "id": 34408786804800081,
+            "name": "UNDER 78.5",
+            "status": "open",
+            "handicap": 78.5,
+            "event-participant-id": null
+          }
+        ]
+      },
+      {
+        "id": 34408786915200081,
+        "name": "1st Half Total",
+        "market-type": "total",
+        "type": "binary",
+        "status": "open",
+        "handicap": 77.5,
+        "number-of-winners": 1,
+        "runners": [
+          {
+            "id": 34408786915700081,
+            "name": "OVER 77.5",
+            "status": "open",
+            "handicap": 77.5,
+            "event-participant-id": null
+          },
+          {
+            "id": 34408786916000081,
+            "name": "UNDER 77.5",
+            "status": "open",
+            "handicap": 77.5,
+            "event-participant-id": null
+          }
+        ]
+      },
+      {
+        "id": 34409395420800081,
+        "name": "1st Half Total",
+        "market-type": "total",
+        "type": "binary",
+        "status": "open",
+        "handicap": 76.5,
+        "number-of-winners": 1,
+        "runners": [
+          {
+            "id": 34409395421700081,
+            "name": "OVER 76.5",
+            "status": "open",
+            "handicap": 76.5,
+            "event-participant-id": null
+          },
+          {
+            "id": 34409395422101081,
+            "name": "UNDER 76.5",
+            "status": "open",
+            "handicap": 76.5,
+            "event-participant-id": null
+          }
+        ]
+      }
+    ]
+  }
+}

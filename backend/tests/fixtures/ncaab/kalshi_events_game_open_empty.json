@@ -1,0 +1,11 @@
+{
+  "fixture_id": "ncaab-kalshi_events_game_open_empty-2026-09-22",
+  "identified_as": "CAPTURED Kalshi KXNCAAMBGAME open events: zero. Healthy off-season/zero fixture state.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events?series_ticker=KXNCAAMBGAME&status=open",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "count": 0,
+    "events": []
+  }
+}

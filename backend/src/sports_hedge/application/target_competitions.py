@@ -31,6 +31,7 @@ class TargetCompetitionCode(StrEnum):
     CHAMPIONS_LEAGUE = "champions_league"
     EUROPA_LEAGUE = "europa_league"
     CONFERENCE_LEAGUE = "conference_league"
+    UEFA_NATIONS_LEAGUE = "uefa_nations_league"
     SUPER_LIG = "super_lig"
     MLS = "mls"
     LIGA_MX = "liga_mx"
@@ -42,6 +43,7 @@ class TargetCompetitionCode(StrEnum):
     SOUTH_AFRICAN_PREMIERSHIP = "south_african_premiership"
     NFL = "nfl"
     NBA = "nba"
+    NCAAB = "ncaab"
 
 
 class VenueMappingStatus(StrEnum):
@@ -49,10 +51,10 @@ class VenueMappingStatus(StrEnum):
     UNVERIFIED = "unverified"
 
 
-PRINCIPAL_OPERATOR_COMPETITION_COUNT = 32
+PRINCIPAL_OPERATOR_COMPETITION_COUNT = 34
 VERIFIED_ALL_3 = "VERIFIED_ALL_3"
 PARTIAL_PROVIDER_MAPPING = "PARTIAL"
-PROVIDER_MATRIX_RETRIEVED_AT = "2026-09-20"
+PROVIDER_MATRIX_RETRIEVED_AT = "2026-09-22"
 
 
 class TargetCompetition(BaseModel):
@@ -80,14 +82,26 @@ class TargetCompetition(BaseModel):
 #   itc=10287, fl1=10195, ere=10286, por=10330, scop=10674, bel1=12351,
 #   mex=10290, bra=10359, arg=10312, lib=10289, spl=10361, jap=10360,
 #   saf1=12360 (South Africa Premiership).
+# Public Gamma GET /sports (retrieved 2026-09-22): unl=11446 UEFA Nations League.
 # Near-neighbor Gamma series left unmatched: bl2 (2. Bundesliga), itsb (Serie B),
 # clf (Club Friendlies), ecu1 (LigaPro Serie A), uwcl (Women's UCL),
-# tur2 (Turkey 1. Lig), ja2/j2100 (J2), bra2/bra3, fr2 (Ligue 2).
+# tur2 (Turkey 1. Lig), ja2/j2100 (J2), bra2/bra3, fr2 (Ligue 2),
+# conl=10673 CONCACAF Nations League.
+# Polymarket group/champion/relegation outrights (e.g. event 994203
+# uefa-nations-league-winner-2026-27) have series=null / sport=null and are
+# not in Gamma series 11446. They stay out of the fixture pipeline.
 #
 # Public Kalshi GET /series category=Sports (retrieved 2026-09-20) match-level
 # GAME/BTTS/TOTAL/(FTTS where present). Short prefixes are not used when they
 # would also match a neighbour (women's, All-Star, 2. Bundesliga, Serie B/C,
 # Ligue 2, J2, Sudamericana).
+# Public Kalshi GET /series category=Sports (retrieved 2026-09-22) UEFA
+# Nations League match-level GAME/BTTS/TOTAL/FTTS:
+#   KXUEFANLGAME, KXUEFANLBTTS, KXUEFANLTOTAL, KXUEFANLFTTS.
+# Observed but not admitted (not already soccer-approved families):
+#   KXUEFANLSPREAD, KXUEFANL1H*, KXUEFANLTEAMTOTAL, KXUEFANLSCORE,
+#   KXUEFANLADVANCE, KXUEFANLMOV. Season series KXUEFANL is not a fixture.
+# Neighbor KXCONCACAFNL is CONCACAF outrights, not UEFA fixtures.
 # Not present on that listing and therefore not invented:
 #   EFL League Two match-level series, South African Premiership match-level series.
 #
@@ -329,6 +343,36 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
             "KXUECLGAME",
             "KXUECLBTTS",
             "KXUECLTOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.UEFA_NATIONS_LEAGUE,
+        display_name="UEFA Nations League",
+        aliases=(
+            "uefa nations league",
+            "nations league",
+            "unl",
+            "uefa nations league 2026/27",
+            "uefa nations league 2026 27",
+            # Live Matchbook COMPETITION meta-tags 2026-09-22 (soccer id=15):
+            # Netherlands vs Germany uses "UEFA Nations League A";
+            # Austria vs Israel uses "UEFA Nations League B";
+            # Andorra vs Malta uses "UEFA Nations League D".
+            # League C was not on that open snapshot and is not registered
+            # until an observed COMPETITION tag exists.
+            "uefa nations league a",
+            "uefa nations league b",
+            "uefa nations league d",
+        ),
+        polymarket_gamma_series_id="11446",
+        polymarket_gamma_sport="unl",
+        # Complete match-level prefixes only. Short KXUEFANL also matches the
+        # season series KXUEFANL and 1H/score/spread/advance neighbors.
+        kalshi_series_prefixes=(
+            "KXUEFANLGAME",
+            "KXUEFANLBTTS",
+            "KXUEFANLTOTAL",
+            "KXUEFANLFTTS",
         ),
     ),
     TargetCompetition(
@@ -746,6 +790,24 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
         polymarket_gamma_sport="nba",
         kalshi_series_prefixes=("KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL"),
     ),
+    TargetCompetition(
+        code=TargetCompetitionCode.NCAAB,
+        display_name="NCAA Men's Basketball",
+        aliases=(
+            "ncaab",
+            "ncaa men",
+            "ncaa men's basketball",
+            "ncaa mens basketball",
+            "college basketball",
+            "cbb",
+            "ncaa cbb",
+            "ncaa division i men's basketball",
+            "ncaamb",
+        ),
+        polymarket_gamma_series_id="10470",
+        polymarket_gamma_sport="cbb",
+        kalshi_series_prefixes=("KXNCAAMBGAME", "KXNCAAMBSPREAD", "KXNCAAMBTOTAL"),
+    ),
 )
 
 _ALIAS_INDEX: dict[str, TargetCompetition] = {}
@@ -773,6 +835,7 @@ _NON_FOOTBALL_SPORTS = {
     "nfl",
     "nba",
     "nba basketball",
+    "wnba",
     "nhl",
     "mlb",
     "baseball",
@@ -791,15 +854,17 @@ EVENT_IDENTITY_MISMATCH = "event_identity_mismatch"
 SERIES_NOT_QUERIED = "series_not_queried"
 UNKNOWN_COMPETITION = "unknown_or_ambiguous_competition"
 NON_FOOTBALL_SPORT = "non_football_sport"
+REJECTED_NON_NCAAB_BASKETBALL = "rejected_non_ncaab_basketball"
 OUT_OF_SCOPE_COMPETITION = "out_of_scope_competition"
 NO_VERIFIED_CROSS_VENUE_MAPPING = "No verified cross-venue mapping"
 KALSHI_SERIES_NOT_VERIFIED = "Kalshi match-level series not verified"
 POLYMARKET_SERIES_NOT_VERIFIED = "Polymarket Gamma series not verified"
 MATCHBOOK_ALIASES_NOT_VERIFIED = "Matchbook label aliases not verified"
+SEASON_PROPOSITION_NOT_FIXTURE = "season_proposition_not_fixture"
 
 # Operator selector grouping. Canonical codes are the operator model; venue
 # tickers stay backend-only.
-OPERATOR_COMPETITION_REGISTRY_VERSION = 5
+OPERATOR_COMPETITION_REGISTRY_VERSION = 7
 OPERATOR_UNIVERSE_SPORT = "football"
 OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("uefa", "UEFA"),
@@ -824,11 +889,13 @@ OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("international", "International"),
     ("nfl", "NFL"),
     ("nba", "NBA"),
+    ("college_basketball", "College Basketball"),
 )
 OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
     TargetCompetitionCode.CHAMPIONS_LEAGUE: ("uefa", "UEFA", "Champions League"),
     TargetCompetitionCode.EUROPA_LEAGUE: ("uefa", "UEFA", "Europa League"),
     TargetCompetitionCode.CONFERENCE_LEAGUE: ("uefa", "UEFA", "Conference League"),
+    TargetCompetitionCode.UEFA_NATIONS_LEAGUE: ("uefa", "UEFA", "Nations League"),
     TargetCompetitionCode.PREMIER_LEAGUE: ("england", "England", "Premier League"),
     TargetCompetitionCode.CHAMPIONSHIP: ("england", "England", "Championship"),
     TargetCompetitionCode.LEAGUE_ONE: ("england", "England", "League One"),
@@ -866,6 +933,7 @@ OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
     ),
     TargetCompetitionCode.NFL: ("nfl", "NFL", "NFL"),
     TargetCompetitionCode.NBA: ("nba", "NBA", "NBA"),
+    TargetCompetitionCode.NCAAB: ("college_basketball", "College Basketball", "NCAA Men"),
 }
 DEFAULT_OPERATOR_COMPETITION_CODES: tuple[TargetCompetitionCode, ...] = (
     TargetCompetitionCode.PREMIER_LEAGUE,
@@ -940,6 +1008,12 @@ KALSHI_SERIES_TICKERS_BY_CODE: dict[TargetCompetitionCode, tuple[str, ...]] = {
         "KXUECLGAME",
         "KXUECLBTTS",
         "KXUECLTOTAL",
+    ),
+    TargetCompetitionCode.UEFA_NATIONS_LEAGUE: (
+        "KXUEFANLGAME",
+        "KXUEFANLBTTS",
+        "KXUEFANLTOTAL",
+        "KXUEFANLFTTS",
     ),
     TargetCompetitionCode.SUPER_LIG: (
         "KXSUPERLIGGAME",
@@ -1042,6 +1116,11 @@ KALSHI_SERIES_TICKERS_BY_CODE: dict[TargetCompetitionCode, tuple[str, ...]] = {
         "KXNBAGAME",
         "KXNBASPREAD",
         "KXNBATOTAL",
+    ),
+    TargetCompetitionCode.NCAAB: (
+        "KXNCAAMBGAME",
+        "KXNCAAMBSPREAD",
+        "KXNCAAMBTOTAL",
     ),
 }
 
@@ -1240,7 +1319,9 @@ def operator_verification_matrix() -> list[CompetitionVerificationRow]:
                     else VenueMappingStatus.UNVERIFIED
                 ),
                 matchbook_evidence=(
-                    "Label aliases; Matchbook has no competition IDs."
+                    "Basketball sport-id 4; no NCAA/NCAAB competition tag in the 2026-09-22 census. WNBA/NBA events are rejected_non_ncaab_basketball."
+                    if item.code is TargetCompetitionCode.NCAAB
+                    else "Label aliases; Matchbook has no competition IDs."
                     if matchbook_mapping_verified(item)
                     else "No verified Matchbook label aliases."
                 ),
@@ -1366,15 +1447,26 @@ def selected_includes_nba(
     return TargetCompetitionCode.NBA.value in _selected_code_set(selected_codes)
 
 
+def selected_includes_ncaab(
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
+) -> bool:
+    return TargetCompetitionCode.NCAAB.value in _selected_code_set(selected_codes)
+
+
+_NON_SOCCER_COMPETITION_CODES = frozenset(
+    {
+        TargetCompetitionCode.NFL.value,
+        TargetCompetitionCode.NBA.value,
+        TargetCompetitionCode.NCAAB.value,
+    }
+)
+
+
 def selected_includes_soccer(
     selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
 ) -> bool:
     codes = _selected_code_set(selected_codes)
-    non_soccer = {
-        TargetCompetitionCode.NFL.value,
-        TargetCompetitionCode.NBA.value,
-    }
-    return any(code not in non_soccer for code in codes)
+    return any(code not in _NON_SOCCER_COMPETITION_CODES for code in codes)
 
 
 def _selected_code_set(
@@ -1426,6 +1518,7 @@ def scope_matchbook_event(
         selected = _selected_code_set(selected_codes)
         nfl_selected = TargetCompetitionCode.NFL.value in selected
         nba_selected = TargetCompetitionCode.NBA.value in selected
+        ncaab_selected = TargetCompetitionCode.NCAAB.value in selected
         if sport_norm in {"american football", "nfl"}:
             if not nfl_selected:
                 return ScopeDecision(
@@ -1435,13 +1528,47 @@ def scope_matchbook_event(
                     sport=sport,
                 )
         elif sport_norm in {"basketball", "nba", "nba basketball"}:
-            if not nba_selected:
+            if not nba_selected and not ncaab_selected:
                 return ScopeDecision(
                     allowed=False,
                     reason=NON_FOOTBALL_SPORT,
                     label=matchbook_competition_label(payload),
                     sport=sport,
                 )
+            from sports_hedge.nba.detect import is_nba_payload
+
+            if nba_selected and is_nba_payload(payload):
+                pass
+            elif ncaab_selected:
+                from sports_hedge.ncaab.detect import (
+                    matchbook_excluded_basketball_reason,
+                    matchbook_has_ncaab_signal,
+                )
+
+                excluded = matchbook_excluded_basketball_reason(payload)
+                if excluded is not None:
+                    return ScopeDecision(
+                        allowed=False,
+                        reason=REJECTED_NON_NCAAB_BASKETBALL,
+                        label=matchbook_competition_label(payload),
+                        sport=sport,
+                    )
+                if matchbook_has_ncaab_signal(payload):
+                    ncaab = competition_by_code(TargetCompetitionCode.NCAAB)
+                    return ScopeDecision(
+                        allowed=True,
+                        competition=ncaab,
+                        label=matchbook_competition_label(payload)
+                        or (ncaab.display_name if ncaab else None),
+                        sport=sport,
+                    )
+                if not nba_selected:
+                    return ScopeDecision(
+                        allowed=False,
+                        reason=REJECTED_NON_NCAAB_BASKETBALL,
+                        label=matchbook_competition_label(payload),
+                        sport=sport,
+                    )
         elif sport_norm in _NON_FOOTBALL_SPORTS:
             return ScopeDecision(
                 allowed=False,
@@ -1506,6 +1633,17 @@ def scope_polymarket_event(
             label=label or resolved.display_name,
             sport=_scope_diagnostic_sport(resolved),
         )
+    if (
+        resolved.code is TargetCompetitionCode.UEFA_NATIONS_LEAGUE
+        and _polymarket_payload_is_season_proposition(payload)
+    ):
+        return ScopeDecision(
+            allowed=False,
+            reason=SEASON_PROPOSITION_NOT_FIXTURE,
+            competition=resolved,
+            label=label or _first_str(payload, "title", "slug") or resolved.display_name,
+            sport="football",
+        )
     return ScopeDecision(
         allowed=True,
         competition=resolved,
@@ -1545,6 +1683,19 @@ def scope_kalshi_event(
             competition=resolved,
             label=label or resolved.display_name,
             sport=_scope_diagnostic_sport(resolved),
+        )
+    if resolved.code is TargetCompetitionCode.UEFA_NATIONS_LEAGUE and (
+        (ticker and series_target is None)
+        or _polymarket_payload_is_season_proposition(payload)
+    ):
+        # Season series KXUEFANL and unadmitted 1H/spread/score/advance
+        # neighbors must not enter the fixture pipeline via competition title.
+        return ScopeDecision(
+            allowed=False,
+            reason=SEASON_PROPOSITION_NOT_FIXTURE,
+            competition=resolved,
+            label=label or resolved.display_name,
+            sport="football",
         )
     return ScopeDecision(
         allowed=True,
@@ -1652,6 +1803,24 @@ def _polymarket_series_title(payload: dict[str, Any]) -> str | None:
             if title:
                 return str(title).strip()
     return None
+
+
+_SEASON_PROPOSITION_TOKENS = ("winner", "champion", "relegat")
+
+
+def _polymarket_payload_is_season_proposition(payload: dict[str, Any]) -> bool:
+    """Reject group/champion/relegation outrights that are not match fixtures.
+
+    Live 2026-09-22 Gamma events such as ``uefa-nations-league-winner-2026-27``
+    have no series id. If a label later resolves to Nations League, the title
+    still must look like a two-team fixture before it may enter PAPER discovery.
+    """
+
+    title = _first_str(payload, "title", "slug", "ticker") or ""
+    blob = f" {normalize_text(title)} "
+    if " vs " in blob:
+        return False
+    return any(token in blob for token in _SEASON_PROPOSITION_TOKENS)
 
 
 def _strip_season_suffix(normalized: str) -> str:

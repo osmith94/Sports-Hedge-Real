@@ -565,6 +565,7 @@ export type LaneRefreshStatus = {
 
 export type PriceEngineTierStatus = {
   working_set?: number;
+  pricing_fixtures?: number;
   due?: number;
   queued?: number;
   in_flight?: number;
@@ -602,6 +603,7 @@ export type ProviderSlotLoad = {
 
 export type HotLoad = {
   fixtures?: number;
+  pricing_fixtures?: number;
   working_set?: number;
   due?: number;
   in_flight?: number;
@@ -610,12 +612,15 @@ export type HotLoad = {
   last_cycle_ms?: number | null;
   cadence_seconds?: number;
   cadence_utilisation?: number | null;
+  health?: string;
 };
 
 export type BackgroundLoad = {
   working_set?: number;
+  pricing_fixtures?: number;
   due?: number;
   cadence_seconds?: number;
+  health?: string;
 };
 
 export type UniverseLoad = {
@@ -628,6 +633,8 @@ export type UniverseLoad = {
   selected_competition_count?: number;
   scope_version?: number | null;
   generation_scope_version?: number | null;
+  worker_state?: string;
+  health?: string;
 };
 
 export type ActiveTradeLoad = {
@@ -636,6 +643,8 @@ export type ActiveTradeLoad = {
   overdue?: number;
   last_cycle_ms?: number | null;
   cadence_seconds?: number;
+  capital_locked_gbp?: string | number | null;
+  health?: string;
 };
 
 export type SystemLoadSummary = {
@@ -1992,6 +2001,11 @@ export type PaperTrade = {
   realised_pnl_gbp?: string | number | null;
   capital_locked_native: Record<string, string | number>;
   capital_locked_gbp?: string | number | null;
+  entry_net_edge?: string | number | null;
+  current_exit_pct?: string | number | null;
+  current_exit_delta_pp?: string | number | null;
+  current_exit_checked_at?: string | null;
+  current_exit_block_reason?: string | null;
   settlement_outcome?: string | null;
   settlement_source?: string | null;
   settlement_source_id?: string | null;

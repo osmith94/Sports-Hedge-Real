@@ -191,6 +191,8 @@ describe("active-trade position management copy", () => {
       }),
     );
     assert.equal(cell.state, "CLOSURE: NOT SAFE");
+    assert.equal(cell.tone, "waiting");
+    assert.notEqual(cell.tone, "ready");
     assert.equal(cell.checkedIso, "2026-09-15T12:00:00.000Z");
     assert.equal(cell.economics, "close-now unavailable");
     assert.equal(cell.threshold, null);
@@ -215,6 +217,7 @@ describe("active-trade position management copy", () => {
       }),
     );
     assert.equal(cell.state, "CLOSURE: NOT SAFE");
+    assert.equal(cell.tone, "unsafe");
     assert.match(cell.economics, /close-now/);
     assert.match(cell.threshold ?? "", /give-up/);
     assert.equal(cell.margin, "EXIT MARGIN n/a");

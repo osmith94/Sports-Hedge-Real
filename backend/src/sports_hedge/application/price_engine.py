@@ -2132,6 +2132,7 @@ class CataloguePriceEngine:
         operations = dict(self._operation_health.get(priority.value) or {})
         return PriceEngineTierStatus(
             working_set=len(items),
+            pricing_fixtures=len({item.identity.canonical_event_id for item in items}),
             due=due,
             queued=due,
             in_flight=in_flight,
@@ -2369,6 +2370,16 @@ def _sport_for_identity(identity: DerivedPriceEngineItem) -> str:
         from sports_hedge.nba.constants import NBA_SPORT
 
         return NBA_SPORT
+    if key.startswith("NCAAB_"):
+        from sports_hedge.ncaab.constants import NCAAB_SPORT
+
+        return NCAAB_SPORT
+    from sports_hedge.ncaab.detect import is_ncaab_competition_label
+
+    if is_ncaab_competition_label(str(identity.competition or "")):
+        from sports_hedge.ncaab.constants import NCAAB_SPORT
+
+        return NCAAB_SPORT
     return "football"
 
 
@@ -2393,6 +2404,12 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
     if key.startswith("NBA_POINT_SPREAD_FT:"):
         return MarketFamily.POINT_SPREAD
     if key.startswith("NBA_TOTAL_POINTS_FT:"):
+        return MarketFamily.TOTAL_POINTS
+    if key == "NCAAB_GAME_WINNER_FT":
+        return MarketFamily.GAME_WINNER
+    if key.startswith("NCAAB_POINT_SPREAD_FT:"):
+        return MarketFamily.POINT_SPREAD
+    if key.startswith("NCAAB_TOTAL_POINTS_FT:"):
         return MarketFamily.TOTAL_POINTS
     if identity.family:
         try:

@@ -31,9 +31,34 @@ export const NFL_SETTLEMENT_CAVEAT_TEXT =
 export const NBA_SETTLEMENT_CAVEAT_TEXT =
   "PAPER comparison is for a normal completed NBA game. Cancellation, suspension, and overtime/exceptional handling can differ across venues and must be resolved before any live execution. Automatic settlement fails closed on those exceptional cases.";
 
+export const NCAAB_PAIR_UNAPPROVED = "ncaab_venue_pair_family_not_evidence_backed";
+
+export const NCAAB_SETTLEMENT_CAVEAT_TEXT =
+  "NCAAB PAPER comparison is not admitted. No venue-pair/family cell has NCAAB-specific settlement evidence. Automatic settlement stays fail-closed and cannot ignore a participating venue.";
+
+function ncaabCompetition(value: string | null | undefined): boolean {
+  const text = (value ?? "").trim().toLowerCase();
+  if (!text) return false;
+  if (text.includes("women")) return false;
+  return (
+    text === "ncaab" ||
+    text === "ncaa men's basketball" ||
+    text === "ncaa mens basketball" ||
+    text.startsWith("ncaa men") ||
+    text.includes("college basketball")
+  );
+}
+
+export function isNcaabPaperTrade(
+  trade: Pick<PaperTrade, "market_family" | "competition">,
+): boolean {
+  return ncaabCompetition(trade.competition);
+}
+
 export function isNflPaperTrade(
   trade: Pick<PaperTrade, "market_family" | "competition">,
 ): boolean {
+  if (isNcaabPaperTrade(trade)) return false;
   return (trade.competition ?? "").trim().toUpperCase() === "NFL";
 }
 
@@ -130,6 +155,8 @@ function familyDisplayLabel(trade: PaperTrade): string {
 }
 
 function compactOutcomeLabel(outcome: string, trade: PaperTrade): string {
+  const ncaabSide = ncaabSideExplanation(outcome, trade);
+  if (ncaabSide) return ncaabSide;
   const nflSide = nflSideExplanation(outcome, trade);
   if (nflSide) return nflSide;
   const nbaSide = nbaSideExplanation(outcome, trade);
@@ -141,6 +168,11 @@ function compactOutcomeLabel(outcome: string, trade: PaperTrade): string {
     return `${label} n.a.`;
   }
   return label;
+}
+
+export function ncaabSideExplanation(outcome: string, trade: PaperTrade): string | null {
+  if (!isNcaabPaperTrade(trade)) return null;
+  return sideExplanation(outcome, trade);
 }
 
 export function nbaSideExplanation(outcome: string, trade: PaperTrade): string | null {

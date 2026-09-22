@@ -3,7 +3,7 @@
 import { Fragment } from "react";
 
 import { LiveRefreshStatus } from "../lib/api";
-import { systemLoadLines } from "../lib/system-load-display";
+import { systemLoadDetailLines, systemLoadLines } from "../lib/system-load-display";
 
 export function SystemLoadSummaryCard({
   status,
@@ -11,6 +11,7 @@ export function SystemLoadSummaryCard({
   status: LiveRefreshStatus | null;
 }) {
   const lines = systemLoadLines(status?.system_load);
+  const details = systemLoadDetailLines(status?.system_load);
   return (
     <div
       className="system-load"
@@ -26,6 +27,19 @@ export function SystemLoadSummaryCard({
           </span>
         </Fragment>
       ))}
+      <details className="system-load-diagnostics">
+        <summary>Diagnostics</summary>
+        <div className="system-load-detail-grid">
+          {details.map((line) => (
+            <Fragment key={`detail-${line.key}-${line.detail}`}>
+              <span className="system-load-key">{line.key}</span>
+              <span className="system-load-detail" title={line.detail}>
+                {line.detail}
+              </span>
+            </Fragment>
+          ))}
+        </div>
+      </details>
     </div>
   );
 }
