@@ -20,7 +20,6 @@ from sports_hedge.application.executable_liquidity import (
     select_fixture_headline,
 )
 from sports_hedge.application.fixture_clusters import (
-    ClusterPass,
     FixtureCluster,
     cluster_canonical_event_id,
     cluster_identity_aliases,
@@ -33,6 +32,10 @@ from sports_hedge.application.universe_identity_cache import (
     GenerationIdentityCache,
     bind_universe_identity_cache,
     get_cross_generation_identity_cache,
+)
+from sports_hedge.application.universe_identity_shards import (
+    cluster_events_sharded,
+    count_raw_events_by_competition,
 )
 from sports_hedge.application.equivalence_diagnostics import (
     zero_equivalent_reason_counts,
@@ -945,6 +948,7 @@ class ReadOnlyCrossVenueCollector:
         cancelled = False
         clustering_truncated = False
         clustering_diagnostics: dict[str, Any] = {}
+        self._op_raw_competition_counts = {}
         self._op_partial_clusters = []
         resolved_lane = (scan_lane or "").strip().casefold() or None
         hot_scope = {item.strip() for item in (identity_scope or []) if item and item.strip()}
@@ -1139,6 +1143,17 @@ class ReadOnlyCrossVenueCollector:
                     50,
                 )
                 skipped_out_of_scope = mb_scope.skipped + pm_scope.skipped + k_scope.skipped
+                self._op_raw_competition_counts = {
+                    VenueName.MATCHBOOK.value: count_raw_events_by_competition(
+                        mb_scope.allowed, venue=VenueName.MATCHBOOK
+                    ),
+                    VenueName.POLYMARKET.value: count_raw_events_by_competition(
+                        pm_scope.allowed, venue=VenueName.POLYMARKET
+                    ),
+                    VenueName.KALSHI.value: count_raw_events_by_competition(
+                        k_scope.allowed, venue=VenueName.KALSHI
+                    ),
+                }
                 matchbook_events = await self._normalize_events(
                     mb_scope.allowed, venue=VenueName.MATCHBOOK, issues=issues
                 )
@@ -2472,6 +2487,71 @@ class ReadOnlyCrossVenueCollector:
                 clustering_truncated
                 or (clustering_diagnostics or {}).get("clustering_truncated")
             ),
+            "raw_events_by_venue_competition": dict(
+                getattr(self, "_op_raw_competition_counts", {}) or {}
+            ),
+            "normalised_events_by_venue_competition": (
+                (clustering_diagnostics or {}).get("events_by_venue_competition") or {}
+            ),
+            "unresolved_events_by_venue": (
+                (clustering_diagnostics or {}).get("unresolved_events_by_venue") or {}
+            ),
+            "identity_shard_count": int(
+                (clustering_diagnostics or {}).get("identity_shard_count") or 0
+            ),
+            "identity_shards_completed": int(
+                (clustering_diagnostics or {}).get("identity_shards_completed") or 0
+            ),
+            "identity_shards_pending": int(
+                (clustering_diagnostics or {}).get("identity_shards_pending") or 0
+            ),
+            "identity_hot_shards": int(
+                (clustering_diagnostics or {}).get("identity_hot_shards") or 0
+            ),
+            "largest_shard_key": (clustering_diagnostics or {}).get("largest_shard_key"),
+            "largest_shard_events": int(
+                (clustering_diagnostics or {}).get("largest_shard_events") or 0
+            ),
+            "largest_shard_candidates": int(
+                (clustering_diagnostics or {}).get("largest_shard_candidates") or 0
+            ),
+            "blocking_shard_key": (clustering_diagnostics or {}).get("blocking_shard_key"),
+            "blocking_shard_status": (clustering_diagnostics or {}).get("blocking_shard_status"),
+            "blocking_shard_events": int(
+                (clustering_diagnostics or {}).get("blocking_shard_events") or 0
+            ),
+            "blocking_shard_candidates": int(
+                (clustering_diagnostics or {}).get("blocking_shard_candidates") or 0
+            ),
+            "blocking_shard_considered": int(
+                (clustering_diagnostics or {}).get("blocking_shard_considered") or 0
+            ),
+            "blocking_shard_remaining_candidates": int(
+                (clustering_diagnostics or {}).get("blocking_shard_remaining_candidates") or 0
+            ),
+            "provenance_counts": (clustering_diagnostics or {}).get("provenance_counts") or {},
+            "provenance_conflicts": int(
+                (clustering_diagnostics or {}).get("provenance_conflicts") or 0
+            ),
+            "unresolved_attached": int(
+                (clustering_diagnostics or {}).get("unresolved_attached") or 0
+            ),
+            "unresolved_bridge_ambiguous": int(
+                (clustering_diagnostics or {}).get("unresolved_bridge_ambiguous") or 0
+            ),
+            "pairs_blocked_before_could_match": int(
+                (clustering_diagnostics or {}).get("pairs_blocked_before_could_match") or 0
+            ),
+            "discovery_snapshot_changed": bool(
+                (clustering_diagnostics or {}).get("discovery_snapshot_changed")
+            ),
+            "global_resume_invalidated_by_discovery": bool(
+                (clustering_diagnostics or {}).get("global_resume_invalidated_by_discovery")
+            ),
+            "shard_resumes_kept_across_discovery_change": bool(
+                (clustering_diagnostics or {}).get("shard_resumes_kept_across_discovery_change")
+            ),
+            "identity_shards": list((clustering_diagnostics or {}).get("identity_shards") or []),
             "identity_graph_components": int(
                 (clustering_diagnostics or {}).get("identity_graph_components") or 0
             ),
@@ -4472,96 +4552,39 @@ class ReadOnlyCrossVenueCollector:
         max_event_pairs: int,
         allow_incremental: bool = True,
     ) -> tuple[list[FixtureCluster], dict[str, int], bool, dict[str, Any]]:
-        cluster_pass = ClusterPass(
-            matchbook=matchbook,
-            polymarket=polymarket,
-            kalshi=kalshi,
-            matcher=self.event_matcher,
-            max_event_pairs=max_event_pairs,
-            identity_cache=self._identity_cache,
-            incremental_cache=(
-                self._incremental_cache if allow_incremental else None
-            ),
-            defer_candidate_build=True,
-        )
-        truncated = False
-        started = monotonic()
         stage_deadline = clustering_stage_deadline_mono(
             remaining_soft=self._remaining_soft(),
             hard_deadline=self._op_deadline,
         )
-        absolute_index = cluster_pass._resume_cursor
-        init_ms = 0
-        consider_ms = 0
-        finalize_ms = 0
-        index_ready = False
 
-        async def _snapshot_partial() -> tuple[list[FixtureCluster], dict[str, int]]:
-            snapshot_started = monotonic()
-            snapshot, snapshot_counts = await cluster_pass.finalize_cooperative()
-            nonlocal finalize_ms
-            finalize_ms = max(0, int((monotonic() - snapshot_started) * 1000))
-            self._op_partial_clusters = snapshot
-            LOGGER.info(
-                "cluster_pass_finalize_ms=%s clusters=%s candidates=%s scored=%s",
-                finalize_ms,
-                len(snapshot),
-                len(cluster_pass._candidates),
-                len(cluster_pass.scored_pairs),
-            )
-            return snapshot, snapshot_counts
+        def _stop() -> bool:
+            if self._hard_deadline_reached():
+                return True
+            return stage_deadline is not None and monotonic() >= stage_deadline
+
+        def _remember(clusters: list[FixtureCluster]) -> None:
+            self._op_partial_clusters = list(clusters)
 
         try:
-            init_started = monotonic()
-            await cluster_pass.load_candidates_cooperative()
-            index_ready = True
-            init_ms = max(0, int((monotonic() - init_started) * 1000))
-            LOGGER.info(
-                "cluster_pass_index_ms=%s candidates=%s",
-                init_ms,
-                len(cluster_pass._candidates),
+            clusters, counts, truncated, diagnostics, unscored = await cluster_events_sharded(
+                matchbook=matchbook,
+                polymarket=polymarket,
+                kalshi=kalshi,
+                matcher=self.event_matcher,
+                max_event_pairs=max_event_pairs,
+                identity_cache=self._identity_cache,
+                incremental_cache=self._incremental_cache if allow_incremental else None,
+                stop=_stop,
+                on_partial=_remember,
             )
-            absolute_index = cluster_pass._resume_cursor
-            consider_started = monotonic()
-            for index, (left, right) in enumerate(cluster_pass.pairs()):
-                if index % CLUSTER_COMPARISON_YIELD_EVERY == 0:
-                    await asyncio.sleep(0)
-                    if self._hard_deadline_reached():
-                        truncated = True
-                        break
-                    if stage_deadline is not None and monotonic() >= stage_deadline:
-                        truncated = True
-                        break
-                cluster_pass.consider(left, right)
-                absolute_index = cluster_pass._resume_cursor + index + 1
-            consider_ms = max(0, int((monotonic() - consider_started) * 1000))
         except asyncio.CancelledError:
-            # Cancel during cooperative index must not overwrite a previous
-            # generation resume with cursor 0 / empty scores. Leftover
-            # finalize may still use restored in-memory scores.
-            if index_ready:
-                cluster_pass.checkpoint(absolute_index)
+            # Shard checkpoints are stored before the cancel leaves the
+            # scheduler. Partial clusters stay available for leftover assembly.
             acknowledge_task_cancellation()
-            await _snapshot_partial()
             raise
-        duration_ms = max(0, int((monotonic() - started) * 1000))
-        if truncated:
-            cluster_pass.checkpoint(absolute_index)
-        else:
-            cluster_pass.checkpoint(len(cluster_pass._candidates))
-        clusters, counts = await _snapshot_partial()
-        if not truncated:
-            cluster_pass.record_generation_negatives(clusters)
-            if allow_incremental:
-                cluster_pass.commit_incremental_snapshot()
-        diagnostics = cluster_pass.clustering_diagnostics(
-            truncated=truncated, duration_ms=duration_ms
-        )
-        diagnostics["cluster_index_ms"] = init_ms
-        diagnostics["cluster_consider_ms"] = consider_ms
-        diagnostics["cluster_finalize_ms"] = finalize_ms
         self._op_clustering_truncated = bool(truncated)
-        self._op_unscored_identity_nodes = set(cluster_pass.last_unscored_nodes)
+        self._op_unscored_identity_nodes = set(unscored)
+        self._op_partial_clusters = list(clusters)
         return clusters, counts, truncated, diagnostics
 
     def _normalizer_for_venue(self, venue: VenueName):

@@ -28,10 +28,12 @@ from sports_hedge.application.fixture_clusters import (
     VenueEvent,
     build_indexed_candidates,
     build_indexed_candidates_cooperative,
+    cluster_events_from_pass,
     cluster_venue_events,
 )
 from sports_hedge.application.hot_market_relationships import relationships_from_fixture_markets
 from sports_hedge.application.scan_lanes import ScanLane
+from sports_hedge.application.universe_identity_shards import cluster_events_sharded
 from sports_hedge.domain.football import CanonicalEvent
 from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.events import EventMatcher
@@ -289,13 +291,16 @@ def test_cancel_recovery_does_not_call_sync_cluster_venue_events() -> None:
     cooperative_src = inspect.getsource(
         ReadOnlyCrossVenueCollector._cluster_venue_events_cooperative
     )
+    shard_src = inspect.getsource(cluster_events_sharded)
+    pass_src = inspect.getsource(cluster_events_from_pass)
     assert "cluster_venue_events(" not in recover_src
+    assert "cluster_venue_events(" not in cooperative_src
     assert "_cluster_venue_events_cooperative(" in recover_src
     assert "allow_incremental=False" in recover_src
-    assert "if index_ready:" in cooperative_src
-    assert "defer_candidate_build=True" in cooperative_src
-    assert "finalize_cooperative" in cooperative_src
-    assert "load_candidates_cooperative" in cooperative_src
+    assert "cluster_events_sharded(" in cooperative_src
+    assert "defer_candidate_build=True" in pass_src
+    assert "finalize_cooperative" in shard_src
+    assert "load_candidates_cooperative" in shard_src
     assert "_apply_identity_graph_cooperative" in inspect.getsource(
         ClusterPass.finalize_cooperative
     )
