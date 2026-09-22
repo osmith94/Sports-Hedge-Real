@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field, model_validator
 
-from sports_hedge.domain.football import MarketFamily, NFL_PAPER_MARKET_FAMILIES
+from sports_hedge.domain.football import MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import (
     CostKnownStatus,
@@ -26,7 +26,11 @@ if TYPE_CHECKING:
         SqliteMatchbookAccountFeeStore,
     )
 
-MATCHBOOK_STANDARD_FOOTBALL_COMMISSION = Decimal("0.02")
+# Venue/account commission. Not a sport schedule. The historical name remains
+# as an alias so existing imports keep resolving the same provider default.
+MATCHBOOK_PROVIDER_DEFAULT_COMMISSION = Decimal("0.02")
+MATCHBOOK_STANDARD_FOOTBALL_COMMISSION = MATCHBOOK_PROVIDER_DEFAULT_COMMISSION
+MATCHBOOK_VENUE_COMMISSION_CLASS = "venue_commission"
 MATCHBOOK_OVERRIDE_SOURCE = "operator_account_assumption:matchbook_net_win_commission"
 MATCHBOOK_OVERRIDE_TIER = "operator_account_override"
 MATCHBOOK_REGISTRY_SOURCE = "venue_cost_registry:matchbook_commission_schedule"
@@ -91,7 +95,13 @@ class VenueCostRule(BaseModel):
             and self.account_or_fee_tier == account_or_fee_tier
         )
 
-    def to_snapshot(self, *, captured_at: datetime) -> VenueCostSnapshot:
+    def to_snapshot(
+        self,
+        *,
+        captured_at: datetime,
+        market_class: str | None = None,
+    ) -> VenueCostSnapshot:
+        priced_class = (market_class or self.market_class).strip().lower()
         return VenueCostSnapshot(
             venue=self.venue,
             action=self.action,
@@ -99,7 +109,7 @@ class VenueCostRule(BaseModel):
             known_status=self.known_status,
             captured_at=captured_at,
             source=self.source,
-            market_class=self.market_class,
+            market_class=priced_class,
             order_role=self.order_role,
             fee_scope=self.fee_scope,
             account_or_fee_tier=self.account_or_fee_tier,
@@ -109,7 +119,10 @@ class VenueCostRule(BaseModel):
             formula_name=self.formula_name,
             currency=self.currency,
             effective_from=self.effective_from,
-            snapshot_id=f"{self.snapshot_id_prefix}:{self.catalog_version}:{self.venue.value}:{self.market_class}:{self.action.value}:{self.order_role.value}",
+            snapshot_id=(
+                f"{self.snapshot_id_prefix}:{self.catalog_version}:{self.venue.value}:"
+                f"{priced_class}:{self.action.value}:{self.order_role.value}"
+            ),
             detail=self.detail,
         )
 
@@ -137,8 +150,9 @@ class VenueCostResolver:
         account_or_fee_tier: str = "standard",
     ) -> VenueCostSnapshot:
         require_aware_utc(as_of, "as_of")
-        family = market_class.value if isinstance(market_class, MarketFamily) else market_class
-        if family.strip().lower() in {"", "unknown"}:
+        raw_family = market_class.value if isinstance(market_class, MarketFamily) else market_class
+        family = raw_family.strip().lower()
+        if family in {"", "unknown"}:
             raise UnknownRequiredCostError(
                 f"unknown_required_venue_cost:{venue.value}",
                 f"market class unknown; {venue.value} cost cannot be assumed",
@@ -151,19 +165,15 @@ class VenueCostResolver:
                     "the venue-cost registry does not seed a global zero"
                 ),
             )
-        matches = [
-            rule
-            for rule in self.rules
-            if rule.matches(
-                venue=venue,
-                market_class=family,
-                action=action,
-                order_role=order_role,
-                account_or_fee_tier=account_or_fee_tier,
-                as_of=as_of,
-            )
-        ]
-        if not matches:
+        chosen = self._select_rule(
+            venue=venue,
+            market_class=family,
+            action=action,
+            order_role=order_role,
+            account_or_fee_tier=account_or_fee_tier,
+            as_of=as_of,
+        )
+        if chosen is None:
             raise UnknownRequiredCostError(
                 f"unknown_required_venue_cost:{venue.value}:{family}",
                 (
@@ -171,8 +181,19 @@ class VenueCostResolver:
                     f"{order_role.value} {account_or_fee_tier}"
                 ),
             )
-        matches.sort(key=lambda rule: rule.effective_from, reverse=True)
-        snapshot = matches[0].to_snapshot(captured_at=as_of)
+        snapshot = chosen.to_snapshot(captured_at=as_of, market_class=family)
+        if (
+            chosen.market_class == MATCHBOOK_VENUE_COMMISSION_CLASS
+            and family != MATCHBOOK_VENUE_COMMISSION_CLASS
+        ):
+            snapshot = snapshot.model_copy(
+                update={
+                    "detail": (
+                        f"{snapshot.detail} Applied to market class {family} from the "
+                        "Matchbook venue/account commission schedule."
+                    )
+                }
+            )
         snapshot = self._apply_matchbook_override(snapshot)
         if snapshot.known_status is CostKnownStatus.UNKNOWN:
             raise UnknownRequiredCostError(
@@ -180,6 +201,70 @@ class VenueCostResolver:
                 snapshot.detail or "required venue cost is unknown",
             )
         return snapshot
+
+    def _select_rule(
+        self,
+        *,
+        venue: VenueName,
+        market_class: str,
+        action: MarketAction,
+        order_role: OrderRole,
+        account_or_fee_tier: str,
+        as_of: datetime,
+    ) -> VenueCostRule | None:
+        """Exact market-class rules beat the Matchbook venue/account schedule.
+
+        The fallback is Matchbook-only. Kalshi series/event metadata and
+        Polymarket per-market metadata stay outside this registry, and a
+        missing rule for any other venue still fails closed.
+        """
+
+        exact = self._matching_rules(
+            venue=venue,
+            market_class=market_class,
+            action=action,
+            order_role=order_role,
+            account_or_fee_tier=account_or_fee_tier,
+            as_of=as_of,
+        )
+        if exact:
+            return exact[0]
+        if venue is not VenueName.MATCHBOOK or market_class == MATCHBOOK_VENUE_COMMISSION_CLASS:
+            return None
+        defaults = self._matching_rules(
+            venue=venue,
+            market_class=MATCHBOOK_VENUE_COMMISSION_CLASS,
+            action=action,
+            order_role=order_role,
+            account_or_fee_tier=account_or_fee_tier,
+            as_of=as_of,
+        )
+        return defaults[0] if defaults else None
+
+    def _matching_rules(
+        self,
+        *,
+        venue: VenueName,
+        market_class: str,
+        action: MarketAction,
+        order_role: OrderRole,
+        account_or_fee_tier: str,
+        as_of: datetime,
+    ) -> list[VenueCostRule]:
+        matches = [
+            rule
+            for rule in self.rules
+            if rule.matches(
+                venue=venue,
+                market_class=market_class,
+                action=action,
+                order_role=order_role,
+                account_or_fee_tier=account_or_fee_tier,
+                as_of=as_of,
+            )
+        ]
+        matches.sort(key=lambda rule: rule.effective_from, reverse=True)
+        return matches
 
     def list_status(self, *, as_of: datetime) -> list[VenueCostSnapshot]:
         require_aware_utc(as_of, "as_of")
@@ -206,10 +291,16 @@ class VenueCostResolver:
         from sports_hedge.fees.labels import operator_fee_label
         from sports_hedge.persistence.matchbook_account_fee import MatchbookAccountFeeStatus
 
-        override = self.matchbook_fee_store.get_override() if self.matchbook_fee_store is not None else None
+        override = (
+            self.matchbook_fee_store.get_override()
+            if self.matchbook_fee_store is not None
+            else None
+        )
         override_rate = override[0] if override is not None else None
         updated_at = override[1] if override is not None else None
-        effective = override_rate if override_rate is not None else MATCHBOOK_STANDARD_FOOTBALL_COMMISSION
+        effective = (
+            override_rate if override_rate is not None else MATCHBOOK_PROVIDER_DEFAULT_COMMISSION
+        )
         snapshot = self.resolve(
             venue=VenueName.MATCHBOOK,
             market_class=MarketFamily.BOTH_TEAMS_TO_SCORE,
@@ -217,7 +308,7 @@ class VenueCostResolver:
             as_of=as_of,
         )
         return MatchbookAccountFeeStatus(
-            provider_default_rate=MATCHBOOK_STANDARD_FOOTBALL_COMMISSION,
+            provider_default_rate=MATCHBOOK_PROVIDER_DEFAULT_COMMISSION,
             override_rate=override_rate,
             effective_rate=effective,
             fee_basis=FeeBasis.PROFIT_COMMISSION,
@@ -247,7 +338,7 @@ class VenueCostResolver:
                 "snapshot_id": f"{snapshot.snapshot_id}:operator_override",
                 "detail": (
                     "Operator/account Matchbook net-profit commission "
-                    f"{rate} replacing provider default {MATCHBOOK_STANDARD_FOOTBALL_COMMISSION}; "
+                    f"{rate} replacing provider default {MATCHBOOK_PROVIDER_DEFAULT_COMMISSION}; "
                     f"saved {updated_at.isoformat()}."
                 ),
             }
@@ -257,52 +348,58 @@ class VenueCostResolver:
 def phase1_seed_rules() -> list[VenueCostRule]:
     """Backend-owned Phase 1 paper catalog. Not a generic operator settings surface.
 
-    Football exchange commission is modelled as per-quote profit commission.
-    Known Matchbook football families, including player_props, use the UK
-    provider default (2% net-win). Polymarket is intentionally absent:
-    per-market CLOB/Gamma fee metadata is required. Unknown classes remain
-    absent and fail closed.
+    Matchbook commission is one venue/account net-win schedule. It applies to
+    every known market class, including sports added later, unless an explicit
+    market-class rule records different authoritative economics. Polymarket is
+    intentionally absent: per-market CLOB/Gamma fee metadata is required.
+    Kalshi is absent: series/event fee metadata is required. Unknown market
+    classes and venues without a rule fail closed. Nothing here is a zero fee.
     """
 
     effective = datetime(2024, 1, 1, tzinfo=UTC)
-    version = "phase1-2026-09-13"
-    football = [
-        family
-        for family in MarketFamily
-        if family is not MarketFamily.UNKNOWN and family not in NFL_PAPER_MARKET_FAMILIES
+    version = "phase1-2026-09-22-venue-commission"
+    detail = (
+        "Matchbook taker net-win commission from the venue/account schedule; "
+        "provider default until an operator/account override is saved."
+    )
+    lay_detail = (
+        "Matchbook taker net-win commission for closing lays from the venue/account "
+        "schedule; provider default until an operator/account override is saved."
+    )
+    return [
+        _matchbook_commission_rule(
+            action=MarketAction.BACK,
+            effective=effective,
+            version=version,
+            detail=detail,
+        ),
+        _matchbook_commission_rule(
+            action=MarketAction.LAY,
+            effective=effective,
+            version=version,
+            detail=lay_detail,
+        ),
     ]
-    rules: list[VenueCostRule] = []
-    for family in football:
-        rules.append(
-            VenueCostRule(
-                venue=VenueName.MATCHBOOK,
-                market_class=family.value,
-                action=MarketAction.BACK,
-                order_role=OrderRole.TAKER,
-                fee_basis=FeeBasis.PROFIT_COMMISSION,
-                known_status=CostKnownStatus.KNOWN,
-                rate=MATCHBOOK_STANDARD_FOOTBALL_COMMISSION,
-                currency="GBP",
-                source=MATCHBOOK_REGISTRY_SOURCE,
-                effective_from=effective,
-                catalog_version=version,
-                detail="UK Matchbook standard football taker net-win commission; provider default until an operator/account override is saved.",
-            )
-        )
-        rules.append(
-            VenueCostRule(
-                venue=VenueName.MATCHBOOK,
-                market_class=family.value,
-                action=MarketAction.LAY,
-                order_role=OrderRole.TAKER,
-                fee_basis=FeeBasis.PROFIT_COMMISSION,
-                known_status=CostKnownStatus.KNOWN,
-                rate=MATCHBOOK_STANDARD_FOOTBALL_COMMISSION,
-                currency="GBP",
-                source=MATCHBOOK_REGISTRY_SOURCE,
-                effective_from=effective,
-                catalog_version=version,
-                detail="UK Matchbook standard football taker net-win commission for closing lays; provider default until an operator/account override is saved.",
-            )
-        )
-    return rules
+
+
+def _matchbook_commission_rule(
+    *,
+    action: MarketAction,
+    effective: datetime,
+    version: str,
+    detail: str,
+) -> VenueCostRule:
+    return VenueCostRule(
+        venue=VenueName.MATCHBOOK,
+        market_class=MATCHBOOK_VENUE_COMMISSION_CLASS,
+        action=action,
+        order_role=OrderRole.TAKER,
+        fee_basis=FeeBasis.PROFIT_COMMISSION,
+        known_status=CostKnownStatus.KNOWN,
+        rate=MATCHBOOK_PROVIDER_DEFAULT_COMMISSION,
+        currency="GBP",
+        source=MATCHBOOK_REGISTRY_SOURCE,
+        effective_from=effective,
+        catalog_version=version,
+        detail=detail,
+    )

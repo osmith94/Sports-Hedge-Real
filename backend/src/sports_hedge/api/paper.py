@@ -79,7 +79,7 @@ from sports_hedge.config import get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.models import FeeSnapshot
-from sports_hedge.fees.resolver import VenueCostResolver
+from sports_hedge.fees.resolver import MATCHBOOK_VENUE_COMMISSION_CLASS, VenueCostResolver
 from sports_hedge.fx.models import FxRateUnavailable
 from sports_hedge.fx.repository import SqliteFxRateRepository
 from sports_hedge.fx.service import FxRateService
@@ -804,7 +804,12 @@ def economics_status(
     venue_rows = [
         snapshot.model_dump(mode="json")
         for snapshot in costs.list_status(as_of=as_of)
-        if snapshot.market_class in {"both_teams_to_score", "match_result", "player_props"}
+        if snapshot.market_class in {
+            "both_teams_to_score",
+            "match_result",
+            "player_props",
+            MATCHBOOK_VENUE_COMMISSION_CLASS,
+        }
     ]
     schedule = get_accounting_schedule()
     return EconomicsStatus(
