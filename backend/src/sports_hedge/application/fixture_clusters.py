@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -186,10 +187,20 @@ def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_se
 
 
 INDEX_COOP_YIELD_EVERY = 1024
+# Count-based yields can still monopolise the loop when each tick is expensive
+# after a large pytest/process heap. Cap a cooperative slice well inside the
+# 0.25s event-loop liveness bound.
+COOP_MAX_SLICE_SECONDS = 0.05
 # Node-local then kickoff-local candidate order. Completing one source event's
 # incident pairs lets truncated finalize assign that fixture instead of waiting
 # for the global cross-venue prefix to finish.
 CANDIDATE_ORDER_VERSION = 2
+
+
+def _coop_pause_due(ticks: int, pause_every: int, last_yield: float) -> bool:
+    if ticks % max(1, int(pause_every)) == 0:
+        return True
+    return (time.perf_counter() - last_yield) >= COOP_MAX_SLICE_SECONDS
 
 
 def _node_sort_tuple(item: VenueEvent) -> tuple[str, str]:
@@ -340,6 +351,34 @@ class _IndexedCandidateBuilder:
                 continue
             self.generated.append((left.item, right.item))
 
+    async def _emit_component_pairs_cooperative(
+        self,
+        compatible: list[tuple[_IndexRecord, _IndexRecord]],
+        parent: dict[int, int],
+        *,
+        yield_every: int,
+    ) -> None:
+        pause_every = max(1, int(yield_every))
+        sizes: dict[int, int] = defaultdict(int)
+        last_yield = time.perf_counter()
+        for ticks, record in enumerate(self.records, start=1):
+            sizes[self._find_component(parent, record.index)] += 1
+            if _coop_pause_due(ticks, pause_every, last_yield):
+                await asyncio.sleep(0)
+                last_yield = time.perf_counter()
+        for ticks, (left, right) in enumerate(compatible, start=1):
+            if self._cache_skip(left, right):
+                self.cache_skipped += 1
+            else:
+                root = self._find_component(parent, left.index)
+                if root != self._find_component(parent, right.index) or sizes[root] < 2:
+                    self.could_match_rejected += 1
+                else:
+                    self.generated.append((left.item, right.item))
+            if _coop_pause_due(ticks, pause_every, last_yield):
+                await asyncio.sleep(0)
+                last_yield = time.perf_counter()
+
     def consider_pair(self, left: _IndexRecord, right: _IndexRecord) -> bool:
         """Compatibility helper used by tests that walk the builder directly."""
 
@@ -406,14 +445,18 @@ class _IndexedCandidateBuilder:
         pause_every = max(1, int(yield_every))
         compatible: list[tuple[_IndexRecord, _IndexRecord]] = []
         parent = self._new_component_parent()
+        last_yield = time.perf_counter()
         try:
             for ticks, pair in enumerate(self._iter_compatible_pairs(), start=1):
                 compatible.append(pair)
                 if self._could_match_pair(*pair):
                     self._union_component(parent, pair[0].index, pair[1].index)
-                if ticks % pause_every == 0:
+                if _coop_pause_due(ticks, pause_every, last_yield):
                     await asyncio.sleep(0)
-            self._emit_component_pairs(compatible, parent)
+                    last_yield = time.perf_counter()
+            await self._emit_component_pairs_cooperative(
+                compatible, parent, yield_every=pause_every
+            )
             await asyncio.sleep(0)
         except asyncio.CancelledError:
             if compatible and not self.generated:
@@ -872,10 +915,12 @@ class ClusterPass:
         self.pair_kinds = {}
         provenance_by_member: dict[tuple[VenueName, str], IdentityAssignmentProvenance] = {}
         pause_every = max(1, int(yield_every))
-        for index, assigned in enumerate(result.clusters):
-            if index % pause_every == 0:
-                await asyncio.sleep(0)
+        last_yield = time.perf_counter()
+        for index, assigned in enumerate(result.clusters, start=1):
             self._record_assigned_identity_cluster(assigned, provenance_by_member)
+            if _coop_pause_due(index, pause_every, last_yield):
+                await asyncio.sleep(0)
+                last_yield = time.perf_counter()
         return provenance_by_member
 
     def finalize(self) -> tuple[list[FixtureCluster], dict[str, int]]:
@@ -889,9 +934,11 @@ class ClusterPass:
         nodes: set[tuple[VenueName, str]] = set()
         remaining = self._candidates[self.candidate_pairs_considered :]
         pause_every = max(1, int(yield_every))
-        for index, (left, right) in enumerate(remaining):
-            if index % pause_every == 0:
+        last_yield = time.perf_counter()
+        for index, (left, right) in enumerate(remaining, start=1):
+            if _coop_pause_due(index, pause_every, last_yield):
                 await asyncio.sleep(0)
+                last_yield = time.perf_counter()
             nodes.add(_key(left.venue, left.source_event_id))
             nodes.add(_key(right.venue, right.source_event_id))
             if len(nodes) >= len(self.nodes):
@@ -902,7 +949,9 @@ class ClusterPass:
         self, *, yield_every: int = 64
     ) -> tuple[list[FixtureCluster], dict[str, int]]:
         threshold = float(getattr(self.bulk_matcher, "threshold", 0.92))
-        unscored_nodes = await self._unscored_identity_nodes_cooperative()
+        unscored_nodes = await self._unscored_identity_nodes_cooperative(
+            yield_every=yield_every
+        )
         provenance_by_member = await self._apply_identity_graph_cooperative(
             threshold, unscored_nodes=unscored_nodes, yield_every=yield_every
         )

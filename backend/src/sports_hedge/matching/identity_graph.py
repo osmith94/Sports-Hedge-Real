@@ -18,6 +18,7 @@ Matchbook, Kalshi, or Polymarket.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ NodeKey = tuple[VenueName, str]
 # 0.80 are unchanged. A thinner global margin fails closed.
 DEFAULT_ASSIGNMENT_MARGIN = 0.03
 MAX_AMBIGUOUS_SUPERNODES = 8
+_ASSIGN_COOP_MAX_SLICE_SECONDS = 0.05
 
 HARD_VETO_REASONS = frozenset(
     {
@@ -990,8 +992,12 @@ async def assign_identity_components_cooperative(
     assigned: list[AssignedIdentityCluster] = []
     pause_every = max(1, int(yield_every))
     await asyncio.sleep(0)
-    for index, component in enumerate(prep.components):
-        if index % pause_every == 0:
-            await asyncio.sleep(0)
+    last_yield = time.perf_counter()
+    for index, component in enumerate(prep.components, start=1):
         assigned.extend(_clusters_for_component(component, prep=prep))
+        if index % pause_every == 0 or (
+            time.perf_counter() - last_yield
+        ) >= _ASSIGN_COOP_MAX_SLICE_SECONDS:
+            await asyncio.sleep(0)
+            last_yield = time.perf_counter()
     return _finish_identity_assignment(prep, assigned)
