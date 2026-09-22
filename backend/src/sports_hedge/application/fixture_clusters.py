@@ -144,6 +144,8 @@ class _IndexRecord:
     kickoff_ts: float
     squad_home: frozenset[str]
     squad_away: frozenset[str]
+    ncaab_home: str | None = None
+    ncaab_away: str | None = None
 
 
 def _kickoff_bucket(timestamp: float, window_seconds: float) -> int:
@@ -155,6 +157,7 @@ def _index_record(index: int, item: VenueEvent) -> _IndexRecord:
     kickoff = canonical.kickoff_utc
     timestamp = kickoff.timestamp()
     sport = str(getattr(canonical, "sport", "") or "")
+    ncaab_home, ncaab_away = _ncaab_index_teams(sport, canonical)
     return _IndexRecord(
         index=index,
         item=item,
@@ -163,7 +166,26 @@ def _index_record(index: int, item: VenueEvent) -> _IndexRecord:
         kickoff_ts=timestamp,
         squad_home=squad_category_fingerprint(canonical.home_team),
         squad_away=squad_category_fingerprint(canonical.away_team),
+        ncaab_home=ncaab_home,
+        ncaab_away=ncaab_away,
     )
+
+
+def _ncaab_index_teams(sport: str, canonical: object) -> tuple[str | None, str | None]:
+    """Resolve NCAAB identity once per event. Soccer/NFL never import the registry."""
+
+    if sport != "basketball":
+        return None, None
+    from sports_hedge.ncaab.detect import is_ncaab_canonical_event
+    from sports_hedge.ncaab.teams import resolve_ncaab_team
+
+    if not is_ncaab_canonical_event(canonical):
+        return None, None
+    home = resolve_ncaab_team(str(getattr(canonical, "home_team", "") or ""))
+    away = resolve_ncaab_team(str(getattr(canonical, "away_team", "") or ""))
+    if not (home.ok and away.ok and home.canonical and away.canonical):
+        return None, None
+    return home.canonical, away.canonical
 
 
 def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_seconds: float) -> bool:
@@ -177,26 +199,17 @@ def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_se
         and left.competition_code != right.competition_code
     ):
         return False
-    from sports_hedge.ncaab.detect import is_ncaab_canonical_event
-    from sports_hedge.ncaab.teams import resolve_ncaab_team
+    left_ncaab = left.ncaab_home is not None and left.ncaab_away is not None
+    right_ncaab = right.ncaab_home is not None and right.ncaab_away is not None
+    if left_ncaab or right_ncaab:
+        return (
+            left_ncaab
+            and right_ncaab
+            and left.ncaab_home == right.ncaab_home
+            and left.ncaab_away == right.ncaab_away
+        )
     from sports_hedge.nfl.constants import NFL_SPORT
 
-    if is_ncaab_canonical_event(left.item.canonical) or is_ncaab_canonical_event(right.item.canonical):
-        if not (
-            is_ncaab_canonical_event(left.item.canonical)
-            and is_ncaab_canonical_event(right.item.canonical)
-        ):
-            return False
-        left_home = resolve_ncaab_team(left.item.canonical.home_team)
-        left_away = resolve_ncaab_team(left.item.canonical.away_team)
-        right_home = resolve_ncaab_team(right.item.canonical.home_team)
-        right_away = resolve_ncaab_team(right.item.canonical.away_team)
-        if not (left_home.ok and left_away.ok and right_home.ok and right_away.ok):
-            return False
-        return (
-            left_home.canonical == right_home.canonical
-            and left_away.canonical == right_away.canonical
-        )
     if left.sport != NFL_SPORT and (
         left.squad_home != right.squad_home or left.squad_away != right.squad_away
     ):

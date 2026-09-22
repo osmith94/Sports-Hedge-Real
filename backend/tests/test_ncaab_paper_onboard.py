@@ -499,6 +499,44 @@ def test_large_ncaab_slate_indexed_candidates_stay_bounded() -> None:
     )
 
 
+def test_soccer_identity_hot_path_does_not_import_ncaab_team_registry() -> None:
+    import sys
+
+    sys.modules.pop("sports_hedge.ncaab.teams", None)
+    left = CanonicalEvent(
+        sport="football",
+        competition="English Premier League",
+        home_team="Arsenal",
+        away_team="Chelsea",
+        kickoff_utc=TIPOFF,
+        source_venue=VenueName.MATCHBOOK,
+        source_event_id="mb-epl-1",
+    )
+    right = CanonicalEvent(
+        sport="football",
+        competition="English Premier League",
+        home_team="Arsenal",
+        away_team="Chelsea",
+        kickoff_utc=TIPOFF,
+        source_venue=VenueName.KALSHI,
+        source_event_id="k-epl-1",
+    )
+    matcher = EventMatcher()
+    assert matcher.could_match(left, right) is True
+    assert matcher.match(left, right).matched is True
+    items = [
+        VenueEvent(venue=left.source_venue, raw={"id": left.source_event_id}, canonical=left, source_event_id=left.source_event_id),
+        VenueEvent(venue=right.source_venue, raw={"id": right.source_event_id}, canonical=right, source_event_id=right.source_event_id),
+    ]
+    candidates, _diagnostics = build_indexed_candidates(
+        items,
+        kickoff_tolerance=timedelta(minutes=5),
+        matcher=matcher,
+    )
+    assert candidates
+    assert "sports_hedge.ncaab.teams" not in sys.modules
+
+
 def test_venue_fees_and_provider_concurrency_unchanged() -> None:
     assert DEFAULT_PROVIDER_CONCURRENCY[VenueName.MATCHBOOK] == 4
     assert DEFAULT_PROVIDER_CONCURRENCY[VenueName.POLYMARKET] == 8
