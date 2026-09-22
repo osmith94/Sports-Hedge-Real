@@ -1,0 +1,19 @@
+{
+  "fixture_id": "ncaab-polymarket_sports_ncaab-2026-09-22",
+  "identified_as": "CAPTURED public Gamma GET /sports ncaab row.",
+  "source": "https://gamma-api.polymarket.com/sports",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": 1,
+    "sport": "ncaab",
+    "name": "March Madness",
+    "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/league-icons/ncaab-3ddd4bb7.png",
+    "resolution": "https://www.ncaa.com/march-madness-live/bracket",
+    "ordering": "home",
+    "tags": "1,100149,100639",
+    "primaryTagId": 100149,
+    "series": "39",
+    "createdAt": "2025-11-05T19:27:45.399303Z"
+  }
+}

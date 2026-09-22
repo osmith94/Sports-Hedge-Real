@@ -1,0 +1,22 @@
+{
+  "fixture_id": "ncaab-kalshi_milestone_michariz_tipoff-2026-09-22",
+  "identified_as": "CAPTURED Kalshi basketball_game milestone. start_date is scheduled tipoff.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events?series_ticker=KXNCAAMBGAME&status=settled&with_milestones=true",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": "49b8960d-90f3-4ff2-8fa3-f92d27e1c308",
+    "type": "basketball_game",
+    "title": "Michigan at Arizona",
+    "start_date": "2026-04-05T01:19:00Z",
+    "details": {
+      "away_team_id": "5de6200f-c507-4bab-915b-be8955635cf5",
+      "home_team_id": "770236b1-0c9b-4954-842a-b36970eb2f17",
+      "league": "NCAAMB",
+      "main_game_event_ticker": "KXNCAAMBGAME-26APR04MICHARIZ",
+      "source_id": "a0d02a1b-d614-4976-bb6d-5a9a314db251",
+      "special_event_type": "march_madness",
+      "status": "inprogress"
+    }
+  }
+}

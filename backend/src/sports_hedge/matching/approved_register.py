@@ -215,6 +215,7 @@ def canonical_key_for_market(market: CanonicalMarket) -> str | None:
     """Instance canonical key. TOTAL includes the exact safe half-line."""
 
     from sports_hedge.nba.register import nba_canonical_key_for_market
+    from sports_hedge.ncaab.register import ncaab_canonical_key_for_market
     from sports_hedge.nfl.register import nfl_canonical_key_for_market
 
     nfl_key = nfl_canonical_key_for_market(market)
@@ -223,6 +224,9 @@ def canonical_key_for_market(market: CanonicalMarket) -> str | None:
     nba_key = nba_canonical_key_for_market(market)
     if nba_key is not None:
         return nba_key
+    ncaab_key = ncaab_canonical_key_for_market(market)
+    if ncaab_key is not None:
+        return ncaab_key
     archetype = venue_native_archetype_for(market)
     if archetype is None:
         return None
@@ -239,8 +243,9 @@ def approved_paper_venue_pair(left: CanonicalMarket, right: CanonicalMarket) -> 
 def registered_canonical_key(left: CanonicalMarket, right: CanonicalMarket) -> str | None:
     """Same canonical key on an approved PAPER venue pair, or None."""
 
-    from sports_hedge.nba.register import nba_registered_canonical_key
-    from sports_hedge.nfl.register import nfl_registered_canonical_key
+    from sports_hedge.nba.register import is_nba_register_market, nba_registered_canonical_key
+    from sports_hedge.ncaab.register import is_ncaab_register_market, ncaab_registered_canonical_key
+    from sports_hedge.nfl.register import is_nfl_register_market, nfl_registered_canonical_key
 
     nfl_key = nfl_registered_canonical_key(left, right)
     if nfl_key is not None:
@@ -248,12 +253,14 @@ def registered_canonical_key(left: CanonicalMarket, right: CanonicalMarket) -> s
     nba_key = nba_registered_canonical_key(left, right)
     if nba_key is not None:
         return nba_key
-    from sports_hedge.nba.register import is_nba_register_market
-    from sports_hedge.nfl.register import is_nfl_register_market
-
-    # Soccer Matchbook↔Kalshi must not admit NBA/NFL families that the
+    ncaab_key = ncaab_registered_canonical_key(left, right)
+    if ncaab_key is not None:
+        return ncaab_key
+    # Soccer Matchbook↔Kalshi must not admit NBA/NFL/NCAAB families that the
     # sport-specific register left fail-closed.
     if is_nba_register_market(left) or is_nba_register_market(right):
+        return None
+    if is_ncaab_register_market(left) or is_ncaab_register_market(right):
         return None
     if is_nfl_register_market(left) or is_nfl_register_market(right):
         return None

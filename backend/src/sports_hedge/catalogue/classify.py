@@ -289,9 +289,16 @@ def _economic_state(
         )
 
     from sports_hedge.nba.detect import NBA_MARKET_FAMILIES
+    from sports_hedge.ncaab.detect import NCAAB_MARKET_FAMILIES
     from sports_hedge.nfl.detect import NFL_MARKET_FAMILIES
 
-    catalogue_families = target_market_families() | CENSUS_V1_FAMILIES | NFL_MARKET_FAMILIES | NBA_MARKET_FAMILIES
+    catalogue_families = (
+        target_market_families()
+        | CENSUS_V1_FAMILIES
+        | NFL_MARKET_FAMILIES
+        | NBA_MARKET_FAMILIES
+        | NCAAB_MARKET_FAMILIES
+    )
     left_in = left.family in catalogue_families
     right_in = right.family in catalogue_families
     if not left_in and not right_in:

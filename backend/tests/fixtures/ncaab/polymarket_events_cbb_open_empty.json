@@ -1,0 +1,11 @@
+{
+  "fixture_id": "ncaab-polymarket_events_cbb_open_empty-2026-09-22",
+  "identified_as": "CAPTURED Gamma CBB series 10470 closed=false. Zero current game markets is a healthy off-season/zero state.",
+  "source": "https://gamma-api.polymarket.com/events?series_id=10470&closed=false&limit=5",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "count": 0,
+    "events": []
+  }
+}

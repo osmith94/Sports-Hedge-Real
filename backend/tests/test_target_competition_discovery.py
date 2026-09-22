@@ -206,6 +206,13 @@ VARIANT_LABELS = {
         "League Two",
         "EFL League Two",
     ),
+    TargetCompetitionCode.NCAAB: (
+        "NCAA Men's Basketball",
+        "NCAA Men",
+        "NCAAB",
+        "College Basketball",
+        "CBB",
+    ),
 }
 
 REJECTED_LABELS = (
@@ -246,6 +253,9 @@ REJECTED_LABELS = (
     "Volleyball Nations League",
     "UEFA Euro Qualification",
     "Europe WC Qualifiers",
+    "NCAAW",
+    "Women's College Basketball",
+    "NCAA Women's Basketball",
 )
 
 
@@ -384,6 +394,8 @@ def test_unselected_registered_competitions_are_out_of_scope(label: str) -> None
         ("10361", TargetCompetitionCode.SAUDI_PRO_LEAGUE),
         ("10360", TargetCompetitionCode.J1_LEAGUE),
         ("12360", TargetCompetitionCode.SOUTH_AFRICAN_PREMIERSHIP),
+        ("12185", TargetCompetitionCode.NFL),
+        ("10470", TargetCompetitionCode.NCAAB),
     ],
 )
 def test_verified_polymarket_series_ids_resolve(
@@ -471,6 +483,10 @@ def test_polymarket_scope_uses_verified_series_coverage() -> None:
         ("KXCONMEBOLLIBGAME", TargetCompetitionCode.COPA_LIBERTADORES),
         ("KXSAUDIPLGAME", TargetCompetitionCode.SAUDI_PRO_LEAGUE),
         ("KXJLEAGUEGAME", TargetCompetitionCode.J1_LEAGUE),
+        ("KXNFLGAME", TargetCompetitionCode.NFL),
+        ("KXNCAAMBGAME", TargetCompetitionCode.NCAAB),
+        ("KXNCAAMBSPREAD", TargetCompetitionCode.NCAAB),
+        ("KXNCAAMBTOTAL", TargetCompetitionCode.NCAAB),
     ],
 )
 def test_verified_kalshi_tickers_resolve(ticker: str, code: TargetCompetitionCode) -> None:
@@ -505,6 +521,9 @@ def test_verified_kalshi_tickers_resolve(ticker: str, code: TargetCompetitionCod
         "KXUEFANLADVANCE",
         "KXUEFANLMOV",
         "KXCONCACAFNL",
+        "KXNCAAWBGAME",
+        "KXNCAABGAME",
+        "KXMARMAD",
     ),
 )
 def test_kalshi_near_neighbor_tickers_are_not_claimed(ticker: str) -> None:
@@ -771,13 +790,14 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
         repository.close()
 
 
-def test_principal_register_has_thirty_three_rows_and_still_excludes_efl_trophy() -> None:
+def test_principal_register_has_thirty_four_rows_and_still_excludes_efl_trophy() -> None:
     codes = {item.code for item in TARGET_COMPETITIONS}
-    assert len(TARGET_COMPETITIONS) == 33
-    assert len(codes) == 33
+    assert len(TARGET_COMPETITIONS) == 34
+    assert len(codes) == 34
     assert TargetCompetitionCode.NFL in codes
     assert TargetCompetitionCode.NBA in codes
     assert TargetCompetitionCode.UEFA_NATIONS_LEAGUE in codes
+    assert TargetCompetitionCode.NCAAB in codes
     assert TargetCompetitionCode.LEAGUE_ONE in codes
     assert TargetCompetitionCode.LEAGUE_TWO in codes
     assert TargetCompetitionCode.LIGUE_1 in codes

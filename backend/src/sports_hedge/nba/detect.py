@@ -76,7 +76,11 @@ def rejected_kalshi_nba_series(ticker: str | None) -> bool:
 def is_nba_canonical_event(event: CanonicalEvent | None) -> bool:
     if event is None:
         return False
-    return event.sport == NBA_SPORT
+    if event.sport != NBA_SPORT:
+        return False
+    from sports_hedge.ncaab.detect import is_ncaab_competition_label
+
+    return not is_ncaab_competition_label(event.competition)
 
 
 def is_nba_market_family(family: MarketFamily | str | None) -> bool:

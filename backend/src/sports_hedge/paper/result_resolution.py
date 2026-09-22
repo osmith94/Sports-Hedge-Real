@@ -512,9 +512,13 @@ def _kalshi_tickers(trade: PaperTrade) -> list[str]:
 
 def _family_blocker(trade: PaperTrade) -> str | None:
     from sports_hedge.nba.settlement import is_nba_paper_trade
+    from sports_hedge.ncaab.settlement import ncaab_family_settlement_blocker
     from sports_hedge.nfl.markets import is_exact_half_line
     from sports_hedge.nfl.settlement import is_nfl_paper_trade
 
+    ncaab_block = ncaab_family_settlement_blocker(trade)
+    if ncaab_block is not None:
+        return ncaab_block
     family = trade.market_family
     if is_nfl_paper_trade(trade):
         if family not in {

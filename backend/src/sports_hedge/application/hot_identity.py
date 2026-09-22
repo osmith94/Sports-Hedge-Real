@@ -42,19 +42,42 @@ def _fixture_is_nba(fixture: Any) -> bool:
     return sport == NBA_SPORT or competition.upper() == NBA_COMPETITION or code == "nba"
 
 
+def _fixture_is_ncaab(fixture: Any) -> bool:
+    from sports_hedge.ncaab.constants import NCAAB_COMPETITION, NCAAB_SPORT
+    from sports_hedge.ncaab.detect import is_ncaab_competition_label
+
+    sport = str(getattr(fixture, "sport", "") or "").strip()
+    competition = str(getattr(fixture, "competition", "") or "").strip()
+    code = _fixture_competition_code(fixture)
+    return (
+        sport == NCAAB_SPORT
+        or is_ncaab_competition_label(competition)
+        or competition == NCAAB_COMPETITION
+        or code == "ncaab"
+    )
+
+
 def scheduling_team_key(
     name: str | None,
     competition: str | None = None,
     *,
     nfl: bool = False,
     nba: bool = False,
+    ncaab: bool = False,
 ) -> str:
     """Resolve a team label to the longest curated canonical prefix.
 
-    NFL/NBA aliases apply only when the caller marks the fixture so soccer
+    NFL/NBA/NCAAB aliases apply only when the caller marks the fixture so soccer
     labels such as Saints/Chiefs/Kings cannot leak into those identities.
     """
 
+    if ncaab:
+        from sports_hedge.ncaab.teams import resolve_ncaab_team
+
+        resolved_ncaab = resolve_ncaab_team(str(name or ""))
+        if resolved_ncaab.ok and resolved_ncaab.canonical:
+            return resolved_ncaab.canonical
+        return str(name or "")
     if nfl:
         from sports_hedge.nfl.teams import resolve_nfl_team
 
@@ -93,14 +116,23 @@ def hot_scheduling_team_pair(fixture: Any) -> tuple[str, str] | None:
     code = _fixture_competition_code(fixture)
     nfl = _fixture_is_nfl(fixture)
     nba = _fixture_is_nba(fixture)
-    home = scheduling_team_key(getattr(fixture, "home_team", None), code, nfl=nfl, nba=nba)
-    away = scheduling_team_key(getattr(fixture, "away_team", None), code, nfl=nfl, nba=nba)
+    ncaab = _fixture_is_ncaab(fixture)
+    home = scheduling_team_key(
+        getattr(fixture, "home_team", None), code, nfl=nfl, nba=nba, ncaab=ncaab
+    )
+    away = scheduling_team_key(
+        getattr(fixture, "away_team", None), code, nfl=nfl, nba=nba, ncaab=ncaab
+    )
     if not home or not away:
         return None
     if home not in _CANONICAL_TEAM_NAMES or away not in _CANONICAL_TEAM_NAMES:
         from sports_hedge.nba.teams import is_canonical_nba_team
+        from sports_hedge.ncaab.teams import is_canonical_ncaab_team
         from sports_hedge.nfl.teams import is_canonical_nfl_team
 
+        if ncaab and is_canonical_ncaab_team(home) and is_canonical_ncaab_team(away):
+            pair = tuple(sorted((home, away)))
+            return pair[0], pair[1]
         if not (nfl and is_canonical_nfl_team(home) and is_canonical_nfl_team(away)) and not (
             nba and is_canonical_nba_team(home) and is_canonical_nba_team(away)
         ):
