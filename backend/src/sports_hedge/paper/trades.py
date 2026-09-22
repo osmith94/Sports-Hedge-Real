@@ -228,6 +228,13 @@ class PaperTrade(BaseModel):
     realised_pnl_gbp: Decimal | None = None
     capital_locked_native: dict[str, Decimal] = Field(default_factory=dict)
     capital_locked_gbp: Decimal | None = None
+    # Read-model only. Recomputed on API read from the immutable entry snapshot
+    # and the latest validated full-close economics. Not scanner or fee inputs.
+    entry_net_edge: Decimal | None = None
+    current_exit_pct: Decimal | None = None
+    current_exit_delta_pp: Decimal | None = None
+    current_exit_checked_at: datetime | None = None
+    current_exit_block_reason: str | None = None
     settlement_outcome: str | None = None
     settlement_source: str | None = None
     settlement_source_id: str | None = None
@@ -266,6 +273,8 @@ class PaperTrade(BaseModel):
             self.settled_at = self.settled_at.replace(tzinfo=UTC)
         if self.last_settlement_check_at is not None and self.last_settlement_check_at.tzinfo is None:
             self.last_settlement_check_at = self.last_settlement_check_at.replace(tzinfo=UTC)
+        if self.current_exit_checked_at is not None and self.current_exit_checked_at.tzinfo is None:
+            self.current_exit_checked_at = self.current_exit_checked_at.replace(tzinfo=UTC)
         return self
 
     @property

@@ -1,4 +1,5 @@
 import { SystemLoadSummary } from "./api";
+import { money } from "./format";
 
 export type SystemLoadLine = {
   key: string;
@@ -6,6 +7,61 @@ export type SystemLoadLine = {
 };
 
 export function systemLoadLines(
+  load: SystemLoadSummary | null | undefined,
+): SystemLoadLine[] {
+  if (!load) {
+    return [{ key: "—", detail: "unavailable" }];
+  }
+  const hot = load.hot ?? {};
+  const background = load.background ?? {};
+  const universe = load.universe ?? {};
+  const active = load.active_trade ?? {};
+  const overdue = asCount(active.overdue);
+  const overdueBit = overdue > 0 ? ` · ${overdue} overdue` : "";
+  const locked = active.capital_locked_gbp == null || active.capital_locked_gbp === ""
+    ? ""
+    : ` · ${money(active.capital_locked_gbp)} locked`;
+  const hotCount = hot.pricing_fixtures != null ? asCount(hot.pricing_fixtures) : asCount(hot.fixtures);
+  const backgroundCount = background.pricing_fixtures != null
+    ? `${asCount(background.pricing_fixtures)} fixtures`
+    : `${asCount(background.working_set)} items`;
+  const universeState = laneState(universe.worker_state, universe.health);
+  const chunk = universe.generation_budget_seconds != null && Number.isFinite(Number(universe.generation_budget_seconds))
+    ? `${Math.round(Number(universe.generation_budget_seconds))}s chunk`
+    : null;
+  return [
+    {
+      key: "HOT",
+      detail: joinBits([
+        `${hotCount} fixtures`,
+        presentHealth(hot.health),
+        formatCadence(hot.cadence_seconds),
+      ]),
+    },
+    {
+      key: "BACKGROUND",
+      detail: joinBits([
+        backgroundCount,
+        presentHealth(background.health),
+        formatCadence(background.cadence_seconds),
+      ]),
+    },
+    {
+      key: "UNIVERSE",
+      detail: joinBits([
+        `${asCount(universe.evaluated)}/${asCount(universe.total)}`,
+        universeState,
+        chunk,
+      ]),
+    },
+    {
+      key: "ACTIVE TRADES",
+      detail: `${asCount(active.open_trades)} open${overdueBit}${locked}`,
+    },
+  ];
+}
+
+export function systemLoadDetailLines(
   load: SystemLoadSummary | null | undefined,
 ): SystemLoadLine[] {
   if (!load) {
@@ -69,6 +125,20 @@ export function systemLoadLines(
       detail: `${asCount(load.catalogue_items)} catalogue items`,
     },
   ];
+}
+
+function presentHealth(health: string | null | undefined): string | null {
+  if (!health || health === "unknown") return null;
+  return health;
+}
+
+function laneState(worker: string | null | undefined, health: string | null | undefined): string | null {
+  if (worker && worker !== "unknown") return worker;
+  return presentHealth(health);
+}
+
+function joinBits(bits: Array<string | null | undefined>): string {
+  return bits.filter((bit) => Boolean(bit)).join(" · ");
 }
 
 function formatCycle(hot: NonNullable<SystemLoadSummary["hot"]>): string {

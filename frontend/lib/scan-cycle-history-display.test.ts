@@ -154,8 +154,11 @@ describe("scan cycle history console wiring", () => {
     assert.match(scan, /last_completed_at/);
     assert.equal(SCAN_CYCLE_TITLE, "Scan cycle history");
     assert.match(panel, /scanCycleRows/);
+    assert.match(panel, /recentScanCycleRows/);
     assert.match(panel, /scanCycleLatestSummary/);
-    assert.match(panel, /<details className="scan-cycle-history-panel discovery-disclosure">/);
+    assert.match(panel, /SCAN_CYCLE_RECENT_TITLE/);
+    assert.match(panel, /SCAN_CYCLE_DIAGNOSTICS_TITLE/);
+    assert.match(panel, /<details className="discovery-disclosure">/);
     assert.match(panel, /Show history/);
     assert.match(panel, /Hide history/);
     assert.doesNotMatch(panel, /\sopen[={]/);

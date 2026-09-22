@@ -302,8 +302,9 @@ export function OpportunityMonitor({
               Current radar set from tracked watchlist / FixtureCurrentStateStore. Age uses each
               row&apos;s last_scanned_at (else last_seen_at), not browser receipt time. State is
               economic/radar classification; quote freshness stays in Lane / freshness and does not
-              replace the primary badge. Default order is qualifying, then near, then other current
-              states, then highest net edge, then recency. User sorting applies to this loaded
+              replace the primary badge. Default order is net edge descending. Rows with no solver
+              economics stay below priced rows. Rejected and single-venue rows stay labelled as
+              such. User sorting applies to this loaded
               current set only.
             </caption>
             <thead>

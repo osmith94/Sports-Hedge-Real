@@ -14,8 +14,11 @@ const REVERSE_BOOK_BLOCKERS = [
   "revalidation_needed",
 ];
 
+export type ManagementTone = "ready" | "waiting" | "unsafe" | "neutral";
+
 export type PositionManagementCellCopy = {
   state: string;
+  tone: ManagementTone;
   checkedIso: string | null;
   economics: string;
   threshold: string | null;
@@ -23,6 +26,28 @@ export type PositionManagementCellCopy = {
   blocker: string | null;
   release: string;
 };
+
+const UNSAFE_TOKENS = ["execution_risk", "unsafe", "unhedged", "error", "failed"];
+
+export function managementTone(
+  snapshot: PositionManagementSnapshot | null | undefined,
+): ManagementTone {
+  if (!snapshot) return "neutral";
+  const reason = `${snapshot.close_blocker ?? ""} ${snapshot.decision_reason ?? ""}`.toLowerCase();
+  if (snapshot.recommendation === "UNWIND_NOT_SAFE") {
+    return UNSAFE_TOKENS.some((token) => reason.includes(token)) ? "unsafe" : "waiting";
+  }
+  if (snapshot.recommendation === "UNWIND_ELIGIBLE" && snapshot.close_executable) return "ready";
+  if (snapshot.recommendation === "HOLD") return "waiting";
+  return "neutral";
+}
+
+export function managementBadgeClass(tone: ManagementTone): string {
+  if (tone === "ready") return "status-badge";
+  if (tone === "unsafe") return "status-badge status-badge-error";
+  if (tone === "waiting") return "status-badge status-badge-warn";
+  return "status-badge status-badge-stopped";
+}
 
 export function signedMoney(value: string | number | null | undefined): string {
   const parsed = number(value);
@@ -70,6 +95,7 @@ export function formatPositionManagementCell(
   if (!snapshot) {
     return {
       state: "—",
+      tone: "neutral",
       checkedIso: null,
       economics: "No position-management evaluation yet.",
       threshold: null,
@@ -111,6 +137,7 @@ export function formatPositionManagementCell(
 
   return {
     state: closureState(snapshot),
+    tone: managementTone(snapshot),
     checkedIso: snapshot.evaluated_at,
     economics,
     threshold,

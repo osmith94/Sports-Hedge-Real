@@ -2132,6 +2132,7 @@ class CataloguePriceEngine:
         operations = dict(self._operation_health.get(priority.value) or {})
         return PriceEngineTierStatus(
             working_set=len(items),
+            pricing_fixtures=len({item.identity.canonical_event_id for item in items}),
             due=due,
             queued=due,
             in_flight=in_flight,

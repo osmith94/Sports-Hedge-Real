@@ -13,7 +13,13 @@ import {
   manualSettlePaperTrade,
 } from "../lib/api";
 import { money } from "../lib/format";
-import { formatPositionManagementCell } from "../lib/paper-position-management-display";
+import {
+  exitBlockReasonText,
+  formatCurrentExit,
+  formatEntryArb,
+  formatExitDelta,
+} from "../lib/active-trade-exit-display";
+import { formatPositionManagementCell, managementBadgeClass } from "../lib/paper-position-management-display";
 import { compactLegLines, compactMarketHeading, NBA_SETTLEMENT_CAVEAT_TEXT, NFL_SETTLEMENT_CAVEAT_TEXT, tradeShowsNbaSettlementCaveat, tradeShowsNflSettlementCaveat } from "../lib/paper-trade-display";
 import { settlementReconciliationLabel } from "../lib/settlement-reconciliation-display";
 import { ActiveTradeLog } from "./active-trade-log";
@@ -70,11 +76,44 @@ function managementHint(trade: PaperTrade): string {
   return bits.join(" · ");
 }
 
-function ManagementCell({ trade }: { trade: PaperTrade }) {
+function compactManagement(trade: PaperTrade): { state: string; tone: "ready" | "waiting" | "unsafe" | "neutral"; detail: string } {
   const cell = formatPositionManagementCell(trade.position_management);
+  const exitText = formatCurrentExit(trade);
+  const block = exitBlockReasonText(trade);
+  if (!trade.position_management && exitText === "—") {
+    return { state: "—", tone: "neutral", detail: block ?? "no evaluation" };
+  }
+  if (cell.tone === "unsafe") {
+    return { state: "CLOSE BLOCKED", tone: "unsafe", detail: block ?? cell.blocker ?? "unsafe close" };
+  }
+  if (exitText !== "—") {
+    return { state: "CLOSE AVAILABLE", tone: "ready", detail: exitText };
+  }
+  return { state: "CLOSE BLOCKED", tone: "waiting", detail: block ?? "incomplete close plan" };
+}
+
+function ManagementCell({ trade, compact = false }: { trade: PaperTrade; compact?: boolean }) {
+  const cell = formatPositionManagementCell(trade.position_management);
+  if (compact) {
+    const brief = compactManagement(trade);
+    return (
+      <td className="paper-trade-management" title={managementHint(trade)}>
+        <span className={managementBadgeClass(brief.tone)}>{brief.state}</span>
+        <div className="panel-meta">
+          {brief.detail}
+          {cell.checkedIso ? (
+            <>
+              {" · "}
+              <HydratedRelativeTime iso={cell.checkedIso} prefix="checked" />
+            </>
+          ) : null}
+        </div>
+      </td>
+    );
+  }
   return (
     <td className="paper-trade-management" title={managementHint(trade)}>
-      <span className="status-badge">{cell.state}</span>
+      <span className={managementBadgeClass(cell.tone)}>{cell.state}</span>
       {cell.checkedIso ? (
         <div className="panel-meta">
           <HydratedRelativeTime iso={cell.checkedIso} prefix="checked" />
@@ -86,6 +125,23 @@ function ManagementCell({ trade }: { trade: PaperTrade }) {
       {cell.blocker ? <div className="panel-meta">{cell.blocker}</div> : null}
       <div className="panel-meta">{cell.release}</div>
     </td>
+  );
+}
+
+function ExitEvidence({ trade }: { trade: PaperTrade }) {
+  const cell = formatPositionManagementCell(trade.position_management);
+  return (
+    <div className="paper-audit-management">
+      <div className="panel-meta">Entry Arb % {formatEntryArb(trade)} · stored opening net edge</div>
+      <div className="panel-meta">Current Exit % {formatCurrentExit(trade)}</div>
+      <div className="panel-meta">Δ {formatExitDelta(trade)}</div>
+      {exitBlockReasonText(trade) ? <div className="panel-meta">{exitBlockReasonText(trade)}</div> : null}
+      <div className="panel-meta">{cell.economics}</div>
+      {cell.threshold ? <div className="panel-meta">{cell.threshold}</div> : null}
+      <div className="panel-meta">{cell.margin}</div>
+      {cell.blocker ? <div className="panel-meta">{cell.blocker}</div> : null}
+      <div className="panel-meta">{cell.release}</div>
+    </div>
   );
 }
 
@@ -290,24 +346,44 @@ function TradeTable({
         <span className="demo-chip">PAPER MODE · RECORDED</span>
       </div>
       <div className="table-wrap">
-        <table className={compact ? "ops-compact" : undefined}>
+        <table className={compact ? "ops-compact paper-trade-compact" : undefined}>
           <thead>
             <tr>
-              <th>Fixture / market</th>
-              <th>Opened</th>
-              <th>Legs</th>
-              <th>Locked capital</th>
-              <th>Risk at entry</th>
-              <th>Guaranteed at open</th>
-              <th>Realised P&L</th>
-              <th>Management</th>
-              <th>Status</th>
+              {compact ? (
+                <>
+                  <th>Fixture</th>
+                  <th>Market</th>
+                  <th>Legs</th>
+                  <th>Locked</th>
+                  <th>Entry Arb %</th>
+                  <th>Guaranteed at Open</th>
+                  <th>Current Exit %</th>
+                  <th>Δ</th>
+                  <th>Management</th>
+                  <th>Status</th>
+                </>
+              ) : (
+                <>
+                  <th>Fixture / market</th>
+                  <th>Opened</th>
+                  <th>Legs</th>
+                  <th>Locked capital</th>
+                  <th>Entry Arb %</th>
+                  <th>Risk at entry</th>
+                  <th>Guaranteed at open</th>
+                  <th>Current Exit %</th>
+                  <th>Δ</th>
+                  <th>Realised P&L</th>
+                  <th>Management</th>
+                  <th>Status</th>
+                </>
+              )}
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={9} className="empty-live">{empty}</td>
+                <td colSpan={compact ? 10 : 12} className="empty-live">{empty}</td>
               </tr>
             ) : (
               rows.map((trade) => (
@@ -317,50 +393,61 @@ function TradeTable({
                       <button type="button" className="text-link paper-trade-fixture-name" onClick={() => onToggle(trade.trade_id)}>
                         {fixture(trade)}
                       </button>
-                      <div className="paper-trade-market" title={trade.solver_model ? `${compactMarketHeading(trade)} · ${trade.solver_model}` : compactMarketHeading(trade)}>
-                        {compactMarketHeading(trade)}
-                      </div>
+                      {compact ? null : (
+                        <div className="paper-trade-market" title={trade.solver_model ? `${compactMarketHeading(trade)} · ${trade.solver_model}` : compactMarketHeading(trade)}>
+                          {compactMarketHeading(trade)}
+                        </div>
+                      )}
                       {tradeShowsNflSettlementCaveat(trade) ? (
                         <div className="panel-meta paper-trade-nfl-caveat">{NFL_SETTLEMENT_CAVEAT_TEXT}</div>
                       ) : tradeShowsNbaSettlementCaveat(trade) ? (
                         <div className="panel-meta paper-trade-nfl-caveat">{NBA_SETTLEMENT_CAVEAT_TEXT}</div>
                       ) : null}
-                      <div className="paper-trade-actions">
-                        <Link href={`/paper/${encodeURIComponent(trade.trade_id)}`}>
-                          Open detail
-                        </Link>
-                        {" · "}
-                        <Link href={`/paper/${encodeURIComponent(trade.trade_id)}#trade-log`}>
-                          Trade log
-                        </Link>
-                        {onManualClose && trade.state !== "CLOSED" && trade.state !== "AWAITING_MANUAL_EXTERNAL" ? (
-                          <>
-                            {" · "}
-                            <button
-                              type="button"
-                              className="text-link"
-                              onClick={() => onManualClose(trade)}
-                            >
-                              Manual close / settle result
-                            </button>
-                          </>
-                        ) : null}
-                      </div>
-                    </td>
-                    <td>
-                      <HydratedRelativeTime iso={trade.opened_at} />
-                      {trade.settled_at ? (
-                        <div className="panel-meta">
-                          Settled <HydratedRelativeTime iso={trade.settled_at} />
+                      {compact ? null : (
+                        <div className="paper-trade-actions">
+                          <Link href={`/paper/${encodeURIComponent(trade.trade_id)}`}>
+                            Open detail
+                          </Link>
+                          {" · "}
+                          <Link href={`/paper/${encodeURIComponent(trade.trade_id)}#trade-log`}>
+                            Trade log
+                          </Link>
+                          {onManualClose && trade.state !== "CLOSED" && trade.state !== "AWAITING_MANUAL_EXTERNAL" ? (
+                            <>
+                              {" · "}
+                              <button
+                                type="button"
+                                className="text-link"
+                                onClick={() => onManualClose(trade)}
+                              >
+                                Manual close / settle result
+                              </button>
+                            </>
+                          ) : null}
                         </div>
-                      ) : null}
+                      )}
                     </td>
+                    {compact ? (
+                      <td className="paper-trade-market">{compactMarketHeading(trade)}</td>
+                    ) : (
+                      <td>
+                        <HydratedRelativeTime iso={trade.opened_at} />
+                        {trade.settled_at ? (
+                          <div className="panel-meta">
+                            Settled <HydratedRelativeTime iso={trade.settled_at} />
+                          </div>
+                        ) : null}
+                      </td>
+                    )}
                     <LegsCell trade={trade} />
                     <td>{nativeLocked(trade)}</td>
-                    <td title={riskTooltip(trade.entry_risk)}>{riskAtEntry(trade)}</td>
+                    <td>{formatEntryArb(trade)}</td>
+                    {compact ? null : <td title={riskTooltip(trade.entry_risk)}>{riskAtEntry(trade)}</td>}
                     <td>{money(trade.guaranteed_profit_gbp_at_open)}</td>
-                    <td>{trade.state === "CLOSED" ? money(trade.realised_pnl_gbp) : "—"}</td>
-                    <ManagementCell trade={trade} />
+                    <td title={exitBlockReasonText(trade) ?? undefined}>{formatCurrentExit(trade)}</td>
+                    <td>{formatExitDelta(trade)}</td>
+                    {compact ? null : <td>{trade.state === "CLOSED" ? money(trade.realised_pnl_gbp) : "—"}</td>}
+                    <ManagementCell trade={trade} compact={compact} />
                     <td>
                       <span className={tradeStateBadgeClass(trade.state)}>{trade.state}</span>
                       {settlementReconciliationLabel(trade) ? (
@@ -368,16 +455,16 @@ function TradeTable({
                           {settlementReconciliationLabel(trade)}
                         </div>
                       ) : null}
-                      {trade.last_settlement_check_at ? (
+                      {compact || !trade.last_settlement_check_at ? null : (
                         <div className="panel-meta">
                           Settlement check <HydratedRelativeTime iso={trade.last_settlement_check_at} />
                         </div>
-                      ) : null}
+                      )}
                     </td>
                   </tr>
                   {openId === trade.trade_id && detail?.trade_id === trade.trade_id ? (
                     <tr>
-                      <td colSpan={9}>
+                      <td colSpan={compact ? 10 : 12}>
                         <AuditBlock trade={detail} busy={busy} onManualClose={onManualClose} />
                       </td>
                     </tr>
@@ -404,6 +491,16 @@ function AuditBlock({
   const recon = settlementReconciliationLabel(trade);
   return (
     <div className="paper-audit">
+      <ExitEvidence trade={trade} />
+      <div className="paper-trade-actions">
+        <Link href={`/paper/${encodeURIComponent(trade.trade_id)}`}>
+          Open detail
+        </Link>
+        {" · "}
+        <Link href={`/paper/${encodeURIComponent(trade.trade_id)}#trade-log`}>
+          Trade log
+        </Link>
+      </div>
       <div className="panel-meta">
         Provenance {trade.provenance} · paper only · no venue orders
         {trade.settlement_outcome

@@ -33,9 +33,14 @@ class ProviderSlotLoad(BaseModel):
 
 
 class HotLoad(BaseModel):
-    """HOT roster vs price-engine working set. Fixture count is not item count."""
+    """HOT roster vs price-engine working set. Fixture count is not item count.
+
+    ``fixtures`` remains lifecycle/promoted membership. ``pricing_fixtures`` is
+    the unique canonical fixtures actually in the HOT price-engine tier.
+    """
 
     fixtures: int = Field(default=0, ge=0)
+    pricing_fixtures: int = Field(default=0, ge=0)
     working_set: int = Field(default=0, ge=0)
     due: int = Field(default=0, ge=0)
     in_flight: int = Field(default=0, ge=0)
@@ -44,14 +49,17 @@ class HotLoad(BaseModel):
     last_cycle_ms: int | None = Field(default=None, ge=0)
     cadence_seconds: int = Field(default=0, ge=0)
     cadence_utilisation: float | None = None
+    health: str = "unknown"
 
 
 class BackgroundLoad(BaseModel):
     """BACKGROUND pricing cadence and working set. Independent of UNIVERSE."""
 
     working_set: int = Field(default=0, ge=0)
+    pricing_fixtures: int = Field(default=0, ge=0)
     due: int = Field(default=0, ge=0)
     cadence_seconds: int = Field(default=0, ge=0)
+    health: str = "unknown"
 
 
 class UniverseLoad(BaseModel):
@@ -66,6 +74,8 @@ class UniverseLoad(BaseModel):
     selected_competition_count: int = Field(default=0, ge=0)
     scope_version: int | None = Field(default=None, ge=0)
     generation_scope_version: int | None = Field(default=None, ge=0)
+    worker_state: str = "unknown"
+    health: str = "unknown"
 
 
 class ActiveTradeLoad(BaseModel):
@@ -76,6 +86,8 @@ class ActiveTradeLoad(BaseModel):
     overdue: int = Field(default=0, ge=0)
     last_cycle_ms: int | None = Field(default=None, ge=0)
     cadence_seconds: int = Field(default=0, ge=0)
+    capital_locked_gbp: float | None = Field(default=None, ge=0)
+    health: str = "unknown"
 
 
 class SystemLoadSummary(BaseModel):
@@ -110,6 +122,7 @@ def system_load_from_status(
     status: Any,
     *,
     universe_work_used_s: float | None = None,
+    active_trade_locked_gbp: float | None = None,
 ) -> SystemLoadSummary:
     """Project System Load from already-public in-memory / read-model fields."""
 
@@ -160,9 +173,12 @@ def system_load_from_status(
             overdue=_count(_attr(active_trade, "not_evaluated_count")),
             last_cycle_ms=_optional_int(_attr(active_trade, "last_duration_ms")),
             cadence_seconds=_count(_attr(active_trade, "cadence_seconds")),
+            capital_locked_gbp=_optional_float(active_trade_locked_gbp),
+            health=_lane_health(active_trade, None),
         ),
         hot=HotLoad(
             fixtures=_count(_attr(hot, "fixture_count")),
+            pricing_fixtures=_count(_attr(hot_engine, "pricing_fixtures")),
             working_set=hot_working,
             due=_count(_attr(hot_engine, "due")),
             in_flight=_count(_attr(hot_engine, "in_flight")),
@@ -171,11 +187,14 @@ def system_load_from_status(
             last_cycle_ms=last_cycle_ms,
             cadence_seconds=cadence_seconds,
             cadence_utilisation=cadence_utilisation(last_cycle_ms, cadence_seconds),
+            health=_lane_health(hot, hot_engine),
         ),
         background=BackgroundLoad(
             working_set=background_working,
+            pricing_fixtures=_count(_attr(background_engine, "pricing_fixtures")),
             due=_count(_attr(background_engine, "due")),
             cadence_seconds=_count(_attr(background, "cadence_seconds")),
+            health=_lane_health(background, background_engine),
         ),
         matchbook=_provider_slot(access, _MATCHBOOK),
         kalshi=_provider_slot(access, _KALSHI),
@@ -193,6 +212,8 @@ def system_load_from_status(
             generation_scope_version=_optional_int(
                 _attr(universe_scope, "generation_scope_version")
             ),
+            worker_state=_worker_state(universe),
+            health=_lane_health(universe, None),
         ),
         catalogue_items=hot_working + background_working,
     )
@@ -224,6 +245,46 @@ def _provider_slot(access: Any, venue: str) -> ProviderSlotLoad:
         deadline_misses=_count(venue_queue.get("deadline_misses")),
         saturated=bool(venue_queue.get("saturated")) if venue_queue else waiting > 0 and _count(inflight_map.get(venue)) >= limit and limit > 0,
     )
+
+
+_DEGRADED_VENUE = frozenset(
+    {"unavailable", "timeout", "degraded", "error", "failed", "discovery_timeout", "market_timeout"}
+)
+
+
+def _worker_state(lane: Any) -> str:
+    if _attr(lane, "cycle_in_progress") is True:
+        return "running"
+    worker = str(_attr(lane, "worker_state") or "").strip().casefold()
+    return worker or "unknown"
+
+
+def _venue_health_degraded(source: Any) -> bool:
+    health = _attr(source, "venue_health")
+    if not isinstance(health, dict):
+        return False
+    return any(str(value).strip().casefold() in _DEGRADED_VENUE for value in health.values())
+
+
+def _lane_health(lane: Any, engine_tier: Any | None) -> str:
+    """Operator health from existing lane/engine fields. Not a safe/unsafe score."""
+
+    if lane is None and engine_tier is None:
+        return "unknown"
+    if _attr(lane, "last_error") or _attr(engine_tier, "last_error"):
+        return "degraded"
+    if _attr(lane, "degraded") is True:
+        return "degraded"
+    worker = _worker_state(lane)
+    if worker == "degraded" or _venue_health_degraded(lane) or _venue_health_degraded(engine_tier):
+        return "degraded"
+    if worker == "running":
+        return "running"
+    if worker in {"waiting", "idle", "complete"}:
+        return "healthy"
+    if lane is None:
+        return "unknown"
+    return "healthy"
 
 
 def _attr(value: Any, name: str) -> Any:

@@ -1,7 +1,11 @@
 import { PaperScanCycleRecord } from "./api";
 import { formatObservationAge } from "./observation-age";
 
+export const MAIN_SCAN_CYCLE_LIMIT = 8;
+
 export const SCAN_CYCLE_TITLE = "Scan cycle history";
+export const SCAN_CYCLE_RECENT_TITLE = "Recent scan cycles";
+export const SCAN_CYCLE_DIAGNOSTICS_TITLE = "Diagnostics / Scan history";
 
 export const SCAN_CYCLE_COPY =
   "Latest 100 completed HOT pricing / BACKGROUND pricing / UNIVERSE discovery cycles, newest first. One row per cycle, including cycles with zero paper decisions. Not market-decision audit.";
@@ -109,6 +113,14 @@ export function scanCycleRows(
   nowMs: number | null = null,
 ): ScanCycleRow[] {
   return (cycles ?? []).map((cycle) => scanCycleRow(cycle, nowMs));
+}
+
+export function recentScanCycleRows(
+  cycles: PaperScanCycleRecord[] | null | undefined,
+  nowMs: number | null = null,
+  limit = MAIN_SCAN_CYCLE_LIMIT,
+): ScanCycleRow[] {
+  return scanCycleRows(cycles, nowMs).slice(0, limit);
 }
 
 export function scanCycleBadgeLabel(

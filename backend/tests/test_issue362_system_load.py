@@ -271,6 +271,7 @@ def test_live_refresh_status_endpoint_includes_compact_system_load() -> None:
     }
     assert set(load["hot"]) == {
         "fixtures",
+        "pricing_fixtures",
         "working_set",
         "due",
         "in_flight",
@@ -279,8 +280,15 @@ def test_live_refresh_status_endpoint_includes_compact_system_load() -> None:
         "last_cycle_ms",
         "cadence_seconds",
         "cadence_utilisation",
+        "health",
     }
-    assert set(load["background"]) == {"working_set", "due", "cadence_seconds"}
+    assert set(load["background"]) == {
+        "working_set",
+        "pricing_fixtures",
+        "due",
+        "cadence_seconds",
+        "health",
+    }
     assert set(load["universe"]) == {
         "evaluated",
         "total",
@@ -291,7 +299,11 @@ def test_live_refresh_status_endpoint_includes_compact_system_load() -> None:
         "selected_competition_count",
         "scope_version",
         "generation_scope_version",
+        "worker_state",
+        "health",
     }
+    assert "capital_locked_gbp" in load["active_trade"]
+    assert "health" in load["active_trade"]
     assert "discovered_fixtures" not in load
     assert "recent_scan_cycles" not in load
     assert "execution_enabled" not in payload
