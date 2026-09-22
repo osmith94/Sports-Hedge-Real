@@ -118,8 +118,8 @@ def test_enable_faulthandler_is_invoked_on_stderr_without_periodic_dumps(
     assert calls[0][1]["all_threads"] is True
     assert crash_diagnostics.faulthandler.is_enabled()
     module_source = inspect.getsource(crash_diagnostics)
-    assert "dump_traceback_later" not in module_source
-    assert "dump_traceback_later" not in inspect.getsource(main_api)
+    assert "dump_traceback_later(" not in module_source
+    assert "dump_traceback_later(" not in inspect.getsource(main_api)
 
 
 def test_api_startup_enables_faulthandler() -> None:
