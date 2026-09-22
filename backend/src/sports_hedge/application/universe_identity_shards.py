@@ -21,13 +21,21 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
+from sports_hedge.application.event_loop_activity import (
+    close_loop_slice,
+    loop_activity_snapshot,
+    mark_loop_phase,
+    yield_event_loop,
+)
 from sports_hedge.application.fixture_clusters import (
+    COOP_MAX_SLICE_SECONDS,
     SECONDARY_BLOCK_ORDER_VERSION,
     FixtureCluster,
     VenueEvent,
     _append_cluster_event,
     cluster_events_from_pass,
-    identity_name_block_overlap,
+    identity_name_block_keys,
+    name_block_keys_overlap,
 )
 from sports_hedge.application.universe_identity_cache import (
     GenerationIdentityCache,
@@ -197,6 +205,157 @@ class ShardPartition:
     unresolved_events_by_venue: dict[str, int]
 
 
+@dataclass
+class _PartitionAccum:
+    grouped: dict[tuple[str, str], IdentityShard] = field(default_factory=dict)
+    unresolved: list[VenueEvent] = field(default_factory=list)
+    provenance_counts: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    conflicts: int = 0
+    unresolved_by_venue: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+
+
+def _cached_block_keys(
+    item: VenueEvent, cache: dict[int, frozenset[str]]
+) -> frozenset[str]:
+    found = cache.get(id(item))
+    if found is None:
+        found = identity_name_block_keys(item)
+        cache[id(item)] = found
+    return found
+
+
+def _accumulate_event(item: VenueEvent, acc: _PartitionAccum) -> None:
+    label_code = target_competition_code(getattr(item.canonical, "competition", None))
+    raw_code, _raw_source = provenance_from_raw(
+        item.raw if isinstance(item.raw, dict) else None,
+        item.venue,
+    )
+    if label_code is not None and raw_code is not None and label_code != raw_code:
+        acc.conflicts += 1
+    code, source = provenance_for_event(item)
+    acc.provenance_counts[source] += 1
+    if code is not None and label_code is None and source != "label":
+        stamp_provenance_competition(item, code)
+    if code is None:
+        acc.unresolved.append(item)
+        acc.unresolved_by_venue[item.venue.value] += 1
+        return
+    key = (_sport_of(item), code)
+    shard = acc.grouped.get(key)
+    if shard is None:
+        shard = IdentityShard(sport=key[0], competition_code=key[1])
+        acc.grouped[key] = shard
+    shard.events.append(item)
+    if source != "label":
+        shard.provenance_events += 1
+
+
+def _kickoff_tolerance_seconds(kickoff_tolerance: timedelta) -> float:
+    tolerance = float(kickoff_tolerance.total_seconds())
+    if tolerance <= 0:
+        return 1.0
+    return tolerance
+
+
+def _shard_name_hit(
+    item_keys: frozenset[str],
+    proven: list[VenueEvent],
+    *,
+    stamp: float,
+    tolerance: float,
+    cache: dict[int, frozenset[str]],
+    start: int,
+    limit: int,
+) -> tuple[bool, int]:
+    """Scan one slice of a shard. Hit means the unresolved event bridges that shard."""
+
+    end = min(len(proven), start + max(1, limit))
+    for index in range(start, end):
+        other = proven[index]
+        if abs(_kickoff_ts(other) - stamp) > tolerance:
+            continue
+        if name_block_keys_overlap(item_keys, _cached_block_keys(other, cache)):
+            return True, index
+    return False, end
+
+
+def _bridge_hits(
+    item: VenueEvent,
+    snapshots: list[tuple[IdentityShard, list[VenueEvent]]],
+    *,
+    tolerance: float,
+    cache: dict[int, frozenset[str]],
+) -> list[IdentityShard]:
+    sport = _sport_of(item)
+    stamp = _kickoff_ts(item)
+    item_keys = _cached_block_keys(item, cache)
+    hits: list[IdentityShard] = []
+    for shard, proven in snapshots:
+        if shard.sport != sport:
+            continue
+        hit, _cursor = _shard_name_hit(
+            item_keys,
+            proven,
+            stamp=stamp,
+            tolerance=tolerance,
+            cache=cache,
+            start=0,
+            limit=len(proven) or 1,
+        )
+        if hit:
+            hits.append(shard)
+    return hits
+
+
+def _apply_bridge_hits(
+    item: VenueEvent,
+    hits: list[IdentityShard],
+    *,
+    attached: int,
+    ambiguous: int,
+    still_unresolved: list[VenueEvent],
+) -> tuple[int, int]:
+    if len(hits) == 1:
+        hits[0].events.append(item)
+        hits[0].unresolved_attached += 1
+        return attached + 1, ambiguous
+    still_unresolved.append(item)
+    if len(hits) > 1:
+        ambiguous += 1
+    return attached, ambiguous
+
+
+def _finish_partition(
+    acc: _PartitionAccum,
+    *,
+    attached: int,
+    ambiguous: int,
+    still_unresolved: list[VenueEvent],
+) -> ShardPartition:
+    if still_unresolved:
+        by_sport: dict[str, list[VenueEvent]] = defaultdict(list)
+        for item in still_unresolved:
+            by_sport[_sport_of(item)].append(item)
+        for sport, events in by_sport.items():
+            acc.grouped[(sport, UNRESOLVED_COMPETITION)] = IdentityShard(
+                sport=sport,
+                competition_code=UNRESOLVED_COMPETITION,
+                events=events,
+            )
+    # First-seen order, not shard-id sort. The soft scan deadline evaluates
+    # clusters in this order and stops. Alphabetical order let a later
+    # competition (la_liga before premier_league) consume the only evaluation
+    # slot and mark the earlier fixture as a deadline leftover.
+    return ShardPartition(
+        shards=list(acc.grouped.values()),
+        provenance_counts=dict(acc.provenance_counts),
+        provenance_conflicts=acc.conflicts,
+        unresolved_attached=attached,
+        unresolved_bridge_ambiguous=ambiguous,
+        unresolved_events_by_venue=dict(acc.unresolved_by_venue),
+    )
+
+
 def partition_identity_shards(
     items: list[VenueEvent],
     *,
@@ -209,87 +368,102 @@ def partition_identity_shards(
     it in the unresolved shard rather than guessing a competition.
     """
 
-    grouped: dict[tuple[str, str], IdentityShard] = {}
-    unresolved: list[VenueEvent] = []
-    provenance_counts: dict[str, int] = defaultdict(int)
-    conflicts = 0
-    unresolved_by_venue: dict[str, int] = defaultdict(int)
+    acc = _PartitionAccum()
     for item in items:
-        label_code = target_competition_code(getattr(item.canonical, "competition", None))
-        raw_code, raw_source = provenance_from_raw(
-            item.raw if isinstance(item.raw, dict) else None,
-            item.venue,
-        )
-        if label_code is not None and raw_code is not None and label_code != raw_code:
-            conflicts += 1
-        code, source = provenance_for_event(item)
-        provenance_counts[source] += 1
-        if code is not None and label_code is None and source != "label":
-            stamp_provenance_competition(item, code)
-        if code is None:
-            unresolved.append(item)
-            unresolved_by_venue[item.venue.value] += 1
-            continue
-        key = (_sport_of(item), code)
-        shard = grouped.get(key)
-        if shard is None:
-            shard = IdentityShard(sport=key[0], competition_code=key[1])
-            grouped[key] = shard
-        shard.events.append(item)
-        if source != "label":
-            shard.provenance_events += 1
-
-    tolerance = float(kickoff_tolerance.total_seconds())
-    if tolerance <= 0:
-        tolerance = 1.0
-    snapshots = [(shard, list(shard.events)) for shard in grouped.values()]
+        _accumulate_event(item, acc)
+    tolerance = _kickoff_tolerance_seconds(kickoff_tolerance)
+    snapshots = [(shard, list(shard.events)) for shard in acc.grouped.values()]
+    cache: dict[int, frozenset[str]] = {}
     attached = 0
     ambiguous = 0
     still_unresolved: list[VenueEvent] = []
-    for item in unresolved:
+    for item in acc.unresolved:
+        hits = _bridge_hits(item, snapshots, tolerance=tolerance, cache=cache)
+        attached, ambiguous = _apply_bridge_hits(
+            item,
+            hits,
+            attached=attached,
+            ambiguous=ambiguous,
+            still_unresolved=still_unresolved,
+        )
+    return _finish_partition(
+        acc,
+        attached=attached,
+        ambiguous=ambiguous,
+        still_unresolved=still_unresolved,
+    )
+
+
+async def partition_identity_shards_cooperative(
+    items: list[VenueEvent],
+    *,
+    kickoff_tolerance: timedelta,
+) -> ShardPartition:
+    """Same partition as ``partition_identity_shards``, yielding inside the bridge.
+
+    The unresolved name-block bridge is quadratic in same-kickoff events and
+    used to run with no await. On a dense owner-live UNIVERSE that monopolised
+    the loop (health and build-info timed out while the process stayed up).
+    Name-block keys are computed once per event; the attachment rule is unchanged.
+    """
+
+    mark_loop_phase(lane="universe", phase="partition", events=len(items))
+    acc = _PartitionAccum()
+    last_yield = time.perf_counter()
+    for index, item in enumerate(items, start=1):
+        _accumulate_event(item, acc)
+        if index % 64 == 0 and (time.perf_counter() - last_yield) >= COOP_MAX_SLICE_SECONDS:
+            await yield_event_loop()
+            last_yield = time.perf_counter()
+    tolerance = _kickoff_tolerance_seconds(kickoff_tolerance)
+    snapshots = [(shard, list(shard.events)) for shard in acc.grouped.values()]
+    cache: dict[int, frozenset[str]] = {}
+    attached = 0
+    ambiguous = 0
+    still_unresolved: list[VenueEvent] = []
+    for item in acc.unresolved:
         sport = _sport_of(item)
         stamp = _kickoff_ts(item)
+        item_keys = _cached_block_keys(item, cache)
         hits: list[IdentityShard] = []
         for shard, proven in snapshots:
             if shard.sport != sport:
                 continue
-            for other in proven:
-                if abs(_kickoff_ts(other) - stamp) > tolerance:
-                    continue
-                if identity_name_block_overlap(item, other):
+            cursor = 0
+            while cursor < len(proven):
+                hit, cursor = _shard_name_hit(
+                    item_keys,
+                    proven,
+                    stamp=stamp,
+                    tolerance=tolerance,
+                    cache=cache,
+                    start=cursor,
+                    limit=1024,
+                )
+                if hit:
                     hits.append(shard)
                     break
-        if len(hits) == 1:
-            hits[0].events.append(item)
-            hits[0].unresolved_attached += 1
-            attached += 1
-        else:
-            still_unresolved.append(item)
-            if len(hits) > 1:
-                ambiguous += 1
-    if still_unresolved:
-        by_sport: dict[str, list[VenueEvent]] = defaultdict(list)
-        for item in still_unresolved:
-            by_sport[_sport_of(item)].append(item)
-        for sport, events in by_sport.items():
-            grouped[(sport, UNRESOLVED_COMPETITION)] = IdentityShard(
-                sport=sport,
-                competition_code=UNRESOLVED_COMPETITION,
-                events=events,
-            )
-    # First-seen order, not shard-id sort. The soft scan deadline evaluates
-    # clusters in this order and stops. Alphabetical order let a later
-    # competition (la_liga before premier_league) consume the only evaluation
-    # slot and mark the earlier fixture as a deadline leftover.
-    shards = list(grouped.values())
-    return ShardPartition(
-        shards=shards,
-        provenance_counts=dict(provenance_counts),
-        provenance_conflicts=conflicts,
-        unresolved_attached=attached,
-        unresolved_bridge_ambiguous=ambiguous,
-        unresolved_events_by_venue=dict(unresolved_by_venue),
+                if (time.perf_counter() - last_yield) >= COOP_MAX_SLICE_SECONDS:
+                    await yield_event_loop()
+                    last_yield = time.perf_counter()
+        attached, ambiguous = _apply_bridge_hits(
+            item,
+            hits,
+            attached=attached,
+            ambiguous=ambiguous,
+            still_unresolved=still_unresolved,
+        )
+        if (time.perf_counter() - last_yield) >= COOP_MAX_SLICE_SECONDS:
+            await yield_event_loop()
+            last_yield = time.perf_counter()
+    result = _finish_partition(
+        acc,
+        attached=attached,
+        ambiguous=ambiguous,
+        still_unresolved=still_unresolved,
     )
+    close_loop_slice()
+    return result
 
 
 def _split_venues(
@@ -369,13 +543,20 @@ def _empty_counts() -> dict[str, int]:
 
 async def _consider_slice(cluster_pass: Any, limit: int, stop: Callable[[], bool]) -> int:
     taken = 0
+    last_yield = time.perf_counter()
     for left, right in cluster_pass.pairs():
         if taken >= limit:
             break
+        # Stop checks stay on the original cadence so a chunk's deadline leftover
+        # set does not move just because a slow match yielded early.
         if taken % CONSIDER_YIELD_EVERY == 0:
-            await asyncio.sleep(0)
+            await yield_event_loop()
+            last_yield = time.perf_counter()
             if stop():
                 break
+        elif (time.perf_counter() - last_yield) >= COOP_MAX_SLICE_SECONDS:
+            await yield_event_loop()
+            last_yield = time.perf_counter()
         cluster_pass.consider(left, right)
         taken += 1
     cluster_pass._resume_cursor = cluster_pass.candidate_pairs_considered
@@ -413,7 +594,11 @@ async def cluster_events_sharded(
     should_stop = stop or (lambda: False)
     items = [*matchbook, *polymarket, *kalshi]
     tolerance = getattr(matcher, "kickoff_tolerance", timedelta(minutes=5))
-    partition = partition_identity_shards(items, kickoff_tolerance=tolerance)
+    partition_started = time.perf_counter()
+    partition = await partition_identity_shards_cooperative(
+        items, kickoff_tolerance=tolerance
+    )
+    partition_ms = max(0, int((time.perf_counter() - partition_started) * 1000))
     discovery_changed = False
     if identity_cache is not None:
         signature = identity_cache.items_signature(items)
@@ -423,6 +608,13 @@ async def cluster_events_sharded(
 
     runs: list[_ShardRun] = []
     evaluation_order: list[_ShardRun] = []
+    mark_loop_phase(
+        lane="universe",
+        phase="schedule_shards",
+        events=len(items),
+        candidates=len(partition.shards),
+    )
+    schedule_yield = time.perf_counter()
     for shard in partition.shards:
         if not shard.events:
             continue
@@ -443,6 +635,9 @@ async def cluster_events_sharded(
             secondary_block=secondary,
         )
         runs.append(_ShardRun(shard=shard, secondary_block=secondary, cluster_pass=cluster_pass))
+        if (time.perf_counter() - schedule_yield) >= COOP_MAX_SLICE_SECONDS:
+            await yield_event_loop()
+            schedule_yield = time.perf_counter()
 
     def _publish(extra_clusters: list[FixtureCluster] | None = None) -> None:
         if on_partial is None:
@@ -456,6 +651,13 @@ async def cluster_events_sharded(
     async def _finalize(run: _ShardRun, *, complete: bool) -> None:
         if run.finalized:
             return
+        mark_loop_phase(
+            lane="universe",
+            phase="finalize",
+            shard_id=run.shard.shard_id,
+            events=len(run.shard.events),
+            candidates=len(run.cluster_pass._candidates) if run.loaded else 0,
+        )
         finalize_started = time.perf_counter()
         clusters, counts = await run.cluster_pass.finalize_cooperative()
         run.finalize_ms += max(0, int((time.perf_counter() - finalize_started) * 1000))
@@ -472,6 +674,12 @@ async def cluster_events_sharded(
     async def _ensure_loaded(run: _ShardRun) -> None:
         if run.loaded:
             return
+        mark_loop_phase(
+            lane="universe",
+            phase="candidate_build",
+            shard_id=run.shard.shard_id,
+            events=len(run.shard.events),
+        )
         index_started = time.perf_counter()
         await run.cluster_pass.load_candidates_cooperative()
         run.index_ms += max(0, int((time.perf_counter() - index_started) * 1000))
@@ -513,6 +721,13 @@ async def cluster_events_sharded(
                 truncated = True
                 pending.appendleft(run)
                 return
+            mark_loop_phase(
+                lane="universe",
+                phase="consider",
+                shard_id=run.shard.shard_id,
+                events=len(run.shard.events),
+                candidates=len(run.cluster_pass._candidates),
+            )
             consider_started = time.perf_counter()
             pair_limit = HOT_SLICE_PAIRS if run.force_hot_slice else slice_pairs
             taken = await _consider_slice(run.cluster_pass, pair_limit, should_stop)
@@ -608,6 +823,7 @@ async def cluster_events_sharded(
             scored.extend(run.cluster_pass.scored_pairs)
             semantic = run.cluster_pass.semantic_version
         incremental_cache.commit_snapshot(items, scored, semantic)
+    close_loop_slice()
     diagnostics = _diagnostics(
         runs=runs,
         items=items,
@@ -619,14 +835,20 @@ async def cluster_events_sharded(
         matcher=matcher,
         unscored_count=len(unscored),
     )
+    diagnostics["partition_ms"] = partition_ms
+    diagnostics.update(loop_activity_snapshot())
     blocking = diagnostics.get("blocking_shard_key")
     LOGGER.info(
-        "identity_shards total=%s complete=%s hot=%s blocking=%s truncated=%s",
+        "identity_shards total=%s complete=%s hot=%s blocking=%s truncated=%s "
+        "partition_ms=%s longest_sync_phase=%s longest_sync_ms=%s",
         diagnostics.get("identity_shard_count"),
         diagnostics.get("identity_shards_completed"),
         diagnostics.get("identity_hot_shards"),
         blocking,
         truncated,
+        diagnostics.get("partition_ms"),
+        diagnostics.get("event_loop_longest_sync_phase"),
+        diagnostics.get("event_loop_longest_sync_ms"),
     )
     _publish()
     return clusters, counts, truncated, diagnostics, unscored

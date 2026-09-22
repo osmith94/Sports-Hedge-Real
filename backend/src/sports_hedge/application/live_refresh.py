@@ -21,6 +21,11 @@ from sports_hedge.application.active_trade_lane import (
     identity_from_open_trade,
     reset_active_trade_registry,
 )
+from sports_hedge.application.event_loop_activity import (
+    LOOP_ACTIVITY,
+    close_loop_slice,
+    mark_loop_phase,
+)
 from sports_hedge.application.hot_market_relationships import HotMarketRelationship
 from sports_hedge.application.collector import (
     DIAGNOSTIC_PROVIDERS,
@@ -3907,6 +3912,7 @@ class LiveRefreshCoordinator:
         task = self._universe_checkpoint_persist_task
         if task is not None and not task.done():
             return
+        LOOP_ACTIVITY.note_offloop_persistence()
         self._universe_checkpoint_persist_task = loop.create_task(
             self._universe_checkpoint_persist_worker(),
             name="universe-checkpoint-persist",
@@ -4900,8 +4906,10 @@ class LiveRefreshCoordinator:
                 self._record_hot_heartbeat(DualCadencePlan(lane="idle", reason="operator_stopped"))
                 await self._sleep_interruptible(2.0)
                 continue
+            mark_loop_phase(lane="hot", phase="scheduler")
             plan = self.plan_hot_tick()
             self._record_hot_heartbeat(plan)
+            close_loop_slice()
             if plan.lane == ScanLane.HOT.value or plan.reason == "hot_scope_empty":
                 try:
                     await self._invoke_tick(tick, plan)
@@ -4955,8 +4963,10 @@ class LiveRefreshCoordinator:
                 )
                 await self._sleep_interruptible(2.0)
                 continue
+            mark_loop_phase(lane="universe", phase="scheduler")
             plan = self.plan_universe_tick()
             self._record_universe_heartbeat(plan)
+            close_loop_slice()
             if plan.lane == ScanLane.UNIVERSE.value:
                 try:
                     await self._invoke_tick(tick, plan)
@@ -5018,7 +5028,9 @@ class LiveRefreshCoordinator:
                     )
                 await self._sleep_interruptible(2.0)
                 continue
+            mark_loop_phase(lane="background", phase="scheduler")
             plan = self.plan_background_tick()
+            close_loop_slice()
             if plan.lane == "background":
                 with self._state_lock:
                     self._background_in_progress = True
@@ -5057,7 +5069,9 @@ class LiveRefreshCoordinator:
                     )
                 await self._sleep_interruptible(2.0)
                 continue
+            mark_loop_phase(lane="active_trade", phase="paper_settlement")
             await self._maybe_run_paper_settlement()
+            mark_loop_phase(lane="active_trade", phase="scheduler")
             plan = self.plan_active_trade_tick()
             snapshot = self._active_trade_status_snapshot(include_summary=True)
             with self._state_lock:
@@ -5075,6 +5089,7 @@ class LiveRefreshCoordinator:
                         )
                     }
                 )
+            close_loop_slice()
             if plan.lane == ACTIVE_TRADE_LANE:
                 with self._state_lock:
                     self._active_trade_in_progress = True

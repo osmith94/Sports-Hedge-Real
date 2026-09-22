@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
+from sports_hedge.application.event_loop_activity import mark_loop_phase, yield_event_loop
 from sports_hedge.application.universe_identity_cache import (
     CrossGenerationIdentityCache,
     IncrementalIdentityDiagnostics,
@@ -221,12 +222,16 @@ def identity_name_block_keys(item: VenueEvent) -> frozenset[str]:
     return frozenset(keys)
 
 
-def identity_name_block_overlap(left: VenueEvent, right: VenueEvent) -> bool:
-    left_keys = identity_name_block_keys(left)
-    right_keys = identity_name_block_keys(right)
-    if _SHORT_BLOCK in left_keys or _SHORT_BLOCK in right_keys:
+def name_block_keys_overlap(left: frozenset[str], right: frozenset[str]) -> bool:
+    """Same canopy test as ``identity_name_block_overlap`` on already-built keys."""
+
+    if _SHORT_BLOCK in left or _SHORT_BLOCK in right:
         return True
-    return bool(left_keys & right_keys)
+    return bool(left & right)
+
+
+def identity_name_block_overlap(left: VenueEvent, right: VenueEvent) -> bool:
+    return name_block_keys_overlap(identity_name_block_keys(left), identity_name_block_keys(right))
 
 
 def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_seconds: float) -> bool:
@@ -546,25 +551,70 @@ class _IndexedCandidateBuilder:
         }
         augmented = list(compatible)
         for root, group in members.items():
-            if sizes[root] < 2:
-                continue
-            if sizes[root] > SECONDARY_CLIQUE_CAP:
-                self.secondary_clique_capped_components += 1
-                continue
-            for left_index, left in enumerate(group):
-                for right in group[left_index + 1 :]:
-                    key = (
-                        (left.index, right.index)
-                        if left.index < right.index
-                        else (right.index, left.index)
-                    )
-                    if key in existing:
-                        continue
-                    if not _compatible_index_pair(left, right, window_seconds=self.window):
-                        continue
-                    existing.add(key)
-                    self.secondary_blocked = max(0, self.secondary_blocked - 1)
-                    augmented.append((left, right) if left.index < right.index else (right, left))
+            self._augment_one_component(root, group, sizes, existing, augmented)
+        return augmented
+
+    def _augment_one_component(
+        self,
+        root: int,
+        group: list[_IndexRecord],
+        sizes: dict[int, int],
+        existing: set[tuple[int, int]],
+        augmented: list[tuple[_IndexRecord, _IndexRecord]],
+    ) -> None:
+        if sizes[root] < 2:
+            return
+        if sizes[root] > SECONDARY_CLIQUE_CAP:
+            self.secondary_clique_capped_components += 1
+            return
+        for left_index, left in enumerate(group):
+            for right in group[left_index + 1 :]:
+                key = (
+                    (left.index, right.index)
+                    if left.index < right.index
+                    else (right.index, left.index)
+                )
+                if key in existing:
+                    continue
+                if not _compatible_index_pair(left, right, window_seconds=self.window):
+                    continue
+                existing.add(key)
+                self.secondary_blocked = max(0, self.secondary_blocked - 1)
+                augmented.append((left, right) if left.index < right.index else (right, left))
+
+    async def _augment_component_cliques_cooperative(
+        self,
+        compatible: list[tuple[_IndexRecord, _IndexRecord]],
+        parent: dict[int, int],
+    ) -> list[tuple[_IndexRecord, _IndexRecord]]:
+        """Same pairs as ``_augment_component_cliques``, yielding between components."""
+
+        if not self.secondary_block:
+            return compatible
+        saved_blocked = self.secondary_blocked
+        saved_capped = self.secondary_clique_capped_components
+        sizes: dict[int, int] = defaultdict(int)
+        members: dict[int, list[_IndexRecord]] = defaultdict(list)
+        for record in self.records:
+            root = self._find_component(parent, record.index)
+            sizes[root] += 1
+            members[root].append(record)
+        existing = {
+            (left.index, right.index) if left.index < right.index else (right.index, left.index)
+            for left, right in compatible
+        }
+        augmented = list(compatible)
+        last_yield = time.perf_counter()
+        try:
+            for ticks, (root, group) in enumerate(members.items(), start=1):
+                self._augment_one_component(root, group, sizes, existing, augmented)
+                if _coop_pause_due(ticks, 8, last_yield):
+                    await yield_event_loop()
+                    last_yield = time.perf_counter()
+        except asyncio.CancelledError:
+            self.secondary_blocked = saved_blocked
+            self.secondary_clique_capped_components = saved_capped
+            raise
         return augmented
 
     def _index_diagnostics(self) -> dict[str, Any]:
@@ -650,9 +700,16 @@ class _IndexedCandidateBuilder:
                         if self._could_match_pair(*pair):
                             self._union_component(parent, pair[0].index, pair[1].index)
                     if _coop_pause_due(ticks, pause_every, last_yield):
-                        await asyncio.sleep(0)
+                        await yield_event_loop()
                         last_yield = time.perf_counter()
-            compatible = self._augment_component_cliques(compatible, parent)
+            mark_loop_phase(
+                lane="universe",
+                phase="clique_augmentation",
+                events=len(self.records),
+                candidates=len(compatible),
+                inherit_shard=True,
+            )
+            compatible = await self._augment_component_cliques_cooperative(compatible, parent)
             await self._emit_component_pairs_cooperative(
                 compatible, parent, yield_every=pause_every
             )
