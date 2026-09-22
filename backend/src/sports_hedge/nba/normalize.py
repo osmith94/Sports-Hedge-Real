@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-import re
 from typing import Any
 
 from sports_hedge.domain.football import (
@@ -32,7 +32,12 @@ from sports_hedge.nba.markets import (
 from sports_hedge.nba.settlement import nba_paper_settlement
 from sports_hedge.nba.teams import require_resolved_nba_team, resolve_nba_team
 from sports_hedge.normalization.text import normalize_text
-from sports_hedge.normalization.venues import VenueNormalizationError, _first, _list_field, _parse_datetime
+from sports_hedge.normalization.venues import (
+    VenueNormalizationError,
+    _first,
+    _list_field,
+    _parse_datetime,
+)
 
 
 def _required_nba_team(value: str | None) -> str:

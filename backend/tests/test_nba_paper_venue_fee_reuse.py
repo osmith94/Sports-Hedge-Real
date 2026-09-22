@@ -12,7 +12,7 @@ def test_nba_has_no_sport_specific_fee_entry_points() -> None:
     import sports_hedge.fees as fees_pkg
     import sports_hedge.fees.kalshi as kalshi_fees
     import sports_hedge.fees.polymarket as polymarket_fees
-    import sports_hedge.fees.resolver as resolver
+    from sports_hedge.fees import resolver
 
     for module in (fees_pkg, kalshi_fees, polymarket_fees, resolver):
         source = getattr(module, "__file__", "")

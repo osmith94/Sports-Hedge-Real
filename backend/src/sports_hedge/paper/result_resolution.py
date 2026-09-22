@@ -32,6 +32,7 @@ GRADED_RESULT_STATUSES = frozenset(
         "determined",
         "finished",
         "final",
+        "finalized",
         "completed",
         "complete",
         "paid",

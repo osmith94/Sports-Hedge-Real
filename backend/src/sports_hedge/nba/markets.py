@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
 import re
+from decimal import Decimal
 
 from sports_hedge.domain.football import FootballPeriod, line_push_possible
 from sports_hedge.normalization.text import normalize_text

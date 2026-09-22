@@ -248,6 +248,15 @@ def registered_canonical_key(left: CanonicalMarket, right: CanonicalMarket) -> s
     nba_key = nba_registered_canonical_key(left, right)
     if nba_key is not None:
         return nba_key
+    from sports_hedge.nba.register import is_nba_register_market
+    from sports_hedge.nfl.register import is_nfl_register_market
+
+    # Soccer Matchbook↔Kalshi must not admit NBA/NFL families that the
+    # sport-specific register left fail-closed.
+    if is_nba_register_market(left) or is_nba_register_market(right):
+        return None
+    if is_nfl_register_market(left) or is_nfl_register_market(right):
+        return None
     if not approved_paper_venue_pair(left, right):
         return None
     left_key = canonical_key_for_market(left)

@@ -13,8 +13,6 @@ from pathlib import Path
 
 import pytest
 
-from sports_hedge.application.complete_set import solver_model_for_pair
-from sports_hedge.application.provider_access import DEFAULT_PROVIDER_CONCURRENCY
 from sports_hedge.application.approved_market_catalogue import (
     derived_price_engine_working_set,
     required_outcomes_for_key,
@@ -23,11 +21,13 @@ from sports_hedge.application.catalogue_maintenance import (
     pair_identity_from_markets,
     persist_universe_catalogue_pass,
 )
+from sports_hedge.application.complete_set import solver_model_for_pair
 from sports_hedge.application.price_engine import (
     _canonical_kalshi_market,
     _canonical_polymarket_market,
     _sport_for_identity,
 )
+from sports_hedge.application.provider_access import DEFAULT_PROVIDER_CONCURRENCY
 from sports_hedge.application.target_competitions import (
     PRINCIPAL_OPERATOR_COMPETITION_COUNT,
     TargetCompetitionCode,
@@ -42,13 +42,26 @@ from sports_hedge.application.target_competitions import (
     selected_includes_nfl,
     selected_includes_soccer,
 )
-from sports_hedge.catalogue.admission import catalogue_allows_live_execution, catalogue_allows_solver
+from sports_hedge.catalogue.admission import (
+    catalogue_allows_live_execution,
+    catalogue_allows_solver,
+)
 from sports_hedge.catalogue.classify import classify_pair
 from sports_hedge.catalogue.states import CatalogueApprovalState
-from sports_hedge.domain.football import CanonicalEvent, CanonicalMarket, CanonicalOutcome, CanonicalRunner, FootballPeriod, MarketFamily
+from sports_hedge.domain.football import (
+    CanonicalEvent,
+    CanonicalMarket,
+    CanonicalOutcome,
+    CanonicalRunner,
+    FootballPeriod,
+    MarketFamily,
+)
 from sports_hedge.domain.models import VenueName
 from sports_hedge.facts.aliases import football_alias_registry, resolve_team_name
-from sports_hedge.matching.approved_register import canonical_key_for_market, registered_canonical_key
+from sports_hedge.matching.approved_register import (
+    canonical_key_for_market,
+    registered_canonical_key,
+)
 from sports_hedge.matching.events import EventMatcher
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.nba.constants import (
@@ -299,7 +312,7 @@ def test_kalshi_new_york_city_label_resolves_via_nyk_ticker() -> None:
 
 
 def test_polymarket_captured_moneyline_spread_and_total() -> None:
-    event, moneyline, raw_ml = _normalize_pm_family("moneyline")
+    event, moneyline, _raw_ml = _normalize_pm_family("moneyline")
     assert event.home_team == "san antonio spurs"
     assert event.away_team == "new york knicks"
     assert event.source_event_id == "567958"
@@ -308,7 +321,7 @@ def test_polymarket_captured_moneyline_spread_and_total() -> None:
         "110136933550893624733134445460153301975615510734202337526927943993346922198810",
         "71785764076184626205908849503698513178149020682140821352707942313255784790169",
     }
-    _, spread, raw_spread = _normalize_pm_family("spreads")
+    _, spread, _raw_spread = _normalize_pm_family("spreads")
     assert spread.family is MarketFamily.POINT_SPREAD
     assert spread.line == Decimal("-5.5")
     assert canonical_key_for_market(spread) == f"{CANONICAL_NBA_POINT_SPREAD}:-5.5"
@@ -511,8 +524,8 @@ def test_automatic_settlement_fails_closed_without_lifecycle_proof() -> None:
                 venue=VenueName.POLYMARKET,
                 outcome="home",
                 currency="USD",
-                requested_stake=Decimal("1"),
-                filled_stake=Decimal("1"),
+                requested_stake=Decimal(1),
+                filled_stake=Decimal(1),
                 displayed_odds=Decimal("1.9"),
                 filled_odds=Decimal("1.9"),
                 source_market_id="synthetic-bosdet-ml",
@@ -524,8 +537,8 @@ def test_automatic_settlement_fails_closed_without_lifecycle_proof() -> None:
                 venue=VenueName.KALSHI,
                 outcome="away",
                 currency="USD",
-                requested_stake=Decimal("1"),
-                filled_stake=Decimal("1"),
+                requested_stake=Decimal(1),
+                filled_stake=Decimal(1),
                 displayed_odds=Decimal("2.1"),
                 filled_odds=Decimal("2.1"),
                 source_market_id="KXNBAGAME-26OCT20BOSDET-BOS",
@@ -567,6 +580,7 @@ def test_automatic_settlement_fails_closed_without_lifecycle_proof() -> None:
         },
     )
     assert ready.blocker is None
+    assert ready.winning_outcome == "away"
     cancelled = nba_lifecycle_observation(["cancelled"], observed_at=NOW)
     blocked_trade = proven.model_copy(update={"audit": list(proven.audit)})
     blocked_trade.audit.append(
@@ -659,6 +673,7 @@ def test_matchbook_pairs_are_not_paper_admitted() -> None:
     assert registered_canonical_key(matchbook, pm) is None
     assert MarketMatcher().match(matchbook, kalshi).matched is False
     assert pair_identity_from_markets(matchbook, kalshi) is None
+    assert pair_identity_from_markets(matchbook, pm) is None
 
 
 def test_game_winner_catalogue_preserves_exact_native_ids() -> None:
