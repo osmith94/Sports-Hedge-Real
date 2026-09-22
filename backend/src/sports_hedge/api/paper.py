@@ -100,6 +100,7 @@ from sports_hedge.paper.chain import SimulatePaperFillRequest, SimulatePaperFill
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.preparation import PreparedPaperDeployment, PreparePaperDeploymentRequest
+from sports_hedge.paper.active_trade_read_model import annotate_active_trade_economics
 from sports_hedge.paper.trades import (
     PaperManualSettlementRequest,
     PaperSettlementOptions,
@@ -1908,18 +1909,24 @@ def paper_trade_summary(
     return operations.book_summary()
 
 
+def _annotated_trade(trade: PaperTrade) -> PaperTrade:
+    """Attach console exit read fields. Does not persist or reprice."""
+
+    return annotate_active_trade_economics(trade)
+
+
 @router.get("/trades/active", response_model=list[PaperTrade])
 def active_paper_trades(
     operations: PaperOperationsService = Depends(get_paper_operations_service),
 ) -> list[PaperTrade]:
-    return operations.list_active_trades()
+    return [_annotated_trade(trade) for trade in operations.list_active_trades()]
 
 
 @router.get("/trades/closed", response_model=list[PaperTrade])
 def closed_paper_trades(
     operations: PaperOperationsService = Depends(get_paper_operations_service),
 ) -> list[PaperTrade]:
-    return operations.list_closed_trades()
+    return [_annotated_trade(trade) for trade in operations.list_closed_trades()]
 
 
 @router.get("/trades/position-management", response_model=list[PositionManagementSnapshot])
@@ -1958,7 +1965,7 @@ def paper_trade_detail(
     operations: PaperOperationsService = Depends(get_paper_operations_service),
 ) -> PaperTradeDetail:
     try:
-        return operations.trade_detail(trade_id)
+        return _annotated_trade(operations.trade_detail(trade_id))
     except PaperOperationsError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

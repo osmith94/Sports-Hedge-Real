@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { LiveRefreshStatus, SystemLoadSummary } from "./api";
-import { systemLoadLines } from "./system-load-display";
+import { systemLoadDetailLines, systemLoadLines } from "./system-load-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = join(here, "..");
@@ -58,23 +58,43 @@ function status(overrides: Partial<LiveRefreshStatus> = {}): LiveRefreshStatus {
 
 describe("system load display", () => {
   it("formats compact copy from backend system_load only", () => {
-    const lines = systemLoadLines(load());
+    const lines = systemLoadLines(load({
+      hot: {
+        fixtures: 8,
+        pricing_fixtures: 0,
+        working_set: 18,
+        due: 4,
+        cadence_seconds: 30,
+        health: "healthy",
+      },
+      background: { working_set: 29, pricing_fixtures: 29, due: 6, cadence_seconds: 60, health: "healthy" },
+      universe: {
+        evaluated: 16,
+        total: 759,
+        remaining: 743,
+        cadence_seconds: 600,
+        generation_budget_seconds: 150,
+        worker_state: "running",
+        health: "running",
+      },
+      active_trade: { open_trades: 4, due: 0, overdue: 0, cadence_seconds: 5, capital_locked_gbp: "58.95" },
+    }));
     assert.deepEqual(
       lines.map((line) => `${line.key}  ${line.detail}`),
       [
-        "ACTIVE TRADE  0 open · 0 due · cadence 5s",
-        "HOT pricing  8 fixtures · 18 items · 4 due · cycle 3.8s / 30s (13%)",
-        "BACKGROUND pricing  31 items · 6 due · cadence 90s",
-        "UNIVERSE discovery  24/30 evaluated · cadence 600s · 42s / 150s",
-        "MB  2/4 in use · queue 0",
-        "K  1/4 in use · queue 0",
-        "ALL  49 catalogue items",
+        "HOT  0 fixtures · healthy · 30s",
+        "BACKGROUND  29 fixtures · healthy · 60s",
+        "UNIVERSE  16/759 · running · 150s chunk",
+        "ACTIVE TRADES  4 open · £58.95 locked",
       ],
     );
+    const detail = systemLoadDetailLines(load());
+    assert.match(detail.map((line) => line.detail).join(" "), /8 fixtures · 18 items/);
+    assert.match(detail.map((line) => `${line.key} ${line.detail}`).join(" "), /MB/);
   });
 
   it("labels generation work above the chunk wall as cumulative, not a blown budget", () => {
-    const lines = systemLoadLines(
+    const universe = systemLoadDetailLines(
       load({
         universe: {
           evaluated: 16,
@@ -85,13 +105,12 @@ describe("system load display", () => {
           generation_budget_seconds: 150,
         },
       }),
-    );
-    const universe = lines.find((line) => line.key === "UNIVERSE discovery");
+    ).find((line) => line.key === "UNIVERSE discovery");
     assert.match(universe?.detail ?? "", /946s cumulative \/ 150s chunk/);
   });
 
     it("appends wait, service latency, deadline misses and saturation without p50 language", () => {
-    const lines = systemLoadLines(
+    const lines = systemLoadDetailLines(
       load({
         matchbook: {
           inflight: 4,
@@ -113,7 +132,7 @@ describe("system load display", () => {
   });
 
   it("keeps fixture count distinct from catalogue items using backend fields", () => {
-    const lines = systemLoadLines(
+    const lines = systemLoadDetailLines(
       load({
         hot: { fixtures: 1, working_set: 3, due: 3, last_cycle_ms: 1200, cadence_seconds: 30 },
         catalogue_items: 3,
@@ -121,10 +140,17 @@ describe("system load display", () => {
     );
     assert.match(lines[1].detail, /1 fixtures · 3 items/);
     assert.equal(lines[6].detail, "3 catalogue items");
+    const compact = systemLoadLines(
+      load({
+        hot: { fixtures: 12, pricing_fixtures: 1, working_set: 3, cadence_seconds: 30 },
+      }),
+    );
+    assert.match(compact[0].detail, /1 fixtures/);
+    assert.doesNotMatch(compact[0].detail, /12 fixtures/);
   });
 
   it("displays backend missing cycle duration without computing utilisation", () => {
-    const missing = systemLoadLines(
+    const missing = systemLoadDetailLines(
       load({
         hot: {
           fixtures: 8,
@@ -143,10 +169,10 @@ describe("system load display", () => {
 
   it("exposes ACTIVE TRADE overdue count only when capacity is late", () => {
     const hidden = systemLoadLines(load({ active_trade: { open_trades: 2, due: 2, overdue: 0, cadence_seconds: 5 } }));
-    assert.equal(hidden[0].detail, "2 open · 2 due · cadence 5s");
-    assert.doesNotMatch(hidden[0].detail, /overdue/);
+    assert.equal(hidden[3].detail, "2 open");
+    assert.doesNotMatch(hidden[3].detail, /overdue/);
     const late = systemLoadLines(load({ active_trade: { open_trades: 2, due: 2, overdue: 1, cadence_seconds: 5 } }));
-    assert.equal(late[0].detail, "2 open · 2 due · 1 overdue · cadence 5s");
+    assert.equal(late[3].detail, "2 open · 1 overdue");
   });
 
   it("does not reconstruct load from raw lane or provider fields when system_load is absent", () => {

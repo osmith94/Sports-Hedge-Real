@@ -56,7 +56,8 @@ export type OpportunityMonitorStateBadge =
   | "QUALIFYING"
   | "NEAR"
   | "BELOW BREAK-EVEN"
-  | "REJECTED";
+  | "REJECTED"
+  | "SINGLE VENUE";
 
 export type OpportunityMonitorLegView = {
   outcome: string;
@@ -203,6 +204,11 @@ export function opportunityMonitorRows(
 export function opportunityMonitorState(item: NearOpportunity): OpportunityMonitorStateBadge {
   // Primary state is economic/radar classification. Quote freshness is a
   // separate Lane / freshness property and a paper-entry gate, not a badge.
+  const reasons = [...item.rejection_reasons, ...item.insufficiency_reasons];
+  const singleVenue =
+    reasons.some((reason) => reason.toLowerCase().includes("single_venue"))
+    || String(item.classification || "").toLowerCase().includes("single_venue");
+  if (singleVenue) return "SINGLE VENUE";
   const net = number(item.current_net_edge);
   if (net !== null && net < 0) {
     return "BELOW BREAK-EVEN";
@@ -216,7 +222,6 @@ export function opportunityMonitorState(item: NearOpportunity): OpportunityMonit
   if (NEAR_STATUSES.has(item.status)) {
     return "NEAR";
   }
-  const reasons = [...item.rejection_reasons, ...item.insufficiency_reasons];
   if (reasons.length) return "REJECTED";
   return "NEAR";
 }
@@ -486,14 +491,14 @@ export function compareDefaultOpportunityOrder(
   left: OpportunityMonitorRow,
   right: OpportunityMonitorRow,
 ): number {
-  const stateDelta = defaultStateRank(left.state) - defaultStateRank(right.state);
-  if (stateDelta !== 0) return stateDelta;
   const leftMissing = left.netEdge === null ? 1 : 0;
   const rightMissing = right.netEdge === null ? 1 : 0;
   if (leftMissing !== rightMissing) return leftMissing - rightMissing;
   if (left.netEdge !== null && right.netEdge !== null && left.netEdge !== right.netEdge) {
     return right.netEdge - left.netEdge;
   }
+  const stateDelta = defaultStateRank(left.state) - defaultStateRank(right.state);
+  if (stateDelta !== 0) return stateDelta;
   const leftAge = parseObservationTimestampMs(left.observedAt);
   const rightAge = parseObservationTimestampMs(right.observedAt);
   if (leftAge === null && rightAge === null) return left.id.localeCompare(right.id);

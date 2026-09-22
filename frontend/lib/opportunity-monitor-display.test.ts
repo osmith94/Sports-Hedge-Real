@@ -337,7 +337,7 @@ describe("opportunity monitor state badges", () => {
 });
 
 describe("opportunity monitor default ordering and user sort", () => {
-  it("defaults to qualifying, then near, then other current, then highest net edge, then recency", () => {
+  it("defaults to net edge descending and keeps null economics below priced rows", () => {
     const rows = [
       opportunityMonitorRow(
         watch({
@@ -396,7 +396,7 @@ describe("opportunity monitor default ordering and user sort", () => {
     const sorted = sortOpportunityMonitor(rows, null);
     assert.deepEqual(
       sorted.map((row) => row.id),
-      ["qual-high", "qual-low", "stale", "near-new", "near-old", "below"],
+      ["stale", "qual-high", "qual-low", "near-new", "near-old", "below"],
     );
     assert.equal(compareDefaultOpportunityOrder(rows[4], rows[3]) < 0, true);
   });

@@ -1079,18 +1079,21 @@ export function RunPaperScan() {
             Clear universe does not call providers and does not cancel HOT, BACKGROUND or ACTIVE TRADE.
           </div>
         </details>
-        <div className="scan-note scan-status-lines" aria-label="ACTIVE TRADE, HOT pricing, BACKGROUND pricing and UNIVERSE discovery status">
-          {dualScanStatusLines(liveRefresh, nowMs).map((line) => (
-            <div key={line}>{line}</div>
-          ))}
-          {autoRefresh
-            ? serverOwned
-              ? scannerStopped
-                ? " · view refresh on · scanner stopped by operator"
-                : " · auto on · view refresh · server owns HOT / BACKGROUND / UNIVERSE"
-              : " · auto on · view refresh"
-            : " · view refresh off"}
-        </div>
+        <details className="scan-help">
+          <summary>Diagnostics / lane status</summary>
+          <div className="scan-note scan-status-lines" aria-label="ACTIVE TRADE, HOT pricing, BACKGROUND pricing and UNIVERSE discovery status">
+            {dualScanStatusLines(liveRefresh, nowMs).map((line) => (
+              <div key={line}>{line}</div>
+            ))}
+            {autoRefresh
+              ? serverOwned
+                ? scannerStopped
+                  ? " · view refresh on · scanner stopped by operator"
+                  : " · auto on · view refresh · server owns HOT / BACKGROUND / UNIVERSE"
+                : " · auto on · view refresh"
+              : " · view refresh off"}
+          </div>
+        </details>
         <ActiveTradeLog recentItems={liveRefresh?.active_trade_timeline} compact />
         <VenueLaneControls
           status={liveRefresh}

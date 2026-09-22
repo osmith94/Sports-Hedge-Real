@@ -15,6 +15,11 @@ import {
 import { percent } from "./format";
 
 export const HOT_ZONE_KICKER = "HOT Zone";
+export const HOT_PRICING_HEADING = "HOT PRICING";
+export const DEFERRED_CROSS_VENUE_HEADING = "DEFERRED / AWAITING CROSS-VENUE";
+export const POST_KICKOFF_PENDING_HEADING = "POST-KICKOFF PENDING";
+export const DEFERRED_NOT_HOT_CAPACITY =
+  "Retained by current state. Not consuming HOT pricing capacity.";
 export const HOT_ROSTER_TITLE = "HOT pricing fixtures";
 
 export const HOT_ROSTER_COPY =
@@ -63,9 +68,65 @@ export function isHotScanLane(lane: string | null | undefined): boolean {
   return String(lane || "").trim().toLowerCase() === "hot";
 }
 
+const AWAITING_CROSS_VENUE_STATES = new Set([
+  "single_venue_no_cross_venue_candidate",
+  "cross_venue_unavailable",
+  "hot_relationship_missing",
+]);
+
+export function isAwaitingCrossVenue(item: DiscoveredFixture): boolean {
+  return AWAITING_CROSS_VENUE_STATES.has(String(item.market_evaluation_state || ""));
+}
+
+export function isPostKickoffPending(item: DiscoveredFixture): boolean {
+  return (item.hot_reasons ?? []).includes(HOT_REASON_POST_KICKOFF_STATUS_PENDING);
+}
+
 export function hotFixtures(status: LiveRefreshStatus | null | undefined): DiscoveredFixture[] {
   const fixtures = status?.discovered_fixtures ?? [];
   return fixtures.filter((item) => isHotScanLane(item.scan_lane));
+}
+
+export function deferredAwaitingFixtures(
+  status: LiveRefreshStatus | null | undefined,
+): DiscoveredFixture[] {
+  const fixtures = status?.discovered_fixtures ?? [];
+  return fixtures.filter((item) => isAwaitingCrossVenue(item));
+}
+
+export function postKickoffPendingFixtures(
+  status: LiveRefreshStatus | null | undefined,
+): DiscoveredFixture[] {
+  return hotFixtures(status).filter(
+    (item) => isPostKickoffPending(item) && !isAwaitingCrossVenue(item),
+  );
+}
+
+function finiteCount(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.trunc(value));
+  return null;
+}
+
+export function hotPricingCount(status: LiveRefreshStatus | null | undefined): number {
+  const priced = finiteCount(status?.price_engine?.hot?.pricing_fixtures);
+  if (priced != null) return priced;
+  const worker = finiteCount(status?.hot?.fixture_count);
+  const lane = hotFixtures(status);
+  const deferredLane = lane.filter((item) => isAwaitingCrossVenue(item));
+  if (worker != null) {
+    if (lane.length > 0 && deferredLane.length === lane.length) return 0;
+    return worker;
+  }
+  return lane.filter((item) => !isAwaitingCrossVenue(item) && !isPostKickoffPending(item)).length;
+}
+
+export function hotPricingFixtures(
+  status: LiveRefreshStatus | null | undefined,
+): DiscoveredFixture[] {
+  if (hotPricingCount(status) <= 0) return [];
+  return hotFixtures(status).filter(
+    (item) => !isAwaitingCrossVenue(item) && !isPostKickoffPending(item),
+  );
 }
 
 export function hotReasonLabels(item: DiscoveredFixture): string[] {
@@ -109,8 +170,8 @@ export function hotRosterBadgeLabel(
   status: LiveRefreshStatus | null,
 ): string {
   if (!available || !status) return "UNAVAILABLE";
-  const count = hotFixtures(status).length;
-  return count ? `${count} HOT` : "EMPTY";
+  const count = hotPricingCount(status);
+  return count ? `${count} HOT PRICING` : "HOT PRICING 0";
 }
 
 function diagnosticCount(diagnostics: Record<string, unknown> | null | undefined, key: string): number | null {
@@ -138,11 +199,18 @@ export function hotPaperDecisionCount(status: LiveRefreshStatus | null): number 
 }
 
 export function fastScanRosterSummary(status: LiveRefreshStatus | null): string {
-  const hotCount = status?.hot?.fixture_count ?? hotFixtures(status).length;
+  const hotCount = hotPricingCount(status);
   const evaluated = status?.hot?.evaluated_count ?? 0;
   const decisions = hotPaperDecisionCount(status);
   const decisionLabel = decisions == null ? "— paper decisions" : `${decisions} paper decisions`;
-  return `${hotCount} HOT · ${evaluated} evaluated · ${decisionLabel}`;
+  const cadence = status?.hot?.cadence_seconds;
+  const cadenceLabel = cadence ? ` · ${cadence}s` : "";
+  return `HOT PRICING ${hotCount}${cadenceLabel} · ${evaluated} evaluated · ${decisionLabel}`;
+}
+
+export function deferredRosterSummary(status: LiveRefreshStatus | null): string {
+  const count = deferredAwaitingFixtures(status).length;
+  return `${DEFERRED_CROSS_VENUE_HEADING} ${count} · ${DEFERRED_NOT_HOT_CAPACITY}`;
 }
 
 export function hotEvaluationLabel(item: DiscoveredFixture): string {
@@ -210,5 +278,19 @@ export function hotFixtureRows(
   status: LiveRefreshStatus | null,
   nowMs: number | null = null,
 ): HotFixtureRow[] {
-  return hotFixtures(status).map((item) => hotFixtureRow(item, nowMs));
+  return hotPricingFixtures(status).map((item) => hotFixtureRow(item, nowMs));
+}
+
+export function deferredFixtureRows(
+  status: LiveRefreshStatus | null,
+  nowMs: number | null = null,
+): HotFixtureRow[] {
+  return deferredAwaitingFixtures(status).map((item) => hotFixtureRow(item, nowMs));
+}
+
+export function postKickoffPendingRows(
+  status: LiveRefreshStatus | null,
+  nowMs: number | null = null,
+): HotFixtureRow[] {
+  return postKickoffPendingFixtures(status).map((item) => hotFixtureRow(item, nowMs));
 }

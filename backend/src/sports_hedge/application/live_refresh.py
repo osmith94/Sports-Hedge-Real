@@ -4771,6 +4771,7 @@ class LiveRefreshCoordinator:
                     "system_load": system_load_from_status(
                         self.status,
                         universe_work_used_s=self._status_universe_work_used(),
+                        active_trade_locked_gbp=self._active_trade_locked_gbp(),
                     ),
                     "active_trade_timeline": self._recent_active_trade_timeline(),
                 }
@@ -5144,6 +5145,32 @@ class LiveRefreshCoordinator:
         if nxt is None:
             return 0.05
         return max(0.05, (nxt - now).total_seconds())
+
+    def _active_trade_locked_gbp(self) -> float | None:
+        """Persisted open-trade GBP lock. Read-only; never a venue call."""
+
+        try:
+            from sports_hedge.api.paper import get_paper_operations_service
+            from sports_hedge.api.priority_alerts import get_priority_alert_service
+            from sports_hedge.api.watchlist import get_watchlist_service
+
+            operations = get_paper_operations_service(
+                get_watchlist_service(), get_priority_alert_service()
+            )
+            trades = operations.list_active_trades()
+        except Exception:
+            return None
+        total = 0.0
+        seen = False
+        for trade in trades:
+            locked = getattr(trade, "capital_locked_gbp", None)
+            if locked is None:
+                continue
+            seen = True
+            total += float(locked)
+        if not seen:
+            return 0.0 if not trades else None
+        return total
 
     def _active_trade_status_snapshot(
         self,

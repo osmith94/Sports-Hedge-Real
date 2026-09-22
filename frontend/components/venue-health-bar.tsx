@@ -102,19 +102,22 @@ export function VenueHealthBar() {
             </span>
           ) : null}
         </div>
-        <div className="status-lanes" aria-label="Scanner lane status">
-          {dualScanStatusLines(refresh, nowMs).map((line) => {
-            const sep = line.indexOf(" · ");
-            const key = sep >= 0 ? line.slice(0, sep) : line;
-            const detail = sep >= 0 ? line.slice(sep + 3) : "";
-            return (
-              <div className="status-lane" key={line} title={line} aria-label={line}>
-                <span className="status-lane-key">{key}</span>
-                <span className="status-lane-detail">{detail}</span>
-              </div>
-            );
-          })}
-        </div>
+        <details className="status-lanes-diagnostics">
+          <summary>Lane diagnostics</summary>
+          <div className="status-lanes" aria-label="Scanner lane status">
+            {dualScanStatusLines(refresh, nowMs).map((line) => {
+              const sep = line.indexOf(" · ");
+              const key = sep >= 0 ? line.slice(0, sep) : line;
+              const detail = sep >= 0 ? line.slice(sep + 3) : "";
+              return (
+                <div className="status-lane" key={line} title={line} aria-label={line}>
+                  <span className="status-lane-key">{key}</span>
+                  <span className="status-lane-detail">{detail}</span>
+                </div>
+              );
+            })}
+          </div>
+        </details>
         {refresh?.last_error ? (
           <span className="status-item status-item-error">{refresh.last_error}</span>
         ) : null}

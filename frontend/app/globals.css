@@ -592,6 +592,15 @@ tr:last-child td { border-bottom: none; }
   background: var(--accent-soft);
   white-space: nowrap;
 }
+.hot-reason-chip-deferred {
+  color: var(--amber);
+  border-color: rgba(241, 191, 105, .28);
+  background: rgba(241, 191, 105, .08);
+}
+.hot-deferred-block { margin-top: 12px; }
+.system-load-diagnostics { grid-column: 1 / -1; }
+.system-load-diagnostics summary { cursor: pointer; color: var(--muted); font-size: 10px; }
+.system-load-detail-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 10px; margin-top: 8px; }
 .scan-cycle-history-panel { margin-bottom: 16px; }
 .scan-cycle-history-panel .panel { margin-top: 0; }
 .scan-cycle-table td { vertical-align: top; }
@@ -600,7 +609,7 @@ tr:last-child td { border-bottom: none; }
 .scan-help .scan-note { margin-top: 8px; }
 .scan-status-lines { margin-top: 10px; }
 table.ops-compact { min-width: 0; }
-table.ops-compact td.paper-trade-fixture { white-space: normal; max-width: 240px; vertical-align: top; }
+table.paper-trade-compact td.paper-trade-fixture { white-space: normal; max-width: 240px; vertical-align: top; }
 .paper-trade-fixture-name {
   display: block;
   max-width: 100%;
@@ -613,9 +622,10 @@ table.ops-compact td.paper-trade-fixture { white-space: normal; max-width: 240px
 .paper-trade-market { color: var(--muted); font-size: 10px; font-weight: 650; margin-top: 2px; }
 .paper-trade-actions { margin-top: 3px; color: var(--muted-2); font-size: 10px; font-weight: 500; }
 .paper-trade-actions .panel-meta { display: inline; }
-table.ops-compact td.paper-trade-legs { white-space: normal; max-width: 280px; }
+table.paper-trade-compact td.paper-trade-legs { white-space: normal; max-width: 280px; }
 .paper-trade-leg { font-size: 10px; line-height: 1.4; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-table.ops-compact td.paper-trade-management { white-space: normal; max-width: 200px; }
+table.paper-trade-compact td.paper-trade-management { white-space: normal; max-width: 160px; }
+table.paper-trade-compact td { padding: 6px 8px; }
 .treasury-carrying { white-space: nowrap; }
 .treasury-carrying-value { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
 .treasury-carrying-source { color: var(--muted-2); font-size: 10px; margin-top: 2px; }
