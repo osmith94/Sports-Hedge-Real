@@ -1,0 +1,240 @@
+{
+  "fixture_id": "ncaab-matchbook_events_basketball_current-2026-09-22",
+  "identified_as": "CAPTURED Matchbook basketball sport-id 4 events. No NCAA/NCAAB competition tag in this window. WNBA games + NBA championship outright only.",
+  "source": "https://api.matchbook.com/edge/rest/events?sport-ids=4",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "total": 6,
+    "events": [
+      {
+        "id": 34406649938500081,
+        "name": "Connecticut Sun at Washington Mystics",
+        "sport-id": 4,
+        "status": "open",
+        "start": "2026-09-22T23:30:00.000Z",
+        "in-running-flag": false,
+        "meta-tags": [
+          {
+            "id": 4,
+            "name": "Basketball",
+            "type": "SPORT",
+            "url-name": "basketball"
+          },
+          {
+            "id": 410468520880009,
+            "name": "Live Betting",
+            "type": "OTHER",
+            "url-name": "live-betting"
+          },
+          {
+            "id": 502879947700009,
+            "name": "WNBA",
+            "type": "COMPETITION",
+            "url-name": "wnba"
+          },
+          {
+            "id": 1904152202480016,
+            "name": "United States of America",
+            "type": "COUNTRY",
+            "url-name": "united-states-of-america"
+          },
+          {
+            "id": 33287185272900047,
+            "name": "September 22nd 2026",
+            "type": "DATE",
+            "url-name": "september-22nd-2026"
+          }
+        ]
+      },
+      {
+        "id": 34400914483400081,
+        "name": "Minnesota Lynx at Indiana Fever",
+        "sport-id": 4,
+        "status": "open",
+        "start": "2026-09-23T00:00:00.000Z",
+        "in-running-flag": false,
+        "meta-tags": [
+          {
+            "id": 4,
+            "name": "Basketball",
+            "type": "SPORT",
+            "url-name": "basketball"
+          },
+          {
+            "id": 410468520880009,
+            "name": "Live Betting",
+            "type": "OTHER",
+            "url-name": "live-betting"
+          },
+          {
+            "id": 502879947700009,
+            "name": "WNBA",
+            "type": "COMPETITION",
+            "url-name": "wnba"
+          },
+          {
+            "id": 1904152202480016,
+            "name": "United States of America",
+            "type": "COUNTRY",
+            "url-name": "united-states-of-america"
+          },
+          {
+            "id": 34280310046100065,
+            "name": "September 23rd 2026",
+            "type": "DATE",
+            "url-name": "september-23rd-2026"
+          }
+        ]
+      },
+      {
+        "id": 34406661417800081,
+        "name": "Toronto Tempo at Chicago Sky",
+        "sport-id": 4,
+        "status": "open",
+        "start": "2026-09-23T00:00:00.000Z",
+        "in-running-flag": false,
+        "meta-tags": [
+          {
+            "id": 4,
+            "name": "Basketball",
+            "type": "SPORT",
+            "url-name": "basketball"
+          },
+          {
+            "id": 410468520880009,
+            "name": "Live Betting",
+            "type": "OTHER",
+            "url-name": "live-betting"
+          },
+          {
+            "id": 502879947700009,
+            "name": "WNBA",
+            "type": "COMPETITION",
+            "url-name": "wnba"
+          },
+          {
+            "id": 1904152202480016,
+            "name": "United States of America",
+            "type": "COUNTRY",
+            "url-name": "united-states-of-america"
+          },
+          {
+            "id": 34280310046100065,
+            "name": "September 23rd 2026",
+            "type": "DATE",
+            "url-name": "september-23rd-2026"
+          }
+        ]
+      },
+      {
+        "id": 34406794309800081,
+        "name": "Golden State Valkyries at Portland Fire",
+        "sport-id": 4,
+        "status": "open",
+        "start": "2026-09-23T02:00:00.000Z",
+        "in-running-flag": false,
+        "meta-tags": [
+          {
+            "id": 4,
+            "name": "Basketball",
+            "type": "SPORT",
+            "url-name": "basketball"
+          },
+          {
+            "id": 410468520880009,
+            "name": "Live Betting",
+            "type": "OTHER",
+            "url-name": "live-betting"
+          },
+          {
+            "id": 502879947700009,
+            "name": "WNBA",
+            "type": "COMPETITION",
+            "url-name": "wnba"
+          },
+          {
+            "id": 1904152202480016,
+            "name": "United States of America",
+            "type": "COUNTRY",
+            "url-name": "united-states-of-america"
+          },
+          {
+            "id": 34280310046100065,
+            "name": "September 23rd 2026",
+            "type": "DATE",
+            "url-name": "september-23rd-2026"
+          }
+        ]
+      },
+      {
+        "id": 34408086917700081,
+        "name": "Los Angeles Sparks at Las Vegas Aces",
+        "sport-id": 4,
+        "status": "open",
+        "start": "2026-09-23T02:00:00.000Z",
+        "in-running-flag": false,
+        "meta-tags": [
+          {
+            "id": 4,
+            "name": "Basketball",
+            "type": "SPORT",
+            "url-name": "basketball"
+          },
+          {
+            "id": 410468520880009,
+            "name": "Live Betting",
+            "type": "OTHER",
+            "url-name": "live-betting"
+          },
+          {
+            "id": 502879947700009,
+            "name": "WNBA",
+            "type": "COMPETITION",
+            "url-name": "wnba"
+          },
+          {
+            "id": 1904152202480016,
+            "name": "United States of America",
+            "type": "COUNTRY",
+            "url-name": "united-states-of-america"
+          },
+          {
+            "id": 34280310046100065,
+            "name": "September 23rd 2026",
+            "type": "DATE",
+            "url-name": "september-23rd-2026"
+          }
+        ]
+      },
+      {
+        "id": 33613052933500045,
+        "name": "NBA Championship Winner 2026/27",
+        "sport-id": 4,
+        "status": "open",
+        "start": "2026-10-06T00:00:00.000Z",
+        "in-running-flag": false,
+        "meta-tags": [
+          {
+            "id": 4,
+            "name": "Basketball",
+            "type": "SPORT",
+            "url-name": "basketball"
+          },
+          {
+            "id": 406202315670010,
+            "name": "NBA",
+            "type": "COMPETITION",
+            "url-name": "nba"
+          },
+          {
+            "id": 489003593880009,
+            "name": "Outright Winner",
+            "type": "OTHER",
+            "url-name": "outright-winner"
+          }
+        ]
+      }
+    ]
+  }
+}

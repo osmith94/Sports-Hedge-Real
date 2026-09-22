@@ -1,0 +1,80 @@
+{
+  "fixture_id": "ncaab-polymarket_event_cbb_del_buck_moneyline-2026-09-22",
+  "identified_as": "CAPTURED historical Gamma CBB moneyline-only game. Not live quotes.",
+  "source": "https://gamma-api.polymarket.com/events/67988",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": "67988",
+    "ticker": "cbb-del-buck-2025-11-03",
+    "slug": "cbb-del-buck-2025-11-03",
+    "title": "Delaware Fightin' Blue Hens vs. Bucknell Bison",
+    "startTime": "2025-11-04T00:00:00Z",
+    "eventDate": "2025-11-03",
+    "endDate": "2025-11-04T00:00:00Z",
+    "period": "FT",
+    "score": "70-78",
+    "live": false,
+    "ended": true,
+    "closed": true,
+    "active": true,
+    "gameId": 67621,
+    "finishedTimestamp": null,
+    "seriesSlug": "ncaa-cbb",
+    "sport": {
+      "sport": "cbb",
+      "series": "10470",
+      "ordering": "away",
+      "name": "College Basketball"
+    },
+    "teams": [
+      {
+        "id": 181947,
+        "name": "Delaware Fightin' Blue Hens",
+        "league": "cbb",
+        "record": "10-21",
+        "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/team_logos/football/cbb/_del_60000133.png",
+        "abbreviation": "del",
+        "createdAt": "2025-10-29T21:14:53.024825Z",
+        "updatedAt": "2026-05-14T09:00:03.04214Z",
+        "providerId": 133,
+        "color": "#134F89",
+        "ordering": "away"
+      },
+      {
+        "id": 182071,
+        "name": "Bucknell Bison",
+        "league": "cbb",
+        "record": "10-23",
+        "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/team_logos/football/cbb/_buck_60000257.png",
+        "abbreviation": "buck",
+        "createdAt": "2025-10-29T21:14:53.234062Z",
+        "updatedAt": "2026-05-14T03:23:32.523745Z",
+        "providerId": 257,
+        "color": "#df6020",
+        "ordering": "home"
+      }
+    ],
+    "markets": [
+      {
+        "id": "655734",
+        "question": "Delaware Fightin' Blue Hens vs. Bucknell Bison",
+        "slug": "cbb-del-buck-2025-11-03",
+        "sportsMarketType": "moneyline",
+        "groupItemTitle": null,
+        "conditionId": "0x76dc5afcee33f9ef0f23ac7ca5a8c87f8222fc4ebcc165924759f763bbc388f5",
+        "clobTokenIds": "[\"44692305213586553443213716195349352583365177572007954916808717686032060963366\", \"530166155715226847793601219919380611308762269755198653475511436430066723501\"]",
+        "outcomes": "[\"Delaware Fightin' Blue Hens\", \"Bucknell Bison\"]",
+        "line": null,
+        "active": true,
+        "closed": true,
+        "umaResolutionStatus": "resolved",
+        "description": "In the upcoming CBB game, scheduled for November 3 at 7:00 PM ET:\n\nIf the Delaware Fightin' Blue Hens win, the market will resolve to \"Delaware Fightin' Blue Hens\".\n\nIf the Bucknell Bison win, the market will resolve to \"Bucknell Bison\".\n\nIf the game is postponed, this market will remain open until the game has been completed.\n\nIf the game is canceled entirely, with no make-up game, this market will resolve 50-50.\n\nThe result will be determined based on the final score including any overtime periods.",
+        "feesEnabled": false,
+        "feeSchedule": null,
+        "feeType": null
+      }
+    ]
+  },
+  "discovery": "GET /events?series_id=10470&closed=true"
+}

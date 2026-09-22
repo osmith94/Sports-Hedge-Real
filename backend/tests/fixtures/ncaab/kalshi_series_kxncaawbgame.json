@@ -1,0 +1,32 @@
+{
+  "fixture_id": "ncaab-kalshi_series_kxncaawbgame-2026-09-22",
+  "identified_as": "CAPTURED public Kalshi GET /series/KXNCAAWBGAME. Series metadata only.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/series/KXNCAAWBGAME",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "ticker": "KXNCAAWBGAME",
+    "title": "College Basketball Women's Game",
+    "category": "Sports",
+    "frequency": "custom",
+    "tags": [
+      "Basketball"
+    ],
+    "contract_terms_url": "https://assets.kalshi.com/contract_terms/ACHIEVEMENTS.pdf",
+    "settlement_sources": [
+      {
+        "name": "ESPN",
+        "url": "https://www.espn.com/"
+      },
+      {
+        "name": "Kalshi using information originating from the NCAA",
+        "url": "https://www.ncaa.com/sports/basketball-women/d1"
+      }
+    ],
+    "product_metadata": {
+      "scope": "Game"
+    },
+    "fee_type": "quadratic",
+    "fee_multiplier": 1
+  }
+}
