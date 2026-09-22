@@ -976,9 +976,11 @@ async def assign_identity_components_cooperative(
     """Same assignment as ``assign_identity_components``, yielding to the loop.
 
     Dense UNIVERSE finalize must not monopolise asyncio for the 0.25s liveness
-    bound. Prep stays sync; the per-component walk is the long tail.
+    bound. Yield before sync prep so a large node/pair index cannot occupy the
+    whole slice, then walk components with the same 0.05s cap as ClusterPass.
     """
 
+    await asyncio.sleep(0)
     prep = _prepare_identity_assignment(
         nodes,
         scored_pairs,
