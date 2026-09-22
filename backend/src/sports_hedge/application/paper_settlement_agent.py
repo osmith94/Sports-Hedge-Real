@@ -116,12 +116,19 @@ class PaperSettlementAgent:
     async def run_cycle(self, *, now: datetime | None = None) -> PaperSettlementCycleResult:
         when = now or self.now()
         result = PaperSettlementCycleResult()
+        from sports_hedge.application.event_loop_activity import (
+            close_loop_slice,
+            mark_loop_phase,
+        )
+
+        mark_loop_phase(lane="active_trade", phase="paper_settlement")
         trades = [
             trade
             for trade in self.operations.list_active_trades()
             if auto_settle_eligible(trade.state)
         ]
         result.examined = len(trades)
+        close_loop_slice()
         for trade in trades:
             try:
                 item = await self.reconcile_trade(trade, now=when)

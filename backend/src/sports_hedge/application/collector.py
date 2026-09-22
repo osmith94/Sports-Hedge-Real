@@ -19,7 +19,9 @@ from sports_hedge.application.executable_liquidity import (
     headline_band_for,
     select_fixture_headline,
 )
+from sports_hedge.application.event_loop_activity import mark_loop_phase, yield_event_loop
 from sports_hedge.application.fixture_clusters import (
+    COOP_MAX_SLICE_SECONDS,
     FixtureCluster,
     cluster_canonical_event_id,
     cluster_identity_aliases,
@@ -2968,7 +2970,16 @@ class ReadOnlyCrossVenueCollector:
         universe_lane = self._op_request_lane == ScanLane.UNIVERSE.value
         hot_lane = self._op_request_lane == ScanLane.HOT.value
         work_indexes: list[int] = []
+        mark_loop_phase(
+            lane=str(self._op_request_lane or "universe"),
+            phase="market_evaluation",
+            events=len(clusters),
+        )
+        last_yield = perf_counter()
         for index, cluster in enumerate(clusters):
+            if (perf_counter() - last_yield) >= COOP_MAX_SLICE_SECONDS:
+                await yield_event_loop()
+                last_yield = perf_counter()
             canonical_id = cluster_canonical_event_id(cluster)
             one_sided = cluster_needs_one_sided_catalogue_markets(cluster)
             if universe_lane and cluster.venue_count < 2 and not one_sided:
@@ -3104,6 +3115,9 @@ class ReadOnlyCrossVenueCollector:
         books = 0
         leftover_needed: list[FixtureCluster] = []
         for index, cluster in enumerate(clusters):
+            if (perf_counter() - last_yield) >= COOP_MAX_SLICE_SECONDS:
+                await yield_event_loop()
+                last_yield = perf_counter()
             row = results[index]
             if row is None:
                 leftover_needed.append(cluster)
