@@ -7,6 +7,8 @@ NBA_PAPER_NORMAL_COMPLETION_REASON = "owner_approved_nba_paper_normal_completion
 NBA_NOT_LIVE_EXECUTION_REASON = "nba_paper_not_live_execution_equivalent"
 NBA_SETTLEMENT_FAIL_CLOSED_REASON = "nba_exceptional_settlement_fail_closed"
 NBA_NORMAL_COMPLETION_NOT_PROVEN = "nba_normal_completion_not_proven"
+NBA_UNSUPPORTED_FAMILY_REASON = "unsupported_nba_family"
+NBA_POLYMARKET_EVIDENCE_REQUIRED = "nba_polymarket_settlement_evidence_required"
 NBA_LIFECYCLE_AUDIT_KIND = "nba_lifecycle"
 NBA_PAIR_UNAPPROVED_REASON = "nba_venue_pair_family_not_evidence_backed"
 

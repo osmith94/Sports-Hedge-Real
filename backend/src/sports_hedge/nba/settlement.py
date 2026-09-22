@@ -254,6 +254,8 @@ def nba_automatic_settlement_lifecycle_blocker(
         return NBA_SETTLEMENT_FAIL_CLOSED_REASON
     if not any(item.phase == NBA_LIFECYCLE_PRE_RESULT for item in history):
         return NBA_NORMAL_COMPLETION_NOT_PROVEN
+    if current.phase == NBA_LIFECYCLE_UNKNOWN:
+        return NBA_NORMAL_COMPLETION_NOT_PROVEN
     return None
 
 
@@ -309,6 +311,12 @@ def _status_tokens_from_payload(payload: object) -> list[str]:
             value = payload.get(key)
             if value not in (None, ""):
                 tokens.append(str(value))
+        if payload.get("closed") is True:
+            tokens.append("closed")
+        if payload.get("ended") is True:
+            tokens.append("ended")
+        if payload.get("active") is True and payload.get("closed") is not True:
+            tokens.append("active")
         nested = payload.get("event")
         if isinstance(nested, dict):
             tokens.extend(_status_tokens_from_payload(nested))

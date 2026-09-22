@@ -21,6 +21,7 @@ from sports_hedge.application.catalogue_maintenance import (
     pair_identity_from_markets,
     persist_universe_catalogue_pass,
 )
+from sports_hedge.application.collector import matchbook_scope_discovery_params
 from sports_hedge.application.complete_set import solver_model_for_pair
 from sports_hedge.application.price_engine import (
     _canonical_kalshi_market,
@@ -38,6 +39,8 @@ from sports_hedge.application.target_competitions import (
     polymarket_series_ids_for_codes,
     resolve_target_competition,
     resolve_target_competition_from_kalshi_ticker,
+    scope_kalshi_event,
+    scope_polymarket_event,
     selected_includes_nba,
     selected_includes_nfl,
     selected_includes_soccer,
@@ -68,10 +71,13 @@ from sports_hedge.nba.constants import (
     CANONICAL_NBA_GAME_WINNER,
     CANONICAL_NBA_POINT_SPREAD,
     CANONICAL_NBA_TOTAL_POINTS,
+    MATCHBOOK_NBA_COMPETITION_TAG_ID,
     NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT,
     NBA_NORMAL_COMPLETION_NOT_PROVEN,
+    NBA_POLYMARKET_EVIDENCE_REQUIRED,
     NBA_SETTLEMENT_FAIL_CLOSED_REASON,
     NBA_SPORT,
+    NBA_UNSUPPORTED_FAMILY_REASON,
 )
 from sports_hedge.nba.detect import is_nba_payload
 from sports_hedge.nba.labels import (
@@ -193,6 +199,85 @@ def _synthetic_pm_bosdet() -> dict:
             }
         ],
     }
+
+
+def _nba_game_winner_trade() -> PaperTrade:
+    return PaperTrade(
+        trade_id="nba-1",
+        opportunity_id="opp-nba",
+        canonical_event_id="KXNBAGAME-26OCT20BOSDET",
+        competition="NBA",
+        home_team="Detroit Pistons",
+        away_team="Boston Celtics",
+        market_family=MarketFamily.GAME_WINNER,
+        period=FootballPeriod.FULL_TIME,
+        state=PaperTradeState.OPEN,
+        opened_at=NOW,
+        last_updated_at=NOW,
+        legs=[
+            PaperTradeLeg(
+                venue=VenueName.POLYMARKET,
+                outcome="home",
+                currency="USD",
+                requested_stake=Decimal(1),
+                filled_stake=Decimal(1),
+                displayed_odds=Decimal("1.9"),
+                filled_odds=Decimal("1.9"),
+                source_market_id="synthetic-bosdet-ml",
+                source_event_id="synthetic-bosdet-pm",
+                source_runner_id="110136933550893624733134445460153301975615510734202337526927943993346922198810",
+                fill_kind=PaperLegFillKind.INTERNAL_SIMULATED,
+            ),
+            PaperTradeLeg(
+                venue=VenueName.KALSHI,
+                outcome="away",
+                currency="USD",
+                requested_stake=Decimal(1),
+                filled_stake=Decimal(1),
+                displayed_odds=Decimal("2.1"),
+                filled_odds=Decimal("2.1"),
+                source_market_id="KXNBAGAME-26OCT20BOSDET-BOS",
+                source_event_id="KXNBAGAME-26OCT20BOSDET",
+                source_contract_id="KXNBAGAME-26OCT20BOSDET-BOS",
+                fill_kind=PaperLegFillKind.INTERNAL_SIMULATED,
+            ),
+        ],
+    )
+
+
+def _kalshi_bos_finalized() -> dict[str, dict]:
+    return {
+        "KXNBAGAME-26OCT20BOSDET-BOS": {
+            "ticker": "KXNBAGAME-26OCT20BOSDET-BOS",
+            "status": "finalized",
+            "result": "yes",
+        }
+    }
+
+
+def _pm_resolved(*, celtics_win: bool, prices: list[str] | None = None) -> dict:
+    if prices is None:
+        prices = ["0", "1"] if celtics_win else ["1", "0"]
+    return {
+        "id": "synthetic-bosdet-ml",
+        "closed": True,
+        "umaResolutionStatus": "resolved",
+        "outcomes": ["Pistons", "Celtics"],
+        "outcomePrices": prices,
+    }
+
+
+def _with_nba_pre_result(trade: PaperTrade) -> PaperTrade:
+    proven = trade.model_copy(update={"audit": []})
+    in_play = nba_lifecycle_observation(["open", "active"], observed_at=NOW)
+    proven.audit.append(
+        PaperTradeAuditEvent(
+            occurred_at=NOW,
+            event_type=PaperTradeAuditEventType.NBA_LIFECYCLE_OBSERVED,
+            detail=nba_lifecycle_audit_detail(in_play),
+        )
+    )
+    return proven
 
 
 def test_thirty_franchises_and_city_ambiguity() -> None:
@@ -507,80 +592,17 @@ def test_automatic_settlement_fails_closed_without_lifecycle_proof() -> None:
     assert nba_exceptional_status_blocker("cancelled") == NBA_SETTLEMENT_FAIL_CLOSED_REASON
     assert nba_exceptional_status_blocker("fair price") == NBA_SETTLEMENT_FAIL_CLOSED_REASON
     assert nba_exceptional_status_blocker("50-50") == NBA_SETTLEMENT_FAIL_CLOSED_REASON
-    trade = PaperTrade(
-        trade_id="nba-1",
-        opportunity_id="opp-nba",
-        canonical_event_id="KXNBAGAME-26OCT20BOSDET",
-        competition="NBA",
-        home_team="Detroit Pistons",
-        away_team="Boston Celtics",
-        market_family=MarketFamily.GAME_WINNER,
-        period=FootballPeriod.FULL_TIME,
-        state=PaperTradeState.OPEN,
-        opened_at=NOW,
-        last_updated_at=NOW,
-        legs=[
-            PaperTradeLeg(
-                venue=VenueName.POLYMARKET,
-                outcome="home",
-                currency="USD",
-                requested_stake=Decimal(1),
-                filled_stake=Decimal(1),
-                displayed_odds=Decimal("1.9"),
-                filled_odds=Decimal("1.9"),
-                source_market_id="synthetic-bosdet-ml",
-                source_event_id="synthetic-bosdet-pm",
-                source_runner_id="110136933550893624733134445460153301975615510734202337526927943993346922198810",
-                fill_kind=PaperLegFillKind.INTERNAL_SIMULATED,
-            ),
-            PaperTradeLeg(
-                venue=VenueName.KALSHI,
-                outcome="away",
-                currency="USD",
-                requested_stake=Decimal(1),
-                filled_stake=Decimal(1),
-                displayed_odds=Decimal("2.1"),
-                filled_odds=Decimal("2.1"),
-                source_market_id="KXNBAGAME-26OCT20BOSDET-BOS",
-                source_event_id="KXNBAGAME-26OCT20BOSDET",
-                source_contract_id="KXNBAGAME-26OCT20BOSDET-BOS",
-                fill_kind=PaperLegFillKind.INTERNAL_SIMULATED,
-            ),
-        ],
-    )
-    graded = resolve_paper_trade_settlement(
-        trade,
-        kalshi_markets={
-            "KXNBAGAME-26OCT20BOSDET-BOS": {
-                "ticker": "KXNBAGAME-26OCT20BOSDET-BOS",
-                "status": "finalized",
-                "result": "yes",
-            }
-        },
-    )
-    assert graded.winning_outcome is None
-    assert graded.blocker == NBA_NORMAL_COMPLETION_NOT_PROVEN
-    proven = trade.model_copy(update={"audit": []})
-    in_play = nba_lifecycle_observation(["open"], observed_at=NOW)
-    proven.audit.append(
-        PaperTradeAuditEvent(
-            occurred_at=NOW,
-            event_type=PaperTradeAuditEventType.NBA_LIFECYCLE_OBSERVED,
-            detail=nba_lifecycle_audit_detail(in_play),
-        )
-    )
-    ready = resolve_paper_trade_settlement(
+    trade = _nba_game_winner_trade()
+    kalshi_only = resolve_paper_trade_settlement(trade, kalshi_markets=_kalshi_bos_finalized())
+    assert kalshi_only.winning_outcome is None
+    assert kalshi_only.blocker == NBA_NORMAL_COMPLETION_NOT_PROVEN
+    proven = _with_nba_pre_result(trade)
+    still_kalshi_only = resolve_paper_trade_settlement(
         proven,
-        kalshi_markets={
-            "KXNBAGAME-26OCT20BOSDET-BOS": {
-                "ticker": "KXNBAGAME-26OCT20BOSDET-BOS",
-                "status": "finalized",
-                "result": "yes",
-            }
-        },
+        kalshi_markets=_kalshi_bos_finalized(),
     )
-    assert ready.blocker is None
-    assert ready.winning_outcome == "away"
+    assert still_kalshi_only.winning_outcome is None
+    assert still_kalshi_only.blocker == NBA_POLYMARKET_EVIDENCE_REQUIRED
     cancelled = nba_lifecycle_observation(["cancelled"], observed_at=NOW)
     blocked_trade = proven.model_copy(update={"audit": list(proven.audit)})
     blocked_trade.audit.append(
@@ -592,16 +614,153 @@ def test_automatic_settlement_fails_closed_without_lifecycle_proof() -> None:
     )
     later = resolve_paper_trade_settlement(
         blocked_trade,
-        kalshi_markets={
-            "KXNBAGAME-26OCT20BOSDET-BOS": {
-                "ticker": "KXNBAGAME-26OCT20BOSDET-BOS",
-                "status": "finalized",
-                "result": "yes",
-            }
-        },
+        kalshi_markets=_kalshi_bos_finalized(),
+        polymarket_market=_pm_resolved(celtics_win=True),
     )
     assert later.winning_outcome is None
     assert later.blocker == NBA_SETTLEMENT_FAIL_CLOSED_REASON
+
+
+def test_nba_kalshi_polymarket_winner_requires_polymarket_evidence() -> None:
+    proven = _with_nba_pre_result(_nba_game_winner_trade())
+    missing_pm = resolve_paper_trade_settlement(
+        proven,
+        kalshi_markets=_kalshi_bos_finalized(),
+    )
+    assert missing_pm.winning_outcome is None
+    assert missing_pm.blocker == NBA_POLYMARKET_EVIDENCE_REQUIRED
+    split = resolve_paper_trade_settlement(
+        proven,
+        kalshi_markets=_kalshi_bos_finalized(),
+        polymarket_market=_pm_resolved(celtics_win=True, prices=["0.5", "0.5"]),
+    )
+    assert split.winning_outcome is None
+    assert split.blocker == NBA_SETTLEMENT_FAIL_CLOSED_REASON
+    unknown = resolve_paper_trade_settlement(
+        proven,
+        kalshi_markets=_kalshi_bos_finalized(),
+        polymarket_market={
+            "id": "synthetic-bosdet-ml",
+            "closed": True,
+            "umaResolutionStatus": "disputed",
+            "outcomes": ["Pistons", "Celtics"],
+            "outcomePrices": ["0", "1"],
+        },
+    )
+    assert unknown.winning_outcome is None
+    assert unknown.blocker in {
+        NBA_SETTLEMENT_FAIL_CLOSED_REASON,
+        NBA_NORMAL_COMPLETION_NOT_PROVEN,
+    }
+    cancelled_pm = resolve_paper_trade_settlement(
+        proven,
+        kalshi_markets=_kalshi_bos_finalized(),
+        polymarket_market={
+            "id": "synthetic-bosdet-ml",
+            "closed": True,
+            "umaResolutionStatus": "resolved",
+            "status": "cancelled",
+            "outcomes": ["Pistons", "Celtics"],
+            "outcomePrices": ["0.5", "0.5"],
+        },
+    )
+    assert cancelled_pm.winning_outcome is None
+    assert cancelled_pm.blocker == NBA_SETTLEMENT_FAIL_CLOSED_REASON
+    ready = resolve_paper_trade_settlement(
+        proven,
+        kalshi_markets=_kalshi_bos_finalized(),
+        polymarket_market=_pm_resolved(celtics_win=True),
+    )
+    assert ready.blocker is None
+    assert ready.winning_outcome == "away"
+    conflict = resolve_paper_trade_settlement(
+        proven,
+        kalshi_markets=_kalshi_bos_finalized(),
+        polymarket_market=_pm_resolved(celtics_win=False),
+    )
+    assert conflict.winning_outcome is None
+    assert conflict.blocker == "conflicting_provider_results"
+
+
+def test_nba_spread_and_total_trades_are_rejected_by_settlement() -> None:
+    winner = _nba_game_winner_trade()
+    spread = winner.model_copy(update={"market_family": MarketFamily.POINT_SPREAD, "line": Decimal("-5.5")})
+    total = winner.model_copy(update={"market_family": MarketFamily.TOTAL_POINTS, "line": Decimal("218.5")})
+    proven_spread = _with_nba_pre_result(spread)
+    proven_total = _with_nba_pre_result(total)
+    spread_resolution = resolve_paper_trade_settlement(
+        proven_spread,
+        kalshi_markets=_kalshi_bos_finalized(),
+        polymarket_market=_pm_resolved(celtics_win=True),
+    )
+    total_resolution = resolve_paper_trade_settlement(
+        proven_total,
+        kalshi_markets=_kalshi_bos_finalized(),
+        polymarket_market=_pm_resolved(celtics_win=True),
+    )
+    assert spread_resolution.winning_outcome is None
+    assert spread_resolution.blocker == NBA_UNSUPPORTED_FAMILY_REASON
+    assert total_resolution.winning_outcome is None
+    assert total_resolution.blocker == NBA_UNSUPPORTED_FAMILY_REASON
+    _, kalshi_spread = _normalize_kalshi_game()  # GAME_WINNER — use PM spread instead
+    _, pm_spread, _ = _normalize_pm_family("spreads")
+    _, pm_total, _ = _normalize_pm_family("totals")
+    kalshi_spread_market = kalshi_spread.model_copy(
+        update={"family": MarketFamily.POINT_SPREAD, "line": Decimal("-5.5")}
+    )
+    assert registered_canonical_key(kalshi_spread_market, pm_spread) is None
+    kalshi_total_market = kalshi_spread.model_copy(
+        update={"family": MarketFamily.TOTAL_POINTS, "line": Decimal("218.5")}
+    )
+    assert registered_canonical_key(kalshi_total_market, pm_total) is None
+
+
+def test_matchbook_nba_only_scope_uses_competition_tag() -> None:
+    nba_only = matchbook_scope_discovery_params(
+        ["nba"],
+        basketball_sport_id="4",
+        football_sport_id="15",
+        american_football_sport_id="1",
+    )
+    assert nba_only["sport-ids"] == "4"
+    assert nba_only["tag-ids"] == MATCHBOOK_NBA_COMPETITION_TAG_ID
+    mixed = matchbook_scope_discovery_params(
+        ["nba", "premier_league", "nfl"],
+        basketball_sport_id="4",
+        football_sport_id="15",
+        american_football_sport_id="1",
+    )
+    assert mixed["sport-ids"] == "15,1,4"
+    assert "tag-ids" not in mixed
+    soccer_only = matchbook_scope_discovery_params(["premier_league"], football_sport_id="15")
+    assert soccer_only == {}
+
+
+def test_scope_diagnostics_report_basketball_for_nba() -> None:
+    pm = scope_polymarket_event(
+        {
+            "id": "567958",
+            "title": "Knicks vs. Spurs",
+            "sport": {"sport": "nba", "series": "10345", "name": "NBA"},
+        },
+        selected_codes=["nba"],
+    )
+    assert pm.allowed is True
+    assert pm.sport == "basketball"
+    kalshi = scope_kalshi_event(
+        {"series_ticker": "KXNBAGAME", "ticker": "KXNBAGAME-26OCT20BOSDET", "title": "Boston vs Detroit"},
+        selected_codes=["nba"],
+    )
+    assert kalshi.allowed is True
+    assert kalshi.sport == "basketball"
+    soccer = scope_polymarket_event(
+        {
+            "id": "pm-epl",
+            "title": "Arsenal vs Chelsea",
+            "series": [{"id": "10188", "title": "Premier League"}],
+        }
+    )
+    assert soccer.sport == "football"
 
 
 def test_missing_and_synthetic_polymarket_tokens_cannot_become_executable_paper() -> None:

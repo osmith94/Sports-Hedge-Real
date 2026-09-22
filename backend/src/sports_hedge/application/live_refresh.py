@@ -5124,6 +5124,7 @@ class LiveRefreshCoordinator:
                 operations=operations,
                 matchbook=None if engine is None else engine.matchbook,
                 kalshi=None if engine is None else engine.kalshi,
+                polymarket=None if engine is None else engine.polymarket,
                 clock=self.now,
                 catalogue=get_approved_market_catalogue_store(),
             )

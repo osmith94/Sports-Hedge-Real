@@ -35,13 +35,21 @@ Normal-completion PAPER equivalence is admitted only where #453 evidence support
 
 Normalisers still parse Kalshi SPREAD/TOTAL titles and Polymarket historical x.5 books for diagnostics/catalogue identity. Matchbook championship outright and WNBA analogue fixtures are rejected, not treated as NBA game proof.
 
+Automatic PAPER settlement for the admitted Kalshi↔Polymarket GAME_WINNER cell requires **both** venues: exact-ID Kalshi market result **and** exact-ID Polymarket Gamma market (`umaResolutionStatus=resolved` plus `outcomePrices` 1/0). Kalshi-only evidence is not enough. Missing/unavailable Polymarket settlement evidence, 50-50/cancel/LFMP/unknown Polymarket lifecycle, and all POINT_SPREAD/TOTAL_POINTS trades stay fail-closed. Elapsed tipoff is never used.
+
 ## Provider identity retained for refresh
 
 | Venue | Event | Market / runner |
 |---|---|---|
 | Kalshi | `event_ticker` + milestone `start_date` (never `occurrence_datetime`) | GAME: two YES tickers as runners; SPREAD/TOTAL: market ticker + YES/NO |
 | Polymarket | Gamma event id | market id plus **exact CLOB token IDs**. Missing tokens, or invented `condition_id:0/1` placeholders, fail closed. |
-| Matchbook | event id | market id + runner ids when a game book exists; discovery uses sport-id 4 + NBA tag `406202315670010` |
+| Matchbook | event id | market id + runner ids when a game book exists |
+
+## Matchbook discovery load
+
+NBA-only UNIVERSE scopes pass Matchbook `sport-ids=4` **and** competition tag `406202315670010`, so discovery does not download the whole basketball slate.
+
+Mixed soccer/NFL/NBA scopes cannot apply that NBA tag without dropping football events. Those scopes keep basketball sport-id 4 on the same Matchbook `list_events` call (no extra concurrency slot) and reject WNBA/NCAAB/championship-outright payloads in the NBA normaliser. Follow-up: a second sequential NBA-tagged Matchbook query for mixed scopes, still on the existing Matchbook concurrency slot.
 
 ## Fees and concurrency
 

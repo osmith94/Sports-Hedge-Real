@@ -1061,6 +1061,12 @@ class ScopeFilterResult(BaseModel):
     rejected_labels: list[str] = Field(default_factory=list)
 
 
+def _scope_diagnostic_sport(competition: TargetCompetition | None) -> str:
+    if competition is not None and competition.code is TargetCompetitionCode.NBA:
+        return "basketball"
+    return "football"
+
+
 def resolve_target_competition(label: str | None) -> TargetCompetition | None:
     """Exact alias match only. Unknown and ambiguous labels fail closed."""
 
@@ -1490,7 +1496,7 @@ def scope_polymarket_event(
             allowed=False,
             reason=UNKNOWN_COMPETITION,
             label=label,
-            sport="football",
+            sport=_scope_diagnostic_sport(resolved),
         )
     if resolved.code.value not in _selected_code_set(selected_codes):
         return ScopeDecision(
@@ -1498,13 +1504,13 @@ def scope_polymarket_event(
             reason=OUT_OF_SCOPE_COMPETITION,
             competition=resolved,
             label=label or resolved.display_name,
-            sport="football",
+            sport=_scope_diagnostic_sport(resolved),
         )
     return ScopeDecision(
         allowed=True,
         competition=resolved,
         label=label or resolved.display_name,
-        sport="football",
+        sport=_scope_diagnostic_sport(resolved),
     )
 
 
@@ -1530,7 +1536,7 @@ def scope_kalshi_event(
             allowed=False,
             reason=UNKNOWN_COMPETITION,
             label=label or ticker or None,
-            sport="football",
+            sport=_scope_diagnostic_sport(resolved),
         )
     if resolved.code.value not in _selected_code_set(selected_codes):
         return ScopeDecision(
@@ -1538,13 +1544,13 @@ def scope_kalshi_event(
             reason=OUT_OF_SCOPE_COMPETITION,
             competition=resolved,
             label=label or resolved.display_name,
-            sport="football",
+            sport=_scope_diagnostic_sport(resolved),
         )
     return ScopeDecision(
         allowed=True,
         competition=resolved,
         label=label or resolved.display_name,
-        sport="football",
+        sport=_scope_diagnostic_sport(resolved),
     )
 
 

@@ -404,6 +404,43 @@ DEFAULT_PROVIDER_CONCURRENCY = {
     VenueName.POLYMARKET: 8,
     VenueName.KALSHI: 4,
 }
+
+
+def matchbook_scope_discovery_params(
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
+    *,
+    football_sport_id: str | None = None,
+    american_football_sport_id: str | None = None,
+    basketball_sport_id: str | None = None,
+) -> dict[str, str]:
+    """Matchbook list_events filters for the selected operator scope.
+
+    NBA-only scopes add the captured NBA competition tag. Mixed soccer/NFL/NBA
+    scopes cannot apply that tag without dropping football events.
+    """
+
+    from sports_hedge.nba.constants import MATCHBOOK_NBA_COMPETITION_TAG_ID
+
+    if not selected_includes_nfl(selected_codes) and not selected_includes_nba(selected_codes):
+        return {}
+    ids: list[str] = []
+    if selected_includes_soccer(selected_codes) and football_sport_id:
+        ids.append(str(football_sport_id))
+    if selected_includes_nfl(selected_codes) and american_football_sport_id:
+        ids.append(str(american_football_sport_id))
+    if selected_includes_nba(selected_codes) and basketball_sport_id:
+        ids.append(str(basketball_sport_id))
+    params: dict[str, str] = {}
+    if ids:
+        params["sport-ids"] = ",".join(ids)
+    nba_only = (
+        selected_includes_nba(selected_codes)
+        and not selected_includes_nfl(selected_codes)
+        and not selected_includes_soccer(selected_codes)
+    )
+    if nba_only:
+        params["tag-ids"] = MATCHBOOK_NBA_COMPETITION_TAG_ID
+    return params
 _WALL_STAGE_NAME = {
     "normalize_match": "mapping_equivalence",
 }
@@ -1801,35 +1838,44 @@ class ReadOnlyCrossVenueCollector:
                 self._op_venue_health[venue.value] = "degraded"
             return default, True
 
-    async def _matchbook_sport_ids_for_scope(self) -> str | None:
-        """Extra Matchbook sport-ids when NFL or NBA is in operator scope.
+    async def _matchbook_discovery_params_for_scope(self) -> dict[str, str]:
+        """Extra Matchbook query params when NFL or NBA is in operator scope.
 
         Soccer-only discovery keeps the historical unfiltered list_events path
         so login/429 handling stays inside that call. NFL/NBA add American
         Football and Basketball (and soccer when also selected) without raising
-        provider concurrency.
+        provider concurrency. NBA-only scopes also pass the captured NBA
+        competition tag so discovery does not download the whole basketball
+        slate. Mixed soccer/NFL/NBA scopes cannot apply that tag without
+        dropping football events, so they keep sport-id 4 and reject
+        WNBA/NCAAB downstream.
         """
 
         client = self.matchbook
         if client is None:
-            return None
+            return {}
         codes = self._op_selected_competition_codes
-        if not selected_includes_nfl(codes) and not selected_includes_nba(codes):
-            return None
-        ids: list[str] = []
+        football = None
+        american = None
+        basketball = None
         if selected_includes_soccer(codes):
             resolver = getattr(client, "resolve_football_sport_id", None)
             if callable(resolver):
-                ids.append(str(await resolver()))
+                football = str(await resolver())
         if selected_includes_nfl(codes):
             resolver = getattr(client, "resolve_american_football_sport_id", None)
             if callable(resolver):
-                ids.append(str(await resolver()))
+                american = str(await resolver())
         if selected_includes_nba(codes):
             resolver = getattr(client, "resolve_basketball_sport_id", None)
             if callable(resolver):
-                ids.append(str(await resolver()))
-        return ",".join(ids) if ids else None
+                basketball = str(await resolver())
+        return matchbook_scope_discovery_params(
+            codes,
+            football_sport_id=football,
+            american_football_sport_id=american,
+            basketball_sport_id=basketball,
+        )
 
     async def _discovery_task(
         self,
@@ -1889,14 +1935,14 @@ class ReadOnlyCrossVenueCollector:
         list_filters = dict(filters)
         if venue is VenueName.MATCHBOOK and "sport-ids" not in list_filters:
             try:
-                sport_ids = await self._matchbook_sport_ids_for_scope()
+                extra_params = await self._matchbook_discovery_params_for_scope()
             except Exception as exc:
                 issues.append(CollectorIssue(stage="list_events", venue=venue, detail=str(exc)))
                 if venue_health.get(venue.value) != VENUE_HEALTH_DISABLED:
                     venue_health[venue.value] = "unavailable"
                 return [], {}
-            if sport_ids:
-                list_filters["sport-ids"] = sport_ids
+            if extra_params:
+                list_filters.update(extra_params)
 
         try:
             async with self._provider_capacity(venue, stage="list_events") as lease:
