@@ -26,7 +26,10 @@ from sports_hedge.application.target_competitions import (
     operator_competition_catalog,
     resolve_target_competition,
 )
-from sports_hedge.application.universe_identity_shards import partition_identity_shards
+from sports_hedge.application.universe_identity_shards import (
+    UNRESOLVED_COMPETITION,
+    partition_identity_shards,
+)
 from sports_hedge.domain.football import CanonicalEvent, MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import MarketAction
@@ -203,7 +206,7 @@ def test_sharding_keeps_nba_ncaab_and_nations_league_apart() -> None:
     assert "football/uefa_nations_league" in shard_ids
     assert "basketball/nba" in shard_ids
     assert "basketball/ncaab" in shard_ids
-    assert "football/unresolved" in shard_ids
+    assert f"football/{UNRESOLVED_COMPETITION}" in shard_ids
     by_id = {shard.shard_id: shard for shard in partition.shards}
     assert {event.source_event_id for event in by_id["football/uefa_nations_league"].events} == {
         "nl-mb"
