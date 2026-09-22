@@ -38,6 +38,7 @@ HARD_VETO_REASONS = frozenset(
         "competition_mismatch",
         "curated_team_mismatch",
         "nfl_team_identity_ambiguous",
+        "nba_team_identity_ambiguous",
         "prefilter_rejected",
     }
 )
@@ -79,7 +80,12 @@ def pair_kind(left: VenueName, right: VenueName) -> str:
 def is_hard_identity_veto(reasons: Sequence[str], *, matched: bool, confidence: float) -> bool:
     if matched:
         return False
-    if any(reason in HARD_VETO_REASONS or reason.startswith("nfl_team_identity") for reason in reasons):
+    if any(
+        reason in HARD_VETO_REASONS
+        or reason.startswith("nfl_team_identity")
+        or reason.startswith("nba_team_identity")
+        for reason in reasons
+    ):
         return True
     return confidence <= 0.0 and "prefilter_rejected" in reasons
 

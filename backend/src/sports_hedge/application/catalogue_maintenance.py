@@ -89,12 +89,17 @@ def catalogue_family_key(register_canonical_key: str) -> str:
     key = str(register_canonical_key or "").strip()
     if key.startswith(f"{CANONICAL_TOTAL_GOALS_FT}:"):
         return CANONICAL_TOTAL_GOALS_FT
+    from sports_hedge.nba.constants import CANONICAL_NBA_POINT_SPREAD, CANONICAL_NBA_TOTAL_POINTS
     from sports_hedge.nfl.constants import CANONICAL_NFL_POINT_SPREAD, CANONICAL_NFL_TOTAL_POINTS
 
     if key.startswith(f"{CANONICAL_NFL_POINT_SPREAD}:"):
         return CANONICAL_NFL_POINT_SPREAD
     if key.startswith(f"{CANONICAL_NFL_TOTAL_POINTS}:"):
         return CANONICAL_NFL_TOTAL_POINTS
+    if key.startswith(f"{CANONICAL_NBA_POINT_SPREAD}:"):
+        return CANONICAL_NBA_POINT_SPREAD
+    if key.startswith(f"{CANONICAL_NBA_TOTAL_POINTS}:"):
+        return CANONICAL_NBA_TOTAL_POINTS
     return key
 
 
@@ -104,6 +109,15 @@ def family_key_from_kalshi_series(series_ticker: str | None) -> str | None:
     ticker = str(series_ticker or "").strip().upper()
     if not ticker:
         return None
+    from sports_hedge.nba.constants import (
+        CANONICAL_NBA_GAME_WINNER,
+        CANONICAL_NBA_POINT_SPREAD,
+        CANONICAL_NBA_TOTAL_POINTS,
+        NBA_KALSHI_GAME_SERIES,
+        NBA_KALSHI_SPREAD_SERIES,
+        NBA_KALSHI_TOTAL_SERIES,
+    )
+    from sports_hedge.nba.detect import approved_kalshi_nba_series
     from sports_hedge.nfl.constants import (
         CANONICAL_NFL_GAME_WINNER,
         CANONICAL_NFL_POINT_SPREAD,
@@ -121,6 +135,13 @@ def family_key_from_kalshi_series(series_ticker: str | None) -> str | None:
         return CANONICAL_NFL_POINT_SPREAD
     if nfl_series == NFL_KALSHI_TOTAL_SERIES:
         return CANONICAL_NFL_TOTAL_POINTS
+    nba_series = approved_kalshi_nba_series(ticker)
+    if nba_series == NBA_KALSHI_GAME_SERIES:
+        return CANONICAL_NBA_GAME_WINNER
+    if nba_series == NBA_KALSHI_SPREAD_SERIES:
+        return CANONICAL_NBA_POINT_SPREAD
+    if nba_series == NBA_KALSHI_TOTAL_SERIES:
+        return CANONICAL_NBA_TOTAL_POINTS
     head = ticker.split("-", 1)[0]
     for suffix, key in _KALSHI_SERIES_FAMILY_SUFFIXES:
         if head.endswith(suffix) or ticker.endswith(suffix):
@@ -161,7 +182,8 @@ class CataloguePairIdentity:
     """Exact registered venue identity for one canonical key.
 
     Soccer PAPER remains Matchbook↔Kalshi. NFL PAPER may attach Matchbook,
-    Kalshi, and Polymarket exact IDs onto the same catalogue row. Polymarket
+    Kalshi, and Polymarket exact IDs onto the same catalogue row. NBA PAPER
+    attaches Kalshi and Polymarket exact IDs for GAME_WINNER only. Polymarket
     legs require real CLOB token IDs.
     """
 

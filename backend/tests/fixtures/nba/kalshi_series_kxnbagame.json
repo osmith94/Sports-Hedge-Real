@@ -1,0 +1,31 @@
+{
+  "fixture_id": "nba-kalshi-series-kxnbagame-2026-09-21",
+  "identified_as": "CAPTURED public Kalshi GET /series/KXNBAGAME. Series metadata only. Not live quotes. NBA Game / GAMEWIN PDF.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/series/KXNBAGAME",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "ticker": "KXNBAGAME",
+    "title": "NBA Game",
+    "category": "Sports",
+    "frequency": "custom",
+    "tags": [
+      "Basketball"
+    ],
+    "contract_terms_url": "https://assets.kalshi.com/contract_terms/BASKETBALLGAMEWIN.pdf",
+    "settlement_sources": [
+      {
+        "name": "the Governing League",
+        "url": "https://www.nba.com"
+      },
+      {
+        "name": "ESPN",
+        "url": "https://www.espn.com"
+      }
+    ],
+    "product_metadata": {
+      "scope": "Game"
+    },
+    "fee_type": "quadratic_with_maker_fees"
+  }
+}

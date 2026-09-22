@@ -28,13 +28,19 @@ export const NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT = "exceptional_settlement_mismatc
 export const NFL_SETTLEMENT_CAVEAT_TEXT =
   "PAPER comparison is for a normal completed NFL game. Cancellation, suspension, and final-tie handling can differ across venues and must be resolved before any live execution. Automatic settlement fails closed on those exceptional cases.";
 
-const NFL_FAMILIES = new Set<MarketFamily>(["game_winner", "point_spread", "total_points"]);
+export const NBA_SETTLEMENT_CAVEAT_TEXT =
+  "PAPER comparison is for a normal completed NBA game. Cancellation, suspension, and overtime/exceptional handling can differ across venues and must be resolved before any live execution. Automatic settlement fails closed on those exceptional cases.";
 
 export function isNflPaperTrade(
   trade: Pick<PaperTrade, "market_family" | "competition">,
 ): boolean {
-  if (trade.market_family && NFL_FAMILIES.has(trade.market_family)) return true;
   return (trade.competition ?? "").trim().toUpperCase() === "NFL";
+}
+
+export function isNbaPaperTrade(
+  trade: Pick<PaperTrade, "market_family" | "competition">,
+): boolean {
+  return (trade.competition ?? "").trim().toUpperCase() === "NBA";
 }
 
 export function tradeShowsNflSettlementCaveat(
@@ -42,8 +48,16 @@ export function tradeShowsNflSettlementCaveat(
 ): boolean {
   if (isNflPaperTrade(trade)) return true;
   return (trade.audit ?? []).some((event) =>
-    `${event.event_id} ${event.detail ?? ""}`.includes(NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT),
+    `${event.event_id} ${event.detail ?? ""}`.includes(NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT)
+    && (trade.competition ?? "").trim().toUpperCase() !== "NBA",
   );
+}
+
+export function tradeShowsNbaSettlementCaveat(
+  trade: Pick<PaperTrade, "market_family" | "competition" | "audit">,
+): boolean {
+  if (isNbaPaperTrade(trade)) return true;
+  return false;
 }
 
 export function reasonsIncludeNflSettlementCaveat(reasons: string[] | null | undefined): boolean {
@@ -118,6 +132,8 @@ function familyDisplayLabel(trade: PaperTrade): string {
 function compactOutcomeLabel(outcome: string, trade: PaperTrade): string {
   const nflSide = nflSideExplanation(outcome, trade);
   if (nflSide) return nflSide;
+  const nbaSide = nbaSideExplanation(outcome, trade);
+  if (nbaSide) return nbaSide;
   const label = outcome.replaceAll("_", " ").toUpperCase();
   const stored = formatStoredLine(trade.line);
   if (stored) return `${label} ${stored}`;
@@ -127,11 +143,20 @@ function compactOutcomeLabel(outcome: string, trade: PaperTrade): string {
   return label;
 }
 
+export function nbaSideExplanation(outcome: string, trade: PaperTrade): string | null {
+  if (!isNbaPaperTrade(trade)) return null;
+  return sideExplanation(outcome, trade);
+}
+
 export function nflSideExplanation(outcome: string, trade: PaperTrade): string | null {
   if (!isNflPaperTrade(trade)) return null;
+  return sideExplanation(outcome, trade);
+}
+
+function sideExplanation(outcome: string, trade: PaperTrade): string | null {
   const token = outcome.trim().toLowerCase();
-  const home = shortNflName(trade.home_team);
-  const away = shortNflName(trade.away_team);
+  const home = shortTeamName(trade.home_team);
+  const away = shortTeamName(trade.away_team);
   if (trade.market_family === "game_winner") {
     if (token === "home") return `${home} · Game winner`;
     if (token === "away") return `${away} · Game winner`;
@@ -173,7 +198,7 @@ function spreadCoverExplanation(team: string, signedLine: number): string {
   return `${team} ${signedText}`;
 }
 
-function shortNflName(team: string | null | undefined): string {
+function shortTeamName(team: string | null | undefined): string {
   if (!team) return "Team";
   const parts = team.trim().split(/\s+/);
   return parts[parts.length - 1] || team;

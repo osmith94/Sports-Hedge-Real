@@ -14,7 +14,7 @@ import {
 } from "../lib/api";
 import { money } from "../lib/format";
 import { formatPositionManagementCell } from "../lib/paper-position-management-display";
-import { compactLegLines, compactMarketHeading, NFL_SETTLEMENT_CAVEAT_TEXT, tradeShowsNflSettlementCaveat } from "../lib/paper-trade-display";
+import { compactLegLines, compactMarketHeading, NBA_SETTLEMENT_CAVEAT_TEXT, NFL_SETTLEMENT_CAVEAT_TEXT, tradeShowsNbaSettlementCaveat, tradeShowsNflSettlementCaveat } from "../lib/paper-trade-display";
 import { settlementReconciliationLabel } from "../lib/settlement-reconciliation-display";
 import { ActiveTradeLog } from "./active-trade-log";
 import { HydratedRelativeTime } from "./hydrated-relative-time";
@@ -322,6 +322,8 @@ function TradeTable({
                       </div>
                       {tradeShowsNflSettlementCaveat(trade) ? (
                         <div className="panel-meta paper-trade-nfl-caveat">{NFL_SETTLEMENT_CAVEAT_TEXT}</div>
+                      ) : tradeShowsNbaSettlementCaveat(trade) ? (
+                        <div className="panel-meta paper-trade-nfl-caveat">{NBA_SETTLEMENT_CAVEAT_TEXT}</div>
                       ) : null}
                       <div className="paper-trade-actions">
                         <Link href={`/paper/${encodeURIComponent(trade.trade_id)}`}>

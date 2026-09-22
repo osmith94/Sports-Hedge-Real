@@ -632,6 +632,14 @@ def family_period_line_from_key(register_canonical_key: str) -> tuple[str | None
     if register_canonical_key.startswith("NFL_TOTAL_POINTS_FT:"):
         line = register_canonical_key.split(":", 1)[1]
         return MarketFamily.TOTAL_POINTS.value, FootballPeriod.FULL_TIME.value, line
+    if register_canonical_key == "NBA_GAME_WINNER_FT":
+        return MarketFamily.GAME_WINNER.value, FootballPeriod.FULL_TIME.value, None
+    if register_canonical_key.startswith("NBA_POINT_SPREAD_FT:"):
+        line = register_canonical_key.split(":", 1)[1]
+        return MarketFamily.POINT_SPREAD.value, FootballPeriod.FULL_TIME.value, line
+    if register_canonical_key.startswith("NBA_TOTAL_POINTS_FT:"):
+        line = register_canonical_key.split(":", 1)[1]
+        return MarketFamily.TOTAL_POINTS.value, FootballPeriod.FULL_TIME.value, line
     return None, FootballPeriod.FULL_TIME.value, None
 
 
@@ -657,6 +665,12 @@ def required_outcomes_for_key(register_canonical_key: str) -> list[str]:
     if register_canonical_key.startswith("NFL_POINT_SPREAD_FT:"):
         return [CanonicalOutcome.HOME.value, CanonicalOutcome.AWAY.value]
     if register_canonical_key.startswith("NFL_TOTAL_POINTS_FT:"):
+        return [CanonicalOutcome.OVER.value, CanonicalOutcome.UNDER.value]
+    if register_canonical_key == "NBA_GAME_WINNER_FT":
+        return [CanonicalOutcome.HOME.value, CanonicalOutcome.AWAY.value]
+    if register_canonical_key.startswith("NBA_POINT_SPREAD_FT:"):
+        return [CanonicalOutcome.HOME.value, CanonicalOutcome.AWAY.value]
+    if register_canonical_key.startswith("NBA_TOTAL_POINTS_FT:"):
         return [CanonicalOutcome.OVER.value, CanonicalOutcome.UNDER.value]
     return []
 

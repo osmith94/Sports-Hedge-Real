@@ -1,0 +1,199 @@
+{
+  "fixture_id": "nba-matchbook-event-34398301280600081-wnba-shape",
+  "identified_as": "CAPTURED unauthenticated Matchbook basketball book SHAPE from a WNBA game (Atlanta Dream at New York Liberty). NOT an NBA game. Used only to show Moneyline / Handicap (integer+half) / Total / 1st Half market-type names while no NBA game events were listed. Prices stripped. No session token.",
+  "source": "https://api.matchbook.com/edge/rest/events/34398301280600081",
+  "markets_source": "https://api.matchbook.com/edge/rest/events/34398301280600081/markets?states=open,suspended,closed,graded&per-page=50",
+  "also_proven_by": "GET https://api.matchbook.com/edge/rest/events/34398301280600081/markets/34398301286100081",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "not_nba": true,
+  "provider_market_total": 29,
+  "payload": {
+    "id": 34398301280600081,
+    "name": "Atlanta Dream at New York Liberty",
+    "start": "2026-09-22T00:00:00.000Z",
+    "status": "open",
+    "sport-id": 4,
+    "in-running-flag": false,
+    "allow-live-betting": true,
+    "meta-tags": [
+      {
+        "id": 4,
+        "name": "Basketball",
+        "type": "SPORT",
+        "url-name": "basketball"
+      },
+      {
+        "id": 410468520880009,
+        "name": "Live Betting",
+        "type": "OTHER",
+        "url-name": "live-betting"
+      },
+      {
+        "id": 502879947700009,
+        "name": "WNBA",
+        "type": "COMPETITION",
+        "url-name": "wnba"
+      },
+      {
+        "id": 1904152202480016,
+        "name": "United States of America",
+        "type": "COUNTRY",
+        "url-name": "united-states-of-america"
+      },
+      {
+        "id": 33287185272900047,
+        "name": "September 22nd 2026",
+        "type": "DATE",
+        "url-name": "september-22nd-2026"
+      }
+    ],
+    "markets": [
+      {
+        "id": 34398301286100081,
+        "name": "Moneyline",
+        "status": "open",
+        "type": "binary",
+        "market-type": "money_line",
+        "number-of-winners": 1,
+        "handicap": null,
+        "in-running-flag": false,
+        "allow-live-betting": true,
+        "start": "2026-09-22T00:00:00.000Z",
+        "event-id": 34398301280600081,
+        "runners": [
+          {
+            "id": 34398301287100081,
+            "name": "Atlanta Dream",
+            "status": "open",
+            "handicap": null,
+            "event-participant-id": 34398301285100081
+          },
+          {
+            "id": 34398301286800081,
+            "name": "New York Liberty",
+            "status": "open",
+            "handicap": null,
+            "event-participant-id": 34398301284800081
+          }
+        ]
+      },
+      {
+        "id": 34398302200600081,
+        "name": "Total",
+        "status": "open",
+        "type": "binary",
+        "market-type": "total",
+        "number-of-winners": 1,
+        "handicap": 162.5,
+        "in-running-flag": false,
+        "allow-live-betting": false,
+        "start": "2026-09-22T00:00:00.000Z",
+        "event-id": 34398301280600081,
+        "runners": [
+          {
+            "id": 34398302202000081,
+            "name": "OVER 162.5",
+            "status": "open",
+            "handicap": 162.5,
+            "event-participant-id": null
+          },
+          {
+            "id": 34398302202201081,
+            "name": "UNDER 162.5",
+            "status": "open",
+            "handicap": 162.5,
+            "event-participant-id": null
+          }
+        ]
+      },
+      {
+        "id": 34398819975900081,
+        "name": "1st Half Total",
+        "status": "open",
+        "type": "binary",
+        "market-type": "total",
+        "number-of-winners": 1,
+        "handicap": 87.5,
+        "in-running-flag": false,
+        "allow-live-betting": false,
+        "start": "2026-09-22T00:00:00.000Z",
+        "event-id": 34398301280600081,
+        "runners": [
+          {
+            "id": 34398819977000081,
+            "name": "OVER 87.5",
+            "status": "open",
+            "handicap": 87.5,
+            "event-participant-id": null
+          },
+          {
+            "id": 34398819977400081,
+            "name": "UNDER 87.5",
+            "status": "open",
+            "handicap": 87.5,
+            "event-participant-id": null
+          }
+        ]
+      },
+      {
+        "id": 34398301928300081,
+        "name": "Handicap",
+        "status": "open",
+        "type": "binary",
+        "market-type": "handicap",
+        "number-of-winners": 1,
+        "handicap": 2,
+        "in-running-flag": false,
+        "allow-live-betting": false,
+        "start": "2026-09-22T00:00:00.000Z",
+        "event-id": 34398301280600081,
+        "runners": [
+          {
+            "id": 34398301929400081,
+            "name": "Atlanta Dream +2.0",
+            "status": "open",
+            "handicap": 2,
+            "event-participant-id": 34398301285100081
+          },
+          {
+            "id": 34398301929200081,
+            "name": "New York Liberty -2.0",
+            "status": "open",
+            "handicap": -2,
+            "event-participant-id": 34398301284800081
+          }
+        ]
+      },
+      {
+        "id": 34398302036400081,
+        "name": "Handicap",
+        "status": "open",
+        "type": "binary",
+        "market-type": "handicap",
+        "number-of-winners": 1,
+        "handicap": 2.5,
+        "in-running-flag": false,
+        "allow-live-betting": false,
+        "start": "2026-09-22T00:00:00.000Z",
+        "event-id": 34398301280600081,
+        "runners": [
+          {
+            "id": 34398302037801081,
+            "name": "Atlanta Dream +2.5",
+            "status": "open",
+            "handicap": 2.5,
+            "event-participant-id": 34398301285100081
+          },
+          {
+            "id": 34398302037600081,
+            "name": "New York Liberty -2.5",
+            "status": "open",
+            "handicap": -2.5,
+            "event-participant-id": 34398301284800081
+          }
+        ]
+      }
+    ]
+  }
+}

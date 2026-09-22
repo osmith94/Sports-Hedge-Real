@@ -141,6 +141,7 @@ from sports_hedge.application.target_competitions import (
     resolve_target_competition,
     resolve_target_competition_from_kalshi_ticker,
     scope_matchbook_event,
+    selected_includes_nba,
     selected_includes_nfl,
     selected_includes_soccer,
 )
@@ -1801,27 +1802,33 @@ class ReadOnlyCrossVenueCollector:
             return default, True
 
     async def _matchbook_sport_ids_for_scope(self) -> str | None:
-        """Extra Matchbook sport-ids only when NFL is in operator scope.
+        """Extra Matchbook sport-ids when NFL or NBA is in operator scope.
 
         Soccer-only discovery keeps the historical unfiltered list_events path
-        so login/429 handling stays inside that call. NFL adds American Football
-        (and soccer when both are selected) without raising provider concurrency.
+        so login/429 handling stays inside that call. NFL/NBA add American
+        Football and Basketball (and soccer when also selected) without raising
+        provider concurrency.
         """
 
         client = self.matchbook
         if client is None:
             return None
         codes = self._op_selected_competition_codes
-        if not selected_includes_nfl(codes):
+        if not selected_includes_nfl(codes) and not selected_includes_nba(codes):
             return None
         ids: list[str] = []
         if selected_includes_soccer(codes):
             resolver = getattr(client, "resolve_football_sport_id", None)
             if callable(resolver):
                 ids.append(str(await resolver()))
-        resolver = getattr(client, "resolve_american_football_sport_id", None)
-        if callable(resolver):
-            ids.append(str(await resolver()))
+        if selected_includes_nfl(codes):
+            resolver = getattr(client, "resolve_american_football_sport_id", None)
+            if callable(resolver):
+                ids.append(str(await resolver()))
+        if selected_includes_nba(codes):
+            resolver = getattr(client, "resolve_basketball_sport_id", None)
+            if callable(resolver):
+                ids.append(str(await resolver()))
         return ",".join(ids) if ids else None
 
     async def _discovery_task(

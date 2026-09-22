@@ -1,0 +1,78 @@
+{
+  "fixture_id": "kalshi-event-game-phinyk-open",
+  "identified_as": "CAPTURED public Kalshi KXNBAGAME event Philadelphia vs New York (upcoming). Title uses city 'New York' while ticker/subtitle use NYK. Two binary team-win contracts. Prices omitted.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events/KXNBAGAME-26OCT20PHINYK?with_nested_markets=true",
+  "also_proven_by": "GET /events/KXNBAGAME-26OCT20PHINYK and GET /markets/KXNBAGAME-26OCT20PHINYK-*",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "event_ticker": "KXNBAGAME-26OCT20PHINYK",
+    "series_ticker": "KXNBAGAME",
+    "title": "Philadelphia vs New York",
+    "sub_title": "PHI vs NYK (Oct 20)",
+    "category": "Sports",
+    "mutually_exclusive": true,
+    "product_metadata": {
+      "competition": "Pro Basketball (M)",
+      "competition_scope": "Game"
+    },
+    "collateral_return_type": "MECNET",
+    "settlement_sources": [
+      {
+        "name": "the Governing League",
+        "url": "https://www.nba.com"
+      }
+    ],
+    "strike_period": "",
+    "markets": [
+      {
+        "ticker": "KXNBAGAME-26OCT20PHINYK-PHI",
+        "event_ticker": "KXNBAGAME-26OCT20PHINYK",
+        "title": "Philadelphia wins",
+        "yes_sub_title": "Philadelphia",
+        "no_sub_title": "Philadelphia",
+        "status": "active",
+        "result": "",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "basketball_team": "0554528d-586b-461f-827b-801cf93e8a8e"
+        },
+        "rules_primary": "If Philadelphia wins the Philadelphia vs New York Pro Basketball game originally scheduled for Oct 20, 2026, then the market resolves to Yes.",
+        "rules_secondary": "If the game is postponed but begins within 48 hours of its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is cancelled or not started within 48 hours of its originally scheduled start, all markets will resolve to a fair price.\n\nKalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+        "occurrence_datetime": "2026-10-21T02:00:00Z",
+        "expected_expiration_time": "2026-10-21T02:00:00Z",
+        "expiration_time": "2026-10-22T23:00:00Z",
+        "close_time": "2026-10-22T23:00:00Z",
+        "open_time": "2026-08-20T15:28:00Z",
+        "can_close_early": true,
+        "early_close_condition": "This market will close and expire after a winner is declared.",
+        "expiration_value": ""
+      },
+      {
+        "ticker": "KXNBAGAME-26OCT20PHINYK-NYK",
+        "event_ticker": "KXNBAGAME-26OCT20PHINYK",
+        "title": "New York wins",
+        "yes_sub_title": "New York",
+        "no_sub_title": "New York",
+        "status": "active",
+        "result": "",
+        "market_type": "binary",
+        "strike_type": "structured",
+        "custom_strike": {
+          "basketball_team": "67468ecc-b868-43a4-b9dc-751a52894bb0"
+        },
+        "rules_primary": "If New York wins the Philadelphia vs New York Pro Basketball game originally scheduled for Oct 20, 2026, then the market resolves to Yes.",
+        "rules_secondary": "If the game is postponed but begins within 48 hours of its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is cancelled or not started within 48 hours of its originally scheduled start, all markets will resolve to a fair price.\n\nKalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+        "occurrence_datetime": "2026-10-21T02:00:00Z",
+        "expected_expiration_time": "2026-10-21T02:00:00Z",
+        "expiration_time": "2026-10-22T23:00:00Z",
+        "close_time": "2026-10-22T23:00:00Z",
+        "open_time": "2026-08-20T15:28:00Z",
+        "can_close_early": true,
+        "early_close_condition": "This market will close and expire after a winner is declared.",
+        "expiration_value": ""
+      }
+    ]
+  }
+}

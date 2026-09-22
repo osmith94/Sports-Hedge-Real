@@ -1,0 +1,68 @@
+{
+  "fixture_id": "nba-matchbook-event-33613052933500045",
+  "identified_as": "CAPTURED unauthenticated Matchbook NBA-tagged event. This is a 2026/27 championship OUTRIGHT, not a game-level moneyline/spread/total. Unsafe/deferred for Stage-1 game equivalence. Prices stripped. No session token.",
+  "source": "https://api.matchbook.com/edge/rest/events/33613052933500045",
+  "markets_source": "https://api.matchbook.com/edge/rest/events/33613052933500045/markets?states=open,suspended,closed,graded",
+  "also_proven_by": "GET https://api.matchbook.com/edge/rest/events/33613052933500045/markets/33613098386100045",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": 33613052933500045,
+    "name": "NBA Championship Winner 2026/27",
+    "start": "2026-10-06T00:00:00.000Z",
+    "status": "open",
+    "sport-id": 4,
+    "in-running-flag": false,
+    "meta-tags": [
+      {
+        "id": 4,
+        "name": "Basketball",
+        "type": "SPORT",
+        "url-name": "basketball"
+      },
+      {
+        "id": 406202315670010,
+        "name": "NBA",
+        "type": "COMPETITION",
+        "url-name": "nba"
+      },
+      {
+        "id": 489003593880009,
+        "name": "Outright Winner",
+        "type": "OTHER",
+        "url-name": "outright-winner"
+      }
+    ],
+    "markets": [
+      {
+        "id": 33613098386100045,
+        "name": "Winner",
+        "status": "open",
+        "type": "multirunner",
+        "market-type": "outright",
+        "number-of-winners": 1,
+        "runner_count_captured": 30,
+        "runners_sample": [
+          {
+            "id": 33613098386500045,
+            "name": "Oklahoma City Thunder",
+            "status": "open",
+            "handicap": null
+          },
+          {
+            "id": 33613098386701045,
+            "name": "San Antonio Spurs",
+            "status": "open",
+            "handicap": null
+          },
+          {
+            "id": 33613098388500045,
+            "name": "Philadelphia 76ers",
+            "status": "open",
+            "handicap": null
+          }
+        ]
+      }
+    ]
+  }
+}

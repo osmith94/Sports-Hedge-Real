@@ -397,6 +397,12 @@ def _parse_register_canonical_key(
         return MarketFamily.POINT_SPREAD.value, FootballPeriod.FULL_TIME.value, key.split(":", 1)[1]
     if key.startswith("NFL_TOTAL_POINTS_FT:"):
         return MarketFamily.TOTAL_POINTS.value, FootballPeriod.FULL_TIME.value, key.split(":", 1)[1]
+    if key == "NBA_GAME_WINNER_FT":
+        return MarketFamily.GAME_WINNER.value, FootballPeriod.FULL_TIME.value, None
+    if key.startswith("NBA_POINT_SPREAD_FT:"):
+        return MarketFamily.POINT_SPREAD.value, FootballPeriod.FULL_TIME.value, key.split(":", 1)[1]
+    if key.startswith("NBA_TOTAL_POINTS_FT:"):
+        return MarketFamily.TOTAL_POINTS.value, FootballPeriod.FULL_TIME.value, key.split(":", 1)[1]
     return None, None, None
 
 

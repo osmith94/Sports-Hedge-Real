@@ -1,0 +1,17 @@
+{
+  "fixture_id": "nba-polymarket-sports-nba-2026-09-21",
+  "identified_as": "CAPTURED public Gamma GET /sports NBA object. series=10345, ordering=away.",
+  "source": "https://gamma-api.polymarket.com/sports",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": 34,
+    "sport": "nba",
+    "name": "NBA",
+    "resolution": "https://www.nba.com/",
+    "ordering": "away",
+    "tags": "1,745,100639",
+    "primaryTagId": 745,
+    "series": "10345"
+  }
+}

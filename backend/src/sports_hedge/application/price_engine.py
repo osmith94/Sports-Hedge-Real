@@ -2239,18 +2239,23 @@ def _required_tickers(identity: DerivedPriceEngineItem) -> list[str]:
 
 def _synthetic_matchbook_event(identity: DerivedPriceEngineItem) -> dict[str, Any]:
     kickoff = identity.kickoff_utc or datetime.now(UTC)
+    key = str(identity.register_canonical_key or "")
+    competition = str(identity.competition or "").upper()
+    if key.startswith("NFL_") or competition == "NFL":
+        sport_name = "American Football"
+        competition_name = identity.competition or "NFL"
+    elif key.startswith("NBA_") or competition == "NBA":
+        sport_name = "Basketball"
+        competition_name = identity.competition or "NBA"
+    else:
+        sport_name = "Football"
+        competition_name = identity.competition or "Premier League"
     return {
         "id": identity.matchbook_event_id,
         "name": f"{identity.home_canonical or 'Home'} vs {identity.away_canonical or 'Away'}",
         "start": kickoff.isoformat(),
-        "sport-name": (
-            "American Football"
-            if str(identity.register_canonical_key or "").startswith("NFL_")
-            or str(identity.competition or "").upper() == "NFL"
-            else "Football"
-        ),
-        "competition-name": identity.competition
-        or ("NFL" if str(identity.register_canonical_key or "").startswith("NFL_") else "Premier League"),
+        "sport-name": sport_name,
+        "competition-name": competition_name,
         "status": "open",
     }
 
@@ -2354,14 +2359,16 @@ def _canonical_polymarket_market(identity: DerivedPriceEngineItem) -> CanonicalM
 
 
 def _sport_for_identity(identity: DerivedPriceEngineItem) -> str:
-    if str(identity.register_canonical_key or "").startswith("NFL_"):
+    key = str(identity.register_canonical_key or "")
+    competition = str(identity.competition or "").upper()
+    if key.startswith("NFL_") or competition == "NFL":
         from sports_hedge.nfl.constants import NFL_SPORT
 
         return NFL_SPORT
-    if str(identity.competition or "").upper() == "NFL":
-        from sports_hedge.nfl.constants import NFL_SPORT
+    if key.startswith("NBA_") or competition == "NBA":
+        from sports_hedge.nba.constants import NBA_SPORT
 
-        return NFL_SPORT
+        return NBA_SPORT
     return "football"
 
 
@@ -2380,6 +2387,12 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
     if key.startswith("NFL_POINT_SPREAD_FT:"):
         return MarketFamily.POINT_SPREAD
     if key.startswith("NFL_TOTAL_POINTS_FT:"):
+        return MarketFamily.TOTAL_POINTS
+    if key == "NBA_GAME_WINNER_FT":
+        return MarketFamily.GAME_WINNER
+    if key.startswith("NBA_POINT_SPREAD_FT:"):
+        return MarketFamily.POINT_SPREAD
+    if key.startswith("NBA_TOTAL_POINTS_FT:"):
         return MarketFamily.TOTAL_POINTS
     if identity.family:
         try:

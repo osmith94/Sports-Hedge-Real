@@ -175,6 +175,13 @@ class PaperSettlementAgent:
             kalshi_markets=kalshi_markets,
             when=when,
         )
+        self._record_nba_lifecycle(
+            trade,
+            matchbook_market=matchbook_market,
+            matchbook_event=matchbook_event,
+            kalshi_markets=kalshi_markets,
+            when=when,
+        )
         resolution = resolve_paper_trade_settlement(
             trade,
             matchbook_market=matchbook_market,
@@ -262,6 +269,50 @@ class PaperSettlementAgent:
                 self.operations.trades.save(trade)
             except Exception:
                 LOGGER.exception("failed to persist NFL lifecycle evidence for %s", trade.trade_id)
+
+    def _record_nba_lifecycle(
+        self,
+        trade: PaperTrade,
+        *,
+        matchbook_market: dict[str, Any] | None,
+        matchbook_event: dict[str, Any] | None,
+        kalshi_markets: dict[str, dict[str, Any]],
+        when: datetime,
+    ) -> None:
+        from sports_hedge.nba.settlement import (
+            collect_nba_lifecycle_tokens,
+            is_nba_paper_trade,
+            nba_lifecycle_audit_detail,
+            nba_lifecycle_observation,
+        )
+
+        if not is_nba_paper_trade(trade):
+            return
+        tokens = collect_nba_lifecycle_tokens(
+            matchbook_market,
+            matchbook_event,
+            *list((kalshi_markets or {}).values()),
+        )
+        observation = nba_lifecycle_observation(tokens, observed_at=when)
+        detail = nba_lifecycle_audit_detail(observation)
+        if any(
+            event.event_type is PaperTradeAuditEventType.NBA_LIFECYCLE_OBSERVED
+            and event.detail == detail
+            for event in trade.audit
+        ):
+            return
+        trade.audit.append(
+            PaperTradeAuditEvent(
+                occurred_at=when,
+                event_type=PaperTradeAuditEventType.NBA_LIFECYCLE_OBSERVED,
+                detail=detail,
+            )
+        )
+        if self.operations.trades is not None:
+            try:
+                self.operations.trades.save(trade)
+            except Exception:
+                LOGGER.exception("failed to persist NBA lifecycle evidence for %s", trade.trade_id)
 
     def _settle(
         self,

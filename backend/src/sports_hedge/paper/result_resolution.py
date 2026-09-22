@@ -190,6 +190,77 @@ def resolve_paper_trade_settlement(
                 scores,
             )
 
+    from sports_hedge.nba.settlement import (
+        collect_nba_lifecycle_tokens,
+        is_nba_paper_trade,
+        nba_automatic_settlement_lifecycle_blocker,
+        nba_exceptional_status_blocker,
+        nba_tied_score_blocker,
+        NBA_SETTLEMENT_FAIL_CLOSED_REASON,
+    )
+
+    if is_nba_paper_trade(trade):
+        nba_exception = nba_exceptional_status_blocker(
+            matchbook.status,
+            kalshi.status,
+            event_status,
+            None if scores is None else scores.status,
+            matchbook.winning_outcome,
+            kalshi.winning_outcome,
+            matchbook.blocker,
+            kalshi.blocker,
+        )
+        if nba_exception is not None:
+            return _blocked(
+                trade,
+                nba_exception,
+                matchbook_market,
+                matchbook_event,
+                kalshi_markets,
+                scores,
+            )
+        if scores is not None:
+            tied = nba_tied_score_blocker(scores.home_score, scores.away_score)
+            if tied is not None:
+                return _blocked(
+                    trade,
+                    tied,
+                    matchbook_market,
+                    matchbook_event,
+                    kalshi_markets,
+                    scores,
+                )
+        if trade.market_family is MarketFamily.GAME_WINNER and score_outcome == "draw":
+            return _blocked(
+                trade,
+                NBA_SETTLEMENT_FAIL_CLOSED_REASON,
+                matchbook_market,
+                matchbook_event,
+                kalshi_markets,
+                scores,
+            )
+        lifecycle_blocker = nba_automatic_settlement_lifecycle_blocker(
+            trade,
+            *collect_nba_lifecycle_tokens(
+                matchbook_market,
+                matchbook_event,
+                *list((kalshi_markets or {}).values()),
+            ),
+            matchbook.status,
+            kalshi.status,
+            event_status,
+            None if scores is None else scores.status,
+        )
+        if lifecycle_blocker is not None:
+            return _blocked(
+                trade,
+                lifecycle_blocker,
+                matchbook_market,
+                matchbook_event,
+                kalshi_markets,
+                scores,
+            )
+
     exception = _exception_blocker(matchbook, kalshi, scores, event_status=event_status)
     if exception is not None:
         return _blocked(trade, exception, matchbook_market, matchbook_event, kalshi_markets, scores)
@@ -333,12 +404,13 @@ def _kalshi_tickers(trade: PaperTrade) -> list[str]:
 
 
 def _family_blocker(trade: PaperTrade) -> str | None:
-    from sports_hedge.nfl.detect import is_nfl_market_family
+    from sports_hedge.nba.markets import is_exact_half_line as nba_is_exact_half_line
+    from sports_hedge.nba.settlement import is_nba_paper_trade
     from sports_hedge.nfl.markets import is_exact_half_line
     from sports_hedge.nfl.settlement import is_nfl_paper_trade
 
     family = trade.market_family
-    if is_nfl_paper_trade(trade) or is_nfl_market_family(family):
+    if is_nfl_paper_trade(trade):
         if family not in {
             MarketFamily.GAME_WINNER,
             MarketFamily.POINT_SPREAD,
@@ -351,6 +423,20 @@ def _family_blocker(trade: PaperTrade) -> str | None:
             line = _line_from_trade(trade)
             if line is None or not is_exact_half_line(line):
                 return "unsupported_nfl_line"
+        return None
+    if is_nba_paper_trade(trade):
+        if family not in {
+            MarketFamily.GAME_WINNER,
+            MarketFamily.POINT_SPREAD,
+            MarketFamily.TOTAL_POINTS,
+        }:
+            return "unsupported_market_family"
+        if trade.period not in SUPPORTED_PERIODS and trade.period is not FootballPeriod.FULL_TIME:
+            return "unsupported_settlement_period"
+        if family in {MarketFamily.POINT_SPREAD, MarketFamily.TOTAL_POINTS}:
+            line = _line_from_trade(trade)
+            if line is None or not nba_is_exact_half_line(line):
+                return "unsupported_nba_line"
         return None
     if family is None or family not in LOCKED_PAPER_FAMILIES:
         return "unsupported_market_family"

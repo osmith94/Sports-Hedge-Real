@@ -21,6 +21,7 @@ _ASSOCIATION_FOOTBALL_SPORT_NAMES = frozenset(
     {"football", "soccer", "association football"}
 )
 _AMERICAN_FOOTBALL_SPORT_NAMES = frozenset({"american football"})
+_BASKETBALL_SPORT_NAMES = frozenset({"basketball"})
 
 MATCHBOOK_SESSION_PATH = "/bpapi/rest/security/session"
 DEFAULT_LOGIN_COOLDOWN_SECONDS = 30.0
@@ -224,6 +225,7 @@ class MatchbookClient(ReadOnlyVenue):
         self._auth_fault: MatchbookAuthFaultError | None = None
         self._football_sport_id: int | None = None
         self._american_football_sport_id: int | None = None
+        self._basketball_sport_id: int | None = None
         self._login_lock = asyncio.Lock()
         self._closed = False
 
@@ -408,6 +410,14 @@ class MatchbookClient(ReadOnlyVenue):
         sports = await self._list_sports()
         sport_id = select_american_football_sport_id(sports)
         self._american_football_sport_id = sport_id
+        return sport_id
+
+    async def resolve_basketball_sport_id(self) -> int:
+        if self._basketball_sport_id is not None:
+            return self._basketball_sport_id
+        sports = await self._list_sports()
+        sport_id = select_basketball_sport_id(sports)
+        self._basketball_sport_id = sport_id
         return sport_id
 
     async def _list_sports(self) -> list[dict[str, Any]]:
@@ -749,6 +759,36 @@ def select_american_football_sport_id(sports: list[dict[str, Any]]) -> int:
     if len(matched_ids) > 1:
         raise MatchbookDiscoveryError(
             "Matchbook lookups/sports returned multiple American Football sport ids: "
+            f"{sorted(matched_ids)} ({matched_names})"
+        )
+    return next(iter(matched_ids))
+
+
+def select_basketball_sport_id(sports: list[dict[str, Any]]) -> int:
+    """Pick Basketball. Association football / American Football fail closed."""
+
+    matched_ids: set[int] = set()
+    matched_names: list[str] = []
+    for item in sports:
+        if not isinstance(item, dict):
+            continue
+        name = normalize_text(str(item.get("name", "")))
+        if name not in _BASKETBALL_SPORT_NAMES:
+            continue
+        sport_id = _optional_int(item.get("id"))
+        if sport_id is None:
+            raise MatchbookDiscoveryError(
+                f"Matchbook Basketball sport {name!r} has no numeric id"
+            )
+        matched_ids.add(sport_id)
+        matched_names.append(name)
+    if not matched_ids:
+        raise MatchbookDiscoveryError(
+            "Matchbook lookups/sports did not include an active Basketball sport"
+        )
+    if len(matched_ids) > 1:
+        raise MatchbookDiscoveryError(
+            "Matchbook lookups/sports returned multiple Basketball sport ids: "
             f"{sorted(matched_ids)} ({matched_names})"
         )
     return next(iter(matched_ids))

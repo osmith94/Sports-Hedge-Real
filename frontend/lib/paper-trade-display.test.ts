@@ -215,9 +215,25 @@ describe("active-trade canonical line and compact odds", () => {
     });
     assert.equal(compactMarketHeading(winner), "Game winner");
     assert.match(compactLegLine(winner, winner.legs[0]), /Chiefs · Game winner/);
+    const nbaWinner = trade({
+      market_family: "game_winner",
+      market_label: "Game winner",
+      line: null,
+      competition: "NBA",
+      home_team: "Detroit Pistons",
+      away_team: "Boston Celtics",
+      legs: [
+        leg({ outcome: "home" }),
+        leg({ venue: "polymarket", outcome: "away", currency: "USD" }),
+      ],
+    });
+    assert.equal(compactMarketHeading(nbaWinner), "Game winner");
+    assert.match(compactLegLine(nbaWinner, nbaWinner.legs[0]), /Pistons · Game winner/);
     const bookSrc = readFileSync(join(frontendRoot, "components/paper-trade-book.tsx"), "utf8");
     assert.match(bookSrc, /NFL_SETTLEMENT_CAVEAT_TEXT/);
+    assert.match(bookSrc, /NBA_SETTLEMENT_CAVEAT_TEXT/);
     const detailSrc = readFileSync(join(frontendRoot, "app/paper/[tradeId]/page.tsx"), "utf8");
     assert.match(detailSrc, /NFL_SETTLEMENT_CAVEAT_TEXT/);
+    assert.match(detailSrc, /NBA_SETTLEMENT_CAVEAT_TEXT/);
   });
 });

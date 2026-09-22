@@ -1,0 +1,34 @@
+{
+  "fixture_id": "nba-kalshi-milestone-bosdet-tipoff-2026-09-21",
+  "identified_as": "CAPTURED public Kalshi basketball_game milestone for Boston at Detroit. Tipoff is start_date, not market occurrence_datetime. Home/away are UUIDs. Injury/last-game blobs stripped.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events?series_ticker=KXNBAGAME&status=open&with_nested_markets=true&with_milestones=true",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": "8c1f39a0-80ea-42d6-844b-eda3ad3ce9f4",
+    "type": "basketball_game",
+    "title": "Boston at Detroit",
+    "start_date": "2026-10-20T19:00:00Z",
+    "category": "Sports",
+    "primary_event_tickers": [
+      "KXNBAGAME-26OCT20BOSDET"
+    ],
+    "related_event_tickers": [
+      "KXNBAGAME-26OCT20BOSDET"
+    ],
+    "source_id": "023405e4-4019-4c27-ae8b-b7064db1d8d0",
+    "source_ids": {
+      "source_3_id": "023405e4-4019-4c27-ae8b-b7064db1d8d0",
+      "source_4_id": "73682354",
+      "source_5_id": "sr:match:73682354"
+    },
+    "details": {
+      "league": "NBA",
+      "status": "scheduled",
+      "home_team_id": "65569528-1888-40aa-9d62-2b0e8142a9b4",
+      "away_team_id": "6dd427f5-fa02-40ef-aa90-cfa73e0c539e",
+      "main_game_event_ticker": "KXNBAGAME-26OCT20BOSDET",
+      "source_id": "023405e4-4019-4c27-ae8b-b7064db1d8d0"
+    }
+  }
+}
