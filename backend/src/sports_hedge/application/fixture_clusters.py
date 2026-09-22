@@ -345,18 +345,25 @@ class _IndexedCandidateBuilder:
             return True
         return bool(could_match(left.item.canonical, right.item.canonical))
 
+    def _accepted_compatible_pair(
+        self, record: _IndexRecord, other: _IndexRecord
+    ) -> tuple[_IndexRecord, _IndexRecord] | None:
+        if record.index >= other.index:
+            return None
+        key = (record.index, other.index)
+        if key in self.seen:
+            return None
+        if not _compatible_index_pair(record, other, window_seconds=self.window):
+            return None
+        self.seen.add(key)
+        return record, other
+
     def _iter_compatible_pairs(self) -> Iterator[tuple[_IndexRecord, _IndexRecord]]:
         for record in self.records:
             for other in self.neighbour_records(record):
-                if record.index >= other.index:
-                    continue
-                key = (record.index, other.index)
-                if key in self.seen:
-                    continue
-                if not _compatible_index_pair(record, other, window_seconds=self.window):
-                    continue
-                self.seen.add(key)
-                yield record, other
+                pair = self._accepted_compatible_pair(record, other)
+                if pair is not None:
+                    yield pair
 
     def _new_component_parent(self) -> dict[int, int]:
         return {record.index: record.index for record in self.records}
@@ -529,10 +536,9 @@ class _IndexedCandidateBuilder:
                     augmented.append((left, right) if left.index < right.index else (right, left))
         return augmented
 
-    def finish(self) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
-        self.generated.sort(key=_candidate_progress_key)
+    def _index_diagnostics(self) -> dict[str, Any]:
         naive = naive_pair_space(len(self.items))
-        diagnostics = {
+        return {
             "naive_pair_space": naive,
             "candidate_pairs_generated": len(self.generated),
             "pairs_pruned_by_index": max(
@@ -556,7 +562,28 @@ class _IndexedCandidateBuilder:
             "max_could_match_component": self.max_could_match_component,
             "secondary_clique_capped_components": self.secondary_clique_capped_components,
         }
-        return self.generated, diagnostics
+
+    def finish(self) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
+        self.generated.sort(key=_candidate_progress_key)
+        return self.generated, self._index_diagnostics()
+
+    async def finish_cooperative(
+        self, *, yield_every: int = INDEX_COOP_YIELD_EVERY
+    ) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
+        """Same candidate order as ``finish``, yielding while decorating sort keys."""
+
+        pause_every = max(1, int(yield_every))
+        last_yield = time.perf_counter()
+        decorated: list[tuple[Any, tuple[VenueEvent, VenueEvent]]] = []
+        for ticks, pair in enumerate(self.generated, start=1):
+            decorated.append((_candidate_progress_key(pair), pair))
+            if _coop_pause_due(ticks, pause_every, last_yield):
+                await asyncio.sleep(0)
+                last_yield = time.perf_counter()
+        decorated.sort(key=lambda item: item[0])
+        await asyncio.sleep(0)
+        self.generated = [pair for _, pair in decorated]
+        return self.generated, self._index_diagnostics()
 
     def run_sync(self) -> tuple[list[tuple[VenueEvent, VenueEvent]], dict[str, Any]]:
         compatible = list(self._iter_compatible_pairs())
@@ -575,14 +602,25 @@ class _IndexedCandidateBuilder:
         compatible: list[tuple[_IndexRecord, _IndexRecord]] = []
         parent = self._new_component_parent()
         last_yield = time.perf_counter()
+        ticks = 0
         try:
-            for ticks, pair in enumerate(self._iter_compatible_pairs(), start=1):
-                compatible.append(pair)
-                if self._could_match_pair(*pair):
-                    self._union_component(parent, pair[0].index, pair[1].index)
-                if _coop_pause_due(ticks, pause_every, last_yield):
-                    await asyncio.sleep(0)
-                    last_yield = time.perf_counter()
+            # Pause on neighbour visits, not only yielded pairs. Same-kickoff
+            # unresolved buckets spend most of the walk skipping the upper
+            # triangle; counting only emitted pairs lets that drain starve
+            # the 0.25s event-loop bound. Secondary name blocking still filters
+            # inside neighbour_records; clique augmentation restores veto pairs
+            # inside small could-match components afterwards.
+            for record in self.records:
+                for other in self.neighbour_records(record):
+                    ticks += 1
+                    pair = self._accepted_compatible_pair(record, other)
+                    if pair is not None:
+                        compatible.append(pair)
+                        if self._could_match_pair(*pair):
+                            self._union_component(parent, pair[0].index, pair[1].index)
+                    if _coop_pause_due(ticks, pause_every, last_yield):
+                        await asyncio.sleep(0)
+                        last_yield = time.perf_counter()
             compatible = self._augment_component_cliques(compatible, parent)
             await self._emit_component_pairs_cooperative(
                 compatible, parent, yield_every=pause_every
@@ -593,7 +631,7 @@ class _IndexedCandidateBuilder:
                 compatible = self._augment_component_cliques(compatible, parent)
                 self._emit_component_pairs(compatible, parent)
             raise
-        return self.finish()
+        return await self.finish_cooperative(yield_every=pause_every)
 
 
 def build_indexed_candidates(
@@ -1080,13 +1118,14 @@ class ClusterPass:
         self, *, yield_every: int = INDEX_COOP_YIELD_EVERY
     ) -> set[tuple[VenueName, str]]:
         nodes: set[tuple[VenueName, str]] = set()
-        remaining = self._candidates[self.candidate_pairs_considered :]
+        start = self.candidate_pairs_considered
         pause_every = max(1, int(yield_every))
         last_yield = time.perf_counter()
-        for index, (left, right) in enumerate(remaining, start=1):
-            if _coop_pause_due(index, pause_every, last_yield):
+        for ticks, index in enumerate(range(start, len(self._candidates)), start=1):
+            if _coop_pause_due(ticks, pause_every, last_yield):
                 await asyncio.sleep(0)
                 last_yield = time.perf_counter()
+            left, right = self._candidates[index]
             nodes.add(_key(left.venue, left.source_event_id))
             nodes.add(_key(right.venue, right.source_event_id))
             if len(nodes) >= len(self.nodes):
@@ -1105,10 +1144,12 @@ class ClusterPass:
         )
         await asyncio.sleep(0)
         pause_every = max(1, int(yield_every))
+        last_yield = time.perf_counter()
         grouped: dict[tuple[VenueName, str], FixtureCluster] = {}
-        for index, (key, item) in enumerate(self.nodes.items()):
-            if index % pause_every == 0:
+        for index, (key, item) in enumerate(self.nodes.items(), start=1):
+            if _coop_pause_due(index, pause_every, last_yield):
                 await asyncio.sleep(0)
+                last_yield = time.perf_counter()
             root = self._find(key)
             cluster = grouped.setdefault(root, FixtureCluster())
             _append_cluster_event(cluster, item)

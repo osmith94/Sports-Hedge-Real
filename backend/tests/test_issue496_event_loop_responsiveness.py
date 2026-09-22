@@ -307,6 +307,16 @@ def test_cancel_recovery_does_not_call_sync_cluster_venue_events() -> None:
     assert "assign_identity_components_cooperative" in inspect.getsource(
         ClusterPass._apply_identity_graph_cooperative
     )
+    clusters_mod = inspect.getmodule(ClusterPass)
+    assert clusters_mod is not None
+    index_src = inspect.getsource(clusters_mod._IndexedCandidateBuilder.run_cooperative)
+    assert "neighbour_records" in index_src
+    assert "finish_cooperative" in index_src
+    assign_src = inspect.getsource(clusters_mod.assign_identity_components_cooperative)
+    assert "await asyncio.sleep(0)" in assign_src
+    assert assign_src.find("await asyncio.sleep(0)") < assign_src.find(
+        "_prepare_identity_assignment"
+    )
 
 
 @pytest.mark.asyncio

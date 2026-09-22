@@ -497,12 +497,14 @@ def test_verified_new_competition_mappings_and_no_guessed_tickers() -> None:
         "champions_league",
         "europa_league",
         "conference_league",
+        "uefa_nations_league",
         "super_lig",
         "mls",
         "ligue_1",
         "liga_mx",
         "brasileirao",
         "nfl",
+        "nba",
     ):
         assert catalog[code]["selectable"] is True
         assert catalog[code]["unavailable_reason"] is None
@@ -524,6 +526,7 @@ def test_verified_new_competition_mappings_and_no_guessed_tickers() -> None:
     assert resolve_target_competition_from_kalshi_ticker("KXNFLGAME-26SEP20INDKC") is not None
     assert resolve_target_competition_from_kalshi_ticker("KXNFLGAMEFG") is None
     assert catalog["nfl"]["default_selected"] is False
+    assert catalog["nba"]["default_selected"] is False
     settings = Settings()
     assert "KXUCLGAME" not in settings.kalshi_series_tickers
     assert "10204" not in settings.resolved_polymarket_series_ids()
@@ -683,7 +686,7 @@ def test_thirty_row_matrix_only_verified_all_three_are_selectable() -> None:
             assert "KX" in "".join(row.kalshi_series_tickers)
     docs = Path(__file__).resolve().parents[2] / "docs" / "OPERATOR_COMPETITION_VERIFICATION_MATRIX.md"
     text = docs.read_text(encoding="utf-8")
-    assert "OPERATOR_COMPETITION_REGISTRY_VERSION = 5" in text
+    assert "OPERATOR_COMPETITION_REGISTRY_VERSION = 6" in text
     assert "VERIFIED_ALL_3" in text
     for row in matrix:
         assert row.code in text

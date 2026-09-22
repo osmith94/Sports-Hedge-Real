@@ -31,6 +31,7 @@ class TargetCompetitionCode(StrEnum):
     CHAMPIONS_LEAGUE = "champions_league"
     EUROPA_LEAGUE = "europa_league"
     CONFERENCE_LEAGUE = "conference_league"
+    UEFA_NATIONS_LEAGUE = "uefa_nations_league"
     SUPER_LIG = "super_lig"
     MLS = "mls"
     LIGA_MX = "liga_mx"
@@ -49,10 +50,10 @@ class VenueMappingStatus(StrEnum):
     UNVERIFIED = "unverified"
 
 
-PRINCIPAL_OPERATOR_COMPETITION_COUNT = 32
+PRINCIPAL_OPERATOR_COMPETITION_COUNT = 33
 VERIFIED_ALL_3 = "VERIFIED_ALL_3"
 PARTIAL_PROVIDER_MAPPING = "PARTIAL"
-PROVIDER_MATRIX_RETRIEVED_AT = "2026-09-20"
+PROVIDER_MATRIX_RETRIEVED_AT = "2026-09-22"
 
 
 class TargetCompetition(BaseModel):
@@ -80,14 +81,26 @@ class TargetCompetition(BaseModel):
 #   itc=10287, fl1=10195, ere=10286, por=10330, scop=10674, bel1=12351,
 #   mex=10290, bra=10359, arg=10312, lib=10289, spl=10361, jap=10360,
 #   saf1=12360 (South Africa Premiership).
+# Public Gamma GET /sports (retrieved 2026-09-22): unl=11446 UEFA Nations League.
 # Near-neighbor Gamma series left unmatched: bl2 (2. Bundesliga), itsb (Serie B),
 # clf (Club Friendlies), ecu1 (LigaPro Serie A), uwcl (Women's UCL),
-# tur2 (Turkey 1. Lig), ja2/j2100 (J2), bra2/bra3, fr2 (Ligue 2).
+# tur2 (Turkey 1. Lig), ja2/j2100 (J2), bra2/bra3, fr2 (Ligue 2),
+# conl=10673 CONCACAF Nations League.
+# Polymarket group/champion/relegation outrights (e.g. event 994203
+# uefa-nations-league-winner-2026-27) have series=null / sport=null and are
+# not in Gamma series 11446. They stay out of the fixture pipeline.
 #
 # Public Kalshi GET /series category=Sports (retrieved 2026-09-20) match-level
 # GAME/BTTS/TOTAL/(FTTS where present). Short prefixes are not used when they
 # would also match a neighbour (women's, All-Star, 2. Bundesliga, Serie B/C,
 # Ligue 2, J2, Sudamericana).
+# Public Kalshi GET /series category=Sports (retrieved 2026-09-22) UEFA
+# Nations League match-level GAME/BTTS/TOTAL/FTTS:
+#   KXUEFANLGAME, KXUEFANLBTTS, KXUEFANLTOTAL, KXUEFANLFTTS.
+# Observed but not admitted (not already soccer-approved families):
+#   KXUEFANLSPREAD, KXUEFANL1H*, KXUEFANLTEAMTOTAL, KXUEFANLSCORE,
+#   KXUEFANLADVANCE, KXUEFANLMOV. Season series KXUEFANL is not a fixture.
+# Neighbor KXCONCACAFNL is CONCACAF outrights, not UEFA fixtures.
 # Not present on that listing and therefore not invented:
 #   EFL League Two match-level series, South African Premiership match-level series.
 #
@@ -329,6 +342,36 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
             "KXUECLGAME",
             "KXUECLBTTS",
             "KXUECLTOTAL",
+        ),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.UEFA_NATIONS_LEAGUE,
+        display_name="UEFA Nations League",
+        aliases=(
+            "uefa nations league",
+            "nations league",
+            "unl",
+            "uefa nations league 2026/27",
+            "uefa nations league 2026 27",
+            # Live Matchbook COMPETITION meta-tags 2026-09-22 (soccer id=15):
+            # Netherlands vs Germany uses "UEFA Nations League A";
+            # Austria vs Israel uses "UEFA Nations League B";
+            # Andorra vs Malta uses "UEFA Nations League D".
+            # League C was not on that open snapshot and is not registered
+            # until an observed COMPETITION tag exists.
+            "uefa nations league a",
+            "uefa nations league b",
+            "uefa nations league d",
+        ),
+        polymarket_gamma_series_id="11446",
+        polymarket_gamma_sport="unl",
+        # Complete match-level prefixes only. Short KXUEFANL also matches the
+        # season series KXUEFANL and 1H/score/spread/advance neighbors.
+        kalshi_series_prefixes=(
+            "KXUEFANLGAME",
+            "KXUEFANLBTTS",
+            "KXUEFANLTOTAL",
+            "KXUEFANLFTTS",
         ),
     ),
     TargetCompetition(
@@ -796,10 +839,11 @@ NO_VERIFIED_CROSS_VENUE_MAPPING = "No verified cross-venue mapping"
 KALSHI_SERIES_NOT_VERIFIED = "Kalshi match-level series not verified"
 POLYMARKET_SERIES_NOT_VERIFIED = "Polymarket Gamma series not verified"
 MATCHBOOK_ALIASES_NOT_VERIFIED = "Matchbook label aliases not verified"
+SEASON_PROPOSITION_NOT_FIXTURE = "season_proposition_not_fixture"
 
 # Operator selector grouping. Canonical codes are the operator model; venue
 # tickers stay backend-only.
-OPERATOR_COMPETITION_REGISTRY_VERSION = 5
+OPERATOR_COMPETITION_REGISTRY_VERSION = 6
 OPERATOR_UNIVERSE_SPORT = "football"
 OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("uefa", "UEFA"),
@@ -829,6 +873,7 @@ OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
     TargetCompetitionCode.CHAMPIONS_LEAGUE: ("uefa", "UEFA", "Champions League"),
     TargetCompetitionCode.EUROPA_LEAGUE: ("uefa", "UEFA", "Europa League"),
     TargetCompetitionCode.CONFERENCE_LEAGUE: ("uefa", "UEFA", "Conference League"),
+    TargetCompetitionCode.UEFA_NATIONS_LEAGUE: ("uefa", "UEFA", "Nations League"),
     TargetCompetitionCode.PREMIER_LEAGUE: ("england", "England", "Premier League"),
     TargetCompetitionCode.CHAMPIONSHIP: ("england", "England", "Championship"),
     TargetCompetitionCode.LEAGUE_ONE: ("england", "England", "League One"),
@@ -940,6 +985,12 @@ KALSHI_SERIES_TICKERS_BY_CODE: dict[TargetCompetitionCode, tuple[str, ...]] = {
         "KXUECLGAME",
         "KXUECLBTTS",
         "KXUECLTOTAL",
+    ),
+    TargetCompetitionCode.UEFA_NATIONS_LEAGUE: (
+        "KXUEFANLGAME",
+        "KXUEFANLBTTS",
+        "KXUEFANLTOTAL",
+        "KXUEFANLFTTS",
     ),
     TargetCompetitionCode.SUPER_LIG: (
         "KXSUPERLIGGAME",
@@ -1506,6 +1557,17 @@ def scope_polymarket_event(
             label=label or resolved.display_name,
             sport=_scope_diagnostic_sport(resolved),
         )
+    if (
+        resolved.code is TargetCompetitionCode.UEFA_NATIONS_LEAGUE
+        and _polymarket_payload_is_season_proposition(payload)
+    ):
+        return ScopeDecision(
+            allowed=False,
+            reason=SEASON_PROPOSITION_NOT_FIXTURE,
+            competition=resolved,
+            label=label or _first_str(payload, "title", "slug") or resolved.display_name,
+            sport="football",
+        )
     return ScopeDecision(
         allowed=True,
         competition=resolved,
@@ -1545,6 +1607,19 @@ def scope_kalshi_event(
             competition=resolved,
             label=label or resolved.display_name,
             sport=_scope_diagnostic_sport(resolved),
+        )
+    if resolved.code is TargetCompetitionCode.UEFA_NATIONS_LEAGUE and (
+        (ticker and series_target is None)
+        or _polymarket_payload_is_season_proposition(payload)
+    ):
+        # Season series KXUEFANL and unadmitted 1H/spread/score/advance
+        # neighbors must not enter the fixture pipeline via competition title.
+        return ScopeDecision(
+            allowed=False,
+            reason=SEASON_PROPOSITION_NOT_FIXTURE,
+            competition=resolved,
+            label=label or resolved.display_name,
+            sport="football",
         )
     return ScopeDecision(
         allowed=True,
@@ -1652,6 +1727,24 @@ def _polymarket_series_title(payload: dict[str, Any]) -> str | None:
             if title:
                 return str(title).strip()
     return None
+
+
+_SEASON_PROPOSITION_TOKENS = ("winner", "champion", "relegat")
+
+
+def _polymarket_payload_is_season_proposition(payload: dict[str, Any]) -> bool:
+    """Reject group/champion/relegation outrights that are not match fixtures.
+
+    Live 2026-09-22 Gamma events such as ``uefa-nations-league-winner-2026-27``
+    have no series id. If a label later resolves to Nations League, the title
+    still must look like a two-team fixture before it may enter PAPER discovery.
+    """
+
+    title = _first_str(payload, "title", "slug", "ticker") or ""
+    blob = f" {normalize_text(title)} "
+    if " vs " in blob:
+        return False
+    return any(token in blob for token in _SEASON_PROPOSITION_TOKENS)
 
 
 def _strip_season_suffix(normalized: str) -> str:
