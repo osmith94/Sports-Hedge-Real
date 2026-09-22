@@ -281,6 +281,11 @@ class GenerationIdentityCache:
         default_factory=dict
     )
     clustering_resume: ClusteringResumeState | None = None
+    # Resume/candidate lists partitioned by identity shard. A change in one
+    # competition must not drop cursors for the others. ``clustering_resume``
+    # stays the single-pass checkpoint used by direct ClusterPass callers.
+    shard_resumes: dict[str, ClusteringResumeState] = field(default_factory=dict)
+    discovery_signature: str | None = None
 
     def bind(self, generation_id: int | None) -> None:
         if generation_id is None:
@@ -295,6 +300,8 @@ class GenerationIdentityCache:
         self.no_cross_venue.clear()
         self.known_other_keys.clear()
         self.clustering_resume = None
+        self.shard_resumes.clear()
+        self.discovery_signature = None
 
     def skip_cross_venue_against(self, item: Any, other: Any) -> bool:
         """True when this pair was already a proven non-candidate this generation."""
@@ -327,6 +334,31 @@ class GenerationIdentityCache:
 
         return "\n".join(sorted(event_identity_fingerprint(item) for item in items))
 
+    def build_clustering_resume(
+        self,
+        *,
+        items: list[Any],
+        cursor: int,
+        parent: dict[tuple[VenueName, str], tuple[VenueName, str]],
+        match_confidence: dict[tuple[VenueName, str], float],
+        pair_kinds: dict[tuple[VenueName, str], set[str]],
+        scored_pairs: list[Any] | None = None,
+        candidate_keys: list[tuple[tuple[str, str], tuple[str, str]]] | None = None,
+        candidate_order_version: int = 2,
+        index_diagnostics: dict[str, Any] | None = None,
+    ) -> ClusteringResumeState:
+        return ClusteringResumeState(
+            items_signature=self.items_signature(items),
+            cursor=max(0, int(cursor)),
+            parent=dict(parent),
+            match_confidence=dict(match_confidence),
+            pair_kinds={key: set(value) for key, value in pair_kinds.items()},
+            scored_pairs=list(scored_pairs or ()),
+            candidate_keys=list(candidate_keys or ()),
+            candidate_order_version=int(candidate_order_version),
+            index_diagnostics=dict(index_diagnostics or {}),
+        )
+
     def store_clustering_resume(
         self,
         *,
@@ -340,17 +372,22 @@ class GenerationIdentityCache:
         candidate_order_version: int = 2,
         index_diagnostics: dict[str, Any] | None = None,
     ) -> None:
-        self.clustering_resume = ClusteringResumeState(
-            items_signature=self.items_signature(items),
-            cursor=max(0, int(cursor)),
-            parent=dict(parent),
-            match_confidence=dict(match_confidence),
-            pair_kinds={key: set(value) for key, value in pair_kinds.items()},
-            scored_pairs=list(scored_pairs or ()),
-            candidate_keys=list(candidate_keys or ()),
-            candidate_order_version=int(candidate_order_version),
-            index_diagnostics=dict(index_diagnostics or {}),
+        self.clustering_resume = self.build_clustering_resume(
+            items=items,
+            cursor=cursor,
+            parent=parent,
+            match_confidence=match_confidence,
+            pair_kinds=pair_kinds,
+            scored_pairs=scored_pairs,
+            candidate_keys=candidate_keys,
+            candidate_order_version=candidate_order_version,
+            index_diagnostics=index_diagnostics,
         )
+
+    def store_shard_resume(self, shard_id: str, **kwargs: Any) -> None:
+        """Checkpoint one competition shard without touching any other shard."""
+
+        self.shard_resumes[str(shard_id)] = self.build_clustering_resume(**kwargs)
 
     def take_clustering_resume(self, items: list[Any]) -> ClusteringResumeState | None:
         snapshot = self.clustering_resume
@@ -360,6 +397,59 @@ class GenerationIdentityCache:
             self.clustering_resume = None
             return None
         return snapshot
+
+
+class ShardResumeCache:
+    """GenerationIdentityCache view whose resume cursor is one shard.
+
+    Negative-pair memory stays on the parent (it is keyed by source event).
+    Candidate lists and cursors do not.
+    """
+
+    def __init__(self, parent: GenerationIdentityCache, shard_id: str) -> None:
+        self._parent = parent
+        self.shard_id = str(shard_id)
+
+    @property
+    def generation_id(self) -> int | None:
+        return self._parent.generation_id
+
+    @property
+    def clustering_resume(self) -> ClusteringResumeState | None:
+        return self._parent.shard_resumes.get(self.shard_id)
+
+    @clustering_resume.setter
+    def clustering_resume(self, value: ClusteringResumeState | None) -> None:
+        if value is None:
+            self._parent.shard_resumes.pop(self.shard_id, None)
+        else:
+            self._parent.shard_resumes[self.shard_id] = value
+
+    def items_signature(self, items: list[Any]) -> str:
+        return self._parent.items_signature(items)
+
+    def take_clustering_resume(self, items: list[Any]) -> ClusteringResumeState | None:
+        snapshot = self.clustering_resume
+        if snapshot is None:
+            return None
+        if snapshot.items_signature != self.items_signature(items):
+            self.clustering_resume = None
+            return None
+        return snapshot
+
+    def store_clustering_resume(self, **kwargs: Any) -> None:
+        self._parent.store_shard_resume(self.shard_id, **kwargs)
+
+    def skip_cross_venue_against(self, item: Any, other: Any) -> bool:
+        return self._parent.skip_cross_venue_against(item, other)
+
+    def record_single_venue(
+        self,
+        item: Any,
+        *,
+        other_venue_keys: frozenset[tuple[str, str]],
+    ) -> None:
+        self._parent.record_single_venue(item, other_venue_keys=other_venue_keys)
 
 
 @dataclass
@@ -549,6 +639,8 @@ def cache_payload_summary(
         "clustering_resume_cursor": (
             None if cache.clustering_resume is None else cache.clustering_resume.cursor
         ),
+        "shard_resume_count": len(cache.shard_resumes),
+        "discovery_signature_set": cache.discovery_signature is not None,
         "cross_generation_events": len(incremental.events),
         "cross_generation_pairs": len(incremental.pairs),
         "cross_generation_semantic_version": incremental.semantic_version,

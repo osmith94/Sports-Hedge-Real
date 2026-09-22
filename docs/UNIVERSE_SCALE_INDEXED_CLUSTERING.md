@@ -157,6 +157,32 @@ fingerprint and the matcher/alias/competition-registry semantic version are
 unchanged. Operator Clear & update invalidates the cache; generation close
 does not. Truncated clustering does not commit a snapshot.
 
+## Phase 7 — competition shards (#511)
+
+Implemented in `universe_identity_shards.py`. After scope filtering, normalised
+events are partitioned by `(sport, target_competition_code)` before the
+identity graph. Exact verified Polymarket Gamma series ids and Kalshi series
+tickers fill that code when the canonical label does not resolve, and the
+registry display name is stamped so EventMatcher scores a known competition.
+Thresholds are unchanged. Events that still cannot be proven stay in an
+explicit `*unresolved*` shard.
+
+Each shard has its own candidate list, signature and resume cursor. A
+discovery change in one competition does not invalidate the others
+(`global_resume_invalidated_by_discovery` stays false). Shards keep first-seen
+order rather than shard-id sort. Scheduling is multi-venue, then single-venue,
+then hot/unresolved with a smaller pair slice, and market evaluation walks
+that same order. The soft scan deadline stops before the next fixture, so an
+alphabetically earlier competition cannot consume the only evaluation slot,
+and a partial hot shard cannot relabel a fixture already evaluated. Hot and
+unresolved shards also apply a fail-open name canopy before fuzzy scoring;
+EventMatcher remains the oracle.
+
+Diagnostics on `scan_diagnostics` include `blocking_shard_key`,
+`largest_shard_*`, per-shard timings, provenance counts, and whether a
+discovery snapshot change kept other shard resumes. Data in the #511 tests
+are synthetic fixtures, not live quotes.
+
 ## Invariants preserved
 
 - PAPER-only, no venue writes
