@@ -86,6 +86,9 @@ if (-not (Test-Path $Logs)) {
 $BackendPidFile = Join-Path $Logs "demo-backend.pid"
 $FrontendPidFile = Join-Path $Logs "demo-frontend.pid"
 $BackendLog = Join-Path $Logs "demo-backend.out.log"
+# faulthandler tracebacks, unhandled asyncio exceptions, and backend_fatal
+# records are written to this process stderr. Keep RedirectStandardError on
+# $BackendErr so they land in logs\demo-backend.err.log.
 $BackendErr = Join-Path $Logs "demo-backend.err.log"
 $FrontendLog = Join-Path $Logs "demo-frontend.out.log"
 $FrontendErr = Join-Path $Logs "demo-frontend.err.log"

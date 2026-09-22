@@ -110,6 +110,14 @@ class LoopActivity:
     def note_offloop_persistence(self) -> None:
         self.offloop_persistence += 1
 
+    def current_open_sync_ms(self) -> int:
+        """Elapsed milliseconds of the open synchronous slice, if one is running."""
+
+        if not self._slice_open or self.current.phase == "idle":
+            return 0
+        elapsed = max(0.0, time.perf_counter() - self._slice_started)
+        return int(elapsed * 1000)
+
 
 LOOP_ACTIVITY = LoopActivity()
 
@@ -152,6 +160,27 @@ def loop_activity_snapshot() -> dict[str, object]:
         "event_loop_longest_sync_candidates": 0 if longest is None else longest.candidates,
         "event_loop_offloop_persistence": LOOP_ACTIVITY.offloop_persistence,
     }
+
+
+def loop_activity_diagnostic_snapshot() -> dict[str, object]:
+    """Current open slice plus the longest closed slice from this process.
+
+    Crash logs use this view. Scanner partition logs keep loop_activity_snapshot().
+    """
+
+    current = LOOP_ACTIVITY.current
+    snapshot = loop_activity_snapshot()
+    snapshot.update(
+        {
+            "event_loop_current_lane": current.lane,
+            "event_loop_current_phase": current.phase,
+            "event_loop_current_shard": current.shard_id,
+            "event_loop_current_events": current.events,
+            "event_loop_current_candidates": current.candidates,
+            "event_loop_current_open_sync_ms": LOOP_ACTIVITY.current_open_sync_ms(),
+        }
+    )
+    return snapshot
 
 
 async def yield_event_loop() -> None:

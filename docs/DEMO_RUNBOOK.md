@@ -57,7 +57,7 @@ After bootstrap, `/paper/economics-status` (econ strip on `/`) shows USD GBP-per
 
 Labelled `/demo` books are frozen `DEMO / FIXTURE REPLAY` snapshots (`data_kind=demo_fixture_replay`). Live quote-age rejection on `/` still fail-closes stale `live_paper` rows. Fixture replay is not a live-freshness waiver.
 
-Logs: `logs\demo-backend.*.log` and `logs\demo-frontend.*.log`.
+Logs: `logs\demo-backend.out.log`, `logs\demo-backend.err.log`, and `logs\demo-frontend.*.log`. Python `faulthandler` tracebacks, unhandled asyncio exceptions, and a single `backend_fatal` record (build SHA/branch plus the current/longest scanner event-loop phase) are written to the backend process stderr. The launcher keeps `RedirectStandardError` on `logs\demo-backend.err.log`, so those diagnostics land there. There is no periodic traceback dump.
 
 ## Click path
 
