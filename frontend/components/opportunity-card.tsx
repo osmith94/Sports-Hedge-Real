@@ -1,6 +1,8 @@
 import { ArbitrageOpportunity } from "../lib/arbitrage-ops";
+import { betBlockedReason, isBetActionable, opportunityBetHref } from "../lib/bet-ticket";
 import { grossPricesEffectivelyEqual } from "../lib/comfort-threshold";
-import { money, percent, percentPoints, relativeTime } from "../lib/format";
+import { money, percent, percentPoints } from "../lib/format";
+import { HydratedRelativeTime } from "./hydrated-relative-time";
 
 function provenanceLabel(value: ArbitrageOpportunity["provenance"]): string {
   return value === "LIVE_PAPER" ? "LIVE PAPER" : "DEMO / FIXTURE";
@@ -92,7 +94,9 @@ export function OpportunityCard({
         <span>{item.currencies.join(" · ")}</span>
         <span>lock {item.expectedLock ?? "—"}</span>
         <span>age at last evaluation {item.quoteFreshness ?? "—"}</span>
-        <span>updated {relativeTime(item.scannedAt)}</span>
+        <span>
+          updated <HydratedRelativeTime iso={item.scannedAt} />
+        </span>
         <span>
           narrative{" "}
           {item.strikeNarrative === "approaching"
@@ -113,6 +117,25 @@ export function OpportunityCard({
       ) : null}
       <div className="opp-note">{operatorNote(item, executable)}</div>
       {feeNote ? <div className="opp-note">{feeNote}</div> : null}
+      <BetAction item={item} />
     </article>
+  );
+}
+
+function BetAction({ item }: { item: ArbitrageOpportunity }) {
+  const href = opportunityBetHref(item);
+  const actionable = isBetActionable(item) && href != null;
+  if (actionable && href) {
+    return (
+      <a className="bet-button" href={href}>
+        BET
+      </a>
+    );
+  }
+  return (
+    <button type="button" className="bet-button bet-button-disabled" disabled title={betBlockedReason(item)}>
+      BET
+      <span className="bet-button-reason">{betBlockedReason(item)}</span>
+    </button>
   );
 }

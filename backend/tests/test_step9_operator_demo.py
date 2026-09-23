@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from sports_hedge.accounting.paper_journal import DataProvenance
 from sports_hedge.api.main import app
 from sports_hedge.api.paper import get_demo_walkthrough_service
 from sports_hedge.application.complete_set import SOLVER_MODEL_GENERALIZED, SOLVER_MODEL_SIMPLE
-from sports_hedge.application.demo_fixtures import DEMO_DATA_KIND, DEMO_FIXTURE_LABEL, DEMO_FX, tighten_reverse_quotes
-from sports_hedge.paper.unwind.models import UnwindPolicy
+from sports_hedge.application.demo_fixtures import DEMO_DATA_KIND, DEMO_FIXTURE_LABEL
 from sports_hedge.application.demo_walkthrough import (
     DemoCloseRequest,
     DemoResetRequest,
@@ -120,7 +121,7 @@ def test_reset_fails_closed_while_open_then_reinitialize_reseeds(tmp_path: Path)
     demo, ops, watchlist, ledger, repository = _bundle(tmp_path)
     try:
         opened = demo.replay(
-            FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold")
+            FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold")
         )
         assert opened.trade is not None
         assert opened.trade.state is PaperTradeState.OPEN
@@ -172,7 +173,7 @@ def test_simple_mb_pm_opens_after_locks_then_settles(tmp_path: Path) -> None:
     try:
         before = ledger.treasury.snapshot()
         opened = demo.replay(
-            FixtureReplayRequest(venue_pair="matchbook_polymarket", solver="simple", close_via="hold")
+            FixtureReplayRequest(venue_pair="matchbook_kalshi", solver="simple", close_via="hold")
         )
         trade = opened.trade
         assert trade is not None
@@ -182,15 +183,14 @@ def test_simple_mb_pm_opens_after_locks_then_settles(tmp_path: Path) -> None:
         assert opened.decision.solver_model == SOLVER_MODEL_SIMPLE
         assert trade.guaranteed_profit_gbp_at_open is not None
         kinds = {leg.fill_kind for leg in trade.legs}
-        assert PaperLegFillKind.INTERNAL_SIMULATED in kinds
-        assert PaperLegFillKind.PAPER_SIMULATED_EXTERNAL in kinds
+        assert kinds == {PaperLegFillKind.INTERNAL_SIMULATED}
         assert PaperLegFillKind.MANUAL_EXTERNAL not in kinds
         after_open = ledger.treasury.snapshot()
         assert after_open.pool(VenueName.MATCHBOOK, "GBP").locked_capital > 0
-        assert after_open.pool(VenueName.POLYMARKET, "USD").locked_capital > 0
-        assert after_open.pool(VenueName.KALSHI, "USD").locked_capital == 0
-        assert after_open.pool(VenueName.KALSHI, "USD").available_cash == before.pool(
-            VenueName.KALSHI, "USD"
+        assert after_open.pool(VenueName.KALSHI, "USD").locked_capital > 0
+        assert after_open.pool(VenueName.POLYMARKET, "USD").locked_capital == 0
+        assert after_open.pool(VenueName.POLYMARKET, "USD").available_cash == before.pool(
+            VenueName.POLYMARKET, "USD"
         ).available_cash
         if opened.unwind is not None:
             assert opened.unwind.estimated_time_to_release.settles_or_releases_capital is False
@@ -214,7 +214,7 @@ def test_generalized_replay_has_no_fabricated_implied_sum(tmp_path: Path) -> Non
     try:
         result = demo.replay(
             FixtureReplayRequest(
-                venue_pair="matchbook_polymarket",
+                venue_pair="matchbook_kalshi",
                 solver="generalized",
                 close_via="hold",
             )
@@ -238,7 +238,7 @@ def test_generalized_replay_rejected_for_unsupported_venue_pair(tmp_path: Path) 
     app.dependency_overrides[get_demo_walkthrough_service] = lambda: demo
     client = TestClient(app)
     try:
-        for pair in ("matchbook_kalshi", "polymarket_kalshi"):
+        for pair in ("matchbook_polymarket", "polymarket_kalshi"):
             denied = client.post(
                 "/paper/demo/fixture-replay",
                 json={"venue_pair": pair, "solver": "generalized", "close_via": "hold"},
@@ -273,19 +273,14 @@ def test_mb_kalshi_internal_fills_and_settlement(tmp_path: Path) -> None:
         ledger.close()
 
 
-def test_pm_kalshi_without_matchbook_uses_simulated_external(tmp_path: Path) -> None:
+def test_pm_kalshi_without_matchbook_is_not_register_admitted(tmp_path: Path) -> None:
     demo, ops, watchlist, ledger, repository = _bundle(tmp_path)
     try:
-        result = demo.replay(
-            FixtureReplayRequest(venue_pair="polymarket_kalshi", close_via="settlement")
-        )
-        assert result.trade is not None
-        venues = {leg.venue for leg in result.trade.legs}
-        assert venues == {VenueName.POLYMARKET, VenueName.KALSHI}
-        by_venue = {leg.venue: leg.fill_kind for leg in result.trade.legs}
-        assert by_venue[VenueName.POLYMARKET] is PaperLegFillKind.PAPER_SIMULATED_EXTERNAL
-        assert by_venue[VenueName.KALSHI] is PaperLegFillKind.INTERNAL_SIMULATED
-        assert result.trade.state is PaperTradeState.CLOSED
+        with pytest.raises(PaperOperationsError, match="not_registered"):
+            demo.replay(
+                FixtureReplayRequest(venue_pair="polymarket_kalshi", close_via="settlement")
+            )
+        assert ops.list_active_trades() == []
     finally:
         repository.close()
         ledger.close()
@@ -317,51 +312,300 @@ def test_repeated_simulate_does_not_duplicate_open_trade(tmp_path: Path) -> None
         ledger.close()
 
 
-def test_kalshi_unwind_fails_closed_without_inventing_fees(tmp_path: Path) -> None:
+def test_qualify_only_then_confirm_ten_pounds_then_hold_unwind_excludes_settlement(
+    tmp_path: Path,
+) -> None:
+    demo, ops, watchlist, ledger, repository = _bundle(tmp_path)
+    try:
+        ten = Decimal("10")
+        before = ledger.treasury.snapshot()
+        qualified = demo.replay(FixtureReplayRequest(close_via="hold", qualify_only=True))
+        assert qualified.trade is None
+        assert qualified.qualify_only is True
+        assert qualified.opportunity_id
+        assert qualified.preparable_opportunities
+        after_preview_seed = ledger.treasury.snapshot()
+        assert after_preview_seed.pool(VenueName.MATCHBOOK, "GBP").locked_capital == before.pool(
+            VenueName.MATCHBOOK, "GBP"
+        ).locked_capital
+        preview = ops.prepare_fixed_deployment(qualified.opportunity_id, ten)
+        assert preview.accepted is True
+        assert preview.prepared_deployment_id
+        assert preview.locks_treasury is False
+        still = ledger.treasury.snapshot()
+        assert still.pool(VenueName.MATCHBOOK, "GBP").available_cash == before.pool(
+            VenueName.MATCHBOOK, "GBP"
+        ).available_cash
+        opened = ops.simulate_fill(
+            qualified.opportunity_id,
+            simulate_external=True,
+            prepared_deployment_id=preview.prepared_deployment_id,
+            requested_size_gbp=ten,
+            provenance=DataProvenance.FIXTURE_DEMO,
+        )
+        assert opened.entry_complete is True
+        trade = ops.list_active_trades()[0]
+        preview_stakes = {(leg.venue, leg.outcome): leg.stake_native for leg in preview.legs}
+        trade_stakes = {(leg.venue, leg.outcome): leg.filled_stake for leg in trade.legs}
+        assert trade_stakes == preview_stakes
+        hold_locked = dict(trade.capital_locked_native)
+        snap = demo.snapshot()
+        assert snap.hold_vs_unwind is not None
+        assert ops.list_active_trades()[0].capital_locked_native == hold_locked
+        closed = demo.close_open_trade(trade.trade_id, DemoCloseRequest(close_via="unwind"))
+        assert closed.trade is not None
+        assert closed.trade.state is PaperTradeState.CLOSED
+        retry = demo.close_open_trade(trade.trade_id, DemoCloseRequest(close_via="unwind"))
+        assert retry.trade is not None
+        assert retry.trade.trade_id == trade.trade_id
+        with pytest.raises(PaperOperationsError):
+            demo.close_open_trade(trade.trade_id, DemoCloseRequest(close_via="settlement"))
+        report = ledger.reconcile()
+        assert report.ok
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_labelled_fixture_replay_does_not_masquerade_as_live_auto_capture(tmp_path: Path) -> None:
+    settings = Settings(
+        max_slippage_bps=0,
+        fx_spread_bps=0,
+        simulated_latency_ms=0,
+        paper_autofill_enabled=True,
+        paper_treasury_seed_gbp=1000,
+        paper_treasury_demo_usd_gbp_per_unit=0.80,
+        paper_treasury_demo_fx_source="paper_demo_fx_snapshot",
+    )
+    ledger = SqlitePaperLedger(
+        tmp_path / "paper.sqlite",
+        seed_gbp=SEED,
+        usd_gbp_per_unit=FX,
+        fx_source="paper_demo_fx_snapshot",
+    )
+    repository = SqliteMarketIntelligenceRepository()
+    watchlist = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=10_000)
+    ops = PaperOperationsService(
+        watchlist=watchlist,
+        alerts=PriorityAlertService(),
+        settings=settings,
+        ledger=ledger,
+    )
+    demo = DemoWalkthroughService(
+        operations=ops,
+        scan=PaperScanService(MarketIntelligenceService(repository), settings=settings),
+        watchlist=watchlist,
+        ledger=ledger,
+        settings=settings,
+    )
+    try:
+        before = ledger.treasury.snapshot()
+        qualified = demo.replay(FixtureReplayRequest(close_via="hold", qualify_only=True))
+        assert qualified.trade is None
+        assert qualified.qualify_only is True
+        assert ops.list_active_trades() == []
+        stored = watchlist.repository.get(qualified.opportunity_id)
+        assert stored is not None
+        assert stored.data_kind == DEMO_DATA_KIND
+        fill_journals = [
+            entry
+            for entry in ops.journal.list_entries()
+            if entry.source not in {"paper_treasury_seed"}
+        ]
+        assert fill_journals == []
+        after = ledger.treasury.snapshot()
+        assert after.pool(VenueName.MATCHBOOK, "GBP").locked_capital == before.pool(
+            VenueName.MATCHBOOK, "GBP"
+        ).locked_capital
+        assert after.pool(VenueName.POLYMARKET, "USD").locked_capital == before.pool(
+            VenueName.POLYMARKET, "USD"
+        ).locked_capital
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_qualify_ten_pounds_accepts_with_production_fx_and_slippage(tmp_path: Path) -> None:
+    settings = Settings(
+        paper_treasury_seed_gbp=1000,
+        paper_treasury_demo_usd_gbp_per_unit=0.80,
+        paper_treasury_demo_fx_source="paper_demo_fx_snapshot",
+        paper_autofill_enabled=False,
+    )
+    assert settings.max_slippage_bps == 25
+    assert settings.fx_spread_bps == 10
+    ledger = SqlitePaperLedger(
+        tmp_path / "paper.sqlite",
+        seed_gbp=SEED,
+        usd_gbp_per_unit=FX,
+        fx_source="paper_demo_fx_snapshot",
+    )
+    repository = SqliteMarketIntelligenceRepository()
+    watchlist = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=10_000)
+    ops = PaperOperationsService(
+        watchlist=watchlist,
+        alerts=PriorityAlertService(),
+        settings=settings,
+        ledger=ledger,
+    )
+    demo = DemoWalkthroughService(
+        operations=ops,
+        scan=PaperScanService(MarketIntelligenceService(repository), settings=settings),
+        watchlist=watchlist,
+        ledger=ledger,
+        settings=settings,
+    )
+    try:
+        qualified = demo.replay(FixtureReplayRequest(close_via="hold", qualify_only=True))
+        preview = ops.prepare_fixed_deployment(qualified.opportunity_id, Decimal("10"))
+        assert preview.accepted is True, preview.rejection_reason
+        assert preview.applied_size_gbp == Decimal("10")
+        assert preview.native_requirements_reconciled is True
+        assert preview.resized is False
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_aged_demo_confirm_keeps_fixture_provenance_and_ten_pound_legs(tmp_path: Path) -> None:
+    """Production watchlist cap is 1000ms; labelled replay must still confirm after operator delay."""
+
+    settings = Settings(
+        paper_treasury_seed_gbp=1000,
+        paper_treasury_demo_usd_gbp_per_unit=0.80,
+        paper_treasury_demo_fx_source="paper_demo_fx_snapshot",
+        paper_autofill_enabled=False,
+    )
+    ledger = SqlitePaperLedger(
+        tmp_path / "paper.sqlite",
+        seed_gbp=SEED,
+        usd_gbp_per_unit=FX,
+        fx_source="paper_demo_fx_snapshot",
+    )
+    repository = SqliteMarketIntelligenceRepository()
+    watchlist = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=1000)
+    ops = PaperOperationsService(
+        watchlist=watchlist,
+        alerts=PriorityAlertService(),
+        settings=settings,
+        ledger=ledger,
+    )
+    demo = DemoWalkthroughService(
+        operations=ops,
+        scan=PaperScanService(MarketIntelligenceService(repository), settings=settings),
+        watchlist=watchlist,
+        ledger=ledger,
+        settings=settings,
+    )
+    try:
+        ten = Decimal("10")
+        qualified = demo.replay(FixtureReplayRequest(close_via="hold", qualify_only=True))
+        stored = watchlist.repository.get(qualified.opportunity_id)
+        assert stored is not None
+        assert stored.data_kind == DEMO_DATA_KIND
+        preview = ops.prepare_fixed_deployment(qualified.opportunity_id, ten)
+        assert preview.accepted is True, preview.rejection_reason
+        aged = stored.last_seen_at + timedelta(seconds=5)
+        opened = ops.simulate_fill(
+            qualified.opportunity_id,
+            simulate_external=True,
+            prepared_deployment_id=preview.prepared_deployment_id,
+            requested_size_gbp=ten,
+            provenance=DataProvenance.LIVE_PAPER,
+            now=aged,
+        )
+        assert opened.entry_complete is True
+        trade = ops.list_active_trades()[0]
+        assert trade.provenance is DataProvenance.FIXTURE_DEMO
+        preview_stakes = {(leg.venue, leg.outcome): leg.stake_native for leg in preview.legs}
+        trade_stakes = {(leg.venue, leg.outcome): leg.filled_stake for leg in trade.legs}
+        assert trade_stakes == preview_stakes
+        retry = ops.simulate_fill(
+            qualified.opportunity_id,
+            simulate_external=True,
+            prepared_deployment_id=preview.prepared_deployment_id,
+            requested_size_gbp=ten,
+            now=aged + timedelta(seconds=1),
+        )
+        assert retry.trade_id == trade.trade_id
+        assert retry.trace.detail is not None
+        assert "idempotent" in retry.trace.detail
+        assert len(ops.list_active_trades()) == 1
+        mb_preview = next(leg.stake_native for leg in preview.legs if leg.venue is VenueName.MATCHBOOK)
+        assert ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital == mb_preview
+    finally:
+        repository.close()
+        ledger.close()
+
+
+def test_ledger_reconciliation_api_is_read_only(tmp_path: Path) -> None:
+    demo, _ops, _watchlist, ledger, repository = _bundle(tmp_path)
+    get_demo_walkthrough_service.cache_clear()
+    app.dependency_overrides[get_demo_walkthrough_service] = lambda: demo
+    from sports_hedge.api.paper import get_paper_ledger
+
+    app.dependency_overrides[get_paper_ledger] = lambda: ledger
+    client = TestClient(app)
+    try:
+        response = client.get("/paper/ledger/reconciliation")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ok"] is True
+        assert body["paper_only"] is True
+        assert body["execution_enabled"] is False
+        assert body["places_orders"] is False
+        assert body["gbp_journals_balanced"] is True
+    finally:
+        app.dependency_overrides.clear()
+        get_demo_walkthrough_service.cache_clear()
+        repository.close()
+        ledger.close()
+
+
+def test_kalshi_demo_unwind_uses_labelled_sell_quotes(tmp_path: Path) -> None:
     demo, ops, watchlist, ledger, repository = _bundle(tmp_path)
     try:
         opened = demo.replay(
             FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold")
         )
         assert opened.trade is not None
-        with pytest.raises(PaperOperationsError, match="unwind"):
-            demo.close_open_trade(
-                opened.trade.trade_id, DemoCloseRequest(close_via="unwind")
-            )
-        still_open = ops._get_trade_by_opportunity(opened.trade.opportunity_id)
-        assert still_open is not None
-        assert still_open.state is PaperTradeState.OPEN
-        assert ledger.treasury.snapshot().pool(VenueName.KALSHI, "USD").locked_capital > 0
+        assert opened.quotes
+        assert any(quote.venue is VenueName.KALSHI for quote in opened.quotes)
+        assert all(
+            quote.closing_cost.action.value == "sell"
+            for quote in opened.quotes
+            if quote.venue is VenueName.KALSHI
+        )
+        closed = demo.close_open_trade(
+            opened.trade.trade_id, DemoCloseRequest(close_via="unwind")
+        )
+        assert closed.trade is not None
+        assert closed.trade.state is PaperTradeState.CLOSED
+        assert ledger.treasury.snapshot().pool(VenueName.KALSHI, "USD").locked_capital == 0
     finally:
         repository.close()
         ledger.close()
 
 
-def test_validated_unwind_releases_mb_pm_locks(tmp_path: Path) -> None:
+def test_validated_unwind_releases_mb_k_locks_via_settlement(tmp_path: Path) -> None:
     demo, ops, watchlist, ledger, repository = _bundle(tmp_path)
     try:
         opened = demo.replay(
-            FixtureReplayRequest(venue_pair="matchbook_polymarket", close_via="hold")
+            FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold")
         )
         assert opened.trade is not None
-        assert opened.unwind is not None
-        assert opened.unwind.spendable is False
-        assert opened.unwind.places_orders is False
-        assert opened.unwind.estimated_time_to_release.settles_or_releases_capital is False
-        before_locks = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital
-        assert before_locks > 0
-        quotes = tighten_reverse_quotes(opened.quotes)
-        closed = ops.complete_validated_unwind(
-            opened.trade.trade_id,
-            quotes=quotes,
-            fx=list(DEMO_FX),
-            policy=UnwindPolicy(max_profit_give_up_gbp=Decimal("1000")),
+        before_mb = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital
+        before_ks = ledger.treasury.snapshot().pool(VenueName.KALSHI, "USD").locked_capital
+        assert before_mb > 0
+        assert before_ks > 0
+        closed = demo.close_open_trade(
+            opened.trade.trade_id, DemoCloseRequest(close_via="settlement", winning_outcome="yes")
         )
-        assert closed.state is PaperTradeState.CLOSED
-        assert closed.settlement_source == "paper_unwind"
-        assert closed.realised_pnl_gbp is not None
+        assert closed.trade is not None
+        assert closed.trade.state is PaperTradeState.CLOSED
         snap = ledger.treasury.snapshot()
         assert snap.pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
+        assert snap.pool(VenueName.KALSHI, "USD").locked_capital == 0
         assert snap.pool(VenueName.POLYMARKET, "USD").locked_capital == 0
     finally:
         repository.close()
@@ -387,7 +631,7 @@ def test_demo_api_reset_and_replay_and_places_orders_rejected(tmp_path: Path) ->
         replay = client.post(
             "/paper/demo/fixture-replay",
             json={
-                "venue_pair": "matchbook_polymarket",
+                "venue_pair": "matchbook_kalshi",
                 "solver": "simple",
                 "close_via": "hold",
                 "places_orders": False,
@@ -427,24 +671,44 @@ def test_windows_launcher_scripts_encode_paper_only_contract() -> None:
     assert "SPORTS_HEDGE_EXECUTION_ENABLED" in start_ps1
     assert '"false"' in start_ps1
     assert "PAPER_AUTOFILL_ENABLED" in start_ps1
+    assert '$env:PAPER_AUTOFILL_ENABLED = "true"' in start_ps1
+    assert "AUTO PAPER CAPTURE ON" in start_ps1
     assert "PAPER_LIVE_REFRESH_ENABLED" in start_ps1
+    assert '$env:PAPER_LIVE_REFRESH_ENABLED = "true"' in start_ps1
+    assert '$env:ACCOUNTING_SCHEDULE_ENABLED = "true"' in start_ps1
+    assert '$env:SPORTS_HEDGE_EXECUTION_ENABLED = "false"' in start_ps1
     assert '"true"' in start_ps1
     assert "WindowStyle Hidden" in start_ps1
     assert "/health" in start_ps1
     assert "demo-backend.pid" in start_ps1
     assert "demo-frontend.pid" in start_ps1
     assert "MessageBox" in start_ps1
-    assert "127.0.0.1:3000/demo" in start_ps1
-    assert "command_tokens" in start_ps1
-    assert "ConvertTo-Json" in start_ps1
+    assert "127.0.0.1:3000/" in start_ps1
+    assert "127.0.0.1:3000/demo" not in start_ps1
+    assert "Wait-HttpOk -Url $BackendHealth -Label \"Sports Hedge backend\" | Out-Null" in start_ps1
+    assert (
+        "Wait-HttpOk -Url $FrontendHealth -Label \"Sports Hedge operator console\" | Out-Null"
+        in start_ps1
+    )
+    identity_ps1 = (REPO_ROOT / "scripts/windows/Demo-LauncherIdentity.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "command_tokens" in identity_ps1
+    assert "ConvertTo-Json" in identity_ps1
+    assert "git_head" in identity_ps1
+    assert "repo_root" in identity_ps1
+    assert "Get-DemoStartAction" in identity_ps1
+    assert "Demo-LauncherIdentity.ps1" in start_ps1
+    assert "Demo-LauncherIdentity.ps1" in stop_ps1
     assert "vercel" not in start_ps1.lower()
     assert "place_order" not in start_ps1
     assert "MATCHBOOK_PASSWORD" not in start_ps1
-    assert "Stop-Process" in stop_ps1
-    assert "Get-CimInstance" in stop_ps1
-    assert "CommandLine" in stop_ps1
-    assert "Test-DemoPidOwned" in stop_ps1
-    assert "unrelated process was not killed" in stop_ps1
+    assert "Stop-DemoPid" in stop_ps1
+    assert "Stop-Process" in identity_ps1
+    assert "Get-CimInstance" in identity_ps1
+    assert "CommandLine" in identity_ps1
+    assert "Test-DemoPidOwned" in identity_ps1
+    assert "unrelated process was not killed" in identity_ps1
     assert "logs" in stop_ps1
     docs = (REPO_ROOT / "docs/DEMO_READINESS.md").read_text(encoding="utf-8")
     assert "PAPER_SIMULATED_EXTERNAL" in docs
@@ -452,6 +716,14 @@ def test_windows_launcher_scripts_encode_paper_only_contract() -> None:
     assert "production readiness" in docs.lower()
     assert "Refresh Live Discovery" in docs
     assert "Tenet 18" in docs or "execution atomicity" in docs.lower()
+    assert "ACCOUNTING_SCHEDULE_ENABLED" in docs
+    runbook = (REPO_ROOT / "docs/DEMO_RUNBOOK.md").read_text(encoding="utf-8")
+    assert "ACCOUNTING_SCHEDULE_ENABLED" in runbook
+    assert "16:15" in runbook
+    assert "paper_demo_fx_snapshot" in runbook
+    assert "demo_fixture_replay" in runbook
+    assert "Retry confirm" in runbook
+    assert "already persisted" in runbook
 
 
 def test_stale_demo_pid_is_not_killed() -> None:
@@ -491,10 +763,12 @@ def test_stale_demo_pid_is_not_killed() -> None:
         )
         == "stale"
     )
-    stop_ps1 = (REPO_ROOT / "scripts/windows/Stop-SportsHedge-Demo.ps1").read_text(encoding="utf-8")
-    stop_index = stop_ps1.index("Stop-Process -Id")
-    assert stop_ps1.index("Test-DemoPidOwned") < stop_index
-    assert stop_ps1.index('$action -ne "stop"') < stop_index
+    identity_ps1 = (REPO_ROOT / "scripts/windows/Demo-LauncherIdentity.ps1").read_text(
+        encoding="utf-8"
+    )
+    stop_index = identity_ps1.index("Stop-Process -Id")
+    assert identity_ps1.index("Test-DemoPidOwned") < stop_index
+    assert identity_ps1.index('$action -ne "stop"') < stop_index
 
 
 def test_demo_operator_surface_wires_live_discovery_and_solver_guard() -> None:

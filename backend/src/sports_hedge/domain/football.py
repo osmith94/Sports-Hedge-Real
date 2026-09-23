@@ -33,6 +33,9 @@ class MarketFamily(StrEnum):
     CORNERS = "corners"
     CARDS = "cards"
     PLAYER_PROPS = "player_props"
+    GAME_WINNER = "game_winner"
+    POINT_SPREAD = "point_spread"
+    TOTAL_POINTS = "total_points"
     UNKNOWN = "unknown"
 
 
@@ -73,14 +76,15 @@ class SettlementFingerprint(BaseModel):
     abandonment_rule: str | None = None
     postponement_rule: str | None = None
     source_rule_version: str | None = None
+    unknown_reason: str | None = None
 
     def deterministic_key(self) -> str:
         """Return only economically relevant settlement semantics.
 
-        ``source_rule_version`` is retained on the model for provenance/audit but is
-        deliberately excluded here. A venue-specific rule document identifier is
-        not itself an economic difference and must not prevent two otherwise
-        equivalent markets from matching.
+        ``source_rule_version`` and ``unknown_reason`` are retained for
+        provenance/audit but are deliberately excluded here. A venue-specific
+        rule document identifier or GAMEWIN placeholder diagnostic is not
+        itself an economic difference.
         """
 
         values = (
@@ -99,7 +103,7 @@ class SettlementFingerprint(BaseModel):
         """Required settlement evidence must be known before markets can compare.
 
         Incomplete fingerprints are not equivalent merely because unknown fields
-        match. ``source_rule_version`` remains provenance-only.
+        match. ``source_rule_version`` and ``unknown_reason`` remain provenance-only.
         """
 
         if self.scope is SettlementScope.UNKNOWN:
@@ -122,6 +126,36 @@ def line_push_possible(line: Decimal | None) -> bool | None:
     if twice != twice.to_integral_value():
         return None
     return line == line.to_integral_value()
+
+
+LINE_PARAMETER_FAMILIES: frozenset[MarketFamily] = frozenset(
+    {
+        MarketFamily.TOTAL_GOALS,
+        MarketFamily.ASIAN_HANDICAP,
+        MarketFamily.TEAM_TOTAL,
+        MarketFamily.POINT_SPREAD,
+        MarketFamily.TOTAL_POINTS,
+    }
+)
+
+NFL_PAPER_MARKET_FAMILIES: frozenset[MarketFamily] = frozenset(
+    {
+        MarketFamily.GAME_WINNER,
+        MarketFamily.POINT_SPREAD,
+        MarketFamily.TOTAL_POINTS,
+    }
+)
+
+
+def format_stored_line(line: Decimal | None) -> str | None:
+    """Render a persisted canonical line. Never invent a value from odds or names."""
+
+    if line is None:
+        return None
+    text = format(line, "f")
+    if "." in text:
+        return text.rstrip("0").rstrip(".")
+    return text
 
 
 class CanonicalEvent(BaseModel):

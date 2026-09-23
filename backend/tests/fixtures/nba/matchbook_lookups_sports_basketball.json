@@ -1,0 +1,13 @@
+{
+  "fixture_id": "nba-matchbook-lookups-sports-basketball-2026-09-21",
+  "identified_as": "CAPTURED unauthenticated Matchbook GET /edge/rest/lookups/sports. Basketball sport-id=4. No session token.",
+  "source": "https://api.matchbook.com/edge/rest/lookups/sports",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": 4,
+    "name": "Basketball",
+    "type": "SPORT",
+    "url-name": "basketball"
+  }
+}

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -10,15 +9,11 @@ from fastapi.testclient import TestClient
 from sports_hedge.accounting.paper_journal import NativeCurrencyMixError
 from sports_hedge.api.main import app
 from sports_hedge.api.paper import get_paper_liquidity_repository
-from sports_hedge.application.market_observation import (
-    MatchbookObservationBuilder,
-    PolymarketObservationBuilder,
-)
+from sports_hedge.application.market_observation import MatchbookObservationBuilder
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.resolver import VenueCostResolver
-from sports_hedge.fx.models import PublishedFxClose
 from sports_hedge.fx.repository import SqliteFxRateRepository
 from sports_hedge.fx.service import FxRateService
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
@@ -26,8 +21,9 @@ from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
-from test_paper_scan_pipeline import OBSERVED, matchbook_payloads, polymarket_payloads
-from venue_cost_helpers import matchbook_polymarket_costs
+from fx_test_helpers import fresh_usd_ecb_close
+from test_paper_scan_pipeline import OBSERVED, kalshi_btts_observation, matchbook_payloads
+from venue_cost_helpers import matchbook_kalshi_costs
 
 
 def test_liquidity_repository_persists_across_reopen(tmp_path: Path) -> None:
@@ -87,19 +83,18 @@ def test_smarkets_pool_is_excluded_from_solver_limits() -> None:
     assert VenueName.SMARKETS not in limits
 
 
-def test_matchbook_and_polymarket_pools_cap_paper_scan() -> None:
+def test_matchbook_and_kalshi_pools_cap_paper_scan() -> None:
     intelligence = MarketIntelligenceService(SqliteMarketIntelligenceRepository())
     liquidity = SqlitePaperLiquidityRepository()
     liquidity.update_available(
         {
             VenueName.MATCHBOOK: Decimal("5"),
-            VenueName.POLYMARKET: Decimal("2"),
+            VenueName.KALSHI: Decimal("2"),
             VenueName.SMARKETS: Decimal("5000"),
         }
     )
     service = PaperScanService(intelligence, liquidity=liquidity)
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(
         mb_event,
         mb_market,
@@ -107,26 +102,19 @@ def test_matchbook_and_polymarket_pools_cap_paper_scan() -> None:
         source_latency_ms=80,
         quote_age_ms=120,
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event,
-        pm_market,
-        pm_books,
-        observed_at=OBSERVED,
-        source_latency_ms=110,
-        quote_age_ms=180,
-    )
+    kalshi = kalshi_btts_observation()
     fx = [FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="test")]
     uncapped = PaperScanService(intelligence).scan_pair(
         matchbook,
-        polymarket,
-        venue_costs=matchbook_polymarket_costs(),
+        kalshi,
+        venue_costs=matchbook_kalshi_costs(),
         fx_snapshots=fx,
         maximum_execution_risk=100,
     )
     capped = service.scan_pair(
         matchbook,
-        polymarket,
-        venue_costs=matchbook_polymarket_costs(),
+        kalshi,
+        venue_costs=matchbook_kalshi_costs(),
         fx_snapshots=fx,
         maximum_execution_risk=100,
     )
@@ -134,7 +122,7 @@ def test_matchbook_and_polymarket_pools_cap_paper_scan() -> None:
     assert capped.depth_scan is not None and capped.depth_scan.solution.is_arbitrage
     limits = {
         VenueName.MATCHBOOK: Decimal("5"),
-        VenueName.POLYMARKET: Decimal("2") * Decimal("0.75"),
+        VenueName.KALSHI: Decimal("2") * Decimal("0.75"),
     }
     used: dict[VenueName, Decimal] = {}
     for stake in capped.depth_scan.solution.stakes:
@@ -144,12 +132,12 @@ def test_matchbook_and_polymarket_pools_cap_paper_scan() -> None:
     assert capped.depth_scan.solution.total_stake < uncapped.depth_scan.solution.total_stake
 
     liquidity.update_available(
-        {VenueName.MATCHBOOK: Decimal("0"), VenueName.POLYMARKET: Decimal("0")}
+        {VenueName.MATCHBOOK: Decimal("0"), VenueName.KALSHI: Decimal("0")}
     )
     rejected = service.scan_pair(
         matchbook,
-        polymarket,
-        venue_costs=matchbook_polymarket_costs(),
+        kalshi,
+        venue_costs=matchbook_kalshi_costs(),
         fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="test")],
         maximum_execution_risk=100,
     )
@@ -157,37 +145,23 @@ def test_matchbook_and_polymarket_pools_cap_paper_scan() -> None:
     assert "insufficient_venue_capital" in rejected.rejection_reasons
 
 
-def test_polymarket_pool_uses_backend_fx_not_client_assumption() -> None:
+def test_kalshi_pool_uses_backend_fx_not_client_assumption() -> None:
     fx = FxRateService(SqliteFxRateRepository())
-    fx.persist_ecb_closes(
-        [
-            PublishedFxClose(
-                currency="USD",
-                gbp_per_unit=Decimal("0.50000000"),
-                source_date=date(2026, 9, 11),
-                retrieved_at=datetime(2026, 9, 11, 16, tzinfo=UTC),
-                source="ecb_eurofxref",
-                source_id="ecb:2026-09-11:USD",
-            )
-        ]
-    )
+    fx.persist_ecb_closes([fresh_usd_ecb_close(Decimal("0.50000000"))])
     intelligence = MarketIntelligenceService(SqliteMarketIntelligenceRepository())
     liquidity = SqlitePaperLiquidityRepository()
     liquidity.update_available(
         {
             VenueName.MATCHBOOK: Decimal("10000"),
-            VenueName.POLYMARKET: Decimal("10"),
+            VenueName.KALSHI: Decimal("10"),
             VenueName.SMARKETS: Decimal("0"),
         }
     )
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
-    )
+    kalshi = kalshi_btts_observation()
     service = PaperScanService(
         intelligence,
         settings=Settings(max_slippage_bps=0, fx_spread_bps=0),
@@ -195,19 +169,24 @@ def test_polymarket_pool_uses_backend_fx_not_client_assumption() -> None:
         cost_resolver=VenueCostResolver(),
         liquidity=liquidity,
     )
-    decision = service.scan_pair(matchbook, polymarket, maximum_execution_risk=100)
+    decision = service.scan_pair(
+        matchbook,
+        kalshi,
+        venue_costs=matchbook_kalshi_costs(),
+        maximum_execution_risk=100,
+    )
     assert decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage
     usd = next(item for item in decision.fx_snapshots if item.currency == "USD")
     assert usd.source == "ecb_eurofxref"
-    used_pm = sum(
+    used_k = sum(
         (
             stake.stake
             for stake in decision.depth_scan.solution.stakes
-            if stake.venue is VenueName.POLYMARKET
+            if stake.venue is VenueName.KALSHI
         ),
         Decimal("0"),
     )
-    assert used_pm <= Decimal("5") + Decimal("0.0000001")
+    assert used_k <= Decimal("5") + Decimal("0.0000001")
 
 
 def test_liquidity_api_persists_and_resets(tmp_path: Path) -> None:
@@ -273,15 +252,20 @@ def test_live_console_hides_demo_pools_and_compacts_empty_states() -> None:
     assert "DEMO_EXECUTABLE" not in page
     assert "DEMO_ACTIVITY" not in page
     assert "getPaperLiquidityPools" in page
+    assert "getPaperTreasury" in page
     assert "empty-live-compact" in page
     assert "demo-walkthrough" in page
     assert "PAPER MODE · NO EXECUTION" in scan
-    assert "Advanced · provenance" in scan
+    assert "Advanced · FX / fees / provenance" in scan
     assert "getEconomicsStatus" in scan
     assert "econ-strip" in scan
     assert "USD → GBP" not in scan
     assert "Matchbook fee %" not in scan
+    assert "HOT cadence" in scan
+    assert "Refresh interval" not in scan
+    assert "Auto 30s" not in scan
     assert "DEMO_LIQUIDITY_POOLS" not in treasury
     assert "PAPER CAPITAL" in pools
     assert "HYPOTHETICAL" in pools
     assert "excluded from solver" in pools
+    assert "Paper Treasury" in pools

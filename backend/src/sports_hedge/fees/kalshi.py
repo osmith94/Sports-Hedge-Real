@@ -106,17 +106,19 @@ def kalshi_cost_from_series(
         return _unknown(
             captured_at=captured,
             source_market_id=source_market_id,
+            action=action,
             detail=f"Kalshi fee metadata unresolved ({resolution_error}); no series fallback",
             order_role=order_role,
             provenance=provenance,
         )
     fee_type = str(metadata.get("fee_type") or "").strip().casefold()
     multiplier = _decimal_or_none(metadata.get("fee_multiplier"))
-    if action is not MarketAction.BUY:
+    if action not in {MarketAction.BUY, MarketAction.SELL}:
         return _unknown(
             captured_at=captured,
             source_market_id=source_market_id,
-            detail=f"Kalshi fee snapshot requires BUY; got {action.value}",
+            action=action,
+            detail=f"Kalshi fee snapshot requires BUY or SELL; got {action.value}",
             order_role=order_role,
             provenance=provenance,
         )
@@ -124,6 +126,7 @@ def kalshi_cost_from_series(
         return _unknown(
             captured_at=captured,
             source_market_id=source_market_id,
+            action=action,
             detail=f"Kalshi {provenance} fee_type missing",
             order_role=order_role,
             provenance=provenance,
@@ -132,6 +135,7 @@ def kalshi_cost_from_series(
         return _unknown(
             captured_at=captured,
             source_market_id=source_market_id,
+            action=action,
             detail=(
                 f"Kalshi {provenance} flat fee_type is not modelled; "
                 "Specific Trading Fees Table is required"
@@ -143,6 +147,7 @@ def kalshi_cost_from_series(
         return _unknown(
             captured_at=captured,
             source_market_id=source_market_id,
+            action=action,
             detail=f"Unsupported Kalshi {provenance} fee_type {fee_type}",
             order_role=order_role,
             provenance=provenance,
@@ -151,6 +156,7 @@ def kalshi_cost_from_series(
         return _unknown(
             captured_at=captured,
             source_market_id=source_market_id,
+            action=action,
             detail=f"Kalshi {provenance} fee_multiplier missing",
             order_role=order_role,
             provenance=provenance,
@@ -159,6 +165,7 @@ def kalshi_cost_from_series(
         return _unknown(
             captured_at=captured,
             source_market_id=source_market_id,
+            action=action,
             detail="Kalshi order role unknown",
             order_role=order_role,
             provenance=provenance,
@@ -190,6 +197,7 @@ def kalshi_cost_from_series(
         return _unknown(
             captured_at=captured,
             source_market_id=source_market_id,
+            action=action,
             detail="Maker fee formula not authorised for this Kalshi fee_type",
             order_role=order_role,
             provenance=provenance,
@@ -212,13 +220,36 @@ def kalshi_cost_from_series(
             "fee_multiplier": multiplier,
             "rounding_increment": KALSHI_CENTICENT,
         },
-        snapshot_id=f"kalshi:{provenance}:{fee_type}:{order_role.value}:{source_market_id or 'series'}",
+        snapshot_id=(
+            f"kalshi:{provenance}:{fee_type}:{action.value}:{order_role.value}:"
+            f"{source_market_id or 'series'}"
+        ),
         detail=(
             "Official Kalshi general trading fee "
             "round_up(M × coefficient × C × P × (1 − P)); "
             f"fee_type={fee_type}; M={multiplier}; coefficient={coefficient}; "
             f"provenance={provenance}."
         ),
+    )
+
+
+def kalshi_closing_cost_from_series(
+    series: dict[str, Any] | None,
+    *,
+    event: dict[str, Any] | None = None,
+    order_role: OrderRole = OrderRole.TAKER,
+    captured_at: datetime | None = None,
+    source_market_id: str | None = None,
+) -> VenueCostSnapshot:
+    """Explicit SELL-close snapshot. Never silently reuses a BUY-only cost row."""
+
+    return kalshi_cost_from_series(
+        series,
+        event=event,
+        action=MarketAction.SELL,
+        order_role=order_role,
+        captured_at=captured_at,
+        source_market_id=source_market_id,
     )
 
 
@@ -267,10 +298,11 @@ def _unknown(
     detail: str,
     order_role: OrderRole,
     provenance: str = FEE_PROVENANCE_SERIES,
+    action: MarketAction = MarketAction.BUY,
 ) -> VenueCostSnapshot:
     return VenueCostSnapshot(
         venue=VenueName.KALSHI,
-        action=MarketAction.BUY,
+        action=action,
         fee_basis=FeeBasis.UNKNOWN,
         known_status=CostKnownStatus.UNKNOWN,
         captured_at=captured_at,
@@ -279,7 +311,7 @@ def _unknown(
         order_role=order_role,
         fee_scope=FeeScope.PER_QUOTE,
         currency="USD",
-        snapshot_id=f"kalshi:{provenance}:unknown:{source_market_id or 'series'}",
+        snapshot_id=f"kalshi:{provenance}:unknown:{action.value}:{source_market_id or 'series'}",
         detail=detail,
     )
 

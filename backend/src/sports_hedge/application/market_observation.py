@@ -11,7 +11,15 @@ from sports_hedge.domain.football import CanonicalMarket, CanonicalOutcome
 from sports_hedge.domain.models import VenueName
 from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.models import MarketSnapshot
-from sports_hedge.normalization.venues import KalshiNormalizer, MatchbookNormalizer, PolymarketNormalizer
+from sports_hedge.normalization.venues import (
+    KalshiNormalizer,
+    MATCHBOOK_NON_UNIQUE_CANONICAL_REASON,
+    MatchbookNormalizer,
+    PolymarketNormalizer,
+    VenueNormalizationError,
+    matchbook_raw_market_type,
+    matchbook_unsupported_market_detail,
+)
 
 
 class OutcomeOrderBook(BaseModel):
@@ -202,6 +210,33 @@ class MatchbookObservationBuilder:
                     raw_book={"prices": raw_runner.get("prices", []) or []},
                 )
             )
+        metadata = _quote_metadata(
+            "exchange_back_lay",
+            basis=quote_age_basis,
+            reason=quote_age_reason,
+        )
+        raw_name = str(market_payload.get("name") or "").strip()
+        if raw_name:
+            metadata["raw_market_name"] = raw_name
+        raw_type = matchbook_raw_market_type(market_payload)
+        if raw_type:
+            metadata["raw_market_type"] = raw_type
+        runner_labels = [
+            str(runner.get("name") or "").strip()
+            for runner in market_payload.get("runners", []) or []
+            if isinstance(runner, dict) and str(runner.get("name") or "").strip()
+        ]
+        if runner_labels:
+            metadata["raw_runner_labels"] = runner_labels
+        outcomes = [book.outcome for book in books]
+        if len(outcomes) != len(set(outcomes)):
+            raise VenueNormalizationError(
+                matchbook_unsupported_market_detail(
+                    raw_name or str(market_payload.get("id") or market.source_market_id),
+                    MATCHBOOK_NON_UNIQUE_CANONICAL_REASON,
+                    market_type=raw_type,
+                )
+            )
         return VenueMarketObservation(
             market=market,
             observed_at=observed_at or datetime.now(UTC),
@@ -209,11 +244,7 @@ class MatchbookObservationBuilder:
             outcome_books=books,
             source_latency_ms=source_latency_ms,
             quote_age_ms=quote_age_ms,
-            metadata=_quote_metadata(
-                "exchange_back_lay",
-                basis=quote_age_basis,
-                reason=quote_age_reason,
-            ),
+            metadata=metadata,
         )
 
 
@@ -227,14 +258,20 @@ class PolymarketObservationBuilder:
         market_payload: dict[str, Any],
         books_by_token: Mapping[str, dict[str, Any]],
         *,
+        canonical: CanonicalMarket | None = None,
         observed_at: datetime | None = None,
         source_latency_ms: int = 0,
         quote_age_ms: int | None = None,
         quote_age_basis: str | None = None,
         quote_age_reason: str | None = None,
+        fee_snapshot: dict[str, Any] | None = None,
     ) -> VenueMarketObservation:
-        event = self.normalizer.normalize_event(event_payload)
-        market = self.normalizer.normalize_market(event, market_payload)
+        event = (
+            canonical.event
+            if canonical is not None
+            else self.normalizer.normalize_event(event_payload)
+        )
+        market = canonical or self.normalizer.normalize_market(event, market_payload)
         books: list[OutcomeOrderBook] = []
         for runner in market.runners:
             raw_book = dict(books_by_token.get(runner.source_runner_id, {}))
@@ -249,6 +286,16 @@ class PolymarketObservationBuilder:
                     raw_book=raw_book,
                 )
             )
+        metadata = _quote_metadata(
+            "clob_token_probability",
+            basis=quote_age_basis,
+            reason=quote_age_reason,
+        )
+        from sports_hedge.fees.polymarket import resolve_polymarket_fee_metadata
+
+        metadata["polymarket_fee"] = resolve_polymarket_fee_metadata(
+            market_payload, captured=fee_snapshot
+        )
         return VenueMarketObservation(
             market=market,
             observed_at=observed_at or datetime.now(UTC),
@@ -256,11 +303,7 @@ class PolymarketObservationBuilder:
             outcome_books=books,
             source_latency_ms=source_latency_ms,
             quote_age_ms=quote_age_ms,
-            metadata=_quote_metadata(
-                "clob_token_probability",
-                basis=quote_age_basis,
-                reason=quote_age_reason,
-            ),
+            metadata=metadata,
         )
 
 
@@ -290,10 +333,40 @@ class KalshiObservationBuilder:
     ) -> VenueMarketObservation:
         event = self.normalizer.normalize_event(event_payload, series=series)
         payloads = market_payloads if isinstance(market_payloads, list) else [market_payloads]
-        assembled = self.normalizer.assemble_canonical_markets(event, payloads, series=series)
+        assembled = self.normalizer.assemble_canonical_markets(
+            event, payloads, series=series, event_payload=event_payload
+        )
         if len(assembled) != 1:
             raise ValueError("Kalshi observation builder requires one canonical market group")
-        market = assembled[0]
+        return self.build_from_canonical(
+            assembled[0],
+            books_by_ticker,
+            observed_at=observed_at,
+            source_latency_ms=source_latency_ms,
+            quote_age_ms=quote_age_ms,
+            quote_age_basis=quote_age_basis,
+            quote_age_reason=quote_age_reason,
+            fee_snapshot=fee_snapshot,
+        )
+
+    def build_from_canonical(
+        self,
+        market: CanonicalMarket,
+        books_by_ticker: Mapping[str, dict[str, Any]],
+        *,
+        observed_at: datetime | None = None,
+        source_latency_ms: int = 0,
+        quote_age_ms: int | None = None,
+        quote_age_basis: str | None = None,
+        quote_age_reason: str | None = None,
+        fee_snapshot: dict[str, Any] | None = None,
+    ) -> VenueMarketObservation:
+        """Build a live quote observation from a persisted canonical market.
+
+        HOT reuses UNIVERSE-proved settlement identity. This does not call
+        assemble_canonical_markets or Get Series.
+        """
+
         books: list[OutcomeOrderBook] = []
         for runner in market.runners:
             ticker, side = _kalshi_runner_ticker_side(runner.source_runner_id)
@@ -308,7 +381,7 @@ class KalshiObservationBuilder:
                     raw_book={
                         **raw_book,
                         "market_ticker": ticker,
-                        "event_ticker": event.source_event_id,
+                        "event_ticker": market.event.source_event_id,
                         "contract_side": side,
                         "complement": (
                             "yes_ask = 1 - no_bid" if side == "YES" else "no_ask = 1 - yes_bid"

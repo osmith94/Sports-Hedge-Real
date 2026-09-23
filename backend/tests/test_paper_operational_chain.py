@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -13,10 +13,7 @@ from sports_hedge.api.market_intelligence import get_market_intelligence_service
 from sports_hedge.api.paper import get_paper_audit_repository, get_paper_operations_service
 from sports_hedge.api.priority_alerts import get_priority_alert_service
 from sports_hedge.api.watchlist import get_watchlist_service
-from sports_hedge.application.market_observation import (
-    MatchbookObservationBuilder,
-    PolymarketObservationBuilder,
-)
+from sports_hedge.application.market_observation import MatchbookObservationBuilder
 from sports_hedge.application.paper_operations import PaperOperationsError, PaperOperationsService
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.arbitrage.priority_alerts.models import ExternalLegConfirmation, LegExecutionMode
@@ -32,10 +29,11 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.chain import PaperChainStep
 from sports_hedge.paper.fills import PaperFillConfig
+from test_paper_trade_lifecycle import _force_external_kalshi
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
-from test_paper_scan_pipeline import matchbook_payloads, polymarket_payloads
-from venue_cost_helpers import matchbook_polymarket_costs
+from test_paper_scan_pipeline import kalshi_btts_observation, matchbook_payloads
+from venue_cost_helpers import matchbook_kalshi_costs
 
 
 OBSERVED = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
@@ -70,17 +68,15 @@ def _scan_and_persist() -> tuple[
         settings=settings,
     )
     mb_event, mb_market = matchbook_payloads()
-    pm_event, pm_market, pm_books = polymarket_payloads()
+    captured = datetime.now(UTC)
     matchbook = MatchbookObservationBuilder().build(
-        mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
+        mb_event, mb_market, observed_at=captured, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
-    )
+    kalshi = kalshi_btts_observation(observed_at=captured)
     decision = scan.scan_pair(
         matchbook,
-        polymarket,
-        venue_costs=matchbook_polymarket_costs(),
+        kalshi,
+        venue_costs=matchbook_kalshi_costs(),
         fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), spread_bps=Decimal("0"))],
         maximum_execution_risk=100,
     )
@@ -144,19 +140,26 @@ def test_partial_paper_fill_records_partial_and_balances() -> None:
         repository.close()
 
 
-def test_stale_before_fill_is_rejected() -> None:
+def test_quote_age_does_not_reject_min_net_qualifying_fill() -> None:
     _scan, _watchlist, ops, repository = _scan_and_persist()
     try:
         opportunity_id = next(iter(ops._plans))
         plan = ops._plans[opportunity_id]
         plan.execution_modes = {venue: LegExecutionMode.INTERNAL for venue in plan.execution_modes}
-        later = OBSERVED + timedelta(seconds=30)
-        with pytest.raises(PaperOperationsError, match="stale_before_fill"):
-            ops.simulate_fill(
-                opportunity_id,
-                config=PaperFillConfig(assumed_latency_ms=0, max_quote_age_ms=10_000),
-                now=later,
-            )
+        stale_legs = [
+            leg.model_copy(update={"quote_age_ms": 50_000}) for leg in plan.legs
+        ]
+        ops._plans[opportunity_id] = plan.model_copy(
+            update={"legs": stale_legs, "quote_age_ms": 50_000, "quote_age_at_decision_ms": 50_000}
+        )
+        result = ops.simulate_fill(
+            opportunity_id,
+            config=PaperFillConfig(assumed_latency_ms=0, max_quote_age_ms=10_000),
+            now=OBSERVED,
+        )
+        assert result.fills.fully_filled is True
+        assert result.places_orders is False
+        assert "snapshot_stale_at_decision" not in ops._entry_rejections.values()
     finally:
         repository.close()
 
@@ -165,15 +168,15 @@ def test_manual_external_requires_confirmation_and_revalidates_hedge() -> None:
     _scan, _watchlist, ops, repository = _scan_and_persist()
     try:
         opportunity_id = next(iter(ops._plans))
-        plan = ops._plans[opportunity_id]
-        assert plan.execution_modes[VenueName.POLYMARKET] is LegExecutionMode.EXTERNAL_OPERATOR
+        plan = _force_external_kalshi(ops._plans[opportunity_id])
+        assert plan.execution_modes[VenueName.KALSHI] is LegExecutionMode.EXTERNAL_OPERATOR
         with pytest.raises(PaperOperationsError, match="manual_external_confirmation_required"):
             ops.simulate_fill(
                 opportunity_id,
                 config=PaperFillConfig(assumed_latency_ms=0, max_quote_age_ms=10_000),
             )
 
-        external = next(leg for leg in plan.legs if leg.venue is VenueName.POLYMARKET)
+        external = next(leg for leg in plan.legs if leg.venue is VenueName.KALSHI)
         from sports_hedge.application.paper_operations import _net_odds_for_leg
 
         net_price = _net_odds_for_leg(plan, external)
@@ -212,7 +215,7 @@ def test_manual_external_requires_confirmation_and_revalidates_hedge() -> None:
         assert result.trace.balanced_gbp is True
         sources = {entry.postings[0].dimensions.capital_source for entry in result.journals}
         assert CapitalSource.MANUAL_EXTERNAL in sources
-        assert not any(fill.venue is VenueName.POLYMARKET for fill in result.fills.fills)
+        assert not any(fill.venue is VenueName.KALSHI for fill in result.fills.fills)
     finally:
         repository.close()
 

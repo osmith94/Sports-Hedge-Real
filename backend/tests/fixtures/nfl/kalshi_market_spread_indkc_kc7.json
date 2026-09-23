@@ -1,0 +1,36 @@
+{
+  "fixture_id": "nfl-kalshi-spread-indkc-kc7-2026-09-20",
+  "identified_as": "CAPTURED Kalshi KXNFLSPREAD binary \"Kansas City wins by over 6.5 points?\" — economically comparable to covering KC -6.5, not a two-runner handicap book. Prices omitted.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events?series_ticker=KXNFLSPREAD&status=open&with_nested_markets=true",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "event": {
+    "event_ticker": "KXNFLSPREAD-26SEP20INDKC",
+    "title": "Indianapolis vs Kansas City: Spread",
+    "mutually_exclusive": false
+  },
+  "payload": {
+    "ticker": "KXNFLSPREAD-26SEP20INDKC-KC7",
+    "event_ticker": "KXNFLSPREAD-26SEP20INDKC",
+    "title": "Kansas City wins by over 6.5 points?",
+    "yes_sub_title": "Kansas City wins by over 6.5 points",
+    "no_sub_title": "Kansas City wins by over 6.5 points",
+    "status": "active",
+    "result": "",
+    "market_type": "binary",
+    "strike_type": "greater",
+    "custom_strike": {
+      "football_team": "64f72720-2e4a-4cc8-a39b-ca148aecb389"
+    },
+    "rules_primary": "If Kansas City wins by more than 6.5 points in the Indianapolis vs Kansas City Pro Football game originally scheduled for Sep 20, 2026, then the market resolves to Yes.",
+    "rules_secondary": "Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+    "occurrence_datetime": "2026-09-21T03:20:00Z",
+    "expected_expiration_time": "2026-09-21T03:20:00Z",
+    "expiration_time": "2026-09-23T00:20:00Z",
+    "close_time": "2026-09-23T00:20:00Z",
+    "open_time": "2026-09-14T01:05:00Z",
+    "can_close_early": true,
+    "early_close_condition": "This market will close and expire after a winner is declared.",
+    "expiration_value": ""
+  }
+}

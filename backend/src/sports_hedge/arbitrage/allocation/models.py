@@ -5,7 +5,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from sports_hedge.accounting.dimensions import CapitalSource
 from sports_hedge.domain.models import VenueName
@@ -36,7 +36,7 @@ class AllocationConstraintKind(StrEnum):
     MIN_FREE_RESERVE = "min_free_reserve"
     EXTERNAL_LEG_CAP = "external_leg_cap"
     SOLVER_CAPITAL = "solver_capital"
-    CONCURRENCY = "concurrency"
+    CONCURRENCY = "concurrency"  # retired; never produced by the standard PAPER allocator
     MISSING_BALANCE_DATA = "missing_balance_data"
     CANNOT_RESIZE = "cannot_resize"
     SOLVER_NOT_ARBITRAGE = "solver_not_arbitrage"
@@ -74,12 +74,13 @@ class ReductionInputStatus(StrEnum):
 class BankrollAllocationPolicy(BaseModel):
     """Conservative, operator-configurable reserve and recommendation policy."""
 
+    model_config = ConfigDict(extra="ignore")
+
     min_reserve_amount: Decimal | None = Field(default=None, ge=0)
     min_reserve_fraction: Decimal = Field(default=Decimal("0.30"), ge=0, le=1)
     max_pool_fraction_per_opportunity: Decimal = Field(default=Decimal("0.25"), gt=0, le=1)
     max_open_capital_fraction: Decimal = Field(default=Decimal("0.70"), gt=0, le=1)
     max_same_fixture_capital_fraction: Decimal = Field(default=Decimal("0.40"), gt=0, le=1)
-    max_concurrent_open_opportunities: int | None = Field(default=4, ge=1)
     per_opportunity_limit_reporting: Decimal | None = Field(default=None, gt=0)
     venue_limits_native: dict[VenueName, Decimal] = Field(default_factory=dict)
     portfolio_cap_reporting: Decimal | None = Field(default=None, gt=0)

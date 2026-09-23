@@ -49,6 +49,13 @@ class PaperScanRecord(BaseModel):
         return self
 
 
+class PaperScanReadIssue(BaseModel):
+    """Diagnostic for a persisted audit row that cannot become a PaperScanRecord."""
+
+    record_id: str | None = None
+    reason: str
+
+
 class PaperScanSummary(BaseModel):
     since: datetime
     scan_count: int = Field(ge=0)
@@ -58,10 +65,56 @@ class PaperScanSummary(BaseModel):
     top_net_edge: Decimal | None = None
     top_guaranteed_profit_gbp: Decimal | None = None
     latest_scan_at: datetime | None = None
+    malformed_count: int = Field(default=0, ge=0)
+    malformed_issues: list[PaperScanReadIssue] = Field(default_factory=list)
+
+
+class PaperScanCycleRecord(BaseModel):
+    """One completed HOT / BACKGROUND / UNIVERSE refresh cycle. Not a market-decision row."""
+
+    cycle_id: str
+    started_at: datetime
+    completed_at: datetime
+    scan_lane: str
+    duration_ms: int = Field(ge=0)
+    fixture_count: int = Field(ge=0)
+    evaluated_count: int = Field(ge=0)
+    not_evaluated_count: int = Field(ge=0)
+    matched_event_pairs: int = Field(ge=0)
+    matched_market_pairs: int = Field(ge=0)
+    paper_decision_count: int = Field(ge=0)
+    qualifying_arb_count: int = Field(ge=0)
+    venue_health: dict[str, str] = Field(default_factory=dict)
+    degraded: bool = False
+    last_error: str | None = None
+    universe_generation_id: int | None = None
+    resume_cursor: str | None = None
+    completeness: str | None = None
+    generation_resume: bool | None = None
+    generation_work_used_s: float | None = None
+    operator_summary: str | None = None
+
+    @model_validator(mode="after")
+    def ensure_timezones(self) -> "PaperScanCycleRecord":
+        if self.started_at.tzinfo is None:
+            self.started_at = self.started_at.replace(tzinfo=UTC)
+        if self.completed_at.tzinfo is None:
+            self.completed_at = self.completed_at.replace(tzinfo=UTC)
+        return self
 
 
 class PaperScanAuditSink(Protocol):
     def append_scan(self, record: PaperScanRecord) -> None: ...
+
+
+def scan_cycle_identity(
+    scan_lane: str,
+    started_at: datetime,
+    completed_at: datetime,
+) -> str:
+    """Stable identity of one completed refresh cycle for idempotent persist."""
+
+    return f"{scan_lane}:{started_at.isoformat()}:{completed_at.isoformat()}"
 
 
 def build_paper_scan_record(
@@ -122,6 +175,7 @@ def build_paper_scan_record(
     venues = sorted({item.venue for item in history}, key=lambda venue: venue.value)
 
     return PaperScanRecord(
+        record_id=decision.paper_audit_record_id or str(uuid4()),
         scanned_at=decision.scanned_at,
         canonical_event_id=decision.canonical_event_id,
         canonical_market_id=decision.canonical_market_id,

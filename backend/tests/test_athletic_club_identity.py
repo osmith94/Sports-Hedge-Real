@@ -13,6 +13,7 @@ from sports_hedge.application.target_competitions import (
     EVENT_IDENTITY_MISMATCH,
     SERIES_NOT_QUERIED,
     UNMATCHED_POLYMARKET_COVERAGE,
+    polymarket_series_ids_for_targets,
 )
 from sports_hedge.config import Settings
 from sports_hedge.domain.football import CanonicalEvent
@@ -22,7 +23,8 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.events import EventMatcher
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs
+from registered_kalshi import FakeKalshiBTTS
 
 
 KICKOFF = datetime(2026, 9, 12, 16, 30, tzinfo=UTC)
@@ -183,15 +185,17 @@ async def test_collector_matches_athletic_bilbao_to_athletic_club_and_compares_m
     collector = ReadOnlyCrossVenueCollector(
         matchbook=AthleticMatchbook(),
         polymarket=AthleticPolymarket(title="Athletic Club vs Elche CF"),
+        kalshi=FakeKalshiBTTS([("La Liga", "Athletic Bilbao", "Elche", KICKOFF)]),
         paper_scan=PaperScanService(intelligence),
     )
     try:
         report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             capital_limit_gbp=Decimal("100"),
             maximum_execution_risk=100,
             polymarket_queried_series_ids=["10188", "10355", "10193"],
+            enabled_venues=[VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI],
         )
         fixture = report.discovered_fixtures[0]
         assert fixture.home_team == "Athletic Bilbao"
@@ -201,7 +205,7 @@ async def test_collector_matches_athletic_bilbao_to_athletic_club_and_compares_m
         assert fixture.market_family == "both_teams_to_score"
         assert fixture.current_net_edge is not None
         assert fixture.solver_is_arbitrage is True
-        assert report.matched_event_pairs == 1
+        assert report.matched_event_pairs >= 1
         assert report.paper_decisions
     finally:
         repository.close()
@@ -282,8 +286,12 @@ async def test_unmatched_reason_is_coverage_when_la_liga_series_was_queried_empt
         repository.close()
 
 
-def test_legacy_single_series_override_emits_backward_compat_warning(caplog: pytest.LogCaptureFixture) -> None:
+def test_legacy_single_series_already_in_targets_is_not_an_operator_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     with caplog.at_level("WARNING", logger="sports_hedge.config"):
         settings = Settings(polymarket_gamma_series_id="10188")
-    assert settings.resolved_polymarket_series_ids() == ["10188"]
-    assert any("legacy single-series override" in record.message for record in caplog.records)
+    assert settings.resolved_polymarket_series_ids() == polymarket_series_ids_for_targets()
+    assert settings.polymarket_series_config_warnings() == []
+    assert not any("legacy single-series" in record.message for record in caplog.records)
+    assert not any("POLYMARKET_GAMMA_SERIES_ID" in record.message for record in caplog.records)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from inspect import getsource
 
+import pytest
 from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
@@ -20,6 +22,8 @@ from sports_hedge.arbitrage.allocation.adapters import (
     request_from_payoff,
 )
 from sports_hedge.arbitrage.allocation.engine import allocate
+from sports_hedge.arbitrage.allocation import engine as allocation_engine
+from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.arbitrage.allocation.models import (
     AllocatedStake,
     AllocationBalance,
@@ -44,7 +48,7 @@ from sports_hedge.arbitrage.priority_alerts.models import (
 from sports_hedge.arbitrage.solver import CompleteSetArbitrageSolver
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
-from sports_hedge.config import Settings
+from sports_hedge.config import RETIRED_ALLOCATION_MAX_CONCURRENT_OPEN_WARNING, Settings
 from sports_hedge.domain.football import (
     CanonicalEvent,
     CanonicalMarket,
@@ -63,10 +67,12 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.persistence.paper import SqlitePaperScanRepository
+from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from venue_cost_helpers import venue_cost_payload
+from registered_kalshi import kalshi_payloads_for_counterpart
 
 from test_paper_scan_api import KICKOFF, OBSERVED
-from test_step8b_first_team_to_score import _ftts_books, _ftts_mb_payload, _ftts_pm_payload
+from test_step8b_first_team_to_score import _ftts_mb_payload, _ftts_pm_payload
 
 
 SOLVER = CompleteSetArbitrageSolver()
@@ -75,7 +81,6 @@ POLICY = BankrollAllocationPolicy(
     max_pool_fraction_per_opportunity=Decimal("0.25"),
     max_open_capital_fraction=Decimal("0.70"),
     max_same_fixture_capital_fraction=Decimal("0.40"),
-    max_concurrent_open_opportunities=4,
     safety_haircut=Decimal("0.05"),
 )
 
@@ -281,13 +286,163 @@ def test_acceptance_concurrency_existing_open_reduces_size() -> None:
         max_pool_fraction_per_opportunity=Decimal("1"),
         max_open_capital_fraction=Decimal("0.70"),
         max_same_fixture_capital_fraction=Decimal("1"),
-        max_concurrent_open_opportunities=4,
         safety_haircut=Decimal("0"),
     )
     deep = allocate(_demo_request(policy=policy, fill=_fill_high()))
     reduced = allocate(_demo_request(balances=balances, open_positions=open_pos, policy=policy, fill=_fill_high()))
     assert reduced.accepted is True
     assert reduced.maximum_validated_capital < deep.maximum_validated_capital
+
+
+def _count_only_opens(count: int) -> list[OpenPositionExposure]:
+    """Open trades that contribute count, not capital, so count cannot be a proxy for risk caps."""
+
+    return [
+        OpenPositionExposure(
+            opportunity_id=f"open-{index}",
+            canonical_event_id=f"other-evt-{index}",
+            capital_native=[],
+            capital_reporting=Decimal("0"),
+        )
+        for index in range(count)
+    ]
+
+
+def _uncapped_count_policy(**overrides) -> BankrollAllocationPolicy:
+    payload = dict(
+        min_reserve_fraction=Decimal("0"),
+        max_pool_fraction_per_opportunity=Decimal("1"),
+        max_open_capital_fraction=Decimal("1"),
+        max_same_fixture_capital_fraction=Decimal("1"),
+        safety_haircut=Decimal("0"),
+        concurrency_reduction_per_open=Decimal("0"),
+        max_concurrency_reduction=Decimal("0"),
+    )
+    payload.update(overrides)
+    return BankrollAllocationPolicy(**payload)
+
+
+def _assert_not_open_count_rejection(result: AllocationResult) -> None:
+    assert result.limiting_constraint is not AllocationConstraintKind.CONCURRENCY
+    assert all(item.kind is not AllocationConstraintKind.CONCURRENCY for item in result.hard_constraints)
+    assert result.rejection_reason != "maximum concurrent open opportunities"
+    assert "maximum concurrent open opportunities" not in (result.limiting_constraint_detail or "")
+    assert "maximum concurrent open opportunities" not in (result.rejection_reason or "")
+
+
+@pytest.mark.parametrize("open_count", [4, 5, 10, 12])
+def test_open_opportunity_count_does_not_independently_reject(open_count: int) -> None:
+    result = allocate(
+        _demo_request(
+            open_positions=_count_only_opens(open_count),
+            policy=_uncapped_count_policy(),
+            fill=_fill_high(),
+        )
+    )
+    assert result.accepted is True
+    _assert_not_open_count_rejection(result)
+
+
+def test_standard_allocator_cannot_emit_retired_open_count_rejection() -> None:
+    source = getsource(allocation_engine)
+    assert "maximum concurrent open opportunities" not in source
+    assert "max_concurrent_open_opportunities" not in source
+    assert "AllocationConstraintKind.CONCURRENCY" not in source
+    defaulted = allocate(_demo_request(open_positions=_count_only_opens(10), fill=_fill_high()))
+    assert defaulted.accepted is True
+    _assert_not_open_count_rejection(defaulted)
+
+
+def test_legacy_policy_kwarg_cannot_restore_open_count_cap() -> None:
+    policy = _uncapped_count_policy(max_concurrent_open_opportunities=1)
+    result = allocate(
+        _demo_request(open_positions=_count_only_opens(5), policy=policy, fill=_fill_high())
+    )
+    assert result.accepted is True
+    _assert_not_open_count_rejection(result)
+
+
+def test_legacy_allocation_max_concurrent_open_env_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("ALLOCATION_MAX_CONCURRENT_OPEN", "1")
+    with caplog.at_level("WARNING", logger="sports_hedge.config"):
+        settings = Settings()
+    assert not hasattr(settings, "allocation_max_concurrent_open")
+    assert any(
+        record.message == RETIRED_ALLOCATION_MAX_CONCURRENT_OPEN_WARNING
+        for record in caplog.records
+    )
+    policy = policy_from_settings(settings)
+    assert "max_concurrent_open_opportunities" not in type(policy).model_fields
+    result = allocate(
+        _demo_request(open_positions=_count_only_opens(10), policy=policy, fill=_fill_high())
+    )
+    assert result.accepted is True
+    _assert_not_open_count_rejection(result)
+
+
+def test_capital_constraints_still_reject_with_many_open_opportunities() -> None:
+    opens = _count_only_opens(10)
+    venue_blocked = allocate(
+        _demo_request(
+            open_positions=opens,
+            policy=_uncapped_count_policy(venue_limits_native={VenueName.MATCHBOOK: Decimal("0")}),
+            fill=_fill_high(),
+        )
+    )
+    assert venue_blocked.accepted is False
+    assert venue_blocked.limiting_constraint is AllocationConstraintKind.VENUE_LIMIT
+    _assert_not_open_count_rejection(venue_blocked)
+
+    reserve_blocked = allocate(
+        _demo_request(
+            open_positions=opens,
+            policy=_uncapped_count_policy(min_reserve_fraction=Decimal("1")),
+            fill=_fill_high(),
+        )
+    )
+    assert reserve_blocked.accepted is False
+    assert reserve_blocked.limiting_constraint is AllocationConstraintKind.MIN_FREE_RESERVE
+    _assert_not_open_count_rejection(reserve_blocked)
+
+    portfolio_blocked = allocate(
+        _demo_request(
+            open_positions=[
+                OpenPositionExposure(
+                    opportunity_id=f"open-{index}",
+                    canonical_event_id=f"other-evt-{index}",
+                    capital_native=[
+                        VenueNativeAmount(
+                            venue=VenueName.MATCHBOOK, currency="GBP", amount=Decimal("80")
+                        )
+                    ],
+                    capital_reporting=Decimal("80"),
+                )
+                for index in range(10)
+            ],
+            balances=[
+                AllocationBalance(
+                    venue=VenueName.MATCHBOOK,
+                    currency="GBP",
+                    available=Decimal("200"),
+                    locked=Decimal("800"),
+                ),
+                AllocationBalance(
+                    venue=VenueName.POLYMARKET,
+                    currency="USD",
+                    available=Decimal("1333.333333333"),
+                    gbp_per_unit=Decimal("0.75"),
+                ),
+                AllocationBalance(venue=VenueName.SMARKETS, currency="GBP", available=Decimal("0")),
+            ],
+            policy=_uncapped_count_policy(max_open_capital_fraction=Decimal("0.70")),
+            fill=_fill_high(),
+        )
+    )
+    assert portfolio_blocked.accepted is False
+    assert portfolio_blocked.limiting_constraint is AllocationConstraintKind.PORTFOLIO_CAP
+    _assert_not_open_count_rejection(portfolio_blocked)
 
 
 def test_acceptance_conditionally_releasable_is_not_spendable() -> None:
@@ -594,31 +749,50 @@ def test_api_allocator_output_on_simple_and_generalized_decisions() -> None:
             "quote_age_ms": 100,
         },
         "right": {
-            "venue": "polymarket",
+            "venue": "kalshi",
             "event_payload": {
-                "id": "pm-event-1",
+                "event_ticker": "KXEPLBTTS-26SEP20NEWCHE",
+                "series_ticker": "KXEPLBTTS",
                 "title": "Newcastle United vs Chelsea",
-                "startTime": KICKOFF.isoformat(),
-                "competition": "Premier League",
+                "category": "Sports",
+                "strike_date": KICKOFF.isoformat(),
+                "product_metadata": {"competition": "Premier League"},
             },
             "market_payload": {
-                "id": "pm-market-1",
-                "question": "Both teams to score?",
-                "sportsMarketType": "both teams to score",
-                "outcomes": '["Yes", "No"]',
-                "clobTokenIds": '["yes-token", "no-token"]',
-                "description": "Resolves based on 90 minutes of regulation time.",
+                "ticker": "KXEPLBTTS-26SEP20NEWCHE-BTTS",
+                "event_ticker": "KXEPLBTTS-26SEP20NEWCHE",
+                "title": "Both Teams To Score",
+                "yes_sub_title": "Yes",
+                "rules_primary": "Resolves on 90 minutes of regulation time. Extra time and penalties do not count.",
+                "series": {
+                    "ticker": "KXEPLBTTS",
+                    "title": "Premier League",
+                    "fee_type": "quadratic",
+                    "fee_multiplier": 1,
+                },
+                "kalshi_fee": {"fee_type": "quadratic", "fee_multiplier": "1"},
             },
             "books_by_token": {
-                "yes-token": {"bids": [{"price": "0.49", "size": "20000"}], "asks": [{"price": "0.51", "size": "20000"}]},
-                "no-token": {"bids": [{"price": "0.41", "size": "20000"}], "asks": [{"price": "0.43", "size": "20000"}]},
+                "KXEPLBTTS-26SEP20NEWCHE-BTTS": {
+                    "orderbook_fp": {
+                        "yes_dollars": [["0.20", "500.00"]],
+                        "no_dollars": [["0.70", "500.00"]],
+                    }
+                }
             },
             "observed_at": OBSERVED.isoformat(),
-            "quote_age_ms": 120,
+            "quote_age_ms": 80,
         },
         "venue_costs": [
             venue_cost_payload("matchbook", "0.02"),
-            venue_cost_payload("polymarket", "0", detail="assumed_zero operator test cost"),
+            kalshi_cost_from_series(
+                {
+                    "ticker": "KXEPLBTTS",
+                    "title": "Premier League",
+                    "fee_type": "quadratic",
+                    "fee_multiplier": 1,
+                }
+            ).model_dump(mode="json"),
         ],
         "fx_snapshots": [{"currency": "USD", "gbp_per_unit": "0.75", "source": "test"}],
         "maximum_execution_risk": 100,
@@ -641,6 +815,17 @@ def test_api_allocator_output_on_simple_and_generalized_decisions() -> None:
             "native_venue_balance",
         }
 
+        ftts_event, ftts_markets, ftts_books, ftts_series = kalshi_payloads_for_counterpart(
+            {
+                "title": "Tottenham vs Everton",
+                "startTime": KICKOFF.isoformat(),
+                "competition": "Premier League",
+            },
+            _ftts_pm_payload(),
+            arb=True,
+            home="Tottenham",
+            away="Everton",
+        )
         generalized = {
             "left": {
                 "venue": "matchbook",
@@ -656,21 +841,27 @@ def test_api_allocator_output_on_simple_and_generalized_decisions() -> None:
                 "quote_age_ms": 100,
             },
             "right": {
-                "venue": "polymarket",
-                "event_payload": {
-                    "id": "pm-tot-eve-step7",
-                    "title": "Tottenham vs Everton",
-                    "startTime": KICKOFF.isoformat(),
-                    "competition": "Premier League",
+                "venue": "kalshi",
+                "event_payload": ftts_event,
+                "market_payload": {
+                    "grouped_payloads": ftts_markets,
+                    "series": ftts_series,
+                    "kalshi_fee": {"fee_type": "quadratic", "fee_multiplier": "1"},
                 },
-                "market_payload": _ftts_pm_payload(),
-                "books_by_token": _ftts_books(),
+                "books_by_token": ftts_books,
                 "observed_at": OBSERVED.isoformat(),
-                "quote_age_ms": 150,
+                "quote_age_ms": 80,
             },
             "venue_costs": [
                 venue_cost_payload("matchbook", "0.02"),
-                venue_cost_payload("polymarket", "0", detail="assumed_zero operator test cost"),
+                kalshi_cost_from_series(
+                    {
+                        "ticker": "KXEPLFTTS",
+                        "title": "Premier League",
+                        "fee_type": "quadratic",
+                        "fee_multiplier": 1,
+                    }
+                ).model_dump(mode="json"),
             ],
             "fx_snapshots": [{"currency": "USD", "gbp_per_unit": "0.75", "source": "test"}],
             "maximum_execution_risk": 100,

@@ -1,8 +1,11 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { getPaperTrade } from "../../../lib/api";
-import { money, relativeTime } from "../../../lib/format";
+import { getActiveTradeEvents, getPaperTrade } from "../../../lib/api";
+import { ActiveTradeLog } from "../../../components/active-trade-log";
+import { money } from "../../../lib/format";
+import { HydratedRelativeTime } from "../../../components/hydrated-relative-time";
+import { NBA_SETTLEMENT_CAVEAT_TEXT, NFL_SETTLEMENT_CAVEAT_TEXT, tradeShowsNbaSettlementCaveat, tradeShowsNflSettlementCaveat } from "../../../lib/paper-trade-display";
 
 export const dynamic = "force-dynamic";
 
@@ -14,8 +17,12 @@ export default async function PaperTradeDetailPage({
   const { tradeId: rawId } = await params;
   const tradeId = decodeURIComponent(rawId);
   let trade;
+  let events = [];
   try {
     trade = await getPaperTrade(tradeId);
+    events = await getActiveTradeEvents(
+      `trade_id=${encodeURIComponent(tradeId)}&limit=200`,
+    );
   } catch {
     notFound();
   }
@@ -27,11 +34,16 @@ export default async function PaperTradeDetailPage({
           <div className="eyebrow">Paper trade</div>
           <h1>{trade.fixture_label ?? trade.trade_id}</h1>
           <p className="page-subtitle">
-            PAPER MODE persisted record. Solver {trade.solver_model ?? "n/a"}. Provenance {trade.provenance}. Places orders: {String(trade.places_orders)}. Fill kinds stay distinct: INTERNAL_SIMULATED, PAPER_SIMULATED_EXTERNAL, and MANUAL_EXTERNAL are not interchangeable.
+            PAPER MODE persisted record. Solver {trade.solver_model ?? "n/a"}. Provenance{" "}
+            {trade.provenance}. No venue orders are placed. Simulated internal, paper-simulated
+            external, and operator-confirmed external fills stay distinct.
+            {tradeShowsNflSettlementCaveat(trade) ? ` ${NFL_SETTLEMENT_CAVEAT_TEXT}` : tradeShowsNbaSettlementCaveat(trade) ? ` ${NBA_SETTLEMENT_CAVEAT_TEXT}` : ""}
           </p>
         </div>
         <Link href="/paper" className="demo-label">Back to trade book</Link>
       </div>
+      <ActiveTradeLog presetTradeId={tradeId} initialEvents={events} />
+      <div style={{ height: 14 }} />
       <section className="metric-grid">
         <div className="metric-card">
           <div className="metric-label">Status</div>
@@ -39,7 +51,20 @@ export default async function PaperTradeDetailPage({
         </div>
         <div className="metric-card">
           <div className="metric-label">Opened</div>
-          <div className="metric-value" style={{ fontSize: 18 }}>{relativeTime(trade.opened_at)}</div>
+          <div className="metric-value" style={{ fontSize: 18 }}>
+            <HydratedRelativeTime iso={trade.opened_at} />
+          </div>
+        </div>
+        <div className="metric-card">
+          <div className="metric-label">Risk at entry</div>
+          <div className="metric-value" style={{ fontSize: 18 }}>
+            {trade.entry_risk?.score != null
+              ? `${trade.entry_risk.score}${trade.entry_risk.band ? ` · ${trade.entry_risk.band}` : ""}`
+              : "—"}
+          </div>
+          <div className="metric-foot">
+            Immutable execution-time snapshot. Not recomputed from later books.
+          </div>
         </div>
         <div className="metric-card">
           <div className="metric-label">Guaranteed at open</div>
@@ -100,6 +125,34 @@ export default async function PaperTradeDetailPage({
         </div>
       </section>
       <div style={{ height: 14 }} />
+      {trade.entry_risk || trade.close_risks?.length ? (
+        <section className="panel">
+          <div className="panel-header">
+            <div className="panel-title">Risk provenance</div>
+          </div>
+          <div className="panel-body">
+            {trade.entry_risk ? (
+              <p className="section-copy">
+                Entry {trade.entry_risk.score ?? "—"}
+                {trade.entry_risk.band ? ` · ${trade.entry_risk.band}` : ""}
+                {trade.entry_risk.reasons?.length ? ` · ${trade.entry_risk.reasons.join(", ")}` : ""}
+                {trade.entry_risk.quote_age_ms != null ? ` · quote ${trade.entry_risk.quote_age_ms}ms` : ""}
+                {trade.entry_risk.size_to_depth_ratio != null ? ` · size/depth ${trade.entry_risk.size_to_depth_ratio}` : ""}
+                {trade.entry_risk.hedge_liquidity_ratio != null ? ` · hedge ${trade.entry_risk.hedge_liquidity_ratio}` : ""}
+                {trade.entry_risk.net_edge != null ? ` · net edge ${trade.entry_risk.net_edge}` : ""}
+              </p>
+            ) : null}
+            {(trade.close_risks ?? []).map((snapshot, index) => (
+              <p className="section-copy" key={`${snapshot.kind}-${snapshot.recorded_at}-${index}`}>
+                {snapshot.kind} {snapshot.score ?? "—"}
+                {snapshot.band ? ` · ${snapshot.band}` : ""}
+                {snapshot.reasons?.length ? ` · ${snapshot.reasons.join(", ")}` : ""}
+              </p>
+            ))}
+          </div>
+        </section>
+      ) : null}
+      <div style={{ height: 14 }} />
       <section className="panel">
         <div className="panel-header">
           <div className="panel-title">Hold vs unwind</div>
@@ -120,7 +173,7 @@ export default async function PaperTradeDetailPage({
           <ol>
             {trade.audit.map((event) => (
               <li key={event.event_id}>
-                {event.event_type} · {relativeTime(event.occurred_at)} · {event.detail ?? "—"}
+                {event.event_type} · <HydratedRelativeTime iso={event.occurred_at} /> · {event.detail ?? "—"}
               </li>
             ))}
           </ol>

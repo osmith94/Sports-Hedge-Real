@@ -7,13 +7,17 @@ from pydantic import BaseModel, Field, model_validator
 
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.arbitrage.depth import DepthScanResult
+from sports_hedge.arbitrage.min_net_threshold import (
+    FIXTURE_MIN_NET_EDGE_SOURCE,
+)
 from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
 from sports_hedge.paper.fills import PaperOpportunityLeg
-from sports_hedge.domain.models import VenueName
+from sports_hedge.domain.models import MarketScope, VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.models import FeeSnapshot
+from sports_hedge.matching.learned_rules import MappingReviewCandidate
 from sports_hedge.matching.markets import MarketMatchResult
-from sports_hedge.risk.execution import ExecutionRiskResult
+from sports_hedge.risk.execution import ExecutionRiskInputs, ExecutionRiskResult
 
 
 BPS_SCALE = Decimal("10000")
@@ -79,11 +83,13 @@ class PaperScanDecision(BaseModel):
     market_match: MarketMatchResult
     canonical_event_id: str | None = None
     canonical_market_id: str | None = None
+    fixture_canonical_event_id: str | None = None
     snapshots_recorded: int = Field(default=0, ge=0)
     depth_scan: DepthScanResult | None = None
     payoff_scan: PayoffScanResult | None = None
     solver_model: str | None = None
     execution_risk: ExecutionRiskResult | None = None
+    execution_risk_inputs: ExecutionRiskInputs | None = None
     eligible_for_paper_simulation: bool = False
     rejection_reasons: list[str] = Field(default_factory=list)
     fee_snapshots: list[FeeSnapshot] = Field(default_factory=list)
@@ -93,16 +99,21 @@ class PaperScanDecision(BaseModel):
     fill_legs: list[PaperOpportunityLeg] = Field(default_factory=list)
     execution_modes: dict[VenueName, str] = Field(default_factory=dict)
     allocation: AllocationResult | None = None
-    minimum_net_edge: Decimal = Field(default=Decimal("0"), ge=0)
+    minimum_net_edge: Decimal | None = Field(default=Decimal("0"), ge=0)
+    min_net_edge_scope: MarketScope = MarketScope.FIXTURE_MATCH
+    min_net_edge_source: str = FIXTURE_MIN_NET_EDGE_SOURCE
+    min_net_edge_configured: bool = True
     maximum_execution_risk: int = Field(default=100, ge=0, le=100)
     quote_age_ms: int | None = Field(default=None, ge=0)
     quote_age_basis: str | None = None
+    mapping_review_candidate: MappingReviewCandidate | None = None
     fixture_discovery_source: VenueName | None = None
     fixture_status: str | None = None
     in_running: bool | None = None
     live_score_supported: bool = False
     home_score: int | None = Field(default=None, ge=0)
     away_score: int | None = Field(default=None, ge=0)
+    paper_audit_record_id: str | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> "PaperScanDecision":

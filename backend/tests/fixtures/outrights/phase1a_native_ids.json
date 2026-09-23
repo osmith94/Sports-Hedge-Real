@@ -1,0 +1,101 @@
+{
+  "data_class": "captured_public_native_ids",
+  "captured_at": "2026-09-20T22:10:00Z",
+  "source": "docs/outrights/01_PROVIDER_EVIDENCE_CENSUS.md Phase 0A GET-only public payloads",
+  "note": "Exact native IDs only. Not live quotes. Not modelled. Not owner-live. CLOB token IDs are the real captured values; tests must fail closed if they are omitted.",
+  "targets": {
+    "epl_champion_arsenal": {
+      "sport": "football",
+      "competition_code": "premier_league",
+      "season_id": "2026/27",
+      "market_family": "competition_winner",
+      "participant_type": "TEAM",
+      "participant_label": "Arsenal",
+      "kalshi": {
+        "series_ticker": "KXPREMIERLEAGUE",
+        "event_ticker": "KXPREMIERLEAGUE-27",
+        "market_ticker": "KXPREMIERLEAGUE-27-ARS",
+        "soccer_team_uuid": "246a91c5-f145-401f-bf0d-2a436e25a5f6"
+      },
+      "polymarket": {
+        "event_id": "659518",
+        "slug": "epl-2027-champion-20260701200428749",
+        "ticker": "epl-2027-champion-20260701200428749",
+        "market_id": "2771324",
+        "condition_id": "0xf02d8d72bb96d84090d4f7d63e7837afb94f8d061e7a2cca8cf21732150e8815",
+        "clob_token_ids": [
+          "106464589845250400124249015666766731317110899241411841699938652823328750757436",
+          "64668172167711604019715186222824944338693111460367065137032921758495495127809"
+        ]
+      },
+      "matchbook": {
+        "event_id": "33368944842100023",
+        "market_id": "33369057018500023",
+        "runner_id": "33369057018701023",
+        "event_participant_id": "33368980860700023"
+      }
+    },
+    "super_bowl_rams": {
+      "sport": "american_football",
+      "competition_code": "nfl",
+      "season_id": "NFL-2026-SB-LXI",
+      "market_family": "competition_winner",
+      "participant_type": "TEAM",
+      "participant_label": "Los Angeles Rams",
+      "kalshi": {
+        "series_ticker": "KXSB",
+        "event_ticker": "KXSB-27",
+        "market_ticker": "KXSB-27-LAR"
+      },
+      "polymarket": {
+        "event_id": "202857",
+        "slug": "pro-football-2027-champion-20260729185915366",
+        "ticker": "big-game-champion-2027",
+        "market_id": "1357389",
+        "condition_id": "0xdb88bf08a8244ff54b020d91853d03655b23eea74ed3ced99be6e6e978b0a3c3",
+        "clob_token_ids": [
+          "43352642039302747588938905555385017655344819959150117270669936414308468726872",
+          "28468320524436456029317358202625636991963165476882735910405095309772884444178"
+        ]
+      },
+      "matchbook": {
+        "event_id": "32522372813000051",
+        "market_id": "32522414109600051",
+        "runner_id": "32522414110200051",
+        "event_participant_id": "32522376778700051"
+      }
+    },
+    "epl_top_scorer_haaland": {
+      "sport": "football",
+      "competition_code": "premier_league",
+      "season_id": "2026/27",
+      "market_family": "top_scorer",
+      "participant_type": "PLAYER",
+      "observation_only": true,
+      "kalshi": {
+        "series_ticker": "KXEPLLEADER",
+        "event_ticker": "KXEPLLEADER-27GOAL",
+        "market_ticker": "KXEPLLEADER-27GOAL-EHAALA9",
+        "soccer_player_uuid": "561342a7-d5fb-4877-9a70-59d20db9caa3"
+      },
+      "polymarket": {
+        "event_id": "871869",
+        "slug": "premier-league-top-goalscorer-2026-27",
+        "ticker": "premier-league-top-goalscorer-2026-27",
+        "market_id": "3704229",
+        "condition_id": "0x8efaed82785c1d4413e1575c13dc41968bf06d69a56ed2c5d88d44fc65915280",
+        "clob_token_ids": [
+          "71203276388548087838135382575389055086960257937141562761749185728535956435144",
+          "102308147632304862415179451488004965270428353213921466692044550446466967450657"
+        ]
+      },
+      "matchbook": {
+        "event_id": "33922033571300023",
+        "market_id": "34014819752300023",
+        "runner_id": "34014819752500023",
+        "event_participant_id": "33922065856900023",
+        "market_type": "outright_ded_fact"
+      }
+    }
+  }
+}

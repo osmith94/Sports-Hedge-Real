@@ -49,7 +49,7 @@ export default async function PaperPortfolioPage() {
           </div>
           <div className="panel-body">
             <HoldVsUnwindCard
-              emptyHint="8D hold-vs-unwind is modelled from executable reverse-side quotes via POST /paper/trades/{id}/close-plan. Spread convergence and clock estimates never release capital. Open the Operator demo for a labelled DEMO / FIXTURE REPLAY that evaluates the same engine."
+              emptyHint="Hold versus unwind is modelled from current reverse-side quotes. Spread convergence and clock estimates never release capital. Open the labelled /demo fixture-replay utility for DEMO / FIXTURE REPLAY."
             />
           </div>
         </div>

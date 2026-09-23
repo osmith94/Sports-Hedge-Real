@@ -1,0 +1,27 @@
+{
+  "fixture_id": "ncaab-kalshi_event_marmad_champion_outright-2026-09-22",
+  "identified_as": "CAPTURED active Kalshi Men's College Basketball Tournament Champion outright. Must stay out of FIXTURE_MATCH.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events/KXMARMAD-27",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "event_ticker": "KXMARMAD-27",
+    "series_ticker": "KXMARMAD",
+    "title": "Men's 2027 College Basketball Champion",
+    "sub_title": "2026-27 Season",
+    "mutually_exclusive": true,
+    "product_metadata": {
+      "competition": "College Basketball (M)",
+      "competition_scope": "Future"
+    },
+    "market_count": 73,
+    "sample_market": {
+      "ticker": "KXMARMAD-27-BUT",
+      "title": "Will Butler win the College Basketball National Championship?",
+      "status": "active",
+      "yes_sub_title": "Butler",
+      "rules_primary": "If Butler is the 2026-27 Division 1 Men's College Basketball National Champion, then the market resolves to Yes.",
+      "rules_secondary": "Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the NCAA. All trademarks, logos, and brand names are the property of their respective owners."
+    }
+  }
+}

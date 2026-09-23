@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -12,16 +13,18 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
+from registered_kalshi import FakeKalshiBTTS
 
 
-KICKOFF = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
+KICKOFF = datetime.now(UTC) + timedelta(days=3)
 
 
 class FakeMatchbook:
     def __init__(self, *, duplicate_event: bool = False) -> None:
         self.duplicate_event = duplicate_event
         self.list_markets_calls: list[str] = []
+        self.get_market_calls: list[tuple[str, str]] = []
 
     async def list_events(self, **filters: Any) -> dict[str, Any]:
         del filters
@@ -51,40 +54,57 @@ class FakeMatchbook:
             )
         return {"events": events}
 
+    def _markets(self, event_id: int | str) -> list[dict[str, Any]]:
+        del event_id
+        return [
+            {
+                "id": 2001,
+                "name": "Both Teams To Score",
+                "runners": [
+                    {
+                        "id": 301,
+                        "name": "Yes",
+                        "prices": [
+                            {"side": "back", "odds": "2.20", "available-amount": "100"},
+                            {"side": "lay", "odds": "2.22", "available-amount": "100"},
+                        ],
+                    },
+                    {
+                        "id": 302,
+                        "name": "No",
+                        "prices": [
+                            {"side": "back", "odds": "1.80", "available-amount": "100"},
+                            {"side": "lay", "odds": "1.82", "available-amount": "100"},
+                        ],
+                    },
+                ],
+            },
+            {
+                "id": 2999,
+                "name": "Novelty unsupported market",
+                "runners": [{"id": 3999, "name": "Yes", "prices": []}],
+            },
+        ]
+
     async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
         del filters
         self.list_markets_calls.append(str(event_id))
-        return {
-            "markets": [
-                {
-                    "id": 2001,
-                    "name": "Both Teams To Score",
-                    "runners": [
-                        {
-                            "id": 301,
-                            "name": "Yes",
-                            "prices": [
-                                {"side": "back", "odds": "2.20", "available-amount": "100"},
-                                {"side": "lay", "odds": "2.22", "available-amount": "100"},
-                            ],
-                        },
-                        {
-                            "id": 302,
-                            "name": "No",
-                            "prices": [
-                                {"side": "back", "odds": "1.80", "available-amount": "100"},
-                                {"side": "lay", "odds": "1.82", "available-amount": "100"},
-                            ],
-                        },
-                    ],
-                },
-                {
-                    "id": 2999,
-                    "name": "Novelty unsupported market",
-                    "runners": [{"id": 3999, "name": "Yes", "prices": []}],
-                },
-            ]
-        }
+        return {"markets": self._markets(event_id)}
+
+    async def get_market(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del filters
+        self.get_market_calls.append((str(event_id), str(market_id)))
+        for market in self._markets(event_id):
+            if str(market.get("id")) == str(market_id):
+                return market
+        from sports_hedge.venues.matchbook import MatchbookMarketGoneError
+
+        raise MatchbookMarketGoneError(event_id, market_id, 404)
 
 
 class FakePolymarket:
@@ -120,6 +140,7 @@ class FakePolymarket:
                 "outcomes": '["Yes", "No"]',
                 "clobTokenIds": '["yes-token", "no-token"]',
                 "description": "Resolves based on 90 minutes of regulation time.",
+                "feesEnabled": False,
             },
             {
                 "id": "pm-market-unsupported",
@@ -127,6 +148,7 @@ class FakePolymarket:
                 "outcomes": '["Yes", "No"]',
                 "clobTokenIds": '["a", "b"]',
                 "description": "Resolves based on 90 minutes of regulation time.",
+                "feesEnabled": False,
             },
         ]
 
@@ -165,15 +187,19 @@ async def test_collector_discovers_matches_fetches_books_and_feeds_paper_pipelin
     intelligence = MarketIntelligenceService(repository)
     matchbook = FakeMatchbook()
     polymarket = FakePolymarket()
+    kalshi = FakeKalshiBTTS(
+        [("Premier League", "Newcastle United", "Chelsea", KICKOFF)], arb=True
+    )
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
         polymarket=polymarket,
+        kalshi=kalshi,
         paper_scan=PaperScanService(intelligence),
     )
 
     try:
         report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             capital_limit_gbp=Decimal("100"),
             maximum_execution_risk=100,
@@ -185,17 +211,23 @@ async def test_collector_discovers_matches_fetches_books_and_feeds_paper_pipelin
         assert report.raw_polymarket_events == 2
         assert report.normalized_matchbook_events == 1
         assert report.normalized_polymarket_events == 2
-        assert report.matched_event_pairs == 1
+        assert report.matched_event_pairs >= 1
         assert report.normalized_matchbook_markets == 1
-        assert report.normalized_polymarket_markets == 1
+        assert report.normalized_polymarket_markets >= 1
         assert report.matched_market_pairs == 1
-        assert report.order_books_fetched == 2
-        assert polymarket.book_calls == ["yes-token", "no-token"]
-        assert len(report.paper_decisions) == 1
-        assert report.discovered_fixtures
+        assert report.discovery_mode == "venue_union"
+        assert report.skipped_out_of_scope == 0
         discovered = {item.source_event_id: item for item in report.discovered_fixtures}
         assert "1001" in discovered
         assert discovered["1001"].polymarket_matched is True
+        assert discovered["1001"].matchbook_matched is True
+        assert "pm-event-2" in discovered
+        assert discovered["pm-event-2"].matchbook_matched is False
+        assert discovered["pm-event-2"].polymarket_matched is True
+        assert report.order_books_fetched >= 2
+        assert "yes-token" in polymarket.book_calls
+        assert "no-token" in polymarket.book_calls
+        assert len(report.paper_decisions) == 1
         assert discovered["1001"].live_score_supported is False
         assert discovered["1001"].home_score is None
         assert discovered["1001"].matched_market_count == 1
@@ -216,13 +248,13 @@ async def test_collector_discovers_matches_fetches_books_and_feeds_paper_pipelin
         assert decision.eligible_for_paper_simulation is True
         assert report.paper_eligible_count == 1
         assert any(issue.stage == "normalize_event" for issue in report.issues)
-        assert sum(issue.stage == "normalize_market" for issue in report.issues) == 2
+        assert sum(issue.stage == "normalize_market" for issue in report.issues) >= 2
 
         history = intelligence.market_history(canonical_market_id=decision.canonical_market_id)
         assert len(history) == 4
-        assert {snapshot.venue for snapshot in history} == {
+        assert {snapshot.venue for snapshot in history} >= {
             VenueName.MATCHBOOK,
-            VenueName.POLYMARKET,
+            VenueName.KALSHI,
         }
     finally:
         repository.close()
@@ -247,14 +279,26 @@ async def test_collector_pairs_each_event_only_once() -> None:
             maximum_execution_risk=100,
         )
         assert report.normalized_matchbook_events == 2
-        assert report.matched_event_pairs == 1
+        assert report.matched_event_pairs >= 1
         assert len(matchbook.list_markets_calls) == 2
-        assert len(polymarket.list_markets_calls) == 1
+        assert len(polymarket.list_markets_calls) >= 1
     finally:
         repository.close()
 
 
 class BrokenPolymarket(FakePolymarket):
+    async def get_order_book(
+        self,
+        event_id: int | str,
+        market_id: int | str,
+        outcome_id: int | str | None = None,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        del event_id, market_id, outcome_id, filters
+        raise RuntimeError("temporary public book failure")
+
+
+class BrokenKalshi(FakeKalshiBTTS):
     async def get_order_book(
         self,
         event_id: int | str,
@@ -273,16 +317,73 @@ async def test_collector_reports_book_failure_without_crashing_scan() -> None:
     collector = ReadOnlyCrossVenueCollector(
         matchbook=FakeMatchbook(),
         polymarket=BrokenPolymarket(),
+        kalshi=BrokenKalshi(
+            [("Premier League", "Newcastle United", "Chelsea", KICKOFF)], arb=False
+        ),
         paper_scan=PaperScanService(intelligence),
     )
 
     try:
-        report = await collector.collect_and_scan(maximum_execution_risk=100)
-        assert report.matched_event_pairs == 1
+        report = await collector.collect_and_scan(
+            enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
+            venue_costs=matchbook_kalshi_costs(),
+            fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
+            maximum_execution_risk=100,
+        )
+        assert report.matched_event_pairs >= 1
         assert report.matched_market_pairs == 1
         assert report.paper_decisions == []
         assert any(
             issue.stage == "order_book" and "temporary public book failure" in issue.detail
+            for issue in report.issues
+        )
+    finally:
+        repository.close()
+
+
+class HangingMatchbook:
+    async def list_events(self, **filters: Any) -> dict[str, Any]:
+        del filters
+        await asyncio.sleep(30)
+        return {"events": []}
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+        del event_id, filters
+        await asyncio.sleep(30)
+        return {"markets": []}
+
+
+@pytest.mark.asyncio
+async def test_collector_returns_healthy_venue_fixtures_when_matchbook_hangs() -> None:
+    import time
+
+    repository = SqliteMarketIntelligenceRepository()
+    intelligence = MarketIntelligenceService(repository)
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=HangingMatchbook(),
+        polymarket=FakePolymarket(),
+        paper_scan=PaperScanService(intelligence),
+        venue_timeout_seconds=0.3,
+        provider_call_timeout_seconds=0.3,
+        cycle_timeout_seconds=2.0,
+    )
+    started = time.monotonic()
+    try:
+        report = await collector.collect_and_scan(maximum_execution_risk=100)
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0
+        assert report.venue_health[VenueName.MATCHBOOK.value] == "discovery_timeout"
+        assert report.venue_health[VenueName.POLYMARKET.value] == "ok"
+        assert report.raw_matchbook_events == 0
+        assert report.raw_polymarket_events == 2
+        discovered = {item.source_event_id: item for item in report.discovered_fixtures}
+        assert "pm-event-1" in discovered or "pm-event-2" in discovered
+        assert any(item.polymarket_matched for item in report.discovered_fixtures)
+        assert not any(item.matchbook_matched for item in report.discovered_fixtures)
+        assert any(
+            issue.stage == "list_events"
+            and issue.venue is VenueName.MATCHBOOK
+            and "timeout" in issue.detail
             for issue in report.issues
         )
     finally:

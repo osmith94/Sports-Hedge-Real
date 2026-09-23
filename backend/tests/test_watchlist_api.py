@@ -102,6 +102,8 @@ def test_watchlist_read_endpoints_expose_near_triggered_and_activity() -> None:
         assert near_body[0]["canonical_market_id"] == "mkt-near"
         assert near_body[0]["status"] == "APPROACHING"
         assert near_body[0]["is_arbitrage"] is False
+        assert near_body[0]["bet_actionable"] is False
+        assert near_body[0]["bet_blocked_reason"] == "below_trigger"
         assert near_body[0]["guaranteed_profit_gbp"] is None
         assert float(near_body[0]["distance_to_trigger_pp"]) == 0.2
         assert near_body[0]["quote_age_basis"] == "source"
@@ -112,6 +114,8 @@ def test_watchlist_read_endpoints_expose_near_triggered_and_activity() -> None:
         assert len(triggered_body) == 1
         assert triggered_body[0]["status"] == "TRIGGERED"
         assert triggered_body[0]["is_arbitrage"] is True
+        assert triggered_body[0]["bet_actionable"] is False
+        assert triggered_body[0]["bet_blocked_reason"] == "unevaluated"
 
         activity = client.get("/paper/watchlist/activity", params={"limit": 20})
         assert activity.status_code == 200

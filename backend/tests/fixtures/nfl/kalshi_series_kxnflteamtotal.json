@@ -1,0 +1,22 @@
+{
+  "fixture_id": "nfl-kalshi-series-kxnflteamtotal-2026-09-20",
+  "identified_as": "CAPTURED public Kalshi GET /series/KXNFLTEAMTOTAL (team total evidence-only). Not live quotes.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/series/KXNFLTEAMTOTAL",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "ticker": "KXNFLTEAMTOTAL",
+    "title": "Pro Football Team Total Points",
+    "category": "Sports",
+    "contract_terms_url": "https://assets.kalshi.com/contract_terms/FOOTBALLENTITYSTAT.pdf",
+    "product_metadata": {
+      "scope": "Team Total"
+    },
+    "settlement_sources": [
+      {
+        "name": "the Governing League",
+        "url": "https://www.nfl.com/"
+      }
+    ]
+  }
+}

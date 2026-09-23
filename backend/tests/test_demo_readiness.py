@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sports_hedge.api.historical import get_facts_repository, get_odds_repository
 from sports_hedge.api.main import app
 from sports_hedge.api.watchlist import get_watchlist_service
+from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.arbitrage.watchlist.economics import distance_to_trigger_pp
 from sports_hedge.arbitrage.watchlist.models import WatchLeg, WatchObservation
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
@@ -89,6 +90,11 @@ def test_tracked_board_keeps_negative_net_margin_and_does_not_reclassify_rejecte
     )
     service.observe(below_even)
     service.observe(rejected)
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
+    from test_tracked_current_snapshot import _report
+
+    coordinator.record_report(_report("mkt-neg", "mkt-rej"))
 
     try:
         tracked = client.get("/paper/watchlist/tracked")
@@ -105,6 +111,7 @@ def test_tracked_board_keeps_negative_net_margin_and_does_not_reclassify_rejecte
         assert ids["mkt-neg"]["guaranteed_profit_gbp"] is None
         assert "mkt-rej" in ids
         assert ids["mkt-rej"]["status"] == "REJECTED"
+        assert [row["canonical_market_id"] for row in body] == ["mkt-neg", "mkt-rej"]
 
         near = client.get("/paper/watchlist/near").json()
         assert [row["canonical_market_id"] for row in near] == ["mkt-neg"]
@@ -113,6 +120,7 @@ def test_tracked_board_keeps_negative_net_margin_and_does_not_reclassify_rejecte
         assert triggered == []
     finally:
         app.dependency_overrides.clear()
+        coordinator.reset()
         repository.close()
 
 

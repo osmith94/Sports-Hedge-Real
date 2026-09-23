@@ -17,7 +17,9 @@ from sports_hedge.application.complete_set import (
     UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
     GeneralizedStateModel,
 )
-from sports_hedge.fees.cost import FeeBasis
+from sports_hedge.fees.cost import FeeBasis, VenueCostSnapshot
+from sports_hedge.fees.kalshi import KALSHI_QUADRATIC_FORMULA
+from sports_hedge.fees.polymarket import POLYMARKET_TAKER_FORMULA
 
 
 class PayoffScanResult(BaseModel):
@@ -27,7 +29,20 @@ class PayoffScanResult(BaseModel):
     cost_rejection_reasons: list[str] = Field(default_factory=list)
 
 
-STATE_SAFE_FEE_BASES = frozenset({FeeBasis.NONE_CONFIRMED, FeeBasis.PROFIT_COMMISSION})
+STATE_SAFE_FEE_BASES = frozenset(
+    {FeeBasis.NONE_CONFIRMED, FeeBasis.PROFIT_COMMISSION, FeeBasis.FORMULA}
+)
+AUTHORIZED_STATE_FORMULAS = frozenset({KALSHI_QUADRATIC_FORMULA, POLYMARKET_TAKER_FORMULA})
+
+
+def is_state_safe_fee(cost: VenueCostSnapshot) -> bool:
+    """FORMULA is state-safe only when an authorised rule is named on the snapshot."""
+
+    if cost.fee_basis in {FeeBasis.NONE_CONFIRMED, FeeBasis.PROFIT_COMMISSION}:
+        return True
+    if cost.fee_basis is FeeBasis.FORMULA:
+        return (cost.formula_name or "") in AUTHORIZED_STATE_FORMULAS
+    return False
 
 
 class DepthAwarePayoffScanner:
@@ -48,7 +63,7 @@ class DepthAwarePayoffScanner:
         states, mapping = _state_mapping(state_model)
         options: list[list[DepthQuoteCandidate]] = []
         cost_reasons: list[str] = []
-        if any(source.cost.fee_basis not in STATE_SAFE_FEE_BASES for source in sources):
+        if any(not is_state_safe_fee(source.cost) for source in sources):
             return PayoffScanResult(
                 solution=PayoffSolution(
                     is_arbitrage=False,

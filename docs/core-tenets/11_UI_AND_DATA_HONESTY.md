@@ -13,6 +13,8 @@ The UI must never make demo, modelled, historical or stale data look live.
 - Clearly distinguish live market quotes, historical observations, model outputs and illustrative fixtures.
 - Do not fabricate fallback opportunities when an API is offline/empty.
 - Show stale/carried-forward/exception states rather than silently presenting them as fresh.
+- When the scanner has more than one cadence, operator status must name each cadence (for example Fast scan vs Full sweep). A single ambiguous `Last scan` is not sufficient.
+- Tracked current-state must not present expired observations as current. Dual-cadence merge (Issue #158): HOT observations for the hot cohort; UNIVERSE observations for distant fixtures until sweep/TTL (HOT 90s / UNIVERSE 360s). Kickoff-passed unknown in-play must not be labelled live, and elapsed time must not fabricate a completed result. Issue #164: explicit terminal/completed/settled provider status, and kickoff-passed unknown beyond the bounded 3h window, must leave current Fixture Discovery / HOT identity / Tracked radar while preserving append-only audit history.
 - Keep sample size, confidence, stability and data quality visible near analytical claims.
 
 ## Football-style drill-down

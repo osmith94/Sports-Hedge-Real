@@ -76,7 +76,8 @@ def test_market_matcher_rejects_different_settlement_semantics() -> None:
 
     result = MarketMatcher().match(regulation, including_extra_time)
     assert result.matched is False
-    assert "settlement_mismatch" in result.reasons
+    assert "settlement_mismatch" not in result.reasons
+    assert "not_registered" in result.reasons
 
 
 def test_two_way_arbitrage_is_depth_capped() -> None:

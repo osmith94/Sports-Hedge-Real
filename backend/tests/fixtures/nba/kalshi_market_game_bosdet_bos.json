@@ -1,0 +1,32 @@
+{
+  "fixture_id": "nba-kalshi-market-kxnbagame-26oct20bosdet-bos",
+  "identified_as": "CAPTURED public Kalshi GET /markets/KXNBAGAME-26OCT20BOSDET-BOS. Proves exact-ticker refresh. Prices omitted. custom_strike.basketball_team UUID retained.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/markets/KXNBAGAME-26OCT20BOSDET-BOS",
+  "also_proven_by": "https://external-api.kalshi.com/trade-api/v2/markets/KXNBAGAME-26OCT20BOSDET-BOS/orderbook (orderbook_fp present)",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "ticker": "KXNBAGAME-26OCT20BOSDET-BOS",
+    "event_ticker": "KXNBAGAME-26OCT20BOSDET",
+    "title": "Boston wins",
+    "yes_sub_title": "Boston",
+    "no_sub_title": "Boston",
+    "status": "active",
+    "result": "",
+    "market_type": "binary",
+    "strike_type": "structured",
+    "custom_strike": {
+      "basketball_team": "6dd427f5-fa02-40ef-aa90-cfa73e0c539e"
+    },
+    "rules_primary": "If Boston wins the Boston vs Detroit Pro Basketball game originally scheduled for Oct 20, 2026, then the market resolves to Yes.",
+    "rules_secondary": "If the game is postponed but begins within 48 hours of its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is cancelled or not started within 48 hours of its originally scheduled start, all markets will resolve to a fair price.\n\nKalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+    "occurrence_datetime": "2026-10-20T22:00:00Z",
+    "expected_expiration_time": "2026-10-20T22:00:00Z",
+    "expiration_time": "2026-10-22T19:00:00Z",
+    "close_time": "2026-10-22T19:00:00Z",
+    "open_time": "2026-08-20T15:28:00Z",
+    "can_close_early": true,
+    "early_close_condition": "This market will close and expire after a winner is declared.",
+    "expiration_value": ""
+  }
+}

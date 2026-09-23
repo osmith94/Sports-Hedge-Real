@@ -18,6 +18,7 @@ class ExecutionRiskResult(BaseModel):
     score: int = Field(ge=0, le=100)
     band: str
     reasons: list[str]
+    inputs: ExecutionRiskInputs | None = None
 
 
 class ExecutionRiskScorer:
@@ -79,4 +80,4 @@ class ExecutionRiskScorer:
         else:
             band = "extreme"
 
-        return ExecutionRiskResult(score=final_score, band=band, reasons=reasons)
+        return ExecutionRiskResult(score=final_score, band=band, reasons=reasons, inputs=data)

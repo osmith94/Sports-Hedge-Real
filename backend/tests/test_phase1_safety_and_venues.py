@@ -106,9 +106,12 @@ async def test_polymarket_list_events_applies_configured_epl_series_filter() -> 
         overridden = await venue.list_events(series_id="99999")
 
     assert events[0]["id"] == "934146"
-    assert seen[0].params["series_id"] == "10188"
+    queried = [url.params.get("series_id") for url in seen]
+    assert "10188" in queried
+    assert "10355" in queried
+    assert "10193" in queried
     assert seen[0].params["limit"] == "100"
-    assert seen[1].params["series_id"] == "99999"
+    assert queried[-1] == "99999"
     assert overridden[0]["id"] == "934146"
 
 

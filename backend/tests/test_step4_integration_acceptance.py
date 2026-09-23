@@ -14,10 +14,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
-from sports_hedge.api.paper import get_fx_rate_service, get_paper_liquidity_repository
+from sports_hedge.api.paper import (
+    get_fx_rate_service,
+    get_matchbook_account_fee_store,
+    get_paper_liquidity_repository,
+    get_venue_cost_resolver,
+)
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.target_competitions import UNMATCHED_POLYMARKET_COVERAGE
+from sports_hedge.application.target_competitions import (
+    UNMATCHED_POLYMARKET_COVERAGE,
+    polymarket_series_ids_for_targets,
+)
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.resolver import VenueCostResolver
@@ -27,6 +35,7 @@ from sports_hedge.fx.service import FxRateService
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
+from sports_hedge.persistence.matchbook_account_fee import SqliteMatchbookAccountFeeStore
 from sports_hedge.venues.matchbook import MatchbookClient
 from sports_hedge.venues.polymarket import PolymarketClient
 from test_matchbook_event_discovery import (
@@ -35,10 +44,11 @@ from test_matchbook_event_discovery import (
     _settings as matchbook_discovery_settings,
 )
 from test_paper_scan_pipeline import OBSERVED, matchbook_payloads, polymarket_payloads
+from fx_test_helpers import fresh_usd_ecb_close
 from sports_hedge.application.market_observation import (
     MatchbookObservationBuilder,
-    PolymarketObservationBuilder,
 )
+from registered_kalshi import FakeKalshiBTTS, registered_right_observation
 
 
 KICKOFF = datetime(2026, 9, 12, 16, 30, tzinfo=UTC)
@@ -149,6 +159,7 @@ class MultiSeriesPolymarket:
                 "outcomes": '["Yes", "No"]',
                 "clobTokenIds": '["yes-token", "no-token"]',
                 "description": "Resolves based on 90 minutes of regulation time.",
+                "feesEnabled": False,
             }
         ]
 
@@ -179,18 +190,7 @@ class MultiSeriesPolymarket:
 
 def _backend_fx(gbp_per_usd: Decimal = Decimal("0.50000000")) -> FxRateService:
     fx = FxRateService(SqliteFxRateRepository())
-    fx.persist_ecb_closes(
-        [
-            PublishedFxClose(
-                currency="USD",
-                gbp_per_unit=gbp_per_usd,
-                source_date=date(2026, 9, 11),
-                retrieved_at=datetime(2026, 9, 11, 16, tzinfo=UTC),
-                source="ecb_eurofxref",
-                source_id="ecb:2026-09-11:USD",
-            )
-        ]
-    )
+    fx.persist_ecb_closes([fresh_usd_ecb_close(gbp_per_usd)])
     return fx
 
 
@@ -220,6 +220,7 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
         {
             VenueName.MATCHBOOK: Decimal("5"),
             VenueName.POLYMARKET: Decimal("10"),
+            VenueName.KALSHI: Decimal("10"),
             VenueName.SMARKETS: Decimal("5000"),
         }
     )
@@ -235,6 +236,12 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
         polymarket=polymarket,
+        kalshi=FakeKalshiBTTS(
+            [
+                ("Premier League", "Newcastle United", "Chelsea", KICKOFF),
+                ("La Liga", "Athletic Bilbao", "Elche", KICKOFF),
+            ]
+        ),
         paper_scan=service,
     )
     report = await collector.collect_and_scan(
@@ -245,7 +252,7 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
     discovered = {item.source_event_id: item for item in report.discovered_fixtures}
     assert set(discovered) == {"8801", "8802", "8803"}
     assert not any(item.source_event_id.startswith("100") for item in report.discovered_fixtures)
-    assert Settings().resolved_polymarket_series_ids() == ["10188", "10355", "10193"]
+    assert Settings().resolved_polymarket_series_ids() == polymarket_series_ids_for_targets()
 
     epl = discovered["8801"]
     assert epl.polymarket_matched is True
@@ -268,17 +275,19 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
         usd = next(item for item in decision.fx_snapshots if item.currency == "USD")
         assert usd.source == "ecb_eurofxref"
         assert usd.gbp_per_unit == Decimal("0.50000000")
-        assert {item.venue.value for item in decision.venue_costs} == {"matchbook", "polymarket"}
-        assert all(item.source.startswith("venue_cost_registry") for item in decision.venue_costs)
-        used_pm = sum(
+        assert {item.venue.value for item in decision.venue_costs} == {"matchbook", "kalshi"}
+        sources = {item.venue.value: item.source for item in decision.venue_costs}
+        assert sources["matchbook"].startswith("venue_cost_registry")
+        assert "kalshi" in sources
+        used_kalshi = sum(
             (
                 stake.stake
                 for stake in (decision.depth_scan.solution.stakes if decision.depth_scan else [])
-                if stake.venue is VenueName.POLYMARKET
+                if stake.venue is VenueName.KALSHI
             ),
             Decimal("0"),
         )
-        assert used_pm <= Decimal("5") + Decimal("0.0000001")
+        assert used_kalshi <= Decimal("10") + Decimal("0.0000001")
         used_mb = sum(
             (
                 stake.stake
@@ -300,8 +309,12 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
 def test_live_collect_and_economics_status_compose_on_http_surface() -> None:
     fx = _backend_fx()
     liquidity = SqlitePaperLiquidityRepository()
+    fee_store = SqliteMatchbookAccountFeeStore()
+    costs = VenueCostResolver(matchbook_fee_store=fee_store)
     app.dependency_overrides[get_fx_rate_service] = lambda: fx
     app.dependency_overrides[get_paper_liquidity_repository] = lambda: liquidity
+    app.dependency_overrides[get_matchbook_account_fee_store] = lambda: fee_store
+    app.dependency_overrides[get_venue_cost_resolver] = lambda: costs
     client = TestClient(app)
     try:
         rejected = client.post(
@@ -324,7 +337,10 @@ def test_live_collect_and_economics_status_compose_on_http_surface() -> None:
         assert "stale_fx_rate:USD" not in body["issues"]
         venues = {row["venue"] for row in body["venue_costs"]}
         assert "matchbook" in venues
-        assert "polymarket" in venues
+        assert "polymarket" not in venues
+        assert body["matchbook_fee"]["label"] == "2.00% net-profit commission"
+        assert body["polymarket_fee_policy"]["catalog_seeded"] is False
+        assert body["polymarket_fee_policy"]["resolution"] == "per_market_clob_metadata"
 
         listed = client.get("/paper/liquidity-pools").json()
         by_venue = {pool["venue"]: pool for pool in listed["pools"]}
@@ -400,15 +416,19 @@ def test_paper_scan_fail_closes_stale_fx_on_the_same_path_as_liquidity_sizing() 
     matchbook = MatchbookObservationBuilder().build(
         mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        pm_event, pm_market, pm_books, observed_at=OBSERVED, quote_age_ms=180
+    right = registered_right_observation(
+        pm_event,
+        pm_market,
+        pm_books,
+        observed_at=OBSERVED,
+        matchbook_event=mb_event,
     )
     decision = PaperScanService(
         intelligence,
         fx_service=fx,
         cost_resolver=VenueCostResolver(),
         liquidity=liquidity,
-    ).scan_pair(matchbook, polymarket, maximum_execution_risk=100)
+    ).scan_pair(matchbook, right, maximum_execution_risk=100)
     assert decision.eligible_for_paper_simulation is False
     assert any(reason.startswith("stale_fx_rate") for reason in decision.rejection_reasons)
 
@@ -423,12 +443,15 @@ def test_operator_console_keeps_steps_1_to_3_console_contract() -> None:
     assert "fee_snapshots" not in collect_type
     assert "venue_costs" not in collect_type
     assert "USD → GBP" not in scan
-    assert "Matchbook fee %" not in scan
-    assert "Polymarket fee" not in scan
+    assert "Matchbook commission %" in scan
+    assert "operator/account assumption" in scan
+    assert "per-market CLOB metadata" in scan
+    assert "fx_snapshots" not in collect_type
     assert "Min net arb %" in scan
+    assert "Outright Min net arb %" in scan
     assert "Max risk" in scan
     assert "Optional capital limit" in scan
-    assert "Advanced · provenance" in scan
+    assert "Advanced · FX / fees / provenance" in scan
     assert "econ-strip" in scan
     assert "getEconomicsStatus" in scan
     assert "PAPER MODE · NO EXECUTION" in scan
@@ -437,6 +460,7 @@ def test_operator_console_keeps_steps_1_to_3_console_contract() -> None:
     assert "DEMO_LIQUIDITY_POOLS" not in page
     assert "liveConnected" in page
     assert "excluded from solver" in pools
+    assert "Operator demo" not in (FRONTEND / "components" / "sidebar.tsx").read_text(encoding="utf-8")
     assert not hasattr(MatchbookClient, "place_order")
     assert not hasattr(PolymarketClient, "place_order")
     for path in (REPO / "backend" / "src" / "sports_hedge" / "venues").glob("*.py"):

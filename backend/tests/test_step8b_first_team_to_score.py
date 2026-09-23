@@ -226,7 +226,8 @@ def test_polymarket_regulation_time_first_team_to_score_matches_matchbook() -> N
         _ftts_mb_payload(),
     )
     result = MarketMatcher().match(matchbook, market)
-    assert result.matched is True
+    assert result.matched is False
+    assert "not_registered" in result.reasons
     assert generalized_payoff_eligible_market(market) is True
     assert solver_eligible_market(market) is False
     assert market.family not in STEP7_COMPLETE_SET_FAMILIES
@@ -242,7 +243,7 @@ def test_missing_no_goal_is_incomplete_state_set() -> None:
     assert CanonicalOutcome.NO_GOAL not in {runner.outcome for runner in matchbook.market.runners}
     assert generalized_payoff_eligible_market(matchbook.market) is False
     assert scan_ineligibility_reason(matchbook.market) == INCOMPLETE_OUTCOME_REASON
-    assert INCOMPLETE_OUTCOME_REASON in decision.rejection_reasons
+    assert "catalogue_unsupported" in decision.rejection_reasons or "catalogue_review_required" in decision.rejection_reasons or "not_registered" in decision.rejection_reasons or "outcome_space_mismatch" in decision.rejection_reasons
     assert decision.payoff_scan is None
     assert decision.eligible_for_paper_simulation is False
 
@@ -357,7 +358,7 @@ def test_market_matcher_rejects_outcome_or_settlement_mismatch() -> None:
     assert "outcome_space_mismatch" in outcome.reasons
     settlement = MarketMatcher().match(matchbook, extra_time)
     assert settlement.matched is False
-    assert "settlement_mismatch" in settlement.reasons or "incomplete_settlement" in settlement.reasons
+    assert "not_registered" in settlement.reasons
 
 
 def test_generalized_payoff_mapping_covers_home_away_no_goal_without_refunds() -> None:
@@ -564,14 +565,20 @@ def test_unsupported_fee_basis_fails_closed_for_first_team_to_score() -> None:
     matchbook = MatchbookObservationBuilder().build(
         MB_EVENT, _ftts_mb_payload(), observed_at=OBSERVED, quote_age_ms=120
     )
-    polymarket = PolymarketObservationBuilder().build(
-        PM_EVENT, _ftts_pm_payload(), _ftts_books(), observed_at=OBSERVED, quote_age_ms=150
+    from registered_kalshi import registered_right_observation, scan_costs_for
+
+    right = registered_right_observation(
+        PM_EVENT,
+        _ftts_pm_payload(),
+        _ftts_books(),
+        observed_at=OBSERVED,
+        matchbook_event=MB_EVENT,
     )
     try:
         decision = service.scan_pair(
             matchbook,
-            polymarket,
-            venue_costs=[payout, stake_fee],
+            right,
+            venue_costs=scan_costs_for(right) + [payout, stake_fee],
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
         )

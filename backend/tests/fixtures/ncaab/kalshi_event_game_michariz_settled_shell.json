@@ -1,0 +1,47 @@
+{
+  "fixture_id": "ncaab-kalshi_event_game_michariz_settled_shell-2026-09-22",
+  "identified_as": "CAPTURED Kalshi settled KXNCAAMBGAME event shell. Nested markets empty/archived. Tipoff is milestone start_date, not occurrence_datetime.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events?series_ticker=KXNCAAMBGAME&status=settled&with_nested_markets=true&with_milestones=true",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "event_ticker": "KXNCAAMBGAME-26APR04MICHARIZ",
+    "series_ticker": "KXNCAAMBGAME",
+    "title": "Michigan at Arizona",
+    "sub_title": "MICH at ARIZ (Apr 4)",
+    "category": "Sports",
+    "mutually_exclusive": true,
+    "product_metadata": {
+      "competition": "CBB Tournament",
+      "competition_scope": "Game"
+    },
+    "settlement_sources": [
+      {
+        "name": "ESPN",
+        "url": "https://www.espn.com/"
+      },
+      {
+        "name": "Kalshi using information originating from the NCAA",
+        "url": "https://www.ncaa.com/sports/basketball-men/d1"
+      }
+    ],
+    "collateral_return_type": "MECNET",
+    "strike_period": "",
+    "markets": [],
+    "milestone": {
+      "id": "49b8960d-90f3-4ff2-8fa3-f92d27e1c308",
+      "type": "basketball_game",
+      "title": "Michigan at Arizona",
+      "start_date": "2026-04-05T01:19:00Z",
+      "details": {
+        "away_team_id": "5de6200f-c507-4bab-915b-be8955635cf5",
+        "home_team_id": "770236b1-0c9b-4954-842a-b36970eb2f17",
+        "league": "NCAAMB",
+        "main_game_event_ticker": "KXNCAAMBGAME-26APR04MICHARIZ",
+        "source_id": "a0d02a1b-d614-4976-bb6d-5a9a314db251",
+        "special_event_type": "march_madness",
+        "status": "inprogress"
+      }
+    }
+  }
+}

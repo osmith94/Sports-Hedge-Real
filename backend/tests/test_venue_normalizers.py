@@ -12,7 +12,9 @@ from sports_hedge.domain.football import (
     MarketFamily,
     SettlementScope,
 )
+from sports_hedge.matching.events import EventMatcher
 from sports_hedge.normalization.venues import (
+    KalshiNormalizer,
     MatchbookNormalizer,
     PolymarketNormalizer,
     VenueNormalizationError,
@@ -92,6 +94,74 @@ def test_matchbook_total_goals_preserves_line_and_push_semantics() -> None:
         CanonicalOutcome.OVER,
         CanonicalOutcome.UNDER,
     ]
+
+
+def test_matchbook_live_named_total_is_full_match_total_goals() -> None:
+    normalizer = MatchbookNormalizer()
+    event = normalizer.normalize_event(MATCHBOOK_EVENT)
+    market = normalizer.normalize_market(
+        event,
+        {
+            "id": 2008,
+            "name": "Total",
+            "market-type": "point-total",
+            "runners": [
+                {"id": 10, "name": "Over 2.5"},
+                {"id": 11, "name": "Under 2.5"},
+            ],
+        },
+    )
+
+    assert market.family == MarketFamily.TOTAL_GOALS
+    assert market.line == Decimal("2.5")
+    assert market.period.value == "full_time"
+
+
+def test_matchbook_named_team_total_is_not_full_match_total_goals() -> None:
+    normalizer = MatchbookNormalizer()
+    event = normalizer.normalize_event(MATCHBOOK_EVENT)
+    market = normalizer.normalize_market(
+        event,
+        {
+            "id": 2005,
+            "name": "Newcastle United Over/Under 2.5 Goals",
+            "market-type": "other",
+            "runners": [
+                {"id": 10, "name": "Over 2.5"},
+                {"id": 11, "name": "Under 2.5"},
+            ],
+        },
+    )
+    assert market.family == MarketFamily.TEAM_TOTAL
+    assert market.line == Decimal("2.5")
+
+
+def test_matchbook_participant_id_total_is_not_full_match_total_goals() -> None:
+    normalizer = MatchbookNormalizer()
+    event = normalizer.normalize_event(MATCHBOOK_EVENT)
+    market = normalizer.normalize_market(
+        event,
+        {
+            "id": 34328274317601081,
+            "name": "Over/Under 2.5 Goals",
+            "market-type": "other",
+            "event-participant-id": 34213468549700100,
+            "runners": [
+                {
+                    "id": 1,
+                    "name": "Over 2.5",
+                    "event-participant-id": 34213468549700100,
+                },
+                {
+                    "id": 2,
+                    "name": "Under 2.5",
+                    "event-participant-id": 34213468549700100,
+                },
+            ],
+        },
+    )
+    assert market.family == MarketFamily.TEAM_TOTAL
+    assert market.source_market_id == "34328274317601081"
 
 
 def test_matchbook_corners_and_cards_are_supported_for_market_intelligence() -> None:
@@ -264,6 +334,39 @@ def test_polymarket_corners_classifies_for_history_without_guessing_settlement()
     assert market.confidence == 0.75
 
 
+def test_fixture_title_strips_market_family_suffix_from_away_team() -> None:
+    normalizer = PolymarketNormalizer()
+    event = normalizer.normalize_event(
+        {
+            **POLYMARKET_EVENT,
+            "title": "Leeds United vs. Leicester City - 1st Half Exact Score",
+        }
+    )
+    assert event.home_team == "Leeds United"
+    assert event.away_team == "Leicester City"
+
+    more_markets = normalizer.normalize_event(
+        {
+            **POLYMARKET_EVENT,
+            "title": "Leeds United vs. Leicester City - More Markets",
+        }
+    )
+    assert more_markets.away_team == "Leicester City"
+
+    kalshi = KalshiNormalizer().normalize_event(
+        {
+            "event_ticker": "KXEPLBTTS-26SEP20LEELEI",
+            "title": "Leeds United vs Leicester City: BTTS",
+            "strike_date": "2026-09-20T15:00:00Z",
+            "product_metadata": {"competition": "EPL", "competition_scope": "Game"},
+        }
+    )
+    assert kalshi.home_team == "Leeds United"
+    assert kalshi.away_team == "Leicester City"
+    match = EventMatcher().match(event, kalshi)
+    assert match.matched is True
+
+
 def test_polymarket_rejects_mismatched_outcomes_and_token_ids() -> None:
     normalizer = PolymarketNormalizer()
     event = normalizer.normalize_event(POLYMARKET_EVENT)
@@ -278,3 +381,85 @@ def test_polymarket_rejects_mismatched_outcomes_and_token_ids() -> None:
                 "clobTokenIds": ["only-one-token"],
             },
         )
+
+
+def _moneyline_payload(market_id: str, question: str, yes_token: str, no_token: str) -> dict:
+    return {
+        "id": market_id,
+        "question": question,
+        "sportsMarketType": "moneyline",
+        "outcomes": '["Yes", "No"]',
+        "clobTokenIds": f'["{yes_token}", "{no_token}"]',
+        "description": "This market resolves from the result after 90 minutes plus stoppage time.",
+    }
+
+
+def test_lone_polymarket_moneyline_binary_is_not_assembled_into_three_way() -> None:
+    from sports_hedge.normalization.venues import promote_polymarket_complete_match_result
+
+    normalizer = PolymarketNormalizer()
+    event = normalizer.normalize_event(POLYMARKET_EVENT)
+    payload = _moneyline_payload(
+        "pm-home", "Will Newcastle United win on 2026-09-20?", "yes-home", "no-home"
+    )
+    market = normalizer.normalize_market(event, payload)
+    promoted = promote_polymarket_complete_match_result([market], [payload])
+    assert len(promoted) == 1
+    assert [runner.outcome for runner in promoted[0].runners] == [
+        CanonicalOutcome.YES,
+        CanonicalOutcome.NO,
+    ]
+
+
+def test_polymarket_assembles_complete_home_draw_away_moneylines() -> None:
+    from sports_hedge.normalization.venues import promote_polymarket_complete_match_result
+
+    normalizer = PolymarketNormalizer()
+    event = normalizer.normalize_event(POLYMARKET_EVENT)
+    payloads = [
+        _moneyline_payload(
+            "pm-home", "Will Newcastle United win on 2026-09-20?", "yes-home", "no-home"
+        ),
+        _moneyline_payload(
+            "pm-draw", "Will the match be a draw on 2026-09-20?", "yes-draw", "no-draw"
+        ),
+        _moneyline_payload(
+            "pm-away", "Will Arsenal win on 2026-09-20?", "yes-away", "no-away"
+        ),
+    ]
+    markets = [normalizer.normalize_market(event, payload) for payload in payloads]
+    promoted = promote_polymarket_complete_match_result(markets, payloads)
+    assert len(promoted) == 1
+    assert [runner.outcome for runner in promoted[0].runners] == [
+        CanonicalOutcome.HOME,
+        CanonicalOutcome.DRAW,
+        CanonicalOutcome.AWAY,
+    ]
+    assert [runner.source_runner_id for runner in promoted[0].runners] == [
+        "yes-home",
+        "yes-draw",
+        "yes-away",
+    ]
+
+
+def test_polymarket_moneyline_yes_outcome_fails_closed_on_ambiguous_titles() -> None:
+    from sports_hedge.normalization.venues import polymarket_moneyline_yes_outcome
+
+    assert (
+        polymarket_moneyline_yes_outcome(
+            "Will Newcastle United or Arsenal win?",
+            home_team="Newcastle United",
+            away_team="Arsenal",
+        )
+        is None
+    )
+    assert polymarket_moneyline_yes_outcome(
+        "Will the match be a draw?",
+        home_team="Newcastle United",
+        away_team="Arsenal",
+    ) is CanonicalOutcome.DRAW
+    assert polymarket_moneyline_yes_outcome(
+        "Will Newcastle United win?",
+        home_team="Newcastle United",
+        away_team="Arsenal",
+    ) is CanonicalOutcome.HOME

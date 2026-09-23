@@ -1,0 +1,33 @@
+{
+  "fixture_id": "nfl-kalshi-total-indkc-48-2026-09-20",
+  "identified_as": "CAPTURED Kalshi KXNFLTOTAL binary \"Full Game: over 47.5 points scored?\". YES=over, NO=under. Half-line only in this snapshot. Prices omitted.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events?series_ticker=KXNFLTOTAL&status=open&with_nested_markets=true",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "event": {
+    "event_ticker": "KXNFLTOTAL-26SEP20INDKC",
+    "title": "Indianapolis vs Kansas City: Total Points"
+  },
+  "payload": {
+    "ticker": "KXNFLTOTAL-26SEP20INDKC-48",
+    "event_ticker": "KXNFLTOTAL-26SEP20INDKC",
+    "title": "Full Game: over 47.5 points scored?",
+    "yes_sub_title": "Over 47.5 points scored",
+    "no_sub_title": "Over 47.5 points scored",
+    "status": "active",
+    "result": "",
+    "market_type": "binary",
+    "strike_type": "greater",
+    "custom_strike": null,
+    "rules_primary": "If Indianapolis and Kansas City collectively score more than 47.5 points in the Indianapolis vs Kansas City Pro Football game originally scheduled for Sep 20, 2026, then the market resolves to Yes.",
+    "rules_secondary": "Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+    "occurrence_datetime": "2026-09-21T03:20:00Z",
+    "expected_expiration_time": "2026-09-21T03:20:00Z",
+    "expiration_time": "2026-09-23T00:20:00Z",
+    "close_time": "2026-09-23T00:20:00Z",
+    "open_time": "2026-09-14T01:05:00Z",
+    "can_close_early": true,
+    "early_close_condition": "This market will close and expire early if the event occurs.",
+    "expiration_value": ""
+  }
+}

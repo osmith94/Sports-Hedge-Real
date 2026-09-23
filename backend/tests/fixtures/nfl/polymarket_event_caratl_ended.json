@@ -1,0 +1,109 @@
+{
+  "fixture_id": "nfl-polymarket-nfl-car-atl-2026-09-20",
+  "identified_as": "CAPTURED public Gamma NFL event nfl-car-atl-2026-09-20 (ended/graded moneyline). Identity + one market per family. Prices/CLOB books omitted. Description/rules retained.",
+  "source": "https://gamma-api.polymarket.com/events/827173",
+  "discovery": "GET /events?series_id=12185",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": "827173",
+    "ticker": "nfl-car-atl-2026-09-20",
+    "slug": "nfl-car-atl-2026-09-20",
+    "title": "Panthers vs. Falcons",
+    "startTime": "2026-09-20T17:00:00Z",
+    "eventDate": "2026-09-20",
+    "endDate": "2026-09-20T17:00:00Z",
+    "period": "VFT",
+    "score": "34-3",
+    "live": false,
+    "ended": true,
+    "closed": false,
+    "active": true,
+    "gameId": 19471,
+    "finishedTimestamp": "2026-09-20T20:07:32.65663Z",
+    "seriesSlug": "nfl-2026",
+    "sport": {
+      "id": 10,
+      "sport": "nfl",
+      "name": "NFL",
+      "ordering": "away",
+      "series": "12185"
+    },
+    "teams": [
+      {
+        "id": 100037,
+        "name": "Carolina Panthers",
+        "abbreviation": "car",
+        "alias": "Panthers",
+        "ordering": "away",
+        "league": "nfl"
+      },
+      {
+        "id": 100039,
+        "name": "Atlanta Falcons",
+        "abbreviation": "atl",
+        "alias": "Falcons",
+        "ordering": "home",
+        "league": "nfl"
+      }
+    ],
+    "markets": [
+      {
+        "id": "3482561",
+        "question": "Panthers vs. Falcons",
+        "slug": "nfl-car-atl-2026-09-20",
+        "sportsMarketType": "moneyline",
+        "groupItemTitle": null,
+        "conditionId": "0xc5a91043c51452c8db48b2420953e906237025c4dd0f7609f0ea1b56f1752c51",
+        "outcomes": "[\"Panthers\", \"Falcons\"]",
+        "line": null,
+        "active": true,
+        "closed": true,
+        "umaResolutionStatus": "resolved",
+        "description": "In the upcoming NFL game, scheduled for September 20 at 1:00PM ET:\nIf Panthers wins, the market will resolve to \"Panthers\".\nIf Falcons wins, the market will resolve to \"Falcons\".\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely or ends in a tie, with no make-up game, this market will resolve 50-50."
+      },
+      {
+        "id": "4448073",
+        "question": "Spread: Panthers (-6.5)",
+        "slug": "nfl-car-atl-2026-09-20-spread-away-6pt5",
+        "sportsMarketType": "spreads",
+        "groupItemTitle": "Spread -6.5",
+        "conditionId": "0x5c3d73761b8c790fbed9cf6b5ff11e84bb8bbd070b8e0175d252aa77572fff58",
+        "outcomes": "[\"Panthers\", \"Falcons\"]",
+        "line": -6.5,
+        "active": true,
+        "closed": true,
+        "umaResolutionStatus": "resolved",
+        "description": "In the upcoming NFL football game between Panthers and Falcons, scheduled for September 20 at 1:00 PM ET:\n\nThis market will resolve to \"Panthers\" if the Panthers win the game by 7 or more points.\n\nOtherwise, this market will resolve to \"Falcons\".\n\nOvertime is included if played.\n\nIf the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50."
+      },
+      {
+        "id": "3517179",
+        "question": "Panthers vs. Falcons: O/U 39.5",
+        "slug": "nfl-car-atl-2026-09-20-total-39pt5",
+        "sportsMarketType": "totals",
+        "groupItemTitle": "O/U 39.5",
+        "conditionId": "0x01deefa3f1b1cb6e322fae4e3093e6412d728a4d5a2586dce218c386d77b9f54",
+        "outcomes": "[\"Over\", \"Under\"]",
+        "line": 39.5,
+        "active": true,
+        "closed": false,
+        "umaResolutionStatus": null,
+        "description": "In the upcoming NFL game, scheduled for September 20 at 1:00 PM ET:\n\nThis market will resolve to \"Over\" if the Panthers and Falcons combine to score 40 or more points in this game.\n\nIf the combined total is less than 40, this market will resolve to \"Under\".\n\nIf the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50."
+      },
+      {
+        "id": "4454728",
+        "question": "Panthers Team Total: O/U 10.5",
+        "slug": "nfl-car-atl-2026-09-20-team-total-car-10pt5",
+        "sportsMarketType": "team_totals",
+        "groupItemTitle": "Panthers O/U 10.5",
+        "conditionId": "0x2a686346e45d4c45c0b9dca4887f8d9e4d97566aab09ca75780da82ba25cf3a3",
+        "outcomes": "[\"Over\", \"Under\"]",
+        "line": 10.5,
+        "active": true,
+        "closed": true,
+        "umaResolutionStatus": "resolved",
+        "description": "In the upcoming NFL game between Panthers and Falcons, scheduled for September 20 at 1:00 PM ET:\n\nThis market will resolve to \"Over\" if the Panthers score 11 or more points in this game.\n\nIf the Panthers score less than 11 points, this market will resolve to \"Under\".\n\nThis market is based solely on the Panthers's score, not the combined score of both teams.\n\nIf the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50."
+      }
+    ]
+  }
+}

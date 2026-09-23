@@ -1,34 +1,43 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from time import monotonic
 
 from sports_hedge.application.complete_set import (
     SOLVER_MODEL_SIMPLE,
     UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
     complete_set_outcomes,
     generalized_payoff_eligible_pair,
-    generalized_state_model,
+    generalized_state_model_for_pair,
     scan_ineligibility_reason,
     solver_eligible_market,
     solver_model_for_pair,
 )
 from sports_hedge.application.market_observation import VenueMarketObservation
+from sports_hedge.application.executable_liquidity import (
+    opening_liquidity_rejection_reasons,
+)
 from sports_hedge.application.quote_freshness import (
     conservative_combined_age_ms,
     conservative_combined_basis,
     require_aware_instant,
 )
 from sports_hedge.arbitrage.depth import DepthAwareCompleteSetScanner, DepthQuoteSource
+from sports_hedge.arbitrage.min_net_threshold import (
+    OUTRIGHT_MIN_NET_EDGE_UNCONFIGURED,
+    resolve_min_net_threshold,
+)
 from sports_hedge.arbitrage.payoff_scan import (
-    STATE_SAFE_FEE_BASES,
     DepthAwarePayoffScanner,
     PayoffScanResult,
+    is_state_safe_fee,
 )
 from sports_hedge.config import Settings, get_settings
-from sports_hedge.domain.football import CanonicalOutcome, SettlementScope
+from sports_hedge.domain.football import CanonicalOutcome
 from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
-from sports_hedge.domain.models import VenueName
+from sports_hedge.domain.models import MarketScope, VenueName
 from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.fees.models import FeeSnapshot
@@ -37,7 +46,9 @@ from sports_hedge.fx.models import FxRateUnavailable
 from sports_hedge.fx.service import FxRateService
 from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
+from sports_hedge.matching.events import paper_event_matcher
 from sports_hedge.matching.markets import MarketMatcher
+from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
 from sports_hedge.normalization.identity import (
     canonical_matched_event_id,
     canonical_matched_market_id,
@@ -56,13 +67,23 @@ from sports_hedge.arbitrage.allocation.engine import allocate
 from sports_hedge.arbitrage.allocation.models import AllocatedStake, AllocationResult
 from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+from sports_hedge.paper.position_management.quotes import LatestObservationCatalog
 from sports_hedge.paper.trades import PaperTrade
 from sports_hedge.persistence.liquidity import SqlitePaperLiquidityRepository
 from sports_hedge.risk.execution import ExecutionRiskInputs, ExecutionRiskScorer
 
 
 class PaperScanService:
-    """Orchestrate strict matching, snapshot capture and paper-only arb analysis."""
+    """Orchestrate register-based matching, snapshot capture and paper-only arb analysis.
+
+    Runtime PAPER market equivalence is the Approved Match Register after
+    fixture identity. Mapping confidence, learned market labels, and mapping
+    review are not admission gates. ``minimum_mapping_confidence`` is a
+    deprecated API field with zero runtime effect. Fixture identity uses the
+    PAPER EventMatcher threshold (``paper_event_match_threshold``, default
+    0.80) and persists the actual match confidence; it does not reuse mapping
+    confidence.
+    """
 
     def __init__(
         self,
@@ -77,17 +98,46 @@ class PaperScanService:
         cost_resolver: VenueCostResolver | None = None,
         liquidity: SqlitePaperLiquidityRepository | None = None,
         open_trades: list[PaperTrade] | None = None,
+        mapping_rule_store: object | None = None,
+        reverse_catalog: LatestObservationCatalog | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
+        del mapping_rule_store
         self.market_intelligence = market_intelligence
-        self.market_matcher = market_matcher or MarketMatcher()
+        self.settings = settings or get_settings()
+        if market_matcher is None:
+            market_matcher = MarketMatcher(paper_event_matcher(self.settings))
+        self.market_matcher = market_matcher
         self.depth_scanner = depth_scanner or DepthAwareCompleteSetScanner()
         self.payoff_scanner = payoff_scanner or DepthAwarePayoffScanner()
         self.risk_scorer = risk_scorer or ExecutionRiskScorer()
-        self.settings = settings or get_settings()
         self.fx_service = fx_service
         self.cost_resolver = cost_resolver
         self.liquidity = liquidity
         self.open_trades = open_trades or []
+        self.reverse_catalog = reverse_catalog
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self.last_scan_phase_ms: dict[str, int] = {
+            "mapping_equivalence": 0,
+            "fees_fx_risk": 0,
+            "solver_allocation": 0,
+        }
+
+    def _stamp_scan_phases(
+        self,
+        *,
+        mapping_ms: int,
+        fee_started: float,
+        solver_started: float | None = None,
+    ) -> None:
+        now = monotonic()
+        self.last_scan_phase_ms = {
+            "mapping_equivalence": max(0, mapping_ms),
+            "fees_fx_risk": max(0, int(((solver_started or now) - fee_started) * 1000)),
+            "solver_allocation": (
+                0 if solver_started is None else max(0, int((now - solver_started) * 1000))
+            ),
+        }
 
     def record_observation(self, observation: VenueMarketObservation) -> int:
         event_id = canonical_source_event_id(observation.market.event)
@@ -111,19 +161,39 @@ class PaperScanService:
         recent_volatility_bps: float = 0.0,
         open_trades: list[PaperTrade] | None = None,
         conditionally_releasable: dict | None = None,
+        fixture_canonical_event_id: str | None = None,
+        market_scope: MarketScope | str = MarketScope.FIXTURE_MATCH,
+        outright_min_net_edge: Decimal | None = None,
     ) -> PaperScanDecision:
-        if minimum_net_edge < 0:
+        scope = MarketScope(market_scope)
+        if scope is MarketScope.FIXTURE_MATCH and minimum_net_edge < 0:
             raise ValueError("minimum_net_edge must be non-negative")
         if not 0 <= maximum_execution_risk <= 100:
             raise ValueError("maximum_execution_risk must be between 0 and 100")
         if not 0 <= minimum_mapping_confidence <= 1:
             raise ValueError("minimum_mapping_confidence must be between 0 and 1")
+        # Deprecated API field. Runtime PAPER equivalence is the register only.
+        del minimum_mapping_confidence
 
+        threshold = resolve_min_net_threshold(
+            scope,
+            fixture_min_net_edge=minimum_net_edge,
+            outright_min_net_edge=outright_min_net_edge,
+        )
+        stamp = threshold.as_decision_fields()
+        applied_threshold = threshold.applied_threshold
+
+        map_started = monotonic()
         match = self.market_matcher.match(left.market, right.market)
+        mapping_ms = max(0, int((monotonic() - map_started) * 1000))
+        fee_started = monotonic()
+        solver_started: float | None = None
         fees = list(fee_snapshots or [])
         rejections: list[str] = []
+        if not threshold.configured and threshold.fail_closed_reason:
+            rejections.append(threshold.fail_closed_reason)
         assumption_labels: list[str] = []
-        evaluated_at = datetime.now(UTC)
+        evaluated_at = self._clock()
         costs, cost_resolve_reasons = self._resolve_costs(
             left,
             right,
@@ -138,6 +208,9 @@ class PaperScanService:
         )
         rejections.extend(cost_resolve_reasons)
         rejections.extend(fx_resolve_reasons)
+        from sports_hedge.fees.labels import cost_assumption_labels_for_snapshots
+
+        assumption_labels.extend(cost_assumption_labels_for_snapshots(costs))
         quote_age_ms = conservative_combined_age_ms(left.quote_age_ms, right.quote_age_ms)
         quote_age_basis = conservative_combined_basis(
             left.metadata.get("quote_age_basis") if isinstance(left.metadata, dict) else None,
@@ -164,6 +237,7 @@ class PaperScanService:
 
         if not match.matched:
             recorded = self.record_observation(left) + self.record_observation(right)
+            self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
                 snapshots_recorded=recorded,
@@ -172,26 +246,49 @@ class PaperScanService:
                 venue_costs=costs,
                 fx_snapshots=fx,
                 cost_assumption_labels=assumption_labels,
-                minimum_net_edge=minimum_net_edge,
+                **stamp,
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
+                mapping_review_candidate=None,
             )
 
-        event_id = canonical_matched_event_id([left.market.event, right.market.event])
-        market_id = canonical_matched_market_id(event_id, [left.market, right.market])
+        pair_event_id = canonical_matched_event_id([left.market.event, right.market.event])
+        fixture_id = (fixture_canonical_event_id or "").strip() or None
+        event_id = fixture_id or pair_event_id
+        market_id = canonical_matched_market_id(pair_event_id, [left.market, right.market])
         recorded = self._record_with_ids(left, event_id=event_id, market_id=market_id)
         recorded += self._record_with_ids(right, event_id=event_id, market_id=market_id)
 
         if left.venue == right.venue:
             rejections.append("same_venue_pair")
-        if match.confidence < minimum_mapping_confidence:
-            rejections.append("mapping_confidence_below_threshold")
-        if (
-            left.market.settlement.scope == SettlementScope.UNKNOWN
-            or right.market.settlement.scope == SettlementScope.UNKNOWN
-        ):
-            rejections.append("unknown_settlement_scope")
+
+        from sports_hedge.catalogue.admission import assess_catalogue_admission
+
+        catalogue_admission = assess_catalogue_admission(left.market, right.market)
+        if not catalogue_admission.allowed:
+            rejections.append(
+                catalogue_admission.rejection_reason or "catalogue_not_registered"
+            )
+            self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
+            return PaperScanDecision(
+                market_match=match,
+                canonical_event_id=event_id,
+                canonical_market_id=market_id,
+                fixture_canonical_event_id=fixture_id,
+                snapshots_recorded=recorded,
+                rejection_reasons=_dedupe(rejections),
+                fee_snapshots=fees,
+                venue_costs=costs,
+                fx_snapshots=fx,
+                cost_assumption_labels=assumption_labels,
+                **stamp,
+                maximum_execution_risk=maximum_execution_risk,
+                quote_age_ms=quote_age_ms,
+                quote_age_basis=quote_age_basis,
+                mapping_review_candidate=None,
+                solver_model=None,
+            )
 
         solver_model = solver_model_for_pair(left.market, right.market)
         if solver_model is None:
@@ -201,20 +298,23 @@ class PaperScanService:
             ):
                 ineligible = scan_ineligibility_reason(right.market)
             rejections.append(ineligible)
+            self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
                 canonical_event_id=event_id,
                 canonical_market_id=market_id,
+                fixture_canonical_event_id=fixture_id,
                 snapshots_recorded=recorded,
                 rejection_reasons=_dedupe(rejections),
                 fee_snapshots=fees,
                 venue_costs=costs,
                 fx_snapshots=fx,
                 cost_assumption_labels=assumption_labels,
-                minimum_net_edge=minimum_net_edge,
+                **stamp,
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
+                mapping_review_candidate=None,
                 solver_model=None,
             )
 
@@ -229,12 +329,12 @@ class PaperScanService:
         if any(outcome == CanonicalOutcome.OTHER for outcome in expected_outcomes):
             rejections.append("noncanonical_outcome_space")
 
+        if venue_costs is None and fees:
+            rejections.append("legacy_fee_snapshot_not_cost_truth")
         if costs:
             cost_map = {snapshot.venue: snapshot for snapshot in costs}
         else:
             cost_map = {}
-            if fees:
-                rejections.append("legacy_fee_snapshot_not_cost_truth")
         scan_costs: dict[VenueName, VenueCostSnapshot] = {}
         missing_fees = False
         for observation in (left, right):
@@ -259,7 +359,7 @@ class PaperScanService:
             except CostRuleError as exc:
                 rejections.append(exc.reason)
                 missing_fees = True
-            if solver_model != SOLVER_MODEL_SIMPLE and cost.fee_basis not in STATE_SAFE_FEE_BASES:
+            if solver_model != SOLVER_MODEL_SIMPLE and not is_state_safe_fee(cost):
                 rejections.append(UNSUPPORTED_STATE_PAYOFF_FEE_BASIS)
                 missing_fees = True
 
@@ -278,23 +378,27 @@ class PaperScanService:
             for reason in rejections
         )
         if missing_fees or missing_fx or cost_clock_blocked:
+            self._stamp_scan_phases(mapping_ms=mapping_ms, fee_started=fee_started)
             return PaperScanDecision(
                 market_match=match,
                 canonical_event_id=event_id,
                 canonical_market_id=market_id,
+                fixture_canonical_event_id=fixture_id,
                 snapshots_recorded=recorded,
                 rejection_reasons=_dedupe(rejections),
                 fee_snapshots=fees,
                 venue_costs=list(scan_costs.values()) or costs,
                 fx_snapshots=fx,
                 cost_assumption_labels=assumption_labels,
-                minimum_net_edge=minimum_net_edge,
+                **stamp,
                 maximum_execution_risk=maximum_execution_risk,
                 quote_age_ms=quote_age_ms,
                 quote_age_basis=quote_age_basis,
+                mapping_review_candidate=None,
                 solver_model=solver_model,
             )
 
+        solver_started = monotonic()
         sources: list[DepthQuoteSource] = []
         configured_spread = Decimal(self.settings.fx_spread_bps)
         configured_fx_slip = Decimal("0")
@@ -364,10 +468,12 @@ class PaperScanService:
             solution = depth_scan.solution
             if not solution.is_arbitrage:
                 rejections.append(solution.rejection_reason or "no_arbitrage")
-            elif solution.roi < minimum_net_edge:
+            elif not threshold.configured:
+                rejections.append(OUTRIGHT_MIN_NET_EDGE_UNCONFIGURED)
+            elif applied_threshold is not None and solution.roi < applied_threshold:
                 rejections.append("net_edge_below_threshold")
         else:
-            state_model = generalized_state_model(left.market)
+            state_model = generalized_state_model_for_pair(left.market, right.market)
             assert state_model is not None
             payoff_scan = self.payoff_scanner.scan(
                 sources,
@@ -380,25 +486,36 @@ class PaperScanService:
             payoff = payoff_scan.solution
             if not payoff.is_arbitrage:
                 rejections.append(payoff.rejection_reason or "no_arbitrage")
-            elif payoff.roi < minimum_net_edge:
+            elif not threshold.configured:
+                rejections.append(OUTRIGHT_MIN_NET_EDGE_UNCONFIGURED)
+            elif applied_threshold is not None and payoff.roi < applied_threshold:
                 rejections.append("net_edge_below_threshold")
 
-        risk_inputs = self._risk_inputs(
-            left,
-            right,
-            depth_scan=depth_scan,
-            payoff_scan=payoff_scan,
-            assumed_latency_ms=assumed_latency_ms,
-            recent_volatility_bps=recent_volatility_bps,
-            quote_age_ms=quote_age_ms if quote_age_ms is not None else 10**9,
+        liquidity_rejections = opening_liquidity_rejection_reasons(
+            list(scan_costs.values()),
+            quote_age_ms=quote_age_ms,
+            max_quote_age_ms=int(self.settings.paper_entry_max_quote_age_ms),
         )
+        rejections.extend(liquidity_rejections)
+
+        risk_inputs = None
         risk = None
-        if risk_inputs is None:
-            rejections.append("missing_risk_evidence")
-        else:
-            risk = self.risk_scorer.score(risk_inputs)
-            if risk.score > maximum_execution_risk:
-                rejections.append("execution_risk_above_threshold")
+        if not liquidity_rejections:
+            risk_inputs = self._risk_inputs(
+                left,
+                right,
+                depth_scan=depth_scan,
+                payoff_scan=payoff_scan,
+                assumed_latency_ms=assumed_latency_ms,
+                recent_volatility_bps=recent_volatility_bps,
+                quote_age_ms=quote_age_ms if quote_age_ms is not None else 10**9,
+            )
+            if risk_inputs is None:
+                rejections.append("missing_risk_evidence")
+            else:
+                risk = self.risk_scorer.score(risk_inputs)
+                if risk.score > maximum_execution_risk:
+                    rejections.append("execution_risk_above_threshold")
 
         execution_modes = {
             left.venue: _default_execution_mode(left.venue),
@@ -411,22 +528,31 @@ class PaperScanService:
             payoff_scan=payoff_scan,
             effective_fx=effective_fx,
         )
+        from sports_hedge.catalogue.states import CatalogueApprovalState
+
+        if (
+            catalogue_admission.assessment.state
+            is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+        ):
+            rejections.append("paper_assumed_equivalent")
 
         draft = PaperScanDecision(
             market_match=match,
             canonical_event_id=event_id,
             canonical_market_id=market_id,
+            fixture_canonical_event_id=fixture_id,
             snapshots_recorded=recorded,
             depth_scan=depth_scan,
             payoff_scan=payoff_scan,
             execution_risk=risk,
-            eligible_for_paper_simulation=not rejections,
+            execution_risk_inputs=risk_inputs,
+            eligible_for_paper_simulation=not _paper_blocking_reasons(rejections),
             rejection_reasons=_dedupe(rejections),
             fee_snapshots=fees,
             venue_costs=list(scan_costs.values()),
             fx_snapshots=fx,
             cost_assumption_labels=_dedupe(assumption_labels),
-            minimum_net_edge=minimum_net_edge,
+            **stamp,
             maximum_execution_risk=maximum_execution_risk,
             quote_age_ms=quote_age_ms,
             quote_age_basis=quote_age_basis,
@@ -454,10 +580,17 @@ class PaperScanService:
                 except FillPlanMappingError as exc:
                     alloc_reasons.append(f"allocation_failed:{exc.reason}")
         rejections.extend(alloc_reasons)
+        self._stamp_scan_phases(
+            mapping_ms=mapping_ms,
+            fee_started=fee_started,
+            solver_started=solver_started,
+        )
         return draft.model_copy(
             update={
-                "eligible_for_paper_simulation": not rejections,
+                "eligible_for_paper_simulation": not _paper_blocking_reasons(rejections),
                 "rejection_reasons": _dedupe(rejections),
+                "mapping_review_candidate": None,
+                "scanned_at": datetime.now(UTC),
             }
         )
 
@@ -525,6 +658,8 @@ class PaperScanService:
         )
         for snapshot in snapshots:
             self.market_intelligence.record_snapshot(snapshot)
+        if self.reverse_catalog is not None:
+            self.reverse_catalog.remember([observation])
         return len(snapshots)
 
     def _risk_inputs(
@@ -636,12 +771,29 @@ class PaperScanService:
                         captured_at=as_of,
                         source_market_id=observation.market.source_market_id,
                     )
-                    if snapshot.is_economically_known():
-                        resolved.append(snapshot)
-                    else:
+                    resolved.append(snapshot)
+                    if not snapshot.is_economically_known():
                         reasons.append("unknown_required_venue_cost:kalshi")
                     continue
                 reasons.append("unknown_required_venue_cost:kalshi")
+                continue
+            if observation.venue is VenueName.POLYMARKET:
+                metadata = observation.metadata if isinstance(observation.metadata, dict) else {}
+                fee_meta = metadata.get("polymarket_fee")
+                if isinstance(fee_meta, dict):
+                    from sports_hedge.fees.polymarket import polymarket_cost_from_market
+
+                    snapshot = polymarket_cost_from_market(
+                        fee_meta,
+                        action=action,
+                        captured_at=as_of,
+                        source_market_id=observation.market.source_market_id,
+                    )
+                    resolved.append(snapshot)
+                    if not snapshot.is_economically_known():
+                        reasons.append("unknown_required_venue_cost:polymarket")
+                    continue
+                reasons.append("unknown_required_venue_cost:polymarket")
                 continue
             if self.cost_resolver is None:
                 continue
@@ -666,15 +818,18 @@ class PaperScanService:
         fx_snapshots: list[FxRateSnapshot] | None,
         as_of: datetime,
     ) -> tuple[list[FxRateSnapshot], list[str]]:
-        if fx_snapshots is not None:
+        if fx_snapshots:
             return _with_gbp_rate(list(fx_snapshots), as_of=as_of), []
         if self.fx_service is None:
             return _with_gbp_rate([], as_of=as_of), []
         currencies = {left.native_currency, right.native_currency, "GBP"}
         try:
-            return self.fx_service.paper_snapshots(currencies, as_of=as_of), []
+            snapshots = self.fx_service.paper_snapshots(currencies, as_of=as_of)
         except FxRateUnavailable as exc:
             return _with_gbp_rate([], as_of=as_of), [exc.reason]
+        if any(item.source == "paper_demo_fx_snapshot" for item in snapshots):
+            return _with_gbp_rate([], as_of=as_of), ["missing_fx_rate:USD"]
+        return snapshots, []
 
 
 def _cost_clock_reasons(captured_at: datetime, *, kind: str, as_of: datetime) -> list[str]:
@@ -703,6 +858,12 @@ def _with_gbp_rate(rates: list[FxRateSnapshot], *, as_of: datetime | None = None
 
 def _dedupe(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+def _paper_blocking_reasons(reasons: list[str]) -> list[str]:
+    """Audit labels such as paper_assumed_equivalent do not block PAPER admission."""
+
+    return [reason for reason in reasons if reason not in PAPER_NONBLOCKING_REJECTION_REASONS]
 
 
 def _default_execution_mode(venue: VenueName) -> LegExecutionMode:
@@ -769,6 +930,7 @@ def _fill_legs_from_observations(
                     venue=observation.venue,
                     source_market_id=observation.market.source_market_id,
                     source_runner_id=book.source_runner_id,
+                    source_event_id=str(observation.market.event.source_event_id),
                     currency=observation.native_currency,
                     requested_stake=requested,
                     displayed_odds=best.decimal_odds,

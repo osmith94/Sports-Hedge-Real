@@ -25,6 +25,78 @@ Sports Hedge must assume that any real execution attempt can encounter:
 
 A stale or previously observed quote is never evidence that the remaining leg can still be filled.
 
+## Executable taker liquidity vs passive/maker liquidity
+
+Fill risk is side-aware. Sports Hedge must distinguish **executable/taker liquidity** from **passive/resting maker liquidity**. This distinction is part of the product contract, not an implementation footnote.
+
+### Freshness is revalidation, not price movement
+
+- A quote being unchanged is not itself stale. Freshness is based on timestamp and revalidation against the current book, not on whether the displayed price moved.
+- Fresh-but-unchanged opposing depth may still be executable if the venue is actively refreshing the book and the quote age is within the absolute freshness limit.
+- A stale or previously observed quote is never executable evidence until it has been revalidated against the current book.
+- Do not waive absolute quote-age/freshness limits merely because a stale-looking price is favourable.
+
+### Executable / taker liquidity
+
+**Executable/taker liquidity** means there is current opposing depth we can consume now at a known price and size.
+
+A freshly revalidated stale-looking price may be attractive if we can actually take it immediately and the hedge remains executable. Consuming current taker depth is still subject to depth, fee/FX, risk and absolute quote-age gates.
+
+Executable taker depth is the only liquidity that may:
+
+- count toward executable depth or solver-qualified opportunity size;
+- qualify an opening arb;
+- become the fixture-row headline `Best Arb`.
+
+### Passive / maker liquidity
+
+**Passive/maker liquidity** means our strategy would require posting an order or lay and waiting for another participant to trade into it.
+
+That is not guaranteed or executable liquidity. It must not be treated as current fillable size.
+
+If an arb depends on posting a passive lay/maker order — especially at a stale or lagging price — it must **fail closed** as an executable arb until an actual fill occurs. Do not merely apply a small risk penalty or down-weight.
+
+Passive or stale maker liquidity must never:
+
+- become the fixture-row headline `Best Arb`;
+- count toward executable depth;
+- count toward solver-qualified opportunity size;
+- be labelled qualifying.
+
+A mathematically attractive maker/passive or stale candidate may appear in drilldown as observed edge / not executable, with the exact rejection reason. It must not outrank a lower-edge genuinely executable taker opportunity on the fixture summary.
+
+### Phase-1 opening path
+
+The current Phase-1 opening arb path remains **back/buy only**.
+
+Matchbook lay levels may be observed for risk and market intelligence. They do not enter opening-arb qualification, executable depth, or fixture-headline `Best Arb` selection.
+
+### Future opening lay / maker execution
+
+Any future support for opening lay/maker execution requires a **separate execution model** before it can qualify as executable. That model must include:
+
+- fill probability;
+- queue position / time-in-market;
+- cancellation and repricing;
+- side-aware freshness (stale or materially lagging passive quotes fail closed immediately);
+- shadow execution evidence;
+- Tenet-18 recovery controls (revalidation after every fill, unhedged-exposure limits, idempotent recovery, kill switch).
+
+Until that model exists, posting a passive order is not an executable opening arb.
+
+### Hard eligibility gates before risk scoring
+
+Stale and passive-liquidity handling is a **hard eligibility gate before risk scoring**, not a larger risk penalty.
+
+Opening qualification runs in this order:
+
+1. Settlement equivalence, fees, FX, executable taker depth, and freshness/revalidation.
+2. **Hard opening-liquidity gates.** If the opportunity would require posting/resting maker or lay liquidity, or the quote is stale/unrevalidated, it is not executable. Do not compute or display an execution-risk score as though it were a valid arb. Fail closed immediately.
+3. **Soft risk scoring only after the gates pass.** Surviving executable/taker liquidity is then scored with the existing components: spread, size/depth, quote age (within the freshness cap), volatility, extra legs, latency, near-kickoff/event-state, hedge-liquidity, plus fill-confidence/persistence where available.
+4. Fixture-row `Best Arb` and the compact `Risk` column are for that same surviving opportunity only. A mathematically attractive passive/stale candidate may appear in drilldown as observed edge / not executable with the rejection reason. It must not headline and must not carry a qualifying risk score.
+
+Paper OPEN records the exact execution-time risk snapshot used for that decision. Later books must not recompute or overwrite it. An unwind or close assessment is a separate append-only snapshot.
+
 ## Non-negotiables before real treasury execution
 
 1. **No paper-to-live equivalence claim.** Realistic paper simulation may model latency, slippage, depth, stale quotes and partial fills, but it is still a model.
@@ -34,6 +106,7 @@ A stale or previously observed quote is never evidence that the remaining leg ca
 5. **Suspension awareness.** Venue paused/suspended/unavailable states must block fresh execution and influence whether an already-filled leg should be hedged, reduced or exited elsewhere.
 6. **Idempotent recovery.** Retries must never duplicate filled exposure.
 7. **Kill switch.** Real execution must be able to halt immediately when fill behaviour, venue status or reconciliation becomes unreliable.
+8. **Taker vs maker.** Only current opposing taker depth is executable opening liquidity. Passive/maker size is not executable until a dedicated execution model and an actual fill exist.
 
 ## Candidate mitigations
 
@@ -60,6 +133,7 @@ For each qualifying opportunity it should record, without sending orders:
 - detection timestamp;
 - intended leg order and size;
 - quoted executable price/depth;
+- whether each leg is taker (consume now) or would require posting/maker;
 - expected venue latency;
 - whether each leg would still have been executable after representative delays;
 - suspension/reopen events;
@@ -68,7 +142,7 @@ For each qualifying opportunity it should record, without sending orders:
 - maximum temporary unhedged exposure;
 - realised hypothetical edge after observed latency.
 
-The purpose is to estimate actual **dual-fill / full-hedge capture probability** rather than assume it from static books.
+The purpose is to estimate actual **dual-fill / full-hedge capture probability** rather than assume it from static books. Shadow evidence for a passive/maker leg is not taker-fill evidence.
 
 ## Micro-live gate
 
@@ -100,6 +174,8 @@ Future execution decisions should distinguish:
 
 A high-edge opportunity with low capture probability may warrant zero live size.
 
+Fixture-row `Best Arb` is the best **fully executable/qualified** opportunity after depth, risk, fill-confidence, freshness and fee/FX gates, not the largest raw or net mathematical edge. If none qualify, prefer the best near opportunity that still satisfies executable-depth and risk requirements. Otherwise show `No executable arb` rather than a misleading headline edge. All market-level comparisons remain visible in drilldown.
+
 ## Review checks
 
 Before any real-money execution capability is approved, reviewers should verify:
@@ -115,10 +191,27 @@ Before any real-money execution capability is approved, reviewers should verify:
 - [ ] a kill switch exists;
 - [ ] shadow execution evidence exists before significant real treasury is enabled;
 - [ ] micro-live evidence exists before treasury size is materially increased;
-- [ ] full-hedge capture probability is measured empirically rather than assumed.
+- [ ] full-hedge capture probability is measured empirically rather than assumed;
+- [ ] freshness is based on timestamp/revalidation, not on whether the price moved;
+- [ ] a stale or previously observed quote cannot count as executable until revalidated;
+- [ ] executable/taker liquidity means current opposing depth we can consume now at known price/size;
+- [ ] passive/maker liquidity (post and wait) is not treated as guaranteed or executable size;
+- [ ] an arb that depends on posting a passive lay/maker order fails closed until an actual fill, not a small risk penalty;
+- [ ] passive or stale liquidity cannot become fixture-row `Best Arb` or count toward executable depth / solver-qualified size;
+- [ ] Phase-1 opening remains back/buy only; Matchbook lay levels may be observed but do not qualify opening arbs;
+- [ ] any future opening lay/maker path has a separate execution model (fill probability, queue/time-in-market, cancel/reprice, shadow evidence, Tenet-18 recovery) before it can qualify;
+- [ ] a stale/passive high-edge candidate cannot outrank a lower-edge genuinely executable taker opportunity;
+- [ ] hard executability, freshness and passive-liquidity gates run before risk scoring;
+- [ ] a non-executable passive/stale candidate is not shown with a risk score as if it were a valid arb;
+- [ ] OPEN paper trades persist an immutable execution-time risk snapshot (score/band/reasons/threshold, quote age/freshness, size-to-depth, hedge liquidity, spread, volatility, latency, fill confidence, net edge/trigger, timestamp);
+- [ ] unwind/close records a separate append-only snapshot and does not overwrite the entry snapshot.
 
 ## Guiding question
 
 Sports Hedge should be able to answer:
 
 > If the first leg fills and the market changes before the remaining legs complete, exactly how much exposure can we have, for how long, and what deterministic action restores or limits the position?
+
+And for every displayed opening opportunity:
+
+> Is this current opposing depth we can take now, or would we have to post and wait — and if we would have to post, why is this still being treated as executable?

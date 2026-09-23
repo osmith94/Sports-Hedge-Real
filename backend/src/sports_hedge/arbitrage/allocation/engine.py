@@ -198,6 +198,90 @@ def allocate(request: AllocationRequest) -> AllocationResult:
     )
 
 
+def allocate_requested_size(request: AllocationRequest, requested_reporting: Decimal) -> AllocationResult:
+    """Scale the solver vector to an operator-chosen reporting size.
+
+    Ratios never change. Requested size is a hard cap against the allocator
+    maximum; it does not bypass native-pool, depth, or reserve constraints.
+    This does not lock treasury or open a trade.
+    """
+
+    if requested_reporting <= 0:
+        return _rejected(
+            request,
+            AllocationConstraintKind.CANNOT_RESIZE,
+            "requested_size_must_be_positive",
+        )
+    baseline = allocate(request)
+    if not baseline.accepted:
+        return baseline
+    solver_capital = request.committed_capital_at_solver_size
+    if solver_capital <= 0:
+        return _rejected(request, AllocationConstraintKind.SOLVER_CAPITAL, "non_positive_solver_capital")
+    requested_scale = requested_reporting / solver_capital
+    if requested_scale > baseline.scale_maximum:
+        rejected = _rejected(
+            request,
+            baseline.limiting_constraint or AllocationConstraintKind.NATIVE_VENUE_BALANCE,
+            "requested_size_exceeds_validated_maximum",
+            hard_constraints=baseline.hard_constraints,
+        )
+        return rejected.model_copy(
+            update={
+                "maximum_validated_capital": baseline.maximum_validated_capital,
+                "maximum_validated_size": baseline.maximum_validated_size,
+                "scale_maximum": baseline.scale_maximum,
+                "limiting_constraint": baseline.limiting_constraint,
+                "limiting_constraint_detail": baseline.limiting_constraint_detail,
+            }
+        )
+    try:
+        plan = _plan_at_scale(request, requested_scale)
+        _validate_scaled_payoff(request, requested_scale)
+        after = _balances_after(request, requested_scale)
+    except ValueError as exc:
+        return _rejected(
+            request,
+            AllocationConstraintKind.CANNOT_RESIZE,
+            str(exc),
+            hard_constraints=baseline.hard_constraints,
+        )
+    applied = solver_capital * requested_scale
+    profit = request.guaranteed_profit_at_solver_size * requested_scale
+    limiting_leg = _limiting_depth_leg(request.legs)
+    estimate = _advisory_time_to_release(request)
+    return AllocationResult(
+        accepted=True,
+        solver_model=request.solver_model,
+        reporting_currency=request.reporting_currency,
+        maximum_validated_capital=baseline.maximum_validated_capital,
+        recommended_committed_capital=applied,
+        maximum_validated_size=baseline.maximum_validated_size,
+        recommended_size=applied,
+        maximum_limiting_stake=baseline.maximum_limiting_stake,
+        recommended_limiting_stake=limiting_leg.solver_stake * requested_scale,
+        recommended_stakes=plan,
+        capital_required=_capital_required(plan),
+        guaranteed_profit=profit,
+        guaranteed_roi=request.roi,
+        free_balance_after=after,
+        reserve_remaining=after,
+        limiting_constraint=baseline.limiting_constraint,
+        limiting_constraint_detail=baseline.limiting_constraint_detail,
+        hard_constraints=baseline.hard_constraints,
+        reduction_factors=[],
+        expected_lock_duration_hours=estimate.hours if estimate else None,
+        expected_lock_basis=estimate.estimate_basis if estimate else None,
+        estimated_time_to_release=estimate,
+        settled_at=None,
+        fill_confidence=request.fill_confidence,
+        execution_risk_score=request.execution_risk_score,
+        survivability=request.survivability,
+        scale_maximum=baseline.scale_maximum,
+        scale_recommended=requested_scale,
+    )
+
+
 def _constraint_priority(kind: AllocationConstraintKind) -> int:
     order = [
         AllocationConstraintKind.MISSING_BALANCE_DATA,
@@ -209,7 +293,6 @@ def _constraint_priority(kind: AllocationConstraintKind) -> int:
         AllocationConstraintKind.PER_OPPORTUNITY_LIMIT,
         AllocationConstraintKind.FIXTURE_CONCENTRATION,
         AllocationConstraintKind.PORTFOLIO_CAP,
-        AllocationConstraintKind.CONCURRENCY,
         AllocationConstraintKind.EXTERNAL_LEG_CAP,
         AllocationConstraintKind.SOLVER_CAPITAL,
     ]
@@ -376,24 +459,6 @@ def _hard_constraints(request: AllocationRequest) -> list[ConstraintBinding]:
                 detail="total open-paper reporting cap",
             )
         )
-    if policy.max_concurrent_open_opportunities is not None:
-        open_count = len(request.open_positions)
-        if open_count >= policy.max_concurrent_open_opportunities:
-            bindings.append(
-                ConstraintBinding(
-                    kind=AllocationConstraintKind.CONCURRENCY,
-                    scale=Decimal("0"),
-                    detail="maximum concurrent open opportunities",
-                )
-            )
-        else:
-            bindings.append(
-                ConstraintBinding(
-                    kind=AllocationConstraintKind.CONCURRENCY,
-                    scale=Decimal("1"),
-                    detail="concurrent open opportunities within cap",
-                )
-            )
 
     external_need = _native_need_external(request.legs)
     if policy.external_leg_cap_native is not None:

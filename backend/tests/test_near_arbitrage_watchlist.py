@@ -74,6 +74,7 @@ def _observation(
     guaranteed_profit_gbp: Decimal | None = None,
     solver_model: str | None = None,
     implied_probability_sum: Decimal | None | object = _AUTO_IMPLIED,
+    data_kind: str = "live_paper",
 ) -> WatchObservation:
     implied: Decimal | None
     if implied_probability_sum is _AUTO_IMPLIED:
@@ -106,6 +107,7 @@ def _observation(
         guaranteed_profit_gbp=guaranteed_profit_gbp,
         expected_lock_minutes=Decimal("120"),
         kickoff_utc=datetime(2026, 9, 20, 15, 0, tzinfo=UTC),
+        data_kind=data_kind,
     )
 
 
@@ -173,13 +175,18 @@ def test_threshold_crossing_creates_lifecycle_event() -> None:
     assert replay[-1].event_type == LifecycleEventType.CANDIDATE_FIRST_SEEN
 
 
-def test_stale_quote_is_rejected_and_flagged() -> None:
+def test_stale_quote_keeps_economic_status_and_is_not_executable() -> None:
     service = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=1000)
     opportunity = service.observe(_observation(quote_age_ms=1500, edge=EDGE_080))
-    assert opportunity.status == OpportunityStatus.REJECTED
-    assert "stale_quote" in opportunity.rejection_reasons
+    assert opportunity.status == OpportunityStatus.APPROACHING
+    assert opportunity.status != OpportunityStatus.REJECTED
+    assert "stale_quote" not in opportunity.rejection_reasons
+    assert service.top_near(limit=10, as_of=OBSERVED) == []
+    tracked = service.tracked(limit=10, as_of=OBSERVED)
+    assert [item.opportunity_id for item in tracked] == [opportunity.opportunity_id]
+    assert tracked[0].status == OpportunityStatus.APPROACHING
     types = [event.event_type for event in service.activity()]
-    assert LifecycleEventType.REJECTED_STALE_QUOTE in types
+    assert LifecycleEventType.REJECTED_STALE_QUOTE not in types
 
 
 def test_missing_costs_fail_closed() -> None:
@@ -309,15 +316,16 @@ def test_filters_and_paper_fill_lifecycle_stay_paper_only() -> None:
     assert LifecycleEventType.TRIGGER_CROSSED in types
 
 
-def test_unknown_quote_age_fails_closed_and_is_not_near() -> None:
+def test_unknown_quote_age_is_not_near_executable_and_keeps_economic_status() -> None:
     service = WatchlistService(SqliteWatchlistRepository())
     opportunity = service.observe(_observation(quote_age_ms=None, edge=EDGE_080))
-    assert opportunity.status == OpportunityStatus.REJECTED
-    assert "unknown_quote_age" in opportunity.rejection_reasons
-    assert opportunity.classification.value != "near_opportunity"
+    assert opportunity.status == OpportunityStatus.APPROACHING
+    assert opportunity.status != OpportunityStatus.REJECTED
+    assert "unknown_quote_age" not in opportunity.rejection_reasons
+    assert opportunity.classification.value == "near_opportunity"
     assert service.top_near(limit=10, as_of=OBSERVED) == []
-    details = [event.detail for event in service.activity()]
-    assert "unknown_quote_age" in details
+    types = [event.event_type for event in service.activity()]
+    assert LifecycleEventType.REJECTED_STALE_QUOTE not in types
 
 
 def test_missing_depth_is_rejected_not_classified_near() -> None:
@@ -496,8 +504,10 @@ def test_adapter_preserves_unknown_quote_age_instead_of_zero() -> None:
     assert mapped is not None
     assert mapped.quote_age_ms is None
     opportunity = WatchlistService(SqliteWatchlistRepository()).observe(mapped)
+    assert opportunity.quote_age_ms is None
+    assert "unknown_quote_age" not in opportunity.rejection_reasons
     assert opportunity.status == OpportunityStatus.REJECTED
-    assert "unknown_quote_age" in opportunity.rejection_reasons
+    assert "missing_net_edge" in opportunity.rejection_reasons
 
 
 def test_adapter_preserves_quote_age_basis_for_operator_presentation() -> None:

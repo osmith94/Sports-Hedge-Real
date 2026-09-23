@@ -1,0 +1,22 @@
+{
+  "fixture_id": "nfl-kalshi-series-kxnflspread-2026-09-20",
+  "identified_as": "CAPTURED public Kalshi GET /series/KXNFLSPREAD (spread). Not live quotes.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/series/KXNFLSPREAD",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "ticker": "KXNFLSPREAD",
+    "title": "Pro Football Spread",
+    "category": "Sports",
+    "contract_terms_url": "https://assets.kalshi.com/contract_terms/FOOTBALLSPREAD.pdf",
+    "product_metadata": {
+      "scope": "Spread"
+    },
+    "settlement_sources": [
+      {
+        "name": "the Governing League",
+        "url": "https://www.nfl.com/"
+      }
+    ]
+  }
+}

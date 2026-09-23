@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -19,11 +19,14 @@ from sports_hedge.application.fixture_inventory import (
     FX_STATUS_NOT_REQUIRED,
     InventoryComparisonStatus,
     InventoryMarket,
+    VenueMarketFacts,
+    VenueQuoteFact,
     assemble_fixture_inventory,
     solver_eligible_pair,
     _fx_status,
 )
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
+from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.domain.football import (
     CanonicalEvent,
@@ -36,12 +39,15 @@ from sports_hedge.domain.football import (
     SettlementScope,
 )
 from sports_hedge.domain.models import VenueName
+from sports_hedge.fees.cost import CostKnownStatus, FeeBasis, MarketAction, VenueCostSnapshot
+from sports_hedge.fees.resolver import VenueCostResolver
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.normalization.identity import canonical_source_event_id
-from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
+from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
+from registered_kalshi import FakeKalshi
 
 
 KICKOFF = datetime(2026, 9, 12, 18, 45, tzinfo=UTC)
@@ -97,19 +103,25 @@ def _market(
     )
 
 
-def _inventory(market: CanonicalMarket, *, name: str) -> InventoryMarket:
+def _inventory(
+    market: CanonicalMarket,
+    *,
+    name: str,
+    observation: VenueMarketObservation | None = None,
+) -> InventoryMarket:
     return InventoryMarket(
         venue=market.source_venue,
         source_event_id=market.event.source_event_id,
         source_market_id=market.source_market_id,
         raw_name=name,
         canonical=market,
+        observation=observation,
     )
 
 
 def test_inventory_keeps_matched_venue_only_settlement_and_unsupported_rows() -> None:
     match_result = _market(VenueName.MATCHBOOK, family=MarketFamily.MATCH_RESULT, source_id="mb-1x2")
-    pm_match_result = _market(VenueName.POLYMARKET, family=MarketFamily.MATCH_RESULT, source_id="pm-1x2")
+    pm_match_result = _market(VenueName.KALSHI, family=MarketFamily.MATCH_RESULT, source_id="k-1x2")
     totals = _market(
         VenueName.MATCHBOOK,
         family=MarketFamily.TOTAL_GOALS,
@@ -161,15 +173,125 @@ def test_inventory_keeps_matched_venue_only_settlement_and_unsupported_rows() ->
     statuses = {row.display_name: row.comparison_status for row in rows}
     assert InventoryComparisonStatus.MATCHED_EQUIVALENT in statuses.values()
     assert InventoryComparisonStatus.VENUE_ONLY in statuses.values()
-    assert InventoryComparisonStatus.SETTLEMENT_MISMATCH in statuses.values()
     assert InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL in statuses.values()
     assert all(not row.entered_solver for row in rows)
-    ah_row = next(row for row in rows if row.comparison_status is InventoryComparisonStatus.SETTLEMENT_MISMATCH)
-    assert "settlement_mismatch" in ah_row.match_reasons
     matcher = MarketMatcher()
     assert matcher.match(ah_mb, ah_pm).matched is False
-    assert "settlement_mismatch" in matcher.match(ah_mb, ah_pm).reasons
+    assert "not_registered" in matcher.match(ah_mb, ah_pm).reasons
     assert solver_eligible_pair(correct, pm_correct, matcher.match(correct, pm_correct)) is False
+
+
+def test_related_kalshi_binary_does_not_match_1x2_despite_shared_settlement() -> None:
+    matchbook_1x2 = _market(VenueName.MATCHBOOK, family=MarketFamily.MATCH_RESULT, source_id="mb-1x2")
+    kalshi_binary = _market(
+        VenueName.KALSHI,
+        family=MarketFamily.MATCH_RESULT,
+        source_id="kalshi-yes-no",
+        outcomes=[CanonicalOutcome.YES, CanonicalOutcome.NO],
+    )
+    assert matchbook_1x2.settlement.deterministic_key() == kalshi_binary.settlement.deterministic_key()
+    matcher = MarketMatcher()
+    mismatch = matcher.match(matchbook_1x2, kalshi_binary)
+    assert mismatch.matched is False
+    assert "outcome_space_mismatch" in mismatch.reasons
+
+    bogus = PaperScanDecision(
+        market_match=mismatch,
+        solver_model="simple_complete_set",
+        eligible_for_paper_simulation=True,
+    )
+    rows = assemble_fixture_inventory(
+        [_inventory(matchbook_1x2, name="Match Result")],
+        [],
+        kalshi_markets=[_inventory(kalshi_binary, name="Match winner yes/no")],
+        decisions_by_pair={
+            (
+                VenueName.MATCHBOOK.value,
+                "mb-1x2",
+                VenueName.KALSHI.value,
+                "kalshi-yes-no",
+            ): bogus
+        },
+    )
+    row = next(item for item in rows if item.matchbook is not None)
+    assert row.kalshi is not None
+    assert row.kalshi.source_market_id == "kalshi-yes-no"
+    assert row.comparison_status is not InventoryComparisonStatus.MATCHED_EQUIVALENT
+    assert "venue_only" in row.rejection_reasons
+    assert "outcome_space_mismatch" in row.rejection_reasons
+    assert row.reason == "outcome_space_mismatch"
+    assert row.entered_solver is False
+    assert row.solver_is_arbitrage is False
+    assert row.solver_model is None
+
+
+def test_equivalent_kalshi_total_is_matched_without_scan_decision() -> None:
+    matchbook_total = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.TOTAL_GOALS,
+        source_id="mb-tg-25",
+        outcomes=[CanonicalOutcome.OVER, CanonicalOutcome.UNDER],
+        line=Decimal("2.5"),
+    )
+    kalshi_total = _market(
+        VenueName.KALSHI,
+        family=MarketFamily.TOTAL_GOALS,
+        source_id="kalshi-tg-25",
+        outcomes=[CanonicalOutcome.OVER, CanonicalOutcome.UNDER],
+        line=Decimal("2.5"),
+    )
+    rows = assemble_fixture_inventory(
+        [_inventory(matchbook_total, name="Over/Under 2.5 Goals")],
+        [],
+        kalshi_markets=[_inventory(kalshi_total, name="Total Goals 2.5")],
+    )
+    row = next(item for item in rows if item.matchbook is not None)
+    assert row.kalshi is not None
+    assert row.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
+    assert "venue_only" not in row.rejection_reasons
+    assert row.entered_solver is False
+
+
+def test_matchbook_half_line_leftover_does_not_consume_exact_kalshi_total() -> None:
+    """Intersect exact totals before attachment. 0.5 must not steal 2.5."""
+
+    matchbook_half = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.TOTAL_GOALS,
+        source_id="mb-tg-05",
+        outcomes=[CanonicalOutcome.OVER, CanonicalOutcome.UNDER],
+        line=Decimal("0.5"),
+    )
+    matchbook_exact = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.TOTAL_GOALS,
+        source_id="mb-tg-25",
+        outcomes=[CanonicalOutcome.OVER, CanonicalOutcome.UNDER],
+        line=Decimal("2.5"),
+    )
+    kalshi_exact = _market(
+        VenueName.KALSHI,
+        family=MarketFamily.TOTAL_GOALS,
+        source_id="kalshi-tg-25",
+        outcomes=[CanonicalOutcome.OVER, CanonicalOutcome.UNDER],
+        line=Decimal("2.5"),
+    )
+    rows = assemble_fixture_inventory(
+        [
+            _inventory(matchbook_half, name="Over/Under 0.5 Goals"),
+            _inventory(matchbook_exact, name="Over/Under 2.5 Goals"),
+        ],
+        [],
+        kalshi_markets=[_inventory(kalshi_exact, name="Total Goals 2.5")],
+    )
+    by_line = {row.line: row for row in rows if row.family == MarketFamily.TOTAL_GOALS.value}
+    leftover = by_line[Decimal("0.5")]
+    matched = by_line[Decimal("2.5")]
+    assert leftover.kalshi is None
+    assert leftover.comparison_status is InventoryComparisonStatus.VENUE_ONLY
+    assert matched.kalshi is not None
+    assert matched.kalshi.source_market_id == "kalshi-tg-25"
+    assert matched.comparison_status is InventoryComparisonStatus.MATCHED_EQUIVALENT
 
 
 def test_unnormalized_market_is_unsupported_family_not_hidden() -> None:
@@ -279,6 +401,7 @@ class RichPolymarket:
                 "outcomes": '["Tottenham", "Draw", "Everton"]',
                 "clobTokenIds": '["h", "d", "a"]',
                 "description": "Resolves based on 90 minutes of regulation time.",
+                "feesEnabled": False,
             },
             {
                 "id": "pm-cs",
@@ -287,6 +410,7 @@ class RichPolymarket:
                 "outcomes": '["1-0", "2-0"]',
                 "clobTokenIds": '["cs1", "cs2"]',
                 "description": "Resolves based on 90 minutes of regulation time.",
+                "feesEnabled": False,
             },
             {
                 "id": "pm-ah",
@@ -296,6 +420,7 @@ class RichPolymarket:
                 "outcomes": '["Tottenham", "Everton"]',
                 "clobTokenIds": '["ah-h", "ah-a"]',
                 "description": "Resolves including extra time.",
+                "feesEnabled": False,
             },
         ]
 
@@ -324,14 +449,19 @@ async def test_collector_inventories_all_families_and_keeps_unsupported_out_of_s
     intelligence = MarketIntelligenceService(repository)
     matchbook = RichMatchbook()
     polymarket = RichPolymarket()
+    kalshi = FakeKalshi(
+        [("Premier League", "Tottenham", "Everton", KICKOFF)],
+        families=("GAME", "TOTAL"),
+    )
     collector = ReadOnlyCrossVenueCollector(
         matchbook=matchbook,
         polymarket=polymarket,
+        kalshi=kalshi,
         paper_scan=PaperScanService(intelligence),
     )
     try:
         report = await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=matchbook_kalshi_costs() + matchbook_polymarket_costs(),
             fx_snapshots=[
                 FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75")),
                 FxRateSnapshot(currency="GBP", gbp_per_unit=Decimal("1")),
@@ -352,9 +482,10 @@ async def test_collector_inventories_all_families_and_keeps_unsupported_out_of_s
         )
         markets = report.fixture_markets[fixture.canonical_event_id]
         statuses = {row.comparison_status for row in markets}
-        assert InventoryComparisonStatus.MATCHED_EQUIVALENT in statuses
-        assert InventoryComparisonStatus.VENUE_ONLY in statuses
-        assert InventoryComparisonStatus.SETTLEMENT_MISMATCH in statuses
+        assert statuses & {
+            InventoryComparisonStatus.MATCHED_EQUIVALENT,
+            InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT,
+        }
         assert InventoryComparisonStatus.UNSUPPORTED_OUTCOME_MODEL in statuses
         assert fixture.discovered_market_count == len(markets)
         assert fixture.matched_equivalent_count >= 1
@@ -379,6 +510,10 @@ async def test_missing_costs_and_fx_fail_closed_on_inventory() -> None:
     collector = ReadOnlyCrossVenueCollector(
         matchbook=RichMatchbook(),
         polymarket=RichPolymarket(),
+        kalshi=FakeKalshi(
+            [("Premier League", "Tottenham", "Everton", KICKOFF)],
+            families=("GAME", "TOTAL"),
+        ),
         paper_scan=PaperScanService(intelligence),
     )
     try:
@@ -388,27 +523,16 @@ async def test_missing_costs_and_fx_fail_closed_on_inventory() -> None:
         equivalent = [
             row
             for row in markets
-            if row.comparison_status
-            in {
-                InventoryComparisonStatus.MATCHED_EQUIVALENT,
-                InventoryComparisonStatus.MISSING_COSTS,
-                InventoryComparisonStatus.MISSING_FX,
-            }
-            and row.entered_solver
+            if row.entered_solver
         ]
         assert equivalent
-        assert any(
-            row.comparison_status
-            in {InventoryComparisonStatus.MISSING_COSTS, InventoryComparisonStatus.MISSING_FX}
-            for row in equivalent
-        )
         assert all(not row.solver_is_arbitrage for row in equivalent)
         assert any(row.matchbook and row.matchbook.fee_status == "missing" for row in markets)
         assert any(
             row.matchbook and row.matchbook.fx_status == FX_STATUS_NOT_REQUIRED for row in markets
         )
         assert any(
-            row.polymarket and row.polymarket.fx_status == FX_STATUS_MISSING for row in markets
+            row.kalshi and row.kalshi.fx_status == FX_STATUS_MISSING for row in markets
         )
     finally:
         repository.close()
@@ -464,7 +588,7 @@ def test_operations_fixture_route_uses_canonical_event_id() -> None:
         home_team="Tottenham",
         away_team="Everton",
         competition="Premier League",
-        kickoff_utc=KICKOFF,
+        kickoff_utc=KICKOFF + timedelta(days=8),
         last_seen_at=KICKOFF,
         discovered_market_count=2,
         matched_equivalent_count=1,
@@ -503,6 +627,10 @@ def test_fixture_ui_routes_by_canonical_id_and_renders_inventory_states() -> Non
     assert "canonical_event_id" in discovered
     assert "/operations/fixtures/" in api
     assert "getFixtureDetail" in page
+    display = (FRONTEND / "lib" / "fixture-inventory-display.ts").read_text(encoding="utf-8")
+    operator = (FRONTEND / "lib" / "fixture-inventory-operator.ts").read_text(encoding="utf-8")
+    preview = (FRONTEND / "components" / "paper-deployment-preview.tsx").read_text(encoding="utf-8")
+    combined = workspace + display + operator + preview
     for token in (
         "matched_equivalent",
         "venue_only",
@@ -510,13 +638,138 @@ def test_fixture_ui_routes_by_canonical_id_and_renders_inventory_states() -> Non
         "unsupported_outcome_model",
         "PAPER MODE",
         "not in solver",
+        "Not comparable — incomplete outcome set",
+        "Paper eligible",
+        "Partially comparable",
+        "Review paper deployment",
+        "Not eligible for deployment",
+        "Advanced · provenance",
+        "paper-deployment",
+        "Market Comparison",
+        "Not comparable with",
+        "Fee ${",
+        "Review paper deployment →",
     ):
-        assert token in workspace or token in (FRONTEND / "lib" / "fixture-inventory-display.ts").read_text(
-            encoding="utf-8"
-        )
+        assert token in combined
+    assert "Raw name" in display
+    assert "Raw type" in display
+    assert "Raw runners" in display
+    assert "comparisonLabel(row.comparison_status)" not in workspace
+    assert "simulatePaperFill" not in workspace
+    assert "Confirm paper OPEN" in preview
+    assert " / ${quote.size_at_touch}" not in display
+    assert "touch ${facts.usable_depth_at_touch}" not in display
     assert "place_order" not in (FRONTEND / "app" / "arbitrage" / "fixtures" / "[eventId]" / "page.tsx").read_text(
         encoding="utf-8"
     )
+
+
+def test_inventory_resolves_seeded_matchbook_football_fee_without_explicit_snapshots() -> None:
+    market = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.BOTH_TEAMS_TO_SCORE,
+        source_id="mb-btts",
+        outcomes=[CanonicalOutcome.YES, CanonicalOutcome.NO],
+    )
+    rows = assemble_fixture_inventory(
+        [_inventory(market, name="Both Teams To Score")],
+        [],
+        cost_resolver=VenueCostResolver(),
+    )
+    assert len(rows) == 1
+    assert rows[0].matchbook is not None
+    assert rows[0].matchbook.fee_status == "known"
+    assert rows[0].matchbook.fee_source == "venue_cost_registry:matchbook_commission_schedule"
+    assert rows[0].matchbook.fee_label == "2.00% net-profit commission"
+    assert rows[0].matchbook.fee_basis == "profit_commission"
+
+
+def test_inventory_without_resolver_or_snapshots_fails_closed_on_fees() -> None:
+    market = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.BOTH_TEAMS_TO_SCORE,
+        source_id="mb-btts",
+        outcomes=[CanonicalOutcome.YES, CanonicalOutcome.NO],
+    )
+    rows = assemble_fixture_inventory([_inventory(market, name="Both Teams To Score")], [])
+    assert rows[0].matchbook is not None
+    assert rows[0].matchbook.fee_status == "missing"
+
+
+def test_inventory_explicit_unknown_fee_is_not_replaced_by_registry() -> None:
+    market = _market(
+        VenueName.MATCHBOOK,
+        family=MarketFamily.BOTH_TEAMS_TO_SCORE,
+        source_id="mb-btts",
+        outcomes=[CanonicalOutcome.YES, CanonicalOutcome.NO],
+    )
+    unknown = VenueCostSnapshot(
+        venue=VenueName.MATCHBOOK,
+        action=MarketAction.BACK,
+        fee_basis=FeeBasis.UNKNOWN,
+        known_status=CostKnownStatus.UNKNOWN,
+        captured_at=datetime.now(UTC),
+        source="test-unknown-fee",
+        currency="GBP",
+    )
+    rows = assemble_fixture_inventory(
+        [_inventory(market, name="Both Teams To Score")],
+        [],
+        venue_costs=[unknown],
+        cost_resolver=VenueCostResolver(),
+    )
+    assert rows[0].matchbook is not None
+    assert rows[0].matchbook.fee_status == "unknown"
+    assert rows[0].matchbook.fee_source == "test-unknown-fee"
+
+
+def test_inventory_quote_json_keeps_full_decimal_precision() -> None:
+    facts = VenueMarketFacts(
+        venue=VenueName.POLYMARKET,
+        source_event_id="pm-event",
+        source_market_id="pm-yes",
+        best_backs=[
+            VenueQuoteFact(
+                outcome="yes",
+                decimal_odds=Decimal("2.272727272727272727"),
+                size_at_touch=Decimal("4317.04002"),
+            )
+        ],
+        usable_depth_at_touch=Decimal("707.27195"),
+        native_currency="USD",
+        fee_status="known",
+    )
+    dumped = facts.model_dump(mode="json")
+    assert dumped["best_backs"][0]["decimal_odds"] == "2.272727272727272727"
+    assert dumped["best_backs"][0]["size_at_touch"] == "4317.04002"
+    assert dumped["usable_depth_at_touch"] == "707.27195"
+
+
+@pytest.mark.asyncio
+async def test_collector_inventory_uses_scanner_cost_resolver_for_known_matchbook_fee() -> None:
+    repository = SqliteMarketIntelligenceRepository()
+    intelligence = MarketIntelligenceService(repository)
+    collector = ReadOnlyCrossVenueCollector(
+        matchbook=RichMatchbook(),
+        polymarket=RichPolymarket(),
+        paper_scan=PaperScanService(intelligence, cost_resolver=VenueCostResolver()),
+    )
+    try:
+        report = await collector.collect_and_scan(maximum_execution_risk=100)
+        markets = report.fixture_markets[report.discovered_fixtures[0].canonical_event_id]
+        football = [
+            row
+            for row in markets
+            if row.matchbook is not None and row.family not in {None, "unknown"}
+        ]
+        assert football
+        assert all(row.matchbook and row.matchbook.fee_status == "known" for row in football)
+        assert any(
+            row.matchbook and row.matchbook.fee_source == "venue_cost_registry:matchbook_commission_schedule"
+            for row in football
+        )
+    finally:
+        repository.close()
 
 
 def test_phase1_operations_router_has_no_execution_surface() -> None:

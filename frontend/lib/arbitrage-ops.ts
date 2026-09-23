@@ -38,6 +38,7 @@ export type ScannerAssumptions = {
 export type ArbitrageOpportunity = {
   id: string;
   provenance: DataProvenance;
+  canonicalEventId?: string | null;
   eventLabel: string;
   competition?: string | null;
   marketLabel: string;
@@ -64,8 +65,10 @@ export type ArbitrageOpportunity = {
   fixtureStatus?: string | null;
   inRunning?: boolean | null;
   liveScoreLabel?: string | null;
-  strikeNarrative?: string | null;
-  observationCount?: number | null;
+    strikeNarrative?: string | null;
+    observationCount?: number | null;
+    betActionable?: boolean;
+    betBlockedReason?: string | null;
 };
 
 export type ActivityEvent = {
@@ -74,7 +77,16 @@ export type ActivityEvent = {
   at: string;
   kind: string;
   title: string;
+  subject?: string | null;
   detail: string;
+  opportunityId?: string;
+  eventType?: string;
+  missedTriggerEventId?: string | null;
+  fixtureLabel?: string | null;
+  marketFamily?: string | null;
+  canonicalEventId?: string | null;
+  canonicalMarketId?: string | null;
+  attemptId?: string | null;
 };
 
 export type CapitalSnapshot = {
@@ -326,8 +338,8 @@ export function buildCapitalSnapshot(
     mtdPnlGbp: null,
     allTimePnlGbp: null,
     note: summary
-      ? `${summary.eligible_count} paper-eligible scan${summary.eligible_count === 1 ? "" : "s"} in the current window. Realised P&L is not persisted.`
-      : "Realised P&L is not persisted on the paper scan read model.",
+      ? `${summary.eligible_count} paper-eligible scan${summary.eligible_count === 1 ? "" : "s"} in the current window.`
+      : "Paper P&L comes from closed trades when recorded.",
   };
   return { live, fixture: DEMO_CAPITAL };
 }

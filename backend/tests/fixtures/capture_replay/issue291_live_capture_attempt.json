@@ -1,0 +1,592 @@
+{
+  "captured_at": "2026-09-18T10:45:02.630493Z",
+  "data_class": "live_read_only_capture",
+  "identified_as": "LIVE read-only capture attempt for Issue #291. Public identifiers only. Not a paper fill. Not an executable opportunity. A missing Matchbook side is not replaced with synthetic events.",
+  "paper_mode": "paper",
+  "execution_enabled": false,
+  "polymarket_included": false,
+  "football_only": true,
+  "existing_same_event_capture_found": false,
+  "matchbook": {
+    "venue": "matchbook",
+    "credentials_present": false,
+    "reachable": null,
+    "events_listed": 0,
+    "unavailable_reason": "MATCHBOOK_USERNAME and MATCHBOOK_PASSWORD are not set in this agent environment. MatchbookClient.list_events requires a session and was not called. The Matchbook side was not fabricated.",
+    "provenance": "unavailable",
+    "data_class": "unavailable",
+    "public_event_summaries": []
+  },
+  "kalshi": {
+    "venue": "kalshi",
+    "credentials_present": false,
+    "reachable": true,
+    "events_listed": 39,
+    "unavailable_reason": null,
+    "provenance": "live_read_only_capture",
+    "data_class": "live_read_only_capture",
+    "public_event_summaries": [
+      {
+        "event_ticker": "KXEPLGAME-26SEP18BRECFC",
+        "series_ticker": "KXEPLGAME",
+        "title": "Brentford vs Chelsea",
+        "competition": "EPL",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXEPLGAME-26SEP18BRECFC-BRE",
+          "KXEPLGAME-26SEP18BRECFC-CFC",
+          "KXEPLGAME-26SEP18BRECFC-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXEPLGAME-26SEP19TOTAVL",
+        "series_ticker": "KXEPLGAME",
+        "title": "Tottenham vs Aston Villa",
+        "competition": "EPL",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXEPLGAME-26SEP19TOTAVL-TOT",
+          "KXEPLGAME-26SEP19TOTAVL-AVL",
+          "KXEPLGAME-26SEP19TOTAVL-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXEPLGAME-26SEP19BRIARS",
+        "series_ticker": "KXEPLGAME",
+        "title": "Brighton vs Arsenal",
+        "competition": "EPL",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXEPLGAME-26SEP19BRIARS-BRI",
+          "KXEPLGAME-26SEP19BRIARS-ARS",
+          "KXEPLGAME-26SEP19BRIARS-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXEPLGAME-26SEP19EVEIPS",
+        "series_ticker": "KXEPLGAME",
+        "title": "Everton vs Ipswich Town",
+        "competition": "EPL",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXEPLGAME-26SEP19EVEIPS-EVE",
+          "KXEPLGAME-26SEP19EVEIPS-IPS",
+          "KXEPLGAME-26SEP19EVEIPS-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXEPLGAME-26SEP19NEWHUL",
+        "series_ticker": "KXEPLGAME",
+        "title": "Newcastle vs Hull City",
+        "competition": "EPL",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXEPLGAME-26SEP19NEWHUL-NEW",
+          "KXEPLGAME-26SEP19NEWHUL-HUL",
+          "KXEPLGAME-26SEP19NEWHUL-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXEPLGAME-26SEP19NFOCOV",
+        "series_ticker": "KXEPLGAME",
+        "title": "Nottingham Forest vs Coventry",
+        "competition": "EPL",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXEPLGAME-26SEP19NFOCOV-NFO",
+          "KXEPLGAME-26SEP19NFOCOV-COV",
+          "KXEPLGAME-26SEP19NFOCOV-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXEPLGAME-26SEP20BOULFC",
+        "series_ticker": "KXEPLGAME",
+        "title": "Bournemouth vs Liverpool",
+        "competition": "EPL",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXEPLGAME-26SEP20BOULFC-BOU",
+          "KXEPLGAME-26SEP20BOULFC-LFC",
+          "KXEPLGAME-26SEP20BOULFC-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXEPLGAME-26SEP20LEECRY",
+        "series_ticker": "KXEPLGAME",
+        "title": "Leeds United vs Crystal Palace",
+        "competition": "EPL",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXEPLGAME-26SEP20LEECRY-LEE",
+          "KXEPLGAME-26SEP20LEECRY-CRY",
+          "KXEPLGAME-26SEP20LEECRY-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXEPLGAME-26SEP20MCISUN",
+        "series_ticker": "KXEPLGAME",
+        "title": "Manchester City vs Sunderland",
+        "competition": "EPL",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXEPLGAME-26SEP20MCISUN-MCI",
+          "KXEPLGAME-26SEP20MCISUN-SUN",
+          "KXEPLGAME-26SEP20MCISUN-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXEPLGAME-26SEP20FULMUN",
+        "series_ticker": "KXEPLGAME",
+        "title": "Fulham vs Manchester United",
+        "competition": "EPL",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXEPLGAME-26SEP20FULMUN-FUL",
+          "KXEPLGAME-26SEP20FULMUN-MUN",
+          "KXEPLGAME-26SEP20FULMUN-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXBUNDESLIGAGAME-26SEP18BMUUNI",
+        "series_ticker": "KXBUNDESLIGAGAME",
+        "title": "Bayern Munich vs Union Berlin",
+        "competition": "Bundesliga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXBUNDESLIGAGAME-26SEP18BMUUNI-BMU",
+          "KXBUNDESLIGAGAME-26SEP18BMUUNI-UNI",
+          "KXBUNDESLIGAGAME-26SEP18BMUUNI-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXBUNDESLIGAGAME-26SEP19BMGM05",
+        "series_ticker": "KXBUNDESLIGAGAME",
+        "title": "M\u00b4gladbach vs Mainz",
+        "competition": "Bundesliga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXBUNDESLIGAGAME-26SEP19BMGM05-BMG",
+          "KXBUNDESLIGAGAME-26SEP19BMGM05-M05",
+          "KXBUNDESLIGAGAME-26SEP19BMGM05-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXBUNDESLIGAGAME-26SEP19HSVKOE",
+        "series_ticker": "KXBUNDESLIGAGAME",
+        "title": "Hamburg vs FC K\u00f6ln",
+        "competition": "Bundesliga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXBUNDESLIGAGAME-26SEP19HSVKOE-HSV",
+          "KXBUNDESLIGAGAME-26SEP19HSVKOE-KOE",
+          "KXBUNDESLIGAGAME-26SEP19HSVKOE-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXBUNDESLIGAGAME-26SEP19SGESCF",
+        "series_ticker": "KXBUNDESLIGAGAME",
+        "title": "Frankfurt vs Freiburg",
+        "competition": "Bundesliga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXBUNDESLIGAGAME-26SEP19SGESCF-SGE",
+          "KXBUNDESLIGAGAME-26SEP19SGESCF-SCF",
+          "KXBUNDESLIGAGAME-26SEP19SGESCF-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXBUNDESLIGAGAME-26SEP19SVWFCA",
+        "series_ticker": "KXBUNDESLIGAGAME",
+        "title": "Bremen vs Augsburg",
+        "competition": "Bundesliga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXBUNDESLIGAGAME-26SEP19SVWFCA-SVW",
+          "KXBUNDESLIGAGAME-26SEP19SVWFCA-FCA",
+          "KXBUNDESLIGAGAME-26SEP19SVWFCA-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXBUNDESLIGAGAME-26SEP19VFBBVB",
+        "series_ticker": "KXBUNDESLIGAGAME",
+        "title": "Stuttgart vs Dortmund",
+        "competition": "Bundesliga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXBUNDESLIGAGAME-26SEP19VFBBVB-VFB",
+          "KXBUNDESLIGAGAME-26SEP19VFBBVB-BVB",
+          "KXBUNDESLIGAGAME-26SEP19VFBBVB-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXBUNDESLIGAGAME-26SEP20LEVRBL",
+        "series_ticker": "KXBUNDESLIGAGAME",
+        "title": "Leverkusen vs Leipzig",
+        "competition": "Bundesliga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXBUNDESLIGAGAME-26SEP20LEVRBL-LEV",
+          "KXBUNDESLIGAGAME-26SEP20LEVRBL-RBL",
+          "KXBUNDESLIGAGAME-26SEP20LEVRBL-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXBUNDESLIGAGAME-26SEP20SCHSVE",
+        "series_ticker": "KXBUNDESLIGAGAME",
+        "title": "Schalke vs Elversberg",
+        "competition": "Bundesliga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXBUNDESLIGAGAME-26SEP20SCHSVE-SCH",
+          "KXBUNDESLIGAGAME-26SEP20SCHSVE-SVE",
+          "KXBUNDESLIGAGAME-26SEP20SCHSVE-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXBUNDESLIGAGAME-26SEP20PADTSG",
+        "series_ticker": "KXBUNDESLIGAGAME",
+        "title": "Paderborn vs Hoffenheim",
+        "competition": "Bundesliga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXBUNDESLIGAGAME-26SEP20PADTSG-PAD",
+          "KXBUNDESLIGAGAME-26SEP20PADTSG-TSG",
+          "KXBUNDESLIGAGAME-26SEP20PADTSG-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXSERIEAGAME-26SEP18MONSAS",
+        "series_ticker": "KXSERIEAGAME",
+        "title": "Monza vs Sassuolo",
+        "competition": "Serie A",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXSERIEAGAME-26SEP18MONSAS-MON",
+          "KXSERIEAGAME-26SEP18MONSAS-SAS",
+          "KXSERIEAGAME-26SEP18MONSAS-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXSERIEAGAME-26SEP19BFCTOR",
+        "series_ticker": "KXSERIEAGAME",
+        "title": "Bologna vs Torino",
+        "competition": "Serie A",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXSERIEAGAME-26SEP19BFCTOR-BFC",
+          "KXSERIEAGAME-26SEP19BFCTOR-TOR",
+          "KXSERIEAGAME-26SEP19BFCTOR-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXSERIEAGAME-26SEP19UDICAG",
+        "series_ticker": "KXSERIEAGAME",
+        "title": "Udinese vs Cagliari",
+        "competition": "Serie A",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXSERIEAGAME-26SEP19UDICAG-UDI",
+          "KXSERIEAGAME-26SEP19UDICAG-CAG",
+          "KXSERIEAGAME-26SEP19UDICAG-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXSERIEAGAME-26SEP19ROMINT",
+        "series_ticker": "KXSERIEAGAME",
+        "title": "Roma vs Inter",
+        "competition": "Serie A",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXSERIEAGAME-26SEP19ROMINT-ROM",
+          "KXSERIEAGAME-26SEP19ROMINT-INT",
+          "KXSERIEAGAME-26SEP19ROMINT-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXSERIEAGAME-26SEP19VENLAZ",
+        "series_ticker": "KXSERIEAGAME",
+        "title": "Venezia vs Lazio",
+        "competition": "Serie A",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXSERIEAGAME-26SEP19VENLAZ-VEN",
+          "KXSERIEAGAME-26SEP19VENLAZ-LAZ",
+          "KXSERIEAGAME-26SEP19VENLAZ-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXSERIEAGAME-26SEP20FIONAP",
+        "series_ticker": "KXSERIEAGAME",
+        "title": "Fiorentina vs Napoli",
+        "competition": "Serie A",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXSERIEAGAME-26SEP20FIONAP-FIO",
+          "KXSERIEAGAME-26SEP20FIONAP-NAP",
+          "KXSERIEAGAME-26SEP20FIONAP-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXSERIEAGAME-26SEP20FROCOM",
+        "series_ticker": "KXSERIEAGAME",
+        "title": "Frosinone vs Como",
+        "competition": "Serie A",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXSERIEAGAME-26SEP20FROCOM-FRO",
+          "KXSERIEAGAME-26SEP20FROCOM-COM",
+          "KXSERIEAGAME-26SEP20FROCOM-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXSERIEAGAME-26SEP20PARGEN",
+        "series_ticker": "KXSERIEAGAME",
+        "title": "Parma Calcio vs Genoa",
+        "competition": "Serie A",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXSERIEAGAME-26SEP20PARGEN-PAR",
+          "KXSERIEAGAME-26SEP20PARGEN-GEN",
+          "KXSERIEAGAME-26SEP20PARGEN-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXSERIEAGAME-26SEP20JUVATA",
+        "series_ticker": "KXSERIEAGAME",
+        "title": "Juventus vs Atalanta",
+        "competition": "Serie A",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXSERIEAGAME-26SEP20JUVATA-JUV",
+          "KXSERIEAGAME-26SEP20JUVATA-ATA",
+          "KXSERIEAGAME-26SEP20JUVATA-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXSERIEAGAME-26SEP20ACMLEC",
+        "series_ticker": "KXSERIEAGAME",
+        "title": "Milan vs Lecce",
+        "competition": "Serie A",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXSERIEAGAME-26SEP20ACMLEC-ACM",
+          "KXSERIEAGAME-26SEP20ACMLEC-LEC",
+          "KXSERIEAGAME-26SEP20ACMLEC-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXLALIGAGAME-26SEP18ESPELC",
+        "series_ticker": "KXLALIGAGAME",
+        "title": "Espanyol vs Elche",
+        "competition": "La Liga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXLALIGAGAME-26SEP18ESPELC-ESP",
+          "KXLALIGAGAME-26SEP18ESPELC-ELC",
+          "KXLALIGAGAME-26SEP18ESPELC-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXLALIGAGAME-26SEP19OSARVC",
+        "series_ticker": "KXLALIGAGAME",
+        "title": "Osasuna vs Vallecano",
+        "competition": "La Liga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXLALIGAGAME-26SEP19OSARVC-OSA",
+          "KXLALIGAGAME-26SEP19OSARVC-RVC",
+          "KXLALIGAGAME-26SEP19OSARVC-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXLALIGAGAME-26SEP19ATHALA",
+        "series_ticker": "KXLALIGAGAME",
+        "title": "Bilbao vs Alaves",
+        "competition": "La Liga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXLALIGAGAME-26SEP19ATHALA-ATH",
+          "KXLALIGAGAME-26SEP19ATHALA-ALA",
+          "KXLALIGAGAME-26SEP19ATHALA-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXLALIGAGAME-26SEP19RCCSAN",
+        "series_ticker": "KXLALIGAGAME",
+        "title": "Celta Vigo vs Santander",
+        "competition": "La Liga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXLALIGAGAME-26SEP19RCCSAN-RCC",
+          "KXLALIGAGAME-26SEP19RCCSAN-SAN",
+          "KXLALIGAGAME-26SEP19RCCSAN-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXLALIGAGAME-26SEP19SEVBAR",
+        "series_ticker": "KXLALIGAGAME",
+        "title": "Sevilla vs Barcelona",
+        "competition": "La Liga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXLALIGAGAME-26SEP19SEVBAR-SEV",
+          "KXLALIGAGAME-26SEP19SEVBAR-BAR",
+          "KXLALIGAGAME-26SEP19SEVBAR-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXLALIGAGAME-26SEP20GETMCF",
+        "series_ticker": "KXLALIGAGAME",
+        "title": "Getafe vs Malaga",
+        "competition": "La Liga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXLALIGAGAME-26SEP20GETMCF-GET",
+          "KXLALIGAGAME-26SEP20GETMCF-MCF",
+          "KXLALIGAGAME-26SEP20GETMCF-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXLALIGAGAME-26SEP20ATMRMA",
+        "series_ticker": "KXLALIGAGAME",
+        "title": "Atletico vs Real Madrid",
+        "competition": "La Liga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXLALIGAGAME-26SEP20ATMRMA-ATM",
+          "KXLALIGAGAME-26SEP20ATMRMA-RMA",
+          "KXLALIGAGAME-26SEP20ATMRMA-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXLALIGAGAME-26SEP20DEPRBB",
+        "series_ticker": "KXLALIGAGAME",
+        "title": "Deportivo De La Coruna vs Real Betis",
+        "competition": "La Liga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXLALIGAGAME-26SEP20DEPRBB-DEP",
+          "KXLALIGAGAME-26SEP20DEPRBB-RBB",
+          "KXLALIGAGAME-26SEP20DEPRBB-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXLALIGAGAME-26SEP20VILLEV",
+        "series_ticker": "KXLALIGAGAME",
+        "title": "Villarreal vs Levante",
+        "competition": "La Liga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXLALIGAGAME-26SEP20VILLEV-VIL",
+          "KXLALIGAGAME-26SEP20VILLEV-LEV",
+          "KXLALIGAGAME-26SEP20VILLEV-TIE"
+        ]
+      },
+      {
+        "event_ticker": "KXLALIGAGAME-26SEP20VCFRSO",
+        "series_ticker": "KXLALIGAGAME",
+        "title": "Valencia vs Real Sociedad",
+        "competition": "La Liga",
+        "market_count": 3,
+        "has_90_minute_clause": true,
+        "has_fair_price_clause": true,
+        "tickers": [
+          "KXLALIGAGAME-26SEP20VCFRSO-VCF",
+          "KXLALIGAGAME-26SEP20VCFRSO-RSO",
+          "KXLALIGAGAME-26SEP20VCFRSO-TIE"
+        ]
+      }
+    ]
+  },
+  "same_event_overlap_found": false,
+  "overlap_fixture": null,
+  "overlap_competition": null,
+  "approved_family_on_both": null,
+  "matched_equivalent": null,
+  "comparison_economics_computed": null,
+  "arb": null,
+  "block_reason": "MATCHBOOK_USERNAME and MATCHBOOK_PASSWORD are not set in this agent environment. MatchbookClient.list_events requires a session and was not called. The Matchbook side was not fabricated.",
+  "notes": [
+    "Phase A: no genuine same-event Matchbook+Kalshi capture exists in repo fixtures.",
+    "Existing Kalshi Bayern/Union Berlin and Matchbook Chelsea/Hull are different events.",
+    "Polymarket was not queried.",
+    "No venue write/order methods were invoked.",
+    "Matchbook credentials are absent in this environment; the Matchbook side was not fabricated."
+  ]
+}

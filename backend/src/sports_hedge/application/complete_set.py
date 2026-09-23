@@ -11,6 +11,7 @@ from sports_hedge.domain.football import (
     line_push_possible,
 )
 from sports_hedge.matching.markets import MarketMatchResult
+from sports_hedge.matching.paper_assumed import paper_assumed_solver_model
 
 # Step 7 allowlist: conventional families whose listed outcomes are mutually
 # exclusive AND exhaustive for the existing complete-set solver (no unmodelled
@@ -24,6 +25,9 @@ STEP7_COMPLETE_SET_FAMILIES: frozenset[MarketFamily] = frozenset(
         MarketFamily.MATCH_RESULT,
         MarketFamily.BOTH_TEAMS_TO_SCORE,
         MarketFamily.TOTAL_GOALS,
+        MarketFamily.GAME_WINNER,
+        MarketFamily.POINT_SPREAD,
+        MarketFamily.TOTAL_POINTS,
     }
 )
 
@@ -53,10 +57,13 @@ COMPLETE_OUTCOME_SPACE: dict[MarketFamily, frozenset[CanonicalOutcome]] = {
     MarketFamily.BOTH_TEAMS_TO_SCORE: frozenset({CanonicalOutcome.YES, CanonicalOutcome.NO}),
     MarketFamily.TOTAL_GOALS: frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER}),
     MarketFamily.ASIAN_HANDICAP: frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY}),
+    MarketFamily.GAME_WINNER: frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY}),
+    MarketFamily.POINT_SPREAD: frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY}),
+    MarketFamily.TOTAL_POINTS: frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER}),
 }
 
 LINE_FAMILIES: frozenset[MarketFamily] = frozenset(
-    {MarketFamily.TOTAL_GOALS, MarketFamily.ASIAN_HANDICAP}
+    {MarketFamily.TOTAL_GOALS, MarketFamily.ASIAN_HANDICAP, MarketFamily.POINT_SPREAD, MarketFamily.TOTAL_POINTS}
 )
 
 SOLVER_INELIGIBLE_REASON = "unsupported_outcome_model"
@@ -207,15 +214,36 @@ def generalized_payoff_eligible_pair(left: CanonicalMarket, right: CanonicalMark
 def solver_model_for_pair(left: CanonicalMarket, right: CanonicalMarket) -> str | None:
     if solver_eligible_market(left) and solver_eligible_market(right):
         return SOLVER_MODEL_SIMPLE
+    paper_model = paper_assumed_solver_model(left, right)
+    if paper_model is not None:
+        return paper_model
     if generalized_payoff_eligible_pair(left, right):
         return SOLVER_MODEL_GENERALIZED
+    return None
+
+
+def generalized_state_model_for_pair(
+    left: CanonicalMarket, right: CanonicalMarket
+) -> GeneralizedStateModel | None:
+    """Pair-level generalized model. Paper-assumed FTTS is Matchbook↔Kalshi only."""
+
+    model = generalized_state_model(left)
+    if model is not None and model == generalized_state_model(right):
+        return model
+    if (
+        paper_assumed_solver_model(left, right) == SOLVER_MODEL_GENERALIZED
+        and left.family is MarketFamily.FIRST_TEAM_TO_SCORE
+    ):
+        return GeneralizedStateModel.FIRST_TEAM_TO_SCORE
     return None
 
 
 def scan_eligible_pair(left: CanonicalMarket, right: CanonicalMarket, match: MarketMatchResult) -> bool:
     if not match.matched:
         return False
-    return solver_model_for_pair(left, right) is not None
+    from sports_hedge.catalogue.admission import catalogue_allows_solver
+
+    return catalogue_allows_solver(left, right)
 
 
 def scan_ineligibility_reason(market: CanonicalMarket) -> str:

@@ -38,7 +38,7 @@ from sports_hedge.paper.unwind.models import (
     VenueCloseMechanics,
     venue_currency_key,
 )
-from sports_hedge.paper.unwind.policy import decide_recommendation
+from sports_hedge.paper.unwind.policy import evaluate_exit_economics
 from sports_hedge.risk.execution import ExecutionRiskInputs, ExecutionRiskResult, ExecutionRiskScorer
 
 
@@ -110,7 +110,7 @@ class PaperUnwindEngine:
 
         hold = position.hold_pnl_gbp
         give_up = (hold - exit_pnl) if fully and exit_pnl is not None else None
-        recommendation, reason = decide_recommendation(
+        economics = evaluate_exit_economics(
             fully_executable=fully,
             fail_reasons=list(dict.fromkeys(reasons)),
             hold_pnl_gbp=hold,
@@ -119,8 +119,10 @@ class PaperUnwindEngine:
             scarcity=request.scarcity,
             execution_risk_score=None if risk is None else risk.score,
         )
+        recommendation, reason = economics.recommendation, economics.reason
         if not fully:
             recommendation = UnwindRecommendation.UNWIND_NOT_SAFE
+            economics = economics.blocked(reason)
 
         releasable: dict[str, Decimal] = {}
         gross_liability: dict[str, Decimal] = {}
@@ -156,8 +158,8 @@ class PaperUnwindEngine:
                 needs_known_incremental
                 and incremental_status is IncrementalCloseCapitalStatus.UNKNOWN_NOT_MODELLED
             ):
-                recommendation = UnwindRecommendation.UNWIND_NOT_SAFE
-                reason = "incremental_close_capital_unknown"
+                economics = economics.blocked("incremental_close_capital_unknown")
+                recommendation, reason = economics.recommendation, economics.reason
 
         # Advisory passthrough only. Do not invent remaining lock from
         # kickoff, match clock, or expected_settlement_at - evaluated_at.
@@ -190,6 +192,11 @@ class PaperUnwindEngine:
             ),
             execution_risk=risk,
             capital_pressure=request.scarcity.pressure,
+            exit_margin_gbp=economics.exit_margin_gbp,
+            exit_threshold_gbp=economics.exit_threshold_gbp,
+            exit_margin_basis=economics.exit_margin_basis,
+            exit_margin_actionable=economics.exit_margin_actionable,
+            close_blocker=economics.close_blocker,
         )
 
     def _close_leg(

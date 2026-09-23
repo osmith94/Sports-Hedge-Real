@@ -1,0 +1,28 @@
+{
+  "fixture_id": "kalshi-event-game-nyksas-settled",
+  "identified_as": "CAPTURED public Kalshi GET /events/KXNBAGAME-26JUN13NYKSAS (2026 Finals G5, settled). Event identity retained. Nested markets empty; GET /markets/{guessed ticker} returned HTTP 404. Graded result fields not available at capture time.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events/KXNBAGAME-26JUN13NYKSAS",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "event_ticker": "KXNBAGAME-26JUN13NYKSAS",
+    "series_ticker": "KXNBAGAME",
+    "title": "Game 5: New York at San Antonio",
+    "sub_title": "NYK at SAS (Jun 13)",
+    "category": "Sports",
+    "mutually_exclusive": true,
+    "product_metadata": {
+      "competition": "Pro Basketball (M)",
+      "competition_scope": "Game"
+    },
+    "collateral_return_type": "MECNET",
+    "settlement_sources": [
+      {
+        "name": "the Governing League",
+        "url": "https://www.nba.com"
+      }
+    ],
+    "strike_period": "",
+    "markets": []
+  }
+}

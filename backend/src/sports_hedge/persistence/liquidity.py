@@ -31,6 +31,7 @@ class SqlitePaperLiquidityRepository:
         self._connection = sqlite3.connect(str(database), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._create_schema()
+        self._repair_legacy_null_balances()
         self._seed_if_empty()
 
     def _create_schema(self) -> None:
@@ -44,6 +45,26 @@ class SqlitePaperLiquidityRepository:
                 transit TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            """
+        )
+        self._connection.commit()
+
+    def _repair_legacy_null_balances(self) -> None:
+        """Fail closed when an older SQLite row contains NULL numeric balances.
+
+        Some owner databases pre-date the current NOT NULL schema.  A NULL balance
+        must never be replaced with a configured bankroll default because that would
+        invent spendable paper capital.  Preserve the existing pool row and reconcile
+        only the unknown numeric cells to zero.
+        """
+
+        self._connection.execute(
+            """
+            UPDATE paper_liquidity_pools
+            SET available = COALESCE(available, '0'),
+                locked = COALESCE(locked, '0'),
+                transit = COALESCE(transit, '0')
+            WHERE available IS NULL OR locked IS NULL OR transit IS NULL
             """
         )
         self._connection.commit()
@@ -100,6 +121,27 @@ class SqlitePaperLiquidityRepository:
         self._connection.commit()
         return self.get()
 
+    def sync_from_treasury_pools(self, pools: list[object]) -> PaperLiquiditySnapshot:
+        """Copy native available/locked from the authoritative treasury snapshot.
+
+        Solver liquidity is a standing-capital projection, not a second lock book.
+        """
+
+        updates: dict[VenueName, Decimal] = {}
+        locked: dict[VenueName, Decimal] = {}
+        for pool in pools:
+            venue = getattr(pool, "venue", None)
+            if venue is None:
+                continue
+            resolved = venue if isinstance(venue, VenueName) else VenueName(str(venue))
+            if resolved is VenueName.SMARKETS:
+                continue
+            updates[resolved] = Decimal(str(getattr(pool, "available_cash")))
+            locked[resolved] = Decimal(str(getattr(pool, "locked_capital")))
+        if not updates:
+            return self.get()
+        return self.update_available(updates, locked=locked)
+
     def update_available(
         self,
         updates: dict[VenueName, Decimal],
@@ -136,15 +178,21 @@ class SqlitePaperLiquidityRepository:
         self._connection.close()
 
 
+def _decimal_or_zero(value: object) -> Decimal:
+    """Decode persisted pool balances without turning unknown legacy data into cash."""
+
+    return Decimal("0") if value is None else Decimal(str(value))
+
+
 def _pool_from_row(row: sqlite3.Row) -> PaperLiquidityPool:
     venue = VenueName(row["venue"])
     solver = venue is not VenueName.SMARKETS
     return PaperLiquidityPool(
         venue=venue,
         native_currency=row["native_currency"],
-        available=Decimal(row["available"]),
-        locked=Decimal(row["locked"]),
-        transit=Decimal(row["transit"]),
+        available=_decimal_or_zero(row["available"]),
+        locked=_decimal_or_zero(row["locked"]),
+        transit=_decimal_or_zero(row["transit"]),
         included_in_solver=solver,
         connection_status="connected" if solver else "not_connected",
         updated_at=datetime.fromisoformat(row["updated_at"]),

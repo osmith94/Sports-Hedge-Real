@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
@@ -68,6 +69,12 @@ def test_matchbook_fixture_state_does_not_invent_scores() -> None:
     assert without_scores.home_score is None
     assert without_scores.away_score is None
 
+    graded = matchbook_fixture_state({"id": 1, "status": "graded", "in-running-flag": False})
+    assert graded.venue_status == "graded"
+    assert graded.in_running is False
+    closed = matchbook_fixture_state({"id": 1, "status": "closed"})
+    assert closed.venue_status == "closed"
+
     with_scores = matchbook_fixture_state(
         {
             "id": 1,
@@ -119,9 +126,11 @@ def test_live_refresh_status_is_matchbook_primary_and_server_loop_off_by_default
     assert health.status_code == 200
     body = health.json()
     assert body["execution_enabled"] is False
+    assert body["paper_autofill_enabled"] is False
     assert body["live_refresh"]["discovery_source"] == "matchbook"
     assert body["live_refresh"]["matching_venue"] == "polymarket"
     assert body["live_refresh"]["server_loop_enabled"] is False
+    assert body["live_refresh"]["paper_autofill_enabled"] is False
     assert body["live_refresh"]["interval_seconds"] >= 15
 
     status = client.get("/paper/live-refresh")
@@ -130,11 +139,17 @@ def test_live_refresh_status_is_matchbook_primary_and_server_loop_off_by_default
     assert payload["discovery_source"] == "matchbook"
     assert payload["matching_venue"] == "polymarket"
     assert payload["server_loop_enabled"] is False
+    assert payload["paper_autofill_enabled"] is False
     assert "unavailable_unless_matchbook_payload_includes_scores" in payload["live_scores"]
     assert payload["discovered_fixtures"] == []
+    assert payload["hot"]["cadence_seconds"] == 30
+    assert payload["background"]["cadence_seconds"] == 90
+    assert payload["universe"]["cadence_seconds"] == 1800
 
 
 def test_tracked_rows_expose_source_freshness_and_narrative() -> None:
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
     repository = SqliteWatchlistRepository()
     service = WatchlistService(repository, clock=lambda: OBSERVED + timedelta(seconds=20))
     app.dependency_overrides[get_watchlist_service] = lambda: service
@@ -143,6 +158,9 @@ def test_tracked_rows_expose_source_freshness_and_narrative() -> None:
     service.observe(
         _observation(market_id="mkt-src", net="-0.006", when=OBSERVED + timedelta(seconds=20))
     )
+    from test_tracked_current_snapshot import _report
+
+    coordinator.record_report(_report("mkt-src"))
     try:
         tracked = client.get("/paper/watchlist/tracked")
         assert tracked.status_code == 200
@@ -157,4 +175,22 @@ def test_tracked_rows_expose_source_freshness_and_narrative() -> None:
         assert row["last_seen_at"]
     finally:
         app.dependency_overrides.clear()
+        coordinator.reset()
         repository.close()
+
+
+@pytest.mark.asyncio
+async def test_live_refresh_records_completion_when_cycle_raises() -> None:
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
+
+    async def boom() -> None:
+        raise RuntimeError("matchbook hung")
+
+    with pytest.raises(RuntimeError, match="hung"):
+        await coordinator.run_cycle(boom)
+    assert coordinator.status.cycle_in_progress is False
+    assert coordinator.status.last_completed_at is not None
+    assert coordinator.status.last_error is not None
+    assert "hung" in coordinator.status.last_error
+    coordinator.reset()

@@ -17,6 +17,7 @@ from sports_hedge.arbitrage.priority_alerts.models import (
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityStatus
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
+from sports_hedge.paper.entry_freshness import PaperEntryFreshness
 from sports_hedge.paper.fills import PaperOpportunityFills, PaperOpportunityLeg
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 
@@ -35,13 +36,27 @@ class PaperChainStep(StrEnum):
 
 
 class PaperFillPlan(BaseModel):
-    """Last solver-validated books needed to simulate an explicit paper fill."""
+    """Immutable solver-qualified snapshot used to simulate one paper fill.
+
+    `scanned_at` is T1, the qualified decision. `autofill_dispatched_at` is T2
+    telemetry only and must not age the snapshot.
+    """
 
     opportunity_id: str
     canonical_event_id: str | None = None
     canonical_market_id: str | None = None
     scanned_at: datetime
     quote_age_ms: int | None = None
+    quote_age_at_decision_ms: int | None = None
+    quote_captured_at: datetime | None = None
+    autofill_dispatched_at: datetime | None = None
+    simulated_latency_ms: int = Field(default=500, ge=0)
+    paper_entry_max_quote_age_ms: int = Field(default=2000, ge=0)
+    mapping_confidence: float | None = Field(default=None, ge=0, le=1)
+    execution_risk_score: int | None = Field(default=None, ge=0, le=100)
+    gross_edge: Decimal | None = None
+    net_edge: Decimal | None = None
+    entry_freshness: PaperEntryFreshness | None = None
     eligible_for_paper_simulation: bool
     settlement_equivalent: bool
     legs: list[PaperOpportunityLeg] = Field(default_factory=list)
@@ -50,12 +65,23 @@ class PaperFillPlan(BaseModel):
     fx_snapshots: list[FxRateSnapshot] = Field(default_factory=list)
     decision: PaperScanDecision
     provenance: DataProvenance = DataProvenance.LIVE_PAPER
+    pricing_lane: str | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> PaperFillPlan:
         if self.scanned_at.tzinfo is None:
             self.scanned_at = self.scanned_at.replace(tzinfo=UTC)
+        if self.quote_captured_at is not None and self.quote_captured_at.tzinfo is None:
+            self.quote_captured_at = self.quote_captured_at.replace(tzinfo=UTC)
+        if self.autofill_dispatched_at is not None and self.autofill_dispatched_at.tzinfo is None:
+            self.autofill_dispatched_at = self.autofill_dispatched_at.replace(tzinfo=UTC)
+        if self.quote_age_at_decision_ms is None:
+            self.quote_age_at_decision_ms = self.quote_age_ms
         return self
+
+    @property
+    def decision_at(self) -> datetime:
+        return self.scanned_at
 
 
 class PaperChainTrace(BaseModel):
@@ -81,6 +107,9 @@ class SimulatePaperFillRequest(BaseModel):
     capital_source: CapitalSource = CapitalSource.AUTO_POOL
     confirm_external: ExternalLegConfirmation | None = None
     provenance: DataProvenance = DataProvenance.LIVE_PAPER
+    prepared_deployment_id: str | None = None
+    requested_size_gbp: Decimal | None = Field(default=None, gt=0)
+    simulate_external: bool = False
 
 
 class SimulatePaperFillResult(BaseModel):
@@ -97,3 +126,5 @@ class SimulatePaperFillResult(BaseModel):
     entry_complete: bool = False
     rejection_reason: str | None = None
     allocated_requested_stakes: dict[str, Decimal] = Field(default_factory=dict)
+    prepared_deployment_id: str | None = None
+    entry_freshness: PaperEntryFreshness | None = None

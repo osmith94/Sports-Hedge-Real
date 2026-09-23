@@ -7,7 +7,8 @@ import httpx
 
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueCapabilities, VenueHealth, VenueName
-from sports_hedge.venues.base import ReadOnlyVenue
+from sports_hedge.venues.base import ReadOnlyVenue, market_data_http_timeout
+from sports_hedge.venues.rate_limit import ProviderCooldown, ProviderRateLimitedError
 
 
 class PolymarketClient(ReadOnlyVenue):
@@ -29,11 +30,14 @@ class PolymarketClient(ReadOnlyVenue):
         settings: Settings,
         *,
         client: httpx.AsyncClient | None = None,
+        cooldown: ProviderCooldown | None = None,
     ) -> None:
         self.settings = settings
         self._owns_client = client is None
+        self._cooldown = cooldown
+        self.last_series_report: list[dict[str, Any]] = []
         self._client = client or httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0),
+            timeout=market_data_http_timeout(),
             headers={
                 "Accept": "application/json",
                 "Accept-Encoding": "gzip",
@@ -44,9 +48,9 @@ class PolymarketClient(ReadOnlyVenue):
     async def list_events(self, **filters: Any) -> list[dict[str, Any]]:
         """List public Gamma events for configured target-competition series.
 
-        Default series IDs come from public ``GET /sports`` (EPL, EFL Championship,
-        La Liga). Pagination is per-series, bounded, and read-only. Empty series
-        results stay empty rather than inventing Championship/La Liga markets.
+        Default series IDs come from public ``GET /sports`` for the current
+        target competitions. Pagination is per-series, bounded, and read-only.
+        Empty series results stay empty rather than inventing markets.
         """
 
         page_limit = self.settings.polymarket_gamma_page_limit
@@ -70,14 +74,47 @@ class PolymarketClient(ReadOnlyVenue):
 
         events: list[dict[str, Any]] = []
         seen: set[str] = set()
+        series_results: list[dict[str, Any]] = []
+        first_total_error: Exception | None = None
         for series_id in series_ids:
-            for item in await self._list_series_events(series_id, params):
+            try:
+                page_items = await self._list_series_events(series_id, params)
+            except Exception as exc:
+                status, retryable = _series_failure_kind(exc)
+                series_results.append(
+                    {
+                        "series": series_id,
+                        "status": status,
+                        "retryable": retryable,
+                        "event_count": 0,
+                        "reason": str(exc),
+                    }
+                )
+                if first_total_error is None:
+                    first_total_error = exc
+                continue
+            retained = 0
+            for item in page_items:
                 event_id = str(item.get("id", "")).strip()
                 if event_id and event_id in seen:
                     continue
                 if event_id:
                     seen.add(event_id)
                 events.append(item)
+                retained += 1
+            series_results.append(
+                {
+                    "series": series_id,
+                    "status": "ok",
+                    "retryable": False,
+                    "event_count": retained,
+                    "reason": None,
+                }
+            )
+        self.last_series_report = series_results
+        if not events and series_results and all(item["status"] != "ok" for item in series_results):
+            if first_total_error is not None:
+                raise first_total_error
         return events
 
     async def _list_series_events(
@@ -102,10 +139,19 @@ class PolymarketClient(ReadOnlyVenue):
         return events
 
     async def _get_event_page(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        if self._cooldown is not None:
+            self._cooldown.raise_if_active()
         response = await self._client.get(
             f"{self.settings.polymarket_gamma_base_url.rstrip('/')}/events",
             params=params,
         )
+        if self._cooldown is not None and self._cooldown.observe_status(
+            response.status_code, response.headers
+        ):
+            raise ProviderRateLimitedError(
+                self._cooldown.remaining_seconds(),
+                provider="polymarket",
+            )
         response.raise_for_status()
         payload = response.json()
         if isinstance(payload, list):
@@ -113,10 +159,19 @@ class PolymarketClient(ReadOnlyVenue):
         return []
 
     async def list_markets(self, event_id: int | str, **filters: Any) -> list[dict[str, Any]]:
+        if self._cooldown is not None:
+            self._cooldown.raise_if_active()
         response = await self._client.get(
             f"{self.settings.polymarket_gamma_base_url.rstrip('/')}/events/{event_id}",
             params=filters,
         )
+        if self._cooldown is not None and self._cooldown.observe_status(
+            response.status_code, response.headers
+        ):
+            raise ProviderRateLimitedError(
+                self._cooldown.remaining_seconds(),
+                provider="polymarket",
+            )
         response.raise_for_status()
         payload = response.json()
         markets = payload.get("markets", []) if isinstance(payload, dict) else []
@@ -125,6 +180,15 @@ class PolymarketClient(ReadOnlyVenue):
     async def get_market(self, market_id: int | str) -> dict[str, Any]:
         response = await self._client.get(
             f"{self.settings.polymarket_gamma_base_url.rstrip('/')}/markets/{market_id}"
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_event(self, event_id: int | str) -> dict[str, Any]:
+        """Exact-ID Gamma event refresh. Read-only; used for settlement lifecycle."""
+
+        response = await self._client.get(
+            f"{self.settings.polymarket_gamma_base_url.rstrip('/')}/events/{event_id}"
         )
         response.raise_for_status()
         return response.json()
@@ -173,3 +237,16 @@ class PolymarketClient(ReadOnlyVenue):
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+
+def _series_failure_kind(exc: BaseException) -> tuple[str, bool]:
+    text = str(exc).casefold()
+    if "401" in text or "403" in text or "auth" in text:
+        return "auth_failure", False
+    if "unsupported" in text or "404" in text:
+        return "unsupported", False
+    if "429" in text or "rate-limited" in text:
+        return "rate_limited", True
+    if "timeout" in text or "timed out" in text:
+        return "discovery_timeout", True
+    return "unavailable", True

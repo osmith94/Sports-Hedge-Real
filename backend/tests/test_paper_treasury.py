@@ -339,6 +339,31 @@ def test_unwind_posts_only_after_completed_close() -> None:
     assert pool.available_cash == Decimal("1010")
     assert pool.realised_pnl_native == Decimal("10")
     assert pool.cumulative_fees_native == Decimal("2")
+    again = ledger.treasury.post_unwind(
+        ValidatedUnwindResult(
+            trade_id="ptrade-demo",
+            close_completed=True,
+            source_id="unwind:ptrade-demo",
+            releases=[
+                UnwindReleaseLeg(
+                    venue=VenueName.MATCHBOOK,
+                    native_currency="GBP",
+                    lock_id="lock-unwind",
+                    amount_native=Decimal("250"),
+                    realised_pnl_native=Decimal("10"),
+                    fee_native=Decimal("2"),
+                    fx_rate_gbp_per_unit=Decimal("1"),
+                )
+            ],
+        ),
+        now=NOW,
+    )
+    assert [entry.source_id for entry in again] == [entry.source_id for entry in posted]
+    pool = ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP")
+    assert pool.locked_capital == Decimal("0")
+    assert pool.available_cash == Decimal("1010")
+    assert pool.realised_pnl_native == Decimal("10")
+    assert pool.cumulative_fees_native == Decimal("2")
     with pytest.raises(PaperTreasuryError, match="release_exceeds_lock"):
         ledger.treasury.post_unwind(
             ValidatedUnwindResult(
@@ -878,6 +903,60 @@ def test_treasury_api_seed_lock_and_fx(tmp_path: Path) -> None:
             },
         )
         assert noop.status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+        ledger.close()
+
+
+def test_operator_treasury_pool_edit_fail_closed_while_locked(tmp_path: Path) -> None:
+    ledger = SqlitePaperLedger(
+        tmp_path / "edit-treasury.sqlite",
+        seed_gbp=SEED,
+        usd_gbp_per_unit=FX,
+        include_kalshi=True,
+    )
+    app.dependency_overrides[get_paper_ledger] = lambda: ledger
+    client = TestClient(app)
+    try:
+        edited = client.post(
+            "/paper/treasury/pools",
+            json={
+                "reason": "operator paper treasury edit",
+                "pools": [
+                    {"venue": "matchbook", "available": "1500"},
+                    {"venue": "polymarket", "available": "2000"},
+                    {"venue": "kalshi", "available": "1250"},
+                ],
+            },
+        )
+        assert edited.status_code == 200
+        venues = {pool["venue"]: pool for pool in edited.json()["pools"]}
+        assert Decimal(venues["matchbook"]["available_cash"]) == Decimal("1500")
+        assert Decimal(venues["polymarket"]["available_cash"]) == Decimal("2000")
+        assert Decimal(venues["kalshi"]["available_cash"]) == Decimal("1250")
+        assert venues["polymarket"]["fx_source"]
+        assert venues["kalshi"]["fx_source"]
+
+        locked = client.post(
+            "/paper/treasury/locks",
+            json=[
+                {
+                    "venue": "matchbook",
+                    "native_currency": "GBP",
+                    "amount_native": "100",
+                    "lock_id": "edit-lock",
+                    "trade_id": "ptrade-edit",
+                    "fx_rate_gbp_per_unit": "1",
+                }
+            ],
+        )
+        assert locked.status_code == 200
+        blocked = client.post(
+            "/paper/treasury/pools",
+            json={"pools": [{"venue": "matchbook", "available": "50"}]},
+        )
+        assert blocked.status_code == 409
+        assert "active_treasury_locks" in str(blocked.json()["detail"])
     finally:
         app.dependency_overrides.clear()
         ledger.close()

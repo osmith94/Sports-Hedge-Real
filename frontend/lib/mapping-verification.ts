@@ -1,0 +1,310 @@
+import { Venue } from "./api";
+
+export type MappingProvenanceSource = "native_deterministic" | "operator_verified";
+
+export type MappingRuleType =
+  | "venue_suffix_strip"
+  | "venue_prefix_strip"
+  | "venue_name_convention"
+  | "venue_market_label_convention"
+  | "fixture_specific_alias";
+
+export type MappingVerdict = "verified" | "not_verified" | "ambiguous";
+
+export type MappingProvenance = {
+  mapping_source?: MappingProvenanceSource | null;
+  rule_id?: string | null;
+  rule_version?: number | null;
+  rule_type?: MappingRuleType | null;
+  applied_rule_ids?: string[];
+};
+
+export type MappingSideEvidence = {
+  venue: Venue;
+  source_event_id: string;
+  source_market_id: string;
+  raw_event_name?: string | null;
+  raw_home_team: string;
+  raw_away_team: string;
+  raw_competition: string;
+  kickoff_utc: string;
+  raw_market_name?: string | null;
+  raw_market_type?: string | null;
+  raw_runner_labels?: string[];
+  family?: string | null;
+  period?: string | null;
+  line?: string | null;
+  settlement_key?: string | null;
+  settlement_scope?: string | null;
+  outcome_space?: string[];
+  current_canonical_candidate?: string | null;
+  confidence?: number | null;
+  match_reasons?: string[];
+};
+
+export type MappingReviewCandidate = {
+  sides: MappingSideEvidence[];
+  current_confidence?: number | null;
+  current_reasons?: string[];
+  current_matched?: boolean | null;
+  conflicting_fields?: string[];
+};
+
+export type MappingProposedRule = {
+  rule_id: string;
+  version: number;
+  enabled: boolean;
+  revoked: boolean;
+  source: string;
+  rule_type: MappingRuleType;
+  venue: Venue;
+  field_scope: string;
+  raw_pattern: string;
+  canonical_transformation: string;
+  guardrails: Record<string, unknown>;
+  evidence: string;
+};
+
+/** Verify is required only when mapping confidence is below 100%. */
+export function shouldOfferMappingVerify(confidence: number | null | undefined): boolean {
+  if (confidence == null || !Number.isFinite(confidence)) return false;
+  return confidence < 1;
+}
+
+export function hasSafeReviewCandidate(
+  candidate?: MappingReviewCandidate | null,
+): boolean {
+  return Boolean(candidate && Array.isArray(candidate.sides) && candidate.sides.length >= 2);
+}
+
+export function shouldOfferMappingVerifyAction(
+  confidence: number | null | undefined,
+  candidate?: MappingReviewCandidate | null,
+): boolean {
+  return shouldOfferMappingVerify(confidence) && hasSafeReviewCandidate(candidate);
+}
+
+export function isNativeHundredPercent(
+  confidence: number | null | undefined,
+  provenance?: MappingProvenance | null,
+): boolean {
+  if (confidence !== 1) return false;
+  const source = provenance?.mapping_source ?? "native_deterministic";
+  return source === "native_deterministic";
+}
+
+export function mappingProvenanceLabel(provenance?: MappingProvenance | null): string {
+  if (provenance?.mapping_source === "operator_verified") {
+    const id = provenance.rule_id ? ` ${provenance.rule_id}` : "";
+    const version =
+      provenance.rule_version != null ? ` v${provenance.rule_version}` : "";
+    return `operator_verified / learned alias${id}${version}`;
+  }
+  return "native deterministic / provider mapping";
+}
+
+export function mappingConfidencePercent(confidence: number): string {
+  return `${(confidence * 100).toFixed(1)}%`;
+}
+
+export function promptContainsSecrets(prompt: string): boolean {
+  const lowered = prompt.toLowerCase();
+  return ["password", "api_key", "authorization", "bearer ", "secret", "token="].some(
+    (fragment) => lowered.includes(fragment),
+  );
+}
+
+/** Declared conflicts that may independently block learned-rule activation. */
+export const STRUCTURAL_BLOCKER_FIELDS = new Set([
+  "sport",
+  "competition",
+  "kickoff",
+  "market_family",
+  "family",
+  "period",
+  "line",
+  "settlement",
+  "settlement_key",
+  "settlement_scope",
+  "outcome_space",
+  "outcome_model",
+]);
+
+const STRUCTURAL_BLOCKER_ALIASES: Record<string, string> = {
+  family: "market_family",
+  settlement_key: "settlement",
+  outcome_model: "outcome_space",
+};
+
+export function canonicalStructuralBlocker(field: string): string | null {
+  const key = field.trim().toLowerCase();
+  if (!key || !STRUCTURAL_BLOCKER_FIELDS.has(key)) return null;
+  return STRUCTURAL_BLOCKER_ALIASES[key] ?? key;
+}
+
+export function structuralConflictsFromDeclared(fields?: string[] | null): string[] {
+  if (!fields) return [];
+  return [...new Set(fields.flatMap((field) => {
+    const canonical = canonicalStructuralBlocker(field);
+    return canonical ? [canonical] : [];
+  }))].sort();
+}
+
+export function canActivateLearnedRule(input: {
+  verdict: MappingVerdict | null;
+  operatorConfirmed: boolean;
+  conflictingFields?: string[] | null;
+  activationBlockedReason?: string | null;
+}): boolean {
+  if (input.verdict !== "verified" || input.operatorConfirmed !== true) return false;
+  if (structuralActivationBlockedReason(input.activationBlockedReason)) return false;
+  return structuralConflictsFromDeclared(input.conflictingFields).length === 0;
+}
+
+/** Interpret returns this until the operator explicitly confirms. Not a structural block. */
+export const TRANSITIONAL_ACTIVATION_REASON = "explicit_operator_confirmation_required";
+
+export function isTransitionalActivationReason(reason?: string | null): boolean {
+  return reason === TRANSITIONAL_ACTIVATION_REASON;
+}
+
+export function structuralActivationBlockedReason(
+  reason?: string | null,
+): string | null {
+  if (!reason || isTransitionalActivationReason(reason)) return null;
+  return reason;
+}
+
+export function mappingConfirmRequest(input: {
+  candidate: MappingReviewCandidate;
+  operator?: string;
+  chatgptText?: string | null;
+  verdict?: MappingVerdict | null;
+  operatorConfirmed: boolean;
+  reviewId?: string | null;
+}): {
+  candidate: MappingReviewCandidate;
+  operator: string;
+  chatgpt_text: string | null;
+  manual_verdict: MappingVerdict | null;
+  operator_confirmed: boolean;
+  review_id?: string;
+} {
+  const body: {
+    candidate: MappingReviewCandidate;
+    operator: string;
+    chatgpt_text: string | null;
+    manual_verdict: MappingVerdict | null;
+    operator_confirmed: boolean;
+    review_id?: string;
+  } = {
+    candidate: input.candidate,
+    operator: input.operator ?? "operator",
+    chatgpt_text: input.chatgptText ?? null,
+    manual_verdict: input.verdict ?? null,
+    operator_confirmed: input.operatorConfirmed,
+  };
+  if (input.reviewId) {
+    body.review_id = input.reviewId;
+  }
+  return body;
+}
+
+/** Confirm/Interpret must bind to this exact current-radar evidence, not just opportunity_id. */
+export const VERIFY_EVIDENCE_CHANGED = "mapping_verify_evidence_changed";
+
+export type MappingVerifyEvidence = {
+  opportunityId: string;
+  observedAt?: string | null;
+  mappingConfidence?: number | null;
+  candidate: MappingReviewCandidate;
+};
+
+export function snapshotMappingCandidate(
+  candidate: MappingReviewCandidate,
+): MappingReviewCandidate {
+  return JSON.parse(JSON.stringify(candidate)) as MappingReviewCandidate;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return `{${entries
+    .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+    .join(",")}}`;
+}
+
+export function mappingVerifyEvidenceFingerprint(input: MappingVerifyEvidence): string {
+  return stableJson({
+    opportunity_id: input.opportunityId,
+    observed_at: input.observedAt ?? null,
+    mapping_confidence:
+      input.mappingConfidence == null || !Number.isFinite(input.mappingConfidence)
+        ? null
+        : input.mappingConfidence,
+    candidate: snapshotMappingCandidate(input.candidate),
+  });
+}
+
+export function fingerprintOpportunityVerifyRow(row: {
+  id: string;
+  observedAt: string | null;
+  mappingConfidence: number | null;
+  mappingCandidate: MappingReviewCandidate | null;
+}): string | null {
+  if (!row.mappingCandidate) return null;
+  return mappingVerifyEvidenceFingerprint({
+    opportunityId: row.id,
+    observedAt: row.observedAt,
+    mappingConfidence: row.mappingConfidence,
+    candidate: row.mappingCandidate,
+  });
+}
+
+export function verifySessionMatchesCurrent(
+  sessionFingerprint: string | null | undefined,
+  currentFingerprint: string | null | undefined,
+): boolean {
+  return Boolean(
+    sessionFingerprint &&
+      currentFingerprint &&
+      sessionFingerprint === currentFingerprint,
+  );
+}
+
+export type MappingVerifyConfirmDecision =
+  | { ok: true; request: ReturnType<typeof mappingConfirmRequest> }
+  | { ok: false; reason: typeof VERIFY_EVIDENCE_CHANGED };
+
+export function mappingVerifyConfirmDecision(input: {
+  sessionFingerprint: string | null | undefined;
+  currentFingerprint: string | null | undefined;
+  sessionCandidate: MappingReviewCandidate | null | undefined;
+  chatgptText?: string | null;
+  verdict?: MappingVerdict | null;
+  reviewId?: string | null;
+}): MappingVerifyConfirmDecision {
+  if (
+    !verifySessionMatchesCurrent(input.sessionFingerprint, input.currentFingerprint) ||
+    !input.sessionCandidate
+  ) {
+    return { ok: false, reason: VERIFY_EVIDENCE_CHANGED };
+  }
+  return {
+    ok: true,
+    request: mappingConfirmRequest({
+      candidate: input.sessionCandidate,
+      chatgptText: input.chatgptText,
+      verdict: input.verdict,
+      operatorConfirmed: true,
+      reviewId: input.reviewId,
+    }),
+  };
+}

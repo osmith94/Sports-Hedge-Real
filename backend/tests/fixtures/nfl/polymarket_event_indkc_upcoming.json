@@ -1,0 +1,95 @@
+{
+  "fixture_id": "nfl-polymarket-nfl-ind-kc-2026-09-21",
+  "identified_as": "CAPTURED public Gamma NFL event nfl-ind-kc-2026-09-21 (upcoming SNF). Identity + one market per family. Prices/CLOB books omitted. Description/rules retained.",
+  "source": "https://gamma-api.polymarket.com/events/827222",
+  "discovery": "GET /events?series_id=12185",
+  "retrieved_at": "2026-09-20T20:54:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": "827222",
+    "ticker": "nfl-ind-kc-2026-09-21",
+    "slug": "nfl-ind-kc-2026-09-21",
+    "title": "Colts vs. Chiefs",
+    "startTime": "2026-09-21T00:20:00Z",
+    "eventDate": "2026-09-20",
+    "endDate": "2026-09-21T00:20:00Z",
+    "period": "NS",
+    "score": null,
+    "live": null,
+    "ended": null,
+    "closed": false,
+    "active": true,
+    "gameId": 19484,
+    "finishedTimestamp": null,
+    "seriesSlug": "nfl-2026",
+    "sport": {
+      "id": 10,
+      "sport": "nfl",
+      "name": "NFL",
+      "ordering": "away",
+      "series": "12185"
+    },
+    "teams": [
+      {
+        "id": 100022,
+        "name": "Indianapolis Colts",
+        "abbreviation": "ind",
+        "alias": "Colts",
+        "ordering": "away",
+        "league": "nfl"
+      },
+      {
+        "id": 100040,
+        "name": "Kansas City Chiefs",
+        "abbreviation": "kc",
+        "alias": "Chiefs",
+        "ordering": "home",
+        "league": "nfl"
+      }
+    ],
+    "markets": [
+      {
+        "id": "3482783",
+        "question": "Colts vs. Chiefs",
+        "slug": "nfl-ind-kc-2026-09-21",
+        "sportsMarketType": "moneyline",
+        "groupItemTitle": null,
+        "conditionId": "0x0ad30faec3cd25a8ee81a919c4241ef9ec076882435a0b23205cd2b31bf32e70",
+        "outcomes": "[\"Colts\", \"Chiefs\"]",
+        "line": null,
+        "active": true,
+        "closed": false,
+        "umaResolutionStatus": null,
+        "description": "In the upcoming NFL game, scheduled for September 20 at 8:20PM ET:\nIf Colts wins, the market will resolve to \"Colts\".\nIf Chiefs wins, the market will resolve to \"Chiefs\".\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely or ends in a tie, with no make-up game, this market will resolve 50-50."
+      },
+      {
+        "id": "3516972",
+        "question": "Spread: Chiefs (-6.5)",
+        "slug": "nfl-ind-kc-2026-09-21-spread-home-6pt5",
+        "sportsMarketType": "spreads",
+        "groupItemTitle": "Spread -6.5",
+        "conditionId": "0x47ee872501c16b566f4777eb9782a07229433fc7dccd617877b2bd9a3518b6cc",
+        "outcomes": "[\"Chiefs\", \"Colts\"]",
+        "line": -6.5,
+        "active": true,
+        "closed": false,
+        "umaResolutionStatus": null,
+        "description": "In the upcoming NFL game, scheduled for September 20 at 8:20 PM ET:\n\nThis market will resolve to \"Chiefs\" if the Chiefs win the game by 7 or more points.\n\nOtherwise, this market will resolve to \"Colts\". If the game ends in a tie, this market will resolve to \"Colts\".\n\nIf the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50."
+      },
+      {
+        "id": "3516981",
+        "question": "Colts vs. Chiefs: O/U 47.5",
+        "slug": "nfl-ind-kc-2026-09-21-total-47pt5",
+        "sportsMarketType": "totals",
+        "groupItemTitle": "O/U 47.5",
+        "conditionId": "0x62cf1b557763120116d4e06435f33093d905cf2981ed0e82add90aef691d07e1",
+        "outcomes": "[\"Over\", \"Under\"]",
+        "line": 47.5,
+        "active": true,
+        "closed": false,
+        "umaResolutionStatus": null,
+        "description": "In the upcoming NFL game, scheduled for September 20 at 8:20 PM ET:\n\nThis market will resolve to \"Over\" if the Colts and Chiefs combine to score 48 or more points in this game.\n\nIf the combined total is less than 48, this market will resolve to \"Under\".\n\nIf the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50."
+      }
+    ]
+  }
+}

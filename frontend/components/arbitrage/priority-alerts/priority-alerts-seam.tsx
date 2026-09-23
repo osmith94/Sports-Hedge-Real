@@ -7,27 +7,19 @@ export function PriorityAlertsSeam({
   liveAvailable?: boolean;
   liveCount?: number;
 }) {
+  if (!liveAvailable || liveCount === 0) return null;
+
   return (
     <section className="pa-seam">
       <div className="pa-seam-copy">
         <div className="pa-seam-kicker">Priority Alerts · PAPER MODE</div>
         <div className="pa-seam-title">
-          {liveAvailable
-            ? `${liveCount} live paper alert${liveCount === 1 ? "" : "s"}`
-            : "Live priority-alert API unavailable"}
+          {`${liveCount} live paper alert${liveCount === 1 ? "" : "s"}`}
         </div>
-        <p>
-          {liveAvailable
-            ? liveCount
-              ? "Live paper alerts available."
-              : "No live alerts."
-            : "Priority-alert API unavailable."}
-        </p>
+        <p>Live paper alerts available.</p>
       </div>
       <div className="pa-seam-actions">
-        <span className={liveAvailable ? "status-badge" : "demo-chip"}>
-          {liveAvailable ? "LIVE PAPER · NO DEMO MIX-IN" : "API UNAVAILABLE"}
-        </span>
+        <span className="status-badge">LIVE PAPER</span>
         <Link className="pa-button" href="/arbitrage/priority-alerts">
           All priority alerts
         </Link>

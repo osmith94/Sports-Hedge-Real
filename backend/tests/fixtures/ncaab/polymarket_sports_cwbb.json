@@ -1,0 +1,19 @@
+{
+  "fixture_id": "ncaab-polymarket_sports_cwbb-2026-09-22",
+  "identified_as": "CAPTURED public Gamma GET /sports cwbb row.",
+  "source": "https://gamma-api.polymarket.com/sports",
+  "retrieved_at": "2026-09-22T14:47:25Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "id": 47,
+    "sport": "cwbb",
+    "name": "Women's College Basketball",
+    "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/league-icons/cwbb-3ddd4bb7.png",
+    "resolution": "https://www.ncaa.com/sports/basketball-women/d1",
+    "ordering": "home",
+    "tags": "1,28,100639,102003",
+    "primaryTagId": 102003,
+    "series": "10471",
+    "createdAt": "2025-11-07T21:09:54.771154Z"
+  }
+}

@@ -1,61 +1,210 @@
-import { DiscoveredFixture } from "./api";
-import { percent, percentPoints } from "./format";
+import { DiscoveredFixture, LiveRefreshStatus } from "./api";
+import {
+  formatKickoffInLocalTimezone,
+  kickoffLocalLabel,
+  kickoffRelativeLabel,
+  percent,
+  percentPoints,
+} from "./format";
+import {
+  VENUE_SHORT,
+  discoveryFailedVenues,
+  discoveryParticipatedVenues,
+} from "./venue-participation-display";
 
 export const DISCOVERY_TABLE_HEADERS = [
   "Fixture",
   "Kickoff",
-  "Matchbook status",
+  "Matchbook",
   "Polymarket",
-  "Matched markets",
-  "Family / outcomes",
-  "Best Matchbook",
-  "Best Polymarket",
+  "Kalshi",
+  "Equivalent",
+  "Best arb market",
   "Net edge",
-  "Trigger",
-  "Distance",
-  "Freshness",
-  "Comparison",
-  "Arb claim",
-  "Score",
-  "Last seen",
+  "Edge vs trigger",
+  "Risk",
+  "Last refresh",
 ] as const;
+
+export const EQUIVALENT_MARKETS_HELP =
+  "Count of settlement-equivalent market comparisons for this fixture after canonical matching. Equivalent 0 means the fixture was evaluated and no settlement-equivalent pairs were found. A dash means markets were not evaluated this cycle (for example the scan budget was exhausted). Venue columns show fixture presence, not market equivalence. The row shows the best executable opportunity; expand the fixture to see every comparison, including rejected or non-executable books.";
+
+export const NOT_EVALUATED_SCAN_BUDGET_LABEL = "Not evaluated — scan budget exhausted";
+export const NOT_EVALUATED_MARKET_FETCH_LABEL = "Not evaluated — market fetch unavailable";
+export const NOT_EVALUATED_SINGLE_VENUE_LABEL =
+  "Not evaluated — single-venue (no cross-venue candidate)";
+export const NOT_EVALUATED_CROSS_VENUE_UNAVAILABLE_LABEL =
+  "Not evaluated — cross-venue unavailable";
+export const NOT_EVALUATED_UPPER_BOUND_BELOW_MIN_NET_LABEL =
+  "Not evaluated — remaining books cannot reach Min Net Arb";
+export const HOT_RELATIONSHIP_MISSING_LABEL = "Not evaluated — HOT relationship missing";
+export const HOT_REVALIDATION_NEEDED_LABEL = "HOT revalidation needed";
+export const FIXTURE_FOUND_LABEL = "fixture found";
+
+export const BEST_ARB_MARKET_HELP =
+  "The market family and selection/line producing the best currently executable net edge for this fixture. Venue prices on this row are for that same market only.";
+
+export const RISK_HELP =
+  "Execution-risk score and band for the same best executable opportunity. Hard freshness and taker-liquidity gates run first; a non-executable book is not scored as a valid arb.";
 
 function decimalText(value: string | number | null | undefined): string {
   if (value === null || value === undefined || value === "") return "—";
   return String(value);
 }
 
+export function venuePresent(flag: boolean | null | undefined): boolean {
+  return Boolean(flag);
+}
+
+export function venueCoverageLabel(item: DiscoveredFixture): string {
+  const bits = [
+    venuePresent(item.matchbook_matched) ? "MB" : "MB · —",
+    venuePresent(item.polymarket_matched) ? "PM" : "PM · —",
+    venuePresent(item.kalshi_matched) ? "K" : "K · —",
+  ];
+  return bits.join(" / ");
+}
+
+export function venueStatusLabel(present: boolean | null | undefined): string {
+  return present ? "fixture found" : "—";
+}
+
+export function venuePriceLabel(price: string | number | null | undefined, present: boolean): string {
+  if (!present) return "—";
+  if (price === null || price === undefined || price === "") return FIXTURE_FOUND_LABEL;
+  return decimalText(price);
+}
+
 export function polymarketCoverageLabel(item: DiscoveredFixture): string {
-  if (item.polymarket_matched) return "matched";
+  if (item.polymarket_matched) return FIXTURE_FOUND_LABEL;
   return item.no_comparison_reason || "unmatched / no supported Polymarket coverage";
 }
 
+export function fixtureDetailHref(canonicalEventId: string): string {
+  return `/arbitrage/fixtures/${encodeURIComponent(canonicalEventId)}`;
+}
+
 export function fixtureHref(item: DiscoveredFixture): string {
-  return `/arbitrage/fixtures/${encodeURIComponent(item.canonical_event_id)}`;
+  return fixtureDetailHref(item.canonical_event_id);
 }
 
 export function fixturePhaseLabel(item: DiscoveredFixture): string {
-  if (item.in_running) return "IN-PLAY";
+  if (item.in_running) return "LIVE";
   const status = (item.fixture_status || "").toLowerCase();
-  if (status.includes("open") || status.includes("pre") || !status) return "PRE";
-  return item.fixture_status?.toUpperCase() || "PRE";
+  if (
+    status.includes("ft") ||
+    status.includes("final") ||
+    status.includes("complete") ||
+    status.includes("settled") ||
+    status.includes("closed")
+  ) {
+    return "FT";
+  }
+  if (status.includes("live") || status.includes("in-play") || status.includes("in_play")) {
+    return "LIVE";
+  }
+  return "PRE";
+}
+
+export function kickoffContextLines(item: DiscoveredFixture, now?: number | null): string[] {
+  const relative = kickoffRelativeLabel(item.kickoff_utc, now);
+  const live = fixturePhaseLabel(item) === "LIVE";
+  const finished = fixturePhaseLabel(item) === "FT";
+  if (live) {
+    const score = liveScoreLabel(item);
+    return score ? [`LIVE · ${score}`] : ["LIVE"];
+  }
+  if (finished) {
+    const score = liveScoreLabel(item);
+    return score ? [`FT · ${score}`] : ["FT"];
+  }
+  const start = relative && !relative.endsWith("ago") ? `Starts ${relative}` : relative;
+  return start ? ["Pre-match", start] : ["Pre-match"];
+}
+
+export function liveScoreLabel(item: DiscoveredFixture): string | null {
+  if (!item.live_score_supported) return null;
+  if (item.home_score == null || item.away_score == null) return null;
+  return `${item.home_score}–${item.away_score}`;
 }
 
 export function kickoffClockLabel(kickoffUtc: string): string {
-  const stamp = new Date(kickoffUtc);
-  if (Number.isNaN(stamp.getTime())) return "—";
-  return stamp.toLocaleTimeString("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "UTC",
-    hour12: false,
-  });
+  if (!kickoffUtc) return "—";
+  // Fixture inventory is a server component, so this heading is not hydrated.
+  // Keep a local-looking clock without going through the hydration-gated helper.
+  return formatKickoffInLocalTimezone(kickoffUtc);
 }
 
 export function inventorySummaryLabel(item: DiscoveredFixture): string {
+  if (marketEvaluationUnevaluated(item)) {
+    return marketEvaluationLabel(item);
+  }
   const discovered = item.discovered_market_count ?? item.matched_market_count;
   const equivalent = item.matched_equivalent_count ?? item.matched_market_count;
   return `${discovered} discovered · ${equivalent} equivalent`;
+}
+
+export function marketEvaluationUnevaluated(item: DiscoveredFixture): boolean {
+  const state = item.market_evaluation_state;
+  if (state === "evaluated") return false;
+  if (
+    state === "not_evaluated_scan_deadline" ||
+    state === "market_fetch_unavailable" ||
+    state === "hot_relationship_missing" ||
+    state === "single_venue_no_cross_venue_candidate" ||
+    state === "cross_venue_unavailable" ||
+    state === "upper_bound_below_min_net" ||
+    item.opportunity_state === "not_evaluated"
+  ) {
+    return true;
+  }
+  return item.matched_equivalent_count == null && !item.solver_is_arbitrage;
+}
+
+export function marketEvaluationLabel(item: DiscoveredFixture): string {
+  if (item.market_evaluation_state === "not_evaluated_scan_deadline") {
+    return NOT_EVALUATED_SCAN_BUDGET_LABEL;
+  }
+  if (item.market_evaluation_state === "market_fetch_unavailable") {
+    return NOT_EVALUATED_MARKET_FETCH_LABEL;
+  }
+  if (item.market_evaluation_state === "hot_relationship_missing") {
+    return HOT_RELATIONSHIP_MISSING_LABEL;
+  }
+  if (item.market_evaluation_state === "single_venue_no_cross_venue_candidate") {
+    return NOT_EVALUATED_SINGLE_VENUE_LABEL;
+  }
+  if (item.market_evaluation_state === "cross_venue_unavailable") {
+    return NOT_EVALUATED_CROSS_VENUE_UNAVAILABLE_LABEL;
+  }
+  if (item.market_evaluation_state === "upper_bound_below_min_net") {
+    return NOT_EVALUATED_UPPER_BOUND_BELOW_MIN_NET_LABEL;
+  }
+  if (item.market_evaluation_reason === "hot_revalidation_needed") {
+    return HOT_REVALIDATION_NEEDED_LABEL;
+  }
+  if (marketEvaluationUnevaluated(item)) return "Not evaluated";
+  return EQUIVALENT_MARKETS_HELP;
+}
+
+export function equivalentCountLabel(item: DiscoveredFixture): string {
+  if (marketEvaluationUnevaluated(item)) return "—";
+  const equivalent = item.matched_equivalent_count ?? item.matched_market_count ?? 0;
+  const near = item.near_executable_market_count;
+  const qualifying = item.qualifying_market_count;
+  const extras: string[] = [];
+  if (qualifying) extras.push(`${qualifying} qualifying`);
+  if (near) extras.push(`${near} near`);
+  return extras.length ? `${equivalent} · ${extras.join(" · ")}` : String(equivalent);
+}
+
+export function opportunityStateLabel(item: DiscoveredFixture): string {
+  if (marketEvaluationUnevaluated(item)) return "not evaluated";
+  if (item.opportunity_state) return item.opportunity_state.replaceAll("_", " ");
+  if (item.solver_is_arbitrage) return "qualifying";
+  return item.matched_equivalent_count
+    ? "matched"
+    : "unmatched";
 }
 
 export function arbClaimLabel(item: DiscoveredFixture): string {
@@ -70,23 +219,186 @@ export function freshnessLabel(item: DiscoveredFixture): string {
   return `${item.quote_age_ms}ms${basis}`;
 }
 
-export function discoveredFixtureCells(item: DiscoveredFixture): Record<(typeof DISCOVERY_TABLE_HEADERS)[number], string> {
+export function lastRefreshLabel(item: DiscoveredFixture, now?: number | null): string {
+  if (item.last_seen_at) {
+    if (now == null || !Number.isFinite(now)) return item.last_seen_at;
+    const relative = kickoffRelativeLabel(item.last_seen_at, now);
+    if (relative?.endsWith("ago")) return relative;
+    if (relative === "<1m ago" || relative === "in <1m") return relative;
+  }
+  if (item.quote_age_ms == null) return "—";
+  if (item.quote_age_ms < 1000) return `${item.quote_age_ms}ms`;
+  const seconds = Math.round(item.quote_age_ms / 1000);
+  return `${seconds}s`;
+}
+
+export function netEdgeSummary(item: DiscoveredFixture): string {
+  if (
+    (item.current_net_edge == null || item.current_net_edge === "") &&
+    (item.headline_band === "no_executable_arb" || item.no_comparison_reason === "no_executable_arb")
+  ) {
+    return "No executable arb";
+  }
+  return percent(item.current_net_edge);
+}
+
+export function signedEdgeVsTrigger(item: DiscoveredFixture): string {
+  if (item.distance_to_trigger_pp == null || item.distance_to_trigger_pp === "") {
+    return opportunityStateLabel(item);
+  }
+  const parsed = Number(item.distance_to_trigger_pp);
+  if (!Number.isFinite(parsed)) return percentPoints(item.distance_to_trigger_pp);
+  // Backend distance is (trigger - current). Edge vs trigger flips the sign so
+  // qualifying is positive (+0.4pp) and below-trigger is negative (-0.6pp).
+  const edgeVsTrigger = -parsed;
+  const signed = `${edgeVsTrigger > 0 ? "+" : ""}${edgeVsTrigger.toFixed(1)}pp`;
+  return `${signed} · ${opportunityStateLabel(item)}`;
+}
+
+export function edgeTone(item: DiscoveredFixture): "qualifying" | "near" | "none" {
+  const state = opportunityStateLabel(item);
+  if (item.headline_band === "qualifying" || state === "qualifying") return "qualifying";
+  if (item.headline_band === "near_executable" || state === "near") return "near";
+  return "none";
+}
+
+export function riskLabel(item: DiscoveredFixture): string {
+  if (item.execution_risk_score == null) return "—";
+  const band = item.execution_risk_band
+    ? item.execution_risk_band.replaceAll("_", " ").replace(/\b\w/g, (ch) => ch.toUpperCase())
+    : null;
+  return band ? `${item.execution_risk_score} · ${band}` : String(item.execution_risk_score);
+}
+
+export function riskReasonsLabel(item: DiscoveredFixture): string {
+  const reasons = item.execution_risk_reasons ?? [];
+  if (!reasons.length) return "Hard executability gates apply before risk scoring.";
+  return reasons.map((reason) => reason.replaceAll("_", " ")).join(" · ");
+}
+
+export function bestArbMarketLabel(item: DiscoveredFixture): string {
+  if (marketEvaluationUnevaluated(item)) return "—";
+  if (item.best_arb_market) return item.best_arb_market;
+  if (item.headline_band === "no_executable_arb" || item.no_comparison_reason === "no_executable_arb") {
+    return "No executable arb";
+  }
+  return "—";
+}
+
+export function discoveredFixtureCells(
+  item: DiscoveredFixture,
+): Record<(typeof DISCOVERY_TABLE_HEADERS)[number], string> {
+  const kickoffLines = kickoffContextLines(item);
   return {
     Fixture: `${item.home_team} v ${item.away_team}`,
-    Kickoff: item.kickoff_utc,
-    "Matchbook status": item.fixture_status ?? "—",
-    Polymarket: polymarketCoverageLabel(item),
-    "Matched markets": inventorySummaryLabel(item),
-    "Family / outcomes": [item.market_family, item.outcome_context].filter(Boolean).join(" · ") || "—",
-    "Best Matchbook": decimalText(item.best_matchbook_price),
-    "Best Polymarket": decimalText(item.best_polymarket_price),
-    "Net edge": percent(item.current_net_edge),
-    Trigger: percent(item.trigger_net_edge),
-    Distance: percentPoints(item.distance_to_trigger_pp),
-    Freshness: freshnessLabel(item),
-    Comparison: item.no_comparison_reason ?? "backend comparison available",
-    "Arb claim": arbClaimLabel(item),
-    Score: "",
-    "Last seen": item.last_seen_at,
+    Kickoff: [kickoffLocalLabel(item.kickoff_utc), ...kickoffLines].join(" · "),
+    Matchbook: venuePriceLabel(item.best_matchbook_price, venuePresent(item.matchbook_matched)),
+    Polymarket: venuePriceLabel(item.best_polymarket_price, venuePresent(item.polymarket_matched)),
+    Kalshi: venuePriceLabel(item.best_kalshi_price, venuePresent(item.kalshi_matched)),
+    Equivalent: equivalentCountLabel(item),
+    "Best arb market": bestArbMarketLabel(item),
+    "Net edge": netEdgeSummary(item),
+    "Edge vs trigger": signedEdgeVsTrigger(item),
+    Risk: riskLabel(item),
+    "Last refresh": lastRefreshLabel(item),
   };
+}
+
+export function technicalDetailLines(item: DiscoveredFixture): string[] {
+  return [
+    item.canonical_event_id ? `canonical ${item.canonical_event_id}` : null,
+    item.source_event_id ? `${item.source} ${item.source_event_id}` : null,
+    item.kickoff_utc ? `kickoff UTC ${item.kickoff_utc}` : null,
+    item.market_family ? `family ${item.market_family}` : null,
+    item.outcome_context ? `outcomes ${item.outcome_context}` : null,
+    item.no_comparison_reason ? `reason ${item.no_comparison_reason}` : null,
+    item.market_evaluation_state ? `evaluation ${item.market_evaluation_state}` : null,
+    item.market_evaluation_reason ? `evaluation reason ${item.market_evaluation_reason}` : null,
+    item.quote_age_basis ? `quote basis ${item.quote_age_basis}` : null,
+    item.quote_age_ms != null ? `quote age ${item.quote_age_ms}ms` : null,
+    item.best_matchbook_price != null ? `MB ${decimalText(item.best_matchbook_price)}` : null,
+    item.best_polymarket_price != null ? `PM ${decimalText(item.best_polymarket_price)}` : null,
+    item.best_kalshi_price != null ? `K ${decimalText(item.best_kalshi_price)}` : null,
+    arbClaimLabel(item),
+  ].filter((line): line is string => Boolean(line));
+}
+
+export function venuePresenceCount(item: DiscoveredFixture): number {
+  return [
+    venuePresent(item.matchbook_matched),
+    venuePresent(item.polymarket_matched),
+    venuePresent(item.kalshi_matched),
+  ].filter(Boolean).length;
+}
+
+export function fixtureIsCrossVenue(item: DiscoveredFixture): boolean {
+  return venuePresenceCount(item) >= 2;
+}
+
+export type DiscoveryCompactCounts = {
+  fixtures: number;
+  crossVenue: number;
+  equivalent: number;
+  qualifying: number;
+  skipped: number;
+};
+
+export function discoveryCompactCounts(status: LiveRefreshStatus | null): DiscoveryCompactCounts {
+  const fixtures = status?.discovered_fixtures ?? [];
+  return {
+    fixtures: fixtures.length,
+    crossVenue: fixtures.filter(fixtureIsCrossVenue).length,
+    equivalent: fixtures.reduce((sum, item) => sum + (item.matched_equivalent_count ?? 0), 0),
+    qualifying: fixtures.filter((item) => item.solver_is_arbitrage).length,
+    skipped: status?.skipped_out_of_scope ?? 0,
+  };
+}
+
+export function discoveryEmptyMatchNote(counts: DiscoveryCompactCounts): string | null {
+  if (counts.fixtures <= 0) return null;
+  if (counts.crossVenue > 0 && counts.equivalent === 0) {
+    return "Multi-venue fixture overlap exists; no settlement-equivalent markets.";
+  }
+  if (counts.crossVenue === 0) {
+    return "No current multi-venue identity overlap; inspect source coverage before changing mapping.";
+  }
+  return null;
+}
+
+export function discoveryCompactSummaryLabel(
+  status: LiveRefreshStatus | null,
+  available: boolean,
+): string {
+  if (!available || !status) {
+    return "Fixture Discovery · status unavailable";
+  }
+  const counts = discoveryCompactCounts(status);
+  const note = discoveryEmptyMatchNote(counts);
+  const headline =
+    `Fixture Discovery · ${counts.fixtures} fixtures · ${counts.crossVenue} cross-venue · ` +
+    `${counts.equivalent} equivalent · ${counts.qualifying} qualifying · ${counts.skipped} skipped`;
+  return note ? `${headline} · ${note}` : headline;
+}
+
+export function discoveryStatusBadgeLabel(
+  available: boolean,
+  status?: LiveRefreshStatus | null,
+): string {
+  if (!available) return "DISCOVERY STATUS UNAVAILABLE";
+  if (!status) return "LIVE PAPER · VENUE SET UNKNOWN";
+  const health = status.venue_health;
+  if (health == null || Object.keys(health).length === 0) {
+    return "LIVE PAPER · LAST SCAN VENUES UNKNOWN";
+  }
+  const participated = discoveryParticipatedVenues(status);
+  const failed = discoveryFailedVenues(status);
+  const participatedLabel = participated.length
+    ? participated.map((venue) => VENUE_SHORT[venue] ?? venue).join(" / ")
+    : "NO VENUE DATA";
+  const failedLabel = failed
+    .map((item) => `${item.short} ${String(item.health).toUpperCase()}`)
+    .join(" · ");
+  return failedLabel
+    ? `LIVE PAPER · ${participatedLabel} · ${failedLabel}`
+    : `LIVE PAPER · ${participatedLabel}`;
 }

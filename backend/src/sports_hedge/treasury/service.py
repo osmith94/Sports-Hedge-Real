@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sports_hedge.accounting.dimensions import CapitalSource, parse_capital_source
+from sports_hedge.accounting.dimensions import CapitalSource, PostingSide, parse_capital_source
 from sports_hedge.accounting.paper_journal import (
     DataProvenance,
     DuplicateJournalError,
@@ -20,6 +20,7 @@ from sports_hedge.accounting.paper_journal import (
 from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.settlement import PaperSettlementComputation
 from sports_hedge.paper.trades import PaperSettlementRequest, PaperTrade
+from sports_hedge.persistence.paper_ledger import SerializedLedgerBound
 from sports_hedge.treasury.models import (
     PaperTreasuryEvent,
     PaperTreasuryEventType,
@@ -40,7 +41,7 @@ class PaperTreasuryError(ValueError):
     """Fail-closed paper treasury mutation."""
 
 
-class PaperTreasuryService:
+class PaperTreasuryService(SerializedLedgerBound):
     def __init__(self, ledger: Any) -> None:
         self._ledger = ledger
         self._connection = ledger._connection
@@ -235,6 +236,101 @@ class PaperTreasuryService:
                 )
         return self.snapshot()
 
+    def set_available_amounts(
+        self,
+        amounts: dict[VenueName, Decimal],
+        *,
+        reason: str = "operator paper treasury edit",
+        provenance: DataProvenance = DataProvenance.LIVE_PAPER,
+        now: datetime | None = None,
+    ) -> PaperTreasurySnapshot:
+        """Set native available cash per venue. Fail-closed while locks/trades are open."""
+
+        if any(value < 0 for value in amounts.values()):
+            raise PaperTreasuryError("invalid_seed_amount")
+        self.assert_mutation_safe()
+        session = self.active_session()
+        if session is None:
+            self.ensure_demo_session(reason=reason, provenance=provenance, now=now)
+            session = self.active_session()
+        if session is None:
+            raise PaperTreasuryError("stale_unknown_pool")
+        occurred = now or datetime.now(UTC)
+        with self._ledger.transaction():
+            self._assert_reset_allowed(session)
+            opportunity_id = f"treasury:{session.session_id}:adjust"
+            for venue, native in amounts.items():
+                if venue is VenueName.SMARKETS:
+                    continue
+                pool = self._pool_row(session.session_id, venue, "GBP" if venue is VenueName.MATCHBOOK else "USD")
+                current = Decimal(pool["available_cash"])
+                delta = native - current
+                if delta == 0:
+                    continue
+                rate = Decimal(pool["fx_rate_gbp_per_unit"] or "0")
+                source = pool["fx_source"]
+                if rate <= 0:
+                    raise PaperTreasuryError("missing_fx_snapshot")
+                gbp = abs(delta) * rate
+                postings = seed_funding_postings(
+                    venue=venue,
+                    currency=pool["native_currency"],
+                    amount_native=abs(delta),
+                    amount_gbp=gbp,
+                    fx_rate_gbp_per_unit=rate,
+                    opportunity_id=opportunity_id,
+                )
+                if delta < 0:
+                    postings = [
+                        item.model_copy(
+                            update={
+                                "side": PostingSide.CREDIT
+                                if item.side is PostingSide.DEBIT
+                                else PostingSide.DEBIT
+                            }
+                        )
+                        for item in postings
+                    ]
+                journal, _created = self._ledger.journal.append_idempotent(
+                    PaperJournalEntry(
+                        source="paper_treasury_adjust",
+                        source_id=f"{session.session_id}:{venue.value}:{occurred.isoformat()}:{native}",
+                        occurred_at=occurred,
+                        description=f"PAPER-ONLY treasury adjust {venue.value}",
+                        opportunity_id=opportunity_id,
+                        provenance=provenance,
+                        postings=postings,
+                    )
+                )
+                self._connection.execute(
+                    """
+                    UPDATE paper_treasury_pools
+                    SET available_cash = ?, seed_native = ?
+                    WHERE pool_id = ?
+                    """,
+                    (str(native), str(native), pool["pool_id"]),
+                )
+                self._insert_event(
+                    PaperTreasuryEvent(
+                        event_id=str(uuid4()),
+                        session_id=session.session_id,
+                        pool_id=pool["pool_id"],
+                        venue=venue,
+                        native_currency=pool["native_currency"],
+                        event_type=PaperTreasuryEventType.CORRECTION,
+                        native_amount=delta,
+                        occurred_at=occurred,
+                        opportunity_id=opportunity_id,
+                        source="paper_treasury_adjust",
+                        source_id=f"{session.session_id}:{venue.value}:{occurred.isoformat()}",
+                        reason=reason,
+                        fx_rate_gbp_per_unit=rate,
+                        fx_source=source,
+                        journal_id=journal.journal_id,
+                    )
+                )
+        return self.snapshot()
+
     def lock_capital(
         self,
         requests: list[TreasuryLockRequest],
@@ -361,12 +457,45 @@ class PaperTreasuryService:
                     if (lock["trade_id"] or None) != result.trade_id:
                         raise PaperTreasuryError("unknown_trade_lock")
                     remaining = Decimal(lock["locked_native"]) - Decimal(lock["released_native"])
-                    if leg.amount_native > remaining:
-                        raise PaperTreasuryError("release_exceeds_lock")
                     if VenueName(lock["venue"]) is not leg.venue:
                         raise PaperTreasuryError("venue_mismatch")
                     if lock["native_currency"] != leg.native_currency.upper():
                         raise PaperTreasuryError("currency_mismatch")
+                    capital_source = parse_capital_source(
+                        _row_value(lock, "capital_source", "AUTO_POOL")
+                    )
+                    journal_source_id = f"{source_id}:{leg.lock_id}"
+                    expected = PaperJournalEntry(
+                        source=result.source,
+                        source_id=journal_source_id,
+                        occurred_at=occurred,
+                        description="PAPER-ONLY validated unwind capital release",
+                        opportunity_id=result.opportunity_id or result.trade_id,
+                        trade_id=result.trade_id,
+                        postings=unwind_close_postings(
+                            venue=leg.venue,
+                            currency=leg.native_currency,
+                            locked_native=leg.amount_native,
+                            realised_pnl_native=leg.realised_pnl_native,
+                            fee_native=leg.fee_native,
+                            amount_gbp_per_native=leg.fx_rate_gbp_per_unit,
+                            opportunity_id=result.opportunity_id or result.trade_id,
+                            capital_source=capital_source,
+                            position_id=result.trade_id,
+                        ),
+                    )
+                    existing = self._ledger.journal.get(result.source, journal_source_id)
+                    if remaining == 0 and existing is not None:
+                        if not existing.facts_match(expected):
+                            raise PaperTreasuryError("conflicting_journal_facts")
+                        entries.append(existing)
+                        continue
+                    if remaining == 0:
+                        raise PaperTreasuryError("release_exceeds_lock")
+                    if existing is not None:
+                        raise PaperTreasuryError("conflicting_journal_facts")
+                    if leg.amount_native > remaining:
+                        raise PaperTreasuryError("release_exceeds_lock")
                     pool = self._pool_row(session.session_id, leg.venue, leg.native_currency)
                     self._release_locked(
                         pool,
@@ -376,30 +505,7 @@ class PaperTreasuryService:
                     pool = self._pool_row(session.session_id, leg.venue, leg.native_currency)
                     self._add_realised(pool, leg.realised_pnl_native, leg.fee_native)
                     self._bump_lock_released(leg.lock_id, leg.amount_native)
-                    capital_source = parse_capital_source(
-                        _row_value(lock, "capital_source", "AUTO_POOL")
-                    )
-                    posted, created = self._ledger.journal.append_idempotent(
-                        PaperJournalEntry(
-                            source=result.source,
-                            source_id=f"{source_id}:{leg.lock_id}",
-                            occurred_at=occurred,
-                            description="PAPER-ONLY validated unwind capital release",
-                            opportunity_id=result.opportunity_id or result.trade_id,
-                            trade_id=result.trade_id,
-                            postings=unwind_close_postings(
-                                venue=leg.venue,
-                                currency=leg.native_currency,
-                                locked_native=leg.amount_native,
-                                realised_pnl_native=leg.realised_pnl_native,
-                                fee_native=leg.fee_native,
-                                amount_gbp_per_native=leg.fx_rate_gbp_per_unit,
-                                opportunity_id=result.opportunity_id or result.trade_id,
-                                capital_source=capital_source,
-                                position_id=result.trade_id,
-                            ),
-                        )
-                    )
+                    posted, created = self._ledger.journal.append_idempotent(expected)
                     entries.append(posted)
                     if created:
                         self._insert_event(
@@ -610,6 +716,19 @@ class PaperTreasuryService:
         occurred_at: datetime,
         provenance: DataProvenance,
     ) -> PaperJournalEntry:
+        with self._ledger.transaction():
+            return self._lock_one_in_transaction(
+                session, request, occurred_at=occurred_at, provenance=provenance
+            )
+
+    def _lock_one_in_transaction(
+        self,
+        session: PaperTreasurySession,
+        request: TreasuryLockRequest,
+        *,
+        occurred_at: datetime,
+        provenance: DataProvenance,
+    ) -> PaperJournalEntry:
         if request.amount_native <= 0:
             raise PaperTreasuryError("invalid_lock_amount")
         existing = self._lock_row(request.lock_id)
@@ -617,9 +736,11 @@ class PaperTreasuryService:
             if not _lock_facts_match(existing, request):
                 raise PaperTreasuryError("conflicting_lock_facts")
             posted = self._ledger.journal.get(request.source, request.lock_id)
-            if posted is None:
-                raise PaperTreasuryError("duplicate_lock")
-            return posted
+            if posted is not None:
+                return posted
+            return self._repair_lock_journal(
+                session, request, existing, occurred_at=occurred_at, provenance=provenance
+            )
         pool = self._pool_row(session.session_id, request.venue, request.native_currency)
         available = Decimal(pool["available_cash"])
         locked = Decimal(pool["locked_capital"])
@@ -662,6 +783,58 @@ class PaperTreasuryService:
                 request.fill_id or request.lock_id,
             ),
         )
+        return self._post_lock_journal_and_event(
+            session,
+            request,
+            pool_id=pool["pool_id"],
+            journal_rate=journal_rate,
+            fx_source=fx_source,
+            amount_gbp=amount_gbp,
+            capital_source=capital_source,
+            occurred_at=occurred_at,
+            provenance=provenance,
+        )
+
+    def _repair_lock_journal(
+        self,
+        session: PaperTreasurySession,
+        request: TreasuryLockRequest,
+        existing: Any,
+        *,
+        occurred_at: datetime,
+        provenance: DataProvenance,
+    ) -> PaperJournalEntry:
+        """Post the missing journal for a committed lock without mutating balances again."""
+
+        pool = self._pool_row(session.session_id, request.venue, request.native_currency)
+        journal_rate, fx_source = self._authoritative_lock_fx(pool, request)
+        amount_gbp = request.amount_native * journal_rate
+        capital_source = parse_capital_source(request.capital_source)
+        return self._post_lock_journal_and_event(
+            session,
+            request,
+            pool_id=existing["pool_id"],
+            journal_rate=journal_rate,
+            fx_source=fx_source,
+            amount_gbp=amount_gbp,
+            capital_source=capital_source,
+            occurred_at=occurred_at,
+            provenance=provenance,
+        )
+
+    def _post_lock_journal_and_event(
+        self,
+        session: PaperTreasurySession,
+        request: TreasuryLockRequest,
+        *,
+        pool_id: str,
+        journal_rate: Decimal,
+        fx_source: str,
+        amount_gbp: Decimal,
+        capital_source: CapitalSource,
+        occurred_at: datetime,
+        provenance: DataProvenance,
+    ) -> PaperJournalEntry:
         posted, _created = self._ledger.journal.append_idempotent(
             PaperJournalEntry(
                 source=request.source,
@@ -683,27 +856,28 @@ class PaperTreasuryService:
                 ),
             )
         )
-        self._insert_event(
-            PaperTreasuryEvent(
-                event_id=str(uuid4()),
-                session_id=session.session_id,
-                pool_id=pool["pool_id"],
-                venue=request.venue,
-                native_currency=request.native_currency,
-                event_type=PaperTreasuryEventType.LOCK,
-                native_amount=request.amount_native,
-                occurred_at=occurred_at,
-                trade_id=request.trade_id,
-                opportunity_id=request.opportunity_id,
-                lock_id=request.lock_id,
-                source=request.source,
-                source_id=request.lock_id,
-                reason=request.reason,
-                fx_rate_gbp_per_unit=journal_rate,
-                fx_source=fx_source,
-                journal_id=posted.journal_id,
+        if not self._event_exists(request.source, request.lock_id):
+            self._insert_event(
+                PaperTreasuryEvent(
+                    event_id=f"lock:{request.lock_id}",
+                    session_id=session.session_id,
+                    pool_id=pool_id,
+                    venue=request.venue,
+                    native_currency=request.native_currency,
+                    event_type=PaperTreasuryEventType.LOCK,
+                    native_amount=request.amount_native,
+                    occurred_at=occurred_at,
+                    trade_id=request.trade_id,
+                    opportunity_id=request.opportunity_id,
+                    lock_id=request.lock_id,
+                    source=request.source,
+                    source_id=request.lock_id,
+                    reason=request.reason,
+                    fx_rate_gbp_per_unit=journal_rate,
+                    fx_source=fx_source,
+                    journal_id=posted.journal_id,
+                )
             )
-        )
         return posted
 
     def _apply_leg_settlement(
@@ -872,19 +1046,41 @@ class PaperTreasuryService:
             )
         )
 
+    def assert_mutation_safe(self) -> None:
+        session = self.active_session()
+        if session is None:
+            return
+        self._assert_reset_allowed(session)
+
     def _assert_reset_allowed(self, session: PaperTreasurySession) -> None:
-        open_locks = self._connection.execute(
-            """
-            SELECT COUNT(*) AS n FROM paper_treasury_locks
-            WHERE session_id = ? AND status = 'open'
-            """,
-            (session.session_id,),
-        ).fetchone()["n"]
-        if open_locks:
-            raise PaperTreasuryError("active_treasury_locks")
+        lock_rows = list(
+            self._connection.execute(
+                """
+                SELECT lock_id, trade_id FROM paper_treasury_locks
+                WHERE session_id = ? AND status = 'open'
+                ORDER BY lock_id
+                """,
+                (session.session_id,),
+            )
+        )
+        if lock_rows:
+            raise PaperTreasuryError(
+                _mutation_block_message(
+                    "active_treasury_locks",
+                    lock_ids=[row["lock_id"] for row in lock_rows],
+                    trade_ids=[row["trade_id"] for row in lock_rows if row["trade_id"]],
+                )
+            )
         trades = getattr(self._ledger, "trades", None)
-        if trades is not None and trades.list_active():
-            raise PaperTreasuryError("open_paper_positions")
+        if trades is not None:
+            active = trades.list_active()
+            if active:
+                raise PaperTreasuryError(
+                    _mutation_block_message(
+                        "open_paper_positions",
+                        trade_ids=[trade.trade_id for trade in active],
+                    )
+                )
 
     def _authoritative_lock_fx(self, pool: Any, request: TreasuryLockRequest) -> tuple[Decimal, str]:
         if pool["fx_rate_gbp_per_unit"] is None:
@@ -1001,7 +1197,16 @@ class PaperTreasuryService:
         locked = Decimal(pool["locked_capital"])
         available = Decimal(pool["available_cash"])
         if amount > locked:
-            raise PaperTreasuryError("release_exceeds_lock")
+            # Sequential native-lock releases can exceed stored pool locked
+            # by Decimal representation dust (sum(locks) == pool, but
+            # pool - a - b < c). Clamp that dust so every lock can still
+            # be released exactly once.
+            dust = amount - locked
+            if dust <= Decimal("1e-18"):
+                into_available -= dust
+                amount = locked
+            else:
+                raise PaperTreasuryError("release_exceeds_lock")
         new_locked = locked - amount
         new_available = available + into_available
         if new_available < 0 or new_locked < 0:
@@ -1068,6 +1273,17 @@ class PaperTreasuryService:
             )
         except Exception as exc:
             raise PaperTreasuryError(f"duplicate_treasury_event:{event.source}:{event.source_id}") from exc
+        emitter = getattr(self._ledger, "accounting_emitter", None)
+        if emitter is not None:
+            journal = None
+            if event.journal_id:
+                for entry in self._ledger.journal.list_entries():
+                    if entry.journal_id == event.journal_id:
+                        journal = entry
+                        break
+            if journal is None:
+                journal = self._ledger.journal.get(event.source, event.source_id)
+            emitter.emit_treasury(event, journal=journal)
 
 
 def _pool_id(session_id: str, venue: VenueName, currency: str) -> str:
@@ -1094,7 +1310,13 @@ def _pool_from_row(row: Any) -> PaperTreasuryPoolState:
     currency = row["native_currency"]
     available = Decimal(row["available_cash"])
     locked = Decimal(row["locked_capital"])
-    rate = Decimal(row["fx_rate_gbp_per_unit"]) if row["fx_rate_gbp_per_unit"] else None
+    rate_raw = _row_value(row, "fx_rate_gbp_per_unit", "")
+    if rate_raw:
+        rate = Decimal(rate_raw)
+    elif currency.upper() == "GBP":
+        rate = Decimal("1")
+    else:
+        rate = None
     native_total = available + locked
     gbp = native_total * rate if rate is not None else None
     if currency == "GBP":
@@ -1103,6 +1325,7 @@ def _pool_from_row(row: Any) -> PaperTreasuryPoolState:
         status = "fx_converted"
     else:
         status = "fx_unavailable"
+    fx_as_of_raw = _row_value(row, "fx_as_of", "")
     return PaperTreasuryPoolState(
         pool_id=row["pool_id"],
         session_id=row["session_id"],
@@ -1117,8 +1340,8 @@ def _pool_from_row(row: Any) -> PaperTreasuryPoolState:
         gbp_carrying_value=gbp,
         gbp_carrying_status=status,
         fx_rate_gbp_per_unit=rate,
-        fx_source=row["fx_source"],
-        fx_as_of=datetime.fromisoformat(row["fx_as_of"]) if row["fx_as_of"] else None,
+        fx_source=_row_value(row, "fx_source", "") or None,
+        fx_as_of=datetime.fromisoformat(fx_as_of_raw) if fx_as_of_raw else None,
     )
 
 
@@ -1165,3 +1388,21 @@ def _lock_facts_match(existing: Any, request: TreasuryLockRequest) -> bool:
         and _row_value(existing, "fill_id", existing["lock_id"])
         == (request.fill_id or request.lock_id)
     )
+
+
+def _mutation_block_message(
+    code: str,
+    *,
+    lock_ids: list[str] | None = None,
+    trade_ids: list[str] | None = None,
+) -> str:
+    """Keep the fail-closed code as the prefix so existing matchers still pass."""
+
+    parts = [code]
+    unique_locks = list(dict.fromkeys(lock_ids or []))
+    unique_trades = list(dict.fromkeys(trade_ids or []))
+    if unique_locks:
+        parts.append("lock_id=" + ",".join(unique_locks))
+    if unique_trades:
+        parts.append("trade_id=" + ",".join(unique_trades))
+    return " ".join(parts)

@@ -12,7 +12,7 @@ These files summarize the non-negotiable product principles agreed for Sports He
 
 1. [`core-tenets/01_PRODUCT_STRUCTURE.md`](core-tenets/01_PRODUCT_STRUCTURE.md) — two distinct top-level product modules: Arbitrage and Research.
 2. [`core-tenets/02_PAPER_MODE_AND_EXECUTION_BOUNDARIES.md`](core-tenets/02_PAPER_MODE_AND_EXECUTION_BOUNDARIES.md) — Phase 1 is read-only toward venues and paper-only.
-3. [`core-tenets/03_CANONICAL_MARKET_EQUIVALENCE.md`](core-tenets/03_CANONICAL_MARKET_EQUIVALENCE.md) — economics and settlement semantics must match before markets are compared.
+3. [`core-tenets/03_CANONICAL_MARKET_EQUIVALENCE.md`](core-tenets/03_CANONICAL_MARKET_EQUIVALENCE.md) — executable cross-venue comparison is strict: both markets must resolve to the same Approved Match Register canonical key with matching required parameters; runtime scanning does not score, review, or re-litigate registered rows.
 4. [`core-tenets/04_ARBITRAGE_OPERATIONS.md`](core-tenets/04_ARBITRAGE_OPERATIONS.md) — arbitrage is depth-, cost- and risk-aware, with near-arb lifecycle visibility.
 5. [`core-tenets/05_RESEARCH_AND_VALUE.md`](core-tenets/05_RESEARCH_AND_VALUE.md) — Research is probabilistic and all actionable signals are weighted against equivalent market odds.
 6. [`core-tenets/06_SCENARIO_RESPONSE_PROFILES.md`](core-tenets/06_SCENARIO_RESPONSE_PROFILES.md) — scenario analysis is team-specific, league-benchmarked and sample-aware.
@@ -27,7 +27,9 @@ These files summarize the non-negotiable product principles agreed for Sports He
 15. [`core-tenets/15_EFFECTIVE_VENUE_ECONOMICS_AND_FEES.md`](core-tenets/15_EFFECTIVE_VENUE_ECONOMICS_AND_FEES.md) — Sports Hedge compares net executable economics after the exact applicable venue/market/side/order-role costs, not headline odds.
 16. [`core-tenets/16_EXTERNAL_MANUAL_LEGS.md`](core-tenets/16_EXTERNAL_MANUAL_LEGS.md) — opportunities with a required non-automated venue leg must hard-stop for explicit external/manual confirmation, keep capital separate, and revalidate the remaining hedge before proceeding.
 17. [`core-tenets/17_HISTORICAL_MARKET_MOVEMENT_CONTEXT.md`](core-tenets/17_HISTORICAL_MARKET_MOVEMENT_CONTEXT.md) — large or rapid market moves should be interpreted against comparable historical team/regime/league movements, with explicit sample size, uncertainty and the ability to report weak/no relationship or no historical precedent.
-18. [`core-tenets/18_EXECUTION_ATOMICITY_AND_FILL_RISK.md`](core-tenets/18_EXECUTION_ATOMICITY_AND_FILL_RISK.md) — one-leg-filled / remaining-leg-failed exposure is a principal production risk; real execution requires fresh revalidation after every fill, hard unhedged-exposure controls, shadow execution evidence and staged micro-live validation before treasury scale increases.
+18. [`core-tenets/18_EXECUTION_ATOMICITY_AND_FILL_RISK.md`](core-tenets/18_EXECUTION_ATOMICITY_AND_FILL_RISK.md) — one-leg-filled / remaining-leg-failed exposure is a principal production risk; executable opening liquidity is current taker depth we can consume now, not passive/maker quotes; real execution requires fresh revalidation after every fill, hard unhedged-exposure controls, shadow execution evidence and staged micro-live validation before treasury scale increases.
+19. [`core-tenets/19_CONCURRENT_HOT_AND_UNIVERSE_SCANNING.md`](core-tenets/19_CONCURRENT_HOT_AND_UNIVERSE_SCANNING.md) — authoritative scanner operating model: UNIVERSE discovers and maintains durable approved-market identity; the catalogue remembers exact native IDs/parameters; one price engine reprices every ACTIVE row; HOT and BACKGROUND are priority tiers, not separate discovery scanners; shared provider coordination, family-scoped completeness, and no global scan lock are non-negotiable.
+20. [`core-tenets/20_APPROVED_MARKET_CATALOGUE_AND_EXCEPTION_REVIEW.md`](core-tenets/20_APPROVED_MARKET_CATALOGUE_AND_EXCEPTION_REVIEW.md) — the operational scanner searches a bounded catalogue of pre-approved football archetypes stored in one versioned Approved Match Register; the scanner consumes that register deterministically. Onboarding review may add register entries; it is not a runtime admission gate for registered rows.
 
 ## Source specifications
 
@@ -40,6 +42,8 @@ These tenets should be read alongside:
 - `SCENARIO_RESPONSE_PROFILES.md`
 - `MANAGER_ERA_AND_REGIME_CONTEXT.md`
 - `PRIORITY_ARB_ALERTS.md`
+- `DUAL_CADENCE_SCANNER.md` — historical implementation record only. Core Tenet 19 is authoritative for the current scanner operating model: UNIVERSE → durable catalogue → one price engine → HOT/BACKGROUND priority. It supersedes serialized/leftover-until-HOT scheduling, any wording that treats HOT as a second broad-discovery scanner, and any flow that redoes matching/equivalence for already-catalogued rows.
+- Core Tenets 03 and 20 are authoritative for market-contract admission. Runtime scanning consumes the versioned Approved Match Register. Numeric mapping confidence is not permission to treat markets as equivalent. Fixture identity may still use scored evidence to find candidates. Onboarding review may add register entries; it is not a scanner gate for already-registered rows.
 - future accounting / FX / historical-data specifications
 
 ## Review rule

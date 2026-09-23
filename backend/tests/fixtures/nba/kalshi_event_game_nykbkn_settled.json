@@ -1,0 +1,28 @@
+{
+  "fixture_id": "kalshi-event-game-nykbkn-settled",
+  "identified_as": "CAPTURED public Kalshi settled event New York at Brooklyn. Title uses city 'New York' vs club 'Brooklyn'; tickers NYK vs BKN. Nested markets empty.",
+  "source": "https://external-api.kalshi.com/trade-api/v2/events/KXNBAGAME-26MAR20NYKBKN",
+  "retrieved_at": "2026-09-21T08:40:00Z",
+  "data_class": "captured_public_payload_shape",
+  "payload": {
+    "event_ticker": "KXNBAGAME-26MAR20NYKBKN",
+    "series_ticker": "KXNBAGAME",
+    "title": "New York at Brooklyn",
+    "sub_title": "NYK at BKN (Mar 20)",
+    "category": "Sports",
+    "mutually_exclusive": true,
+    "product_metadata": {
+      "competition": "Pro Basketball (M)",
+      "competition_scope": "Game"
+    },
+    "collateral_return_type": "MECNET",
+    "settlement_sources": [
+      {
+        "name": "the Governing League",
+        "url": "https://www.nba.com"
+      }
+    ],
+    "strike_period": "",
+    "markets": []
+  }
+}

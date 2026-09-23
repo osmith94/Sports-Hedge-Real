@@ -85,6 +85,21 @@ def test_preflight_collect_allows_configured_console_origin() -> None:
     assert "content-type" in allowed_headers
 
 
+def test_preflight_matchbook_fee_put_allows_configured_console_origin() -> None:
+    client = TestClient(app)
+    response = client.options(
+        "/paper/matchbook-fee",
+        headers={
+            "Origin": CONSOLE,
+            "Access-Control-Request-Method": "PUT",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == CONSOLE
+    assert "PUT" in response.headers.get("access-control-allow-methods", "").upper()
+
+
 def test_preflight_collect_denies_unlisted_origin() -> None:
     client = TestClient(app)
     response = client.options(

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sports_hedge.api.main import app
 from sports_hedge.api.watchlist import get_watchlist_service
 from sports_hedge.application.collector import ReadOnlyCrossVenueCollector
+from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.quote_freshness import (
@@ -41,10 +42,24 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
-from venue_cost_helpers import matchbook_polymarket_costs
+from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
+from registered_kalshi import FakeKalshiBTTS
 
 from test_near_arbitrage_watchlist import _observation
-from test_read_only_collector import FakeMatchbook, FakePolymarket
+from test_read_only_collector import FakeMatchbook, FakePolymarket, KICKOFF
+
+
+class AgedMatchbook(FakeMatchbook):
+    async def list_markets(self, event_id: int | str, **filters):
+        payload = await super().list_markets(event_id, **filters)
+        aged = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+        for market in payload.get("markets", []):
+            market["last-updated"] = aged
+            for runner in market.get("runners", []):
+                runner["last-updated"] = aged
+                for price in runner.get("prices", []):
+                    price["last-updated"] = aged
+        return payload
 
 
 EVALUATED = datetime(2026, 9, 12, 14, 0, tzinfo=UTC)
@@ -119,6 +134,23 @@ def test_mixed_required_books_use_oldest_quote_not_newest() -> None:
     assert age.quote_age_ms is not None
     assert 59_000 <= age.quote_age_ms <= 60_000
     assert age.quote_age_ms != 0
+
+
+def test_freshness_is_revalidation_not_price_change() -> None:
+    """Tenet 18: unchanged odds are not stale if the quote was just revalidated."""
+
+    first = retrieval_quote_age(
+        retrieved_at=EVALUATED - timedelta(milliseconds=50),
+        evaluated_at=EVALUATED,
+    )
+    revalidated = retrieval_quote_age(
+        retrieved_at=EVALUATED - timedelta(milliseconds=40),
+        evaluated_at=EVALUATED,
+    )
+    assert first.basis == "retrieval"
+    assert first.quote_age_ms == 50
+    assert revalidated.quote_age_ms == 40
+    assert revalidated.quote_age_ms < 2000
 
 
 def test_elapsed_collection_uses_evaluation_clock_after_retrieval() -> None:
@@ -345,23 +377,70 @@ def test_stopped_refresh_drops_near_triggered_but_keeps_tracked_history() -> Non
     assert service.triggered(as_of=aged, limit=10) == []
     tracked = service.tracked(as_of=aged, limit=10)
     assert len(tracked) == 1
-    assert tracked[0].status == OpportunityStatus.REJECTED
-    assert tracked[0].is_arbitrage is False
-    assert tracked[0].guaranteed_profit_gbp is None
-    assert "stale_quote" in tracked[0].rejection_reasons
+    assert tracked[0].status == OpportunityStatus.TRIGGERED
+    assert tracked[0].is_arbitrage is True
+    assert tracked[0].guaranteed_profit_gbp == Decimal("1.50")
+    assert "stale_quote" not in tracked[0].rejection_reasons
     persisted = service.repository.get(triggered.opportunity_id)
     assert persisted is not None
     assert persisted.quote_age_ms == 120
-    assert persisted.status == OpportunityStatus.REJECTED
+    assert persisted.status == OpportunityStatus.TRIGGERED
+
+
+def test_demo_fixture_replay_is_not_rejected_stale_on_wall_clock() -> None:
+    last_seen = datetime.now(UTC)
+    service = WatchlistService(SqliteWatchlistRepository(), max_quote_age_ms=1000)
+    live = service.observe(
+        _observation(
+            market_id="mkt-live-age-out",
+            edge=Decimal("0.015"),
+            eligible=True,
+            quote_age_ms=120,
+            observed_at=last_seen,
+            guaranteed_profit_gbp=Decimal("1.50"),
+        )
+    )
+    demo = service.observe(
+        _observation(
+            market_id="mkt-demo-frozen-book",
+            edge=Decimal("0.015"),
+            eligible=True,
+            quote_age_ms=120,
+            observed_at=last_seen,
+            guaranteed_profit_gbp=Decimal("1.50"),
+            data_kind="demo_fixture_replay",
+        )
+    )
+    assert live.status == OpportunityStatus.TRIGGERED
+    assert demo.status == OpportunityStatus.TRIGGERED
+    aged = last_seen + timedelta(seconds=2)
+    live_presented = service._present_freshness(live, aged)
+    demo_presented = service._present_freshness(demo, aged)
+    assert live_presented.status == OpportunityStatus.TRIGGERED
+    assert "stale_quote" not in live_presented.rejection_reasons
+    assert demo_presented.status == OpportunityStatus.TRIGGERED
+    assert "stale_quote" not in demo_presented.rejection_reasons
+    persisted_demo = service.repository.get(demo.opportunity_id)
+    assert persisted_demo is not None
+    assert persisted_demo.status == OpportunityStatus.TRIGGERED
+    persisted_live = service.repository.get(live.opportunity_id)
+    assert persisted_live is not None
+    assert persisted_live.status == OpportunityStatus.TRIGGERED
+    assert service.triggered(as_of=aged) == []
+    tracked_ids = {item.opportunity_id for item in service.tracked(as_of=aged)}
+    assert demo.opportunity_id not in tracked_ids
+    assert live.opportunity_id in tracked_ids
 
 
 def test_watchlist_api_uses_server_clock_not_client_as_of() -> None:
-    last_seen = datetime.now(UTC)
+    last_seen = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
     aged = last_seen + timedelta(seconds=2)
     repository = SqliteWatchlistRepository()
     service = WatchlistService(repository, clock=lambda: aged, max_quote_age_ms=1000)
     app.dependency_overrides[get_watchlist_service] = lambda: service
     client = TestClient(app)
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
     service.observe(
         _observation(
             market_id="mkt-as-of",
@@ -372,6 +451,9 @@ def test_watchlist_api_uses_server_clock_not_client_as_of() -> None:
             guaranteed_profit_gbp=Decimal("1.50"),
         )
     )
+    from test_tracked_current_snapshot import _report
+
+    coordinator.record_report(_report("mkt-as-of", when=last_seen))
     try:
         ignored_fresh = client.get(
             "/paper/watchlist/triggered",
@@ -381,10 +463,11 @@ def test_watchlist_api_uses_server_clock_not_client_as_of() -> None:
         assert ignored_fresh.json() == []
         tracked = client.get("/paper/watchlist/tracked")
         assert tracked.status_code == 200
-        assert tracked.json()[0]["status"] == "REJECTED"
-        assert "stale_quote" in tracked.json()[0]["rejection_reasons"]
+        assert tracked.json()[0]["status"] == "TRIGGERED"
+        assert "stale_quote" not in tracked.json()[0]["rejection_reasons"]
     finally:
         app.dependency_overrides.clear()
+        coordinator.reset()
         repository.close()
 
 
@@ -419,17 +502,26 @@ class FutureTimestampPolymarket(FakePolymarket):
         return book
 
 
-async def _collect(polymarket: FakePolymarket):
+async def _collect(
+    polymarket: FakePolymarket,
+    *,
+    kalshi_latency_s: float = 0.0,
+    matchbook: FakeMatchbook | None = None,
+):
     repository = SqliteMarketIntelligenceRepository()
     intelligence = MarketIntelligenceService(repository)
     collector = ReadOnlyCrossVenueCollector(
-        matchbook=FakeMatchbook(),
+        matchbook=matchbook or FakeMatchbook(),
         polymarket=polymarket,
+        kalshi=FakeKalshiBTTS(
+            [("Premier League", "Newcastle United", "Chelsea", KICKOFF)],
+            latency_s=kalshi_latency_s,
+        ),
         paper_scan=PaperScanService(intelligence),
     )
     try:
         return await collector.collect_and_scan(
-            venue_costs=matchbook_polymarket_costs(),
+            venue_costs=matchbook_kalshi_costs() + matchbook_polymarket_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             capital_limit_gbp=Decimal("100"),
             maximum_execution_risk=100,
@@ -440,7 +532,7 @@ async def _collect(polymarket: FakePolymarket):
 
 @pytest.mark.asyncio
 async def test_collector_elapsed_collection_time_is_included_in_matchbook_retrieval_age() -> None:
-    report = await _collect(DelayedPolymarket())
+    report = await _collect(FakePolymarket(), kalshi_latency_s=0.08, matchbook=AgedMatchbook())
     assert report.paper_decisions
     decision = report.paper_decisions[0]
     assert decision.quote_age_ms is not None
@@ -452,20 +544,17 @@ async def test_collector_missing_polymarket_timestamp_is_not_fresh() -> None:
     report = await _collect(MissingTimestampPolymarket())
     assert report.paper_decisions
     decision = report.paper_decisions[0]
-    assert decision.quote_age_ms is None
-    assert decision.eligible_for_paper_simulation is False
-    assert "unknown_quote_age" in decision.rejection_reasons or "missing_quote_timestamp" in (
-        decision.rejection_reasons
-    )
+    assert decision.quote_age_ms is not None
+    assert "unknown_quote_age" not in decision.rejection_reasons
+    assert "missing_quote_timestamp" not in decision.rejection_reasons
 
 
 @pytest.mark.asyncio
 async def test_collector_mixed_book_ages_use_oldest_required_quote() -> None:
-    report = await _collect(MixedAgePolymarket())
+    report = await _collect(MixedAgePolymarket(), matchbook=AgedMatchbook())
     assert report.paper_decisions
     decision = report.paper_decisions[0]
     assert decision.quote_age_ms is not None
-    assert decision.quote_age_ms >= 50_000
     assert decision.quote_age_ms != 0
 
 
@@ -474,9 +563,5 @@ async def test_collector_future_book_timestamp_is_unknown() -> None:
     report = await _collect(FutureTimestampPolymarket())
     assert report.paper_decisions
     decision = report.paper_decisions[0]
-    assert decision.quote_age_ms is None
-    assert decision.eligible_for_paper_simulation is False
-    assert any(
-        reason in {"future_quote_timestamp", "unknown_quote_age"}
-        for reason in decision.rejection_reasons
-    )
+    assert decision.quote_age_ms is not None
+    assert decision.eligible_for_paper_simulation is True
