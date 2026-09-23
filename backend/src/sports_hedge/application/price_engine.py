@@ -34,6 +34,7 @@ from logging import getLogger
 from time import monotonic
 from typing import Any
 
+from sports_hedge.application.fixture_sport import resolve_discovered_fixture_sport
 from sports_hedge.application.approved_market_catalogue import (
     ApprovedMarketCatalogueRow,
     DerivedPriceEngineItem,
@@ -1534,6 +1535,7 @@ class CataloguePriceEngine:
             home_team=identity.home_canonical or "Home",
             away_team=identity.away_canonical or "Away",
             competition=identity.competition or "Premier League",
+            sport=_discovered_fixture_sport(identity),
             kickoff_utc=identity.kickoff_utc or observed_at,
             last_seen_at=observed_at,
             last_scanned_at=observed_at,
@@ -1892,6 +1894,7 @@ class CataloguePriceEngine:
             home_team=identity.home_canonical or "Home",
             away_team=identity.away_canonical or "Away",
             competition=identity.competition or "Premier League",
+            sport=_discovered_fixture_sport(identity),
             kickoff_utc=identity.kickoff_utc or observed_at,
             last_seen_at=observed_at,
             last_scanned_at=observed_at,
@@ -2356,6 +2359,15 @@ def _canonical_polymarket_market(identity: DerivedPriceEngineItem) -> CanonicalM
             extra_time_included=None,
         ),
         runners=runners,
+    )
+
+
+def _discovered_fixture_sport(identity: DerivedPriceEngineItem) -> str:
+    """Read-model sport only. Does not change catalogue identity or pricing."""
+
+    return resolve_discovered_fixture_sport(
+        competition=identity.competition,
+        register_canonical_key=identity.register_canonical_key,
     )
 
 

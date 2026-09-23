@@ -212,6 +212,7 @@ export type DiscoveredFixture = {
   home_team: string;
   away_team: string;
   competition: string;
+  sport?: string | null;
   target_competition_code?: string | null;
   kickoff_utc: string;
   matchbook_matched?: boolean;

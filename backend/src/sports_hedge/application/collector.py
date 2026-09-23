@@ -69,6 +69,10 @@ from sports_hedge.application.hot_market_relationships import (
     kalshi_tickers_for_leg,
     matchbook_payload_is_terminal,
 )
+from sports_hedge.application.fixture_sport import (
+    provider_sport_label,
+    resolve_discovered_fixture_sport,
+)
 from sports_hedge.application.fixture_state import matchbook_fixture_state
 from sports_hedge.application.lane_venues import (
     INSUFFICIENT_VENUES_REASON,
@@ -529,6 +533,7 @@ class DiscoveredFixture(BaseModel):
     home_team: str
     away_team: str
     competition: str
+    sport: str = "unknown"
     target_competition_code: str | None = None
     kickoff_utc: datetime
     matchbook_matched: bool = False
@@ -5929,6 +5934,15 @@ def _fixture_from_cluster(
         home_team=canonical.home_team,
         away_team=canonical.away_team,
         competition=canonical.competition,
+        sport=resolve_discovered_fixture_sport(
+            competition=canonical.competition,
+            target_competition_code=competition.code.value if competition else None,
+            provider_sport=provider_sport_label(
+                anchor.venue,
+                anchor.raw if isinstance(anchor.raw, dict) else None,
+            ),
+            canonical_sport=canonical.sport,
+        ),
         target_competition_code=competition.code.value if competition else None,
         kickoff_utc=canonical.kickoff_utc,
         matchbook_matched=cluster.matchbook is not None,
