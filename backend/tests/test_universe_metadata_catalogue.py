@@ -87,6 +87,11 @@ class _PricableMatchbook(OverlapMatchbook):
     def __init__(self, events: list[dict[str, Any]], markets_by_id: dict[str, list[dict[str, Any]]]) -> None:
         super().__init__(events, markets_by_id)
         self.get_market_calls: list[tuple[str, str]] = []
+        self.list_markets_filters: list[dict[str, Any]] = []
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> dict[str, Any]:
+        self.list_markets_filters.append(dict(filters))
+        return await super().list_markets(event_id, **filters)
 
     async def get_market(
         self,
@@ -200,6 +205,11 @@ async def test_pm_heavy_universe_catalogues_without_book_fanout_and_background_p
         classes = report.scan_diagnostics["provider_call_classes"]
         assert polymarket.book_calls == []
         assert kalshi.book_calls == []
+        assert matchbook.list_markets_filters
+        assert all(
+            item.get("include-prices") == "false" and "price-depth" not in item
+            for item in matchbook.list_markets_filters
+        )
         assert report.scan_diagnostics["stages"]["book_depth"]["calls"] == 0
         assert classes["executable_book_depth"] == 0
         assert classes["identity_metadata"] > 0

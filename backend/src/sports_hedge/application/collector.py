@@ -4351,10 +4351,16 @@ class ReadOnlyCrossVenueCollector:
             mb_listed = True
             try:
                 mb_started = perf_counter()
+                listing_filters = dict(matchbook_market_filters)
+                if self._universe_defers_executable_pricing():
+                    # Identity listing only. Do not ask Matchbook for prices
+                    # or a price ladder during UNIVERSE discovery.
+                    listing_filters["include-prices"] = "false"
+                    listing_filters.pop("price-depth", None)
                 mb_market_payload, mb_failed = await self._wait_provider(
                     self.matchbook.list_markets(
                         mb_event.canonical.source_event_id,
-                        **matchbook_market_filters,
+                        **listing_filters,
                     ),
                     stage="list_markets",
                     venue=VenueName.MATCHBOOK,
