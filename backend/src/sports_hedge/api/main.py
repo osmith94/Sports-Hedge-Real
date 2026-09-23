@@ -7,6 +7,11 @@ from datetime import UTC, datetime
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
+from sports_hedge.application.crash_diagnostics import (
+    enable_faulthandler,
+    install_asyncio_exception_handler,
+    record_backend_fatal,
+)
 from sports_hedge.api.dislocations import router as dislocations_router
 from sports_hedge.api.event_intelligence import router as event_intelligence_router
 from sports_hedge.api.historical import router as historical_router
@@ -32,21 +37,38 @@ from sports_hedge.venues.matchbook import aclose_shared_matchbook_client
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    emit_dotenv_operator_diagnostics(force=True)
-    get_serving_build_info()
-    coordinator = get_live_refresh_coordinator()
-    coordinator.bind_universe_checkpoint_store(get_universe_checkpoint_store())
-    coordinator.configure_from_settings()
-    schedule = get_accounting_schedule()
-    await coordinator.start_server_loop(server_owned_refresh_tick)
-    await schedule.start()
+    enable_faulthandler()
+    loop = asyncio.get_running_loop()
+    previous_handler = install_asyncio_exception_handler(loop)
     try:
-        yield
+        try:
+            emit_dotenv_operator_diagnostics(force=True)
+            get_serving_build_info()
+            coordinator = get_live_refresh_coordinator()
+            coordinator.bind_universe_checkpoint_store(get_universe_checkpoint_store())
+            coordinator.configure_from_settings()
+            schedule = get_accounting_schedule()
+            await coordinator.start_server_loop(server_owned_refresh_tick)
+            await schedule.start()
+            try:
+                yield
+            finally:
+                await schedule.stop()
+                await coordinator.stop_server_loop()
+                await aclose_shared_provider_runtime()
+                await aclose_shared_matchbook_client()
+        except GeneratorExit:
+            raise
+        except BaseException as exc:
+            record_backend_fatal(exc)
+            raise
     finally:
-        await schedule.stop()
-        await coordinator.stop_server_loop()
-        await aclose_shared_provider_runtime()
-        await aclose_shared_matchbook_client()
+        loop.set_exception_handler(previous_handler)
+
+
+# Fatal interpreter faults write to stderr. The Windows launcher redirects that
+# stream to logs\demo-backend.err.log. No periodic traceback dump.
+enable_faulthandler()
 
 
 app = FastAPI(
