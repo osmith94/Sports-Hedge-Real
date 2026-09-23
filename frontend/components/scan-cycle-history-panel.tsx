@@ -3,13 +3,10 @@
 import { PaperScanCycleRecord } from "../lib/api";
 import {
   SCAN_CYCLE_COPY,
-  SCAN_CYCLE_DIAGNOSTICS_TITLE,
   SCAN_CYCLE_EMPTY,
   SCAN_CYCLE_HEADERS,
-  SCAN_CYCLE_RECENT_TITLE,
   SCAN_CYCLE_TITLE,
   SCAN_CYCLE_UNAVAILABLE,
-  recentScanCycleRows,
   scanCycleBadgeLabel,
   scanCycleLatestSummary,
   scanCycleRows,
@@ -25,31 +22,17 @@ export function ScanCycleHistoryPanel({
 }) {
   const nowMs = useHydratedNowMs();
   const rows = available ? scanCycleRows(cycles, nowMs) : [];
-  const recent = available ? recentScanCycleRows(cycles, nowMs) : [];
   const badge = scanCycleBadgeLabel(available, cycles);
   const latest = scanCycleLatestSummary(available, cycles);
+  const loadedLabel = `${rows.length} loaded cycle${rows.length === 1 ? "" : "s"}`;
 
   return (
     <section className="scan-cycle-history-panel">
-      <div className="panel">
-        <div className="panel-header">
-          <div>
-            <div className="panel-title">{SCAN_CYCLE_RECENT_TITLE}</div>
-            <div className="panel-meta">{SCAN_CYCLE_TITLE} · {latest}. Latest {recent.length} of {rows.length} loaded cycles.</div>
-          </div>
-          <span className={available ? "status-badge" : "demo-chip"}>{badge}</span>
-        </div>
-        {!available ? <div className="empty-live-compact">{SCAN_CYCLE_UNAVAILABLE}</div> : null}
-        {available && recent.length === 0 ? (
-          <div className="empty-live-compact">{SCAN_CYCLE_EMPTY}</div>
-        ) : null}
-        {available && recent.length > 0 ? <CycleTable rows={recent} /> : null}
-      </div>
-      <details className="discovery-disclosure">
+      <details className="discovery-disclosure scan-cycle-history-disclosure">
         <summary className="discovery-summary">
           <span className="discovery-chevron" aria-hidden="true" />
           <span className="audit-summary-copy">
-            {SCAN_CYCLE_DIAGNOSTICS_TITLE} · {latest}
+            {SCAN_CYCLE_TITLE} · {latest} · {loadedLabel}
           </span>
           <span className={available ? "status-badge" : "demo-chip"}>{badge}</span>
           <span className="discovery-toggle discovery-toggle-show">Show history</span>
@@ -63,10 +46,11 @@ export function ScanCycleHistoryPanel({
             </div>
             <span className={available ? "status-badge" : "demo-chip"}>{badge}</span>
           </div>
-          {available && rows.length > 0 ? <CycleTable rows={rows} /> : null}
+          {!available ? <div className="empty-live-compact">{SCAN_CYCLE_UNAVAILABLE}</div> : null}
           {available && rows.length === 0 ? (
             <div className="empty-live-compact">{SCAN_CYCLE_EMPTY}</div>
           ) : null}
+          {available && rows.length > 0 ? <CycleTable rows={rows} /> : null}
         </section>
       </details>
     </section>

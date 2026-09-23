@@ -15,7 +15,6 @@ import {
   HOT_ZONE_KICKER,
   POST_KICKOFF_PENDING_HEADING,
   deferredFixtureRows,
-  deferredRosterSummary,
   fastScanRosterSummary,
   hotFixtureRows,
   hotPricingCount,
@@ -38,7 +37,6 @@ export function HotFixturesPanel({
   const pending = available ? postKickoffPendingRows(status, nowMs) : [];
   const badge = hotRosterBadgeLabel(available, status);
   const summary = available && status ? fastScanRosterSummary(status) : null;
-  const deferredSummary = available && status ? deferredRosterSummary(status) : null;
   const pricingCount = available && status ? hotPricingCount(status) : 0;
 
   return (
@@ -63,15 +61,17 @@ export function HotFixturesPanel({
       {available && rows.length > 0 ? <FixtureTable rows={rows} nowMs={nowMs} /> : null}
 
       {available && status ? (
-        <div className="hot-deferred-block">
-          <div className="panel-title">{DEFERRED_CROSS_VENUE_HEADING}</div>
-          <div className="panel-meta">{deferredSummary ?? DEFERRED_NOT_HOT_CAPACITY}</div>
+        <details className="hot-deferred-block">
+          <summary>
+            <span className="panel-title">{DEFERRED_CROSS_VENUE_HEADING} · {deferred.length}</span>
+            <span className="panel-meta"> · {DEFERRED_NOT_HOT_CAPACITY} Expand to inspect.</span>
+          </summary>
           {deferred.length === 0 ? (
             <div className="empty-live-compact">No fixtures awaiting a cross-venue candidate.</div>
           ) : (
             <FixtureTable rows={deferred} nowMs={nowMs} deferred />
           )}
-        </div>
+        </details>
       ) : null}
 
       {available && pending.length > 0 ? (

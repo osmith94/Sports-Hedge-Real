@@ -331,6 +331,11 @@ UNIVERSE_COMPLETENESS_COMPLETE = "complete"
 UNIVERSE_COMPLETENESS_DEADLINE_LEFTOVER = "deadline_leftover"
 UNIVERSE_COMPLETENESS_EMPTY_UNIVERSE = "empty_universe"
 UNIVERSE_COMPLETENESS_STALE_GENERATION_STATE = "stale_generation_state"
+# UNIVERSE catalogues identity. Executable books and paper decisions wait for
+# the price engine (BACKGROUND / HOT / ACTIVE). Headline listing prices are
+# not executable quotes.
+UNIVERSE_PAPER_DECISION_TIMING = "deferred_to_price_engine"
+COLLECTOR_PAPER_DECISION_TIMING = "collector_executable_books"
 CANONICAL_WORK_SET_PARTIAL_REASONS = frozenset(
     {
         "clustering_truncated",
@@ -2416,6 +2421,21 @@ class ReadOnlyCrossVenueCollector:
                 "eligible_markets": self._kalshi_books_eligible,
                 "skipped_unapproved": self._kalshi_books_skipped_unapproved,
             },
+            "provider_call_classes": {
+                "identity_metadata": (
+                    attributed["stages"]["event_lookup"]["calls"]
+                    + attributed["stages"]["market_discovery"]["calls"]
+                ),
+                "executable_book_depth": attributed["stages"]["book_depth"]["calls"],
+            },
+            "universe_executable_pricing_deferred": (
+                (scan_lane or "").strip().casefold() == ScanLane.UNIVERSE.value
+            ),
+            "paper_decision_timing": (
+                UNIVERSE_PAPER_DECISION_TIMING
+                if (scan_lane or "").strip().casefold() == ScanLane.UNIVERSE.value
+                else COLLECTOR_PAPER_DECISION_TIMING
+            ),
             "hot_targeted_refresh": dict(getattr(self, "_op_hot_stats", {})),
             "identity_scope": [
                 item.canonical_event_id for item in discovered_fixtures
@@ -3152,6 +3172,11 @@ class ReadOnlyCrossVenueCollector:
             books,
         )
 
+    def _universe_defers_executable_pricing(self) -> bool:
+        """UNIVERSE discovers and catalogues. It does not price executable books."""
+
+        return self._op_request_lane == ScanLane.UNIVERSE.value
+
     async def _scan_cluster(
         self,
         cluster: FixtureCluster,
@@ -3419,22 +3444,31 @@ class ReadOnlyCrossVenueCollector:
             ),
             issues=issues,
         )
-        if kalshi_depth_markets:
-            await self._fetch_kalshi_depth_for_markets(
-                k_events,
-                kalshi_depth_markets,
-                side=kalshi_side,
-                issues=issues,
-            )
-        order_books_fetched = (
-            matchbook_side.books + polymarket_side.books + kalshi_side.books
-        )
-        for source_id, observation in kalshi_side.observations.items():
-            observations_by_market_id[(VenueName.KALSHI, source_id)] = observation
         decisions: list[PaperScanDecision] = []
         decisions_by_source_ids: dict[tuple[str, str], PaperScanDecision] = {}
         decisions_by_pair: dict[tuple[str, str, str, str], PaperScanDecision] = {}
         headline_applies: list[tuple] = []
+        # Catalogue identity is already persisted. UNIVERSE must not spend the
+        # discovery budget on executable books or treat listing prices as quotes.
+        # BACKGROUND / HOT / ACTIVE own that pricing from the durable catalogue.
+        if self._universe_defers_executable_pricing():
+            order_books_fetched = (
+                matchbook_side.books + polymarket_side.books + kalshi_side.books
+            )
+            eligible_pairs = []
+        else:
+            if kalshi_depth_markets:
+                await self._fetch_kalshi_depth_for_markets(
+                    k_events,
+                    kalshi_depth_markets,
+                    side=kalshi_side,
+                    issues=issues,
+                )
+            order_books_fetched = (
+                matchbook_side.books + polymarket_side.books + kalshi_side.books
+            )
+            for source_id, observation in kalshi_side.observations.items():
+                observations_by_market_id[(VenueName.KALSHI, source_id)] = observation
         for left_venue, right_venue, left_market, right_market, _match in eligible_pairs:
             left_obs = observations_by_market_id.get(
                 (left_venue, left_market.canonical.source_market_id)
@@ -4360,6 +4394,10 @@ class ReadOnlyCrossVenueCollector:
             )
             side.markets.extend(markets)
             side.inventory.extend(inventory)
+            if self._universe_defers_executable_pricing():
+                # Listing payloads may carry indicative prices. They are not
+                # executable quotes and must not become observations on UNIVERSE.
+                continue
             retrieved_at = side.retrieved_at or datetime.now(UTC)
             for left_market in markets:
                 observation = self._try_matchbook_observation(
@@ -4443,6 +4481,8 @@ class ReadOnlyCrossVenueCollector:
         side.markets, side.inventory = _promote_polymarket_cluster_markets(
             side.markets, side.inventory
         )
+        if self._universe_defers_executable_pricing():
+            return
 
         async def _one_market(right_market: _NormalizedMarket) -> None:
             if self._provider_budget_exhausted():
