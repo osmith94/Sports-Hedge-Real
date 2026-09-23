@@ -377,10 +377,12 @@ describe("HOT Zone evaluation state and HOT pricing summary", () => {
     assert.match(panel, /HOT_PRICING_HEADING/);
     assert.match(panel, /DEFERRED_CROSS_VENUE_HEADING/);
     assert.match(panel, /deferredFixtureRows/);
-    assert.match(panel, /<details className="hot-deferred-block">/);
-    assert.match(panel, /<summary>/);
-    assert.match(panel, /DEFERRED_CROSS_VENUE_HEADING} · {deferred.length}/);
-    assert.doesNotMatch(panel, /<details className="hot-deferred-block" open/);
+    assert.match(panel, /useState\(false\)/);
+    assert.match(panel, /aria-expanded=\{expanded\}/);
+    assert.match(panel, /DEFERRED_CROSS_VENUE_HEADING} · \{rows\.length\}/);
+    assert.match(panel, /\{expanded \? \(/);
+    assert.doesNotMatch(panel, /<details/);
+    assert.doesNotMatch(panel, /<summary>/);
   });
 
   it("keeps post-kickoff pending fixtures out of the HOT pricing count", () => {

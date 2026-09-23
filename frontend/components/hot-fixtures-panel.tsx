@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 
 import { LiveRefreshStatus } from "../lib/api";
 import {
@@ -23,6 +24,8 @@ import {
 } from "../lib/hot-fixture-roster-display";
 import { kickoffLocalLabel } from "../lib/format";
 import { useHydratedNowMs } from "./hydrated-relative-time";
+
+export const DEFERRED_ROSTER_REGION_ID = "hot-deferred-roster";
 
 export function HotFixturesPanel({
   status,
@@ -61,17 +64,7 @@ export function HotFixturesPanel({
       {available && rows.length > 0 ? <FixtureTable rows={rows} nowMs={nowMs} /> : null}
 
       {available && status ? (
-        <details className="hot-deferred-block">
-          <summary>
-            <span className="panel-title">{DEFERRED_CROSS_VENUE_HEADING} · {deferred.length}</span>
-            <span className="panel-meta"> · {DEFERRED_NOT_HOT_CAPACITY} Expand to inspect.</span>
-          </summary>
-          {deferred.length === 0 ? (
-            <div className="empty-live-compact">No fixtures awaiting a cross-venue candidate.</div>
-          ) : (
-            <FixtureTable rows={deferred} nowMs={nowMs} deferred />
-          )}
-        </details>
+        <DeferredCrossVenueSection rows={deferred} nowMs={nowMs} />
       ) : null}
 
       {available && pending.length > 0 ? (
@@ -82,6 +75,62 @@ export function HotFixturesPanel({
         </div>
       ) : null}
     </section>
+  );
+}
+
+export function DeferredCrossVenueRoster({
+  rows,
+  nowMs,
+  expanded,
+  onToggle,
+}: {
+  rows: ReturnType<typeof hotFixtureRows>;
+  nowMs: number | null;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="hot-deferred-block">
+      <button
+        type="button"
+        className="hot-deferred-toggle"
+        aria-expanded={expanded}
+        aria-controls={DEFERRED_ROSTER_REGION_ID}
+        onClick={onToggle}
+      >
+        <span className="panel-title">{DEFERRED_CROSS_VENUE_HEADING} · {rows.length}</span>
+        <span className="panel-meta">
+          {" "}· {DEFERRED_NOT_HOT_CAPACITY} {expanded ? "Collapse." : "Expand to inspect."}
+        </span>
+      </button>
+      {expanded ? (
+        <div id={DEFERRED_ROSTER_REGION_ID}>
+          {rows.length === 0 ? (
+            <div className="empty-live-compact">No fixtures awaiting a cross-venue candidate.</div>
+          ) : (
+            <FixtureTable rows={rows} nowMs={nowMs} deferred />
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function DeferredCrossVenueSection({
+  rows,
+  nowMs,
+}: {
+  rows: ReturnType<typeof hotFixtureRows>;
+  nowMs: number | null;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <DeferredCrossVenueRoster
+      rows={rows}
+      nowMs={nowMs}
+      expanded={expanded}
+      onToggle={() => setExpanded((current) => !current)}
+    />
   );
 }
 

@@ -598,6 +598,34 @@ tr:last-child td { border-bottom: none; }
   background: rgba(241, 191, 105, .08);
 }
 .hot-deferred-block { margin-top: 12px; }
+.hot-deferred-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1.4;
+}
+.hot-deferred-toggle::before {
+  content: "▸";
+  flex: 0 0 auto;
+  margin-right: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.hot-deferred-toggle[aria-expanded="true"]::before { content: "▾"; }
+.hot-deferred-toggle:focus { outline: none; }
+.hot-deferred-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
 .system-load-diagnostics { grid-column: 1 / -1; }
 .system-load-diagnostics summary { cursor: pointer; color: var(--muted); font-size: 10px; }
 .system-load-detail-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 10px; margin-top: 8px; }
