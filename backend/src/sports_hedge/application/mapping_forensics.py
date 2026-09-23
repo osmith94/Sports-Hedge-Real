@@ -1127,6 +1127,27 @@ def _outcome_space(facts: VenueMarketFacts) -> list[str]:
         text = str(label or "").strip()
         if text and text not in outcomes:
             outcomes.append(text)
+    if outcomes:
+        return outcomes
+    # UNIVERSE inventory has canonical runners and no executable quotes.
+    # Shape classification still needs that metadata outcome space.
+    return _canonical_runner_outcomes(facts)
+
+
+def _canonical_runner_outcomes(facts: VenueMarketFacts) -> list[str]:
+    identity = facts.canonical_identity
+    if not isinstance(identity, dict):
+        return []
+    runners = identity.get("runners")
+    if not isinstance(runners, list):
+        return []
+    outcomes: list[str] = []
+    for runner in runners:
+        if not isinstance(runner, dict):
+            continue
+        value = str(runner.get("outcome") or "").strip()
+        if value and value not in outcomes:
+            outcomes.append(value)
     return outcomes
 
 

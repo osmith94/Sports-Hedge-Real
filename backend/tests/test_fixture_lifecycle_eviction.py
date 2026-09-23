@@ -709,8 +709,10 @@ async def test_matchbook_finished_stops_hot_market_book_and_economics_calls() ->
         )
         coordinator.record_report(universe, scan_lane=ScanLane.UNIVERSE)
         assert matchbook.list_markets_calls
-        assert kalshi.book_calls
-        assert paper_scan.scan_pair_calls > 0
+        # UNIVERSE discovers and catalogues. Executable books and paper
+        # economics belong to the following HOT refresh.
+        assert kalshi.book_calls == 0
+        assert paper_scan.scan_pair_calls == 0
         universe_markets = list(matchbook.list_markets_calls)
         universe_k_books = kalshi.book_calls
         fixture = next(item for item in universe.discovered_fixtures if item.matchbook_matched)

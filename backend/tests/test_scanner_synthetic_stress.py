@@ -245,9 +245,21 @@ def _assert_stable_report(
     assert diagnostics["inflight_live"] == 0
     assert diagnostics["timeout_count"] == 0
     assert diagnostics["stages"]["market_discovery"]["calls"] >= fixture_count
-    assert diagnostics["stages"]["book_depth"]["calls"] >= fixture_count
-    assert diagnostics["stages"]["mapping_equivalence"]["calls"] >= fixture_count
-    assert diagnostics["stages"]["fees_fx_risk"]["calls"] >= fixture_count
+    classes = diagnostics["provider_call_classes"]
+    if hot:
+        assert diagnostics["stages"]["book_depth"]["calls"] >= fixture_count
+        assert diagnostics["stages"]["mapping_equivalence"]["calls"] >= fixture_count
+        assert diagnostics["stages"]["fees_fx_risk"]["calls"] >= fixture_count
+        assert classes["executable_book_depth"] >= fixture_count
+    else:
+        # UNIVERSE catalogues from metadata. Executable books and solver
+        # economics belong to the price engine, not discovery.
+        assert diagnostics["stages"]["book_depth"]["calls"] == 0
+        assert classes["executable_book_depth"] == 0
+        assert classes["identity_metadata"] >= fixture_count
+        assert diagnostics["universe_executable_pricing_deferred"] is True
+        assert diagnostics["paper_decision_timing"] == "deferred_to_price_engine"
+        assert report.paper_decisions == []
     observed = dict(diagnostics["matching_coverage"])
     observed.pop("catalogue_by_archetype", None)
     assert observed == {
@@ -308,7 +320,7 @@ async def test_synthetic_universe_stress_has_headroom_and_no_orphans(
         assert wall_seconds < SYNTHETIC_CYCLE_BUDGET_SECONDS * 0.8
         assert report.scan_diagnostics["total_ms"] <= wall_seconds * 1000 + 10
         assert matchbook.list_events_calls == kalshi.list_events_calls == 1
-        assert kalshi.book_calls >= fixture_count
+        assert kalshi.book_calls == 0
         print(
             json.dumps(
                 {

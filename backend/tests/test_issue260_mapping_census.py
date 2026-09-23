@@ -90,7 +90,9 @@ EXPECTED_FULL_CENSUS = {
     },
     "evaluated_zero_equivalent_fixtures": 3,
     "unsupported_market_skips": 1,
-    "qualifying_arbs": 2,
+    # UNIVERSE catalogues from metadata and does not emit paper decisions.
+    # Qualifying arbs are produced by BACKGROUND/HOT executable pricing.
+    "qualifying_arbs": 0,
 }
 
 

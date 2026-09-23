@@ -793,7 +793,9 @@ async def test_collector_sequential_reanchor_merges_into_existing_identity() -> 
         ]
         assert len(newcastle) == 1
         first_id = newcastle[0].canonical_event_id
-        assert first_id in store.hot_identity_scope(evaluated)
+        # Distant catalogue identity is not a HOT promotion. Paper decisions
+        # that would promote it are deferred to BACKGROUND/HOT pricing.
+        assert first_id not in store.hot_identity_scope(evaluated)
         assert store.resolve_canonical_id("pm-event-1") == first_id
 
         second = await collector.collect_and_scan(

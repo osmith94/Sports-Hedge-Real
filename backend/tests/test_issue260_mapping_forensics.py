@@ -470,6 +470,31 @@ def _safe_identity(report) -> dict[str, Any]:
     }
 
 
+def _regulation_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compare regulation identity without quote-vs-listing outcome labels."""
+
+    projected: list[dict[str, Any]] = []
+    for item in candidates:
+        venues = [
+            {key: value for key, value in venue.items() if key != "outcome_space"}
+            for venue in item["venues"]
+        ]
+        projected.append({**item, "venues": venues})
+    return projected
+
+
+def _candidates_are_complete_3way(candidates: list[dict[str, Any]]) -> bool:
+    if not candidates:
+        return False
+    for item in candidates:
+        for venue in item["venues"]:
+            space = {str(value).casefold() for value in venue["outcome_space"]}
+            listing_draw = "draw" in space and len(space) >= 3
+            if not ({"home", "draw", "away"} <= space or listing_draw):
+                return False
+    return True
+
+
 def _safe_lane_snapshot(report, census, forensics) -> dict[str, Any]:
     mbk = forensics.matchbook_kalshi_match_result
     candidates = []
@@ -1267,7 +1292,13 @@ async def test_hot_and_universe_agree_on_get_market_regulation() -> None:
     universe_snap = _safe_lane_snapshot(universe_report, universe_census, universe_forensics)
     hot_snap = _safe_lane_snapshot(hot_report, hot_census, hot_forensics)
     assert universe_snap["identity"] == hot_snap["identity"]
-    assert universe_snap["candidates"] == hot_snap["candidates"]
+    # Settlement and matcher identity agree. Outcome label strings differ:
+    # UNIVERSE uses listing/canonical metadata, HOT uses executable quote outcomes.
+    assert _regulation_candidates(universe_snap["candidates"]) == _regulation_candidates(
+        hot_snap["candidates"]
+    )
+    assert _candidates_are_complete_3way(universe_snap["candidates"])
+    assert _candidates_are_complete_3way(hot_snap["candidates"])
     assert universe_snap["matched_equivalent"] == hot_snap["matched_equivalent"] == 1
     assert universe_snap["both_settlement_complete"] == 1
     assert hot_kalshi.get_market_calls == []

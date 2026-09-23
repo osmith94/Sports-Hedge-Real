@@ -119,6 +119,15 @@ describe("scan cycle history presentation", () => {
     );
   });
 
+  it("keeps every loaded cycle in one row set rather than a second recent slice", () => {
+    const cycles = Array.from({ length: 12 }, (_, index) =>
+      cycle({ cycle_id: `cycle-${index}`, scan_lane: index % 2 === 0 ? "hot" : "universe" }),
+    );
+    const rows = scanCycleRows(cycles);
+    assert.equal(rows.length, 12);
+    assert.deepEqual(rows.map((item) => item.id), cycles.map((item) => item.cycle_id));
+  });
+
   it("keeps empty and unavailable states honest", () => {
     assert.equal(scanCycleBadgeLabel(true, []), "EMPTY");
     assert.equal(scanCycleBadgeLabel(false, null), "UNAVAILABLE");
@@ -153,12 +162,15 @@ describe("scan cycle history console wiring", () => {
     assert.match(scan, /router\.refresh\(\)/);
     assert.match(scan, /last_completed_at/);
     assert.equal(SCAN_CYCLE_TITLE, "Scan cycle history");
+    assert.equal((panel.match(/<CycleTable/g) || []).length, 1);
+    assert.equal((panel.match(/<table/g) || []).length, 1);
     assert.match(panel, /scanCycleRows/);
-    assert.match(panel, /recentScanCycleRows/);
+    assert.doesNotMatch(panel, /recentScanCycleRows/);
+    assert.doesNotMatch(panel, /SCAN_CYCLE_RECENT_TITLE/);
+    assert.doesNotMatch(panel, /SCAN_CYCLE_DIAGNOSTICS_TITLE/);
     assert.match(panel, /scanCycleLatestSummary/);
-    assert.match(panel, /SCAN_CYCLE_RECENT_TITLE/);
-    assert.match(panel, /SCAN_CYCLE_DIAGNOSTICS_TITLE/);
-    assert.match(panel, /<details className="discovery-disclosure">/);
+    assert.match(panel, /loaded cycle/);
+    assert.match(panel, /<details className="discovery-disclosure scan-cycle-history-disclosure">/);
     assert.match(panel, /Show history/);
     assert.match(panel, /Hide history/);
     assert.doesNotMatch(panel, /\sopen[={]/);

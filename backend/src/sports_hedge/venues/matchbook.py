@@ -533,6 +533,11 @@ class MatchbookClient(ReadOnlyVenue):
             **filters,
         }
         params["per-page"] = per_page
+        # Metadata listings must not pull price ladders. Priced refresh stays
+        # on get_market(), which keeps include-prices and price-depth.
+        if str(params.get("include-prices", "true")).strip().casefold() in {"false", "0"}:
+            params["include-prices"] = "false"
+            params.pop("price-depth", None)
         if "offset" in filters:
             page = await self._get(f"/edge/rest/events/{event_id}/markets", params=params)
             return {

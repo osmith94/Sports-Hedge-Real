@@ -76,32 +76,52 @@ def _same_kickoff_universe(*, per_competition: int, unresolved: int) -> list[Ven
     space instead of attaching early. That is the pathological owner shape.
     """
 
-    items: list[VenueEvent] = []
+    return list(_iter_same_kickoff_universe(per_competition=per_competition, unresolved=unresolved))
+
+
+def _iter_same_kickoff_universe(*, per_competition: int, unresolved: int):
     venues = (VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI)
     for competition_index, competition in enumerate(COMPETITIONS):
         for fixture_index in range(per_competition):
             home = f"Homeclub{competition_index} Side{fixture_index}"
             away = f"Awayclub{competition_index} Side{fixture_index}"
             for venue in venues:
-                items.append(
-                    _event(
-                        venue,
-                        f"{venue.value}-{competition_index}-{fixture_index}",
-                        home=home,
-                        away=away,
-                        competition=competition,
-                    )
+                yield _event(
+                    venue,
+                    f"{venue.value}-{competition_index}-{fixture_index}",
+                    home=home,
+                    away=away,
+                    competition=competition,
                 )
     for index in range(unresolved):
-        items.append(
-            _event(
-                VenueName.POLYMARKET,
-                f"unresolved-{index}",
-                home=f"Zzxq{index} Wanderers",
-                away=f"Qqyy{index} Athletic",
-                competition="",
-            )
+        yield _event(
+            VenueName.POLYMARKET,
+            f"unresolved-{index}",
+            home=f"Zzxq{index} Wanderers",
+            away=f"Qqyy{index} Athletic",
+            competition="",
         )
+
+
+async def _same_kickoff_universe_yielding(
+    *, per_competition: int, unresolved: int
+) -> list[VenueEvent]:
+    """Build the pathological set without a single synchronous burst.
+
+    Constructing every canonical event before the first await starved the
+    loop for longer than the #519 0.25s bound while the partition phase
+    itself stayed under that bound. Yielding here keeps the probe on the
+    bridge and the cluster pass, which are the production sync slices.
+    """
+
+    items: list[VenueEvent] = []
+    for index, item in enumerate(
+        _iter_same_kickoff_universe(per_competition=per_competition, unresolved=unresolved),
+        start=1,
+    ):
+        items.append(item)
+        if index % 128 == 0:
+            await asyncio.sleep(0)
     return items
 
 
@@ -234,11 +254,11 @@ async def test_startup_dense_shard_keeps_api_scheduling_gap_under_quarter_second
             await asyncio.sleep(0)
             return
         baseline.update(LOOP_ACTIVITY.mark_counts)
-        dense = _same_kickoff_universe(per_competition=50, unresolved=1800)
+        dense = await _same_kickoff_universe_yielding(per_competition=50, unresolved=1800)
         partition_holder["partition"] = await partition_identity_shards_cooperative(
             dense, kickoff_tolerance=timedelta(minutes=5)
         )
-        modest = _same_kickoff_universe(per_competition=3, unresolved=40)
+        modest = await _same_kickoff_universe_yielding(per_competition=3, unresolved=40)
         matchbook = [item for item in modest if item.venue is VenueName.MATCHBOOK]
         polymarket = [item for item in modest if item.venue is VenueName.POLYMARKET]
         kalshi = [item for item in modest if item.venue is VenueName.KALSHI]
