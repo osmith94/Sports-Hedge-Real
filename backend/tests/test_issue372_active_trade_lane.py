@@ -183,6 +183,100 @@ def test_active_trade_lane_does_not_rediscover_or_rematch() -> None:
     assert "PRICE_ENGINE_ACTIVE_TRADE_LANE" in tick_src
 
 
+@pytest.mark.asyncio
+async def test_active_trade_fresh_refresh_updates_exit_management_without_extra_provider_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ACTIVE exit economics consume the just-fetched exact-ID books."""
+
+    helper_src = inspect.getsource(
+        LiveRefreshCoordinator._refresh_active_trade_position_management
+    )
+    assert "PriceEngineItemStatus.EVALUATED" in helper_src
+    assert "asyncio.to_thread" in helper_src
+    for forbidden in ("get_market(", "order_book(", "list_events(", "list_markets("):
+        assert forbidden not in helper_src
+
+    ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
+    _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
+    coordinator = None
+    try:
+        trade = ops.list_active_trades()[0]
+        decision = ops._plans[trade.opportunity_id].decision
+        calls: list[tuple[str, datetime | None]] = []
+
+        class _FakeManager:
+            def __init__(self) -> None:
+                self.operations = None
+                self.catalog = SimpleNamespace(name="old")
+
+            def manage_trade(self, trade_id: str, *, now=None):
+                calls.append((trade_id, now))
+                return SimpleNamespace(trade_id=trade_id)
+
+        manager = _FakeManager()
+        fresh_catalog = SimpleNamespace(name="fresh-active-books")
+        mode = {"status": "retry_wait"}
+
+        class _FakeEngine:
+            def __init__(self) -> None:
+                self.paper_scan = SimpleNamespace(reverse_catalog=fresh_catalog)
+
+            async def _price_item(self, runtime, slice_result, *, lane=None):
+                assert lane == PRICE_ENGINE_ACTIVE_TRADE_LANE
+                if mode["status"] == "retry_wait":
+                    runtime.status = PriceEngineItemStatus.RETRY_WAIT
+                    return PriceEngineItemStatus.RETRY_WAIT
+                runtime.status = PriceEngineItemStatus.EVALUATED
+                # Keep top-up out of this regression; exit management must still run
+                # because the market observations themselves are fresh.
+                runtime.last_persist_error = "injected_capture_failure"
+                slice_result.decisions.append(decision)
+                return PriceEngineItemStatus.EVALUATED
+
+            async def drain_item_captures(self) -> None:
+                return None
+
+            def set_background_interval_seconds(self, _cadence: int) -> None:
+                return None
+
+            def restart(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            "sports_hedge.api.paper.get_paper_operations_service",
+            lambda *_args, **_kwargs: ops,
+        )
+        monkeypatch.setattr(
+            "sports_hedge.api.paper.get_paper_position_manager",
+            lambda: manager,
+        )
+
+        engine = _FakeEngine()
+        coordinator = LiveRefreshCoordinator(clock=lambda: OBSERVED, price_engine=engine)
+        tick_plan = DualCadencePlan(
+            lane=ACTIVE_TRADE_LANE,
+            reason="active_trade_due",
+            identity_scope=[trade.trade_id],
+        )
+
+        await coordinator._run_active_trade_tick(tick_plan)
+        assert calls == []
+
+        mode["status"] = "evaluated"
+        await coordinator._run_active_trade_tick(tick_plan)
+        assert len(calls) == 1
+        assert calls[0][0] == trade.trade_id
+        assert manager.operations is ops
+        assert manager.catalog is fresh_catalog
+    finally:
+        if coordinator is not None:
+            coordinator.reset()
+        repository.close()
+        ledger.close()
+        reset_active_trade_registry()
+
 def test_qualifying_arb_adds_second_tranche(tmp_path: Path) -> None:
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
     store = _raise_trade_cap(tmp_path, Decimal("1000"))
