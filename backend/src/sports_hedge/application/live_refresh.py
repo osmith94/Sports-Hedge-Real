@@ -5277,6 +5277,52 @@ class LiveRefreshCoordinator:
             return ActiveTradeReasonCode.REFRESH_MISSING_IDENTITY, "ACTIVE refresh missing identity or engine"
         return ActiveTradeReasonCode.REFRESH_FAILED, "ACTIVE refresh produced no fresh decision"
 
+    async def _refresh_active_trade_position_management(
+        self,
+        operations: Any,
+        trade_id: str,
+        *,
+        status: Any,
+        runtime: Any,
+        slice_result: Any,
+    ) -> bool:
+        """Re-evaluate exit economics from this ACTIVE tick\'s fresh exact-ID books.
+
+        This is deliberately downstream of provider pricing. It performs no
+        venue/discovery IO: PaperPositionManager reads the reverse-book
+        catalogue populated by PaperScanService.scan_pair during the
+        successful ACTIVE refresh. Failed/incomplete refreshes remain fail-closed
+        and must not make an older catalogue observation look current.
+        """
+
+        from sports_hedge.application.price_engine import PriceEngineItemStatus
+
+        if status is not PriceEngineItemStatus.EVALUATED or runtime is None:
+            return False
+        if slice_result is None or not list(getattr(slice_result, "decisions", None) or []):
+            return False
+        try:
+            from sports_hedge.api.paper import get_paper_position_manager
+
+            manager = get_paper_position_manager()
+            manager.operations = operations
+            paper_scan = getattr(self._price_engine, "paper_scan", None)
+            reverse_catalog = getattr(paper_scan, "reverse_catalog", None)
+            if reverse_catalog is not None:
+                manager.catalog = reverse_catalog
+            await asyncio.to_thread(
+                manager.manage_trade,
+                trade_id,
+                now=self.now(),
+            )
+            return True
+        except Exception:
+            LOGGER.exception(
+                "ACTIVE TRADE position-management refresh failed trade_id=%s",
+                trade_id,
+            )
+            return False
+
     async def _run_active_trade_tick(self, plan: DualCadencePlan) -> None:
         """Exact-ID refresh + optional top-up. Never list_events/list_markets.
 
@@ -5323,6 +5369,13 @@ class LiveRefreshCoordinator:
             jobs.append(trade)
 
         engine = self._price_engine
+        if isinstance(engine, CataloguePriceEngine) and engine.paper_scan is None:
+            # ACTIVE can be the first lane after process restart. Ensure its
+            # exact-ID observations populate the same reverse-book catalogue
+            # used by position management; this does not add provider calls.
+            from sports_hedge.api.paper import scheduled_paper_scan_service
+
+            engine.paper_scan = scheduled_paper_scan_service()
 
         async def _price_one(
             trade: Any,
@@ -5441,6 +5494,24 @@ class LiveRefreshCoordinator:
             loaded = trade
             if operations.trades is not None:
                 loaded = operations.trades.get(trade.trade_id) or trade
+
+            # The ACTIVE lane owns the freshest books for an open position.
+            # Reuse those exact observations immediately for Current Exit % /
+            # unwind safety instead of waiting for a later HOT/UNIVERSE persist.
+            await self._refresh_active_trade_position_management(
+                operations,
+                loaded.trade_id,
+                status=status,
+                runtime=runtime,
+                slice_result=slice_result,
+            )
+            if operations.trades is not None:
+                loaded = operations.trades.get(trade.trade_id) or loaded
+            if loaded.state not in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
+                self._active_trades.drop(loaded.trade_id)
+                priced += 1
+                continue
+
             self._active_trades.mark_priced(
                 loaded.trade_id,
                 now=priced_at,
