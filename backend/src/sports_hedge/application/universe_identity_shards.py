@@ -410,9 +410,11 @@ async def partition_identity_shards_cooperative(
     mark_loop_phase(lane="universe", phase="partition", events=len(items))
     acc = _PartitionAccum()
     last_yield = time.perf_counter()
-    for index, item in enumerate(items, start=1):
+    for item in items:
         _accumulate_event(item, acc)
-        if index % 64 == 0 and (time.perf_counter() - last_yield) >= COOP_MAX_SLICE_SECONDS:
+        # Yield as soon as the slice budget is spent. A fixed event stride
+        # can outrun the 0.25s liveness bound on a dense startup shard.
+        if (time.perf_counter() - last_yield) >= COOP_MAX_SLICE_SECONDS:
             await yield_event_loop()
             last_yield = time.perf_counter()
     tolerance = _kickoff_tolerance_seconds(kickoff_tolerance)
@@ -438,7 +440,7 @@ async def partition_identity_shards_cooperative(
                     tolerance=tolerance,
                     cache=cache,
                     start=cursor,
-                    limit=1024,
+                    limit=48,
                 )
                 if hit:
                     hits.append(shard)
