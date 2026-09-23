@@ -29,6 +29,13 @@ from sports_hedge.application.fixture_clusters import (
     to_venue_event,
     universe_cluster_sort_key,
 )
+from sports_hedge.application.universe_matching_report import (
+    MAX_STORED_NORMALIZATION_REJECTIONS,
+    MAX_STORED_SCOPE_REJECTIONS,
+    attach_universe_matching_evidence,
+    new_matching_review_slot,
+    raw_display_fields,
+)
 from sports_hedge.application.universe_identity_cache import (
     CrossGenerationIdentityCache,
     GenerationIdentityCache,
@@ -849,6 +856,7 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_books_skipped_unapproved = 0
         self._kalshi_get_market_failed_tickers: set[str] = set()
         self._identity_cache: GenerationIdentityCache | None = None
+        self._op_matching_review: dict[str, Any] | None = None
         self._incremental_cache: CrossGenerationIdentityCache | None = None
         self._op_partial_clusters: list[FixtureCluster] = []
         self._op_clustering_truncated = False
@@ -1028,6 +1036,11 @@ class ReadOnlyCrossVenueCollector:
         self._op_raw_competition_counts = {}
         self._op_partial_clusters = []
         resolved_lane = (scan_lane or "").strip().casefold() or None
+        self._op_matching_review = (
+            new_matching_review_slot()
+            if resolved_lane == ScanLane.UNIVERSE.value
+            else None
+        )
         hot_scope = {item.strip() for item in (identity_scope or []) if item and item.strip()}
         skip_ids = {item.strip() for item in (skip_event_ids or []) if item and item.strip()}
         clusters_before_resume = 0
@@ -1220,6 +1233,7 @@ class ReadOnlyCrossVenueCollector:
                     50,
                 )
                 skipped_out_of_scope = mb_scope.skipped + pm_scope.skipped + k_scope.skipped
+                self._retain_scope_rejections(mb_scope, pm_scope, k_scope)
                 self._op_raw_competition_counts = {
                     VenueName.MATCHBOOK.value: count_raw_events_by_competition(
                         mb_scope.allowed, venue=VenueName.MATCHBOOK
@@ -2749,7 +2763,7 @@ class ReadOnlyCrossVenueCollector:
             "viable_venue_count": None,
         }
         LOGGER.info("scan_diagnostics %s", diagnostics)
-        return CollectionReport(
+        report = CollectionReport(
             started_at=started_at,
             completed_at=completed_at,
             discovery_source=VenueName.MATCHBOOK,
@@ -2803,6 +2817,95 @@ class ReadOnlyCrossVenueCollector:
             scan_lane=scan_lane,
             resume_cursor=resume_cursor,
         )
+        self._publish_matching_review(
+            report,
+            completeness=completeness,
+            partial=bool(diagnostics.get("partial")),
+            clustering_truncated=bool(clustering_truncated),
+            venue_health=venue_health,
+            enabled_venues=[item.value for item in enabled_list],
+            raw_counts={
+                VenueName.MATCHBOOK.value: len(raw_matchbook_events),
+                VenueName.POLYMARKET.value: len(raw_polymarket_events),
+                VenueName.KALSHI.value: len(raw_kalshi_events),
+            },
+            normalized_counts={
+                VenueName.MATCHBOOK.value: len(matchbook_events),
+                VenueName.POLYMARKET.value: len(polymarket_events),
+                VenueName.KALSHI.value: len(kalshi_events),
+            },
+            skipped_out_of_scope=skipped_out_of_scope,
+            skipped_by_reason=skipped_by_reason,
+            universe_generation_id=universe_generation_id,
+            generated_at=completed_at,
+        )
+        return report
+
+    def _retain_scope_rejections(self, *scopes: Any) -> None:
+        review = self._op_matching_review
+        if review is None:
+            return
+        rows = review["scope_rejections"]
+        for scope in scopes:
+            for item in getattr(scope, "rejected_events", ()) or ():
+                if len(rows) >= MAX_STORED_SCOPE_REJECTIONS:
+                    review["scope_rejections_truncated"] = True
+                    return
+                rows.append(item)
+            if getattr(scope, "rejected_events_truncated", False):
+                review["scope_rejections_truncated"] = True
+
+    def _retain_normalization_rejection(
+        self,
+        payload: dict[str, Any],
+        *,
+        venue: VenueName,
+        reason: str,
+        source_id: str | None,
+    ) -> None:
+        review = self._op_matching_review
+        if review is None:
+            return
+        rows = review["normalization_rejections"]
+        if len(rows) >= MAX_STORED_NORMALIZATION_REJECTIONS:
+            review["normalization_rejections_truncated"] = True
+            return
+        display = raw_display_fields(payload)
+        rows.append(
+            {
+                "venue": venue.value,
+                "source_event_id": source_id,
+                "provider_label": display["provider_label"],
+                "provider_label_evidence": display["provider_label_evidence"],
+                "reason": reason[:300],
+            }
+        )
+
+    def _publish_matching_review(self, report: CollectionReport, **context: Any) -> None:
+        review = self._op_matching_review
+        if review is None:
+            return
+        payload = dict(review)
+        payload["meta"] = {
+            "generated_at": context["generated_at"].isoformat(),
+            "universe_generation_id": context["universe_generation_id"],
+            "completeness": context["completeness"],
+            "partial": bool(context["partial"]),
+            "clustering_truncated": bool(context["clustering_truncated"]),
+            "selected_competition_codes": list(self._op_selected_competition_codes or ()),
+            "selected_season_scope_codes": list(self._op_selected_season_scope_codes or ()),
+            "matcher_threshold": review.get("matcher_threshold"),
+            "matcher_semantic_version": review.get("matcher_semantic_version"),
+            "enabled_venues": list(context["enabled_venues"]),
+            "venue_health": dict(context["venue_health"]),
+            "source_event_counts": {
+                "raw_by_venue": dict(context["raw_counts"]),
+                "normalized_by_venue": dict(context["normalized_counts"]),
+                "skipped_out_of_scope": context["skipped_out_of_scope"],
+                "skipped_by_reason": dict(context["skipped_by_reason"]),
+            },
+        }
+        attach_universe_matching_evidence(report, payload)
 
     def _cluster_identity_incomplete(self, cluster: FixtureCluster) -> bool:
         """True when truncated clustering still has unscored pairs for this fixture."""
@@ -4725,6 +4828,7 @@ class ReadOnlyCrossVenueCollector:
                 incremental_cache=self._incremental_cache if allow_incremental else None,
                 stop=_stop,
                 on_partial=_remember,
+                review_slot=getattr(self, "_op_matching_review", None),
             )
         except asyncio.CancelledError:
             # Shard checkpoints are stored before the cancel leaves the
@@ -4766,6 +4870,7 @@ class ReadOnlyCrossVenueCollector:
                     detail=str(exc),
                 )
             )
+            self._retain_normalization_rejection(payload, venue=venue, reason=str(exc), source_id=source_id)
             return None
 
     async def _clusters_from_known_source_events(

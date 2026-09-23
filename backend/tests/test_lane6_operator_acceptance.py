@@ -153,7 +153,7 @@ def test_operator_console_hierarchy_is_treasury_then_positions_then_scan() -> No
         "<OpportunityMonitor",
         "<ActivityFeed",
         "<CapitalSummary",
-        "Demo walkthrough · not live operations",
+        "<GenerateMatchingReport",
     ]
     positions = [page.index(marker) for marker in order]
     assert positions == sorted(positions)

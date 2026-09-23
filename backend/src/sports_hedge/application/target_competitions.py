@@ -1197,6 +1197,8 @@ class ScopeFilterResult(BaseModel):
     skipped: int = 0
     skipped_by_reason: dict[str, int] = Field(default_factory=dict)
     rejected_labels: list[str] = Field(default_factory=list)
+    rejected_events: list[dict[str, Any]] = Field(default_factory=list)
+    rejected_events_truncated: bool = False
 
 
 def _scope_diagnostic_sport(competition: TargetCompetition | None) -> str:
@@ -1932,6 +1934,37 @@ def scope_kalshi_event(
     )
 
 
+_MAX_RETAINED_SCOPE_REJECTIONS = 2000
+_SCOPE_LABEL_KEYS = ("title", "name", "question", "event_title", "subtitle")
+
+
+def _scope_rejection_record(
+    payload: dict[str, Any], venue: VenueName, decision: ScopeDecision
+) -> dict[str, Any]:
+    """Identity fields only. Full provider payloads stay out of the diagnostic."""
+
+    source_id = str(
+        payload.get("id") or payload.get("event_ticker") or payload.get("ticker") or ""
+    ).strip()
+    label = None
+    for key in _SCOPE_LABEL_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            label = value.strip()[:300]
+            break
+    if label is None and decision.label:
+        label = decision.label.strip()[:300]
+    return {
+        "venue": venue.value,
+        "source_event_id": source_id or None,
+        "provider_label": label,
+        "provider_label_evidence": "retained" if label else "unavailable",
+        "scope_reason": decision.reason or OUT_OF_SCOPE_COMPETITION,
+        "competition_label": decision.label,
+        "sport": decision.sport,
+    }
+
+
 def filter_in_scope_events(
     payloads: list[dict[str, Any]],
     *,
@@ -1943,8 +1976,10 @@ def filter_in_scope_events(
     allowed: list[dict[str, Any]] = []
     skipped_by_reason: dict[str, int] = {}
     rejected: list[str] = []
+    rejected_events: list[dict[str, Any]] = []
     seen_labels: set[str] = set()
     skipped = 0
+    truncated = False
     for payload in payloads:
         decision = _scope_for_venue(payload, venue, selected_codes=selected_codes)
         if decision.allowed:
@@ -1957,11 +1992,17 @@ def filter_in_scope_events(
         if label and label not in seen_labels:
             seen_labels.add(label)
             rejected.append(label)
+        if len(rejected_events) < _MAX_RETAINED_SCOPE_REJECTIONS:
+            rejected_events.append(_scope_rejection_record(payload, venue, decision))
+        else:
+            truncated = True
     return ScopeFilterResult(
         allowed=allowed,
         skipped=skipped,
         skipped_by_reason=skipped_by_reason,
         rejected_labels=rejected[:50],
+        rejected_events=rejected_events,
+        rejected_events_truncated=truncated,
     )
 
 
