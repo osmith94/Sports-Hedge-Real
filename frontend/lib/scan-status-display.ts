@@ -206,6 +206,12 @@ export function backgroundPriceCopy(
       detail: "waiting for startup universe",
     };
   }
+  if (status?.background_pricing_paused || lane?.last_plan_reason === "background_paused") {
+    return {
+      label: BACKGROUND_PRICING_LABEL,
+      detail: "paused by operator · cursor preserved · HOT / ACTIVE / UNIVERSE continue",
+    };
+  }
   const coverage = lane?.last_diagnostics?.coverage as
     | { pass_number?: number; position?: number; catalogue_rows?: number; percent?: number }
     | undefined;

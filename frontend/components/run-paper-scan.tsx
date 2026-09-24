@@ -14,8 +14,10 @@ import {
   clearPaperUniverse,
   getEconomicsStatus,
   getLiveRefreshStatus,
+  pauseBackgroundPricing,
   pauseUniverseSchedule,
   resetMatchbookFee,
+  resumeBackgroundPricing,
   resumePaperScanner,
   resumeUniverseSchedule,
   runPaperBackgroundRefresh,
@@ -241,6 +243,7 @@ export function RunPaperScan() {
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [scannerControlBusy, setScannerControlBusy] = useState(false);
   const [universeScheduleBusy, setUniverseScheduleBusy] = useState(false);
+  const [backgroundPauseBusy, setBackgroundPauseBusy] = useState(false);
   const [universeRunMode, setUniverseRunMode] = useState<UniverseRunMode>("update");
   const [universeActionBusy, setUniverseActionBusy] = useState<"run" | "clear" | null>(null);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
@@ -535,6 +538,23 @@ export function RunPaperScan() {
     }
   }
 
+  async function toggleBackgroundPricingPaused() {
+    setBackgroundPauseBusy(true);
+    setSettingsMessage(null);
+    try {
+      const status = liveRefresh?.background_pricing_paused
+        ? await resumeBackgroundPricing()
+        : await pauseBackgroundPricing();
+      applyLiveRefresh(status, { forceSettings: true });
+    } catch (error) {
+      setSettingsMessage(
+        error instanceof Error ? error.message : "Could not change BACKGROUND pricing pause.",
+      );
+    } finally {
+      setBackgroundPauseBusy(false);
+    }
+  }
+
   async function toggleUniverseSchedulePaused() {
     setUniverseScheduleBusy(true);
     setSettingsMessage(null);
@@ -714,6 +734,7 @@ export function RunPaperScan() {
   const serverOwned = Boolean(liveRefresh?.server_loop_enabled);
   const scannerStopped = Boolean(liveRefresh?.scanner_stopped);
   const universeScansPaused = Boolean(liveRefresh?.universe_scans_paused);
+  const backgroundPricingPaused = Boolean(liveRefresh?.background_pricing_paused);
   const nextHotMs = liveRefresh?.hot?.next_due_at
     ? Date.parse(liveRefresh.hot.next_due_at)
     : Number.NaN;
@@ -973,6 +994,30 @@ export function RunPaperScan() {
                 ? "Resume scheduled UNIVERSE"
                 : "Pause scheduled UNIVERSE"}
           </button>
+          <button
+            className={backgroundPricingPaused ? "scan-button" : "scan-button-secondary"}
+            type="button"
+            disabled={backgroundPauseBusy || loading || scannerStopped}
+            onClick={() => void toggleBackgroundPricingPaused()}
+            aria-label={
+              backgroundPricingPaused ? "Resume BACKGROUND" : "Pause BACKGROUND"
+            }
+            title={
+              scannerStopped
+                ? "Scanner stopped by operator"
+                : backgroundPricingPaused
+                  ? "Resume BACKGROUND from the existing cursor. Does not restart at row 1."
+                  : "Stop new BACKGROUND pricing. In-flight calls finish. HOT, ACTIVE and UNIVERSE continue."
+            }
+          >
+            {backgroundPauseBusy
+              ? backgroundPricingPaused
+                ? "Resuming BACKGROUND…"
+                : "Pausing BACKGROUND…"
+              : backgroundPricingPaused
+                ? "Resume BACKGROUND"
+                : "Pause BACKGROUND"}
+          </button>
         </div>
         <div className="scan-ops-actions">
           <button
@@ -1006,6 +1051,10 @@ export function RunPaperScan() {
             <span className="status-badge" role="status">
               UNIVERSE SCHEDULE PAUSED · BACKGROUND / HOT / ACTIVE TRADE continue
             </span>
+          ) : backgroundPricingPaused ? (
+            <span className="status-badge" role="status">
+              BACKGROUND PAUSED · cursor preserved · HOT / ACTIVE / UNIVERSE continue
+            </span>
           ) : null}
         </div>
         {settingsMessage ? (
@@ -1025,6 +1074,7 @@ export function RunPaperScan() {
             Clear universe clears live UNIVERSE current-state, active generation and checkpoint only.
             Clears the live UNIVERSE working set only. History, catalogue, PAPER trades and Treasury are preserved.
             Pause scheduled UNIVERSE stops the periodic timer only; it does not fake a huge discovery refresh, and the stored discovery refresh stays editable for resume.
+            Pause BACKGROUND stops new BACKGROUND pricing slices only. In-flight provider calls finish, the coverage cursor stays, and HOT, ACTIVE and UNIVERSE continue. Resume continues from that cursor.
             Update saves Min Net Arb, Outright Min Net Arb, Max Risk, HOT target refresh and UNIVERSE discovery refresh
             and max allocated per trade for subsequent server-owned work and does not trigger a scan.
             Football competitions Apply changes the current session scope, including season

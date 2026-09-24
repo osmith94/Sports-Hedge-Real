@@ -285,6 +285,8 @@ def _cycle_operator_summary(
     elif matched_event_pairs > 0 and matched_market_pairs == 0:
         notes.append("evaluated · 0 equivalent markets")
     if existing and existing.strip():
+        if "HOT fixtures" in existing:
+            return existing.strip()
         if notes:
             extra = " · ".join(notes)
             if extra not in existing:

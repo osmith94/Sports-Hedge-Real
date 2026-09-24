@@ -8,6 +8,10 @@ because a timer fires.
 BACKGROUND has no target wait: the next pass starts as soon as the current
 one has claimed every member. HOT may wait until a target refresh boundary
 after a pass finishes early. A slow pass is never reset at that boundary.
+
+Claiming a row is not coverage. ``release_unstarted`` puts rows that never
+started provider work back into the current pass. A pass finishes only when
+every member was honestly completed or is still claimed as completed.
 """
 
 from __future__ import annotations
@@ -31,6 +35,8 @@ class CoverageCursor:
     last_full_pass_seconds: float | None = None
     hold_until: datetime | None = None
     last_claimed: list[str] = field(default_factory=list)
+    # Last membership order. Recovery uses this sequence, not row-id sort.
+    order_snapshot: list[str] = field(default_factory=list)
 
     def snapshot(self) -> dict[str, object]:
         position = self.completed_this_pass
@@ -59,8 +65,11 @@ class CoverageCursor:
             for row_id in self.pending_inserts
             if row_id in member_set and row_id not in self.visited
         ]
+        previous = list(self.order_snapshot)
         if self.cursor_after_id not in member_set:
-            self.cursor_after_id = _predecessor(ordered, self.cursor_after_id)
+            self.cursor_after_id = _anchor_after_removal(
+                previous, ordered, self.cursor_after_id
+            )
         start = _start_index(ordered, self.cursor_after_id)
         passed = set(ordered[:start])
         known = set(self.pending_inserts) | self.visited
@@ -72,6 +81,7 @@ class CoverageCursor:
                 known.add(row_id)
         self.catalogue_count = len(ordered)
         self.completed_this_pass = len(self.visited)
+        self.order_snapshot = ordered
         return ordered
 
     def claim(
@@ -145,6 +155,32 @@ class CoverageCursor:
         self._finish_pass(now)
         return []
 
+    def release_unstarted(self, row_ids: list[str]) -> None:
+        """Return claims that never started work to the current pass.
+
+        ``claim`` marks rows visited so a concurrent claim cannot take them
+        twice. That mark is not coverage. Rows that end as
+        ``not_started_this_cadence`` are removed from ``visited`` and queued
+        behind the cursor via ``pending_inserts``. If the claim had closed
+        the pass, the pass reopens. The next claim continues forward, then
+        picks these rows up before a new pass starts.
+        """
+
+        if not row_ids:
+            return
+        released = False
+        for row_id in row_ids:
+            if row_id in self.visited:
+                self.visited.discard(row_id)
+                released = True
+            if row_id not in self.visited and row_id not in self.pending_inserts:
+                self.pending_inserts.append(row_id)
+        if not released:
+            return
+        self.completed_this_pass = len(self.visited)
+        if self.hold_until is not None:
+            self.hold_until = None
+
     def hold_for_target(self, *, target_seconds: float, now: datetime) -> float:
         """Arm the post-pass wait. Returns seconds until the next pass may start."""
 
@@ -208,6 +244,7 @@ class CoverageCursor:
             "catalogue_count": self.catalogue_count,
             "pass_started_at": self.pass_started_at.isoformat() if self.pass_started_at else None,
             "last_full_pass_seconds": self.last_full_pass_seconds,
+            "order_snapshot": list(self.order_snapshot),
         }
 
     @classmethod
@@ -231,7 +268,39 @@ class CoverageCursor:
             cursor.pass_started_at = datetime.fromisoformat(started)
         last = payload.get("last_full_pass_seconds")
         cursor.last_full_pass_seconds = float(last) if last is not None else None
+        snapshot = payload.get("order_snapshot") or []
+        if isinstance(snapshot, list):
+            cursor.order_snapshot = [str(item) for item in snapshot]
         return cursor
+
+
+def _anchor_after_removal(
+    previous: list[str],
+    ordered: list[str],
+    missing: str | None,
+) -> str | None:
+    """Point the cursor at the predecessor of the next surviving row.
+
+    ``previous`` is the last membership order, which for HOT is
+    fixture-interleaved and is not sorted by catalogue row id. Walking that
+    sequence finds the next remaining row. Lexical comparison is only the
+    fallback when no order was stored (older BACKGROUND resume payloads).
+    """
+
+    if not missing:
+        return None
+    if previous and missing in previous:
+        member_set = set(ordered)
+        index = previous.index(missing)
+        for row_id in previous[index + 1 :]:
+            if row_id not in member_set:
+                continue
+            new_index = ordered.index(row_id)
+            if new_index == 0:
+                return None
+            return ordered[new_index - 1]
+        return ordered[-1] if ordered else None
+    return _predecessor(ordered, missing)
 
 
 def _predecessor(ordered: list[str], missing: str | None) -> str | None:
@@ -248,12 +317,13 @@ def _predecessor(ordered: list[str], missing: str | None) -> str | None:
 def _start_index(ordered: list[str], cursor_after_id: str | None) -> int:
     if cursor_after_id is None:
         return 0
-    if cursor_after_id in ordered:
+    try:
         return ordered.index(cursor_after_id) + 1
-    for index, row_id in enumerate(ordered):
-        if row_id > cursor_after_id:
-            return index
-    return len(ordered)
+    except ValueError:
+        for index, row_id in enumerate(ordered):
+            if row_id > cursor_after_id:
+                return index
+        return len(ordered)
 
 
 def _seconds(value: float):

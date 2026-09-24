@@ -51,6 +51,7 @@ from sports_hedge.application.live_refresh import (
     get_live_refresh_coordinator,
 )
 from sports_hedge.application.price_engine import (
+    HOT_IDLE_SCHEDULER_DISPOSITIONS,
     CataloguePriceEngine,
     HotPromotionFact,
     PriceEnginePriority,
@@ -1141,6 +1142,28 @@ def resume_universe_schedule(
     return _status_with_scan_cycles(coordinator.public_status(), repository)
 
 
+@router.post("/scanner/background-pricing/pause", response_model=LiveRefreshStatus)
+def pause_background_pricing(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Stop new BACKGROUND pricing slices. In-flight calls finish. Cursor stays."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_background_pricing_paused(True)
+    return _status_with_scan_cycles(coordinator.public_status(), repository)
+
+
+@router.post("/scanner/background-pricing/resume", response_model=LiveRefreshStatus)
+def resume_background_pricing(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> LiveRefreshStatus:
+    """Resume BACKGROUND from the existing coverage cursor. No row-1 restart."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_background_pricing_paused(False)
+    return _status_with_scan_cycles(coordinator.public_status(), repository)
+
+
 @router.post(
     "/collect/hot",
     response_model=CollectionReport,
@@ -1676,6 +1699,17 @@ async def persist_background_price_cycle_history(
     await asyncio.to_thread(_write)
 
 
+def _hot_report_disposition(report: CollectionReport) -> str | None:
+    diagnostics = dict(report.scan_diagnostics or {})
+    coverage = diagnostics.get("hot_coverage")
+    if not isinstance(coverage, dict):
+        return None
+    raw = coverage.get("scheduler_disposition")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip()
+
+
 async def persist_scheduled_collection_report(
     coordinator,
     report: CollectionReport,
@@ -1830,6 +1864,12 @@ async def server_owned_refresh_tick(plan=None) -> None:
         )
         return
     if resolved.lane == ScanLane.HOT.value or getattr(resolved, "reason", "") == "hot_scope_empty":
+        if getattr(resolved, "reason", "") == "hot_scope_empty":
+            return
+        idle_reason = coordinator.price_engine().peek_hot_idle_reason(coordinator.now())
+        if idle_reason is not None:
+            coordinator.note_hot_scheduler_idle(idle_reason)
+            return
         hot_wall = float(settings.paper_scan_hot_cycle_timeout_seconds)
         price_engine_venues = [VenueName.MATCHBOOK, VenueName.KALSHI]
 
@@ -1844,6 +1884,12 @@ async def server_owned_refresh_tick(plan=None) -> None:
                 paper_scan=service,
             )
             finished = coordinator.now()
+            hot_coverage = getattr(result, "hot_coverage", None)
+            coverage_summary = None
+            if isinstance(hot_coverage, dict):
+                raw_summary = hot_coverage.get("summary")
+                if isinstance(raw_summary, str) and raw_summary.strip():
+                    coverage_summary = raw_summary.strip()
             return CollectionReport(
                 started_at=started,
                 completed_at=finished,
@@ -1854,10 +1900,16 @@ async def server_owned_refresh_tick(plan=None) -> None:
                 scan_lane=ScanLane.HOT.value,
                 venue_health=dict(result.venue_health),
                 operation_health=dict(result.operation_health),
+                operator_summary=coverage_summary,
                 scan_diagnostics={
                     "price_engine": True,
                     "priority": PriceEnginePriority.HOT.value,
                     **price_engine_slice_count_fields(result),
+                    **(
+                        {"hot_coverage": dict(hot_coverage)}
+                        if isinstance(hot_coverage, dict)
+                        else {}
+                    ),
                     **(
                         {"cycle_diagnostic": dict(result.diagnostic)}
                         if isinstance(getattr(result, "diagnostic", None), dict)
@@ -1885,6 +1937,12 @@ async def server_owned_refresh_tick(plan=None) -> None:
         # Item captures started during the slice. Drain them outside run_cycle
         # so slow SQLite/treasury work cannot become scan_cycle_timeout.
         await coordinator.price_engine().drain_item_captures()
+        disposition = _hot_report_disposition(report)
+        if disposition in HOT_IDLE_SCHEDULER_DISPOSITIONS:
+            # Heartbeat already advanced inside the HOT loop. Do not store a
+            # pricing-history row for a wake that did not price or miss capacity.
+            coordinator.note_hot_scheduler_idle(disposition)
+            return
         # Cycle history / position management only. Capture already ran at
         # item completion. Do not recapture the same decision here.
         await persist_scheduled_collection_report(

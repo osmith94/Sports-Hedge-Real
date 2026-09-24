@@ -96,7 +96,7 @@ class _CountingMatchbook(FakeMatchbook):
         del filters
         market = str(market_id)
         self.get_market_calls.append((str(event_id), market))
-        if self.kalshi.stall_inflight >= 4 and not self.kalshi.release.is_set():
+        if self.kalshi.stall_inflight >= 2 and not self.kalshi.release.is_set():
             self.calls_while_kalshi_stalled += 1
         return _mb_btts(int(market))
 
@@ -153,7 +153,8 @@ async def _row_centric_reference(
                 await kalshi.get_order_book(row.kalshi_event_ticker, ticker)
 
     async def _release_after_stall() -> int:
-        while kalshi.stall_inflight < 4:
+        # BACKGROUND may occupy only the lower-priority Kalshi ceiling (2 of 4).
+        while kalshi.stall_inflight < 2:
             await asyncio.sleep(0)
         for _ in range(40):
             await asyncio.sleep(0)
@@ -177,7 +178,9 @@ async def test_row_centric_shape_stops_matchbook_when_kalshi_slots_stall() -> No
         {VenueName.MATCHBOOK: 4, VenueName.KALSHI: 4, VenueName.POLYMARKET: 8}
     )
     seen = await _row_centric_reference(rows, matchbook, kalshi, layer)
-    assert seen <= 4
+    # Eight workers, two of which can sit in the lower-priority Kalshi ceiling.
+    # The rest may finish the Matchbook read they already started, then wait.
+    assert seen <= 6
     assert len(matchbook.get_market_calls) == 16
 
 
@@ -450,8 +453,8 @@ async def test_hot_acquire_is_granted_before_the_next_background_matchbook() -> 
         def __init__(self) -> None:
             super().__init__()
             self.entered = 0
-            self.four = asyncio.Event()
-            self.release_one = asyncio.Event()
+            self.two = asyncio.Event()
+            self.release_held = asyncio.Event()
             self.release_rest = asyncio.Event()
 
         async def get_market(
@@ -464,10 +467,10 @@ async def test_hot_acquire_is_granted_before_the_next_background_matchbook() -> 
             self.get_market_calls.append((str(event_id), str(market_id)))
             self.entered += 1
             ordinal = self.entered
-            if ordinal == 4:
-                self.four.set()
-            if ordinal == 1:
-                await self.release_one.wait()
+            if ordinal == 2:
+                self.two.set()
+            if ordinal <= 2:
+                await self.release_held.wait()
             else:
                 await self.release_rest.wait()
             return _mb_btts(int(market_id))
@@ -477,28 +480,23 @@ async def test_hot_acquire_is_granted_before_the_next_background_matchbook() -> 
     engine, matchbook, _kalshi, layer = _engine(rows, matchbook=matchbook, timeout=3)
 
     async def _hot_then_release() -> None:
-        await matchbook.four.wait()
+        await matchbook.two.wait()
+        assert 2 <= layer.lower_in_use[VenueName.MATCHBOOK] <= 3
 
         async def _hot() -> None:
             async with layer.acquire_wait(
                 VenueName.MATCHBOOK,
                 lane="hot",
                 stage="get_market",
-                timeout=3,
+                timeout=1,
             ) as lease:
                 assert lease is not None
-                assert len(matchbook.get_market_calls) == 4
+                assert layer.lower_in_use[VenueName.MATCHBOOK] <= 3
+                assert layer.snapshot().inflight[VenueName.MATCHBOOK.value] >= 3
+                matchbook.release_held.set()
                 matchbook.release_rest.set()
 
-        hot_task = asyncio.create_task(_hot())
-        for _ in range(100):
-            if layer.snapshot().waiting.get(VenueName.MATCHBOOK.value, 0) >= 1:
-                break
-            await asyncio.sleep(0)
-        else:
-            raise AssertionError("HOT request did not queue while BACKGROUND held Matchbook")
-        matchbook.release_one.set()
-        await hot_task
+        await _hot()
 
     _hot_result, slice_result = await asyncio.wait_for(
         asyncio.gather(

@@ -733,6 +733,7 @@ export type OperatorScannerSettings = {
   max_allocated_per_trade_gbp?: string;
   scanner_stopped: boolean;
   universe_scans_paused?: boolean;
+  background_pricing_paused?: boolean;
   source?: "operator" | "env_default";
   updated_at?: string | null;
   restart_semantics?: string;
@@ -812,6 +813,7 @@ export type LiveRefreshStatus = {
   paper_autofill_enabled?: boolean;
   scanner_stopped?: boolean;
   universe_scans_paused?: boolean;
+  background_pricing_paused?: boolean;
   operator_settings?: OperatorScannerSettings | null;
   universe_scope?: OperatorUniverseScope | null;
   startup_pricing_ready?: boolean;
@@ -1186,6 +1188,26 @@ export type ScanCycleDiagnosticReport = {
   slowest?: Array<Record<string, unknown>>;
   samples?: Record<string, Array<{ row_id?: string; reason?: string }>>;
   worker_errors?: Array<{ type?: string; message?: string }>;
+  hot_coverage?: {
+    summary?: string;
+    roster_fixtures?: number;
+    roster_rows?: number;
+    due_rows?: number;
+    claimed_rows?: number;
+    started_rows?: number;
+    evaluated_rows?: number;
+    skipped_viability?: number;
+    deferred_rows?: number;
+    retry_wait_rows?: number;
+    not_started_this_cadence?: number;
+    fixtures_touched?: number;
+    fixtures_evaluated?: number;
+    fixtures_missed_capacity?: number;
+    cursor_pass_number?: number;
+    cursor_position?: number;
+    cursor_total?: number;
+    hot_slot_wait_ms?: number;
+  };
 };
 
 export type ScanCycleDiagnosticResponse = {
@@ -1604,6 +1626,32 @@ export async function resumePaperScanner(): Promise<LiveRefreshStatus> {
 
 export async function pauseUniverseSchedule(): Promise<LiveRefreshStatus> {
   const response = await fetch(`${API_BASE}/paper/scanner/universe-schedule/pause`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function pauseBackgroundPricing(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/background-pricing/pause`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function resumeBackgroundPricing(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/background-pricing/resume`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),

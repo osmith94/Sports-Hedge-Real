@@ -5,6 +5,23 @@ must not cancel or reset UNIVERSE. After a bounded run of HOT grants while
 UNIVERSE is waiting, the next slot goes to UNIVERSE so a busy HOT roster
 cannot starve discovery.
 
+Matchbook and Kalshi keep their physical caps (4). After startup pricing is
+released, lower-priority occupancy follows HOT demand:
+
+- no runnable HOT work: BACKGROUND and UNIVERSE may use 3 of 4, leaving one
+  slot for ACTIVE even when ACTIVE is not queued;
+- runnable HOT work: new lower-priority leases stop at 1 of 4 so ACTIVE and
+  HOT can use the rest. HOT is not capped. ACTIVE still outranks HOT.
+
+Already-running lower-priority HTTP calls are not cancelled when demand
+changes. Anti-starvation may still grant a lower-priority waiter into a
+non-protected slot; it must not spend the protected headroom.
+
+During the startup UNIVERSE barrier, HOT and BACKGROUND are already gated.
+The reservation is one slot so ACTIVE cannot be locked out, and UNIVERSE may
+use the other three. That is the whole startup exception. Once pricing opens,
+the dynamic policy above applies.
+
 Issue #473 adds deadline/value-aware ranking and queue metrics on top of
 those slot caps. Limits are never raised here.
 
@@ -49,6 +66,14 @@ DEFAULT_STARVATION_HOT_GRANTS = 8
 PRICE_ENGINE_BACKGROUND_LANE = "background"
 PRICE_ENGINE_ACTIVE_TRADE_LANE = "active_trade"
 PRICE_ENGINE_SETTLEMENT_LANE = "settlement"
+# Ungranted BACKGROUND waiters refused because the operator paused the lane.
+BACKGROUND_ADMISSION_PAUSED = "background_admission_paused"
+# No runnable HOT work: leave one physical slot for ACTIVE (3 of 4 for lower).
+IDLE_ACTIVE_RESERVED_SLOTS = 1
+# Runnable HOT work: new lower-priority leases stop at one slot.
+HOT_DEMAND_LOWER_OCCUPANCY_CEILING = 1
+# Startup UNIVERSE barrier: leave one slot for ACTIVE. HOT/BACKGROUND are gated.
+STARTUP_ACTIVE_RESERVED_SLOTS = 1
 
 
 class ProviderPriority(IntEnum):
@@ -76,6 +101,7 @@ class _Waiter:
     seq: int
     lane: str
     stage: str
+    requested_lane: str = ""
     event: asyncio.Event = field(default_factory=asyncio.Event)
     granted: bool = False
     cancelled: bool = False
@@ -161,6 +187,8 @@ class ProviderAccessSnapshot:
     limits: dict[str, int]
     queue: dict[str, dict[str, Any]] = field(default_factory=dict)
     deadline_misses_by_lane: dict[str, int] = field(default_factory=dict)
+    lower_priority_inflight: dict[str, int] = field(default_factory=dict)
+    lower_priority_ceiling: dict[str, int | None] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -173,6 +201,8 @@ class ProviderAccessSnapshot:
             "limits": dict(self.limits),
             "queue": {venue: dict(metrics) for venue, metrics in self.queue.items()},
             "deadline_misses_by_lane": dict(self.deadline_misses_by_lane),
+            "lower_priority_inflight": dict(self.lower_priority_inflight),
+            "lower_priority_ceiling": dict(self.lower_priority_ceiling),
         }
 
 
@@ -193,6 +223,12 @@ class ProviderAccessLayer:
         }
         self._starvation_hot_grants = max(1, int(starvation_hot_grants))
         self._in_use = {venue: 0 for venue in self._limits}
+        self._lower_in_use = {venue: 0 for venue in self._limits}
+        self._peak_lower_in_use = {venue: 0 for venue in self._limits}
+        self._startup_active_headroom = False
+        self._hot_provider_demand = False
+        self._background_admission_paused = False
+        self._bound_loop: asyncio.AbstractEventLoop | None = None
         self._waiters: dict[VenueName, list[_Waiter]] = {venue: [] for venue in self._limits}
         self._hot_grants_since_universe = {venue: 0 for venue in self._limits}
         self._active_grants_since_hot = {venue: 0 for venue in self._limits}
@@ -215,6 +251,180 @@ class ProviderAccessLayer:
     @property
     def limits(self) -> dict[VenueName, int]:
         return dict(self._limits)
+
+    @property
+    def lower_in_use(self) -> dict[VenueName, int]:
+        return dict(self._lower_in_use)
+
+    @property
+    def peak_lower_in_use(self) -> dict[VenueName, int]:
+        return dict(self._peak_lower_in_use)
+
+    def set_startup_active_headroom(self, enabled: bool) -> None:
+        """Reserve one Matchbook/Kalshi slot for ACTIVE during startup UNIVERSE.
+
+        HOT and BACKGROUND are gated while the startup barrier is closed, so
+        the runnable-HOT ceiling would only slow discovery. One reserved slot
+        is enough for ACTIVE. Pass False when startup pricing is released;
+        lower-priority occupancy then follows HOT demand.
+        """
+
+        self._startup_active_headroom = bool(enabled)
+
+    def set_hot_provider_demand(self, active: bool) -> None:
+        """Record that HOT has due provider work or is waiting on a slot.
+
+        The price engine sets this from in-memory scheduler truth. Admission
+        only reads the flag. It does not query the catalogue. A change in
+        either direction reconsiders queued waiters immediately so a cleared
+        HOT demand flag can fill the expanded lower-priority ceiling without
+        waiting for another enqueue or release.
+        """
+
+        active = bool(active)
+        if self._hot_provider_demand == active:
+            return
+        self._hot_provider_demand = active
+        self._reconsider_admission()
+
+    @property
+    def hot_provider_demand(self) -> bool:
+        return self._hot_provider_demand
+
+    def set_background_admission_paused(self, paused: bool) -> None:
+        """Refuse new BACKGROUND leases while the operator pause is on.
+
+        Already granted leases are left to finish. Queued, not-yet-granted
+        BACKGROUND waiters are woken immediately and are not granted later.
+        HOT, ACTIVE, UNIVERSE, and settlement keep their own admission rules.
+        """
+
+        paused = bool(paused)
+        if self._background_admission_paused == paused:
+            return
+        self._background_admission_paused = paused
+        self._reconsider_admission()
+
+    @property
+    def background_admission_paused(self) -> bool:
+        return self._background_admission_paused
+
+    def _bind_loop(self) -> None:
+        if self._bound_loop is None:
+            self._bound_loop = asyncio.get_running_loop()
+
+    def _reconsider_admission(self) -> None:
+        """Grant legal waiters or refuse paused BACKGROUND waiters now.
+
+        Safe on the event loop when the condition is free, and safe from a
+        worker thread by scheduling onto the loop that owns the waiters.
+        Does not block the event loop and does not require the setter to be
+        async.
+        """
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not None and not self._cond.locked():
+            self._reconsider_unlocked()
+            return
+        loop = self._bound_loop or running
+        if loop is None or loop.is_closed():
+            return
+
+        def _later() -> None:
+            if self._cond.locked():
+                loop.call_soon(self._reconsider_when_free)
+                return
+            self._reconsider_unlocked()
+
+        if running is loop:
+            loop.call_soon(_later)
+        else:
+            loop.call_soon_threadsafe(_later)
+
+    def _reconsider_when_free(self) -> None:
+        loop = self._bound_loop
+        if self._cond.locked():
+            if loop is not None and not loop.is_closed():
+                loop.call_soon(self._reconsider_when_free)
+            return
+        self._reconsider_unlocked()
+
+    def _reconsider_unlocked(self) -> None:
+        if self._background_admission_paused:
+            for waiters in self._waiters.values():
+                for waiter in waiters:
+                    if waiter.granted or not self._background_admission_blocked(waiter):
+                        continue
+                    self._refuse_ungranted_background(waiter)
+        for venue in self._limits:
+            self._pump(venue)
+
+    def _background_admission_blocked(self, waiter: _Waiter) -> bool:
+        return (
+            self._background_admission_paused
+            and waiter.requested_lane == PRICE_ENGINE_BACKGROUND_LANE
+        )
+
+    def _refuse_ungranted_background(self, waiter: _Waiter) -> None:
+        if waiter.granted or waiter.cancelled:
+            return
+        waiter.cancelled = True
+        waiter.reason = BACKGROUND_ADMISSION_PAUSED
+        waiter.event.set()
+
+    def _hot_demand_active(self) -> bool:
+        """True when HOT can use a slot or is already using one.
+
+        Queued and granted HOT leases count even if the engine flag has not
+        been refreshed yet. That keeps a HOT request from waiting behind a
+        lower-priority grant that would fill the last protected slot.
+        """
+
+        if self._hot_provider_demand:
+            return True
+        for waiters in self._waiters.values():
+            for item in waiters:
+                if item.cancelled or item.priority is not ProviderPriority.HOT:
+                    continue
+                return True
+        return False
+
+    def lower_priority_occupancy_ceiling(self, venue: VenueName) -> int | None:
+        """Max simultaneous BACKGROUND+UNIVERSE leases, or None when uncapped."""
+
+        protected = self._protected_high_priority_slots(venue)
+        if protected <= 0 or venue not in self._limits:
+            return None
+        return max(0, self._limits[venue] - protected)
+
+    def _protected_high_priority_slots(self, venue: VenueName) -> int:
+        if venue not in {VenueName.MATCHBOOK, VenueName.KALSHI}:
+            return 0
+        if venue not in self._limits:
+            return 0
+        limit = self._limits[venue]
+        if limit < 4:
+            return 0
+        if self._startup_active_headroom:
+            return STARTUP_ACTIVE_RESERVED_SLOTS
+        if self._hot_demand_active():
+            return limit - HOT_DEMAND_LOWER_OCCUPANCY_CEILING
+        return IDLE_ACTIVE_RESERVED_SLOTS
+
+    @staticmethod
+    def _is_lower_priority(priority: ProviderPriority) -> bool:
+        return priority not in {ProviderPriority.ACTIVE_TRADE, ProviderPriority.HOT}
+
+    def _lower_grant_allowed(self, venue: VenueName, waiter: _Waiter) -> bool:
+        if not self._is_lower_priority(waiter.priority):
+            return True
+        ceiling = self.lower_priority_occupancy_ceiling(venue)
+        if ceiling is None:
+            return True
+        return self._lower_in_use[venue] < ceiling
 
     def snapshot(self) -> ProviderAccessSnapshot:
         waiting_by_lane = {
@@ -283,6 +493,13 @@ class ProviderAccessLayer:
             limits={venue.value: limit for venue, limit in self._limits.items()},
             queue=queue,
             deadline_misses_by_lane=dict(self._deadline_misses_by_lane),
+            lower_priority_inflight={
+                venue.value: count for venue, count in self._lower_in_use.items()
+            },
+            lower_priority_ceiling={
+                venue.value: self.lower_priority_occupancy_ceiling(venue)
+                for venue in self._limits
+            },
         )
 
     def lane_wait_reason(self, lane: ScanLane | str | None) -> str | None:
@@ -343,9 +560,13 @@ class ProviderAccessLayer:
         work: Any = None,
     ) -> _Waiter:
         async with self._cond:
+            self._bind_loop()
             waiter = self._make_waiter(venue, lane=lane, stage=stage, work=work)
             self._waiters[venue].append(waiter)
-            self._pump(venue)
+            if self._background_admission_blocked(waiter):
+                self._refuse_ungranted_background(waiter)
+            else:
+                self._pump(venue)
             return waiter
 
     def _make_waiter(
@@ -358,6 +579,7 @@ class ProviderAccessLayer:
     ) -> _Waiter:
         self._seq += 1
         priority = priority_for_lane(lane)
+        requested_lane = str(lane or "").strip().casefold()
         reason = HEALTH_WAITING
         if (
             priority not in {ProviderPriority.HOT, ProviderPriority.ACTIVE_TRADE}
@@ -383,6 +605,7 @@ class ProviderAccessLayer:
             seq=self._seq,
             lane=waiter_lane,
             stage=stage,
+            requested_lane=requested_lane,
             reason=reason,
             work=resolved_work,
             enqueued_mono=self._clock(),
@@ -430,6 +653,9 @@ class ProviderAccessLayer:
                 yield None
                 return
             if waiter.cancelled:
+                if waiter.reason == BACKGROUND_ADMISSION_PAUSED:
+                    yield None
+                    return
                 raise asyncio.CancelledError
             yield lease
         finally:
@@ -456,6 +682,7 @@ class ProviderAccessLayer:
             return
         lease: ProviderLease | None = None
         async with self._cond:
+            self._bind_loop()
             waiter = self._make_waiter(venue, lane=lane, stage=stage, work=work)
             self._waiters[venue].append(waiter)
             picked = self._pick(venue)
@@ -484,6 +711,8 @@ class ProviderAccessLayer:
             if waiter.granted:
                 self._record_service(venue, waiter)
                 self._in_use[venue] = max(0, self._in_use[venue] - 1)
+                if self._is_lower_priority(waiter.priority):
+                    self._lower_in_use[venue] = max(0, self._lower_in_use[venue] - 1)
             else:
                 waiter.cancelled = True
                 self._record_unserved_deadline(venue, waiter)
@@ -540,7 +769,16 @@ class ProviderAccessLayer:
         )
 
     def _pick(self, venue: VenueName) -> _Waiter | None:
-        pending = [item for item in self._waiters[venue] if not item.granted and not item.cancelled]
+        pending = [
+            item
+            for item in self._waiters[venue]
+            if (
+                not item.granted
+                and not item.cancelled
+                and not self._background_admission_blocked(item)
+                and self._lower_grant_allowed(venue, item)
+            )
+        ]
         if not pending:
             return None
         starve_universe = (
@@ -613,6 +851,11 @@ class ProviderAccessLayer:
         waiter.event.set()
         self._in_use[venue] += 1
         self._peak_inflight[venue] = max(self._peak_inflight[venue], self._in_use[venue])
+        if self._is_lower_priority(waiter.priority):
+            self._lower_in_use[venue] += 1
+            self._peak_lower_in_use[venue] = max(
+                self._peak_lower_in_use[venue], self._lower_in_use[venue]
+            )
         self._count_high_priority_grant(venue, waiter.priority)
         self._record_grant_deadline(venue, waiter)
 

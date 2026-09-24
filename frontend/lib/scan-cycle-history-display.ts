@@ -58,6 +58,10 @@ export function scanCycleCoverageLabel(cycle: PaperScanCycleRecord): string {
   const count = Number(cycle.fixture_count);
   const n = Number.isFinite(count) ? count : 0;
   const lane = String(cycle.scan_lane || "").trim().toLowerCase();
+  const summary = String(cycle.operator_summary || "").trim();
+  if (lane === "hot" && summary.includes("HOT fixtures")) {
+    return summary;
+  }
   if (lane === "hot" || lane === "background") {
     return n === 1 ? "1 catalogue row" : `${n} catalogue rows`;
   }
@@ -158,6 +162,7 @@ export function scanCycleDiagnosticLines(report: ScanCycleDiagnosticReport | nul
   const limitText = Object.entries(limits)
     .map(([venue, value]) => `${venue} ${value}`)
     .join(", ");
+  const hotCoverage = report.hot_coverage;
   const lines = [
     report.note || "Cycle diagnostic counters. Not live quotes.",
     `Lane ${report.lane || "—"} · wall ${scanCycleDurationLabel(report.wall_ms)} · ${report.evaluations_per_second ?? 0} evaluated/s`,
@@ -168,6 +173,9 @@ export function scanCycleDiagnosticLines(report: ScanCycleDiagnosticReport | nul
     `Saved calls ${report.saved_provider_calls ?? 0} · coalesced ${report.coalesced_provider_calls ?? 0} · repeated exact ids ${report.repeated_exact_id_calls ?? 0} / distinct ${report.distinct_exact_ids ?? 0}`,
     `Workers ${shape.worker_limit ?? "—"} · sequential within item ${shape.sequential_within_item ? "yes" : "no"} · explicit slice wall ${shape.explicit_slice_wall ? "yes" : "no"} · limits ${limitText || "—"} · provider calls ${shape.provider_calls ?? 0}`,
   ];
+  if (hotCoverage && typeof hotCoverage.summary === "string" && hotCoverage.summary) {
+    lines.push(hotCoverage.summary);
+  }
   for (const stage of report.stages ?? []) {
     lines.push(
       `${stage.venue || "stage"} ${stage.stage || "—"} · n ${stage.count ?? 0} · avg ${stage.avg_ms ?? 0}ms · p50 ${stage.p50_ms ?? "—"} · p95 ${stage.p95_ms ?? "—"} · max ${stage.max_ms ?? "—"} · ok ${stage.success ?? 0} · timeout ${stage.timeout ?? 0} · rate limit ${stage.rate_limit ?? 0} · deferred ${stage.capacity_deferred ?? 0}`,
