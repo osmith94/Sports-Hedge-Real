@@ -45,6 +45,12 @@ export function hotPricingCopy(
   }
   const venues = lastScanVenueClause(status, "hot");
   const venueSuffix = venues ? ` · ${venues}` : "";
+  if (hot.last_plan_reason === "startup_universe_pending") {
+    return {
+      label: HOT_PRICING_LABEL,
+      detail: "waiting for startup universe",
+    };
+  }
   if (hot.cycle_in_progress) {
     return { label: HOT_PRICING_LABEL, detail: `in progress${venueSuffix}` };
   }
@@ -101,15 +107,20 @@ export function universeDiscoveryCopy(
   if (universe.cycle_in_progress || universe.worker_state === "running") {
     const progress =
       discovered > 0 ? `${evaluated}/${discovered} evaluated` : `${evaluated} evaluated`;
+    const startup =
+      status?.startup_pricing_ready === false
+        ? "startup discovery / generation running · "
+        : "";
     return {
       label: UNIVERSE_DISCOVERY_LABEL,
-      detail: `in progress · ${progress}${venueSuffix}${persist}`,
+      detail: `${startup}in progress · ${progress}${venueSuffix}${persist}`,
     };
   }
   const refreshSeconds = universe.discovery_refresh_seconds ?? universe.cadence_seconds;
   const cadence = refreshSeconds ? ` · discovery refresh ${refreshSeconds}s` : "";
   if (
     status?.universe_scans_paused &&
+    status?.startup_pricing_ready !== false &&
     (universe.last_plan_reason === "universe_scheduled_paused" || universe.next_due_at == null)
   ) {
     return {
@@ -189,6 +200,12 @@ export function backgroundPriceCopy(
   const working = engine?.working_set ?? 0;
   const inFlight = engine?.in_flight ?? 0;
   const suffix = lane?.cycle_in_progress ? " · in progress" : "";
+  if (lane?.last_plan_reason === "startup_universe_pending") {
+    return {
+      label: BACKGROUND_PRICING_LABEL,
+      detail: "waiting for startup universe",
+    };
+  }
   const coverage = lane?.last_diagnostics?.coverage as
     | { pass_number?: number; position?: number; catalogue_rows?: number; percent?: number }
     | undefined;

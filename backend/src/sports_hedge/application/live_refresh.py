@@ -125,6 +125,13 @@ from sports_hedge.application.scan_lanes import (
     OPERATOR_BACKGROUND_PRICING_LABEL,
     OPERATOR_HOT_PRICING_LABEL,
     OPERATOR_UNIVERSE_DISCOVERY_LABEL,
+    STARTUP_PHASE_RUNNING,
+    STARTUP_PHASE_UNIVERSE_INITIALISING,
+    STARTUP_PRICING_GATED_SLEEP_SECONDS,
+    STARTUP_READINESS_COLD_UNREADY,
+    STARTUP_READINESS_FRESH_GENERATION_READY,
+    STARTUP_READINESS_WARM_CATALOGUE_READY,
+    STARTUP_UNIVERSE_PENDING,
     UNIVERSE_MIN_CHUNK_SECONDS,
     WORKER_COMPLETE,
     WORKER_DEGRADED,
@@ -382,6 +389,8 @@ class LiveRefreshStatus(BaseModel):
     active_trade_timeline: list[ActiveTradeTimelineItem] = Field(default_factory=list)
     system_load: SystemLoadSummary = Field(default_factory=SystemLoadSummary)
     universe_scope: OperatorUniverseScope | None = None
+    startup_pricing_ready: bool = False
+    startup_phase: str = STARTUP_PHASE_UNIVERSE_INITIALISING
 
 
 class DualCadencePlan(BaseModel):
@@ -510,6 +519,11 @@ class LiveRefreshCoordinator:
         self._operator_scanner_stopped = False
         self._universe_scans_paused = False
         self._universe_oneshot_pending = True
+        self._startup_barrier_armed = False
+        self._startup_pricing_ready = False
+        self._startup_pricing_readiness = STARTUP_READINESS_COLD_UNREADY
+        self._startup_replacement_required = False
+        self._startup_warm_catalogue_usable = False
         self._last_request: dict[str, Any] = {}
         self._last_report: CollectionReport | None = None
         self._fixture_state = FixtureCurrentStateStore()
@@ -618,6 +632,234 @@ class LiveRefreshCoordinator:
     def now(self) -> datetime:
         return require_aware_instant(self._clock(), "now")
 
+    def _startup_pricing_gated_unlocked(self) -> bool:
+        return bool(self._startup_barrier_armed) and not self._startup_pricing_ready
+
+    def startup_pricing_ready(self) -> bool:
+        return bool(self._startup_pricing_ready)
+
+    def mark_startup_pricing_ready(self) -> None:
+        """Open the HOT/BACKGROUND startup barrier.
+
+        Production opens this only from a terminal-complete UNIVERSE close.
+        Tests that model post-startup runtime may call this directly.
+        """
+
+        with self._state_lock:
+            self._open_startup_pricing_unlocked(
+                readiness=STARTUP_READINESS_FRESH_GENERATION_READY
+            )
+        self._pulse_control()
+
+    def arm_startup_pricing_barrier(self) -> None:
+        """Close HOT/BACKGROUND until the startup UNIVERSE generation commits."""
+
+        with self._state_lock:
+            self._startup_barrier_armed = True
+            if not self._startup_pricing_ready:
+                self.status = self.status.model_copy(
+                    update={
+                        "startup_pricing_ready": False,
+                        "startup_phase": STARTUP_PHASE_UNIVERSE_INITIALISING,
+                        "hot": self.status.hot.model_copy(
+                            update=self._apply_gated_pricing_lane_unlocked("hot")
+                        ),
+                        "background": self.status.background.model_copy(
+                            update=self._apply_gated_pricing_lane_unlocked("background")
+                        ),
+                    }
+                )
+        self.prepare_startup_warm_catalogue()
+
+    def startup_pricing_readiness(self) -> str:
+        return self._startup_pricing_readiness
+
+    def _open_startup_pricing_unlocked(self, *, readiness: str) -> bool:
+        """Return True when this call newly opens the barrier."""
+
+        if self._startup_pricing_ready:
+            return False
+        self._startup_pricing_ready = True
+        self._startup_pricing_readiness = readiness
+        if readiness == STARTUP_READINESS_FRESH_GENERATION_READY:
+            self._startup_replacement_required = False
+        self.status = self.status.model_copy(
+            update={
+                "startup_pricing_ready": True,
+                "startup_phase": STARTUP_PHASE_RUNNING,
+            }
+        )
+        return True
+
+    def _close_startup_pricing_unlocked(self) -> None:
+        self._startup_pricing_ready = False
+        self._startup_pricing_readiness = STARTUP_READINESS_COLD_UNREADY
+        if not self._startup_barrier_armed:
+            return
+        self.status = self.status.model_copy(
+            update={
+                "startup_pricing_ready": False,
+                "startup_phase": STARTUP_PHASE_UNIVERSE_INITIALISING,
+            }
+        )
+
+    def _startup_generation_retry_blocked_unlocked(self) -> bool:
+        """True when an open generation cannot progress except by retry backoff.
+
+        Pending or running work is not this state. A bare timeout with no
+        classified work is not this state. Completeness is unchanged.
+        """
+
+        if self._startup_replacement_required:
+            return False
+        if self._universe_generation_started_at is None:
+            return False
+        if self._universe_generation_superseded:
+            return False
+        if self._universe_needs_rehydration:
+            return False
+        if self._universe_sweep_is_complete_unlocked():
+            return False
+        unfinished = [
+            unit
+            for unit in self._universe_work.values()
+            if unit.state not in SWEEP_TERMINAL_STATES
+        ]
+        unfinished_series = [
+            unit
+            for unit in self._universe_series_work.values()
+            if unit.state not in SERIES_TERMINAL_STATES
+        ]
+        if not unfinished and not unfinished_series:
+            return False
+        return all(unit.state == SWEEP_RETRY_WAIT for unit in unfinished) and all(
+            unit.state == SWEEP_RETRY_WAIT for unit in unfinished_series
+        )
+
+    def _startup_provider_backoff_unlocked(self) -> bool:
+        """True when discovery failed before any canonical/series work existed.
+
+        The generation stays open. `_universe_retry_at` is left untouched.
+        """
+
+        if self._startup_replacement_required:
+            return False
+        if self._universe_generation_started_at is None:
+            return False
+        if self._universe_generation_superseded:
+            return False
+        if self._universe_needs_rehydration:
+            return False
+        if self._universe_sweep_is_complete_unlocked():
+            return False
+        if self._universe_provider_failures <= 0:
+            return False
+        retry_at = self._universe_retry_at
+        if retry_at is None or retry_at <= self.now():
+            return False
+        unfinished = [
+            unit
+            for unit in self._universe_work.values()
+            if unit.state not in SWEEP_TERMINAL_STATES
+        ]
+        unfinished_series = [
+            unit
+            for unit in self._universe_series_work.values()
+            if unit.state not in SERIES_TERMINAL_STATES
+        ]
+        return not unfinished and not unfinished_series
+
+    def prepare_startup_warm_catalogue(self) -> bool:
+        """Cache whether the persisted catalogue can price a warm start.
+
+        SQLite and reconstruction run outside `_state_lock`. The scheduler
+        only reads the cached bool.
+        """
+
+        if self._state_lock.held_by_current_thread:
+            raise RuntimeError("warm catalogue readiness must be prepared outside _state_lock")
+        usable = self._evaluate_persisted_catalogue_pricing_usable()
+        with self._state_lock:
+            if self._startup_replacement_required or self._universe_generation_superseded:
+                usable = False
+            self._startup_warm_catalogue_usable = usable
+        return usable
+
+    def _evaluate_persisted_catalogue_pricing_usable(self) -> bool:
+        """Schema-compatible ACTIVE rows that reconstruct into scoped price-engine items.
+
+        Local catalogue only. No provider calls and no fixture-radar TTL.
+        Caller must not hold `_state_lock`.
+        """
+
+        if self._startup_replacement_required or self._universe_generation_superseded:
+            return False
+        store = self._catalogue_store
+        if store is None and self._price_engine is not None:
+            store = self._price_engine.catalogue_store
+        if store is None or not hasattr(store, "list_active"):
+            return False
+        try:
+            rows = list(store.list_active())
+        except Exception:
+            return False
+        from sports_hedge.application.approved_market_catalogue import (
+            CATALOGUE_SCHEMA_VERSION,
+            CatalogueRowState,
+        )
+
+        compatible = [
+            row
+            for row in rows
+            if int(getattr(row, "schema_version", 0) or 0) == CATALOGUE_SCHEMA_VERSION
+            and getattr(row, "row_state", None) is CatalogueRowState.ACTIVE
+        ]
+        if not compatible:
+            return False
+        engine = self.price_engine()
+        selected = self.effective_universe_scope().selected_set()
+        engine.set_operator_scope(selected, exempt_event_ids=self._open_paper_event_ids())
+        return bool(engine.reconstruct(compatible))
+
+    def _consider_warm_catalogue_release_unlocked(self) -> bool:
+        """Open pricing from the cached catalogue when startup is degraded.
+
+        Memory only. Catalogue SQLite and reconstruction happen in
+        `prepare_startup_warm_catalogue`.
+        """
+
+        if not self._startup_pricing_gated_unlocked():
+            return False
+        if not self._startup_warm_catalogue_usable:
+            return False
+        if self._startup_replacement_required or self._universe_generation_superseded:
+            return False
+        degraded = (
+            self._startup_generation_retry_blocked_unlocked()
+            or self._startup_provider_backoff_unlocked()
+        )
+        if not degraded:
+            return False
+        return self._open_startup_pricing_unlocked(
+            readiness=STARTUP_READINESS_WARM_CATALOGUE_READY
+        )
+
+    def _gated_pricing_plan(self) -> DualCadencePlan:
+        return DualCadencePlan(lane="idle", reason=STARTUP_UNIVERSE_PENDING)
+
+    def _apply_gated_pricing_lane_unlocked(self, lane: str) -> dict[str, Any]:
+        label = (
+            OPERATOR_HOT_PRICING_LABEL
+            if lane == "hot"
+            else OPERATOR_BACKGROUND_PRICING_LABEL
+        )
+        return {
+            "last_plan_reason": STARTUP_UNIVERSE_PENDING,
+            "worker_state": WORKER_WAITING,
+            "cycle_in_progress": False,
+            "operator_summary": f"{label} · waiting for startup universe",
+        }
+
     def configure_from_settings(self, settings: Settings | None = None) -> None:
         resolved = settings or get_settings()
         operator = resolve_operator_scanner_settings(
@@ -645,6 +887,12 @@ class LiveRefreshCoordinator:
                     "paper_auto_unwind_enabled": resolved.paper_auto_unwind_enabled,
                     "scanner_stopped": operator.scanner_stopped,
                     "universe_scans_paused": operator.universe_scans_paused,
+                    "startup_pricing_ready": self._startup_pricing_ready,
+                    "startup_phase": (
+                        STARTUP_PHASE_RUNNING
+                        if self._startup_pricing_ready
+                        else STARTUP_PHASE_UNIVERSE_INITIALISING
+                    ),
                     "operator_settings": operator,
                     "interval_seconds": hot_target,
                     "hot": self.status.hot.model_copy(
@@ -888,6 +1136,7 @@ class LiveRefreshCoordinator:
             if self._universe_generation_started_at is not None and changed:
                 self._universe_generation_superseded = True
         self._reconstruct_price_engine_for_scope()
+        self.prepare_startup_warm_catalogue()
         if self._operator_scanner_stopped:
             self._pulse_control()
         elif run_universe_now or (changed and self._universe_scans_paused):
@@ -944,6 +1193,11 @@ class LiveRefreshCoordinator:
             prior_cursor = self._status_universe_cursor()
             self._universe_apply_epoch += 1
             self._invalidate_universe_chunk_epoch_unlocked()
+            if run_after:
+                self._startup_barrier_armed = True
+                self._startup_replacement_required = True
+                self._startup_warm_catalogue_usable = False
+                self._close_startup_pricing_unlocked()
             self._reset_live_universe_generation_unlocked(now=now, run_after=run_after)
             self._mark_universe_checkpoint_dirty_unlocked()
         inventory = self._fixture_state.inventory(now)
@@ -1111,12 +1365,15 @@ class LiveRefreshCoordinator:
         return bool(self._universe_generation_superseded)
 
     def _open_paper_event_ids(self) -> frozenset[str]:
+        """OPEN/PARTIAL paper event ids from a concrete operations service.
+
+        The FastAPI factory defaults to `Depends(...)`. Calling that factory
+        with no request injects those objects into the cached service, so the
+        server path uses the already-built journal holder instead.
+        """
+
         try:
-            from sports_hedge.api.paper import get_paper_operations_service
-        except Exception:
-            return frozenset()
-        try:
-            operations = get_paper_operations_service()
+            operations = self._server_owned_paper_operations()
             trades = operations.list_active_trades()
         except Exception:
             return frozenset()
@@ -1131,6 +1388,25 @@ class LiveRefreshCoordinator:
             if event_id:
                 ids.add(event_id)
         return frozenset(ids)
+
+    def _server_owned_paper_operations(self):
+        import inspect
+
+        from fastapi.params import Depends as DependsMarker
+
+        from sports_hedge.api import paper as paper_api
+
+        factory = paper_api.get_paper_operations_service
+        try:
+            defaults = [
+                parameter.default
+                for parameter in inspect.signature(factory).parameters.values()
+            ]
+        except (TypeError, ValueError):
+            defaults = []
+        if any(isinstance(default, DependsMarker) for default in defaults):
+            return paper_api.get_paper_journal_holder()
+        return factory()
 
     def _reconstruct_price_engine_for_scope(self) -> None:
         engine = self._price_engine
@@ -1646,6 +1922,11 @@ class LiveRefreshCoordinator:
             self._manual_background_in_progress = False
             self._universe_run_now_pending = False
             self._universe_oneshot_pending = True
+            self._startup_barrier_armed = False
+            self._startup_pricing_ready = False
+            self._startup_pricing_readiness = STARTUP_READINESS_COLD_UNREADY
+            self._startup_replacement_required = False
+            self._startup_warm_catalogue_usable = False
             self._universe_generation_superseded = False
             self._universe_generation_scope_version = 0
             self._session_selected_codes = None
@@ -1855,6 +2136,10 @@ class LiveRefreshCoordinator:
             return DualCadencePlan(lane="idle", reason="operator_stopped")
         with self._state_lock:
             self._ensure_due_times_unlocked(evaluated, resolved)
+            if self._consider_warm_catalogue_release_unlocked():
+                self._pulse_control()
+            if self._startup_pricing_gated_unlocked():
+                return self._gated_pricing_plan()
             if self._hot_in_progress or self._manual_hot_in_progress:
                 return DualCadencePlan(lane="idle", reason="hot_in_progress")
             next_hot_due = self._next_hot_due
@@ -1877,6 +2162,10 @@ class LiveRefreshCoordinator:
             return DualCadencePlan(lane="idle", reason="operator_stopped")
         with self._state_lock:
             self._ensure_due_times_unlocked(evaluated, resolved)
+            if self._consider_warm_catalogue_release_unlocked():
+                self._pulse_control()
+            if self._startup_pricing_gated_unlocked():
+                return self._gated_pricing_plan()
             if self._background_in_progress:
                 return DualCadencePlan(lane="idle", reason="background_in_progress")
             next_due = self._next_background_due
@@ -1920,6 +2209,7 @@ class LiveRefreshCoordinator:
         self._catalogue_store = store
         if self._price_engine is not None:
             self._price_engine.catalogue_store = store
+        self.prepare_startup_warm_catalogue()
 
     def bind_price_engine(self, engine: CataloguePriceEngine) -> None:
         self._price_engine = engine
@@ -2237,6 +2527,11 @@ class LiveRefreshCoordinator:
 
         resolved = settings or get_settings()
         evaluated = require_aware_instant(now or self.now(), "now")
+        if self._operator_scanner_stopped:
+            raise ExplicitCollectBusy(SCANNER_STOPPED_BY_OPERATOR)
+        with self._state_lock:
+            if self._startup_pricing_gated_unlocked():
+                return self._gated_pricing_plan()
         hot_scope = self._hot_identity_scope(evaluated, resolved)
         return self._hot_plan(hot_scope, resolved, reason="manual_hot")
 
@@ -2322,6 +2617,11 @@ class LiveRefreshCoordinator:
     ) -> CollectionReport:
         settings = get_settings()
         lane = _coerce_lane(scan_lane)
+        if (
+            lane is ScanLane.HOT
+            and self._startup_pricing_gated_unlocked()
+        ):
+            raise ExplicitCollectBusy("startup universe pending")
         if timeout_seconds is None and lane is ScanLane.HOT:
             timeout: float | None = float(
                 settings.paper_scan_hot_cycle_timeout_seconds + SCAN_CYCLE_RETURN_GRACE_SECONDS
@@ -2416,6 +2716,8 @@ class LiveRefreshCoordinator:
 
         if self._operator_scanner_stopped:
             raise ExplicitCollectBusy(SCANNER_STOPPED_BY_OPERATOR)
+        if self._startup_pricing_gated_unlocked():
+            raise ExplicitCollectBusy("startup universe pending")
         if self._manual_hot_in_progress:
             raise ExplicitCollectBusy("manual HOT refresh in progress")
         if self.scheduled_hot_active():
@@ -2489,6 +2791,8 @@ class LiveRefreshCoordinator:
 
         if self._operator_scanner_stopped:
             raise ExplicitCollectBusy(SCANNER_STOPPED_BY_OPERATOR)
+        if self._startup_pricing_gated_unlocked():
+            raise ExplicitCollectBusy("startup universe pending")
         if self._manual_background_in_progress or self._background_in_progress:
             raise ExplicitCollectBusy("BACKGROUND pricing in progress")
         with self._state_lock:
@@ -4370,6 +4674,11 @@ class LiveRefreshCoordinator:
         if action == "complete" and unfinished:
             action = "supersede"
             to_phase = UniverseGenerationPhase.IDLE
+        opened_pricing = False
+        if action == "complete":
+            opened_pricing = self._open_startup_pricing_unlocked(
+                readiness=STARTUP_READINESS_FRESH_GENERATION_READY
+            )
         self._audit_universe_lifecycle(
             decide_generation_transition(
                 UniverseGenerationPhase.OPEN,
@@ -4401,6 +4710,8 @@ class LiveRefreshCoordinator:
         else:
             self._universe_oneshot_pending = False
         self._mark_universe_checkpoint_dirty_unlocked()
+        if opened_pricing:
+            self._pulse_control()
 
     def _effective_hot_target_refresh_seconds(self) -> int:
         operator = self.status.operator_settings
@@ -4834,6 +5145,13 @@ class LiveRefreshCoordinator:
             or current.last_plan_reason == UNIVERSE_SCHEDULED_PAUSED
         ):
             summary = f"{OPERATOR_UNIVERSE_DISCOVERY_LABEL} · scheduled scans paused"
+        elif self._startup_pricing_gated_unlocked():
+            if self._universe_in_progress or self._universe_generation_started_at is not None:
+                summary = (
+                    f"{OPERATOR_UNIVERSE_DISCOVERY_LABEL} · startup discovery / generation running"
+                )
+            else:
+                summary = f"{OPERATOR_UNIVERSE_DISCOVERY_LABEL} · startup discovery pending"
         else:
             summary = _universe_operator_summary(
                 current.last_duration_ms or 0,
@@ -4942,6 +5260,9 @@ class LiveRefreshCoordinator:
                 if self._background_in_progress
                 else self.status.background.worker_state,
             }
+            if self._startup_pricing_gated_unlocked() and not self._operator_scanner_stopped:
+                hot_update.update(self._apply_gated_pricing_lane_unlocked("hot"))
+                background_update.update(self._apply_gated_pricing_lane_unlocked("background"))
             hot = self.status.hot.model_copy(update=hot_update)
             background = self.status.background.model_copy(update=background_update)
             active_trade = self.status.active_trade.model_copy(
@@ -4987,6 +5308,12 @@ class LiveRefreshCoordinator:
                     or self._manual_background_in_progress,
                     "scanner_stopped": self._operator_scanner_stopped,
                     "universe_scans_paused": self._universe_scans_paused,
+                    "startup_pricing_ready": self._startup_pricing_ready,
+                    "startup_phase": (
+                        STARTUP_PHASE_RUNNING
+                        if self._startup_pricing_ready
+                        else STARTUP_PHASE_UNIVERSE_INITIALISING
+                    ),
                     "operator_settings": self.status.operator_settings
                     or env_operator_scanner_settings(),
                     "universe_scope": self._decorate_universe_scope(
@@ -5082,6 +5409,7 @@ class LiveRefreshCoordinator:
         self.configure_from_settings()
         if not self.status.server_loop_enabled:
             return
+        self.arm_startup_pricing_barrier()
         if self._hot_task is not None and not self._hot_task.done():
             return
         self._stop = asyncio.Event()
@@ -5169,6 +5497,23 @@ class LiveRefreshCoordinator:
 
         now = self.now()
         with self._state_lock:
+            if (
+                plan.reason == STARTUP_UNIVERSE_PENDING
+                and self.status.hot.last_plan_reason == STARTUP_UNIVERSE_PENDING
+                and not self._hot_in_progress
+            ):
+                self.status = self.status.model_copy(
+                    update={
+                        "hot": self.status.hot.model_copy(
+                            update={
+                                "last_heartbeat_at": now,
+                                "cycle_in_progress": False,
+                                "worker_state": WORKER_WAITING,
+                            }
+                        )
+                    }
+                )
+                return
             hot_update: dict[str, Any] = {
                 "last_heartbeat_at": now,
                 "last_plan_reason": plan.reason,
@@ -5186,6 +5531,8 @@ class LiveRefreshCoordinator:
                     hot_update["operator_summary"] = (
                         f"{OPERATOR_HOT_PRICING_LABEL} · worker alive · scope empty · polling · no provider call"
                     )
+                elif plan.reason == STARTUP_UNIVERSE_PENDING:
+                    hot_update.update(self._apply_gated_pricing_lane_unlocked("hot"))
                 elif plan.reason == "waiting" and self.status.hot.last_started_at is None:
                     hot_update["worker_state"] = WORKER_WAITING
                     hot_update["operator_summary"] = (
@@ -5271,6 +5618,45 @@ class LiveRefreshCoordinator:
             mark_loop_phase(lane="background", phase="scheduler")
             plan = self.plan_background_tick()
             close_loop_slice()
+            if plan.lane != "background" and not self._background_in_progress:
+                with self._state_lock:
+                    if (
+                        plan.reason == self.status.background.last_plan_reason
+                        and plan.reason == STARTUP_UNIVERSE_PENDING
+                    ):
+                        self.status = self.status.model_copy(
+                            update={
+                                "background": self.status.background.model_copy(
+                                    update={
+                                        "last_heartbeat_at": self.now(),
+                                        "cycle_in_progress": False,
+                                        "worker_state": WORKER_WAITING,
+                                    }
+                                )
+                            }
+                        )
+                    else:
+                        background_update = {
+                            "last_heartbeat_at": self.now(),
+                            "last_plan_reason": plan.reason,
+                        }
+                        if plan.reason == STARTUP_UNIVERSE_PENDING:
+                            background_update.update(
+                                self._apply_gated_pricing_lane_unlocked("background")
+                            )
+                        elif plan.reason == "operator_stopped":
+                            background_update["worker_state"] = WORKER_WAITING
+                            background_update["cycle_in_progress"] = False
+                            background_update["operator_summary"] = (
+                                f"{OPERATOR_BACKGROUND_PRICING_LABEL} · stopped by operator · no provider call"
+                            )
+                        self.status = self.status.model_copy(
+                            update={
+                                "background": self.status.background.model_copy(
+                                    update=background_update
+                                )
+                            }
+                        )
             if plan.lane == "background":
                 with self._state_lock:
                     self._background_in_progress = True
@@ -5810,6 +6196,10 @@ class LiveRefreshCoordinator:
 
     def _seconds_until_background(self) -> float:
         now = self.now()
+        if self._startup_pricing_gated_unlocked() and not self._operator_scanner_stopped:
+            if self._next_background_due is not None and self._next_background_due > now:
+                return max(0.05, (self._next_background_due - now).total_seconds())
+            return STARTUP_PRICING_GATED_SLEEP_SECONDS
         if self._background_in_progress:
             return 1.0
         if self._next_background_due is None:
@@ -5818,6 +6208,10 @@ class LiveRefreshCoordinator:
 
     def _seconds_until_hot(self) -> float:
         now = self.now()
+        if self._startup_pricing_gated_unlocked() and not self._operator_scanner_stopped:
+            if self._next_hot_due is not None and self._next_hot_due > now:
+                return max(0.05, (self._next_hot_due - now).total_seconds())
+            return STARTUP_PRICING_GATED_SLEEP_SECONDS
         if self._hot_in_progress:
             return 0.25
         if self._next_hot_due is None:

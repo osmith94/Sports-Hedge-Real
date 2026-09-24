@@ -814,6 +814,8 @@ export type LiveRefreshStatus = {
   universe_scans_paused?: boolean;
   operator_settings?: OperatorScannerSettings | null;
   universe_scope?: OperatorUniverseScope | null;
+  startup_pricing_ready?: boolean;
+  startup_phase?: string;
   interval_seconds: number;
   cycle_in_progress: boolean;
   last_started_at?: string | null;
