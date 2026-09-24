@@ -44,6 +44,8 @@ class TargetCompetitionCode(StrEnum):
     NFL = "nfl"
     NBA = "nba"
     NCAAB = "ncaab"
+    ATP = "atp"
+    WTA = "wta"
 
 
 class VenueMappingStatus(StrEnum):
@@ -51,7 +53,7 @@ class VenueMappingStatus(StrEnum):
     UNVERIFIED = "unverified"
 
 
-PRINCIPAL_OPERATOR_COMPETITION_COUNT = 34
+PRINCIPAL_OPERATOR_COMPETITION_COUNT = 36
 VERIFIED_ALL_3 = "VERIFIED_ALL_3"
 PARTIAL_PROVIDER_MAPPING = "PARTIAL"
 PROVIDER_MATRIX_RETRIEVED_AT = "2026-09-22"
@@ -808,6 +810,36 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
         polymarket_gamma_sport="cbb",
         kalshi_series_prefixes=("KXNCAAMBGAME", "KXNCAAMBSPREAD", "KXNCAAMBTOTAL"),
     ),
+    TargetCompetition(
+        code=TargetCompetitionCode.ATP,
+        display_name="ATP",
+        aliases=(
+            "atp",
+            "atp tour",
+            "atp hangzhou",
+            "hangzhou open",
+            "atp chengdu",
+            "chengdu open",
+        ),
+        polymarket_gamma_series_id="10365",
+        polymarket_gamma_sport="atp",
+        # Exact match series only. KXATPGAME and challenger/doubles series are excluded.
+        kalshi_series_prefixes=("KXATPMATCH",),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.WTA,
+        display_name="WTA",
+        aliases=(
+            "wta",
+            "wta tour",
+            "wta singapore",
+            "singapore open",
+            "wta seoul",
+        ),
+        polymarket_gamma_series_id="10366",
+        polymarket_gamma_sport="wta",
+        kalshi_series_prefixes=("KXWTAMATCH",),
+    ),
 )
 
 _ALIAS_INDEX: dict[str, TargetCompetition] = {}
@@ -864,7 +896,7 @@ SEASON_PROPOSITION_NOT_FIXTURE = "season_proposition_not_fixture"
 
 # Operator selector grouping. Canonical codes are the operator model; venue
 # tickers stay backend-only.
-OPERATOR_COMPETITION_REGISTRY_VERSION = 7
+OPERATOR_COMPETITION_REGISTRY_VERSION = 8
 OPERATOR_UNIVERSE_SPORT = "football"
 OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("uefa", "UEFA"),
@@ -890,6 +922,7 @@ OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("nfl", "NFL"),
     ("nba", "NBA"),
     ("college_basketball", "College Basketball"),
+    ("tennis", "Tennis"),
 )
 OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
     TargetCompetitionCode.CHAMPIONS_LEAGUE: ("uefa", "UEFA", "Champions League"),
@@ -934,6 +967,8 @@ OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
     TargetCompetitionCode.NFL: ("nfl", "NFL", "NFL"),
     TargetCompetitionCode.NBA: ("nba", "NBA", "NBA"),
     TargetCompetitionCode.NCAAB: ("college_basketball", "College Basketball", "NCAA Men"),
+    TargetCompetitionCode.ATP: ("tennis", "Tennis", "ATP"),
+    TargetCompetitionCode.WTA: ("tennis", "Tennis", "WTA"),
 }
 DEFAULT_OPERATOR_COMPETITION_CODES: tuple[TargetCompetitionCode, ...] = (
     TargetCompetitionCode.PREMIER_LEAGUE,
@@ -1122,6 +1157,8 @@ KALSHI_SERIES_TICKERS_BY_CODE: dict[TargetCompetitionCode, tuple[str, ...]] = {
         "KXNCAAMBSPREAD",
         "KXNCAAMBTOTAL",
     ),
+    TargetCompetitionCode.ATP: ("KXATPMATCH",),
+    TargetCompetitionCode.WTA: ("KXWTAMATCH",),
 }
 
 
@@ -1141,6 +1178,11 @@ class ScopeFilterResult(BaseModel):
 
 
 def _scope_diagnostic_sport(competition: TargetCompetition | None) -> str:
+    if competition is not None and competition.code in {
+        TargetCompetitionCode.ATP,
+        TargetCompetitionCode.WTA,
+    }:
+        return "tennis"
     if competition is not None and competition.code is TargetCompetitionCode.NBA:
         return "basketball"
     return "football"
@@ -1429,7 +1471,9 @@ def operator_competition_catalog() -> list[dict[str, Any]]:
                 "unavailable_reason": competition_unavailable_reason(item),
                 "market_scope": "FIXTURE_MATCH",
                 "observation_only": False,
-                "paper_executable": selectable,
+                "paper_executable": selectable
+                and item.code
+                not in {TargetCompetitionCode.ATP, TargetCompetitionCode.WTA},
             }
         )
     return rows
@@ -1453,11 +1497,20 @@ def selected_includes_ncaab(
     return TargetCompetitionCode.NCAAB.value in _selected_code_set(selected_codes)
 
 
+def selected_includes_tennis(
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
+) -> bool:
+    codes = _selected_code_set(selected_codes)
+    return TargetCompetitionCode.ATP.value in codes or TargetCompetitionCode.WTA.value in codes
+
+
 _NON_SOCCER_COMPETITION_CODES = frozenset(
     {
         TargetCompetitionCode.NFL.value,
         TargetCompetitionCode.NBA.value,
         TargetCompetitionCode.NCAAB.value,
+        TargetCompetitionCode.ATP.value,
+        TargetCompetitionCode.WTA.value,
     }
 )
 
@@ -1527,6 +1580,43 @@ def scope_matchbook_event(
                     label=matchbook_competition_label(payload),
                     sport=sport,
                 )
+        elif sport_norm == "tennis":
+            if not selected_includes_tennis(selected):
+                return ScopeDecision(
+                    allowed=False,
+                    reason=NON_FOOTBALL_SPORT,
+                    label=matchbook_competition_label(payload),
+                    sport=sport,
+                )
+            label = matchbook_competition_label(payload)
+            from sports_hedge.tennis.constants import TENNIS_TOUR_ATP
+            from sports_hedge.tennis.tournaments import admitted_tournament
+
+            admitted = admitted_tournament(label)
+            if admitted is None:
+                return ScopeDecision(
+                    allowed=False,
+                    reason="tennis_tournament_not_admitted",
+                    label=label,
+                    sport=sport,
+                )
+            tour, _tournament = admitted
+            code = TargetCompetitionCode.ATP if tour == TENNIS_TOUR_ATP else TargetCompetitionCode.WTA
+            competition = competition_by_code(code)
+            if code.value not in selected:
+                return ScopeDecision(
+                    allowed=False,
+                    reason=OUT_OF_SCOPE_COMPETITION,
+                    competition=competition,
+                    label=label,
+                    sport=sport,
+                )
+            return ScopeDecision(
+                allowed=True,
+                competition=competition,
+                label=label or (competition.display_name if competition else None),
+                sport=sport,
+            )
         elif sport_norm in {"basketball", "nba", "nba basketball"}:
             if not nba_selected and not ncaab_selected:
                 return ScopeDecision(
@@ -1633,6 +1723,18 @@ def scope_polymarket_event(
             label=label or resolved.display_name,
             sport=_scope_diagnostic_sport(resolved),
         )
+    if resolved.code in {TargetCompetitionCode.ATP, TargetCompetitionCode.WTA}:
+        from sports_hedge.tennis.normalize import polymarket_stage1_rejection
+
+        rejected = polymarket_stage1_rejection(payload)
+        if rejected is not None:
+            return ScopeDecision(
+                allowed=False,
+                reason=rejected,
+                competition=resolved,
+                label=label or resolved.display_name,
+                sport="tennis",
+            )
     if (
         resolved.code is TargetCompetitionCode.UEFA_NATIONS_LEAGUE
         and _polymarket_payload_is_season_proposition(payload)
@@ -1684,6 +1786,21 @@ def scope_kalshi_event(
             label=label or resolved.display_name,
             sport=_scope_diagnostic_sport(resolved),
         )
+    if resolved.code in {TargetCompetitionCode.ATP, TargetCompetitionCode.WTA}:
+        meta = payload.get("product_metadata")
+        competition_label = None
+        if isinstance(meta, dict):
+            competition_label = str(meta.get("competition") or "").strip() or None
+        from sports_hedge.tennis.tournaments import admitted_tournament
+
+        if admitted_tournament(competition_label) is None:
+            return ScopeDecision(
+                allowed=False,
+                reason="tennis_tournament_not_admitted",
+                competition=resolved,
+                label=competition_label or label or resolved.display_name,
+                sport="tennis",
+            )
     if resolved.code is TargetCompetitionCode.UEFA_NATIONS_LEAGUE and (
         (ticker and series_target is None)
         or _polymarket_payload_is_season_proposition(payload)

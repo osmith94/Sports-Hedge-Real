@@ -90,7 +90,10 @@ def catalogue_family_key(register_canonical_key: str) -> str:
     if key.startswith(f"{CANONICAL_TOTAL_GOALS_FT}:"):
         return CANONICAL_TOTAL_GOALS_FT
     from sports_hedge.nba.constants import CANONICAL_NBA_POINT_SPREAD, CANONICAL_NBA_TOTAL_POINTS
-    from sports_hedge.ncaab.constants import CANONICAL_NCAAB_POINT_SPREAD, CANONICAL_NCAAB_TOTAL_POINTS
+    from sports_hedge.ncaab.constants import (
+        CANONICAL_NCAAB_POINT_SPREAD,
+        CANONICAL_NCAAB_TOTAL_POINTS,
+    )
     from sports_hedge.nfl.constants import CANONICAL_NFL_POINT_SPREAD, CANONICAL_NFL_TOTAL_POINTS
 
     if key.startswith(f"{CANONICAL_NFL_POINT_SPREAD}:"):
@@ -113,6 +116,13 @@ def family_key_from_kalshi_series(series_ticker: str | None) -> str | None:
 
     ticker = str(series_ticker or "").strip().upper()
     if not ticker:
+        return None
+    from sports_hedge.tennis.constants import CANONICAL_TENNIS_MATCH_WINNER
+    from sports_hedge.tennis.detect import approved_kalshi_tennis_series, is_tennis_kalshi_ticker
+
+    if approved_kalshi_tennis_series(ticker) is not None:
+        return CANONICAL_TENNIS_MATCH_WINNER
+    if is_tennis_kalshi_ticker(ticker):
         return None
     from sports_hedge.nba.constants import (
         CANONICAL_NBA_GAME_WINNER,

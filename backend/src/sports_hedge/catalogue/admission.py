@@ -50,7 +50,17 @@ def assess_catalogue_admission(
 ) -> CatalogueAdmission:
     assessment = classify_pair(left, right)
     from sports_hedge.matching.approved_register import registered_structural_match
+    from sports_hedge.tennis.settlement import tennis_executable_block_reason
 
+    block = tennis_executable_block_reason(left, right)
+    if block is not None and registered_structural_match(left, right):
+        return CatalogueAdmission(
+            allowed=False,
+            assessment=assessment,
+            rejection_reason=block,
+            paper_mode_admitted=False,
+            live_execution_eligible=False,
+        )
     if assessment.paper_mode_admitted and registered_structural_match(left, right):
         return CatalogueAdmission(
             allowed=True,

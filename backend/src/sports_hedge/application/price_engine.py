@@ -2386,6 +2386,10 @@ def _sport_for_identity(identity: DerivedPriceEngineItem) -> str:
         from sports_hedge.ncaab.constants import NCAAB_SPORT
 
         return NCAAB_SPORT
+    if key == "TENNIS_MATCH_WINNER" or competition in {"ATP", "WTA"}:
+        from sports_hedge.tennis.constants import TENNIS_SPORT
+
+        return TENNIS_SPORT
     from sports_hedge.ncaab.detect import is_ncaab_competition_label
 
     if is_ncaab_competition_label(str(identity.competition or "")):
@@ -2418,6 +2422,8 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
     if key.startswith("NBA_TOTAL_POINTS_FT:"):
         return MarketFamily.TOTAL_POINTS
     if key == "NCAAB_GAME_WINNER_FT":
+        return MarketFamily.GAME_WINNER
+    if key == "TENNIS_MATCH_WINNER":
         return MarketFamily.GAME_WINNER
     if key.startswith("NCAAB_POINT_SPREAD_FT:"):
         return MarketFamily.POINT_SPREAD

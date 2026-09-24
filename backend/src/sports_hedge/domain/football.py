@@ -167,6 +167,11 @@ class CanonicalEvent(BaseModel):
     source_venue: VenueName
     source_event_id: str
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    # Tennis identity. Empty for football, NFL and basketball. Participant
+    # order is canonicalised separately; these fields are not a second matcher.
+    tournament: str = ""
+    round_label: str = ""
+    event_type: str = ""
 
     def identity_tuple(self) -> tuple[str, str, str, str, datetime]:
         return (

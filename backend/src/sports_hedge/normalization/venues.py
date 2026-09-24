@@ -181,6 +181,11 @@ class MatchbookNormalizer:
             return matchbook_ncaab_event(payload)
         if is_nba_payload(payload):
             return matchbook_nba_event(payload)
+        from sports_hedge.tennis.detect import is_tennis_payload
+        from sports_hedge.tennis.normalize import matchbook_tennis_event
+
+        if is_tennis_payload(payload):
+            return matchbook_tennis_event(payload)
         source_id = _required_string(payload, "id")
         title = _required_string(payload, "name")
         home_team, away_team = _split_fixture_title(title)
@@ -215,6 +220,11 @@ class MatchbookNormalizer:
             return matchbook_ncaab_market(event, payload)
         if is_nba_canonical_event(event):
             return matchbook_nba_market(event, payload)
+        from sports_hedge.tennis.detect import is_tennis_canonical_event
+        from sports_hedge.tennis.normalize import matchbook_tennis_market
+
+        if is_tennis_canonical_event(event):
+            return matchbook_tennis_market(event, payload)
         source_market_id = _required_string(payload, "id")
         name = _required_string(payload, "name")
         family, line = _matchbook_market_family(
@@ -283,6 +293,11 @@ class PolymarketNormalizer:
             return polymarket_ncaab_event(payload)
         if is_nba_payload(payload):
             return polymarket_nba_event(payload)
+        from sports_hedge.tennis.detect import is_tennis_payload
+        from sports_hedge.tennis.normalize import polymarket_tennis_event
+
+        if is_tennis_payload(payload):
+            return polymarket_tennis_event(payload)
         source_id = _required_string(payload, "id")
         title = str(_first(payload, "title", "question", "name") or "").strip()
         if not title:
@@ -319,6 +334,11 @@ class PolymarketNormalizer:
             return polymarket_ncaab_market(event, payload)
         if is_nba_canonical_event(event):
             return polymarket_nba_market(event, payload)
+        from sports_hedge.tennis.detect import is_tennis_canonical_event
+        from sports_hedge.tennis.normalize import polymarket_tennis_market
+
+        if is_tennis_canonical_event(event):
+            return polymarket_tennis_market(event, payload)
         source_market_id = str(_first(payload, "id", "conditionId", "condition_id") or "").strip()
         if not source_market_id:
             raise VenueNormalizationError("Polymarket market has no id/condition id")
@@ -386,6 +406,11 @@ class PolymarketNormalizer:
         Incomplete groups stay fail-closed as binaries.
         """
 
+        from sports_hedge.tennis.detect import is_tennis_canonical_event
+        from sports_hedge.tennis.normalize import polymarket_tennis_markets
+
+        if is_tennis_canonical_event(event):
+            return polymarket_tennis_markets(event, payloads)
         normalized: list[CanonicalMarket] = []
         for payload in payloads:
             normalized.append(self.normalize_market(event, payload))
@@ -416,6 +441,11 @@ class KalshiNormalizer:
             return kalshi_ncaab_event(payload, series=series)
         if is_nba_payload(payload) or is_nba_payload(series or {}):
             return kalshi_nba_event(payload, series=series)
+        from sports_hedge.tennis.detect import is_tennis_payload
+        from sports_hedge.tennis.normalize import kalshi_tennis_event
+
+        if is_tennis_payload(payload) or is_tennis_payload(series or {}):
+            return kalshi_tennis_event(payload, series=series)
         source_id = str(
             _first(payload, "event_ticker", "ticker", "id") or ""
         ).strip()
@@ -496,6 +526,21 @@ class KalshiNormalizer:
             or any(is_nba_payload(item) for item in payloads if isinstance(item, dict))
         ):
             return kalshi_nba_markets(
+                event,
+                payloads,
+                series=series,
+                event_payload=event_payload,
+            )
+        from sports_hedge.tennis.detect import is_tennis_canonical_event, is_tennis_payload
+        from sports_hedge.tennis.normalize import kalshi_tennis_markets
+
+        if (
+            is_tennis_canonical_event(event)
+            or is_tennis_payload(event_payload)
+            or is_tennis_payload(series or {})
+            or any(is_tennis_payload(item) for item in payloads if isinstance(item, dict))
+        ):
+            return kalshi_tennis_markets(
                 event,
                 payloads,
                 series=series,
@@ -2601,6 +2646,10 @@ def _matchbook_market_family(
         raise VenueNormalizationError("soccer recogniser does not classify NCAAB markets")
     if is_nba_payload(payload):
         raise VenueNormalizationError("soccer recogniser does not classify NBA markets")
+    from sports_hedge.tennis.detect import is_tennis_payload
+
+    if is_tennis_payload(payload):
+        raise VenueNormalizationError("soccer recogniser does not classify tennis markets")
     compound_markers = _matchbook_family_markers(text)
     if len(compound_markers) >= 2:
         raise VenueNormalizationError(
@@ -2683,6 +2732,10 @@ def _polymarket_market_family(
         raise VenueNormalizationError("soccer recogniser does not classify NCAAB markets")
     if is_nba_payload(payload):
         raise VenueNormalizationError("soccer recogniser does not classify NBA markets")
+    from sports_hedge.tennis.detect import is_tennis_payload
+
+    if is_tennis_payload(payload):
+        raise VenueNormalizationError("soccer recogniser does not classify tennis markets")
     line = _line_from_payload_or_text(payload, question)
     combined = f"{sports_type} {text}".strip()
     if "corner" in combined:

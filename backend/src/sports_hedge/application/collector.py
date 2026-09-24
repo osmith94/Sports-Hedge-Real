@@ -154,6 +154,7 @@ from sports_hedge.application.target_competitions import (
     selected_includes_nfl,
     selected_includes_ncaab,
     selected_includes_soccer,
+    selected_includes_tennis,
 )
 from sports_hedge.outrights.universe_scopes import (
     kalshi_series_tickers_for_season_scopes,
@@ -427,6 +428,7 @@ def matchbook_scope_discovery_params(
     football_sport_id: str | None = None,
     american_football_sport_id: str | None = None,
     basketball_sport_id: str | None = None,
+    tennis_sport_id: str | None = None,
 ) -> dict[str, str]:
     """Matchbook list_events filters for the selected operator scope.
 
@@ -439,7 +441,7 @@ def matchbook_scope_discovery_params(
 
     if not selected_includes_nfl(selected_codes) and not selected_includes_nba(
         selected_codes
-    ) and not selected_includes_ncaab(selected_codes):
+    ) and not selected_includes_ncaab(selected_codes) and not selected_includes_tennis(selected_codes):
         return {}
     ids: list[str] = []
     if selected_includes_soccer(selected_codes) and football_sport_id:
@@ -448,6 +450,8 @@ def matchbook_scope_discovery_params(
         ids.append(str(american_football_sport_id))
     if (selected_includes_nba(selected_codes) or selected_includes_ncaab(selected_codes)) and basketball_sport_id:
         ids.append(str(basketball_sport_id))
+    if selected_includes_tennis(selected_codes) and tennis_sport_id:
+        ids.append(str(tennis_sport_id))
     params: dict[str, str] = {}
     if ids:
         params["sport-ids"] = ",".join(ids)
@@ -456,6 +460,7 @@ def matchbook_scope_discovery_params(
         and not selected_includes_nfl(selected_codes)
         and not selected_includes_soccer(selected_codes)
         and not selected_includes_ncaab(selected_codes)
+        and not selected_includes_tennis(selected_codes)
     )
     if nba_only:
         params["tag-ids"] = MATCHBOOK_NBA_COMPETITION_TAG_ID
@@ -1894,11 +1899,13 @@ class ReadOnlyCrossVenueCollector:
             not selected_includes_nfl(codes)
             and not selected_includes_nba(codes)
             and not selected_includes_ncaab(codes)
+            and not selected_includes_tennis(codes)
         ):
             return {}
         football = None
         american = None
         basketball = None
+        tennis = None
         if selected_includes_soccer(codes):
             resolver = getattr(client, "resolve_football_sport_id", None)
             if callable(resolver):
@@ -1911,11 +1918,16 @@ class ReadOnlyCrossVenueCollector:
             resolver = getattr(client, "resolve_basketball_sport_id", None)
             if callable(resolver):
                 basketball = str(await resolver())
+        if selected_includes_tennis(codes):
+            resolver = getattr(client, "resolve_tennis_sport_id", None)
+            if callable(resolver):
+                tennis = str(await resolver())
         return matchbook_scope_discovery_params(
             codes,
             football_sport_id=football,
             american_football_sport_id=american,
             basketball_sport_id=basketball,
+            tennis_sport_id=tennis,
         )
 
     async def _discovery_task(
@@ -3409,6 +3421,13 @@ class ReadOnlyCrossVenueCollector:
                 (left_venue, right_venue, left_market, right_market, match)
                 for left_market, right_market, match in market_pairs
             )
+        from sports_hedge.matching.approved_register import registered_canonical_key
+
+        catalogue_pairs = [
+            item
+            for item in selected_pairs
+            if registered_canonical_key(item[2].canonical, item[3].canonical) is not None
+        ]
         eligible_pairs = [
             item
             for item in selected_pairs
@@ -3435,7 +3454,7 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_books_skipped_unapproved += len(leftover_kalshi)
         await self._persist_universe_catalogue_from_pairs(
             fixture=fixture,
-            eligible_pairs=eligible_pairs,
+            eligible_pairs=catalogue_pairs,
             k_events=k_events,
             family_discovery=FamilyDiscoveryCompleteness(
                 matchbook_listing_complete=matchbook_side.listing_complete,

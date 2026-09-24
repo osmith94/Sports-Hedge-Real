@@ -1,8 +1,8 @@
 # Operator football competition verification matrix
 
-`OPERATOR_COMPETITION_REGISTRY_VERSION = 7`
+`OPERATOR_COMPETITION_REGISTRY_VERSION = 8`
 
-Principal visible catalogue: **34** rows.
+Principal visible catalogue: **36** rows.
 Operator UI/state uses canonical codes only. Venue identifiers below are backend evidence, not operator-selectable tickers.
 
 Retrieved 2026-09-22 from read-only public metadata:
@@ -50,6 +50,8 @@ Partial rows remain visible and disabled. Identifiers were not guessed.
 | `nfl` | NFL | NFL | yes | VERIFIED_ALL_3 | verified | verified | verified | Stage 1B PAPER: KXNFLGAME,KXNFLSPREAD,KXNFLTOTAL (full-game half-point families only); Gamma nfl/12185; Matchbook American Football + NFL competition tag. Not in the default eight. Exceptional tie/cancel/suspend differences are an audit caveat, not live-execution equivalence. |
 | `nba` | NBA | NBA | yes | VERIFIED_ALL_3 | verified | verified | verified | PAPER: KXNBAGAME,KXNBASPREAD,KXNBATOTAL (full-game half-point families only). Gamma nba/10345. Matchbook basketball sport-id 4 + NBA tag 406202315670010. Selectable with zero fixtures. Not in the default eight. Only Kalshi↔Polymarket GAME_WINNER is PAPER-admitted (normal completion). Spreads/totals and all Matchbook NBA pairs stay fail-closed pending game-book/OT evidence. WNBA/NCAAB/Summer League are not NBA. |
 | `ncaab` | NCAA Men's Basketball | College Basketball | yes | VERIFIED_ALL_3 | verified | verified | verified | Issue #508. Kalshi KXNCAAMBGAME,KXNCAAMBSPREAD,KXNCAAMBTOTAL (full-game half-point structural families only; **no PAPER pair admitted**). Gamma cbb/10470 (0 open games on 2026-09-22). Matchbook Basketball sport-id 4; **no NCAA/NCAAB competition tag** — WNBA/NBA listings are rejected_non_ncaab_basketball. Selectable with a healthy zero-fixture off-season. Not default. NCAAW is not selectable. Census 2026-09-22. |
+| `atp` | ATP | Tennis | yes | VERIFIED_ALL_3 | verified | verified | verified | Stage 1 ATP singles discovery only. Public 2026-09-24: Kalshi series KXATPMATCH (not KXATPGAME, not challenger/doubles/set/game/outright series). Gamma atp/10365. Matchbook sport-id 9 name Tennis (Table Tennis is a different sport). Admitted tournament labels from the same player pairs: ATP Hangzhou = Hangzhou Open, ATP Chengdu = Chengdu Open. Match Winner is catalogued and **not paper-executable** (`tennis_retirement_settlement_not_equivalent`). Not in the default eight. |
+| `wta` | WTA | Tennis | yes | VERIFIED_ALL_3 | verified | verified | verified | Stage 1 WTA singles discovery only. Public 2026-09-24: Kalshi series KXWTAMATCH. Gamma wta/10366. Matchbook sport-id 9. Admitted labels: WTA Singapore = Singapore Open, WTA Seoul (Matchbook label only; Korea Open was not proven as the same tournament). Match Winner is catalogued and **not paper-executable**. Not in the default eight. |
 
 ## Deliberately excluded neighbours
 
@@ -66,4 +68,4 @@ Partial rows remain visible and disabled. Identifiers were not guessed.
   UEFA Women's Nations League, CONCACAF Nations League, UEFA Nations League C
   (not on the 2026-09-22 open snapshot; do not invent from the A/B/D tag family).
 
-Default selected startup scope remains the original eight competitions. NFL, NBA, and NCAA Men's Basketball are selectable and are not default.
+Default selected startup scope remains the original eight competitions. NFL, NBA, NCAA Men's Basketball, ATP, and WTA are selectable and are not default. ATP and WTA are discovery-selectable and are not paper-executable.

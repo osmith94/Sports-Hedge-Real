@@ -134,6 +134,9 @@ class EventMatcher:
 
         if left.sport != right.sport:
             return False
+        tennis_prefilter = self._tennis_could_match(left, right)
+        if tennis_prefilter is not None:
+            return tennis_prefilter
         ncaab_prefilter = self._ncaab_could_match(left, right)
         if ncaab_prefilter is not None:
             return ncaab_prefilter
@@ -222,6 +225,10 @@ class EventMatcher:
 
         if left.sport != right.sport:
             return EventMatchResult(matched=False, confidence=0.0, reasons=["sport_mismatch"])
+
+        tennis_result = self._tennis_match(left, right)
+        if tennis_result is not None:
+            return tennis_result
 
         ncaab_result = self._ncaab_match(left, right)
         if ncaab_result is not None:
@@ -370,6 +377,91 @@ class EventMatcher:
             reasons=reasons,
             provenance=provenance,
         )
+
+    def _tennis_could_match(self, left: CanonicalEvent, right: CanonicalEvent) -> bool | None:
+        status = self._tennis_identity(left, right)
+        if status is None:
+            return None
+        return status[0]
+
+    def _tennis_match(self, left: CanonicalEvent, right: CanonicalEvent) -> EventMatchResult | None:
+        status = self._tennis_identity(left, right)
+        if status is None:
+            return None
+        matched, reasons = status
+        return EventMatchResult(
+            matched=matched,
+            confidence=1.0 if matched else 0.0,
+            reasons=reasons,
+        )
+
+    @staticmethod
+    def _tennis_identity(
+        left: CanonicalEvent, right: CanonicalEvent
+    ) -> tuple[bool, list[str]] | None:
+        """Player pair, tour, tournament and round. Kickoff is supporting only.
+
+        Returns None when neither event is tennis so football keeps its
+        5-minute kickoff veto. A matched pair may drift for up to 14 days.
+        """
+
+        from datetime import timedelta
+
+        from sports_hedge.tennis.constants import (
+            TENNIS_EVENT_SINGLES,
+            TENNIS_EVENT_TYPE_NOT_SINGLES,
+            TENNIS_PARTICIPANT_ORDER_REVERSED,
+            TENNIS_PLAYER_IDENTITY_AMBIGUOUS,
+            TENNIS_PLAYER_MISMATCH,
+            TENNIS_ROUND_MISMATCH,
+            TENNIS_ROUND_UNAVAILABLE,
+            TENNIS_SCHEDULE_DRIFT,
+            TENNIS_SCHEDULE_OUTSIDE_SUPPORTING_WINDOW,
+            TENNIS_SPORT,
+            TENNIS_TOUR_MISMATCH,
+            TENNIS_TOURNAMENT_MISMATCH,
+            TENNIS_TOURNAMENT_NOT_ADMITTED,
+        )
+        from sports_hedge.tennis.players import resolve_tennis_player, same_player_pair
+
+        if left.sport != TENNIS_SPORT and right.sport != TENNIS_SPORT:
+            return None
+        if left.sport != TENNIS_SPORT or right.sport != TENNIS_SPORT:
+            return False, ["sport_mismatch"]
+        if left.event_type != TENNIS_EVENT_SINGLES or right.event_type != TENNIS_EVENT_SINGLES:
+            return False, [TENNIS_EVENT_TYPE_NOT_SINGLES]
+        if left.competition != right.competition:
+            return False, [TENNIS_TOUR_MISMATCH]
+        if not left.tournament or not right.tournament:
+            return False, [TENNIS_TOURNAMENT_NOT_ADMITTED]
+        if left.tournament != right.tournament:
+            return False, [TENNIS_TOURNAMENT_MISMATCH]
+        if not left.round_label or not right.round_label:
+            return False, [TENNIS_ROUND_UNAVAILABLE]
+        if left.round_label != right.round_label:
+            return False, [TENNIS_ROUND_MISMATCH]
+        resolved = [
+            resolve_tennis_player(label)
+            for label in (left.home_team, left.away_team, right.home_team, right.away_team)
+        ]
+        if any(not item.ok or not item.canonical for item in resolved):
+            reason = next(
+                (item.reason for item in resolved if not item.ok),
+                TENNIS_PLAYER_IDENTITY_AMBIGUOUS,
+            )
+            return False, [reason or TENNIS_PLAYER_IDENTITY_AMBIGUOUS]
+        left_home, left_away, right_home, right_away = (item.canonical or "" for item in resolved)
+        if not same_player_pair(left_home, left_away, right_home, right_away):
+            return False, [TENNIS_PLAYER_MISMATCH]
+        kickoff_delta = abs(left.kickoff_utc - right.kickoff_utc)
+        if kickoff_delta > timedelta(days=14):
+            return False, [TENNIS_SCHEDULE_OUTSIDE_SUPPORTING_WINDOW]
+        reasons: list[str] = []
+        if (left.home_team, left.away_team) != (right.home_team, right.away_team):
+            reasons.append(TENNIS_PARTICIPANT_ORDER_REVERSED)
+        if kickoff_delta.total_seconds() > 0:
+            reasons.append(TENNIS_SCHEDULE_DRIFT)
+        return True, reasons
 
     def _ncaab_could_match(self, left: CanonicalEvent, right: CanonicalEvent) -> bool | None:
         """Exact NCAAB prefilter, or None when neither event is NCAAB.

@@ -98,6 +98,8 @@ EXPECTED_CATALOGUE_CODES = frozenset(
         "nfl",
         "nba",
         "ncaab",
+        "atp",
+        "wta",
     }
 )
 
@@ -131,11 +133,11 @@ def _event(
 def test_composed_catalogue_keeps_nba_ncaab_and_nations_league() -> None:
     codes = {item.code for item in TARGET_COMPETITIONS}
     values = {item.code.value for item in TARGET_COMPETITIONS}
-    assert len(TARGET_COMPETITIONS) == 34
-    assert len(codes) == 34
+    assert len(TARGET_COMPETITIONS) == 36
+    assert len(codes) == 36
     assert values == EXPECTED_CATALOGUE_CODES
-    assert PRINCIPAL_OPERATOR_COMPETITION_COUNT == 34
-    assert OPERATOR_COMPETITION_REGISTRY_VERSION == 7
+    assert PRINCIPAL_OPERATOR_COMPETITION_COUNT == 36
+    assert OPERATOR_COMPETITION_REGISTRY_VERSION == 8
     assert {
         TargetCompetitionCode.NBA,
         TargetCompetitionCode.NCAAB,
