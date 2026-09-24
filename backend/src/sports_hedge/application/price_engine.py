@@ -18,6 +18,9 @@ PAPER / read-only. Exact persisted Matchbook/Kalshi/Polymarket IDs only — neve
 ``list_events`` / ``list_markets`` rediscovery on this path. Polymarket CLOB
 books use real token IDs from the catalogue; missing or synthetic tokens are
 not executable.
+
+BACKGROUND schedules those exact-ID reads by provider stage and coalesces
+identical requests inside one slice. HOT and ACTIVE TRADE stay sequential.
 """
 
 from __future__ import annotations
@@ -192,6 +195,19 @@ class RetrievedVenuePayload:
     retrieved_at: datetime
 
 
+@dataclass(slots=True)
+class ExactIdPricingPrep:
+    """Exact-ID inputs for one catalogue row. No discovery."""
+
+    lane: str
+    active_lane: bool
+    matchbook_ready: bool
+    kalshi_ready: bool
+    polymarket_ready: bool
+    pm_tokens: list[Any]
+    skip_bound: bool
+
+
 @dataclass
 class PriceEngineRuntimeItem:
     """Process-memory scheduler view of one derived catalogue item."""
@@ -280,6 +296,14 @@ class PriceEngineSliceResult:
     skip_reasons: dict[str, str] = field(default_factory=dict)
     upper_bound_net_edge: str | None = None
     viable_venue_count: int | None = None
+    # Slice-local exact-ID schedule counters. Vocabulary matches the #552
+    # diagnostic names so a later rationalisation can read them without a
+    # second logging system. Zero unless this slice used the BACKGROUND planner.
+    issued_provider_calls: int = 0
+    coalesced_provider_calls: int = 0
+    repeated_exact_id_calls: int = 0
+    provider_stage_calls: dict[str, int] = field(default_factory=dict)
+    pricing_call_shape: str = ""
 
     def statuses(self) -> dict[str, str]:
         payload: dict[str, str] = {}
@@ -745,35 +769,69 @@ class CataloguePriceEngine:
         pending = deque(expensive)
         self._slice_remaining = remaining
         try:
-            async def _worker() -> None:
-                while True:
-                    rem = remaining()
-                    if rem is not None and rem <= 0:
-                        return
-                    try:
-                        runtime = pending.popleft()
-                    except IndexError:
-                        return
-                    rem = remaining()
-                    if rem is not None and rem <= 0:
-                        runtime.status = PriceEngineItemStatus.NOT_STARTED
-                        self._record_outcome(runtime, PriceEngineItemStatus.NOT_STARTED, result)
-                        self._record_item_deadline_miss(runtime)
-                        continue
-                    outcome = await self._price_item(runtime, result)
-                    self._record_outcome(runtime, outcome, result)
-
-            worker_n = min(self._slice_worker_limit(), len(expensive))
-            if worker_n > 0:
-                await asyncio.gather(
-                    *(asyncio.create_task(_worker()) for _ in range(worker_n)),
-                    return_exceptions=True,
+            if priority is PriceEnginePriority.BACKGROUND and expensive:
+                from sports_hedge.application.background_exact_id_planner import (
+                    run_background_exact_id_slice,
                 )
-            while pending:
-                runtime = pending.popleft()
-                runtime.status = PriceEngineItemStatus.NOT_STARTED
-                result.not_started.append(runtime.identity.catalogue_row_id)
-                self._record_item_deadline_miss(runtime)
+                from sports_hedge.application.exact_id_coalesce import (
+                    ExactIdSliceCoalescer,
+                    bind_exact_id_coalescer,
+                )
+
+                coalescer = ExactIdSliceCoalescer()
+                with bind_exact_id_coalescer(coalescer):
+                    await run_background_exact_id_slice(
+                        self,
+                        expensive,
+                        result,
+                        remaining=remaining,
+                    )
+                result.issued_provider_calls = coalescer.issued_provider_calls
+                result.coalesced_provider_calls = coalescer.coalesced_provider_calls
+                result.repeated_exact_id_calls = coalescer.repeated_exact_id_calls
+                result.provider_stage_calls = dict(coalescer.provider_stage_calls)
+                result.pricing_call_shape = "provider_centric_staged_exact_id"
+            else:
+                async def _worker() -> None:
+                    while True:
+                        rem = remaining()
+                        if rem is not None and rem <= 0:
+                            return
+                        try:
+                            runtime = pending.popleft()
+                        except IndexError:
+                            return
+                        rem = remaining()
+                        if rem is not None and rem <= 0:
+                            runtime.status = PriceEngineItemStatus.NOT_STARTED
+                            self._record_outcome(
+                                runtime, PriceEngineItemStatus.NOT_STARTED, result
+                            )
+                            self._record_item_deadline_miss(runtime)
+                            continue
+                        try:
+                            outcome = await self._price_item(runtime, result)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            runtime.last_error_stage = "price_item"
+                            runtime.last_error_detail = f"{type(exc).__name__}: {exc}"
+                            outcome = self._schedule_retry(
+                                runtime, runtime.last_error_detail
+                            )
+                        self._record_outcome(runtime, outcome, result)
+
+                worker_n = min(self._slice_worker_limit(), len(expensive))
+                if worker_n > 0:
+                    await asyncio.gather(
+                        *(asyncio.create_task(_worker()) for _ in range(worker_n)),
+                        return_exceptions=True,
+                    )
+                while pending:
+                    runtime = pending.popleft()
+                    runtime.status = PriceEngineItemStatus.NOT_STARTED
+                    result.not_started.append(runtime.identity.catalogue_row_id)
+                    self._record_item_deadline_miss(runtime)
         finally:
             self._slice_remaining = None
         self._last_slice_not_started[priority.value] = len(result.not_started)
@@ -782,14 +840,12 @@ class CataloguePriceEngine:
         result.scan_budget_exhausted = False
         return result
 
-    async def _price_item(
+    def _mark_price_item_started(
         self,
         runtime: PriceEngineRuntimeItem,
-        result: PriceEngineSliceResult,
         *,
         lane: str | None = None,
-    ) -> PriceEngineItemStatus:
-        identity = runtime.identity
+    ) -> str:
         runtime.in_flight = True
         runtime.status = PriceEngineItemStatus.IN_FLIGHT
         runtime.list_events_calls = 0
@@ -801,144 +857,249 @@ class CataloguePriceEngine:
                 if runtime.priority is PriceEnginePriority.HOT
                 else PRICE_ENGINE_BACKGROUND_LANE
             )
-        try:
-            matchbook_ready = bool(identity.matchbook_event_id and identity.matchbook_market_id)
-            kalshi_ready = bool(identity.kalshi_event_ticker and _kalshi_tickers(identity))
-            pm_tokens = executable_polymarket_token_ids(
-                list(identity.polymarket_token_ids),
-                event_id=identity.polymarket_event_id,
-                market_id=identity.polymarket_market_id,
-                condition_id=identity.polymarket_condition_id,
-                required_outcomes=list(identity.required_outcomes)
-                or required_outcomes_for_key(identity.register_canonical_key),
-            )
-            polymarket_ready = bool(pm_tokens)
-            if not matchbook_ready and not (kalshi_ready and polymarket_ready):
-                return self._request_revalidation(runtime, "missing_matchbook_identity")
-            if not kalshi_ready and not (matchbook_ready and polymarket_ready):
-                return self._request_revalidation(runtime, "missing_kalshi_identity")
-            if not polymarket_ready and not (matchbook_ready and kalshi_ready):
-                return self._request_revalidation(runtime, "missing_polymarket_identity")
+        return lane
 
-            active_lane = str(lane).strip().casefold() == PRICE_ENGINE_ACTIVE_TRADE_LANE
-            viability = assess_identity_viability(
+    def _prepare_exact_id_pricing(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        result: PriceEngineSliceResult,
+        *,
+        lane: str,
+    ) -> ExactIdPricingPrep | PriceEngineItemStatus:
+        """Validate exact catalogue IDs and viability. Does not call providers."""
+
+        identity = runtime.identity
+        matchbook_ready = bool(identity.matchbook_event_id and identity.matchbook_market_id)
+        kalshi_ready = bool(identity.kalshi_event_ticker and _kalshi_tickers(identity))
+        pm_tokens = executable_polymarket_token_ids(
+            list(identity.polymarket_token_ids),
+            event_id=identity.polymarket_event_id,
+            market_id=identity.polymarket_market_id,
+            condition_id=identity.polymarket_condition_id,
+            required_outcomes=list(identity.required_outcomes)
+            or required_outcomes_for_key(identity.register_canonical_key),
+        )
+        polymarket_ready = bool(pm_tokens)
+        if not matchbook_ready and not (kalshi_ready and polymarket_ready):
+            return self._request_revalidation(runtime, "missing_matchbook_identity")
+        if not kalshi_ready and not (matchbook_ready and polymarket_ready):
+            return self._request_revalidation(runtime, "missing_kalshi_identity")
+        if not polymarket_ready and not (matchbook_ready and kalshi_ready):
+            return self._request_revalidation(runtime, "missing_polymarket_identity")
+
+        active_lane = str(lane).strip().casefold() == PRICE_ENGINE_ACTIVE_TRADE_LANE
+        viability = assess_identity_viability(
+            identity,
+            cache=self.viability_cache,
+            active_event_ids=self._exempt_event_ids,
+            active_trade_lane=active_lane,
+        )
+        result.viable_venue_count = viability.viable_venue_count
+        if viability.skip_expensive_work:
+            saved = _expected_provider_calls(
+                matchbook_ready=matchbook_ready,
+                kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
+                polymarket_tokens=pm_tokens if polymarket_ready else [],
+            )
+            return self._skip_item(
+                runtime,
+                result,
+                reason=viability.reason or CROSS_VENUE_UNAVAILABLE,
+                saved_calls=saved,
+                viable_count=viability.viable_venue_count,
+            )
+        return ExactIdPricingPrep(
+            lane=lane,
+            active_lane=active_lane,
+            matchbook_ready=matchbook_ready,
+            kalshi_ready=kalshi_ready,
+            polymarket_ready=polymarket_ready,
+            pm_tokens=list(pm_tokens),
+            skip_bound=active_lane or bool(viability.active_trade_override),
+        )
+
+    async def _load_matchbook_stage(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        result: PriceEngineSliceResult,
+        *,
+        prep: ExactIdPricingPrep,
+    ) -> tuple[RetrievedVenuePayload, dict[str, Decimal]] | PriceEngineItemStatus:
+        identity = runtime.identity
+        matchbook_payload = await self._refresh_matchbook(runtime, lane=prep.lane)
+        if isinstance(matchbook_payload, PriceEngineItemStatus):
+            if runtime.last_error_detail and ":gone" in str(runtime.last_error_detail):
+                remaining = _expected_provider_calls(
+                    matchbook_ready=False,
+                    kalshi_tickers=_kalshi_tickers(identity) if prep.kalshi_ready else [],
+                    polymarket_tokens=prep.pm_tokens if prep.polymarket_ready else [],
+                )
+                result.skipped_provider_calls += remaining
+                result.saved_provider_calls += remaining
+                result.viable_venue_count = assess_identity_viability(
+                    identity,
+                    cache=self.viability_cache,
+                    active_event_ids=self._exempt_event_ids,
+                    active_trade_lane=prep.active_lane,
+                ).viable_venue_count
+            return self._finalize_provider_status(runtime, matchbook_payload)
+        known_implied = merge_known_implied(
+            self._implied_from_matchbook(identity, matchbook_payload)
+        )
+        if not prep.active_lane and not prep.skip_bound:
+            post_mb = assess_identity_viability(
                 identity,
                 cache=self.viability_cache,
                 active_event_ids=self._exempt_event_ids,
-                active_trade_lane=active_lane,
+                active_trade_lane=False,
             )
-            result.viable_venue_count = viability.viable_venue_count
-            if viability.skip_expensive_work:
+            result.viable_venue_count = post_mb.viable_venue_count
+            if post_mb.skip_expensive_work:
                 saved = _expected_provider_calls(
-                    matchbook_ready=matchbook_ready,
-                    kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
-                    polymarket_tokens=pm_tokens if polymarket_ready else [],
+                    matchbook_ready=False,
+                    kalshi_tickers=_kalshi_tickers(identity) if prep.kalshi_ready else [],
+                    polymarket_tokens=prep.pm_tokens if prep.polymarket_ready else [],
                 )
                 return self._skip_item(
                     runtime,
                     result,
-                    reason=viability.reason or CROSS_VENUE_UNAVAILABLE,
+                    reason=post_mb.reason or CROSS_VENUE_UNAVAILABLE,
                     saved_calls=saved,
-                    viable_count=viability.viable_venue_count,
+                    viable_count=post_mb.viable_venue_count,
                 )
+        return matchbook_payload, known_implied
 
+    async def _load_kalshi_stage(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        result: PriceEngineSliceResult,
+        *,
+        prep: ExactIdPricingPrep,
+        known_implied: Mapping[str, Decimal],
+    ) -> dict[str, RetrievedVenuePayload] | PriceEngineItemStatus:
+        kalshi_books = await self._refresh_kalshi_constituents(
+            runtime,
+            lane=prep.lane,
+            result=result,
+            known_implied=known_implied,
+            skip_bound=prep.skip_bound,
+        )
+        if isinstance(kalshi_books, PriceEngineItemStatus):
+            return self._finalize_provider_status(runtime, kalshi_books)
+        required = _required_tickers(runtime.identity)
+        if any(ticker not in kalshi_books for ticker in required):
+            if runtime.status is PriceEngineItemStatus.SKIPPED:
+                return PriceEngineItemStatus.SKIPPED
+            return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
+        return kalshi_books
+
+    async def _load_polymarket_stage(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        *,
+        prep: ExactIdPricingPrep,
+        matchbook: RetrievedVenuePayload | None,
+        kalshi_books: Mapping[str, RetrievedVenuePayload] | None,
+    ) -> dict[str, RetrievedVenuePayload] | None | PriceEngineItemStatus:
+        polymarket_books = await self._refresh_polymarket(
+            runtime, lane=prep.lane, tokens=prep.pm_tokens
+        )
+        if isinstance(polymarket_books, PriceEngineItemStatus):
+            if matchbook is not None and kalshi_books is not None:
+                return None
+            return self._finalize_provider_status(runtime, polymarket_books)
+        return polymarket_books
+
+    async def _publish_loaded_books(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        result: PriceEngineSliceResult,
+        *,
+        matchbook: RetrievedVenuePayload | None,
+        kalshi_books: Mapping[str, RetrievedVenuePayload] | None,
+        polymarket_books: Mapping[str, RetrievedVenuePayload] | None,
+    ) -> PriceEngineItemStatus:
+        if matchbook is not None and kalshi_books is not None:
+            status = await self._evaluate_complete_item(
+                runtime,
+                matchbook=matchbook,
+                kalshi_books=kalshi_books,
+                result=result,
+            )
+            if (
+                status is PriceEngineItemStatus.EVALUATED
+                and polymarket_books
+                and self.paper_scan is not None
+            ):
+                await self._evaluate_extra_polymarket_pairs(
+                    runtime,
+                    matchbook=matchbook,
+                    kalshi_books=kalshi_books,
+                    polymarket_books=polymarket_books,
+                    result=result,
+                )
+            return status
+        return await self._evaluate_flexible_pairs(
+            runtime,
+            matchbook=matchbook,
+            kalshi_books=kalshi_books,
+            polymarket_books=polymarket_books,
+            result=result,
+        )
+
+    async def _price_item(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        result: PriceEngineSliceResult,
+        *,
+        lane: str | None = None,
+    ) -> PriceEngineItemStatus:
+        """Sequential exact-ID pricing used by HOT and ACTIVE TRADE.
+
+        BACKGROUND uses the staged planner instead. Stage order here stays
+        Matchbook, then Kalshi with upper-bound pruning, then Polymarket.
+        """
+
+        lane = self._mark_price_item_started(runtime, lane=lane)
+        try:
+            prepared = self._prepare_exact_id_pricing(runtime, result, lane=lane)
+            if isinstance(prepared, PriceEngineItemStatus):
+                return prepared
             matchbook_payload: RetrievedVenuePayload | None = None
             known_implied: dict[str, Decimal] = {}
-            if matchbook_ready:
-                matchbook_payload = await self._refresh_matchbook(runtime, lane=lane)
-                if isinstance(matchbook_payload, PriceEngineItemStatus):
-                    if runtime.last_error_detail and ":gone" in str(runtime.last_error_detail):
-                        remaining = _expected_provider_calls(
-                            matchbook_ready=False,
-                            kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
-                            polymarket_tokens=pm_tokens if polymarket_ready else [],
-                        )
-                        result.skipped_provider_calls += remaining
-                        result.saved_provider_calls += remaining
-                        result.viable_venue_count = assess_identity_viability(
-                            identity,
-                            cache=self.viability_cache,
-                            active_event_ids=self._exempt_event_ids,
-                            active_trade_lane=active_lane,
-                        ).viable_venue_count
-                    return self._finalize_provider_status(runtime, matchbook_payload)
-                known_implied = merge_known_implied(
-                    self._implied_from_matchbook(identity, matchbook_payload)
-                )
-                if not active_lane and not viability.active_trade_override:
-                    post_mb = assess_identity_viability(
-                        identity,
-                        cache=self.viability_cache,
-                        active_event_ids=self._exempt_event_ids,
-                        active_trade_lane=False,
-                    )
-                    result.viable_venue_count = post_mb.viable_venue_count
-                    if post_mb.skip_expensive_work:
-                        saved = _expected_provider_calls(
-                            matchbook_ready=False,
-                            kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
-                            polymarket_tokens=pm_tokens if polymarket_ready else [],
-                        )
-                        return self._skip_item(
-                            runtime,
-                            result,
-                            reason=post_mb.reason or CROSS_VENUE_UNAVAILABLE,
-                            saved_calls=saved,
-                            viable_count=post_mb.viable_venue_count,
-                        )
-
+            if prepared.matchbook_ready:
+                loaded = await self._load_matchbook_stage(runtime, result, prep=prepared)
+                if isinstance(loaded, PriceEngineItemStatus):
+                    return loaded
+                matchbook_payload, known_implied = loaded
             kalshi_books: dict[str, RetrievedVenuePayload] | None = None
-            if kalshi_ready:
-                kalshi_books = await self._refresh_kalshi_constituents(
+            if prepared.kalshi_ready:
+                kalshi_loaded = await self._load_kalshi_stage(
                     runtime,
-                    lane=lane,
-                    result=result,
+                    result,
+                    prep=prepared,
                     known_implied=known_implied,
-                    skip_bound=active_lane or viability.active_trade_override,
                 )
-                if isinstance(kalshi_books, PriceEngineItemStatus):
-                    return self._finalize_provider_status(runtime, kalshi_books)
-                required = _required_tickers(identity)
-                if any(ticker not in kalshi_books for ticker in required):
-                    if runtime.status is PriceEngineItemStatus.SKIPPED:
-                        return PriceEngineItemStatus.SKIPPED
-                    return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
-
+                if isinstance(kalshi_loaded, PriceEngineItemStatus):
+                    return kalshi_loaded
+                kalshi_books = kalshi_loaded
             polymarket_books: dict[str, RetrievedVenuePayload] | None = None
-            if polymarket_ready:
-                polymarket_books = await self._refresh_polymarket(runtime, lane=lane, tokens=pm_tokens)
-                if isinstance(polymarket_books, PriceEngineItemStatus):
-                    if matchbook_payload is not None and kalshi_books is not None:
-                        polymarket_books = None
-                    else:
-                        return self._finalize_provider_status(runtime, polymarket_books)
-
-            if matchbook_payload is not None and kalshi_books is not None:
-                status = await self._evaluate_complete_item(
+            if prepared.polymarket_ready:
+                polymarket_loaded = await self._load_polymarket_stage(
                     runtime,
+                    prep=prepared,
                     matchbook=matchbook_payload,
                     kalshi_books=kalshi_books,
-                    result=result,
                 )
-                if (
-                    status is PriceEngineItemStatus.EVALUATED
-                    and polymarket_books
-                    and self.paper_scan is not None
-                ):
-                    await self._evaluate_extra_polymarket_pairs(
-                        runtime,
-                        matchbook=matchbook_payload,
-                        kalshi_books=kalshi_books,
-                        polymarket_books=polymarket_books,
-                        result=result,
-                    )
-                return status
-            return await self._evaluate_flexible_pairs(
+                if isinstance(polymarket_loaded, PriceEngineItemStatus):
+                    return polymarket_loaded
+                polymarket_books = polymarket_loaded
+            return await self._publish_loaded_books(
                 runtime,
+                result,
                 matchbook=matchbook_payload,
                 kalshi_books=kalshi_books,
                 polymarket_books=polymarket_books,
-                result=result,
             )
         finally:
             runtime.in_flight = False
@@ -959,6 +1120,10 @@ class CataloguePriceEngine:
                 lane=lane,
                 stage="get_market",
                 source_id=str(identity.matchbook_market_id),
+                coalesce_parts=(
+                    str(identity.matchbook_event_id),
+                    str(identity.matchbook_market_id),
+                ),
                 coro=getter(identity.matchbook_event_id, identity.matchbook_market_id),
                 runtime=runtime,
             )
@@ -1039,6 +1204,7 @@ class CataloguePriceEngine:
                 lane=lane,
                 stage="order_book",
                 source_id=ticker,
+                coalesce_parts=(str(identity.kalshi_event_ticker), str(ticker)),
                 coro=getter(identity.kalshi_event_ticker, ticker),
                 runtime=runtime,
             )
@@ -1080,6 +1246,11 @@ class CataloguePriceEngine:
                 lane=lane,
                 stage="order_book",
                 source_id=token,
+                coalesce_parts=(
+                    str(identity.polymarket_event_id),
+                    str(identity.polymarket_market_id),
+                    token,
+                ),
                 coro=getter(
                     identity.polymarket_event_id,
                     identity.polymarket_market_id,
@@ -1719,6 +1890,63 @@ class CataloguePriceEngine:
         )
 
     async def _provider_call(
+        self,
+        venue: VenueName,
+        *,
+        lane: str,
+        stage: str,
+        source_id: str,
+        coro: Any,
+        runtime: PriceEngineRuntimeItem | None = None,
+        coalesce_parts: tuple[str, ...] | None = None,
+    ) -> tuple[Any, PriceEngineItemStatus | None]:
+        """Issue one exact-ID read, coalescing identical keys inside a BACKGROUND slice.
+
+        HOT and ACTIVE leave the slice coalescer unset, so they keep one call
+        per row. A joined caller closes its unused coroutine and reuses the
+        leader's result. The cache does not outlive the slice context.
+        """
+
+        from sports_hedge.application.exact_id_coalesce import (
+            ExactRequestKey,
+            current_exact_id_coalescer,
+        )
+
+        coalescer = current_exact_id_coalescer()
+        if coalescer is None:
+            return await self._provider_call_execute(
+                venue,
+                lane=lane,
+                stage=stage,
+                source_id=source_id,
+                coro=coro,
+                runtime=runtime,
+            )
+        parts = tuple(str(part) for part in (coalesce_parts or (source_id,)))
+        key = ExactRequestKey(venue=str(venue.value), stage=str(stage), parts=parts)
+
+        def _close_unused_coro() -> None:
+            close = getattr(coro, "close", None)
+            if not callable(close):
+                return
+            try:
+                close()
+            except (RuntimeError, ValueError):
+                return
+
+        async def _leader() -> tuple[Any, PriceEngineItemStatus | None]:
+            return await self._provider_call_execute(
+                venue,
+                lane=lane,
+                stage=stage,
+                source_id=source_id,
+                coro=coro,
+                runtime=runtime,
+            )
+
+        return await coalescer.share(key, _leader, on_join=_close_unused_coro)
+
+    async def _provider_call_execute(
         self,
         venue: VenueName,
         *,

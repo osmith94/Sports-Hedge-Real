@@ -391,9 +391,10 @@ def test_timeouts_caps_and_paper_boundary_unchanged() -> None:
     assert ".list_events(" not in price_item_src
     assert ".list_markets(" not in price_item_src
     assert "MarketMatcher" not in inspect.getsource(CataloguePriceEngine._refresh_matchbook)
-    provider_src = inspect.getsource(CataloguePriceEngine._provider_call)
+    provider_src = inspect.getsource(CataloguePriceEngine._provider_call_execute)
     assert "acquire_wait" in provider_src
     assert "try_acquire" not in provider_src
+    assert "try_acquire" not in inspect.getsource(CataloguePriceEngine._provider_call)
     assert "create_task(_run" not in inspect.getsource(CataloguePriceEngine.run_slice)
 
 
