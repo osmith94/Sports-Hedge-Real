@@ -85,7 +85,6 @@ class ExactIdSliceCoalescer:
 
     issued_provider_calls: int = 0
     coalesced_provider_calls: int = 0
-    repeated_exact_id_calls: int = 0
     provider_stage_calls: dict[str, int] = field(default_factory=dict)
     _done: dict[ExactRequestKey, _SharedOutcome] = field(default_factory=dict)
     _inflight: dict[ExactRequestKey, asyncio.Future[_SharedOutcome]] = field(default_factory=dict)
@@ -164,5 +163,4 @@ class ExactIdSliceCoalescer:
         self._done.clear()
         self.issued_provider_calls = 0
         self.coalesced_provider_calls = 0
-        self.repeated_exact_id_calls = 0
         self.provider_stage_calls.clear()

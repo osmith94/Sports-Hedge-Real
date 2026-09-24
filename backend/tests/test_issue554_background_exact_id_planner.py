@@ -264,7 +264,6 @@ async def test_duplicate_exact_ids_are_issued_once_per_background_slice() -> Non
     assert matchbook.get_market_calls == [("8801", "316020")]
     assert kalshi.book_calls == ["KXSHARE-BTTS"]
     assert result.coalesced_provider_calls >= 1
-    assert result.repeated_exact_id_calls == 0
     assert result.issued_provider_calls == 2
     assert result.provider_stage_calls.get("matchbook:get_market") == 1
     assert result.provider_stage_calls.get("kalshi:order_book") == 1

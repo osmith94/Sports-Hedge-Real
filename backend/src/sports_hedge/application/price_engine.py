@@ -296,12 +296,11 @@ class PriceEngineSliceResult:
     skip_reasons: dict[str, str] = field(default_factory=dict)
     upper_bound_net_edge: str | None = None
     viable_venue_count: int | None = None
-    # Slice-local exact-ID schedule counters. Vocabulary matches the #552
-    # diagnostic names so a later rationalisation can read them without a
-    # second logging system. Zero unless this slice used the BACKGROUND planner.
+    # Slice-local exact-ID schedule counters for the BACKGROUND planner.
+    # Duplicate avoidance is ``coalesced_provider_calls`` only. Zero unless
+    # this slice used that planner.
     issued_provider_calls: int = 0
     coalesced_provider_calls: int = 0
-    repeated_exact_id_calls: int = 0
     provider_stage_calls: dict[str, int] = field(default_factory=dict)
     pricing_call_shape: str = ""
 
@@ -788,7 +787,6 @@ class CataloguePriceEngine:
                     )
                 result.issued_provider_calls = coalescer.issued_provider_calls
                 result.coalesced_provider_calls = coalescer.coalesced_provider_calls
-                result.repeated_exact_id_calls = coalescer.repeated_exact_id_calls
                 result.provider_stage_calls = dict(coalescer.provider_stage_calls)
                 result.pricing_call_shape = "provider_centric_staged_exact_id"
             else:
@@ -809,16 +807,7 @@ class CataloguePriceEngine:
                             )
                             self._record_item_deadline_miss(runtime)
                             continue
-                        try:
-                            outcome = await self._price_item(runtime, result)
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as exc:
-                            runtime.last_error_stage = "price_item"
-                            runtime.last_error_detail = f"{type(exc).__name__}: {exc}"
-                            outcome = self._schedule_retry(
-                                runtime, runtime.last_error_detail
-                            )
+                        outcome = await self._price_item(runtime, result)
                         self._record_outcome(runtime, outcome, result)
 
                 worker_n = min(self._slice_worker_limit(), len(expensive))
