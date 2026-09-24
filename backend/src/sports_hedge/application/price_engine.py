@@ -585,26 +585,11 @@ class CataloguePriceEngine:
         """Claim the next round-robin region. Age gates do not rewind the cursor."""
 
         evaluated = now or self.now()
-        eligible: list[PriceEngineRuntimeItem] = []
-        blocked: set[str] = set()
-        for runtime in self._items.values():
-            runtime.priority = self.classify_priority(runtime.identity)
-            if runtime.priority is not priority:
-                continue
-            row_id = runtime.identity.catalogue_row_id
-            if runtime.in_flight:
-                blocked.add(row_id)
-                continue
-            if runtime.next_retry_at is not None and evaluated < runtime.next_retry_at:
-                blocked.add(row_id)
-                continue
-            self._refresh_scheduler_signals(runtime)
-            eligible.append(runtime)
-        eligible.sort(key=lambda item: item.identity.catalogue_row_id)
-        by_id = {item.identity.catalogue_row_id: item for item in eligible}
+        membership, blocked = self._lane_membership(priority, evaluated)
+        by_id = {item.identity.catalogue_row_id: item for item in membership}
         cursor = self._coverage[priority.value]
         claimed = cursor.claim(
-            [item.identity.catalogue_row_id for item in eligible],
+            [item.identity.catalogue_row_id for item in membership],
             blocked=blocked,
             limit=self._coverage_claim_limit[priority.value],
             now=evaluated,
@@ -612,11 +597,80 @@ class CataloguePriceEngine:
         due: list[PriceEngineRuntimeItem] = []
         for row_id in claimed:
             runtime = by_id.get(row_id)
-            if runtime is None:
+            if runtime is None or row_id in blocked:
                 continue
             runtime.status = PriceEngineItemStatus.DUE
             due.append(runtime)
         return due
+
+    def next_runnable_at(
+        self,
+        priority: PriceEnginePriority,
+        *,
+        now: datetime | None = None,
+    ) -> datetime:
+        """When this lane can claim another row.
+
+        A runnable unvisited row is due immediately. If the only remaining
+        rows are in retry or in flight, return the earliest retry instant or
+        a short bounded delay. That delay is process-local; it is not a queue.
+        """
+
+        evaluated = now or self.now()
+        cursor = self._coverage[priority.value]
+        if cursor.hold_until is not None and evaluated < cursor.hold_until:
+            return cursor.hold_until
+        membership, blocked = self._lane_membership(priority, evaluated, refresh=False)
+        ordered = [item.identity.catalogue_row_id for item in membership]
+        if cursor._unvisited_unblocked(ordered, blocked):
+            return evaluated
+        earliest: datetime | None = None
+        in_flight = False
+        for runtime in membership:
+            row_id = runtime.identity.catalogue_row_id
+            if row_id in cursor.visited or row_id not in blocked:
+                continue
+            if runtime.in_flight:
+                in_flight = True
+            retry_at = runtime.next_retry_at
+            if retry_at is not None and evaluated < retry_at and (
+                earliest is None or retry_at < earliest
+            ):
+                earliest = retry_at
+        if earliest is not None:
+            return earliest
+        if in_flight or blocked:
+            return evaluated + timedelta(milliseconds=250)
+        if cursor.hold_until is not None:
+            return cursor.hold_until
+        return evaluated
+
+    def _lane_membership(
+        self,
+        priority: PriceEnginePriority,
+        evaluated: datetime,
+        *,
+        refresh: bool = True,
+    ) -> tuple[list[PriceEngineRuntimeItem], set[str]]:
+        """Current lane rows, including rows that cannot run yet."""
+
+        membership: list[PriceEngineRuntimeItem] = []
+        blocked: set[str] = set()
+        for runtime in self._items.values():
+            runtime.priority = self.classify_priority(runtime.identity)
+            if runtime.priority is not priority:
+                continue
+            row_id = runtime.identity.catalogue_row_id
+            waiting = runtime.in_flight or (
+                runtime.next_retry_at is not None and evaluated < runtime.next_retry_at
+            )
+            if waiting:
+                blocked.add(row_id)
+            elif refresh:
+                self._refresh_scheduler_signals(runtime)
+            membership.append(runtime)
+        membership.sort(key=lambda item: item.identity.catalogue_row_id)
+        return membership, blocked
 
     def _refresh_scheduler_signals(self, runtime: PriceEngineRuntimeItem) -> None:
         identity = runtime.identity

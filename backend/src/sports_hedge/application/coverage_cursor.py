@@ -26,9 +26,6 @@ class CoverageCursor:
     visited: set[str] = field(default_factory=set)
     pending_inserts: list[str] = field(default_factory=list)
     completed_this_pass: int = 0
-    decisions_this_pass: int = 0
-    promotions_this_pass: int = 0
-    timeouts_this_pass: int = 0
     catalogue_count: int = 0
     pass_started_at: datetime | None = None
     last_full_pass_seconds: float | None = None
@@ -46,9 +43,6 @@ class CoverageCursor:
             "position": position,
             "catalogue_rows": total,
             "percent": round(percent, 1),
-            "decisions_this_pass": self.decisions_this_pass,
-            "hot_promotions_this_pass": self.promotions_this_pass,
-            "provider_timeouts_this_pass": self.timeouts_this_pass,
             "last_full_pass_seconds": self.last_full_pass_seconds,
             "hold_until": self.hold_until.isoformat() if self.hold_until else None,
             "running": self.hold_until is None,
@@ -151,15 +145,6 @@ class CoverageCursor:
         self._finish_pass(now)
         return []
 
-    def note_decision(self) -> None:
-        self.decisions_this_pass += 1
-
-    def note_promotion(self) -> None:
-        self.promotions_this_pass += 1
-
-    def note_timeout(self) -> None:
-        self.timeouts_this_pass += 1
-
     def hold_for_target(self, *, target_seconds: float, now: datetime) -> float:
         """Arm the post-pass wait. Returns seconds until the next pass may start."""
 
@@ -209,9 +194,6 @@ class CoverageCursor:
         self.pending_inserts.clear()
         self.cursor_after_id = None
         self.completed_this_pass = 0
-        self.decisions_this_pass = 0
-        self.promotions_this_pass = 0
-        self.timeouts_this_pass = 0
         self.pass_started_at = now
         self.hold_until = None
         self.last_claimed = []
@@ -223,9 +205,6 @@ class CoverageCursor:
             "visited": sorted(self.visited),
             "pending_inserts": list(self.pending_inserts),
             "completed_this_pass": self.completed_this_pass,
-            "decisions_this_pass": self.decisions_this_pass,
-            "promotions_this_pass": self.promotions_this_pass,
-            "timeouts_this_pass": self.timeouts_this_pass,
             "catalogue_count": self.catalogue_count,
             "pass_started_at": self.pass_started_at.isoformat() if self.pass_started_at else None,
             "last_full_pass_seconds": self.last_full_pass_seconds,
@@ -246,9 +225,6 @@ class CoverageCursor:
         if isinstance(pending, list):
             cursor.pending_inserts = [str(item) for item in pending]
         cursor.completed_this_pass = int(payload.get("completed_this_pass") or len(cursor.visited))
-        cursor.decisions_this_pass = int(payload.get("decisions_this_pass") or 0)
-        cursor.promotions_this_pass = int(payload.get("promotions_this_pass") or 0)
-        cursor.timeouts_this_pass = int(payload.get("timeouts_this_pass") or 0)
         cursor.catalogue_count = int(payload.get("catalogue_count") or 0)
         started = payload.get("pass_started_at")
         if isinstance(started, str) and started:
@@ -287,7 +263,12 @@ def _seconds(value: float):
 
 
 class SqliteCoverageCursorStore:
-    """Minimal resume keys. Not a pricing work queue. Writes stay off provider calls."""
+    """Optional process-restart resume for a coverage cursor.
+
+    Production does not construct this store. It persists pass position only
+    (cursor, visited, pending inserts). It does not store retry times, in-flight
+    flags, or a durable pricing queue.
+    """
 
     def __init__(self, path: str) -> None:
         self.path = path

@@ -171,28 +171,39 @@ async def test_background_slice_schedules_next_scan_not_reprice_age() -> None:
     assert due.lane == "background"
 
 
-def test_hot_scan_reschedules_from_scan_interval_without_calling_providers(tmp_path: Path) -> None:
+def test_hot_target_refresh_reschedules_without_calling_providers(tmp_path: Path) -> None:
     clock = FakeClock(NOW)
     store = SqliteOperatorScannerSettingsStore(tmp_path / "hot-scan.sqlite")
     coordinator = LiveRefreshCoordinator(clock=clock, operator_settings_store=store)
     coordinator.configure_from_settings()
     coordinator._clock = clock
     coordinator._next_hot_due = NOW
-    saved = coordinator.apply_operator_scan_settings(
+    coordinator._next_background_due = NOW + timedelta(seconds=3)
+    legacy = coordinator.apply_operator_scan_settings(
         min_net_edge=Decimal("0.01"),
         max_execution_risk=60,
         hot_scan_interval_seconds=15,
         hot_reprice_after_seconds=30,
-        background_scan_interval_seconds=10,
-        background_reprice_after_seconds=600,
+        background_scan_interval_seconds=20,
+        background_reprice_after_seconds=90,
         universe_discovery_refresh_seconds=3600,
     )
-    assert saved.hot_scan_interval_seconds == 15
-    assert saved.hot_reprice_after_seconds == 30
-    assert coordinator._next_hot_due == NOW + timedelta(seconds=15)
+    assert legacy.hot_scan_interval_seconds == 15
+    assert coordinator._next_hot_due == NOW
+    assert coordinator._next_background_due == NOW + timedelta(seconds=3)
+    saved = coordinator.apply_operator_scan_settings(
+        min_net_edge=Decimal("0.01"),
+        max_execution_risk=60,
+        hot_target_refresh_seconds=20,
+        universe_discovery_refresh_seconds=3600,
+    )
+    assert saved.hot_target_refresh_seconds == 20
+    assert coordinator._next_hot_due == NOW + timedelta(seconds=20)
     assert coordinator.plan_hot_tick(now=NOW).reason == "waiting"
-    assert coordinator.status.hot.reprice_after_seconds == 30
-    assert coordinator.status.interval_seconds == 15
+    assert coordinator.status.hot.cadence_seconds == 20
+    assert coordinator.status.hot.target_refresh_seconds == 20
+    assert coordinator.status.interval_seconds == 20
+    assert "next scan" not in (coordinator.status.hot.operator_summary or "")
     store.close()
 
 

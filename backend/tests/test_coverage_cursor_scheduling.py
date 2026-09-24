@@ -98,9 +98,8 @@ def test_hot_membership_changes_do_not_rewind() -> None:
     assert "b" not in left
 
 
-def test_resume_key_is_not_a_work_queue() -> None:
-    store_path = "/tmp/coverage-cursor-3713.sqlite"
-    store = SqliteCoverageCursorStore(store_path)
+def test_resume_key_is_not_a_work_queue(tmp_path) -> None:
+    store = SqliteCoverageCursorStore(str(tmp_path / "coverage-cursor.sqlite"))
     cursor = CoverageCursor(lane="background")
     cursor.claim(_ids(10), blocked=set(), limit=4, now=T0)
     store.save(cursor)

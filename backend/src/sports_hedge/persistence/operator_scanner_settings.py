@@ -6,8 +6,7 @@ One singleton SQLite row is the operator override for:
 - Outright Min Net Arb / ``outright_min_net_edge`` (COMPETITION_SEASON only;
   None is unconfigured and fails closed; never falls back to fixture)
 - Max Risk / ``maximum_execution_risk`` (scan/watchlist threshold only)
-- HOT scan interval and HOT reprice-after age
-- BACKGROUND scan interval and BACKGROUND reprice-after age
+- HOT target refresh (desired time between completed HOT passes)
 - UNIVERSE discovery refresh (fresh generation restart interval)
 - Max allocated per trade (GBP) — allocator per-opportunity cap authority
 - operator Stop / Resume pause flag
@@ -19,12 +18,13 @@ UNIVERSE schedule pause/resume are persistence/control seams only: they must
 not scan, discover, or call providers. UNIVERSE discovery refresh here is the
 post-completion fresh-generation interval only — not radar TTL, intra-generation
 worker cooldown, or budget. Pausing scheduled UNIVERSE scans does not
-substitute a giant discovery refresh; BACKGROUND, HOT and ACTIVE TRADE stay on
-their own timers. HOT/BACKGROUND scan interval is how often the worker checks
-for due rows. Reprice-after is how old a successfully priced row must be before
-it is due again. Legacy ``*_cadence_seconds`` columns migrate to reprice-after
-or discovery refresh when the new column is absent. Scan intervals default to
-10s and are not copied from the old cadence.
+substitute a giant discovery refresh. BACKGROUND coverage is continuous.
+HOT waits only for ``hot_target_refresh_seconds`` between completed passes.
+ACTIVE TRADE stays on its own exact-ID cadence. Legacy scan-interval and
+reprice-after columns remain for compatibility and do not schedule work.
+Legacy ``*_cadence_seconds`` columns migrate to reprice-after or discovery
+refresh when the new column is absent. A missing HOT target migrates from
+the saved HOT reprice-after value.
 
 Backend-restart semantics (safety-first): a persisted operator Stop remains
 stopped across process restart until an explicit Resume. A persisted UNIVERSE
