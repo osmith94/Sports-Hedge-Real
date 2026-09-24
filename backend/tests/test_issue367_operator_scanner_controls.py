@@ -164,13 +164,14 @@ def test_update_shifts_hot_due_without_running_a_cycle(tmp_path: Path) -> None:
     coordinator.apply_operator_scan_settings(
         min_net_edge=Decimal("0.005"),
         max_execution_risk=60,
-        hot_cadence_seconds=15,
+        hot_target_refresh_seconds=15,
         background_cadence_seconds=90,
     )
-    assert coordinator._next_hot_due == NOW + timedelta(seconds=10)
-    assert coordinator.status.hot.reprice_after_seconds == 15
+    assert coordinator._next_hot_due == NOW + timedelta(seconds=15)
+    assert coordinator.status.hot.target_refresh_seconds == 15
+    assert coordinator.status.hot.cadence_seconds == 15
     assert coordinator.plan_hot_tick(now=NOW).reason == "waiting"
-    due = coordinator.plan_hot_tick(now=NOW + timedelta(seconds=10))
+    due = coordinator.plan_hot_tick(now=NOW + timedelta(seconds=15))
     assert due.reason in {"hot_due", "hot_scope_empty"}
     bind_runtime_operator_scanner_settings_store(None)
     store.close()
