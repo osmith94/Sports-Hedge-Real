@@ -634,6 +634,36 @@ def test_download_endpoint_uses_retained_evidence_only(monkeypatch: pytest.Monke
         coordinator._universe_matching_evidence = previous
 
 
+def test_repeated_attach_take_does_not_grow_fallback_state() -> None:
+    from types import SimpleNamespace
+
+    from sports_hedge.application.universe_matching_report import (
+        _ATTACHED,
+        attach_universe_matching_evidence,
+        take_universe_matching_evidence,
+    )
+
+    class _SlotsOnly:
+        __slots__ = ()
+
+    before = len(_ATTACHED)
+    retained = []
+    for index in range(6):
+        report = SimpleNamespace()
+        evidence = {"index": index, "identity_evidence": "retained"}
+        attach_universe_matching_evidence(report, evidence)
+        assert take_universe_matching_evidence(report) == evidence
+        retained.append(report)
+        frozen = _SlotsOnly()
+        fallback = {"index": index, "path": "fallback"}
+        attach_universe_matching_evidence(frozen, fallback)
+        assert take_universe_matching_evidence(frozen) == fallback
+        retained.append(frozen)
+    assert len(_ATTACHED) == before
+    for report in retained:
+        assert id(report) not in _ATTACHED
+
+
 def test_repeated_builds_are_deterministic() -> None:
     evidence = {
         "identity_evidence": "retained",

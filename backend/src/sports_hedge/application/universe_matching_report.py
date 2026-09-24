@@ -279,6 +279,12 @@ _ATTACHED: dict[int, dict[str, Any]] = {}
 
 
 def attach_universe_matching_evidence(report: object, evidence: dict[str, Any]) -> None:
+    """Store evidence on the report, with an id-keyed fallback when setattr fails.
+
+    ``take_universe_matching_evidence`` always drops the fallback entry so a
+    successful direct attachment cannot leave ``_ATTACHED`` growing forever.
+    """
+
     _ATTACHED[id(report)] = evidence
     try:
         object.__setattr__(report, "_universe_matching_evidence", evidence)
@@ -287,10 +293,13 @@ def attach_universe_matching_evidence(report: object, evidence: dict[str, Any]) 
 
 
 def take_universe_matching_evidence(report: object) -> dict[str, Any] | None:
+    fallback = _ATTACHED.pop(id(report), None)
     payload = getattr(report, "_universe_matching_evidence", None)
     if isinstance(payload, dict):
         return payload
-    return _ATTACHED.pop(id(report), None)
+    if isinstance(fallback, dict):
+        return fallback
+    return None
 
 
 def _stage(status: str, evidence: str, **extra: Any) -> dict[str, Any]:
