@@ -1068,7 +1068,11 @@ def put_operator_scanner_settings(
     update: OperatorScannerSettingsUpdate,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
 ) -> LiveRefreshStatus:
-    """Persist scanner thresholds and HOT/BACKGROUND/UNIVERSE timing. Does not scan or call providers."""
+    """Persist scanner thresholds, the HOT target, and UNIVERSE discovery refresh.
+
+    Legacy HOT/BACKGROUND timing fields are optional. Omitting them keeps the
+    stored compatibility values. This endpoint does not scan or call providers.
+    """
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_operator_scan_settings(

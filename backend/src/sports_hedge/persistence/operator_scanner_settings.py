@@ -244,17 +244,6 @@ class OperatorScannerSettingsUpdate(BaseModel):
         )
         return payload
 
-    @model_validator(mode="after")
-    def require_hot_and_background_timing(self) -> OperatorScannerSettingsUpdate:
-        if self.hot_reprice_after_seconds is None and self.hot_cadence_seconds is None:
-            raise ValueError("hot reprice after is required")
-        if (
-            self.background_reprice_after_seconds is None
-            and self.background_cadence_seconds is None
-        ):
-            raise ValueError("background reprice after is required")
-        return self
-
 
 def _copy_legacy_when_new_absent(payload: dict[str, Any], new_key: str, old_key: str) -> None:
     """Map a persisted/API cadence name onto the new field only when the new field is absent."""

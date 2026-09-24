@@ -83,12 +83,17 @@ describe("system load display", () => {
       lines.map((line) => `${line.key}  ${line.detail}`),
       [
         "HOT  0 fixtures · healthy · 30s",
-        "BACKGROUND  29 fixtures · healthy · 60s",
+        "BACKGROUND  29 fixtures · healthy · continuous",
         "UNIVERSE  16/759 · running · 150s chunk",
         "ACTIVE TRADES  4 open · £58.95 locked",
       ],
     );
     const detail = systemLoadDetailLines(load());
+    const storedInterval = systemLoadLines(load({
+      background: { working_set: 300, cadence_seconds: 10, health: "ok" },
+    })).find((line) => line.key === "BACKGROUND");
+    assert.equal(storedInterval?.detail, "300 items · ok · continuous");
+    assert.doesNotMatch(storedInterval?.detail ?? "", /10s|60s|90s/);
     assert.match(detail.map((line) => line.detail).join(" "), /8 fixtures · 18 items/);
     assert.match(detail.map((line) => `${line.key} ${line.detail}`).join(" "), /MB/);
   });

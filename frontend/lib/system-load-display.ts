@@ -43,7 +43,7 @@ export function systemLoadLines(
       detail: joinBits([
         backgroundCount,
         presentHealth(background.health),
-        formatCadence(background.cadence_seconds),
+        "continuous",
       ]),
     },
     {

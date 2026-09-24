@@ -151,6 +151,77 @@ def test_update_http_is_backend_authoritative_and_does_not_scan(tmp_path: Path) 
         _unbind(coordinator, store)
 
 
+def test_frontend_settings_payload_keeps_legacy_timing_and_does_not_scan(
+    tmp_path: Path,
+) -> None:
+    """The operator UI posts only the active controls. Legacy timing stays stored."""
+
+    coordinator, store = _bind_store(tmp_path)
+    client = TestClient(app)
+    ticks: list[str] = []
+
+    async def boom(_plan=None) -> None:
+        ticks.append("tick")
+        raise AssertionError("Update must not trigger scanner work")
+
+    original = paper_api.server_owned_refresh_tick
+    paper_api.server_owned_refresh_tick = boom  # type: ignore[method-assign]
+    kept_background_due = NOW + timedelta(seconds=7)
+    try:
+        coordinator.apply_operator_scan_settings(
+            min_net_edge=Decimal("0.02"),
+            max_execution_risk=40,
+            hot_target_refresh_seconds=20,
+            hot_scan_interval_seconds=12,
+            hot_reprice_after_seconds=25,
+            background_scan_interval_seconds=15,
+            background_reprice_after_seconds=120,
+            universe_discovery_refresh_seconds=1800,
+            max_allocated_per_trade_gbp=Decimal("500"),
+        )
+        coordinator._next_background_due = kept_background_due
+        payload = {
+            "min_net_edge": "0.01",
+            "outright_min_net_edge": "0.03",
+            "max_execution_risk": 60,
+            "hot_target_refresh_seconds": 10,
+            "universe_discovery_refresh_seconds": 3600,
+            "max_allocated_per_trade_gbp": "250",
+        }
+        assert set(payload) == {
+            "min_net_edge",
+            "outright_min_net_edge",
+            "max_execution_risk",
+            "hot_target_refresh_seconds",
+            "universe_discovery_refresh_seconds",
+            "max_allocated_per_trade_gbp",
+        }
+        response = client.put("/paper/operator-scanner-settings", json=payload)
+        assert response.status_code == 200
+        settings = response.json()["operator_settings"]
+        assert Decimal(str(settings["min_net_edge"])) == Decimal("0.01")
+        assert Decimal(str(settings["outright_min_net_edge"])) == Decimal("0.03")
+        assert settings["max_execution_risk"] == 60
+        assert Decimal(str(settings["max_allocated_per_trade_gbp"])) == Decimal("250")
+        assert settings["hot_target_refresh_seconds"] == 10
+        assert settings["universe_discovery_refresh_seconds"] == 3600
+        assert settings["hot_scan_interval_seconds"] == 12
+        assert settings["hot_reprice_after_seconds"] == 25
+        assert settings["hot_cadence_seconds"] == 25
+        assert settings["background_scan_interval_seconds"] == 15
+        assert settings["background_reprice_after_seconds"] == 120
+        assert settings["background_cadence_seconds"] == 120
+        assert coordinator._next_background_due == kept_background_due
+        assert ticks == []
+        put_src = inspect.getsource(paper_api.put_operator_scanner_settings)
+        assert "collect_and_scan" not in put_src
+        assert "list_events" not in put_src
+        assert "list_markets" not in put_src
+    finally:
+        paper_api.server_owned_refresh_tick = original
+        _unbind(coordinator, store)
+
+
 def test_update_shifts_hot_due_without_running_a_cycle(tmp_path: Path) -> None:
     clock = {"now": NOW}
 
