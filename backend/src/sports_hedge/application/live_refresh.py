@@ -523,6 +523,7 @@ class LiveRefreshCoordinator:
         self._startup_pricing_ready = False
         self._startup_pricing_readiness = STARTUP_READINESS_COLD_UNREADY
         self._startup_replacement_required = False
+        self._startup_warm_catalogue_usable = False
         self._last_request: dict[str, Any] = {}
         self._last_report: CollectionReport | None = None
         self._fixture_state = FixtureCurrentStateStore()
@@ -668,6 +669,7 @@ class LiveRefreshCoordinator:
                         ),
                     }
                 )
+        self.prepare_startup_warm_catalogue()
 
     def startup_pricing_readiness(self) -> str:
         return self._startup_pricing_readiness
@@ -734,10 +736,60 @@ class LiveRefreshCoordinator:
             unit.state == SWEEP_RETRY_WAIT for unit in unfinished_series
         )
 
-    def _persisted_catalogue_pricing_usable(self) -> bool:
+    def _startup_provider_backoff_unlocked(self) -> bool:
+        """True when discovery failed before any canonical/series work existed.
+
+        The generation stays open. `_universe_retry_at` is left untouched.
+        """
+
+        if self._startup_replacement_required:
+            return False
+        if self._universe_generation_started_at is None:
+            return False
+        if self._universe_generation_superseded:
+            return False
+        if self._universe_needs_rehydration:
+            return False
+        if self._universe_sweep_is_complete_unlocked():
+            return False
+        if self._universe_provider_failures <= 0:
+            return False
+        retry_at = self._universe_retry_at
+        if retry_at is None or retry_at <= self.now():
+            return False
+        unfinished = [
+            unit
+            for unit in self._universe_work.values()
+            if unit.state not in SWEEP_TERMINAL_STATES
+        ]
+        unfinished_series = [
+            unit
+            for unit in self._universe_series_work.values()
+            if unit.state not in SERIES_TERMINAL_STATES
+        ]
+        return not unfinished and not unfinished_series
+
+    def prepare_startup_warm_catalogue(self) -> bool:
+        """Cache whether the persisted catalogue can price a warm start.
+
+        SQLite and reconstruction run outside `_state_lock`. The scheduler
+        only reads the cached bool.
+        """
+
+        if self._state_lock.held_by_current_thread:
+            raise RuntimeError("warm catalogue readiness must be prepared outside _state_lock")
+        usable = self._evaluate_persisted_catalogue_pricing_usable()
+        with self._state_lock:
+            if self._startup_replacement_required or self._universe_generation_superseded:
+                usable = False
+            self._startup_warm_catalogue_usable = usable
+        return usable
+
+    def _evaluate_persisted_catalogue_pricing_usable(self) -> bool:
         """Schema-compatible ACTIVE rows that reconstruct into scoped price-engine items.
 
         Local catalogue only. No provider calls and no fixture-radar TTL.
+        Caller must not hold `_state_lock`.
         """
 
         if self._startup_replacement_required or self._universe_generation_superseded:
@@ -770,13 +822,23 @@ class LiveRefreshCoordinator:
         return bool(engine.reconstruct(compatible))
 
     def _consider_warm_catalogue_release_unlocked(self) -> bool:
-        """Open pricing against a known-good catalogue when startup is retry-blocked."""
+        """Open pricing from the cached catalogue when startup is degraded.
+
+        Memory only. Catalogue SQLite and reconstruction happen in
+        `prepare_startup_warm_catalogue`.
+        """
 
         if not self._startup_pricing_gated_unlocked():
             return False
-        if not self._startup_generation_retry_blocked_unlocked():
+        if not self._startup_warm_catalogue_usable:
             return False
-        if not self._persisted_catalogue_pricing_usable():
+        if self._startup_replacement_required or self._universe_generation_superseded:
+            return False
+        degraded = (
+            self._startup_generation_retry_blocked_unlocked()
+            or self._startup_provider_backoff_unlocked()
+        )
+        if not degraded:
             return False
         return self._open_startup_pricing_unlocked(
             readiness=STARTUP_READINESS_WARM_CATALOGUE_READY
@@ -1074,6 +1136,7 @@ class LiveRefreshCoordinator:
             if self._universe_generation_started_at is not None and changed:
                 self._universe_generation_superseded = True
         self._reconstruct_price_engine_for_scope()
+        self.prepare_startup_warm_catalogue()
         if self._operator_scanner_stopped:
             self._pulse_control()
         elif run_universe_now or (changed and self._universe_scans_paused):
@@ -1133,6 +1196,7 @@ class LiveRefreshCoordinator:
             if run_after:
                 self._startup_barrier_armed = True
                 self._startup_replacement_required = True
+                self._startup_warm_catalogue_usable = False
                 self._close_startup_pricing_unlocked()
             self._reset_live_universe_generation_unlocked(now=now, run_after=run_after)
             self._mark_universe_checkpoint_dirty_unlocked()
@@ -1301,12 +1365,15 @@ class LiveRefreshCoordinator:
         return bool(self._universe_generation_superseded)
 
     def _open_paper_event_ids(self) -> frozenset[str]:
+        """OPEN/PARTIAL paper event ids from a concrete operations service.
+
+        The FastAPI factory defaults to `Depends(...)`. Calling that factory
+        with no request injects those objects into the cached service, so the
+        server path uses the already-built journal holder instead.
+        """
+
         try:
-            from sports_hedge.api.paper import get_paper_operations_service
-        except Exception:
-            return frozenset()
-        try:
-            operations = get_paper_operations_service()
+            operations = self._server_owned_paper_operations()
             trades = operations.list_active_trades()
         except Exception:
             return frozenset()
@@ -1321,6 +1388,25 @@ class LiveRefreshCoordinator:
             if event_id:
                 ids.add(event_id)
         return frozenset(ids)
+
+    def _server_owned_paper_operations(self):
+        import inspect
+
+        from fastapi.params import Depends as DependsMarker
+
+        from sports_hedge.api import paper as paper_api
+
+        factory = paper_api.get_paper_operations_service
+        try:
+            defaults = [
+                parameter.default
+                for parameter in inspect.signature(factory).parameters.values()
+            ]
+        except (TypeError, ValueError):
+            defaults = []
+        if any(isinstance(default, DependsMarker) for default in defaults):
+            return paper_api.get_paper_journal_holder()
+        return factory()
 
     def _reconstruct_price_engine_for_scope(self) -> None:
         engine = self._price_engine
@@ -1840,6 +1926,7 @@ class LiveRefreshCoordinator:
             self._startup_pricing_ready = False
             self._startup_pricing_readiness = STARTUP_READINESS_COLD_UNREADY
             self._startup_replacement_required = False
+            self._startup_warm_catalogue_usable = False
             self._universe_generation_superseded = False
             self._universe_generation_scope_version = 0
             self._session_selected_codes = None
@@ -2122,6 +2209,7 @@ class LiveRefreshCoordinator:
         self._catalogue_store = store
         if self._price_engine is not None:
             self._price_engine.catalogue_store = store
+        self.prepare_startup_warm_catalogue()
 
     def bind_price_engine(self, engine: CataloguePriceEngine) -> None:
         self._price_engine = engine

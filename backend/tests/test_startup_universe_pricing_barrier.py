@@ -359,6 +359,7 @@ def test_warm_catalogue_opens_on_success_and_on_retryable_degradation() -> None:
     degraded = _coordinator(clock)
     row = _warm_row()
     degraded._catalogue_store = _Catalogue([row])
+    assert degraded.prepare_startup_warm_catalogue() is True
     _retry_blocked(degraded)
     cursor = degraded._universe_cursor
     generation_id = degraded._universe_generation_id
@@ -381,6 +382,7 @@ def test_warm_catalogue_opens_on_success_and_on_retryable_degradation() -> None:
 def test_incompatible_persisted_catalogue_stays_gated() -> None:
     coordinator = _coordinator()
     coordinator._catalogue_store = _Catalogue([_warm_row(schema_version=99)])
+    assert coordinator.prepare_startup_warm_catalogue() is False
     _retry_blocked(coordinator)
     assert coordinator.plan_background_tick(now=NOW).reason == STARTUP_UNIVERSE_PENDING
     assert coordinator.startup_pricing_readiness() == STARTUP_READINESS_COLD_UNREADY
@@ -479,3 +481,121 @@ async def test_active_open_trade_runs_while_pricing_stays_gated() -> None:
     assert provider_calls == ["active-provider"]
     assert coordinator.status.active_trade.cadence_seconds == 5
     assert coordinator.plan_background_tick(now=NOW).reason == STARTUP_UNIVERSE_PENDING
+
+
+def _provider_timeout(coordinator: LiveRefreshCoordinator) -> None:
+    coordinator._mark_lane_error(
+        ScanLane.UNIVERSE, NOW, NOW, "matchbook discovery timeout"
+    )
+
+
+def test_warm_catalogue_opens_on_provider_backoff_before_work_units() -> None:
+    coordinator = _coordinator()
+    coordinator._catalogue_store = _Catalogue([_warm_row()])
+    assert coordinator.prepare_startup_warm_catalogue() is True
+    _provider_timeout(coordinator)
+    retry_at = coordinator._universe_retry_at
+    cursor = coordinator._universe_cursor
+    generation_id = coordinator._universe_generation_id
+    assert coordinator._universe_work == {}
+    assert coordinator._universe_series_work == {}
+    hot = coordinator.plan_hot_tick(now=NOW)
+    assert hot.reason != STARTUP_UNIVERSE_PENDING
+    assert coordinator.startup_pricing_readiness() == STARTUP_READINESS_WARM_CATALOGUE_READY
+    assert coordinator._universe_retry_at == retry_at
+    assert coordinator._universe_generation_started_at is not None
+    assert coordinator._universe_generation_id == generation_id
+    assert coordinator._universe_cursor == cursor
+    universe = coordinator.plan_universe_tick(now=NOW)
+    assert universe.lane == "idle"
+    assert universe.reason == "universe_provider_backoff"
+    assert coordinator.startup_pricing_ready() is True
+    assert coordinator.plan_background_tick(now=NOW).reason != STARTUP_UNIVERSE_PENDING
+
+
+def test_cold_catalogue_provider_backoff_stays_gated() -> None:
+    coordinator = _coordinator()
+    _provider_timeout(coordinator)
+    assert coordinator.plan_hot_tick(now=NOW).reason == STARTUP_UNIVERSE_PENDING
+    assert coordinator.startup_pricing_readiness() == STARTUP_READINESS_COLD_UNREADY
+    assert coordinator.plan_universe_tick(now=NOW).reason == "universe_provider_backoff"
+
+
+def test_incompatible_catalogue_provider_backoff_stays_gated() -> None:
+    coordinator = _coordinator()
+    coordinator._catalogue_store = _Catalogue([_warm_row(schema_version=99)])
+    assert coordinator.prepare_startup_warm_catalogue() is False
+    _provider_timeout(coordinator)
+    assert coordinator.plan_background_tick(now=NOW).reason == STARTUP_UNIVERSE_PENDING
+    assert coordinator.plan_universe_tick(now=NOW).reason == "universe_provider_backoff"
+
+
+def test_clear_and_update_provider_backoff_stays_gated() -> None:
+    coordinator = _coordinator()
+    coordinator._catalogue_store = _Catalogue([_warm_row()])
+    assert coordinator.prepare_startup_warm_catalogue() is True
+    coordinator.clear_universe_working_set(run_after=True)
+    assert coordinator._startup_warm_catalogue_usable is False
+    _provider_timeout(coordinator)
+    assert coordinator.plan_hot_tick(now=NOW).reason == STARTUP_UNIVERSE_PENDING
+    assert coordinator.startup_pricing_readiness() == STARTUP_READINESS_COLD_UNREADY
+    assert coordinator._universe_retry_at is not None
+    assert coordinator.plan_universe_tick(now=NOW).reason == "universe_provider_backoff"
+
+
+def test_scheduler_planning_does_not_read_catalogue_under_state_lock() -> None:
+    coordinator = _coordinator()
+    seen: list[tuple[str, bool]] = []
+
+    class _TrackingCatalogue:
+        def list_active(self) -> list:
+            seen.append(("list_active", coordinator._state_lock.held_by_current_thread))
+            return [_warm_row()]
+
+    coordinator._catalogue_store = _TrackingCatalogue()
+    engine = coordinator.price_engine()
+    original = engine.reconstruct
+
+    def _reconstruct(rows=None):
+        seen.append(("reconstruct", coordinator._state_lock.held_by_current_thread))
+        return original(rows)
+
+    engine.reconstruct = _reconstruct  # type: ignore[method-assign]
+    assert coordinator.prepare_startup_warm_catalogue() is True
+    assert seen
+    assert all(held is False for _name, held in seen)
+    prepared = len(seen)
+    _retry_blocked(coordinator)
+    coordinator.plan_hot_tick(now=NOW)
+    coordinator.plan_background_tick(now=NOW)
+    assert len(seen) == prepared
+    assert coordinator.startup_pricing_readiness() == STARTUP_READINESS_WARM_CATALOGUE_READY
+
+
+def test_startup_readiness_does_not_inject_fastapi_depends() -> None:
+    from fastapi.params import Depends as DependsMarker
+
+    from sports_hedge.api.paper import get_paper_journal_holder, get_paper_operations_service
+
+    calls = {"factory": 0}
+    original = get_paper_operations_service
+
+    def _spy(*args, **kwargs):
+        calls["factory"] += 1
+        return original(*args, **kwargs)
+
+    _spy.__signature__ = inspect.signature(original)  # type: ignore[attr-defined]
+    import sports_hedge.api.paper as paper_api
+
+    paper_api.get_paper_operations_service = _spy
+    try:
+        coordinator = _coordinator()
+        coordinator._catalogue_store = _Catalogue([_warm_row()])
+        coordinator.prepare_startup_warm_catalogue()
+        coordinator._open_paper_event_ids()
+        operations = get_paper_journal_holder()
+        assert calls["factory"] == 0
+        assert not isinstance(operations.watchlist, DependsMarker)
+        assert not isinstance(operations.alerts, DependsMarker)
+    finally:
+        paper_api.get_paper_operations_service = original
