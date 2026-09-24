@@ -127,6 +127,10 @@ def _sport_for_catalogue(item: TargetCompetition) -> str:
         return "american_football"
     if item.code in {TargetCompetitionCode.NBA, TargetCompetitionCode.NCAAB}:
         return "basketball"
+    if item.code is TargetCompetitionCode.MLB:
+        return "baseball"
+    if item.code in {TargetCompetitionCode.ATP, TargetCompetitionCode.WTA}:
+        return "tennis"
     return "football"
 
 
@@ -138,6 +142,10 @@ def _sport_for_register_key(key: str | None) -> str | None:
         return "american_football"
     if text.startswith("NBA_") or text.startswith("NCAAB_"):
         return "basketball"
+    if text.startswith("MLB_"):
+        return "baseball"
+    if text.startswith("TENNIS_"):
+        return "tennis"
     if text in {"MATCH_RESULT_FT", "BTTS_FT", "FTTS_FT"} or text.startswith("TOTAL_GOALS_FT:"):
         return "football"
     return None

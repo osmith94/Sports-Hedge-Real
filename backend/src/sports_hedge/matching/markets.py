@@ -74,6 +74,8 @@ class MarketMatcher:
                 ],
                 provenance=event_result.provenance,
             )
+        from sports_hedge.mlb.detect import is_mlb_canonical_event
+        from sports_hedge.mlb.teams import is_canonical_mlb_team
         from sports_hedge.nfl.detect import is_nfl_canonical_event
         from sports_hedge.nfl.teams import is_canonical_nfl_team
         from sports_hedge.tennis.detect import is_tennis_canonical_event
@@ -85,6 +87,21 @@ class MarketMatcher:
                 left.event.away_team,
                 right.event.home_team,
                 right.event.away_team,
+            ):
+                return MarketMatchResult(
+                    matched=False,
+                    confidence=event_result.confidence,
+                    reasons=["event_mismatch", "participant_identity_unproven", *event_result.reasons],
+                    provenance=event_result.provenance,
+                )
+        elif is_mlb_canonical_event(left.event) or is_mlb_canonical_event(right.event):
+            if not (
+                is_canonical_mlb_team(left.event.home_team)
+                and is_canonical_mlb_team(left.event.away_team)
+                and left.event.home_team == right.event.home_team
+                and left.event.away_team == right.event.away_team
+                and left.event.scheduled_game_key
+                and left.event.scheduled_game_key == right.event.scheduled_game_key
             ):
                 return MarketMatchResult(
                     matched=False,
@@ -226,7 +243,10 @@ class MarketMatcher:
 
         reasons = structural_mismatch_reasons(left, right)
         if not reasons:
-            reasons = [NOT_REGISTERED_REASON]
+            from sports_hedge.mlb.settlement import mlb_pair_non_executable_reason
+
+            settlement_reason = mlb_pair_non_executable_reason(left, right)
+            reasons = [settlement_reason or NOT_REGISTERED_REASON]
         return MarketMatchResult(
             matched=False,
             confidence=event_result.confidence,

@@ -2245,7 +2245,10 @@ def _synthetic_matchbook_event(identity: DerivedPriceEngineItem) -> dict[str, An
     kickoff = identity.kickoff_utc or datetime.now(UTC)
     key = str(identity.register_canonical_key or "")
     competition = str(identity.competition or "").upper()
-    if key.startswith("NFL_") or competition == "NFL":
+    if key.startswith("MLB_") or competition == "MLB":
+        sport_name = "Baseball"
+        competition_name = identity.competition or "mlb"
+    elif key.startswith("NFL_") or competition == "NFL":
         sport_name = "American Football"
         competition_name = identity.competition or "NFL"
     elif key.startswith("NBA_") or competition == "NBA":
@@ -2374,6 +2377,10 @@ def _discovered_fixture_sport(identity: DerivedPriceEngineItem) -> str:
 def _sport_for_identity(identity: DerivedPriceEngineItem) -> str:
     key = str(identity.register_canonical_key or "")
     competition = str(identity.competition or "").upper()
+    if key.startswith("MLB_") or competition == "MLB":
+        from sports_hedge.mlb.constants import MLB_SPORT
+
+        return MLB_SPORT
     if key.startswith("NFL_") or competition == "NFL":
         from sports_hedge.nfl.constants import NFL_SPORT
 
@@ -2409,6 +2416,10 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
         return MarketFamily.FIRST_TEAM_TO_SCORE
     if key.startswith("TOTAL_GOALS_FT:"):
         return MarketFamily.TOTAL_GOALS
+    if key == "MLB_GAME_WINNER_FT":
+        return MarketFamily.GAME_WINNER
+    if key.startswith("MLB_TOTAL_RUNS_FT:"):
+        return MarketFamily.TOTAL_RUNS
     if key == "NFL_GAME_WINNER_FT":
         return MarketFamily.GAME_WINNER
     if key.startswith("NFL_POINT_SPREAD_FT:"):

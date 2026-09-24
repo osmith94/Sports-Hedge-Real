@@ -74,7 +74,7 @@ def test_discovered_fixtures_expose_football_nfl_and_baseball_sports() -> None:
     assert nfl.sport == "american_football"
     assert nfl.target_competition_code == "nfl"
     assert baseball.sport == "baseball"
-    assert baseball.target_competition_code is None
+    assert baseball.target_competition_code == "mlb"
     assert len({football.sport, nfl.sport, baseball.sport}) == 3
     assert baseball.home_team == "New York Yankees"
     assert baseball.away_team == "Boston Red Sox"
@@ -89,13 +89,22 @@ def test_unrecognized_competition_labels_stay_unknown() -> None:
             "competition-name": "Mystery Boxing Card",
         }
     )
-    mlb_label_only = resolve_discovered_fixture_sport(
+    mlb_label = resolve_discovered_fixture_sport(
         competition="MLB",
+        canonical_sport="football",
+    )
+    atp_label = resolve_discovered_fixture_sport(target_competition_code="atp")
+    wta_label = resolve_discovered_fixture_sport(competition="WTA")
+    still_unknown = resolve_discovered_fixture_sport(
+        competition="Mystery Boxing Card",
         canonical_sport="football",
     )
 
     assert mystery.sport == "unknown"
-    assert mlb_label_only == "unknown"
+    assert mlb_label == "baseball"
+    assert atp_label == "tennis"
+    assert wta_label == "tennis"
+    assert still_unknown == "unknown"
 
 
 def test_price_engine_projection_sport_follows_catalogue_identity() -> None:
@@ -113,14 +122,30 @@ def test_price_engine_projection_sport_follows_catalogue_identity() -> None:
         register_canonical_key="NFL_GAME_WINNER_FT",
         competition="NFL",
     )
+    baseball = DerivedPriceEngineItem(
+        catalogue_row_id="row-mlb",
+        content_version=1,
+        canonical_event_id="evt-mlb",
+        register_canonical_key="MLB_GAME_WINNER_FT",
+        competition="MLB",
+    )
+    tennis = DerivedPriceEngineItem(
+        catalogue_row_id="row-atp",
+        content_version=1,
+        canonical_event_id="evt-atp",
+        register_canonical_key="TENNIS_MATCH_WINNER",
+        competition="ATP",
+    )
     unlabeled = DerivedPriceEngineItem(
         catalogue_row_id="row-unknown",
         content_version=1,
         canonical_event_id="evt-unknown",
         register_canonical_key="UNREGISTERED",
-        competition="MLB",
+        competition="Mystery Boxing Card",
     )
 
     assert _discovered_fixture_sport(football) == "football"
     assert _discovered_fixture_sport(nfl) == "american_football"
+    assert _discovered_fixture_sport(baseball) == "baseball"
+    assert _discovered_fixture_sport(tennis) == "tennis"
     assert _discovered_fixture_sport(unlabeled) == "unknown"

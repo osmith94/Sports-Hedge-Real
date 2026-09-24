@@ -370,8 +370,8 @@ def test_provider_concurrency_and_tennis_discovery_scope() -> None:
     ]
     assert select_tennis_sport_id(sports) == 9
     catalog = {row["code"]: row for row in operator_competition_catalog()}
-    assert len(catalog) == PRINCIPAL_OPERATOR_COMPETITION_COUNT == 36
-    assert OPERATOR_COMPETITION_REGISTRY_VERSION == 8
+    assert len(catalog) == PRINCIPAL_OPERATOR_COMPETITION_COUNT == 37
+    assert OPERATOR_COMPETITION_REGISTRY_VERSION == 9
     assert catalog["atp"]["selectable"] is True
     assert catalog["atp"]["paper_executable"] is False
     assert catalog["wta"]["paper_executable"] is False

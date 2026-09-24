@@ -150,6 +150,7 @@ from sports_hedge.application.target_competitions import (
     resolve_target_competition,
     resolve_target_competition_from_kalshi_ticker,
     scope_matchbook_event,
+    selected_includes_mlb,
     selected_includes_nba,
     selected_includes_nfl,
     selected_includes_ncaab,
@@ -422,26 +423,67 @@ DEFAULT_PROVIDER_CONCURRENCY = {
 }
 
 
+def universe_catalogue_pairs(
+    selected_pairs: list[
+        tuple[VenueName, VenueName, _NormalizedMarket, _NormalizedMarket, MarketMatchResult]
+    ],
+) -> list[tuple[VenueName, VenueName, _NormalizedMarket, _NormalizedMarket, MarketMatchResult]]:
+    """Pairs persisted as catalogue identity before depth and the solver.
+
+    Scan-eligible pairs stay the admission set for football, NFL, NBA, NCAAB
+    and MLB. Tennis Match Winner is structurally registered and deliberately
+    non-executable, so those rows are kept for exact native-ID observation.
+    A registered-but-not-scan-eligible football/NFL/NBA/NCAAB/MLB pair is not
+    catalogued by this path.
+    """
+
+    from sports_hedge.matching.approved_register import registered_canonical_key
+    from sports_hedge.tennis.detect import is_tennis_canonical_event
+
+    kept: list[
+        tuple[VenueName, VenueName, _NormalizedMarket, _NormalizedMarket, MarketMatchResult]
+    ] = []
+    for item in selected_pairs:
+        left = item[2].canonical
+        right = item[3].canonical
+        if scan_eligible_pair(left, right, item[4]):
+            kept.append(item)
+            continue
+        if not (
+            is_tennis_canonical_event(left.event) or is_tennis_canonical_event(right.event)
+        ):
+            continue
+        if registered_canonical_key(left, right) is not None:
+            kept.append(item)
+    return kept
+
+
 def matchbook_scope_discovery_params(
     selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
     *,
     football_sport_id: str | None = None,
     american_football_sport_id: str | None = None,
     basketball_sport_id: str | None = None,
+    baseball_sport_id: str | None = None,
     tennis_sport_id: str | None = None,
 ) -> dict[str, str]:
     """Matchbook list_events filters for the selected operator scope.
 
-    NBA-only scopes add the captured NBA competition tag. Mixed soccer/NFL/NBA
-    or NCAAB scopes cannot apply that tag without dropping football or NCAAB
-    events. NCAAB has no Matchbook competition tag.
+    NBA-only scopes add the captured NBA competition tag. MLB-only scopes add
+    the captured Major League Baseball tag. Mixed scopes cannot apply either
+    tag without dropping the other sport. NCAAB has no Matchbook competition tag.
     """
 
+    from sports_hedge.mlb.constants import MATCHBOOK_MLB_COMPETITION_TAG_ID
     from sports_hedge.nba.constants import MATCHBOOK_NBA_COMPETITION_TAG_ID
 
-    if not selected_includes_nfl(selected_codes) and not selected_includes_nba(
-        selected_codes
-    ) and not selected_includes_ncaab(selected_codes) and not selected_includes_tennis(selected_codes):
+    if (
+        not selected_includes_nfl(selected_codes)
+        and not selected_includes_nba(selected_codes)
+        and not selected_includes_ncaab(selected_codes)
+        and not selected_includes_mlb(selected_codes)
+        and not selected_includes_tennis(selected_codes)
+    ):
         return {}
     ids: list[str] = []
     if selected_includes_soccer(selected_codes) and football_sport_id:
@@ -450,6 +492,8 @@ def matchbook_scope_discovery_params(
         ids.append(str(american_football_sport_id))
     if (selected_includes_nba(selected_codes) or selected_includes_ncaab(selected_codes)) and basketball_sport_id:
         ids.append(str(basketball_sport_id))
+    if selected_includes_mlb(selected_codes) and baseball_sport_id:
+        ids.append(str(baseball_sport_id))
     if selected_includes_tennis(selected_codes) and tennis_sport_id:
         ids.append(str(tennis_sport_id))
     params: dict[str, str] = {}
@@ -460,10 +504,21 @@ def matchbook_scope_discovery_params(
         and not selected_includes_nfl(selected_codes)
         and not selected_includes_soccer(selected_codes)
         and not selected_includes_ncaab(selected_codes)
+        and not selected_includes_mlb(selected_codes)
+        and not selected_includes_tennis(selected_codes)
+    )
+    mlb_only = (
+        selected_includes_mlb(selected_codes)
+        and not selected_includes_nfl(selected_codes)
+        and not selected_includes_soccer(selected_codes)
+        and not selected_includes_ncaab(selected_codes)
+        and not selected_includes_nba(selected_codes)
         and not selected_includes_tennis(selected_codes)
     )
     if nba_only:
         params["tag-ids"] = MATCHBOOK_NBA_COMPETITION_TAG_ID
+    elif mlb_only:
+        params["tag-ids"] = MATCHBOOK_MLB_COMPETITION_TAG_ID
     return params
 _WALL_STAGE_NAME = {
     "normalize_match": "mapping_equivalence",
@@ -1899,12 +1954,14 @@ class ReadOnlyCrossVenueCollector:
             not selected_includes_nfl(codes)
             and not selected_includes_nba(codes)
             and not selected_includes_ncaab(codes)
+            and not selected_includes_mlb(codes)
             and not selected_includes_tennis(codes)
         ):
             return {}
         football = None
         american = None
         basketball = None
+        baseball = None
         tennis = None
         if selected_includes_soccer(codes):
             resolver = getattr(client, "resolve_football_sport_id", None)
@@ -1918,6 +1975,10 @@ class ReadOnlyCrossVenueCollector:
             resolver = getattr(client, "resolve_basketball_sport_id", None)
             if callable(resolver):
                 basketball = str(await resolver())
+        if selected_includes_mlb(codes):
+            resolver = getattr(client, "resolve_baseball_sport_id", None)
+            if callable(resolver):
+                baseball = str(await resolver())
         if selected_includes_tennis(codes):
             resolver = getattr(client, "resolve_tennis_sport_id", None)
             if callable(resolver):
@@ -1927,6 +1988,7 @@ class ReadOnlyCrossVenueCollector:
             football_sport_id=football,
             american_football_sport_id=american,
             basketball_sport_id=basketball,
+            baseball_sport_id=baseball,
             tennis_sport_id=tennis,
         )
 
@@ -3421,13 +3483,7 @@ class ReadOnlyCrossVenueCollector:
                 (left_venue, right_venue, left_market, right_market, match)
                 for left_market, right_market, match in market_pairs
             )
-        from sports_hedge.matching.approved_register import registered_canonical_key
-
-        catalogue_pairs = [
-            item
-            for item in selected_pairs
-            if registered_canonical_key(item[2].canonical, item[3].canonical) is not None
-        ]
+        catalogue_pairs = universe_catalogue_pairs(selected_pairs)
         eligible_pairs = [
             item
             for item in selected_pairs

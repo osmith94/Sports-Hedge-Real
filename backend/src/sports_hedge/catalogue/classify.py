@@ -306,6 +306,13 @@ def _economic_state(
             notes,
         )
 
+    from sports_hedge.mlb.settlement import mlb_pair_non_executable_reason
+
+    mlb_reason = mlb_pair_non_executable_reason(left, right)
+    if mlb_reason is not None:
+        notes.append("mlb_stage1_settlement_not_proven")
+        return CatalogueApprovalState.UNSUPPORTED, mlb_reason, notes
+
     from sports_hedge.nba.detect import NBA_MARKET_FAMILIES
     from sports_hedge.ncaab.detect import NCAAB_MARKET_FAMILIES
     from sports_hedge.nfl.detect import NFL_MARKET_FAMILIES

@@ -1,0 +1,84 @@
+"""MLB structural catalogue keys. No venue pair is PAPER-admitted.
+
+Game Winner and Total Runs x.5 are the only candidate families. Run line,
+first-five, inning, props, series, and futures do not receive a key.
+Settlement equivalence was not proven on 2026-09-24, so registered_canonical_key
+stays empty and those families remain non-executable.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+
+from sports_hedge.domain.football import (
+    CanonicalMarket,
+    CanonicalOutcome,
+    FootballPeriod,
+    MarketFamily,
+)
+from sports_hedge.mlb.constants import CANONICAL_MLB_GAME_WINNER, CANONICAL_MLB_TOTAL_RUNS
+from sports_hedge.mlb.detect import is_mlb_canonical_event, is_mlb_market_family
+from sports_hedge.mlb.markets import is_exact_half_line
+
+GAME_WINNER_OUTCOMES = frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY})
+TOTAL_OUTCOMES = frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER})
+
+
+def _outcomes(market: CanonicalMarket) -> set[CanonicalOutcome]:
+    return {runner.outcome for runner in market.runners}
+
+
+def _line_key(line: Decimal) -> str:
+    return format(line.normalize(), "f")
+
+
+def is_mlb_register_market(market: CanonicalMarket) -> bool:
+    return is_mlb_canonical_event(market.event)
+
+
+def mlb_structural_identity(market: CanonicalMarket) -> bool:
+    if not is_mlb_canonical_event(market.event) or not is_mlb_market_family(market.family):
+        return False
+    if market.period is not FootballPeriod.FULL_TIME:
+        return False
+    if not market.event.scheduled_game_key:
+        return False
+    if CanonicalOutcome.OTHER in _outcomes(market) or CanonicalOutcome.DRAW in _outcomes(market):
+        return False
+    if market.family is MarketFamily.GAME_WINNER:
+        return market.line is None and _outcomes(market) == GAME_WINNER_OUTCOMES
+    if market.family is MarketFamily.TOTAL_RUNS:
+        return is_exact_half_line(market.line) and _outcomes(market) == TOTAL_OUTCOMES
+    return False
+
+
+def mlb_canonical_key_for_market(market: CanonicalMarket) -> str | None:
+    """Structural key only. Not permission to compare prices."""
+
+    if not mlb_structural_identity(market):
+        return None
+    if market.family is MarketFamily.GAME_WINNER:
+        return CANONICAL_MLB_GAME_WINNER
+    if market.family is MarketFamily.TOTAL_RUNS:
+        assert market.line is not None
+        return f"{CANONICAL_MLB_TOTAL_RUNS}:{_line_key(market.line)}"
+    return None
+
+
+def mlb_approved_paper_venue_pair(left: CanonicalMarket, right: CanonicalMarket) -> bool:
+    del left, right
+    return False
+
+
+def mlb_registered_canonical_key(
+    left: CanonicalMarket, right: CanonicalMarket
+) -> str | None:
+    if not is_mlb_register_market(left) or not is_mlb_register_market(right):
+        return None
+    if not mlb_approved_paper_venue_pair(left, right):
+        return None
+    left_key = mlb_canonical_key_for_market(left)
+    right_key = mlb_canonical_key_for_market(right)
+    if left_key is None or left_key != right_key:
+        return None
+    return left_key

@@ -363,7 +363,7 @@ def _canonical(home: str, away: str, competition: str, venue: VenueName, source_
 
 def test_nations_league_is_selectable_under_uefa_and_not_default() -> None:
     catalog = {row["code"]: row for row in operator_competition_catalog()}
-    assert len(catalog) == PRINCIPAL_OPERATOR_COMPETITION_COUNT == 36
+    assert len(catalog) == PRINCIPAL_OPERATOR_COMPETITION_COUNT == 37
     row = catalog[UNL]
     assert row["display_name"] == "UEFA Nations League"
     assert row["selector_label"] == "Nations League"
@@ -377,7 +377,7 @@ def test_nations_league_is_selectable_under_uefa_and_not_default() -> None:
     assert item is not None
     assert competition_has_verified_cross_venue_mapping(item)
     assert item.code not in DEFAULT_OPERATOR_COMPETITION_CODES
-    assert OPERATOR_COMPETITION_REGISTRY_VERSION == 8
+    assert OPERATOR_COMPETITION_REGISTRY_VERSION == 9
     settings = Settings()
     assert "11446" not in settings.resolved_polymarket_series_ids()
     assert "KXUEFANLGAME" not in settings.kalshi_series_tickers
