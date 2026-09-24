@@ -53,6 +53,7 @@ HOT_REASON_POST_KICKOFF_STATUS_PENDING = "POST-KICKOFF STATUS PENDING"
 HOT_REASON_ARB_PROMOTION = "ARB PROMOTION"
 HOT_REASON_SURVEILLANCE = "SURVEILLANCE"
 HOT_REASON_NET_PROXIMITY_PREFIX = "NET PROXIMITY"
+HOT_REASON_RECENTLY_QUALIFYING_EXECUTION_MISS = "RECENTLY QUALIFYING EXECUTION MISS"
 
 WORKER_IDLE = "idle"
 WORKER_RUNNING = "running"
@@ -208,6 +209,7 @@ def hot_reason_labels(
     surveillance_promotion: bool = False,
     net_proximity_promotion: bool = False,
     net_proximity_distance_pp: Decimal | None = None,
+    execution_miss_promotion: bool = False,
     hot_horizon: timedelta = DEFAULT_HOT_HORIZON,
 ) -> list[str]:
     """Return truthful current-state HOT reasons. Empty when membership is not HOT.
@@ -246,6 +248,8 @@ def hot_reason_labels(
             labels.append(net_proximity_reason_label(net_proximity_distance_pp))
         elif surveillance_promotion:
             labels.append(HOT_REASON_SURVEILLANCE)
+        elif execution_miss_promotion:
+            labels.append(HOT_REASON_RECENTLY_QUALIFYING_EXECUTION_MISS)
     return labels
 
 

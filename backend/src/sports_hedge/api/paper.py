@@ -51,6 +51,7 @@ from sports_hedge.application.price_engine import (
     HotPromotionFact,
     PriceEnginePriority,
 )
+from sports_hedge.arbitrage.watchlist.service import _opportunity_id
 from sports_hedge.application.scanner_phase6 import (
     DATA_CLASS_OWNER_LIVE_OBSERVATION,
     ScannerValidationSnapshot,
@@ -2268,6 +2269,21 @@ def bind_price_engine_item_persist(
             watchlist=watchlist,
             pricing_lane=_pricing_lane_from_runtime(runtime),
         )
+        if decision.canonical_market_id:
+            operations = get_paper_operations_service(watchlist, get_priority_alert_service())
+            miss = operations.consume_execution_miss(
+                _opportunity_id(decision.canonical_market_id)
+            )
+            if miss is not None and miss.retains_hot and miss.sticky_until is not None:
+                engine.note_recently_qualifying_execution_miss(
+                    canonical_event_id=runtime.identity.canonical_event_id,
+                    catalogue_row_id=runtime.identity.catalogue_row_id,
+                    content_version=runtime.identity.content_version,
+                    occurred_at=miss.occurred_at,
+                    sticky_until=miss.sticky_until,
+                    zero_fill_reason=miss.reason,
+                    pricing_lane=miss.pricing_lane or _pricing_lane_from_runtime(runtime),
+                )
         engine.schedule_observability(
             lambda captured=history, item=decision: record_price_engine_item_audit(
                 item, audit=audit, history=captured
@@ -2285,6 +2301,7 @@ def bind_price_engine_item_persist(
             current_net_edge=fact.current_net_edge,
             distance_to_trigger_pp=fact.distance_to_trigger_pp,
             opportunity_id=fact.opportunity_id,
+            detail=fact.detail,
         )
 
     engine.on_item_decision = _handoff

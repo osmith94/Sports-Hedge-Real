@@ -527,6 +527,8 @@ class WatchlistService:
         occurred_at,
         detail: str,
         reject_triggered: bool = False,
+        zero_fill_fact: str | None = None,
+        zero_fill_audit_detail: str | None = None,
     ) -> NearOpportunity | None:
         """Surface a failed paper-entry attempt without OPEN/PARTIAL/FILLED mutation.
 
@@ -589,6 +591,26 @@ class WatchlistService:
                 )
             )
             self._active_bound_attempts.discard(opportunity_id)
+            if zero_fill_fact:
+                self.repository.append_event(
+                    OpportunityLifecycleEvent(
+                        event_id=paper_fill_lifecycle_event_id(
+                            opportunity_id,
+                            LifecycleEventType.ZERO_FILL_EXECUTION_MISS,
+                            attempt_id,
+                        ),
+                        opportunity_id=opportunity_id,
+                        occurred_at=occurred_at,
+                        event_type=LifecycleEventType.ZERO_FILL_EXECUTION_MISS,
+                        status=status,
+                        current_net_edge=current.current_net_edge,
+                        distance_to_trigger_pp=current.distance_to_trigger_pp,
+                        detail=zero_fill_audit_detail
+                        or f"fill_result=zero; zero_fill_fact={zero_fill_fact}; reason={detail}",
+                        attempt_id=attempt_id,
+                        **lifecycle_identity_from_opportunity(current),
+                    )
+                )
             return current
 
     def close(

@@ -133,7 +133,14 @@ from sports_hedge.arbitrage.watchlist.economics import (
     qualifies_min_net_arb,
 )
 from sports_hedge.arbitrage.min_net_threshold import catalogue_market_scope
-from sports_hedge.arbitrage.watchlist.models import hot_promotion_opportunity_id
+from sports_hedge.arbitrage.watchlist.models import (
+    format_hot_promotion_detail,
+    hot_promotion_opportunity_id,
+)
+from sports_hedge.lifecycle.execution_miss import (
+    REASON_RECENTLY_QUALIFYING_EXECUTION_MISS,
+    execution_miss_hot_active,
+)
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.persistence.operator_scanner_settings import (
     effective_operator_scanner_settings,
@@ -214,6 +221,7 @@ class PriceEngineRuntimeItem:
     viability_reason: str | None = None
     near_threshold: bool = False
     qualifying: bool = False
+    execution_miss_sticky: bool = False
     last_priority_decision: dict[str, Any] | None = None
 
     @property
@@ -254,6 +262,8 @@ class HotPromotionFact:
     pricing_lane: str = PriceEnginePriority.BACKGROUND.value
     current_net_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
+    promotion_reason: str | None = None
+    detail: str | None = None
 
 
 @dataclass
@@ -380,6 +390,8 @@ class CataloguePriceEngine:
         self._promoted_hot_rows: dict[str, int] = {}
         self._promoted_hot_ids: set[str] = set()
         self._hot_promotion_episodes: dict[str, int] = {}
+        self._execution_miss_until: dict[str, datetime] = {}
+        self._execution_miss_version: dict[str, int] = {}
         self._operation_health: dict[str, dict[str, Any]] = {
             PriceEnginePriority.HOT.value: {},
             PriceEnginePriority.BACKGROUND.value: {},
@@ -480,6 +492,10 @@ class CataloguePriceEngine:
         self._promoted_hot_rows.clear()
         self._promoted_hot_ids.clear()
         self._hot_promotion_episodes.clear()
+        self._execution_miss_until.clear()
+        self._execution_miss_version.clear()
+        if self.fixture_state is not None:
+            self.fixture_state.clear_execution_miss_hot()
         self.revalidation_requests.clear()
         reset_opportunity_viability_cache()
         self.viability_cache = get_opportunity_viability_cache()
@@ -1422,6 +1438,10 @@ class CataloguePriceEngine:
         version = runtime.identity.content_version
         canonical_id = runtime.identity.canonical_event_id
         if _decision_is_interesting(decision):
+            self._clear_execution_miss(row_id)
+            runtime.execution_miss_sticky = False
+            if self.fixture_state is not None and not self._event_execution_miss_active(canonical_id):
+                self.fixture_state.clear_execution_miss_hot(canonical_id)
             already_fixture = canonical_id in self._promoted_hot_ids
             was_scheduler_hot = (
                 already_fixture
@@ -1446,15 +1466,90 @@ class CataloguePriceEngine:
         else:
             runtime.near_threshold = False
             runtime.qualifying = False
-            self._promoted_hot_rows.pop(row_id, None)
-            self._refresh_promoted_hot_ids()
+            if self._execution_miss_still_hot(row_id, version):
+                runtime.execution_miss_sticky = True
+                self._promoted_hot_rows[row_id] = version
+                self._promoted_hot_ids.add(canonical_id)
+            else:
+                runtime.execution_miss_sticky = False
+                self._clear_execution_miss(row_id)
+                self._promoted_hot_rows.pop(row_id, None)
+                self._refresh_promoted_hot_ids()
+                if self.fixture_state is not None and not self._event_execution_miss_active(canonical_id):
+                    self.fixture_state.clear_execution_miss_hot(canonical_id)
         self._reclassify_fixture(canonical_id)
+
+    def note_recently_qualifying_execution_miss(
+        self,
+        *,
+        canonical_event_id: str,
+        catalogue_row_id: str,
+        content_version: int,
+        occurred_at: datetime,
+        sticky_until: datetime,
+        zero_fill_reason: str,
+        pricing_lane: str | None = None,
+    ) -> bool:
+        """Retain HOT after a zero-fill price-movement miss. Returns whether it stuck.
+
+        Does not open a paper trade. A later qualifying decision clears this
+        window and uses the normal HOT lifecycle. Expired windows demote on
+        the next uninteresting evaluation.
+        """
+
+        if not execution_miss_hot_active(self.now(), sticky_until):
+            return False
+        self._execution_miss_until[catalogue_row_id] = sticky_until
+        self._execution_miss_version[catalogue_row_id] = content_version
+        self._promoted_hot_rows[catalogue_row_id] = content_version
+        self._promoted_hot_ids.add(canonical_event_id)
+        if self.fixture_state is not None:
+            self.fixture_state.note_execution_miss_hot(canonical_event_id, until=sticky_until)
+        runtime = self._items.get(f"{catalogue_row_id}:{content_version}")
+        if runtime is not None:
+            runtime.execution_miss_sticky = True
+            self._reclassify_fixture(canonical_event_id)
+            self._emit_operator_hot_promotion(
+                runtime,
+                None,
+                PriceEngineSliceResult(),
+                promotion_reason=REASON_RECENTLY_QUALIFYING_EXECUTION_MISS,
+                occurred_at=occurred_at,
+                zero_fill_reason=zero_fill_reason,
+                pricing_lane=pricing_lane,
+            )
+        return True
+
+    def _execution_miss_still_hot(self, row_id: str, version: int) -> bool:
+        if self._execution_miss_version.get(row_id) != version:
+            return False
+        return execution_miss_hot_active(self.now(), self._execution_miss_until.get(row_id))
+
+    def _event_execution_miss_active(self, canonical_event_id: str) -> bool:
+        for runtime in self._items.values():
+            if runtime.identity.canonical_event_id != canonical_event_id:
+                continue
+            if self._execution_miss_still_hot(
+                runtime.identity.catalogue_row_id,
+                runtime.identity.content_version,
+            ):
+                return True
+        return False
+
+    def _clear_execution_miss(self, row_id: str) -> None:
+        self._execution_miss_until.pop(row_id, None)
+        self._execution_miss_version.pop(row_id, None)
 
     def _emit_operator_hot_promotion(
         self,
         runtime: PriceEngineRuntimeItem,
         decision: PaperScanDecision | None,
         result: PriceEngineSliceResult,
+        *,
+        promotion_reason: str | None = None,
+        occurred_at: datetime | None = None,
+        zero_fill_reason: str | None = None,
+        pricing_lane: str | None = None,
     ) -> None:
         """Persist one operator-feed event for a real BACKGROUND→HOT episode."""
 
@@ -1474,19 +1569,37 @@ class CataloguePriceEngine:
             fixture_label = f"{home} v {away}"
         elif home or away:
             fixture_label = home or away
-        lane = runtime.pricing_slice_priority or runtime.priority or PriceEnginePriority.BACKGROUND
+        lane = pricing_lane or (
+            runtime.pricing_slice_priority or runtime.priority or PriceEnginePriority.BACKGROUND
+        )
+        lane_value = getattr(lane, "value", str(lane))
+        detail = None
+        if promotion_reason:
+            detail = format_hot_promotion_detail(
+                canonical_event_id=canonical_id,
+                fixture_label=fixture_label,
+                market_family=identity.family,
+                pricing_lane=lane_value,
+                current_net_edge=edge,
+                distance_to_trigger_pp=distance,
+            )
+            detail = f"{detail} · {promotion_reason}"
+            if zero_fill_reason:
+                detail = f"{detail} · zero_fill_reason={zero_fill_reason}"
         fact = HotPromotionFact(
             canonical_event_id=canonical_id,
             catalogue_row_id=identity.catalogue_row_id,
             content_version=identity.content_version,
-            occurred_at=self.now(),
+            occurred_at=occurred_at or self.now(),
             opportunity_id=hot_promotion_opportunity_id(canonical_id),
             episode=episode,
             fixture_label=fixture_label,
             market_family=identity.family,
-            pricing_lane=getattr(lane, "value", str(lane)),
+            pricing_lane=lane_value,
             current_net_edge=edge,
             distance_to_trigger_pp=distance,
+            promotion_reason=promotion_reason,
+            detail=detail,
         )
         if self.on_hot_promotion is None:
             return
