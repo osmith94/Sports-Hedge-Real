@@ -10,6 +10,8 @@ from sports_hedge.domain.models import VenueCapabilities, VenueHealth, VenueName
 from sports_hedge.venues.base import ReadOnlyVenue, market_data_http_timeout
 from sports_hedge.venues.rate_limit import ProviderCooldown, ProviderRateLimitedError
 
+_SERIES_IDS_UNSET = object()
+
 
 class PolymarketClient(ReadOnlyVenue):
     """Public-data-only Polymarket adapter.
@@ -46,11 +48,14 @@ class PolymarketClient(ReadOnlyVenue):
         )
 
     async def list_events(self, **filters: Any) -> list[dict[str, Any]]:
-        """List public Gamma events for configured target-competition series.
+        """List public Gamma events for configured or caller-selected series.
 
-        Default series IDs come from public ``GET /sports`` for the current
-        target competitions. Pagination is per-series, bounded, and read-only.
-        Empty series results stay empty rather than inventing markets.
+        ``series_id`` selects exactly one Gamma series. Plural ``series_ids``
+        is a client-side discovery control: it is removed before any provider
+        request and, when supplied without ``series_id``, selects those series
+        in order. Settings defaults apply only when neither control is supplied.
+        Pagination stays per-series, bounded, and read-only. Empty series
+        results stay empty rather than inventing markets.
         """
 
         page_limit = self.settings.polymarket_gamma_page_limit
@@ -60,6 +65,8 @@ class PolymarketClient(ReadOnlyVenue):
             "limit": page_limit,
             **filters,
         }
+        # Never a Gamma query parameter, including on the singular series_id path.
+        requested_series_ids = params.pop("series_ids", _SERIES_IDS_UNSET)
         caller_series = params.get("series_id")
         if caller_series is not None and str(caller_series).strip() == "":
             params.pop("series_id", None)
@@ -68,7 +75,14 @@ class PolymarketClient(ReadOnlyVenue):
         if caller_series is not None:
             return await self._list_series_events(str(caller_series), params)
 
-        series_ids = self.settings.resolved_polymarket_series_ids()
+        if requested_series_ids is _SERIES_IDS_UNSET:
+            series_ids = self.settings.resolved_polymarket_series_ids()
+        else:
+            series_ids = _ordered_series_ids(requested_series_ids)
+            if not series_ids:
+                self.last_series_report = []
+                return []
+
         if not series_ids:
             return await self._get_event_page(params)
 
@@ -237,6 +251,26 @@ class PolymarketClient(ReadOnlyVenue):
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+
+def _ordered_series_ids(value: Any) -> list[str]:
+    """Deduplicate a client-side series selection, preserving first-seen order."""
+
+    if isinstance(value, str):
+        raw_items: list[Any] = [value]
+    elif isinstance(value, (list, tuple)):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    selected: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        selected.append(text)
+    return selected
 
 
 def _series_failure_kind(exc: BaseException) -> tuple[str, bool]:
