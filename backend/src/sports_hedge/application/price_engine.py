@@ -1637,6 +1637,7 @@ class CataloguePriceEngine:
             VenueName.MATCHBOOK,
             str(identity.matchbook_market_id),
         )
+        self.viability_cache.clear_provider_issue(VenueName.MATCHBOOK)
         return RetrievedVenuePayload(payload=market, retrieved_at=self.now())
 
     async def _refresh_kalshi_constituents(
@@ -1709,6 +1710,7 @@ class CataloguePriceEngine:
             self.viability_cache.clear_market(
                 identity.canonical_event_id, VenueName.KALSHI, ticker
             )
+            self.viability_cache.clear_provider_issue(VenueName.KALSHI)
             outcome = _ticker_outcome(identity, ticker)
             implied = implied_from_kalshi_book(payload)
             if outcome and implied is not None:
@@ -1758,6 +1760,7 @@ class CataloguePriceEngine:
                 runtime.last_error_detail = PRICE_ENGINE_ITEM_TIMEOUT_REASON
                 return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
             books[token] = RetrievedVenuePayload(payload=payload, retrieved_at=self.now())
+            self.viability_cache.clear_provider_issue(VenueName.POLYMARKET)
         return books
 
     async def _evaluate_complete_item(

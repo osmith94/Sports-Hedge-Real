@@ -262,6 +262,13 @@ export type DiscoveredFixture = {
         source_event_id?: string | null;
       }
     >;
+    source_event_viability?: Array<{
+      venue?: string;
+      source_event_id?: string;
+      state?: string;
+      evidence_scope?: string;
+      evidence_reason?: string;
+    }>;
     market_gone?: Array<{
       venue?: string;
       native_market_id?: string;

@@ -298,4 +298,34 @@ describe("single-venue UNIVERSE evaluation honesty", () => {
     assert.match(summary || "", /market gone matchbook 9004 market_gone/);
     assert.doesNotMatch(summary || "", /unavailable/);
   });
+
+  it("shows a closed Kalshi family without marking the fixture terminal", () => {
+    const summary = viabilityEvidenceSummary({
+      event_viability: {
+        matchbook: { state: "viable", evidence_scope: "event", evidence_reason: "event_current" },
+        kalshi: { state: "unknown", evidence_scope: "event", evidence_reason: null },
+      },
+      source_event_viability: [
+        {
+          venue: "kalshi",
+          source_event_id: "KXGAME-NOR",
+          state: "terminal",
+          evidence_scope: "source_event",
+          evidence_reason: "source_event_terminal",
+        },
+        {
+          venue: "kalshi",
+          source_event_id: "KXBTTS-NOR",
+          state: "viable",
+          evidence_scope: "source_event",
+          evidence_reason: "source_event_current",
+        },
+      ],
+    });
+    assert.match(summary || "", /kalshi unknown/);
+    assert.match(summary || "", /source kalshi KXGAME-NOR terminal/);
+    assert.match(summary || "", /kalshi KXBTTS-NOR viable/);
+    assert.doesNotMatch(summary || "", /event kalshi terminal/);
+    assert.doesNotMatch(summary || "", /get_market_timeout/);
+  });
 });

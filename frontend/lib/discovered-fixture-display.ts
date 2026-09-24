@@ -173,6 +173,12 @@ export function viabilityEvidenceSummary(
       return `${venue} ${state}${reason}`;
     })
     .join(" · ");
+  const sources = (evidence.source_event_viability ?? [])
+    .map(
+      (row) =>
+        `${row.venue ?? "venue"} ${row.source_event_id ?? "source"} ${row.state ?? "unknown"}`,
+    )
+    .join(", ");
   const gone = (evidence.market_gone ?? [])
     .map((row) => `${row.venue} ${row.native_market_id} ${row.evidence_reason ?? row.state}`)
     .join(", ");
@@ -181,6 +187,7 @@ export function viabilityEvidenceSummary(
     .join(", ");
   const parts = [
     eventText ? `event ${eventText}` : null,
+    sources ? `source ${sources}` : null,
     gone ? `market gone ${gone}` : null,
     provider ? `provider ${provider}` : null,
     evidence.final_reason ? `final ${evidence.final_reason}` : null,

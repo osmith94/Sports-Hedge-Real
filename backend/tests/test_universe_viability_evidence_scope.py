@@ -35,6 +35,8 @@ from sports_hedge.application.opportunity_viability import (
     assess_identity_viability,
     get_opportunity_viability_cache,
     reset_opportunity_viability_cache,
+    venue_blocked_for_identity,
+    venue_event_is_currently_viable,
 )
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.price_engine import PriceEnginePriority
@@ -229,6 +231,7 @@ async def test_provider_timeout_does_not_mark_the_fixture_unavailable() -> None:
     assert row.matchbook_market_id in {market_id for _event, market_id in matchbook.get_market_calls}
     assert recovered.skip_reasons.get(row.catalogue_row_id) != CROSS_VENUE_UNAVAILABLE
     assert cache.is_blocked(CANONICAL, VenueName.MATCHBOOK) is False
+    assert cache.provider_issue(VenueName.MATCHBOOK) is None
 
 
 def test_fresh_non_terminal_event_heals_stale_event_unavailability() -> None:
@@ -343,3 +346,179 @@ async def test_universe_still_catalogues_siblings_when_one_market_is_gone() -> N
     assert matchbook_event["evidence_scope"] == "event"
     assert evidence["final_reason"] != "cross_venue_unavailable"
     store.close()
+
+
+def _status_event(venue: VenueName, source_event_id: str, status: str) -> VenueEvent:
+    kickoff = NOW + timedelta(days=3)
+    event = _event(
+        venue,
+        source_event_id,
+        home="Norway",
+        away="Denmark",
+        kickoff=kickoff,
+    )
+    event.raw["status"] = status
+    return event
+
+
+def _football_family_cluster(*events: VenueEvent):
+    matchbook = [item for item in events if item.venue is VenueName.MATCHBOOK]
+    polymarket = [item for item in events if item.venue is VenueName.POLYMARKET]
+    kalshi = [item for item in events if item.venue is VenueName.KALSHI]
+    clusters, _counts = cluster_venue_events(
+        matchbook=matchbook,
+        polymarket=polymarket,
+        kalshi=kalshi,
+        matcher=EventMatcher(),
+        max_event_pairs=16,
+    )
+    assert len(clusters) == 1
+    return clusters[0]
+
+
+def _family_row(suffix: str, *, kalshi_event: str, key: str = CANONICAL_BTTS_FT):
+    return _row(
+        suffix=suffix,
+        key=key,
+        kickoff=NOW + timedelta(days=3),
+        kalshi_event=kalshi_event,
+    ).model_copy(update={"canonical_event_id": "evt-kalshi-families"})
+
+
+def test_closed_kalshi_game_does_not_poison_open_sibling_families() -> None:
+    """GAME closed, BTTS open, TOTAL open. Fixture + Kalshi stays viable."""
+
+    reset_opportunity_viability_cache()
+    cache = get_opportunity_viability_cache()
+    game = _status_event(VenueName.KALSHI, "KXGAME-NOR", "closed")
+    btts = _status_event(VenueName.KALSHI, "KXBTTS-NOR", "open")
+    total = _status_event(VenueName.KALSHI, "KXTOTAL-NOR", "open")
+    matchbook = _status_event(VenueName.MATCHBOOK, "mb-nor", "open")
+    # Observe the closed family first so a later open sibling cannot hide a write.
+    assert (
+        venue_event_is_currently_viable(
+            game, canonical_event_id="evt-kalshi-families", cache=cache
+        )
+        is False
+    )
+    assert cache.is_blocked("evt-kalshi-families", VenueName.KALSHI) is False
+    assert cache.event_evidence("evt-kalshi-families", VenueName.KALSHI) is None
+    assert cache.source_event_is_blocked("evt-kalshi-families", VenueName.KALSHI, "KXGAME-NOR")
+    game_evidence = cache.source_event_evidence(
+        "evt-kalshi-families", VenueName.KALSHI, "KXGAME-NOR"
+    )
+    assert game_evidence is not None
+    assert game_evidence.scope == "source_event"
+    assert game_evidence.reason == "source_event_terminal"
+    cluster = _football_family_cluster(matchbook, game, btts, total)
+    assessment = assess_cluster_viability(
+        cluster, canonical_event_id="evt-kalshi-families", cache=cache
+    )
+    assert VenueName.KALSHI in assessment.viable_venues
+    assert VenueName.MATCHBOOK in assessment.viable_venues
+    assert assessment.skip_expensive_work is False
+    assert cache.is_blocked("evt-kalshi-families", VenueName.KALSHI) is False
+    assert cache.source_event_is_blocked("evt-kalshi-families", VenueName.KALSHI, "KXBTTS-NOR") is False
+    assert cache.source_event_is_blocked("evt-kalshi-families", VenueName.KALSHI, "KXTOTAL-NOR") is False
+    game_row = _family_row("game", kalshi_event="KXGAME-NOR", key=CANONICAL_MATCH_RESULT_FT)
+    btts_row = _family_row("btts", kalshi_event="KXBTTS-NOR")
+    total_row = _family_row("total", kalshi_event="KXTOTAL-NOR", key="TOTAL_GOALS_FT:2.5")
+    unseen_row = _family_row("ftts", kalshi_event="KXFTS-NOR")
+    assert venue_blocked_for_identity(cache, "evt-kalshi-families", VenueName.KALSHI, game_row)
+    assert venue_blocked_for_identity(cache, "evt-kalshi-families", VenueName.KALSHI, btts_row) is False
+    assert venue_blocked_for_identity(cache, "evt-kalshi-families", VenueName.KALSHI, total_row) is False
+    assert venue_blocked_for_identity(cache, "evt-kalshi-families", VenueName.KALSHI, unseen_row) is False
+    assert assess_identity_viability(btts_row, cache=cache).skip_expensive_work is False
+    assert assess_identity_viability(total_row, cache=cache).skip_expensive_work is False
+    assert assess_identity_viability(unseen_row, cache=cache).skip_expensive_work is False
+    game_assessment = assess_identity_viability(game_row, cache=cache)
+    assert game_assessment.skip_expensive_work is True
+    assert game_assessment.reason == CROSS_VENUE_UNAVAILABLE
+
+
+def test_all_observed_kalshi_families_terminal_stays_source_scoped() -> None:
+    """The cluster may drop Kalshi without persisting fixture-wide terminal."""
+
+    reset_opportunity_viability_cache()
+    cache = get_opportunity_viability_cache()
+    game = _status_event(VenueName.KALSHI, "KXGAME-NOR", "closed")
+    btts = _status_event(VenueName.KALSHI, "KXBTTS-NOR", "settled")
+    total = _status_event(VenueName.KALSHI, "KXTOTAL-NOR", "closed")
+    matchbook = _status_event(VenueName.MATCHBOOK, "mb-nor", "open")
+    cluster = _football_family_cluster(matchbook, game, btts, total)
+    assessment = assess_cluster_viability(
+        cluster, canonical_event_id="evt-kalshi-families", cache=cache
+    )
+    assert VenueName.KALSHI not in assessment.viable_venues
+    assert assessment.reason == CROSS_VENUE_UNAVAILABLE
+    assert assessment.skip_expensive_work is True
+    assert cache.is_blocked("evt-kalshi-families", VenueName.KALSHI) is False
+    assert cache.event_evidence("evt-kalshi-families", VenueName.KALSHI) is None
+    for source_id in ("KXGAME-NOR", "KXBTTS-NOR", "KXTOTAL-NOR"):
+        evidence = cache.source_event_evidence(
+            "evt-kalshi-families", VenueName.KALSHI, source_id
+        )
+        assert evidence is not None
+        assert evidence.state.value == "terminal"
+        assert evidence.scope == "source_event"
+    btts_row = _family_row("btts-all", kalshi_event="KXBTTS-NOR")
+    unseen_row = _family_row("ftts-all", kalshi_event="KXFTS-NOR")
+    assert venue_blocked_for_identity(cache, "evt-kalshi-families", VenueName.KALSHI, btts_row)
+    assert venue_blocked_for_identity(
+        cache, "evt-kalshi-families", VenueName.KALSHI, unseen_row
+    ) is False
+    assert assess_identity_viability(unseen_row, cache=cache).skip_expensive_work is False
+
+
+def test_polymarket_sports_event_terminal_is_source_scoped() -> None:
+    """Polymarket is not fixture-level authority.
+
+    Football clusters attach multiple Gamma events to one canonical fixture.
+    NFL/NBA/NCAAB censuses also put many markets on one Gamma event, but that
+    is still one source event and is not proof it is the only Polymarket
+    listing. A closed moneyline must not write fixture + Polymarket terminal.
+    """
+
+    reset_opportunity_viability_cache()
+    cache = get_opportunity_viability_cache()
+    moneyline = _status_event(VenueName.POLYMARKET, "pm-moneyline", "closed")
+    btts = _status_event(VenueName.POLYMARKET, "pm-btts", "open")
+    matchbook = _status_event(VenueName.MATCHBOOK, "mb-nor", "open")
+    assert (
+        venue_event_is_currently_viable(
+            moneyline, canonical_event_id="evt-pm-families", cache=cache
+        )
+        is False
+    )
+    assert cache.is_blocked("evt-pm-families", VenueName.POLYMARKET) is False
+    assert cache.event_evidence("evt-pm-families", VenueName.POLYMARKET) is None
+    cluster = _football_family_cluster(matchbook, moneyline, btts)
+    assessment = assess_cluster_viability(
+        cluster, canonical_event_id="evt-pm-families", cache=cache
+    )
+    assert VenueName.POLYMARKET in assessment.viable_venues
+    assert cache.source_event_is_blocked("evt-pm-families", VenueName.POLYMARKET, "pm-moneyline")
+    assert cache.source_event_is_blocked("evt-pm-families", VenueName.POLYMARKET, "pm-btts") is False
+    closed_row = _row(
+        suffix="pm-closed",
+        kickoff=NOW + timedelta(days=3),
+    ).model_copy(
+        update={
+            "canonical_event_id": "evt-pm-families",
+            "polymarket_event_id": "pm-moneyline",
+            "polymarket_market_id": "pm-market-ml",
+        }
+    )
+    open_row = closed_row.model_copy(
+        update={
+            "catalogue_row_id": "amc-pm-open",
+            "polymarket_event_id": "pm-btts",
+            "polymarket_market_id": "pm-market-btts",
+        }
+    )
+    assert venue_blocked_for_identity(
+        cache, "evt-pm-families", VenueName.POLYMARKET, closed_row
+    )
+    assert venue_blocked_for_identity(
+        cache, "evt-pm-families", VenueName.POLYMARKET, open_row
+    ) is False
