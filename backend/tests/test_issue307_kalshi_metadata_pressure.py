@@ -806,15 +806,17 @@ async def test_matchbook_list_markets_peak_live_stays_within_concurrency() -> No
                     default=None,
                 )
             )
-            for index in range(4)
+            for index in range(2)
         ]
         await asyncio.sleep(0.08)
-        assert live["n"] == 4
-        assert access.snapshot().inflight["matchbook"] == 4
+        assert live["n"] == 2
+        assert access.snapshot().inflight["matchbook"] == 2
+        assert access.lower_in_use[VenueName.MATCHBOOK] == 2
+        assert access.limits[VenueName.MATCHBOOK] == 4
         results = await asyncio.gather(*first_wave)
         assert all(timed_out for _payload, timed_out in results)
-        assert live["n"] == 4
-        assert access.snapshot().inflight["matchbook"] == 4
+        assert live["n"] == 2
+        assert access.snapshot().inflight["matchbook"] == 2
 
         retry_started = asyncio.Event()
 
@@ -830,7 +832,7 @@ async def test_matchbook_list_markets_peak_live_stays_within_concurrency() -> No
                             source_id=str(100 + index),
                             default=None,
                         )
-                        for index in range(4)
+                        for index in range(2)
                     ]
                 )
             )
@@ -838,13 +840,14 @@ async def test_matchbook_list_markets_peak_live_stays_within_concurrency() -> No
         retry_task = asyncio.create_task(retry_wave())
         await retry_started.wait()
         await asyncio.sleep(0.12)
-        assert live["n"] == 4
-        assert live["peak"] == 4
-        assert access.snapshot().inflight["matchbook"] == 4
+        assert live["n"] == 2
+        assert live["peak"] == 2
+        assert access.snapshot().inflight["matchbook"] == 2
+        assert access.peak_lower_in_use[VenueName.MATCHBOOK] <= 2
         assert not retry_task.done()
         release.set()
         await asyncio.wait_for(retry_task, timeout=1.0)
-        assert live["peak"] == 4
+        assert live["peak"] == 2
         assert live["n"] == 0
         assert access.snapshot().inflight["matchbook"] == 0
         assert collector._provider_peak_inflight[VenueName.MATCHBOOK] <= 4

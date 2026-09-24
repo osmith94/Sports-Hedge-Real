@@ -109,6 +109,23 @@ def test_resume_key_is_not_a_work_queue(tmp_path) -> None:
     assert "next_retry_at" not in restored.to_resume()
 
 
+def test_unstarted_claims_stay_in_the_current_pass() -> None:
+    cursor = CoverageCursor(lane="hot")
+    rows = _ids(8)
+    claimed = cursor.claim(rows, blocked=set(), limit=8, now=T0)
+    assert claimed == rows
+    assert cursor.hold_until is not None
+    assert cursor.visited == set(rows)
+    cursor.release_unstarted(rows[2:])
+    assert cursor.visited == {"row-001", "row-002"}
+    assert cursor.hold_until is None
+    assert cursor.pass_number == 1
+    nxt = cursor.claim(rows, blocked=set(), limit=8, now=T0)
+    assert nxt[0] != "row-001"
+    assert set(nxt) == set(rows[2:])
+    assert cursor.hold_until is not None
+
+
 def test_new_rows_do_not_reset_the_cursor() -> None:
     cursor = CoverageCursor(lane="background")
     cursor.claim(["b", "c", "d"], blocked=set(), limit=2, now=T0)

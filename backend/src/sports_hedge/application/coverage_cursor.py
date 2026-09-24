@@ -8,6 +8,10 @@ because a timer fires.
 BACKGROUND has no target wait: the next pass starts as soon as the current
 one has claimed every member. HOT may wait until a target refresh boundary
 after a pass finishes early. A slow pass is never reset at that boundary.
+
+Claiming a row is not coverage. ``release_unstarted`` puts rows that never
+started provider work back into the current pass. A pass finishes only when
+every member was honestly completed or is still claimed as completed.
 """
 
 from __future__ import annotations
@@ -144,6 +148,32 @@ class CoverageCursor:
             return []
         self._finish_pass(now)
         return []
+
+    def release_unstarted(self, row_ids: list[str]) -> None:
+        """Return claims that never started work to the current pass.
+
+        ``claim`` marks rows visited so a concurrent claim cannot take them
+        twice. That mark is not coverage. Rows that end as
+        ``not_started_this_cadence`` are removed from ``visited`` and queued
+        behind the cursor via ``pending_inserts``. If the claim had closed
+        the pass, the pass reopens. The next claim continues forward, then
+        picks these rows up before a new pass starts.
+        """
+
+        if not row_ids:
+            return
+        released = False
+        for row_id in row_ids:
+            if row_id in self.visited:
+                self.visited.discard(row_id)
+                released = True
+            if row_id not in self.visited and row_id not in self.pending_inserts:
+                self.pending_inserts.append(row_id)
+        if not released:
+            return
+        self.completed_this_pass = len(self.visited)
+        if self.hold_until is not None:
+            self.hold_until = None
 
     def hold_for_target(self, *, target_seconds: float, now: datetime) -> float:
         """Arm the post-pass wait. Returns seconds until the next pass may start."""

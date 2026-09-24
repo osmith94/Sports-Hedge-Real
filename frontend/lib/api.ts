@@ -1186,6 +1186,26 @@ export type ScanCycleDiagnosticReport = {
   slowest?: Array<Record<string, unknown>>;
   samples?: Record<string, Array<{ row_id?: string; reason?: string }>>;
   worker_errors?: Array<{ type?: string; message?: string }>;
+  hot_coverage?: {
+    summary?: string;
+    roster_fixtures?: number;
+    roster_rows?: number;
+    due_rows?: number;
+    claimed_rows?: number;
+    started_rows?: number;
+    evaluated_rows?: number;
+    skipped_viability?: number;
+    deferred_rows?: number;
+    retry_wait_rows?: number;
+    not_started_this_cadence?: number;
+    fixtures_touched?: number;
+    fixtures_evaluated?: number;
+    fixtures_missed_capacity?: number;
+    cursor_pass_number?: number;
+    cursor_position?: number;
+    cursor_total?: number;
+    hot_slot_wait_ms?: number;
+  };
 };
 
 export type ScanCycleDiagnosticResponse = {

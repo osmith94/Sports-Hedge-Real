@@ -669,6 +669,7 @@ class LiveRefreshCoordinator:
                         ),
                     }
                 )
+            self._sync_provider_startup_headroom_unlocked()
         self.prepare_startup_warm_catalogue()
 
     def startup_pricing_readiness(self) -> str:
@@ -681,6 +682,7 @@ class LiveRefreshCoordinator:
             return False
         self._startup_pricing_ready = True
         self._startup_pricing_readiness = readiness
+        self._sync_provider_startup_headroom_unlocked()
         if readiness == STARTUP_READINESS_FRESH_GENERATION_READY:
             self._startup_replacement_required = False
         self.status = self.status.model_copy(
@@ -691,9 +693,24 @@ class LiveRefreshCoordinator:
         )
         return True
 
+    def _sync_provider_startup_headroom_unlocked(self) -> None:
+        """Match provider reservation to the startup barrier.
+
+        While HOT/BACKGROUND are gated, Matchbook and Kalshi reserve one slot
+        for ACTIVE and UNIVERSE may use the other three. After pricing is
+        released, BACKGROUND + UNIVERSE stay at or below 2 of 4.
+        """
+
+        from sports_hedge.application.provider_access import get_shared_provider_access
+
+        get_shared_provider_access().set_startup_active_headroom(
+            self._startup_pricing_gated_unlocked()
+        )
+
     def _close_startup_pricing_unlocked(self) -> None:
         self._startup_pricing_ready = False
         self._startup_pricing_readiness = STARTUP_READINESS_COLD_UNREADY
+        self._sync_provider_startup_headroom_unlocked()
         if not self._startup_barrier_armed:
             return
         self.status = self.status.model_copy(
@@ -2317,6 +2334,11 @@ class LiveRefreshCoordinator:
                 "not_started_this_cadence": tier.not_started_this_cadence,
                 "revalidation_needed": tier.revalidation_needed,
                 "coverage": self.price_engine().coverage_cursor(priority).snapshot(),
+                **(
+                    {"hot_coverage": dict(result.hot_coverage)}
+                    if isinstance(getattr(result, "hot_coverage", None), dict)
+                    else {}
+                ),
                 "persist_failures": list(getattr(result, "persist_failures", []) or []),
                 **(
                     result.viability_diagnostics()

@@ -357,8 +357,8 @@ async def test_hot_consumer_is_granted_ahead_of_a_queued_background_read() -> No
         def __init__(self) -> None:
             super().__init__()
             self.entered = 0
-            self.four = asyncio.Event()
-            self.release_one = asyncio.Event()
+            self.two = asyncio.Event()
+            self.release_held = asyncio.Event()
             self.release_rest = asyncio.Event()
             self.hot_entered = asyncio.Event()
             self.hot_release = asyncio.Event()
@@ -379,10 +379,10 @@ async def test_hot_consumer_is_granted_ahead_of_a_queued_background_read() -> No
                 return _mb_btts(int(market))
             self.entered += 1
             ordinal = self.entered
-            if ordinal == 4:
-                self.four.set()
-            if ordinal == 1:
-                await self.release_one.wait()
+            if ordinal == 2:
+                self.two.set()
+            if ordinal <= 2:
+                await self.release_held.wait()
             else:
                 await self.release_rest.wait()
             return _mb_btts(int(market))
@@ -417,7 +417,8 @@ async def test_hot_consumer_is_granted_ahead_of_a_queued_background_read() -> No
             await matchbook.release_rest.wait()
 
     async def _pressure() -> None:
-        await matchbook.four.wait()
+        await matchbook.two.wait()
+        assert layer.lower_in_use[VenueName.MATCHBOOK] == 2
         engine.reconstruct()
         hot_due = engine.due_items(PriceEnginePriority.HOT, now=NOW)
         assert [item.identity.catalogue_row_id for item in hot_due] == [hot_row.catalogue_row_id]
@@ -431,25 +432,11 @@ async def test_hot_consumer_is_granted_ahead_of_a_queued_background_read() -> No
             )
         )
         background_task = asyncio.create_task(_queued_background())
-        for _ in range(100):
-            waiting = layer.snapshot().waiting_by_lane
-            hot_waiting = waiting["hot"][VenueName.MATCHBOOK.value]
-            background_waiting = waiting["background"][VenueName.MATCHBOOK.value]
-            if hot_waiting >= 1 and background_waiting >= 1:
-                break
-            await asyncio.sleep(0)
-        else:
-            raise AssertionError("HOT and BACKGROUND did not both queue for Matchbook")
-        matchbook.release_one.set()
         await matchbook.hot_entered.wait()
+        assert layer.lower_in_use[VenueName.MATCHBOOK] <= 2
         assert not background_entered.is_set()
-        hot_index = next(
-            index
-            for index, (_event_id, market_id) in enumerate(matchbook.get_market_calls)
-            if market_id == matchbook.hot_market_id
-        )
-        assert hot_index == 4
         matchbook.hot_release.set()
+        matchbook.release_held.set()
         matchbook.release_rest.set()
         await hot_task
         await background_task

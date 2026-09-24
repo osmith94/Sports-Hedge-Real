@@ -1844,6 +1844,12 @@ async def server_owned_refresh_tick(plan=None) -> None:
                 paper_scan=service,
             )
             finished = coordinator.now()
+            hot_coverage = getattr(result, "hot_coverage", None)
+            coverage_summary = None
+            if isinstance(hot_coverage, dict):
+                raw_summary = hot_coverage.get("summary")
+                if isinstance(raw_summary, str) and raw_summary.strip():
+                    coverage_summary = raw_summary.strip()
             return CollectionReport(
                 started_at=started,
                 completed_at=finished,
@@ -1854,10 +1860,16 @@ async def server_owned_refresh_tick(plan=None) -> None:
                 scan_lane=ScanLane.HOT.value,
                 venue_health=dict(result.venue_health),
                 operation_health=dict(result.operation_health),
+                operator_summary=coverage_summary,
                 scan_diagnostics={
                     "price_engine": True,
                     "priority": PriceEnginePriority.HOT.value,
                     **price_engine_slice_count_fields(result),
+                    **(
+                        {"hot_coverage": dict(hot_coverage)}
+                        if isinstance(hot_coverage, dict)
+                        else {}
+                    ),
                     **(
                         {"cycle_diagnostic": dict(result.diagnostic)}
                         if isinstance(getattr(result, "diagnostic", None), dict)

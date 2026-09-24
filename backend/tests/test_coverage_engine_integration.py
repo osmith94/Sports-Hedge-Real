@@ -204,21 +204,27 @@ async def test_large_catalogue_fairness_is_synthetic(tmp_path) -> None:
         async with priority_layer.acquire(VenueName.MATCHBOOK, lane=lane):
             grants.append(lane)
 
-    held = [priority_layer.acquire(VenueName.MATCHBOOK, lane="background") for _ in range(4)]
-    for slot in held:
+    held_background = [
+        priority_layer.acquire(VenueName.MATCHBOOK, lane="background") for _ in range(2)
+    ]
+    held_hot = [priority_layer.acquire(VenueName.MATCHBOOK, lane="hot") for _ in range(2)]
+    for slot in [*held_background, *held_hot]:
         await slot.__aenter__()
     assert priority_layer.snapshot().inflight[VenueName.MATCHBOOK.value] == 4
+    assert priority_layer.lower_in_use[VenueName.MATCHBOOK] == 2
     background_wait = asyncio.create_task(_take("background"))
-    await asyncio.sleep(0)
     hot_wait = asyncio.create_task(_take("hot"))
-    await asyncio.sleep(0)
     active_wait = asyncio.create_task(_take("active_trade"))
     await asyncio.sleep(0)
-    await held[0].__aexit__(None, None, None)
-    await asyncio.wait({background_wait, hot_wait, active_wait}, timeout=1)
-    assert grants == ["active_trade", "hot", "background"]
-    for slot in held[1:]:
+    assert grants == []
+    await held_hot[0].__aexit__(None, None, None)
+    await asyncio.wait({active_wait, hot_wait}, timeout=1)
+    assert grants == ["active_trade", "hot"]
+    assert not background_wait.done()
+    for slot in [*held_background, held_hot[1]]:
         await slot.__aexit__(None, None, None)
+    await asyncio.wait({background_wait}, timeout=1)
+    assert "background" in grants
 
 
 def test_open_hot_pass_keeps_its_cursor_when_target_changes(tmp_path) -> None:

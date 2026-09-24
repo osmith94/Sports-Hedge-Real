@@ -146,6 +146,14 @@ describe("scan cycle history presentation", () => {
     );
     assert.equal(scanCycleCoverageLabel(cycle({ scan_lane: "background", fixture_count: 491 })), "491 catalogue rows");
     assert.equal(scanCycleCoverageLabel(cycle({ scan_lane: "hot", fixture_count: 1 })), "1 catalogue row");
+    assert.equal(
+      scanCycleCoverageLabel(cycle({
+        scan_lane: "hot",
+        fixture_count: 2,
+        operator_summary: "11 HOT fixtures · 70 rows · 8 fixtures touched · 2 evaluated · 43 rows deadline/capacity missed",
+      })),
+      "11 HOT fixtures · 70 rows · 8 fixtures touched · 2 evaluated · 43 rows deadline/capacity missed",
+    );
     assert.equal(scanCycleCoverageLabel(cycle({ scan_lane: "universe", fixture_count: 1 })), "1 fixture");
     assert.equal(SCAN_CYCLE_HEADERS[3], "Coverage");
     assert.match(SCAN_CYCLE_COPY, /catalogue\/market rows/);

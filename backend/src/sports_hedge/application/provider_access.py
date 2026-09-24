@@ -5,6 +5,17 @@ must not cancel or reset UNIVERSE. After a bounded run of HOT grants while
 UNIVERSE is waiting, the next slot goes to UNIVERSE so a busy HOT roster
 cannot starve discovery.
 
+Matchbook and Kalshi keep their physical caps (4). After startup pricing is
+released, new BACKGROUND and UNIVERSE leases together may occupy at most 2 of
+those 4 slots. The other two stay available for ACTIVE and HOT even when no
+high-priority request is queued. Already-running lower-priority HTTP calls are
+not cancelled. Anti-starvation may still grant a lower-priority waiter into a
+non-protected slot; it must not spend the protected headroom.
+
+During the startup UNIVERSE barrier, HOT and BACKGROUND are already gated.
+The reservation shrinks to one slot so ACTIVE cannot be locked out, and
+UNIVERSE may use the other three. That is the whole startup exception.
+
 Issue #473 adds deadline/value-aware ranking and queue metrics on top of
 those slot caps. Limits are never raised here.
 
@@ -49,6 +60,10 @@ DEFAULT_STARVATION_HOT_GRANTS = 8
 PRICE_ENGINE_BACKGROUND_LANE = "background"
 PRICE_ENGINE_ACTIVE_TRADE_LANE = "active_trade"
 PRICE_ENGINE_SETTLEMENT_LANE = "settlement"
+# Post-startup Matchbook/Kalshi: lower-priority occupancy stays at or below this.
+LOWER_PRIORITY_OCCUPANCY_CEILING = 2
+# Startup UNIVERSE barrier: leave one slot for ACTIVE. HOT/BACKGROUND are gated.
+STARTUP_ACTIVE_RESERVED_SLOTS = 1
 
 
 class ProviderPriority(IntEnum):
@@ -161,6 +176,8 @@ class ProviderAccessSnapshot:
     limits: dict[str, int]
     queue: dict[str, dict[str, Any]] = field(default_factory=dict)
     deadline_misses_by_lane: dict[str, int] = field(default_factory=dict)
+    lower_priority_inflight: dict[str, int] = field(default_factory=dict)
+    lower_priority_ceiling: dict[str, int | None] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -173,6 +190,8 @@ class ProviderAccessSnapshot:
             "limits": dict(self.limits),
             "queue": {venue: dict(metrics) for venue, metrics in self.queue.items()},
             "deadline_misses_by_lane": dict(self.deadline_misses_by_lane),
+            "lower_priority_inflight": dict(self.lower_priority_inflight),
+            "lower_priority_ceiling": dict(self.lower_priority_ceiling),
         }
 
 
@@ -193,6 +212,9 @@ class ProviderAccessLayer:
         }
         self._starvation_hot_grants = max(1, int(starvation_hot_grants))
         self._in_use = {venue: 0 for venue in self._limits}
+        self._lower_in_use = {venue: 0 for venue in self._limits}
+        self._peak_lower_in_use = {venue: 0 for venue in self._limits}
+        self._startup_active_headroom = False
         self._waiters: dict[VenueName, list[_Waiter]] = {venue: [] for venue in self._limits}
         self._hot_grants_since_universe = {venue: 0 for venue in self._limits}
         self._active_grants_since_hot = {venue: 0 for venue in self._limits}
@@ -215,6 +237,57 @@ class ProviderAccessLayer:
     @property
     def limits(self) -> dict[VenueName, int]:
         return dict(self._limits)
+
+    @property
+    def lower_in_use(self) -> dict[VenueName, int]:
+        return dict(self._lower_in_use)
+
+    @property
+    def peak_lower_in_use(self) -> dict[VenueName, int]:
+        return dict(self._peak_lower_in_use)
+
+    def set_startup_active_headroom(self, enabled: bool) -> None:
+        """Reserve one Matchbook/Kalshi slot for ACTIVE during startup UNIVERSE.
+
+        HOT and BACKGROUND are gated while the startup barrier is closed, so
+        the post-startup 2-of-4 ceiling would only slow discovery. One reserved
+        slot is enough for ACTIVE. Pass False when startup pricing is released;
+        BACKGROUND + UNIVERSE then stay at or below 2 of 4.
+        """
+
+        self._startup_active_headroom = bool(enabled)
+
+    def lower_priority_occupancy_ceiling(self, venue: VenueName) -> int | None:
+        """Max simultaneous BACKGROUND+UNIVERSE leases, or None when uncapped."""
+
+        protected = self._protected_high_priority_slots(venue)
+        if protected <= 0 or venue not in self._limits:
+            return None
+        return max(0, self._limits[venue] - protected)
+
+    def _protected_high_priority_slots(self, venue: VenueName) -> int:
+        if venue not in {VenueName.MATCHBOOK, VenueName.KALSHI}:
+            return 0
+        if venue not in self._limits:
+            return 0
+        limit = self._limits[venue]
+        if self._startup_active_headroom:
+            return STARTUP_ACTIVE_RESERVED_SLOTS if limit >= 2 else 0
+        if limit >= 4:
+            return limit - LOWER_PRIORITY_OCCUPANCY_CEILING
+        return 0
+
+    @staticmethod
+    def _is_lower_priority(priority: ProviderPriority) -> bool:
+        return priority not in {ProviderPriority.ACTIVE_TRADE, ProviderPriority.HOT}
+
+    def _lower_grant_allowed(self, venue: VenueName, waiter: _Waiter) -> bool:
+        if not self._is_lower_priority(waiter.priority):
+            return True
+        ceiling = self.lower_priority_occupancy_ceiling(venue)
+        if ceiling is None:
+            return True
+        return self._lower_in_use[venue] < ceiling
 
     def snapshot(self) -> ProviderAccessSnapshot:
         waiting_by_lane = {
@@ -283,6 +356,13 @@ class ProviderAccessLayer:
             limits={venue.value: limit for venue, limit in self._limits.items()},
             queue=queue,
             deadline_misses_by_lane=dict(self._deadline_misses_by_lane),
+            lower_priority_inflight={
+                venue.value: count for venue, count in self._lower_in_use.items()
+            },
+            lower_priority_ceiling={
+                venue.value: self.lower_priority_occupancy_ceiling(venue)
+                for venue in self._limits
+            },
         )
 
     def lane_wait_reason(self, lane: ScanLane | str | None) -> str | None:
@@ -484,6 +564,8 @@ class ProviderAccessLayer:
             if waiter.granted:
                 self._record_service(venue, waiter)
                 self._in_use[venue] = max(0, self._in_use[venue] - 1)
+                if self._is_lower_priority(waiter.priority):
+                    self._lower_in_use[venue] = max(0, self._lower_in_use[venue] - 1)
             else:
                 waiter.cancelled = True
                 self._record_unserved_deadline(venue, waiter)
@@ -540,7 +622,11 @@ class ProviderAccessLayer:
         )
 
     def _pick(self, venue: VenueName) -> _Waiter | None:
-        pending = [item for item in self._waiters[venue] if not item.granted and not item.cancelled]
+        pending = [
+            item
+            for item in self._waiters[venue]
+            if not item.granted and not item.cancelled and self._lower_grant_allowed(venue, item)
+        ]
         if not pending:
             return None
         starve_universe = (
@@ -613,6 +699,11 @@ class ProviderAccessLayer:
         waiter.event.set()
         self._in_use[venue] += 1
         self._peak_inflight[venue] = max(self._peak_inflight[venue], self._in_use[venue])
+        if self._is_lower_priority(waiter.priority):
+            self._lower_in_use[venue] += 1
+            self._peak_lower_in_use[venue] = max(
+                self._peak_lower_in_use[venue], self._lower_in_use[venue]
+            )
         self._count_high_priority_grant(venue, waiter.priority)
         self._record_grant_deadline(venue, waiter)
 
